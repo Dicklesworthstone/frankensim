@@ -354,6 +354,11 @@ impl ClosedGasParcel {
 // Both time discretizations use the original selective-transfer caloric owner
 // and the same actual endpoint entropy gate. An exponential species update is
 // not permission to relax a source, withdrawal, mass or energy allowance.
+// Preserve the original public error value while identifying this finite-step
+// refusal separately from source support and malformed input failures.
+pub(super) const DIFFUSION_ENTROPY_REFUSAL: GasEnergyError =
+    GasEnergyError::Invalid("finite diffusion step decreases pair entropy; reduce the interval");
+
 fn finish_candidate(
     left: &ClosedGasParcel, right: &ClosedGasParcel, flux: GasDiffusionFlux,
     rows: &[SpeciesMassTransfer], controls: GasDiffusionSolve,
@@ -369,7 +374,7 @@ fn finish_candidate(
         super::entropy::Error::Cancelled => GasEnergyError::Cancelled,
     })?;
     if entropy < -controls.entropy_tolerance_j_k {
-        return Err(invalid("finite diffusion step decreases pair entropy; reduce the interval"));
+        return Err(DIFFUSION_ENTROPY_REFUSAL);
     }
     poll(&mut cancelled)?;
     Ok(GasDiffusionCandidate { exchange, flux, entropy_change_j_k: entropy })

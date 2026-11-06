@@ -1,3 +1,5 @@
+mod adaptive;
+
 use super::*;
 use network::binary::{
     BinaryDiffusionNetworkControls, BinaryDiffusionNetworkError, advance_candidate,

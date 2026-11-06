@@ -11,7 +11,11 @@ use super::super::super::network::transport::{
 };
 use super::super::super::{GasSpeciesExchangeStep, SpeciesId, Sum};
 use super::super::binary::BinaryDiffusionStep;
-use super::adaptive::DiffusionNetworkIntegratedTransfer;
+use super::adaptive::{
+    self, DiffusionNetworkAdvanceCandidate, DiffusionNetworkAdvanceControls,
+    DiffusionNetworkAdvanceError, DiffusionNetworkAdvanceReport,
+    DiffusionNetworkIntegratedTransfer,
+};
 use super::{
     ClosedGasParcel, DiffusionNetworkLink, DiffusionNetworkSolve, GasDiffusionFlux,
     GasDiffusionSolve, GasEnergyError, GasEnergySolve, GasSpeciesExchangeSolve,
@@ -30,6 +34,21 @@ pub struct BinaryDiffusionNetworkControls {
     /// an empty graph costs zero. Closed faces count as pair calls.
     pub maximum_pair_evaluations: usize,
 }
+
+/// Local accuracy, trial count and actual source-aware pair work for adaptivity.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BinaryDiffusionNetworkAdvanceControls {
+    /// Shared inventory/temperature tolerances, interval bounds and trial budget.
+    pub temporal: DiffusionNetworkAdvanceControls,
+    /// Actual pair calls across accepted, rejected and failed probes.
+    /// Must be in 1..=1,000,000; complete candidate trials have a separate budget.
+    pub maximum_pair_evaluations: usize,
+}
+
+pub type BinaryDiffusionNetworkAdvanceReport =
+    DiffusionNetworkAdvanceReport<Vec<BinaryDiffusionNetworkFaceStep>>;
+pub type BinaryDiffusionNetworkAdvanceCandidate =
+    DiffusionNetworkAdvanceCandidate<Vec<BinaryDiffusionNetworkFaceStep>>;
 
 /// One actual pair update from the last symmetric sweep, in execution order.
 #[derive(Clone, Debug, PartialEq)]
@@ -200,6 +219,23 @@ pub fn advance_candidate(
     endpoints: &BTreeMap<u64, GasEnergySolve>,
     physical: DiffusionNetworkSolve,
     controls: BinaryDiffusionNetworkControls,
+    cancelled: impl FnMut() -> bool,
+) -> Result<BinaryDiffusionNetworkCandidate, Error> {
+    advance_counted_candidate(
+        original, links, duration_s, endpoints, physical, controls, &mut 0, cancelled,
+    )
+}
+
+// Adaptive probes retain actual work even when a later pair refuses.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn advance_counted_candidate(
+    original: &BTreeMap<u64, ClosedGasParcel>,
+    links: &[DiffusionNetworkLink<'_>],
+    duration_s: f64,
+    endpoints: &BTreeMap<u64, GasEnergySolve>,
+    physical: DiffusionNetworkSolve,
+    controls: BinaryDiffusionNetworkControls,
+    pair_evaluations: &mut usize,
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<BinaryDiffusionNetworkCandidate, Error> {
     poll(&mut cancelled)?;
@@ -316,6 +352,7 @@ pub fn advance_candidate(
                     },
                 };
                 evaluations += 1;
+                *pair_evaluations += 1;
                 let candidate = state[&left]
                     .diffuse_binary_exponential_with(
                         &state[&right],
@@ -411,4 +448,32 @@ pub fn advance_candidate(
             last_sweep,
         },
     })
+}
+
+/// Complete a binary network window with local step-doubling error control.
+///
+/// One full symmetric sweep is compared with two half sweeps; only the fine
+/// path enters the accepted inventory and transfer account. Every probe refreshes
+/// its actual source data and partial enthalpies. The shared first-order error
+/// scaling (denominator one) is conservative for the exact constant-state
+/// second-order special case, and makes no unsupported nonlinear order claim.
+///
+/// Owner-defined withdrawal/finite-step entropy refusals and typed caloric
+/// solver limits can shorten a trial. Missing data, source/domain errors and
+/// malformed inputs propagate unchanged. Actual pair work includes rejected
+/// probes and partially evaluated sweeps. Whole-window physical budgets are
+/// unchanged; a late error or cancellation publishes no partial network.
+#[allow(clippy::too_many_arguments)]
+pub fn advance_adaptive_candidate(
+    original: &BTreeMap<u64, ClosedGasParcel>,
+    links: &[DiffusionNetworkLink<'_>],
+    duration_s: f64,
+    endpoints: &BTreeMap<u64, GasEnergySolve>,
+    physical: DiffusionNetworkSolve,
+    controls: BinaryDiffusionNetworkAdvanceControls,
+    cancelled: impl FnMut() -> bool,
+) -> Result<BinaryDiffusionNetworkAdvanceCandidate, DiffusionNetworkAdvanceError> {
+    adaptive::advance_binary_candidate(
+        original, links, duration_s, endpoints, physical, controls, cancelled,
+    )
 }

@@ -1,20 +1,27 @@
 //! Complete molecular-diffusion windows with local temporal error control.
 //!
-//! One full explicit step estimates the error of two half steps; only the fine
-//! path can be accepted. Each stage uses the original simultaneous face/source,
-//! species inventory, caloric reconstruction and entropy owners. This remains
-//! first order in time. The local estimate is not a global error certificate or
-//! a license to leave the selected molecular closure's constitutive domain.
+//! One full step estimates the error of two half steps; only the fine path can
+//! be accepted. The same controller, physical inventory comparisons, accepted
+//! transfer ledger and final audit serve the original explicit snapshot and the
+//! exponential binary sweep. Conservative first-order step-doubling scaling is
+//! used for both. The local estimate is not a global error certificate or a
+//! license to leave the selected molecular closure's constitutive domain.
 
 use super::super::super::super::snapshot::{MAX_SNAPSHOT_PARCELS, MAX_SNAPSHOT_TRANSFERS};
 use super::super::super::network::transport::{
     GasTransportError, GasTransportSolve, audit_closed_window,
 };
-use super::super::super::{SpeciesId, Sum, inventory};
+use super::super::super::{SPECIES_WITHDRAWAL_REFUSAL, SpeciesId, Sum, inventory};
+use super::super::DIFFUSION_ENTROPY_REFUSAL;
+use super::binary::{
+    self, BinaryDiffusionNetworkAdvanceCandidate, BinaryDiffusionNetworkAdvanceControls,
+    BinaryDiffusionNetworkCandidate, BinaryDiffusionNetworkControls, BinaryDiffusionNetworkError,
+    BinaryDiffusionNetworkFaceStep,
+};
 use super::{
     ClosedGasParcel, DiffusionNetworkCandidate, DiffusionNetworkError, DiffusionNetworkLink,
-    DiffusionNetworkSolve, DiffusionNetworkStep, GasEnergySolve, SpeciesNetworkError,
-    GasDiffusionDriving, candidate_before_entropy_gate, check,
+    DiffusionNetworkSolve, DiffusionNetworkStep, GasDiffusionDriving, GasEnergyError,
+    GasEnergySolve, SpeciesNetworkError, candidate_before_entropy_gate, check,
 };
 use std::collections::BTreeMap;
 
@@ -25,7 +32,8 @@ pub struct DiffusionNetworkAdvanceControls {
     pub maximum_step_s: f64,
     /// Smallest retry interval [s]. A shorter final remainder may be attempted.
     pub minimum_step_s: f64,
-    /// Complete snapshot evaluations, including rejected coarse and fine probes.
+    /// Complete candidate evaluations, including rejected coarse and fine probes.
+    /// The binary owner additionally bounds actual pair calls separately.
     /// At least three are required; the hard bound is 100,000.
     pub maximum_evaluations: usize,
     /// Per-parcel, per-species absolute inventory error allowance [kg].
@@ -52,13 +60,16 @@ pub struct DiffusionNetworkIntegratedTransfer {
 
 /// Bounded whole-window report. Rejected probes spend work but no inventory.
 #[derive(Clone, Debug, PartialEq)]
-pub struct DiffusionNetworkAdvanceReport {
+pub struct DiffusionNetworkAdvanceReport<Step = DiffusionNetworkStep> {
     pub duration_s: f64,
     pub accepted_intervals: usize,
     /// Two conservative half steps per accepted comparison interval.
     pub accepted_substeps: usize,
     pub rejected_intervals: usize,
     pub evaluations: usize,
+    /// Actual exponential pair calls, including rejected/failed probes.
+    /// Zero for the explicit snapshot entry points.
+    pub pair_evaluations: usize,
     pub minimum_accepted_substep_s: f64,
     pub maximum_accepted_substep_s: f64,
     pub maximum_species_error_ratio: f64,
@@ -77,27 +88,27 @@ pub struct DiffusionNetworkAdvanceReport {
     /// Original-to-final source-qualified closed-network entropy change [J/K].
     pub entropy_change_j_k: f64,
     /// Source receipts for the last accepted half step; history is not retained.
-    pub last_substep: DiffusionNetworkStep,
+    pub last_substep: Step,
 }
 
 /// Complete proposed network and accounting, published together after all gates.
 #[derive(Clone, Debug, PartialEq)]
-pub struct DiffusionNetworkAdvanceCandidate {
+pub struct DiffusionNetworkAdvanceCandidate<Step = DiffusionNetworkStep> {
     parcels: BTreeMap<u64, ClosedGasParcel>,
-    report: DiffusionNetworkAdvanceReport,
+    report: DiffusionNetworkAdvanceReport<Step>,
 }
-impl DiffusionNetworkAdvanceCandidate {
+impl<Step> DiffusionNetworkAdvanceCandidate<Step> {
     pub fn parcels(&self) -> &BTreeMap<u64, ClosedGasParcel> {
         &self.parcels
     }
-    pub const fn report(&self) -> &DiffusionNetworkAdvanceReport {
+    pub const fn report(&self) -> &DiffusionNetworkAdvanceReport<Step> {
         &self.report
     }
     pub fn into_parts(
         self,
     ) -> (
         BTreeMap<u64, ClosedGasParcel>,
-        DiffusionNetworkAdvanceReport,
+        DiffusionNetworkAdvanceReport<Step>,
     ) {
         (self.parcels, self.report)
     }
@@ -113,6 +124,17 @@ pub enum DiffusionNetworkAdvanceError {
         elapsed_s: f64,
         step_s: f64,
         error: DiffusionNetworkError,
+    },
+    BinaryStep {
+        elapsed_s: f64,
+        step_s: f64,
+        error: BinaryDiffusionNetworkError,
+    },
+    PairWorkLimit {
+        elapsed_s: f64,
+        accepted_intervals: usize,
+        pair_evaluations: usize,
+        maximum_pair_evaluations: usize,
     },
     Accuracy {
         elapsed_s: f64,
@@ -142,34 +164,127 @@ use DiffusionNetworkAdvanceError as Error;
 
 enum TrialFailure {
     Physical(DiffusionNetworkError),
+    Binary(BinaryDiffusionNetworkError),
     Entropy(f64),
     Work,
+    PairWork,
+}
+
+#[derive(Default)]
+struct Work {
+    evaluations: usize,
+    pair_evaluations: usize,
+}
+
+// Borrowed transfer views let both original owners share accounting without
+// allocating or cloning an intermediate stream for rejected probes.
+struct Transfer<'a> {
+    donor: u64,
+    receiver: u64,
+    species: &'a SpeciesId,
+    mass_kg: f64,
+    enthalpy_j: f64,
+}
+trait Candidate {
+    type Receipt;
+    fn parcels(&self) -> &BTreeMap<u64, ClosedGasParcel>;
+    fn entropy_change(&self) -> f64;
+    fn energy_residual(&self) -> f64;
+    fn transfers(&self) -> impl Iterator<Item = Transfer<'_>>;
+    fn into_parts(self) -> (BTreeMap<u64, ClosedGasParcel>, Self::Receipt);
+}
+impl Candidate for DiffusionNetworkCandidate {
+    type Receipt = DiffusionNetworkStep;
+    fn parcels(&self) -> &BTreeMap<u64, ClosedGasParcel> {
+        DiffusionNetworkCandidate::parcels(self)
+    }
+    fn entropy_change(&self) -> f64 {
+        self.step().entropy_change_j_k
+    }
+    fn energy_residual(&self) -> f64 {
+        self.step().exchange.total_energy_residual_j
+    }
+    fn transfers(&self) -> impl Iterator<Item = Transfer<'_>> {
+        self.step().exchange.fluxes.iter().map(|row| Transfer {
+            donor: row.transfer.donor,
+            receiver: row.transfer.receiver,
+            species: &row.transfer.species,
+            mass_kg: row.transfer.mass_kg,
+            enthalpy_j: row.carried_enthalpy_j,
+        })
+    }
+    fn into_parts(self) -> (BTreeMap<u64, ClosedGasParcel>, Self::Receipt) {
+        DiffusionNetworkCandidate::into_parts(self)
+    }
+}
+impl Candidate for BinaryDiffusionNetworkCandidate {
+    type Receipt = Vec<BinaryDiffusionNetworkFaceStep>;
+    fn parcels(&self) -> &BTreeMap<u64, ClosedGasParcel> {
+        BinaryDiffusionNetworkCandidate::parcels(self)
+    }
+    fn entropy_change(&self) -> f64 {
+        self.report().entropy_change_j_k
+    }
+    fn energy_residual(&self) -> f64 {
+        self.report().total_energy_residual_j
+    }
+    fn transfers(&self) -> impl Iterator<Item = Transfer<'_>> {
+        self.report().transfers.iter().map(|row| Transfer {
+            donor: row.donor,
+            receiver: row.receiver,
+            species: &row.species,
+            mass_kg: row.mass_kg,
+            enthalpy_j: row.carried_enthalpy_j,
+        })
+    }
+    fn into_parts(self) -> (BTreeMap<u64, ClosedGasParcel>, Self::Receipt) {
+        let (parcels, report) = BinaryDiffusionNetworkCandidate::into_parts(self);
+        (parcels, report.last_sweep)
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
-fn trial(
+fn trial<C: Candidate>(
     parcels: &BTreeMap<u64, ClosedGasParcel>,
-    links: &[DiffusionNetworkLink<'_>],
     dt: f64,
-    endpoints: &BTreeMap<u64, GasEnergySolve>,
     physical: DiffusionNetworkSolve,
-    driving: GasDiffusionDriving,
-    evaluations: &mut usize,
+    work: &mut Work,
     maximum_evaluations: usize,
+    evaluate: &mut impl FnMut(
+        &BTreeMap<u64, ClosedGasParcel>,
+        f64,
+        &mut Work,
+        &mut dyn FnMut() -> bool,
+    ) -> Result<C, TrialFailure>,
     cancelled: &mut impl FnMut() -> bool,
-) -> Result<DiffusionNetworkCandidate, TrialFailure> {
+) -> Result<C, TrialFailure> {
     check(cancelled).map_err(TrialFailure::Physical)?;
-    if *evaluations == maximum_evaluations {
+    if work.evaluations == maximum_evaluations {
         return Err(TrialFailure::Work);
     }
-    *evaluations += 1;
-    let candidate =
-        candidate_before_entropy_gate(parcels, links, dt, endpoints, physical, driving, cancelled)
-            .map_err(TrialFailure::Physical)?;
-    if candidate.step().entropy_change_j_k < -physical.entropy_tolerance_j_k {
-        return Err(TrialFailure::Entropy(candidate.step().entropy_change_j_k));
+    work.evaluations += 1;
+    let candidate = evaluate(parcels, dt, work, cancelled)?;
+    if candidate.entropy_change() < -physical.entropy_tolerance_j_k {
+        return Err(TrialFailure::Entropy(candidate.entropy_change()));
     }
     Ok(candidate)
+}
+
+fn retryable_binary(error: &BinaryDiffusionNetworkError) -> bool {
+    match error {
+        BinaryDiffusionNetworkError::Face { error, .. } => {
+            *error == SPECIES_WITHDRAWAL_REFUSAL
+                || *error == DIFFUSION_ENTROPY_REFUSAL
+                || matches!(
+                    error,
+                    GasEnergyError::OutsideBracket { .. } | GasEnergyError::NotConverged { .. }
+                )
+        }
+        BinaryDiffusionNetworkError::Window(GasTransportError::Diffusion(
+            DiffusionNetworkError::EntropyDecrease { .. },
+        )) => true,
+        _ => false,
+    }
 }
 
 fn physical_error(error: DiffusionNetworkError, elapsed_s: f64, step_s: f64) -> Error {
@@ -242,21 +357,17 @@ struct Ledger {
     transfers: BTreeMap<(u64, u64, SpeciesId), (Sum, Sum)>,
 }
 impl Ledger {
-    fn record(
+    fn record<C: Candidate>(
         &mut self,
-        step: &DiffusionNetworkStep,
+        step: &C,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<(), Error> {
         self.energy
-            .add(step.exchange.total_energy_residual_j)
+            .add(step.energy_residual())
             .map_err(arithmetic)?;
-        for row in &step.exchange.fluxes {
+        for row in step.transfers() {
             poll(cancelled)?;
-            let key = (
-                row.transfer.donor,
-                row.transfer.receiver,
-                row.transfer.species.clone(),
-            );
+            let key = (row.donor, row.receiver, row.species.clone());
             if !self.transfers.contains_key(&key) && self.transfers.len() == MAX_SNAPSHOT_TRANSFERS
             {
                 return Err(Error::Invalid(
@@ -264,8 +375,8 @@ impl Ledger {
                 ));
             }
             let totals = self.transfers.entry(key).or_default();
-            totals.0.add(row.transfer.mass_kg).map_err(arithmetic)?;
-            totals.1.add(row.carried_enthalpy_j).map_err(arithmetic)?;
+            totals.0.add(row.mass_kg).map_err(arithmetic)?;
+            totals.1.add(row.enthalpy_j).map_err(arithmetic)?;
         }
         Ok(())
     }
@@ -295,8 +406,16 @@ pub fn advance_candidate(
     controls: DiffusionNetworkAdvanceControls,
     cancelled: impl FnMut() -> bool,
 ) -> Result<DiffusionNetworkAdvanceCandidate, Error> {
-    advance_candidate_with_driving(original, links, duration_s, endpoints, physical,
-        controls, GasDiffusionDriving::IsobaricMolar, cancelled)
+    advance_candidate_with_driving(
+        original,
+        links,
+        duration_s,
+        endpoints,
+        physical,
+        controls,
+        GasDiffusionDriving::IsobaricMolar,
+        cancelled,
+    )
 }
 
 /// Advance the selected molecular force/frame through the complete window.
@@ -313,8 +432,94 @@ pub fn advance_candidate_with_driving(
     physical: DiffusionNetworkSolve,
     controls: DiffusionNetworkAdvanceControls,
     driving: GasDiffusionDriving,
-    mut cancelled: impl FnMut() -> bool,
+    cancelled: impl FnMut() -> bool,
 ) -> Result<DiffusionNetworkAdvanceCandidate, Error> {
+    advance_with_kernel(
+        original,
+        links,
+        duration_s,
+        endpoints,
+        physical,
+        controls,
+        None,
+        |state, dt, _, cancelled| {
+            candidate_before_entropy_gate(state, links, dt, endpoints, physical, driving, cancelled)
+                .map_err(TrialFailure::Physical)
+        },
+        cancelled,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn advance_binary_candidate(
+    original: &BTreeMap<u64, ClosedGasParcel>,
+    links: &[DiffusionNetworkLink<'_>],
+    duration_s: f64,
+    endpoints: &BTreeMap<u64, GasEnergySolve>,
+    physical: DiffusionNetworkSolve,
+    controls: BinaryDiffusionNetworkAdvanceControls,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<BinaryDiffusionNetworkAdvanceCandidate, Error> {
+    poll(&mut cancelled)?;
+    if !(1..=1_000_000).contains(&controls.maximum_pair_evaluations) {
+        return Err(Error::Invalid(
+            "bounded positive binary pair-work budget required",
+        ));
+    }
+    advance_with_kernel(
+        original,
+        links,
+        duration_s,
+        endpoints,
+        physical,
+        controls.temporal,
+        Some(controls.maximum_pair_evaluations),
+        |state, dt, work, cancelled| {
+            let remaining = controls.maximum_pair_evaluations - work.pair_evaluations;
+            let required = if links.is_empty() {
+                0
+            } else {
+                2 * links.len() - 1
+            };
+            if required > remaining {
+                return Err(TrialFailure::PairWork);
+            }
+            binary::advance_counted_candidate(
+                state,
+                links,
+                dt,
+                endpoints,
+                physical,
+                BinaryDiffusionNetworkControls {
+                    substeps: 1,
+                    maximum_pair_evaluations: remaining.clamp(1, 100_000),
+                },
+                &mut work.pair_evaluations,
+                cancelled,
+            )
+            .map_err(TrialFailure::Binary)
+        },
+        cancelled,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn advance_with_kernel<C: Candidate>(
+    original: &BTreeMap<u64, ClosedGasParcel>,
+    links: &[DiffusionNetworkLink<'_>],
+    duration_s: f64,
+    endpoints: &BTreeMap<u64, GasEnergySolve>,
+    physical: DiffusionNetworkSolve,
+    controls: DiffusionNetworkAdvanceControls,
+    maximum_pair_evaluations: Option<usize>,
+    mut evaluate: impl FnMut(
+        &BTreeMap<u64, ClosedGasParcel>,
+        f64,
+        &mut Work,
+        &mut dyn FnMut() -> bool,
+    ) -> Result<C, TrialFailure>,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<DiffusionNetworkAdvanceCandidate<C::Receipt>, Error> {
     poll(&mut cancelled)?;
     if ![
         duration_s,
@@ -354,7 +559,8 @@ pub fn advance_candidate_with_driving(
     let mut state = original.clone();
     let mut elapsed = 0.0;
     let mut ceiling = controls.maximum_step_s;
-    let (mut evaluations, mut accepted, mut rejected) = (0usize, 0usize, 0usize);
+    let mut work = Work::default();
+    let (mut accepted, mut rejected) = (0usize, 0usize);
     let (mut minimum, mut maximum) = (f64::INFINITY, 0.0_f64);
     let (mut max_species_error, mut max_temperature_error) = (0.0_f64, 0.0_f64);
     let mut ledger = Ledger::default();
@@ -372,35 +578,29 @@ pub fn advance_candidate_with_driving(
         let attempted = (|| {
             let coarse = trial(
                 &state,
-                links,
                 dt,
-                endpoints,
                 physical,
-                driving,
-                &mut evaluations,
+                &mut work,
                 controls.maximum_evaluations,
+                &mut evaluate,
                 &mut cancelled,
             )?;
             let first = trial(
                 &state,
-                links,
                 half,
-                endpoints,
                 physical,
-                driving,
-                &mut evaluations,
+                &mut work,
                 controls.maximum_evaluations,
+                &mut evaluate,
                 &mut cancelled,
             )?;
             let second = trial(
                 first.parcels(),
-                links,
                 half,
-                endpoints,
                 physical,
-                driving,
-                &mut evaluations,
+                &mut work,
                 controls.maximum_evaluations,
+                &mut evaluate,
                 &mut cancelled,
             )?;
             Ok((coarse, first, second))
@@ -410,8 +610,32 @@ pub fn advance_candidate_with_driving(
                 return Err(Error::WorkLimit {
                     elapsed_s: elapsed,
                     accepted_intervals: accepted,
-                    evaluations,
+                    evaluations: work.evaluations,
                 });
+            }
+            Err(TrialFailure::PairWork) => {
+                return Err(Error::PairWorkLimit {
+                    elapsed_s: elapsed,
+                    accepted_intervals: accepted,
+                    pair_evaluations: work.pair_evaluations,
+                    maximum_pair_evaluations: maximum_pair_evaluations
+                        .expect("binary trials own a pair-work budget"),
+                });
+            }
+            Err(TrialFailure::Binary(error)) => {
+                if error == BinaryDiffusionNetworkError::Cancelled {
+                    return Err(Error::Cancelled);
+                }
+                let retry = retryable_binary(&error);
+                let error = Error::BinaryStep {
+                    elapsed_s: elapsed,
+                    step_s: dt,
+                    error,
+                };
+                if !retry {
+                    return Err(error);
+                }
+                error
             }
             Err(TrialFailure::Physical(error)) => {
                 let retry = matches!(
@@ -438,8 +662,8 @@ pub fn advance_candidate_with_driving(
                     &mut cancelled,
                 )?;
                 if species_error <= 1.0 && temperature_error <= 1.0 {
-                    ledger.record(first.step(), &mut cancelled)?;
-                    ledger.record(second.step(), &mut cancelled)?;
+                    ledger.record(&first, &mut cancelled)?;
+                    ledger.record(&second, &mut cancelled)?;
                     let (next, step) = second.into_parts();
                     state = next;
                     last = Some(step);
@@ -525,7 +749,8 @@ pub fn advance_candidate_with_driving(
             accepted_intervals: accepted,
             accepted_substeps: 2 * accepted,
             rejected_intervals: rejected,
-            evaluations,
+            evaluations: work.evaluations,
+            pair_evaluations: work.pair_evaluations,
             minimum_accepted_substep_s: minimum,
             maximum_accepted_substep_s: maximum,
             maximum_species_error_ratio: max_species_error,

@@ -16953,3 +16953,28 @@ source-preserving rebinding, exact endpoints, bounded-domain refusal and
 cancellation. The exact source module passed all 11 native tests: these five
 plus six unchanged original isochoric regressions. This is a focused native
 module check against genuine dependencies, not a full workspace Cargo/DSR gate.
+
+## Adaptive exponential diffusion across finite binary gas networks
+
+`thermochemical_gas::energy::parcel::transfer::species::diffusion::network::binary::advance_adaptive_candidate`
+completes a requested duration through the existing molecular temporal controller.
+Each comparison uses one full exponential sweep and two half sweeps; only the
+accepted fine path contributes state and integrated transport. Error scales
+compare actual species inventories and endpoint temperatures with conservative
+first-order step-doubling scaling. Every attempted edge refreshes its source
+state and upstream partial enthalpy. The constant-state exact-flow special case
+retains its original order; no higher nonlinear order is inferred from symmetry.
+
+Separate complete-trial and actual pair-call budgets include rejected and
+partially failed sweeps. Only original-owner withdrawal/finite-step entropy
+refusals and typed caloric bracket/convergence failures permit cutback.
+Source/domain and malformed-input failures remain direct. Original whole-window
+species, mass, source-relative energy and entropy budgets apply unchanged;
+late errors and cancellation publish no partial network. Gross transfers include
+only accepted fine intervals, and detailed receipts retain only the last one.
+
+This extends the declared binary molar-frame closure. It adds no multicomponent,
+pressure-frame, Soret/Dufour or fully coupled implicit constitutive authority.
+G1/G4 regression definitions cover analytic unequal-volume relaxation, network
+mode refinement, temperature-dependent transport against an independent ODE,
+partial-sweep work charging, source failures and atomic work/cancellation gates.

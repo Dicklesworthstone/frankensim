@@ -22,6 +22,11 @@ use super::{ClosedGasParcel, Composition, CompositionBasis, GasEnergyError, GasE
 use std::collections::BTreeMap;
 use fs_qty::Temperature;
 
+// The adaptive owner recognizes this exact owner-defined refusal; it never
+// retries arbitrary Invalid or material-source errors.
+pub(super) const SPECIES_WITHDRAWAL_REFUSAL: GasEnergyError =
+    GasEnergyError::Invalid("selective transfer exceeds an original species inventory allowance");
+
 /// Integrated species mass, positive left -> right; negative right -> left.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SpeciesMassTransfer {
@@ -198,7 +203,7 @@ impl ClosedGasParcel {
             let donor = usize::from(dm < 0.0);
             let present = before[donor].get(id).copied().unwrap_or(0.0);
             if !positive(present) || dm.abs() / present > controls.maximum_species_fraction {
-                return Err(invalid("selective transfer exceeds an original species inventory allowance"));
+                return Err(SPECIES_WITHDRAWAL_REFUSAL);
             }
             for (side, sign) in [(0, -1.0), (1, 1.0)] {
                 let old = before[side].get(id).copied().unwrap_or(0.0);
@@ -228,7 +233,7 @@ impl ClosedGasParcel {
                 network::SpeciesNetworkError::Cancelled => GasEnergyError::Cancelled,
                 network::SpeciesNetworkError::Invalid(message) => invalid(message),
                 network::SpeciesNetworkError::Parcel { error, .. } => error,
-                network::SpeciesNetworkError::Withdrawal { .. } => invalid("selective transfer exceeds an original species inventory allowance"),
+                network::SpeciesNetworkError::Withdrawal { .. } => SPECIES_WITHDRAWAL_REFUSAL,
             })?;
         let (mut endpoints, report) = candidate.into_parts();
         let left_account = &report.parcels[0];
