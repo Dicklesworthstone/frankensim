@@ -7,7 +7,8 @@ mod layer;
 use fs_thermal::enthalpy::DepositionError;
 pub use layer::{
     ConductivityCurve, GrayLayerConductionResponse, GrayLayerGap, LayerConductionConfig,
-    LayerConductionResponse, MAX_CONDUCTIVITY_KNOTS, TwoLayerConduction,
+    LayerConductionResponse, MAX_CONDUCTIVITY_KNOTS, SurfaceExchangeState,
+    SurfaceLayerConductionResponse, TwoLayerConduction,
 };
 
 mod stack;

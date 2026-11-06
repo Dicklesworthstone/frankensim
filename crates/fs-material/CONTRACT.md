@@ -8694,6 +8694,52 @@ asymmetric coverage, source-domain, disjoint-support, insulation and exact
 radiation-disabled contact limits. All 25 focused native original Cp/Cv and
 integrated exchange tests pass.
 
+## Source-resolved exchange between two material surfaces
+
+`TwoLayerConduction::evaluate_surface_exchange` closes both original supported
+conductivity integrals against one passive source at the actual ordered A/B
+surface temperatures. `SurfaceExchangeState` supplies one flux density,
+its passive secant, two signed surface partials and an original payload.
+The payload from the accepted query is retained without another source call.
+The source owns the complete interface; an additional authored contact
+resistance refuses. No surface storage or distributed material source is
+introduced.
+
+The existing scalar flux driver now accepts optional independent source
+temperature supports. Both ends of both face intervals are mapped through the
+original Kirchhoff integrals, forming a supported lower AND upper flux bound.
+A face interval may exclude its body's temperature or be an exact singleton.
+Material charts can remain disjoint across a finite physical interface.
+Upper/lower endpoint and interior callbacks all count against the declared
+maximum iteration budget and are bracketed by cancellation checks. No callback
+is extrapolated outside its source interval. Source errors retain their original
+identity; interval bounds do not certify a coupled source's unsampled domain.
+
+The same safeguarded driver retains both actual material integrals, layer heat
+balance and one original A-to-B transfer. The interface derivative is
+`D=1+F_A*d_A/k(Tsa)-F_B*d_B/k(Tsb)`.
+Endpoint derivatives and the explicit-source response scale `A/D` differentiate
+this same balance. Negative source differential slopes remain signed. An
+intermediate nonpositive D requests bisection; an accepted singular or locally
+unstable elimination refuses. No global uniqueness claim follows for an
+arbitrary nonlinear source. Exact insulation, equilibrium and original A/B
+ordering remain explicit. Existing fixed-contact and fixed-gray calls preserve
+their prior arithmetic and checkpoint flow.
+
+The kernel allocates no trial tables, introduces no new scalar solver and
+resamples no conductivity chart. The original finite thermal owner retains
+caloric storage, time and entropy; source evaluation retains its own costs.
+General radiative enclosures remain with the existing radiosity owner.
+
+Four new native regressions pass: independent affine-k/quartic surface balance
+and derivatives in both directions; disjoint/narrow, endpoint and singleton
+supports without unsupported queries; signed stable/unstable and zero limits;
+and source-error/cancellation/work-budget behavior. All 44 selected original
+caloric, integrated exchange and shared-surface tests pass. The complete
+thermal production crate and focused material subset compile with unchanged
+numerical dependencies; full workspace Cargo/Clippy remains unavailable because
+external constellation dependencies are absent.
+
 ## Exterior-temperature source feedback on original Cp/Cv storage
 
 `IntegratedCaloricGrayBoundary::with_exterior_law` binds one original

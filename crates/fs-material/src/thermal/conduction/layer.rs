@@ -12,6 +12,9 @@ use fs_thermal::enthalpy::{DepositionError, series_contact_conductance_w_k};
 mod gray_gap;
 pub use gray_gap::{GrayLayerConductionResponse, GrayLayerGap};
 
+mod surface_exchange;
+pub use surface_exchange::{SurfaceExchangeState, SurfaceLayerConductionResponse};
+
 /// Maximum retained temperature/conductivity knots in one constitutive chart.
 pub const MAX_CONDUCTIVITY_KNOTS: usize = 4096;
 
@@ -254,7 +257,7 @@ pub struct TwoLayerConduction<'a> {
     contact_resistance_m2_k_w: f64,
 }
 
-// Both interface laws use the SAME supported Kirchhoff inverses, heat checks
+// All interface laws use the SAME supported Kirchhoff inverses, heat checks
 // and safeguarded scalar-flux iteration. Only their physical jump relation
 // differs. Fluxes and temperatures below are ordered hot/cold, not A/B.
 struct LayerFluxTrial {
@@ -269,6 +272,11 @@ enum LayerFluxUpdate<R> {
     Continue {
         decreasing_residual: f64,
         slope_magnitude: f64,
+    },
+    // General passive sources can have a nonmonotone differential response.
+    // Keep the supported sign bracket without taking an invalid Newton step.
+    Bisect {
+        decreasing_residual: f64,
     },
 }
 
@@ -455,6 +463,25 @@ impl<'a> TwoLayerConduction<'a> {
         config: LayerConductionConfig,
         maximum_flux_w_m2: Option<f64>,
         checkpoint: &mut impl FnMut() -> Result<(), DepositionError>,
+        evaluate: impl FnMut(LayerFluxTrial) -> Result<LayerFluxUpdate<R>, DepositionError>,
+    ) -> Result<R, DepositionError> {
+        self.solve_interface_with_support(
+            temperatures_k,
+            config,
+            maximum_flux_w_m2,
+            None,
+            checkpoint,
+            evaluate,
+        )
+    }
+
+    fn solve_interface_with_support<R>(
+        &self,
+        temperatures_k: [f64; 2],
+        config: LayerConductionConfig,
+        maximum_flux_w_m2: Option<f64>,
+        surface_temperature_bounds_k: Option<[[f64; 2]; 2]>,
+        checkpoint: &mut impl FnMut() -> Result<(), DepositionError>,
         mut evaluate: impl FnMut(LayerFluxTrial) -> Result<LayerFluxUpdate<R>, DepositionError>,
     ) -> Result<R, DepositionError> {
         let (hot, cold) = if temperatures_k[0] > temperatures_k[1] {
@@ -469,18 +496,60 @@ impl<'a> TwoLayerConduction<'a> {
         // when a resistive/radiative interface bridges disjoint source spans.
         let hot_limit = kh.temperature_range_k()[0].max(tc);
         let cold_limit = kc.temperature_range_k()[1].min(th);
-        let hot_integral = kh.integral_w_m(hot_limit, th)?;
-        let cold_integral = kc.integral_w_m(tc, cold_limit)?;
-        if hot_integral == 0.0 || cold_integral == 0.0 {
+        let (hot_limit, cold_limit, hot_near, cold_near) =
+            if let Some(bounds) = surface_temperature_bounds_k {
+                (
+                    hot_limit.max(bounds[hot][0]),
+                    cold_limit.min(bounds[cold][1]),
+                    th.min(bounds[hot][1]),
+                    tc.max(bounds[cold][0]),
+                )
+            } else {
+                (hot_limit, cold_limit, th, tc)
+            };
+        if hot_limit > hot_near || cold_near > cold_limit {
             return Err(DepositionError::MaterialDomain);
         }
-        let hot_flux_limit = positive(hot_integral / dh)?;
-        let cold_flux_limit = positive(cold_integral / dc)?;
+        let hot_integral = kh.integral_w_m(hot_limit, th)?;
+        let cold_integral = kc.integral_w_m(tc, cold_limit)?;
+        if surface_temperature_bounds_k.is_none() && (hot_integral == 0.0 || cold_integral == 0.0) {
+            return Err(DepositionError::MaterialDomain);
+        }
+        let hot_flux_limit = if hot_integral == 0.0 {
+            0.0
+        } else {
+            positive(hot_integral / dh)?
+        };
+        let cold_flux_limit = if cold_integral == 0.0 {
+            0.0
+        } else {
+            positive(cold_integral / dc)?
+        };
         let mut hi = hot_flux_limit.min(cold_flux_limit);
         if let Some(limit) = maximum_flux_w_m2 {
             hi = hi.min(limit);
         }
-        let mut lo = 0.0;
+        // A source interval can exclude either bulk temperature. Map BOTH
+        // interval ends through the same Kirchhoff integrals; q=0 must not be
+        // queried when the original surface source does not support it.
+        let (hot_minimum, cold_minimum) = if surface_temperature_bounds_k.is_some() {
+            let hot = kh.integral_w_m(hot_near, th)?;
+            let cold = kc.integral_w_m(tc, cold_near)?;
+            (
+                if hot == 0.0 { 0.0 } else { positive(hot / dh)? },
+                if cold == 0.0 {
+                    0.0
+                } else {
+                    positive(cold / dc)?
+                },
+            )
+        } else {
+            (0.0, 0.0)
+        };
+        let mut lo = hot_minimum.max(cold_minimum);
+        if lo > hi {
+            return Err(DepositionError::MaterialDomain);
+        }
         // The supported upper endpoint distinguishes a supported root from
         // source exhaustion, including a root exactly at a source boundary.
         let mut flux = hi;
@@ -489,14 +558,25 @@ impl<'a> TwoLayerConduction<'a> {
             // Keep source endpoints exact across division/multiplication.
             let u = if flux == hot_flux_limit {
                 hot_limit
+            } else if surface_temperature_bounds_k.is_some() && flux == hot_minimum {
+                hot_near
             } else {
                 kh.temperature_after_integral_w_m(th, -finite(flux * dh)?)?
             };
             let v = if flux == cold_flux_limit {
                 cold_limit
+            } else if surface_temperature_bounds_k.is_some() && flux == cold_minimum {
+                cold_near
             } else {
                 kc.temperature_after_integral_w_m(tc, finite(flux * dc)?)?
             };
+            if let Some(bounds) = surface_temperature_bounds_k {
+                if !(bounds[hot][0]..=bounds[hot][1]).contains(&u)
+                    || !(bounds[cold][0]..=bounds[cold][1]).contains(&v)
+                {
+                    return Err(DepositionError::MaterialDomain);
+                }
+            }
             let update = evaluate(LayerFluxTrial {
                 flux_w_m2: flux,
                 surface_temperature_k: [u, v],
@@ -506,6 +586,9 @@ impl<'a> TwoLayerConduction<'a> {
                 ],
                 iterations: iteration + 1,
             })?;
+            if surface_temperature_bounds_k.is_some() {
+                checkpoint()?;
+            }
             let (gap, slope) = match update {
                 LayerFluxUpdate::Accepted(response) => {
                     checkpoint()?;
@@ -514,17 +597,40 @@ impl<'a> TwoLayerConduction<'a> {
                 LayerFluxUpdate::Continue {
                     decreasing_residual,
                     slope_magnitude,
-                } => (finite(decreasing_residual)?, positive(slope_magnitude)?),
+                } => (
+                    finite(decreasing_residual)?,
+                    Some(positive(slope_magnitude)?),
+                ),
+                LayerFluxUpdate::Bisect {
+                    decreasing_residual,
+                } => (finite(decreasing_residual)?, None),
             };
             if iteration == 0 && gap > 0.0 {
                 return Err(DepositionError::MaterialDomain);
+            }
+            if surface_temperature_bounds_k.is_some() {
+                if iteration == 0 {
+                    if lo == hi {
+                        return Err(DepositionError::MaterialDomain);
+                    }
+                    // The lower source endpoint can be strictly positive. It
+                    // must establish the other sign before any interior trial.
+                    flux = lo;
+                    continue;
+                }
+                if iteration == 1 && gap < 0.0 {
+                    return Err(DepositionError::MaterialDomain);
+                }
             }
             if gap > 0.0 {
                 lo = flux;
             } else {
                 hi = flux;
             }
-            let newton = flux + gap / slope;
+            let newton = match slope {
+                Some(slope) => flux + gap / slope,
+                None => f64::NAN,
+            };
             let width = hi - lo;
             // Periodic bisection guarantees bracket contraction without
             // rejecting a rapidly converging Newton step near one bracket end.
