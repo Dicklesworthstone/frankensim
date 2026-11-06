@@ -43,6 +43,8 @@ pub mod admission;
 pub mod bridge;
 /// Complete bounded nonsymmetric dense spectra through the existing L1 kernels.
 pub mod dense;
+/// Complete numerical Floquet spectra and original-flow phase assessment.
+pub mod floquet;
 pub mod generalized;
 pub mod service;
 pub mod truth;

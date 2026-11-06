@@ -2,7 +2,7 @@
 
 ## Purpose and layer
 
-Layer L1 numerical spectra, spectral semantics and health monitoring. This crate owns four related,
+Layer L1 numerical spectra, spectral semantics and health monitoring. This crate owns five related,
 but deliberately separate, capabilities:
 
 1. deterministic sheaf-Laplacian gap health, confidence demotion, conditioning
@@ -12,7 +12,9 @@ but deliberately separate, capabilities:
 3. RB.M1 versioned Maslov--Krein--Evans theorem statements, executable
    convention transforms, and explicit hypothesis/implication lattices; and
 4. complete bounded nonsymmetric dense numerical spectra through the existing
-   fs-la QR/SVD owners, with eigenpair residual and whole-basis admission.
+   fs-la QR/SVD owners, with eigenpair residual and whole-basis admission; and
+5. numerical Floquet interpretation of supplied monodromies, with explicit
+   original-flow phase checks and no orbit-existence or theorem authority.
 
 The second and third capabilities are semantic and epistemic boundaries. They
 classify problems or theorem statements, verify that retained evidence names
@@ -67,6 +69,42 @@ or forward-error bounds for nonnormal eigenvalues. Callers supply appropriate
 dimensionless coordinates. Focused G1/G0/G4 regressions check complex pairs,
 semisimple repeated/zero/unstable roots, defective-basis refusal, deterministic
 replay, residual falsification, resource limits and cancellation.
+
+## Numerical Floquet assessment
+
+`dense::nonsymmetric_eigenbasis` accepts a complete previously computed root
+list and uses the SAME SVD, original-row residual and complete-basis checks as
+`nonsymmetric_spectrum`. It skips only QR discovery and its work charge.
+Missing, false, spuriously duplicated or deficient modes cannot bypass the matrix checks.
+Canonical returned ordering preserves multiplicity, including signed zeros.
+
+`floquet::analyze_monodromy` computes the complete numerical spectrum of an
+explicitly supplied dimensionless period map. The corresponding
+`assess_monodromy_with_multipliers` reuses a native map's existing QR roots,
+avoiding a second discovery solve. Both retain all roots, right vectors,
+residuals and complete-basis conditioning. The caller owns the original
+evolution, periodic-base validity, temporal convergence and physical chart.
+
+An externally forced map keeps every root in its radius, including a unit
+root at zero forcing amplitude. An explicit autonomous flow declaration must
+supply a complete nonzero direction in that same chart, including memory
+coordinates. Its actual original-row `M*g=g` residual, exactly one root near
++1, and separation of all other roots from +1 must pass before a transverse
+radius is reported. Phase is never deleted from the returned spectrum.
+Stationary declarations refuse; unresolved/extra neutral modes remain
+unresolved. Whole-basis failures remain spectral refusals.
+
+Stable/unstable/unresolved classifications concern the supplied finite
+numerical map under the authored unit-circle guard. They do not construct
+admission/truth authority, prove periodic-orbit existence or nonlinear/global
+attraction, certify nonnormal forward error, or classify a bifurcation.
+The reported real growth rate is ln(effective radius)/period, without a
+complex logarithm branch or damping/energy-Q interpretation.
+
+`tests/floquet.rs` checks nonnormal complex maps and signed growth against
+closed forms, full phase/memory directions, retained forced unit modes,
+unresolved neutral families, original phase residuals, supplied-root and
+defective-basis refusals, resource limits and cancellation.
 
 ## Existing spectral-health API
 
@@ -690,13 +728,17 @@ representable. Authority verifier and policy descriptors retain their tighter
 
 ## Units and normalization
 
-Floquet periods use `fs_qty::Time`; continuous branch anchors use
+In the versioned admission API, Floquet periods use `fs_qty::Time`; continuous branch anchors use
 `fs_qty::Angle`. Spectral values cross the numerical boundary as
 `QtyAny`. `SpectralScalingContextV1::normalize` requires exact runtime
 dimensions and a finite positive scale; `denormalize` restores the declared
 dimensions. Non-finite input, overflow, and nonzero-to-zero underflow fail
 closed rather than silently erasing a spectral value. Signed zero is
 canonicalized in identity-bearing numeric fields.
+The separate numerical `floquet` entry points accept a finite positive period
+in seconds and a dimensionless monodromy in the caller's disclosed state chart;
+their real growth rates are in inverse seconds. They mint no typed admission or
+spectral-truth proposition.
 
 ## Error model
 

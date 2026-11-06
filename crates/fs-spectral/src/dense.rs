@@ -82,12 +82,63 @@ pub fn nonsymmetric_spectrum(
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<DenseSpectrum, DenseSpectrumError> {
     poll(&mut cancelled)?;
+    admit(matrix, n, options, true)?;
+    let values = eig_with_cancel(matrix, n, options.qr_max_sweeps_per_window, &mut cancelled)
+        .map_err(|e| {
+            if e == EigError::Cancelled {
+                DenseSpectrumError::Cancelled
+            } else {
+                DenseSpectrumError::Eigen(e)
+            }
+        })?;
+    recover_basis(matrix, n, values, options, &mut cancelled)
+}
+
+/// Verify a COMPLETE previously computed numerical spectrum and recover its
+/// right eigenvectors through the same original-row and full-basis checks.
+///
+/// This skips only QR discovery. It is useful when a native variational map
+/// already computed its multipliers. Every supplied root must participate in a
+/// dimension-many independent numerical eigenbasis of the ACTUAL matrix; a
+/// fabricated duplicate, missing mode or unresolved defective basis cannot pass
+/// merely because an individually small eigenpair residual exists. Values are
+/// returned in canonical (real, imaginary) order, preserving multiplicity.
+///
+/// The SVD, residual and complete-basis owners are shared with
+/// `nonsymmetric_spectrum`. The payload allowance is unchanged; the work model
+/// excludes QR, and `qr_max_sweeps_per_window` is unused. No partial spectrum,
+/// eigenvalue refinement or infinite-precision completeness claim is returned.
+///
+/// # Errors
+/// Incomplete/nonfinite roots or matrix, exhausted resource/iteration limits,
+/// failed original residual or basis conditioning, or cancellation.
+pub fn nonsymmetric_eigenbasis(
+    matrix: &[C64],
+    n: usize,
+    values: &[C64],
+    options: DenseSpectrumOptions,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<DenseSpectrum, DenseSpectrumError> {
+    poll(&mut cancelled)?;
+    admit(matrix, n, options, false)?;
+    if values.len() != n || values.iter().any(|&z| !finite(z)) {
+        return Err(invalid("complete finite candidate spectrum required"));
+    }
+    recover_basis(matrix, n, values.to_vec(), options, &mut cancelled)
+}
+
+fn admit(
+    matrix: &[C64],
+    n: usize,
+    options: DenseSpectrumOptions,
+    with_qr: bool,
+) -> Result<(), DenseSpectrumError> {
     if n == 0
         || n > 1024
         || n > options.maximum_dimension
         || n.checked_mul(n) != Some(matrix.len())
         || matrix.iter().any(|&z| !finite(z))
-        || options.qr_max_sweeps_per_window == 0
+        || (with_qr && options.qr_max_sweeps_per_window == 0)
         || options.svd_max_sweeps == 0
         || !options.svd_tolerance.is_finite()
         || options.svd_tolerance <= f64::EPSILON
@@ -105,7 +156,12 @@ pub fn nonsymmetric_spectrum(
     }
     let size = n as u128;
     let bytes = 16 * (18 * size * size + 24 * size);
-    let work = 32 * options.qr_max_sweeps_per_window as u128 * size.pow(4)
+    let qr_work = if with_qr {
+        32 * options.qr_max_sweeps_per_window as u128 * size.pow(4)
+    } else {
+        0
+    };
+    let work = qr_work
         + 64 * options.svd_max_sweeps as u128 * (size + 1) * size.pow(3)
         + 256 * size.pow(3);
     if bytes > options.maximum_dense_bytes as u128 || work > options.maximum_work as u128 {
@@ -113,24 +169,36 @@ pub fn nonsymmetric_spectrum(
             "complete spectrum exceeds its declared dense payload or work budget",
         ));
     }
-    let values = eig_with_cancel(matrix, n, options.qr_max_sweeps_per_window, &mut cancelled)
-        .map_err(|e| {
-            if e == EigError::Cancelled {
-                DenseSpectrumError::Cancelled
-            } else {
-                DenseSpectrumError::Eigen(e)
-            }
-        })?;
+    Ok(())
+}
+
+fn recover_basis(
+    matrix: &[C64],
+    n: usize,
+    mut values: Vec<C64>,
+    options: DenseSpectrumOptions,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<DenseSpectrum, DenseSpectrumError> {
     if values.len() != n || values.iter().any(|&z| !finite(z)) {
         return Err(invalid(
             "native QR did not return the complete finite spectrum",
         ));
     }
+    // Finite validation precedes comparison; +/- zero compare equal so exact
+    // repeated roots stay contiguous even when supplied with signed zeros.
+    values.sort_by(|a, b| {
+        a.re.partial_cmp(&b.re)
+            .unwrap_or(core::cmp::Ordering::Equal)
+            .then_with(|| {
+                a.im.partial_cmp(&b.im)
+                    .unwrap_or(core::cmp::Ordering::Equal)
+            })
+    });
     let mut vectors = Vec::with_capacity(n);
     let mut residuals = Vec::with_capacity(n);
     let mut at = 0;
     while at < n {
-        poll(&mut cancelled)?;
+        poll(cancelled)?;
         let value = values[at];
         let mut end = at + 1;
         while end < n && values[end] == value {
@@ -146,13 +214,13 @@ pub fn nonsymmetric_spectrum(
             n,
             options.svd_tolerance,
             options.svd_max_sweeps,
-            &mut cancelled,
+            &mut *cancelled,
         )
         .map_err(map_svd)?;
         for index in at..end {
             let column = n - 1 - (index - at);
             let vector: Vec<_> = (0..n).map(|i| svd.v[i * n + column]).collect();
-            let rows = eigenpair_row_residuals(matrix, n, value, &vector, &mut cancelled)?;
+            let rows = eigenpair_row_residuals(matrix, n, value, &vector, &mut *cancelled)?;
             let relative = rows.into_iter().fold(0., f64::max);
             if relative > options.maximum_relative_residual {
                 return Err(DenseSpectrumError::EigenpairResidual { index, relative });
@@ -167,7 +235,7 @@ pub fn nonsymmetric_spectrum(
     // a complete diagonalization merely because every returned vector is close.
     let mut basis = vec![C64::ZERO; n * n];
     for i in 0..n {
-        poll(&mut cancelled)?;
+        poll(cancelled)?;
         for j in 0..n {
             basis[i * n + j] = vectors[j][i];
         }
@@ -178,7 +246,7 @@ pub fn nonsymmetric_spectrum(
         n,
         options.svd_tolerance,
         options.svd_max_sweeps,
-        &mut cancelled,
+        &mut *cancelled,
     )
     .map_err(map_svd)?;
     let reciprocal_condition = svd.singular_values[n - 1] / svd.singular_values[0];
@@ -189,7 +257,7 @@ pub fn nonsymmetric_spectrum(
             reciprocal_condition,
         });
     }
-    poll(&mut cancelled)?;
+    poll(cancelled)?;
     Ok(DenseSpectrum {
         values,
         right_vectors: vectors,
