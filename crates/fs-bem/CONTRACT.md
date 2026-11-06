@@ -2401,7 +2401,15 @@ agreement and original-fluid propagation.
 diffraction through one bounded homogeneous fluid body, with continuous pressure
 and outward normal velocity. Both the exterior and interior retain their original
 `FluidAcoustics` owner and one coherent numerical snapshot at a shared angular
-frequency. Each source is queried once during preparation; repeated incident
+frequency. Reusing the same nonzero-sized `&dyn FluidAcoustics` view for both
+exterior and interior or across several `FluidBodies` regions retains its first
+snapshot, preventing repeated observation of that live view from manufacturing
+a material jump within one preparation. This compares complete trait-object
+pointer values, not material-owner identity: independently coerced views may
+have different vtables and be sampled separately. Zero-sized sources are always
+sampled per role; equal numerical coefficients never merge source views. Callers
+requiring shared live-source evaluation must reuse one nonzero-sized trait-object
+view or supply an explicitly frozen `FluidAcousticState`. Repeated incident
 fields reuse the coupled factorization. The snapshots do not independently
 confer measured or calibrated material authority.
 

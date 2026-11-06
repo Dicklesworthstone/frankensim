@@ -115,6 +115,26 @@ fn medium(state: FluidAcousticState) -> Medium {
     }
 }
 
+// Reuse the exact borrowed trait-object view, not an inferred material identity.
+// The full pointer preserves both its data and dispatch view: comparing data
+// addresses alone would also merge overlapping wrappers of different types.
+// Separately coerced views can have different vtables for the same underlying
+// object. Zero-sized values have no distinct storage address, so never merge
+// their roles. Neither equality of coefficients nor a source name is a key.
+fn acoustic_snapshot_for_view<'a>(
+    source: &dyn FluidAcoustics,
+    previous: impl IntoIterator<Item = (&'a dyn FluidAcoustics, FluidAcousticState)>,
+) -> Result<FluidAcousticState, MaterialError> {
+    if core::mem::size_of_val(source) != 0 {
+        for (original, state) in previous {
+            if core::ptr::eq(source, original) {
+                return Ok(state);
+            }
+        }
+    }
+    source.acoustic_state()
+}
+
 /// One admitted fluid inclusion, frequency and reusable coupled factorization.
 ///
 /// The retained triangles must form ONE outward, non-self-intersecting closed
@@ -135,9 +155,13 @@ pub struct FluidInterface<'a> {
     condition_lower_bound: f64,
 }
 impl<'a> FluidInterface<'a> {
-    /// Query each original material exactly once, admit BOTH wavelengths, and
-    /// factor the coupled interface. Cancellation is checked during assembly
-    /// and by the original cancellable blocked LU owner.
+    /// Prepare both acoustic snapshots, admit BOTH wavelengths, and factor the
+    /// coupled interface. Reusing one nonzero-sized `&dyn FluidAcoustics` view
+    /// for both roles reuses its first snapshot. Independently coerced views
+    /// need not share their dispatch metadata and may be evaluated separately;
+    /// zero-sized sources are always evaluated per role. This is not an owner
+    /// identity test. Cancellation is checked during assembly and by the
+    /// original cancellable blocked LU owner.
     pub fn new(
         surface: &'a SpherePanels,
         exterior_source: &'a dyn FluidAcoustics,
@@ -170,7 +194,7 @@ impl<'a> FluidInterface<'a> {
         poll(gate)?;
         let exterior = exterior_source.acoustic_state()?;
         poll(gate)?;
-        let interior = interior_source.acoustic_state()?;
+        let interior = acoustic_snapshot_for_view(interior_source, [(exterior_source, exterior)])?;
         poll(gate)?;
         let k_o = omega_rad_s / exterior.sound_speed_m_s();
         let k_i = omega_rad_s / interior.sound_speed_m_s();

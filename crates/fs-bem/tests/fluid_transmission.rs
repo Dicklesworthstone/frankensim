@@ -114,6 +114,85 @@ impl FluidAcoustics for CountedFluid {
 }
 
 #[test]
+fn reused_live_fluid_view_on_both_sides_has_no_fictitious_refraction() {
+    // The same original source can be backed by an evolving physical state.
+    // One interface preparation must freeze it once, not mistake a second
+    // observation of that source for a material jump across this surface.
+    struct EvolvingFluid(AtomicUsize);
+    impl FluidAcoustics for EvolvingFluid {
+        fn acoustic_state(&self) -> Result<FluidAcousticState, MaterialError> {
+            let observation = self.0.fetch_add(1, Ordering::Relaxed);
+            Ok(if observation == 0 {
+                fluid(1.2, 340.0)
+            } else {
+                fluid(1.8, 270.0)
+            })
+        }
+    }
+    let surface = SpherePanels::icosphere(1.0, 0).unwrap();
+    let original = EvolvingFluid(AtomicUsize::new(0));
+    // Reuse this already constructed view; independently coerced views are
+    // not promised to have the same vtable across code-generation units.
+    let source: &dyn FluidAcoustics = &original;
+    let gate = CancelGate::new();
+    let interface =
+        FluidInterface::new(&surface, source, source, 170.0, Options::default(), &gate).unwrap();
+    assert_eq!(interface.exterior_state(), fluid(1.2, 340.0));
+    assert_eq!(interface.interior_state(), interface.exterior_state());
+    assert_eq!(original.0.load(Ordering::Relaxed), 1);
+    for _ in 0..2 {
+        let solved = interface.scatter_field(plane(), 0.01, &gate).unwrap();
+        assert!(
+            solved
+                .solution()
+                .scattered()
+                .pressure
+                .iter()
+                .chain(&solved.solution().scattered().velocity)
+                .all(|value| *value == C64::ZERO)
+        );
+    }
+    assert_eq!(original.0.load(Ordering::Relaxed), 1);
+}
+
+#[test]
+fn zero_sized_fluid_sources_are_sampled_per_role() {
+    // A ZST can observe external state, and equal pointer values do not give
+    // its separate source roles a distinct identity. Preserve both queries.
+    struct ExternalFluid;
+    static QUERIES: AtomicUsize = AtomicUsize::new(0);
+    impl FluidAcoustics for ExternalFluid {
+        fn acoustic_state(&self) -> Result<FluidAcousticState, MaterialError> {
+            Ok(if QUERIES.fetch_add(1, Ordering::Relaxed) == 0 {
+                fluid(1.0, 1.0)
+            } else {
+                fluid(1.8, 0.8)
+            })
+        }
+    }
+    let surface = SpherePanels::icosphere(1.0, 0).unwrap();
+    let original = ExternalFluid;
+    let source: &dyn FluidAcoustics = &original;
+    assert_eq!(core::mem::size_of_val(source), 0);
+    let gate = CancelGate::new();
+    let interface =
+        FluidInterface::new(&surface, source, source, 0.5, Options::default(), &gate).unwrap();
+    assert_eq!(QUERIES.load(Ordering::Relaxed), 2);
+    assert_eq!(interface.exterior_state(), fluid(1.0, 1.0));
+    assert_eq!(interface.interior_state(), fluid(1.8, 0.8));
+    let solved = interface.scatter_field(plane(), 0.01, &gate).unwrap();
+    assert!(
+        solved
+            .solution()
+            .scattered()
+            .pressure
+            .iter()
+            .any(|value| value.abs() > 1e-3)
+    );
+    assert_eq!(QUERIES.load(Ordering::Relaxed), 2);
+}
+
+#[test]
 fn identical_fluids_preserve_coherent_traces_exactly_and_query_sources_once() {
     let surface = SpherePanels::icosphere(1.0, 1).unwrap();
     let exterior = CountedFluid {

@@ -76,6 +76,108 @@ impl FluidAcoustics for Counted {
 }
 
 #[test]
+fn repeated_live_source_views_retain_one_state_across_all_fluid_bodies() {
+    struct EvolvingFluid {
+        initial: FluidAcousticState,
+        later: FluidAcousticState,
+        queries: AtomicUsize,
+    }
+    impl FluidAcoustics for EvolvingFluid {
+        fn acoustic_state(&self) -> Result<FluidAcousticState, MaterialError> {
+            Ok(if self.queries.fetch_add(1, Ordering::Relaxed) == 0 {
+                self.initial
+            } else {
+                self.later
+            })
+        }
+    }
+    let surfaces = [
+        sphere(0, [0.0, 0.0, -3.0]),
+        sphere(0, [0.0, 0.0, 0.0]),
+        sphere(0, [0.0, 0.0, 3.0]),
+    ];
+    let exterior = EvolvingFluid {
+        initial: fluid(1.0, 1.0),
+        later: fluid(1.3, 1.2),
+        queries: AtomicUsize::new(0),
+    };
+    let interior = EvolvingFluid {
+        initial: fluid(1.8, 0.8),
+        later: fluid(0.7, 1.2),
+        queries: AtomicUsize::new(0),
+    };
+    let exterior_view: &dyn FluidAcoustics = &exterior;
+    let interior_view: &dyn FluidAcoustics = &interior;
+    let bodies = [
+        Body {
+            surface: &surfaces[0],
+            material: exterior_view,
+        },
+        Body {
+            surface: &surfaces[1],
+            material: interior_view,
+        },
+        Body {
+            surface: &surfaces[2],
+            material: interior_view,
+        },
+    ];
+    let gate = CancelGate::new();
+    let owner =
+        FluidBodies::new(&bodies, exterior_view, 0.5, 0.01, Options::default(), &gate).unwrap();
+    assert_eq!(owner.interior_state(0), Some(exterior.initial));
+    assert_eq!(owner.interior_state(1), Some(interior.initial));
+    assert_eq!(owner.interior_state(2), Some(interior.initial));
+    assert_eq!(exterior.queries.load(Ordering::Relaxed), 1);
+    assert_eq!(interior.queries.load(Ordering::Relaxed), 1);
+
+    // Reusing the same original source view must reproduce the complete coupled
+    // reflection of independently frozen states, including the transparent
+    // first body's illumination by its two scattering neighbors.
+    let frozen_bodies = [
+        Body {
+            surface: &surfaces[0],
+            material: &exterior.initial,
+        },
+        Body {
+            surface: &surfaces[1],
+            material: &interior.initial,
+        },
+        Body {
+            surface: &surfaces[2],
+            material: &interior.initial,
+        },
+    ];
+    let frozen = FluidBodies::new(
+        &frozen_bodies,
+        &exterior.initial,
+        0.5,
+        0.01,
+        Options::default(),
+        &gate,
+    )
+    .unwrap();
+    for _ in 0..2 {
+        let actual = owner.scatter_field(plane(), 0.01, &gate).unwrap();
+        let expected = frozen.scatter_field(plane(), 0.01, &gate).unwrap();
+        assert_eq!(
+            actual.solution().scattered_pressure_pa(),
+            expected.solution().scattered_pressure_pa()
+        );
+        assert_eq!(
+            actual.solution().scattered_normal_velocity_m_s(),
+            expected.solution().scattered_normal_velocity_m_s()
+        );
+        assert_eq!(
+            actual.solution().total_pressure_pa(),
+            expected.solution().total_pressure_pa()
+        );
+    }
+    assert_eq!(exterior.queries.load(Ordering::Relaxed), 1);
+    assert_eq!(interior.queries.load(Ordering::Relaxed), 1);
+}
+
+#[test]
 fn transparent_bodies_preserve_coherent_volume_force_and_plane_sources_exactly() {
     let s0 = sphere(0, [0.0, 0.0, -1.6]);
     let s1 = sphere(0, [0.0, 0.0, 1.6]);

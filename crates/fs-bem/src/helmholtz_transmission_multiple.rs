@@ -62,7 +62,10 @@ impl engine::BoundaryBlock for PreparedBody<'_> {
 ///
 /// Unknowns are grouped by body, then pressure and q/k_o. The exterior Green
 /// transfer and factorization are prepared once and reused across incidents.
-/// Interior states are sampled once each; the shared exterior is sampled once.
+/// Reusing the same nonzero-sized `&dyn FluidAcoustics` view across bodies or
+/// as the exterior shares its first snapshot. Independently coerced views may
+/// be evaluated separately; zero-sized sources are always evaluated per role.
+/// This view reuse does not establish a general material-owner identity.
 pub struct FluidBodies<'a> {
     bodies: Vec<PreparedBody<'a>>,
     surface: SpherePanels,
@@ -122,13 +125,20 @@ impl<'a> FluidBodies<'a> {
         {
             return Err(bad("unrepresentable multiple-fluid exterior scale").into());
         }
-        let mut prepared = Vec::with_capacity(bodies.len());
+        let mut prepared: Vec<PreparedBody<'a>> = Vec::with_capacity(bodies.len());
         let mut triangles = Vec::with_capacity(count);
         let mut first_panel = 0;
         let mut ppw = f64::INFINITY;
         for &body in bodies {
             poll(gate)?;
-            let state = body.material.acoustic_state()?;
+            let state = acoustic_snapshot_for_view(
+                body.material,
+                core::iter::once((exterior_source, exterior)).chain(
+                    prepared
+                        .iter()
+                        .map(|previous| (previous.original.material, previous.state)),
+                ),
+            )?;
             let k = omega_rad_s / state.sound_speed_m_s();
             let eta = state.density_kg_m3() / exterior.density_kg_m3();
             let delta_rho =
