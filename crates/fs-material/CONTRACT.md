@@ -16718,3 +16718,32 @@ The thermal brittle source now exposes `source::expansion::dynamics::resolve_the
 The material force is work-conjugate to both total displacement strain and free thermal strain. Their separate work ports sum to original mechanical-strain path work; a coupled consumer must retain the old thermal source to evaluate that split. This adapter supplies neither its own time integrator nor a heat/entropy model. Coefficients are transferred first, then total/eigenstrain follow one admitted straight increment under the new coefficients; no second-order thermal trajectory or unseen-reversal claim follows.
 
 Four regression definitions cover complete original density/expansion/fracture source binding; native mean work with independent full total-strain tangent columns; matched free thermal motion versus restrained damage and reheating; and density, source-owner, strain-domain and nonsmooth-derivative refusals. Changed Rust parsed/formatted with pinned Rustfmt and received bounded source/API review. Native compilation and runtime execution remain unperformed in the full-filesystem environment.
+
+## Original IF97 equilibrium water density and high-pressure acoustics
+
+`phase::water::acoustics::HomogeneousEquilibriumWater` retains an original
+saturation pair and an explicit rapid-phase-equilibrium closure. The original
+Regions 1/2 entry remains available; the regional entry also consumes prepared
+Region 3 liquid/vapor endpoints below the original critical temperature. Density
+comes from phase-mass-weighted specific volume. Compressibility and sound speed
+follow the original Region 4 saturation slope and the reversible-work tangent
+`du + p dv = 0`, with no fitted mixture equation or resampling of the EOS.
+
+Dense-phase pressure inversion residuals remain visible. The phase caloric
+tangents include the difference between each achieved phase pressure and the
+common coexistence pressure, and latent work uses the original
+`delta_u + p delta_v`. Original entropy, Gibbs, Clapeyron, saturation-pressure
+and latent-enthalpy consistency defects are reported without shifting source
+properties or treating numerical inconsistency as physical entropy production.
+Both phase masses must be positive; exact endpoints refuse an ambiguous
+equilibrium tangent. The caller owns rapid thermal/phase equilibration,
+negligible slip and the validity of this acoustic-frequency limit.
+
+Evaluation is fixed-size and allocation-free after the caller prepares the
+source pair. The focused regressions define original low-temperature parity,
+dense-water reversible-work finite perturbations, phase-inventory density,
+source/pressure-defect retention, energy closure and invalid-quality controls.
+Independent source-equation calculations checked the three IAPWS Table 33
+reference states and nine high-pressure coexistence states at 630, 640 and
+646 K. Native Rust compilation and execution of the new regression definitions
+remain unperformed because the execution environment became unavailable.
