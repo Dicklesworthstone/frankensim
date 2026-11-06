@@ -16911,3 +16911,8 @@ claim. Bulk flow, pressure diffusion, reactions and moving volumes retain
 their separate owners. G1/G3/G4 fixtures cover analytic stiff relaxation,
 chain refinement and conservation, variable-source cycles, canonical ordering,
 closed faces and transactional work/source/cancellation refusal.
+
+
+### Affine stress-charge piezoelectric thermal sources
+
+`ThermalLongitudinalPiezoelectric::from_stress_charge_tensor` admits complete affine C^E(T), e(T), epsilon^S(T) source tensors over a positive absolute-temperature interval with constant reference density. It preserves source selections, fixed frame/direction, and native transverse relaxation, differentiates the resulting non-affine longitudinal inverse exactly through second order, and supplies the existing rod/circuit thermal owner with consistent Helmholtz energy, entropy, internal energy, and fixed-coordinate field capacity. Complete source endpoint SPD establishes source-interval stability; a whole-interval inverse bound supplies conservative field-capacity admission. This is analytic model admission with roundoff padding, not an interval-arithmetic certificate. Synthetic G0/G1/G3 checks do not establish measured-material accuracy. No pyroelectric offset, thermal expansion, phase transition, depoling, or hysteresis is inferred.

@@ -1,18 +1,20 @@
 //! Thermal derivatives of the SAME longitudinal strain/charge potential.
 //!
 //! A(T)=[[s_E,d],[d,epsilon_T]] maps [stress,E] to x=[strain,D]. With fixed
-//! axes and reference volume, psi=V*x^T A^-1*x/2. For an affine, positive
-//! definite A, S=V*y^T A'*y/2 and C_x=-T*V*(A'*y)^T A^-1*(A'*y), where
-//! y=A^-1*x. Signed d and d' are retained; diagonal-only derivative formulas
-//! would discard real electromechanical thermal exchange.
+//! axes and reference volume, psi=V*x^T A^-1*x/2 and y=A^-1*x. The exact
+//! derivatives are S=V*y^T A'*y/2 and
+//! C_x=T*V*(y^T A''*y/2-(A'*y)^T A^-1*(A'*y)).
+//! Signed coupling and both tensor derivatives are retained.
 //!
-//! This uses the original small-signal constitutive response and the common
-//! affine-source/capacity admission. `from_tensor` also admits complete affine
-//! strain-charge tensors at a fixed oriented longitudinal projection, preserving
-//! transverse relaxation and all coupled thermal derivatives. It adds no
-//! pyroelectric offset, thermal
-//! expansion, depoling, hysteresis, phase transition or mechanical integrator.
-
+//! The scalar and `from_tensor` paths admit affine strain-charge sources.
+//! `from_stress_charge_tensor` admits affine C^E, e, epsilon^S, differentiates
+//! their nonlinear inverse reduction exactly, and retains its positive
+//! curvature as a Gram factor. All paths preserve the complete original source,
+//! fixed oriented projection and transverse relaxation. The common interval
+//! capacity admission is reused by rod/circuit consumers.
+//!
+//! This adds no pyroelectric offset, thermal expansion, depoling, hysteresis,
+//! phase transition or mechanical integrator.
 use super::*;
 use crate::field_storage::{
     FieldStorageError, admit_source_temperature_refresh,
@@ -21,7 +23,7 @@ use crate::field_storage::{
 
 mod tensor;
 
-/// Fixed frame and direction of the full original strain-charge source.
+/// Fixed frame and direction of the full original tensor source.
 /// Its retained scales measure cancellation roundoff, never replace source data.
 #[derive(Clone, Debug, PartialEq)]
 struct TensorThermalReduction {
@@ -30,6 +32,24 @@ struct TensorThermalReduction {
     source_to_frame: [[f64; 3]; 3],
     direction: [f64; 3],
     coefficient_roundoff_scales: [f64; 3],
+    stress_charge: Option<StressChargeThermalSource>,
+}
+
+/// Source slopes transformed once into the fixed CURRENT frame. The original
+/// source roles and selected claims remain in the material, not in surrogates.
+#[derive(Clone, Debug, PartialEq)]
+struct StressChargeThermalSource {
+    stiffness_slope: [[f64; 6]; 6],
+    coupling_slope: [[f64; 6]; 3],
+    permittivity_slope: [[f64; 3]; 3],
+    reference_curvature_factor: [[f64; 6]; 2],
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct TensorThermalDerivatives {
+    slopes: [f64; 3],
+    // A''=2 B B^T. Preserving B makes its quadratic form nonnegative.
+    curvature_factor: [[f64; 6]; 2],
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -40,8 +60,9 @@ pub struct ThermalLongitudinalPiezoelectric {
     temperature_range_k: [f64; 2],
     reference_temperature_k: f64,
     slopes: [f64; 3],
-    // A=S G S with S=diag(sqrt(s_ref),sqrt(epsilon_ref)). G is dimensionless;
-    // its endpoint eigenvalue lower bounds every affine interior G by convexity.
+    // A=S G S with S=diag(sqrt(s_ref),sqrt(epsilon_ref)). G is dimensionless.
+    // Affine compliance uses endpoint convexity; affine stress-charge sources
+    // use bounds on the entire inverse reduction, never just its endpoints.
     scales: [f64; 2],
     minimum_eigenvalue: f64,
     derivative_norm_bound_per_k: f64,
@@ -53,6 +74,7 @@ pub struct ResolvedThermalPiezoelectric {
     material: LongitudinalPiezoelectric,
     temperature_k: f64,
     slopes: [f64; 3],
+    curvature_factor: Option<[[f64; 6]; 2]>,
 }
 
 fn field_error(error: FieldStorageError) -> PiezoelectricError {
@@ -124,17 +146,24 @@ impl ThermalLongitudinalPiezoelectric {
             temperature_axis: temperature_axis.to_owned(), temperature_range_k,
             reference_temperature_k, slopes, scales, minimum_eigenvalue: f64::INFINITY,
             derivative_norm_bound_per_k, tensor_reduction };
-        for temperature in temperature_range_k {
-            let material = law.at_temperature(temperature)?.material;
-            let [s,d,e] = coefficients(&material);
-            let (a,b,c) = (s/scales[0]/scales[0], d/scales[0]/scales[1], e/scales[1]/scales[1]);
-            let determinant = finite(a.mul_add(c,-b*b))?;
-            let largest = finite(0.5*(a+c+(a-c).hypot(2.0*b)))?;
-            let smallest = finite(determinant/largest)? * (1.0-4096.0*f64::EPSILON);
-            if smallest <= 0.0 {
-                return Err(PiezoelectricError::Invalid("complete affine piezoelectric block must remain representably positive definite"));
+        if let Some(reduction) = law.tensor_reduction.as_ref()
+            .filter(|reduction| reduction.stress_charge.is_some()) {
+            let (minimum, derivative) = reduction.stress_charge_capacity_bounds(&law)?;
+            law.minimum_eigenvalue = minimum;
+            law.derivative_norm_bound_per_k = derivative;
+        } else {
+            for temperature in temperature_range_k {
+                let material = law.at_temperature(temperature)?.material;
+                let [s,d,e] = coefficients(&material);
+                let (a,b,c) = (s/scales[0]/scales[0], d/scales[0]/scales[1], e/scales[1]/scales[1]);
+                let determinant = finite(a.mul_add(c,-b*b))?;
+                let largest = finite(0.5*(a+c+(a-c).hypot(2.0*b)))?;
+                let smallest = finite(determinant/largest)? * (1.0-4096.0*f64::EPSILON);
+                if smallest <= 0.0 {
+                    return Err(PiezoelectricError::Invalid("complete affine piezoelectric block must remain representably positive definite"));
+                }
+                law.minimum_eigenvalue = law.minimum_eigenvalue.min(smallest);
             }
-            law.minimum_eigenvalue = law.minimum_eigenvalue.min(smallest);
         }
         Ok(law)
     }
@@ -152,32 +181,49 @@ impl ThermalLongitudinalPiezoelectric {
         let point = self.original.material().query().with(&self.temperature_axis,temperature_k)
             .map_err(|_| PiezoelectricError::Invalid("piezoelectric thermal query is unrepresentable"))?;
         let resolved = self.original.material().at_query_point(&self.card,&point)?;
-        let material = match &self.tensor_reduction {
-            Some(_) if resolved.identity() == self.original.material().identity() => self.original.clone(),
+        let (material, derivatives) = match &self.tensor_reduction {
+            Some(reduction) if resolved.identity() == self.original.material().identity() => {
+                let derivatives = reduction.stress_charge.as_ref().map(|source| {
+                    TensorThermalDerivatives {
+                        slopes: self.slopes,
+                        curvature_factor: source.reference_curvature_factor,
+                    }
+                });
+                (self.original.clone(), derivatives)
+            }
             Some(reduction) => reduction.material(resolved)?,
-            None => LongitudinalPiezoelectric::from_material_state(resolved)?,
+            None => (LongitudinalPiezoelectric::from_material_state(resolved)?, None),
         };
-        for (index, ((original, actual), slope)) in coefficients(&self.original).into_iter()
-            .zip(coefficients(&material)).zip(self.slopes).enumerate() {
-            let expected = finite(slope.mul_add(temperature_k-self.reference_temperature_k,original))?;
-            // A signed cross coefficient may pass through zero. Compare with
-            // its admitted path scale, without clamping the actual source value.
-            let span = (self.temperature_range_k[0]-self.reference_temperature_k).abs()
-                .max((self.temperature_range_k[1]-self.reference_temperature_k).abs());
-            // Tensor projections can cancel while individual signed terms are
-            // large. Admission uses their source scale without changing values.
-            let tensor_scale = self.tensor_reduction.as_ref()
-                .map_or(0.0, |reduction| reduction.coefficient_roundoff_scales[index]);
-            let scale = original.abs().max(finite(slope.abs()*span)?)
-                .max(actual.abs()).max(expected.abs()).max(tensor_scale);
-            if (actual-expected).abs() > 512.0*f64::EPSILON*scale {
-                return Err(PiezoelectricError::Invalid("piezoelectric source left its admitted affine path"));
+        // Only an affine strain-charge input has affine projected coefficients.
+        // Stress-charge inputs retain the actual inverse derivatives at this T.
+        if derivatives.is_none() {
+            for (index, ((original, actual), slope)) in coefficients(&self.original).into_iter()
+                .zip(coefficients(&material)).zip(self.slopes).enumerate() {
+                let expected = finite(slope.mul_add(temperature_k-self.reference_temperature_k,original))?;
+                // A signed cross coefficient may pass through zero. Compare with
+                // its admitted path scale, without clamping the actual source value.
+                let span = (self.temperature_range_k[0]-self.reference_temperature_k).abs()
+                    .max((self.temperature_range_k[1]-self.reference_temperature_k).abs());
+                // Tensor projections can cancel while individual signed terms are
+                // large. Admission uses their source scale without changing values.
+                let tensor_scale = self.tensor_reduction.as_ref()
+                    .map_or(0.0, |reduction| reduction.coefficient_roundoff_scales[index]);
+                let scale = original.abs().max(finite(slope.abs()*span)?)
+                    .max(actual.abs()).max(expected.abs()).max(tensor_scale);
+                if (actual-expected).abs() > 512.0*f64::EPSILON*scale {
+                    return Err(PiezoelectricError::Invalid("piezoelectric source left its admitted affine path"));
+                }
             }
         }
         if material.density_kg_m3().to_bits() != self.original.density_kg_m3().to_bits() {
             return Err(PiezoelectricError::Invalid("piezoelectric reference density changed"));
         }
-        Ok(ResolvedThermalPiezoelectric { material, temperature_k, slopes: self.slopes })
+        Ok(ResolvedThermalPiezoelectric {
+            material,
+            temperature_k,
+            slopes: derivatives.as_ref().map_or(self.slopes, |value| value.slopes),
+            curvature_factor: derivatives.map(|value| value.curvature_factor),
+        })
     }
 
     pub fn at_material(&self, material: &LongitudinalPiezoelectric)
@@ -197,7 +243,9 @@ impl ThermalLongitudinalPiezoelectric {
 
     /// Conservative full-interval lower bound on fixed-(strain,D) field heat
     /// capacity. Caller adds the actual whole-rod caloric capacity and enforces
-    /// both coordinate limits. This is a model bound, not a numerical certificate.
+    /// both coordinate limits. For affine stress-charge sources, A'' is positive
+    /// semidefinite, so discarding its nonnegative capacity contribution gives
+    /// a conservative lower bound. This is a model bound, not a numerical certificate.
     pub fn minimum_heat_capacity_j_k(&self, maximum_abs_strain: f64,
         maximum_abs_displacement_c_m2: f64, volume_m3: f64) -> Result<f64, PiezoelectricError> {
         if [maximum_abs_strain,maximum_abs_displacement_c_m2].iter()
@@ -220,6 +268,26 @@ impl ResolvedThermalPiezoelectric {
     pub fn material(&self) -> &LongitudinalPiezoelectric { &self.material }
     pub fn temperature_k(&self) -> f64 { self.temperature_k }
 
+    /// First derivatives [ds_E/dT, dd/dT, d(epsilon_T)/dT] at this temperature,
+    /// in [Pa^-1/K, m/V/K, F/m/K]. Stress-charge source inverses are not affine.
+    pub fn coefficient_first_derivatives_per_k(&self) -> [f64; 3] { self.slopes }
+
+    /// Second derivatives in the same order, with one further inverse kelvin.
+    /// Affine compliance sources return zero; affine stiffness sources retain
+    /// the complete inverse and coupling curvature.
+    pub fn coefficient_second_derivatives_per_k2(&self) -> Result<[f64; 3], PiezoelectricError> {
+        let Some(factor) = self.curvature_factor else { return Ok([0.0; 3]); };
+        let mut result = [0.0; 3];
+        for (output, (i, j)) in [(0, 0), (0, 1), (1, 1)].into_iter().enumerate() {
+            let product = (0..6).fold(0.0, |sum, k| factor[i][k].mul_add(factor[j][k], sum));
+            result[output] = finite(2.0 * product)?;
+            if i == j && factor[i].iter().any(|&v| v != 0.0) && result[output] == 0.0 {
+                return Err(PiezoelectricError::Invalid("piezoelectric inverse curvature underflows"));
+            }
+        }
+        Ok(result)
+    }
+
     /// Exact integrated potentials of the original coupled compliance law.
     pub fn state(&self, strain: f64, displacement_c_m2: f64, volume_m3: f64)
         -> Result<FieldThermalState, PiezoelectricError> {
@@ -233,11 +301,29 @@ impl ResolvedThermalPiezoelectric {
         let entropy_j_k = finite(0.5*volume_m3*y.stress_pa.mul_add(derivative[0],y.electric_field_v_m*derivative[1]))?;
         // The same native inverse block evaluates (A'y)^T A^-1(A'y)/2.
         let quadratic = self.material.response(derivative[0],derivative[1])?.stored_energy_j_m3;
-        let heat_capacity_j_k = finite(-2.0*self.temperature_k*volume_m3*quadratic)?;
+        let negative_capacity = finite(2.0*self.temperature_k*volume_m3*quadratic)?;
+        // For affine C/e/epsilonS, A''=2 B B^T. Squared factor actions
+        // preserve the positive curvature without an indefinite tensor product.
+        let mut curvature = 0.0;
+        let mut nonzero_curvature_action = false;
+        if let Some(factor) = self.curvature_factor {
+            for k in 0..6 {
+                let value = finite(factor[0][k].mul_add(y.stress_pa,
+                    factor[1][k]*y.electric_field_v_m))?;
+                nonzero_curvature_action |= value != 0.0;
+                curvature = finite(value.mul_add(value, curvature))?;
+            }
+        }
+        let positive_capacity = finite(self.temperature_k*volume_m3*curvature)?;
+        let heat_capacity_j_k = finite(positive_capacity-negative_capacity)?;
         let internal_energy_j = finite(self.temperature_k.mul_add(entropy_j_k,free_energy_j))?;
-        if y.stored_energy_j_m3 != 0.0 && free_energy_j == 0.0 || quadratic != 0.0 && heat_capacity_j_k == 0.0 {
+        if y.stored_energy_j_m3 != 0.0 && free_energy_j == 0.0
+            || quadratic != 0.0 && negative_capacity == 0.0
+            || nonzero_curvature_action && (curvature == 0.0 || positive_capacity == 0.0) {
             return Err(PiezoelectricError::Invalid("piezoelectric thermal contribution underflows"));
         }
+        // Exact cancellation of the two finite terms is physical: affine
+        // elastic stiffness alone contributes zero fixed-strain heat capacity.
         Ok(FieldThermalState { free_energy_j,entropy_j_k,internal_energy_j,heat_capacity_j_k })
     }
 }

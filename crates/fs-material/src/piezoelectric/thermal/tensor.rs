@@ -15,30 +15,47 @@ use super::*;
 use crate::piezoelectric::tensor::TensorPiezoelectric;
 use crate::tensor::mandel_basis;
 
+mod stress_charge;
+
 impl TensorThermalReduction {
-    fn material(
+    fn tensor(
         &self,
         source: ResolvedMaterialStatePoint,
-    ) -> Result<LongitudinalPiezoelectric, PiezoelectricError> {
-        let tensor = TensorPiezoelectric::from_strain_charge_material_state(
-            source,
-            self.source_frame,
-        )?;
+    ) -> Result<TensorPiezoelectric, PiezoelectricError> {
+        let tensor = if self.stress_charge.is_some() {
+            TensorPiezoelectric::from_material_state(source, self.source_frame)?
+        } else {
+            TensorPiezoelectric::from_strain_charge_material_state(source, self.source_frame)?
+        };
         let identity = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
         let tensor = if self.frame == self.source_frame && self.source_to_frame == identity {
             tensor
         } else {
             tensor.rotated(self.frame, self.source_to_frame)?
         };
-        tensor.longitudinal(self.direction)
+        Ok(tensor)
+    }
+
+    pub(super) fn material(
+        &self,
+        source: ResolvedMaterialStatePoint,
+    ) -> Result<(LongitudinalPiezoelectric, Option<TensorThermalDerivatives>), PiezoelectricError> {
+        let tensor = self.tensor(source)?;
+        let material = tensor.longitudinal(self.direction)?;
+        let direction = material.tensor_reduction().expect("native reduction receipt").direction;
+        let derivatives = self.stress_charge.as_ref()
+            .map(|source| source.derivatives(&tensor, direction))
+            .transpose()?;
+        Ok((material, derivatives))
     }
 }
 
 impl ThermalLongitudinalPiezoelectric {
     /// Bind a full anisotropic strain-charge source to the existing longitudinal
     /// rod/circuit thermal law. The original source tensor must declare all
-    /// s^E, signed d, epsilon^T and density roles; an affine stress-charge input
-    /// generally gives non-affine compliance and is deliberately refused.
+    /// s^E, signed d, epsilon^T and density roles. For affine C^E, e and
+    /// epsilon^S input, use `from_stress_charge_tensor`, which retains the
+    /// non-affine inverse derivatives.
     ///
     /// The fixed physical projection imposes T=t n⊗n and E=E_n n. Transverse
     /// strain and electric displacement relax exactly as in `longitudinal`.
@@ -70,6 +87,7 @@ impl ThermalLongitudinalPiezoelectric {
             source_to_frame: *original.source_to_frame_rotation(),
             direction,
             coefficient_roundoff_scales: [0.0; 3],
+            stress_charge: None,
         };
         // Original source coordinates, rather than scalar surrogate claims,
         // admit all 64 roles and retain their exact source-domain boundaries.

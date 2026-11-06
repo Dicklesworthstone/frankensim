@@ -145,6 +145,23 @@ impl<const N: usize> ScaledSpd<N> {
         }
         Ok(result)
     }
+    /// Action of L^-1 D^-1 for C=D L L^T D. Dot products of these
+    /// vectors evaluate the inverse quadratic form without subtracting energies.
+    fn inverse_factor_action(&self, rhs: [f64; N]) -> Result<[f64; N]> {
+        let mut result = core::array::from_fn(|i| rhs[i] / self.scale[i]);
+        for i in 0..N {
+            let value = (0..i).fold(result[i], |sum, j| {
+                (-self.factor.l(i, j)).mul_add(result[j], sum)
+            });
+            result[i] = value / self.factor.l(i, i);
+        }
+        if result.iter().any(|x| !x.is_finite()) {
+            return Err(invalid(
+                "piezoelectric inverse factor action is unrepresentable",
+            ));
+        }
+        Ok(result)
+    }
     fn energy(&self, x: &[f64; N]) -> Result<f64> {
         let scaled: [f64; N] = core::array::from_fn(|i| self.scale[i] * x[i]);
         let mut energy = 0.0;
@@ -477,6 +494,15 @@ impl TensorPiezoelectric {
     /// Original fixed-reference density at the same material state [kg/m³].
     pub const fn density_kg_m3(&self) -> f64 {
         self.density
+    }
+
+    // Thermal source differentiation reuses the already admitted native
+    // elastic factor; no inverse matrix or separate factorization owner.
+    pub(super) fn solve_elastic(&self, rhs: [f64; 6]) -> Result<[f64; 6]> {
+        self.elastic_factor.solve(rhs)
+    }
+    pub(super) fn elastic_inverse_factor_action(&self, rhs: [f64; 6]) -> Result<[f64; 6]> {
+        self.elastic_factor.inverse_factor_action(rhs)
     }
 
     /// Reduce the SAME tensor to a homogeneous longitudinal sensor/actuator law.

@@ -1,4 +1,7 @@
 //! Full-source thermal reduction, independently checked in strain-charge form.
+#[path = "thermal/stress_charge.rs"]
+mod stress_charge;
+
 use super::*;
 use fs_qty::{
     QuantitySpec, Temperature,
