@@ -26,6 +26,8 @@ use fs_math::det::{ln, sqrt};
 use fs_qty::{AmountConcentration, Temperature};
 use std::sync::Arc;
 
+/// Bounded deterministic phase-count and seed discovery.
+pub mod discovery;
 /// Conserved finite-inventory phase splits at an explicit phase count and seed.
 pub mod equilibrium;
 /// Full-simplex local stability and finite tangent-plane comparisons.
