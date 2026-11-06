@@ -20,6 +20,9 @@ use fs_mbd::articulated::{ArticulatedError, BaseState, forward_kinematics};
 mod finite;
 pub use finite::ArticulatedFiniteTankLoad;
 
+mod motion;
+pub use motion::{ArticulatedHydrostaticMotionError, ArticulatedHydrostaticMotionStep};
+
 mod sealed {
     pub trait Prescribed {}
 }

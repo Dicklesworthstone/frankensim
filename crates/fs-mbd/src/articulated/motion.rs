@@ -113,6 +113,10 @@ pub struct FreeFloatingMotionStep {
     /// Midpoint body-wrench work plus uniform-gravity work along the computed
     /// COM increment, retaining displacements below the absolute pose's ulp.
     pub external_work: f64,
+    /// Uniform-gravity work along the computed COM displacement, in joules.
+    /// This is already included in external_work. It is reduced before adding
+    /// the world origin, so a distant coordinate datum cannot erase the work.
+    pub gravity_work: f64,
     /// Midpoint work of internal spatial connections, in joules; zero in the
     /// held-wrench API. Their storage and loss are owned by the connection lane.
     pub internal_body_work: f64,
@@ -698,6 +702,7 @@ fn step_evaluated_with_forcing<'a, C: FnMut() -> bool>(
             actuator_work,
             constraint_work,
             external_work,
+            gravity_work.to_f64(),
             internal_body_work,
             dissipated_energy,
             kinetic_work_residual,
@@ -725,6 +730,7 @@ fn step_evaluated_with_forcing<'a, C: FnMut() -> bool>(
             actuator_work,
             constraint_work,
             external_work,
+            gravity_work: gravity_work.to_f64(),
             internal_body_work,
             kinetic_work_residual,
         },

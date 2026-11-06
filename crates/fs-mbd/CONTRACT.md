@@ -7680,3 +7680,14 @@ pressure/temperature/lower-speed refusals, an internal speed peak with safe
 outer endpoints, binding permutation and ordered card identity, and unsupported
 laws/geometry/cancellation. The shared kernel ambiguity test additionally checks
 incomparable maximal sticking sets of different cardinalities.
+
+### Uniform gravity work in free-motion receipts
+
+`FreeFloatingMotionStep::gravity_work` exposes the uniform-gravity contribution
+already computed by the explicit and implicit native motion owners. It is
+included in `external_work`, and must not be added to it again. Both owners
+retain their existing compensated mass-times-gravity-times-COM-displacement
+calculation before adding the world origin. Conservative coupled storage gates
+can use its negative as the body gravitational-potential change without
+subtracting large absolute pose potentials. The integration equations, force
+stages and momentum reconstruction are unchanged.

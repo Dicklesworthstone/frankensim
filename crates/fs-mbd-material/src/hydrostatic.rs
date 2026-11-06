@@ -39,6 +39,7 @@ mod finite_layered;
 mod articulated;
 pub use articulated::{
     ArticulatedFiniteTankLoad, ArticulatedHydrostaticError, ArticulatedHydrostaticLoad,
+    ArticulatedHydrostaticMotionError, ArticulatedHydrostaticMotionStep,
     PreparedArticulatedHydrostatics, PrescribedHydrostaticReservoir,
 };
 pub use finite_layered::{

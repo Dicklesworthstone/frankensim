@@ -1951,3 +1951,44 @@ independent uniform/stratified liquid-energy integrals, hinge virtual work at
 moving interfaces, free-floating density ratios, and transactional refusal.
 Rustfmt parsed the changed Rust files. Native Cargo execution was unavailable
 during this extension; these added regressions are not a passing qualification.
+
+## Staged buoyancy during native articulated motion
+
+`PreparedArticulatedHydrostatics::step_free_floating` and its finite-tank and
+finite-layered-tank entries advance the original material-defined mechanism
+through `step_free_floating_with_forcing`. Hydrostatics is evaluated at the
+actual initial and reconstructed midpoint configurations. The native ABA,
+momentum reconstruction, joint limits and free-base recoil retain one owner.
+The same midpoint buoyancy supplies dynamics, impulse and work.
+
+The returned `ArticulatedHydrostaticMotionStep` retains both force-stage
+receipts and a fresh endpoint load. Each finite stage solves one shared
+waterline or complete conserved layer stack across every link. Endpoint
+geometry, source-domain, floor/wall and overflow admission precede publication.
+Body weight uses the reservoir gravity once; supplied held joint efforts remain
+internal actuators with their original midpoint work.
+
+An absolute energy gate measures polarized kinetic change minus native
+uniform-gravity work plus the single fluid-potential change minus actuator work.
+Compensated reduction avoids first subtracting rounded large energy totals.
+The native gravity-work receipt retains the computed relative COM displacement,
+including for a distant world-coordinate datum. Fluid potential remains the
+existing clipped owner's f64 endpoint quantity. No damping, heat, projection
+or energy repair is invented to meet the gate.
+
+This is the existing explicit second-order smooth free-flight method. It is
+not energy-exact, stiffly stable, a supported/contact mechanism integrator, or
+a resolved fluid-inertia model. Fixed sources, inventories, mass properties
+and disjoint envelopes must be retained between steps. Geometry changes
+between force samples still require resolved timesteps. Cancellation shares
+one callback across native and hydrostatic work, and any late refusal returns
+no candidate trajectory.
+
+`tests/hydrostatic/articulated/motion.rs` defines physical regressions for
+density-ratio rise/neutrality/sinking, actual midpoint immersion, analytic heave
+convergence, finite-tank restoring frequency, layered-liquid motion, actuator
+work and free-base recoil, and transactional energy/endpoint/cancellation
+refusal. All seven changed Rust files were parsed successfully with rustfmt; the new
+motion and regression modules were formatted. Native Cargo compilation and
+regression execution remain outstanding because DSR/RCH are unavailable and
+the shared filesystem is full.
