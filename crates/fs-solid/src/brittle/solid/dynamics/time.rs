@@ -16,20 +16,20 @@
 //! reversal/event was resolved. Split non-affine loads at their physical knots.
 
 use fs_exec::Cx;
+use fs_material::brittle::BrittleEnergy;
 use fs_math::det;
 
 use super::super::path::{Sum, interpolate};
 use super::super::{BrittleTetError, checkpoint, energy_gate};
 use super::{
     BrittleTetDynamicControls, BrittleTetDynamicEnergy, BrittleTetDynamicError, BrittleTetMotion,
-    BrittleTetMotionStep,
 };
 use crate::plastic3::dynamics::InertialEnergy;
 use crate::plastic3::{IncrementSettings, SmallStrainTetError};
 
 /// Explicit physical intervals, native solve/storage budgets and local errors.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct BrittleTetTimeControls {
+pub struct BrittleTetTimeControls<W = BrittleTetDynamicControls> {
     /// Duration of the first full-vs-two-halves comparison.
     pub initial_interval_s: f64,
     /// Smallest comparison interval, except a shorter final remainder.
@@ -50,9 +50,10 @@ pub struct BrittleTetTimeControls {
     /// Maximum damage increase per element in EITHER accepted half step.
     pub maximum_damage_increment: f64,
     /// Physical/kinetic identities apply locally and to the complete duration.
-    /// Constitutive-defect and numerical-kinetic-loss allowances are WHOLE
-    /// duration budgets, partitioned by each actual native timestep.
-    pub work: BrittleTetDynamicControls,
+    /// With the default backward-Euler policy, constitutive-defect and
+    /// numerical-kinetic-loss allowances are WHOLE duration budgets,
+    /// partitioned by each actual native timestep.
+    pub work: W,
 }
 
 /// Fine-vs-coarse differences before accepting the unmodified native fine state.
@@ -68,13 +69,13 @@ pub struct BrittleTetTimeErrorEstimate {
 
 /// Compact accepted pair; its two energy receipts belong to actual fine steps.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct BrittleTetTimeRecord {
+pub struct BrittleTetTimeRecord<E = BrittleTetDynamicEnergy> {
     pub start_time_s: f64,
     pub midpoint_time_s: f64,
     pub end_time_s: f64,
     pub estimate: BrittleTetTimeErrorEstimate,
     pub maximum_damage_increment: f64,
-    pub energy: [BrittleTetDynamicEnergy; 2],
+    pub energy: [E; 2],
 }
 
 /// Only a complete physical duration publishes its final original motion.
@@ -152,155 +153,17 @@ impl<'a> BrittleTetMotion<'a> {
         controls: BrittleTetTimeControls,
         cx: &Cx<'_>,
     ) -> Result<BrittleTetTimeStep<'a>, BrittleTetTimeError> {
-        checkpoint(cx)?;
-        validate(controls)?;
-        let target_time = self.time_s + duration_s;
-        if !duration_s.is_finite()
-            || duration_s <= 0.0
-            || !target_time.is_finite()
-            || target_time <= self.time_s
-        {
-            return Err(BrittleTetTimeError::Invalid(
-                "positive representable physical duration required",
-            ));
-        }
-        let mut loads = Loads::new(self, target_time, prescribed_end_m, force_intervals_n, cx)?;
-        let duration = target_time - self.time_s;
-        let mut current: Option<BrittleTetMotion<'a>> = None;
-        let mut records = buffer(controls.maximum_intervals.min(64))?;
-        let mut sums = [Sum::default(); 10];
-        let mut interval = controls.initial_interval_s;
-        let mut trials = 0;
-        let mut rejected = 0;
-        loop {
-            checkpoint(cx)?;
-            let accepted = current.as_ref().unwrap_or(self);
-            if accepted.time_s == target_time {
-                break;
-            }
-            if records.len() >= controls.maximum_intervals || controls.maximum_trials - trials < 3 {
-                return Err(BrittleTetTimeError::WorkLimit {
-                    accepted_intervals: records.len(),
-                    trials,
-                });
-            }
-            if accepted.remaining_steps() < 2 {
-                return Err(BrittleTetDynamicError::StepBudget {
-                    accepted_steps: accepted.accepted_steps,
-                    maximum_steps: accepted.maximum_steps,
-                }
-                .into());
-            }
-            let end = (accepted.time_s + interval).min(target_time);
-            let span = end - accepted.time_s;
-            let midpoint = accepted.time_s + 0.5 * span;
-            if !span.is_finite() || span <= 0.0 || midpoint <= accepted.time_s || midpoint >= end {
-                return Err(BrittleTetTimeError::Invalid(
-                    "two increasing native physical timesteps must be representable",
-                ));
-            }
-            let attempted = compare_interval(
-                accepted,
-                midpoint,
-                end,
-                &mut loads,
-                settings,
-                controls,
-                &mut trials,
-                cx,
-            );
-            let pair = match attempted {
-                Ok(pair) => pair,
-                Err(BrittleTetTimeError::Endpoint(error)) if retryable(&error) => {
-                    interval = refine(
-                        accepted.time_s,
-                        span,
-                        controls.minimum_interval_s,
-                        BrittleTetTimeRefinementCause::Endpoint(error),
-                    )?;
-                    rejected += 1;
-                    continue;
-                }
-                Err(error) => return Err(error),
-            };
-            let cause = if pair.estimate.normalized_error > 1.0 {
-                Some(BrittleTetTimeRefinementCause::ErrorEstimate(pair.estimate))
-            } else if pair.maximum_damage_increment > controls.maximum_damage_increment {
-                Some(BrittleTetTimeRefinementCause::DamageIncrement {
-                    observed: pair.maximum_damage_increment,
-                    maximum: controls.maximum_damage_increment,
-                })
-            } else {
-                None
-            };
-            if let Some(cause) = cause {
-                interval = refine(accepted.time_s, span, controls.minimum_interval_s, cause)?;
-                rejected += 1;
-                continue;
-            }
-            let energies = [pair.first_energy, pair.fine.energy];
-            for energy in energies {
-                for (sum, value) in sums.iter_mut().zip([
-                    energy.material_work_j,
-                    energy.fracture_dissipation_j,
-                    energy.internal_endpoint_work_j,
-                    energy.dead_load_endpoint_work_j,
-                    energy.support_endpoint_work_j,
-                    energy.constitutive_endpoint_defect_j,
-                    energy.constitutive_endpoint_defect_j.abs(),
-                    energy.inertia.kinetic_change_j,
-                    energy.inertia.numerical_loss_j,
-                    energy.inertia.inertial_work_j,
-                ]) {
-                    sum.add(value);
-                    if !sum.value().is_finite() {
-                        return Err(BrittleTetTimeError::Invalid(
-                            "complete physical-time work must be representable",
-                        ));
-                    }
-                }
-            }
-            if records.len() == records.capacity() {
-                records
-                    .try_reserve(1)
-                    .map_err(|_| BrittleTetTimeError::Allocation)?;
-            }
-            records.push(BrittleTetTimeRecord {
-                start_time_s: accepted.time_s,
-                midpoint_time_s: midpoint,
-                end_time_s: end,
-                estimate: pair.estimate,
-                maximum_damage_increment: pair.maximum_damage_increment,
-                energy: energies,
-            });
-            let error_growth = if pair.estimate.normalized_error > 0.0 {
-                (0.9 / det::sqrt(pair.estimate.normalized_error)).clamp(0.5, 2.0)
-            } else {
-                2.0
-            };
-            let damage_growth = growth(
-                controls.maximum_damage_increment,
-                pair.maximum_damage_increment,
-            );
-            let part = span / duration;
-            let work_growth = growth(
-                controls.work.work.maximum_endpoint_work_defect_j * part,
-                energies
-                    .iter()
-                    .map(|e| e.constitutive_endpoint_defect_j.abs())
-                    .sum(),
-            )
-            .min(growth(
-                controls.work.maximum_numerical_kinetic_loss_j * part,
-                energies.iter().map(|e| e.inertia.numerical_loss_j).sum(),
-            ));
-            interval = (span * error_growth.min(damage_growth).min(work_growth))
-                .clamp(controls.minimum_interval_s, controls.maximum_interval_s);
-            current = Some(pair.fine.motion);
-        }
-        let motion = current.ok_or(BrittleTetTimeError::Invalid(
-            "no physical-time interval accepted",
-        ))?;
+        let result = drive(
+            self,
+            duration_s,
+            prescribed_end_m,
+            force_intervals_n,
+            settings,
+            controls,
+            BackwardEuler,
+            cx,
+        )?;
+        let motion = result.motion;
         let [
             material,
             fracture,
@@ -312,7 +175,7 @@ impl<'a> BrittleTetMotion<'a> {
             kinetic,
             numerical,
             inertial,
-        ] = sums.map(Sum::value);
+        ] = result.values;
         let storage_change = motion.solid.stored_energy_j - self.solid.stored_energy_j;
         let inertia = InertialEnergy {
             reference_mass_kg: self.reference_mass_kg(),
@@ -383,40 +246,365 @@ impl<'a> BrittleTetMotion<'a> {
         checkpoint(cx)?;
         Ok(BrittleTetTimeStep {
             motion,
-            records,
-            trials,
-            rejected_intervals: rejected,
+            records: result.records,
+            trials: result.trials,
+            rejected_intervals: result.rejected_intervals,
             energy,
             absolute_constitutive_defect_j: absolute_constitutive,
         })
     }
 }
 
-struct Compared<'a> {
-    fine: BrittleTetMotionStep<'a>,
-    first_energy: BrittleTetDynamicEnergy,
+/// Shared native trial representation; it never fabricates a material state.
+pub(super) struct TimeTrial<'a, E> {
+    pub(super) motion: BrittleTetMotion<'a>,
+    pub(super) element_energy: Vec<BrittleEnergy>,
+    pub(super) energy: E,
+    pub(super) numerical_tangent_evaluations: usize,
+}
+
+/// Private integration policy: physical sampling and energy interpretation stay
+/// with the native scheme, while subdivision/history/error logic is shared.
+pub(super) trait Scheme {
+    type Work: Copy;
+    type Energy: Copy;
+    const MEAN_FORCES: bool;
+    fn validate(&self, work: Self::Work) -> Result<(), BrittleTetTimeError>;
+    #[allow(clippy::too_many_arguments)]
+    fn advance<'a>(
+        &self,
+        old: &BrittleTetMotion<'a>,
+        dt_s: f64,
+        prescribed_m: &[(usize, f64)],
+        forces_n: &[(usize, f64)],
+        settings: IncrementSettings,
+        work: Self::Work,
+        part: f64,
+        cx: &Cx<'_>,
+    ) -> Result<TimeTrial<'a, Self::Energy>, BrittleTetDynamicError>;
+    /// Material, fracture, internal, applied, support, signed work defect,
+    /// absolute work defect, kinetic change, numerical loss, inertial work.
+    /// The concrete public result retains endpoint-vs-mean semantics.
+    fn values(&self, energy: Self::Energy) -> [f64; 10];
+    fn work_growth(&self, work: Self::Work, part: f64, energy: [Self::Energy; 2]) -> f64;
+    fn retryable(&self, error: &BrittleTetDynamicError) -> bool;
+}
+
+pub(super) struct TimeTrajectory<'a, E> {
+    pub(super) motion: BrittleTetMotion<'a>,
+    pub(super) records: Vec<BrittleTetTimeRecord<E>>,
+    pub(super) trials: usize,
+    pub(super) rejected_intervals: usize,
+    pub(super) values: [f64; 10],
+    /// Tangent evaluations from completed native solves, including discarded
+    /// coarse/rejected candidates.
+    /// A failed native solve does not expose its partial tangent telemetry.
+    pub(super) numerical_tangent_evaluations: usize,
+}
+
+struct BackwardEuler;
+impl Scheme for BackwardEuler {
+    type Work = BrittleTetDynamicControls;
+    type Energy = BrittleTetDynamicEnergy;
+    const MEAN_FORCES: bool = false;
+
+    fn validate(&self, c: Self::Work) -> Result<(), BrittleTetTimeError> {
+        if ![
+            c.work.material_energy_tolerance_j,
+            c.work.equilibrium_work_tolerance_j,
+            c.work.maximum_endpoint_work_defect_j,
+            c.kinetic_work_tolerance_j,
+            c.maximum_numerical_kinetic_loss_j,
+        ]
+        .iter()
+        .all(|v| v.is_finite() && *v >= 0.0)
+        {
+            return Err(BrittleTetTimeError::Invalid(
+                "ordered positive intervals, positive error/solve budgets and finite nonnegative work gates required",
+            ));
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn advance<'a>(
+        &self,
+        old: &BrittleTetMotion<'a>,
+        dt_s: f64,
+        prescribed_m: &[(usize, f64)],
+        forces_n: &[(usize, f64)],
+        settings: IncrementSettings,
+        controls: Self::Work,
+        part: f64,
+        cx: &Cx<'_>,
+    ) -> Result<TimeTrial<'a, Self::Energy>, BrittleTetDynamicError> {
+        let local = BrittleTetDynamicControls {
+            work: super::super::BrittleTetControls {
+                maximum_endpoint_work_defect_j: controls.work.maximum_endpoint_work_defect_j * part,
+                ..controls.work
+            },
+            maximum_numerical_kinetic_loss_j: controls.maximum_numerical_kinetic_loss_j * part,
+            ..controls
+        };
+        let step = old.advance(dt_s, prescribed_m, forces_n, settings, local, cx)?;
+        Ok(TimeTrial {
+            motion: step.motion,
+            element_energy: step.element_energy,
+            energy: step.energy,
+            numerical_tangent_evaluations: 0,
+        })
+    }
+
+    fn values(&self, e: Self::Energy) -> [f64; 10] {
+        [
+            e.material_work_j,
+            e.fracture_dissipation_j,
+            e.internal_endpoint_work_j,
+            e.dead_load_endpoint_work_j,
+            e.support_endpoint_work_j,
+            e.constitutive_endpoint_defect_j,
+            e.constitutive_endpoint_defect_j.abs(),
+            e.inertia.kinetic_change_j,
+            e.inertia.numerical_loss_j,
+            e.inertia.inertial_work_j,
+        ]
+    }
+
+    fn work_growth(&self, c: Self::Work, part: f64, e: [Self::Energy; 2]) -> f64 {
+        growth(
+            c.work.maximum_endpoint_work_defect_j * part,
+            e.iter()
+                .map(|e| e.constitutive_endpoint_defect_j.abs())
+                .sum(),
+        )
+        .min(growth(
+            c.maximum_numerical_kinetic_loss_j * part,
+            e.iter().map(|e| e.inertia.numerical_loss_j).sum(),
+        ))
+    }
+    fn retryable(&self, error: &BrittleTetDynamicError) -> bool {
+        newton_retryable(error)
+            || matches!(error, BrittleTetDynamicError::Solid(BrittleTetError::EnergyGate {
+                account: "dynamic constitutive endpoint integration defect"
+                    | "backward-Euler numerical kinetic loss",
+                defect_j, ..
+            }) if defect_j.is_finite())
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn drive<'a, S: Scheme>(
+    original: &BrittleTetMotion<'a>,
+    duration_s: f64,
+    prescribed_end_m: &[(usize, f64)],
+    force_intervals_n: &[(usize, [f64; 2])],
+    settings: IncrementSettings,
+    controls: BrittleTetTimeControls<S::Work>,
+    scheme: S,
+    cx: &Cx<'_>,
+) -> Result<TimeTrajectory<'a, S::Energy>, BrittleTetTimeError> {
+    checkpoint(cx)?;
+    validate(&controls)?;
+    scheme.validate(controls.work)?;
+    let target_time = original.time_s + duration_s;
+    if !duration_s.is_finite()
+        || duration_s <= 0.0
+        || !target_time.is_finite()
+        || target_time <= original.time_s
+    {
+        return Err(BrittleTetTimeError::Invalid(
+            "positive representable physical duration required",
+        ));
+    }
+    let mut loads = Loads::new(
+        original,
+        target_time,
+        prescribed_end_m,
+        force_intervals_n,
+        cx,
+    )?;
+    let duration = target_time - original.time_s;
+    let mut current: Option<BrittleTetMotion<'a>> = None;
+    let mut records = buffer(controls.maximum_intervals.min(64))?;
+    let mut sums = [Sum::default(); 10];
+    let mut interval = controls.initial_interval_s;
+    let mut trials = 0;
+    let mut rejected = 0;
+    let mut tangent_evaluations = 0;
+    loop {
+        checkpoint(cx)?;
+        let accepted = current.as_ref().unwrap_or(original);
+        if accepted.time_s == target_time {
+            break;
+        }
+        if records.len() >= controls.maximum_intervals || controls.maximum_trials - trials < 3 {
+            return Err(BrittleTetTimeError::WorkLimit {
+                accepted_intervals: records.len(),
+                trials,
+            });
+        }
+        if accepted.remaining_steps() < 2 {
+            return Err(BrittleTetDynamicError::StepBudget {
+                accepted_steps: accepted.accepted_steps,
+                maximum_steps: accepted.maximum_steps,
+            }
+            .into());
+        }
+        let end = (accepted.time_s + interval).min(target_time);
+        let span = end - accepted.time_s;
+        let midpoint = accepted.time_s + 0.5 * span;
+        if !span.is_finite() || span <= 0.0 || midpoint <= accepted.time_s || midpoint >= end {
+            return Err(BrittleTetTimeError::Invalid(
+                "two increasing native physical timesteps must be representable",
+            ));
+        }
+        let attempted = compare_interval(
+            accepted,
+            midpoint,
+            end,
+            &mut loads,
+            settings,
+            controls,
+            &scheme,
+            &mut trials,
+            &mut tangent_evaluations,
+            cx,
+        );
+        let pair = match attempted {
+            Ok(pair) => pair,
+            Err(BrittleTetTimeError::Endpoint(error)) if scheme.retryable(&error) => {
+                interval = refine(
+                    accepted.time_s,
+                    span,
+                    controls.minimum_interval_s,
+                    BrittleTetTimeRefinementCause::Endpoint(error),
+                )?;
+                rejected += 1;
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        let cause = if pair.estimate.normalized_error > 1.0 {
+            Some(BrittleTetTimeRefinementCause::ErrorEstimate(pair.estimate))
+        } else if pair.maximum_damage_increment > controls.maximum_damage_increment {
+            Some(BrittleTetTimeRefinementCause::DamageIncrement {
+                observed: pair.maximum_damage_increment,
+                maximum: controls.maximum_damage_increment,
+            })
+        } else {
+            None
+        };
+        if let Some(cause) = cause {
+            interval = refine(accepted.time_s, span, controls.minimum_interval_s, cause)?;
+            rejected += 1;
+            continue;
+        }
+        let energies = [pair.first_energy, pair.fine.energy];
+        for energy in energies {
+            for (sum, value) in sums.iter_mut().zip(scheme.values(energy)) {
+                sum.add(value);
+                if !sum.value().is_finite() {
+                    return Err(BrittleTetTimeError::Invalid(
+                        "complete physical-time work must be representable",
+                    ));
+                }
+            }
+        }
+        if records.len() == records.capacity() {
+            records
+                .try_reserve(1)
+                .map_err(|_| BrittleTetTimeError::Allocation)?;
+        }
+        records.push(BrittleTetTimeRecord {
+            start_time_s: accepted.time_s,
+            midpoint_time_s: midpoint,
+            end_time_s: end,
+            estimate: pair.estimate,
+            maximum_damage_increment: pair.maximum_damage_increment,
+            energy: energies,
+        });
+        // The same bounded conservative controller is retained at nonsmooth
+        // fracture events; it does not presume a smooth higher-order solution.
+        let error_growth = if pair.estimate.normalized_error > 0.0 {
+            (0.9 / det::sqrt(pair.estimate.normalized_error)).clamp(0.5, 2.0)
+        } else {
+            2.0
+        };
+        let damage_growth = growth(
+            controls.maximum_damage_increment,
+            pair.maximum_damage_increment,
+        );
+        let work_growth = scheme.work_growth(controls.work, span / duration, energies);
+        interval = (span * error_growth.min(damage_growth).min(work_growth))
+            .clamp(controls.minimum_interval_s, controls.maximum_interval_s);
+        current = Some(pair.fine.motion);
+    }
+    let motion = current.ok_or(BrittleTetTimeError::Invalid(
+        "no physical-time interval accepted",
+    ))?;
+    checkpoint(cx)?;
+    Ok(TimeTrajectory {
+        motion,
+        records,
+        trials,
+        rejected_intervals: rejected,
+        values: sums.map(Sum::value),
+        numerical_tangent_evaluations: tangent_evaluations,
+    })
+}
+
+struct Compared<'a, E> {
+    fine: TimeTrial<'a, E>,
+    first_energy: E,
     estimate: BrittleTetTimeErrorEstimate,
     maximum_damage_increment: f64,
 }
 
 #[allow(clippy::too_many_arguments)]
-fn compare_interval<'a>(
+fn compare_interval<'a, S: Scheme>(
     old: &BrittleTetMotion<'a>,
     midpoint: f64,
     end: f64,
     loads: &mut Loads<'_>,
     settings: IncrementSettings,
-    controls: BrittleTetTimeControls,
+    controls: BrittleTetTimeControls<S::Work>,
+    scheme: &S,
     trials: &mut usize,
+    tangent_evaluations: &mut usize,
     cx: &Cx<'_>,
-) -> Result<Compared<'a>, BrittleTetTimeError> {
+) -> Result<Compared<'a, S::Energy>, BrittleTetTimeError> {
     *trials += 1;
-    let coarse = loads.advance(old, end, settings, controls.work, cx)?;
+    let coarse = loads.advance(
+        old,
+        end,
+        settings,
+        controls.work,
+        scheme,
+        tangent_evaluations,
+        cx,
+    )?;
     *trials += 1;
-    let first = loads.advance(old, midpoint, settings, controls.work, cx)?;
+    let first = loads.advance(
+        old,
+        midpoint,
+        settings,
+        controls.work,
+        scheme,
+        tangent_evaluations,
+        cx,
+    )?;
     *trials += 1;
-    let fine = loads.advance(&first.motion, end, settings, controls.work, cx)?;
-    let (estimate, maximum_damage_increment) = estimate(old, &coarse, &first, &fine, controls, cx)?;
+    let fine = loads.advance(
+        &first.motion,
+        end,
+        settings,
+        controls.work,
+        scheme,
+        tangent_evaluations,
+        cx,
+    )?;
+    let (estimate, maximum_damage_increment) =
+        estimate(old, &coarse, &first, &fine, controls, scheme, cx)?;
     Ok(Compared {
         fine,
         first_energy: first.energy,
@@ -425,12 +613,13 @@ fn compare_interval<'a>(
     })
 }
 
-fn estimate(
+fn estimate<S: Scheme>(
     old: &BrittleTetMotion<'_>,
-    coarse: &BrittleTetMotionStep<'_>,
-    first: &BrittleTetMotionStep<'_>,
-    fine: &BrittleTetMotionStep<'_>,
-    c: BrittleTetTimeControls,
+    coarse: &TimeTrial<'_, S::Energy>,
+    first: &TimeTrial<'_, S::Energy>,
+    fine: &TimeTrial<'_, S::Energy>,
+    c: BrittleTetTimeControls<S::Work>,
+    scheme: &S,
     cx: &Cx<'_>,
 ) -> Result<(BrittleTetTimeErrorEstimate, f64), BrittleTetTimeError> {
     let mut out = BrittleTetTimeErrorEstimate::default();
@@ -496,8 +685,8 @@ fn estimate(
         out.fracture_dissipation_error_j,
         c.fracture_dissipation_tolerance_j,
         c.relative_tolerance,
-        (first.energy.fracture_dissipation_j + fine.energy.fracture_dissipation_j)
-            .max(coarse.energy.fracture_dissipation_j),
+        (scheme.values(first.energy)[1] + scheme.values(fine.energy)[1])
+            .max(scheme.values(coarse.energy)[1]),
     )?);
     Ok((out, maximum_increment))
 }
@@ -519,7 +708,6 @@ fn normalized(
             "finite local error normalization required",
         ));
     }
-    // An overflowing positive ratio is still an unambiguous refinement request.
     Ok(error / denominator)
 }
 fn norm(v: [f64; 3]) -> f64 {
@@ -583,19 +771,29 @@ impl<'a> Loads<'a> {
         })
     }
 
-    fn advance<'m>(
+    #[allow(clippy::too_many_arguments)]
+    fn advance<'m, S: Scheme>(
         &mut self,
         old: &BrittleTetMotion<'m>,
         target: f64,
         settings: IncrementSettings,
-        controls: BrittleTetDynamicControls,
+        controls: S::Work,
+        scheme: &S,
+        tangent_evaluations: &mut usize,
         cx: &Cx<'_>,
-    ) -> Result<BrittleTetMotionStep<'m>, BrittleTetTimeError> {
+    ) -> Result<TimeTrial<'m, S::Energy>, BrittleTetTimeError> {
         let duration = self.end_time_s - self.start_time_s;
         let fraction = if target == self.end_time_s {
             1.0
         } else {
             (target - self.start_time_s) / duration
+        };
+        // Average interval endpoint fractions, avoiding an absolute midpoint
+        // clock that can round onto one endpoint at a large accumulated time.
+        let force_fraction = if S::MEAN_FORCES {
+            0.5 * ((old.time_s - self.start_time_s) / duration) + 0.5 * fraction
+        } else {
+            fraction
         };
         for (i, (entry, &(dof, end))) in self
             .prescribed
@@ -614,19 +812,24 @@ impl<'a> Loads<'a> {
             if i % 256 == 0 {
                 checkpoint(cx)?;
             }
-            entry.1 = interpolate(start, end, fraction);
+            entry.1 = interpolate(start, end, force_fraction);
         }
         let dt = target - old.time_s;
-        let part = dt / duration;
-        let local = BrittleTetDynamicControls {
-            work: super::super::BrittleTetControls {
-                maximum_endpoint_work_defect_j: controls.work.maximum_endpoint_work_defect_j * part,
-                ..controls.work
-            },
-            maximum_numerical_kinetic_loss_j: controls.maximum_numerical_kinetic_loss_j * part,
-            ..controls
-        };
-        let step = old.advance(dt, &self.prescribed, &self.forces, settings, local, cx)?;
+        let step = scheme.advance(
+            old,
+            dt,
+            &self.prescribed,
+            &self.forces,
+            settings,
+            controls,
+            dt / duration,
+            cx,
+        )?;
+        *tangent_evaluations = (*tangent_evaluations)
+            .checked_add(step.numerical_tangent_evaluations)
+            .ok_or(BrittleTetTimeError::Invalid(
+                "completed tangent count overflow",
+            ))?;
         if step.motion.time_s != target {
             return Err(BrittleTetTimeError::Invalid(
                 "native clock did not reach the requested physical time",
@@ -636,7 +839,7 @@ impl<'a> Loads<'a> {
     }
 }
 
-fn validate(c: BrittleTetTimeControls) -> Result<(), BrittleTetTimeError> {
+fn validate<W>(c: &BrittleTetTimeControls<W>) -> Result<(), BrittleTetTimeError> {
     if ![
         c.initial_interval_s,
         c.minimum_interval_s,
@@ -654,16 +857,8 @@ fn validate(c: BrittleTetTimeControls) -> Result<(), BrittleTetTimeError> {
         || c.maximum_damage_increment > 1.0
         || c.maximum_intervals == 0
         || c.maximum_trials < 3
-        || ![
-            c.relative_tolerance,
-            c.work.work.material_energy_tolerance_j,
-            c.work.work.equilibrium_work_tolerance_j,
-            c.work.work.maximum_endpoint_work_defect_j,
-            c.work.kinetic_work_tolerance_j,
-            c.work.maximum_numerical_kinetic_loss_j,
-        ]
-        .iter()
-        .all(|x| x.is_finite() && *x >= 0.0)
+        || !c.relative_tolerance.is_finite()
+        || c.relative_tolerance < 0.0
     {
         return Err(BrittleTetTimeError::Invalid(
             "ordered positive intervals, positive error/solve budgets and finite nonnegative work gates required",
@@ -685,17 +880,14 @@ fn growth(allowance: f64, used: f64) -> f64 {
         2.0
     }
 }
-fn retryable(error: &BrittleTetDynamicError) -> bool {
+pub(super) fn newton_retryable(error: &BrittleTetDynamicError) -> bool {
     matches!(
         error,
         BrittleTetDynamicError::Solid(BrittleTetError::Solve(
             SmallStrainTetError::NewtonStalled { .. }
                 | SmallStrainTetError::LinearSolveFailed { .. }
         ))
-    ) || matches!(error, BrittleTetDynamicError::Solid(BrittleTetError::EnergyGate {
-        account: "dynamic constitutive endpoint integration defect" | "backward-Euler numerical kinetic loss",
-        defect_j, ..
-    }) if defect_j.is_finite())
+    )
 }
 fn refine(
     time_s: f64,

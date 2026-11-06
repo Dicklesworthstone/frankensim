@@ -23,6 +23,9 @@
 /// Original thermal source/history transfer followed by work-conjugate motion.
 pub mod temperature;
 
+/// Adaptive native half-step trajectories with mean-force work and error control.
+pub mod time;
+
 use std::sync::Arc;
 
 use fs_exec::Cx;

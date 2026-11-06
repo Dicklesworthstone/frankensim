@@ -428,3 +428,6 @@ fn cancellation_and_failed_newton_candidates_leave_motion_and_step_budget_retrya
         assert_eq!(motion.solid().solution(), &saved);
     });
 }
+
+#[path = "brittle_tet_midpoint/time.rs"]
+mod time;
