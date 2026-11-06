@@ -699,7 +699,14 @@ impl FreezingWater {
             ))
         }
     }
-    /// ThermalLaw-facing relative entropy integral on the admitted enthalpy path.
+    /// ThermalLaw-facing entropy for the supplied stored-enthalpy increment.
+    ///
+    /// Original ice, liquid and fusion increments supply the mean reciprocal
+    /// temperature. The actual stored heat multiplies that source ratio, so
+    /// inverse residuals cannot erase or change its amount. Equal reconstructed
+    /// temperatures use `Delta h / T`, exactly on the fusion plateau and in the
+    /// differential limit of a sensible branch. Endpoint accuracy retains the
+    /// declared inverse tolerance; source-state entropy remains a separate query.
     pub fn specific_entropy_change_j_kg_k(
         &self,
         initial_h_j_kg: f64,
@@ -709,10 +716,31 @@ impl FreezingWater {
         let a = self
             .state_at_specific_enthalpy(initial_h_j_kg, &mut cancelled)?
             .into_state();
+        if initial_h_j_kg == final_h_j_kg {
+            poll(&mut cancelled)?;
+            return Ok(0.0);
+        }
         let b = self
             .state_at_specific_enthalpy(final_h_j_kg, &mut cancelled)?
             .into_state();
-        let entropy = self.thermal_entropy_change_j_kg_k(a, b)?;
+        let stored_delta_h = final_h_j_kg - initial_h_j_kg;
+        let entropy = if a.temperature_k() == b.temperature_k() {
+            stored_delta_h / a.temperature_k()
+        } else {
+            let source = self.changes(a, b)?;
+            let source_delta_h = source.sensible[0] + source.fusion[0];
+            let source_delta_s =
+                source.sensible[3] + source.fusion[0] / self.melting.temperature().value();
+            stored_delta_h * (source_delta_s / source_delta_h)
+        };
+        if !entropy.is_finite()
+            || entropy == 0.0
+            || entropy.is_sign_positive() != stored_delta_h.is_sign_positive()
+        {
+            return Err(FreezingWaterError::Unrepresentable(
+                "stored-enthalpy entropy increment",
+            ));
+        }
         poll(&mut cancelled)?;
         Ok(entropy)
     }

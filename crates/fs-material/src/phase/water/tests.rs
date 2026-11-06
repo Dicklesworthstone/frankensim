@@ -245,6 +245,67 @@ fn explicit_entropy_seam_retains_raw_if97_and_a_path_additive_thermal_primitive(
 }
 
 #[test]
+fn thermal_entropy_retains_sensible_heat_below_the_inverse_tolerance() {
+    for pressure in [101325.0, 3e6] {
+        let law = chart(pressure);
+        for temperature in [300.0, 700.0] {
+            let h = at_t(&law, temperature).specific_enthalpy_j_kg();
+            let next_h = h.next_up();
+            let heat = next_h - h;
+            assert!(heat > 0.0 && heat < controls().enthalpy_tolerance_j_kg);
+            // This finite stored heat can disappear when its inverse temperatures
+            // round together. The thermal consumer must still receive dh/T.
+            let entropy = ThermalLaw::specific_entropy_change_j_kg_k(&law, h, next_h)
+                .unwrap()
+                .unwrap();
+            assert!(entropy > 0.0);
+            near(entropy / (heat / temperature), 1.0, 1e-10);
+            assert_eq!(
+                ThermalLaw::specific_entropy_change_j_kg_k(&law, next_h, h)
+                    .unwrap()
+                    .unwrap(),
+                -entropy
+            );
+            assert_eq!(
+                ThermalLaw::specific_entropy_change_j_kg_k(&law, h, h)
+                    .unwrap()
+                    .unwrap(),
+                0.0
+            );
+        }
+    }
+}
+
+#[test]
+fn thermal_entropy_retains_stored_latent_heat_across_quality_roundoff() {
+    for pressure in [101325.0, 3e6] {
+        let law = chart(pressure);
+        let liquid_h = law.saturation().liquid().specific_enthalpy().value();
+        let vapor_h = law.saturation().vapor().specific_enthalpy().value();
+        let middle_h = liquid_h + 0.5 * (vapor_h - liquid_h);
+        let temperature = law.saturation().temperature().value();
+        for (initial_h, final_h) in [
+            (liquid_h, vapor_h),
+            (middle_h, middle_h.next_up()),
+            (middle_h, vapor_h),
+        ] {
+            let entropy = ThermalLaw::specific_entropy_change_j_kg_k(&law, initial_h, final_h)
+                .unwrap()
+                .unwrap();
+            // The continuous isobaric primitive includes latent h/T, not the
+            // unequal raw IF97 regional entropy jump or rounded quality change.
+            assert_eq!(entropy, (final_h - initial_h) / temperature);
+            assert_eq!(
+                ThermalLaw::specific_entropy_change_j_kg_k(&law, final_h, initial_h)
+                    .unwrap()
+                    .unwrap(),
+                -entropy
+            );
+        }
+    }
+}
+
+#[test]
 fn bounds_domains_inverse_work_and_cancellation_are_explicit() {
     let law = chart(3e6);
     let ts = law.saturation().temperature().value();
@@ -298,6 +359,14 @@ fn bounds_domains_inverse_work_and_cancellation_are_explicit() {
     let [lo, hi] = law.enthalpy_bounds_j_kg();
     assert!(law.state_at_specific_enthalpy(lo - 1.0, || false).is_err());
     assert!(law.state_at_specific_enthalpy(hi + 1.0, || false).is_err());
+    assert!(
+        law.specific_entropy_change_j_kg_k(hi.next_up(), hi.next_up(), || false)
+            .is_err()
+    );
+    assert_eq!(
+        law.specific_entropy_change_j_kg_k(lo, lo, || true),
+        Err(WaterError::Cancelled)
+    );
     let limited = IsobaricWater::new(
         Pressure::new(3e6),
         WaterChartControls {

@@ -9415,6 +9415,15 @@ dh/T on this isobar, and must never be substituted for absolute source entropy
 in a pressure-changing device. The correction is not physical entropy
 generation or an added heat source.
 
+Thermal entropy increments retain the supplied stored enthalpy difference.
+The original-source ratio Delta S*/Delta h supplies the mean reciprocal
+temperature between the admitted inverse endpoints; coincident temperatures
+use Delta h/T. This preserves tiny sensible and latent heat contributions
+when source inverse or quality rounding would erase or change them. Endpoint
+accuracy still follows the declared inverse controls. Native regressions call
+the shared `ThermalLaw` directly for liquid, steam, and coexistence at two
+pressures, including reversed and single-ULP heat increments.
+
 `advance_heat` retains fixed mass and reports both phase inventories, physical
 volume change, delta_h, delta_u and outward p*delta_v work. Original-source
 stable increments and actual rounded endpoint differences independently satisfy
@@ -10451,6 +10460,14 @@ integral of dh/T. It does not introduce a second heat solver, apparent-Cp
 regularization, a sampled stability minimum, or a new energy reference.
 Unresolved source bounds and cancellation yield no prepared law. Runtime
 domain errors propagate through the existing transactional thermal owner.
+
+Its entropy increment preserves the supplied stored Delta h, using the
+original ice/liquid/fusion Delta S*/Delta h as mean reciprocal temperature.
+Coincident inverse temperatures use Delta h/T, retaining small sensible heat
+and exact latent storage despite source inverse or phase-fraction rounding.
+The source-state entropy and heat-step accounts keep their original increments.
+Additional `ThermalLaw` regressions cover single-ULP ice and liquid heating,
+full and tiny fusion increments, reversal, domain rejection and cancellation.
 
 `cargo run -p fs-material --example water_freeze_thaw` evolves a uniform
 50 g sample at 101325 Pa through cold and warm reservoir contact. The original

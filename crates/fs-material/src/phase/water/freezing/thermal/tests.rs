@@ -221,6 +221,71 @@ fn thermal_preparation_retains_both_source_bounds_and_admits_a_zero_slope_latent
     ));
 }
 
+#[test]
+fn thermal_entropy_retains_single_ulp_ice_and_liquid_heat() {
+    let law = law();
+    for temperature in [253.15, 293.15] {
+        let h = at_t(&law, temperature).specific_enthalpy_j_kg();
+        let next_h = h.next_up();
+        let heat = next_h - h;
+        assert!(heat > 0.0 && heat < law.chart().controls().enthalpy_tolerance_j_kg);
+        let entropy = ThermalLaw::specific_entropy_change_j_kg_k(&law, h, next_h)
+            .unwrap()
+            .unwrap();
+        assert!(entropy > 0.0);
+        near(entropy / (heat / temperature), 1.0, 1e-10);
+        assert_eq!(
+            ThermalLaw::specific_entropy_change_j_kg_k(&law, next_h, h)
+                .unwrap()
+                .unwrap(),
+            -entropy
+        );
+        assert_eq!(
+            ThermalLaw::specific_entropy_change_j_kg_k(&law, h, h)
+                .unwrap()
+                .unwrap(),
+            0.0
+        );
+    }
+    let [lo, hi] = law.chart().enthalpy_bounds_j_kg();
+    assert_eq!(
+        ThermalLaw::specific_entropy_change_j_kg_k(&law, hi.next_up(), hi.next_up()),
+        Err(DepositionError::MaterialDomain)
+    );
+    assert_eq!(
+        law.chart().specific_entropy_change_j_kg_k(lo, lo, || true),
+        Err(crate::phase::water::freezing::FreezingWaterError::Cancelled)
+    );
+}
+
+#[test]
+fn thermal_entropy_retains_stored_fusion_heat_across_fraction_roundoff() {
+    let law = law();
+    let melting = law.chart().melting();
+    let ice_h = melting.ice().specific_enthalpy().value();
+    let liquid_h = melting.liquid().specific_enthalpy().value();
+    let middle_h = ice_h + 0.5 * (liquid_h - ice_h);
+    let temperature = melting.temperature().value();
+    for (initial_h, final_h) in [
+        (ice_h, liquid_h),
+        (middle_h, middle_h.next_up()),
+        (middle_h, liquid_h),
+    ] {
+        let entropy = ThermalLaw::specific_entropy_change_j_kg_k(&law, initial_h, final_h)
+            .unwrap()
+            .unwrap();
+        // Fusion uses the actual stored enthalpy and the isobar's latent h/T,
+        // including its source seam, independent of rounded phase fractions.
+        assert_eq!(entropy, (final_h - initial_h) / temperature);
+        assert_eq!(
+            ThermalLaw::specific_entropy_change_j_kg_k(&law, final_h, initial_h)
+                .unwrap()
+                .unwrap(),
+            -entropy
+        );
+    }
+}
+
 fn reservoir_history(law: &FreezingWaterThermalLaw, dt: f64) -> (FreezingWaterState, [f64; 4]) {
     let warm = at_t(law, 293.15);
     let initial = DepositionSimulation::new(

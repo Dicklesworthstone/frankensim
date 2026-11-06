@@ -720,9 +720,16 @@ impl IsobaricWater {
         }
         Ok(result)
     }
-    /// Fixed-pressure dh/T integral, with the source seam explicitly accounted.
-    /// Evaluated at actual inverse endpoints; each h residual is bounded by the
-    /// declared inverse tolerance. No source-fit uncertainty is claimed.
+    /// Fixed-pressure thermal entropy for the supplied stored-enthalpy increment.
+    ///
+    /// The original-source ratio `Delta S* / Delta h` gives the mean reciprocal
+    /// temperature between the inverse endpoints, including the saturation seam.
+    /// Applying it to the supplied enthalpy increment preserves heat that would
+    /// otherwise be lost or changed by the source inverse residuals. Equal
+    /// reconstructed temperatures use `Delta h / T`, exactly on a latent plateau
+    /// and in the differential limit of a sensible branch. The declared inverse
+    /// tolerance still controls endpoint accuracy; no source-fit uncertainty is
+    /// claimed. Raw source properties and calorimetry retain their own increments.
     pub fn specific_entropy_change_j_kg_k(
         &self,
         initial_h: f64,
@@ -732,10 +739,26 @@ impl IsobaricWater {
         let a = self
             .state_at_specific_enthalpy(initial_h, &mut cancelled)?
             .into_state();
+        if initial_h == final_h {
+            poll(&mut cancelled)?;
+            return Ok(0.0);
+        }
         let b = self
             .state_at_specific_enthalpy(final_h, &mut cancelled)?
             .into_state();
-        let change = self.changes(a, b)?[4];
+        let stored_delta_h = final_h - initial_h;
+        let change = if a.temperature_k() == b.temperature_k() {
+            stored_delta_h / a.temperature_k()
+        } else {
+            let source = self.changes(a, b)?;
+            stored_delta_h * (source[4] / source[0])
+        };
+        if !change.is_finite()
+            || change == 0.0
+            || change.is_sign_positive() != stored_delta_h.is_sign_positive()
+        {
+            return Err(WaterError::Unrepresentable("stored-enthalpy entropy increment"));
+        }
         poll(&mut cancelled)?;
         Ok(change)
     }
