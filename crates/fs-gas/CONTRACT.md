@@ -6322,13 +6322,18 @@ zero-gravity parity. The new production file and corrected integration tests
 passed native rustfmt. Root and an independent reviewer checked the discrete
 force/work and atomic-publication scheme.
 
-Validation is incomplete: the first full native gas source check stopped on
-three APIs missing from the old cached thermochemical dependency. A genuine
-current-source dependency rebuild was started, but the executor disconnected
-before it returned. The final native gas build, these four new tests, and three
-selected unchanged-path regressions therefore have no completed result. No
-native test pass, whole-workspace Cargo pass or DSR pass is claimed for this
-increment. The focused integration target is
+Focused native validation is complete for the exact published source in
+`57475f27b2af915c77f30f9c6eb8a3166289258e`. After rebuilding genuine current
+thermochemistry, the original chemistry/body-force/dynamics/multicomponent
+source hierarchy compiled successfully. All four new gravity tests passed.
+Three unchanged native regressions also passed: accepted-work integration,
+zero-force bit parity, and invalid-source/late-cancellation atomicity. Every
+compiler and test process returned exit code zero; no product correction was
+needed after the interrupted run resumed.
+
+This bounded native source check excludes unrelated fusion and optional
+material root modules. It is not a whole-workspace Cargo or DSR pass. The
+focused integration target remains
 `cargo test -p fs-gas --features experimental-euler --test mixture_gravity`.
 
 ### Complete open reacting durations in one original entropy basis
