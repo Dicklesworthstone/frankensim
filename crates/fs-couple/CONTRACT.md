@@ -905,3 +905,43 @@ G1/G4 regression definitions cover independently integrated finite-bath
 relaxation/refinement, equilibrium phase buffering and solute conservation,
 opposing shared specimen transfers, kinetic/cancellation refusals, and adaptive
 whole-duration accuracy and work limits.
+
+## Condensate films on the original spatial thermal graph
+
+`finite_gas_thermal::wall_film::deposition::advance_deposition_with_wall_film`
+attaches one independent Dry/Wet film to an existing native thermal cell.
+The original `BackwardEulerStep` supplies every cell's caloric storage, contact
+flux, source and prescribed bath. The original material wall-film endpoint
+supplies evaporation/condensation, zero-inventory complementarity, liquid storage,
+vapor-carried energy and finite-gas feedback. A shared Newton solve uses native
+cell-energy increments, one volatile inventory coordinate and gas temperature.
+
+The selected patch occupies actual exposed wall area. Its gas convection is
+reciprocal; the remaining area retains the original ambient cooling. Native
+reservoir coverage and contacts remain authoritative. An ambiguous callback
+replacement of that occupied ambient channel refuses. Other endpoint sources,
+link conductances, internal transfers and bath replacements remain available,
+and their callback sees the actual trial wall graph and gas.
+
+The underlying wall keeps its mass, material identity and original phase chart.
+Liquid-film h(T) comes from its separate source; melting/freezing storage in the
+wall is never treated as film mass or apparent heat capacity. A conductive
+neighbor may supply evaporation heat or absorb condensation heat while the
+wall stays on its latent plateau.
+
+No gas or wall caloric root is nested inside residual evaluations. After one
+original gas reconstruction, a fresh native heat/phase evaluation checks the
+actual joint endpoint. The independent external-heat audit runs only on this
+final replay, reusing the same resolved coefficients without another callback.
+Local cell defects, the complete signed/absolute energy account, source-port
+roundoff and original species/mass balances all gate publication. The shared
+implicit work meter also supports enclosing continuations.
+
+This event-free first-order endpoint preserves native exact-target event
+semantics and fixed geometry between events. Each cell remains a uniform
+control volume requiring spatial/time refinement; the film is fully wetting,
+pure liquid and thermally equilibrated with its wall patch. It adds no drainage,
+moving contact line, boiling or liquid-mixture activity model. Focused tests
+cover analytic conductive supply on a wall fusion plateau, dry condensation,
+the uniform-wall limit, manufactured partial-area/source feedback and atomic
+physical/source/event/work refusal.

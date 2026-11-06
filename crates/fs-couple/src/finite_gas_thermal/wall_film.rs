@@ -16,6 +16,8 @@
 pub mod window;
 /// Simultaneous original wall, finite gas and zero-capable film endpoint.
 pub mod implicit;
+/// Zero-capable film on an original spatial thermal-network wall cell.
+pub mod deposition;
 
 use crate::cavity_phs::piston::thermal::{HeatExchangeSolve, feedback};
 use fs_conduction::{

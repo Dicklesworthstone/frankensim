@@ -127,7 +127,7 @@ impl WorkMeter {
     pub(super) fn charged_gas_iterations(&self) -> usize {
         self.gas_charged.get()
     }
-    fn remaining_iterations(&self) -> Result<usize> {
+    pub(super) fn remaining_iterations(&self) -> Result<usize> {
         let remaining = self.maximum_iterations - self.iterations.get();
         if remaining == 0 {
             Err(WallFilmImplicitError::IterationBudget)
@@ -135,7 +135,7 @@ impl WorkMeter {
             Ok(remaining)
         }
     }
-    fn gas_limit(&self, original_limit: usize) -> Result<usize> {
+    pub(super) fn gas_limit(&self, original_limit: usize) -> Result<usize> {
         let remaining = self.maximum_gas_iterations - self.gas_charged.get();
         if remaining == 0 {
             Err(WallFilmImplicitError::GasIterationBudget)
@@ -143,7 +143,7 @@ impl WorkMeter {
             Ok(original_limit.min(remaining))
         }
     }
-    fn refund_gas(&self, reserved: usize, actual: usize) -> Result<()> {
+    pub(super) fn refund_gas(&self, reserved: usize, actual: usize) -> Result<()> {
         if actual > reserved {
             return Err(Error::Invalid("original gas work exceeded its reserved loop").into());
         }
@@ -151,6 +151,21 @@ impl WorkMeter {
             .set(self.gas_charged.get() - (reserved - actual));
         self.gas_iterations.set(self.gas_iterations.get() + actual);
         Ok(())
+    }
+    pub(super) fn spend_evaluation(&self) -> Result<()> {
+        spend(&self.evaluations, self.maximum_evaluations)
+    }
+    pub(super) fn record_iterations(&self, completed: usize) -> Result<()> {
+        if completed > self.maximum_iterations - self.iterations.get() {
+            return Err(Error::Invalid("original Newton work exceeded its allowance").into());
+        }
+        self.iterations.set(self.iterations.get() + completed);
+        Ok(())
+    }
+    pub(super) fn reserve_gas(&self, original_limit: usize) -> Result<usize> {
+        let reserved = self.gas_limit(original_limit)?;
+        self.gas_charged.set(self.gas_charged.get() + reserved);
+        Ok(reserved)
     }
 }
 
