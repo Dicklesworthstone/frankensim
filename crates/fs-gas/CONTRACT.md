@@ -4885,6 +4885,33 @@ Rustfmt parsed the new source and tests. Native compilation and execution remain
 unverified because the shared build disk is exhausted; no passing native result
 is claimed for this new module.
 
+## Source-bound real-gas normal-shock compression
+
+`material::nonideal_shock::normal_shock` joins the original Peng--Robinson
+mechanics, NASA calorics and material contexts to the normal-shock mass,
+momentum and energy equations. It solves the Rayleigh pressure against the
+native density/internal-energy reconstruction on an explicit compression
+bracket. The Hugoniot energy uses the original finite internal-energy increment,
+including both density departures; independent species formation datums cancel
+before rounding. Native sound speed, Cv and thermal pressure derivatives supply
+the safeguarded Newton tangent and sonic checks. No fitted gamma enters.
+
+Both density bounds exceed the inlet density, and a small momentum residual
+cannot admit the identity root: upstream flow must be supersonic and downstream
+flow subsonic in the shock-relative frame. The complete candidate must pass
+mass, momentum, Hugoniot energy, stagnation enthalpy and signed entropy gates.
+Numerical tolerances, temperature/density bounds and iteration work are explicit.
+Source refusals or cancellation publish no candidate and preserve all inputs.
+
+The original composition, critical properties, pair interactions and material
+context remain attached to both resolved states. Five focused regressions cover
+an independent high-precision dense PR shock, the analytic dilute limit,
+formation/entropy reference invariance, source/bracket/work refusals and
+cancellation/retry. This assumes one caller-declared continuous homogeneous
+stable branch; local stability checks do not establish global phase stability.
+It does not resolve a two-phase front, chemical or vibrational relaxation,
+shock thickness or spatial field evolution.
+
 ## Simultaneous reaction and finite reservoir heat exchange
 
 The prepared constant-volume and constant-pressure reactors accept an explicit

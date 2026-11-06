@@ -11,6 +11,8 @@ pub mod isobaric;
 
 /// Adiabatic compressor/expander outlets with original mixture phase equilibrium.
 pub mod phase_machinery;
+/// Conservative homogeneous real-gas normal-shock compression.
+pub mod nonideal_shock;
 
 /// Shared material-card viscosity/conductivity in conservative gas transport.
 #[cfg(feature = "experimental-euler")]
