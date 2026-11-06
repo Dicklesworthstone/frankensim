@@ -47,7 +47,7 @@ impl<'a> MulticomponentCaloricInventoryRefV1<'a> {
             Self::Equilibrium(state) => state.component_moles(),
         }
     }
-    fn phases(self) -> impl Iterator<Item = MixingInventory<'a>> {
+    pub(super) fn phases(self) -> impl Iterator<Item = MixingInventory<'a>> {
         let count = match self {
             Self::Homogeneous(_) => 1,
             Self::Equilibrium(state) => state.candidate().phases().len(),

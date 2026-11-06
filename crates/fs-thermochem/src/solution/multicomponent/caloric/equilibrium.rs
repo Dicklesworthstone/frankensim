@@ -14,7 +14,11 @@
 //! directly, with no phase solves or branch claim elsewhere in the bracket.
 //! No phase insertion, latent-heat smearing,
 //! concentration floor or regularized physical heat capacity is introduced.
+//! The explicit [`discovery`] child separately admits changing phase counts
+//! through the original finite search without altering fixed-branch continuation.
 
+/// Conserved thermal endpoints with the original bounded phase-count discovery.
+pub mod discovery;
 /// Conserved relaxation and mixing of actual homogeneous or separated inputs.
 pub mod transactions;
 
@@ -25,6 +29,7 @@ use super::{
 use crate::solution::caloric::temperature::{self, TemperatureControl, TemperatureSample};
 use crate::solution::caloric::{BinaryCaloricErrorV1, PureLiquidHeatCapacityV1};
 use crate::solution::ln_complement;
+use crate::solution::multicomponent::discovery::MulticomponentPhaseDiscoveryErrorV1;
 use crate::solution::multicomponent::equilibrium::caloric::{
     MulticomponentCaloricResponseControlV1, MulticomponentCaloricResponseErrorV1,
 };
@@ -57,6 +62,13 @@ pub enum MulticomponentEquilibriumCaloricErrorV1 {
     Caloric(MulticomponentCaloricErrorV1),
     Equilibrium(MulticomponentEquilibriumErrorV1),
     Response(MulticomponentCaloricResponseErrorV1),
+    Discovery(MulticomponentPhaseDiscoveryErrorV1),
+    /// Remaining whole-call work cannot admit another complete, unchanged
+    /// configured discovery policy. No shortened final search is substituted.
+    DiscoverySolveBudget {
+        completed_candidate_solves: usize,
+        required_trial_allowance: usize,
+    },
     PhaseSolveBudget {
         completed_phase_solves: usize,
     },
@@ -105,6 +117,14 @@ impl From<MulticomponentCaloricResponseErrorV1> for MulticomponentEquilibriumCal
         match error {
             MulticomponentCaloricResponseErrorV1::Cancelled => Self::Cancelled,
             other => Self::Response(other),
+        }
+    }
+}
+impl From<MulticomponentPhaseDiscoveryErrorV1> for MulticomponentEquilibriumCaloricErrorV1 {
+    fn from(error: MulticomponentPhaseDiscoveryErrorV1) -> Self {
+        match error {
+            MulticomponentPhaseDiscoveryErrorV1::Cancelled => Self::Cancelled,
+            other => Self::Discovery(other),
         }
     }
 }
@@ -162,7 +182,7 @@ impl MulticomponentEquilibriumCaloricStateV1 {
     }
 }
 
-/// Conserved signed heat and system entropy on the accepted local phase branch.
+/// Conserved signed heat and system entropy between actual admitted states.
 #[derive(Clone, Debug, PartialEq)]
 pub struct MulticomponentEquilibriumCaloricBalanceV1 {
     final_state: MulticomponentEquilibriumCaloricStateV1,

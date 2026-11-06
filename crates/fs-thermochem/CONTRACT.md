@@ -692,6 +692,37 @@ arbitrary reference shifts, unequal-temperature ternary mixing with homogeneous
 and separated inputs, distinct enthalpies and unequal weights of asymmetric
 solvent phases, the isolated entropy guard and transactional refusals.
 
+### Conserved thermal endpoints with bounded liquid phase discovery
+
+`solution::multicomponent::caloric::equilibrium::discovery` adds
+`add_heat_discovered` and `mix_discovered` for actual homogeneous or separated
+parcels. Every temperature sample invokes the original deterministic phase
+discovery with exactly the same configured seed policy, then binds its selected
+candidate through the original caloric owner and unregularized physical Cp.
+The original shared temperature inverse accepts the full source-relative
+enthalpy residual; the final phase count can differ from every input's count.
+Pure Cp/CpT integrals and the existing common-feed phase H/S differences count
+every actual initial and final phase once, including unequal input temperatures.
+
+The result retains the original final discovery report and controls, accepted
+caloric candidate, finite thermal/entropy balance, temperature bracket, actual
+search count and total candidate attempts. Each new sample reserves its full
+configured search allowance before work begins; completed searches debit only
+actual attempts. Exhausting whole-call work never silently shortens the seed
+policy. Isolated endpoints must pass the original entropy-increase admission.
+Nonzero supplied heat still needs the caller's actual reservoir entropy account.
+
+This is a bounded lowest-accepted-Gibbs search, not a proved global envelope or
+a continuous phase trajectory. A failed search never falls back to an unstable
+homogeneous feed. An unresolved physical response or enthalpy jump refuses;
+no interpolation manufactures a latent plateau, extra coexistence phases,
+interfacial storage or nucleation kinetics. Numerical and source failures and
+cancellation leave all inputs intact. Focused physical regressions cover binary
+2-to-1 heating and 1-to-2 cooling against original common-tangent calorics,
+large reference shifts, adiabatic demixing and unequal-temperature mixing,
+three-phase disappearance with an absent species, metastable entropy refusal
+and the symmetric ternary first-order enthalpy gap.
+
 ### Closed isobaric liquid calorics
 
 `solution::caloric` combines that SAME pair law with explicitly ordered

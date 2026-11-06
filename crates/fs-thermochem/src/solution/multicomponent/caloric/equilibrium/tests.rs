@@ -5,6 +5,8 @@ use crate::solution::multicomponent::equilibrium::MulticomponentEquilibriumContr
 use crate::solution::{BinaryCoexistenceOptionsV1, BinaryRegularSolutionV1};
 use crate::{MolarThermalQuantityV1, SpeciesId};
 
+#[path = "discovery/tests.rs"]
+mod discovery;
 #[path = "transactions/tests.rs"]
 mod transactions;
 
