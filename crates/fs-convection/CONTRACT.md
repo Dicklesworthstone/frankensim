@@ -21,11 +21,12 @@ correlation.
 
 ## Public types and semantics
 
-- `CorrelationId` names twenty-three implemented relations: circular-duct 3.66 and
+- `CorrelationId` names twenty-four implemented relations: circular-duct 3.66 and
   4.36 limits; a thermally developing circular-duct relation; rectangular-
   duct constant-temperature and constant-flux limits; one simultaneously
   developing constant-temperature rectangular-duct table slice at
-  `alpha*=0.5`, `Pr=0.72`; Dittus-Boelter; Gnielinski; Sieder-Tate turbulent
+  `alpha*=0.5`, `Pr=0.72`; Dittus-Boelter; Gnielinski; a separate constant-property
+  Gnielinski (2013) developing turbulent tube; Sieder-Tate turbulent
   tube convection with explicit bulk/wall viscosity correction; laminar and
   leading-edge-corrected turbulent average flat-plate relations;
   Churchill-Bernstein cylinder crossflow; and Churchill-Chu vertical-plate
@@ -298,6 +299,39 @@ None.
   heat removal.
 
 ## No-claim boundaries
+
+- `GnielinskiDeveloping` implements the constant-property (`K=1`) specialization
+  of [Gnielinski (2013), Eqs. (2) and (6)](https://doi.org/10.1016/j.ijheatmasstransfer.2013.04.015),
+  including the finite heated-length multiplier `1+(D/L)^(2/3)` and the
+  `f=[1.8 log10(Re)-1.5]^-2` Darcy factor. The inverse-square exponent follows
+  the author's [2015 corrigendum](https://doi.org/10.1016/j.ijheatmasstransfer.2014.10.063).
+  The existing fully developed `Gnielinski` card and its older friction fit
+  remain distinct. Re `[1e4,1e6]`, Pr `[0.5,200]` and L/D `[10,1e6]` are
+  conservative implementation admissions, not a jointly validated experimental
+  box. They deliberately exclude transition and the paper's very-short-tube
+  caveats. Bulk properties are held constant; the source's variable-property
+  liquid/gas correction is not replaced by an implicit viscosity adjustment.
+  The 20% allowance is an engineering assumption, not a confidence interval.
+  Roughness, buoyancy, phase change, compressibility, non-circular geometry and
+  strongly variable properties are outside this model. Analytic Re, Pr and
+  heated-length partials are available only at their admitted interior points.
+
+  `developing::evaluate_turbulent_circular_duct_section` integrates that same
+  mean over a physical interval from one inlet. With `s=x/D`, its primitive
+  is `Nu_infinity*(s+s^(1/3))`; rationalizing the cube-root difference keeps
+  adjacent floating-point endpoints usable. Each positive endpoint must pass
+  the original card. Exact start zero uses the primitive's zero limit and
+  retains the original downstream mean evidence; a small positive start is
+  never reset or clamped to zero. Positive-start section coefficients retain
+  both mean evaluations and report unbounded model discrepancy, since a mean
+  allowance does not validate a local profile. Subdivision additivity assumes
+  fixed Re, Pr, diameter, fluid properties and wall convention. Per-cell
+  re-querying is a held-property approximation, not a resolved variable-property
+  boundary layer. The returned coefficient and Robin row share the existing
+  evidence-preserving conduction seam. Tests in `turbulent_entrance.rs` check
+  independent 80-digit formula values, the analytically soluble `Pr=1` limit,
+  finite-length response, input derivatives, conservative section heat and
+  source-domain refusals; they do not establish experimental validation.
 
 - `SiederTateTurbulent` implements `Nu_D = 0.027 Re_D^(4/5) Pr^(1/3)
   (mu_bulk/mu_wall)^0.14` as printed in Matuska and Zmrhal, CTU Prague,

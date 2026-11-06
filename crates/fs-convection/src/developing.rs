@@ -16,6 +16,12 @@ mod flat_plate;
 pub(super) use flat_plate::{flat_plate_laminar_mean, flat_plate_turbulent_mean};
 mod rectangular;
 pub(super) use rectangular::mean_nusselt as rectangular_mean_nusselt;
+mod turbulent;
+pub use turbulent::{TurbulentCircularDuctSection, evaluate_turbulent_circular_duct_section};
+pub(super) use turbulent::{
+    card as turbulent_card, elasticity as turbulent_elasticity,
+    mean_nusselt as turbulent_mean_nusselt,
+};
 
 /// Mean transfer over one finite section of the original rectangular CWT
 /// table slice at aspect ratio 0.5 and Pr=0.72. Lengths use hydraulic diameter.

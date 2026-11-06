@@ -212,6 +212,9 @@ fn input_elasticity(
                 0.0
             }
         }
+        CorrelationId::GnielinskiDeveloping => super::developing::turbulent_elasticity(
+            group("Re"), group("Pr"), group("L_over_Dh"), axis,
+        ),
         CorrelationId::FlatPlateLaminarAverage | CorrelationId::FlatPlateTurbulentAverage => {
             if axis == "Pr" { 1.0 / 3.0 } else { 0.0 }
         }
@@ -413,6 +416,9 @@ impl NusseltEvaluation {
                 let c = 12.7/(det::sqrt(8.0)*z)*(det::pow(pr, 2.0/3.0)-1.0);
                 re/(re-1000.0) - 1.58/z*(1.0-0.5*c/(1.0+c))
             }
+            CorrelationId::GnielinskiDeveloping => super::developing::turbulent_elasticity(
+                group("Re")?, group("Pr")?, group("L_over_Dh")?, "Re",
+            ),
             CorrelationId::FlatPlateLaminarAverage => 0.5,
             CorrelationId::FlatPlateTurbulentAverage => {
                 let term = 0.037*det::pow(group("Re")?, 0.8);

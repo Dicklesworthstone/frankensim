@@ -63,6 +63,8 @@ pub enum CorrelationId {
     DittusBoelter,
     /// Smooth turbulent tube, Gnielinski relation.
     Gnielinski,
+    /// Developing smooth turbulent tube, Gnielinski (2013), with constant properties.
+    GnielinskiDeveloping,
     /// Fully developed smooth tube with explicit bulk-to-wall viscosity correction.
     SiederTateTurbulent,
     /// Isothermal laminar flat plate, average coefficient.
@@ -98,7 +100,7 @@ pub enum CorrelationId {
 impl CorrelationId {
     /// Complete catalog order. This is stable audit order, not a selection
     /// preference.
-    pub const ALL: [CorrelationId; 23] = [
+    pub const ALL: [CorrelationId; 24] = [
         Self::CircularDuctLaminarCwt,
         Self::CircularDuctLaminarChf,
         Self::CircularDuctHausen,
@@ -122,6 +124,7 @@ impl CorrelationId {
         Self::HollandsInclinedAirLayer,
         Self::WrightVerticalAirLayer,
         Self::SiederTateTurbulent,
+        Self::GnielinskiDeveloping,
     ];
 
     /// Stable model-card identifier.
@@ -138,6 +141,7 @@ impl CorrelationId {
             }
             Self::DittusBoelter => "convection.dittus-boelter",
             Self::Gnielinski => "convection.gnielinski",
+            Self::GnielinskiDeveloping => "convection.gnielinski-developing",
             Self::SiederTateTurbulent => "convection.sieder-tate-turbulent",
             Self::FlatPlateLaminarAverage => "convection.flat-plate-laminar-average",
             Self::FlatPlateTurbulentAverage => "convection.flat-plate-turbulent-average",
@@ -181,6 +185,9 @@ impl CorrelationId {
             Self::DittusBoelter => "Nu = 0.023 Re^0.8 Pr^n; n=0.4 heating, 0.3 cooling",
             Self::Gnielinski => {
                 "Nu = (f/8)(Re-1000)Pr / (1 + 12.7 sqrt(f/8)(Pr^(2/3)-1)); f=(0.79 ln Re-1.64)^-2"
+            }
+            Self::GnielinskiDeveloping => {
+                "Nu = (f/8)(Re-1000)Pr [1+(D/L)^(2/3)] / (1+12.7 sqrt(f/8)(Pr^(2/3)-1)); f=[1.8 log10(Re)-1.5]^-2; K=1"
             }
             Self::SiederTateTurbulent => {
                 "Nu_D = 0.027 Re_D^(4/5) Pr^(1/3) (mu_bulk/mu_surface)^0.14"
@@ -937,6 +944,9 @@ fn evaluate_formula(
                 1.0 + 12.7 * det::sqrt(friction / 8.0) * (det::pow(pr, 2.0 / 3.0) - 1.0);
             numerator / denominator
         }
+        CorrelationId::GnielinskiDeveloping => {
+            developing::turbulent_mean_nusselt(group("Re"), group("Pr"), group("L_over_Dh"))
+        }
         CorrelationId::FlatPlateLaminarAverage => {
             developing::flat_plate_laminar_mean(group("Re"), group("Pr"))
         }
@@ -1083,6 +1093,7 @@ fn card_for(id: CorrelationId) -> CorrelationCard {
         CorrelationId::HollandsHorizontalAirLayer => return enclosed::card(),
         CorrelationId::HollandsInclinedAirLayer => return enclosed::inclined_card(),
         CorrelationId::WrightVerticalAirLayer => return enclosed::vertical::card(),
+        CorrelationId::GnielinskiDeveloping => return developing::turbulent_card(),
         CorrelationId::CircularDuctLaminarCwt => (
             SHAH_LONDON,
             fully_developed(),
