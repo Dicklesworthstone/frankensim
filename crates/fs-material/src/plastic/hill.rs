@@ -22,6 +22,7 @@
 //! References: Hill (1948), doi:10.1098/rspa.1948.0045; Sandia LAME,
 //! <https://www.sandia.gov/files/sierra/SM_LAME_5_28/main/models/hill.html>.
 
+mod calibration;
 /// Fixed material orientation without changing the local history convention.
 pub mod oriented;
 /// Original material-card support for the directional constitutive parameters.

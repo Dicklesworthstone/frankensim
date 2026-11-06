@@ -13,6 +13,10 @@
 //! makes no empirical calibration claim for authored coefficient fixtures.
 
 use core::fmt;
+
+/// Calibration from measured planar plastic strain ratios and explicit shear data.
+pub mod planar;
+
 use fs_evidence::ModelCard;
 use fs_matdb::{MaterialCard, QueryPoint};
 use fs_qty::{Dims, Pressure, QuantitySpec};

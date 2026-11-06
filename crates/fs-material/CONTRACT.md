@@ -17478,3 +17478,35 @@ work identities, reference shifts, partial yielding and springback,
 nonproportional Chaboche tangents, timed holds, domain/history refusals, native
 heat and numerical-loss separation. These are added test definitions; native
 compilation and execution remain outstanding in the resource-exhausted runner.
+
+
+## Hill48 calibration from planar plastic strain ratios
+
+`Hill48Coefficients::from_planar_r_values` converts explicit Lankford plastic
+width/thickness ratios at 0, 45 and 90 degrees to the rolling direction into
+the existing associated Hill surface. The rolling-direction uniaxial yield
+is the reference radius: `G+H=1`, `H/G=r0`, `H/F=r90`, and
+`N=(r45+1/2)(F+G)`. Independently supplied transverse shear yield ratios in
+planes 23 and 31, normalized by `Y_rolling/sqrt(3)`, determine L and M.
+The three planar tests alone do not identify those shear coefficients.
+
+`source::planar::resolve_hill48_from_planar_r_values` and
+`ResolvedHill48::try_from_planar_r_material` retain the original material
+bundle, fixed query, selected source claims, uncertainty and usage receipts.
+Their nine scalar requirements include the ordinary elastic coefficients,
+explicit rolling-reference yield and Hill hardening modulus,
+`hill_lankford_r_0`, `hill_lankford_r_45`, `hill_lankford_r_90`,
+`hill_shear_yield_ratio_23` and `hill_shear_yield_ratio_31`. Derived F/G/H/L/M/N
+are not passed off as original observations. Extra physics receipts survive.
+Missing shear data, wrong quantities, evolving mechanical conditions,
+nonpositive ratios, and numerically unrepresentable calibrations refuse.
+
+This calibration fits plastic flow ratios within the fixed Hill48 surface;
+it does not independently fit every directional yield observation. The input
+ratios are plastic strain increments, not engineering elongation, total
+strain or a failure measure. The original small-strain, small-rotation,
+tension/compression-symmetric applicability and explicit material-frame
+requirements remain unchanged. `tests/plastic_hill_calibration.rs` checks
+independent 0/45/90-degree tension and compression endpoints, rolling/shear
+yield normalization and explicit refusals; `tests/plastic_hill_planar_source.rs`
+checks original receipts, fixed conditions, orientation and missing data.
