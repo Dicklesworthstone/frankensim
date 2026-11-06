@@ -20,6 +20,7 @@
 //! transport; a coating is a local planar scattering boundary, without a ray
 //! displacement or film transit delay. It adds no coherence between distinct
 //! paths, roughness, gradient-element continuation or bundle derivatives.
+//! [`curved`] adds a separate bounded owner for nonuniform P1 elements.
 
 use super::*;
 use crate::charts::proximity::segment_clearance;
@@ -33,6 +34,9 @@ use crate::gradient_index::{
 use crate::polarization::dielectric::fresnel_dielectric_polarized;
 use crate::polarization::dielectric::transport::{BeamError, PolarizationFrame, physical_roundoff};
 use crate::polarization::{Mueller, Stokes};
+
+/// Curved propagation and polarized refraction through nonuniform P1 contacts.
+pub mod curved;
 
 type Binding<'a> = MaterialThermoOpticField<'a, P1ConductionElement<'a>>;
 
@@ -120,9 +124,15 @@ pub enum P1ContactError {
     Dielectric(DielectricError),
     Polarization(BeamError),
     InvalidPair,
-    NonuniformElement { element: usize },
+    NonuniformElement {
+        element: usize,
+    },
     InvalidLaunch,
-    ContactNotFirstFace { local_face: usize },
+    ContactNotFirstFace {
+        local_face: usize,
+    },
+    /// The incident arc budget ended before the selected contact was reached.
+    IncidentDistanceLimit,
     ForeignArrival,
     UnresolvedFace,
 }
@@ -149,7 +159,7 @@ impl From<BeamError> for P1ContactError {
 }
 impl core::fmt::Display for P1ContactError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "isothermal P1 contact refraction: {self:?}")
+        write!(f, "P1 contact refraction: {self:?}")
     }
 }
 impl core::error::Error for P1ContactError {}
@@ -160,6 +170,15 @@ impl<'a> P1ContactInterface<'a> {
         bindings: [&'a Binding<'a>; 2],
         local_faces: [usize; 2],
     ) -> Result<Self, P1ContactError> {
+        Self::prepare(cx, bindings, local_faces, true)
+    }
+
+    fn prepare(
+        cx: &Cx<'_>,
+        bindings: [&'a Binding<'a>; 2],
+        local_faces: [usize; 2],
+        require_uniform: bool,
+    ) -> Result<Self, P1ContactError> {
         poll(cx)?;
         let elements = bindings.map(|b| b.temperature_source());
         if local_faces.iter().any(|&f| f >= 4)
@@ -169,7 +188,7 @@ impl<'a> P1ContactInterface<'a> {
             return Err(P1ContactError::InvalidPair);
         }
         for element in elements {
-            if element.values.iter().any(|&t| t != element.values[0]) {
+            if require_uniform && element.values.iter().any(|&t| t != element.values[0]) {
                 return Err(P1ContactError::NonuniformElement {
                     element: element.element,
                 });
@@ -363,60 +382,23 @@ impl<'a> P1ContactInterface<'a> {
             return Err(P1ContactError::ForeignArrival);
         }
         let outward = hit.hit.normal.ok_or(P1ContactError::UnresolvedFace)?;
-        let cosine = incident.ray.dir.dot(outward);
-        if !cosine.is_finite() || cosine <= 0.0 || cosine > 1.0 + 2.0e-10 {
-            return Err(P1ContactError::InvalidLaunch);
-        }
-        let ni = sample_i.phase_index();
-        let nt = sample_t.phase_index();
-        // One native solve supplies both branch matrices and positive film
-        // work. Do not reconstruct small absorbed power by subtracting R+T.
-        let coating_balance = self
-            .coating
-            .map(|coating| {
-                coating.layer_power_balance(
-                    wavelength_nm,
-                    incident_side == 1,
-                    cosine.min(1.0),
-                    ni,
-                    nt,
-                )
-            })
-            .transpose()?;
-        let response = match &coating_balance {
-            Some(balance) => balance.fresnel,
-            None => fresnel_dielectric_polarized(cosine.min(1.0), ni, nt)?,
-        };
-        let fresnel = response.scalar;
-        let normal = outward.scale(-1.0);
-        let wo = incident.ray.dir.scale(-1.0);
-        let incident_frame =
-            PolarizationFrame::try_new(incident.ray.dir, incident.transverse_axis)?;
-        let perpendicular = cross(incident.ray.dir, normal);
-        let s = if perpendicular == Vec3::new(0.0, 0.0, 0.0) {
-            incident_frame.horizontal()
-        } else {
-            perpendicular
-        };
-        let interface_frame = PolarizationFrame::try_new(incident.ray.dir, s)?;
-        let input = physical_roundoff(
-            incident_frame.express_in(incident_stokes, interface_frame),
-            incident_stokes.i,
+        let channels = contact_channels(
+            self.coating,
+            incident_side,
+            incident,
+            incident_stokes,
+            outward,
+            sample_i.phase_index(),
+            sample_t.phase_index(),
+            wavelength_nm,
         )?;
-        let reflected_power = apply_power(response.reflection, input)?;
-        let transmitted_power = apply_power(response.transmission, input)?;
-        let coating_absorbed_power_fraction = coating_balance.map_or(0.0, |balance| {
-            let s_power = (0.5 * input.i + 0.5 * input.q).max(0.0);
-            let p_power = (0.5 * input.i - 0.5 * input.q).max(0.0);
-            s_power * balance.absorbed[0] + p_power * balance.absorbed[1]
-        });
-        let reflected = if reflected_power.i > 0.0 {
+        let reflected = if let Some((power, frame)) = channels.reflected {
             Some(self.branch(
                 cx,
                 incident_side,
                 incident,
-                reflected_power,
-                PolarizationFrame::try_new(reflect(wo, normal), interface_frame.horizontal())?,
+                power,
+                frame,
                 sample_i,
                 wavelength_nm,
                 max_distance_m,
@@ -424,16 +406,13 @@ impl<'a> P1ContactInterface<'a> {
         } else {
             None
         };
-        let transmitted = if transmitted_power.i > 0.0 {
+        let transmitted = if let Some((power, frame)) = channels.transmitted {
             Some(self.branch(
                 cx,
                 1 - incident_side,
                 incident,
-                transmitted_power,
-                PolarizationFrame::try_new(
-                    refract(wo, normal, ni, nt, fresnel.transmitted_cosine)?,
-                    interface_frame.horizontal(),
-                )?,
+                power,
+                frame,
                 sample_t,
                 wavelength_nm,
                 max_distance_m,
@@ -444,9 +423,9 @@ impl<'a> P1ContactInterface<'a> {
         Ok(P1ContactSplit {
             incident,
             incident_stokes,
-            incident_frame,
-            fresnel,
-            coating_absorbed_power_fraction,
+            incident_frame: channels.incident_frame,
+            fresnel: channels.fresnel,
+            coating_absorbed_power_fraction: channels.coating_absorbed_power_fraction,
             reflected,
             transmitted,
         })
@@ -503,6 +482,91 @@ impl<'a> P1ContactInterface<'a> {
             arrival: reached.then_some((face, hit)),
         })
     }
+}
+
+// Both exact straight and numerical curved contacts use this same optical
+// boundary response. Geometry and bulk propagation remain with their owners.
+struct ContactChannels {
+    incident_frame: PolarizationFrame,
+    fresnel: FresnelDielectric,
+    coating_absorbed_power_fraction: f64,
+    reflected: Option<(Stokes, PolarizationFrame)>,
+    transmitted: Option<(Stokes, PolarizationFrame)>,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn contact_channels(
+    coating: Option<DielectricCoatingStack<'_>>,
+    incident_side: usize,
+    incident: GradientIndexPropagation,
+    incident_stokes: Stokes,
+    outward: Vec3,
+    ni: f64,
+    nt: f64,
+    wavelength_nm: f64,
+) -> Result<ContactChannels, P1ContactError> {
+    let cosine = incident.ray.dir.dot(outward);
+    if !cosine.is_finite() || cosine <= 0.0 || cosine > 1.0 + 2.0e-10 {
+        return Err(P1ContactError::InvalidLaunch);
+    }
+    // One native solve supplies branch matrices and positive film work.
+    let balance = coating
+        .map(|stack| {
+            stack.layer_power_balance(wavelength_nm, incident_side == 1, cosine.min(1.0), ni, nt)
+        })
+        .transpose()?;
+    let response = match &balance {
+        Some(balance) => balance.fresnel,
+        None => fresnel_dielectric_polarized(cosine.min(1.0), ni, nt)?,
+    };
+    let fresnel = response.scalar;
+    let normal = outward.scale(-1.0);
+    let wo = incident.ray.dir.scale(-1.0);
+    let incident_frame = PolarizationFrame::try_new(incident.ray.dir, incident.transverse_axis)?;
+    let perpendicular = cross(incident.ray.dir, normal);
+    let s = if perpendicular == Vec3::new(0.0, 0.0, 0.0) {
+        incident_frame.horizontal()
+    } else {
+        perpendicular
+    };
+    let interface_frame = PolarizationFrame::try_new(incident.ray.dir, s)?;
+    let input = physical_roundoff(
+        incident_frame.express_in(incident_stokes, interface_frame),
+        incident_stokes.i,
+    )?;
+    let reflected_power = apply_power(response.reflection, input)?;
+    let transmitted_power = apply_power(response.transmission, input)?;
+    let coating_absorbed_power_fraction = balance.map_or(0.0, |balance| {
+        let s_power = (0.5 * input.i + 0.5 * input.q).max(0.0);
+        let p_power = (0.5 * input.i - 0.5 * input.q).max(0.0);
+        s_power * balance.absorbed[0] + p_power * balance.absorbed[1]
+    });
+    let reflected = if reflected_power.i > 0.0 {
+        Some((
+            reflected_power,
+            PolarizationFrame::try_new(reflect(wo, normal), interface_frame.horizontal())?,
+        ))
+    } else {
+        None
+    };
+    let transmitted = if transmitted_power.i > 0.0 {
+        Some((
+            transmitted_power,
+            PolarizationFrame::try_new(
+                refract(wo, normal, ni, nt, fresnel.transmitted_cosine)?,
+                interface_frame.horizontal(),
+            )?,
+        ))
+    } else {
+        None
+    };
+    Ok(ContactChannels {
+        incident_frame,
+        fresnel,
+        coating_absorbed_power_fraction,
+        reflected,
+        transmitted,
+    })
 }
 
 impl ContactSide<'_> {
@@ -664,10 +728,17 @@ fn append(
         .accepted_steps
         .checked_add(next.accepted_steps)
         .ok_or(GradientIndexError::StepBudgetExceeded)?;
+    next.rejected_steps = previous
+        .rejected_steps
+        .checked_add(next.rejected_steps)
+        .ok_or(GradientIndexError::StepBudgetExceeded)?;
     next.field_evaluations = previous
         .field_evaluations
         .checked_add(next.field_evaluations)
         .ok_or(GradientIndexError::StepBudgetExceeded)?;
+    next.max_normalized_error_estimate = previous
+        .max_normalized_error_estimate
+        .max(next.max_normalized_error_estimate);
     Ok(next)
 }
 

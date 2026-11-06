@@ -7621,6 +7621,35 @@ discontinuous-index GRIN continuation, angular-bundle derivatives or global
 mesh locator. Thermal contact resistance is not assigned optical absorption;
 bulk absorption remains with each original glass.
 
+### Curved refraction at nonuniform thermal contacts
+
+`contact::curved::P1CurvedContactInterface` accepts the same original paired
+faces without requiring uniform nodal temperatures. Incoming and both nonzero
+outgoing branches use the native clearance-controlled GRIN event integrator.
+Each optical law retains its original reference glass, thermo-optic coefficients,
+spectral support and accepted P1 snapshot. Temperature and gradient are evaluated
+at every optical stage; phase, group delay, Beer loss and parallel-transported
+polarization follow the actual curved arc. The exact and curved contact owners
+share one Fresnel/coherent-coating response, including positive film absorption.
+
+A private numerical collar continues the selected element's original affine P1
+polynomial through a thin contact slab inside a ball excluding the face edges
+and every other face of both cells. The public temperature element keeps its
+strict domain. No field average, position projection or unintegrated offset is
+introduced. Temperature/source-domain refusals remain active inside the collar.
+This follows the native numerical-contact model: the result reports
+`contact_resolution_m`, not an exact interface location or a certified global
+optical-path error. Tightening the event tolerance controls this localization.
+
+Both attempted ODE steps (including rejection) and boundary queries share one
+request budget across arrival, collar preparation and both outgoing branches.
+Queries allocate nothing. A private original-binding/native-witness branch can
+continue through `split_arrival`; its existing history is retained without
+charging it again. All four faces return to the boundary search after departure,
+so a gradient can bend a ray back to the same interface. The model remains
+isotropic geometrical power transport on one immutable accepted thermal state;
+it adds no birefringence, moving-interface physics or film transit delay.
+
 Six focused controls cover independent Snell/Fresnel and distinct phase/group
 paths, Beer loss, temperature-jump refraction and reverse incidence, TIR and
 equal-index limits, composition through three original elements with nonparallel
