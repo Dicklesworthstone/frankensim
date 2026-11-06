@@ -6,6 +6,10 @@
 //! no physical gas equation of state, finite reservoir or pressure-work model
 //! is inferred. The caller binds each scenario region to a native lattice face.
 
+/// Source-owned compressible reservoir exchange from pressure/temperature histories.
+#[cfg(any(feature = "experimental-shock-loading", feature = "nonlinear-brass"))]
+pub mod compressible;
+
 use fs_exec::CancelGate;
 use fs_lbm::d3q19::{BoundaryForcingError3, BoundaryGrid3, BoundarySpec3, Face3, FaceBoundary3};
 use fs_lbm::material::{MaterialLbmError, MaterialScaling};

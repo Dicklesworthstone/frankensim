@@ -305,6 +305,28 @@ impl NonlinearDuct {
         Ok(self.solver.step(maximum_duration, controls, cancelled)?)
     }
 
+    /// Advance with source-owned end fluxes sampled at each actual RK stage.
+    ///
+    /// `Some(flux)` replaces that end's physical boundary for the stage;
+    /// `None` retains it. Fluxes are per unit area in the increasing axial
+    /// coordinate. The native solver resamples both stages after a shortened
+    /// retry and reports their accepted mass, momentum and total-energy
+    /// exchanges. A provider must be replayable and publish any companion
+    /// state only after success. Geometry and cell observation indices remain
+    /// owned by this duct; periodic and hydrostatic port paths retain the gas
+    /// owner's explicit refusals.
+    pub fn step_with_ports(
+        &mut self,
+        maximum_duration: Time,
+        controls: StepControl,
+        ports: impl FnMut(&PortStage) -> Result<[Option<FaceFlux>; 2], GasError>,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<StepReport, NonlinearDuctError> {
+        Ok(self
+            .solver
+            .step_with_ports(maximum_duration, controls, ports, cancelled)?)
+    }
+
     /// Evaluate one cell without allocating a complete waveform snapshot.
     pub fn sample(&self, cell: usize) -> Result<NonlinearDuctSample, NonlinearDuctError> {
         let conserved: Conserved = *self
