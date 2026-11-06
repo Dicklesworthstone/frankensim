@@ -1,5 +1,41 @@
 # fs-solid CONTRACT
 
+## Sustained static friction between released brittle fragments
+
+The `contact::friction::sustained` owner advances the original nonlinear
+brittle midpoint with simultaneous normal and tangential mean contact forces.
+It reuses the existing force/configuration solver and work-conjugate elliptic
+coordinates. All same-body and normal/shear coupling comes from complete
+native responses; no rigid proxy, impulse-over-time conversion, penalty or
+additional compliance supplies the force. Shared force assembly, response
+replay and external/contact energy admission also serve the existing normal
+contact path. A public generic result retains each original motion/energy type.
+
+Only initially active, matched pairs at rest in all three relative velocity
+components may carry load. Loaded pairs must remain matched, active and static
+at both native endpoints with bounded physical tangential displacement.
+All other non-tied pairs remain in the solve with zero friction so unexpected
+loading or arrival is detected and refused. Unloaded pairs may separate freely.
+The native sustained ellipse admits two positive coefficients or equal
+coefficients including zero; its unsupported single-zero directional case is
+refused without artificial resistance.
+
+Every trial replays one accepted material/mass/history state. Final original
+force replay, strict nonnegative gaps, both-endpoint complementarity, physical
+ellipse capacity, actual path/force residuals and endpoint speeds gate
+publication. Separate normal/tangential and absolute contact work, physical/
+solver coordinate work, native/external work and absolute individual pair
+couples must pass. Static constraint work is a bounded numerical residual,
+not dissipation or heat. One accepted interval consumes one physical step;
+a refusal publishes no partial material or motion state.
+
+Focused native tests use exact P1 consistent mass and independent work/momentum
+inventories. They cover timestep-independent force with deforming apex motion,
+moving-support shear transfer, actual unloaded release, rotated partial support
+with normal/tangent coupling, insufficient static capacity, bounded refusal and
+replay. The model remains small-strain and fixed-pair: sustained sliding, new
+spatial contact discovery and unlocalized impact/arrival require further modes.
+
 ## Source-bound friction on mechanical and thermal brittle fragments
 
 The `contact::friction::source` adapter binds an explicit ordered interface,

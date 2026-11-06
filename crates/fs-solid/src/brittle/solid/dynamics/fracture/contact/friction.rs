@@ -9,6 +9,9 @@
 /// Original interface sources sampled at actual incoming relative slip.
 pub mod source;
 
+/// Static directional-friction loads through the original nonlinear midpoint.
+pub mod sustained;
+
 use std::sync::Arc;
 
 pub use fs_contact::frictional_multicontact::elliptic::EllipticFriction;

@@ -3,6 +3,8 @@
 
 #[path = "friction/source.rs"]
 mod source;
+#[path = "friction/sustained.rs"]
+mod sustained;
 
 use super::*;
 use fs_contact::frictional_multicontact::{FrictionalContactConfig, FrictionalContactDeterminacy};

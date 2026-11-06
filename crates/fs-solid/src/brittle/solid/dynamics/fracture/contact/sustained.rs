@@ -291,6 +291,234 @@ pub(crate) struct NativeFaceSustainedStep<Motion, Energy> {
     pub numerical_tangent_evaluations: usize,
 }
 
+/// Original load assembly shared by normal and directional held-force laws.
+pub(crate) fn sustained_external_loads(
+    dofs: usize,
+    prescribed_m: &[(usize, f64)],
+    mean_nodal_forces_n: &[(usize, f64)],
+    cx: &Cx<'_>,
+) -> Result<Vec<f64>, BrittleFaceSustainedError> {
+    use BrittleFaceSustainedError as E;
+    if mean_nodal_forces_n.len() > dofs || prescribed_m.len() > dofs {
+        return Err(E::Invalid("load entries exceed original DOF count"));
+    }
+    let mut external = vec![0.0; dofs];
+    for &(dof, value) in mean_nodal_forces_n {
+        checkpoint(cx)?;
+        if dof >= external.len() || !value.is_finite() {
+            return Err(E::Invalid(
+                "finite external loads on existing DOFs required",
+            ));
+        }
+        external[dof] += value;
+        if !external[dof].is_finite() {
+            return Err(E::Invalid("unrepresentable accumulated external load"));
+        }
+    }
+    Ok(external)
+}
+
+/// Fresh original response retained only after the native force solver's replay.
+pub(crate) struct NativeFaceForceResponse<Step> {
+    pub step: Step,
+    pub solve: SolveReport,
+    pub contact_load_n: Vec<f64>,
+    pub numerical_tangent_evaluations: usize,
+}
+
+/// The same native nonlinear solve and force transpose for every contact law.
+/// Coordinate maps change only force/path coordinates, never the material or
+/// inertia response. Every probe starts from the caller's accepted midpoint.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn solve_released_face_force_response<Step: NativeFaceSustainedTrial>(
+    external: &[f64],
+    rows: &[BrittleFaceImpactRow],
+    friction: &[f64],
+    scales: &[NaturalMapScales],
+    seeds: &[[f64; 3]],
+    controls: SolveControls,
+    cx: &Cx<'_>,
+    mut candidate: impl FnMut(&[(usize, f64)]) -> Result<Step, BrittleTetDynamicError>,
+    physical_force: impl Fn(usize, [f64; 3]) -> Result<[f64; 3], BrittleTetDynamicError>,
+    path: impl Fn(usize, ReleasedFaceMotionView<'_>) -> Result<[f64; 3], BrittleTetDynamicError>,
+) -> Result<NativeFaceForceResponse<Step>, BrittleFaceSustainedError> {
+    use BrittleFaceSustainedError as E;
+    let mut total: Vec<_> = external.iter().copied().enumerate().collect();
+    let mut contact_load = vec![0.0; external.len()];
+    let mut retained = None;
+    let mut final_forces = Vec::new();
+    let mut evaluations = 0usize;
+    let mut tangent_evaluations = 0usize;
+    let solve = fs_contact::sustained::solve::solve(
+        friction,
+        scales,
+        seeds,
+        controls,
+        &mut |forces, stop| {
+            if stop() {
+                return Err(BrittleTetError::Cancelled.into());
+            }
+            retained = None;
+            contact_load.fill(0.0);
+            for (i, (row, &force)) in rows.iter().zip(forces).enumerate() {
+                checkpoint(cx)?;
+                let force = physical_force(i, force)?;
+                for axis in 0..3 {
+                    contact_load[3 * row.nodes[0] + axis] -= force[axis];
+                    contact_load[3 * row.nodes[1] + axis] += force[axis];
+                }
+            }
+            for (i, ((_, value), &base)) in total.iter_mut().zip(external).enumerate() {
+                if i % 256 == 0 {
+                    checkpoint(cx)?;
+                }
+                *value = base + contact_load[i];
+                if !value.is_finite() {
+                    return Err(BrittleTetDynamicError::Invalid(
+                        "unrepresentable sustained total load",
+                    ));
+                }
+            }
+            evaluations += 1;
+            let step = candidate(&total)?;
+            tangent_evaluations = tangent_evaluations
+                .checked_add(step.tangent_evaluations())
+                .ok_or(BrittleTetDynamicError::Invalid(
+                    "completed tangent count overflow",
+                ))?;
+            let mut paths = Vec::with_capacity(rows.len());
+            for i in 0..rows.len() {
+                paths.push(path(i, step.face_motion())?);
+            }
+            final_forces.clear();
+            final_forces.extend_from_slice(forces);
+            retained = Some(step);
+            Ok(paths)
+        },
+        &mut || cx.checkpoint().is_err(),
+    )
+    .map_err(|error| E::Solve(Box::new(error)))?;
+    if evaluations != solve.response_evaluations || final_forces != solve.forces_n {
+        return Err(E::Invalid("missing original final force replay"));
+    }
+    let step = retained.ok_or(E::Invalid("missing final native midpoint candidate"))?;
+    Ok(NativeFaceForceResponse {
+        step,
+        solve,
+        contact_load_n: contact_load,
+        numerical_tangent_evaluations: tangent_evaluations,
+    })
+}
+
+/// Work of the actual pair forces, including uncancelled absolute pair gates.
+pub(crate) struct SustainedContactWork {
+    pub contact_work_j: f64,
+    pub absolute_contact_work_j: f64,
+    pub absolute_contact_couple_n_m: f64,
+}
+
+pub(crate) struct SustainedWorkAdmission<Energy> {
+    pub energy: Energy,
+    pub native_energy: Energy,
+    pub contact_work_balance_error_j: f64,
+}
+
+/// Keep the native thermal/mechanical accounts while removing internal contact
+/// loads from external work. Normal dwell and static friction both require
+/// zero contact work to the declared allowance; neither manufactures heat.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn admit_released_face_sustained_work<Step: NativeFaceSustainedTrial>(
+    old_motion: ReleasedFaceMotionView<'_>,
+    step: &Step,
+    mean_nodal_forces_n: &[(usize, f64)],
+    contact_load_n: &[f64],
+    contact: SustainedContactWork,
+    controls: BrittleFaceSustainedControls,
+    cx: &Cx<'_>,
+) -> Result<SustainedWorkAdmission<Step::Energy>, BrittleFaceSustainedError> {
+    let old_u = old_motion.displacement_m.as_flattened();
+    let new_u = step.face_motion().displacement_m.as_flattened();
+    let mut external_work = Sum::default();
+    for &(dof, force) in mean_nodal_forces_n {
+        checkpoint(cx)?;
+        external_work.add(force * (new_u[dof] - old_u[dof]));
+    }
+    let mut nodal_contact_work = Sum::default();
+    let mut resultant = [Sum::default(); 3];
+    for (dof, &force) in contact_load_n.iter().enumerate() {
+        if dof % 256 == 0 {
+            checkpoint(cx)?;
+        }
+        nodal_contact_work.add(force * (new_u[dof] - old_u[dof]));
+        resultant[dof % 3].add(force);
+    }
+    let native_energy = step.native_energy();
+    let work = Step::work(&native_energy);
+    let contact_work_balance_error_j =
+        (work.dead_load_mean_work_j - external_work.value()) - contact.contact_work_j;
+    let external = external_work.value() + work.support_mean_work_j;
+    let equilibrium_work_residual_j = (external - work.mean_internal_work_j) - work.inertial_work_j;
+    let total_balance_error_j = ((((external + work.parameter_work_j) + work.eigenstrain_work_j)
+        - work.storage_change_j)
+        - work.fracture_dissipation_j)
+        - work.kinetic_change_j;
+    let energy = Step::external_energy(
+        native_energy,
+        external_work.value(),
+        equilibrium_work_residual_j,
+        total_balance_error_j,
+    );
+    for (account, defect, tolerance) in [
+        (
+            "sustained contact work",
+            contact.contact_work_j,
+            controls.contact_work_tolerance_j,
+        ),
+        (
+            "sustained absolute contact work",
+            contact.absolute_contact_work_j,
+            controls.contact_work_tolerance_j,
+        ),
+        (
+            "sustained nodal/paired contact work",
+            nodal_contact_work.value() - contact.contact_work_j,
+            controls.contact_work_tolerance_j,
+        ),
+        (
+            "sustained external/contact applied work",
+            contact_work_balance_error_j,
+            controls.contact_work_tolerance_j,
+        ),
+        (
+            "sustained external-only equilibrium work",
+            equilibrium_work_residual_j,
+            controls.work.equilibrium_work_tolerance_j,
+        ),
+        (
+            "sustained external-only physical work",
+            total_balance_error_j,
+            controls.work.total_energy_tolerance_j,
+        ),
+    ] {
+        energy_gate(account, defect, tolerance)?;
+    }
+    balance(
+        "internal contact resultant force",
+        super::norm(resultant.map(Sum::value)),
+        controls.force_tolerance_n,
+    )?;
+    balance(
+        "absolute internal contact force couple",
+        contact.absolute_contact_couple_n_m,
+        controls.force_moment_tolerance_n_m,
+    )?;
+    Ok(SustainedWorkAdmission {
+        energy,
+        native_energy,
+        contact_work_balance_error_j,
+    })
+}
+
 /// The original bounded nonlinear contact solve shared by native material owners.
 /// Every signed-force probe is a disposable, complete native midpoint candidate.
 /// Only its final freshly replayed response can escape. Complete scope admits
@@ -305,28 +533,17 @@ pub(crate) fn solve_released_face_sustained<Step: NativeFaceSustainedTrial>(
     scope: SustainedScope,
     controls: BrittleFaceSustainedControls,
     cx: &Cx<'_>,
-    mut candidate: impl FnMut(&[(usize, f64)]) -> Result<Step, BrittleTetDynamicError>,
+    candidate: impl FnMut(&[(usize, f64)]) -> Result<Step, BrittleTetDynamicError>,
 ) -> Result<NativeFaceSustainedStep<Step::Motion, Step::Energy>, BrittleFaceSustainedError> {
     use BrittleFaceSustainedError as E;
     checkpoint(cx)?;
     validate_controls(controls)?;
-    let old_u = old_motion.displacement_m.as_flattened();
-    if mean_nodal_forces_n.len() > old_u.len() || prescribed_m.len() > old_u.len() {
-        return Err(E::Invalid("load entries exceed original DOF count"));
-    }
-    let mut external = vec![0.0; old_u.len()];
-    for &(dof, value) in mean_nodal_forces_n {
-        checkpoint(cx)?;
-        if dof >= external.len() || !value.is_finite() {
-            return Err(E::Invalid(
-                "finite external loads on existing DOFs required",
-            ));
-        }
-        external[dof] += value;
-        if !external[dof].is_finite() {
-            return Err(E::Invalid("unrepresentable accumulated external load"));
-        }
-    }
+    let external = sustained_external_loads(
+        old_motion.displacement_m.as_flattened().len(),
+        prescribed_m,
+        mean_nodal_forces_n,
+        cx,
+    )?;
     let mut rows = Vec::new();
     let mut normals = Vec::new();
     let mut initial = Vec::new();
@@ -392,76 +609,35 @@ pub(crate) fn solve_released_face_sustained<Step: NativeFaceSustainedTrial>(
         };
         rows.len()
     ];
-    let mut total: Vec<_> = external.iter().copied().enumerate().collect();
-    let mut contact_load = vec![0.0; old_u.len()];
-    let mut retained = None;
-    let mut final_forces = Vec::new();
-    let mut evaluations = 0usize;
-    let mut tangent_evaluations = 0usize;
     // For mu=0 the two tangent equations are simply Ft=0. Their path
     // coordinates are dummy algebraic zeros: only normal forces are sent
     // to the body, and the returned tangent forces must be exactly zero.
-    let solve = fs_contact::sustained::solve::solve(
+    let NativeFaceForceResponse {
+        step,
+        solve,
+        contact_load_n,
+        numerical_tangent_evaluations,
+    } = solve_released_face_force_response(
+        &external,
+        &rows,
         &friction,
         &scales,
         &seeds,
         controls.solve,
-        &mut |forces, stop| {
-            if stop() {
-                return Err(BrittleTetError::Cancelled.into());
+        cx,
+        candidate,
+        |i, force| Ok(normals[i].map(|value| value * force[0])),
+        |i, motion| {
+            let gap = opening(motion, rows[i], normals[i]);
+            if !gap.is_finite() {
+                return Err(BrittleTetDynamicError::Invalid(
+                    "unrepresentable paired response gap",
+                ));
             }
-            retained = None;
-            contact_load.fill(0.0);
-            for ((row, normal), force) in rows.iter().zip(&normals).zip(forces) {
-                checkpoint(cx)?;
-                for axis in 0..3 {
-                    let value = normal[axis] * force[0];
-                    contact_load[3 * row.nodes[0] + axis] -= value;
-                    contact_load[3 * row.nodes[1] + axis] += value;
-                }
-            }
-            for (i, ((_, value), &base)) in total.iter_mut().zip(&external).enumerate() {
-                if i % 256 == 0 {
-                    checkpoint(cx)?;
-                }
-                *value = base + contact_load[i];
-                if !value.is_finite() {
-                    return Err(BrittleTetDynamicError::Invalid(
-                        "unrepresentable sustained total load",
-                    ));
-                }
-            }
-            evaluations += 1;
-            let step = candidate(&total)?;
-            tangent_evaluations = tangent_evaluations
-                .checked_add(step.tangent_evaluations())
-                .ok_or(BrittleTetDynamicError::Invalid(
-                    "completed tangent count overflow",
-                ))?;
-            let mut paths = Vec::with_capacity(rows.len());
-            for (row, normal) in rows.iter().zip(&normals) {
-                let gap = opening(step.face_motion(), *row, *normal);
-                if !gap.is_finite() {
-                    return Err(BrittleTetDynamicError::Invalid(
-                        "unrepresentable paired response gap",
-                    ));
-                }
-                paths.push([gap, 0.0, 0.0]);
-            }
-            final_forces.clear();
-            final_forces.extend_from_slice(forces);
-            retained = Some(step);
-            Ok(paths)
+            Ok([gap, 0.0, 0.0])
         },
-        &mut || cx.checkpoint().is_err(),
-    )
-    .map_err(|error| E::Solve(Box::new(error)))?;
-    if evaluations != solve.response_evaluations || final_forces != solve.forces_n {
-        return Err(E::Invalid("missing original final force replay"));
-    }
-    let step = retained.ok_or(E::Invalid("missing final native midpoint candidate"))?;
+    )?;
     let final_motion = step.face_motion();
-    let new_u = final_motion.displacement_m.as_flattened();
     let mut contact_work = Sum::default();
     let mut absolute_work = Sum::default();
     let mut absolute_couple = Sum::default();
@@ -525,82 +701,25 @@ pub(crate) fn solve_released_face_sustained<Step: NativeFaceSustainedTrial>(
             cx,
         )?;
     }
-    let mut external_work = Sum::default();
-    for &(dof, force) in mean_nodal_forces_n {
-        checkpoint(cx)?;
-        external_work.add(force * (new_u[dof] - old_u[dof]));
-    }
-    let mut nodal_contact_work = Sum::default();
-    let mut resultant = [Sum::default(); 3];
-    for (dof, &force) in contact_load.iter().enumerate() {
-        if dof % 256 == 0 {
-            checkpoint(cx)?;
-        }
-        nodal_contact_work.add(force * (new_u[dof] - old_u[dof]));
-        resultant[dof % 3].add(force);
-    }
     let normal_contact_work_j = contact_work.value();
     let absolute_contact_work_j = absolute_work.value();
     let absolute_contact_couple_n_m = absolute_couple.value();
-    let native_energy = step.native_energy();
-    let work = Step::work(&native_energy);
-    let contact_work_balance_error_j =
-        (work.dead_load_mean_work_j - external_work.value()) - normal_contact_work_j;
-    let external = external_work.value() + work.support_mean_work_j;
-    let equilibrium_work_residual_j = (external - work.mean_internal_work_j) - work.inertial_work_j;
-    let total_balance_error_j = ((((external + work.parameter_work_j) + work.eigenstrain_work_j)
-        - work.storage_change_j)
-        - work.fracture_dissipation_j)
-        - work.kinetic_change_j;
-    let energy = Step::external_energy(
+    let SustainedWorkAdmission {
+        energy,
         native_energy,
-        external_work.value(),
-        equilibrium_work_residual_j,
-        total_balance_error_j,
-    );
-    for (account, defect, tolerance) in [
-        (
-            "sustained normal contact work",
-            normal_contact_work_j,
-            controls.contact_work_tolerance_j,
-        ),
-        (
-            "sustained absolute normal contact work",
+        contact_work_balance_error_j,
+    } = admit_released_face_sustained_work(
+        old_motion,
+        &step,
+        mean_nodal_forces_n,
+        &contact_load_n,
+        SustainedContactWork {
+            contact_work_j: normal_contact_work_j,
             absolute_contact_work_j,
-            controls.contact_work_tolerance_j,
-        ),
-        (
-            "sustained nodal/paired normal work",
-            nodal_contact_work.value() - normal_contact_work_j,
-            controls.contact_work_tolerance_j,
-        ),
-        (
-            "sustained external/contact applied work",
-            contact_work_balance_error_j,
-            controls.contact_work_tolerance_j,
-        ),
-        (
-            "sustained external-only equilibrium work",
-            equilibrium_work_residual_j,
-            controls.work.equilibrium_work_tolerance_j,
-        ),
-        (
-            "sustained external-only physical work",
-            total_balance_error_j,
-            controls.work.total_energy_tolerance_j,
-        ),
-    ] {
-        energy_gate(account, defect, tolerance)?;
-    }
-    balance(
-        "internal contact resultant force",
-        super::norm(resultant.map(Sum::value)),
-        controls.force_tolerance_n,
-    )?;
-    balance(
-        "absolute internal contact force couple",
-        absolute_contact_couple_n_m,
-        controls.force_moment_tolerance_n_m,
+            absolute_contact_couple_n_m,
+        },
+        controls,
+        cx,
     )?;
     checkpoint(cx)?;
     Ok(NativeFaceSustainedStep {
@@ -613,7 +732,7 @@ pub(crate) fn solve_released_face_sustained<Step: NativeFaceSustainedTrial>(
         absolute_contact_work_j,
         contact_work_balance_error_j,
         absolute_contact_couple_n_m,
-        numerical_tangent_evaluations: tangent_evaluations,
+        numerical_tangent_evaluations,
     })
 }
 
@@ -623,7 +742,7 @@ pub(crate) enum SustainedScope {
     InitialResting,
 }
 
-fn validate_controls(
+pub(crate) fn validate_controls(
     controls: BrittleFaceSustainedControls,
 ) -> Result<(), BrittleFaceSustainedError> {
     if !controls.normal_scale_n_per_m.is_finite()
@@ -654,11 +773,11 @@ fn resting(geometry: Pair, controls: BrittleFaceSustainedControls) -> bool {
 }
 
 #[derive(Clone, Copy)]
-struct Pair {
-    gap: f64,
-    speed: f64,
-    tangent: f64,
-    separation: [f64; 3],
+pub(crate) struct Pair {
+    pub gap: f64,
+    pub speed: f64,
+    pub tangent: f64,
+    pub separation: [f64; 3],
 }
 
 fn opening(motion: ReleasedFaceMotionView<'_>, row: BrittleFaceImpactRow, normal: [f64; 3]) -> f64 {
@@ -679,7 +798,7 @@ fn pair(
     pair_view(motion.released_face_motion_view(), row, normal)
 }
 
-fn pair_view(
+pub(crate) fn pair_view(
     motion: ReleasedFaceMotionView<'_>,
     row: BrittleFaceImpactRow,
     normal: [f64; 3],
@@ -717,7 +836,7 @@ fn geometry_error(row: BrittleFaceImpactRow, reason: &'static str) -> BrittleFac
     }
 }
 
-fn balance(
+pub(crate) fn balance(
     account: &'static str,
     defect: f64,
     tolerance: f64,
