@@ -9,7 +9,7 @@
 //! changes no species or flow clock and publishes all gas cells and walls
 //! together. Composing owners retain candidate wall temperatures through both
 //! halves and discard them when the complete wave/reaction step is retried.
-//! An optional original-source transport binding refreshes developed circular
+//! An optional original-source transport binding refreshes developed
 //! branch drag and conductance from each cell's current mixture at every half.
 //! A material wall-conduction binding composes the solid's k(T) and actual
 //! resistance geometry with that same film and finite-wall heat transaction.
@@ -36,10 +36,10 @@ pub use shared::{
 };
 
 mod transport;
-use transport::CircularWallTransport;
+use transport::DevelopedWallTransport;
 pub use transport::{
     CircularChurchillWall, CircularGnielinskiWall, CircularLaminarWall, CircularTurbulentWall,
-    CircularWallModel,
+    CircularWallModel, DevelopedWallModel, RectangularLaminarWall,
 };
 
 #[cfg(feature = "material")]
@@ -110,6 +110,9 @@ struct BranchShape {
 /// from current source-owned gas properties instead of retaining authored values.
 /// [`Self::with_circular_transport`] also admits explicit turbulent rough-pipe
 /// models through the same source, heat and momentum transaction.
+/// [`Self::with_rectangular_laminar_transport`] retains the actual rectangular
+/// Poiseuille shape factor through that same transaction.
+/// [`Self::with_developed_transport`] admits both geometries in one network.
 /// [`Self::with_material_heat_storage`] supplies original source-dependent finite thermal
 /// storage, including exact latent plateaus, instead of a constant capacity.
 pub struct NetworkWallOperator<'law> {
@@ -127,7 +130,7 @@ pub struct NetworkWallOperator<'law> {
     last_report: Option<NetworkWallReport>,
     trial_report: Option<NetworkWallReport>,
     trial_active: bool,
-    transport: Option<CircularWallTransport>,
+    transport: Option<DevelopedWallTransport>,
     caloric: Vec<Option<MaterialWallCaloric<'law>>>,
     shared: Option<SharedWalls<'law>>,
     supports: Option<recoil::FiniteSupports>,

@@ -3241,6 +3241,46 @@ after reaction also checks whole-network/finite-wall rollback. These are
 manufactured numerical integration tests, not experimental combustion or
 convection validation.
 
+### Rectangular developed-flow wall resistance
+
+`NetworkWallOperator::with_rectangular_laminar_transport` binds a prepared
+`RectangularLaminarWall` to selected constant-area rectangular branches.
+The original widths, heights, Nusselt inputs and applicability are available
+through `rectangular_walls`. Circular entry points and their arithmetic remain
+unchanged. Both shapes share the source-owned transport query, original wall
+transaction, exponential relative-slip drag, moving-wall/finite-support work,
+finite thermal storage and atomic publication.
+`with_developed_transport` combines circular and rectangular branch models
+under one original transport law. `developed_walls` retains the complete mixed
+axis; the circular/rectangular slice inspectors apply to homogeneous bindings.
+
+For smaller side h, larger side w and a=h/w, the no-slip Fourier solution gives
+`Q = w h^3 C(a) dp/(12 mu L)` and hence bulk drag rate `12 mu/(rho h² C(a))`.
+The complete side-wall correction is retained; it is not circular Poiseuille
+with a hydraulic-diameter substitution. A fixed six-term exponential-difference
+sum evaluates the shape factor once at preparation; the omitted correction is
+below 1e-23 on 0<a<=1. Source intervals refresh current gas viscosity and density
+without repeating that series. Reference: Mortensen, Okkels and Bruus (2005),
+Phys. Rev. E 71, 057301, equations (3), (10), (11),
+<https://doi.org/10.1103/PhysRevE.71.057301>.
+
+Actual area w*h and integrated cell volumes must agree with the original mesh.
+Hydraulic diameter `Dh=2wh/(w+h)` controls Reynolds admission, authored Nu and
+cell wetted area `4V/Dh`. Nu must apply to the declared rectangular aspect ratio
+and thermal wall conditions; no circular heat-transfer relation is inferred.
+All four walls share their contact temperature and axial velocity. Reynolds
+support lies within 0..2300 and wall-relative Mach is at most 0.3. These bounds
+do not establish laminarity, entrance development or quasi-steady validity.
+Slip, rarefaction, turbulent rectangular flow and unsteady transverse profiles
+remain outside this model. Source coefficients retain the existing first-order
+interval lag and endpoint domain checks.
+
+G1/G3 tests compare square-duct resistance, an independent long Fourier sum,
+parallel-plate convergence, swapped sides, signed flow and moving-wall boosts.
+They also check actual perimeter heat exchange, density/material substitution
+and kinetic-to-thermal conversion without a second heat source. G0/G4 checks
+cover source/geometry/regime refusal and cancellation with complete rollback.
+
 ### Current material state and roughness in turbulent pipe-wall friction
 
 `NetworkWallOperator::with_circular_transport` accepts one explicit

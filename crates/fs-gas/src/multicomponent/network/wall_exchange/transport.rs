@@ -7,7 +7,9 @@ use crate::multicomponent::{Cell, MAX_SPECIES, Mesh1d, MixtureGas, allocated, po
 use fs_qty::{Length, Pressure, Temperature};
 
 mod churchill;
+mod rectangular;
 mod turbulent;
+pub use rectangular::RectangularLaminarWall;
 pub use turbulent::{CircularChurchillWall, CircularGnielinskiWall, CircularTurbulentWall};
 
 /// Explicit circular, developed-laminar approximation for one complete branch.
@@ -148,9 +150,45 @@ fn admit_circular_mesh(diameter: Length, mesh: &Mesh1d) -> Result<(), WallExchan
     Ok(())
 }
 
-pub(super) struct CircularWallTransport {
+/// Explicit geometry and developed-flow law for one original gas branch.
+///
+/// Circular and rectangular passages can share one source-owned transport
+/// binding. Each branch retains its own shape, heat relation and applicability.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum DevelopedWallModel {
+    /// Circular Poiseuille, Colebrook, Gnielinski or Churchill wall model.
+    Circular(CircularWallModel),
+    /// Full no-slip rectangular Poiseuille shape and an authored Nusselt number.
+    Rectangular(RectangularLaminarWall),
+}
+
+impl DevelopedWallModel {
+    fn admit_mesh(self, mesh: &Mesh1d) -> Result<(), WallExchangeError> {
+        match self {
+            Self::Circular(model) => model.admit_mesh(mesh),
+            Self::Rectangular(model) => model.admit_mesh(mesh),
+        }
+    }
+
+    fn parameters(self) -> (Length, [f64; 2], f64) {
+        match self {
+            Self::Circular(model) => model.parameters(),
+            Self::Rectangular(model) => (
+                model.hydraulic_diameter(),
+                model.reynolds_number(),
+                model.maximum_mach_number(),
+            ),
+        }
+    }
+}
+
+pub(super) struct DevelopedWallTransport {
     law: Box<dyn TransportLaw + Send + Sync>,
-    branches: Vec<Option<CircularWallModel>>,
+    branches: Vec<Option<DevelopedWallModel>>,
+    // Preserve existing typed slice inspectors. Views are prepared only for
+    // homogeneous bindings; mixed networks retain only their complete models.
+    circular: Option<Vec<Option<CircularWallModel>>>,
+    rectangular: Option<Vec<Option<RectangularLaminarWall>>>,
     binary: Vec<f64>,
 }
 
@@ -199,9 +237,58 @@ impl NetworkWallOperator<'_> {
     /// moving-wall work, finite-support recoil and whole-network rollback.
     /// Coefficients are frozen per source interval and checked at both endpoints.
     pub fn with_circular_transport<L: TransportLaw + Send + Sync + 'static>(
-        mut self,
+        self,
         law: L,
         branches: Vec<Option<CircularWallModel>>,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, WallExchangeError> {
+        poll(&mut cancelled)?;
+        let mut models = allocated(branches.len(), None)?;
+        for (model, branch) in models.iter_mut().zip(branches) {
+            poll(&mut cancelled)?;
+            *model = branch.map(DevelopedWallModel::Circular);
+        }
+        self.with_developed_transport(law, models, cancelled)
+    }
+
+    /// Bind actual gas transport to selected developed rectangular branches.
+    ///
+    /// The prepared no-slip shape factor supplies `12 mu/(rho h² C)` for
+    /// smaller side h, not circular drag at an equivalent diameter. Complete
+    /// cell conductance is `Nu k (4 V/Dh)/Dh`; the authored rectangular Nusselt
+    /// number retains its own thermal-wall applicability. `None` leaves that
+    /// branch's authored contact unchanged; plenums also remain unchanged.
+    ///
+    /// Source identity, current composition, endpoint domain checks, moving-wall
+    /// work, finite supports, heat storage and rollback use the same transaction
+    /// as [`Self::with_circular_transport`]. Coefficients are frozen per source
+    /// interval, so this is a quasi-steady developed-profile approximation,
+    /// not a resolved unsteady transverse viscous boundary layer.
+    pub fn with_rectangular_laminar_transport<L: TransportLaw + Send + Sync + 'static>(
+        self,
+        law: L,
+        branches: Vec<Option<RectangularLaminarWall>>,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, WallExchangeError> {
+        poll(&mut cancelled)?;
+        let mut models = allocated(branches.len(), None)?;
+        for (model, branch) in models.iter_mut().zip(branches) {
+            poll(&mut cancelled)?;
+            *model = branch.map(DevelopedWallModel::Rectangular);
+        }
+        self.with_developed_transport(law, models, cancelled)
+    }
+
+    /// Bind one original transport source to mixed circular and rectangular ducts.
+    ///
+    /// Each selected branch retains its own geometry and admissible flow regime.
+    /// `None` preserves authored contact coefficients. The complete network uses
+    /// one conservative wall transaction; a refusal on any branch rolls back all
+    /// branches and finite walls. Bind before the first accepted wall step.
+    pub fn with_developed_transport<L: TransportLaw + Send + Sync + 'static>(
+        mut self,
+        law: L,
+        branches: Vec<Option<DevelopedWallModel>>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<Self, WallExchangeError> {
         poll(&mut cancelled)?;
@@ -218,18 +305,47 @@ impl NetworkWallOperator<'_> {
                 "wall transport original source or branch axis",
             ));
         }
+        let (mut only_circular, mut only_rectangular) = (true, true);
         for (model, shape) in branches.iter().zip(&self.branches) {
             poll(&mut cancelled)?;
             if let Some(model) = model {
                 model.admit_mesh(&shape.mesh)?;
+                match model {
+                    DevelopedWallModel::Circular(_) => only_rectangular = false,
+                    DevelopedWallModel::Rectangular(_) => only_circular = false,
+                }
+            }
+        }
+        let mut circular = if only_circular {
+            Some(allocated(branches.len(), None)?)
+        } else {
+            None
+        };
+        let mut rectangular = if only_rectangular {
+            Some(allocated(branches.len(), None)?)
+        } else {
+            None
+        };
+        for (index, model) in branches.iter().enumerate() {
+            poll(&mut cancelled)?;
+            match (model, &mut circular, &mut rectangular) {
+                (Some(DevelopedWallModel::Circular(model)), Some(view), _) => {
+                    view[index] = Some(*model)
+                }
+                (Some(DevelopedWallModel::Rectangular(model)), _, Some(view)) => {
+                    view[index] = Some(*model)
+                }
+                _ => {}
             }
         }
         let n = self.gas.species_count();
         let binary = allocated(n * n, 0.0)?;
         poll(&mut cancelled)?;
-        self.transport = Some(CircularWallTransport {
+        self.transport = Some(DevelopedWallTransport {
             law: Box::new(law),
             branches,
+            circular,
+            rectangular,
             binary,
         });
         Ok(self)
@@ -242,15 +358,25 @@ impl NetworkWallOperator<'_> {
             .map(|transport| transport.law.as_ref() as &dyn TransportLaw)
     }
 
-    /// Original developed-wall models, geometry and applicability, in branch order.
+    /// Original circular models for a homogeneous circular binding, otherwise None.
     pub fn circular_walls(&self) -> Option<&[Option<CircularWallModel>]> {
+        self.transport.as_ref()?.circular.as_deref()
+    }
+
+    /// Original rectangular models for a homogeneous rectangular binding, otherwise None.
+    pub fn rectangular_walls(&self) -> Option<&[Option<RectangularLaminarWall>]> {
+        self.transport.as_ref()?.rectangular.as_deref()
+    }
+
+    /// Complete original geometry and flow model in branch order, including mixtures.
+    pub fn developed_walls(&self) -> Option<&[Option<DevelopedWallModel>]> {
         self.transport
             .as_ref()
             .map(|transport| transport.branches.as_slice())
     }
 }
 
-impl CircularWallTransport {
+impl DevelopedWallTransport {
     pub(super) fn resolve(
         &mut self,
         gas: &MixtureGas,
@@ -296,13 +422,17 @@ impl CircularWallTransport {
         admit("Reynolds number", reynolds, minimum, maximum)?;
         admit("Mach number", mach, 0.0, maximum_mach_number)?;
         let (friction_factor, nusselt_number) = match model {
-            CircularWallModel::Laminar(laminar) => (None, laminar.nusselt_number),
-            CircularWallModel::Churchill(churchill) => (None, churchill.nusselt_number),
-            CircularWallModel::Turbulent(turbulent) => (
+            DevelopedWallModel::Circular(CircularWallModel::Laminar(laminar)) => {
+                (None, laminar.nusselt_number)
+            }
+            DevelopedWallModel::Circular(CircularWallModel::Churchill(churchill)) => {
+                (None, churchill.nusselt_number)
+            }
+            DevelopedWallModel::Circular(CircularWallModel::Turbulent(turbulent)) => (
                 Some(turbulent.darcy_factor(reynolds)?),
                 turbulent.nusselt_number,
             ),
-            CircularWallModel::Gnielinski(thermal) => {
+            DevelopedWallModel::Circular(CircularWallModel::Gnielinski(thermal)) => {
                 // Cp, not Cv, defines Pr. Use the original NASA mixture at the
                 // current composition and temperature, preserving formation-
                 // reference independence and avoiding a constant-gamma proxy.
@@ -314,9 +444,10 @@ impl CircularWallTransport {
                 let (factor, nu) = thermal.coefficients(reynolds, prandtl)?;
                 (Some(factor), nu)
             }
+            DevelopedWallModel::Rectangular(rectangular) => (None, rectangular.nusselt_number()),
         };
         contact.drag = match model {
-            CircularWallModel::Churchill(churchill) => {
+            DevelopedWallModel::Circular(CircularWallModel::Churchill(churchill)) => {
                 let WallDrag::Linear { rate_per_s } = WallDrag::circular_laminar(
                     coefficients.dynamic_viscosity,
                     primitive.density,
@@ -345,7 +476,7 @@ impl CircularWallTransport {
                     wall_velocity_m_s: motion.unwrap_or(0.0),
                 }
             }
-            CircularWallModel::Laminar(_) => {
+            DevelopedWallModel::Circular(CircularWallModel::Laminar(_)) => {
                 let drag = WallDrag::circular_laminar(
                     coefficients.dynamic_viscosity,
                     primitive.density,
@@ -361,7 +492,9 @@ impl CircularWallTransport {
                     _ => drag,
                 }
             }
-            CircularWallModel::Turbulent(_) | CircularWallModel::Gnielinski(_) => {
+            DevelopedWallModel::Circular(
+                CircularWallModel::Turbulent(_) | CircularWallModel::Gnielinski(_),
+            ) => {
                 let friction_factor =
                     friction_factor.expect("turbulent branch evaluated its factor");
                 match motion {
@@ -374,6 +507,16 @@ impl CircularWallTransport {
                         friction_factor,
                         hydraulic_diameter_m: diameter.value(),
                     },
+                }
+            }
+            DevelopedWallModel::Rectangular(rectangular) => {
+                let rate_per_s = rectangular.linear_rate(viscosity, primitive.density)?;
+                match motion {
+                    Some(wall_velocity_m_s) => WallDrag::MovingLinear {
+                        rate_per_s,
+                        wall_velocity_m_s,
+                    },
+                    None => WallDrag::Linear { rate_per_s },
                 }
             }
         };

@@ -1,4 +1,6 @@
 //! G1 analytic wall exchange and G3 source/domain substitution in the real owner.
+mod rectangular;
+
 use super::*;
 use crate::multicomponent::dissipation::{ConstantTransport, TransportDomain};
 use crate::multicomponent::network::dissipation::tests::law;
