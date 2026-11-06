@@ -38,6 +38,8 @@ pub mod area_lights;
 
 /// Source-bounded multichannel detector signals, including infrared bands.
 pub mod sensor;
+/// Native finite-source histories at the original observation clock.
+pub mod transient;
 
 /// Native wave imaging through a proven clear homogeneous source scene.
 pub mod wave;

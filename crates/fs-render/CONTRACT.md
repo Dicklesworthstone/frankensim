@@ -8122,3 +8122,25 @@ Seven G1/G3/G4 tests cover native static/RNG parity, distinct per-source delays,
 chromatic pulse arrivals, an independent curved-path group integral, large-epoch
 invariance, source/domain refusals and late cancellation. Numerical execution
 remains separate from source and formatting checks.
+
+## Transient spectral pixels and quantum-efficiency channels
+
+`camera::raster::transient` connects the finite-source history observer to the
+original raster, pupil, CIE/XYZ and quantum-efficiency sensor integrations.
+`sample_pixel_transient_at_time` and `sample_pixel_sensor_transient_at_time`
+trace each original wavelength independently and evaluate its own refracted
+emission times. All detector channels share the same four spectral paths;
+adding QE channels adds no propagation or source-history calls.
+
+Original random-counter domains, wavelength proposals, spectral support,
+photon-energy conversion and aperture-average conventions are retained.
+A failed source or wavelength lane refuses the complete pixel, preserving its
+original error without retrying or renormalizing surviving channels. Results
+are instantaneous radiance and photoelectron rates at the declared DD launch
+clock, before exposure, etendue, lens transit and electronics. The underlying
+finite-source and frozen-medium assumptions remain unchanged.
+
+Three G1/G3/G4 tests cover static pixel/sensor parity and replay, channel-count
+independent transport work, chromatic pulse energy/photon references, and
+failed-lane/cancellation behavior. These are authored numerical regressions;
+execution is reported separately.
