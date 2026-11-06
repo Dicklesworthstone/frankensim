@@ -12,6 +12,8 @@ use crate::dense::{
 };
 use fs_math::{c64::C64, det};
 
+pub mod transient;
+
 /// Complete spectral acceptance plus an explicit unit-circle exclusion margin.
 #[derive(Clone, Copy, Debug)]
 pub struct FloquetControls {

@@ -2,7 +2,7 @@
 
 ## Purpose and layer
 
-Layer L1 numerical spectra, spectral semantics and health monitoring. This crate owns five related,
+Layer L1 numerical spectra, spectral semantics and health monitoring. This crate owns six related,
 but deliberately separate, capabilities:
 
 1. deterministic sheaf-Laplacian gap health, confidence demotion, conditioning
@@ -14,7 +14,9 @@ but deliberately separate, capabilities:
 4. complete bounded nonsymmetric dense numerical spectra through the existing
    fs-la QR/SVD owners, with eigenpair residual and whole-basis admission; and
 5. numerical Floquet interpretation of supplied monodromies, with explicit
-   original-flow phase checks and no orbit-existence or theorem authority.
+   original-flow phase checks and no orbit-existence or theorem authority; and
+6. finite-horizon stroboscopic perturbation amplification in the supplied
+   complete state chart, independently of asymptotic spectral stability.
 
 The second and third capabilities are semantic and epistemic boundaries. They
 classify problems or theorem statements, verify that retained evidence names
@@ -105,6 +107,37 @@ complex logarithm branch or damping/energy-Q interpretation.
 closed forms, full phase/memory directions, retained forced unit modes,
 unresolved neutral families, original phase residuals, supplied-root and
 defective-basis refusals, resource limits and cancellation.
+
+## Stroboscopic perturbation growth
+
+`floquet::transient::stroboscopic_growth` measures the largest singular gain
+of complete period-map powers at explicitly requested integer cycle counts.
+The initial and final singular directions identify the optimal perturbation
+in the caller's dimensionless Euclidean state chart. Original forward and
+adjoint equations are checked independently. The existing fs-la scalar GEMM
+and complex Jacobi SVD own the numerical kernels; no Gram matrix, eigenbasis
+approximation or duplicate integrator is introduced. Defective maps are
+admissible because this query does not require an independent eigenbasis.
+
+Sorted horizon gaps use binary powers with a bounded number of live matrices.
+Normalized powers retain their logarithmic scale, so a nonzero gain outside
+ordinary floating-point range has a finite log gain and an unavailable ordinary
+gain. A zero map has zero gain and no normalized final direction. Dimension,
+horizon count, period count, native iterations, total payload/work and
+cancellation are explicit; failures return no partial result.
+
+Every original state direction, including autonomous phase and memory, remains
+in this query. Its norm is the supplied chart's Euclidean norm. Physical energy
+requires a separately justified metric transform. These fixed-section integer
+cycle samples are distinct from within-period or all-starting-phase maxima,
+phase-quotiented growth, continuous-time decay, resolvent/Kreiss bounds,
+nonlinear basin size and verified spectral authority. Temporal discretization
+and source equivalence remain with the map's owner. In particular, a stable
+spectral radius does not force every finite-horizon gain below one.
+
+`tests/floquet_transient.rs` exercises normal rotations, stable nonnormal/Jordan
+amplification followed by decay, sparse horizons, unrepresentable ordinary
+gains, zero maps, original singular equations, budgets and cancellation.
 
 ## Existing spectral-health API
 
