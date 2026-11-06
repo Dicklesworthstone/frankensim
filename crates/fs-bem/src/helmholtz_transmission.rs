@@ -37,6 +37,10 @@ pub mod molecular;
 #[path = "helmholtz_transmission_multiple.rs"]
 pub mod multiple;
 
+/// Coupled refraction through one curved fluid shell and its enclosed core.
+#[path = "helmholtz_transmission/nested.rs"]
+pub mod nested;
+
 /// A transmission solve has two pressure-scaled unknowns per panel.
 pub const MAX_TRANSMISSION_PANELS: usize = MAX_DENSE_PANELS / 2;
 

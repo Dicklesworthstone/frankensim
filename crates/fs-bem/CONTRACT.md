@@ -3374,3 +3374,54 @@ inferred. For nonstationary fields, reversing a pair and negating its lag also
 requires shifting the observation window by that lag. The harmonic continuation,
 original receiver/source identities, clock and unresolved physical uncertainty
 remain explicit; this is not a finite pulse or sampling-bandwidth model.
+
+
+## Coupled fluid core and shell refraction
+
+`helmholtz::transmission::nested::CoreShellFluidInterface` prepares one curved
+fluid shell enclosing one core from the two original triangle surfaces and three
+original `FluidAcoustics` providers. The stationary inviscid fluids retain their
+actual positive density and sound-speed snapshots at one angular frequency. An
+identical retained provider view is sampled once, including when it fills more
+than one region. This owner does not fit spheres, average adjacent media, or
+invent material data.
+
+The two pressure/physical-normal-velocity traces are solved together. Both
+off-diagonal operators propagate through the shell fluid, with the correct
+target derivative scaling and opposite signs for its inner and outer boundary.
+The native analytically factored kernel differences form the contrast forcing;
+weak scattering is not recovered by subtracting rounded total fields. A common
+pressure-scaled velocity coordinate and the original cancellable blocked LU
+retain all repeated interface interactions. Repeated coherent incident fields
+reuse the prepared factorization without resampling material providers.
+
+Exactly matched adjacent states remove their interface algebraically. Matching
+the exterior and shell reduces to the original core inclusion; matching shell
+and core reduces to the original outer inclusion. Complete matching has zero
+scattering and returns the original analytic incident field. The response
+exposes the surviving radiating surface, active-interface pressure and physical
+normal velocity, signed interface work, and the native integrated far field.
+Its region-typed observer returns total pressure and particle velocity in the
+exterior, shell, or core. The shell combines both signed layer representations
+with one shared native quadrature-work allowance.
+
+Admission requires one convex outer surface and a strictly enclosed core with
+caller-selected positive separation. Original closed, outward, non-self-
+intersecting mesh input duties remain. Conservative numerical half-space tests
+use the requested clearance plus a coordinate-scaled roundoff margin; they are
+not an exact convexity or global intersection certificate. Incident source
+singularities must remain outside the complete outer volume. Both original
+surfaces participate in receiver-region and distance checks, even when an
+interface is transparent. Dense memory admission includes factorization,
+contrast drive, vectors, permutation, and worker-dependent LU workspace before
+quadratic allocation. Existing panel, wavelength, source, receiver, kernel,
+memory, and cancellation bounds remain active.
+
+Scope is one shell and one core of nondispersive fluids, with a convex outer
+boundary; this does not admit an arbitrary nesting tree, attenuation, elastic
+mode conversion, or an unbounded high-frequency solve. The regression fixture
+uses an independent four-continuity-equation spherical-wave oracle, checks all
+three regional fields and far-field mesh refinement, both single-interface
+reductions, transparent fields, offset-core translation, and refusal/reuse
+behavior. Oracle self-tests can run independently of the BEM dependency graph;
+their success alone is not verification of the coupled production solve.
