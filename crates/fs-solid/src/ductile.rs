@@ -44,6 +44,39 @@ pub trait PlasticStrainHistory {
     /// Dimensionless accumulated equivalent plastic strain.
     fn plastic_strain_accumulation(&self) -> f64;
 }
+
+/// Explicit material admission for a ductile law used with source-resolved
+/// mechanics. Authored numerical laws retain their declared assumptions;
+/// sourced laws must match the original card, named state and complete fixed
+/// context. There is no blanket unchecked implementation for sourced laws.
+pub trait DuctileMaterialBinding: DuctileInitiationLaw {
+    /// Admit the complete source identity and fixed quantity-typed context.
+    /// Authored numerical laws may explicitly carry no material-card binding.
+    fn matches_material(
+        &self, material: &fs_material::state_point::ResolvedMaterialStatePoint,
+    ) -> bool;
+}
+
+impl DuctileMaterialBinding for fs_material::ductile::JohnsonCookInitiation {
+    fn matches_material(&self, _: &fs_material::state_point::ResolvedMaterialStatePoint) -> bool {
+        true
+    }
+}
+impl DuctileMaterialBinding for fs_material::ductile::TabulatedDuctileLocus {
+    fn matches_material(&self, _: &fs_material::state_point::ResolvedMaterialStatePoint) -> bool {
+        true
+    }
+}
+impl DuctileMaterialBinding for fs_material::ductile::source::ResolvedDuctileLocus {
+    fn matches_material(&self, material: &fs_material::state_point::ResolvedMaterialStatePoint) -> bool {
+        self.source().matches_material(material)
+    }
+}
+impl<L: DuctileMaterialBinding + ?Sized> DuctileMaterialBinding for &L {
+    fn matches_material(&self, material: &fs_material::state_point::ResolvedMaterialStatePoint) -> bool {
+        (**self).matches_material(material)
+    }
+}
 impl PlasticStrainHistory for J2State {
     fn plastic_strain_accumulation(&self) -> f64 { self.alpha }
 }
@@ -340,6 +373,58 @@ impl<'a, L: DuctileInitiationLaw> DuctileHistory<'a, L> {
         let ductility = self.trial(&mechanics.quadrature_states,
             &mechanics.quadrature_stress_pa, conditions, cx)?;
         Ok(DuctileAccepted { mechanics, ductility })
+    }
+}
+
+impl<'a, L: DuctileMaterialBinding> DuctileHistory<'a, L> {
+    fn check_materials(
+        &self, materials: &[fs_material::plastic::source::ResolvedJ2Plasticity], cx: &Cx<'_>,
+    ) -> Result<(), DuctileSolidError> {
+        checkpoint(cx)?;
+        if materials.len() != self.points.len() {
+            return Err(DuctileSolidError::Input("material sources must cover every ductile point"));
+        }
+        for (point, material) in materials.iter().enumerate() {
+            if point % 256 == 0 { checkpoint(cx)?; }
+            if !self.laws.at(point).matches_material(material.material()) {
+                return Err(DuctileSolidError::Input(
+                    "fracture calibration does not match native material card, state and context",
+                ));
+            }
+        }
+        checkpoint(cx)
+    }
+
+    /// Admit accepted material/history/temperature before an external coupled
+    /// owner performs an expensive proposal. This reads the native history;
+    /// it never re-runs a constitutive update or changes initiation history.
+    pub fn validate_material_history<S: PlasticStrainHistory>(
+        &self, states: &[S], materials: &[fs_material::plastic::source::ResolvedJ2Plasticity],
+        conditions: DuctileStepConditions<'_>, cx: &Cx<'_>,
+    ) -> Result<(), DuctileSolidError> {
+        self.check_materials(materials, cx)?;
+        self.prepare(states, conditions, cx)
+    }
+
+    /// Gate one already converged native tetrahedral interval, preserving the
+    /// complete source binding at both endpoints. Thermal/coupled owners use
+    /// their actual endpoint temperatures and physical duration; neither a
+    /// second Newton solve nor a second constitutive increment is performed.
+    /// The caller retains the complete coupled candidate until this succeeds.
+    #[allow(clippy::too_many_arguments)]
+    pub fn check_material_tet_candidate<S: PlasticStrainHistory>(
+        &self, old_states: &[S],
+        old_materials: &[fs_material::plastic::source::ResolvedJ2Plasticity],
+        candidate: &SmallStrainTetSolution<S>,
+        candidate_materials: &[fs_material::plastic::source::ResolvedJ2Plasticity],
+        conditions: DuctileStepConditions<'_>, cx: &Cx<'_>,
+    ) -> Result<Self, DuctileSolidError> {
+        self.validate_material_history(old_states, old_materials, conditions, cx)?;
+        self.check_materials(candidate_materials, cx)?;
+        if candidate.increments.len() != 1 || candidate.element_strain.len() != self.points.len() {
+            return Err(DuctileSolidError::Input("one complete native tetrahedral interval required"));
+        }
+        self.trial(&candidate.element_states, &candidate.element_stress, conditions, cx)
     }
 }
 

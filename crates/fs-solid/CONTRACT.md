@@ -8967,6 +8967,17 @@ state and fixed context at every subsequent increment. Changing material/context
 does not silently preserve a source qualification. Generic authored numeric
 entry points retain their explicitly supplied calibration assumptions.
 
+`DuctileMaterialBinding` also admits already converged coupled tetrahedral
+intervals through `validate_material_history` and
+`check_material_tet_candidate`. Source-resolved laws recheck the original
+card, named state and complete fixed context against both endpoint material
+bundles. Explicit numerical Johnson--Cook and tabulated laws retain their
+authored assumptions; there is no blanket unchecked source implementation.
+The gate requires one native increment, actual endpoint temperatures and its
+physical duration, reads the complete native plastic history, and performs no
+second constitutive update or equilibrium solve. A thermal owner additionally
+admits the immutable source reference before calling this candidate check.
+
 Regression definitions exercise actual native uniaxial plastic response,
 initiation refusal and refined retry, unloading/reversal/replay, all plane and
 hex point histories, rotated finite deformation, creep separation, source/card

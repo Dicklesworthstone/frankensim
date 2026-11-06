@@ -1708,6 +1708,52 @@ Physical sources and facet bindings are shared immutably; borrowed endpoint sect
 
 Four focused synthetic regressions cover an independent heated uniaxial plastic membrane/permanent-set oracle, layer-gradient thermal moment reversal with original conduction, late-refusal checkpoint preservation, and prescribed plastic motion with an independent P1 kinetic integral, incorrect eccentric mass rejection and no heat from numerical stopping loss. They also exercise a cold reference binding whose free-coordinate budget is smaller than its total physical coordinate count. Formatting and source checks do not substitute for execution of these native numerical tests.
 
+## Ductile initiation on coupled thermal plastic solids and motion
+
+`solid_enthalpy::plastic::ductile` adds `advance_with_ductility` to the original
+`ThermoplasticSolid` and `ThermoplasticDynamics` owners. The existing native
+proposal retains all thermal, equilibrium, source refresh, physical/reversible
+heat, inertia and energy-balance behavior. Only after that complete proposal
+converges does `DuctileHistory` assess the actual endpoint stress and accumulated
+plastic alpha. Complete J2 and Chaboche histories remain the original states;
+backstress is not projected away and reverse flow accumulates ductile usage.
+
+Each point's physical temperature is evaluated from its retained cell enthalpy
+through the SAME original caloric source. The shared physical duration is the
+target time minus the accepted coupled time, including after restart. Material
+kinetics, momentum and ductile plastic-strain rate use that interval. No ambient
+temperature, iteration time, total strain or kinetic/numerical loss substitutes
+for those quantities. The bridge allocates one bounded temperature vector per
+endpoint and performs no extra material-source query or constitutive solve.
+
+Before a proposal, the law is admitted against the immutable original thermal
+source reference and accepted endpoint material. The converged endpoint source
+is admitted again before acceptance. Card identity, named state, all fixed
+context values and quantity types remain binding. A resolved fracture table at
+one fixed temperature refuses a changed temperature, even when that change lies
+inside its source validity box. Re-resolving a table at the latest temperature
+does not replace original source authority. Explicit authored Johnson--Cook
+coefficients may carry temperature/rate dependence across their declared domain;
+this does not infer material calibration.
+
+The returned `DuctileAccepted` contains the complete native coupled candidate
+and corresponding initiation history. The caller adopts them together. Source,
+temperature, history-reset, initiation, native solve and cancellation refusals
+publish none of the proposed enthalpy, displacement, full plastic state, velocity
+or observer state. Callers refine from the complete accepted pair to locate
+initiation. Endpoint-held accumulation is first order and its crossing fraction
+is plastic accumulation, not resolved event time. This gate supplies no
+post-initiation degradation, fracture heat, topology change or fragments.
+
+Five synthetic regressions in `tests/solid_plastic_enthalpy/ductile.rs` cover
+independent Johnson--Cook temperature/rate utilization over successive physical
+intervals, equality with the original native coupled solution and heat accounts,
+initiation/refined retry/history-reset rollback, inertia and numerical-loss
+separation, complete cyclic Chaboche backstress, and original-card/fixed-temperature
+source refusal including attempted endpoint rebinding. All five passed against
+the original native material, solid and thermal owners in the focused source
+closure; this is not a full-workspace Cargo test result.
+
 ## Source-bound Timoshenko frame self-heating
 
 `frame_vibration::thermal` and its complete exterior-fluid thermal consumer

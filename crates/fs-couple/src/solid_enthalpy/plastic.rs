@@ -19,6 +19,8 @@
 pub mod contact;
 /// Inertial motion, plastic heating and reciprocal thermal feedback together.
 pub mod dynamics;
+/// Original thermo-mechanical proposals gated by calibrated ductile initiation.
+pub mod ductile;
 /// Finite electrical storage, native 3D plasticity and one shared thermal solve.
 pub mod electrical;
 /// Finite source gas, actual loaded plastic history and reciprocal cell heat.
