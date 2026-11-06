@@ -272,10 +272,8 @@ fn g0_geometry_and_complete_shared_cell_correspondence_are_required() {
         DiffusionHeating::new(&wrong, sources.clone(), spatial_budget()),
         Err(FissionThermalError::BindingChanged(CellId(20)))
     ));
-    let incomplete =
-        DiffusionHeating::new(&initial, vec![sources[0].clone()], spatial_budget()).unwrap();
     assert!(matches!(
-        incomplete.advance_to(&initial, 0.1, controls(0.1), || Ok(())),
+        DiffusionHeating::new(&initial, vec![sources[0].clone()], spatial_budget()),
         Err(FissionThermalError::Invalid(_))
     ));
     assert!(DiffusionCellSource::bind(state, vec![(CellId(20), MaterialId(1))]).is_err());

@@ -49,6 +49,19 @@ pub trait NuclearHeatSource: sealed::Sealed + Clone + core::fmt::Debug {
     ) -> Result<(), FissionThermalError>;
     /// Refuse temperatures outside the declared nuclear-data domain.
     fn validate_temperature(&self, temperature_k: f64) -> Result<(), FissionThermalError>;
+    /// Admit collection-wide ownership even for an idle thermal advance. Local
+    /// sources need no shared history; a compartment or spatial source requires
+    /// exactly one handle for every cell in the same immutable checkpoint.
+    /// The iterator adds no allocation or traversal to independent source laws.
+    fn validate_sources<'source>(
+        _sources: impl ExactSizeIterator<Item = &'source Self>,
+        _checkpoint: &mut dyn FnMut() -> Result<(), FissionThermalError>,
+    ) -> Result<(), FissionThermalError>
+    where
+        Self: 'source,
+    {
+        Ok(())
+    }
     /// Prepare an independent source candidate over the final thermal interval.
     fn trial_source(
         &self,

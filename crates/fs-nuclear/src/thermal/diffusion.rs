@@ -193,6 +193,43 @@ impl NuclearHeatSource for DiffusionCellSource {
             .validate_temperature(temperature_k)?;
         Ok(())
     }
+    fn validate_sources<'source>(
+        mut sources: impl ExactSizeIterator<Item = &'source Self>,
+        checkpoint: &mut dyn FnMut() -> Result<(), FissionThermalError>,
+    ) -> Result<(), FissionThermalError>
+    where
+        Self: 'source,
+    {
+        checkpoint()?;
+        let count = sources.len();
+        let first = sources.next().ok_or(FissionThermalError::Invalid(
+            "spatial collection must be nonempty",
+        ))?;
+        if count != first.state.inventories().len() {
+            return Err(FissionThermalError::Invalid(
+                "all spatial cells must advance together",
+            ));
+        }
+        let mut seen = vec![false; count];
+        for source in std::iter::once(first).chain(sources) {
+            checkpoint()?;
+            if !Arc::ptr_eq(&first.state, &source.state)
+                || !match (&first.sources, &source.sources) {
+                    (None, None) => true,
+                    (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+                    _ => false,
+                }
+                || source.cell_index >= count
+                || seen[source.cell_index]
+            {
+                return Err(FissionThermalError::Invalid(
+                    "spatial cells must share one complete accepted history",
+                ));
+            }
+            seen[source.cell_index] = true;
+        }
+        Ok(())
+    }
     fn trial_source(
         &self,
         _: f64,
@@ -213,34 +250,18 @@ impl NuclearHeatSource for DiffusionCellSource {
         budget: Self::Budget,
         checkpoint: &mut dyn FnMut() -> Result<(), FissionError>,
     ) -> Result<Vec<(Self, Self::Step)>, FissionThermalError> {
-        checkpoint()?;
-        let first = sources.first().ok_or(FissionThermalError::Invalid(
-            "spatial collection must be nonempty",
-        ))?;
-        if sources.len() != first.state.inventories().len() || temperatures_k.len() != sources.len()
-        {
+        Self::validate_sources(sources.iter().copied(), &mut || {
+            checkpoint().map_err(Into::into)
+        })?;
+        let first = sources[0];
+        if temperatures_k.len() != sources.len() {
             return Err(FissionThermalError::Invalid(
-                "all spatial cells must advance together",
+                "one temperature per spatial cell required",
             ));
         }
-        let mut seen = vec![false; sources.len()];
         let mut temperatures = vec![0.0; sources.len()];
         for (source, &temperature) in sources.iter().zip(temperatures_k) {
             checkpoint()?;
-            if !Arc::ptr_eq(&first.state, &source.state)
-                || !match (&first.sources, &source.sources) {
-                    (None, None) => true,
-                    (Some(a), Some(b)) => Arc::ptr_eq(a, b),
-                    _ => false,
-                }
-                || source.cell_index >= seen.len()
-                || seen[source.cell_index]
-            {
-                return Err(FissionThermalError::Invalid(
-                    "spatial cells must share one complete accepted history",
-                ));
-            }
-            seen[source.cell_index] = true;
             temperatures[source.cell_index] = temperature;
         }
         let (state, report) = if let Some(schedule) = &first.sources {

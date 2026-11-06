@@ -8,8 +8,8 @@
 //! Prescribed-event sources and multigroup neutron irradiation share one clock,
 //! material binding and heat-credit transaction. Their authored transitions clip
 //! the native step exactly. Nuclear reservoirs advance over the FINAL accepted
-//! interval. A spatial diffusion cohort advances one shared neutron field and
-//! its finite inventories before per-cell heat is credited. Thermal transport
+//! interval. A spatial diffusion cohort or compartments exchanging nuclides
+//! advance one shared physical history before per-cell heat is credited. Thermal transport
 //! retains its original explicit timestep and uniform-cell limitations.
 
 use std::{collections::BTreeMap, sync::Arc};
@@ -42,6 +42,12 @@ mod diffusion;
 pub use diffusion::{
     DiffusionCellSource, DiffusionCellStep, DiffusionHeating, DiffusionSourceChange,
     DiffusionSourceSchedule,
+};
+
+mod transport;
+pub use transport::{
+    BurnupTransportCellSource, BurnupTransportCellStep, BurnupTransportHeating,
+    NuclideTransportChange, NuclideTransportSchedule,
 };
 
 mod production;
@@ -353,6 +359,7 @@ impl<S: NuclearHeatSource> NuclearHeating<S> {
                 "source bindings need distinct active cells",
             ));
         }
+        S::validate_sources(sources.iter(), &mut || Ok(()))?;
         let mut bound = BTreeMap::new();
         for source in sources {
             let id = source.cell_id();
@@ -494,6 +501,10 @@ impl<S: NuclearHeatSource> NuclearHeating<S> {
                 fission_time_s: expected_time_s,
             });
         }
+        S::validate_sources(
+            self.sources.values().map(|bound| &bound.source),
+            &mut || checkpoint().map_err(Into::into),
+        )?;
         for (index, (&id, bound)) in self.sources.iter().enumerate() {
             if index % 64 == 0 {
                 checkpoint()?;

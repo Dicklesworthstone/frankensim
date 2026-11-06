@@ -288,6 +288,22 @@ impl BurnupTransportState {
                 .model(),
         );
         let n = model.nuclides().len();
+        // Check the bounded shape before converting caller-owned volumes into an Arc.
+        let cells = inventories.len();
+        let nodes = cells
+            .checked_mul(n)
+            .ok_or(BurnupError::Budget("joint inventory nodes"))?;
+        if cells > limits.max_compartments
+            || nodes > limits.burnup.propagation.maximum_nodes
+            || nodes > MAX_DECAY_NODES
+        {
+            return Err(BurnupError::Budget("joint compartment/nuclide nodes"));
+        }
+        if volumes_m3.len() != cells {
+            return Err(BurnupError::Invalid(
+                "fixed compartment volumes and transfer path ordering required",
+            ));
+        }
         let mut state = Self {
             model,
             inventories,

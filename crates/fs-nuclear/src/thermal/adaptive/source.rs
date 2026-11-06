@@ -9,6 +9,7 @@ use crate::decay::thermal::DecayCellSource;
 use crate::irradiation::IrradiationState;
 
 mod diffusion;
+mod transport;
 
 /// Physical state and interval comparisons used by the shared adaptive owner.
 /// Sealed through `NuclearHeatSource`; every implementation retains the original

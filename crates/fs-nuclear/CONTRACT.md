@@ -1490,3 +1490,51 @@ and reaction identity remain explicit. Original work/range/cancellation bounds
 apply, with separate output-curve/value limits. This is condensation of supplied
 laws under one declared spectrum and processed state, not spectrum evolution,
 resonance reconstruction, self-shielding or a data-accuracy certificate.
+
+## Transported radionuclides on the original thermal clock
+
+`thermal::BurnupTransportHeating` binds every compartment of the original
+transport state to a distinct original thermal cell and material. Volumes must
+agree with the thermal geometry. The shared source transaction evolves the
+entire reaction/transport cohort once for each accepted native interval, then
+credits each compartment's integrated locally deposited energy to its cell.
+Radiation and escaped channels remain separate. Past emitted energy stays in
+its original location; subsequent daughter events release energy wherever
+their nuclei then reside.
+
+The adapter reuses per-compartment `NeutronFluxSchedule` and
+`BurnupProductionSchedule`. `NuclideTransportSchedule` supplies a bounded,
+right-continuous history of the same directed transfer/outflow paths with
+changed first-order rates. The union of independently authored flux, feed and
+movement transitions clips the original thermal scheduler. Restart binds
+current inventories at the actual absolute time and does not replay earlier
+sources or movement. The thermal material continues to own its mass and
+caloric law; moving tracked nuclei adds no implicit carrier enthalpy.
+
+A small default `NuclearHeatSource::validate_sources` hook admits complete
+shared collections at construction and idle/positive advances. Independent
+sources retain their existing behavior without another traversal or allocation.
+Transport and spatial diffusion require exactly one handle per represented
+cell, one accepted cohort and one shared set of histories. Partial, mixed or
+duplicate cohorts refuse before any candidate is published.
+
+The existing adaptive controller compares individual local populations,
+physical reactions, released energy and external supply. It also compares every
+directed transfer and exterior outflow count in original nuclide order, once
+per cohort. Thus equal total material movement cannot hide isotope or path
+redistribution. Native numerical accounts, source discontinuities, thermal
+stability limits, work ceilings and cancellation keep their original owners.
+Local refinement does not establish a certified global error bound or solve
+carrier flow.
+
+Six coupled regressions cover analytic migration and heat location, continuous
+supply ages, independent feed/flux/flow shutdowns and absolute-time restart,
+complete-cohort/material/volume binding including idle calls, atomic budget/
+cancellation/domain refusal, and adaptive temperature-dependent capture
+against an independent nonlinear analytic solution. Existing spatial-source
+tests now check earlier constructor-time refusal of incomplete or mismatched
+cohorts. The transport constructor additionally checks the flattened shape and
+volume length before allocating its retained volume array.
+
+The combined native integration gate passed all 242 nuclear and thermal tests,
+including the six new coupled transport regressions and the constructor guard.

@@ -27,6 +27,9 @@ mod adaptive_tests;
 #[path = "diffusion/tests.rs"]
 mod diffusion_tests;
 
+#[path = "transport/tests.rs"]
+mod transport_tests;
+
 // Manufactured caloric/source data isolate the coupling equations. These
 // coefficients are not nuclear isotope data or an empirical validation deck.
 struct LinearLaw {

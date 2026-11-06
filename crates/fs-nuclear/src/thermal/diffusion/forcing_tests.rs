@@ -321,14 +321,12 @@ fn g0_spatial_schedule_admits_all_rates_and_rejects_mixed_source_histories() {
     )
     .unwrap();
     let initial = two_cells(0.0);
-    let mixed = DiffusionHeating::new(
-        &initial,
-        vec![first[0].clone(), second[1].clone()],
-        spatial_budget(),
-    )
-    .unwrap();
     assert!(matches!(
-        mixed.advance_to(&initial, 0.1, controls(0.1), || Ok(())),
+        DiffusionHeating::new(
+            &initial,
+            vec![first[0].clone(), second[1].clone()],
+            spatial_budget(),
+        ),
         Err(FissionThermalError::Invalid(_))
     ));
 }
