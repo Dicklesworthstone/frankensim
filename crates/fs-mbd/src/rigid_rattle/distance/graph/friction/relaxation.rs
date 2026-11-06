@@ -6,6 +6,10 @@
 //! Its integrated actions update the original body momenta once; elapsed time,
 //! travel and physical path work are retained separately from the frozen poses.
 
+/// Adaptive native pose evolution with changing authored axial loads.
+#[path = "relaxation/trajectory.rs"]
+pub mod trajectory;
+
 use super::{
     ArticulatedJoint, Dd, DistanceGraphControls, DistanceGraphError, DistanceStepError,
     JointFrictionControls, JointFrictionError, JointFrictionPort, JointReactionImpulse,

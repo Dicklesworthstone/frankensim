@@ -7498,3 +7498,15 @@ refusal, and every observed cancellation boundary. All six pass alongside all
 regressions in a source-selected native build using the original numerical
 owners. Unrelated rigid-disk/periodic module exports were omitted from that
 build; whole-crate Cargo/DSR verification is not claimed.
+
+## Moving articulated trajectories with coupled dry friction
+
+`rigid_rattle::distance::graph::joint_friction::relaxation::trajectory::advance_joint_friction_trajectory` advances actual native poses and momenta by composing the original constrained graph half steps with the continuous coupled-friction phase. Geometry and the complete native constrained mobility are rebuilt at every moved midpoint. The original flow travel remains a path-work measure; it is never applied as a second pose drift.
+
+A fixed stack source bank permits changing authored capacities and drives at the actual midpoint states and physical time, preserving joint indices and kinds. No bearing normal pressure is inferred from aggregate bilateral reaction. Strictly ordered caller-authored breakpoints split known load switches and short pulses; unknown features still require a suitable maximum step. The represented endpoint-minus-start duration owns both clock advancement and integrated force/work. Interval partitioning integrates a small terminal remainder instead of discarding it.
+
+One-split versus two-half-split differences control positions, orientation, world spin and linear momenta, per-port scaled travel, actions and work. Raw differences use no assumed-order Richardson divisor; stopping can reduce splitting order. The accepted two-half paths accumulate numerical estimates against caller budgets, not certified global error bounds. Trial/step/time/workspace limits and representability failures refuse without partial publication.
+
+The final receipt retains original mechanical energy including uniform-gravity potential, original free-step force/displacement and body-torque/midpoint work, physical axial drive work, nonnegative friction loss, signed constraint work and its absolute accepted-step sum, and the raw balance residual. These independent accounts remain separately gated. Exact static balance belongs in the axial drive ports: splitting separately authored body wrenches can require further refinement or refuse at the configured limit. There is no inferred heat/wear partition or distinct static/kinetic coefficient in this owner.
+
+Nine direct regressions cover finite-carrier stopping distance, reversal poses/work, analytical coupled-rotor attitudes, authored short pulses, pose-dependent spring drive, a rotating rail with rotated full body inertias against an independent centrifugal/friction ODE, gravity and external work, large-epoch represented time, and atomic late-source/cancellation/refinement refusals.
