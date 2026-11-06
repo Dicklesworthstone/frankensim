@@ -97,7 +97,7 @@ impl<'a, 'h, 's, 'm, 'o> TransientCurvedRayleighCameraScene<'a, 'h, 's, 'm, 'o> 
         cx.checkpoint()?;
         let time = admit_time(observation_time_s)?;
         let camera = self.camera.source_camera();
-        let beam = camera.launch(ray, wavelength_nm, initial_medium)?;
+        let beam = self.camera.launch(ray, wavelength_nm, initial_medium)?;
         let index = phase_index(beam.medium(), wavelength_nm)?;
         let mut emission = SurfaceEmission::new(camera, index);
         let mut error = None;
@@ -132,7 +132,7 @@ impl<'a, 'h, 's, 'm, 'o> TransientCurvedRayleighCameraScene<'a, 'h, 's, 'm, 'o> 
         cx.checkpoint()?;
         let time = admit_time(observation_time_s)?;
         let camera = self.camera.source_camera();
-        let beam = camera.launch(ray, wavelength_nm, initial_medium)?;
+        let beam = self.camera.launch(ray, wavelength_nm, initial_medium)?;
         let index = phase_index(beam.medium(), wavelength_nm)?;
         let mut emission = SurfaceEmission::new(camera, index);
         let mut error = None;
@@ -170,7 +170,7 @@ impl<'a, 'h, 's, 'm, 'o> TransientCurvedRayleighCameraScene<'a, 'h, 's, 'm, 'o> 
         cx.checkpoint()?;
         let time = admit_time(observation_time_s)?;
         let camera = self.camera.source_camera();
-        let beam = camera.launch(ray, wavelength_nm, initial_medium)?;
+        let beam = self.camera.launch(ray, wavelength_nm, initial_medium)?;
         let index = phase_index(beam.medium(), wavelength_nm)?;
         let mut emission = SurfaceEmission::new(camera, index);
         let mut error = None;

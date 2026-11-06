@@ -1,5 +1,6 @@
 //! G1/G3: actual chromatic source times through native pixel and QE integrals.
 
+mod analyzer;
 mod exposure;
 
 use super::super::tests::{bindings, camera, geometry, settings, with_cx};

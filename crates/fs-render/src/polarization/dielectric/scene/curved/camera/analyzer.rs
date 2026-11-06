@@ -126,7 +126,7 @@ impl CameraAnalyzer {
         self.reference_axis
     }
 
-    fn launch(
+    pub(super) fn launch(
         self,
         camera: &CurvedCameraScene<'_, '_>,
         ray: Ray,

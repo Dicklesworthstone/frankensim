@@ -92,7 +92,7 @@ impl TransientCurvedCameraScene<'_, '_, '_> {
         path_id: u64,
     ) -> Result<ExposureCameraSample, TransientCameraError> {
         cx.checkpoint()?;
-        let beam = self.camera.launch(ray, wavelength_nm, initial_medium)?;
+        let beam = self.launch(ray, wavelength_nm, initial_medium)?;
         let initial_index = phase_index(beam.medium(), wavelength_nm)?;
         let mut emission = SurfaceEmission::new(self.camera, initial_index);
         let mut error = None;
@@ -130,7 +130,7 @@ impl TransientCurvedCameraScene<'_, '_, '_> {
         samples: impl FnMut(u32) -> [f64; 3],
     ) -> Result<ExposureCameraSample, TransientCameraError> {
         cx.checkpoint()?;
-        let beam = self.camera.launch(ray, wavelength_nm, initial_medium)?;
+        let beam = self.launch(ray, wavelength_nm, initial_medium)?;
         let initial_index = phase_index(beam.medium(), wavelength_nm)?;
         let mut emission = SurfaceEmission::new(self.camera, initial_index);
         let mut error = None;

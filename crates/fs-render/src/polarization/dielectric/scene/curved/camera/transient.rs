@@ -25,12 +25,14 @@
 //! <https://imaging.cs.cmu.edu/rrte/assets/Renderer_AuthorCopy.pdf>.
 
 use super::super::{CurvedTraceEvent, CurvedTraceSettings};
+use super::analyzer::CameraAnalyzer;
 use super::emission::SurfaceEmission;
 use super::{
     CameraRadianceError, CameraRadianceSample, CurvedCameraScene, CurvedPathResult,
     CurvedSceneError, EmissionSides, phase_index,
 };
 use crate::charts::Ray;
+use crate::polarization::dielectric::transport::PolarizedBeam;
 use fs_blake3::ContentHash;
 use fs_exec::Cx;
 use fs_geom::Point3;
@@ -165,9 +167,12 @@ impl TransientCameraSample {
 /// Borrowed finite-source histories over the existing prepared camera. The
 /// single bounded slot table is allocated at preparation; tracing adds no
 /// camera-owned allocation, resampling, path integration or delay surrogate.
+/// An optional launch-plane analyzer applies to every instantaneous and finite-
+/// exposure observation, including the original raster and molecular adapters.
 pub struct TransientCurvedCameraScene<'a, 's, 'm> {
     camera: &'a CurvedCameraScene<'s, 'm>,
     histories: Vec<Option<SurfaceEmissionHistoryBinding<'a>>>,
+    analyzer: Option<CameraAnalyzer>,
 }
 
 impl<'a, 's, 'm> TransientCurvedCameraScene<'a, 's, 'm> {
@@ -204,11 +209,47 @@ impl<'a, 's, 'm> TransientCurvedCameraScene<'a, 's, 'm> {
             histories[slot] = Some(*binding);
         }
         cx.checkpoint()?;
-        Ok(Self { camera, histories })
+        Ok(Self {
+            camera,
+            histories,
+            analyzer: None,
+        })
+    }
+
+    /// Measure all observations through this passive analyzer at the original
+    /// camera launch plane. Configuration moves the prepared source bindings;
+    /// it neither rebuilds them nor changes the original scene identity.
+    ///
+    /// The reciprocal complete-Stokes seed precedes every surface and volume
+    /// response, preserving native proposal probabilities, Beer absorption and
+    /// radiance conversion. Each history still sees its own accumulated group
+    /// delay, and finite exposures still request the source-owned interval
+    /// mean. The analyzer adds no transit time or random variates. Its world
+    /// axis is projected per camera ray; invalid projections refuse that whole
+    /// observation. Calling this again replaces the previous analyzer.
+    pub fn with_analyzer(mut self, analyzer: CameraAnalyzer) -> Self {
+        self.analyzer = Some(analyzer);
+        self
+    }
+
+    pub const fn analyzer(&self) -> Option<CameraAnalyzer> {
+        self.analyzer
     }
 
     pub const fn source_camera(&self) -> &'a CurvedCameraScene<'s, 'm> {
         self.camera
+    }
+
+    fn launch(
+        &self,
+        ray: Ray,
+        wavelength_nm: f64,
+        medium: usize,
+    ) -> Result<PolarizedBeam, CameraRadianceError> {
+        match self.analyzer {
+            Some(analyzer) => analyzer.launch(self.camera, ray, wavelength_nm, medium),
+            None => self.camera.launch(ray, wavelength_nm, medium),
+        }
     }
 
     pub fn history_identity(&self, object_id: u64) -> Option<ContentHash> {
@@ -237,7 +278,7 @@ impl<'a, 's, 'm> TransientCurvedCameraScene<'a, 's, 'm> {
     ) -> Result<TransientCameraSample, TransientCameraError> {
         cx.checkpoint()?;
         let observation_time_s = admit_time(observation_time_s)?;
-        let beam = self.camera.launch(ray, wavelength_nm, initial_medium)?;
+        let beam = self.launch(ray, wavelength_nm, initial_medium)?;
         let initial_index = phase_index(beam.medium(), wavelength_nm)?;
         let mut emission = SurfaceEmission::new(self.camera, initial_index);
         let mut error = None;
@@ -278,7 +319,7 @@ impl<'a, 's, 'm> TransientCurvedCameraScene<'a, 's, 'm> {
     ) -> Result<TransientCameraSample, TransientCameraError> {
         cx.checkpoint()?;
         let observation_time_s = admit_time(observation_time_s)?;
-        let beam = self.camera.launch(ray, wavelength_nm, initial_medium)?;
+        let beam = self.launch(ray, wavelength_nm, initial_medium)?;
         let initial_index = phase_index(beam.medium(), wavelength_nm)?;
         let mut emission = SurfaceEmission::new(self.camera, initial_index);
         let mut error = None;

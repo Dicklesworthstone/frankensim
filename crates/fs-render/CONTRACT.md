@@ -8378,3 +8378,34 @@ chromatic integrated energy/photon references, one-versus-three-channel shared
 work and unsupported-history refusal. Pinned Rust formatting/parser checks
 passed for both module trees; native test execution was not performed in the
 shared editing environment.
+
+## Polarization-resolved transient camera and shutter observations
+
+`TransientCurvedCameraScene::with_analyzer` configures the existing
+`CameraAnalyzer` at the original launch plane. The optional setting feeds the
+same complete-Stokes reciprocal seed into every clear and Rayleigh
+instantaneous/exposure launch, including seeded, explicit-flight and tracking
+observations. The existing transient CIE XYZ and QE raster adapters inherit
+that prepared configuration; no additional tracing or detector wrapper is
+introduced. Default construction retains the original analyzer-free behavior.
+
+Every original source keeps its own DD retarded group clock and finite-shutter
+interval mean. Native refractive/Fresnel and molecular Mueller responses,
+proposal probabilities, Beer loss, volume emission, endpoint radiance
+conversion and random domains remain with the existing transport owners.
+Configuration moves the original history bindings and adds no samples,
+path integrations, random draws or source-history allocations. An invalid
+projected analyzer axis refuses the complete observation.
+
+This remains an ideal passive wavelength-independent launch-plane analyzer
+over the original unpolarized emitters, frozen geometry/media and narrowband
+envelope/group-delay assumptions. It introduces no lens/analyzer transit,
+polarized source history or coherent optical carrier evolution.
+
+Three focused regression groups specify native oblique-Fresnel analyzer
+parity and original history identity; complementary complete-Stokes molecular
+observations of a picosecond pulse inside a finite shutter at a large DD
+epoch; and chromatic XYZ/QE observation, shared four-path work, zero-response
+channels and unsupported-source-integral refusal. Pinned Rust formatting/
+parser checks and bounded source/API/physics review passed. The native Rust
+regressions were authored but not executed in the shared editing environment.

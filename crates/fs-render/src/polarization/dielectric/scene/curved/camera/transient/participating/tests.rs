@@ -1,3 +1,4 @@
+mod analyzer;
 mod exposure;
 
 use super::super::{

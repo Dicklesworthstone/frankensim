@@ -1,5 +1,6 @@
 //! G1/G3: actual source histories, dispersive delays and original native paths.
 
+mod analyzer;
 mod exposure;
 
 use super::*;
