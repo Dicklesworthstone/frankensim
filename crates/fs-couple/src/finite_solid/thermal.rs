@@ -21,6 +21,9 @@ pub use expansion::{ExpansionThermalFrame, ExpansionThermalReference};
 /// Source-preserving thermal-reference changes in finite viscoelastic histories.
 pub mod visco;
 
+/// Source-backed natural strain in native conservative TET10 motion.
+pub mod conservative;
+
 use super::{FiniteSolidError, FiniteSolidMaterial};
 use fs_blake3::ContentHash;
 use fs_matdb::{MaterialCard, PropertyKey, QueryPoint};
