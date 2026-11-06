@@ -40,6 +40,8 @@ pub mod array;
 pub mod layer;
 /// Reflected and coherent total fields in the original incident fluid.
 pub mod reflection;
+/// Original symmetric volume-stress sources through the refracting interface.
+pub mod quadrupole;
 
 mod force;
 pub use force::{

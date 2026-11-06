@@ -576,9 +576,11 @@ impl ReflectionKernel {
     }
 }
 
-/// Above EVERY medium's critical wavenumber, the reflected amplitude has
-/// magnitude at most one for an original lossless positive-density fluid
-/// interface or finite fluid layer. H is the exterior return clearance only.
+/// Bound a positive spectral tail C*integral exp(-h*t)*(t+kmax)^degree dt.
+/// Each caller supplies its original attenuation clearance and prefactor.
+/// Above every critical circle, a reflected lossless-fluid amplitude has
+/// magnitude at most one; transmitted kernels include their admittance bound
+/// in the prefactor. Degrees zero through three cover Q, force and stress.
 pub(super) fn prepare_reflected_tail(
     h: f64,
     kmax: f64,
@@ -588,6 +590,9 @@ pub(super) fn prepare_reflected_tail(
     channels: [usize; 2],
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(f64, [f64; 2]), AeroacError> {
+    if degrees.iter().any(|degree| *degree > 3) {
+        return Err(invalid("evanescent tail polynomial degree is unsupported"));
+    }
     let hk = h * kmax;
     if !hk.is_finite() {
         return Err(nonfinite("reflected clearance wavenumber"));
@@ -606,7 +611,14 @@ pub(super) fn prepare_reflected_tail(
                 0 => 0.0,
                 1 => det::ln(x),
                 // (s+hk)^2 + 2(s+hk) + 2 = x²+1; no x² overflow.
-                _ => 2.0 * det::ln(x) + det::ln(1.0 + (1.0 / x) * (1.0 / x)),
+                2 => 2.0 * det::ln(x) + det::ln(1.0 + (1.0 / x) * (1.0 / x)),
+                // (s+hk)^3 + 3(s+hk)^2 + 6(s+hk) + 6 = x³+3x+2.
+                // Ratios retain the cubic envelope without forming x³.
+                3 => {
+                    let inverse = 1.0 / x;
+                    3.0 * det::ln(x) + det::ln(1.0 + inverse * inverse * (3.0 + 2.0 * inverse))
+                }
+                _ => unreachable!("tail degrees admitted above"),
             };
             log_scales[i] - (f64::from(degrees[i]) + 1.0) * log_h - s + polynomial
         })
@@ -749,5 +761,55 @@ mod tests {
         assert!(kernel.coordinates.height.to_f64() * (hi.zeta[0].im - lo.zeta[0].im).abs() < 2.0);
         assert!(!kernel.resolved(1, 0.0, 1.0));
         assert!((kernel.coefficient(hi.zeta) - kernel.coefficient(lo.zeta)).abs() > 1.9);
+    }
+
+    #[test]
+    fn cubic_tail_matches_independent_integration_by_parts() {
+        let limits = QuadratureLimits {
+            absolute_pressure: 1e-7,
+            absolute_velocity: 1e-9,
+            relative: 0.0,
+            maximum_evaluations: 1024,
+            maximum_depth: 24,
+        };
+        let scales: [f64; 2] = [0.7, 1.3];
+        let channels: [usize; 2] = [5, 14];
+        for h in [0.005, 0.2, 3.0] {
+            let kmax = 80.0;
+            let (cutoff, bounds) = prepare_reflected_tail(
+                h,
+                kmax,
+                limits,
+                [2, 3],
+                scales.map(f64::ln),
+                channels,
+                &mut || false,
+            )
+            .unwrap();
+            // Integration by parts, directly in physical t units; this does
+            // not use the dimensionless shifted/log polynomial above.
+            let boundary = (-h * cutoff).exp() / h;
+            let mut integral = boundary;
+            let mut power = 1.0;
+            for degree in 1..=3 {
+                power *= cutoff + kmax;
+                integral = boundary * power + f64::from(degree) * integral / h;
+                if degree >= 2 {
+                    let index = (degree - 2) as usize;
+                    let expected = scales[index] * integral;
+                    assert!((bounds[index] - expected).abs() <= 3e-12 * expected);
+                }
+            }
+            for (i, tolerance) in [limits.absolute_pressure, limits.absolute_velocity]
+                .into_iter()
+                .enumerate()
+            {
+                assert!(bounds[i] * 4.0 * (channels[i] as f64).sqrt() <= tolerance);
+            }
+        }
+        assert!(
+            prepare_reflected_tail(0.1, 80.0, limits, [2, 4], [0.0; 2], channels, &mut || false,)
+                .is_err()
+        );
     }
 }

@@ -2540,3 +2540,36 @@ exact reductions, strict domains, finite reflected self-fields and aggregate
 preparation/coherence budgets. The same stationary, lossless, infinite planar,
 nontrapping-layer and prescribed-source scope applies; source loading, guided
 poles, absorption, moving fluids and finite edges remain outside this API.
+
+## Full-wave refraction of original volume-stress sources
+
+`curle3d::refraction::full_wave::quadrupole::PreparedFullWaveQuadrupole`
+transmits the existing symmetric `QuadrupolePhasor` [N m] across an original
+planar interface between two stationary homogeneous lossless fluids. Analytic
+source Hessians and receiving derivatives retain all six physical stress
+entries, their trace and shear, full complex pressure and vector velocity.
+No receiving plane-wave impedance or refracted-direction approximation replaces
+the near field. Source and receiver normal derivatives retain their distinct
+original fluid wavenumbers.
+
+Fourteen normalized cylindrical channels reuse the native spectral branch maps,
+bounded adaptive integration and cancellation. Square-root-two shear weights
+make pressure/velocity diagnostics complete Frobenius transfer norms. A stable
+axis continuation and logarithmically balanced products preserve physical
+derivatives near zero lateral range and after raw evanescent decay underflows.
+The shared positive tail envelope now admits cubic derivative powers explicitly.
+Exactly equal original speeds use the native homogeneous quadrupole owner,
+including the correct pressure and velocity factors for a density jump.
+
+Preparation caches a Cartesian 4-by-6 transfer; warm field and harmonic-line
+evaluation allocates nothing and performs no quadrature or additional delay.
+Each cell remains a prescribed compact stress moment. Source-size error,
+unresolved SGS stresses, mean flow, absorption, finite boundaries, loading and
+measured-SPL qualification are outside scope. Quadrature estimates and analytic
+spectral tails are separate from geometry/Bessel/floating-point errors.
+
+Six native tests cover homogeneous/density-jump limits, independent derivatives
+of force sources, trace and axis shear, receiving momentum/divergence, full
+tensor rotation, density scaling, normalized errors, admission/cancellation and
+third derivatives after raw-decay underflow. A shared-tail test independently
+checks the cubic envelope by integration by parts.
