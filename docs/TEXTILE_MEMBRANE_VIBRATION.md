@@ -169,25 +169,73 @@ references, including explicitly bound thermal endpoints, use the same
 transformed Gram rows described above. Trials that violate the material domain, step/work budget, energy
 budget or cancellation leave accepted motion and heat unchanged.
 
+## Damping heat in finite thermal storage
+
+`fs_couple::membrane_thermal::advance_candidate` advances a
+`DampedMembraneMotion` alongside the existing
+`fs_thermal::enthalpy::DepositionSimulation`. Bind one unique active thermal
+cell per original triangle with `ElementThermalCell`, supplying the exact
+`SheetCaloric` law already installed in that cell and an explicit fully solid
+temperature interval for the frozen mechanical model. The caloric sheet must
+retain the same complete original material bundle as that triangle.
+
+Thermal mass is the full original P1 reference-density integral, including
+constrained mechanical coordinates and nonuniform corner densities. Thermal
+volume is original area times reference thickness. The coupling checks these
+against the receiver and retains its cell identity, mass, geometry and original
+caloric-law instance. Deformation, hot density and a reduced mechanical mode
+cannot alter that inventory.
+
+The native thermal timeline chooses the shared substeps, retaining conduction,
+convection/reservoirs, authored sources, pairwise exchange, events and observer
+hooks. The mechanical maximum step is an additional ceiling. Every substep
+advances the existing damped motion once and transfers each triangle's actual
+integrated material heat to its receiver as average power. Variable heat capacity
+is handled through the original enthalpy chart and its inverse; temperature is
+never incremented using a snapshot `Q/(m*Cp)`.
+
+The returned candidate contains the accepted motion, thermal timeline, observer
+and `MembraneThermalReport`. Use `into_parts()` to continue from all accepted
+owners together. The report separates physical heat, applied work, thermal
+sources, support impulse, signed mechanical numerical defect, absolute substep
+defects and combined energy residual. Numerical error is never credited as heat.
+A temperature/domain refusal, observer failure or cancellation publishes no part
+of the coupled advance. The prepared mechanical state is copied once on the
+first interval, then its existing buffers are reused across all substeps.
+
+This first composition freezes the elastic and viscous coefficients and natural
+reference while heat evolves. The explicit temperature interval admits that
+approximation and supports repeated advances of the accepted state. It does
+not perform temperature feedback into stiffness/viscosity, changing stress-free
+geometry, reversible thermoelastic work or phase-dependent membrane mechanics.
+Thermal transport retains its original order; the mechanical channel composition
+retains its splitting error. Refine the shared interval for the required
+trajectory and temperature accuracy.
+
 ## Focused native checks
 
 ```sh
 cargo test -p fs-solid --test membrane -- --test-threads=1
 cargo test -p fs-solid --test membrane_viscosity -- --test-threads=1
+cargo test -p fs-couple --test membrane_thermal -- --test-threads=1
+cargo test -p fs-couple --lib membrane_thermal::tests -- --test-threads=1
+cargo test -p fs-thermal --lib interval_source -- --test-threads=1
 cargo test -p fs-couple --example textile_sheet -- --test-threads=1
 ```
 
-The damping sources received API/physics review and rustfmt parsing; new
+The damping runtimes, thermal endpoint sources, thermal integration tests and
+interval heat-rate fix received API/physics review and rustfmt parsing. New
 runtime and test modules were formatted. Native Cargo compilation and tests
 remain unexecuted: the restored host has a full shared filesystem, a stale
-checkout without these commits, and a refused sibling-dependency preflight.
-Independent numerical references checked natural-frame work/heat, exact
-channel flows and second-order refinement. These do not substitute for the
-native checks above.
+checkout without these commits and a refused sibling-dependency preflight. Independent references checked natural-frame work/heat, exact channel
+flows, second-order refinement, endpoint viscosity scaling and variable-Cp
+energy conversion. These do not substitute for the native checks above.
 
 The example remains a fixed-state elastic membrane and lossless vibration
 demonstration. The opt-in viscosity APIs add complete linear modal evolution
 and nonlinear damped motion when the source supplies the required coefficients.
-The nonlinear wrapper retains the original dead-load/stationary-support scope;
-it supplies no follower pressure, gas feedback, bending/contact, evolving
-material state, continuum stability certificate or empirical fabric validation.
+The new coupling adds finite heat storage and existing thermal transport within
+an explicit frozen-coefficient temperature interval. The mechanics retains its
+original dead-load/stationary-support scope; it supplies no follower pressure,
+gas feedback, bending/contact, evolving mechanical material state, continuum
+stability certificate or empirical fabric validation.

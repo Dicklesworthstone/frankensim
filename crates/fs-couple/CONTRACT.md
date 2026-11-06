@@ -1,3 +1,41 @@
+## Nonlinear membrane damping and source-bound finite heat storage
+
+`membrane_thermal::advance_candidate` composes the existing nonlinear
+`DampedMembraneMotion` with `DepositionSimulation::advance_observed`. One
+unique active caloric receiver belongs to each original reference triangle.
+Its `SheetCaloric` retains the identical complete original sheet source and
+must be the exact caloric law already borrowed by that thermal cell. Volume is
+original area times reference thickness; mass is the original P1 corner-density
+integral, including nonuniform reference inventories and constrained coordinates.
+An initial 512-epsilon relative allowance covers arithmetic only. Subsequent
+cell/material/body/segment, geometry, mass and caloric-instance checks are exact.
+
+The native thermal owner chooses every conductive/event/source interval, also
+bounded by the mechanical step ceiling. Analytically integrated per-triangle
+Kelvin--Voigt heat becomes average power on that same interval. Original source,
+conductance, ambient/reservoir, pairwise-transfer, transition and observer hooks
+remain active. No instantaneous-Cp temperature increment, second thermal solver,
+numerical-defect heat or support-impulse heat is introduced. The source chart
+performs the original nonlinear enthalpy-to-temperature conversion.
+
+Mechanical state is borrowed until the first actual interval, then cloned once;
+its prepared inertia and damping buffers are reused across substeps. The thermal
+owner supplies whole-call transactional cloning. Motion, thermal inventory,
+observer history and energy records publish together after final checks;
+refusals and cancellation expose none of their half-steps. Compensated accounts
+retain physical heat, held-load work, support impulses and signed numerical
+defects. Absolute substep mechanical defects and per-cell heat-handoff errors
+have whole-call budgets, preventing cancellation of opposite errors.
+
+The combined physical residual is mechanical storage change plus native thermal
+storage change minus incoming inventory and external work/heat. It remains an
+uncorrected numerical residual; native mechanical defect is separately disclosed,
+never deposited. Frozen elastic/viscous coefficients, natural reference and
+geometry must stay within the caller's explicit fully solid temperature interval.
+This is one-way finite self-heating, not evolving-temperature material feedback,
+reversible thermoelastic work, phase-dependent mechanics or a stability/accuracy
+certificate. Native transport order and nonlinear split error require refinement.
+
 
 
 ## Explicit rigid-impact loss heating in original finite caloric cells

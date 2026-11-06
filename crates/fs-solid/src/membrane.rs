@@ -185,6 +185,15 @@ impl MembranePatch {
     }
     /// Original reference mesh, including its named boundary patches.
     pub fn mesh(&self) -> &Mesh2 { &self.mesh }
+    /// Admitted triangle reference areas [m²], in original connectivity order.
+    ///
+    /// Current deformation and stationary supports do not change these measures.
+    /// Pair them with the retained reference corner densities to recover each
+    /// complete facet's mass, independently of the selected dynamic inertia image.
+    /// This observation allocates nothing and reuses the original geometry.
+    pub fn reference_triangle_areas_m2(&self) -> impl ExactSizeIterator<Item = f64> + '_ {
+        self.elements.iter().map(|element| element.area)
+    }
     /// Complete original source objects in original triangle order.
     pub fn sheets(&self) -> &[ResolvedSheet] { &self.sheets }
     /// Material axis angles in the original reference plane, in radians.
