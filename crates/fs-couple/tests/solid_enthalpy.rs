@@ -29,6 +29,8 @@ mod damping;
 
 #[path = "solid_enthalpy/thermoelastic.rs"]
 mod thermoelastic;
+#[path = "solid_enthalpy/observed.rs"]
+mod observed;
 
 const NODES: [[f64;3];4] = [[0.,0.,0.],[1.,0.,0.],[0.,1.,0.],[0.,0.,1.]];
 const TETS: [[usize;4];1] = [[0,1,2,3]];

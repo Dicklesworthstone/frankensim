@@ -60,6 +60,7 @@ use fs_thermal::enthalpy::{
     CellId, DepositedCell, DepositionError, DepositionObserver, DepositionSimulation,
     EnergyAudit, Event, StepConfig, ThermalLaw,
 };
+use fs_thermal::observers::{CoupledObservers, ObserverCouplingError};
 
 #[derive(Debug)]
 pub enum SolidEnthalpyError {
@@ -112,6 +113,21 @@ impl From<TransientError3> for SolidEnthalpyError {
 }
 fn poll(cx: &Cx<'_>) -> Result<(), SolidEnthalpyError> {
     cx.checkpoint().map_err(|_| SolidEnthalpyError::Cancelled)
+}
+// Preserve the original public error surface when no physical observer is supplied.
+fn unobserved_error(
+    error: ObserverCouplingError<SolidEnthalpyError, DepositionError>,
+) -> SolidEnthalpyError {
+    match error {
+        ObserverCouplingError::First(error) => error,
+        ObserverCouplingError::Thermal(error) | ObserverCouplingError::Second(error) => error.into(),
+        // Neither the source-admission observer nor () supplies overrides.
+        ObserverCouplingError::ConflictingConductance(_)
+        | ObserverCouplingError::ConflictingReservoirConductance(_)
+        | ObserverCouplingError::ConflictingAmbientConductance(_) => {
+            SolidEnthalpyError::Invalid("conflicting thermal conductance owners")
+        }
+    }
 }
 fn same_measure(a: f64, b: f64) -> bool {
     a.is_finite() && b.is_finite() && a > 0.0 && b > 0.0
@@ -314,23 +330,65 @@ impl<'a> SolidEnthalpy<'a> {
     /// The thermal audit is the original CALORIC balance. The returned native
     /// stress report records elastic energy separately, without claiming that
     /// this sequential approximation supplies reversible thermoelastic feedback.
+    /// Use [`Self::advance_observed_to`] to retain a coupled heat owner's history.
     #[allow(clippy::too_many_arguments)]
     pub fn advance_to<'t>(
         &self, thermal: &DepositionSimulation<'t>, target_s: f64, thermal_config: StepConfig,
         loads: &TetLoadCase3<'_, '_>, fixed_dofs: &[usize], solve: SolidEquilibriumConfig,
         cx: &Cx<'_>,
     ) -> Result<SolidEnthalpyCandidate<'a, 't>, SolidEnthalpyError> {
-        poll(cx)?;
-        // Validate the accepted starting inventory before any proposed aging.
-        self.resolve(thermal, cx)?;
-        let observer = SolidSourceObserver { source: self, cx };
-        let (thermal, _, thermal_audit) = thermal.advance_observed(
-            &observer, target_s, thermal_config, ||
+        self.advance_observed_to(thermal, &(), target_s, thermal_config,
+            loads, fixed_dofs, solve, cx)
+            .map(|(candidate, ())| candidate)
+            .map_err(unobserved_error)
+    }
+
+    /// Advance physical heat sources/transport and structural equilibrium on
+    /// the same native thermal history. Source/phase admission still runs after
+    /// every substep and individual event, including intermediate heat/cool cycles.
+    ///
+    /// All observer hooks, including transitions and interval-dependent heat,
+    /// compose through the existing thermal owner. The returned observer is its
+    /// accepted candidate history; accept it together with the thermal, material
+    /// and mechanical candidate. Its Clone must isolate mutable physical state.
+    /// Any thermal, source, structural or cancellation failure leaves both inputs
+    /// unchanged. Bound structural mass, geometry and caloric laws remain fixed.
+    ///
+    /// As in `advance_to`, this is sequential thermal loading. The caloric audit
+    /// counts observer heat once; elastic work is not reciprocal thermal feedback.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_observed_to<'t, O: DepositionObserver>(
+        &self, thermal: &DepositionSimulation<'t>, observer: &O,
+        target_s: f64, thermal_config: StepConfig,
+        loads: &TetLoadCase3<'_, '_>, fixed_dofs: &[usize], solve: SolidEquilibriumConfig,
+        cx: &Cx<'_>,
+    ) -> Result<(SolidEnthalpyCandidate<'a, 't>, O),
+        ObserverCouplingError<SolidEnthalpyError, O::Error>> {
+        let (thermal, thermal_audit, state, observer) = self.advance_thermal_observed(
+            thermal, observer, target_s, thermal_config, cx)?;
+        let equilibrium = state.solve(loads, fixed_dofs, solve, cx)
+            .map_err(ObserverCouplingError::First)?;
+        poll(cx).map_err(ObserverCouplingError::First)?;
+        Ok((SolidEnthalpyCandidate { thermal, thermal_audit, state, equilibrium }, observer))
+    }
+
+    // Shared by equilibrium and pressure-valve consumers: one source-admitted
+    // heat timeline, with every physical observer hook and its accepted history.
+    fn advance_thermal_observed<'t, O: DepositionObserver>(
+        &self, thermal: &DepositionSimulation<'t>, observer: &O,
+        target_s: f64, thermal_config: StepConfig, cx: &Cx<'_>,
+    ) -> Result<(DepositionSimulation<'t>, EnergyAudit, SolidEnthalpyState<'a>, O),
+        ObserverCouplingError<SolidEnthalpyError, O::Error>> {
+        poll(cx).map_err(ObserverCouplingError::First)?;
+        self.resolve(thermal, cx).map_err(ObserverCouplingError::First)?;
+        let observers = CoupledObservers::new(
+            SolidSourceObserver { source: self, cx }, observer.clone());
+        let (thermal, observers, thermal_audit) = thermal.advance_observed(
+            &observers, target_s, thermal_config, ||
                 cx.checkpoint().map_err(|_| DepositionError::Cancelled))?;
-        let state = self.resolve(&thermal, cx)?;
-        let equilibrium = state.solve(loads, fixed_dofs, solve, cx)?;
-        poll(cx)?;
-        Ok(SolidEnthalpyCandidate { thermal, thermal_audit, state, equilibrium })
+        let state = self.resolve(&thermal, cx).map_err(ObserverCouplingError::First)?;
+        let (_, observer) = observers.into_parts();
+        Ok((thermal, thermal_audit, state, observer))
     }
 }
 
