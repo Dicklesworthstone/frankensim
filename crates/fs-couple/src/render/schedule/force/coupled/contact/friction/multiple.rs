@@ -1015,6 +1015,11 @@ impl MultiFrictionModalSystem {
     // hyperbolic law). Only after such a staging miss is the step solved again from
     // the accepted state with the sweep's per-port test at half the tolerance, and
     // staged against the UNCHANGED tolerance; a second miss refuses.
+    //
+    // A stuck port is the same: the sweep accepts its predicted slip anywhere up to
+    // the sticking bound, and the stepped state's slip can pass that bound by
+    // round-off (MagentaBadger 4967: 1.3e-19 m past 1e-12 m). Its re-solve holds the
+    // per-port slip test at half the bound.
     fn stage_multiple(&mut self, external: &[f64], drives: &[FrictionDrive],
         obstacle_offsets: Option<&[f64]>, gate: Option<&CancelGate>)
         -> Result<MultiFrictionFrame, ModalFrictionError>
@@ -1174,9 +1179,11 @@ impl MultiFrictionModalSystem {
                 let (loss, port_declared, residual) = match checked {
                     Ok(checked) => checked,
                     Err(error) => {
-                        // Named so that stage_multiple solves this step once more with headroom.
+                        // Named so that stage_multiple solves this step once more with
+                        // headroom: a sliding port's force residual or a stuck port's slip.
                         self.port_endpoint_missed = matches!(error,
-                            ModalFrictionError::Network(ModalCouplingError::ContactSolve { .. }));
+                            ModalFrictionError::Network(ModalCouplingError::ContactSolve { .. })
+                            | ModalFrictionError::Sticking { .. });
                         return Err(error);
                     },
                 };

@@ -767,3 +767,87 @@ fn a_port_that_misses_again_after_the_headroom_re_solve_still_refuses() {
     assert_eq!(frame.port_resolves, 0);
     assert_eq!(system.samples_rendered(), 1);
 }
+
+// A STUCK port that misses at its actual endpoint (MagentaBadger 4967/4988). The
+// sweep accepts a stuck port's predicted slip anywhere up to the sticking bound,
+// and the slip of the stepped state, rounded along another path, can then pass
+// that bound by round-off: YellowDog's bass A1 page refused 1.3e-19 m past
+// 1e-12 m. A stuck port therefore gets the same one re-solve as a sliding one,
+// with the per-port slip test at half the bound. The staging check keeps the
+// unchanged bound, and a second miss refuses. Port 0 sticks under `two_drives`
+// (0.2 m/s: 0.96 N against a 1.2 N cone).
+
+#[test]
+fn the_per_port_stick_test_at_half_the_bound_refuses_what_the_full_bound_accepts() {
+    let mut system = system(hyperbolic());
+    let drives = two_drives();
+    let bound = system.points[0].config.sticking_tolerance_m;
+    // Port 0 held stuck with a predicted slip 0.9 of the bound.
+    let traction = 0.5;
+    system.tractions[0] = traction;
+    system.regimes[0] = ModalFrictionRegime::Sticking;
+    let line0: f64 = system.line(0)[0];
+    system.free_slip[0] = 0.9 * bound + line0 * traction;
+    let seeded = system.free_slip[0] - line0 * traction;
+    assert!((seeded / bound - 0.9).abs() < 1e-6, "seeded {}", seeded / bound);
+    assert!(system.first_port_failure(&drives, None).unwrap().is_none());
+    system.port_headroom = true;
+    match system.first_port_failure(&drives, None).unwrap() {
+        Some(ModalFrictionError::Sticking { residual_m, tolerance_m }) => {
+            assert_eq!(tolerance_m, 0.5 * bound);
+            assert!(residual_m.abs() > tolerance_m);
+        }
+        other => panic!("expected the half-bound stick refusal, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_stuck_port_that_misses_at_its_actual_endpoint_is_solved_again_with_headroom_and_passes() {
+    let drives = two_drives();
+    let probe = system(hyperbolic()).step(&[0.0, 0.0], &drives).unwrap().ports[0].regime;
+    assert_eq!(probe, ModalFrictionRegime::Sticking, "the planted miss needs a stuck port");
+    let mut system = system(hyperbolic());
+    let bound = system.points[0].config.sticking_tolerance_m;
+    // A slip error of twice the bound at port 0's staging check: a stick miss at the actual endpoint.
+    system.staging_slip_nudges = vec![2.0 * bound];
+    let frame = system.step(&[0.0, 0.0], &drives)
+        .unwrap_or_else(|error| panic!("the planted stick miss refused: {error}")).clone();
+    assert_eq!(frame.ports[0].regime, ModalFrictionRegime::Sticking);
+    assert_eq!(frame.port_resolves, 1);
+    assert_eq!(frame.obstacle_resolves, 0);
+    assert_eq!(system.port_resolves(), 1);
+    assert!(system.staging_slip_nudges.is_empty());
+    assert!(!system.port_headroom && !system.port_endpoint_missed);
+    // The accepted stick passes the UNCHANGED bound at its actual endpoint (a first
+    // step carries no creep, so its line slip is its end slip).
+    let end_slip = frame.ports[0].end_slip_speed_m_s.unwrap() * system.sample_period_s();
+    assert!(end_slip.abs() <= bound, "{end_slip}");
+    // A step that passes the first time is not re-solved and is not counted.
+    let frame = system.step(&[0.0, 0.0], &drives).unwrap();
+    assert_eq!(frame.port_resolves, 0);
+    assert_eq!(system.port_resolves(), 1);
+    assert_eq!(system.samples_rendered(), 2);
+}
+
+#[test]
+fn a_stuck_port_that_misses_again_after_the_headroom_re_solve_still_refuses() {
+    let drives = two_drives();
+    let mut system = system(hyperbolic());
+    let bound = system.points[0].config.sticking_tolerance_m;
+    system.staging_slip_nudges = vec![2.0 * bound, 2.0 * bound];
+    let error = system.step(&[0.0, 0.0], &drives).unwrap_err();
+    // Today's refusal, against the unchanged bound.
+    match &error {
+        ModalFrictionError::Sticking { tolerance_m, .. } => assert_eq!(*tolerance_m, bound),
+        other => panic!("expected the stick refusal, got {other:?}"),
+    }
+    assert!(error.to_string().contains("sticking mismatch"), "{error}");
+    // The refusal publishes nothing, leaves no flag behind, and the step can be retried.
+    assert_eq!(system.samples_rendered(), 0);
+    assert_eq!(system.port_resolves(), 0);
+    assert!(system.staging_slip_nudges.is_empty());
+    assert!(!system.port_headroom && !system.port_endpoint_missed);
+    let frame = system.step(&[0.0, 0.0], &drives).unwrap();
+    assert_eq!(frame.port_resolves, 0);
+    assert_eq!(system.samples_rendered(), 1);
+}

@@ -120,9 +120,9 @@ pub(super) fn check(law: &FrictionLaw, config: ModalFrictionConfig, dt: f64,
     check_within(law, config, dt, drive, traction, line_slip, distance, regime, iterations, 1.0)
 }
 
-/// [`check`] with the sliding force residual bounded by `share` of the declared
-/// tolerance: all of it (1.0) at the actual endpoint, half of it on a prediction
-/// solved with headroom. The sticking-slip bound is not scaled.
+/// [`check`] with the sliding force residual and the sticking slip each bounded
+/// by `share` of its declared tolerance: all of it (1.0) at the actual endpoint,
+/// half of it on a prediction solved with headroom.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn check_within(law: &FrictionLaw, config: ModalFrictionConfig, dt: f64,
     drive: FrictionDrive, traction: f64, line_slip: f64, distance: f64, regime: ModalFrictionRegime,
@@ -135,9 +135,9 @@ pub(super) fn check_within(law: &FrictionLaw, config: ModalFrictionConfig, dt: f
         ModalFrictionRegime::Shearing { .. } | ModalFrictionRegime::Microslip => return Err(invalid("material shear must be checked by its stateful constitutive owner").into()),
         ModalFrictionRegime::Released => (0.0, 0.0),
         ModalFrictionRegime::Sticking => {
-            if line_slip.abs() > config.sticking_tolerance_m {
-                return Err(ModalFrictionError::Sticking { residual_m: line_slip,
-                    tolerance_m: config.sticking_tolerance_m });
+            let bound = share*config.sticking_tolerance_m;
+            if line_slip.abs() > bound {
+                return Err(ModalFrictionError::Sticking { residual_m: line_slip, tolerance_m: bound });
             }
             (0.0, work)
         }
