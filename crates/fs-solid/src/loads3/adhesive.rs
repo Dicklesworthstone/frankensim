@@ -10,10 +10,12 @@
 //! This supports an interior patch or a fan of faces around a contact centre;
 //! it does not silently clip arbitrary triangle/polar intersections. Loads are
 //! prescribed fields on reference geometry, not an implicit adhesion solve or
-//! a follower-pressure law. The existing native solver owns deformation.
+//! a follower-pressure law. The existing native solver owns deformation and
+//! any explicitly prescribed support motion. Pressure work uses that same
+//! full nodal motion; support-reaction work remains in its own native account.
 
 mod transient;
-pub use transient::{AdhesiveP1Step3, AdhesiveP1Transient3};
+pub use transient::{AdhesiveP1Step3, AdhesiveP1SupportEndpoint3, AdhesiveP1Transient3};
 
 use super::{LoadError3, TetLoadCase3, TetLoadGeometry3, cross, dot, norm, sub};
 use core::f64::consts::{PI, TAU};

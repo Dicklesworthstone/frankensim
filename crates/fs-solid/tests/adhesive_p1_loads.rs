@@ -788,3 +788,367 @@ fn late_receiver_cancellation_and_erased_background_load_preserve_the_native_che
         patch.assemble(&a, &other, &gate(), cx).unwrap();
     });
 }
+
+#[test]
+fn fully_prescribed_pressure_keeps_support_reaction_work_and_sub_ulp_native_travel() {
+    let source = sources::jkr();
+    let start = AdhesiveTractionProfile::jkr_attached(&source, 0.0).unwrap();
+    let end = AdhesiveTractionProfile::jkr_attached(&source, 1e-6).unwrap();
+    let r = end.contact_radius_m();
+    let l = 4.0 * r;
+    let nodes = nodes(l);
+    let material = material();
+    let fixed: Vec<_> = (0..18).collect();
+    let problem = TetLinearElasticProblem {
+        nodes_m: &nodes,
+        tetrahedra: &TETS,
+        materials: TetMaterialField::Uniform(&material),
+        fixed_dofs: &fixed,
+        budget: Default::default(),
+    };
+    support::with_cx(|cx| {
+        let g = TetLoadGeometry3::new(&nodes, &TETS, problem.budget, 16, cx).unwrap();
+        let other_force = 1e-5;
+        let other = g
+            .assemble(&[], VolumeLoad3::None, &[(17, other_force)], cx)
+            .unwrap();
+        let h = 2e-7;
+        // Rigid z motion has zero strain. Four tets each have volume L³/6;
+        // their consistent-mass row sums give total mass rho*2L³/3.
+        let mass = 1500.0 * 2.0 * l.powi(3) / 3.0;
+        for (displacement_control, datum, initial_speed, control) in [
+            (false, 0.0, 1e-3, 20.0),
+            (true, 0.0, 1e-3, 4e-10),
+            (false, 1e-4, 0.0, 1e-13),
+        ] {
+            let mut projection = controls(&end);
+            projection.work_absolute_tolerance_j = 1e-42;
+            let initial_u = [[0.0, 0.0, datum]; 6];
+            let initial_v = [[0.0, 0.0, initial_speed]; 6];
+            let mut run =
+                AdhesiveP1Patch3::new(&g, frame(), grid(&g, vec![0.0, r]), projection, &gate(), cx)
+                    .unwrap()
+                    .begin_transient_with_supports(
+                        &start,
+                        &other,
+                        &problem,
+                        None,
+                        0.0,
+                        &initial_u,
+                        &initial_v,
+                        &[[0.0; 3]; 6],
+                        native_config(),
+                        &gate(),
+                        cx,
+                    )
+                    .unwrap();
+            let endpoint: Vec<_> = (0..6).map(|n| (3 * n + 2, control)).collect();
+            let kind = if displacement_control {
+                AdhesiveP1SupportEndpoint3::Displacement(&endpoint)
+            } else {
+                AdhesiveP1SupportEndpoint3::Acceleration(&endpoint)
+            };
+            let result = run
+                .advance_with_supports(&end, &other, kind, h, &gate(), cx)
+                .unwrap()
+                .clone();
+            let motion = run.native().nodal_motion(cx).unwrap();
+            let acceleration = if displacement_control {
+                (control - datum - h * initial_speed) / (0.25 * h * h)
+            } else {
+                control
+            };
+            let speed = initial_speed + 0.5 * h * acceleration;
+            let travel = h * (0.5 * initial_speed + 0.5 * speed);
+            let pressure_work = -0.5 * (start.normal_force_n() + end.normal_force_n()) * travel;
+            let other_work = other_force * travel;
+            let support_work = mass * 0.5 * acceleration * travel - pressure_work - other_work;
+            for row in &motion[1] {
+                close(row[2], speed, 1e-30);
+            }
+            for row in &motion[2] {
+                close(row[2], acceleration, 1e-24);
+            }
+            assert!(run.native().free_dofs().is_empty());
+            assert!(run.native().state().displacement.is_empty());
+            assert_ne!(pressure_work, 0.0);
+            let tolerance = if datum != 0.0 { 1e-40 } else { 1e-23 };
+            close(result.spatial_traction_work_j, pressure_work, tolerance);
+            close(result.traction_work_on_solid_j, pressure_work, tolerance);
+            close(result.other_external_work_j, other_work, tolerance);
+            close(
+                result.native.mechanical_work_j,
+                pressure_work + other_work,
+                tolerance,
+            );
+            close(result.native.support_work_j, support_work, tolerance);
+            close(
+                run.native().state().kinetic_energy_j,
+                0.5 * mass * speed * speed,
+                if datum != 0.0 { 1e-45 } else { 1e-23 },
+            );
+            if datum != 0.0 {
+                // The full accepted u endpoint rounds to the old datum, while
+                // the original acceleration/velocity map resolves positive work.
+                assert_eq!(motion[0], initial_u);
+                assert!(travel > 0.0 && travel < f64::EPSILON * datum);
+            }
+            let response = run
+                .native()
+                .recover_response(ContentHash([81; 32]), 0.01, cx)
+                .unwrap();
+            let mut pressure = [0.0; 6];
+            for (d, force) in jkr_nodal(&end, l) {
+                pressure[d / 3] = force;
+            }
+            for (node, weight) in [0.25, 0.125, 0.125, 0.125, 0.125, 0.25]
+                .into_iter()
+                .enumerate()
+            {
+                let applied = pressure[node] + if node == 5 { other_force } else { 0.0 };
+                close(response.external_force_n[node][2], applied, 1e-17);
+                close(
+                    response.support_reactions_n[node][2],
+                    weight * mass * acceleration - applied,
+                    1e-15,
+                );
+            }
+        }
+    });
+}
+
+#[test]
+fn moving_pressure_supports_match_original_native_response_and_roll_back_together() {
+    let source = sources::jkr();
+    let start = AdhesiveTractionProfile::jkr_attached(&source, 0.0).unwrap();
+    let end = AdhesiveTractionProfile::jkr_attached(&source, 1e-6).unwrap();
+    let r = end.contact_radius_m();
+    let l = 4.0 * r;
+    let nodes = nodes(l);
+    let material = material();
+    let fixed: Vec<_> = (3..18).collect();
+    let problem = TetLinearElasticProblem {
+        nodes_m: &nodes,
+        tetrahedra: &TETS,
+        materials: TetMaterialField::Uniform(&material),
+        fixed_dofs: &fixed,
+        budget: Default::default(),
+    };
+    let config = TransientConfig3 {
+        mass_damping_per_s: 10.0,
+        stiffness_damping_s: 1e-7,
+        ..native_config()
+    };
+    support::with_cx(|cx| {
+        let g = TetLoadGeometry3::new(&nodes, &TETS, problem.budget, 16, cx).unwrap();
+        let other = g
+            .assemble(&[], VolumeLoad3::None, &[(2, 1e-5), (17, -3e-5)], cx)
+            .unwrap();
+        // Integrate the source analytically on the original face shape functions
+        // for a direct native run, independent of the production polar transfer.
+        let reference_load = |profile: &AdhesiveTractionProfile| {
+            let mut values = [0.0; 18];
+            for &(d, value) in other.nodal_forces_n() {
+                values[d] += value;
+            }
+            for (d, value) in jkr_nodal(profile, l) {
+                values[d] += value;
+            }
+            let rows: Vec<_> = values
+                .into_iter()
+                .enumerate()
+                .filter(|(_, f)| *f != 0.0)
+                .collect();
+            g.assemble(&[], VolumeLoad3::None, &rows, cx).unwrap()
+        };
+        let initial_load = reference_load(&start);
+        let mut reference = initial_load
+            .begin_transient_with_supports(
+                &problem,
+                None,
+                0.0,
+                &[[0.0; 3]; 6],
+                &[[0.0; 3]; 6],
+                &[[0.0; 3]; 6],
+                config,
+                cx,
+            )
+            .unwrap();
+        let mut run = AdhesiveP1Patch3::new(
+            &g,
+            frame(),
+            grid(&g, vec![0.0, r]),
+            controls(&end),
+            &gate(),
+            cx,
+        )
+        .unwrap()
+        .begin_transient_with_supports(
+            &start,
+            &other,
+            &problem,
+            None,
+            0.0,
+            &[[0.0; 3]; 6],
+            &[[0.0; 3]; 6],
+            &[[0.0; 3]; 6],
+            config,
+            &gate(),
+            cx,
+        )
+        .unwrap();
+        let displacement = [
+            (5, 1e-10),
+            (8, 2e-10),
+            (11, 1.5e-10),
+            (14, -1e-10),
+            (17, 5e-11),
+        ];
+        let acceleration = [(5, 20.0), (8, -10.0), (11, 15.0), (14, 5.0), (17, -2.0)];
+        let h = 2e-7;
+        let mut old_profile = &start;
+        for (index, profile) in [&end, &start].into_iter().enumerate() {
+            let supports = if index == 0 {
+                AdhesiveP1SupportEndpoint3::Displacement(&displacement)
+            } else {
+                AdhesiveP1SupportEndpoint3::Acceleration(&acceleration)
+            };
+            let before = run.native().nodal_motion(cx).unwrap();
+            let old_response = run
+                .native()
+                .recover_response(ContentHash([82; 32]), 0.01, cx)
+                .unwrap();
+            let old_energy = run.native().state().total_energy_j;
+            if index == 1 {
+                let state = run.native().state().clone();
+                let transfer = *run.current_transfer();
+                let report = run.last_step().cloned();
+                assert!(run.advance(profile, &other, h, &gate(), cx).is_err());
+                assert!(
+                    run.advance_with_supports(
+                        profile,
+                        &other,
+                        AdhesiveP1SupportEndpoint3::Acceleration(&[(2, 1.0)]),
+                        h,
+                        &gate(),
+                        cx
+                    )
+                    .is_err()
+                );
+                for cancel in [false, true] {
+                    let pending = gate();
+                    let refused: Result<(), AdhesiveP1Error3> = run
+                        .advance_with_supports_and_admission(
+                            profile,
+                            &other,
+                            supports,
+                            h,
+                            &pending,
+                            cx,
+                            |_, candidate| {
+                                assert_ne!(candidate.nodal_motion(cx).unwrap(), before);
+                                if cancel {
+                                    pending.request();
+                                    Ok(())
+                                } else {
+                                    Err(AdhesiveP1Error3::Invalid("receiver refused"))
+                                }
+                            },
+                        );
+                    if cancel {
+                        assert!(matches!(refused, Err(AdhesiveP1Error3::Cancelled)));
+                    } else {
+                        assert!(refused.is_err());
+                    }
+                }
+                assert_eq!(run.native().state(), &state);
+                assert_eq!(run.native().nodal_motion(cx).unwrap(), before);
+                assert_eq!(
+                    run.native()
+                        .recover_response(ContentHash([82; 32]), 0.01, cx)
+                        .unwrap(),
+                    old_response
+                );
+                assert_eq!(run.current_transfer(), &transfer);
+                assert_eq!(run.last_step(), report.as_ref());
+            }
+            let load = reference_load(profile);
+            let expected = if index == 0 {
+                reference
+                    .advance_with_supports(&load, &displacement, h, cx)
+                    .unwrap()
+            } else {
+                reference
+                    .advance_with_support_accelerations(&load, &acceleration, h, cx)
+                    .unwrap()
+            };
+            let published: [Vec<[f64; 3]>; 3] = run
+                .advance_with_supports_and_admission(
+                    profile,
+                    &other,
+                    supports,
+                    h,
+                    &gate(),
+                    cx,
+                    |_, candidate| -> Result<_, AdhesiveP1Error3> {
+                        Ok(candidate.nodal_motion(cx)?)
+                    },
+                )
+                .unwrap();
+            assert_eq!(published, run.native().nodal_motion(cx).unwrap());
+            for ((actual_field, expected_field), tolerance) in published
+                .iter()
+                .zip(reference.nodal_motion(cx).unwrap())
+                .zip([1e-20, 1e-13, 1e-7])
+            {
+                for (actual_node, expected_node) in actual_field.iter().zip(expected_field) {
+                    for (actual, expected) in actual_node.iter().zip(expected_node) {
+                        close(*actual, expected, tolerance);
+                    }
+                }
+            }
+            let response = run
+                .native()
+                .recover_response(ContentHash([82; 32]), 0.01, cx)
+                .unwrap();
+            let mut travel = [0.0; 18];
+            for d in 0..18 {
+                travel[d] = h * (0.5 * before[1][d / 3][d % 3] + 0.5 * published[1][d / 3][d % 3]);
+            }
+            let pressure_work: f64 = jkr_nodal(old_profile, l)
+                .into_iter()
+                .zip(jkr_nodal(profile, l))
+                .map(|((d, a), (_, b))| 0.5 * (a + b) * travel[d])
+                .sum();
+            let support_work: f64 = fixed
+                .iter()
+                .map(|&d| {
+                    0.5 * (old_response.support_reactions_n[d / 3][d % 3]
+                        + response.support_reactions_n[d / 3][d % 3])
+                        * travel[d]
+                })
+                .sum();
+            let result = run.last_step().unwrap();
+            close(result.spatial_traction_work_j, pressure_work, 1e-23);
+            close(result.traction_work_on_solid_j, pressure_work, 1e-23);
+            close(result.native.support_work_j, support_work, 1e-23);
+            close(
+                result.native.mechanical_work_j,
+                expected.mechanical_work_j,
+                1e-23,
+            );
+            close(result.native.support_work_j, expected.support_work_j, 1e-23);
+            close(
+                result.native.quadratic_energy_j - old_energy,
+                result.traction_work_on_solid_j
+                    + result.other_external_work_j
+                    + result.native.support_work_j
+                    - result.native.damping_loss_j,
+                1e-20,
+            );
+            assert_ne!(result.native.support_work_j, 0.0);
+            assert!(run.native().state().displacement.iter().any(|u| *u != 0.0));
+            old_profile = profile;
+        }
+    });
+}

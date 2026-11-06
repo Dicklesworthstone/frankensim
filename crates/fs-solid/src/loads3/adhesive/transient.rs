@@ -6,6 +6,8 @@ use crate::loads3::transient::{
 };
 
 /// Subdivisions of the native mechanical-work account, never an extra debit.
+/// Includes pressure work on moving constrained nodes. `native.support_work_j`
+/// separately retains the work of support reactions ON the solid.
 #[derive(Clone, Debug, PartialEq)]
 pub struct AdhesiveP1Step3 {
     pub native: TransientStep3,
@@ -20,11 +22,30 @@ pub struct AdhesiveP1Step3 {
     pub quadrature_work_estimate_j: f64,
 }
 
+/// Absolute world-component support endpoint on the original fixed DOF set.
+/// Components must be finite, sorted and unique; the native owner checks all
+/// motion, solve and displacement bounds. Both variants use the same Newmark
+/// support kinematics, consistent mass, damping and elastic coupling.
+#[derive(Clone, Copy, Debug)]
+pub enum AdhesiveP1SupportEndpoint3<'a> {
+    /// Absolute support displacement [m]. An omitted fixed DOF is zero at this
+    /// endpoint. Support velocity and acceleration follow the Newmark map;
+    /// sufficiently smooth motion and adequate time resolution are required.
+    Displacement(&'a [(usize, f64)]),
+    /// Endpoint support acceleration [m/s²]. An omitted fixed DOF has zero
+    /// acceleration; its accepted displacement and velocity continue. No
+    /// impulse or velocity-jump convention is inferred.
+    Acceleration(&'a [(usize, f64)]),
+}
+
 /// Fixed coplanar pressure patch on the existing complete sparse Newmark owner.
 /// Matrices remain shared by the native candidate clone. Projection storage is
 /// reused; the native trajectory keeps its existing bounded vector allocation.
-/// Supports are stationary and zero. Read-only native access prevents an
-/// untracked load/support change; consume this wrapper to continue elsewhere.
+/// Supports may be stationary or explicitly prescribed. Pressure stays on the
+/// reference material trace with its original fixed normal; support movement
+/// does not create follower loads, contact migration or a new adhesion law.
+/// Read-only native access prevents an untracked load/support change; consume
+/// this wrapper to continue elsewhere.
 pub struct AdhesiveP1Transient3<'g, 'm, 'p, 's> {
     patch: AdhesiveP1Patch3<'g, 'm>,
     native: TetTransientRun3<'g, 'm, 'p, 's>,
@@ -41,11 +62,11 @@ impl<'g, 'm> AdhesiveP1Patch3<'g, 'm> {
     /// Start the actual native tetrahedral trajectory with this original source
     /// in its INITIAL force/acceleration balance. Material, consistent mass,
     /// thermal strain, damping and supports enter the existing native owner.
-    /// Nonzero prescribed support motion has its own native path and is not
-    /// silently omitted by this fixed-reference pressure adapter.
+    /// This constructor requires stationary zero supports. Use
+    /// `begin_transient_with_supports` for explicitly prescribed motion.
     #[allow(clippy::too_many_arguments)]
     pub fn begin_transient<'p, 's>(
-        mut self,
+        self,
         profile: &AdhesiveTractionProfile,
         other: &TetLoadCase3<'_, '_>,
         problem: &'p TetLinearElasticProblem<'s>,
@@ -57,16 +78,96 @@ impl<'g, 'm> AdhesiveP1Patch3<'g, 'm> {
         gate: &CancelGate,
         cx: &Cx<'_>,
     ) -> Result<AdhesiveP1Transient3<'g, 'm, 'p, 's>, AdhesiveP1Error3> {
-        let (load, current) = self.assemble(profile, other, gate, cx)?;
-        let native = load.begin_transient(
+        self.begin_impl(
+            profile,
+            other,
             problem,
             thermal,
             time_s,
             displacement_m,
             velocity_m_s,
+            None,
             config,
+            gate,
             cx,
-        )?;
+        )
+    }
+
+    /// Start with prescribed supports in the ORIGINAL full mass/stiffness and
+    /// force balance. Initial u/v include free and fixed components; supplied
+    /// acceleration is nonzero only on fixed DOFs. Free acceleration is solved
+    /// by the native owner, including M_fc, C_fc and K_fc coupling.
+    ///
+    /// Every subsequent step must supply an explicit support endpoint using
+    /// `advance_with_supports` or its admission variant. The constrained DOF set
+    /// and reference pressure trace remain frozen.
+    #[allow(clippy::too_many_arguments)]
+    pub fn begin_transient_with_supports<'p, 's>(
+        self,
+        profile: &AdhesiveTractionProfile,
+        other: &TetLoadCase3<'_, '_>,
+        problem: &'p TetLinearElasticProblem<'s>,
+        thermal: Option<TetThermalStrainField<'_>>,
+        time_s: f64,
+        displacement_m: &[[f64; 3]],
+        velocity_m_s: &[[f64; 3]],
+        prescribed_acceleration_m_s2: &[[f64; 3]],
+        config: TransientConfig3,
+        gate: &CancelGate,
+        cx: &Cx<'_>,
+    ) -> Result<AdhesiveP1Transient3<'g, 'm, 'p, 's>, AdhesiveP1Error3> {
+        self.begin_impl(
+            profile,
+            other,
+            problem,
+            thermal,
+            time_s,
+            displacement_m,
+            velocity_m_s,
+            Some(prescribed_acceleration_m_s2),
+            config,
+            gate,
+            cx,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn begin_impl<'p, 's>(
+        mut self,
+        profile: &AdhesiveTractionProfile,
+        other: &TetLoadCase3<'_, '_>,
+        problem: &'p TetLinearElasticProblem<'s>,
+        thermal: Option<TetThermalStrainField<'_>>,
+        time_s: f64,
+        displacement_m: &[[f64; 3]],
+        velocity_m_s: &[[f64; 3]],
+        prescribed_acceleration_m_s2: Option<&[[f64; 3]]>,
+        config: TransientConfig3,
+        gate: &CancelGate,
+        cx: &Cx<'_>,
+    ) -> Result<AdhesiveP1Transient3<'g, 'm, 'p, 's>, AdhesiveP1Error3> {
+        let (load, current) = self.assemble(profile, other, gate, cx)?;
+        let native = match prescribed_acceleration_m_s2 {
+            Some(acceleration) => load.begin_transient_with_supports(
+                problem,
+                thermal,
+                time_s,
+                displacement_m,
+                velocity_m_s,
+                acceleration,
+                config,
+                cx,
+            )?,
+            None => load.begin_transient(
+                problem,
+                thermal,
+                time_s,
+                displacement_m,
+                velocity_m_s,
+                config,
+                cx,
+            )?,
+        };
         let mut cells = vec![SectorAdhesiveTraction::default(); self.cells.len()];
         let mut represented = vec![Dd::ZERO; self.represented.len()];
         let mut background = vec![0.0; self.background.len()];
@@ -115,7 +216,7 @@ impl<'g, 'm, 'p, 's> AdhesiveP1Transient3<'g, 'm, 'p, 's> {
         gate: &CancelGate,
         cx: &Cx<'_>,
     ) -> Result<&AdhesiveP1Step3, AdhesiveP1Error3> {
-        let (candidate, report) = self.prepare(profile, other, step_s, gate, cx)?;
+        let (candidate, report) = self.prepare(profile, other, None, step_s, gate, cx)?;
         self.publish(candidate, report);
         Ok(self.last.as_ref().unwrap())
     }
@@ -137,7 +238,52 @@ impl<'g, 'm, 'p, 's> AdhesiveP1Transient3<'g, 'm, 'p, 's> {
         E: From<AdhesiveP1Error3>,
     {
         let (candidate, report) = self
-            .prepare(profile, other, step_s, gate, cx)
+            .prepare(profile, other, None, step_s, gate, cx)
+            .map_err(E::from)?;
+        let receiving = admit(&report, &candidate)?;
+        poll(gate, cx).map_err(E::from)?;
+        self.publish(candidate, report);
+        Ok(receiving)
+    }
+
+    /// Advance pressure and support motion together through the existing native
+    /// Newmark owner. Full nodal travel includes constrained pressure nodes.
+    /// Source-pressure work and support-reaction work remain separate physical
+    /// inputs. The fixed reference patch does not follow a moving obstacle.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_with_supports(
+        &mut self,
+        profile: &AdhesiveTractionProfile,
+        other: &TetLoadCase3<'_, '_>,
+        supports: AdhesiveP1SupportEndpoint3<'_>,
+        step_s: f64,
+        gate: &CancelGate,
+        cx: &Cx<'_>,
+    ) -> Result<&AdhesiveP1Step3, AdhesiveP1Error3> {
+        let (candidate, report) = self.prepare(profile, other, Some(supports), step_s, gate, cx)?;
+        self.publish(candidate, report);
+        Ok(self.last.as_ref().unwrap())
+    }
+
+    /// Admit another receiver against the same complete free/support candidate.
+    /// Refusal or late cancellation preserves accepted support motion, native
+    /// forces, pressure endpoints and all work accounts together.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_with_supports_and_admission<R, E>(
+        &mut self,
+        profile: &AdhesiveTractionProfile,
+        other: &TetLoadCase3<'_, '_>,
+        supports: AdhesiveP1SupportEndpoint3<'_>,
+        step_s: f64,
+        gate: &CancelGate,
+        cx: &Cx<'_>,
+        admit: impl FnOnce(&AdhesiveP1Step3, &TetTransientRun3<'g, 'm, 'p, 's>) -> Result<R, E>,
+    ) -> Result<R, E>
+    where
+        E: From<AdhesiveP1Error3>,
+    {
+        let (candidate, report) = self
+            .prepare(profile, other, Some(supports), step_s, gate, cx)
             .map_err(E::from)?;
         let receiving = admit(&report, &candidate)?;
         poll(gate, cx).map_err(E::from)?;
@@ -154,29 +300,64 @@ impl<'g, 'm, 'p, 's> AdhesiveP1Transient3<'g, 'm, 'p, 's> {
         self.last = Some(report);
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn prepare(
         &mut self,
         profile: &AdhesiveTractionProfile,
         other: &TetLoadCase3<'_, '_>,
+        supports: Option<AdhesiveP1SupportEndpoint3<'_>>,
         step_s: f64,
         gate: &CancelGate,
         cx: &Cx<'_>,
     ) -> Result<(TetTransientRun3<'g, 'm, 'p, 's>, AdhesiveP1Step3), AdhesiveP1Error3> {
         let (load, transfer) = self.patch.assemble(profile, other, gate, cx)?;
         let mut candidate = self.native.clone();
-        let native = candidate.advance(&load, step_s, cx)?;
-        self.delta.fill(0.0);
-        for ((&d, &after), &before) in candidate
-            .free_dofs()
-            .iter()
-            .zip(&candidate.state().displacement)
-            .zip(&self.native.state().displacement)
-        {
-            poll(gate, cx)?;
-            self.delta[d] = finite(after - before)?;
+        let native = match supports {
+            Some(AdhesiveP1SupportEndpoint3::Displacement(values)) => {
+                candidate.advance_with_supports(&load, values, step_s, cx)?
+            }
+            Some(AdhesiveP1SupportEndpoint3::Acceleration(values)) => {
+                candidate.advance_with_support_accelerations(&load, values, step_s, cx)?
+            }
+            None => candidate.advance(&load, step_s, cx)?,
+        };
+        if supports.is_some() {
+            // Use the original support owner's Newmark travel h*v_mid on ALL
+            // components. Absolute u1-u0 can round away an acceleration-driven
+            // increment about a nonzero support datum. Native work retains it.
+            // Extract only velocity; the other temporary full fields drop here.
+            let [_, before, _] = self.native.nodal_motion(cx)?;
+            for (node, row) in before.iter().enumerate() {
+                if node % 256 == 0 {
+                    poll(gate, cx)?;
+                }
+                for c in 0..3 {
+                    self.delta[3 * node + c] = 0.5 * row[c];
+                }
+            }
+            drop(before);
+            let [_, after, _] = candidate.nodal_motion(cx)?;
+            for (node, row) in after.iter().enumerate() {
+                if node % 256 == 0 {
+                    poll(gate, cx)?;
+                }
+                for c in 0..3 {
+                    self.delta[3 * node + c] =
+                        finite(step_s * finite(self.delta[3 * node + c] + 0.5 * row[c])?)?;
+                }
+            }
+        } else {
+            self.delta.fill(0.0);
+            for ((&d, &after), &before) in candidate
+                .free_dofs()
+                .iter()
+                .zip(&candidate.state().displacement)
+                .zip(&self.native.state().displacement)
+            {
+                poll(gate, cx)?;
+                self.delta[d] = finite(after - before)?;
+            }
         }
-        // Fixed supports have exactly zero actual travel; their forces remain
-        // in the original native load and later reaction recovery, not dropped.
         let mut actual = Dd::ZERO;
         let mut other_work = Dd::ZERO;
         for (d, &change) in self.delta.iter().enumerate() {
