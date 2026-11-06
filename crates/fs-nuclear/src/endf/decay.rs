@@ -29,6 +29,10 @@ use super::{EV_J, EndfError, EndfReadLimits, Reader, Record, budget, convert_si}
 use crate::irradiation::NuclideId;
 use crate::{Accumulator, FissionError, nonnegative, positive};
 
+/// Assemble evaluated half-lives, daughters and explicit energy routing into the
+/// original decay and burnup data owners.
+pub mod model;
+
 /// Both source identities must agree; no ground-state/isomer substitution occurs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct EndfDecaySelection {

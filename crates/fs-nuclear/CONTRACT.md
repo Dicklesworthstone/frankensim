@@ -1250,3 +1250,49 @@ passed all 126 tests. The fixture source and exact original Git blobs are
 recorded in `tests/data/endf_b_viii_0/README.md`. These checks establish
 import interoperability and numerical behavior, not empirical nuclear-data
 validation.
+
+## Evaluated decay data in inventories and burnup
+
+`endf::decay::model::EvaluatedDecayAssembly` resolves original-order
+nuclide/isomer identities into the existing `Arc<DecayModel>`. It retains the
+evaluations, uncertainties, routing assumptions and identity-to-population
+index map. `burnup_data` emits ordinary `BurnupNuclide` and source-labelled
+decay `BurnupReaction` values for composition with separately supplied capture
+and fission channels. The original inventory, numerical propagator, energy
+ledger and thermal adapters remain the evolution owners.
+
+Supported RTYP sequences derive the residual daughter for beta-minus,
+electron-capture/positron emission, isomeric transition, alpha, neutron and
+proton emission, including immediate combinations such as 1.5 and 1.44.
+RFS selects its isomer. Every daughter must be explicitly present: absent
+evaluations never become stable sinks. Duplicate identities, unsupported
+origin codes and spontaneous fission without resolved product yields refuse.
+Branch closure, topology and model work limits are admitted by the original
+`DecayModel`, without branch normalization.
+
+Callers explicitly route each of the ELP, EEM and EHP aggregate emitted-energy
+categories among deposited, radiation and escaped destinations. Fractions are
+admitted as supplied and applied once. Unknown aggregate energies refuse model
+assembly. Detailed NC17 components are not added again; its known neutrino
+mean may optionally enter only the escaped channel. Q never supplies heat or
+an inferred energy remainder. Each branch receives the parent's routed mean,
+preserving expected calorimetry without inventing daughter/emission
+correlations. The heavy-particle aggregate includes neutrons and recoil, so its
+shared routing fraction is an explicit transport approximation.
+
+Source uncertainties remain observable data; they are not propagated into
+solver tolerances or treated as validation evidence. No emitted-particle
+inventory, material-mass adjustment or nuclear mass/charge ledger is inferred.
+Assembly is bounded by the original node/edge limits and cancellable; burnup
+data construction preserves deterministic ordering and source mode labels.
+
+Six focused regressions cover published tritium/helium-3 populations and
+calorimetry, equal-half-life chains and partitioned evolution, residual
+daughter identities, aggregate/optional-neutrino routing, admission refusals,
+and imported decay combined with an authored reciprocal capture channel in
+the original cyclic burnup solver. After including concurrently published
+spatial-neutron modules, the default-feature actual-root native gate passed
+all 150 tests. The `evaluated_decay` example also compiled and ran: at the
+imported half-life it retained half the original tritium, produced the other
+half as helium-3, and deposited the explicitly routed 5690 eV mean electron
+energy per transformation rather than the 18590 eV Q value.
