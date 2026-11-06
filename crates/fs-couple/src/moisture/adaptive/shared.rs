@@ -51,13 +51,14 @@ pub type SharedAtmosphereMoistureAdvanceCandidate = SharedMoistureAdvanceCandida
     SharedAtmosphereMoistureStep,
     2,
 >;
-pub type SharedCartesianAtmosphereMoistureAdvanceCandidate = SharedMoistureAdvanceCandidate<
-    FiniteMoistureAtmosphere,
-    MoistureCartesian,
-    MoistureCartesianReport,
-    SharedAtmosphereMoistureStep,
-    6,
->;
+pub type SharedCartesianAtmosphereMoistureAdvanceCandidate<Transport = MoistureCartesianReport> =
+    SharedMoistureAdvanceCandidate<
+        FiniteMoistureAtmosphere,
+        MoistureCartesian,
+        Transport,
+        SharedAtmosphereMoistureStep,
+        6,
+    >;
 pub type SharedSolutionMoistureAdvanceCandidate = SharedMoistureAdvanceCandidate<
     FiniteMoistureSolution,
     MoistureSlab,
@@ -162,6 +163,7 @@ fn observe_fields<'a, B, F: ReservoirField<N>, E, const N: usize>(
 fn evolve_shared<
     B: Clone,
     F: ReservoirField<N> + Clone,
+    R: WaterStep<N>,
     T,
     E: Retryable + From<MoistureError>,
     const N: usize,
@@ -172,17 +174,15 @@ fn evolve_shared<
     maximum_cells: usize,
     temperature: f64,
     time: MoistureTimeControls,
+    method: TimeMethod,
     observe: fn(&B) -> Result<[f64; 2], E>,
     mut propose: impl FnMut(
         &B,
         &[ReservoirParticipant<'_, F, N>],
         f64,
-    ) -> Result<(B, Vec<SharedMoistureSolid<F, F::Report>>, T), E>,
+    ) -> Result<(B, Vec<SharedMoistureSolid<F, R>>, T), E>,
     cx: &Cx<'_>,
-) -> Result<SharedMoistureAdvanceCandidate<B, F, F::Report, T, N>, MoistureAdvanceError<E>>
-where
-    F::Report: WaterStep<N>,
-{
+) -> Result<SharedMoistureAdvanceCandidate<B, F, R, T, N>, MoistureAdvanceError<E>> {
     admit_count(participants.len(), maximum_cells, cx)?;
     participants.sort_unstable_by_key(|p| p.id);
     if participants.windows(2).any(|pair| pair[0].id == pair[1].id) {
@@ -217,10 +217,11 @@ where
             .map(|p| (p.id, (*p.field).clone()))
             .collect(),
     );
-    let (state, report) = evolve_fields(
+    let (state, report) = evolve_fields_with_method(
         &initial,
         target_s,
         time,
+        method,
         |state, dt| {
             poll(cx)?;
             if state.1.len() != participants.len() {
@@ -259,6 +260,7 @@ where
             ))
         },
         |state| observe_fields::<B, F, E, N>(state, observe),
+        |_, _, _| Ok(0.0),
         cx,
     )?;
     let mut transports = Vec::new();
@@ -324,6 +326,7 @@ impl FiniteMoistureAtmosphere {
             maximum_total_cells,
             self.gas().state().state().temperature,
             time,
+            TimeMethod::FirstOrder,
             observe_vapor,
             |air, fields, dt| {
                 air.advance_fields(fields, dt, maximum_total_cells, physical, cx)
@@ -364,10 +367,80 @@ impl FiniteMoistureAtmosphere {
             maximum_total_cells,
             self.gas().state().state().temperature,
             time,
+            TimeMethod::FirstOrder,
             observe_vapor,
             |air, fields, dt| {
                 air.advance_fields(fields, dt, maximum_total_cells, physical, cx)
                     .map(|c| c.into_parts())
+            },
+            cx,
+        )?;
+        finite::check_vapor(
+            self,
+            &candidate.reservoir,
+            candidate.report.summary.water_change_kg,
+            time.water_balance_tolerance_kg,
+            &mut candidate.report.summary,
+            cx,
+        )?;
+        Ok(candidate)
+    }
+
+    /// Complete second-order diffusion for multiple native Cartesian specimens
+    /// and one evolving finite vapor inventory.
+    ///
+    /// Every specimen's cells retain independent local error control, even
+    /// when simultaneous uptake and desorption leave total water or RH nearly
+    /// unchanged. RH and vapor inventory are also compared independently. The
+    /// second-order estimator and cubic growth rule apply to the complete
+    /// coupled state, with both implicit stages charged for every probe.
+    ///
+    /// Per-specimen six-face accounts integrate only accepted RK-weighted half
+    /// intervals in stable-ID order. The retained first-stage transport reports
+    /// are diagnostic, not additional water transfers. Whole-window water,
+    /// carrier and total-mass checks admit all endpoints together; a failed
+    /// duration exposes neither a partial reservoir nor a subset of specimens.
+    pub fn advance_shared_cartesian_sdirk2_adaptive_to(
+        &self,
+        participants: &[CartesianMoistureParticipant<'_>],
+        target_s: f64,
+        maximum_total_cells: usize,
+        physical: AtmosphereMoistureSolve,
+        time: MoistureTimeControls,
+        cx: &Cx<'_>,
+    ) -> Result<
+        SharedCartesianAtmosphereMoistureAdvanceCandidate<MoistureCartesianSdirk2Report>,
+        MoistureAdvanceError<AtmosphereMoistureError>,
+    > {
+        let fields = cartesians(participants, maximum_total_cells, cx)?;
+        let mut candidate = evolve_shared(
+            self,
+            fields,
+            target_s,
+            maximum_total_cells,
+            self.gas().state().state().temperature,
+            time,
+            TimeMethod::Sdirk2,
+            observe_vapor,
+            |air, fields, dt| {
+                let participants: Vec<_> = fields
+                    .iter()
+                    .map(|field| CartesianMoistureParticipant {
+                        id: field.id,
+                        moisture: field.field,
+                        faces: field.faces,
+                        transport: field.transport.0,
+                        nonlinear: field.transport.1,
+                    })
+                    .collect();
+                air.advance_shared_cartesian_sdirk2(
+                    &participants,
+                    dt,
+                    maximum_total_cells,
+                    physical,
+                    cx,
+                )
+                .map(|c| c.into_parts())
             },
             cx,
         )?;
@@ -406,6 +479,7 @@ impl FiniteMoistureSolution {
             maximum_total_cells,
             self.solution().temperature_k(),
             time,
+            TimeMethod::FirstOrder,
             observe_solution,
             |bath, fields, dt| {
                 bath.advance_fields(fields, dt, maximum_total_cells, physical, cx)
@@ -438,6 +512,7 @@ impl FiniteMoistureSolution {
             maximum_total_cells,
             self.solution().temperature_k(),
             time,
+            TimeMethod::FirstOrder,
             observe_solution,
             |bath, fields, dt| {
                 bath.advance_fields(fields, dt, maximum_total_cells, physical, cx)

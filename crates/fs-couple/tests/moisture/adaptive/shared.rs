@@ -6,6 +6,9 @@ use fs_couple::moisture::{
     solution::SolutionMoistureError,
 };
 
+#[path = "shared/sdirk.rs"]
+mod sdirk;
+
 fn participant<'a>(
     id: u64,
     slab: &'a MoistureSlab,

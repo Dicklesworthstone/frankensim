@@ -821,3 +821,18 @@ been executed against the current fs-mbd/fs-couple dependency closure; no
 Cargo/DSR gate is claimed. This remains an isotropic rigid point-contact model
 with a held world couple, explicit temperature/pressure owners, and no inferred
 contact area or impact-to-heat allocation.
+
+## Adaptive second-order diffusion with shared finite vapor
+
+`FiniteMoistureAtmosphere::advance_shared_cartesian_sdirk2_adaptive_to`
+extends the same second-order controller to separate native Cartesian specimens
+sharing one vapor inventory. Each field retains independent local error and
+six-face water accounts, including simultaneous uptake/desorption with zero net
+reservoir change; RH and vapor mass are checked separately. Only accepted
+RK-weighted half intervals contribute transfers. Both implicit stages count per
+coupled probe, stable IDs determine output order, and final whole-window water,
+carrier and total-mass checks admit all endpoints together. The local error
+estimate remains asymptotic, without a global-error guarantee.
+
+G1/G4 regression definitions cover coupled mean/difference modes, stationary
+vapor with opposing transfers, ID permutations and late stage-budget failure.
