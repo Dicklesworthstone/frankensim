@@ -1171,6 +1171,31 @@ certify force equilibrium or constitutive provenance of a supplied matrix;
 the composing physical owner must supply the same accepted state, supports and
 complete tangent. Existing held-pressure solve semantics are unchanged.
 
+## Source-derived membrane viscosity and exact modal motion
+
+`membrane::viscosity::MembraneViscosity` binds one reduced plane-stress
+viscosity tensor per original sheet triangle, using the identical complete
+material-state bundle, ordered warp/weft axes and reference thickness.
+Engineering Green-strain rate gives objective resisting force and independently
+integrated power over reference area times thickness. Rigid motions and
+directional loss nullspaces are preserved. Flat prestressed transverse motion
+has zero first-order material strain-rate loss despite positive geometric
+stiffness. Shifted natural/thermal references refuse pending their constitutive
+pullback; no unmeasured damping floor is supplied.
+
+`MembraneModes` retains the exact accepted linearization displacement.
+Projection keeps the complete modal resistance and source Gram rows, with
+source-band admission covering every eigenfrequency enclosure. The opt-in
+`viscosity::modal::PreparedMembraneDamping` reuses `fs-phs`'s exact held-force
+quadratic flow and positive physical-heat owner. State is `[q, qdot]`; ports
+pair generalized force with interval-mean modal velocity. Successful warm steps
+reuse prepared buffers, and late cancellation publishes no partial outputs.
+All retained modes and cross-mode terms remain; two states plus one force port
+per mode limit this existing dense exact path to 42 complete modes. Larger
+bases refuse rather than truncate. This is motion linearized at the original
+geometry, not nonlinear damped integration or a guarantee that arbitrary
+forcing stays within the declared source band.
+
 ## Variable-amplitude critical-plane Miner damage on native J2 histories
 
 The quasistatic and backward-Euler J2 fatigue owners now admit

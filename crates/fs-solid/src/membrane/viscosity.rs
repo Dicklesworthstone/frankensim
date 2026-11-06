@@ -386,3 +386,6 @@ impl<'a> MembraneViscosity<'a> {
         Ok(MembraneModalViscosity { matrix_per_s, dissipation_rows, mode_count: n, row_count: rows })
     }
 }
+
+/// Exact coupled evolution of the complete source-derived modal resistance.
+pub mod modal;

@@ -56,17 +56,78 @@ the existing `ModalAcousticTimeModel` and reconstructs nodal displacement. It
 selects zero damping and zero pressure transfer explicitly, so this is a
 lossless small-vibration check, **not synthesized microphone audio**.
 
+## Material damping and exact coupled modal motion
+
+`fs_solid::membrane::viscosity::MembraneViscosity` adds an explicitly
+selected, objective Kelvin--Voigt loss law to the original sheet geometry.
+Resolve the six reduced plane-stress viscosity coefficients together with
+the sheet properties in one complete material-state bundle, then derive
+`ResolvedSheet` and `PlaneStressViscosity` from that same bundle. The selected
+viscosity plane is `Axes12`, matching the sheet's ordered warp/weft axes.
+Reference thickness comes from the sheet; neither density nor elastic
+stiffness is used to invent a loss coefficient.
+
+`evaluate` returns the full resisting nodal force and total/per-triangle
+irreversible power. It uses engineering Green-strain rate and integrates
+against reference area times reference thickness. This is an explicit
+reference-configuration constitutive choice; it does not establish that
+small-strain source data are calibrated at finite strain. Shifted natural
+and thermal hyperelastic references currently refuse because their viscosity
+needs an additional constitutive pullback and an updated source state.
+
+`project_modes` uses the exact geometry retained by `MembraneModes` and
+preserves the complete matrix `C = Phi^T C_spatial Phi`, including
+off-diagonal terms. Its source square-root rows preserve directional
+zero-loss channels. Every retained eigenfrequency enclosure must fit the
+declared source band. That admission does not prove that arbitrary forcing
+or a finite-amplitude trajectory stays within the band's physical validity.
+
+A flat, prestretched membrane has zero first-order in-plane strain rate
+under purely transverse motion. This mechanism therefore leaves those
+linear modes undamped even when their prestress stiffness is positive.
+Curvature and in-plane motion produce the corresponding material loss.
+Bending, air loading, support friction and material memory require their
+own models; none is inserted as a damping floor.
+
+`viscosity::modal::PreparedMembraneDamping` advances the full retained
+equation `q'' + C q' + Lambda q = f` through the existing
+`fs_phs::linear_exact::PreparedExactZoh`. `from_vibration` binds the original
+accepted equilibrium; `new` also accepts an existing `MembraneModes`
+basis, including a gas-loaded basis supplied by `fs-couple`. The original
+gas stiffness must remain in that basis without being applied a second time.
+
+State order is `[q_0, ..., q_(n-1), qdot_0, ..., qdot_(n-1)]`, with unit
+modal mass. Inputs are held generalized forces from `project_nodal_force`;
+outputs are interval-mean modal velocities. The returned record separates
+mechanical energy change, applied work and independently integrated material
+heat. `step_into` reuses prepared work arrays and introduces no new
+exponential or owner allocation on a successful warm call. A late
+cancellation or refused step preserves both caller output arrays.
+
+Preparation retains all modes and all damping couplings. With two states and
+one force port per membrane mode, the existing exact owner's augmented
+dimension limit permits at most 42 modes. A larger basis refuses instead
+of being silently truncated. `LinearSplitBudget.max_modes` counts scalar
+state coordinates (two per structural mode); projection also takes its own
+explicit work/storage limit. This path provides linear motion around the
+retained configuration, not nonlinear damped membrane time integration.
+
 ## Focused native checks
 
 ```sh
 cargo test -p fs-solid --test membrane -- --test-threads=1
+cargo test -p fs-solid --test membrane_viscosity -- --test-threads=1
 cargo test -p fs-couple --example textile_sheet -- --test-threads=1
 ```
 
-Native compilation and these tests were not executable in the authoring host
-because Cargo/rustc were unavailable. Independent symbolic and NumPy/SciPy
-references passed, including the loaded-pyramid frequency of 129.76741009 Hz,
-but do not substitute for these native checks. Scope is fixed-state quadratic
-sheet elasticity, dead-load prestress and linearized vibration. No wrinkle
-relaxation, bending/contact, time-evolving material state, fluid loading,
-finite-amplitude vibration, continuum stability or empirical fabric claim.
+The material-damping additions were reviewed against the existing owners, but
+native Rust compilation, formatting and these new tests could not run because
+the execution environment was unavailable. Independent numerical mechanics
+checks confirmed objective strain-rate work and heat; they do not substitute
+for native tests.
+
+The example remains a fixed-state elastic membrane and lossless vibration
+demonstration. The opt-in viscosity API adds material damping and linearized
+time evolution when the source supplies the required coefficients. It adds no
+wrinkle relaxation, bending/contact, evolving material state, nonlinear damped
+trajectory, continuum stability certificate or empirical fabric validation.

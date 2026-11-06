@@ -286,3 +286,6 @@ fn source_axes_band_budget_foreign_geometry_and_cancelled_trials_refuse() {
     assert_eq!(basis.linearization_displacement_m(), u.as_slice());
     damping.evaluate(&u, &[[0.0; 3]; 3], || false).unwrap();
 }
+
+#[path = "membrane_viscosity/modal.rs"]
+mod modal;
