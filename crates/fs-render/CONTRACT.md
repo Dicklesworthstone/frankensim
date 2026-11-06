@@ -8264,3 +8264,28 @@ integral through a rejected tracking candidate, static and zero-scattering
 replay, scene identity and history/domain/work/cancellation refusals. Pinned
 Rust formatting/parser checks passed. The native Rust regressions were authored
 but not executed in the shared editing environment.
+
+
+## Spectral pixels and QE rates with retarded molecular paths
+
+With `volumes`, the native raster adds `sample_pixel_rayleigh_transient_at_time`
+and `sample_pixel_sensor_rayleigh_transient_at_time`. Each wavelength reaches
+finite source histories along its actual refracted and scattered path; all
+sensor channels share those same four original trajectories. Original CIE and
+QE proposals, photon-energy conversion, pupil/diffraction weights, surface
+Philox domain `0x6372_7340 + lane`, and tracking domain `0x6372_7350 + lane`
+remain unchanged. Additional QE channels add neither traces nor history calls.
+
+Samples retain their normalized DD observation clock and per-lane native
+volume-event and free-flight counts. Histories, unresolved transport or cancelled
+lanes refuse the complete pixel while preserving the original source error;
+remaining lanes are not renormalized. Outputs are instantaneous aperture-average
+radiance and photoelectron rates under the original frozen-medium, finite-surface
+history scope, before exposure, etendue and sensor electronics.
+
+Three regression groups use a closed emitting geometry with actual seeded
+molecular collisions: static CIE/QE parity and replay, channel-independent work,
+per-wavelength scattered group delay against independent energy/photon sums,
+and late-history/work/cancellation refusal. Pinned Rust formatting/parser checks
+passed; these native tests were authored but not executed in the shared editing
+environment.

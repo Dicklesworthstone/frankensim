@@ -25,6 +25,9 @@ use crate::spectral::detector::QuantumEfficiencySensor;
 use fs_exec::Cx;
 use fs_math::dd::Dd;
 
+#[cfg(feature = "volumes")]
+pub mod participating;
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum TransientRasterError {
     Raster(CurvedRasterError),
