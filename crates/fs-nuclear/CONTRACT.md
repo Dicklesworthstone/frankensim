@@ -284,6 +284,37 @@ propagator when individual transformations are not required. The runnable
 `cargo run -p fs-nuclear --example stochastic_decay` uses explicitly
 manufactured coefficients and demonstrates a whole-inventory restart.
 
+## Stochastic decay events on the shared thermal timeline
+
+With the existing `thermal` feature, `thermal::StochasticDecayHeating` binds
+integer inventories to original material cells through `NuclearHeating<S>`.
+`StochasticDecayCellSource` retains each cell/material identity and the complete
+stochastic inventory. Its absolute clock must match the thermal clock at
+binding; independent cells must have distinct logical random-stream keys.
+
+The next sampled transformation is a thermal step boundary. The pre-event
+material state supplies heat fluxes over that interval, and only the original
+branch's deposited joules are credited at its containing endpoint. Radiation
+and escaped energy remain in their separate nuclear accounts. Daughters retain
+their sampled birth times; several sub-ULP events may share one representable
+thermal endpoint, subject to the source's event budget. The original explicit
+thermal timestep and global substep limits continue to apply.
+
+The source receives the thermal owner's original absolute endpoint, rather than
+reconstructing it as `start + duration`, which need not reproduce the same
+binary64 time. Existing continuous sources retain their original integration
+duration. All source, material, energy, and cancellation checks remain inside
+the existing joint transaction. Failed heating publishes neither the material
+candidate nor changes to inventory, pending clocks, or random-stream state.
+
+This coupling uses the existing uniform-cell thermal model and the authored
+constant half-life and mean-energy data. It does not infer environmental
+half-life changes, sample radiation spectra, change bulk caloric mass, or add
+particle transport. Stochastic sources do not implement the deterministic
+adaptive-error estimator. Five focused regressions cover event-time heat,
+energy destinations, restart/partition identity, exact endpoint clocks, stream
+binding, and complete refusal rollback.
+
 ## Radioactive decay heat on the shared thermal timeline
 
 With the existing `thermal` feature, `decay::thermal::DecayHeating` binds each

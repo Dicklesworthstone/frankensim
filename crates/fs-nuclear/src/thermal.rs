@@ -61,6 +61,9 @@ pub use production::{DecayProductionCellSource, DecayProductionHeating};
 mod activation;
 pub use activation::{CaptureActivationCellSource, CaptureActivationHeating};
 
+mod stochastic;
+pub use stochastic::{StochasticDecayCellSource, StochasticDecayHeating};
+
 mod kinetics;
 pub use kinetics::{
     KineticCellSource, KineticCellStep, KineticHeating, KineticHeatingBudget, KineticsControl,
@@ -657,10 +660,11 @@ impl<S: NuclearHeatSource> DepositionObserver for NuclearHeating<S> {
             temperatures.push(thermal.temperature_k(id)?);
         }
         let mut checkpoint_error = None;
-        let trials = S::trial_sources(
+        let trials = S::trial_sources_to(
             &source_refs,
             start_s,
             duration_s,
+            end_s,
             &temperatures,
             self.budget,
             &mut || {

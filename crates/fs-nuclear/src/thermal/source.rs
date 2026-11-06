@@ -96,6 +96,29 @@ pub trait NuclearHeatSource: sealed::Sealed + Clone + core::fmt::Debug {
             })
             .collect()
     }
+    /// The same collection trial with the thermal owner's exact accepted
+    /// endpoint. Histories carrying absolute event clocks can override this
+    /// entry point rather than reconstructing the endpoint from a rounded
+    /// duration. Existing duration-based laws keep their original operation.
+    fn trial_sources_to(
+        sources: &[&Self],
+        time_s: f64,
+        duration_s: f64,
+        end_s: f64,
+        temperatures_k: &[f64],
+        budget: Self::Budget,
+        checkpoint: &mut dyn FnMut() -> Result<(), FissionError>,
+    ) -> Result<Vec<(Self, Self::Step)>, FissionThermalError> {
+        let _ = end_s;
+        Self::trial_sources(
+            sources,
+            time_s,
+            duration_s,
+            temperatures_k,
+            budget,
+            checkpoint,
+        )
+    }
     /// Actual source release over an accepted interval.
     fn released(step: &Self::Step) -> EnergyChannels;
     /// Noncancelling numerical energy-account defects over that interval.
