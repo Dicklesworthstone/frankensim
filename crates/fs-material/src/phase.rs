@@ -582,6 +582,43 @@ impl ResolvedHeatCapacityCurve {
         reference_specific_enthalpy_j_kg: f64,
         maximum_interpolation_error_j_kg: f64,
     ) -> Result<Self, PhaseStateError> {
+        Self::resolve(
+            card,
+            query,
+            phase,
+            reference_specific_enthalpy_j_kg,
+            Some(maximum_interpolation_error_j_kg),
+        )
+    }
+
+    /// Resolve an analytical single-phase caloric law with only source knots.
+    ///
+    /// The union of original Cp and density breakpoints is retained, including
+    /// crossings of supported source-surface cells. Between those points the
+    /// same chart integrates Cp, inverts h(T), and evaluates rho(T) analytically.
+    /// No enthalpy-chord tolerance or artificial subdivision is needed. Source
+    /// support, selection, receipts, reference datum and knot budgets retain
+    /// their original admission; this does not reduce source uncertainty.
+    ///
+    /// Consumers must use the chart's caloric methods rather than interpolate
+    /// its public boundary knots. Use [`Self::try_new`] when an additional
+    /// bound on that straight boundary-chord representation is required.
+    pub fn try_new_exact(
+        card: &MaterialCard,
+        query: HeatCapacitySourceQuery<'_>,
+        phase: SolidLiquidPhase,
+        reference_specific_enthalpy_j_kg: f64,
+    ) -> Result<Self, PhaseStateError> {
+        Self::resolve(card, query, phase, reference_specific_enthalpy_j_kg, None)
+    }
+
+    fn resolve(
+        card: &MaterialCard,
+        query: HeatCapacitySourceQuery<'_>,
+        phase: SolidLiquidPhase,
+        reference_specific_enthalpy_j_kg: f64,
+        maximum_interpolation_error_j_kg: Option<f64>,
+    ) -> Result<Self, PhaseStateError> {
         let invalid = |what| PhaseStateError::InvalidCurve { what };
         single_phase_fraction(phase)?;
         let keys = [query.heat_capacity, query.density];
@@ -626,7 +663,7 @@ impl ResolvedHeatCapacityCurve {
                 bulk_density_kg_m3: values[1],
             });
         }
-        let mut curve = EquilibriumEnthalpyPhaseCurve::try_from_heat_capacity(
+        let mut curve = EquilibriumEnthalpyPhaseCurve::from_heat_capacity(
             card.content_hash(),
             phase,
             reference_specific_enthalpy_j_kg,
@@ -987,6 +1024,48 @@ impl EquilibriumEnthalpyPhaseCurve {
         knots: &[HeatCapacityKnot],
         maximum_interpolation_error_j_kg: f64,
     ) -> Result<Self, PhaseStateError> {
+        Self::from_heat_capacity(
+            material_card_identity,
+            phase,
+            reference_specific_enthalpy_j_kg,
+            knots,
+            Some(maximum_interpolation_error_j_kg),
+        )
+    }
+
+    /// Retain one analytical caloric interval per original Cp/density interval.
+    ///
+    /// Preparation and storage are linear in the supplied source knot count;
+    /// neither depends on an enthalpy-chord approximation tolerance. Every
+    /// interval retains its affine Cp(T) and rho(T) and uses the same exact
+    /// caloric evaluation, inverse, derivatives and entropy as the subdivided
+    /// constructor. No source breakpoint is removed and no new one is invented.
+    ///
+    /// The original positive-capacity, temperature, density, representability
+    /// and source-count limits still apply. Public knots describe interval
+    /// boundaries, not a substitute interpolation law for h(T).
+    pub fn try_from_heat_capacity_exact(
+        material_card_identity: ContentHash,
+        phase: SolidLiquidPhase,
+        reference_specific_enthalpy_j_kg: f64,
+        knots: &[HeatCapacityKnot],
+    ) -> Result<Self, PhaseStateError> {
+        Self::from_heat_capacity(
+            material_card_identity,
+            phase,
+            reference_specific_enthalpy_j_kg,
+            knots,
+            None,
+        )
+    }
+
+    fn from_heat_capacity(
+        material_card_identity: ContentHash,
+        phase: SolidLiquidPhase,
+        reference_specific_enthalpy_j_kg: f64,
+        knots: &[HeatCapacityKnot],
+        maximum_interpolation_error_j_kg: Option<f64>,
+    ) -> Result<Self, PhaseStateError> {
         let liquid_mass_fraction = single_phase_fraction(phase)?;
         let generated_count = heat_capacity_generated_knot_count(
             material_card_identity,
@@ -1015,18 +1094,8 @@ impl EquilibriumEnthalpyPhaseCurve {
                 + 0.5 * pair[1].specific_heat_capacity_j_kg_k)
                 * delta_temperature;
             let endpoint_enthalpy = enthalpy + enthalpy_gain;
-            let curvature_error = (pair[1].specific_heat_capacity_j_kg_k
-                - pair[0].specific_heat_capacity_j_kg_k)
-                .abs()
-                * delta_temperature
-                / 8.0;
-            let subdivisions = if curvature_error <= maximum_interpolation_error_j_kg {
-                1
-            } else {
-                (curvature_error / maximum_interpolation_error_j_kg)
-                    .sqrt()
-                    .ceil() as usize
-            };
+            let subdivisions =
+                heat_capacity_subdivisions(pair, maximum_interpolation_error_j_kg)?;
             for step in 1..=subdivisions {
                 let fraction = step as f64 / subdivisions as f64;
                 let delta = delta_temperature * fraction;
@@ -1676,7 +1745,7 @@ fn heat_capacity_generated_knot_count(
     material_card_identity: ContentHash,
     reference_specific_enthalpy_j_kg: f64,
     knots: &[HeatCapacityKnot],
-    maximum_interpolation_error_j_kg: f64,
+    maximum_interpolation_error_j_kg: Option<f64>,
 ) -> Result<usize, PhaseStateError> {
     if material_card_identity == ContentHash([0; 32]) {
         return Err(PhaseStateError::InvalidCurve {
@@ -1688,7 +1757,7 @@ fn heat_capacity_generated_knot_count(
             what: "reference specific enthalpy must be finite",
         });
     }
-    if !(maximum_interpolation_error_j_kg.is_finite() && maximum_interpolation_error_j_kg > 0.0) {
+    if maximum_interpolation_error_j_kg.is_some_and(|error| !error.is_finite() || error <= 0.0) {
         return Err(PhaseStateError::InvalidCurve {
             what: "maximum interpolation error must be finite and positive",
         });
@@ -1725,28 +1794,7 @@ fn heat_capacity_generated_knot_count(
                 what: "heat-capacity temperatures must be strictly increasing",
             });
         }
-        let curvature_error =
-            (pair[1].specific_heat_capacity_j_kg_k - pair[0].specific_heat_capacity_j_kg_k).abs()
-                * delta_temperature
-                / 8.0;
-        if !curvature_error.is_finite() {
-            return Err(PhaseStateError::InvalidCurve {
-                what: "heat-capacity interpolation error is not finite",
-            });
-        }
-        let subdivisions = if curvature_error <= maximum_interpolation_error_j_kg {
-            1
-        } else {
-            let required = (curvature_error / maximum_interpolation_error_j_kg)
-                .sqrt()
-                .ceil();
-            if !(required.is_finite() && required <= MAX_HEAT_CAPACITY_ENTHALPY_KNOTS as f64) {
-                return Err(PhaseStateError::InvalidCurve {
-                    what: "heat-capacity interpolation exceeds the generated-knot budget",
-                });
-            }
-            required as usize
-        };
+        let subdivisions = heat_capacity_subdivisions(pair, maximum_interpolation_error_j_kg)?;
         generated_count =
             generated_count
                 .checked_add(subdivisions)
@@ -1770,6 +1818,34 @@ fn heat_capacity_generated_knot_count(
         enthalpy = next_enthalpy;
     }
     Ok(generated_count)
+}
+
+fn heat_capacity_subdivisions(
+    pair: &[HeatCapacityKnot],
+    maximum_interpolation_error_j_kg: Option<f64>,
+) -> Result<usize, PhaseStateError> {
+    let Some(allowance) = maximum_interpolation_error_j_kg else {
+        return Ok(1);
+    };
+    let curvature_error =
+        (pair[1].specific_heat_capacity_j_kg_k - pair[0].specific_heat_capacity_j_kg_k).abs()
+            * (pair[1].temperature_k - pair[0].temperature_k)
+            / 8.0;
+    if !curvature_error.is_finite() {
+        return Err(PhaseStateError::InvalidCurve {
+            what: "heat-capacity interpolation error is not finite",
+        });
+    }
+    if curvature_error <= allowance {
+        return Ok(1);
+    }
+    let required = (curvature_error / allowance).sqrt().ceil();
+    if !(required.is_finite() && required <= MAX_HEAT_CAPACITY_ENTHALPY_KNOTS as f64) {
+        return Err(PhaseStateError::InvalidCurve {
+            what: "heat-capacity interpolation exceeds the generated-knot budget",
+        });
+    }
+    Ok(required as usize)
 }
 
 fn validate_curve_common(

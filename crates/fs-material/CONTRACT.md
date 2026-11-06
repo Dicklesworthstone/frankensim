@@ -29,6 +29,17 @@ calorics no longer replace the source law by those boundary chords. Explicitly
 authored h/T charts keep their authored interpolation, and a latent plateau
 retains exactly zero temperature slope and its single original latent account.
 
+`EquilibriumEnthalpyPhaseCurve::try_from_heat_capacity_exact` and
+`ResolvedHeatCapacityCurve::try_new_exact` retain only the original Cp/density
+source-knot union. They use the same analytical calorics and source admission,
+without generating enthalpy-chord subdivisions or evaluating their error
+diagnostics. The supplied source-knot budget remains explicit. Existing
+constructors still admit an optional finer public boundary chart; consumers
+of the compact path use caloric methods rather than interpolate boundary
+chords. `material_surface::caloric` checks crossed source cells, original
+receipts, exact heat/entropy/density, support refusals and finite storage that
+an unnecessary chord-error intermediate could not represent.
+
 `sensible_heat_capacities_on_interval` identifies retained source intervals.
 `specific_enthalpy_on_sensible_interval` supplies their original temperature
 inverse, and `sensible_heat_capacity_bounds_j_kg_k` supplies positive minimum

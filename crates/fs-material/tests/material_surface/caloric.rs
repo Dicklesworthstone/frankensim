@@ -5,7 +5,10 @@ use fs_matdb::{
     ClaimSet, InterpolationPolicy, MaterialCard, MaterialStateId, PropertyClaim, PropertyKey,
     PropertyValue, Provenance, QueryPoint, SelectionPolicy, UncertaintyModel,
 };
-use fs_material::phase::{HeatCapacitySourceQuery, ResolvedHeatCapacityCurve, SolidLiquidPhase};
+use fs_material::phase::{
+    EquilibriumEnthalpyPhaseCurve, HeatCapacityKnot, HeatCapacitySourceQuery,
+    ResolvedHeatCapacityCurve, SolidLiquidPhase,
+};
 use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
 use fs_qty::{Dims, Pressure, QuantitySpec, Temperature};
 
@@ -169,6 +172,167 @@ fn capacity_paths_refuse_real_source_holes_and_discrete_only_samples() {
     assert!(caloric(&card(true, InterpolationPolicy::LinearInside), 150.0, 0.0).is_err());
     // Both endpoints are source vertices, but samples do not supply the path.
     assert!(caloric(&card(false, InterpolationPolicy::TabulatedOnly), 100.0, 0.0).is_err());
+}
+
+#[test]
+fn g1_compact_source_calorics_keep_original_knots_heat_entropy_and_density() {
+    let source = card(false, InterpolationPolicy::LinearInside);
+    let cp = PropertyKey::new("specific_heat_capacity", CP);
+    let density = PropertyKey::new("density", DENSITY);
+    let (lower, upper) = (point(300.0, 150.0), point(400.0, 150.0));
+    let query = HeatCapacitySourceQuery {
+        heat_capacity: &cp,
+        density: &density,
+        temperature_axis: "T",
+        lower: &lower,
+        upper: &upper,
+        selection: SelectionPolicy::SingleClaimOnly,
+    };
+    // An extremely fine boundary-chord demand exhausts the old chart budget;
+    // it is unrelated to the exactly integrable original caloric source.
+    assert!(
+        ResolvedHeatCapacityCurve::try_new(&source, query, SolidLiquidPhase::Liquid, 0.0, 1e-12,)
+            .is_err()
+    );
+    for datum in [0.0, -1000.0] {
+        let law = ResolvedHeatCapacityCurve::try_new_exact(
+            &source,
+            query,
+            SolidLiquidPhase::Liquid,
+            datum,
+        )
+        .unwrap();
+        assert_eq!(
+            law.curve()
+                .knots()
+                .iter()
+                .map(|k| k.temperature_k)
+                .collect::<Vec<_>>(),
+            vec![300.0, 350.0, 400.0]
+        );
+        assert_eq!(
+            law.receipts(),
+            caloric(&source, 150.0, datum).unwrap().receipts()
+        );
+        for receipt in law.receipts() {
+            source.claims().verify_receipt(receipt).unwrap();
+        }
+        for t in [300.0, 325.0, 350.0, 375.0, 400.0] {
+            let (heat, capacity) = if t <= 350.0 {
+                let x = t - 300.0;
+                (3.0 * x + 0.01 * x * x, 3.0 + 0.02 * x)
+            } else {
+                let x = t - 350.0;
+                (175.0 + 4.0 * x + 0.03 * x * x, 4.0 + 0.06 * x)
+            };
+            let state = law.state_at_temperature(t).unwrap();
+            near(state.specific_enthalpy_j_kg(), datum + heat);
+            near(state.temperature_k(), t);
+            near(state.bulk_density_kg_m3(), 1050.0);
+            near(law.specific_enthalpy_change(300.0, t).unwrap(), heat);
+            near(law.secant_heat_capacity(t, t).unwrap(), capacity);
+            near(
+                law.curve()
+                    .temperature_derivative_at_specific_enthalpy(state.specific_enthalpy_j_kg())
+                    .unwrap(),
+                1.0 / capacity,
+            );
+        }
+        let entropy = 4.0 - 3.0 * (350.0_f64 / 300.0).ln() - 17.0 * (400.0_f64 / 350.0).ln();
+        near(law.specific_entropy_change(300.0, 400.0).unwrap(), entropy);
+        near(law.specific_entropy_change(400.0, 300.0).unwrap(), -entropy);
+        assert!(law.state_at_temperature(299.0).is_err());
+        assert!(law.specific_enthalpy_change(300.0, 401.0).is_err());
+    }
+    for unsupported in [
+        card(true, InterpolationPolicy::LinearInside),
+        card(false, InterpolationPolicy::TabulatedOnly),
+    ] {
+        assert!(
+            ResolvedHeatCapacityCurve::try_new_exact(
+                &unsupported,
+                query,
+                SolidLiquidPhase::Liquid,
+                0.0,
+            )
+            .is_err()
+        );
+    }
+}
+
+#[test]
+fn g0_compact_calorics_admit_finite_heat_without_unneeded_chord_arithmetic() {
+    let identity = fs_blake3::ContentHash([0x82; 32]);
+    let knots = [
+        HeatCapacityKnot {
+            temperature_k: 300.0,
+            specific_heat_capacity_j_kg_k: 1.0,
+            bulk_density_kg_m3: 1000.0,
+        },
+        HeatCapacityKnot {
+            temperature_k: 302.0,
+            specific_heat_capacity_j_kg_k: 1e308,
+            bulk_density_kg_m3: 900.0,
+        },
+    ];
+    // The real integral is finite while the legacy chord-error intermediate
+    // overflows. This probes arithmetic admission, not a measured material.
+    let law = EquilibriumEnthalpyPhaseCurve::try_from_heat_capacity_exact(
+        identity,
+        SolidLiquidPhase::Solid,
+        0.0,
+        &knots,
+    )
+    .unwrap();
+    assert_eq!(law.knots().len(), 2);
+    assert_eq!(law.knots()[1].specific_enthalpy_j_kg, 1e308);
+    let h = law
+        .specific_enthalpy_on_sensible_interval(0, 301.0)
+        .unwrap();
+    assert!((h / 2.5e307 - 1.0).abs() < 1e-14);
+    let state = law.state_at_specific_enthalpy(h).unwrap();
+    near(state.temperature_k(), 301.0);
+    near(state.bulk_density_kg_m3(), 950.0);
+    assert!(
+        EquilibriumEnthalpyPhaseCurve::try_from_heat_capacity(
+            identity,
+            SolidLiquidPhase::Solid,
+            0.0,
+            &knots,
+            1e300,
+        )
+        .is_err()
+    );
+    let mut invalid = knots;
+    invalid[1].specific_heat_capacity_j_kg_k = 0.0;
+    assert!(
+        EquilibriumEnthalpyPhaseCurve::try_from_heat_capacity_exact(
+            identity,
+            SolidLiquidPhase::Solid,
+            0.0,
+            &invalid,
+        )
+        .is_err()
+    );
+    assert!(
+        EquilibriumEnthalpyPhaseCurve::try_from_heat_capacity_exact(
+            identity,
+            SolidLiquidPhase::Solid,
+            f64::INFINITY,
+            &knots,
+        )
+        .is_err()
+    );
+    let too_many = vec![knots[0]; fs_material::phase::MAX_HEAT_CAPACITY_ENTHALPY_KNOTS + 1];
+    assert!(
+        EquilibriumEnthalpyPhaseCurve::try_from_heat_capacity_exact(
+            identity,
+            SolidLiquidPhase::Solid,
+            0.0,
+            &too_many,
+        )
+        .is_err()
+    );
 }
 
 #[test]
