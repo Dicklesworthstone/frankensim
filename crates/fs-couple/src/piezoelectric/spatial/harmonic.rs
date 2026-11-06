@@ -17,6 +17,10 @@
 //! pole, mesh convergence, intrinsic coupling loss, radiation or empirical
 //! material accuracy. A residual is not a forward-error bound near resonance.
 //!
+//! [`TetPiezoelectricModel::solve_harmonic_with_acoustic_ports`] also retains
+//! incident plane-wave pressure and reciprocal guide loading in this pencil.
+//! Its outgoing acoustic energy is distinct from material or conductor heat.
+//!
 //! [`TetPiezoelectricModel::solve_harmonic_with_relaxation`] additionally admits
 //! original-card Maxwell mechanical and directed Debye polarization processes.
 //! Their complex increments use the same mesh gradients and reciprocal G;
@@ -35,6 +39,10 @@ use fs_math::{c64::C64, det};
 use fs_sparse::Coo;
 
 mod relaxation;
+
+/// Reciprocal material-backed plane-wave fluid loading and incident sensing.
+pub mod acoustic;
+use acoustic::{HarmonicAcousticPort, HarmonicAcousticPortResponse};
 
 /// Prescribed peak phasor. A zero current is an AC open circuit, and a zero
 /// voltage is a short circuit to the component's explicit voltage reference.
@@ -194,6 +202,11 @@ pub struct HarmonicPiezoelectricResponse {
     pub electrodes: Vec<HarmonicElectrodeResponse>,
     /// Actual branch current and heat in original load order.
     pub loads: Vec<HarmonicElectrodeLoadResponse>,
+    /// Incoming/outgoing fluid waves on the original mechanical pressure ports.
+    pub acoustic_ports: Vec<HarmonicAcousticPortResponse>,
+    /// Signed mean power entering the attached guides [W]; negative for a net
+    /// incident acoustic supply. This is not ceramic heat.
+    pub average_acoustic_power_w: f64,
     /// Cycle-averaged elastic, electric and material-memory body storage [J].
     pub average_stored_energy_j: f64,
     /// Cycle-averaged kinetic storage from the original consistent mass [J].
@@ -206,7 +219,8 @@ pub struct HarmonicPiezoelectricResponse {
     pub average_load_heat_w: f64,
     /// Intrinsic mechanical plus dielectric heat, integrated over all cells [W].
     pub average_material_heat_w: f64,
-    /// Mechanical plus electrical supply minus load AND material heat [W].
+    /// Mechanical plus electrical supply minus load/material heat AND signed
+    /// outward acoustic power [W].
     pub power_balance_residual_w: f64,
     /// Largest peak complex force residual on an unconstrained mechanical DOF [N].
     pub maximum_force_residual_n: f64,
@@ -276,6 +290,7 @@ impl TetPiezoelectricModel<'_> {
         self.solve_harmonic_internal(
             omega_rad_s,
             None,
+            &[],
             prescribed_displacements,
             electrodes,
             loads,
@@ -313,6 +328,40 @@ impl TetPiezoelectricModel<'_> {
         self.solve_harmonic_internal(
             omega_rad_s,
             Some(intrinsic_materials),
+            &[],
+            prescribed_displacements,
+            electrodes,
+            loads,
+            nodal_forces_n,
+            nodal_free_charge_c,
+            controls,
+            cx,
+        )
+    }
+
+    /// Solve the original electroelastic field with reciprocal fluid loading.
+    /// Each prepared acoustic port retains its original model and fluid owner.
+    /// Incoming waves drive the solid/electrodes; outgoing waves exert the
+    /// pressure backreaction in the same sparse solve. Optional intrinsic
+    /// ceramic relaxation and all original electrical shunts compose with it.
+    #[allow(clippy::too_many_arguments)]
+    pub fn solve_harmonic_with_acoustic_ports(
+        &self,
+        omega_rad_s: f64,
+        acoustic_ports: &[HarmonicAcousticPort<'_>],
+        intrinsic_materials: Option<&[RelaxingTensorPiezoelectric]>,
+        prescribed_displacements: &[(usize, C64)],
+        electrodes: &[HarmonicElectrode<'_>],
+        loads: &[HarmonicElectrodeLoad],
+        nodal_forces_n: &[[C64; 3]],
+        nodal_free_charge_c: &[C64],
+        controls: HarmonicPiezoelectricControls,
+        cx: &Cx<'_>,
+    ) -> Result<HarmonicPiezoelectricResponse> {
+        self.solve_harmonic_internal(
+            omega_rad_s,
+            intrinsic_materials,
+            acoustic_ports,
             prescribed_displacements,
             electrodes,
             loads,
@@ -328,6 +377,7 @@ impl TetPiezoelectricModel<'_> {
         &self,
         omega_rad_s: f64,
         intrinsic_materials: Option<&[RelaxingTensorPiezoelectric]>,
+        acoustic_ports: &[HarmonicAcousticPort<'_>],
         prescribed_displacements: &[(usize, C64)],
         electrodes: &[HarmonicElectrode<'_>],
         loads: &[HarmonicElectrodeLoad],
@@ -357,6 +407,12 @@ impl TetPiezoelectricModel<'_> {
                 "finite complete phasors and positive representable frequency/power controls required",
             ));
         }
+        let acoustic_ports = acoustic::prepare(self, acoustic_ports, omega_rad_s, cx)?;
+        let mut acoustic_sources = (!acoustic_ports.is_empty()).then(|| nodal_forces_n.to_vec());
+        if let Some(forces) = &mut acoustic_sources {
+            acoustic::add_sources(&acoustic_ports, forces, cx)?;
+        }
+        let rhs_forces = acoustic_sources.as_deref().unwrap_or(nodal_forces_n);
         let source_conditions = electrodes
             .iter()
             .map(|e| {
@@ -389,10 +445,7 @@ impl TetPiezoelectricModel<'_> {
                     },
                 })
                 .collect::<Vec<_>>();
-            let forces = nodal_forces_n
-                .iter()
-                .map(|f| f.map(part))
-                .collect::<Vec<_>>();
+            let forces = rhs_forces.iter().map(|f| f.map(part)).collect::<Vec<_>>();
             let charges = nodal_free_charge_c
                 .iter()
                 .map(|&q| part(q))
@@ -483,6 +536,7 @@ impl TetPiezoelectricModel<'_> {
         if let Some(coefficients) = &intrinsic_coefficients {
             relaxation::stamp(self, coefficients, &mut add, cx)?;
         }
+        acoustic::stamp(&acoustic_ports, omega_rad_s, &mut add, cx)?;
         let mut admittances = Vec::with_capacity(loads.len());
         for load in loads {
             poll(cx)?;
@@ -534,6 +588,7 @@ impl TetPiezoelectricModel<'_> {
             nodal_forces_n,
             nodal_free_charge_c,
             intrinsic_materials,
+            &acoustic_ports,
             controls,
             iterations,
             relative_residual,
@@ -554,6 +609,7 @@ impl TetPiezoelectricModel<'_> {
         forces: &[[C64; 3]],
         charges: &[C64],
         intrinsic_materials: Option<&[RelaxingTensorPiezoelectric]>,
+        acoustic_ports: &[acoustic::PreparedAcousticPort<'_>],
         controls: HarmonicPiezoelectricControls,
         iterations: usize,
         relative_residual: f64,
@@ -592,6 +648,18 @@ impl TetPiezoelectricModel<'_> {
                 reversible_charges[node] = reversible_charges[node] - intrinsic.charge_c[node];
             }
         }
+        let acoustic_responses = acoustic::recover(
+            acoustic_ports,
+            omega,
+            full,
+            &mut effective_force,
+            controls.power_tolerance_w,
+            cx,
+        )?;
+        let acoustic_power = acoustic_responses
+            .iter()
+            .map(|port| port.average_net_outward_power_w)
+            .sum::<f64>();
         let mut outgoing = vec![C64::ZERO; electrodes.len()];
         let mut load_responses = Vec::with_capacity(loads.len());
         let mut heat = 0.0;
@@ -834,7 +902,7 @@ impl TetPiezoelectricModel<'_> {
             });
         }
         let storage = 0.5 * a.stored_energy_j + 0.5 * b.stored_energy_j + memory_energy;
-        let residual = mechanical + electrical - heat - material_heat;
+        let residual = mechanical + electrical - heat - material_heat - acoustic_power;
         if [
             kinetic,
             storage,
@@ -843,6 +911,7 @@ impl TetPiezoelectricModel<'_> {
             heat,
             material_heat,
             memory_energy,
+            acoustic_power,
             residual,
         ]
         .iter()
@@ -855,7 +924,7 @@ impl TetPiezoelectricModel<'_> {
         }
         if residual.abs() > controls.power_tolerance_w {
             return Err(super::TetPiezoelectricError::Balance(
-                "harmonic source power does not equal external load and intrinsic material heat",
+                "harmonic supply does not equal load/material heat and signed acoustic outflow",
             ));
         }
         poll(cx)?;
@@ -867,6 +936,8 @@ impl TetPiezoelectricModel<'_> {
             cells,
             electrodes: electrode_responses,
             loads: load_responses,
+            acoustic_ports: acoustic_responses,
+            average_acoustic_power_w: acoustic_power,
             average_stored_energy_j: storage,
             average_kinetic_energy_j: kinetic,
             average_mechanical_power_w: mechanical,

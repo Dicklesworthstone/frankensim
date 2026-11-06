@@ -9,6 +9,9 @@ use fs_math::c64::C64;
 #[path = "harmonic/relaxation.rs"]
 pub(super) mod relaxation;
 
+#[path = "harmonic/acoustic.rs"]
+mod acoustic;
+
 const ZERO: C64 = C64::new(0.0, 0.0);
 
 fn hc() -> HControls {

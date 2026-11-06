@@ -640,3 +640,38 @@ Focused regressions compare tightened controls against independent continuous
 wall/film/gas balance equations, isolate phase-fraction refinement at constant
 wall temperature, and verify fine-only source composition, complete discarded
 work charging, bounded rejection and atomic refusal.
+
+### Reciprocal acoustic guide loading of spatial piezoelectric transducers
+
+`harmonic::acoustic::PlaneWaveAcousticPort` prepares an original exterior-face
+pressure/flow map. The exact P1 outward normal weights b give U=b^T v and
+traction -b p. One original `FluidAcoustics` owner supplies the coherent
+density, adiabatic sound speed and bulk modulus at the evaluated state.
+The retained uniform guide mode has Z=rho*c/A and p=Z U+2 p_in under the
+original exp(-i omega t) convention. The guide section can include a declared
+rigid area; moving-face geometry remains the original tetrahedral trace.
+
+`solve_harmonic_with_acoustic_ports` adds -i omega Z b b^T and -2 b p_in to
+the same sparse electroelastic pencil, including intrinsic relaxation and
+external electrical shunts. Upper-triangle entries are mirrored exactly.
+Pressure recovery retains complete fluid loading in support reactions.
+Independent incoming/outgoing wave powers and signed p/U work remain distinct
+from conductor and ceramic heat. Net outward acoustic power enters the same
+physical work acceptance gate; incident sound may supply a real sensor/shunt.
+
+Ports retain their exact model, unique consistently outward planar exterior
+faces, complete guide area and explicit surface-coordinate work bound.
+Duplicate/foreign ports, inconsistent geometry, invalid original fluid states,
+out-of-band wavenumbers, excessive pressure/flow amplitudes and cancellation
+refuse before publishing a response. Material evaluation occurs once per port
+before sparse assembly, never in Krylov iterations.
+
+This is a declared single uniform-mode, lossless semi-infinite guide model.
+The caller owns its transverse-mode cutoff/accuracy domain and rigid remainder.
+It is not free-space diffraction, a higher-mode/evanescent approximation,
+viscothermal guide loss, a nonlinear acoustic model or empirical validation.
+Four synthetic G1/G3/G4 regression definitions specify electrical actuation,
+incoming-sound sensing with shunt heat, rotated pressure traces, rigid reflection
+and refusal. Rust syntax/format and source/equation review passed; independent
+scalar work calculations agreed. Native compile/tests remain unverified under
+the editing environment's disk and memory limits.

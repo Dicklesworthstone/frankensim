@@ -81,6 +81,8 @@ pub struct TetPiezoelectricControls {
 pub enum TetPiezoelectricError {
     /// The source tensor cannot evaluate the requested state.
     Material(PiezoelectricError),
+    /// Original fluid acoustic material/EOS admission failed.
+    AcousticMaterial(fs_material::MaterialError),
     /// Native solid assembly or support admission failed.
     Solid(TetElasticError),
     /// Native dielectric assembly or field reconstruction failed.
