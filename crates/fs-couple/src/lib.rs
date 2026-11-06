@@ -177,6 +177,8 @@ pub mod reed_bore;
 pub mod render;
 /// Finite propellant storage and nozzle impulse on the original variable-mass vehicle.
 pub mod rocket_blowdown;
+/// Typed SI pressure histories on the original open-boundary owners.
+pub mod scenario_pressure;
 pub mod scenario_velocity;
 pub mod scenario_wall_velocity;
 pub mod selector;

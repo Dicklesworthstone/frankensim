@@ -138,3 +138,28 @@ The last case checks actual poses, endpoint rates, drive work, kinetic change,
 integrated friction loss and thermal storage together. No new capture speed,
 implicit presliding history, inferred heat fraction or imposed thermostat is
 introduced.
+
+
+## Scenario pressure histories on native fluid reservoirs
+
+`scenario_pressure` connects declared `IncompressibleFlow/PressureOutlet`
+boundaries to the original specialized D3Q19 and generic D3Q19/D3Q27 open
+boundary owners. `PressureReference` explicitly distinguishes signed gauge
+pressure from positive absolute pressure with a supplied positive reference.
+Both use `MaterialScaling::density_lattice_from_pressure_perturbation`; the
+adapter does not infer an acoustic equation of state or a pressure-work model.
+
+Uniform values and `TimeSignal` histories retain SI dimensions, the original
+interpolation/clamping rules and cancellable validation/evaluation. Scalar
+pressure is invariant under a checked frame transform. Spatial profiles require
+an explicit geometry binding and refuse this uniform-time lane. Selected native
+pressure profiles also refuse, including unchanged dormant uniform targets;
+unselected controls and profiles remain active.
+
+A six-face batch prepares every target before one native rebind. Sampling,
+reference, units, density, native-kind or cancellation refusal preserves all
+controls and fluid state. This updates held controls; native stepping retains
+collision, force correction and reservoir transport. G0/G3 tests in
+`tests/scenario_pressure.rs` exercise both native quadratures, actual boundary
+density after steps, gauge/absolute equivalence, histories, profile precedence,
+transactional refusal and cancellation. No new dependency or solver is added.
