@@ -1,9 +1,12 @@
 //! Equilibrium miscibility energy on the shared conservative thermal timeline.
 //!
 //! The fixed component inventory defines composition and a mass normalization;
-//! timeline cells may have different masses of that same composition. The cold
-//! bracket endpoint is the common zero of specific enthalpy. Every temperature
-//! inversion uses the original caloric equilibrium solver, including the energy
+//! timeline cells may have different masses of that same composition. Closed
+//! storage uses zero specific enthalpy at its cold bracket endpoint. Explicit
+//! stream storage instead retains the original common pure-species datum, so
+//! mass exchange between compositions carries their actual mixing enthalpy.
+//! Every temperature inversion uses the original caloric equilibrium solver,
+//! including the energy
 //! of phase redistribution, without a sampled enthalpy chart or another Cp law.
 //!
 //! This is thermal storage at externally maintained pressure. It does not move
@@ -11,8 +14,9 @@
 //! Numeric thermal trials do not refresh mixture transport: publish resolved
 //! phases through the original source-bound law when those properties are used.
 //! Entropy uses the same pure Cp/T integrals and accepted mixing phases.
-//! Advection binding and hashed caloric identity remain unavailable; consumers
-//! requiring those optional capabilities must refuse them.
+//! Only the explicit stream constructor supplies an advection binding and
+//! caloric identity. Chemical entropy transported between different compositions
+//! remains outside the existing stationary-species flow entropy capability.
 
 use super::{
     BinaryCaloricSolveV1, BinaryCaloricStateV1, BinaryLiquidCaloricError, BinaryLiquidCaloricLaw,
@@ -26,15 +30,20 @@ use std::sync::Arc;
 /// implicit thermal solver, including phase-redistribution heat capacity.
 pub mod conduction;
 
+/// Common-datum liquid storage for the existing stationary-species flow graph.
+pub mod stream;
+
 /// Immutable fixed-composition caloric law, retaining both original Cp sources.
 #[derive(Clone, Debug, PartialEq)]
 pub struct BinaryLiquidThermalStorage {
     owner: Arc<SourceOwner>,
     endpoints: [BinaryCaloricStateV1; 2],
     mass_kg: f64,
+    lower_specific_h_j_kg: f64,
     upper_specific_h_j_kg: f64,
     maximum_slope: f64,
     controls: BinaryCaloricSolveV1,
+    stream: Option<stream::StreamBinding>,
 }
 
 impl BinaryLiquidCaloricLaw<'_, '_> {
@@ -97,9 +106,11 @@ impl BinaryLiquidCaloricLaw<'_, '_> {
             owner: Arc::clone(&self.owner),
             endpoints: [cold.caloric_state().clone(), hot.caloric_state().clone()],
             mass_kg,
+            lower_specific_h_j_kg: 0.0,
             upper_specific_h_j_kg,
             maximum_slope,
             controls,
+            stream: None,
         })
     }
 }
@@ -108,9 +119,11 @@ impl BinaryLiquidThermalStorage {
     pub const fn temperature_domain(&self) -> [Temperature; 2] {
         self.controls.temperature_bracket
     }
-    /// Relative specific enthalpy, with zero at the cold endpoint [J/kg].
+    /// Inclusive specific-enthalpy bounds [J/kg]. Ordinary thermal storage
+    /// uses zero at the cold endpoint; stream storage retains the original
+    /// common pure-species datum, including the equilibrium mixing enthalpy.
     pub const fn specific_enthalpy_domain_j_kg(&self) -> [f64; 2] {
-        [0.0, self.upper_specific_h_j_kg]
+        [self.lower_specific_h_j_kg, self.upper_specific_h_j_kg]
     }
     pub fn sources(&self) -> &[IsobaricHeatCapacityLaw; 2] {
         &self.owner.sources
@@ -174,7 +187,7 @@ impl BinaryLiquidThermalStorage {
             ));
         }
         if temperature == lower {
-            return Ok(0.0);
+            return Ok(self.lower_specific_h_j_kg);
         }
         if temperature == upper {
             return Ok(self.upper_specific_h_j_kg);
@@ -185,14 +198,22 @@ impl BinaryLiquidThermalStorage {
             self.controls.coexistence,
             &mut cancelled,
         )?;
-        let h = self
+        let increment = self
             .owner
             .model
             .enthalpy_change_j(&self.endpoints[0], &state)?
             / self.mass_kg;
-        if !positive(h) {
+        if !positive(increment) {
             return Err(BinaryLiquidCaloricError::Invalid(
                 "positive thermal-storage enthalpy increment is unrepresentable",
+            ));
+        }
+        let h = self.lower_specific_h_j_kg + increment;
+        if self.stream.is_some()
+            && (h <= self.lower_specific_h_j_kg || h >= self.upper_specific_h_j_kg)
+        {
+            return Err(BinaryLiquidCaloricError::Invalid(
+                "interior stream enthalpy is not representable in the common datum",
             ));
         }
         self.admit(h)?;
@@ -209,13 +230,13 @@ impl BinaryLiquidThermalStorage {
         poll(&mut cancelled)?;
         self.admit(specific_h_j_kg)?;
         // Preserve exact endpoints through the J/kg-to-J round trip.
-        if specific_h_j_kg == 0.0 {
+        if specific_h_j_kg == self.lower_specific_h_j_kg {
             return Ok(self.endpoints[0].clone());
         }
         if specific_h_j_kg == self.upper_specific_h_j_kg {
             return Ok(self.endpoints[1].clone());
         }
-        let heat_j = specific_h_j_kg * self.mass_kg;
+        let heat_j = (specific_h_j_kg - self.lower_specific_h_j_kg) * self.mass_kg;
         if !positive(heat_j) {
             return Err(BinaryLiquidCaloricError::Invalid(
                 "positive thermal-storage heat input is unrepresentable",
@@ -229,7 +250,7 @@ impl BinaryLiquidThermalStorage {
     }
 
     fn admit(&self, h: f64) -> Result<(), BinaryLiquidCaloricError> {
-        if !h.is_finite() || h < 0.0 || h > self.upper_specific_h_j_kg {
+        if !h.is_finite() || h < self.lower_specific_h_j_kg || h > self.upper_specific_h_j_kg {
             Err(BinaryLiquidCaloricError::Invalid(
                 "enthalpy outside thermal-storage domain",
             ))
@@ -240,6 +261,16 @@ impl BinaryLiquidThermalStorage {
 }
 
 impl ThermalLaw for BinaryLiquidThermalStorage {
+    fn caloric_identity(&self) -> Option<[u8; 32]> {
+        self.stream
+            .as_ref()
+            .map(stream::StreamBinding::caloric_identity)
+    }
+    fn advected_composition(
+        &self,
+    ) -> Option<fs_thermal::enthalpy::advection::species::CaloricComposition<'_>> {
+        self.stream.as_ref().map(stream::StreamBinding::composition)
+    }
     fn temperature_k(&self, h: f64) -> Result<f64, DepositionError> {
         self.caloric_state_at_specific_enthalpy(h, || false)
             .map(|state| state.temperature().value())

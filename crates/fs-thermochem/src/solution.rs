@@ -193,6 +193,24 @@ impl BinaryRegularSolutionV1 {
         self.excess_heat_capacity_j_per_mol_k
     }
 
+    /// Original dimensionless A coefficient, without reconstructing a fit
+    /// from sampled interaction values. Together with B, C, T0 and the source
+    /// domain this identifies the complete shared liquid caloric convention.
+    pub const fn chi_constant(&self) -> f64 {
+        self.chi_constant
+    }
+
+    /// Original B coefficient in kelvin, in the declared species order.
+    pub const fn chi_inverse_temperature_k(&self) -> f64 {
+        self.chi_inverse_temperature_k
+    }
+
+    /// Original datum T0 of the authored excess heat capacity. For zero C the
+    /// canonical datum is the domain's lower endpoint, since T0 has no effect.
+    pub const fn excess_heat_capacity_reference_temperature(&self) -> Temperature {
+        self.excess_heat_capacity_reference_temperature
+    }
+
     /// Original component identities in the declared, never silently sorted order.
     pub const fn species(&self) -> &[SpeciesId; 2] {
         &self.species

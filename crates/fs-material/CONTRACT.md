@@ -15814,9 +15814,10 @@ existing storage/consumer compatibility and atomic source refusals; native
 integration execution remains required to validate those cases.
 
 `caloric::storage::BinaryLiquidThermalStorage` makes the same fixed-composition
-equilibrium available to the existing `fs-thermal` enthalpy timeline. Zero
-specific enthalpy is the cold equilibrium endpoint; heat increments and the
-inverse temperature use the original caloric owner. Its conservative slope
+equilibrium available to the existing `fs-thermal` enthalpy timeline. The
+`thermal_storage` constructor uses the cold equilibrium endpoint as zero
+specific enthalpy; heat increments and the inverse temperature use the original
+caloric owner. Its conservative slope
 bound comes from the original caloric owner's source knots and includes a
 signed heat capacity of mixing. Changing equilibrium compositions adds
 nonnegative heat capacity for the symmetric pair law; negative fixed-phase
@@ -15828,8 +15829,9 @@ uses the SAME pure Cp/T integrals and accepted phase mixing entropy, divided
 by the retained reference mass. Both enthalpy endpoints must be admitted;
 a nonzero interval unresolved by the caloric inversion refuses. Existing
 entropy-aware thermal advances can therefore audit changing liquid phases.
-External source watts still do not define a reservoir entropy. Advection and
-identity-dependent thermal capabilities remain unavailable.
+External source watts still do not define a reservoir entropy. This closed
+storage constructor has no advection or caloric-identity binding; the explicit
+stream constructor below supplies the common reference required for flow.
 
 The same storage exposes equilibrium specific heat in J/(kg K), including
 phase redistribution from the original regular-solution owner and both pure
@@ -15847,8 +15849,8 @@ same approximate tangent. Acceptance still uses complete equilibrium energy.
 The bulk conductivity curve is caller-declared for the fixed composition,
 pressure and geometry, with complete support over the storage domain. It is
 not inferred from phase conductivities or treated as a resolved two-phase
-fluid. No interphase kinetics, morphology law, advection binding or phase
-fraction error observable is supplied. Synthetic regressions compare Cp
+fluid. No interphase kinetics, morphology law or phase-fraction error observable
+is supplied. Synthetic regressions compare Cp
 against independent high-precision values and enthalpy differences, and check
 native implicit heat exchange across miscibility against an independent
 energy balance with unequal cell masses and an interval beyond explicit CFL.
@@ -15861,6 +15863,40 @@ the hydrostatic consumer checks independently calculated interfaces, buoyancy
 and native motion from the resulting thermal endpoints. These are synthetic
 numerical fixtures. They do not establish measured pair accuracy or a combined
 thermal, gravitational and mechanical energy balance while interfaces move.
+
+### Nonideal liquid streams, mixers and recirculating thermal flow
+
+`BinaryLiquidCaloricLaw::stream_storage_from_mass_fractions` prepares the SAME
+storage and conduction consumers on a common original pure-species enthalpy
+datum. Each inlet carries its own actual sensible-plus-mixing enthalpy;
+receiving cells recover temperature using their own retained composition and
+original caloric owner. Composition-dependent heat of mixing, variable pure
+Cp, signed excess Cp and equilibrium redistribution enter once. Independent
+cold-endpoint zeroes cannot be used for energy exchanged between compositions.
+
+Exact authored mass fractions bind directly to the existing stationary-species
+solution. Conversion uses each original molar mass and refuses lost positive
+traces. The common reference binds ordered species, masses, pure-source
+identities, pressure and the complete original A/B/C/T0 interaction law and
+domain. It excludes composition and numerical budgets; the separate storage
+identity retains composition and temperature support. Inversion subtracts the
+same cold-endpoint offset, and admitted endpoint temperatures are exact.
+Unrepresentable common-datum ranges and unresolved interior offsets refuse.
+
+Existing `Advected::with_stationary_species` and implicit chain/graph consumers
+own mass and energy transport, including inlet-fed recirculation and simultaneous
+conduction. This remains prescribed, stationary, mass-balanced bulk flow at
+one fixed pressure. It does not evolve species inventories, select individual
+liquid phases for transport, solve momentum or infer geometry. Original
+fixed-composition storage entropy remains available; chemical-flow entropy
+remains explicitly unclassified by the existing thermal owner.
+
+Native integration tests run an open implicit mixer at ten cell residence
+times and an inlet-fed recirculating conduction graph against independent
+coupled energy equations and analytic variable-Cp enthalpy inverses. They
+cover unequal component masses, both signs of excess Cp, equal-temperature
+heat of mixing, unequal-temperature feeds, conservative external energy,
+exact composition binding, source/datum rejection and unchanged closed storage.
 
 
 ### Qualified molecular momentum moments

@@ -8,6 +8,8 @@ use fs_thermal::enthalpy::{
 
 #[path = "storage/conduction.rs"]
 mod conduction;
+#[path = "storage/stream.rs"]
+mod stream;
 
 fn boundary(source_w: f64) -> Boundary {
     Boundary {
