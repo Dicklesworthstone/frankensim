@@ -11,6 +11,20 @@ use std::cell::{Cell, RefCell};
 use fs_solver::{CheckedCgConfig, CheckedCgError, LinearOp, checked_cg};
 use fs_sparse::precond::Precond;
 
+/// A candidate the rounded-pose audit refuses is solved again, one eighth
+/// tighter each time. The retries change nothing about what the audit accepts,
+/// and every retry spends the same Newton budget.
+pub(crate) const ROUNDED_POSE_RETRIES: usize = 3;
+pub(crate) const RETRY_TIGHTENING: f64 = 0.125;
+
+/// Which independent check refused a candidate. The core audits the response
+/// it solved; the body adapter repeats that audit at the rounded nodal pose.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RefusalSite {
+    CoreAudit,
+    RoundedPose,
+}
+
 /// Accuracy and bounded work for one simultaneous contact solve.
 #[derive(Clone, Copy, Debug)]
 pub struct Controls {
@@ -77,10 +91,24 @@ pub enum SolveError {
         residual: f64,
     },
     NoConvergence {
+        site: RefusalSite,
         newton_iterations: usize,
         displacement_residual: f64,
         force_residual: f64,
     },
+}
+
+impl SolveError {
+    /// Count the Newton steps of refused candidates in a later refusal.
+    pub(crate) fn after_newton(mut self, spent: usize) -> Self {
+        if let Self::NoConvergence {
+            newton_iterations, ..
+        } = &mut self
+        {
+            *newton_iterations += spent;
+        }
+        self
+    }
 }
 
 impl std::fmt::Display for SolveError {
@@ -101,12 +129,13 @@ impl std::fmt::Display for SolveError {
                 "normal contact: CG failed after {iterations} iterations (residual {residual:e})"
             ),
             Self::NoConvergence {
+                site,
                 newton_iterations,
                 displacement_residual,
                 force_residual,
             } => write!(
                 f,
-                "normal contact: no convergence after {newton_iterations} Newton steps (scaled penetration {displacement_residual:e}, force {force_residual:e})"
+                "normal contact: refused at {site:?} after {newton_iterations} Newton steps (scaled penetration {displacement_residual:e}, force {force_residual:e})"
             ),
         }
     }
@@ -124,6 +153,9 @@ pub struct SolveReport {
     pub compliance_applications: usize,
     pub displacement_residual: f64,
     pub force_residual: f64,
+    /// Candidates the core accepted and the rounded-pose audit then refused
+    /// before this one was published. Their Newton work is in the counts above.
+    pub rounded_pose_retries: usize,
 }
 
 /// Linear storage in the number of contacts. Vectors are retained between
@@ -254,12 +286,17 @@ impl Workspace {
     /// repeated footprint entries must be combined before forming that bound.
     /// This method changes scratch only; the caller publishes the forces and
     /// corrected body state together after success.
+    /// `acceptance` is the largest scaled residual, at most one, this call may
+    /// return. It tightens the iteration only; `Controls` still defines the
+    /// laws' tolerance, which the rounded-pose audit applies at one.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn solve(
         &mut self,
         predicted: &[f64],
         previous_force: &[f64],
         compliance_diagonal_bound: &[f64],
         controls: Controls,
+        acceptance: f64,
         apply_compliance: impl FnMut(&[f64], &mut [f64]),
         mut evaluate_law: impl FnMut(usize, f64) -> (f64, f64),
     ) -> Result<SolveReport, SolveError> {
@@ -279,6 +316,9 @@ impl Workspace {
             ));
         }
         controls.validate()?;
+        if !(acceptance > 0.0 && acceptance <= 1.0) {
+            return Err(SolveError::InvalidInput("acceptance must lie in (0, 1]"));
+        }
         for v in [
             &mut self.d,
             &mut self.force,
@@ -346,7 +386,7 @@ impl Workspace {
                     .max((self.force[i] - actual_force).abs() / force_scale);
             }
             report.compliance_applications = compliance.applications.get();
-            if report.displacement_residual <= 1.0 && report.force_residual <= 1.0 {
+            if report.displacement_residual <= acceptance && report.force_residual <= acceptance {
                 for i in 0..n {
                     self.response[i] = predicted[i] - self.response[i];
                 }
@@ -354,6 +394,7 @@ impl Workspace {
                 return Ok(report);
             }
             let exhausted = || SolveError::NoConvergence {
+                site: RefusalSite::CoreAudit,
                 newton_iterations: report.newton_iterations,
                 displacement_residual: report.displacement_residual,
                 force_residual: report.force_residual,
@@ -465,6 +506,7 @@ mod tests {
                 &[0.0; 2],
                 &[2e-6; 2],
                 Controls::default(),
+                1.0,
                 |x, y| apply_dense(c, x, y),
                 |i, d| {
                     if d > 0.0 {
@@ -503,6 +545,7 @@ mod tests {
                 &[0.0; 2],
                 &[1.0; 2],
                 Controls::default(),
+                1.0,
                 |x, y| apply_dense(c, x, y),
                 |_, d| if d > 0.0 { (d, 1.0) } else { (0.0, 0.0) },
             )
@@ -522,6 +565,7 @@ mod tests {
                 &[0.2; 2],
                 &[1.0; 2],
                 Controls::default(),
+                1.0,
                 |x, y| apply_dense(c, x, y),
                 |_, d| (d.max(0.0), if d > 0.0 { 1.0 } else { 0.0 }),
             )
@@ -537,10 +581,17 @@ mod tests {
                 max_newton_iterations: 0,
                 ..Controls::default()
             },
+            1.0,
             |x, y| apply_dense(c, x, y),
             |_, d| (d.max(0.0), if d > 0.0 { 1.0 } else { 0.0 }),
         );
-        assert!(matches!(refused, Err(SolveError::NoConvergence { .. })));
+        assert!(matches!(
+            refused,
+            Err(SolveError::NoConvergence {
+                site: RefusalSite::CoreAudit,
+                ..
+            })
+        ));
         assert!(workspace.forces().is_empty() && workspace.penetrations().is_empty());
     }
 }

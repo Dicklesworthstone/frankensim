@@ -2,7 +2,8 @@
 
 use super::{Body, Contact, ContactQueue, Friction, contact_response};
 use crate::contact_island::{
-    Controls as NormalControls, SolveError as ContactError, SolveReport as NormalReport,
+    Controls as NormalControls, RETRY_TIGHTENING, ROUNDED_POSE_RETRIES, RefusalSite,
+    SolveError as ContactError, SolveReport as NormalReport,
 };
 use crate::friction_island::{
     Controls, SolveError, SolveReport, Tangential, Workspace as IslandWorkspace, check_friction,
@@ -138,6 +139,9 @@ fn apply_response(
 /// Validate every normal and tangential candidate at one common rounded body
 /// pose, then publish the whole stage. Earlier body prediction is caller-owned.
 /// Normal-only samples retain the existing independent/component fast paths.
+/// The core's own audit can pass a candidate with no margin, and the rounded
+/// pose can then refuse it on roundoff alone. Such a candidate is iterated
+/// further until that audit passes or the budget runs out and the step refuses.
 pub(crate) fn solve_contacts_with_friction_checked(
     bodies: &mut [Body],
     contacts: &mut [Contact],
@@ -149,6 +153,55 @@ pub(crate) fn solve_contacts_with_friction_checked(
     k: f64,
     normal_controls: NormalControls,
     controls: Controls,
+) -> Result<(NormalReport, SolveReport), ContactError> {
+    let mut spent = SolveReport::default();
+    let mut acceptance = 1.0;
+    loop {
+        match attempt_candidate(
+            bodies,
+            contacts,
+            frictions,
+            mindlin,
+            queue,
+            normal,
+            work,
+            k,
+            normal_controls,
+            controls,
+            acceptance,
+            &mut spent,
+        ) {
+            Err(ContactError::Friction(SolveError::NoConvergence {
+                site: RefusalSite::RoundedPose,
+                ..
+            })) if spent.rounded_pose_retries < ROUNDED_POSE_RETRIES
+                && spent.newton_iterations < controls.max_newton_iterations =>
+            {
+                spent.rounded_pose_retries += 1;
+                acceptance *= RETRY_TIGHTENING;
+            }
+            result => return result,
+        }
+    }
+}
+
+/// One candidate of the sample. Nothing physical is written before every check
+/// passes, so a refused candidate can be followed by another. `spent` carries
+/// the refused candidates' counts; on a retry the core still holds the last one.
+#[allow(clippy::too_many_arguments)]
+fn attempt_candidate(
+    bodies: &mut [Body],
+    contacts: &mut [Contact],
+    frictions: &mut [Friction],
+    mindlin: &mut [MindlinContact],
+    queue: &mut ContactQueue,
+    normal: &mut contact_response::Workspace,
+    work: &mut Workspace,
+    k: f64,
+    normal_controls: NormalControls,
+    controls: Controls,
+    acceptance: f64,
+    spent: &mut SolveReport,
 ) -> Result<(NormalReport, SolveReport), ContactError> {
     let fail = ContactError::Friction;
     let mut has_friction = false;
@@ -284,6 +337,9 @@ pub(crate) fn solve_contacts_with_friction_checked(
         work.previous_force.push(contact.report().traction_n);
         work.bound.push(bound);
     }
+    if spent.rounded_pose_retries > 0 {
+        work.previous_force.copy_from_slice(work.core.forces());
+    }
     work.paths.resize(work.predicted.len(), 0.0);
     work.stuck.resize(work.active.len(), false);
     work.mindlin_candidates.clear();
@@ -310,7 +366,11 @@ pub(crate) fn solve_contacts_with_friction_checked(
             n,
             tangents,
             mindlin.len(),
-            controls,
+            Controls {
+                max_newton_iterations: controls.max_newton_iterations - spent.newton_iterations,
+                ..controls
+            },
+            acceptance,
             |force, response| {
                 apply_response(
                     bodies,
@@ -353,9 +413,21 @@ pub(crate) fn solve_contacts_with_friction_checked(
                     friction: active[friction],
                     error,
                 },
-                other => other,
+                mut other => {
+                    if let SolveError::NoConvergence {
+                        newton_iterations, ..
+                    } = &mut other
+                    {
+                        *newton_iterations += spent.newton_iterations;
+                    }
+                    other
+                }
             })
         })?;
+    report.newton_iterations += spent.newton_iterations;
+    report.linear_iterations += spent.linear_iterations;
+    report.compliance_applications += spent.compliance_applications;
+    report.rounded_pose_retries = spent.rounded_pose_retries;
     let forces = core.forces();
     // The last Krylov action is not the accepted force. Apply the entire
     // accepted aggregate once, including zero forces, before publication.
@@ -427,10 +499,15 @@ pub(crate) fn solve_contacts_with_friction_checked(
         let at = n + 2 * slot;
         let q = [forces[at], forces[at + 1]];
         let mut s = [0.0; 2];
+        let mut slip_rounding = [0.0; 2];
         for (axis, terms) in [&fr.sx, &fr.sy].into_iter().enumerate() {
             for &(b, i, w) in terms {
                 if w != 0.0 {
-                    s[axis] += w * ((bodies[b].wn[i] - bodies[b].tmp[i]) - bodies[b].wp[i]);
+                    let pose = bodies[b].wn[i] - bodies[b].tmp[i];
+                    s[axis] += w * (pose - bodies[b].wp[i]);
+                    // Half an ulp of the pose at most: the slip the rounded
+                    // pose cannot represent, whatever the iteration does.
+                    slip_rounding[axis] += w.abs() * 0.5 * f64::EPSILON * pose.abs();
                 }
             }
             paths[at + axis] = s[axis];
@@ -446,6 +523,7 @@ pub(crate) fn solve_contacts_with_friction_checked(
             [predicted[at], predicted[at + 1]],
             fr.mu,
             [bound[at], bound[at + 1]],
+            slip_rounding,
             controls,
         )
         .map_err(|error| {
@@ -509,7 +587,9 @@ pub(crate) fn solve_contacts_with_friction_checked(
         || report.retained_residual > 1.0
         || displacement_residual > 1.0
     {
+        *spent = report;
         return Err(fail(SolveError::NoConvergence {
+            site: RefusalSite::RoundedPose,
             newton_iterations: report.newton_iterations,
             normal_residual: report.normal_residual.max(displacement_residual),
             friction_residual: report.friction_residual,
@@ -557,6 +637,7 @@ pub(crate) fn solve_contacts_with_friction_checked(
             compliance_applications: report.compliance_applications,
             displacement_residual,
             force_residual: report.normal_residual,
+            rounded_pose_retries: report.rounded_pose_retries,
         },
         report,
     ))

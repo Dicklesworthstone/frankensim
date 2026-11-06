@@ -128,6 +128,16 @@ measured-material fidelity or real-time throughput.
   tangential elastic memory or thermal state, and acceptance does not establish global uniqueness
   or continuum convergence. Export refuses nonzero friction until the external/GPU stepper
   implements the same joint solve.
+  The core's audit and the check at the rounded pose apply the same tolerance, so roundoff alone
+  can refuse a candidate the core accepted. Normal and joint solves then iterate that candidate
+  further, an eighth tighter each time, at most three times and from the same Newton budget. The
+  tolerance itself never changes, and a sample the first candidate satisfies is unchanged.
+  `rounded_pose_retries` in the solve reports counts these retries, and a refusal names its site.
+  Far from rest at very low load, that tolerance can ask for slip finer than one ulp of the pose,
+  which no iteration can reach. So the rounded-pose friction check adds to its scale what rounding
+  the pose can do to the natural residual, computed per contact: half an ulp of each node's pose,
+  through the tangent step and the disk projection's slope. The core's audit and the normal checks
+  carry no such allowance.
 - **Retained contact compliance**: `Instrument::attach_mindlin_contact` attaches a
   `MindlinContact` built from an original `SourceMindlinContact`, its explicit checkpoint,
   scalar shear footprint and explicit force budget. The existing material-derived circular

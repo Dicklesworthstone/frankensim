@@ -4,7 +4,10 @@ use super::{
     Body, Contact, ContactQueue, Crush, Law, contact_force, contact_phi, crush_force, crush_phi,
     viscoelastic_force, viscoelastic_phi,
 };
-use crate::contact_island::{Controls, SolveError, SolveReport, Workspace as IslandWorkspace};
+use crate::contact_island::{
+    Controls, RETRY_TIGHTENING, ROUNDED_POSE_RETRIES, RefusalSite, SolveError, SolveReport,
+    Workspace as IslandWorkspace,
+};
 
 #[path = "contact_components.rs"]
 mod components;
@@ -328,6 +331,9 @@ pub(super) fn prepare(
 /// Publish all normal forces, crush memories and body displacements together.
 /// A refusal changes only private numerical scratch. A caller needing friction
 /// must use the joint adapter so its final normal laws remain consistent.
+/// The core's own audit can pass a candidate with no margin, and the rounded
+/// pose can then refuse it on roundoff alone. Such a candidate is iterated
+/// further until that audit passes or the budget runs out and the step refuses.
 pub(crate) fn solve_contacts_checked(
     bodies: &mut [Body],
     contacts: &mut [Contact],
@@ -415,19 +421,25 @@ pub(crate) fn solve_contacts_checked(
             frame,
             k,
             controls,
+            1.0,
             scalar_force,
             scalar_pose,
         )?;
     }
     let mut retried_scalar_components = false;
+    let (mut acceptance, mut rounded_pose_retries) = (1.0, 0);
     loop {
         if !scalar && !partitioned {
-            let spent = report.compliance_applications;
+            let spent = report;
             let result = core.solve(
                 predicted,
                 previous_force,
                 diagonal_bound,
-                controls,
+                Controls {
+                    max_newton_iterations: controls.max_newton_iterations - spent.newton_iterations,
+                    ..controls
+                },
+                acceptance,
                 |force, response| {
                     apply_compliance(bodies, contacts, indices, touched, k, force, response)
                 },
@@ -445,9 +457,11 @@ pub(crate) fn solve_contacts_checked(
                 SolveError::InvalidLaw { contact } => SolveError::InvalidLaw {
                     contact: indices[contact],
                 },
-                other => other,
+                other => other.after_newton(spent.newton_iterations),
             })?;
-            report.compliance_applications += spent;
+            report.newton_iterations += spent.newton_iterations;
+            report.cg_iterations += spent.cg_iterations;
+            report.compliance_applications += spent.compliance_applications;
         }
         let (forces, penetrations) = if scalar || partitioned {
             (&scalar_force[..], &scalar_pose[..])
@@ -551,6 +565,7 @@ pub(crate) fn solve_contacts_checked(
                 || report.displacement_residual > 1.0
             {
                 return Err(SolveError::NoConvergence {
+                    site: RefusalSite::RoundedPose,
                     newton_iterations: report.newton_iterations,
                     displacement_residual: report.displacement_residual,
                     force_residual: report.force_residual,
@@ -591,6 +606,51 @@ pub(crate) fn solve_contacts_checked(
                 retried_scalar_components = true;
                 continue;
             }
+            let rounded = matches!(
+                error,
+                SolveError::NoConvergence {
+                    site: RefusalSite::RoundedPose,
+                    ..
+                }
+            );
+            if rounded
+                && rounded_pose_retries < ROUNDED_POSE_RETRIES
+                && report.newton_iterations < controls.max_newton_iterations
+            {
+                rounded_pose_retries += 1;
+                acceptance *= RETRY_TIGHTENING;
+                // Keep what was spent and discard the failed gate's residuals.
+                report = SolveReport {
+                    newton_iterations: report.newton_iterations,
+                    cg_iterations: report.cg_iterations,
+                    compliance_applications: report.compliance_applications,
+                    ..SolveReport::default()
+                };
+                if partitioned {
+                    // A component's budget is its own, so a sum of spent steps
+                    // leaves every component inside the budget it started with.
+                    let retry = components
+                        .solve(
+                            bodies,
+                            contacts,
+                            queue,
+                            core,
+                            frame,
+                            k,
+                            Controls {
+                                max_newton_iterations: controls.max_newton_iterations
+                                    - report.newton_iterations,
+                                ..controls
+                            },
+                            acceptance,
+                            scalar_force,
+                            scalar_pose,
+                        )
+                        .map_err(|e| e.after_newton(report.newton_iterations))?;
+                    components::add_report(&mut report, retry);
+                }
+                continue;
+            }
             return Err(error);
         }
         if sparse {
@@ -617,6 +677,7 @@ pub(crate) fn solve_contacts_checked(
             c.d_now = actual_pose[slot];
             c.crush = crush[slot];
         }
+        report.rounded_pose_retries = rounded_pose_retries;
         return Ok(report);
     }
 }

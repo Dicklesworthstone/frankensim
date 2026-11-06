@@ -142,6 +142,7 @@ impl Components {
         frame: Frame<'_>,
         k: f64,
         controls: Controls,
+        acceptance: f64,
         forces: &mut [f64],
         poses: &mut [f64],
     ) -> Result<SolveReport, SolveError> {
@@ -165,7 +166,8 @@ impl Components {
                     core,
                     k,
                     controls,
-                    true,
+                    acceptance,
+                    acceptance == 1.0,
                     forces,
                     poses,
                 )?,
@@ -179,7 +181,8 @@ impl Components {
             add_report(
                 &mut report,
                 self.group.solve(
-                    slots, frame, bodies, contacts, queue, core, k, controls, false, forces, poses,
+                    slots, frame, bodies, contacts, queue, core, k, controls, acceptance, false,
+                    forces, poses,
                 )?,
             );
         }
@@ -207,6 +210,7 @@ impl Components {
             core,
             k,
             controls,
+            1.0,
             false,
             forces,
             poses,
@@ -302,6 +306,7 @@ impl Group {
         core: &mut IslandWorkspace,
         k: f64,
         controls: Controls,
+        acceptance: f64,
         mut scalar: bool,
         forces: &mut [f64],
         poses: &mut [f64],
@@ -349,6 +354,7 @@ impl Group {
                     &self.previous_force,
                     &self.bound,
                     controls,
+                    acceptance,
                     |force, response| {
                         apply(
                             bodies,

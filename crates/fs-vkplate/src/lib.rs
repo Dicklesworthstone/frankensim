@@ -82,7 +82,7 @@ pub mod shaft;
 
 mod contact_island;
 mod contact_response;
-pub use contact_island::{Controls as ContactSolveControls, SolveError as ContactSolveError, SolveReport as ContactSolveReport};
+pub use contact_island::{Controls as ContactSolveControls, RefusalSite as ContactRefusalSite, SolveError as ContactSolveError, SolveReport as ContactSolveReport};
 mod friction_island;
 mod friction_response;
 pub use friction_island::{Controls as FrictionSolveControls, SolveError as FrictionSolveError, SolveReport as FrictionSolveReport};

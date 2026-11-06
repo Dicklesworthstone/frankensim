@@ -891,6 +891,7 @@ fn global_contact_oracle(
             &warm,
             &diagonal,
             Controls::default(),
+            1.0,
             |x, y| {
                 for (i, value) in y.iter_mut().enumerate() {
                     *value = dot(&compliance[i * count..(i + 1) * count], x);
@@ -1046,4 +1047,94 @@ fn later_island_refusal_publishes_no_earlier_pose_force_or_crush_history() {
         assert_eq!(contact.d_now, previous.d_now);
         assert_eq!(contact.crush, previous.crush);
     }
+}
+
+/// The normal law's version of the same defect: a warm force at the edge of the
+/// core's acceptance passes the core, and roundoff can refuse it at the rounded
+/// pose. That refusal goes back to Newton until the audit passes. Without budget
+/// it stays a named refusal that publishes nothing.
+#[test]
+fn rounded_pose_refusal_at_the_acceptance_edge_iterates_until_the_audit_passes() {
+    let k = 1e-5;
+    let step = |state: &mut (Vec<Body>, Vec<Contact>), controls| {
+        solve_contacts_checked(
+            &mut state.0,
+            &mut state.1,
+            &mut ContactQueue::default(),
+            &mut Workspace::default(),
+            k,
+            controls,
+        )
+    };
+    let mut retried = 0;
+    for member in 0..32 {
+        let offset = 1e-2 * (1.0 + f64::from(member) / 32.0);
+        let penetration = 1.5e-8;
+        let mut contacts = chain_contacts();
+        for c in &mut contacts {
+            c.law = Law::Power {
+                k: 1e8,
+                alpha: 1.0,
+                mu: 0.0,
+            };
+        }
+        let pristine = (
+            vec![
+                point_body(1.0, k, offset + penetration, offset + penetration),
+                point_body(1.0, k, offset, offset),
+                point_body(1.0, k, offset - penetration, offset - penetration),
+            ],
+            contacts,
+        );
+        let mut settled = pristine.clone();
+        step(&mut settled, Controls::default()).unwrap();
+        let warmed = |excess: f64| {
+            let mut state = pristine.clone();
+            for (c, old) in state.1.iter_mut().zip(&settled.1) {
+                c.force = old.force * (1.0 + excess);
+            }
+            state
+        };
+        // Bisect for the largest warm error the core accepts without a step.
+        let (mut inside, mut outside) = (0.0, 1e-6);
+        for _ in 0..48 {
+            let excess = 0.5 * (inside + outside);
+            let report = step(&mut warmed(excess), Controls::default()).unwrap();
+            if report.newton_iterations == 0 {
+                inside = excess;
+            } else {
+                outside = excess;
+            }
+        }
+        let mut state = warmed(outside);
+        let report = step(&mut state, Controls::default()).unwrap();
+        if report.rounded_pose_retries == 0 {
+            continue;
+        }
+        retried += 1;
+        assert!(report.newton_iterations > 0);
+        assert!(report.force_residual <= 1.0 && report.displacement_residual <= 1.0);
+
+        let mut refused = warmed(outside);
+        let exhausted = Controls {
+            max_newton_iterations: 0,
+            ..Controls::default()
+        };
+        let error = step(&mut refused, exhausted).unwrap_err();
+        assert!(matches!(
+            error,
+            ContactSolveError::NoConvergence {
+                site: ContactRefusalSite::RoundedPose,
+                newton_iterations: 0,
+                ..
+            }
+        ));
+        for (body, old) in refused.0.iter().zip(&pristine.0) {
+            assert_eq!(body.wn, old.wn);
+        }
+        for (c, old) in refused.1.iter().zip(&warmed(outside).1) {
+            assert_eq!(c.force, old.force);
+        }
+    }
+    assert!(retried > 0, "no family member reached the rounded-pose refusal");
 }

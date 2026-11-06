@@ -27,6 +27,8 @@ use fs_solver::{
     NewtonStallDiagnosis, NonlinearProblem,
 };
 
+use crate::contact_island::RefusalSite;
+
 /// Accuracy and bounded work for one coupled response component.
 #[derive(Clone, Copy, Debug)]
 pub struct Controls {
@@ -35,6 +37,7 @@ pub struct Controls {
     pub displacement_tolerance: f64,
     pub force_tolerance: f64,
     /// Total Newton attempts, including at most two force-scale refinements.
+    /// The body adapter's rounded-pose retries spend this same budget.
     pub max_newton_iterations: usize,
     /// FGMRES columns per Newton attempt. The restart/cycle product is rounded
     /// down to this budget; no incomplete restart is added beyond it.
@@ -108,6 +111,9 @@ pub struct SolveReport {
     /// Change in recoverable tangential interface storage [J]. A negative
     /// value can supply positive body work without violating passivity.
     pub stored_change_j: f64,
+    /// Candidates the core accepted and the rounded-pose audit then refused
+    /// before this one was published. Their Newton work is in the counts above.
+    pub rounded_pose_retries: usize,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -127,6 +133,7 @@ pub enum SolveError {
     },
     Newton(NewtonError),
     NoConvergence {
+        site: RefusalSite,
         newton_iterations: usize,
         normal_residual: f64,
         friction_residual: f64,
@@ -151,6 +158,7 @@ impl std::fmt::Display for SolveError {
             }
             Self::Newton(error) => write!(f, "joint contact: {error}"),
             Self::NoConvergence {
+                site,
                 newton_iterations,
                 normal_residual,
                 friction_residual,
@@ -158,7 +166,7 @@ impl std::fmt::Display for SolveError {
                 diagnosis,
             } => write!(
                 f,
-                "joint contact refused after {newton_iterations} Newton attempts: scaled normal {normal_residual:e}, friction {friction_residual:e}, retained {retained_residual:e}, {diagnosis:?}"
+                "joint contact refused at {site:?} after {newton_iterations} Newton attempts: scaled normal {normal_residual:e}, friction {friction_residual:e}, retained {retained_residual:e}, {diagnosis:?}"
             ),
         }
     }
@@ -191,6 +199,28 @@ fn tangent_step(diagonal_bound: [f64; 2]) -> Result<f64, ContactLawError> {
     }
 }
 
+/// What rounding the pose can add to the natural residual: the slip's rounding
+/// times the tangent step, times the disk projection's slope, which is one
+/// inside the disk and `capacity / |trial|` outside it. No iteration can remove
+/// this, and on a lightly loaded contact far from rest it can exceed the force
+/// tolerance.
+fn pose_rounding_force(
+    opposing_force: [f64; 2],
+    centered_slip: [f64; 2],
+    slip_rounding: [f64; 2],
+    capacity: f64,
+    step: f64,
+) -> f64 {
+    let error = step * slip_rounding[0].hypot(slip_rounding[1]);
+    let trial = (step * centered_slip[0] + opposing_force[0])
+        .hypot(step * centered_slip[1] + opposing_force[1]);
+    if trial - error > capacity {
+        error * capacity / (trial - error)
+    } else {
+        error
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn friction_audit(
     normal_force: f64,
@@ -199,6 +229,7 @@ fn friction_audit(
     predicted_slip: [f64; 2],
     mu: f64,
     natural_residual: [f64; 2],
+    pose_rounding_n: f64,
     controls: Controls,
 ) -> Result<FrictionCheck, ContactLawError> {
     let magnitude = opposing_force[0].hypot(opposing_force[1]);
@@ -213,7 +244,7 @@ fn friction_audit(
     let work_scale = force_scale * slip
         + slip_scale * magnitude.max(capacity)
         + controls.force_tolerance * controls.displacement_tolerance;
-    let residual = natural_residual[0].hypot(natural_residual[1]) / force_scale;
+    let residual = natural_residual[0].hypot(natural_residual[1]) / (force_scale + pose_rounding_n);
     let cone = (magnitude - capacity).max(0.0) / force_scale;
     let duality = duality_gap.abs() / work_scale;
     let wrong_work = (-work).max(0.0) / work_scale;
@@ -244,7 +275,8 @@ fn friction_audit(
 
 /// Re-evaluate the original Coulomb law at an independently formed final
 /// path. A result is admitted only when `residual <= 1` and the caller also
-/// admits its original compliant normal law at that same path.
+/// admits its original compliant normal law at that same path. `slip_rounding`
+/// bounds what rounding the pose put into `centered_slip`.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn check_friction(
     normal_force: f64,
@@ -253,11 +285,13 @@ pub(crate) fn check_friction(
     predicted_slip: [f64; 2],
     mu: f64,
     diagonal_bound: [f64; 2],
+    slip_rounding: [f64; 2],
     controls: Controls,
 ) -> Result<FrictionCheck, ContactLawError> {
     if predicted_slip.iter().any(|v| !v.is_finite()) {
         return Err(ContactLawError::Invalid("finite predicted slip required"));
     }
+    let step = tangent_step(diagonal_bound)?;
     let block = linearize(
         ContactPoint {
             force_n: [normal_force, -opposing_force[0], -opposing_force[1]],
@@ -267,7 +301,7 @@ pub(crate) fn check_friction(
         },
         NaturalMapScales {
             normal_n_per_m: 1.0,
-            tangent_n_per_m: tangent_step(diagonal_bound)?,
+            tangent_n_per_m: step,
         },
     )?;
     friction_audit(
@@ -277,6 +311,13 @@ pub(crate) fn check_friction(
         predicted_slip,
         mu,
         [block.residual_n[1], block.residual_n[2]],
+        pose_rounding_force(
+            opposing_force,
+            centered_slip,
+            slip_rounding,
+            mu * normal_force.max(0.0),
+            step,
+        ),
         controls,
     )
 }
@@ -445,6 +486,7 @@ fn audit(
             [predicted[a], predicted[a + 1]],
             tangent.mu,
             [cache.residual[a], cache.residual[a + 1]],
+            0.0,
             controls,
         )
         .map_err(|error| SolveError::Coulomb { friction: j, error })?;
@@ -671,6 +713,9 @@ impl Workspace {
     /// Solve the declared joint laws without publishing any body or material
     /// state. The callback is one fixed symmetric positive-semidefinite Gram
     /// action for this call; normal laws and histories must stay frozen.
+    /// `acceptance` is the largest scaled residual, at most one, this call may
+    /// return. It tightens the iteration only; `Controls` still defines the
+    /// laws' tolerance, which the rounded-pose audit applies at one.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn solve(
         &mut self,
@@ -681,12 +726,18 @@ impl Workspace {
         tangents: &[Tangential],
         retained_count: usize,
         controls: Controls,
+        acceptance: f64,
         mut apply_compliance: impl FnMut(&[f64], &mut [f64]),
         mut normal_law: impl FnMut(usize, f64) -> (f64, f64),
         mut retained_law: impl FnMut(usize, f64) -> Result<(f64, f64), SolveError>,
     ) -> Result<SolveReport, SolveError> {
         self.accepted = false;
         controls.validate()?;
+        if !(acceptance > 0.0 && acceptance <= 1.0) {
+            return Err(SolveError::InvalidInput(
+                "acceptance must lie in (0, 1]",
+            ));
+        }
         let dimension = tangents
             .len()
             .checked_mul(2)
@@ -746,8 +797,11 @@ impl Workspace {
             .linear_restart
             .min(controls.max_linear_iterations)
             .min(dimension.max(1));
+        let admitted = |normal: f64, friction: f64, retained: f64, feasible: bool| {
+            feasible && normal <= acceptance && friction <= acceptance && retained <= acceptance
+        };
         let config = NewtonKrylovConfig {
-            absolute_tolerance: 0.125,
+            absolute_tolerance: 0.125 * acceptance,
             relative_tolerance: 0.0,
             linear_restart: restart,
             max_linear_cycles: controls.max_linear_iterations / restart,
@@ -777,7 +831,7 @@ impl Workspace {
             report.friction_residual = friction;
             report.retained_residual = retained;
             report.compliance_applications = applications.get();
-            if feasible && normal <= 1.0 && friction <= 1.0 && retained <= 1.0 {
+            if admitted(normal, friction, retained, feasible) {
                 self.paths.copy_from_slice(&self.cache.paths);
                 self.accepted = true;
                 return Ok(report);
@@ -864,7 +918,7 @@ impl Workspace {
                     report.normal_residual = normal;
                     report.friction_residual = friction;
                     report.retained_residual = retained;
-                    if feasible && normal <= 1.0 && friction <= 1.0 && retained <= 1.0 {
+                    if admitted(normal, friction, retained, feasible) {
                         break;
                     }
                 }
@@ -917,12 +971,13 @@ impl Workspace {
         report.friction_residual = friction;
         report.retained_residual = retained;
         report.compliance_applications = applications.get();
-        if feasible && normal <= 1.0 && friction <= 1.0 && retained <= 1.0 {
+        if admitted(normal, friction, retained, feasible) {
             self.paths.copy_from_slice(&self.cache.paths);
             self.accepted = true;
             Ok(report)
         } else {
             Err(SolveError::NoConvergence {
+                site: RefusalSite::CoreAudit,
                 newton_iterations: report.newton_iterations,
                 normal_residual: normal,
                 friction_residual: friction,
@@ -960,6 +1015,7 @@ mod tests {
                     &[Tangential { normal: 0, mu }],
                     0,
                     Controls::default(),
+                    1.0,
                     |q, y| dense(&c, q, y),
                     |_, d| (0.5e6 * (d + 0.001), 0.5e6),
                     |_, _| unreachable!(),
@@ -988,6 +1044,7 @@ mod tests {
                 &[Tangential { normal: 0, mu: 0.4 }],
                 0,
                 Controls::default(),
+                1.0,
                 |q, y| {
                     y[0] = 1e-6 * q[0];
                     y[1] = 0.0;
@@ -1016,6 +1073,7 @@ mod tests {
                 &t,
                 0,
                 Controls::default(),
+                1.0,
                 |q, y| dense(&c, q, y),
                 law,
                 |_, _| unreachable!(),
@@ -1032,11 +1090,18 @@ mod tests {
                 max_newton_iterations: 0,
                 ..Controls::default()
             },
+            1.0,
             |q, y| dense(&c, q, y),
             law,
             |_, _| unreachable!(),
         );
-        assert!(matches!(refused, Err(SolveError::NoConvergence { .. })));
+        assert!(matches!(
+            refused,
+            Err(SolveError::NoConvergence {
+                site: RefusalSite::CoreAudit,
+                ..
+            })
+        ));
         assert!(workspace.forces().is_empty() && workspace.paths().is_empty());
     }
 }

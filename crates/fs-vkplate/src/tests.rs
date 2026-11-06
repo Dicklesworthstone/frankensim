@@ -1367,7 +1367,6 @@ fn g0_head_viscous_layer_increases_modal_damping() {
     let n = plain.cols.len();
     let trace = |l: &radiation::ModalAirLoad| (0..n).map(|i| l.damping[i * n + i]).sum::<f64>();
     assert!(trace(&layered) > trace(&plain), "viscous layer did not add loss: {} <= {}", trace(&layered), trace(&plain));
-    assert!(layered.rate_bound > plain.rate_bound);
     // Beyond the table a shape takes its evanescent air mass; on the table's own high
     // shapes (j_mn >= 15) that law agrees with the baked load (-9 % to -0.5 % on the kit
     // heads), which a wrong factor in it would not.

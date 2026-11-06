@@ -373,6 +373,198 @@ fn interacting_friction_disks_are_order_independent_and_obey_both_final_laws() {
     }
 }
 
+type Joint = (Vec<Body>, Vec<Contact>, Vec<Friction>);
+type JointWork = (
+    ContactQueue,
+    contact_response::Workspace,
+    friction_response::Workspace,
+);
+
+fn step_joint(
+    (bodies, contacts, frictions): &mut Joint,
+    (queue, normal, work): &mut JointWork,
+    k: f64,
+    controls: FrictionSolveControls,
+) -> Result<FrictionSolveReport, ContactSolveError> {
+    friction_response::solve_contacts_with_friction_checked(
+        bodies,
+        contacts,
+        frictions,
+        &mut [],
+        queue,
+        normal,
+        work,
+        k,
+        ContactSolveControls::default(),
+        controls,
+    )
+    .map(|reports| reports.1)
+}
+
+/// One sliding contact. `normal_offset` and `tangent_offset` set how far the
+/// normal and tangent bodies sit from zero, and so how much roundoff each part
+/// of the rounded pose carries.
+fn offset_sliding_contact(
+    normal_offset: f64,
+    tangent_offset: f64,
+    penetration: f64,
+    stiffness: f64,
+    slip: f64,
+    k: f64,
+) -> Joint {
+    let angle = 0.7_f64;
+    let tangent = |name, direction: f64| {
+        let far = tangent_offset;
+        point_with_prediction(name, far, far - 0.5 * slip * direction, 0.0, k)
+    };
+    let normal = normal_offset + penetration;
+    (
+        vec![
+            point_with_prediction("normal", normal, normal, 0.0, k),
+            tangent("tangent x", angle.cos()),
+            tangent("tangent y", angle.sin()),
+        ],
+        vec![Contact::new(
+            vec![(0, 0, 1.0)],
+            vec![],
+            normal_offset,
+            Law::Power {
+                k: stiffness,
+                alpha: 1.0,
+                mu: 0.0,
+            },
+        )],
+        vec![Friction {
+            contact: 0,
+            sx: vec![(1, 0, 1.0)],
+            sy: vec![(2, 0, 1.0)],
+            mu: 0.6,
+            force: 0.0,
+            stuck: false,
+        }],
+    )
+}
+
+/// A warm start at the edge of the core's acceptance leaves it no margin, so
+/// roundoff alone can refuse the normal law at the rounded pose. That refusal
+/// goes back to Newton until the audit passes. Without budget it stays a named
+/// refusal that publishes nothing: the normal check has no rounding allowance.
+#[test]
+fn rounded_pose_refusal_at_the_acceptance_edge_iterates_until_the_audit_passes() {
+    let k = 1e-5;
+    let controls = FrictionSolveControls::default();
+    let mut retried = 0;
+    for member in 0..32 {
+        let offset = 1e-2 * (1.0 + f64::from(member) / 32.0);
+        let pristine = offset_sliding_contact(offset, 0.0, 1.5e-8, 1e7, 1e-10, k);
+        let mut settled_work = JointWork::default();
+        let mut settled = pristine.clone();
+        step_joint(&mut settled, &mut settled_work, k, controls).unwrap();
+        let warmed = |excess: f64| {
+            let mut state = pristine.clone();
+            state.1[0].force = settled.1[0].force * (1.0 + excess);
+            state
+        };
+        // Bisect for the largest warm error the core accepts without a step.
+        let (mut inside, mut outside) = (0.0, 1e-6);
+        for _ in 0..48 {
+            let excess = 0.5 * (inside + outside);
+            let mut state = warmed(excess);
+            let report = step_joint(&mut state, &mut settled_work.clone(), k, controls).unwrap();
+            if report.newton_iterations == 0 {
+                inside = excess;
+            } else {
+                outside = excess;
+            }
+        }
+        let mut state = warmed(outside);
+        let report = step_joint(&mut state, &mut settled_work.clone(), k, controls).unwrap();
+        if report.rounded_pose_retries == 0 {
+            continue;
+        }
+        retried += 1;
+        assert!(report.newton_iterations > 0);
+        assert!(report.normal_residual <= 1.0 && report.friction_residual <= 1.0);
+        check_normal_laws(&state.0, &state.1, k);
+
+        let mut refused = warmed(outside);
+        let exhausted = FrictionSolveControls {
+            max_newton_iterations: 0,
+            ..controls
+        };
+        let error = step_joint(&mut refused, &mut settled_work.clone(), k, exhausted).unwrap_err();
+        let ContactSolveError::Friction(FrictionSolveError::NoConvergence {
+            site: ContactRefusalSite::RoundedPose,
+            newton_iterations: 0,
+            normal_residual,
+            ..
+        }) = error
+        else {
+            panic!("expected a rounded-pose refusal, got {error:?}");
+        };
+        assert!(normal_residual > 1.0);
+        for (body, old) in refused.0.iter().zip(&pristine.0) {
+            assert_eq!(body.wn, old.wn);
+        }
+        assert_eq!(refused.1[0].force, warmed(outside).1[0].force);
+    }
+    assert!(retried > 0, "no family member reached the rounded-pose refusal");
+}
+
+/// Built like the closed hi-hat rim that refused: a sliding contact with very
+/// little load, 1 mm from rest, slipping about 2e-11 m in a sample. There the
+/// 1e-10 force tolerance asks for slip finer than one ulp of the pose, so the
+/// audit alone refuses at any iteration. The rounding bound admits these
+/// states, and a violation bigger than that bound still refuses.
+#[test]
+fn rounded_pose_floor_admits_only_what_the_pose_cannot_represent() {
+    let k = 7.7e-5;
+    let controls = FrictionSolveControls::default();
+    let mut floored = 0;
+    for member in 0..32 {
+        let offset = 1.07e-3 * (1.0 + f64::from(member) / 32.0);
+        let mut state = offset_sliding_contact(0.0, offset, 3.55e-10, 1e7, 1.9e-11, k);
+        let mut work = JointWork::default();
+        let report = step_joint(&mut state, &mut work, k, controls).unwrap();
+        assert!(report.friction_residual <= 1.0);
+        let (bodies, contacts, _) = &state;
+        let tangent = [&bodies[1], &bodies[2]];
+        let slip = tangent.map(|b| b.wn[0] - b.wp[0]);
+        let rounding = tangent.map(|b| 0.5 * f64::EPSILON * b.wn[0].abs());
+        let bound = tangent.map(|b| b.compliance(0, k));
+        let q = work.2.tangential_forces()[0].map(|force| -force);
+        let audit = |q: [f64; 2], rounding: [f64; 2]| {
+            friction_island::check_friction(
+                contacts[0].force,
+                q,
+                slip,
+                slip,
+                0.6,
+                bound,
+                rounding,
+                controls,
+            )
+            .unwrap()
+            .residual
+        };
+        floored += usize::from(audit(q, [0.0; 2]) > 1.0);
+        assert!(audit(q, rounding) <= 1.0);
+
+        // Turn the force off the sliding direction by twice what the check
+        // allows. The projection follows a share `slope` of that turn.
+        let step = 2.0 / (bound[0] + bound[1]);
+        let capacity = 0.6 * contacts[0].force;
+        let trial = (q[0] + step * slip[0]).hypot(q[1] + step * slip[1]);
+        let slope = capacity / trial;
+        let allowed = controls.force_tolerance
+            + controls.relative_tolerance * capacity
+            + slope * step * rounding[0].hypot(rounding[1]);
+        let turn = 2.0 * allowed / (1.0 - slope) / q[0].hypot(q[1]);
+        assert!(audit([q[0] - turn * q[1], q[1] + turn * q[0]], rounding) > 1.0);
+    }
+    assert!(floored > 0, "no family member reached the rounding floor");
+}
+
 #[test]
 fn refused_joint_step_preserves_every_contact_friction_and_crush_state() {
     let k = 0.001;
