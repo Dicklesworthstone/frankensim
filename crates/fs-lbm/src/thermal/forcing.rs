@@ -70,6 +70,13 @@ pub(crate) fn reframe3(
 pub enum ThermalForcingError {
     /// A buoyancy direction must have finite components and nonzero length.
     InvalidDirection,
+    /// Angular velocity or its midpoint inverse is not finite/representable.
+    InvalidRotation,
+    /// A rotating live cell has invalid density, velocity or composed force.
+    InvalidCoriolisCell {
+        /// Linear grid-cell index.
+        cell: usize,
+    },
     /// The field must contain one vector per cell, including wall cells.
     Length {
         /// Required number of cell vectors.
@@ -93,6 +100,8 @@ impl core::fmt::Display for ThermalForcingError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::InvalidDirection => write!(f, "buoyancy direction must be finite and nonzero"),
+            Self::InvalidRotation => write!(f, "thermal Coriolis rotation must be finite and representable"),
+            Self::InvalidCoriolisCell { cell } => write!(f, "invalid thermal Coriolis state at cell {cell}"),
             Self::Length { expected, actual } => write!(f, "thermal force field has {actual} cells, expected {expected}"),
             Self::NonFinite { cell, component } => write!(f, "nonfinite thermal force at cell {cell}, component {component}"),
             Self::Layout => write!(f, "invalid thermal force/temperature layout"),
@@ -101,6 +110,71 @@ impl core::fmt::Display for ThermalForcingError {
     }
 }
 impl std::error::Error for ThermalForcingError {}
+
+
+// One admitted inverse serves every force refresh. D2 embeds its scalar spin
+// about +z, while D3 retains all components. The existing frame kernel owns
+// the sign and midpoint algebra; no second source integrator is introduced.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct CoriolisSource {
+    rotation: crate::d3q19::Coriolis3,
+    denominator: f64,
+}
+
+impl CoriolisSource {
+    pub(crate) fn new(
+        angular_velocity: [f64; 3],
+    ) -> Result<Option<Self>, ThermalForcingError> {
+        let rotation = crate::d3q19::Coriolis3 { angular_velocity };
+        let denominator = rotation.frame()
+            .midpoint_denominator([0.0; 3])
+            .map_err(|_| ThermalForcingError::InvalidRotation)?;
+        if angular_velocity == [0.0; 3] {
+            return Ok(None);
+        }
+        Ok(Some(Self { rotation, denominator }))
+    }
+
+    pub(crate) fn angular_velocity(self) -> [f64; 3] {
+        self.rotation.angular_velocity
+    }
+
+    pub(crate) fn force<const D: usize>(
+        self,
+        density: f64,
+        velocity: [f64; D],
+        uniform_acceleration: [f64; D],
+        force: [f64; D],
+        cell: usize,
+    ) -> Result<[f64; D], ThermalForcingError> {
+        debug_assert!(D == 2 || D == 3);
+        let invalid = ThermalForcingError::InvalidCoriolisCell { cell };
+        if !density.is_finite() || density <= 0.0
+            || !velocity.into_iter().chain(uniform_acceleration).chain(force).all(f64::is_finite)
+        {
+            return Err(invalid);
+        }
+        let mut u = [0.0; 3];
+        let mut base = [0.0; 3];
+        for axis in 0..D {
+            u[axis] = velocity[axis];
+            base[axis] = uniform_acceleration[axis] + force[axis] / density;
+        }
+        let acceleration = self.rotation.frame().source_acceleration::<true>(
+            [0.0; 3], u, base, self.denominator,
+        );
+        // D2's grid.g remains owned by the grid. Include it in the midpoint
+        // solve, then remove just that separately-applied acceleration from
+        // fext. Source density departures have already modified gravity only.
+        let result = core::array::from_fn(|axis| {
+            density * (acceleration[axis] - uniform_acceleration[axis])
+        });
+        if !result.into_iter().all(f64::is_finite) {
+            return Err(invalid);
+        }
+        Ok(result)
+    }
+}
 
 /// Normalize once at admission, outside the per-cell collision loop. Scaling
 /// first admits both subnormal and near-MAX vectors without norm under/overflow.

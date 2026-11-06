@@ -360,6 +360,7 @@ fn nonlinear_gas_density_has_distinct_force_and_exact_accepted_source_epochs() {
 #[test]
 fn force_query_and_exact_final_source_refusals_keep_the_whole_material_step_atomic() {
     let (spec, _, _, mut fluid) = setup();
+    fluid.set_coriolis_si([40.0, -25.0, 30.0]).unwrap();
     let before = (
         fluid.lattice.grid.f.clone(),
         fluid.lattice.gpop.clone(),
@@ -418,6 +419,7 @@ fn force_query_and_exact_final_source_refusals_keep_the_whole_material_step_atom
         );
     }
     let (_, _, _, mut clean) = setup();
+    clean.set_coriolis_si([40.0, -25.0, 30.0]).unwrap();
     for state in [&mut fluid, &mut clean] {
         state
             .step_with_boussinesq_material_transport_endpoint_averaged(
@@ -433,4 +435,156 @@ fn force_query_and_exact_final_source_refusals_keep_the_whole_material_step_atom
     assert_eq!(fluid.lattice.grid.f, clean.lattice.grid.f);
     assert_eq!(fluid.lattice.gpop, clean.lattice.gpop);
     assert_eq!(fluid.lattice.grid.fext, clean.lattice.grid.fext);
+}
+
+
+// Independent elimination for (I + [omega]x) u_mid = u + F/(2 rho).
+// This oracle neither calls the production inverse nor material SI helpers.
+fn rotating_force<const D: usize>(
+    omega: [f64; 3],
+    density: f64,
+    velocity: [f64; D],
+    force: [f64; D],
+) -> [f64; D] {
+    let [x, y, z] = omega;
+    let mut matrix = [[1.0, -z, y], [z, 1.0, -x], [-y, x, 1.0]];
+    let mut midpoint = [0.0; 3];
+    for axis in 0..D {
+        midpoint[axis] = velocity[axis] + 0.5 * force[axis] / density;
+    }
+    for pivot in 0..3 {
+        let diagonal = matrix[pivot][pivot];
+        for column in pivot..3 {
+            matrix[pivot][column] /= diagonal;
+        }
+        midpoint[pivot] /= diagonal;
+        for row in 0..3 {
+            if row != pivot {
+                let factor = matrix[row][pivot];
+                for column in pivot..3 {
+                    matrix[row][column] -= factor * matrix[pivot][column];
+                }
+                midpoint[row] -= factor * midpoint[pivot];
+            }
+        }
+    }
+    let cross = [
+        y * midpoint[2] - z * midpoint[1],
+        z * midpoint[0] - x * midpoint[2],
+        x * midpoint[1] - y * midpoint[0],
+    ];
+    core::array::from_fn(|axis| force[axis] - 2.0 * density * cross[axis])
+}
+
+#[test]
+fn g1_rotating_boussinesq_thermal_steps_retain_original_source_epochs_and_one_flow_step() {
+    let (spec, retained, mut two, mut three) = setup();
+    let (_, _, mut control2, mut control3) = setup();
+    let gate = CancelGate::new_clock_free();
+    let spin2 = 40.0;
+    let spin3 = [40.0, -25.0, 30.0];
+    two.set_coriolis_si(spin2).unwrap();
+    three.set_coriolis_si(spin3).unwrap();
+    two.lattice.gbeta = 0.25;
+    three.lattice.gbeta = 0.25;
+    let external2 = [1.0, -0.5];
+    let external3 = [1.0, -0.5, 0.25];
+    let gravity2 = [-9.81, 0.0];
+    let gravity3 = [3.0, -4.0, -8.0];
+    let rho0 = retained.density_kg_m3();
+    let heat = power().map(|p| p / rho0 / retained.specific_heat_j_kg_k() * 0.001 / 10.0);
+    let native_limits = ThermalSourceLimits {
+        max_cells: 16,
+        temperature_range: [-1.0, 3.0],
+        balance_tolerance: 1e-10,
+    };
+    for _ in 0..4 {
+        let opening2: Vec<_> = (0..16).map(|cell| two.lattice.grid.moments(cell)).collect();
+        let opening3: Vec<_> = (0..16).map(|cell| three.lattice.grid.moments3(cell)).collect();
+        let mut queries2 = 0;
+        let report2 = two.step_with_boussinesq_material_transport_endpoint_averaged(
+            &power(), &[external2; 16], 0.01, limits(), config(gravity2), &gate,
+            |_, temperature, reference| {
+                assert_eq!(*reference, retained);
+                let result = ticket(&spec, temperature, queries2);
+                queries2 += 1;
+                result
+            },
+        ).unwrap();
+        let mut queries3 = 0;
+        let report3 = three.step_with_boussinesq_material_transport_endpoint_averaged(
+            &power(), &[external3; 16], limits(), config(gravity3), &gate,
+            |_, temperature, reference| {
+                assert_eq!(*reference, retained);
+                let result = ticket(&spec, temperature, queries3);
+                queries3 += 1;
+                result
+            },
+        ).unwrap();
+        assert_eq!((queries2, queries3), (36, 36));
+        let mut force2 = [[0.0; 2]; 16];
+        let mut force3 = [[0.0; 3]; 16];
+        let mut momentum2 = [1.0; 16];
+        let mut thermal2 = [1.0; 16];
+        let mut momentum3 = [1.0; 16];
+        let mut thermal3 = [1.0; 16];
+        for (initial, next) in report2.transport.applied.iter().zip(&report2.force_endpoint) {
+            let cell = initial.cell;
+            let departure = 0.5 * (initial.material.resolved_transport().density_kg_m3() - rho0)
+                + 0.5 * (next.material.resolved_transport().density_kg_m3() - rho0);
+            let body = core::array::from_fn(|axis| {
+                (external2[axis] + departure * gravity2[axis]) / rho0 * 0.001_f64.powi(2) / 0.01
+            });
+            force2[cell] = rotating_force(
+                [0.0, 0.0, spin2 * 0.001], opening2[cell].rho, opening2[cell].u, body,
+            );
+            momentum2[cell] = initial.momentum_relaxation;
+            thermal2[cell] = initial.thermal_relaxation;
+            for axis in 0..2 {
+                close(two.lattice.grid.fext[cell][axis], force2[cell][axis], 3e-14);
+            }
+        }
+        for (initial, next) in report3.transport.applied.iter().zip(&report3.force_endpoint) {
+            let cell = initial.cell;
+            let departure = 0.5 * (initial.material.resolved_transport().density_kg_m3() - rho0)
+                + 0.5 * (next.material.resolved_transport().density_kg_m3() - rho0);
+            let body = core::array::from_fn(|axis| {
+                (external3[axis] + departure * gravity3[axis]) / rho0 * 0.001_f64.powi(2) / 0.01
+            });
+            force3[cell] = rotating_force(
+                spin3.map(|w| w * 0.001), opening3[cell].0, opening3[cell].1, body,
+            );
+            momentum3[cell] = initial.momentum_relaxation;
+            thermal3[cell] = initial.thermal_relaxation;
+            for axis in 0..3 {
+                close(three.lattice.grid.fext[cell][axis], force3[cell][axis], 3e-14);
+            }
+        }
+        // One independent native replay receives the complete force calculated
+        // above, with the same original molecular rates. A second collision,
+        // repeated heat transport or density-weighted Coriolis cannot match it.
+        control2.lattice.step_with_sources_and_transport(
+            &heat, &force2, RelaxationField { momentum: &momentum2, thermal: &thermal2 },
+            native_limits,
+        ).unwrap();
+        control3.lattice.step_with_sources_and_transport(
+            &heat, &force3, RelaxationField { momentum: &momentum3, thermal: &thermal3 },
+            native_limits,
+        ).unwrap();
+        for (actual, expected) in two.lattice.grid.f.iter().flatten().zip(control2.lattice.grid.f.iter().flatten())
+            .chain(two.lattice.gpop.iter().flatten().zip(control2.lattice.gpop.iter().flatten()))
+            .chain(three.lattice.grid.f.iter().flatten().zip(control3.lattice.grid.f.iter().flatten()))
+            .chain(three.lattice.gpop.iter().flatten().zip(control3.lattice.gpop.iter().flatten()))
+        {
+            close(*actual, *expected, 3e-12);
+        }
+        for heat_balance in [report2.transport.heat, report3.transport.heat] {
+            close(heat_balance.source_j, 12.0 * 1e6 * 1e-6 * 0.001, 1e-13);
+            assert!(heat_balance.defect_j.abs() < 1e-10);
+        }
+        assert_eq!(two.lattice.gbeta, 0.25);
+        assert_eq!(three.lattice.gbeta, 0.25);
+        assert_eq!(two.lattice.coriolis().angular_velocity, spin2 * 0.001);
+        assert_eq!(three.lattice.coriolis().angular_velocity, spin3.map(|w| w * 0.001));
+    }
 }

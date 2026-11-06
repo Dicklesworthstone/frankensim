@@ -45,6 +45,7 @@ pub struct ThermalLbm {
     pub t_ref: f64,
     pub(crate) buoyancy_direction: [f64; 2],
     pub(crate) buoyancy_quadrature: BuoyancyQuadrature,
+    pub(crate) coriolis: Option<forcing::CoriolisSource>,
     pub(crate) wall_boundaries: Option<[ThermalWall; 2]>,
     pub(crate) spatial_wall_boundaries: Option<[Vec<ThermalWall>; 2]>,
     pub(crate) wall_exchange: Option<[ThermalWallExchange; 2]>,
@@ -98,6 +99,7 @@ impl ThermalLbm {
             t_ref: 0.5,
             buoyancy_direction: [0.0, 1.0],
             buoyancy_quadrature: BuoyancyQuadrature::OpeningTemperature,
+            coriolis: None,
             wall_boundaries: None,
             spatial_wall_boundaries: None,
             wall_exchange: None,
@@ -155,6 +157,41 @@ impl ThermalLbm {
     #[must_use]
     pub fn buoyancy_quadrature(&self) -> BuoyancyQuadrature {
         self.buoyancy_quadrature
+    }
+
+    /// Configure the local rotating-plane source for all subsequent steps.
+    ///
+    /// Spin is right-handed about +z in radians per lattice time; effective
+    /// gravity must already absorb the background centrifugal potential.
+    /// Initial fluid and wall velocities are expressed in these moving axes.
+    /// This changes no populations, physical velocity, stress or thermal
+    /// history. Zero spin disables rotation on the next step.
+    ///
+    /// External fields contain non-Coriolis loads. Each opening or endpoint
+    /// force refresh combines the original buoyancy,
+    /// external load and grid acceleration with the same midpoint Coriolis
+    /// solve. Only one flow collision and one scalar transport advance time.
+    /// Material density departures affect gravity, never the Coriolis term.
+    /// Checked source/material steps retain this setting and their rollback.
+    ///
+    /// Coriolis contributes no heat. Its isolated homogeneous source preserves
+    /// speed, with angle -2 atan(spin) per step; the complete thermal/flow split
+    /// retains its existing accuracy and stability limits. This local model
+    /// adds no accelerating-vessel or global spherical-geometry dynamics.
+    pub fn set_coriolis(
+        &mut self,
+        rotation: crate::core2::frame::Coriolis2,
+    ) -> Result<(), ThermalForcingError> {
+        self.coriolis = forcing::CoriolisSource::new([0.0, 0.0, rotation.angular_velocity])?;
+        Ok(())
+    }
+
+    /// The configured local rotation, initially zero.
+    #[must_use]
+    pub fn coriolis(&self) -> crate::core2::frame::Coriolis2 {
+        crate::core2::frame::Coriolis2 {
+            angular_velocity: self.coriolis.map_or(0.0, |source| source.angular_velocity()[2]),
+        }
     }
 
     /// Set bottom/top thermal laws without changing populations, buoyancy or
@@ -288,10 +325,11 @@ impl ThermalLbm {
     /// Each total force is held over this interval. Changing it first rebinds
     /// the Guo half-source frame at fixed physical velocity and stress; switching
     /// on, reversing or removing a magnetic load supplies no extra half impulse.
-    /// Invalid fields or nonfinite opening-force sums are refused before any
-    /// mutation. Endpoint averaging also checks the transported force before
-    /// flow collision; that later refusal can leave a transported thermal
-    /// state. Checked source/material APIs provide complete rollback. Ordinary
+    /// Invalid external fields or nonfinite opening buoyancy sums are refused
+    /// before mutation. Coriolis composition and endpoint averaging additionally
+    /// check the selected total force before flow collision; refusal can leave
+    /// tentative force/thermal state. Checked source/material APIs provide
+    /// complete rollback. Ordinary
     /// solver-state and stability requirements still apply.
     pub fn step_with_external_forces(&mut self, forces: &[[f64; 2]]) -> Result<(), ThermalForcingError> {
         forcing::validate_external_forces(forces, &self.gpop, self.grid.nx, self.gbeta, self.t_ref, self.buoyancy_direction)?;
@@ -359,12 +397,7 @@ impl ThermalLbm {
                             *total += load;
                         }
                     }
-                    let previous = self.grid.fext[i];
-                    if previous != total {
-                        let velocity = self.grid.moments(i).u;
-                        forcing::reframe2(&mut self.grid.f[i], velocity, previous, total);
-                        self.grid.fext[i] = total;
-                    }
+                    self.bind_thermal_force(i, total)?;
                 }
             }
         }
@@ -427,15 +460,33 @@ impl ThermalLbm {
                     before, after, self.gbeta, self.t_ref,
                     self.buoyancy_direction, external.map(|field| field[cell]), cell,
                 )?;
-                let previous = self.grid.fext[cell];
-                if previous != total {
-                    let velocity = self.grid.moments(cell).u;
-                    forcing::reframe2(&mut self.grid.f[cell], velocity, previous, total);
-                    self.grid.fext[cell] = total;
-                }
+                self.bind_thermal_force(cell, total)?;
             }
         }
         self.grid.step(&mut self.scratch);
+        Ok(())
+    }
+
+    // The complete selected non-Coriolis load is known here. Rebinding is a
+    // Guo coordinate change, so neither force refresh nor scalar transport
+    // applies an extra Coriolis impulse before the single flow collision.
+    fn bind_thermal_force(
+        &mut self,
+        cell: usize,
+        mut total: [f64; 2],
+    ) -> Result<(), ThermalForcingError> {
+        let previous = self.grid.fext[cell];
+        if previous == total && self.coriolis.is_none() {
+            return Ok(());
+        }
+        let moments = self.grid.moments(cell);
+        if let Some(rotation) = self.coriolis {
+            total = rotation.force(moments.rho, moments.u, self.grid.g, total, cell)?;
+        }
+        if previous != total {
+            forcing::reframe2(&mut self.grid.f[cell], moments.u, previous, total);
+            self.grid.fext[cell] = total;
+        }
         Ok(())
     }
 

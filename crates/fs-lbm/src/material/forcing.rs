@@ -33,6 +33,18 @@ impl ForceUnits {
         }
     }
 
+    fn angular_velocity(self, angular_velocity_rad_s: f64) -> Result<f64, MaterialLbmError> {
+        let converted = angular_velocity_rad_s * self.timestep_s;
+        if !angular_velocity_rad_s.is_finite() || !converted.is_finite()
+            || (angular_velocity_rad_s != 0.0 && converted == 0.0)
+        {
+            return Err(MaterialLbmError::Invalid(
+                "physical angular velocity is not representable in lattice units",
+            ));
+        }
+        Ok(converted)
+    }
+
     fn component(self, force_n_m3: f64) -> Result<f64, MaterialLbmError> {
         // Lattice force is momentum per lattice volume per lattice step,
         // NOT acceleration: F_lb = F_SI/rho_ref * dt²/dx.
@@ -71,6 +83,23 @@ impl<F: FluidTransport + ?Sized> MaterialScaling<'_, F> {
 }
 
 impl MaterialSlab<ThermalLbm> {
+    /// Configure persistent local Coriolis rotation about +z [rad/s].
+    ///
+    /// Uses this slab's retained timestep: omega_lattice = omega_SI * dt.
+    /// All ordinary, prescribed-heat, material transport and rheology steps
+    /// then compose rotation with their original selected force owner.
+    /// Boussinesq density departures affect effective gravity only; rotation
+    /// supplies no heat. Gravity must already include centrifugal potential.
+    /// Initial velocities use the moving axes, as in the native setter.
+    ///
+    /// Zero disables rotation on the next step. Invalid/unrepresentable input
+    /// leaves the setting, physical populations and thermal history unchanged.
+    pub fn set_coriolis_si(&mut self, angular_velocity_rad_s: f64) -> Result<(), MaterialLbmError> {
+        let angular_velocity = self.force_units.angular_velocity(angular_velocity_rad_s)?;
+        self.lattice.set_coriolis(crate::core2::frame::Coriolis2 { angular_velocity })?;
+        Ok(())
+    }
+
     /// Advance 2-D heat and flow with external body forces [N/m³] PLUS buoyancy.
     /// Supply one vector per grid cell, in its existing linear order, including
     /// wall cells (whose forces are ignored). No force persists implicitly:
@@ -89,6 +118,23 @@ impl MaterialSlab<ThermalLbm> {
 }
 
 impl MaterialSlab<ThermalLbm3> {
+    /// Configure persistent arbitrary-axis local Coriolis rotation [rad/s].
+    ///
+    /// Shares the two-dimensional SI/force/heat/rollback contract. Components
+    /// are resolved in the slab axes and converted with its retained timestep.
+    /// Use the local effective-gravity model, not full vessel kinematics.
+    pub fn set_coriolis_si(
+        &mut self,
+        angular_velocity_rad_s: [f64; 3],
+    ) -> Result<(), MaterialLbmError> {
+        let mut angular_velocity = [0.0; 3];
+        for axis in 0..3 {
+            angular_velocity[axis] = self.force_units.angular_velocity(angular_velocity_rad_s[axis])?;
+        }
+        self.lattice.set_coriolis(crate::d3q19::Coriolis3 { angular_velocity })?;
+        Ok(())
+    }
+
     /// Advance 3-D heat and flow with external body forces [N/m³] PLUS buoyancy.
     /// Uses the same material-bound conversion and refusal contract as the 2-D
     /// method. The field includes both wall planes and is ordered x-fastest.

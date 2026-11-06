@@ -359,6 +359,7 @@ impl Slab<2, 5> for ThermalLbm {
             t_ref: self.t_ref, scratch: Vec::new(),
             buoyancy_direction: self.buoyancy_direction,
             buoyancy_quadrature: self.buoyancy_quadrature,
+            coriolis: self.coriolis,
             wall_boundaries: self.wall_boundaries, wall_exchange: self.wall_exchange,
             spatial_wall_boundaries: self.spatial_wall_boundaries.clone(),
             advection_history: self.advection_history.clone(),
@@ -431,6 +432,7 @@ impl Slab<3, 7> for ThermalLbm3 {
         s.t_bottom = self.t_bottom; s.t_top = self.t_top; s.t_ref = self.t_ref;
         s.buoyancy_direction = self.buoyancy_direction;
         s.buoyancy_quadrature = self.buoyancy_quadrature;
+        s.coriolis = self.coriolis;
         s.wall_boundaries = self.wall_boundaries; s.wall_exchange = self.wall_exchange;
         s.spatial_wall_boundaries.clone_from(&self.spatial_wall_boundaries);
         (s, weights)

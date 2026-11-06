@@ -237,3 +237,36 @@ fn g3_calibration_refusal_keeps_native_flow_and_heat_state_unchanged() {
     assert_eq!(slab.lattice.gpop, before_g);
     assert_eq!(slab.lattice.grid.tau, before_tau);
 }
+
+
+#[test]
+fn g3_local_rotation_preserves_original_constitutive_strain_and_molecular_heat() {
+    let mut rotating = slab();
+    let mut fixed = slab();
+    rotating.set_coriolis_si([2.0, -3.0, 4.0]).unwrap();
+    let model = law(20_000.0, 0.5);
+    let advance = |state: &mut MaterialSlab3| {
+        state.step_with_material_rheology_and_viscous_heating(
+            &[0.0; 16], &[[0.0; 3]; 16], limits(), controls(),
+            &CancelGate::new_clock_free(),
+            |point, _| model.evaluate(point.temperature_k, point.shear_rate_per_s)?
+                .bind(fluid(1.0)),
+        ).unwrap()
+    };
+    let actual = advance(&mut rotating);
+    let reference = advance(&mut fixed);
+    assert_eq!(actual.viscous.power_w_m3, reference.viscous.power_w_m3);
+    assert!(actual.viscous.power_w_m3[SHEAR_CELL] > 0.0);
+    for (a, b) in actual.transport.applied.iter().zip(&reference.transport.applied) {
+        assert_eq!(a.material.point(), b.material.point());
+        assert_eq!(a.transport, b.transport);
+        assert_eq!(a.momentum_relaxation, b.momentum_relaxation);
+        assert_eq!(a.thermal_relaxation, b.thermal_relaxation);
+    }
+    near(actual.transport.heat.source_j, reference.transport.heat.source_j, 2e-12);
+    for (a, b) in rotating.lattice.gpop.iter().zip(&fixed.lattice.gpop) {
+        near(a.iter().sum(), b.iter().sum(), 2e-12);
+    }
+    assert_ne!(rotating.lattice.grid.f, fixed.lattice.grid.f);
+    assert_eq!(rotating.lattice.coriolis().angular_velocity, [0.02, -0.03, 0.04]);
+}

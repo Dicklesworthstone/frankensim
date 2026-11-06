@@ -748,6 +748,7 @@ pub struct ThermalLbm3 {
     pub t_ref: f64,
     pub(crate) buoyancy_direction: [f64; 3],
     pub(crate) buoyancy_quadrature: BuoyancyQuadrature,
+    pub(crate) coriolis: Option<crate::thermal::forcing::CoriolisSource>,
     pub(crate) wall_boundaries: Option<[ThermalWall; 2]>,
     pub(crate) spatial_wall_boundaries: Option<[Vec<ThermalWall>; 2]>,
     pub(crate) wall_exchange: Option<[ThermalWallExchange; 2]>,
@@ -804,6 +805,7 @@ impl ThermalLbm3 {
             t_ref: 0.5,
             buoyancy_direction: [0.0, 0.0, 1.0],
             buoyancy_quadrature: BuoyancyQuadrature::OpeningTemperature,
+            coriolis: None,
             wall_boundaries: None,
             spatial_wall_boundaries: None,
             wall_exchange: None,
@@ -860,6 +862,42 @@ impl ThermalLbm3 {
     #[must_use]
     pub fn buoyancy_quadrature(&self) -> BuoyancyQuadrature {
         self.buoyancy_quadrature
+    }
+
+    /// Configure local arbitrary-axis Coriolis forcing for every coupled step.
+    ///
+    /// Angular velocity is in radians per lattice time and resolved in grid
+    /// axes. Effective gravity already includes the background centrifugal
+    /// potential; fluid and prescribed plate velocities are relative to these
+    /// axes. Setting or clearing rotation applies no impulse and changes no
+    /// population, force representation, physical stress or thermal history.
+    ///
+    /// External fields contain non-Coriolis loads. The complete selected
+    /// buoyancy/external load enters the shared midpoint
+    /// solve before the only native momentum collision. Opening, averaged and
+    /// material-resolved buoyancy retain their original sampling. Coriolis
+    /// receives no material-density-departure multiplier and supplies no heat.
+    /// Source, transport, rheology and material candidates retain this setting
+    /// and their original atomic admission and wall/heat accounting.
+    ///
+    /// The isolated homogeneous source preserves speed and axial velocity,
+    /// with angle -2 atan(|omega|) per tick. Spatial transport and thermal
+    /// splitting retain their existing errors. This is a local model, not a
+    /// full accelerating vessel, a spherical solver or a full-flow energy law.
+    pub fn set_coriolis(
+        &mut self,
+        rotation: super::Coriolis3,
+    ) -> Result<(), ThermalForcingError> {
+        self.coriolis = crate::thermal::forcing::CoriolisSource::new(rotation.angular_velocity)?;
+        Ok(())
+    }
+
+    /// The configured local rotation, initially zero.
+    #[must_use]
+    pub fn coriolis(&self) -> super::Coriolis3 {
+        super::Coriolis3 {
+            angular_velocity: self.coriolis.map_or([0.0; 3], |source| source.angular_velocity()),
+        }
     }
 
     /// Set bottom/top thermal laws without changing populations, buoyancy or
@@ -984,9 +1022,9 @@ impl ThermalLbm3 {
     /// Advance with external lattice force densities added to thermal buoyancy.
     /// The borrowed field has one vector per cell including the two wall
     /// planes, whose loads are ignored. It contains EXTERNAL forces only, not
-    /// the previous step's total `fext`. Opening-force admission precedes
-    /// mutation. Endpoint averaging additionally checks the transported force
-    /// before flow collision. Complete thermal/flow rollback on a later native
+    /// the previous step's total `fext`. External/opening-buoyancy admission
+    /// precedes mutation. Coriolis composition and endpoint averaging check
+    /// the selected total force before flow collision. Complete thermal/flow rollback on a later native
     /// refusal is supplied by the checked source/material APIs; this low-level
     /// method is not transactional.
     /// Total forces are held over this interval. Source-frame changes preserve
@@ -1077,17 +1115,7 @@ impl ThermalLbm3 {
                                 *total += load;
                             }
                         }
-                        let previous = self.grid.fext[i];
-                        if previous != total {
-                            let velocity = self.grid.moments3(i).1;
-                            crate::thermal::forcing::reframe3(
-                                &mut self.grid.f[i],
-                                velocity,
-                                previous,
-                                total,
-                            );
-                            self.grid.fext[i] = total;
-                        }
+                        self.bind_thermal_force(i, total)?;
                     }
                 }
             }
@@ -1151,17 +1179,32 @@ impl ThermalLbm3 {
                     before, after, self.gbeta, self.t_ref,
                     self.buoyancy_direction, external.map(|field| field[cell]), cell,
                 )?;
-                let previous = self.grid.fext[cell];
-                if previous != total {
-                    let velocity = self.grid.moments3(cell).1;
-                    crate::thermal::forcing::reframe3(
-                        &mut self.grid.f[cell], velocity, previous, total,
-                    );
-                    self.grid.fext[cell] = total;
-                }
+                self.bind_thermal_force(cell, total)?;
             }
         }
         self.grid.try_step().map_err(ThermalForcingError::Flow3).map_err(E::from)
+    }
+
+    fn bind_thermal_force(
+        &mut self,
+        cell: usize,
+        mut total: [f64; 3],
+    ) -> Result<(), ThermalForcingError> {
+        let previous = self.grid.fext[cell];
+        if previous == total && self.coriolis.is_none() {
+            return Ok(());
+        }
+        let (density, velocity) = self.grid.moments3(cell);
+        if let Some(rotation) = self.coriolis {
+            total = rotation.force(density, velocity, [0.0; 3], total, cell)?;
+        }
+        if previous != total {
+            crate::thermal::forcing::reframe3(
+                &mut self.grid.f[cell], velocity, previous, total,
+            );
+            self.grid.fext[cell] = total;
+        }
+        Ok(())
     }
 
     /// Total kinetic energy of the fluid.

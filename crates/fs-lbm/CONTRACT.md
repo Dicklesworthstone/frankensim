@@ -11722,6 +11722,43 @@ theorem. Independent dimensional midpoint, material feedback, no-heat,
 interface-transport and atomic-refusal regression definitions are in
 `tests/material_free_surface_enthalpy/frame.rs`.
 
+### Persistent local Coriolis in dense thermal and material slabs
+
+`ThermalLbm::set_coriolis` and `ThermalLbm3::set_coriolis` retain admitted
+local rotation for ordinary, external-force, prescribed-heat, transport and
+rheology steps. Their `MaterialSlab::set_coriolis_si` methods convert physical
+angular velocity with the slab's retained timestep,
+`Omega_lattice = Omega_SI*dt`. Invalid or unrepresentable configuration leaves
+the setting unchanged; setting or clearing rotation changes no populations,
+physical velocity, stress or thermal history. Zero disables the source on the
+next step.
+
+The common force-binding seam composes rotation with the complete selected
+non-Coriolis load immediately before the single native momentum collision.
+Opening, endpoint-average and original-material buoyancy keep their existing
+sampling epochs. The analytic midpoint inverse is admitted once per setting;
+no grid-sized rotation field is allocated. The two-dimensional grid's separate
+uniform acceleration participates in the same solve and retains its original
+owner. Guo reframing preserves physical velocity and stress at force refresh,
+without an extra half impulse. Material density departures weight effective
+gravity only, never the Coriolis term.
+
+Checked source/material snapshots retain the setting and existing rollback.
+Wall exchange, heat accounting, material query ownership and constitutive
+stress reconstruction stay on the original trajectory. Coriolis supplies no
+molecular or sensible heat. Isolated homogeneous source motion preserves speed
+and axial velocity with the midpoint phase; spatial transport, thermal
+splitting, boundaries and their stability limits remain unchanged. Fluid and
+wall velocities are relative to the local axes, with background centrifugal
+effects represented in effective gravity.
+
+Regressions in `thermal_sources.rs`, `material_buoyancy_endpoint.rs` and
+`material_thermal_rheology.rs` exercise signed/arbitrary-axis phase, both
+buoyancy quadratures and native collision families, independent combined-force
+oracles, material SI scaling and source epochs, refusal/cancellation replay,
+and unchanged initial molecular strain and heat. This extends the dense thermal
+owners; the sparse liquid rotating-source contracts above remain separate.
+
 ### Acceleration of sparse free surfaces and material-owned vessels
 
 `RigidFrame3::prepare_free_surface_step` applies the SAME admitted rigid-frame
