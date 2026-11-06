@@ -23,6 +23,9 @@
 //! spin is free. No torque, artificial stopping impulse or numerical heat is
 //! supplied for an unrepresented physical coordinate.
 
+/// Prescribed original-source temperature changes at fixed native body state.
+pub mod temperature;
+
 use crate::{DynamicsError, MassProperties, PointKinematics, RigidBodyState, Vec3, Wrench};
 use fs_contact::interface_binding::adhesive_shear::SourceAdhesiveShear;
 use fs_contact::normal_patch::dmt::{

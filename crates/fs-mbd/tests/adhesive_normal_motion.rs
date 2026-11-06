@@ -6,6 +6,9 @@ mod common;
 #[path = "adhesive_normal_motion/driven.rs"]
 mod driven;
 
+#[path = "adhesive_normal_motion/temperature.rs"]
+mod temperature;
+
 use core::f64::consts::PI;
 use fs_contact::normal_patch::dmt::{SourceDmtSphereContact, coupled::*};
 use fs_exec::CancelGate;
