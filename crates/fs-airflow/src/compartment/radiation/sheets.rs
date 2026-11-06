@@ -81,6 +81,8 @@ impl ParticipatingEnclosure {
             surface_temperatures,
             emissivities,
             sheets,
+            &[],
+            &[],
             gas_temperatures,
             absorption,
             controls,
@@ -209,18 +211,28 @@ impl ParticipatingEnclosure {
             return self.prepare_optics(emissivities, absorption, work, cancelled);
         }
         self.prepare_exchange(absorption, work, cancelled)?;
+        self.factor_boundary_optics(&coefficients(emissivities, sheets), work, cancelled)
+    }
+
+    // One surface operator for opaque, sheet and finite-layer boundary laws.
+    pub(super) fn factor_boundary_optics(
+        &self,
+        coefficients: &BoundaryCoefficients,
+        work: &mut RadiationWorkspace,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(), RadiationError> {
         let n = self.geometry.len();
         let m = n + 2;
-        let (reflection, transmission, partner) = coefficients(emissivities, sheets);
+        let BoundaryCoefficients { reflection, transmission, partner, diagonal, thermal_anchor } = coefficients;
         work.matrix.fill(0.0);
         let mut anchored = [false; MAX_RADIATION_SURFACES];
         for i in 0..n {
             checkpoint(cancelled)?;
             let t = transmission[i];
             let p = partner[i];
-            work.matrix[i * n + i] = emissivities[i] + t;
+            work.matrix[i * n + i] = diagonal[i];
             work.matrix[i * n + p] -= t;
-            anchored[i] = emissivities[i] > 0.0;
+            anchored[i] = thermal_anchor[i];
             // H_k = J_k + P_k/A_k. Keep the original implicit self-return
             // instead of assuming that the off-diagonal G row sums to A_k.
             for (k, fraction) in [(i, reflection[i]), (p, t)] {
@@ -264,23 +276,20 @@ impl ParticipatingEnclosure {
         checkpoint(cancelled)
     }
 
-    pub(super) fn solve_sheet_emission(
+    // Sources may sum several independently emitting material layers.
+    pub(super) fn solve_boundary_field(
         &self,
-        emissivities: &[f64],
-        sheets: &[SheetPair],
-        controls: RadiationSolve,
+        coefficients: &BoundaryCoefficients,
+        source: &[f64],
         work: &mut RadiationWorkspace,
         cancelled: &mut impl FnMut() -> bool,
-    ) -> Result<(f64, f64), RadiationError> {
-        if sheets.is_empty() {
-            return self.solve_emission(emissivities, controls, work, cancelled);
-        }
+    ) -> Result<[f64; MAX_RADIATION_SURFACES], RadiationError> {
         let n = self.geometry.len();
         let m = n + 2;
-        let (reflection, transmission, partner) = coefficients(emissivities, sheets);
+        let BoundaryCoefficients { reflection, transmission, partner, .. } = coefficients;
         for i in 0..n {
             checkpoint(cancelled)?;
-            let mut rhs = finite(emissivities[i] * work.emission[i])?;
+            let mut rhs = finite(source[i])?;
             for (k, fraction) in [(i, reflection[i]), (partner[i], transmission[i])] {
                 if fraction == 0.0 {
                     continue;
@@ -302,6 +311,30 @@ impl ParticipatingEnclosure {
             irradiation[i] =
                 finite(work.radiosity[i] + work.powers[i] / self.geometry.areas_m2()[i])?;
         }
+        Ok(irradiation)
+    }
+
+    pub(super) fn solve_sheet_emission(
+        &self,
+        emissivities: &[f64],
+        sheets: &[SheetPair],
+        controls: RadiationSolve,
+        work: &mut RadiationWorkspace,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(f64, f64), RadiationError> {
+        if sheets.is_empty() {
+            return self.solve_emission(emissivities, controls, work, cancelled);
+        }
+        let n = self.geometry.len();
+        let coefficients = coefficients(emissivities, sheets);
+        let mut source = [0.0; MAX_RADIATION_SURFACES];
+        for i in 0..n {
+            source[i] = finite(emissivities[i] * work.emission[i])?;
+        }
+        let irradiation = self.solve_boundary_field(
+            &coefficients, &source[..n], work, cancelled,
+        )?;
+        let BoundaryCoefficients { reflection, transmission, partner, .. } = coefficients;
         let mut maximum = 0.0_f64;
         for i in 0..n {
             let residual = finite(
@@ -338,32 +371,45 @@ impl ParticipatingEnclosure {
     }
 }
 
-fn coefficients(
+pub(super) struct BoundaryCoefficients {
+    pub reflection: [f64; MAX_RADIATION_SURFACES],
+    pub transmission: [f64; MAX_RADIATION_SURFACES],
+    pub partner: [usize; MAX_RADIATION_SURFACES],
+    pub diagonal: [f64; MAX_RADIATION_SURFACES],
+    pub thermal_anchor: [bool; MAX_RADIATION_SURFACES],
+}
+
+pub(super) fn coefficients(
     emissivities: &[f64],
     sheets: &[SheetPair],
-) -> (
-    [f64; MAX_RADIATION_SURFACES],
-    [f64; MAX_RADIATION_SURFACES],
-    [usize; MAX_RADIATION_SURFACES],
-) {
-    let mut reflection = [0.0; MAX_RADIATION_SURFACES];
-    let mut transmission = [0.0; MAX_RADIATION_SURFACES];
-    let mut partner = [0; MAX_RADIATION_SURFACES];
+) -> BoundaryCoefficients {
+    let mut result = BoundaryCoefficients {
+        reflection: [0.0; MAX_RADIATION_SURFACES],
+        transmission: [0.0; MAX_RADIATION_SURFACES],
+        partner: [0; MAX_RADIATION_SURFACES],
+        diagonal: [0.0; MAX_RADIATION_SURFACES],
+        thermal_anchor: [false; MAX_RADIATION_SURFACES],
+    };
     for (i, &a) in emissivities.iter().enumerate() {
-        reflection[i] = 1.0 - a;
-        partner[i] = i;
+        result.reflection[i] = 1.0 - a;
+        result.partner[i] = i;
+        result.diagonal[i] = a;
+        result.thermal_anchor[i] = a > 0.0;
     }
     for sheet in sheets {
         let [i, j] = sheet.surfaces;
         let [ri, rj] = sheet.optics.reflectance();
-        reflection[i] = ri;
-        reflection[j] = rj;
-        transmission[i] = sheet.optics.transmittance();
-        transmission[j] = sheet.optics.transmittance();
-        partner[i] = j;
-        partner[j] = i;
+        let t = sheet.optics.transmittance();
+        result.reflection[i] = ri;
+        result.reflection[j] = rj;
+        result.transmission[i] = t;
+        result.transmission[j] = t;
+        result.partner[i] = j;
+        result.partner[j] = i;
+        result.diagonal[i] = emissivities[i] + t;
+        result.diagonal[j] = emissivities[j] + t;
     }
-    (reflection, transmission, partner)
+    result
 }
 
 /// Implicit radiation heating of the original finite thermal inventory.

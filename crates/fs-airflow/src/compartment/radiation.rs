@@ -29,6 +29,9 @@ use fs_qty::{Area, Length, Power, Qty, Temperature};
 /// Reciprocal, source-bounded transmitting sheets on the same optical paths.
 pub mod sheets;
 
+/// Non-isothermal absorbing material layers with explicitly diffuse exterior ports.
+pub mod slabs;
+
 /// Source-explicit Rayleigh soot absorption and its Planck-weighted gray mean.
 pub mod soot;
 
@@ -146,6 +149,8 @@ pub struct RadiationWorkspace {
     emission: Vec<f64>,
     radiosity: Vec<f64>,
     powers: Vec<f64>,
+    layer_emission: Vec<f64>,
+    layer_powers: Vec<f64>,
     lu: LuWorkspace,
 }
 
@@ -164,17 +169,24 @@ pub struct RadiationReport {
     /// Original paired sheet sources; their face powers contain thermal heat
     /// only, excluding power transmitted to the opposite side.
     pub sheets: Vec<sheets::SheetPair>,
+    /// Original finite-layer sources. Their exterior ports have zero surface
+    /// thermal power; each layer's separate heat belongs to its material owner.
+    pub slabs: Vec<slabs::SlabPair>,
+    /// Actual temperatures and powers in slab-then-layer order.
+    pub layer_temperatures: Vec<Vec<Temperature>>,
+    pub layer_heat_power: Vec<Vec<Power>>,
     /// Actual supplied gas optical coefficients and sources.
     pub absorption: [LayerAbsorption; 2],
     /// Largest independent surface reflection-equation defect [W/m²].
     pub maximum_surface_residual_w_m2: f64,
-    /// Signed sum of boundary and gas powers; retained, never redistributed [W].
+    /// Signed sum of boundary, material-layer and gas powers; never redistributed [W].
     pub energy_residual_w: f64,
 }
 impl RadiationReport {
     /// Add the identical gas exchanges to the existing source owner, atomically.
     /// The caller must also apply `surface_heat_power` to the corresponding
-    /// walls exactly once. These are internal transfers, not fire heat release.
+    /// walls exactly once, and apply each slab's separate `layer_heat_power` to
+    /// its original material cells. These are internal transfers, not fire heat release.
     pub fn add_gas_heat(&self, rates: &mut [LayerRates; 2]) -> Result<(), RadiationError> {
         let mut candidate = *rates;
         for (rate, &heat) in candidate.iter_mut().zip(&self.gas_heat_power) {
@@ -365,6 +377,8 @@ impl ParticipatingEnclosure {
             emission: vec![0.0; n + 2],
             radiosity: vec![0.0; n],
             powers: vec![0.0; n + 2],
+            layer_emission: vec![0.0; slabs::MAX_SLAB_LAYERS],
+            layer_powers: vec![0.0; slabs::MAX_SLAB_LAYERS],
             lu: LuWorkspace::new(n)?,
         })
     }
@@ -425,7 +439,7 @@ impl ParticipatingEnclosure {
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<RadiationReport, RadiationError> {
         self.evaluate_gray(
-            surface_temperatures, emissivities, &[], gas_temperatures,
+            surface_temperatures, emissivities, &[], &[], &[], gas_temperatures,
             absorption, controls, work, &mut cancelled,
         )
     }
@@ -436,6 +450,8 @@ impl ParticipatingEnclosure {
         surface_temperatures: &[Temperature],
         emissivities: &[SurfaceEmissivity],
         sheets: &[sheets::SheetPair],
+        slabs: &[slabs::SlabPair],
+        layer_temperatures: &[Vec<Temperature>],
         gas_temperatures: [Temperature; 2],
         absorption: &[LayerAbsorption; 2],
         controls: RadiationSolve,
@@ -444,7 +460,7 @@ impl ParticipatingEnclosure {
     ) -> Result<RadiationReport, RadiationError> {
         self.admit_state(
             surface_temperatures,
-            sheets.is_empty().then_some(emissivities),
+            (sheets.is_empty() && slabs.is_empty()).then_some(emissivities),
             gas_temperatures,
             controls,
             work,
@@ -453,7 +469,12 @@ impl ParticipatingEnclosure {
         let n = self.geometry.len();
         let m = n + 2;
         let mut values = [0.0; MAX_RADIATION_SURFACES];
-        if sheets.is_empty() {
+        if !slabs.is_empty() {
+            self.gray_slab_emissivities(
+                surface_temperatures, emissivities, slabs, layer_temperatures,
+                &mut values[..n], &mut cancelled,
+            )?;
+        } else if sheets.is_empty() {
             for (value, emissivity) in values.iter_mut().zip(emissivities) {
                 *value = emissivity.value();
             }
@@ -463,13 +484,17 @@ impl ParticipatingEnclosure {
                 &mut values[..n], &mut cancelled,
             )?;
         }
-        self.prepare_sheet_optics(
-            &values[..n],
-            sheets,
-            absorption.each_ref().map(|a| a.coefficient.value()),
-            work,
-            &mut cancelled,
-        )?;
+        if slabs.is_empty() {
+            self.prepare_sheet_optics(
+                &values[..n], sheets, absorption.each_ref().map(|a| a.coefficient.value()),
+                work, &mut cancelled,
+            )?;
+        } else {
+            self.prepare_slab_optics(
+                &values[..n], slabs, absorption.each_ref().map(|a| a.coefficient.value()),
+                work, &mut cancelled,
+            )?;
+        }
         // Subtract one common blackbody background before solving. A transparent,
         // disconnected gas layer must not obscure adjacent surface temperatures.
         let mut reference = surface_temperatures
@@ -486,6 +511,13 @@ impl ParticipatingEnclosure {
                 reference = reference.min(t.value());
             }
         }
+        for (slab, temperatures) in slabs.iter().zip(layer_temperatures) {
+            for (source, temperature) in slab.optics.layers().iter().zip(temperatures) {
+                if source.optical_depth() > 0.0 {
+                    reference = reference.min(temperature.value());
+                }
+            }
+        }
         let reference_emission = finite(STEFAN_BOLTZMANN_W_M2_K4 * reference.powi(4))?;
         for (i, t) in surface_temperatures
             .iter()
@@ -498,8 +530,22 @@ impl ParticipatingEnclosure {
                 emission_difference(t.value(), reference)?
             };
         }
-        let (maximum, balance) =
-            self.solve_sheet_emission(&values[..n], sheets, controls, work, &mut cancelled)?;
+        let mut offset = 0;
+        for (slab, temperatures) in slabs.iter().zip(layer_temperatures) {
+            for (source, temperature) in slab.optics.layers().iter().zip(temperatures) {
+                work.layer_emission[offset] = if source.optical_depth() == 0.0 {
+                    0.0
+                } else {
+                    emission_difference(temperature.value(), reference)?
+                };
+                offset += 1;
+            }
+        }
+        let (maximum, balance) = if slabs.is_empty() {
+            self.solve_sheet_emission(&values[..n], sheets, controls, work, &mut cancelled)?
+        } else {
+            self.solve_slab_emission(&values[..n], slabs, controls, work, &mut cancelled)?
+        };
         let mut radiosity = Vec::with_capacity(n);
         for &delta in &work.radiosity {
             let value = finite(reference_emission + delta)?;
@@ -515,6 +561,9 @@ impl ParticipatingEnclosure {
             surface_radiosity_w_m2: radiosity,
             surface_emissivities: emissivities.to_vec(),
             sheets: sheets.to_vec(),
+            slabs: slabs.to_vec(),
+            layer_temperatures: layer_temperatures.to_vec(),
+            layer_heat_power: slabs::layer_powers(slabs, &work.layer_powers),
             absorption: (*absorption).clone(),
             maximum_surface_residual_w_m2: maximum,
             energy_residual_w: balance,
