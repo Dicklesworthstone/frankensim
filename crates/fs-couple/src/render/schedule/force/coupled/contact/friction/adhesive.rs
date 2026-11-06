@@ -1,4 +1,7 @@
 //! Real adhesive junction shear in the original finite-body modal transaction.
+/// Original normal/shear material updates at held native tangential state.
+pub mod temperature;
+
 use super::*;
 use fs_contact::interface_binding::adhesive_shear::{SourceAdhesiveContactUpdate, SourceAdhesiveTangential};
 use fs_tribo::adhesive::{AdhesiveContactState, AdhesiveTangentialContact};

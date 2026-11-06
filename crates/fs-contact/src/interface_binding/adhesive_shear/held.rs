@@ -1,4 +1,6 @@
 //! Retain both original source owners while the normal owner supplies geometry.
+mod temperature;
+
 use super::*;
 use crate::normal_patch::maugis::{
     MaugisResponse, SourceMaugisSphereContact, continuation::MaugisEquilibrium,
