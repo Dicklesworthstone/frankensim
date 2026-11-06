@@ -82,7 +82,9 @@ impl CoupledModalSystem {
     /// to continue their dynamics, and retain the held forces until release.
     /// Every contact-loaded free coordinate requires independent bilateral
     /// support; unloaded position gauges may remain at zero. A mass supported
-    /// ONLY by unilateral contacts remains outside this solve.
+    /// ONLY by unilateral contacts remains outside this solve; a single contact
+    /// restraining one declared null direction can use
+    /// [`Self::initialize_contact_equilibrium_with_gauge`].
     pub fn initialize_contact_equilibrium(
         &mut self,
         external: &[f64],
@@ -91,6 +93,35 @@ impl CoupledModalSystem {
         gate: &CancelGate,
     ) -> Result<f64, ModalCouplingError> {
         preload::initialize(self, external, contacts, None, config, gate).map(|(energy, _)| energy)
+    }
+
+    /// Settle a free assembly whose single null direction is restrained by one
+    /// compliant normal contact. The complete, unit mass-normalized direction
+    /// must span the bilateral network's entire nullspace and annihilate every
+    /// positive-stiffness spring. No elastic stiffness is discarded.
+    ///
+    /// Original free-direction force balance determines the nonnegative normal
+    /// reaction. The existing gauged Schur response gives the deformation; a
+    /// translation along the admitted direction establishes the closure required
+    /// by the original contact law. A tensile required reaction always refuses.
+    /// With exactly zero resultant load, the zero-gauge pose is retained when
+    /// separated and otherwise moved to touching, selecting one of the possible
+    /// unloaded equilibria. Contact loss and bilateral dashpots have no static force.
+    ///
+    /// This uses the network's setup cap and the contact's scalar iteration,
+    /// force and penetration caps. Actual original forces, material histories
+    /// and total stored energy must pass the shared preload publication gates.
+    /// No support spring or force projection is introduced; cancellation-sized
+    /// load residuals are bounded against the original force terms. Cancellation
+    /// or refusal preserves all accepted state. Multiple null directions,
+    /// multiple contacts and condensed omitted-mode contacts need other solves.
+    /// As with [`Self::initialize_contact_equilibrium`], attach the same contact
+    /// to the dynamic owner and retain the held forces until physical release.
+    pub fn initialize_contact_equilibrium_with_gauge(
+        &mut self, external: &[f64], contact: &contact::ModalContact,
+        config: contact::ModalContactConfig, null_direction: &[f64], gate: &CancelGate,
+    ) -> Result<f64, ModalCouplingError> {
+        preload::initialize_supported(self, external, contact, config, null_direction, gate)
     }
 
     // The same equilibrium for contacts condensed over omitted modes (see
@@ -252,6 +283,22 @@ impl StaticResponse {
     pub(super) fn solve(&self, network: &CoupledModalSystem, external: &[f64], include_rest: bool,
         enforce_limits: bool, gate: &CancelGate) -> Result<Vec<f64>, ModalCouplingError>
     {
+        self.solve_with_roundoff(network, external, include_rest, enforce_limits, None, gate)
+    }
+
+    // The single-contact support solve retains f - b R verbatim. A subtraction
+    // can round to a small nonzero free-direction load even when both original
+    // terms balance. These per-coordinate ROUNDING bounds admit that arithmetic
+    // without projecting loads; the caller places the free pose and rechecks
+    // every original force through the common contact publication gate.
+    fn solve_with_roundoff(&self, network: &CoupledModalSystem, external: &[f64], include_rest: bool,
+        enforce_limits: bool, roundoff: Option<&[f64]>, gate: &CancelGate)
+        -> Result<Vec<f64>, ModalCouplingError>
+    {
+        if roundoff.is_some_and(|a| a.len() != external.len()
+            || a.iter().any(|v| !v.is_finite() || *v < 0.0)) {
+            return Err(invalid("static roundoff bounds must be finite complete nonnegative values"));
+        }
         for &index in &self.gauges {
             poll(Some(gate))?;
             // Also applies to contact/tangent compliance queries: an unsupported
@@ -270,7 +317,7 @@ impl StaticResponse {
         self.factor.solve(&mut solution);
         check_solve(&self.matrix, &solution, &rhs, network.config.solve_relative_tolerance)?;
         let free_q = if let Some(free) = &self.free {
-            let q = free.complete(external, &mut rhs, &solution, network.config.solve_relative_tolerance, gate)?;
+            let q = free.complete(external, &mut rhs, &solution, network.config.solve_relative_tolerance, roundoff, gate)?;
             solution.copy_from_slice(&rhs);
             self.factor.solve(&mut solution);
             check_solve(&self.matrix, &solution, &rhs, network.config.solve_relative_tolerance)?;
@@ -287,7 +334,7 @@ impl StaticResponse {
         }
         let mut q: Vec<f64> = self.compliance.iter().zip(total).map(|(d,g)| finite(d*g)).collect::<Result<_,_>>()?;
         if let (Some(free), Some(free_q)) = (&self.free, &free_q) {
-            free.check_and_insert(external, &solution, free_q, &mut q, network.config.solve_relative_tolerance, gate)?;
+            free.check_and_insert(external, &solution, free_q, &mut q, network.config.solve_relative_tolerance, roundoff, gate)?;
         }
         Ok(q)
     }

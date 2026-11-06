@@ -6,6 +6,9 @@ use super::normal::{admit_setup, solve_joint};
 use fs_dcontact::ContactStorage;
 use fs_phs::Storage;
 
+mod supported;
+pub(super) use supported::initialize as initialize_supported;
+
 struct ZeroStorage;
 impl Storage for ZeroStorage {
     fn hamiltonian(&self, _: &[f64]) -> f64 { 0.0 }
@@ -81,7 +84,7 @@ pub(super) fn initialize(
     let mut sweeps = solve_joint(&compliance, &free_x, |i| points[i].config,
         |i,x| points[i].force(x), config.max_sweeps, &mut reactions, Some(gate))?;
     let mut corrected = false;
-    let mut energy = loop {
+    let energy = loop {
         let mut forces = external.to_vec();
         for (point, reaction) in points.iter().zip(&reactions) {
             if *reaction != 0.0 {
@@ -119,6 +122,17 @@ pub(super) fn initialize(
         sweeps = solve_joint(&compliance, &free_x, |i| points[i].config,
             |i,x| points[i].force(x), config.max_sweeps, &mut reactions, Some(gate))?;
     };
+    let energy = publish(network, external, &points, condensed, &reactions, energy, sweeps, gate)?;
+    Ok((energy, reactions))
+}
+
+// Shared final admission for the compliance solve and the one-direction free
+// support solve. Only this owner publishes settled contact/network histories.
+fn publish(network: &mut CoupledModalSystem, external: &[f64], points: &[Point],
+    condensed: Option<&Condensed<'_>>, reactions: &[f64], mut energy: f64,
+    sweeps: usize, gate: &CancelGate) -> Result<f64, ModalCouplingError>
+{
+    let p = points.len();
     // Recompute contact law on ACTUAL rounded states. In addition to the
     // bilateral force-balance gate above, report no equilibrium if one of
     // these contact equations fails. Neither candidate states nor reactions
@@ -127,11 +141,11 @@ pub(super) fn initialize(
     let mut actual_forces = external.to_vec();
     let mut actual_scale: Vec<f64> = external.iter().map(|f| f.abs()).collect();
     let mut contact_allowance = vec![0.0; network.mode_count()];
-    for (index, (point, reaction)) in points.iter().zip(&reactions).enumerate() {
+    for (index, (point, reaction)) in points.iter().zip(reactions).enumerate() {
         poll(Some(gate))?;
         let mut x = extension(&network.candidates, &point.column, 0.0)?;
         if let Some(set) = condensed {
-            let lag = dot(&set.compliance[index*p..(index+1)*p], &reactions)?;
+            let lag = dot(&set.compliance[index*p..(index+1)*p], reactions)?;
             x = finite(x-lag)?;
             energy = finite(energy+0.5*reaction*lag)?;
         }
@@ -187,5 +201,5 @@ pub(super) fn initialize(
     poll(Some(gate))?;
     std::mem::swap(&mut network.models, &mut network.candidates);
     std::mem::swap(&mut network.material_memory, &mut network.candidate_material_memory);
-    Ok((energy, reactions))
+    Ok(energy)
 }

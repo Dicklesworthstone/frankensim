@@ -112,14 +112,22 @@ impl FreeResponse {
     // The existing connection solution is A^-1(C_e^T D_e f_e - sqrt(k) rest).
     // Solve S q_f = f_f - C_f solution, then rebuild the FULL connection RHS.
     pub(super) fn complete(&self, external: &[f64], rhs: &mut [f64], solution: &[f64],
-        tolerance: f64, gate: &CancelGate) -> Result<Vec<f64>, ModalCouplingError>
+        tolerance: f64, roundoff: Option<&[f64]>, gate: &CancelGate) -> Result<Vec<f64>, ModalCouplingError>
     {
         if !self.nullspace.is_empty() {
             let forces: Vec<f64> = self.indices.iter().map(|&i| external[i]).collect();
             for basis in &self.nullspace {
                 poll(Some(gate))?;
-                check_zero_dot(basis, &forces, tolerance,
-                    "static forces are incompatible with a declared free direction")?;
+                if let Some(bounds) = roundoff {
+                    let bound = self.indices.iter().zip(basis).try_fold(0.0,
+                        |sum, (&i, &a)| finite(sum + a.abs()*bounds[i]))?;
+                    if dot(basis, &forces)?.abs() > bound {
+                        return Err(invalid("static contact load does not balance its free direction to roundoff"));
+                    }
+                } else {
+                    check_zero_dot(basis, &forces, tolerance,
+                        "static forces are incompatible with a declared free direction")?;
+                }
             }
         }
         let mut scaled_rhs = Vec::with_capacity(self.indices.len());
@@ -132,10 +140,15 @@ impl FreeResponse {
         check_solve(&self.scaled_matrix, &scaled_q, &scaled_rhs, tolerance)?;
         let q: Vec<f64> = scaled_q.iter().zip(&self.scales)
             .map(|(q,s)| finite(q*s)).collect::<Result<_,_>>()?;
-        for basis in &self.nullspace {
-            poll(Some(gate))?;
-            check_zero_dot(basis, &q, tolerance,
-                "static displacement exceeds its declared zero-gauge tolerance")?;
+        // A contact-supported caller selects its pose along this nullspace
+        // after the solve. Its accepted force roundoff can otherwise create an
+        // immaterial nonzero gauge component in the augmented scratch system.
+        if roundoff.is_none() {
+            for basis in &self.nullspace {
+                poll(Some(gate))?;
+                check_zero_dot(basis, &q, tolerance,
+                    "static displacement exceeds its declared zero-gauge tolerance")?;
+            }
         }
         for (row, &value) in self.rows.iter().zip(&q) {
             poll(Some(gate))?;
@@ -147,7 +160,7 @@ impl FreeResponse {
     // This gate is also applied to unit-load compliance queries for contacts;
     // a small Schur residual alone is not a complete free-mode force balance.
     pub(super) fn check_and_insert(&self, external: &[f64], solution: &[f64], free_q: &[f64],
-        q: &mut [f64], tolerance: f64, gate: &CancelGate) -> Result<(), ModalCouplingError>
+        q: &mut [f64], tolerance: f64, roundoff: Option<&[f64]>, gate: &CancelGate) -> Result<(), ModalCouplingError>
     {
         let mut size = solution.iter().fold(0.0_f64, |m, x| m.max(x.abs()));
         if !self.nullspace.is_empty() {
@@ -177,6 +190,10 @@ impl FreeResponse {
             let mut scale = external[index].abs();
             for a in &self.rows[i] { scale = finite(scale + finite(a.abs()*size)?)?; }
             let residual = finite(applied - external[index])?.abs();
+            let residual = match roundoff {
+                Some(bounds) => (residual-bounds[index]).max(0.0),
+                None => residual,
+            };
             let relative = if scale == 0.0 { 0.0 } else { residual / scale };
             if relative > tolerance {
                 return Err(ModalCouplingError::SolveResidual { relative, tolerance });
