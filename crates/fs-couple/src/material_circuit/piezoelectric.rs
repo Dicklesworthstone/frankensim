@@ -309,8 +309,25 @@ impl PiezoelectricCircuit {
             for column in 0..old_d { q[row*d+column] = original_q[row*old_n+column]; }
         }
         q[charge*d+charge] = 0.0;
+        // H = H_other + p²/(2m) + k_E*x²/2 + (Q-theta*x)²/(2C).
+        // Retain the COMPLETE differential Hessian so the native descriptor
+        // uses its analytic Jacobian. Unit-sized finite differences of Q are
+        // invalid for small electrodes even when the physical state is well
+        // inside the original electric-field envelope.
+        let mut quadratic = q.clone();
+        let cross = -self.rod.coupling_c_m()*inverse_c;
+        quadratic[charge*d+charge] = inverse_c;
+        quadratic[old_d*d+old_d] = self.rod.open_circuit_stiffness_n_m();
+        quadratic[(old_d+1)*d+old_d+1] = 1.0/self.rod.modal_mass_kg();
+        quadratic[charge*d+old_d] = cross;
+        quadratic[old_d*d+charge] = cross;
+        if quadratic.iter().any(|value| !value.is_finite())
+            || self.rod.coupling_c_m() != 0.0 && cross == 0.0 {
+            return Err(invalid("piezoelectric differential Hessian is unrepresentable"));
+        }
         let law = PiezoelectricCircuitStorage {
             other: QuadraticStorage::new(q, d).map_err(native)?,
+            quadratic,
             rod: self.rod.clone(), charge, extension: old_d, momentum: old_d+1,
         };
         let (old_j, old_r, old_g) = original.system.structure();
@@ -338,6 +355,7 @@ impl PiezoelectricCircuit {
 #[derive(Clone)]
 struct PiezoelectricCircuitStorage {
     other: QuadraticStorage,
+    quadratic: Vec<f64>,
     rod: PiezoelectricRod,
     charge: usize,
     extension: usize,
@@ -349,6 +367,7 @@ impl PiezoelectricCircuitStorage {
     }
 }
 impl Storage for PiezoelectricCircuitStorage {
+    fn exact_quadratic_matrix(&self) -> Option<&[f64]> { Some(&self.quadratic) }
     fn hamiltonian(&self, x: &[f64]) -> f64 {
         self.other.hamiltonian(x) + self.component_energy(x)
     }

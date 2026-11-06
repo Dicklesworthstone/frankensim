@@ -9,6 +9,9 @@ mod ceramic_thermal;
 #[path = "circuit/tensor.rs"]
 mod tensor_source;
 
+#[path = "circuit/charge_scale.rs"]
+mod charge_scale;
+
 use fs_couple::circuit_enthalpy::{CircuitEnthalpyError, CircuitEnthalpySolve};
 use fs_couple::circuit_enthalpy::material::{CellResistor, ConductionLink, MaterialCell, MaterialNetwork};
 use fs_couple::circuit_enthalpy::piezoelectric::{self as heated, PiezoelectricEnthalpyInput};

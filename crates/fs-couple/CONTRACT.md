@@ -312,3 +312,17 @@ with the original material response, independently reconstructs stored energy,
 checks reciprocity and the analytic directional action, and verifies refusal
 outside the original strain envelope. This adds no measured material
 validation or hard real-time timing claim.
+
+
+### Native circuit charge scales
+
+The piezoelectric circuit now declares its complete reciprocal quadratic
+differential block to native descriptor admission and stepping. Original
+circuit storage, charge/strain cross terms, fixed-charge stiffness and inertia
+are retained; algebraic multipliers carry zero storage. Analytic Jacobians
+avoid generic finite differences of physical charge, including microscopic
+electrodes. Material support and independent closed-work acceptance remain
+authoritative. Regression definitions in tests/piezoelectric/circuit/charge_scale.rs
+compare subfemtocoulomb response with independently eliminated loaded-rod
+equations, both poling signs, zero coupling, domain refusal and retry.
+These authored ceramic-scale fixtures are not measured material calibration.
