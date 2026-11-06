@@ -103,6 +103,8 @@ pub use compliant_wall::DgCompliantWallHeat;
 pub use compliant_wall::{DgCompliantWallState, DgWallMaterialUpdate, DgWallRelaxationTransfer};
 mod port_response;
 pub use port_response::{DgMultiportResponse, DgPortResponse};
+mod krylov;
+pub use krylov::DgKrylovReport;
 mod boundary_power;
 pub use boundary_power::{DgBoundaryEnergy, DgBoundaryStepOutput, PreparedDgBoundaryEnergy};
 mod side_ports;
@@ -118,9 +120,14 @@ pub const MAX_DG_ORDER: usize = 8;
 /// Maximum admitted element count $K$ in a single 1-D DG duct.
 pub const MAX_DG_ELEMENTS: usize = 512;
 
-/// Largest total DOF count $N = 2 K (p + 1)$ a dense propagator admits. There is no Krylov
-/// exp-action path, so larger discretizations refuse by name.
+/// Largest total DOF count $N = 2 K (p + 1)$ a dense propagator admits. A duct that has not
+/// opted in with [`DgDuct::with_dof_cap`] refuses larger discretizations by name; one that has
+/// takes the sparse Krylov propagator above this size (see the module documentation).
 pub const MAX_DG_PROPAGATOR_DOFS: usize = 2048;
+
+/// Largest total DOF count the sparse Krylov propagator admits after [`DgDuct::with_dof_cap`].
+/// The assembled generator is still held dense (8 N^2 bytes: 2.1 GB at this size).
+pub const MAX_DG_SPARSE_DOFS: usize = 16384;
 
 /// Jordan–Wielandt eigenvalues within this fraction of the spectral radius are null
 /// singular values of `G` (the closed–closed duct's uniform-pressure mode).
@@ -621,6 +628,9 @@ pub struct DgDuct<M: DgMedium = GasState> {
     ports: Vec<(PortId, Vec<f64>)>,
     /// Point junctions on original element faces, in attachment order.
     side_ports: Vec<DgSidePort>,
+    /// Largest total DOF count the duct admits when memory states are attached and a propagator
+    /// is built: [`MAX_DG_PROPAGATOR_DOFS`] (dense only) unless raised by [`Self::with_dof_cap`].
+    dof_cap: usize,
 }
 
 /// Bind the physical coordinate maps as well as the energy-normalized operator.
@@ -1161,6 +1171,7 @@ impl<M: DgMedium> DgDuct<M> {
             g_block,
             ports,
             side_ports: Vec::new(),
+            dof_cap: MAX_DG_PROPAGATOR_DOFS,
         })
     }
 
@@ -1268,6 +1279,32 @@ impl<M: DgMedium> DgDuct<M> {
     #[must_use]
     pub const fn total_dofs(&self) -> usize {
         2 * self.field_dofs + self.memory_dofs
+    }
+
+    /// The duct's DOF cap: [`MAX_DG_PROPAGATOR_DOFS`] unless raised by [`Self::with_dof_cap`].
+    #[must_use]
+    pub const fn dof_cap(&self) -> usize {
+        self.dof_cap
+    }
+
+    /// Opt in to the sparse Krylov propagator: raise the DOF cap that wall-memory attachment and
+    /// [`DgDuct::propagator`] enforce from [`MAX_DG_PROPAGATOR_DOFS`] to `cap`.
+    ///
+    /// A duct whose total stays at or under [`MAX_DG_PROPAGATOR_DOFS`] still takes the dense
+    /// propagator, bit for bit as without this call; above it the propagator is the sparse Krylov
+    /// exp-action (full state, same ports, same ledger). Call this before attaching memory.
+    ///
+    /// # Errors
+    /// [`DuctError::BadParameter`] unless [`MAX_DG_PROPAGATOR_DOFS`] <= `cap` <= [`MAX_DG_SPARSE_DOFS`],
+    /// or the duct already holds more than `cap` DOFs.
+    pub fn with_dof_cap(mut self, cap: usize) -> Result<Self, DuctError> {
+        if !(MAX_DG_PROPAGATOR_DOFS..=MAX_DG_SPARSE_DOFS).contains(&cap) || self.total_dofs() > cap {
+            return Err(DuctError::BadParameter {
+                what: "DG DOF cap must lie in MAX_DG_PROPAGATOR_DOFS..=MAX_DG_SPARSE_DOFS and cover the duct",
+            });
+        }
+        self.dof_cap = cap;
+        Ok(self)
     }
 
     /// Scalar DOFs per field $M = K (p + 1)$.
@@ -1486,6 +1523,7 @@ impl<M: DgMedium> DgDuct<M> {
             cumulative_parameter_work_j: 0.0,
             cumulative_dissipated_j: 0.0,
             nodal_dirty: false,
+            solve_cache: krylov::SolveCache::default(),
         }
     }
 
@@ -1514,6 +1552,7 @@ impl<M: DgMedium> DgDuct<M> {
             cumulative_parameter_work_j: 0.0,
             cumulative_dissipated_j: 0.0,
             nodal_dirty: false,
+            solve_cache: krylov::SolveCache::default(),
         }
     }
 
@@ -1576,10 +1615,17 @@ impl<M: DgMedium> DgDuct<M> {
     /// semigroup is contractive) and an a-posteriori estimate, the change under one more
     /// halving. That estimate is not an enclosure.
     ///
+    /// Above [`MAX_DG_PROPAGATOR_DOFS`] DOFs, on a duct that opted in with [`Self::with_dof_cap`],
+    /// the propagator is a sparse Krylov exp-action instead: one Arnoldi basis per step on the
+    /// current state gives `e^{dt L} x` and `dt φ1(dt L) x`, the held-input columns are formed
+    /// once, and the certificate is the larger of the per-step a-posteriori estimate (with a
+    /// safety factor) and the change between `s` and `2s` substeps on the port vectors and
+    /// fixed probe states. It keeps the full state and the energy ledger.
+    ///
     /// # Errors
-    /// [`DuctError::BadParameter`]: `dt` or `tol` not positive and finite, more than
-    /// [`MAX_DG_PROPAGATOR_DOFS`] DOFs (there is no Krylov path), or the dense eigensolver's
-    /// work cap. [`DuctError::PropagatorCertificate`]: the certificate exceeds `tol`.
+    /// [`DuctError::BadParameter`]: `dt` or `tol` not positive and finite, more DOFs than the
+    /// duct's cap ([`MAX_DG_PROPAGATOR_DOFS`] unless raised), or the dense eigensolver's work cap.
+    /// [`DuctError::PropagatorCertificate`]: the certificate exceeds `tol`.
     pub fn propagator(&self, dt: f64, tol: f64) -> Result<DgPropagator, DuctError> {
         if !(dt.is_finite() && dt > 0.0) {
             return Err(DuctError::BadParameter {
@@ -1591,10 +1637,13 @@ impl<M: DgMedium> DgDuct<M> {
                 what: "DG propagator certificate tolerance must be positive and finite",
             });
         }
-        if self.total_dofs() > MAX_DG_PROPAGATOR_DOFS {
+        if self.total_dofs() > self.dof_cap {
             return Err(DuctError::BadParameter {
                 what: "DG propagator DOFs exceed MAX_DG_PROPAGATOR_DOFS (no Krylov path)",
             });
+        }
+        if self.total_dofs() > MAX_DG_PROPAGATOR_DOFS {
+            return self.build_krylov_propagator(dt, tol);
         }
         match &self.g_block {
             Some(g) => self.build_skew_propagator(g, dt, tol),
@@ -2015,6 +2064,8 @@ enum PropagatorKernel {
         port_cols_phi2: Vec<Vec<f64>>,
         ports: Vec<(PortId, Vec<f64>)>,
     },
+    /// Sparse Krylov exp-action above the dense cap (opt-in, [`DgDuct::with_dof_cap`]).
+    Krylov(krylov::KrylovKernel),
 }
 
 /// Time-domain state of a [`DgDuct`]. The energy coordinates `tilde` are current after
@@ -2035,6 +2086,9 @@ pub struct DgState {
     cumulative_parameter_work_j: f64,
     cumulative_dissipated_j: f64,
     nodal_dirty: bool,
+    /// One solve of the Krylov kernel for this exact state; empty on the dense and skew kernels.
+    /// Never part of equality.
+    solve_cache: krylov::SolveCache,
 }
 
 impl DgState {
@@ -2218,6 +2272,7 @@ impl DgPropagator {
                 port_cols_phi2,
                 ports,
             ),
+            PropagatorKernel::Krylov(kernel) => self.step_krylov(state, port_inputs, kernel),
         }
     }
 
@@ -2374,6 +2429,22 @@ impl DgPropagator {
             next_tilde[i] = acc_next;
             int_tilde[i] = acc_int;
         }
+        self.finish_series_step(state, ports, &efforts, e_prev, next_tilde, &int_tilde)
+    }
+
+    /// The port outputs and the energy ledger of one accepted step, from the end-of-step state
+    /// `next_tilde` and the step integral `int_tilde` of the energy coordinates. Shared by the
+    /// dense and the Krylov kernels; the arithmetic below is the dense kernel's, unchanged.
+    fn finish_series_step(
+        &self,
+        state: &mut DgState,
+        ports: &[(PortId, Vec<f64>)],
+        efforts: &[f64],
+        e_prev: f64,
+        next_tilde: Vec<f64>,
+        int_tilde: &[f64],
+    ) -> Result<DgStepOutput, DuctError> {
+        let n = self.total_dofs;
         let mut port_outputs = Vec::with_capacity(ports.len());
         let mut step_work = 0.0;
         for (slot, (port_id, tilde_b)) in ports.iter().enumerate() {

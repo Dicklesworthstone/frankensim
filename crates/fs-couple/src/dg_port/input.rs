@@ -15,7 +15,7 @@ use crate::bernoulli_aperture::radiation::environment::multiport::source::Comput
 use crate::pcm_wav::baffled::openings::CircularOpening;
 use fs_duct::dg::{
     DgBoundary, DgDuct, DgMesh, DgSidePort, DgWallResolution, MAX_DG_ELEMENTS, MAX_DG_ORDER,
-    MAX_DG_PROPAGATOR_DOFS, MAX_DG_SIDE_PORTS, PortId,
+    MAX_DG_PROPAGATOR_DOFS, MAX_DG_SIDE_PORTS, MAX_DG_SPARSE_DOFS, PortId,
 };
 use fs_duct::profile::gas_field::GasFieldDuctError;
 use fs_duct::{Duct, Segment};
@@ -339,7 +339,8 @@ impl DgSourceInput {
         let band_hz = [row.positive()?, row.positive()?];
         let maximum_relative_error = row.positive()?;
         let exponential_tolerance = row.positive()?;
-        let maximum_dofs = row.count(MAX_DG_PROPAGATOR_DOFS)?;
+        // Above MAX_DG_PROPAGATOR_DOFS the card opts in to the sparse Krylov propagator (the main bore only).
+        let maximum_dofs = row.count(MAX_DG_SPARSE_DOFS)?;
         let wall_quadrature = if kind == "dg_bore" {
             Some(row.count(64)?)
         } else { None };
@@ -881,6 +882,11 @@ impl DgSourceInput {
                 &self.geometry, ambient, self.mesh, DgBoundary::Port(PortId(0)), self.outlet,
             ).map_err(|error| DgSourceError::Physics(AcousticRealizeError::Duct(error)))?
         };
+        // A card that declares more than the dense cap opts the main bore in to the sparse Krylov
+        // propagator; a card at or under the dense cap keeps the dense path unchanged.
+        let owner = owner
+            .with_dof_cap(self.maximum_dofs.max(MAX_DG_PROPAGATOR_DOFS))
+            .map_err(|error| DgSourceError::Physics(AcousticRealizeError::Duct(error)))?;
         checkpoint(gate, self.line)?;
         let ports: Vec<_> = self.side_openings.iter().map(|(port, _)| *port).collect();
         let owner = owner.with_side_ports(&ports)

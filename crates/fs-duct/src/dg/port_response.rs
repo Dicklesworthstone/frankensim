@@ -89,6 +89,32 @@ impl DgPropagator {
                     impedance_pa_s_m3: impedance,
                 }
             }
+            PropagatorKernel::Krylov(kernel) => {
+                // The same affine law from the sparse kernel: history from the cached step integral,
+                // impedance from the state-independent port columns.
+                let n = self.total_dofs;
+                let solved = kernel.solve_cached(self.dt, state)?;
+                let count = kernel.ports.len();
+                let mut history = vec![0.0; count];
+                let mut impedance = vec![0.0; count * count];
+                for (row, (_, b)) in kernel.ports.iter().enumerate() {
+                    for i in 0..n {
+                        history[row] += b[i] * solved.int[i];
+                        for col in 0..count {
+                            impedance[row * count + col] += b[i] * kernel.port_cols_phi2[col][i];
+                        }
+                    }
+                    history[row] /= self.dt;
+                    for col in 0..count {
+                        impedance[row * count + col] /= self.dt;
+                    }
+                }
+                DgMultiportResponse {
+                    ports: kernel.ports.iter().map(|(id, _)| *id).collect(),
+                    history_pressure_pa: history,
+                    impedance_pa_s_m3: impedance,
+                }
+            }
             PropagatorKernel::SkewModal {
                 sigmas,
                 u_cols,
@@ -198,6 +224,22 @@ impl DgPropagator {
                     }
                     history += b[i] * integral;
                     impedance += b[i] * port_cols_phi2[slot][i];
+                }
+                (history / self.dt, impedance / self.dt)
+            }
+            PropagatorKernel::Krylov(kernel) => {
+                let slot = kernel
+                    .ports
+                    .iter()
+                    .position(|(id, _)| *id == port)
+                    .ok_or_else(missing)?;
+                let b = &kernel.ports[slot].1;
+                let solved = kernel.solve_cached(self.dt, state)?;
+                let mut history = 0.0;
+                let mut impedance = 0.0;
+                for i in 0..self.total_dofs {
+                    history += b[i] * solved.int[i];
+                    impedance += b[i] * kernel.port_cols_phi2[slot][i];
                 }
                 (history / self.dt, impedance / self.dt)
             }

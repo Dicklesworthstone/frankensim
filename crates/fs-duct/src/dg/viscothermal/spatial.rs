@@ -243,6 +243,8 @@ impl<M: DgMedium> DgDuct<M> {
             return Err(invalid("DG wall pole or quadrature count is outside its domain").into());
         }
         let acoustic_dofs = 2 * self.field_dofs;
+        // MAX_DG_PROPAGATOR_DOFS unless the duct opted in to the sparse Krylov propagator.
+        let dof_cap = self.dof_cap;
         let mut spans = Vec::with_capacity(duct.segments.len());
         let mut x_start = 0.0;
         for segment in &duct.segments {
@@ -314,7 +316,7 @@ impl<M: DgMedium> DgDuct<M> {
                     }
                     let next_cursor = cursor
                         .checked_add(terms.len())
-                        .filter(|n| *n <= MAX_DG_PROPAGATOR_DOFS)
+                        .filter(|n| *n <= dof_cap)
                         .ok_or_else(|| {
                             invalid(
                                 "DG acoustic plus wall-memory DOFs exceed MAX_DG_PROPAGATOR_DOFS",
