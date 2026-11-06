@@ -31,8 +31,8 @@
 //! The local error estimate is not a global error certificate. This owner does
 //! not predict confinement times, spatial transport, radiation transport or
 //! magnetic fields. Optional original-source Coulomb exchange, optically thin
-//! bremsstrahlung and explicitly prescribed thermal energy confinement
-//! participate in the same feedback and energy account. Its
+//! bremsstrahlung, prescribed thermal energy confinement and fully-ionized
+//! particle supply/exhaust participate in the same feedback and energy account. Its
 //! returned common state can enter existing thermal owners in a separately
 //! declared coupling schedule, subject to each owner's physical domain.
 
@@ -57,7 +57,10 @@ mod thermal;
 pub mod kinetic;
 /// Competing D–T, D–D and D–He3 reactions on the same material state.
 pub mod network;
+/// Quasineutral fuel supply and selective Maxwellian-particle exhaust.
+pub mod particles;
 pub mod volume;
+pub use particles::{FusionParticleBalance, FusionParticleExchange};
 
 const AVOGADRO: f64 = 6.022_140_76e23;
 const CV_MOLAR: f64 = 1.5 * R;
@@ -136,7 +139,7 @@ impl FusionEnergyConfinement {
     }
 }
 
-/// Optional source-owned thermal laws and explicit energy-confinement closure.
+/// Optional source-owned thermal laws and explicit energy/particle transport.
 ///
 /// Coulomb energy is transferred reciprocally between the two thermal pools.
 /// Bremsstrahlung removes electron energy and records it as escaping photons:
@@ -152,6 +155,9 @@ pub struct DtFusionTransport {
     pub bremsstrahlung: Option<ElectronIonBremsstrahlungV1>,
     /// Prescribed non-radiative thermal transport, independent of particle loss.
     pub energy_confinement: Option<FusionEnergyConfinement>,
+    /// Explicit fully-ionized supply and thermal-particle exhaust. Its carried
+    /// energy is separate from energy confinement, radiation and external heat.
+    pub particles: Option<FusionParticleExchange>,
 }
 
 /// Declared physical domain and bounded numerical work for one burn interval.
@@ -292,6 +298,8 @@ impl std::error::Error for DtFusionError {}
 /// Actual interval accounts, distinct from source uncertainty or global error.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct DtFusionBalance {
+    /// Accepted external ion/electron transfers and their sensible energy.
+    pub particles: FusionParticleBalance,
     /// D and T consumed, He4 created and neutrons emitted [mol of each].
     pub reaction_extent_mol: f64,
     /// Rest-mass energy converted by the admitted nuclear reaction [J].
@@ -320,11 +328,12 @@ pub struct DtFusionBalance {
     pub electron_energy_residual_j: f64,
     /// Final source heavy energy minus its independently accumulated budget [J].
     pub heavy_energy_residual_j: f64,
-    /// Delta thermal U + neutron/photon/transport energy out - Q - external heat [J].
+    /// Delta thermal U + neutron/photon/transport energy out - Q - external heat
+    /// + particle-carried energy out - particle-carried energy in [J].
     pub total_energy_residual_j: f64,
-    /// Relative baryon inventory drift, including escaped neutrons.
+    /// Relative baryon drift, including escaped neutrons and supplied/exhausted ions.
     pub relative_baryon_residual: f64,
-    /// Relative positive-ion charge inventory drift; electrons retain their amount.
+    /// Relative positive-ion charge drift after accounting for particle exchange.
     pub relative_charge_residual: f64,
     /// Largest accepted full/two-half local error norm, at most one.
     pub maximum_normalized_local_error: f64,

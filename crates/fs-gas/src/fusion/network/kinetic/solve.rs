@@ -502,7 +502,7 @@ impl<'a> Problem<'a> {
             self.initial.plasma(),
             &physical_grid,
             point.alphas,
-            self.initial.thermal_helium4_amount,
+            point.core.thermal_helium4_amount.value,
             point.core.kinetic_alpha_amount.value,
             Time::new(self.initial.elapsed_time().value() + point.core.time),
             self.controls.plasma_limits,

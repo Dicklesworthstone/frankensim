@@ -24,6 +24,12 @@ impl Sum {
         self.correction = (next - self.value) - y;
         self.value = next;
     }
+
+    /// Retain a small local transfer even after a large accumulated history.
+    /// Kahan's low part has the opposite sign of `correction`.
+    pub(super) fn increment_since(self, previous: Self) -> f64 {
+        (self.value - previous.value) + (previous.correction - self.correction)
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -41,6 +47,9 @@ pub(super) struct Point {
     neutron_interval: Option<NeutronMoments>,
     coulomb_transfer: Sum,
     photon_energy: Sum,
+    // Only the open-particle path uses these directly evolved canonical stocks.
+    particle_amounts: [Sum; 4],
+    particles: particles::Accounts,
 }
 
 pub(super) struct Problem<'a> {
@@ -54,6 +63,7 @@ pub(super) struct Problem<'a> {
     excess_fuel: f64,
     initial_pool_energy: [f64; 2],
     q_molar: f64,
+    particles: Option<particles::Prepared>,
 }
 
 impl<'a> Problem<'a> {
@@ -99,7 +109,20 @@ impl<'a> Problem<'a> {
             ));
         }
         let amounts = core::array::from_fn(|i| initial.amounts()[i].value());
-        let [d, t, _] = plasma.indices();
+        let [d, t, he] = plasma.indices();
+        let particles = transport
+            .particles
+            .map(|law| {
+                particles::Prepared::new(
+                    law,
+                    plasma.thermodynamics(),
+                    [None, Some(d), Some(t), None, Some(he)],
+                    plasma.electron_index(),
+                    controls.plasma_limits,
+                    cancelled,
+                )
+            })
+            .transpose()?;
         let result = Self {
             initial,
             plasma,
@@ -114,6 +137,7 @@ impl<'a> Problem<'a> {
                 initial.electron_internal_energy().value(),
             ],
             q_molar: FusionReactionV1::DeuteriumTritium.q_j() * AVOGADRO,
+            particles,
         };
         result.sources(result.start(), cancelled)?;
         Ok(result)
@@ -136,10 +160,15 @@ impl<'a> Problem<'a> {
                 .then(NeutronMoments::default),
             coulomb_transfer: Sum::default(),
             photon_energy: Sum::default(),
+            particle_amounts: self.initial_amounts.map(Sum::new),
+            particles: particles::Accounts::default(),
         }
     }
 
     fn amounts(&self, point: Point) -> [Amount; 4] {
+        if self.particles.is_some() {
+            return point.particle_amounts.map(|n| Amount::new(n.value));
+        }
         let mut amounts = self.initial_amounts.map(Amount::new);
         let [d, t, he] = self.plasma.indices();
         let (limiting, other) = if self.deuterium_is_limiting {
@@ -154,7 +183,7 @@ impl<'a> Problem<'a> {
     }
 
     fn pool_energy(&self, point: Point) -> [f64; 2] {
-        if self.transport.energy_confinement.is_some() {
+        if self.retains_thermal_energy() {
             return point.thermal_energy.map(|energy| energy.value);
         }
         self.accounted_energy(point)
@@ -167,22 +196,53 @@ impl<'a> Problem<'a> {
                 + self.heating.heavy_power.value() * point.time
                 + ((1.0 - f) * point.alpha_energy.value - point.ion_removal.value)
                 + point.coulomb_transfer.value
-                - point.transport_energy_out[0].value,
+                - point.transport_energy_out[0].value
+                + point.particles.energy_in[0].value
+                - point.particles.energy_out[0].value,
             self.initial_pool_energy[1]
                 + self.heating.electron_power.value() * point.time
                 + f * point.alpha_energy.value
                 - point.coulomb_transfer.value
                 - point.photon_energy.value
-                - point.transport_energy_out[1].value,
+                - point.transport_energy_out[1].value
+                + point.particles.energy_in[1].value
+                - point.particles.energy_out[1].value,
         ]
     }
 
     fn add_pool_energy(&self, point: &mut Point, increments: [f64; 2]) {
-        if self.transport.energy_confinement.is_some() {
+        if self.retains_thermal_energy() {
             for (energy, increment) in point.thermal_energy.iter_mut().zip(increments) {
                 energy.add(increment);
             }
         }
+    }
+
+    fn retains_thermal_energy(&self) -> bool {
+        self.transport.energy_confinement.is_some() || self.particles.is_some()
+    }
+
+    fn exchange_particles(
+        &self,
+        old: Point,
+        dt: f64,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Point, DtFusionError> {
+        let Some(source) = &self.particles else {
+            return Ok(old);
+        };
+        let mut next = old;
+        source.apply(
+            &mut next.particle_amounts,
+            None,
+            0.0,
+            &mut next.thermal_energy,
+            &mut next.particles,
+            dt,
+            cancelled,
+        )?;
+        self.admit(next, cancelled)?;
+        Ok(next)
     }
 
     fn temperatures(&self, point: Point) -> Result<[f64; 2], DtFusionError> {
@@ -190,6 +250,7 @@ impl<'a> Problem<'a> {
         // NASA-9 (h - RT) through a separately rounded Cv*T can move an exact
         // source-domain endpoint one ULP outside before any time has elapsed.
         if point.time == 0.0
+            && point.particles.is_zero()
             && point.coulomb_transfer.value == 0.0
             && point.photon_energy.value == 0.0
             && point
@@ -243,7 +304,12 @@ impl<'a> Problem<'a> {
                 .transport_energy_out
                 .iter()
                 .any(|energy| !energy.value.is_finite())
-            || (self.transport.energy_confinement.is_some()
+            || !point.particles.finite()
+            || point
+                .particle_amounts
+                .iter()
+                .any(|n| !n.value.is_finite() || n.value < 0.0)
+            || (self.retains_thermal_energy()
                 && point
                     .thermal_energy
                     .iter()
@@ -279,9 +345,17 @@ impl<'a> Problem<'a> {
         let event = reaction
             .thermal_event(Temperature::new(temperature))
             .map_err(DtFusionError::Reaction)?;
+        let [d, t, he] = self.plasma.indices();
+        let (limiting, excess) = if self.particles.is_some() {
+            let d = old.particle_amounts[d].value;
+            let t = old.particle_amounts[t].value;
+            (d.min(t), (d - t).abs())
+        } else {
+            (old.limiting_fuel, self.excess_fuel)
+        };
         let (remaining, extent) = frozen_depletion(
-            old.limiting_fuel,
-            self.excess_fuel,
+            limiting,
+            excess,
             event.reactivity().value_m3_s(),
             self.initial.volume().value(),
             dt,
@@ -293,6 +367,18 @@ impl<'a> Problem<'a> {
         let mut next = old;
         next.time = old.time + dt;
         next.limiting_fuel = remaining;
+        if self.particles.is_some() {
+            let (small, large) = if old.particle_amounts[d].value <= old.particle_amounts[t].value {
+                (d, t)
+            } else {
+                (t, d)
+            };
+            next.particle_amounts[small] =
+                particles::withdraw(old.particle_amounts[small], extent, remaining);
+            next.particle_amounts[large] =
+                particles::withdraw(old.particle_amounts[large], extent, remaining + excess);
+            next.particle_amounts[he].add(extent);
+        }
         next.extent.add(extent);
         next.alpha_energy.add(alpha_energy);
         next.ion_removal.add(removed_energy);
@@ -379,6 +465,13 @@ impl<'a> Problem<'a> {
                 c.energy_tolerance_j,
             );
         }
+        old.particles.compare(
+            full.particles,
+            fine.particles,
+            c.absolute_amount_tolerance_mol,
+            c.energy_tolerance_j,
+            &mut add,
+        );
         if !norm.is_finite() {
             return Err(DtFusionError::Arithmetic("local error estimate"));
         }
@@ -506,6 +599,10 @@ impl<'a> Problem<'a> {
             + point.photon_energy.value
             + point.transport_energy_out[0].value
             + point.transport_energy_out[1].value
+            + point.particles.energy_out[0].value
+            + point.particles.energy_out[1].value
+            - point.particles.energy_in[0].value
+            - point.particles.energy_in[1].value
             - released
             - external_heavy
             - external_electron;
@@ -520,8 +617,47 @@ impl<'a> Problem<'a> {
         let before_charge =
             self.initial_amounts[d] + self.initial_amounts[t] + 2.0 * self.initial_amounts[he];
         let after_charge = amounts[d].value() + amounts[t].value() + 2.0 * amounts[he].value();
-        let baryon_residual = (after_baryons - before_baryons) / before_baryons;
-        let charge_residual = (after_charge - before_charge) / before_charge;
+        let particles = point.particles;
+        let net = particles.nuclei_net_in();
+        let activity = particles.nuclei_activity();
+        let baryon_residual =
+            (after_baryons - before_baryons - net[0]) / (before_baryons + activity[0]);
+        let charge_residual =
+            (after_charge - before_charge - net[1]) / (before_charge + activity[1]);
+        for (slot, index, coefficient) in [(1, d, -1.0), (2, t, -1.0), (4, he, 1.0)] {
+            let mut expected_amount = Sum::new(self.initial_amounts[index]);
+            expected_amount.add(coefficient * point.extent.value);
+            expected_amount.add(particles.injected[slot].value);
+            expected_amount.add(-particles.exhausted[slot].value);
+            let activity = self.initial_amounts[index]
+                + point.extent.value
+                + particles.injected[slot].value
+                + particles.exhausted[slot].value;
+            if (amounts[index].value() - expected_amount.value).abs()
+                > self.controls.absolute_amount_tolerance_mol
+                    + self.controls.balance_relative_tolerance * activity
+            {
+                return Err(DtFusionError::Balance(
+                    "D-T reaction and particle-source inventory",
+                ));
+            }
+        }
+        let electron = self.plasma.electron_index();
+        let electron_change = amounts[electron].value() - self.initial_amounts[electron];
+        let electron_particle_residual =
+            electron_change - particles.electrons_in.value + particles.electrons_out.value;
+        if !electron_particle_residual.is_finite()
+            || electron_particle_residual.abs()
+                > self.controls.absolute_amount_tolerance_mol
+                    + self.controls.balance_relative_tolerance
+                        * (self.initial_amounts[electron]
+                            + particles.electrons_in.value
+                            + particles.electrons_out.value)
+        {
+            return Err(DtFusionError::Balance(
+                "particle-source companion electrons",
+            ));
+        }
         let tolerance = self.controls.energy_tolerance_j
             + self.controls.balance_relative_tolerance
                 * (released.abs()
@@ -529,6 +665,10 @@ impl<'a> Problem<'a> {
                     + external_electron.abs()
                     + point.transport_energy_out[0].value.abs()
                     + point.transport_energy_out[1].value.abs()
+                    + particles.energy_in[0].value
+                    + particles.energy_in[1].value
+                    + particles.energy_out[0].value
+                    + particles.energy_out[1].value
                     + self.initial_pool_energy[0].abs()
                     + self.initial_pool_energy[1].abs());
         if [
@@ -551,6 +691,7 @@ impl<'a> Problem<'a> {
             ));
         }
         *balance = DtFusionBalance {
+            particles: particles.balance(),
             reaction_extent_mol: point.extent.value,
             nuclear_energy_released_j: released,
             alpha_energy_deposited_j: point.alpha_energy.value,

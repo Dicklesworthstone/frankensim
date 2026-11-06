@@ -225,6 +225,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         100_000,
     )?;
     let thermal_transport = FusionNetworkTransport {
+        particles: None,
         energy_confinement: None,
         coulomb: Some(background),
         bremsstrahlung: Some(ElectronIonBremsstrahlungV1::new(

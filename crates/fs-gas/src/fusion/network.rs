@@ -4,8 +4,9 @@
 //! The two D–D rates already describe separate branches: each receives the
 //! identical-pair factor once, without an extra assumed branching fraction.
 //! Tritium and He3 born during a step can subsequently react; no trace seed is
-//! inserted. All charged products remain and thermalize instantaneously with
-//! an explicit per-product electron/ion split. Every neutron escapes.
+//! inserted. Charged products thermalize instantaneously with an explicit
+//! per-product electron/ion split; optional particle ports can replenish fuel
+//! and exhaust thermal ions with their companion electrons. Every neutron escapes.
 //!
 //! Exact positive finite-stock reaction maps are composed symmetrically at
 //! midpoint coefficients. The shared Coulomb and radiation kernels act on the
@@ -26,7 +27,7 @@ use fs_thermochem::fusion::{FusionReactionV1, NuclearSpeciesV1};
 pub use super::DtFusionError as FusionNetworkError;
 /// Shared physical/numerical controls, including the original plasma limits.
 pub use super::DtFusionSolve as FusionNetworkSolve;
-/// Shared Coulomb/radiation sources and optional thermal energy confinement.
+/// Shared Coulomb/radiation sources and optional energy/particle transport.
 pub use super::DtFusionTransport as FusionNetworkTransport;
 
 pub(crate) mod kinetic;
@@ -119,6 +120,8 @@ impl FusionNetworkHeating {
 /// Accepted interval accounts; nuclear rest energy is outside gas calorics.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct FusionNetworkBalance {
+    /// Accepted external ion/electron transfers and their sensible energy.
+    pub particles: super::FusionParticleBalance,
     /// Event amounts [mol] in `FusionReactionV1::ALL` order; DD consumes twice its extent.
     pub reaction_extents_mol: [f64; 4],
     /// Born product kinetic energies [J], by channel and original product order.
@@ -141,7 +144,7 @@ pub struct FusionNetworkBalance {
     /// Free-free emission escaping the explicitly optically thin boundary [J].
     pub photon_energy_escaped_j: f64,
     /// Signed ion thermal energy transported to its prescribed exterior [J].
-    /// Negative means exterior heating. Neither fuel nor kinetic alphas escape.
+    /// Negative means exterior heating. Particle-carried energy is separate.
     pub heavy_transport_energy_out_j: f64,
     /// Signed electron thermal energy transported to its prescribed exterior [J].
     pub electron_transport_energy_out_j: f64,
@@ -158,13 +161,13 @@ pub struct FusionNetworkBalance {
     /// Final source ion energy minus its independent transfer account [J].
     pub heavy_energy_residual_j: f64,
     /// Delta thermal U + neutron/photon/transport energy out - Q - external heat
-    /// - work on ions - work on electrons [J].
+    /// - work on ions - work on electrons + particle energy out - particle energy in [J].
     pub total_energy_residual_j: f64,
-    /// Relative baryon drift, including all emitted neutrons.
+    /// Relative baryon drift, including emitted neutrons and external ion transfers.
     pub relative_baryon_residual: f64,
-    /// Relative positive-ion charge drift; electron amount is fixed.
+    /// Relative positive-ion charge drift after accounting for particle exchange.
     pub relative_charge_residual: f64,
-    /// Largest absolute species residual against independent channel extents [mol].
+    /// Largest absolute species residual against channel extents and particle ports [mol].
     pub maximum_stoichiometry_residual_mol: f64,
     /// Largest accepted full/two-half-step normalized local error, at most one.
     pub maximum_normalized_local_error: f64,

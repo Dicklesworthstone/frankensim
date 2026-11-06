@@ -124,6 +124,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let (plasma, initial) = source::plasma([2e19, 3e20, 7e19, 4e19, 1e19], 0.025, [15.0, 4.0]);
     let transport = FusionNetworkTransport {
+        particles: None,
         energy_confinement: None,
         coulomb: Some(CoulombModelV1::new_with_cutoff(
             &initial,

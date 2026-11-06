@@ -44,6 +44,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         false
     })?;
     let transport = DtFusionTransport {
+        particles: None,
         energy_confinement: None,
         coulomb: Some(CoulombModelV1::new_with_cutoff(
             &initial,

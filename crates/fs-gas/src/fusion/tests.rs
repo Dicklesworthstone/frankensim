@@ -1,6 +1,7 @@
 use super::*;
 use fs_thermochem::fusion::{KELVIN_PER_KEV, NuclearSpeciesV1, SPEED_OF_LIGHT_M_S};
 pub(super) mod history;
+mod particles;
 #[path = "../../examples/dt_fusion/source.rs"]
 mod source;
 mod transport;

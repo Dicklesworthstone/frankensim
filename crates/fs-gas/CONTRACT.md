@@ -1,5 +1,65 @@
 # fs-gas contract
 
+## Fully-ionized fueling and selective thermal ash exhaust
+
+`FusionParticleExchange` supplies explicit constant ion rates in mol/s and
+first-order thermal-particle removal hazards in 1/s. Every array uses the
+physical order `p, D, T, He3, He4`, independent of canonical material ordering.
+`DtFusionTransport::particles` selects this optional source in the original
+D-T, four-channel network and kinetic-alpha entrypoints, including prescribed
+volume histories. The D-T bank refuses nonzero proton or He3 ports. No source
+is inferred when the option is absent; the original closed-particle path stays
+available.
+
+Each ion brings or removes its own charge's companion electrons. Injected
+ions and electrons have separate authored temperatures, with sensible internal
+energy evaluated from their original monatomic source cards once per solve.
+Incoming source coverage and the declared nonrelativistic temperature limit
+remain mandatory, even when a tiny injected population would dilute into an
+admitted bulk state. Outgoing particles carry the actual mean thermal energy
+of their pool. Thermal fuel dilution, charge balance, changing heat capacities,
+reaction competition, radiation and alpha slowing therefore see the evolving
+populations. The supplied ionization state is assumed; neutral/pellet ablation,
+ionization energy, bulk momentum, ambipolar potential, recycling and reservoir
+dynamics are not supplied. These are local inventory sources, not flow-face
+enthalpy fluxes; no additional inlet/outlet pressure work is inferred.
+
+The common bounded source kernel composes exact exponential exhaust with
+constant injection symmetrically. Positive survivors and small losses are
+evaluated separately, retaining deep trace inventories and tiny transfers.
+The original midpoint/step-doubling owners resolve simultaneous supply,
+selective removal, burn and thermal feedback. Trials allocate no source history
+and retain independent compensated particle/energy accounts; local transfer
+error includes the compensated low parts so a weak late flow is not hidden by
+a large accumulated account. Every candidate retains original material and
+physical-domain checks; refusal or cancellation publishes no partial state.
+
+Kinetic He4 is explicitly excluded from this thermal exhaust. The Maxwellian
+He4 inventory now evolves as its own retained stock through supply, exhaust
+and restart. Fast alpha number, distribution energy and pressure remain under
+their existing birth/collision owners. The reflecting lower-energy alpha grid
+has no thermalization handoff: even its low-energy tail remains kinetic and is
+not silently reclassified as removable Maxwellian ash. Incoming He4 enters
+the thermal stock and does not seed the kinetic distribution.
+
+Both result balance families expose `particles: FusionParticleBalance`, with
+all five ion transfers, companion electrons and separate incoming/outgoing
+heavy/electron energies. Species, baryon and charge audits include these
+external transfers. The full energy account adds particle energy out and
+subtracts particle energy in. `FusionEnergyConfinement` remains a separate
+non-particle energy term and must exclude energy already carried by these
+ports. The published transfers allow an explicitly coupled receiver to debit
+or credit its own finite inventory without inventing that receiver here.
+
+Fuel replenishment and helium removal are distinct physical needs in a
+sustained burn; see the [UKAEA PROCESS fuel and ash exhaust discussion](https://ukaea.github.io/PROCESS/eng-models/cryostat-and-vacuum-system/).
+The rates here are caller-authored closures, not a fitted pumping or magnetic
+particle-confinement model. Numerical checks cover analytic supply mixing and
+deep exhaust, initially absent fuel and restart, all five ion ports against an
+independent continuum energy ODE under compression, second-order refinement,
+all-channel Coulomb/radiation/confinement coupling, thermal-only kinetic ash
+removal, cold helium supply without artificial fast alphas and atomic refusal.
+
 ## Finite thermal energy confinement and neutron-source handoff
 
 `FusionEnergyConfinement` explicitly authors separate ion/electron energy

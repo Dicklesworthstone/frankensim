@@ -18,6 +18,7 @@ mod fixture;
 mod compression;
 mod confinement;
 mod history;
+mod particles;
 
 const KEV_J: f64 = 1.602_176_634e-16;
 const BOLTZMANN: f64 = 1.380_649e-23;
@@ -101,6 +102,7 @@ fn thermal_transport(
     ion_variance_limit: f64,
 ) -> FusionNetworkTransport {
     FusionNetworkTransport {
+        particles: None,
         energy_confinement: None,
         coulomb: Some(alpha.collisions().background().clone()),
         bremsstrahlung: Some(
@@ -298,7 +300,9 @@ fn check_accounts(result: &KineticFusionResult) {
             + b.electron_to_heavy_coulomb_energy_j
             + b.external_heavy_energy_j
             + b.boundary_work_on_heavy_j
-            - b.heavy_transport_energy_out_j,
+            - b.heavy_transport_energy_out_j
+            + b.particles.injected_thermal_energy_j[0]
+            - b.particles.exhausted_thermal_energy_j[0],
         3e-12,
         2e-6,
     );
@@ -309,7 +313,9 @@ fn check_accounts(result: &KineticFusionResult) {
             - b.photon_energy_escaped_j
             + b.external_electron_energy_j
             + b.boundary_work_on_electrons_j
-            - b.electron_transport_energy_out_j,
+            - b.electron_transport_energy_out_j
+            + b.particles.injected_thermal_energy_j[1]
+            - b.particles.exhausted_thermal_energy_j[1],
         3e-12,
         2e-6,
     );
@@ -318,13 +324,15 @@ fn check_accounts(result: &KineticFusionResult) {
             + b.neutron_energy_escaped_j
             + b.photon_energy_escaped_j
             + b.heavy_transport_energy_out_j
-            + b.electron_transport_energy_out_j,
+            + b.electron_transport_energy_out_j
+            + b.particles.exhausted_thermal_energy_j.iter().sum::<f64>(),
         b.nuclear_energy_released_j
             + b.external_heavy_energy_j
             + b.external_electron_energy_j
             + b.boundary_work_on_heavy_j
             + b.boundary_work_on_electrons_j
-            + a.boundary_work_on_alphas_j,
+            + a.boundary_work_on_alphas_j
+            + b.particles.injected_thermal_energy_j.iter().sum::<f64>(),
         3e-12,
         2e-6,
     );
@@ -343,7 +351,19 @@ fn check_accounts(result: &KineticFusionResult) {
         } else {
             0.0
         };
-        close(inventory(state) + escaped, inventory(initial), 3e-12, 1e-20);
+        let net_particles: f64 = weights
+            .into_iter()
+            .enumerate()
+            .map(|(i, weight)| {
+                weight * (b.particles.injected_ions_mol[i] - b.particles.exhausted_ions_mol[i])
+            })
+            .sum();
+        close(
+            inventory(state) + escaped,
+            inventory(initial) + net_particles,
+            3e-12,
+            1e-20,
+        );
     }
     assert!(b.maximum_normalized_local_error <= 1.0);
     assert_eq!(state.plasma(), initial.plasma());

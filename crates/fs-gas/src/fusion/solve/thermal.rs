@@ -28,12 +28,13 @@ impl Problem<'_> {
         sources: Sources,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Point, DtFusionError> {
-        let first = self.thermal_step(old, 0.5 * dt, sources, cancelled)?;
+        let supplied = self.exchange_particles(old, 0.5 * dt, cancelled)?;
+        let first = self.thermal_step(supplied, 0.5 * dt, sources, cancelled)?;
         let burned = self.frozen_step(first, dt, sources.temperatures[0])?;
         self.admit(burned, cancelled)?;
         let next = self.thermal_step(burned, 0.5 * dt, sources, cancelled)?;
         self.admit(next, cancelled)?;
-        Ok(next)
+        self.exchange_particles(next, 0.5 * dt, cancelled)
     }
 
     fn thermal_step(

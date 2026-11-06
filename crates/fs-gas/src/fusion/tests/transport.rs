@@ -6,6 +6,7 @@ mod confinement;
 
 fn thermal_sources(state: &FrozenIonizedGasStateV1) -> DtFusionTransport {
     DtFusionTransport {
+        particles: None,
         energy_confinement: None,
         coulomb: Some(
             CoulombModelV1::new_with_cutoff(

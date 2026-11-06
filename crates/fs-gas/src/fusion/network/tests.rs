@@ -15,6 +15,7 @@ mod compression;
 mod confinement;
 mod fixture;
 mod history;
+mod particles;
 
 const MIXED_DENSITY: [f64; 5] = [2e19, 3e20, 7e19, 4e19, 1e19];
 
@@ -58,6 +59,7 @@ fn mixed_heating() -> FusionNetworkHeating {
 
 fn transport(state: &FrozenIonizedGasStateV1) -> FusionNetworkTransport {
     FusionNetworkTransport {
+        particles: None,
         energy_confinement: None,
         coulomb: Some(
             CoulombModelV1::new_with_cutoff(

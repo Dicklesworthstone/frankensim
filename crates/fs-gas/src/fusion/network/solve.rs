@@ -1,4 +1,5 @@
 use super::super::emission::{self, NeutronMoments};
+use super::super::particles;
 use super::super::solve::{Sum, frozen_depletion};
 use super::super::thermal::{self, ThermalSources};
 use super::super::volume::{adiabatic_work_on_pools, log_volume_ratio};
@@ -21,6 +22,7 @@ pub(super) struct Point {
     work_on_pools: [Sum; 2],
     transport_energy_out: [Sum; 2],
     pub(super) kinetic_alpha_amount: Sum,
+    pub(super) thermal_helium4_amount: Sum,
     pub(super) alpha_deposited: [Sum; 2],
     amounts: [Sum; 6],
     extents: [Sum; 4],
@@ -31,6 +33,7 @@ pub(super) struct Point {
     pub(super) neutron_interval: Option<NeutronMoments>,
     exchange: Sum,
     photons: Sum,
+    particles: particles::Accounts,
 }
 
 #[derive(Clone, Copy)]
@@ -53,6 +56,7 @@ pub(super) struct Problem<'a> {
     kinetic_alphas: bool,
     initial_alpha_amount: f64,
     thermal_helium4_amount: f64,
+    particles: Option<particles::Prepared>,
 }
 
 impl<'a> Problem<'a> {
@@ -103,6 +107,19 @@ impl<'a> Problem<'a> {
                 "network thermal operators must retain the original source bank",
             ));
         }
+        let particles = transport
+            .particles
+            .map(|law| {
+                particles::Prepared::new(
+                    law,
+                    plasma.thermodynamics(),
+                    plasma.indices().map(Some),
+                    plasma.electron_index(),
+                    controls.plasma_limits,
+                    cancelled,
+                )
+            })
+            .transpose()?;
         let result = Self {
             initial,
             plasma,
@@ -120,6 +137,7 @@ impl<'a> Problem<'a> {
             kinetic_alphas: false,
             initial_alpha_amount: 0.0,
             thermal_helium4_amount: initial.amounts()[plasma.indices()[4]].value(),
+            particles,
         };
         result.sources(result.start(), cancelled)?;
         Ok(result)
@@ -164,6 +182,7 @@ impl<'a> Problem<'a> {
             work_on_pools: [Sum::default(); 2],
             transport_energy_out: [Sum::default(); 2],
             kinetic_alpha_amount: sum(self.initial_alpha_amount),
+            thermal_helium4_amount: sum(self.thermal_helium4_amount),
             alpha_deposited: [Sum::default(); 2],
             amounts: self.initial_amounts.map(sum),
             extents: [Sum::default(); 4],
@@ -177,6 +196,7 @@ impl<'a> Problem<'a> {
                 .then(NeutronMoments::default),
             exchange: Sum::default(),
             photons: Sum::default(),
+            particles: particles::Accounts::default(),
         }
     }
     pub(super) fn amounts(&self, point: Point) -> [Amount; 6] {
@@ -187,7 +207,7 @@ impl<'a> Problem<'a> {
         if self.kinetic_alphas {
             // He4 is not a reactant. Retain the original thermal stock directly
             // rather than subtracting two large nearly equal alpha inventories.
-            amounts[self.plasma.indices()[4]] = Amount::new(self.thermal_helium4_amount);
+            amounts[self.plasma.indices()[4]] = Amount::new(point.thermal_helium4_amount.value);
         }
         amounts
     }
@@ -200,7 +220,7 @@ impl<'a> Problem<'a> {
                     .iter()
                     .map(|&i| {
                         if self.kinetic_alphas && i == self.plasma.indices()[4] {
-                            self.thermal_helium4_amount
+                            point.thermal_helium4_amount.value
                         } else {
                             point.amounts[i].value
                         }
@@ -220,6 +240,7 @@ impl<'a> Problem<'a> {
         self.volume_history.is_some()
             || self.kinetic_alphas
             || self.transport.energy_confinement.is_some()
+            || self.particles.is_some()
     }
     /// Independent cumulative transfer accounts, also used to verify moving
     /// states. The rigid path retains its original arithmetic and fast path.
@@ -231,7 +252,9 @@ impl<'a> Problem<'a> {
                 + point.exchange.value
                 + point.work_on_pools[0].value
                 + point.alpha_deposited[0].value
-                - point.transport_energy_out[0].value,
+                - point.transport_energy_out[0].value
+                + point.particles.energy_in[0].value
+                - point.particles.energy_out[0].value,
             self.initial_energy[1]
                 + self.heating.electron_power.value() * point.time
                 + point.deposited[1].value
@@ -239,7 +262,9 @@ impl<'a> Problem<'a> {
                 - point.photons.value
                 + point.work_on_pools[1].value
                 + point.alpha_deposited[1].value
-                - point.transport_energy_out[1].value,
+                - point.transport_energy_out[1].value
+                + point.particles.energy_in[1].value
+                - point.particles.energy_out[1].value,
         ]
     }
     fn add_pool_energy(&self, point: &mut Point, increments: [f64; 2]) {
@@ -253,6 +278,7 @@ impl<'a> Problem<'a> {
         // Keep exact authored endpoints when no physical transfer has occurred.
         // A thermal substep can act at t=0, so elapsed time alone is insufficient.
         if point.extents.iter().all(|x| x.value == 0.0)
+            && point.particles.is_zero()
             && point.exchange.value == 0.0
             && point.photons.value == 0.0
             && point.work_on_pools.iter().all(|x| x.value == 0.0)
@@ -294,6 +320,9 @@ impl<'a> Problem<'a> {
                 .any(|x| !x.value.is_finite())
             || !point.kinetic_alpha_amount.value.is_finite()
             || point.kinetic_alpha_amount.value < 0.0
+            || !point.thermal_helium4_amount.value.is_finite()
+            || point.thermal_helium4_amount.value < 0.0
+            || !point.particles.finite()
             || (self.retains_thermal_energy()
                 && point.thermal_energy.iter().any(|x| !x.value.is_finite()))
             || point
@@ -489,6 +518,33 @@ impl<'a> Problem<'a> {
         self.admit(next, cancelled)?;
         Ok(next)
     }
+    fn exchange_particles(
+        &self,
+        old: Point,
+        dt: f64,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Point, FusionNetworkError> {
+        let Some(source) = &self.particles else {
+            return Ok(old);
+        };
+        let mut next = old;
+        let ash = if self.kinetic_alphas {
+            Some(&mut next.thermal_helium4_amount)
+        } else {
+            None
+        };
+        source.apply(
+            &mut next.amounts,
+            ash,
+            next.kinetic_alpha_amount.value,
+            &mut next.thermal_energy,
+            &mut next.particles,
+            dt,
+            cancelled,
+        )?;
+        self.admit(next, cancelled)?;
+        Ok(next)
+    }
     fn frozen_step(
         &self,
         old: Point,
@@ -511,7 +567,8 @@ impl<'a> Problem<'a> {
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<(Point, [f64; 2]), FusionNetworkError> {
         let mut births = [Sum::default(); 2];
-        let mut next = self.thermal_step(old, 0.5 * dt, sources.thermal, cancelled)?;
+        let supplied = self.exchange_particles(old, 0.5 * dt, cancelled)?;
+        let mut next = self.thermal_step(supplied, 0.5 * dt, sources.thermal, cancelled)?;
         // Palindromic channel composition: each selected binary map is exact
         // at fixed T. Products can feed later maps without an overdraw or seed.
         for r in 0..4 {
@@ -548,6 +605,7 @@ impl<'a> Problem<'a> {
         self.admit(next, cancelled)?;
         let next = self.thermal_step(next, 0.5 * dt, sources.thermal, cancelled)?;
         self.admit(next, cancelled)?;
+        let next = self.exchange_particles(next, 0.5 * dt, cancelled)?;
         Ok((next, births.map(|n| n.value)))
     }
 
@@ -635,6 +693,13 @@ impl<'a> Problem<'a> {
                 c.absolute_amount_tolerance_mol,
             );
         }
+        if self.kinetic_alphas {
+            add(
+                full.thermal_helium4_amount.value,
+                fine.thermal_helium4_amount.value,
+                c.absolute_amount_tolerance_mol,
+            );
+        }
         for r in 0..4 {
             add(
                 full.extents[r].value - old.extents[r].value,
@@ -697,6 +762,13 @@ impl<'a> Problem<'a> {
                 c.energy_tolerance_j,
             );
         }
+        old.particles.compare(
+            full.particles,
+            fine.particles,
+            c.absolute_amount_tolerance_mol,
+            c.energy_tolerance_j,
+            &mut add,
+        );
         if !norm.is_finite() {
             return Err(FusionNetworkError::Arithmetic(
                 "network local error estimate",
@@ -870,6 +942,10 @@ impl<'a> Problem<'a> {
             + point.photons.value
             + point.transport_energy_out[0].value
             + point.transport_energy_out[1].value
+            + point.particles.energy_out[0].value
+            + point.particles.energy_out[1].value
+            - point.particles.energy_in[0].value
+            - point.particles.energy_in[1].value
             - released.value
             - external_heavy
             - external_electron
@@ -886,7 +962,7 @@ impl<'a> Problem<'a> {
         let mut baryons = [0.0, neutron_amount];
         let mut charge = [0.0; 2];
         let mut stoichiometry = 0.0_f64;
-        for (species, index) in nuclei.iter().zip(self.plasma.indices()) {
+        for (slot, (species, index)) in nuclei.iter().zip(self.plasma.indices()).enumerate() {
             let before = self.initial_amounts[index];
             let after = amounts[index].value();
             baryons[0] += f64::from(species.baryon_number()) * before;
@@ -900,6 +976,10 @@ impl<'a> Problem<'a> {
                 expected_amount.add(transfer);
                 activity += transfer.abs();
             }
+            expected_amount.add(point.particles.injected[slot].value);
+            expected_amount.add(-point.particles.exhausted[slot].value);
+            activity +=
+                point.particles.injected[slot].value + point.particles.exhausted[slot].value;
             let residual = (after - expected_amount.value).abs();
             stoichiometry = stoichiometry.max(residual);
             if !residual.is_finite()
@@ -912,8 +992,28 @@ impl<'a> Problem<'a> {
                 ));
             }
         }
-        let baryon_residual = (baryons[1] - baryons[0]) / baryons[0];
-        let charge_residual = (charge[1] - charge[0]) / charge[0];
+        let particles = point.particles;
+        let net = particles.nuclei_net_in();
+        let activity = particles.nuclei_activity();
+        let baryon_residual = (baryons[1] - baryons[0] - net[0]) / (baryons[0] + activity[0]);
+        let charge_residual = (charge[1] - charge[0] - net[1]) / (charge[0] + activity[1]);
+        let electron = self.plasma.electron_index();
+        let electron_particle_residual = amounts[electron].value()
+            - self.initial_amounts[electron]
+            - particles.electrons_in.value
+            + particles.electrons_out.value;
+        if !electron_particle_residual.is_finite()
+            || electron_particle_residual.abs()
+                > self.controls.absolute_amount_tolerance_mol
+                    + self.controls.balance_relative_tolerance
+                        * (self.initial_amounts[electron]
+                            + particles.electrons_in.value
+                            + particles.electrons_out.value)
+        {
+            return Err(FusionNetworkError::Balance(
+                "particle-source companion electrons",
+            ));
+        }
         let tolerance = self.controls.energy_tolerance_j
             + self.controls.balance_relative_tolerance
                 * (released.value.abs()
@@ -921,6 +1021,10 @@ impl<'a> Problem<'a> {
                     + external_electron.abs()
                     + point.transport_energy_out[0].value.abs()
                     + point.transport_energy_out[1].value.abs()
+                    + particles.energy_in[0].value
+                    + particles.energy_in[1].value
+                    + particles.energy_out[0].value
+                    + particles.energy_out[1].value
                     + point.work_on_pools[0].value.abs()
                     + point.work_on_pools[1].value.abs()
                     + kinetic_energy_change_j.abs()
@@ -947,6 +1051,7 @@ impl<'a> Problem<'a> {
             ));
         }
         *balance = FusionNetworkBalance {
+            particles: particles.balance(),
             reaction_extents_mol: extents,
             product_kinetic_energies_j: point.products.map(|row| row.map(|x| x.value)),
             nuclear_energy_released_j: released.value,
