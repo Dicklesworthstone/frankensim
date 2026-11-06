@@ -172,16 +172,28 @@ impl SmallStrainLaw for OrientedHill48 {
         self.law.initial_state()
     }
     fn stress(&self, strain: &Voigt, state: &HillState) -> Voigt {
-        self.response(strain, state)
-            .map_or([f64::NAN; 6], |r| r.stress_pa)
+        // A residual evaluation needs only the returned stress. Avoid forming
+        // and rotating the full constitutive tangent during each line search.
+        let local = self.law.stress(&self.local_strain(strain), state);
+        let stress = if self.aligned {
+            local
+        } else {
+            apply(&self.to_spatial, &local)
+        };
+        if stress.iter().all(|v| v.is_finite()) {
+            stress
+        } else {
+            [f64::NAN; 6]
+        }
     }
     fn tangent(&self, strain: &Voigt, state: &HillState) -> Tangent6 {
         self.response(strain, state)
             .map_or([[f64::NAN; 6]; 6], |r| r.tangent_pa)
     }
     fn update_state(&self, strain: &Voigt, state: &HillState) -> HillState {
-        self.response(strain, state)
-            .map_or_else(|_| state.clone(), |r| r.state)
+        // Accepted history remains local; neither stress nor tangent needs a
+        // spatial rotation for this operation.
+        self.law.update_state(&self.local_strain(strain), state)
     }
     fn admissibility(&self) -> MaterialAdmissibility {
         self.law.admissibility()

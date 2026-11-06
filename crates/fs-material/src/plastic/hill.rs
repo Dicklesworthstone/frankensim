@@ -141,6 +141,24 @@ pub struct HillEnergyIncrement {
     pub energy: IncrementEnergy,
 }
 
+// Stress-only line searches and accepted-history updates use the same checked
+// return without constructing its tangent. Retain the scalar solve's data so
+// a requested tangent still differentiates that exact candidate.
+struct HillTrial {
+    stress_pa: Voigt,
+    state: HillState,
+    plastic_increment: f64,
+    yield_residual_pa: f64,
+    tangent: Option<PlasticTangent>,
+}
+
+struct PlasticTangent {
+    radius_ratio: f64,
+    denominators: [f64; 5],
+    normalized: [f64; 5],
+    ratios: [f64; 5],
+}
+
 /// Parameter, history, numerical or explicit work-account refusal.
 #[derive(Clone, Debug, PartialEq)]
 pub enum HillError {
@@ -210,9 +228,12 @@ fn positive(x: f64) -> bool {
 }
 
 fn norm<const N: usize>(v: &[f64; N]) -> f64 {
+    if v.iter().any(|x| x.is_nan()) {
+        return f64::NAN;
+    }
     let scale = v.iter().fold(0.0_f64, |s, x| s.max(x.abs()));
-    if scale == 0.0 {
-        return 0.0;
+    if scale == 0.0 || !scale.is_finite() {
+        return scale;
     }
     scale * det::sqrt(v.iter().map(|x| (x / scale).powi(2)).sum())
 }
@@ -418,7 +439,14 @@ impl Hill48 {
         if stress.iter().any(|v| !v.is_finite()) {
             return Err(HillError::State("stress must be finite"));
         }
-        let value = self.modes.equivalent(&self.modes.coordinates(stress));
+        // Normalize before differences and Mandel scaling: finite components
+        // can overflow those intermediates while the effective stress is finite.
+        let scale = stress.iter().fold(0.0_f64, |s, x| s.max(x.abs()));
+        if scale == 0.0 {
+            return Ok(0.0);
+        }
+        let normalized = stress.map(|value| value / scale);
+        let value = scale * self.modes.equivalent(&self.modes.coordinates(&normalized));
         if !value.is_finite() {
             return Err(HillError::Numerical(
                 "equivalent stress is not representable",
@@ -514,13 +542,7 @@ impl Hill48 {
         Ok(())
     }
 
-    /// Checked backward-Euler stress, algorithmic tangent and candidate history.
-    /// The elastic-side tangent is selected at first yield and within its
-    /// floating-point stress envelope. The envelope includes cancellation in
-    /// subtracting retained plastic strain, so inspecting an accepted endpoint
-    /// cannot invent a new plastic step from roundoff. This is not a physical
-    /// transition band. The scalar return has a fixed iteration cap.
-    pub fn response(&self, strain: &Voigt, state: &HillState) -> Result<HillResponse, HillError> {
+    fn returned(&self, strain: &Voigt, state: &HillState) -> Result<HillTrial, HillError> {
         let elastic = self.admit(strain, state)?;
         let trial = self
             .modes
@@ -541,12 +563,12 @@ impl Hill48 {
             if stress.iter().any(|v| !v.is_finite()) {
                 return Err(HillError::Numerical("elastic stress is not representable"));
             }
-            return Ok(HillResponse {
+            return Ok(HillTrial {
                 stress_pa: stress,
-                tangent_pa: bulk_shear_stiffness(self.bulk, 0.5 * self.twice_shear),
                 state: state.clone(),
                 plastic_increment: 0.0,
                 yield_residual_pa: q_trial - y0,
+                tangent: None,
             });
         }
 
@@ -641,6 +663,37 @@ impl Hill48 {
             *component += pressure;
         }
 
+        let yield_residual = self.modes.equivalent(&returned) - self.radius(alpha)?;
+        if stress.iter().any(|v| !v.is_finite()) || !yield_residual.is_finite() {
+            return Err(HillError::Numerical(
+                "returned stress or yield residual is not representable",
+            ));
+        }
+        Ok(HillTrial {
+            stress_pa: stress,
+            state: candidate,
+            plastic_increment: increment,
+            yield_residual_pa: yield_residual,
+            tangent: Some(PlasticTangent {
+                radius_ratio,
+                denominators,
+                normalized,
+                ratios,
+            }),
+        })
+    }
+
+    fn returned_tangent(&self, trial: &HillTrial) -> Result<Tangent6, HillError> {
+        let Some(data) = &trial.tangent else {
+            return Ok(bulk_shear_stiffness(self.bulk, 0.5 * self.twice_shear));
+        };
+        let PlasticTangent {
+            radius_ratio,
+            denominators,
+            normalized,
+            ratios,
+        } = data;
+
         // Analytic rank-one correction in the prepared orthonormal modes.
         // Dividing by return_scale/q_trial before forming products avoids
         // squared stress moduli and preserves the symmetric Mandel tangent.
@@ -658,7 +711,7 @@ impl Hill48 {
                     ((self.twice_shear * self.modes.eigenvalues[i] / self.return_scale)
                         / denominators[i]
                         / b)
-                        * (radius_ratio / denominators[i]),
+                        * (*radius_ratio / denominators[i]),
                 )
         });
         let direction: Voigt =
@@ -673,23 +726,29 @@ impl Hill48 {
             })
         });
         let tangent = mandel_stiffness_to_voigt(&mandel);
-        let yield_residual = self.modes.equivalent(&returned) - self.radius(alpha)?;
-        if stress
-            .iter()
-            .chain(tangent.iter().flatten())
-            .any(|v| !v.is_finite())
-            || !yield_residual.is_finite()
-        {
+        if tangent.iter().flatten().any(|v| !v.is_finite()) {
             return Err(HillError::Numerical(
-                "returned stress, tangent or yield residual is not representable",
+                "returned tangent is not representable",
             ));
         }
+        Ok(tangent)
+    }
+
+    /// Checked backward-Euler stress, algorithmic tangent and candidate history.
+    /// The elastic-side tangent is selected at first yield and within its
+    /// floating-point stress envelope. The envelope includes cancellation in
+    /// subtracting retained plastic strain, so inspecting an accepted endpoint
+    /// cannot invent a new plastic step from roundoff. This is not a physical
+    /// transition band. The scalar return has a fixed iteration cap.
+    pub fn response(&self, strain: &Voigt, state: &HillState) -> Result<HillResponse, HillError> {
+        let trial = self.returned(strain, state)?;
+        let tangent = self.returned_tangent(&trial)?;
         Ok(HillResponse {
-            stress_pa: stress,
+            stress_pa: trial.stress_pa,
             tangent_pa: tangent,
-            state: candidate,
-            plastic_increment: increment,
-            yield_residual_pa: yield_residual,
+            state: trial.state,
+            plastic_increment: trial.plastic_increment,
+            yield_residual_pa: trial.yield_residual_pa,
         })
     }
 
@@ -790,7 +849,7 @@ impl SmallStrainLaw for Hill48 {
         Self::initial_state(self)
     }
     fn stress(&self, strain: &Voigt, state: &HillState) -> Voigt {
-        self.response(strain, state)
+        self.returned(strain, state)
             .map_or([f64::NAN; 6], |r| r.stress_pa)
     }
     fn tangent(&self, strain: &Voigt, state: &HillState) -> Tangent6 {
@@ -798,7 +857,7 @@ impl SmallStrainLaw for Hill48 {
             .map_or([[f64::NAN; 6]; 6], |r| r.tangent_pa)
     }
     fn update_state(&self, strain: &Voigt, state: &HillState) -> HillState {
-        self.response(strain, state)
+        self.returned(strain, state)
             .map_or_else(|_| state.clone(), |r| r.state)
     }
     fn admissibility(&self) -> MaterialAdmissibility {

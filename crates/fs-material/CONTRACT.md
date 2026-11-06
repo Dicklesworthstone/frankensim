@@ -17271,3 +17271,19 @@ conversion, second thermal store, moving skeleton, saturation, turbulence or
 compressibility closure is inferred. Focused synthetic regressions cover source
 continuation, distinct conventions, unsupported calibration and source-switching
 refusal; they do not establish experimental validity.
+
+
+## Hill48 stress and history evaluation
+
+The local `Hill48` and `OrientedHill48` implementations share the same checked
+constitutive return across full responses, stress-only residual evaluations,
+and accepted-history updates. Stress and history requests do not construct a
+6x6 tangent; oriented residual evaluations rotate only stress, while the
+accepted history remains in the original material coordinates. Full responses
+retain the analytic discrete tangent and tensor-shear transformation.
+
+Public effective-stress evaluation normalizes finite stress components before
+normal differences and Mandel scaling, preserving representable answers even
+when those intermediate operations would otherwise overflow. It still refuses
+nonfinite inputs or an unrepresentable effective stress. Independent numerical
+oracles and exact path-parity cases live in `tests/plastic_hill_robustness.rs`.
