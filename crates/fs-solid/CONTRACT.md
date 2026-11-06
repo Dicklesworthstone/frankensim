@@ -1,5 +1,39 @@
 # fs-solid CONTRACT
 
+## Static-friction modes of closed brittle cracks
+
+`frozen_sticking_contact_modes` on mechanical and thermal brittle motion
+reuses the same exact contact projection with the native directional static
+friction ellipse. Explicit face/vertex preloads use the original normal and
+two-tangent frame. Native `EllipticForceCoordinates` evaluates the physical
+force in its work-conjugate disk coordinates; a caller-specified fractional
+interior margin excludes the slip boundary. Loaded, tangentially resting
+points with two positive principal coefficients contribute two exact tangent
+constraints in addition to the normal constraint.
+
+Two zero coefficients preserve the identical frictionless normal pencil and
+require zero tangential preload. One zero coefficient retains the native
+sustained law's explicit refusal; no regularization invents resistance on a
+free axis. Open and tied pairs require zero force in all components and do
+not evaluate inactive friction inputs. Bounds count every scalar constraint,
+including both tangents, before allocation and reduction.
+
+The ellipse selects admissible contact membership, not a spring stiffness.
+Neither preload magnitude nor ellipse coordinates alter physical constrained
+frequencies while the same sticking subspace remains admitted. Original
+material stiffness, accepted damage, mechanical thermal strain, reference
+mass and time remain with their native owners. Coefficients are explicit
+model inputs; no new source authority, equilibrium, finite-amplitude sticking,
+frictional heating, sliding trajectory or modal damping is inferred.
+
+G3 regressions specify complete paired-trace equality, spectrum invariance
+under a change of tangent frame, native strong/weak ellipse-axis admission,
+and exact recovery of the frictionless pencil at zero coefficients. G0 cases
+exclude the slip boundary, singular sustained ellipses, moving tangent traces
+and insufficient scalar-row bounds. Thermal coverage checks original mass
+normalization and unchanged source/fracture histories in both compressive and
+fully failed normal-opening material branches.
+
 ## Preloaded brittle crack-contact vibration
 
 `BrittleTetMotion::frozen_contact_modes` and the corresponding thermal method

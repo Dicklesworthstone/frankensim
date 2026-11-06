@@ -1,8 +1,12 @@
 //! G1: exact closed-crack constraints with retained tetrahedral compression.
 
 use super::*;
+use fs_solid::brittle::solid::dynamics::fracture::contact::friction::{
+    BrittleFaceFriction, EllipticFriction,
+};
 use fs_solid::brittle::solid::dynamics::modes::FrozenBrittleModesControls;
 use fs_solid::brittle::solid::dynamics::modes::contact::FrozenBrittleContactControls;
+use fs_solid::brittle::solid::dynamics::modes::contact::friction::FrozenBrittleStickingControls;
 
 fn modal_controls() -> FrozenBrittleContactControls {
     FrozenBrittleContactControls {
@@ -78,6 +82,166 @@ fn hold_tangent_dofs(motion: &BrittleTetMotion<'_>) -> Vec<usize> {
     (0..3 * motion.solid().geometry().nodes_m().len())
         .filter(|dof| dof % 3 != 2)
         .collect()
+}
+
+fn sticking_controls() -> FrozenBrittleStickingControls {
+    FrozenBrittleStickingControls {
+        contact: FrozenBrittleContactControls {
+            maximum_contact_rows: 9,
+            maximum_dense_entries: 65_536,
+            ..modal_controls()
+        },
+        minimum_friction_margin: 1e-6,
+    }
+}
+
+fn friction_model(mu: [f64; 2], direction: [f64; 3]) -> [BrittleFaceFriction; 1] {
+    [BrittleFaceFriction {
+        tangent_direction: direction,
+        vertices: [EllipticFriction {
+            coefficients_mu: mu,
+            principal_axis: [3.0, 4.0],
+        }; 3],
+    }]
+}
+
+#[test]
+fn g3_static_friction_constrains_tangent_modes_without_invented_stiffness() {
+    with_loaded_fragments(|motion, normal, cx| {
+        let preload = [normal[0].map(|force| [force, 0.0, 0.0])];
+        let friction = friction_model([0.8, 0.2], [1.0, 0.0, 0.0]);
+        let sticking = motion
+            .frozen_sticking_contact_modes(&friction, &preload, &[], sticking_controls(), cx)
+            .unwrap();
+        assert_eq!(sticking.constraints().len(), 9);
+        assert_eq!(sticking.dimension(), 15);
+        close(sticking.pencil().reference_mass_kg(), 2.0, 1e-15);
+        // The first principal axis is (3/5,4/5), with capacity 0.8 fn;
+        // its perpendicular has capacity 0.2 fn. Equal tangent magnitudes
+        // must therefore produce different admission on these two axes.
+        let strong_axis = [normal[0].map(|force| [force, 0.24 * force, 0.32 * force])];
+        let strong = motion
+            .frozen_sticking_contact_modes(&friction, &strong_axis, &[], sticking_controls(), cx)
+            .unwrap();
+        assert_eq!(
+            sticking.projected_stiffness_n_m(),
+            strong.projected_stiffness_n_m()
+        );
+        assert_eq!(sticking.projected_mass_kg(), strong.projected_mass_kg());
+        let weak_axis = [normal[0].map(|force| [force, -0.32 * force, 0.24 * force])];
+        assert!(
+            motion
+                .frozen_sticking_contact_modes(&friction, &weak_axis, &[], sticking_controls(), cx,)
+                .is_err()
+        );
+        let face = &motion.solid().released_faces()[0];
+        for mode in sticking.modes() {
+            for vertex in 0..3 {
+                let a = face.paired_nodes[0][vertex];
+                let b = face.paired_nodes[1][vertex];
+                for axis in 0..3 {
+                    close(
+                        mode.displacement_shape[3 * a + axis],
+                        mode.displacement_shape[3 * b + axis],
+                        1e-11,
+                    );
+                }
+            }
+        }
+        // Both tangents span the same physical sticking plane after a change
+        // of contact coordinates. Ellipse orientation cannot alter its modes.
+        let rotated = motion
+            .frozen_sticking_contact_modes(
+                &friction_model([0.3, 0.9], [3.0, 4.0, 0.0]),
+                &preload,
+                &[],
+                sticking_controls(),
+                cx,
+            )
+            .unwrap();
+        for (a, b) in sticking.modes().iter().zip(rotated.modes()) {
+            close(a.coordinates.lambda, b.coordinates.lambda, 2e-7);
+        }
+        // A genuinely zero friction ellipse must recover the identical normal
+        // contact pencil. It must not silently glue the two tangential traces.
+        let frictionless = motion
+            .frozen_sticking_contact_modes(
+                &friction_model([0.0, 0.0], [1.0, 0.0, 0.0]),
+                &preload,
+                &[],
+                sticking_controls(),
+                cx,
+            )
+            .unwrap();
+        let normal_only = motion
+            .frozen_contact_modes(&normal, &[], sticking_controls().contact, cx)
+            .unwrap();
+        assert_eq!(frictionless.dimension(), 21);
+        assert_eq!(frictionless.constraints().len(), 3);
+        assert_eq!(
+            frictionless.projected_stiffness_n_m(),
+            normal_only.projected_stiffness_n_m()
+        );
+        assert_eq!(
+            frictionless.projected_mass_kg(),
+            normal_only.projected_mass_kg()
+        );
+    });
+}
+
+#[test]
+fn g0_sticking_modes_refuse_slip_boundary_singular_friction_and_moving_traces() {
+    with_loaded_fragments(|motion, normal, cx| {
+        let preload = [normal[0].map(|force| [force, 0.0, 0.0])];
+        let friction = friction_model([0.5, 0.5], [1.0, 0.0, 0.0]);
+        for factor in [0.5, 0.75] {
+            let boundary = [normal[0].map(|force| [force, factor * force, 0.0])];
+            assert!(
+                motion
+                    .frozen_sticking_contact_modes(
+                        &friction,
+                        &boundary,
+                        &[],
+                        sticking_controls(),
+                        cx
+                    )
+                    .is_err()
+            );
+        }
+        assert!(
+            motion
+                .frozen_sticking_contact_modes(
+                    &friction_model([0.5, 0.0], [1.0, 0.0, 0.0]),
+                    &preload,
+                    &[],
+                    sticking_controls(),
+                    cx,
+                )
+                .is_err()
+        );
+        let insufficient = FrozenBrittleStickingControls {
+            contact: FrozenBrittleContactControls {
+                maximum_contact_rows: 8,
+                ..sticking_controls().contact
+            },
+            ..sticking_controls()
+        };
+        assert!(
+            motion
+                .frozen_sticking_contact_modes(&friction, &preload, &[], insufficient, cx)
+                .is_err()
+        );
+        let mut velocity = motion.velocity_mps().to_vec();
+        velocity[motion.solid().released_faces()[0].paired_nodes[1][0]][0] += 1.0;
+        let sliding =
+            BrittleTetMotion::try_from_solid(motion.solid(), &velocity, motion.time_s(), 1, cx)
+                .unwrap();
+        assert!(
+            sliding
+                .frozen_sticking_contact_modes(&friction, &preload, &[], sticking_controls(), cx)
+                .is_err()
+        );
+    });
 }
 
 #[test]

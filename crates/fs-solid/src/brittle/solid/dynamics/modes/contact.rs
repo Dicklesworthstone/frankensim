@@ -13,6 +13,9 @@
 //! prove a finite amplitude that keeps contact loaded, resolve a switching
 //! contact, include friction, geometric prestress stiffness or new collisions.
 
+/// Exact sticking constraints strictly inside the native directional friction law.
+pub mod friction;
+
 use super::{FrozenBrittleModesControls, FrozenBrittlePencil, assemble_frozen_pencil};
 use crate::brittle::solid::dynamics::BrittleTetMotion;
 use crate::brittle::solid::dynamics::fracture::contact::BrittleFaceImpactRow;

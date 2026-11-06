@@ -12,7 +12,10 @@
 use fs_exec::Cx;
 
 use super::ThermalBrittleTetMotion;
+use crate::brittle::solid::dynamics::fracture::contact::friction::BrittleFaceFriction;
 use crate::brittle::solid::dynamics::modes::contact::assemble_contact_modes;
+pub use crate::brittle::solid::dynamics::modes::contact::friction::FrozenBrittleStickingControls;
+use crate::brittle::solid::dynamics::modes::contact::friction::assemble_sticking_contact_modes;
 pub use crate::brittle::solid::dynamics::modes::contact::{
     FrozenBrittleContactControls, FrozenBrittleContactError, FrozenBrittleContactModes,
 };
@@ -21,6 +24,47 @@ use crate::brittle::solid::dynamics::modes::{assemble_frozen_pencil, require_ope
 use crate::brittle::solid::{BrittleTetError, checkpoint};
 
 impl ThermalBrittleTetMotion<'_> {
+    /// Observe a held static-friction branch using the native directional ellipse.
+    ///
+    /// Each face has three preload vectors in its declared normal/tangent frame.
+    /// Loaded, resting forces strictly inside a positive friction ellipse
+    /// impose exact normal and both tangential constraints. A zero ellipse
+    /// preserves frictionless tangent freedom; a singular one-axis ellipse or
+    /// force at the slip boundary refuses. Coefficients are explicit model
+    /// inputs, not new source evidence or tangential penalty stiffnesses.
+    ///
+    /// Thermal coefficients, mechanical histories, original reference mass
+    /// and time stay with this motion. Contact membership and temperature are
+    /// held. Equilibrium and finite-amplitude sticking are caller obligations;
+    /// no frictional heat, damping or evolving slip is supplied by these modes.
+    pub fn frozen_sticking_contact_modes(
+        &self,
+        friction: &[BrittleFaceFriction],
+        preload_n: &[[[f64; 3]; 3]],
+        fixed_dofs: &[usize],
+        controls: FrozenBrittleStickingControls,
+        cx: &Cx<'_>,
+    ) -> Result<FrozenBrittleContactModes, FrozenBrittleContactError> {
+        assemble_sticking_contact_modes(
+            self.solid.geometry,
+            self.solid.budget,
+            self.solid
+                .materials
+                .iter()
+                .map(|source| source.band().law()),
+            &self.solid.solution.element_states,
+            &self.solid.solution.displacement_m,
+            &self.velocity_mps,
+            &self.solid.released_faces,
+            &self.mass,
+            friction,
+            preload_n,
+            fixed_dofs,
+            controls,
+            cx,
+        )
+    }
+
     /// Observe conditional modes with explicitly preloaded normal crack contact.
     ///
     /// The three entries of each `normal_preload_n` row are normal forces at

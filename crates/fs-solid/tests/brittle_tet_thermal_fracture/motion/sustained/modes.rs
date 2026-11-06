@@ -1,8 +1,11 @@
 //! G1: closed thermal cracks use mechanical strain and original reference inertia.
 
 use super::*;
+use fs_solid::brittle::solid::dynamics::fracture::contact::friction::{
+    BrittleFaceFriction, EllipticFriction,
+};
 use fs_solid::brittle::solid::expansion::dynamics::modes::{
-    FrozenBrittleContactControls, FrozenBrittleModesControls,
+    FrozenBrittleContactControls, FrozenBrittleModesControls, FrozenBrittleStickingControls,
 };
 
 fn controls() -> FrozenBrittleContactControls {
@@ -103,6 +106,60 @@ fn g1_thermal_contact_spectrum_retains_original_mass_and_compression_branch() {
                     .frozen_contact_modes(&[[0.0; 3]], &fixed, controls(), cx)
                     .is_err()
             );
+
+            // The same thermally fractured body also supports a strictly
+            // interior static ellipse, with physical constraints on all axes.
+            let friction = [BrittleFaceFriction {
+                tangent_direction: [3.0, 4.0, 0.0],
+                vertices: [EllipticFriction {
+                    coefficients_mu: [0.7, 0.25],
+                    principal_axis: [4.0, -3.0],
+                }; 3],
+            }];
+            let forces = [preload[0].map(|force| [force, 0.0, 0.0])];
+            let sticking = loaded
+                .motion
+                .frozen_sticking_contact_modes(
+                    &friction,
+                    &forces,
+                    &[],
+                    FrozenBrittleStickingControls {
+                        contact: FrozenBrittleContactControls {
+                            maximum_contact_rows: 9,
+                            maximum_dense_entries: 65_536,
+                            ..controls()
+                        },
+                        minimum_friction_margin: 1e-6,
+                    },
+                    cx,
+                )
+                .unwrap();
+            assert_eq!(sticking.dimension(), 15);
+            assert_eq!(sticking.constraints().len(), 9);
+            close(sticking.pencil().reference_mass_kg(), 2.0, 1e-15);
+            let face = &loaded.motion.solid().released_faces()[0];
+            for mode in sticking.modes() {
+                let mut mass_norm = 0.0;
+                for i in 0..24 {
+                    for j in 0..24 {
+                        mass_norm += mode.displacement_shape[i]
+                            * sticking.pencil().mass_kg().get(i, j)
+                            * mode.displacement_shape[j];
+                    }
+                }
+                close(mass_norm, 1.0, 1e-11);
+                for vertex in 0..3 {
+                    for axis in 0..3 {
+                        close(
+                            mode.displacement_shape[3 * face.paired_nodes[0][vertex] + axis],
+                            mode.displacement_shape[3 * face.paired_nodes[1][vertex] + axis],
+                            1e-11,
+                        );
+                    }
+                }
+            }
+            assert_eq!(loaded.motion.solid().solution(), &before);
+            assert_eq!(loaded.motion.accepted_steps(), 4);
         });
     }
 }
