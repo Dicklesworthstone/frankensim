@@ -1,7 +1,7 @@
 use std::io::Cursor;
 use fs_couple::modal_acoustic_time::{ModalAcousticMode, ModalAcousticState, ModalAcousticTimeBudget, ModalAcousticTimeModel};
 use fs_couple::pcm_wav::{decimate::Decimator, encode_pcm16_wav};
-use fs_couple::pcm_wav::observation::DecimatedRenderer;
+use fs_couple::pcm_wav::observation::{DecimatedRenderer, PressureRenderer};
 use fs_couple::pcm_wav::stream::{Pcm16WavStream, ScheduledWavProgress, render_pressure_pcm16};
 use fs_couple::render::{ControlDelta, ModalStringVoice, RenderContext, RenderError, RenderVoice};
 use fs_couple::render::schedule::{ScheduledControl, ScheduledRenderer};
@@ -121,6 +121,9 @@ fn late_physics_failure_poisoning_keeps_only_complete_output_callbacks() {
     assert!(render_pressure_pcm16(&mut r,&mut stream,&CancelGate::new(),&mut [0.0;2],4).is_err());
     assert_eq!(stream.samples_written(),2);assert_eq!(r.samples_rendered(),2);
     assert_eq!(r.source().samples_rendered(),12);
+    let live = [ControlDelta::SetModalForce { voice: 0, mode: 0, force_n_per_sqrt_kg: 0.0 }];
+    assert!(matches!(r.validate_controls(&live), Err(RenderError::Poisoned)));
+    assert!(matches!(r.apply_controls(&live), Err(RenderError::Poisoned)));
     let mut untouched=[7.0;2];assert!(matches!(r.block(&mut untouched),Err(RenderError::Poisoned)));
     assert_eq!(untouched,[7.0;2]);
     let (output,summary)=stream.finish().unwrap();assert_eq!(summary.samples,2);assert_eq!(output.into_inner().len(),48);
@@ -148,4 +151,97 @@ fn actual_high_rate_modal_tone_is_filtered_before_it_can_fold_into_audio() {
     let naive=(0..1024).map(|i| (core::f64::consts::TAU*36_000.0*(i+1) as f64/48_000.0).cos().powi(2))
         .sum::<f64>()/1024.0;
     assert!(naive.sqrt()>0.7);
+}
+
+#[test]
+fn live_inputs_reach_retained_mechanics_through_borrow_erasure_and_decimation() {
+    use fs_couple::render::schedule::force::ensemble::{EnsembleConfig, EnsembleRenderer};
+
+    let live = ControlDelta::SetModalForce { voice: 0, mode: 0, force_n_per_sqrt_kg: 7.0 };
+    let oracle = source(96_000, 1);
+    let events = oracle.pending_controls().to_vec();
+    let mut direct = oracle.into_context();
+    let mut mechanics = vec![0.0; 256];
+    for (sample, value) in mechanics.iter_mut().enumerate() {
+        if sample == 64 { direct.apply_controls(&[live]).unwrap(); }
+        for event in events.iter().filter(|event| event.sample == sample as u64) {
+            direct.apply_controls(&[event.delta]).unwrap();
+        }
+        direct.block(std::slice::from_mut(value)).unwrap();
+    }
+    let mut filter = Decimator::new(2, 1).unwrap();
+    let expected: Vec<_> = mechanics.chunks_exact(2).map(|chunk| {
+        let value = filter.preview(chunk).unwrap()[0];
+        filter.commit();
+        value
+    }).collect();
+
+    let mut retained = EnsembleRenderer::from_parts(vec![source(96_000, 1)], EnsembleConfig {
+        sample_rate_hz: 96_000, max_block: 1, samples: 256, max_voices: 1, max_events: 5,
+    }).unwrap();
+    let mut actual = vec![0.0; 128];
+    {
+        let erased: Box<dyn PressureRenderer + '_> = Box::new(&mut retained);
+        let mut decimated = DecimatedRenderer::new(erased, 96_000, 48_000, 32).unwrap();
+        let renderer: &mut dyn PressureRenderer = &mut decimated;
+        renderer.block(&mut actual[..32]).unwrap();
+        renderer.validate_controls(&[live]).unwrap();
+        renderer.apply_controls(&[live]).unwrap();
+        assert_eq!(renderer.samples_rendered(), 32);
+        for chunk in actual[32..].chunks_mut(13) { renderer.block(chunk).unwrap(); }
+        assert_eq!(renderer.samples_rendered(), 128);
+        assert_eq!(decimated.source().samples_rendered(), 256);
+    }
+    assert_eq!(actual.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+        expected.iter().map(|v| v.to_bits()).collect::<Vec<_>>());
+    assert_eq!(retained.renderer().context().control_log(), direct.control_log());
+    assert_eq!(retained.renderer().pending_controls()[0].sample, 1028);
+    assert_eq!(retained.remaining_samples(), 0);
+}
+
+#[test]
+fn invalid_live_batches_refuse_atomically_without_losing_source_events_or_history() {
+    let mut renderer = DecimatedRenderer::new(source(96_000, 1), 96_000, 48_000, 16).unwrap();
+    let mut reference = DecimatedRenderer::new(source(96_000, 1), 96_000, 48_000, 16).unwrap();
+    renderer.block(&mut [0.0; 6]).unwrap();
+    reference.block(&mut [0.0; 6]).unwrap();
+    let log = renderer.source().context().control_log().to_vec();
+    let pending = renderer.source().pending_controls().to_vec();
+    let applied = renderer.source().applied_controls().to_vec();
+    let deltas = [
+        ControlDelta::SetModalForce { voice: 0, mode: 0, force_n_per_sqrt_kg: 7.0 },
+        ControlDelta::SetModalForce { voice: 1, mode: 0, force_n_per_sqrt_kg: 2.0 },
+    ];
+    assert!(matches!(renderer.validate_controls(&deltas), Err(RenderError::UnknownVoice { index: 1 })));
+    assert!(matches!(renderer.apply_controls(&deltas), Err(RenderError::UnknownVoice { index: 1 })));
+    assert_eq!(renderer.samples_rendered(), 6);
+    assert_eq!(renderer.source().samples_rendered(), 12);
+    assert_eq!(renderer.source().context().control_log(), log);
+    assert_eq!(renderer.source().pending_controls(), pending);
+    assert_eq!(renderer.source().applied_controls(), applied);
+    let mut actual = [0.0; 16];
+    let mut expected = [0.0; 16];
+    renderer.block(&mut actual).unwrap();
+    reference.block(&mut expected).unwrap();
+    assert_eq!(actual, expected);
+    assert_eq!(renderer.source().context().control_log(), reference.source().context().control_log());
+}
+
+#[test]
+fn pressure_only_producers_refuse_inputs_and_keep_their_stream_usable() {
+    use fs_couple::pcm_wav::observation::ensemble::{PressureEnsemble, PressureEnsembleConfig};
+
+    let part = DecimatedRenderer::new(source(96_000, 1), 96_000, 48_000, 8).unwrap();
+    let mut renderer = PressureEnsemble::new(vec![part], PressureEnsembleConfig {
+        sample_rate_hz: 48_000, samples: 8, max_block: 8, max_parts: 1,
+    }).unwrap();
+    let deltas = [ControlDelta::SetModalForce { voice: 0, mode: 0, force_n_per_sqrt_kg: 7.0 }];
+    assert!(matches!(renderer.validate_controls(&deltas), Err(RenderError::Control { .. })));
+    assert!(matches!(renderer.apply_controls(&deltas), Err(RenderError::Control { .. })));
+    renderer.validate_controls(&[]).unwrap();
+    renderer.apply_controls(&[]).unwrap();
+    assert_eq!(renderer.samples_rendered(), 0);
+    let mut actual = [0.0; 8];
+    renderer.block(&mut actual).unwrap();
+    assert_eq!(actual.as_slice(), reference(2, 8));
 }

@@ -7,7 +7,7 @@
 //! or suppress frequencies already aliased at its own mechanical sample rate.
 
 use super::decimate::Decimator;
-use crate::render::{RenderError, schedule::ScheduledRenderer};
+use crate::render::{ControlDelta, RenderError, schedule::ScheduledRenderer};
 
 /// Latency-aligned acoustic superposition of independently clocked mechanics.
 pub mod ensemble;
@@ -42,6 +42,32 @@ pub trait PressureRenderer {
     fn validate_sample_rate(&self, sample_rate_hz: u32) -> Result<(), RenderError>;
     /// Check all clocks for a whole request, before its first callback.
     fn validate_sample_count(&self, samples: u64) -> Result<(), RenderError>;
+    /// Admit a complete runtime input batch without changing state, clocks,
+    /// pending events or logs. Voice/mode indices name the source's own topology.
+    /// Producers without a compatible control sink refuse nonempty batches.
+    fn validate_controls(&self, deltas: &[ControlDelta]) -> Result<(), RenderError> {
+        self.validate_sample_count(0)?;
+        if !deltas.is_empty() {
+            return Err(RenderError::Control {
+                what: "this pressure producer does not accept runtime controls",
+            });
+        }
+        Ok(())
+    }
+    /// Apply inputs at the current physical source boundary without advancing
+    /// time or rebuilding state. Refusals leave inputs, pending events and logs
+    /// untouched. Existing source schedules retain their declared ordering.
+    /// Control admission/logging may allocate outside the pressure callback.
+    fn apply_controls(&mut self, deltas: &[ControlDelta]) -> Result<(), RenderError> {
+        self.validate_sample_count(0)?;
+        // Do not infer an input sink from an overridden validator alone.
+        if !deltas.is_empty() {
+            return Err(RenderError::Control {
+                what: "this pressure producer does not accept runtime controls",
+            });
+        }
+        Ok(())
+    }
     /// Produce a complete nonempty pressure callback within the admitted size.
     fn block(&mut self, output: &mut [f64]) -> Result<(), RenderError>;
 }
@@ -88,6 +114,12 @@ impl<T: PressureRenderer + ?Sized> PressureRenderer for Box<T> {
     fn validate_sample_count(&self, samples: u64) -> Result<(), RenderError> {
         (**self).validate_sample_count(samples)
     }
+    fn validate_controls(&self, deltas: &[ControlDelta]) -> Result<(), RenderError> {
+        (**self).validate_controls(deltas)
+    }
+    fn apply_controls(&mut self, deltas: &[ControlDelta]) -> Result<(), RenderError> {
+        (**self).apply_controls(deltas)
+    }
     fn block(&mut self, output: &mut [f64]) -> Result<(), RenderError> {
         (**self).block(output)
     }
@@ -104,6 +136,12 @@ impl<T: PressureRenderer + ?Sized> PressureRenderer for &mut T {
     fn validate_sample_count(&self, samples: u64) -> Result<(), RenderError> {
         (**self).validate_sample_count(samples)
     }
+    fn validate_controls(&self, deltas: &[ControlDelta]) -> Result<(), RenderError> {
+        (**self).validate_controls(deltas)
+    }
+    fn apply_controls(&mut self, deltas: &[ControlDelta]) -> Result<(), RenderError> {
+        (**self).apply_controls(deltas)
+    }
     fn block(&mut self, output: &mut [f64]) -> Result<(), RenderError> {
         (**self).block(output)
     }
@@ -117,6 +155,12 @@ impl PressureRenderer for ScheduledRenderer {
     }
     fn validate_sample_count(&self, samples: u64) -> Result<(), RenderError> {
         ScheduledRenderer::validate_sample_count(self, samples)
+    }
+    fn validate_controls(&self, deltas: &[ControlDelta]) -> Result<(), RenderError> {
+        ScheduledRenderer::validate_controls(self, deltas)
+    }
+    fn apply_controls(&mut self, deltas: &[ControlDelta]) -> Result<(), RenderError> {
+        ScheduledRenderer::apply_controls(self, deltas)
     }
     fn block(&mut self, output: &mut [f64]) -> Result<(), RenderError> {
         ScheduledRenderer::block(self, output)
@@ -135,6 +179,12 @@ impl PressureRenderer for crate::render::schedule::force::ensemble::EnsembleRend
             return Err(sizing("requested pressure window exceeds the finite ensemble horizon"));
         }
         Ok(())
+    }
+    fn validate_controls(&self, deltas: &[ControlDelta]) -> Result<(), RenderError> {
+        Self::validate_controls(self, deltas)
+    }
+    fn apply_controls(&mut self, deltas: &[ControlDelta]) -> Result<(), RenderError> {
+        Self::apply_controls(self, deltas)
     }
     fn block(&mut self, output: &mut [f64]) -> Result<(), RenderError> {
         Self::block(self, output)
@@ -240,6 +290,20 @@ impl<S: PressureRenderer> DecimatedRenderer<S> {
             .ok_or_else(|| sizing("expanded mechanics sample count overflow"))?;
         PressureRenderer::validate_sample_count(&self.source, mechanics)
     }
+    /// Validate inputs on the retained mechanical source, without moving either
+    /// clock or changing the causal observation history.
+    pub fn validate_controls(&self, deltas: &[ControlDelta]) -> Result<(), RenderError> {
+        if self.poisoned { return Err(RenderError::Poisoned); }
+        self.source.validate_controls(deltas)
+    }
+    /// Apply inputs before the next mechanical sample at this output boundary.
+    /// Values and source-local voice indices pass through unchanged. Scheduled
+    /// source events retain their ordering; filter state and delay are retained.
+    /// A refused input batch does not poison a healthy observation.
+    pub fn apply_controls(&mut self, deltas: &[ControlDelta]) -> Result<(), RenderError> {
+        if self.poisoned { return Err(RenderError::Poisoned); }
+        self.source.apply_controls(deltas)
+    }
     /// Convert an exact mechanics horizon without padding, truncation or flushing.
     /// A fractional last output interval refuses, even when no event occurs there.
     pub fn output_samples_for(&self, mechanics_samples: u64) -> Result<u64, RenderError> {
@@ -295,6 +359,8 @@ impl<S: PressureRenderer> PressureRenderer for DecimatedRenderer<S> {
     fn max_block_len(&self) -> usize { Self::max_block_len(self) }
     fn validate_sample_rate(&self, rate: u32) -> Result<(), RenderError> { Self::validate_sample_rate(self, rate) }
     fn validate_sample_count(&self, samples: u64) -> Result<(), RenderError> { Self::validate_sample_count(self, samples) }
+    fn validate_controls(&self, deltas: &[ControlDelta]) -> Result<(), RenderError> { Self::validate_controls(self, deltas) }
+    fn apply_controls(&mut self, deltas: &[ControlDelta]) -> Result<(), RenderError> { Self::apply_controls(self, deltas) }
     fn block(&mut self, output: &mut [f64]) -> Result<(), RenderError> { Self::block(self, output) }
 }
 fn sizing(what: &'static str) -> RenderError { RenderError::Sizing { what } }

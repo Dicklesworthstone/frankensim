@@ -358,4 +358,117 @@ fn late_network_refusal_preserves_all_retained_owners_and_output() {
         renderer.block(&mut output),
         Err(RenderError::Poisoned)
     ));
+    assert!(matches!(
+        renderer.validate_controls(&[]),
+        Err(RenderError::Poisoned)
+    ));
+    assert!(matches!(
+        renderer.apply_controls(&[]),
+        Err(RenderError::Poisoned)
+    ));
+}
+
+#[test]
+fn decimated_live_forces_preserve_the_original_network_motion_and_observation() {
+    use crate::pcm_wav::decimate::Decimator;
+    use crate::pcm_wav::observation::DecimatedRenderer;
+
+    let card = card(0.001);
+    let curve = chart(&card, 0.0002);
+    let radiation = artifact();
+    let make = || {
+        observer(
+            ThermalNetworkSource::new(
+                liquid_pair(&card, &curve),
+                thermal(&curve),
+                (),
+                bindings(),
+                config(),
+                frozen_contact,
+            ),
+            &radiation,
+        )
+    };
+    let mut direct = make();
+    let mut filter = Decimator::new(2, 1).unwrap();
+    let mut renderer = DecimatedRenderer::new(make(), RATE, RATE / 2, 32).unwrap();
+    let mut actual = [0.0; 128];
+    let mut expected = [0.0; 128];
+    for (start, end, force) in [(0, 32, 0.0), (32, 80, 1e-4), (80, 128, 0.0)] {
+        let control = ControlDelta::SetModalForce {
+            voice: 0,
+            mode: 0,
+            force_n_per_sqrt_kg: force,
+        };
+        if start == 32 {
+            let held = renderer.source().forces.clone();
+            let invalid = [
+                ControlDelta::SetModalForce {
+                    voice: 1,
+                    mode: 0,
+                    force_n_per_sqrt_kg: force,
+                },
+                ControlDelta::SetModalForce {
+                    voice: 0,
+                    mode: 2,
+                    force_n_per_sqrt_kg: force,
+                },
+                ControlDelta::SetModalForce {
+                    voice: 0,
+                    mode: 0,
+                    force_n_per_sqrt_kg: f64::NAN,
+                },
+                ControlDelta::SetModalForce {
+                    voice: 0,
+                    mode: 0,
+                    force_n_per_sqrt_kg: 2.0,
+                },
+                ControlDelta::SetBlowingPressure {
+                    voice: 0,
+                    pressure_pa: 1.0,
+                },
+            ];
+            for bad in invalid {
+                let batch = [control, bad];
+                assert!(renderer.validate_controls(&batch).is_err());
+                assert!(renderer.apply_controls(&batch).is_err());
+                assert_eq!(renderer.source().forces, held);
+                assert_eq!(renderer.samples_rendered(), 32);
+                assert_eq!(renderer.source().mechanics().samples_rendered(), 64);
+            }
+        }
+        direct.set_forces(&[force, 0.0]).unwrap();
+        renderer.validate_controls(&[control]).unwrap();
+        renderer.apply_controls(&[control]).unwrap();
+        assert_eq!(renderer.samples_rendered(), start as u64);
+        for value in &mut expected[start..end] {
+            let mut pressure = [0.0; 2];
+            direct.block(&mut pressure).unwrap();
+            *value = filter.preview(&pressure).unwrap()[0];
+            filter.commit();
+        }
+        for chunk in actual[start..end].chunks_mut(19) {
+            renderer.block(chunk).unwrap();
+        }
+        let retained = renderer.source().mechanics();
+        assert_eq!(retained.state(), direct.mechanics().state());
+        assert_eq!(
+            retained.source().system().reservoirs(),
+            direct.mechanics().source().system().reservoirs()
+        );
+        assert_eq!(
+            retained.source().sources(),
+            direct.mechanics().source().sources()
+        );
+        assert_eq!(
+            retained.thermal().cells(),
+            direct.mechanics().thermal().cells()
+        );
+        assert_eq!(
+            retained.thermal().time_s(),
+            direct.mechanics().thermal().time_s()
+        );
+        assert_eq!(retained.samples_rendered(), (2 * end) as u64);
+    }
+    assert_eq!(actual.map(f64::to_bits), expected.map(f64::to_bits));
 }

@@ -264,3 +264,32 @@ fixed within its explicit original-inventory removal envelope. Source regression
 exercise thermal-softening recruitment followed by wear-induced opening, actual
 friction/volume/heat accounts, original irreversible histories, incomplete face
 support and late source refusal using independent two-cell elastic/heat references.
+
+## Runtime controls through pressure observation
+
+`PressureRenderer` admits and applies batches of the existing `ControlDelta`
+inputs at the current physical source boundary. Validation never advances time;
+a refused batch leaves held inputs, pending events and control logs unchanged.
+Producers without an explicit compatible input topology refuse nonempty batches.
+
+Boxing and borrowing a producer preserve its input sink. `ScheduledRenderer`,
+`EnsembleRenderer` and `DecimatedRenderer` forward controls to their original
+retained mechanics. Decimation does not scale force, reindex source voices, move
+source events, or reset the pressure filter. Both clocks remain unchanged by an
+input update, and a poisoned producer refuses controls as well as rendering.
+
+Live scheduled inputs apply immediately. A pending event on that same source
+sample still runs in the schedule's existing stable order before the next sample,
+so a scheduled assignment to the same input takes precedence. Live admission
+reserves log capacity for the new batch and every remaining scheduled record;
+the next pressure callback does not allocate merely because live logging consumed
+the schedule's original capacity. This is a cold control operation, not a new
+allocation-free control-thread guarantee. Schedule-only applied-event history
+remains separate from the context's complete control log.
+
+`ImpactPressureRenderer` accepts `SetModalForce` for its sole source slot zero.
+The mode index, N/sqrt(kg) units and force ceiling are those of its original
+`ImpactSource`, including a retained spatial thermal network. The complete batch
+is checked before any held force changes; no mechanical, caloric, material,
+radiation or propagation history is rebuilt. A force update uses the same held
+input path as the concrete renderer's original `set_forces` operation.

@@ -153,6 +153,18 @@ impl EnsembleRenderer {
     #[must_use]
     pub fn renderer(&self) -> &ScheduledRenderer { &self.renderer }
 
+    /// Admit live inputs using joined voice slots from [`Self::origins`].
+    /// Source-local slots are never guessed or remapped by this input seam.
+    pub fn validate_controls(&self, deltas: &[ControlDelta]) -> Result<(), RenderError> {
+        self.renderer.validate_controls(deltas)
+    }
+
+    /// Update retained parts without resetting their state or the finite window.
+    /// The shared scheduler retains its event ordering and reserves its log.
+    pub fn apply_controls(&mut self, deltas: &[ControlDelta]) -> Result<(), RenderError> {
+        self.renderer.apply_controls(deltas)
+    }
+
     /// Explicitly remove this output-window cap and recover the shared renderer.
     /// Bow horizons and poisoned-state restrictions still apply. This does not
     /// recover discarded pre-join outer logs or reset any physical voice state.

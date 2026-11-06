@@ -31,7 +31,7 @@ use crate::broadband_radiation::{
     evaluate_real_tesseral,
 };
 use crate::pcm_wav::observation::PressureRenderer;
-use crate::render::RenderError;
+use crate::render::{ControlDelta, RenderError};
 use fs_exec::CancelGate;
 use fs_math::{c64::C64, det};
 
@@ -223,6 +223,9 @@ impl ImpactSource for LiquidFilmImpactSystem<'_> {
 /// [`network::ThermalNetworkSource`] retains the original spatial heat network,
 /// its observer and material refresh on the same mechanical timeline. None of
 /// these observation adapters adds acoustic back-reaction.
+/// Runtime `SetModalForce` controls address this source as voice slot zero and
+/// use its original mass-normalized mechanical mode indices and force limits.
+/// They replace held inputs without resetting any physical or acoustic history.
 /// A failed callback poisons this host because a physical prefix may have run.
 /// Callers must discard the failed callback's output, as PressureRenderer requires.
 pub struct ImpactPressureRenderer<'a, M: ImpactSource = ImpactSystem> {
@@ -370,6 +373,34 @@ impl<M: ImpactSource> PressureRenderer for ImpactPressureRenderer<'_, M> {
         if self.completed.checked_add(samples).is_none() || samples > self.mechanics.remaining_steps() {
             return Err(input("pressure request exceeds remaining mechanical horizon"));
         } Ok(())
+    }
+    fn validate_controls(&self, deltas: &[ControlDelta]) -> Result<(), RenderError> {
+        self.validate_sample_count(0)?;
+        for delta in deltas {
+            let ControlDelta::SetModalForce { voice, mode, force_n_per_sqrt_kg } = delta else {
+                return Err(input("impact pressure accepts only its mechanical modal-force inputs"));
+            };
+            if *voice != 0 { return Err(RenderError::UnknownVoice { index: *voice }); }
+            if *mode >= self.forces.len() {
+                return Err(input("impact force index is outside the admitted mechanical basis"));
+            }
+            if !force_n_per_sqrt_kg.is_finite()
+                || force_n_per_sqrt_kg.abs() > self.mechanics.maximum_generalized_force()
+            {
+                return Err(input("held impact force exceeds its finite physical limit"));
+            }
+        }
+        Ok(())
+    }
+    fn apply_controls(&mut self, deltas: &[ControlDelta]) -> Result<(), RenderError> {
+        self.validate_controls(deltas)?;
+        // All admission precedes mutation; repeated coordinates retain batch order.
+        for delta in deltas {
+            if let ControlDelta::SetModalForce { mode, force_n_per_sqrt_kg, .. } = delta {
+                self.forces[*mode] = *force_n_per_sqrt_kg;
+            }
+        }
+        Ok(())
     }
     fn block(&mut self, out: &mut [f64]) -> Result<(), RenderError> {
         if self.poisoned { return Err(RenderError::Poisoned); }

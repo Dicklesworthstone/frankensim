@@ -237,6 +237,38 @@ impl ScheduledRenderer {
         &self.events[self.next_event..]
     }
 
+    /// Validate a live input batch without changing physical state, clocks,
+    /// logs or the admitted schedule. Voice indices use the hosted context.
+    pub fn validate_controls(&self, deltas: &[ControlDelta]) -> Result<(), RenderError> {
+        self.context.validate_controls(deltas)
+    }
+
+    /// Apply live inputs at the current boundary without consuming scheduled
+    /// events. Events at this same sample still apply before the next physical
+    /// step, in their original order, and therefore override live assignments
+    /// to the same input. Future events keep their original sample times.
+    ///
+    /// Live inputs are recorded in the context's control log; `applied_controls`
+    /// continues to describe only the admitted schedule. Admission may allocate
+    /// to retain space for ALL pending scheduled log entries before any input
+    /// changes. The later scheduling callback still allocates no log storage.
+    ///
+    /// # Errors
+    /// Invalid controls, a poisoned context or failure to reserve the combined
+    /// live/pending log refuse without changing inputs, events, clocks or logs.
+    pub fn apply_controls(&mut self, deltas: &[ControlDelta]) -> Result<(), RenderError> {
+        self.validate_controls(deltas)?;
+        let additional = self.pending_controls().len().checked_add(deltas.len())
+            .ok_or(RenderError::Sizing {
+                what: "live and pending control-log count overflows usize",
+            })?;
+        self.context.controls_applied.try_reserve(additional)
+            .map_err(|_| RenderError::Sizing {
+                what: "cannot reserve live and pending scheduled control logs",
+            })?;
+        self.context.apply_controls(deltas)
+    }
+
     /// Recover the context at its current physical state, dropping future events.
     #[must_use]
     pub fn into_context(self) -> RenderContext {
@@ -567,6 +599,61 @@ pub(crate) fn compile_pressure_gestures_admitted(
         }
     }
     Ok(controls)
+}
+
+#[cfg(test)]
+mod runtime_control_tests {
+    use super::*;
+    use crate::modal_acoustic_time::{
+        ModalAcousticMode, ModalAcousticTimeBudget, ModalAcousticTimeModel,
+    };
+    use crate::render::{ModalStringVoice, RenderVoice};
+
+    #[test]
+    fn live_controls_preserve_pending_log_capacity_and_same_sample_order() {
+        let context = || {
+            let model = ModalAcousticTimeModel::try_new(48_000, vec![ModalAcousticMode {
+                angular_frequency_rad_s: 1000.0,
+                damping_ratio: 0.01,
+                pressure_per_modal_velocity: fs_math::c64::C64::new(1.0, 0.0),
+            }], ModalAcousticTimeBudget::audible_reference()).unwrap();
+            RenderContext::new(vec![RenderVoice::ModalString(
+                ModalStringVoice::new(model, vec![0.0]).unwrap(),
+            )], 16)
+        };
+        let delta = |force| ControlDelta::SetModalForce {
+            voice: 0, mode: 0, force_n_per_sqrt_kg: force,
+        };
+        let events: Vec<_> = (0..8).map(|sample| ScheduledControl {
+            sample, delta: delta(sample as f64 * 0.25),
+        }).collect();
+        let mut renderer = ScheduledRenderer::new(context(), events.clone(), 8).unwrap();
+        let mut reference = ScheduledRenderer::new(context(), events.clone(), 8).unwrap();
+        // Fill the old reservation exactly: reserving only the live batch would
+        // otherwise force the very next scheduled event to grow its log.
+        let live = vec![delta(9.0); renderer.context.controls_applied.capacity()];
+        renderer.validate_controls(&live).unwrap();
+        assert!(renderer.context.control_log().is_empty());
+        renderer.apply_controls(&live).unwrap();
+        assert_eq!(renderer.samples_rendered(), 0);
+        assert!(renderer.applied_controls().is_empty());
+        assert_eq!(renderer.pending_controls(), events);
+        let log = &renderer.context.controls_applied;
+        assert!(log.capacity() - log.len() >= events.len());
+        let capacity = log.capacity();
+        let allocation = log.as_ptr();
+        let mut actual = [0.0; 16];
+        let mut expected = [0.0; 16];
+        renderer.block(&mut actual).unwrap();
+        reference.block(&mut expected).unwrap();
+        // The pre-existing sample-zero assignment supersedes the live batch.
+        assert_eq!(actual, expected);
+        assert_eq!(renderer.context.controls_applied.capacity(), capacity);
+        assert_eq!(renderer.context.controls_applied.as_ptr(), allocation);
+        assert_eq!(renderer.context.control_log().len(), live.len() + events.len());
+        assert_eq!(renderer.applied_controls(), events);
+        assert!(renderer.pending_controls().is_empty());
+    }
 }
 
 #[cfg(test)]
