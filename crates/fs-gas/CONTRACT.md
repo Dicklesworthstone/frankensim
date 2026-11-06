@@ -6085,3 +6085,42 @@ changes of about -6e-6 J/K each and a direct total of -1.2e-5 J/K: a single
 review and independent arithmetic were performed. Native Cargo tests,
 typechecking and the DSR gate were not run; disk pressure and unavailable
 remote build runners prevented a supported native verification run.
+
+## Photon-conserving atomic gas evolution
+
+`chemistry::photoionization::advance_monochromatic_photoionization` evolves
+a rigid, uniformly mixed column under a constant monochromatic photon number
+flux. Its original atomic source supplies the event cross section and chemical
+gap. The actual neutral inventory supplies Beer-Lambert opacity. The update is
+analytic: `expm1(tau1) = expm1(tau0) * exp(-sigma*flux*duration)`.
+There is no reaction time-step or nonlinear-iteration loop in this owner.
+
+Stable thin/thick branches calculate the smaller absorbed or surviving
+population directly, preserving tiny ionization increments and representable
+neutral tails without overflowing at large optical depth. Each new ion and
+electron corresponds to one absorbed photon. Transmitted photons supply no
+heat. Original chemical storage and the changing electron sensible pool close
+against absorbed photon energy within an explicit numerical joule allowance.
+Conserved formation-reference offsets cancel before the physical energy
+difference. Heavy temperature and all spectator amounts remain unchanged.
+
+Exact zero initial electrons are allowed: photoionization supplies their
+physical source. The endpoint is the existing `FrozenIonizedGasStateV1`, with
+its original thermodynamics, amounts, separate temperatures and charge checks.
+Unsupported electron temperatures, source domains, arithmetic and cancellation
+refuse before publication; no temperature floor or artificial seed is added.
+
+This is a perfectly mixed, quasi-static monochromatic column model. It does
+not resolve a spatial ionization front, light-travel delay, recoil, secondary
+ionization, excited states, radiative recombination or a nonthermal electron
+spectrum. Immediate photoelectron thermalization is an explicit assumption.
+Radiation entropy is not modeled, so closed-material entropy inequalities are
+not applied to this driven subsystem. Discrete spectral source evaluation
+exists in L1; different photon cross sections cannot be collapsed into this
+single-group exact transient.
+
+Focused regressions specify zero-seed creation, original-source energy and
+mass/charge accounts, photon-limited thick columns, thin exponential depletion,
+tiny surviving populations, exact interval composition, conserved-reference
+invariance, source refusal and cancellation. The scalar kernel includes
+independent high-precision optical-depth reference values.

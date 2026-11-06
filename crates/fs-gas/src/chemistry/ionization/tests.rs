@@ -333,3 +333,5 @@ fn recombination_at_the_closed_electron_source_minimum_heats_into_the_domain() {
     assert!(result.balance().energy_residual_j.abs() <= controls().energy_tolerance_j);
     assert!(result.balance().entropy_change_j_k >= -controls().entropy_tolerance_j_k);
 }
+
+mod photoionization;

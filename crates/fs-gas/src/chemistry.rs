@@ -28,6 +28,8 @@ pub mod energy;
 pub mod heat;
 /// Source-bound two-temperature atomic ionization and three-body recombination.
 pub mod ionization;
+/// Photon-conserving ionization of a rigid uniformly mixed column.
+pub mod photoionization;
 /// Constant-pressure evolution through the shared extent integrator.
 pub mod isobaric;
 mod prepared;
