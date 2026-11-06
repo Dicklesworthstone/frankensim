@@ -17133,6 +17133,36 @@ covered by `fs-solid/tests/plastic_hill.rs`. These are numerical constitutive
 checks, not measured-metal calibration, finite-strain anisotropic forming,
 texture evolution, necking, fracture, fatigue or forming-limit predictions.
 
+## Homogeneous multicomponent liquid sources
+
+`liquid::solution::multicomponent::MulticomponentLiquidSolutionLaw` binds the
+original N-component regular-solution owner to one pinned liquid-property
+bundle. Explicit species bindings carry molar masses and N-1 distinct typed
+mole-fraction axes; the remaining species is declared dependent. Sorting keeps
+each species, mass and source coordinate together. Inventory inputs and all
+returned arrays use the thermodynamic owner's canonical species order.
+
+`homogeneous` retains the actual finite component amounts, evaluates the same
+homogeneous free energy and refreshes the original density, viscosity, heat
+capacity and conductivity at that composition and temperature. Pressure and
+other source coordinates stay fixed. Mass, mass fractions, source-derived
+volume and molar concentration feed existing fluid/thermal transport consumers.
+The retained thermodynamic state supplies cross-component Maxwell-Stefan forces
+and simplex curvature; negative curvature does not trigger an implicit flash.
+Positive traces lost in normalization or inaccurately represented by the
+dependent source coordinate refuse. An absent dependent component requires
+exactly zero chart remainder; a positive component requires relative agreement
+within 64 machine epsilons. An abundant dependent component avoids subtractive
+loss of trace fractions. Source failures and cancellation publish no partial cell.
+
+The caller qualifies pair parameters, ordered chemistry and mixture-property
+data. There is no pure-fluid averaging, inferred expansion, N-component phase
+equilibrium, spatial evolution or excess-enthalpy/Cp consistency claim. G0/G1/
+G3/G4 fixtures in `tests/liquid_multicomponent.rs` exercise authored ternary
+surfaces, independent component/mass/volume accounts, exact equal-diffusivity
+fluxes, unstable homogeneous compositions, source/species permutation, traces,
+typed-coordinate refusal and atomic source/cancellation failures.
+
 ### Full three-dimensional piezoelectric thermal storage
 
 `piezoelectric::thermal::ThermalTensorPiezoelectric` binds complete affine original stress-charge stiffness, signed coupling and clamped-permittivity source tensors over a positive absolute-temperature interval with constant reference density. It preserves full source selections, nonthermal context and the fixed frame transformation. At fixed full Mandel strain and Cartesian electric displacement, the native tensor/factor owner supplies Helmholtz energy, exact entropy, internal energy and nonpositive field heat capacity, without scalar projection or fresh response-time factorization. Complete endpoint tensor admission establishes affine-source stability. A rotation-invariant norm bound supplies a conservative whole-interval capacity floor under explicit strain/displacement envelopes; consuming caloric owners must add their actual capacity and enforce those bounds. Reversible thermal exchange is separate from material loss. No pyroelectric offset, expansion, hysteresis, phase transition, depoling or measured-material validation is implied. Focused synthetic G0/G1/G3 regression sources cover independent diagonal/dense potentials, co-rotation and domain refusal; native execution remains a separate verification obligation.

@@ -19,6 +19,8 @@
 pub mod caloric;
 /// Source-resolved homogeneous cells for finite-rate diffuse interfaces.
 pub mod gradient;
+/// Original-source transport for homogeneous liquids with more than two components.
+pub mod multicomponent;
 mod mixing;
 pub use mixing::BinaryLiquidMixing;
 
