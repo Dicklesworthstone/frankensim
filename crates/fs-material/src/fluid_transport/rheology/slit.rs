@@ -161,6 +161,20 @@ impl LaminarCarreauSlit {
     pub const fn gap_m(&self) -> f64 {
         self.gap_m
     }
+    /// Rebind the actual positive hydraulic aperture while retaining the
+    /// original prepared temperature, law, support, width and passage length.
+    /// Reynolds pressure iterations need not repeat thermal preparation.
+    pub fn with_gap(&self, gap_m: f64) -> Result<Self, MaterialError> {
+        if !positive(gap_m) {
+            return Err(parameters("Carreau slit gap must be positive and finite"));
+        }
+        Ok(Self { gap_m, ..*self })
+    }
+    /// Original thermally shifted zero-shear viscosity [Pa s], useful for a
+    /// source-consistent Newtonian limit or pressure-solver preconditioner.
+    pub const fn zero_shear_viscosity_pa_s(&self) -> f64 {
+        self.prepared.rest.viscosity
+    }
     pub const fn length_m(&self) -> f64 {
         self.length_m
     }
@@ -679,6 +693,11 @@ impl CarreauSlitProfile {
     }
     pub const fn flow(&self) -> &CarreauSlitFlow {
         &self.flow
+    }
+    /// Solved midpoint shear stress c [Pa]. Retaining this small sliding
+    /// component avoids subtracting nearly equal pressure-driven wall stresses.
+    pub const fn stress_offset_pa(&self) -> f64 {
+        self.offset_pa
     }
 
     /// Sample physical y in [0,h] from the lower wall. Endpoints use the

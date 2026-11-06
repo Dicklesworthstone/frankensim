@@ -3040,6 +3040,7 @@ dependencies = [
 name = "fs-tribo"
 version = "0.0.1"
 dependencies = [
+ "fs-material",
  "fs-math",
  "fs-rand",
 ]

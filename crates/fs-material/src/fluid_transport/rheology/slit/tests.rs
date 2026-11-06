@@ -69,6 +69,20 @@ fn g1_newtonian_pressure_sliding_traction_heat_and_tangents_are_one_profile() {
             .unwrap()
             .dynamic_viscosity_pa_s();
         let (w, h, l) = (film.width_m(), film.gap_m(), film.length_m());
+        assert_eq!(film.zero_shear_viscosity_pa_s(), mu);
+        let rebound = film.with_gap(1.5 * h).unwrap();
+        assert_eq!(rebound.gap_m(), 1.5 * h);
+        assert_eq!(rebound.law(), film.law());
+        assert_eq!(rebound.temperature_k(), film.temperature_k());
+        assert_eq!(rebound.width_m(), film.width_m());
+        assert_eq!(rebound.length_m(), film.length_m());
+        assert_eq!(rebound.zero_shear_viscosity_pa_s(), mu);
+        assert_eq!(
+            rebound.maximum_laminar_shear_rate_per_s(),
+            film.maximum_laminar_shear_rate_per_s()
+        );
+        assert!(film.with_gap(0.0).is_err());
+        assert!(film.with_gap(f64::INFINITY).is_err());
         for dp in [-4000.0, 0.0, 4000.0] {
             for walls in [[-0.25, 0.75], [2.0, 2.0], [0.0, 0.0]] {
                 let profile = film
@@ -78,6 +92,7 @@ fn g1_newtonian_pressure_sliding_traction_heat_and_tangents_are_one_profile() {
                 let relative = walls[1] - walls[0];
                 let mean = 0.5 * (walls[0] + walls[1]);
                 let c = mu * relative / h;
+                close(profile.stress_offset_pa(), c, 5e-14);
                 let s = dp * h / (2.0 * l);
                 let g = w * h.powi(3) / (12.0 * mu * l);
                 close(f.pressure_flow_m3_s, g * dp, 5e-14);

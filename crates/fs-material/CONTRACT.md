@@ -15685,6 +15685,15 @@ Geometry, uniform temperature and an explicit supported shear-rate ceiling are
 fixed during a solve. The zero-shear core and both actual wall states must remain
 inside the original temperature and reduced-rate support.
 
+`LaminarCarreauSlit::with_gap` validates and rebinds a positive physical aperture
+while retaining the original prepared temperature, law and source-rate ceiling;
+it does not repeat thermal preparation. `zero_shear_viscosity_pa_s` exposes the
+original prepared rest viscosity, and the solved profile's `stress_offset_pa`
+exposes its midpoint stress without subtracting large wall stresses. The
+`fs_tribo::resistive_film::carreau::CarreauFilm` consumer uses these source-owned
+quantities for coupled pressure, squeeze and sliding Reynolds graphs while the
+slit itself remains a single-passage constitutive owner.
+
 Momentum gives `tau(y)=c+delta_p*(h/2-y)/L`. A bounded, bracketed offset solve
 enforces the upper-minus-lower wall speed. Pressure-driven and sliding shear
 therefore belong to one velocity profile. The resulting flux cannot be obtained

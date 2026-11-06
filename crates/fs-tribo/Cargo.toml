@@ -9,6 +9,7 @@ description = "Typed dry-contact and tribology baseline for FrankenSim"
 layer = "L3"
 
 [dependencies]
+fs-material = { path = "../fs-material" }
 fs-math = { path = "../fs-math" }
 fs-rand = { path = "../fs-rand" }
 

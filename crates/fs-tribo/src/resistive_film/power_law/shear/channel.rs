@@ -426,6 +426,7 @@ pub(in super::super) fn evaluate(
         // cancels; otherwise large common translation can erase pressure terms.
         aperture_derivative: aperture,
         wall,
+        ..Channel::default()
     };
     if [
         result.flow,

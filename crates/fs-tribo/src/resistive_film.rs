@@ -32,6 +32,8 @@ pub mod stratified;
 
 /// Regularized power-law pressure flow on the original Reynolds graph.
 pub mod power_law;
+/// Source-owned thermal Carreau pressure, squeeze and sliding-wall films.
+pub use power_law::carreau;
 /// Externally pressurized films with conservative hydraulic and mechanical work.
 pub mod pressure;
 

@@ -2127,6 +2127,59 @@ compliant recoil and transactional refusal. An independent pressure-times-plasti
 slip return map refines in space and time across simultaneous load and shear
 reversals, including contact entry/exit; it does not reuse native dissipated work.
 
+## Original thermal Carreau Reynolds films
+
+`resistive_film::carreau::CarreauFilm` couples original
+`fs_material::fluid_transport::rheology::slit::LaminarCarreauSlit` passages to
+the live incompressible, full-film `ResistiveFilm` graph. Normal gap motion,
+prescribed reservoir pressures and both tangential wall velocities share one
+pressure solve. Every channel retains its original thermal Carreau-Yasuda law,
+prepared temperature, physical shear-rate ceiling and source convergence
+controls. A replacement material state is installed explicitly through
+`with_passages`; evaluation does not advance a thermal clock or fit a scalar
+effective viscosity.
+
+The private, statically dispatched Reynolds engine is shared with the existing
+regularized power-law owners. Their pressure Newton solve, positive Cholesky
+Jacobian, line search, continuity and work gates remain the same. Source
+zero-shear viscosity supplies the geometry seed, and a truly constant original
+law retains the native Newtonian pressure path. Nonlinear pressure flow and
+wall shear are resolved together by the original slit profile. Mean wall
+translation is added as exact entrainment while the source resolves centered
+relative motion; large common translation therefore does not erase a small
+physical sliding rate. Source-supported zero-shear plateaus, high-rate
+plateaus, transition curvature and thermal shifts are all retained.
+
+Reports retain signed wall and pressure work, individual wall tractions,
+source-integrated nonnegative viscous heat and the original constitutive work
+defect. Requested mechanical work is not relabeled as accepted heat. The
+complete graph balance includes pressure-supply work. Analytic pressure and
+relative-wall mobilities from the source drive both Newton and the full
+gap/velocity/reservoir directional tangent. In particular, with physical gap
+`h`, relative wall velocity `r`, signed pressure drop `dp`, pressure-flow
+component `Qp`, and source derivatives `g = dQp/ddp`, `Qr = dQp/dr`, the shared
+geometry derivative is `dQp/dh = (2*Qp + dp*g - r*Qr)/h`. No finite differences
+are used in production tangents.
+
+Passage width and length must match the original graph. `with_gap` rebinds the
+actual affine aperture without preparing temperature again. A closed
+fixed-wall passage has exactly zero flow; an authored moving-wall passage must
+remain open. Existing Barus pressure dependence is refused rather than
+discarded. Successful evaluations and tangents use bounded stack scratch and
+publish all outputs only after the source, pressure, continuity, work and final
+cancellation checks succeed. Original source support or exhausted work
+refuses the candidate without changing accepted caller output.
+
+The scope is quasi-steady, incompressible thin-gap Reynolds flow at a frozen
+source temperature: no cavitation, fluid inertia, thermal evolution, slip or
+yield memory is inferred. The existing graph size caps and nonlinear solve
+budgets apply. Focused tests exercise an independent nonlinear manufactured
+pressure/flow/traction/heat solution, the Newtonian supplied sliding limit,
+full directional tangents and reciprocity, multi-cell continuity and signed
+reversal, temperature refresh, common translation, closed passages, source
+refusal and late cancellation with exact retry. Existing regularized power-law
+regressions remain applicable to the shared engine.
+
 ## Regularized power-law Reynolds passages
 
 `resistive_film::power_law::PowerLawFilm` adds a stationary-wall,

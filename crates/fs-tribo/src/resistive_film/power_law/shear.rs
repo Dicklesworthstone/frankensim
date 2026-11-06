@@ -14,9 +14,8 @@
 
 pub use super::super::shear::WallVelocityPorts;
 use super::{
-    FilmError, FilmReport, FlowBalance, MAX_CELLS, MAX_CHANNELS, MAX_PORTS, PowerLawFilmReport,
-    PressureDrivenPowerLawFilm, PressureDrivenPowerLawReport, RegularizedPowerLaw, dot, fail,
-    solve_factored,
+    FilmError, FilmReport, MAX_CHANNELS, PowerLawFilmReport, PressureDrivenPowerLawFilm,
+    PressureDrivenPowerLawReport, RegularizedPowerLaw, ReynoldsLaw, dot, fail,
 };
 
 pub(super) mod channel;
@@ -124,6 +123,46 @@ impl Coefficients {
     }
 }
 
+pub(super) fn compile_walls(
+    walls: &[WallVelocityPorts],
+    ports: usize,
+) -> Result<(Vec<Coefficients>, bool), FilmError> {
+    if walls.iter().any(|wall| {
+        wall.lower.len() != ports
+            || wall.upper.len() != ports
+            || wall.lower.iter().chain(&wall.upper).any(|x| !x.is_finite())
+    }) {
+        return fail("sliding film needs finite original-order wall rows");
+    }
+    let mut coefficients = Vec::with_capacity(walls.len());
+    let mut moving = false;
+    for wall in walls {
+        let mut mean = Vec::with_capacity(ports);
+        let mut relative = Vec::with_capacity(ports);
+        for (&lower, &upper) in wall.lower.iter().zip(&wall.upper) {
+            let difference = upper - lower;
+            let average = if lower.abs() <= upper.abs() {
+                0.5_f64.mul_add(difference, lower)
+            } else {
+                (-0.5_f64).mul_add(difference, upper)
+            };
+            if !difference.is_finite() || !average.is_finite() {
+                return fail("power-law wall mean or relative row is unrepresentable");
+            }
+            mean.push(average);
+            relative.push(difference);
+        }
+        let active = wall.lower.iter().chain(&wall.upper).any(|&x| x != 0.0);
+        moving |= active;
+        coefficients.push(Coefficients {
+            mean,
+            relative,
+            moving: active,
+        });
+    }
+    Ok((coefficients, moving))
+}
+
 impl ShearedPowerLawFilm {
     /// Bind native wall-velocity rows in original hydraulic-channel order.
     /// Zero rows retain fixed walls; a nonzero row requires an open passage
@@ -133,41 +172,10 @@ impl ShearedPowerLawFilm {
         walls: Vec<WallVelocityPorts>,
     ) -> Result<Self, FilmError> {
         let geometry = film.power_law_film().pressure_operator();
-        if walls.len() != geometry.channel_count()
-            || walls.iter().any(|wall| {
-                wall.lower.len() != geometry.port_count()
-                    || wall.upper.len() != geometry.port_count()
-                    || wall.lower.iter().chain(&wall.upper).any(|x| !x.is_finite())
-            })
-        {
+        if walls.len() != geometry.channel_count() {
             return fail("power-law sliding film needs finite original-order wall rows");
         }
-        let mut coefficients = Vec::with_capacity(walls.len());
-        let mut moving = false;
-        for wall in &walls {
-            let mut mean = Vec::with_capacity(geometry.port_count());
-            let mut relative = Vec::with_capacity(geometry.port_count());
-            for (&lower, &upper) in wall.lower.iter().zip(&wall.upper) {
-                let difference = upper - lower;
-                let average = if lower.abs() <= upper.abs() {
-                    0.5_f64.mul_add(difference, lower)
-                } else {
-                    (-0.5_f64).mul_add(difference, upper)
-                };
-                if !difference.is_finite() || !average.is_finite() {
-                    return fail("power-law wall mean or relative row is unrepresentable");
-                }
-                mean.push(average);
-                relative.push(difference);
-            }
-            let active = wall.lower.iter().chain(&wall.upper).any(|&x| x != 0.0);
-            moving |= active;
-            coefficients.push(Coefficients {
-                mean,
-                relative,
-                moving: active,
-            });
-        }
+        let (coefficients, moving) = compile_walls(&walls, geometry.port_count())?;
         Ok(Self {
             film,
             walls,
@@ -378,113 +386,17 @@ impl ShearedPowerLawFilm {
                 check,
             );
         }
-        let original = self.film.power_law_film();
-        let geometry = original.pressure_operator();
-        if dq.len() != geometry.port_count()
-            || dv.len() != geometry.port_count()
-            || out.len() != geometry.port_count()
-            || dq.iter().chain(dv).any(|x| !x.is_finite())
-            || reservoir_directions_pa.len() != geometry.channel_count()
-            || reservoir_directions_pa.iter().any(|x| !x.is_finite())
-            || geometry
-                .channels
-                .iter()
-                .zip(reservoir_directions_pa)
-                .any(|(edge, &dp)| edge.to.is_some() && dp != 0.0)
-        {
-            return fail("invalid moving power-law film tangent direction");
-        }
-        let reservoirs = self.film.evaluation_reservoirs();
-        let state = original.solve_with_motion(
+        self.film.power_law_film().tangent_with_walls(
             q,
             velocity,
-            reservoirs,
-            Some(&self.coefficients),
+            dq,
+            dv,
+            reservoir_directions_pa,
+            out,
+            self.film.evaluation_reservoirs(),
+            &self.coefficients,
             &mut check,
-        )?;
-        if state.channels[..geometry.channel_count()]
-            .iter()
-            .any(|c| c.wall.tangent_ambiguous)
-        {
-            return fail("power-law wall tangent is undefined at the pure-Couette core corner");
-        }
-        let mut rhs = [0.0; MAX_CELLS];
-        let mut entrainment_change = [FlowBalance::default(); MAX_CELLS];
-        for (i, cell) in geometry.cells.iter().enumerate() {
-            rhs[i] = cell.area_m2 * dot(&cell.gap.closure, dv);
-        }
-        for (k, edge) in geometry.channels.iter().enumerate() {
-            if k.is_multiple_of(32) {
-                check()?;
-            }
-            let coefficients = &self.coefficients[k];
-            let h = edge.gap.reference_m - dot(&edge.gap.closure, q);
-            let dh = -dot(&edge.gap.closure, dq);
-            let local = state.channels[k];
-            let change = local.aperture_derivative * dh
-                + local.wall.relative_flow_derivative * dot(&coefficients.relative, dv);
-            rhs[edge.from] -= change;
-            if let Some(j) = edge.to {
-                rhs[j] += change;
-            } else {
-                rhs[edge.from] += local.differential * reservoir_directions_pa[k];
-            }
-            if coefficients.moving {
-                let transported = edge.width_m
-                    * (dh * dot(&coefficients.mean, velocity) + h * dot(&coefficients.mean, dv));
-                entrainment_change[edge.from].add(transported);
-                if let Some(j) = edge.to {
-                    entrainment_change[j].add(-transported);
-                }
-            }
-        }
-        for (i, value) in rhs[..geometry.cell_count()].iter_mut().enumerate() {
-            *value -= entrainment_change[i].value();
-        }
-        solve_factored(
-            &state.system.lower,
-            &state.system.scale,
-            geometry.cell_count(),
-            &mut rhs,
-        )?;
-        let mut candidate = [0.0; MAX_PORTS];
-        geometry.project(&rhs, &mut candidate);
-        for (k, edge) in geometry.channels.iter().enumerate() {
-            let coefficients = &self.coefficients[k];
-            if !coefficients.moving {
-                continue;
-            }
-            let h = edge.gap.reference_m - dot(&edge.gap.closure, q);
-            let dh = -dot(&edge.gap.closure, dq);
-            let dp = state.system.potential[edge.from]
-                - edge.to.map_or_else(
-                    || reservoirs.map_or(0.0, |r| r.potential[k]),
-                    |j| state.system.potential[j],
-                );
-            let ddp = rhs[edge.from] - edge.to.map_or(reservoir_directions_pa[k], |j| rhs[j]);
-            let wall = state.channels[k].wall;
-            let mean_change = -edge.width_m * (h * ddp + dp * dh);
-            // Implicit stress derivatives share the cross coefficient Q_r:
-            // (w L c)_p = -Q_r and (w L c)_h = -(dp Q_r + D r)/h.
-            let relative_change = -wall.relative_flow_derivative * ddp
-                + wall.relative_effort_derivative * dot(&coefficients.relative, dv)
-                - (dp * wall.relative_flow_derivative
-                    + wall.relative_effort_derivative * dot(&coefficients.relative, velocity))
-                    * (dh / h);
-            for (j, output) in candidate[..geometry.port_count()].iter_mut().enumerate() {
-                *output +=
-                    coefficients.mean[j] * mean_change + coefficients.relative[j] * relative_change;
-            }
-        }
-        if candidate[..geometry.port_count()]
-            .iter()
-            .any(|x| !x.is_finite())
-        {
-            return fail("moving power-law film tangent is unrepresentable");
-        }
-        check()?;
-        out.copy_from_slice(&candidate[..geometry.port_count()]);
-        Ok(())
+        )
     }
 }
 
