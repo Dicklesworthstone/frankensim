@@ -19,6 +19,8 @@ pub mod isobaric;
 pub mod mechanics;
 /// Simultaneous heating and volume work through the original material laws.
 pub mod midpoint;
+/// Simultaneous heat/work with the original-law discrete Gibbs identity.
+pub mod discrete_gradient;
 /// Conservative paired gas mass, species and enthalpy transfer at fixed volumes.
 pub mod transfer;
 
