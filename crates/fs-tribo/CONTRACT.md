@@ -1579,8 +1579,10 @@ it.
 
 ### Benchmark tangential laws (`benchmark-laws`)
 
-These laws exist for named comparisons, such as the X-Bw2 bow-law bakeoff.
-They are never render laws.
+`RateState` and `LuGre` exist for named comparisons, such as the X-Bw2
+bow-law bakeoff. They are never render laws. `SmithWoodhouse` is re-exported
+here under its benchmark name, but it lives in the ungated
+`fs_tribo::rosin_thermal` and is a render law (next section).
 
 `RateState` is Dieterich–Ruina rate-and-state friction.
 - Friction: `mu = mu0 + a ln(V/V0) + b ln(V0 theta/Dc)`.
@@ -1602,6 +1604,15 @@ Both laws implement `TangentialLaw`:
 - The compliant branch bisects with the caller's `TangentialSolveConfig` budget.
 - A rate-and-state root that needs a speed outside the admitted range returns `OutsideApplicability`.
 - Parameter caps are checked at `cap` and at the next representable value above it.
+
+### Rosin thermal law (`rosin_thermal`, ungated)
+
+Promoted out of `benchmark` on 2026-11-06. It is the bowed-string thermal rosin
+model (Smith & Woodhouse 2000; Woodhouse 2003; Woodhouse & Galluzzo 2025), and
+it is promoted for the fs-couple bowed-string rosin row; a card without that
+row never reaches it. Every input stays the caller's: the module admits no material and
+carries no bow geometry. The g0 reachability scan still guards
+`fs_tribo::benchmark` (rate-and-state, LuGre).
 
 `SmithWoodhouse` is the plastic thermal model of rosin from Smith & Woodhouse
 (2000), J. Mech. Phys. Solids 48:1633-1681. Equation numbers are the paper's.

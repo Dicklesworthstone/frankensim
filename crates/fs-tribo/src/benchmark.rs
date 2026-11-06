@@ -1,9 +1,10 @@
 //! Benchmark tangential laws (IRP M4.2-W4): rate-and-state friction
 //! (Dieterich 1979; Ruina 1983) with the aging and slip evolution laws,
-//! LuGre (Canudas de Wit, Olsson, Astrom & Lischinsky 1995), and the Smith &
-//! Woodhouse (2000) plastic thermal model of rosin. They exist only
-//! under `cfg(test)` or the non-default `benchmark-laws` feature: named
-//! comparisons for experiments such as X-Bw2, never render laws.
+//! and LuGre (Canudas de Wit, Olsson, Astrom & Lischinsky 1995). They exist
+//! only under `cfg(test)` or the non-default `benchmark-laws` feature: named
+//! comparisons for experiments such as X-Bw2, never render laws. The Smith &
+//! Woodhouse (2000) plastic thermal model of rosin is re-exported here under
+//! its benchmark names; it is a render law in [`crate::rosin_thermal`].
 //!
 //! **Held-effort discretization.** Over one interval the relative speed
 //! `V = |du|/dt` is constant, so both state equations integrate exactly:
@@ -25,10 +26,11 @@
 //! dissipation would be negative refuses, because passivity of the full
 //! force map depends on `sigma1` and is not assumed here.
 //!
-//! [`SmithWoodhouse`] (in `smith_woodhouse.rs`) follows the paper's Eqs.
+//! [`SmithWoodhouse`] (in [`crate::rosin_thermal`]) follows the paper's Eqs.
 //! (2), (6), (10)-(16), (20) and (21). Its module documentation lists the
 //! two discretization choices that are not the paper's.
 
+use crate::rosin_thermal::{admit_input, checked, outside};
 use crate::tangential::{TangentialLaw, TangentialStep, TangentialStepInput};
 use crate::{
     FrictionRegime, TriboError, checked_add, checked_mul, finite, nonnegative_finite,
@@ -41,38 +43,6 @@ pub use smith_woodhouse::{
     MAX_HISTORY_STEPS, RosinContact, SmithWoodhouse, SmithWoodhouseParams, SmithWoodhouseState,
     SteadySlidingFit, ThermalSolid, half_space_unit_weight,
 };
-
-fn checked(value: f64, field: &'static str) -> Result<f64, TriboError> {
-    finite(value, field)?;
-    Ok(value)
-}
-fn outside(field: &'static str, value: f64, range: [f64; 2]) -> TriboError {
-    TriboError::OutsideApplicability {
-        field,
-        value,
-        minimum: range[0],
-        maximum: range[1],
-    }
-}
-
-/// Validated common input; returns the released slip distance [m].
-fn admit_input(x: &TangentialStepInput) -> Result<f64, TriboError> {
-    x.solve.validate()?;
-    nonnegative_finite(x.normal_n, "normal_force")?;
-    nonnegative_finite(x.compliance_m_per_n, "compliance_m_per_n")?;
-    positive_finite(x.dt_s, "dt_s")?;
-    for value in x.slip_increment_m {
-        finite(value, "slip_increment_m")?;
-    }
-    checked(
-        if x.slip_increment_m[1] == 0.0 {
-            x.slip_increment_m[0].abs()
-        } else {
-            det::hypot(x.slip_increment_m[0], x.slip_increment_m[1])
-        },
-        "free_slip_distance_m",
-    )
-}
 
 /// Bisection for the unique root of a residual that increases with the
 /// traction, inside `[lo, hi]`, with the caller's budget and tolerance.

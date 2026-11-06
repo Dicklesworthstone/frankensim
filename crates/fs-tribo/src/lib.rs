@@ -30,9 +30,12 @@ pub mod stribeck_friction;
 pub use tangential::{
     DryTangentialState, TangentialLaw, TangentialSolveConfig, TangentialStep, TangentialStepInput,
 };
-/// Benchmark tangential laws (rate-and-state, LuGre, Smith & Woodhouse
-/// thermal) for named comparisons; test-only or the non-default
-/// `benchmark-laws` feature, never render laws.
+/// Smith & Woodhouse (2000) plastic thermal friction of rosin: a render law,
+/// for the fs-couple bowed-string rosin row.
+pub mod rosin_thermal;
+/// Benchmark tangential laws (rate-and-state, LuGre; Smith & Woodhouse is
+/// re-exported from [`rosin_thermal`]) for named comparisons; test-only or the
+/// non-default `benchmark-laws` feature, never render laws.
 #[cfg(any(test, feature = "benchmark-laws"))]
 pub mod benchmark;
 
