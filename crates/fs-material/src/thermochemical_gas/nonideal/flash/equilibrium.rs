@@ -17,6 +17,8 @@ use fs_thermochem::eos::peng_robinson::{
     stability::PengRobinsonStabilityOptionsV1,
 };
 
+/// Explicit phase-equilibrating acoustic and conservative pressure response.
+pub mod acoustics;
 /// Entropy-constrained pressure changes through the same original phase owner.
 pub mod entropy;
 /// Conserved internal-energy and volume closure over the same phase owner.

@@ -18,7 +18,7 @@ pub struct EquilibriumThermodynamicDerivatives {
     pub isochoric_heat_capacity_j_kg_k: f64,
     /// `(dp/dT)_rho` [Pa/K].
     pub pressure_temperature_at_density_pa_k: f64,
-    /// `(dp/drho)_T` [m²/s²], zero inside the two-phase dome.
+    /// `(dp/drho)_T` [m²/s²], zero on pure-fluid two-phase coexistence.
     pub pressure_density_at_temperature_m2_s2: f64,
     /// `(ds/dT)_rho` [J/(kg K²)].
     pub entropy_temperature_at_density_j_kg_k2: f64,
