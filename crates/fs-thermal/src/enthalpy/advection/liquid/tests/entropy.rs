@@ -82,7 +82,7 @@ fn liquid_inlet_entropy_closes_latent_storage_and_is_caloric_datum_invariant() {
             .with_liquid_carrier(carrier(&law)).unwrap()
             .with_boundaries(open::boundaries(CellId(0), CellId(0), 0.5, datum + 200.0), 2).unwrap();
         let baseline = initial.advance_observed(&original, 0.25, config(1.0), || Ok(())).unwrap();
-        let (next, observed, energy) = initial.advance_observed(
+        let (next, observed, energy, unified) = initial.advance_advected_with_entropy(
             &original.with_entropy_audit(), 0.25, config(1.0), || Ok(()),
         ).unwrap();
         assert_eq!(next.cells(), baseline.0.cells());
@@ -100,8 +100,15 @@ fn liquid_inlet_entropy_closes_latent_storage_and_is_caloric_datum_invariant() {
         close(audit.temporal_defect_j_k, 0.0, 1e-15);
         close(audit.other_energy_at_cell_temperature_j_k, 0.0, 1e-15);
         close(audit.advective_balance_residual_j_k, 0.0, 1e-15);
+        close(unified.thermal_storage_change_j_k, 12.5 / 500.0, 1e-15);
+        let transported = unified.advection.unwrap();
+        close(transported.boundary_entropy_input_j_k, net_carried_entropy, 1e-15);
+        close(transported.upwind_mixing_j_k, 12.5 / 500.0 - net_carried_entropy, 1e-15);
+        assert_eq!(unified.unclassified_source_at_cell_j_k, 0.0);
+        assert!(!unified.has_unclassified_sources);
+        close(unified.temporal_defect_j_k, 0.0, 1e-15);
         balance(audit);
-        audits.push(audit);
+        audits.push((audit, unified));
     }
     assert_eq!(audits[0], audits[1]);
     assert_eq!(audits[0], audits[2]);

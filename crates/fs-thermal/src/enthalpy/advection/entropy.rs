@@ -9,9 +9,10 @@
 
 use super::liquid::LiquidEnthalpyCarrier;
 use super::{Advected, MassBoundary, MassFlow, finite, invalid};
-use crate::enthalpy::{CellId, DepositionError, DepositionSimulation, MaterialId};
+use crate::enthalpy::{CellId, DepositionError, DepositionObserver, DepositionSimulation,
+    EnergyAudit, MaterialId, StepConfig};
 use crate::enthalpy::backward_euler::TransportStepCoefficients;
-use crate::enthalpy::entropy::AdvectiveEntropyContribution;
+use crate::enthalpy::entropy::{AdvectiveEntropyContribution, EntropyAudit, EntropyObserver};
 use std::collections::BTreeMap;
 
 /// Entropy balance over the last successful advance, in J/K.
@@ -155,6 +156,18 @@ impl Advected<()> {
 }
 
 impl<O> Advected<O> {
+    // Preserve accepted history and every transport binding while composing
+    // the two existing audit owners. No topology or physical owner is rebuilt.
+    fn map_inner<N>(self, map: impl FnOnce(O) -> N) -> Advected<N> {
+        Advected {
+            inner: map(self.inner), flows: self.flows, boundaries: self.boundaries,
+            reference_cells: self.reference_cells, selective_outlets: self.selective_outlets,
+            stationary_species: self.stationary_species, liquid_carrier: self.liquid_carrier,
+            boundary_pending: self.boundary_pending, pending: self.pending,
+            audit: self.audit, entropy: self.entropy,
+        }
+    }
+
     /// Audit entropy on the SAME accepted upwind trajectory. Every active law
     /// must provide its exact dh/T integral. Flowing cells and inlets must use
     /// the same immutable MaterialId; a shared enthalpy datum alone is not
@@ -183,6 +196,46 @@ impl<O> Advected<O> {
     #[must_use]
     pub fn entropy_audit(&self) -> Option<AdvectionEntropyAudit> {
         self.entropy.as_ref().map(|state| state.audit)
+    }
+}
+
+impl DepositionSimulation<'_> {
+    /// Advance native fixed-mass flow with one classified thermal entropy audit.
+    ///
+    /// The original `Advected` owner supplies net stream entropy, upwind mixing
+    /// and its balance residue on the SAME starting-state quadrature as its
+    /// enthalpy flux. Conduction retains actual bath temperatures and applied
+    /// coefficients; other sources/transfers remain explicitly unclassified.
+    /// No advective energy/T is counted again as an unclassified heat source.
+    /// The signed temporal defect includes caloric/time/roundoff error, not
+    /// constitutive fluid dissipation or chemical entropy production.
+    ///
+    /// Every energy update, CFL restriction, event and original observer hook
+    /// remains on the existing trajectory. The returned flow retains its inner
+    /// history and has `entropy_audit()` enabled; per-call accounts reset through
+    /// the usual `begin()` hook. The input thermal and observer states are
+    /// unchanged on failure, including missing entropy or late cancellation.
+    /// Same-law balanced bulk flow and the existing liquid carrier are supported;
+    /// stationary species and selective outlets still require another closure.
+    pub fn advance_advected_with_entropy<O: DepositionObserver>(
+        &self, observer: &Advected<O>, target_s: f64, config: StepConfig,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(Self, Advected<O>, EnergyAudit, EntropyAudit), O::Error> {
+        // Put thermal observation INSIDE advection: it retains only genuine
+        // nonadvective sources, including their flags when signed terms cancel.
+        // Subtracting accumulated transport from a combined Q/T would lose that
+        // distinction and magnify cancellation at disparate source scales.
+        let wrapped = observer.clone().with_entropy_audit().map_inner(EntropyObserver::new);
+        let (next, wrapped, energy) = self.advance_observed(&wrapped, target_s, config, checkpoint)?;
+        let flow = wrapped.entropy_audit().ok_or(DepositionError::Arithmetic)?;
+        let mut entropy = wrapped.inner.audit;
+        entropy.advection = Some(AdvectiveEntropyContribution {
+            boundary_entropy_input_j_k: flow.advective_boundary_entropy_input_j_k,
+            upwind_mixing_j_k: flow.upwind_mixing_j_k,
+            balance_residual_j_k: flow.advective_balance_residual_j_k,
+        });
+        entropy.refresh_temporal_defect()?;
+        Ok((next, wrapped.map_inner(|observer| observer.inner), energy, entropy))
     }
 }
 

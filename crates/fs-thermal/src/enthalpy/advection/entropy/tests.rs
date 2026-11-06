@@ -183,14 +183,14 @@ fn closed_ring_retains_original_trajectory_and_separates_upwind_from_time_error(
 #[test]
 fn steady_open_flow_uses_donor_entropy_and_keeps_source_heat_unclassified() {
     let mut reports = Vec::new();
-    for shift in [0.0, 1_048_576.0] {
+    for shift in [0.0, 1_048_576.0, 2.0_f64.powi(52), -2.0_f64.powi(52)] {
         let law = Law { shift };
         let mut c = cell(0, 400.0 + shift);
         c.boundary.source_w = -200.0; // Holds the well-mixed cell at 400 K.
         let s = prepared(&law, vec![c]);
         let flow = open(600.0 + shift).with_entropy_audit();
-        let (next, observed, energy) = s
-            .advance_observed(&flow, 0.25, cfg(1.0), || Ok(()))
+        let (next, observed, energy, unified) = s
+            .advance_advected_with_entropy(&flow, 0.25, cfg(1.0), || Ok(()))
             .unwrap();
         assert_eq!(next.cells(), s.cells());
         close(energy.external_heat_j, 0.0, 0.0);
@@ -204,10 +204,119 @@ fn steady_open_flow_uses_donor_entropy_and_keeps_source_heat_unclassified() {
         close(a.other_energy_at_cell_temperature_j_k, -0.125, 0.0);
         assert_eq!(a.thermal_storage_change_j_k, 0.0);
         assert_eq!(a.temporal_defect_j_k, 0.0);
+        let advective = unified.advection.unwrap();
+        assert_eq!(advective.boundary_entropy_input_j_k, a.advective_boundary_entropy_input_j_k);
+        assert_eq!(advective.upwind_mixing_j_k, a.upwind_mixing_j_k);
+        assert_eq!(advective.balance_residual_j_k, a.advective_balance_residual_j_k);
+        assert_eq!(unified.unclassified_source_at_cell_j_k, -0.125);
+        assert!(unified.has_unclassified_sources);
+        close(unified.temporal_defect_j_k, 0.0, 1e-14);
         balance(a);
-        reports.push(a);
+        reports.push((a, unified));
     }
-    assert_eq!(reports[0], reports[1]);
+    assert!(reports.iter().all(|report| report == &reports[0]));
+}
+
+#[test]
+fn unified_entropy_combines_original_streams_and_actual_baths_without_changing_heat() {
+    let initial = [300.0, 600.0, 450.0];
+    let mut cells: Vec<_> = (0..3).map(|i| cell(i as u64, initial[i])).collect();
+    cells[0].boundary.ambient_k = 280.0;
+    cells[0].boundary.htc_w_m2_k = 2.0;
+    cells[2].boundary.reservoir = Some(Reservoir {
+        area_m2: 0.5, conductance_w_k: 1.0, temperature_k: 500.0,
+    });
+    let s = prepared(&LAW, cells);
+    let flow = Advected::new((), ring(0.25), 3).unwrap();
+    let (plain, plain_flow, plain_energy) = s
+        .advance_observed(&flow, 0.125, cfg(1.0), || Ok(())).unwrap();
+    let (next, observed, energy, unified) = s
+        .advance_advected_with_entropy(&flow, 0.125, cfg(1.0), || Ok(())).unwrap();
+    assert_eq!(next.cells(), plain.cells());
+    assert_eq!(energy, plain_energy);
+    assert_eq!(observed.audit(), plain_flow.audit());
+    assert_eq!(energy.external_heat_j, 1.25);
+    assert_eq!(unified.unclassified_source_at_cell_j_k, 0.0);
+    assert!(!unified.has_unclassified_sources);
+    let advective = unified.advection.unwrap();
+    assert_eq!(advective.boundary_entropy_input_j_k, 0.0);
+    let mixing: f64 = (0..3).map(|i| {
+        let ratio = initial[(i + 2) % 3] / initial[i];
+        0.125 * 0.25 * (ratio - 1.0 - ratio.ln())
+    }).sum();
+    close(advective.upwind_mixing_j_k, mixing, 1e-14);
+    close(unified.reservoir_entropy_input_j_k, 0.125 * (-40.0 / 280.0 + 50.0 / 500.0), 1e-14);
+    close(unified.conduction_generation_j_k,
+        0.125 * ((-40.0 / 300.0) * (-20.0 / 280.0) + (50.0 / 450.0) * (50.0 / 500.0)), 1e-14);
+    let exact: f64 = (0..3).map(|i|
+        (next.temperature_k(CellId(i as u64)).unwrap() / initial[i]).ln()).sum();
+    close(unified.thermal_storage_change_j_k, exact, 1e-14);
+    close(unified.temporal_defect_j_k, observed.entropy_audit().unwrap().temporal_defect_j_k, 1e-14);
+    assert!(unified.temporal_defect_j_k < 0.0);
+    assert!(flow.entropy_audit().is_none());
+}
+
+#[test]
+fn unified_entropy_preserves_inner_history_events_and_cancelling_source_flags() {
+    #[derive(Clone, Debug, PartialEq)]
+    struct History(Vec<(u8, f64)>);
+    impl DepositionObserver for History {
+        type Error = DepositionError;
+        fn begin(&mut self) -> Result<(), Self::Error> {
+            self.0.push((0, 0.0));
+            Ok(())
+        }
+        fn sources(&mut self, thermal: &DepositionSimulation<'_>,
+            _: &mut dyn FnMut() -> Result<(), DepositionError>,
+        ) -> Result<BTreeMap<CellId, f64>, Self::Error> {
+            self.0.push((1, thermal.time_s()));
+            Ok(BTreeMap::from([(CellId(0), 4.0)]))
+        }
+        fn requires_step_interval(&self) -> bool { true }
+        fn step_sources(&mut self, _: &DepositionSimulation<'_>, _: f64, _: f64, end: f64,
+            _: &mut dyn FnMut() -> Result<(), DepositionError>,
+        ) -> Result<BTreeMap<CellId, f64>, Self::Error> {
+            self.0.push((2, end));
+            Ok(BTreeMap::from([(CellId(0), -4.0)]))
+        }
+        fn event(&mut self, _: &Event, thermal: &DepositionSimulation<'_>) -> Result<(), Self::Error> {
+            self.0.push((3, thermal.time_s()));
+            Ok(())
+        }
+        fn step(&mut self, _: f64, _: f64, _: &BTreeMap<CellId, f64>,
+            thermal: &DepositionSimulation<'_>, _: &mut dyn FnMut() -> Result<(), DepositionError>,
+        ) -> Result<(), Self::Error> {
+            self.0.push((4, thermal.time_s()));
+            Ok(())
+        }
+    }
+    let c = cell(0, 400.0);
+    let boundary = Boundary { htc_w_m2_k: 1.0, ..c.boundary };
+    let s = DepositionSimulation::new(vec![
+        TimedEvent { time_s: 0.0, event: Event::Birth(c) },
+        TimedEvent { time_s: 0.125, event: Event::Boundary(CellId(0), boundary) },
+    ], &[(MaterialId(1), &LAW as &dyn ThermalLaw)], DepositionBudget {
+        max_cells: 1, max_links: 2, max_events: 2, max_substeps: 100,
+    }).unwrap();
+    let flow = open(600.0).map_inner(|()| History(vec![(9, -1.0)]));
+    let (plain, plain_flow, plain_energy) = s
+        .advance_observed(&flow, 0.25, cfg(0.2), || Ok(())).unwrap();
+    let (next, observed, energy, entropy) = s
+        .advance_advected_with_entropy(&flow, 0.25, cfg(0.2), || Ok(())).unwrap();
+    assert_eq!(next.cells(), plain.cells());
+    assert_eq!(energy, plain_energy);
+    assert_eq!(observed.inner(), plain_flow.inner());
+    assert_eq!(observed.audit(), plain_flow.audit());
+    assert_eq!(entropy.unclassified_source_at_cell_j_k, 0.0);
+    assert!(entropy.has_unclassified_sources);
+    assert_eq!(energy.events, 2);
+    let (continued, retained, _, _) = next
+        .advance_advected_with_entropy(&observed, 0.5, cfg(0.2), || Ok(())).unwrap();
+    let (expected, expected_history, _) = plain
+        .advance_observed(&plain_flow, 0.5, cfg(0.2), || Ok(())).unwrap();
+    assert_eq!(continued.cells(), expected.cells());
+    assert_eq!(retained.inner(), expected_history.inner());
+    assert_eq!(flow.inner().0, vec![(9, -1.0)]);
 }
 
 #[test]
@@ -292,8 +401,8 @@ fn latent_enthalpy_carries_entropy_once_without_temperature_mixing() {
     }
     let s = prepared(&Plateau, vec![cell(0, 100_000.0)]);
     let flow = open(200_000.0).with_entropy_audit();
-    let (next, observed, energy) = s
-        .advance_observed(&flow, 0.125, cfg(1.0), || Ok(()))
+    let (next, observed, energy, unified) = s
+        .advance_advected_with_entropy(&flow, 0.125, cfg(1.0), || Ok(()))
         .unwrap();
     let a = observed.entropy_audit().unwrap();
     close(next.temperature_k(CellId(0)).unwrap(), 350.0, 0.0);
@@ -307,6 +416,11 @@ fn latent_enthalpy_carries_entropy_once_without_temperature_mixing() {
     assert_eq!(a.upwind_mixing_j_k, 0.0);
     assert_eq!(a.temporal_defect_j_k, 0.0);
     close(a.other_energy_at_cell_temperature_j_k, 0.0, 1e-12);
+    close(unified.thermal_storage_change_j_k, a.thermal_storage_change_j_k, 1e-12);
+    assert_eq!(unified.advection.unwrap().upwind_mixing_j_k, 0.0);
+    assert_eq!(unified.unclassified_source_at_cell_j_k, 0.0);
+    assert!(!unified.has_unclassified_sources);
+    close(unified.temporal_defect_j_k, 0.0, 1e-12);
     balance(a);
 }
 
@@ -331,7 +445,7 @@ fn missing_entropy_and_late_cancellation_leave_original_observers_unchanged() {
     );
     let flow = plain.with_entropy_audit();
     assert!(matches!(
-        missing.advance_observed(&flow, 0.125, cfg(1.0), || Ok(())),
+        missing.advance_advected_with_entropy(&flow, 0.125, cfg(1.0), || Ok(())),
         Err(DepositionError::InvalidInput(
             "thermal law does not provide advective entropy change"
         ))
@@ -339,7 +453,7 @@ fn missing_entropy_and_late_cancellation_leave_original_observers_unchanged() {
     let s = prepared(&LAW, cells());
     let mut polls = 0;
     assert!(matches!(
-        s.advance_observed(&flow, 1.0, cfg(0.01), || {
+        s.advance_advected_with_entropy(&flow, 1.0, cfg(0.01), || {
             polls += 1;
             if polls > 60 {
                 Err(DepositionError::Cancelled)
@@ -404,7 +518,7 @@ fn a_shared_enthalpy_reference_does_not_admit_stationary_species_entropy() {
     );
     let audited = flow.with_entropy_audit();
     assert!(matches!(
-        s.advance_observed(&audited, 0.125, cfg(1.0), || Ok(())),
+        s.advance_advected_with_entropy(&audited, 0.125, cfg(1.0), || Ok(())),
         Err(DepositionError::InvalidInput(
             "thermal advection entropy does not cover stationary species mixing"
         ))

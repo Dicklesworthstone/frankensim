@@ -1037,6 +1037,20 @@ entropy integration. G1/G3 tests cover isolated exchange, refinement, reservoirs
 latent storage, equilibrium, deferred birth, resolved implicit sources, missing
 material entropy and cancellation without publication.
 
+`advance_advected_with_entropy` composes the original explicit `Advected`
+entropy owner with this thermal account. Net stream entropy, upwind mixing and
+advective balance residue populate `EntropyAudit::advection`; they are excluded
+from unclassified source energy/T. Thermal observation sits inside the flow
+wrapper, so actual nonadvective source flags survive signed cancellation without
+subtracting large transport accounts. Both owners use the same accepted states,
+CFL/event grid and original source/history hooks. The returned observer retains
+its inner history and enabled flow entropy account, with the usual per-advance
+`begin()` reset semantics. Balanced same-law bulk and admitted liquid-carrier
+flow are covered; stationary species, selective streams and chemical entropy
+remain outside this closure. G1/G3/G4 regressions cover actual bath temperatures,
+datum shifts, latent storage, unchanged heat trajectories, retained histories,
+events, unavailable entropy and cancellation without publication.
+
 
 ## Shared chambers on actual multi-cell heat histories
 

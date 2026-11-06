@@ -161,16 +161,13 @@ impl DepositionSimulation<'_> {
     /// Unclassified internal transfers contribute their signed entropy-at-cell
     /// terms; they are not assumed to be passive conduction. Every hook is
     /// forwarded once. Failure discards thermal, observer and entropy candidates.
+    /// For a native `Advected` flow, use `advance_advected_with_entropy` to
+    /// classify its boundary entropy and upwind mixing with the original owner.
     pub fn advance_observed_with_entropy<O: DepositionObserver>(
         &self, observer: &O, target_s: f64, config: StepConfig,
         checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<(Self, O, EnergyAudit, EntropyAudit), O::Error> {
-        let wrapped = EntropyObserver {
-            inner: observer.clone(), initial_h: BTreeMap::new(),
-            sources: BTreeMap::new(), conductances: BTreeMap::new(),
-            reservoirs: BTreeMap::new(), ambient: BTreeMap::new(), transfers: Vec::new(),
-            interval_sources: BTreeMap::new(), audit: EntropyAudit::default(),
-        };
+        let wrapped = EntropyObserver::new(observer.clone());
         let (next, wrapped, energy) = self.advance_observed(&wrapped, target_s, config, checkpoint)?;
         Ok((next, wrapped.inner, energy, wrapped.audit))
     }
@@ -334,8 +331,8 @@ impl DepositionSimulation<'_> {
 }
 
 #[derive(Clone)]
-struct EntropyObserver<O> {
-    inner: O,
+pub(super) struct EntropyObserver<O> {
+    pub(super) inner: O,
     initial_h: BTreeMap<CellId, f64>,
     sources: BTreeMap<CellId, f64>,
     conductances: BTreeMap<u64, f64>,
@@ -343,7 +340,17 @@ struct EntropyObserver<O> {
     ambient: BTreeMap<CellId, f64>,
     transfers: Vec<HeatTransfer>,
     interval_sources: BTreeMap<CellId, f64>,
-    audit: EntropyAudit,
+    pub(super) audit: EntropyAudit,
+}
+impl<O> EntropyObserver<O> {
+    pub(super) fn new(inner: O) -> Self {
+        Self {
+            inner, initial_h: BTreeMap::new(), sources: BTreeMap::new(),
+            conductances: BTreeMap::new(), reservoirs: BTreeMap::new(),
+            ambient: BTreeMap::new(), transfers: Vec::new(),
+            interval_sources: BTreeMap::new(), audit: EntropyAudit::default(),
+        }
+    }
 }
 impl<O: DepositionObserver> DepositionObserver for EntropyObserver<O> {
     type Error = O::Error;
