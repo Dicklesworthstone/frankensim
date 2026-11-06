@@ -2,7 +2,10 @@
 //! The mechanical/caloric oracle is independent of the production return map.
 
 use super::*;
-use fs_material::plastic::finite::thermal::source::THERMAL_FINITE_NORTON_LAW_ID;
+use fs_material::creep::StrainHardeningCreep;
+use fs_material::plastic::finite::thermal::source::{
+    THERMAL_FINITE_NORTON_LAW_ID, THERMAL_FINITE_PRIMARY_NORTON_LAW_ID,
+};
 
 const MU: f64 = 80.0e6;
 const BULK: f64 = 160.0e6;
@@ -12,7 +15,7 @@ const ACTIVATION: f64 = 6000.0;
 const DEAD_PIOLA: f64 = 1.0e6;
 const COMPARISON_YIELD: f64 = 2.0e6;
 
-fn fixture(exponent: f64) -> Fixture {
+fn creep_model(exponent: f64) -> ConstitutiveModelCard {
     let mut source = model();
     source.law = LawId(THERMAL_FINITE_NORTON_LAW_ID.into());
     for name in [
@@ -47,7 +50,15 @@ fn fixture(exponent: f64) -> Fixture {
             .parameters
             .insert(name.into(), LawParameter { value, dims });
     }
-    Fixture::with_model(CP, 11, scalar(DENSITY_PROPERTY, Density::DIMS, RHO), source)
+    source
+}
+fn fixture(exponent: f64) -> Fixture {
+    Fixture::with_model(
+        CP,
+        11,
+        scalar(DENSITY_PROPERTY, Density::DIMS, RHO),
+        creep_model(exponent),
+    )
 }
 fn adiabatic(fixture: &Fixture) -> DepositionSimulation<'_> {
     DepositionSimulation::new(
@@ -192,6 +203,71 @@ fn adiabatic_endpoint(old: Point, dt: f64, exponent: f64, hold: bool) -> Point {
     }
     mechanical(old, 0.5 * (lo + hi), dt, exponent, hold)
 }
+
+// An independent m=1, zero-floor quadratic solves the retained primary rate.
+// The scalar equilibrium also resolves finite dead-load geometry and the
+// separate temperature root closes adiabatic physical heat, not rate potential.
+fn primary_mechanical(old: Point, temperature: f64, dt: f64, reference: f64, hold: bool) -> Point {
+    let eta = VISCOSITY * (ACTIVATION * (1.0 / temperature - 1.0 / 300.0)).exp();
+    let compliance = 1.0 / (9.0 * BULK) + 1.0 / (3.0 * MU);
+    let increment = |q: f64| {
+        let shifted = reference + old.creep;
+        let drive = reference * dt * q / eta;
+        2.0 * drive / (shifted + (shifted * shifted + 4.0 * drive).sqrt())
+    };
+    let residual = |q: f64| {
+        if hold {
+            q + 3.0 * MU * increment(q) - old.q
+        } else {
+            (q / DEAD_PIOLA).ln() - old.creep - increment(q) - compliance * q
+        }
+    };
+    let (mut lo, mut hi) = if hold {
+        (0.0, old.q)
+    } else {
+        (DEAD_PIOLA, 2.0 * DEAD_PIOLA)
+    };
+    assert!(residual(lo) < 0.0 && residual(hi) > 0.0);
+    for _ in 0..100 {
+        let q = 0.5 * (lo + hi);
+        if residual(q) < 0.0 {
+            lo = q;
+        } else {
+            hi = q;
+        }
+    }
+    let q = 0.5 * (lo + hi);
+    let dc = increment(q);
+    let creep = old.creep + dc;
+    let (a, b) = if hold {
+        (old.a, old.b)
+    } else {
+        (
+            creep + compliance * q,
+            q / (9.0 * BULK) - q / (6.0 * MU) - 0.5 * creep,
+        )
+    };
+    let mut state = point(old, a, b, creep, temperature, 1.0);
+    state.potential = state.free
+        + eta / dt
+            * (0.5 * (1.0 + old.creep / reference) * dc * dc + dc * dc * dc / (3.0 * reference));
+    state
+}
+
+fn primary_adiabatic_endpoint(old: Point, dt: f64, reference: f64, hold: bool) -> Point {
+    let (mut lo, mut hi) = (old.temperature, old.temperature + 4.0);
+    for _ in 0..100 {
+        let temperature = 0.5 * (lo + hi);
+        let state = primary_mechanical(old, temperature, dt, reference, hold);
+        if RHO * CP * (temperature - old.temperature) < state.dissipation {
+            lo = temperature;
+        } else {
+            hi = temperature;
+        }
+    }
+    primary_mechanical(old, 0.5 * (lo + hi), dt, reference, hold)
+}
+
 fn supports(old: Point, hold: bool) -> Vec<(usize, f64)> {
     (0..12)
         .filter(|dof| hold || ![3, 7, 11].contains(dof))
@@ -415,6 +491,152 @@ fn sourced_norton_body_creeps_below_yield_heats_and_relaxes_with_physical_clock_
                 time = end;
             }
             assert!(solid.mechanics().displacement_m()[1][0] > 0.09 * L);
+        }
+    });
+}
+
+#[test]
+fn sourced_finite_primary_creep_heats_with_endpoint_work_and_retains_thermal_feedback() {
+    context(|cx| {
+        let hardening = StrainHardeningCreep {
+            reference_strain: 0.01,
+            exponent: 1.0,
+            residual_rate_fraction: 0.0,
+        };
+        let mut source = creep_model(1.0);
+        source.law = LawId(THERMAL_FINITE_PRIMARY_NORTON_LAW_ID.into());
+        for (name, value) in [
+            (
+                "creep_hardening_reference_strain",
+                hardening.reference_strain,
+            ),
+            ("creep_hardening_exponent", hardening.exponent),
+            (
+                "creep_residual_rate_fraction",
+                hardening.residual_rate_fraction,
+            ),
+        ] {
+            source.parameters.insert(
+                name.into(),
+                LawParameter {
+                    value,
+                    dims: Dims::NONE,
+                },
+            );
+        }
+        let fixture =
+            Fixture::with_model(CP, 12, scalar(DENSITY_PROPERTY, Density::DIMS, RHO), source);
+        let mut thermal = adiabatic(&fixture);
+        let mut solid = bind(&fixture, &thermal, false, cx);
+        let mut old = Point::virgin();
+        let mut time = 0.0;
+        let mut previous_increment = f64::INFINITY;
+        for (index, dt) in [1.0, 1.0, 1.0, 0.5].into_iter().enumerate() {
+            let hold = index == 3;
+            let expected = primary_adiabatic_endpoint(old, dt, hardening.reference_strain, hold);
+            let cold =
+                primary_mechanical(old, old.temperature, dt, hardening.reference_strain, hold);
+            let increment = expected.creep - old.creep;
+            assert!(increment > 0.0 && expected.q < COMPARISON_YIELD);
+            assert!(expected.temperature > old.temperature && expected.creep > cold.creep);
+            if index == 1 || index == 2 {
+                assert!(increment < previous_increment);
+            }
+            let prescribed = supports(old, hold);
+            let load = if hold {
+                vec![]
+            } else {
+                vec![(3, V / L * DEAD_PIOLA)]
+            };
+            let end = time + dt;
+            let saved_history = solid.mechanics().element_states().to_vec();
+            let saved_h = thermal.cells()[&CELL].specific_h_j_kg;
+            let candidate = solid
+                .advance(
+                    &thermal,
+                    &(),
+                    end,
+                    &prescribed,
+                    &load,
+                    [0.0; 3],
+                    settings(),
+                    controls(),
+                    thermal_config(),
+                    config(),
+                    cx,
+                )
+                .unwrap();
+            let actual = candidate.solid().mechanics();
+            let report = candidate.report();
+            close(
+                candidate.thermal().temperature_k(CELL).unwrap(),
+                expected.temperature,
+                2e-7,
+            );
+            close(actual.temperatures_k()[0], expected.temperature, 2e-7);
+            close(actual.element_states()[0].alpha, expected.creep, 3e-9);
+            assert_eq!(actual.element_states()[0].creep_alpha, 0.0);
+            for (axis, logarithm) in [expected.a, expected.b, expected.b].into_iter().enumerate() {
+                close(
+                    actual.displacement_m()[axis + 1][axis],
+                    L * (logarithm.exp() - 1.0),
+                    3e-11,
+                );
+                close(
+                    actual.element_first_piola_pa()[0][4 * axis],
+                    expected.piola[axis],
+                    0.5,
+                );
+            }
+            close(
+                report.material_energy.caloric_heat_j,
+                V * expected.dissipation,
+                3e-9,
+            );
+            close(
+                report.material_energy.plastic_dissipation_j,
+                V * expected.dissipation,
+                3e-9,
+            );
+            close(report.material_energy.creep_dissipation_j, 0.0, 0.0);
+            close(report.material_energy.reversible_heat_j, 0.0, 0.0);
+            close(
+                report.material_energy.incremental_potential_j,
+                V * expected.potential,
+                3e-9,
+            );
+            close(
+                report.thermal_audit.stored_energy_change_j,
+                RHO * V * CP * (expected.temperature - old.temperature),
+                3e-9,
+            );
+            assert!(expected.potential - expected.free < 0.5 * expected.dissipation);
+            close(report.external_heat_j, 0.0, 1e-12);
+            close(report.thermal_residual_j, 0.0, config().energy_tolerance_j);
+            close(report.combined_residual_j, 0.0, config().energy_tolerance_j);
+            let material = &actual.families()[0];
+            assert_eq!(
+                material.family().law().norton_strain_hardening(),
+                Some(&hardening)
+            );
+            assert_eq!(material.family().model_card(), &fixture.card.models()[0]);
+            assert!(std::ptr::eq(material.caloric_source(), &fixture.caloric));
+            if hold {
+                assert!(expected.q < old.q);
+                close(report.material_energy.internal_endpoint_work_j, 0.0, 1e-12);
+            }
+            assert_eq!(solid.mechanics().element_states(), saved_history);
+            close(thermal.cells()[&CELL].specific_h_j_kg, saved_h, 0.0);
+            close(thermal.time_s(), time, 0.0);
+            close(solid.time_s(), time, 0.0);
+            let (next_thermal, next_solid, (), _) = candidate.into_parts();
+            thermal = next_thermal;
+            solid = next_solid;
+            close(thermal.time_s(), end, 0.0);
+            close(solid.time_s(), end, 0.0);
+            old = expected;
+            previous_increment = increment;
+            time = end;
         }
     });
 }

@@ -1,9 +1,10 @@
-//! Synthetic secondary-creep references, not empirical material calibrations.
+//! Synthetic creep references, not empirical material calibrations.
 
 use fs_evidence::ValidityDomain;
 use fs_matdb::{
     ConstitutiveModelCard, InitialStatePolicy, LawId, LawParameter, Provenance, QueryPoint,
 };
+use fs_material::creep::StrainHardeningCreep;
 use fs_material::plastic::finite::FiniteJ2Limits;
 use fs_material::plastic::finite::thermal::source::{
     ResolvedAffineThermalFiniteJ2, THERMAL_FINITE_J2_LAW_ID, THERMAL_FINITE_NORTON_LAW_ID,
@@ -216,6 +217,160 @@ fn sustained_small_kirchhoff_stress_accumulates_large_creep_without_stored_harde
             .unwrap(),
         family.thermodynamics(&old_f, &state, 300.0).unwrap()
     );
+}
+
+#[test]
+fn primary_creep_keeps_implicit_history_across_heating_and_cooling_without_stored_hardening() {
+    let p = parameters();
+    let kinetics = kinetics(1.0);
+    let primary = StrainHardeningCreep {
+        reference_strain: 0.02,
+        exponent: 1.0,
+        residual_rate_fraction: 0.0,
+    };
+    let secondary = AffineThermalFiniteJ2::new_norton(p, LIMITS, kinetics).unwrap();
+    let family = secondary
+        .clone()
+        .with_norton_strain_hardening(primary)
+        .unwrap();
+    assert_eq!(family.norton_strain_hardening(), Some(&primary));
+    assert!(secondary.norton_strain_hardening().is_none());
+    let (q, dt) = (0.4e6, 0.3);
+    let mut state = family.initial_state();
+    let mut old_temperature = 300.0;
+    let mut old_f = coaxial(0.0, q / (3.0 * p.shear_modulus_pa));
+    let mut accumulated = 0.0;
+    let mut previous = None;
+    for temperature in [300.0, 300.0, 380.0, 380.0, 440.0, 300.0] {
+        let eta = kinetics.reference_viscosity_pa_s
+            * (kinetics.activation_temperature_k * (1.0 / temperature - 1.0 / 300.0)).exp();
+        let virgin_increment = q * dt / eta;
+        // Independent positive root of dg*(a+alpha_old+dg)=a*dt*q/eta(T).
+        let b = primary.reference_strain + accumulated;
+        let c = primary.reference_strain * virgin_increment;
+        let expected_increment = 2.0 * c / (b + (b * b + 4.0 * c).sqrt());
+        accumulated += expected_increment;
+        let thermal_delta = temperature - p.reference_temperature_k;
+        let mu = p.shear_modulus_pa + p.shear_modulus_slope_pa_k * thermal_delta;
+        let theta = (p.logarithmic_expansion_per_k * thermal_delta
+            + 0.5 * p.logarithmic_expansion_slope_per_k2 * thermal_delta * thermal_delta)
+            .exp();
+        let f = coaxial(0.0, accumulated + q / (3.0 * mu)).map(|value| theta * value);
+        let saved = state.clone();
+        let step = family
+            .checked_increment_for_step(&old_f, &state, old_temperature, &f, temperature, 0.0, dt)
+            .unwrap();
+        near(
+            step.mechanical.plastic_increment,
+            expected_increment,
+            3e-13,
+            2e-10,
+        );
+        near(step.mechanical.state.alpha, accumulated, 5e-13, 2e-10);
+        near(step.mechanical.equivalent_kirchhoff_pa, q, 2e-5, 2e-10);
+        near(
+            step.mechanical.inelastic_dissipation_j_m3(),
+            q * expected_increment,
+            2e-6,
+            2e-10,
+        );
+        near(step.balance_error_j_m3, 0.0, 2e-6, 0.0);
+        assert_eq!(step.mechanical.state.creep_alpha, 0.0);
+        assert_eq!(
+            family
+                .thermodynamics(&f, &step.mechanical.state, temperature)
+                .unwrap(),
+            secondary
+                .thermodynamics(&f, &step.mechanical.state, temperature)
+                .unwrap(),
+        );
+        if let Some((previous_temperature, previous_increment)) = previous {
+            if temperature == previous_temperature {
+                assert!(step.mechanical.plastic_increment < previous_increment);
+            }
+        }
+        previous = Some((temperature, step.mechanical.plastic_increment));
+        assert_eq!(state, saved);
+        state = step.mechanical.state;
+        old_f = f;
+        old_temperature = temperature;
+    }
+    assert!(old_f[0] > 1.05 && state.alpha > 0.05);
+    assert_eq!(family.norton_strain_hardening(), Some(&primary));
+}
+
+#[test]
+fn primary_selection_requires_norton_and_preserves_explicit_coefficients() {
+    let secondary = AffineThermalFiniteJ2::new_norton(parameters(), LIMITS, kinetics(2.0)).unwrap();
+    let primary = StrainHardeningCreep {
+        reference_strain: 0.02,
+        exponent: 1.5,
+        residual_rate_fraction: 0.1,
+    };
+    let selected = secondary
+        .clone()
+        .with_norton_strain_hardening(primary)
+        .unwrap();
+    assert_eq!(
+        selected
+            .clone()
+            .with_norton_strain_hardening(primary)
+            .unwrap(),
+        selected
+    );
+    assert!(
+        selected
+            .clone()
+            .with_norton_strain_hardening(StrainHardeningCreep {
+                exponent: 2.0,
+                ..primary
+            })
+            .is_err()
+    );
+    for invalid in [
+        StrainHardeningCreep {
+            reference_strain: 0.0,
+            ..primary
+        },
+        StrainHardeningCreep {
+            exponent: -1.0,
+            ..primary
+        },
+        StrainHardeningCreep {
+            residual_rate_fraction: 1.01,
+            ..primary
+        },
+        StrainHardeningCreep {
+            residual_rate_fraction: f64::NAN,
+            ..primary
+        },
+    ] {
+        assert!(
+            secondary
+                .clone()
+                .with_norton_strain_hardening(invalid)
+                .is_err()
+        );
+    }
+    let mut parameters = *secondary.parameters();
+    parameters.reference.yield_stress_pa = 2e6;
+    parameters.reference.hardening_modulus_pa = 8e6;
+    let plastic = AffineThermalFiniteJ2::new(parameters, LIMITS).unwrap();
+    assert!(
+        plastic
+            .clone()
+            .with_norton_strain_hardening(primary)
+            .is_err()
+    );
+    assert!(
+        plastic
+            .with_overstress(kinetics(2.0))
+            .unwrap()
+            .with_norton_strain_hardening(primary)
+            .is_err()
+    );
+    assert!(selected.at_temperature(300.0).is_err());
+    assert!(selected.at_temperature_for_step(300.0, 0.0).is_err());
 }
 
 #[test]

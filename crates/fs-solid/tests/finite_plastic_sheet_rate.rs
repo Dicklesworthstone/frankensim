@@ -3,6 +3,7 @@
 
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
+use fs_material::creep::StrainHardeningCreep;
 use fs_material::hyper::plane_stress::PlaneStressSettings;
 use fs_material::plastic::finite::combined::FiniteNortonJ2;
 use fs_material::plastic::finite::creep::FiniteNortonCreep;
@@ -357,6 +358,140 @@ fn combined_sheet_yields_then_creeps_without_turning_creep_into_hardening() {
                         assert!(new.creep_alpha > old.creep_alpha);
                     }
                 }
+                sheet = endpoint.sheet;
+            }
+        }
+    });
+}
+
+#[test]
+fn primary_combined_sheets_preserve_distinct_histories_through_hold_unload_and_reload() {
+    with_cx(|cx, _| {
+        let reference = 0.005;
+        let material = FiniteNortonJ2::new(backbone(), kinetics(1.0), DT, 3.0)
+            .unwrap()
+            .with_strain_hardening(StrainHardeningCreep {
+                reference_strain: reference,
+                exponent: 1.0,
+                residual_rate_fraction: 0.0,
+            })
+            .unwrap();
+        for triangular in [false, true] {
+            let mesh = mesh(triangular);
+            let thickness = vec![THICKNESS; mesh.elems.len()];
+            let mut sheet = FinitePlasticSheet::try_new(
+                &mesh,
+                FinitePlasticLawField::Uniform(&material),
+                &thickness,
+                local(),
+                budget(),
+                cx,
+            )
+            .unwrap();
+            let (mut plastic, mut creep) = (0.0_f64, 0.0_f64);
+            let mut previous_increment = f64::INFINITY;
+            for index in 0..5 {
+                let axial: f64 = match index {
+                    0 | 1 => 0.08,
+                    // Unload elastically without reversing the flow direction.
+                    2 => 0.5 * (plastic + creep) + 0.001,
+                    _ => 0.10,
+                };
+                let stretch = axial.exp();
+                let old_creep = creep;
+                let radius = Y + H * plastic;
+                let creep_increment = |q: f64| {
+                    let shifted = reference + old_creep;
+                    let drive = reference * DT * q / ETA;
+                    2.0 * drive / (shifted + (shifted * shifted + 4.0 * drive).sqrt())
+                };
+                // Independent equibiaxial plane-stress equilibrium:
+                // ln(lambda)=C*q+(plastic_new+creep_new)/2. Plasticity obeys
+                // complementarity; primary resistance uses only creep history.
+                let residual = |q: f64| {
+                    C * q
+                        + 0.5
+                            * (plastic
+                                + ((q - radius) / H).max(0.0)
+                                + old_creep
+                                + creep_increment(q))
+                        - axial
+                };
+                let (mut lo, mut hi) = (0.0, axial / C);
+                assert!(residual(lo) < 0.0 && residual(hi) > 0.0);
+                for _ in 0..100 {
+                    let q = 0.5 * (lo + hi);
+                    if residual(q) < 0.0 {
+                        lo = q;
+                    } else {
+                        hi = q;
+                    }
+                }
+                let q = 0.5 * (lo + hi);
+                let dc = creep_increment(q);
+                let dp = ((q - radius) / H).max(0.0);
+                assert!(dc > 0.0);
+                if index == 0 || index == 3 {
+                    assert!(dp > 0.0);
+                } else {
+                    assert_eq!(dp, 0.0);
+                }
+                if index == 1 || index == 2 || index == 4 {
+                    assert!(dc < previous_increment);
+                }
+                plastic += dp;
+                creep += dc;
+                let stored = THICKNESS * (C * q * q + 0.5 * H * plastic * plastic);
+                let plastic_heat = THICKNESS * Y * dp;
+                let creep_heat = THICKNESS * q * dc;
+                let creep_potential = THICKNESS * ETA / DT
+                    * (0.5 * (1.0 + old_creep / reference) * dc * dc
+                        + dc * dc * dc / (3.0 * reference));
+                assert!(creep_potential < 0.5 * creep_heat);
+                let supports = biaxial_supports(&mesh, stretch);
+                let displacement: Vec<_> = mesh
+                    .nodes
+                    .iter()
+                    .map(|&[x, y]| [(stretch - 1.0) * x, (stretch - 1.0) * y])
+                    .collect();
+                let old_states = sheet.quadrature_states().to_vec();
+                let old_time = sheet.physical_time_s();
+                let trial = sheet.evaluate_trial(&displacement, false, cx).unwrap();
+                let endpoint = sheet
+                    .advance(&supports, &[], IncrementSettings::default(), controls(), cx)
+                    .unwrap();
+                check_biaxial(&endpoint.sheet, stretch, q, plastic, creep);
+                near(endpoint.energy.stored_after_j, stored, 3e-4, 2e-8);
+                near(
+                    endpoint.energy.plastic_dissipation_j,
+                    plastic_heat,
+                    3e-4,
+                    2e-8,
+                );
+                near(endpoint.energy.creep_dissipation_j, creep_heat, 3e-4, 2e-8);
+                let potential = stored + plastic_heat + creep_potential;
+                near(
+                    endpoint.energy.incremental_potential_j,
+                    potential,
+                    3e-4,
+                    2e-8,
+                );
+                near(trial.incremental_potential_j, potential, 3e-4, 2e-8);
+                near(
+                    endpoint.sheet.physical_time_s().unwrap(),
+                    f64::from(index + 1) * DT,
+                    1e-14,
+                    0.0,
+                );
+                assert_eq!(sheet.quadrature_states(), old_states);
+                assert_eq!(sheet.physical_time_s(), old_time);
+                if dp == 0.0 {
+                    for (old, new) in old_states.iter().zip(endpoint.sheet.quadrature_states()) {
+                        assert_eq!(old.alpha, new.alpha);
+                        assert!(new.creep_alpha > old.creep_alpha);
+                    }
+                }
+                previous_increment = dc;
                 sheet = endpoint.sheet;
             }
         }

@@ -57,6 +57,20 @@
 //! 1; state version is 2 for simultaneous creep/plasticity and 1 otherwise.
 //! The original selectors and pure Norton reject these additional keys.
 //!
+//! Primary creep has three separate selectors:
+//! `finite-primary-norton-hencky-kirchhoff-thermal`,
+//! `finite-primary-norton-j2-hencky-kirchhoff-thermal`, and
+//! `finite-primary-norton-j2-voce-hencky-kirchhoff-thermal`. Each adds exactly
+//! three dimensionless coefficients to its corresponding Norton family:
+//! positive `creep_hardening_reference_strain`, nonnegative
+//! `creep_hardening_exponent`, and `creep_residual_rate_fraction` in [0,1].
+//! They select the shared strain-hardening multiplier at the implicit creep
+//! endpoint; the reference viscosity denotes the virgin rate. Their values
+//! stay constant over the complete temperature span. They introduce no energy,
+//! entropy or history variable, and keep law version 1 with state version 1
+//! for standalone creep or 2 for the simultaneous selections. Existing law
+//! selectors reject these extra keys rather than silently changing their flow.
+//!
 //! The four reference coefficients `shear_modulus_pa`, `bulk_modulus_pa`,
 //! `yield_stress_pa`, `hardening_modulus_pa` are in Pa. Their four derivatives
 //! `shear_modulus_slope_pa_k`, `bulk_modulus_slope_pa_k`,
@@ -101,6 +115,7 @@ use super::{
     FiniteJ2ThermalParameters, FiniteNortonThermalParameters, FiniteThermalJ2Material,
 };
 use crate::MaterialError;
+use crate::creep::StrainHardeningCreep;
 use crate::plastic::finite::{FiniteJ2Limits, FiniteJ2Parameters};
 use fs_matdb::{ConstitutiveModelCard, InitialStatePolicy, QueryPoint};
 use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
@@ -122,6 +137,15 @@ pub const THERMAL_PERZYNA_FINITE_J2_VOCE_LAW_ID: &str =
 /// Simultaneous Norton/J2 with energetic Voce saturation and state schema 2.
 pub const THERMAL_FINITE_NORTON_J2_VOCE_LAW_ID: &str =
     "finite-norton-j2-voce-hencky-kirchhoff-thermal";
+/// Primary/secondary Norton creep with explicit accumulated-strain kinetics.
+pub const THERMAL_FINITE_PRIMARY_NORTON_LAW_ID: &str =
+    "finite-primary-norton-hencky-kirchhoff-thermal";
+/// Primary Norton creep and energetic linear J2 hardening, state schema 2.
+pub const THERMAL_FINITE_PRIMARY_NORTON_J2_LAW_ID: &str =
+    "finite-primary-norton-j2-hencky-kirchhoff-thermal";
+/// Primary Norton creep and energetic Voce J2 hardening, state schema 2.
+pub const THERMAL_FINITE_PRIMARY_NORTON_J2_VOCE_LAW_ID: &str =
+    "finite-primary-norton-j2-voce-hencky-kirchhoff-thermal";
 
 const PA: Dims = Dims([-1, 1, -2, 0, 0, 0]);
 const PA_S: Dims = Dims([-1, 1, -1, 0, 0, 0]);
@@ -171,6 +195,11 @@ const VOCE_PARAMETERS: [&str; 3] = [
     "voce_saturation_pa",
     "voce_rate_per_strain",
     "voce_saturation_slope_pa_k",
+];
+const PRIMARY_PARAMETERS: [&str; 3] = [
+    "creep_hardening_reference_strain",
+    "creep_hardening_exponent",
+    "creep_residual_rate_fraction",
 ];
 
 /// Original source family, fixed external context and explicit evolving T axis.
@@ -312,24 +341,49 @@ fn kinetics(
     })
 }
 
+fn select_primary(
+    card: &ConstitutiveModelCard,
+    family: AffineThermalFiniteJ2,
+    selected: bool,
+) -> Result<AffineThermalFiniteJ2, MaterialError> {
+    if !selected {
+        return Ok(family);
+    }
+    family
+        .with_norton_strain_hardening(StrainHardeningCreep {
+            reference_strain: parameter(card, PRIMARY_PARAMETERS[0], Dims::NONE)?,
+            exponent: parameter(card, PRIMARY_PARAMETERS[1], Dims::NONE)?,
+            residual_rate_fraction: parameter(card, PRIMARY_PARAMETERS[2], Dims::NONE)?,
+        })
+        .map_err(|error| {
+            refusal(format!(
+                "inadmissible finite thermal primary creep: {error}"
+            ))
+        })
+}
+
 fn parse_law(card: &ConstitutiveModelCard) -> Result<AffineThermalFiniteJ2, MaterialError> {
     card.validate()
         .map_err(|error| refusal(error.to_string()))?;
-    let (selected_overstress, selected_norton, selected_combined, selected_voce) = match card.law.0.as_str() {
-        THERMAL_FINITE_J2_LAW_ID => (false, false, false, false),
-        THERMAL_PERZYNA_FINITE_J2_LAW_ID => (true, false, false, false),
-        THERMAL_FINITE_NORTON_LAW_ID => (false, true, false, false),
-        THERMAL_FINITE_NORTON_J2_LAW_ID => (false, false, true, false),
-        THERMAL_FINITE_J2_VOCE_LAW_ID => (false, false, false, true),
-        THERMAL_PERZYNA_FINITE_J2_VOCE_LAW_ID => (true, false, false, true),
-        THERMAL_FINITE_NORTON_J2_VOCE_LAW_ID => (false, false, true, true),
-        _ => {
-            return Err(refusal(format!(
-                "unsupported finite thermal law {}; an exact thermal Hencky/Kirchhoff J2, Perzyna, Norton or Norton/J2 selector is required, with explicit Voce selection when used",
-                card.law.0
-            )));
-        }
-    };
+    let (selected_overstress, selected_norton, selected_combined, selected_voce, selected_primary) =
+        match card.law.0.as_str() {
+            THERMAL_FINITE_J2_LAW_ID => (false, false, false, false, false),
+            THERMAL_PERZYNA_FINITE_J2_LAW_ID => (true, false, false, false, false),
+            THERMAL_FINITE_NORTON_LAW_ID => (false, true, false, false, false),
+            THERMAL_FINITE_NORTON_J2_LAW_ID => (false, false, true, false, false),
+            THERMAL_FINITE_J2_VOCE_LAW_ID => (false, false, false, true, false),
+            THERMAL_PERZYNA_FINITE_J2_VOCE_LAW_ID => (true, false, false, true, false),
+            THERMAL_FINITE_NORTON_J2_VOCE_LAW_ID => (false, false, true, true, false),
+            THERMAL_FINITE_PRIMARY_NORTON_LAW_ID => (false, true, false, false, true),
+            THERMAL_FINITE_PRIMARY_NORTON_J2_LAW_ID => (false, false, true, false, true),
+            THERMAL_FINITE_PRIMARY_NORTON_J2_VOCE_LAW_ID => (false, false, true, true, true),
+            _ => {
+                return Err(refusal(format!(
+                    "unsupported finite thermal law {}; an exact thermal Hencky/Kirchhoff J2, Perzyna, Norton or Norton/J2 selector is required, with explicit Voce or primary creep selection when used",
+                    card.law.0
+                )));
+            }
+        };
     if card.law_version != 1
         || card.state_schema_version != if selected_combined { 2 } else { 1 }
         || card.initial_state != InitialStatePolicy::ZeroInternalState
@@ -341,6 +395,9 @@ fn parse_law(card: &ConstitutiveModelCard) -> Result<AffineThermalFiniteJ2, Mate
     if let Some(name) = card.parameters.keys().find(|name| {
         let name = name.as_str();
         if selected_voce && VOCE_PARAMETERS.contains(&name) {
+            return false;
+        }
+        if selected_primary && PRIMARY_PARAMETERS.contains(&name) {
             return false;
         }
         if selected_norton {
@@ -368,7 +425,7 @@ fn parse_law(card: &ConstitutiveModelCard) -> Result<AffineThermalFiniteJ2, Mate
         )?,
     };
     if selected_norton {
-        return AffineThermalFiniteJ2::new_norton(
+        let family = AffineThermalFiniteJ2::new_norton(
             FiniteNortonThermalParameters {
                 reference_temperature_k: parameter(card, "reference_temperature_k", K)?,
                 temperature_range_k: [
@@ -397,7 +454,8 @@ fn parse_law(card: &ConstitutiveModelCard) -> Result<AffineThermalFiniteJ2, Mate
             refusal(format!(
                 "inadmissible finite thermal Norton family: {error}"
             ))
-        });
+        })?;
+        return select_primary(card, family, selected_primary);
     }
     let reference = FiniteJ2Parameters {
         shear_modulus_pa: parameter(card, "shear_modulus_pa", PA)?,
@@ -439,7 +497,7 @@ fn parse_law(card: &ConstitutiveModelCard) -> Result<AffineThermalFiniteJ2, Mate
     } else {
         family
     };
-    if selected_combined {
+    let family = if selected_combined {
         family
             .with_norton_creep(
                 kinetics(card, &CREEP_PARAMETERS)?,
@@ -460,5 +518,6 @@ fn parse_law(card: &ConstitutiveModelCard) -> Result<AffineThermalFiniteJ2, Mate
             })
     } else {
         Ok(family)
-    }
+    }?;
+    select_primary(card, family, selected_primary)
 }

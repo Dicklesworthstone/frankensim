@@ -4,6 +4,7 @@
 
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
+use fs_material::creep::StrainHardeningCreep;
 use fs_material::plastic::finite::FiniteJ2Limits;
 use fs_material::plastic::finite::thermal::{
     AffineThermalFiniteJ2, FiniteJ2ThermalOverstress, FiniteNortonThermalParameters,
@@ -121,6 +122,7 @@ struct Point {
     piola: [f64; 3],
     free: f64,
     dissipation: f64,
+    flow_potential: f64,
 }
 fn endpoint(old: Point, a: f64, b: f64, creep: f64) -> Point {
     let g = a + 2.0 * b;
@@ -138,6 +140,7 @@ fn endpoint(old: Point, a: f64, b: f64, creep: f64) -> Point {
         ],
         free: 0.5 * BULK * g * g + 1.5 * MU * e * e,
         dissipation: q * (creep - old.creep),
+        flow_potential: 0.5 * q * (creep - old.creep),
     }
 }
 // Uniaxial Kirchhoff stress q gives g=q/(3K), e_x=q/(3mu).
@@ -162,6 +165,40 @@ fn loaded(old: Point, temperature: f64, dt: f64) -> Point {
     let creep = old.creep + rate * q;
     let b = q / (9.0 * BULK) - q / (6.0 * MU) - 0.5 * creep;
     endpoint(old, a, b, creep)
+}
+
+// For m=1 and zero secondary floor, backward Euler gives the independent
+// quadratic dc*(reference+old_creep+dc)=reference*dt*q/eta(T).
+fn primary_loaded(old: Point, temperature: f64, dt: f64, reference: f64) -> Point {
+    let compliance = 1.0 / (9.0 * BULK) + 1.0 / (3.0 * MU);
+    let modulus = viscosity(temperature) / dt;
+    let increment = |q: f64| {
+        let shifted = reference + old.creep;
+        let drive = reference * q / modulus;
+        2.0 * drive / (shifted + (shifted * shifted + 4.0 * drive).sqrt())
+    };
+    let residual = |q: f64| (q / DEAD_PIOLA).ln() - old.creep - increment(q) - compliance * q;
+    let (mut lo, mut hi) = (DEAD_PIOLA, 2.0 * DEAD_PIOLA);
+    assert!(residual(lo) < 0.0 && residual(hi) > 0.0);
+    for _ in 0..100 {
+        let q = 0.5 * (lo + hi);
+        if residual(q) < 0.0 {
+            lo = q;
+        } else {
+            hi = q;
+        }
+    }
+    let q = 0.5 * (lo + hi);
+    let dc = increment(q);
+    let creep = old.creep + dc;
+    let a = creep + compliance * q;
+    let b = q / (9.0 * BULK) - q / (6.0 * MU) - 0.5 * creep;
+    let mut point = endpoint(old, a, b, creep);
+    // Integrate q(s)=(eta/dt)*s*(1+(old_creep+s)/reference), independently
+    // of both the production quadrature and the physical endpoint heat q*dc.
+    point.flow_potential = modulus
+        * (0.5 * (1.0 + old.creep / reference) * dc * dc + dc * dc * dc / (3.0 * reference));
+    point
 }
 fn held(old: Point, temperature: f64, dt: f64) -> Point {
     let q = old.q / (1.0 + 3.0 * MU * dt / viscosity(temperature));
@@ -217,7 +254,7 @@ fn check(step: &FiniteThermoplasticTetStep<'_>, old: Point, expected: Point) {
     close(step.energy.reversible_heat_j, 0.0, 0.0);
     close(
         step.energy.incremental_potential_j,
-        V * (expected.free + 0.5 * expected.dissipation),
+        V * (expected.free + expected.flow_potential),
         1e-7,
     );
     let work = V
@@ -230,6 +267,74 @@ fn check(step: &FiniteThermoplasticTetStep<'_>, old: Point, expected: Point) {
         1e-6,
     );
     close(step.energy.balance_error_j, 0.0, 1e-6);
+}
+
+#[test]
+fn finite_primary_creep_retains_resistance_through_heating_and_native_free_motion() {
+    with_cx(|cx| {
+        let hardening = StrainHardeningCreep {
+            reference_strain: 0.015,
+            exponent: 1.0,
+            residual_rate_fraction: 0.0,
+        };
+        let family = family().with_norton_strain_hardening(hardening).unwrap();
+        let mut solid = FiniteThermoplasticTetSolid::try_new(
+            &NODES,
+            &TETS,
+            vec![family],
+            &[300.0],
+            TetAssemblyBudget::standard(),
+            cx,
+        )
+        .unwrap();
+        let mut old = Point::default();
+        let mut previous_increment = f64::INFINITY;
+        for (index, temperature) in [300.0, 300.0, 300.0, 330.0, 330.0, 300.0]
+            .into_iter()
+            .enumerate()
+        {
+            let expected = primary_loaded(old, temperature, 1.0, hardening.reference_strain);
+            let increment = expected.creep - old.creep;
+            assert!(increment > 0.0 && expected.q < COMPARISON_YIELD);
+            if index == 1 || index == 2 || index == 4 {
+                assert!(increment < previous_increment);
+            }
+            if index == 3 {
+                let cold = primary_loaded(old, 300.0, 1.0, hardening.reference_strain);
+                assert!(increment > previous_increment);
+                assert!(expected.creep > cold.creep);
+            }
+            let saved_history = solid.element_states().to_vec();
+            let saved_u = solid.displacement_m().to_vec();
+            let step = solid
+                .advance(
+                    &[temperature],
+                    &supports(),
+                    &[(3, V * DEAD_PIOLA)],
+                    [0.0; 3],
+                    1.0,
+                    settings(),
+                    controls(),
+                    cx,
+                )
+                .unwrap();
+            check(&step, old, expected);
+            assert!(expected.flow_potential < 0.5 * expected.dissipation);
+            assert_eq!(solid.element_states(), saved_history);
+            assert_eq!(solid.displacement_m(), saved_u);
+            assert_eq!(
+                step.solid.families()[0].norton_strain_hardening(),
+                Some(&hardening)
+            );
+            assert_eq!(step.solid.temperatures_k(), &[temperature]);
+            assert_eq!(step.solid.element_states()[0].creep_alpha, 0.0);
+            previous_increment = increment;
+            solid = step.solid;
+            old = expected;
+        }
+        assert!(solid.displacement_m()[1][0] > 0.05);
+        assert!(solid.displacement_m()[2][1] < -0.02);
+    });
 }
 
 #[test]

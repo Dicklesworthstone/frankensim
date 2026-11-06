@@ -40,8 +40,9 @@
 //! selection has no yield or hardening energy. The native `Cp^-1, alpha` state,
 //! plastic-named result fields and history bounds then describe creep: alpha
 //! is accumulated equivalent creep, and physical loss is `q*delta_alpha`.
-//! This is one secondary-creep mechanism, not simultaneous creep and yielding,
-//! primary/tertiary creep, rupture or an empirical material calibration.
+//! This is one creep mechanism, not simultaneous creep and yielding. Primary
+//! strain hardening is an explicit additional selection described below;
+//! tertiary creep, rupture and empirical material calibration remain outside it.
 //! The [Norton/Arrhenius reference](https://doc.comsol.com/6.4/doc/com.comsol.help.sme/sme_ug_theory.06.039.html)
 //! uses the rate prefactor A; the explicit normalization here is `A=s0/eta`.
 //!
@@ -53,6 +54,13 @@
 //! dissipative part of caloric heat. An accepted combined state must satisfy
 //! equilibrium yield at its actual temperature even when inspected without dt.
 //!
+//! [`AffineThermalFiniteJ2::with_norton_strain_hardening`] selects the shared
+//! dimensionless primary multiplier at the implicit accumulated-creep endpoint.
+//! Its reference viscosity describes the virgin rate. The same coefficients
+//! persist through temperature changes, with no new history, stored energy or
+//! entropy term. Both standalone and simultaneous Norton families support this
+//! selection, including independently selected energetic Voce hardening.
+//!
 //! The explicit exponential/tangent expansion convention is described in
 //! the [COMSOL finite-strain theory reference](https://doc.comsol.com/6.4/doc/com.comsol.help.sme/sme_ug_theory.06.031.html).
 //! This reduced free-energy model is not the full independent-plastic-entropy
@@ -63,6 +71,7 @@ use super::rate::{FiniteOverstressJ2, FiniteOverstressParameters};
 use super::{
     FiniteJ2, FiniteJ2Error, FiniteJ2Limits, FiniteJ2Parameters, FiniteJ2Response, FiniteJ2State,
 };
+use crate::creep::StrainHardeningCreep;
 use fs_math::det;
 
 /// Exact model-card binding for the affine Kirchhoff/logarithmic thermal family.
@@ -150,6 +159,7 @@ pub struct AffineThermalFiniteJ2 {
     overstress: Option<FiniteJ2ThermalOverstress>,
     norton_creep: bool,
     maximum_accumulated_creep_strain: Option<f64>,
+    norton_strain_hardening: Option<StrainHardeningCreep>,
 }
 
 /// Keep only one native backbone per frozen point, including kinetic points.
@@ -387,6 +397,7 @@ impl AffineThermalFiniteJ2 {
             overstress: None,
             norton_creep,
             maximum_accumulated_creep_strain: None,
+            norton_strain_hardening: None,
         };
         family.native_backbone(p.reference)?;
         let low = family.at_temperature(lo)?;
@@ -565,6 +576,39 @@ impl AffineThermalFiniteJ2 {
         let mut family = self.with_overstress(kinetics)?;
         family.maximum_accumulated_creep_strain = Some(maximum_accumulated_creep_strain);
         Ok(family)
+    }
+
+    /// Select primary strain hardening for an already selected Norton family.
+    /// The shared multiplier changes only creep kinetics: alpha owns standalone
+    /// creep and creep_alpha owns the combined mechanism. All three parameters
+    /// stay fixed across the thermal span, independently of energetic hardening.
+    /// The native owner validates them; no primary values or recovery law are
+    /// inferred. Replacing an existing selection with different values refuses.
+    pub fn with_norton_strain_hardening(
+        mut self,
+        parameters: StrainHardeningCreep,
+    ) -> Result<Self, FiniteJ2ThermalError> {
+        if (!self.norton_creep && self.maximum_accumulated_creep_strain.is_none())
+            || self
+                .norton_strain_hardening
+                .is_some_and(|old| old != parameters)
+        {
+            return Err(FiniteJ2ThermalError::Parameters(
+                "primary creep requires a selected Norton family and no replacement of selected coefficients",
+            ));
+        }
+        self.norton_strain_hardening = Some(parameters);
+        // Unit duration admits the selected native law, without advancing any
+        // history. Every executed return still uses its own physical interval.
+        for temperature in self.parameters.temperature_range_k {
+            self.at_temperature_for_step(temperature, 1.0)?;
+        }
+        Ok(self)
+    }
+
+    /// Original primary-creep coefficients; None keeps secondary Norton flow.
+    pub const fn norton_strain_hardening(&self) -> Option<&StrainHardeningCreep> {
+        self.norton_strain_hardening.as_ref()
     }
 
     /// The original explicitly selected kinetics; None is rate independence.
@@ -750,11 +794,17 @@ impl AffineThermalFiniteJ2 {
                     exponent: kinetics.exponent,
                 };
                 if let Some(maximum) = self.maximum_accumulated_creep_strain {
-                    FrozenNative::Combined(FiniteNortonJ2::new(
-                        native, parameters, duration, maximum,
-                    )?)
+                    let mut law = FiniteNortonJ2::new(native, parameters, duration, maximum)?;
+                    if let Some(primary) = self.norton_strain_hardening {
+                        law = law.with_strain_hardening(primary)?;
+                    }
+                    FrozenNative::Combined(law)
                 } else {
-                    FrozenNative::Overstress(FiniteOverstressJ2::new(native, parameters, duration)?)
+                    let mut law = FiniteOverstressJ2::new(native, parameters, duration)?;
+                    if let Some(primary) = self.norton_strain_hardening {
+                        law = law.with_norton_strain_hardening(primary)?;
+                    }
+                    FrozenNative::Overstress(law)
                 }
             } else if self.maximum_accumulated_creep_strain.is_some() {
                 FrozenNative::CombinedInspection(native)

@@ -13760,6 +13760,57 @@ The self-heating reference couples the Arrhenius and primary laws to finite
 heat capacity. These are manufactured analytical/consistency cases, not new
 experimental calibration data or service-life qualification.
 
+## Finite primary creep with shared kinetic history
+
+`FiniteNortonCreep::with_strain_hardening` and
+`FiniteNortonJ2::with_strain_hardening` select the same normalized
+`StrainHardeningCreep` multiplier as the additive owner. The finite stress
+measure is explicitly equivalent Kirchhoff stress; a Cauchy-stress fit is not
+silently converted. Reference viscosity describes the virgin rate. Standalone
+Norton retains accumulated creep in its original `alpha` field; simultaneous
+Norton/J2 retains it in `creep_alpha`, with plastic `alpha` still controlling
+energetic linear or Voce hardening. No new history schema or clock is created.
+
+The original bounded logarithmic primary root is shared across kinematics.
+The active finite joint return eliminates the plastic increment as
+`p = (q_trial-q(c))/(3 mu)-c`, leaving one monotone scalar solve, including
+perfect, linear and Voce plastic hardening. The original finite owner retains
+isochoric metric reconstruction, objectivity, full analytic `dP/dF`, history
+bounds and representability refusals. Absent or disabled primary selection
+keeps the original secondary numerical path.
+
+The reduced kinetic potential is the integral of the inverse endpoint rate
+`q(c) = s0 [eta c/(dt s0 h(alpha_old+c))]^(1/n)`. Physical heat remains
+`q delta_c`, with separate plastic yield heat and stored hardening. The common
+`n=m=1`, zero-floor case uses its exact cubic primitive. Other selections use
+an allocation-free transformed Gauss 7 / Kronrod 15 integral with a scaled
+absolute/relative error estimate, explicit sharp-endpoint detection, a depth
+cap of 28 and a 512-panel work cap. This is a bounded numerical estimate,
+not interval certification. Unresolved quadrature returns an error.
+`FiniteJ2Response::flow_potential_j_m3` retains the native integrated value
+without subtracting large stored energies. Thermal tetrahedra and hexahedra
+consume this field directly; plane-stress sheets already use native potentials.
+
+`AffineThermalFiniteJ2::with_norton_strain_hardening` preserves the selection
+through every physical-duration/temperature freeze and rejects Perzyna or
+rate-independent selections. Kinetic hardening adds no fixed-history free
+energy, entropy or heat capacity. Exact source selectors
+`finite-primary-norton-hencky-kirchhoff-thermal`,
+`finite-primary-norton-j2-hencky-kirchhoff-thermal`, and
+`finite-primary-norton-j2-voce-hencky-kirchhoff-thermal` require all original
+coefficients plus dimensionless `creep_hardening_reference_strain`,
+`creep_hardening_exponent` and `creep_residual_rate_fraction`. They retain
+20/25/28 parameters respectively and the original standalone/combined state
+versions. Old selectors continue rejecting these extra parameters.
+
+Focused cases cover finite quadratic/cubic references, nonproportional
+potential and tangent derivatives, separate plastic/creep histories, primary
+resistance through heating/cooling, P1/Q1 plane-stress continuation, loaded
+thermal tetrahedra and source-bound adiabatic enthalpy feedback. These
+manufactured cases do not supply experimental calibration, cyclic recovery,
+tertiary damage, rupture or service-life qualification. Backward Euler remains
+first order in physical time.
+
 ## Simultaneous permanent creep and isotropic yielding
 
 `creep::plastic::NortonJ2` combines the original Norton kinetics and native

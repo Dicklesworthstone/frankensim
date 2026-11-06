@@ -4,9 +4,12 @@ use fs_evidence::ValidityDomain;
 use fs_matdb::{
     ConstitutiveModelCard, InitialStatePolicy, LawId, LawParameter, Provenance, QueryPoint,
 };
+use fs_material::creep::StrainHardeningCreep;
 use fs_material::plastic::finite::thermal::source::{
     ResolvedAffineThermalFiniteJ2, THERMAL_FINITE_J2_LAW_ID, THERMAL_FINITE_J2_VOCE_LAW_ID,
     THERMAL_FINITE_NORTON_J2_LAW_ID, THERMAL_FINITE_NORTON_J2_VOCE_LAW_ID,
+    THERMAL_FINITE_NORTON_LAW_ID, THERMAL_FINITE_PRIMARY_NORTON_J2_LAW_ID,
+    THERMAL_FINITE_PRIMARY_NORTON_J2_VOCE_LAW_ID, THERMAL_FINITE_PRIMARY_NORTON_LAW_ID,
     THERMAL_PERZYNA_FINITE_J2_LAW_ID, THERMAL_PERZYNA_FINITE_J2_VOCE_LAW_ID,
 };
 use fs_material::plastic::finite::thermal::{
@@ -168,6 +171,227 @@ fn voce_fixture(id: &str) -> ConstitutiveModelCard {
         }
     }
     card
+}
+
+const PRIMARY: StrainHardeningCreep = StrainHardeningCreep {
+    reference_strain: 0.02,
+    exponent: 1.2,
+    residual_rate_fraction: 0.15,
+};
+const PRIMARY_PARAMETERS: [(&str, f64); 3] = [
+    ("creep_hardening_reference_strain", PRIMARY.reference_strain),
+    ("creep_hardening_exponent", PRIMARY.exponent),
+    (
+        "creep_residual_rate_fraction",
+        PRIMARY.residual_rate_fraction,
+    ),
+];
+const PRIMARY_SELECTORS: [(&str, &str, usize); 3] = [
+    (
+        THERMAL_FINITE_PRIMARY_NORTON_LAW_ID,
+        THERMAL_FINITE_NORTON_LAW_ID,
+        20,
+    ),
+    (
+        THERMAL_FINITE_PRIMARY_NORTON_J2_LAW_ID,
+        THERMAL_FINITE_NORTON_J2_LAW_ID,
+        25,
+    ),
+    (
+        THERMAL_FINITE_PRIMARY_NORTON_J2_VOCE_LAW_ID,
+        THERMAL_FINITE_NORTON_J2_VOCE_LAW_ID,
+        28,
+    ),
+];
+
+fn primary_fixture(id: &str) -> ConstitutiveModelCard {
+    let mut card = if id == THERMAL_FINITE_PRIMARY_NORTON_J2_VOCE_LAW_ID {
+        voce_fixture(THERMAL_FINITE_NORTON_J2_VOCE_LAW_ID)
+    } else {
+        fixture()
+    };
+    card.law = LawId(id.into());
+    if id == THERMAL_FINITE_PRIMARY_NORTON_LAW_ID {
+        for name in [
+            "yield_stress_pa",
+            "hardening_modulus_pa",
+            "yield_stress_slope_pa_k",
+            "hardening_modulus_slope_pa_k",
+        ] {
+            card.parameters.remove(name);
+        }
+    } else {
+        card.state_schema_version = 2;
+        card.parameters.insert(
+            "maximum_accumulated_creep_strain".into(),
+            LawParameter {
+                value: 3.0,
+                dims: Dims::NONE,
+            },
+        );
+    }
+    for (name, value, dims) in [
+        (
+            "creep_reference_viscosity_pa_s",
+            VOCE_KINETICS.reference_viscosity_pa_s,
+            Dims([-1, 1, -1, 0, 0, 0]),
+        ),
+        ("creep_stress_scale_pa", VOCE_KINETICS.stress_scale_pa, PA),
+        ("creep_exponent", VOCE_KINETICS.exponent, Dims::NONE),
+        (
+            "creep_activation_temperature_k",
+            VOCE_KINETICS.activation_temperature_k,
+            K,
+        ),
+    ] {
+        card.parameters
+            .insert(name.into(), LawParameter { value, dims });
+    }
+    for (name, value) in PRIMARY_PARAMETERS {
+        card.parameters.insert(
+            name.into(),
+            LawParameter {
+                value,
+                dims: Dims::NONE,
+            },
+        );
+    }
+    card
+}
+
+#[test]
+fn explicit_primary_sources_keep_full_cards_and_finite_thermal_histories() {
+    let identity = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+    for (id, secondary_id, parameter_count) in PRIMARY_SELECTORS {
+        let card = primary_fixture(id);
+        let source = resolve(&card);
+        assert_eq!(source.model_card(), &card);
+        assert_eq!(source.model_card().content_hash(), card.content_hash());
+        assert_eq!(source.model_card().parameters.len(), parameter_count);
+        assert_eq!(source.context(), &context());
+        assert_eq!(source.temperature_axis(), "temperature");
+        assert_eq!(source.law().norton_strain_hardening(), Some(&PRIMARY));
+        let mut secondary_card = card.clone();
+        secondary_card.law = LawId(secondary_id.into());
+        for (name, _) in PRIMARY_PARAMETERS {
+            secondary_card.parameters.remove(name);
+        }
+        let secondary = resolve(&secondary_card);
+        assert!(secondary.law().norton_strain_hardening().is_none());
+        let expected = secondary
+            .law()
+            .clone()
+            .with_norton_strain_hardening(PRIMARY)
+            .unwrap();
+        assert_eq!(source.law(), &expected);
+        let mut old = source.law().initial_state();
+        let mut old_f = identity;
+        let mut old_temperature = T_REF;
+        for (temperature, axial) in [(300.0, 0.16), (380.0, 0.2), (420.0, 0.24)] {
+            let f = deformation(temperature, 0.02, axial);
+            let saved = old.clone();
+            let actual = source
+                .thermal_finite_j2()
+                .checked_increment_for_step(
+                    &old_f,
+                    &old,
+                    old_temperature,
+                    &f,
+                    temperature,
+                    1e-4,
+                    0.03,
+                )
+                .unwrap();
+            assert_eq!(
+                actual,
+                expected
+                    .checked_increment_for_step(
+                        &old_f,
+                        &old,
+                        old_temperature,
+                        &f,
+                        temperature,
+                        1e-4,
+                        0.03,
+                    )
+                    .unwrap()
+            );
+            assert!(actual.mechanical.inelastic_dissipation_j_m3() > 0.0);
+            assert!(actual.mechanical.jacobian > 1.0);
+            assert!(actual.mechanical.state.alpha > old.alpha);
+            if id == THERMAL_FINITE_PRIMARY_NORTON_LAW_ID {
+                assert_eq!(actual.mechanical.state.creep_alpha, 0.0);
+            } else {
+                assert!(actual.mechanical.state.creep_alpha > old.creep_alpha);
+                assert!(actual.mechanical.creep_dissipation_j_m3 > 0.0);
+                assert!(actual.mechanical.plastic_dissipation_j_m3 > 0.0);
+            }
+            assert_eq!(old, saved);
+            old = actual.mechanical.state;
+            old_f = f;
+            old_temperature = temperature;
+        }
+        assert_eq!(source.model_card(), &card);
+        assert_eq!(source.law().norton_strain_hardening(), Some(&PRIMARY));
+    }
+}
+
+#[test]
+fn primary_source_selectors_require_all_parameters_and_the_original_history_schema() {
+    let admit = |card: &ConstitutiveModelCard| {
+        ResolvedAffineThermalFiniteJ2::try_from_model_card_at(card, &context(), "temperature")
+    };
+    for (id, secondary_id, _) in PRIMARY_SELECTORS {
+        let original = primary_fixture(id);
+        for (name, _) in PRIMARY_PARAMETERS {
+            let mut missing = original.clone();
+            missing.parameters.remove(name);
+            assert!(admit(&missing).is_err(), "missing {name} for {id}");
+            let mut units = original.clone();
+            units.parameters.get_mut(name).unwrap().dims = K;
+            assert!(admit(&units).is_err(), "wrong units for {name} in {id}");
+            let mut nonfinite = original.clone();
+            nonfinite.parameters.get_mut(name).unwrap().value = f64::NAN;
+            assert!(admit(&nonfinite).is_err());
+        }
+        for (name, value) in [
+            ("creep_hardening_reference_strain", 0.0),
+            ("creep_hardening_exponent", -1.0),
+            ("creep_residual_rate_fraction", -0.01),
+            ("creep_residual_rate_fraction", 1.01),
+        ] {
+            let mut invalid = original.clone();
+            invalid.parameters.get_mut(name).unwrap().value = value;
+            assert!(admit(&invalid).is_err(), "invalid {name} for {id}");
+        }
+        let mut legacy = original.clone();
+        legacy.law = LawId(secondary_id.into());
+        assert!(admit(&legacy).is_err());
+        let mut schema = original.clone();
+        schema.state_schema_version = if original.state_schema_version == 1 {
+            2
+        } else {
+            1
+        };
+        assert!(admit(&schema).is_err());
+        let mut uncovered = original.clone();
+        uncovered.validity = ValidityDomain::unconstrained().with_quantity(
+            "temperature",
+            semantic(QuantityKind::AbsoluteTemperature),
+            T_REF,
+            T_SPAN[1],
+        );
+        assert!(admit(&uncovered).is_err());
+        let mut changing_primary = original;
+        changing_primary.parameters.insert(
+            "creep_hardening_reference_strain_slope_per_k".into(),
+            LawParameter {
+                value: 0.0,
+                dims: INV_K,
+            },
+        );
+        assert!(admit(&changing_primary).is_err());
+    }
 }
 
 #[test]
