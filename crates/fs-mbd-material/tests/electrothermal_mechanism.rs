@@ -22,6 +22,9 @@ use fs_mbd_material::{RegionBinding, ResolvedBody, VolumeMoments, resolve_body};
 use fs_mbd_material::articulated::{MaterialLink, ResolvedArticulated, resolve_articulated};
 use fs_mbd_material::thermal::heating::{HeatedArticulated, HeatedBody, HeatingError, LinkHeating,
     ThermalRegion};
+use fs_mbd_material::thermal::heating::articulated_motion::{
+    Controls, Error as MotionError, HeatedArticulatedMotion,
+};
 use fs_qty::Temperature;
 use fs_thermal::enthalpy::*;
 use fs_thermal::observers::ObserverCouplingError;
@@ -120,6 +123,141 @@ fn link(patch: &ContactPatch, sides: [&EnthalpyTransportSample<ResolvedMaterialS
 fn acceleration(body: &HeatedArticulated<'_>) -> f64 {
     forward_dynamics(body.configuration().model(), BaseState::stationary(Se3::identity()),
         &[0.], &[0.], &[1.], Vec3::default(), &[Wrench::default(); 2]).unwrap().generalized_acceleration[0]
+}
+
+fn moving(body: HeatedArticulated<'_>, velocity: f64, effort: f64) -> HeatedArticulatedMotion<'_> {
+    HeatedArticulatedMotion::new(body, Se3::identity(), vec![0.2], vec![velocity],
+        vec![effort], Vec3::default(), Controls {
+            maximum_step_s: config().max_dt_s,
+            relative_state_tolerance: 1e-10,
+            absolute_position_tolerance: vec![1e-11],
+            absolute_velocity_tolerance: vec![1e-11],
+            maximum_rk_attempts_per_substep: 128,
+            relative_momentum_tolerance: 1e-11,
+            absolute_momentum_tolerance: vec![1e-12],
+            maximum_parameter_work_j: 10.,
+            maximum_numerical_energy_change_j: 1e-7,
+        }, || Ok(())).unwrap()
+}
+
+#[test]
+fn joule_heating_retains_the_original_heat_solution_and_continuing_joint_momentum() {
+    let c = card(10., 5., 500.);
+    let h = caloric(&c, 1e5, SolidLiquidPhase::Solid);
+    let r = mechanism(&c);
+    let body = heated(&r, &c, &h);
+    let moving = moving(body.clone(), 2., 0.);
+    let domain = VoxelDomain::new(3,1,1,1.).unwrap();
+    let drive = setup(20.);
+    let gate = CancelGate::new();
+    let (configured, expected) = body.advance_joule(2., config(), input(&domain, &drive),
+        &LINKS, &gate, |_,_,t| resolve(&c,t), link).unwrap();
+    let (next, report) = moving.advance_joule(2., config(), input(&domain, &drive),
+        &LINKS, &gate, |_,cell,t| {
+            let binding = moving.regions().iter().flatten()
+                .find(|binding| binding.cell_id == cell.id).unwrap();
+            resolve(binding.card,t)
+        }, link).unwrap();
+
+    // Existing electrical/thermal owner equivalence at identical accepted steps.
+    assert_eq!(next.thermal().cells(), configured.thermal().cells());
+    assert_eq!(next.configuration(), configured.configuration());
+    assert_eq!(report.transport.joule, expected.joule);
+    assert_eq!(report.transport.endpoint, expected.endpoint);
+    assert_eq!(report.transport.last_applied, expected.last_applied);
+    assert_eq!(report.motion.thermal, report.transport.joule.thermal);
+    assert!(next.joint_position()[0] > moving.joint_position()[0]);
+    assert!(next.joint_velocity()[0] < moving.joint_velocity()[0]);
+    close(next.joint_momentum().unwrap()[0], moving.joint_momentum().unwrap()[0]);
+    let stretch = 1. + 2e-3 * (next.thermal().temperature_k(IDS[1]).unwrap() - 300.);
+    close(next.joint_velocity()[0], 2. / (stretch * stretch));
+    close(next.thermal().mass_kg(), moving.thermal().mass_kg());
+    assert!(report.motion.parameter_work_j < 0.);
+    close(report.motion.applied_joint_work_j, 0.);
+    let total_change = next.thermal().energy_j() - moving.thermal().energy_j()
+        + report.motion.mechanical_after.kinetic_j - report.motion.mechanical_before.kinetic_j;
+    close(total_change - report.transport.joule.electrode_energy_j
+        - report.motion.parameter_work_j - report.motion.numerical_energy_change_j,
+        report.combined_residual_j);
+    close(report.combined_residual_j, 0.);
+
+    // Electrical shutoff retains the trajectory and thermal redistribution.
+    let off = setup(0.);
+    let (cooled, stopped) = next.advance_joule(4., config(), input(&domain, &off),
+        &LINKS, &gate, |_,_,t| resolve(&c,t), link).unwrap();
+    assert!(cooled.joint_position()[0] > next.joint_position()[0]);
+    assert!(cooled.joint_velocity()[0] > next.joint_velocity()[0]);
+    close(cooled.joint_momentum().unwrap()[0], moving.joint_momentum().unwrap()[0]);
+    close(stopped.transport.joule.electrode_energy_j, 0.);
+    close(cooled.thermal().energy_j(), next.thermal().energy_j());
+    close(stopped.combined_residual_j, 0.);
+}
+
+#[test]
+fn zero_voltage_is_the_original_motion_and_preserves_restart() {
+    let c = card(10., 5., 500.);
+    let h = caloric(&c, 1e5, SolidLiquidPhase::Solid);
+    let r = mechanism(&c);
+    let body = moving(heated(&r, &c, &h), 0.5, 1.);
+    let domain = VoxelDomain::new(3,1,1,1.).unwrap();
+    let off = setup(0.);
+    let gate = CancelGate::new();
+    let (plain, audit) = body.advance_to(1., config(), || Ok(())).unwrap();
+    let (next, report) = body.advance_joule(1., config(), input(&domain, &off),
+        &[], &gate, |_,_,t| resolve(&c,t), link).unwrap();
+    assert_eq!(next.thermal().cells(), plain.thermal().cells());
+    assert_eq!(next.configuration(), plain.configuration());
+    assert_eq!(next.joint_position(), plain.joint_position());
+    assert_eq!(next.joint_velocity(), plain.joint_velocity());
+    assert_eq!(report.motion, audit);
+    close(next.joint_momentum().unwrap()[0] - body.joint_momentum().unwrap()[0], 1.);
+    close(report.motion.applied_joint_work_j, next.joint_position()[0] - body.joint_position()[0]);
+    let (middle, _) = body.advance_joule(0.5, config(), input(&domain, &off),
+        &[], &gate, |_,_,t| resolve(&c,t), link).unwrap();
+    let (restarted, _) = middle.advance_joule(1., config(), input(&domain, &off),
+        &[], &gate, |_,_,t| resolve(&c,t), link).unwrap();
+    assert_eq!(restarted.thermal().cells(), next.thermal().cells());
+    assert_eq!(restarted.joint_position(), next.joint_position());
+    assert_eq!(restarted.joint_velocity(), next.joint_velocity());
+}
+
+#[test]
+fn late_joule_or_motion_refusal_and_cancellation_preserve_the_whole_trajectory() {
+    let c = card(10., 5., 500.);
+    let h = caloric(&c, 1e5, SolidLiquidPhase::Solid);
+    let r = mechanism(&c);
+    let body = moving(heated(&r, &c, &h), 2., 1.);
+    let original_momentum = body.joint_momentum().unwrap();
+    let domain = VoxelDomain::new(3,1,1,1.).unwrap();
+    let drive = setup(20.);
+    let gate = CancelGate::new();
+    let mut request = input(&domain, &drive);
+    request.max_current_solves = 1;
+    assert!(matches!(body.advance_joule(0.25, config(), request, &[], &gate,
+        |_,_,t| resolve(&c,t), link),
+        Err(ObserverCouplingError::First(JouleEnthalpyError::CurrentBudget))));
+    assert!(matches!(body.advance_joule(0.25, config(), input(&domain, &drive), &[], &gate,
+        |_,_,t| if t > 300. { Err(JouleEnthalpyError::Invalid("endpoint source unavailable")) }
+            else { resolve(&c,t) }, link),
+        Err(ObserverCouplingError::First(JouleEnthalpyError::Invalid(_)))));
+    let limited = card(10., 5., 300.5);
+    let curve = caloric(&limited, 1e5, SolidLiquidPhase::Solid);
+    let reference = mechanism(&limited);
+    let narrow = moving(heated(&reference, &limited, &curve), 2., 1.);
+    assert!(matches!(narrow.advance_joule(0.25, config(), input(&domain, &drive), &[], &gate,
+        |_,_,t| resolve(&limited,t), link),
+        Err(ObserverCouplingError::Second(MotionError::Heating(HeatingError::Mechanical(_))))));
+    gate.request();
+    assert!(body.advance_joule(0.25, config(), input(&domain, &drive), &[], &gate,
+        |_,_,t| resolve(&c,t), link).is_err());
+    for unchanged in [&body, &narrow] {
+        assert_eq!(unchanged.thermal().time_s(), 0.);
+        assert_eq!(unchanged.thermal().energy_j(), 0.);
+        assert_eq!(unchanged.configuration().model(), unchanged.reference().model());
+        assert_eq!(unchanged.joint_position(), &[0.2]);
+        assert_eq!(unchanged.joint_velocity(), &[2.]);
+        assert_eq!(unchanged.joint_momentum().unwrap(), original_momentum);
+    }
 }
 
 #[test]

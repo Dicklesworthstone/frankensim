@@ -27,6 +27,16 @@ use fs_time::{
 use std::cell::RefCell;
 use std::collections::BTreeSet;
 
+#[cfg(feature = "electrothermal-coupling")]
+use fs_exec::CancelGate;
+#[cfg(feature = "electrothermal-coupling")]
+use fs_lbm::conjugate::enthalpy::{JouleEnthalpyError, JouleEnthalpyInput};
+#[cfg(feature = "electrothermal-coupling")]
+use fs_lbm::conjugate::enthalpy::transport::{
+    EnthalpyTransport, EnthalpyTransportSample, JouleTransportReport,
+    advance_joule_enthalpy_with_material_transport_observed,
+};
+
 /// Material-driven journal loss and its receiving thermal control volume.
 pub mod viscous;
 use viscous::{BoundBearing, ExpandingJournalBearing, JournalBearing, JournalBearingState};
@@ -173,6 +183,23 @@ pub struct Audit {
     pub combined_residual_j: f64,
 }
 
+/// Electrical source work, thermal storage and continuing motion on one interval.
+#[cfg(feature = "electrothermal-coupling")]
+#[derive(Debug)]
+pub struct JouleMotionReport<F, I> {
+    /// Original spatial electrical/thermal report and concrete material sources.
+    /// Its thermal audit already includes Joule and mechanical dissipation heat.
+    pub transport: JouleTransportReport<F, I>,
+    /// Original motion audit, including joint work, loss and configuration work.
+    /// Its thermal audit is the same accepted interval as `transport`.
+    pub motion: Audit,
+    /// Combined storage residual referenced to electrode work rather than
+    /// deposited Joule heat [J]. Internal mechanical losses cancel once;
+    /// thermal configuration work and numerical error remain separate accounts.
+    /// This bookkeeping check is not reciprocal thermoelastic coupling.
+    pub combined_residual_j: f64,
+}
+
 /// One material mechanism, heat history, joint state and physical clock.
 ///
 /// Constant declared joint efforts and uniform gravity act on a stationary
@@ -250,6 +277,11 @@ impl<'a> HeatedArticulatedMotion<'a> {
     }
     pub const fn reference(&self) -> &'a ResolvedArticulated {
         self.motion.expansion.reference
+    }
+    /// Original thermal/material assignments in native link and region order.
+    /// Electrical source callbacks can reuse these cards and cell identities.
+    pub fn regions(&self) -> &[Vec<ThermalRegion<'a>>] {
+        &self.motion.expansion.regions
     }
     pub fn joint_position(&self) -> &[f64] {
         &self.motion.position
@@ -609,6 +641,58 @@ impl<'a> HeatedArticulatedMotion<'a> {
         let audit = self.audit(&next, audit)?;
         Ok((next, audit))
     }
+
+    /// Advance spatial electrical heating and the SAME continuing joint state.
+    ///
+    /// The original current/enthalpy driver and native motion observer share
+    /// actual CFL- and mechanics-limited substeps, source temperatures and event
+    /// boundaries. Joint positions, velocities, attached constitutive histories
+    /// and momentum-preserving inertia updates continue without reconstruction.
+    /// Mechanical dissipation heats its finite cells alongside Joule power once.
+    /// The returned reports retain both owners' accounts and source payloads.
+    /// Resolvers should use the original cards and full state contexts retained
+    /// by `regions()`, rather than independently selecting replacement matter.
+    ///
+    /// All source, endpoint, motion and energy checks finish before publication;
+    /// any refusal leaves this accepted state unchanged. The electrical/thermal
+    /// reference grid stays prescribed: motion does not update electrical
+    /// geometry or create electromagnetic torque. Applied joint effort remains
+    /// an independently declared mechanical source. Expansion parameter work
+    /// retains the original explicit, one-way thermoelastic split.
+    #[cfg(feature = "electrothermal-coupling")]
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    pub fn advance_joule<F, I>(
+        &self,
+        target_s: f64,
+        config: StepConfig,
+        input: JouleEnthalpyInput<'_>,
+        link_ids: &[u64],
+        gate: &CancelGate,
+        resolve: impl Fn(usize, &fs_thermal::enthalpy::DepositedCell, f64)
+            -> Result<EnthalpyTransport<F>, JouleEnthalpyError>,
+        resolve_link: impl Fn(
+            &fs_thermal::enthalpy::ContactPatch,
+            [&EnthalpyTransportSample<F>; 2],
+        ) -> Result<(f64, I), JouleEnthalpyError>,
+    ) -> Result<(Self, JouleMotionReport<F, I>), ObserverCouplingError<JouleEnthalpyError, Error>> {
+        let (thermal, motion, transport) = advance_joule_enthalpy_with_material_transport_observed(
+            &self.thermal, target_s, config, input, link_ids, gate, &self.motion,
+            resolve, resolve_link,
+        )?;
+        let next = Self { thermal, motion };
+        let motion = self
+            .audit(&next, transport.joule.thermal)
+            .map_err(ObserverCouplingError::Second)?;
+        // Electrode - deposited = electrical defect + transfer defect. The
+        // native motion audit already cancels mechanical loss against heat;
+        // only replace its deposited-Joule source by the actual electrode work.
+        let combined_residual_j = finite(
+            motion.combined_residual_j - transport.joule.electrical_defect_j
+                - transport.joule.transfer_defect_j,
+        ).map_err(ObserverCouplingError::Second)?;
+        Ok((next, JouleMotionReport { transport, motion, combined_residual_j }))
+    }
+
     /// Generated heat and transport share the same accepted substeps; the
     /// supplied observer's original state and errors remain attached.
     pub fn advance_with<O: DepositionObserver>(

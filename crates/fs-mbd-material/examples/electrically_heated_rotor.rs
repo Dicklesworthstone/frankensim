@@ -1,4 +1,4 @@
-//! A data-file-driven current -> heat -> free expansion -> joint-response path.
+//! A data-file-driven current -> heat -> expansion -> continuing rotor trajectory.
 //! See docs/MATERIAL_ELECTROTHERMAL_MECHANISM.md for physical scope and usage.
 #[path = "electrically_heated_rotor/source.rs"]
 mod source;
@@ -13,6 +13,7 @@ use fs_mbd::articulated::{BaseState, JointModel, forward_dynamics};
 use fs_mbd_material::{RegionBinding, VolumeMoments};
 use fs_mbd_material::articulated::{MaterialLink, ResolvedArticulated, resolve_articulated};
 use fs_mbd_material::thermal::heating::{HeatedArticulated, LinkHeating, ThermalRegion};
+use fs_mbd_material::thermal::heating::articulated_motion::{Controls, HeatedArticulatedMotion};
 use fs_thermal::enthalpy::*;
 use source::Source;
 
@@ -69,6 +70,8 @@ fn electrodes(voltage: f64) -> ElectricSetup {
 struct Row {
     time: f64, voltage: f64, temperature: [f64; 3], current: f64,
     thermal_energy: f64, source_work: f64, volume: f64, mass: f64, acceleration: f64,
+    angle: f64, angular_velocity: f64, angular_momentum: f64, mechanical_energy: f64,
+    joint_work: f64, parameter_work: f64, numerical_change: f64, combined_residual: f64,
 }
 
 fn run(source: &Source, voltage: f64, off: f64, end: f64, max_dt: f64,
@@ -80,13 +83,30 @@ fn run(source: &Source, voltage: f64, off: f64, end: f64, max_dt: f64,
         return Err(invalid("finite voltage, 0 < shutoff < end, positive step, at most 10000 requested steps required"));
     }
     let reference = reference(source)?;
-    let mut body = heated(source, &reference)?;
+    let mut body = HeatedArticulatedMotion::new(
+        heated(source, &reference)?, Se3::identity(), vec![0.], vec![0.], vec![1.],
+        Vec3::default(), Controls {
+            maximum_step_s: max_dt,
+            relative_state_tolerance: 1e-10,
+            absolute_position_tolerance: vec![1e-11],
+            absolute_velocity_tolerance: vec![1e-11],
+            maximum_rk_attempts_per_substep: 128,
+            relative_momentum_tolerance: 1e-11,
+            absolute_momentum_tolerance: vec![1e-12],
+            maximum_parameter_work_j: 1000.,
+            maximum_numerical_energy_change_j: 1e-7,
+        }, || Ok(()),
+    )?;
     let domain = VoxelDomain::new(3,1,1,1.)?;
     let on = electrodes(voltage);
     let shorted = electrodes(0.);
     let gate = CancelGate::new();
     let config = StepConfig { max_dt_s: max_dt, energy_tolerance_j: 1e-8 };
     let mut work = 0.;
+    let mut joint_work = 0.;
+    let mut parameter_work = 0.;
+    let mut numerical_change = 0.;
+    let mut combined_residual = 0.;
     let mut total_substeps = 0usize;
     while body.thermal().time_s() < end {
         let time = body.thermal().time_s();
@@ -106,19 +126,30 @@ fn run(source: &Source, voltage: f64, off: f64, end: f64, max_dt: f64,
                 let kb = sides[1].response.conductivity_w_m_k();
                 Ok((patch.link.area_m2 / (0.5/ka + 0.5/kb), (ka,kb)))
             })?;
-        total_substeps += report.joule.thermal.substeps;
-        work += report.joule.electrode_energy_j;
-        if !work.is_finite() { return Err(invalid("accumulated source work is unrepresentable")); }
+        total_substeps += report.transport.joule.thermal.substeps;
+        work += report.transport.joule.electrode_energy_j;
+        joint_work += report.motion.applied_joint_work_j;
+        parameter_work += report.motion.parameter_work_j;
+        numerical_change += report.motion.numerical_energy_change_j;
+        combined_residual += report.combined_residual_j;
+        if [work, joint_work, parameter_work, numerical_change, combined_residual]
+            .iter().any(|value| !value.is_finite()) {
+            return Err(invalid("accumulated source or mechanical work is unrepresentable"));
+        }
         let mechanical = &next.configuration().bodies()[1];
         let dynamics = forward_dynamics(next.configuration().model(), BaseState::stationary(Se3::identity()),
-            &[0.], &[0.], &[1.], Vec3::default(), &[Wrench::default();2])?;
+            next.joint_position(), next.joint_velocity(), &[1.], Vec3::default(), &[Wrench::default();2])?;
         let row = Row { time: next.thermal().time_s(), voltage: if driven { voltage } else { 0. },
             temperature: [next.thermal().temperature_k(CELLS[0])?, next.thermal().temperature_k(CELLS[1])?,
                 next.thermal().temperature_k(CELLS[2])?],
-            current: report.joule.endpoint.electric.electrodes[0].current_a,
+            current: report.transport.joule.endpoint.electric.electrodes[0].current_a,
             thermal_energy: next.thermal().energy_j(), source_work: work,
             volume: mechanical.regions()[0].geometry().volume_m3(), mass: mechanical.inertia().mass(),
-            acceleration: dynamics.generalized_acceleration[0] };
+            acceleration: dynamics.generalized_acceleration[0],
+            angle: next.joint_position()[0], angular_velocity: next.joint_velocity()[0],
+            angular_momentum: next.joint_momentum()?[0],
+            mechanical_energy: report.motion.mechanical_after.kinetic_j,
+            joint_work, parameter_work, numerical_change, combined_residual };
         // Publish a complete accepted interval. Earlier CSV rows are retained
         // on a later failure; no incomplete row or partial mechanism is emitted.
         output(row)?;
@@ -139,11 +170,13 @@ fn main() -> Result<(), Error> {
     let [voltage, off, end, dt] = [args[1].parse()?, args[2].parse()?, args[3].parse()?, args[4].parse()?];
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
-    writeln!(out, "time_s,applied_voltage_v,left_k,rotor_k,right_k,current_a,thermal_j,electrode_work_j,rotor_volume_m3,rotor_mass_kg,test_acceleration_rad_s2")?;
+    writeln!(out, "time_s,applied_voltage_v,left_k,rotor_k,right_k,current_a,thermal_j,electrode_work_j,rotor_volume_m3,rotor_mass_kg,acceleration_rad_s2,angle_rad,angular_velocity_rad_s,angular_momentum_kg_m2_s,mechanical_j,joint_work_j,parameter_work_j,numerical_energy_change_j,combined_residual_j")?;
     run(&source, voltage, off, end, dt, |r| {
-        writeln!(out, "{:.9},{:.9},{:.9},{:.9},{:.9},{:.9},{:.12},{:.12},{:.12},{:.12},{:.12}",
+        writeln!(out, "{:.9},{:.9},{:.9},{:.9},{:.9},{:.9},{:.12},{:.12},{:.12},{:.12},{:.12},{:.12},{:.12},{:.12},{:.12},{:.12},{:.12},{:.12},{:.12}",
             r.time, r.voltage, r.temperature[0], r.temperature[1], r.temperature[2], r.current,
-            r.thermal_energy, r.source_work, r.volume, r.mass, r.acceleration)?;
+            r.thermal_energy, r.source_work, r.volume, r.mass, r.acceleration,
+            r.angle, r.angular_velocity, r.angular_momentum, r.mechanical_energy,
+            r.joint_work, r.parameter_work, r.numerical_change, r.combined_residual)?;
         Ok(())
     })
 }
@@ -167,14 +200,43 @@ mod tests {
             assert!(cool.temperature[1]<hot.temperature[1]);
             assert!(cool.temperature[0]>hot.temperature[0]);
             assert!(cool.acceleration>hot.acceleration);
+            assert!(cool.angle>hot.angle);
+            assert!(cool.angular_velocity>hot.angular_velocity);
             assert_eq!(hot.mass,cool.mass);
             assert_eq!(hot.source_work,cool.source_work);
             assert!((hot.thermal_energy-cool.thermal_energy).abs()<1e-8);
+            for row in &rows {
+                // The continuously applied 1 N m torque gives L(t)=t, even
+                // while heating changes the source-resolved inertia.
+                assert!((row.angular_momentum-row.time).abs()<1e-9);
+                assert!((row.joint_work-row.angle).abs()<1e-9);
+                let balance = row.thermal_energy + row.mechanical_energy - row.source_work
+                    - row.joint_work - row.parameter_work - row.numerical_change;
+                assert!((balance-row.combined_residual).abs()<1e-8);
+                assert!(row.combined_residual.abs()<1e-8);
+            }
             traces.push(rows);
         }
         assert!(traces[0][7].temperature[1]>traces[1][7].temperature[1]);
         assert!(traces[0][7].current<traces[1][7].current);
         assert!(traces[0][7].acceleration<traces[1][7].acceleration);
+        assert!(traces[0][7].angle<traces[1][7].angle);
+        assert!(traces[0][7].angular_velocity<traces[1][7].angular_velocity);
+    }
+    #[test]
+    fn unheated_rotor_matches_the_continuous_constant_torque_solution() {
+        let source = Source::parse(CP10, "fixture").unwrap();
+        run(&source,0.,2.,4.,0.25,|row| {
+            // Reference hinge inertia is 16/3 kg m²; no heating changes it.
+            assert!((row.angle-3.*row.time*row.time/32.).abs()<1e-10);
+            assert!((row.angular_velocity-3.*row.time/16.).abs()<1e-10);
+            assert!((row.angular_momentum-row.time).abs()<1e-10);
+            assert!((row.mechanical_energy-row.angle).abs()<1e-10);
+            assert_eq!(row.thermal_energy,0.);
+            assert_eq!(row.source_work,0.);
+            assert_eq!(row.parameter_work,0.);
+            Ok(())
+        }).unwrap();
     }
     #[test]
     fn malformed_data_and_unresolvable_clocks_refuse() {
