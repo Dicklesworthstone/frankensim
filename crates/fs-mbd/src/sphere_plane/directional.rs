@@ -146,9 +146,10 @@ pub fn advance_sphere_plane_directional_with<S: Clone, E>(
     ) -> Result<(EllipticDrivenReport, S), E>,
     cancelled: impl FnMut() -> bool,
 ) -> Result<SpherePlaneDirectionalAdvance, SpherePlaneDirectionalError<E>> {
-    advance_directional_contact(
+    advance_sphere_plane_directional_with_torque(
         scene,
         state,
+        Vec3::ZERO,
         history,
         frame,
         duration_s,
@@ -159,10 +160,32 @@ pub fn advance_sphere_plane_directional_with<S: Clone, E>(
     )
 }
 
+/// Advance driven directional contact with source-owned support and impact laws.
+///
+/// The held world couple acts about the sphere centre of mass. Its angular
+/// acceleration enters the original contact-point driving acceleration before
+/// the directional law resolves static traction, slip, arrest or breakaway.
+/// Torque-updated spin also reaches the original instantaneous impact phase.
+/// Both callbacks receive the accepted mechanical state in the plane's fixed
+/// texture frame; the motor does not rotate that material frame.
+///
+/// Return `None` from `resolve_impact` to retain the scene's original circular
+/// impact law, or `Some((report, history))` to supply the existing directional
+/// impulse law. Support and impact remain separate physical laws; no synthetic
+/// impact duration or heat partition is inferred. All candidate history stays
+/// private until the original geometry, work and momentum gates accept.
+///
+/// The motion receipt reports signed motor work and world couple impulse
+/// separately from force work, plane work, sustained slip heat and impact loss.
+/// Zero couple retains the original arithmetic. This is a prescribed constant
+/// world torque on isotropic inertia; body-held/state-dependent motors and
+/// finite-patch torsional resistance require different owners. Attitude and
+/// curved-slip refinement retain the existing independent controls.
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-fn advance_directional_contact<S: Clone, E>(
+pub fn advance_sphere_plane_directional_with_torque<S: Clone, E>(
     scene: &SpherePlane,
     state: SpherePlaneState,
+    torque_world_nm: Vec3,
     history: &mut S,
     frame: TangentFrame,
     duration_s: f64,
@@ -202,7 +225,7 @@ fn advance_directional_contact<S: Clone, E>(
     let result = advance_with_contact(
         scene,
         state,
-        Vec3::ZERO,
+        torque_world_nm,
         // Unused by this support hook. Instantaneous tangent response comes
         // from the impact callback or the original scene-owned fallback.
         &FrictionLaw::Coulomb {

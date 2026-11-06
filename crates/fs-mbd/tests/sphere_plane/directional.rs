@@ -11,6 +11,9 @@ use fs_tribo::{FrictionLaw, TangentialLaw, TangentialSolveConfig};
 #[path = "directional/impact.rs"]
 mod impact;
 
+#[path = "directional/torque.rs"]
+mod torque;
+
 fn frame() -> TangentFrame {
     TangentFrame::new([0.0, 1.0, 0.0], [1.0, 0.0, 0.0]).unwrap()
 }

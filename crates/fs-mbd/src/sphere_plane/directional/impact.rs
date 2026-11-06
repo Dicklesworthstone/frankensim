@@ -50,9 +50,53 @@ pub fn advance_sphere_plane_directional_impacts(
     SpherePlaneDirectionalAdvance,
     SpherePlaneDirectionalError<SpherePlaneDirectionalLawError>,
 > {
-    advance_sphere_plane_directional_with_impacts(
+    advance_sphere_plane_directional_impacts_with_torque(
         scene,
         state,
+        Vec3::ZERO,
+        support_law,
+        history,
+        impact_law,
+        impact_history,
+        frame,
+        duration_s,
+        controls,
+        impact_controls,
+        cancelled,
+    )
+}
+
+/// Drive the original sphere with a held world couple and separate native
+/// directional support and impact laws.
+///
+/// Motor torque is propagated through free flight, instantaneous friction and
+/// every accepted support segment. Both laws retain their original coefficient
+/// and texture-history meanings. Applied-couple work and impulse belong to the
+/// motion receipt; support heat and unallocated impact loss remain separate.
+/// All supplied history is unchanged on refusal, including late failure after
+/// an earlier private impact or support phase.
+#[allow(clippy::too_many_arguments)]
+pub fn advance_sphere_plane_directional_impacts_with_torque(
+    scene: &SpherePlane,
+    state: SpherePlaneState,
+    torque_world_nm: Vec3,
+    support_law: &EllipticCoulomb,
+    history: &mut EllipticCoulombState,
+    impact_law: &EllipticCoulomb,
+    impact_history: &EllipticCoulombState,
+    frame: TangentFrame,
+    duration_s: f64,
+    controls: SpherePlaneDirectionalControls,
+    impact_controls: EllipticImpulseControls,
+    cancelled: impl FnMut() -> bool,
+) -> Result<
+    SpherePlaneDirectionalAdvance,
+    SpherePlaneDirectionalError<SpherePlaneDirectionalLawError>,
+> {
+    advance_sphere_plane_directional_with_torque(
+        scene,
+        state,
+        torque_world_nm,
         history,
         frame,
         duration_s,
@@ -76,7 +120,7 @@ pub fn advance_sphere_plane_directional_impacts(
                     cancel()
                 })
                 .map_err(SpherePlaneDirectionalLawError::Impact)?;
-            Ok((report, history.clone()))
+            Ok(Some((report, history.clone())))
         },
         cancelled,
     )
@@ -113,9 +157,10 @@ pub fn advance_sphere_plane_directional_with_impacts<S: Clone, E>(
     ) -> Result<(EllipticImpulseReport, S), E>,
     cancelled: impl FnMut() -> bool,
 ) -> Result<SpherePlaneDirectionalAdvance, SpherePlaneDirectionalError<E>> {
-    advance_directional_contact(
+    advance_sphere_plane_directional_with_torque(
         scene,
         state,
+        Vec3::ZERO,
         history,
         frame,
         duration_s,

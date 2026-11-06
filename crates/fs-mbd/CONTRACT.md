@@ -2947,7 +2947,29 @@ and split continuation, transverse sliding against independent Newton/Euler RK4,
 and zero-couple parity with late refusal. The ideal spherical point contact
 does not acquire torsional friction, finite-patch rolling resistance or a
 time-varying/body-held motor law from this extension. Material-derived rolling
-and directional-source entries retain their existing zero-applied-couple APIs.
+retains its existing zero-applied-couple API.
+
+### Motor torque through directional support and impact
+
+`sphere_plane::directional::advance_sphere_plane_directional_with_torque`
+carries the same prescribed COM world couple through original directional
+support and optional instantaneous-impact callbacks. The native
+`directional::impact::advance_sphere_plane_directional_impacts_with_torque`
+supplies the existing distinct sustained and impulse laws. Actual driven point
+acceleration and pre-impact spin determine traction and impact response.
+The fixed plane texture, source-phase/native-slide/attitude bounds and atomic
+history publication retain their original owners. Returning no custom impulse
+preserves the scene's circular impact law. Existing entries delegate zero couple.
+
+Force work, signed couple work, prescribed-plane work, sustained slip heat and
+impact loss remain distinct. Four G1/G3/G4 groups in
+`tests/sphere_plane/directional/torque.rs` cover weak/strong texture breakaway,
+zero point-slip drive with nonzero force/couple work, torque-dependent impact
+with frame/conveyor covariance, and late source/cancellation/forged-work/
+nonfinite-torque refusal. Native rustfmt parses the changed sources and
+independent analytic ledgers close; native fs-mbd test execution remains unrun
+under the unavailable current dependency closure. No Cargo/DSR gate is claimed.
+The constant world-couple and isotropic point-contact model boundaries remain.
 
 ## Native rigid-body simultaneous frictional impacts
 
