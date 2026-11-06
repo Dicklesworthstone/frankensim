@@ -25,6 +25,8 @@ use super::mechanical::{SpatialLorentzLoadError, SpatialLorentzLoadLimits, Spati
 use super::*;
 use std::collections::BTreeSet;
 
+/// Physical electrode closure against the native RLC circuit and sources.
+pub mod circuit;
 /// Total-current control with solved equipotential electrode voltages.
 pub mod current;
 

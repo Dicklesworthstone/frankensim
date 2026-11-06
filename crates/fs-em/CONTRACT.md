@@ -2807,6 +2807,58 @@ but separately incompatible conductor currents, and budget/cancellation
 rollback. The parent fixed-geometry/material MQS scope remains in force; this
 adds no contact impedance, displacement current or moving material interface.
 
+### Native external circuits on physical 3D induction electrodes
+
+`spatial::vector_potential::induction::terminals::circuit::SpatialTerminalCircuit`
+joins the original physical electrode layout to an authored `fs_phs::circuit`
+RLC graph, reciprocal mutual inductance, ideal transformers and original source
+ports. Native fluxes and charges retain their original branch ordering and
+storage; `native_seed` does not project them. Every finite-stage field and circuit
+trial starts from the same accepted histories. Only the complete jointly checked
+candidate advances either history.
+
+For fixed linear/recoil magnetics, conductivity, geometry and prescribed
+velocity, the actual midpoint field step supplies the affine electrode relation
+`I = I0 + Y V`. This retains diffusion, magnetic history and motional generation;
+`Y` is not a static resistor model and its power is never labeled heat. One
+positive numerical reference resistor and compensating native current port per
+unshorted coordinate give `j = V/Rref - I`. The native circuit response
+`V = V0 + H j` closes through a small scaled LU solve of
+`[Id - H (Gref - Y)] V = V0 - H I0`. Final native and full-field replays must
+recover the same terminal voltages and currents. An electrode wired to the same
+circuit node as its conductor reference has exactly zero relative voltage and
+creates no artificial self-loop source; a wholly shorted layout needs one field
+step and no response factorization.
+
+Explicit voltage/current probe scales, a field-trial budget, native state and
+interface-memory bounds apply before response construction. Probe fields retain
+the original constitutive operating-domain checks. At most 16 unshorted terminal
+coordinates, 32 original source indices, 48 total native ports, 32 circuit nodes,
+128 total branches and 128 native states enter this dense interface. A cached
+response requires identical duration, velocity, fixed configuration, field solve
+settings and probe scales. History offsets and final physical replays are always
+fresh; the current call's voltage, current, Schur and energy allowances still
+gate acceptance. A cold nontrivial interval uses `coordinates + 2` field trials;
+a response reuse uses two.
+
+Positive electrode current enters the conducting body. Its terminal supply is
+`dt * sum((Vt - Vref) * It)` and cancels native interface work after removing the
+numerical reference loss. Independent original branch currents reconstruct KCL,
+resistor heat, capacitor charge work, inductor flux work including mutual terms,
+ideal-transformer work and original external-source supply. Combined field and
+circuit storage, conductor-frame Ohmic heat, physical graph-resistor heat,
+Lorentz work, impressed-current work and external supply must close. The native
+diagnostic record retains the canceled reference contribution; the physical heat
+fields exclude it. Consistent Lorentz loads use the same accepted field current.
+
+This owner adds no switching, source-dependent circuit storage, material or
+geometry refresh, contact impedance, thermal deposition, nonlinear field step,
+moving interface or displacement-current law. The native circuit retains its
+own topology and initial-constraint refusals. Focused electrode-circuit tests
+compare independent reduced FE/RC/RL midpoint equations, numerical-reference
+invariance, motional generation, ideal source and shorted-node topologies,
+recoil-domain refusal and preservation of both histories on rejection.
+
 ## Source-backed orthotropic conductivity in native 3D induction
 
 `fs_material::conductor::spatial` supplies a sealed shared conductor boundary
