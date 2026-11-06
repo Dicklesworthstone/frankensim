@@ -35,6 +35,9 @@ pub mod newton;
 pub mod porous;
 /// Conservative directional volume transport on the original BDM1 faces.
 pub mod transport;
+/// Estimated planar Smagorinsky stress on the original implicit flow solver.
+#[cfg(feature = "experimental-sgs")]
+pub mod sgs;
 
 fn positive_viscosity(nu: f64) -> f64 {
     assert!(

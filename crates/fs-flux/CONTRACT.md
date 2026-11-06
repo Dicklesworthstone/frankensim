@@ -7056,3 +7056,29 @@ thermodynamics, stress work, species enthalpy, conservative advancement,
 transport-ratio refusal and timestep bounds remain authoritative. The
 face-reference tests include a positive-Germano-fit velocity field whose two
 adjacent centered strains vanish while its resolved face shear is nonzero.
+
+## Native planar Smagorinsky stress
+
+With `continuum` and `experimental-sgs`,
+`ns::sgs::PlanarSmagorinsky` binds an explicit nonnegative coefficient,
+positive cell filter widths and molecular kinematic viscosities to the original
+BDM1 mesh. It adds `nu_t = (C_s Delta)^2 sqrt(2 D:D)` to the existing symmetric
+stress operator, with strain and convection evaluated at the same nonlinear
+endpoint in BDF1 or equal-step BDF2. Original mixed velocity/total-traction
+boundaries, backflow policy, harmonic SIP, history, convergence and constitutive
+source-refusal checks remain authoritative. A zero coefficient retains the
+molecular constitutive law. Prepared mixing lengths are reused and the local
+constitutive callback allocates no storage.
+
+Accepted-velocity diagnostics report cell-interior specific SGS transfer in
+m²/s³ and its triangle-area integral in m⁴/s³; multiplication by constant density
+converts the latter to power per span. These exclude molecular, SIP and upwind
+contributions and are neither accumulated heat nor a whole-step energy balance.
+This is an Estimated planar screen, without a resolved three-dimensional
+turbulent cascade, validated LES, wall model, transition model or backscatter.
+The deferred three-dimensional turbulence epic remains open.
+
+`tests/incompressible_sgs.rs` covers analytical shear, filter scaling, rigid
+rotation and translation invariance, mixed-traction BDF1/BDF2 endpoint
+consistency, zero-closure molecular equivalence, no-slip decay and refusal of
+unrepresentable transport without mutating either history.
