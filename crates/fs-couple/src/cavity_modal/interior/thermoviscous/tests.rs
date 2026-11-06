@@ -11,6 +11,7 @@ use fs_rep_mesh::TetComplex;
 
 mod fluid;
 mod heat_source;
+mod volume_source;
 mod time;
 mod spatial_wall;
 

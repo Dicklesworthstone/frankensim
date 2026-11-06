@@ -696,10 +696,37 @@ impl<'a, 'c> PreparedThermoviscousTime<'a, 'c> {
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<(Vec<f64>, Vec<f64>), ThermoviscousTimeError> {
         poll(cancelled)?;
-        let pressure_ports = self.model.loads.len();
-        if selected_ports.is_empty() || selected_ports.len() > pressure_ports
-            || traction_pa.len() != pressure_ports
+        if traction_pa.len() != self.model.loads.len()
             || wall_forces_n_per_sqrt_kg.len() != self.wall_scale.len()
+        {
+            return Err(invalid("complete original pressure and structural drives required"));
+        }
+        self.average_relations_from_inputs(
+            initial,
+            &[traction_pa, wall_forces_n_per_sqrt_kg],
+            selected_ports,
+            cancelled,
+        )
+    }
+
+    // Shared contraction of the original cached mean maps. Input slices keep
+    // their physical port order without allocating a concatenated drive vector.
+    // Volume-source wrappers supply their additional columns here; they never
+    // expose their underlying cache to the pressure-only interface APIs.
+    fn average_relations_from_inputs(
+        &self,
+        initial: &ThermoviscousTimeState,
+        input_parts: &[&[f64]],
+        selected_ports: &[usize],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(Vec<f64>, Vec<f64>), ThermoviscousTimeError> {
+        poll(cancelled)?;
+        let pressure_ports = self.model.loads.len();
+        let ports = self.system.port_dim();
+        let supplied = input_parts.iter().try_fold(0usize, |n, part| n.checked_add(part.len()));
+        if selected_ports.is_empty() || selected_ports.len() > pressure_ports
+            || supplied != Some(ports)
+            || input_parts.first().map(|part| part.len()) != Some(pressure_ports)
         {
             return Err(invalid("nonempty original pressure selection and complete held drives required"));
         }
@@ -710,14 +737,13 @@ impl<'a, 'c> PreparedThermoviscousTime<'a, 'c> {
             }
             selected[port] = true;
         }
-        if traction_pa.iter().enumerate().any(|(port, value)| !selected[port] && !value.is_finite())
-            || wall_forces_n_per_sqrt_kg.iter().any(|value| !value.is_finite())
+        if input_parts.iter().flat_map(|part| part.iter()).enumerate()
+            .any(|(port, value)| (port >= pressure_ports || !selected[port]) && !value.is_finite())
         {
             return Err(invalid("complete original fields and finite other held drives required"));
         }
         let state = self.encode(initial)?;
         let n = self.system.state_dim();
-        let ports = pressure_ports + self.wall_scale.len();
         let entries = selected_ports.len().checked_mul(selected_ports.len())
             .ok_or_else(|| invalid("original pressure response storage overflow"))?;
         let mut free = Vec::with_capacity(selected_ports.len());
@@ -727,7 +753,7 @@ impl<'a, 'c> PreparedThermoviscousTime<'a, 'c> {
             let mut value: f64 = self.mean_state[port * n..(port + 1) * n]
                 .iter().zip(&state).map(|(a, x)| a * x).sum();
             let row = &self.mean_input[port * ports..(port + 1) * ports];
-            value += row.iter().zip(traction_pa.iter().chain(wall_forces_n_per_sqrt_kg))
+            value += row.iter().zip(input_parts.iter().flat_map(|part| part.iter()))
                 .enumerate()
                 .filter(|(input, _)| *input >= pressure_ports || !selected[*input])
                 .map(|(_, (a, u))| a * u).sum::<f64>();

@@ -590,3 +590,170 @@ fn g0_volume_time_preserves_original_identity_complete_counts_and_transactional_
     ));
     assert_eq!(state, original);
 }
+
+#[test]
+fn g3_cached_volume_drives_close_every_selected_mean_pressure_port() {
+    let size = [0.004, 0.002, 0.002];
+    let volume = size.iter().product::<f64>();
+    let (mesh, positions) = box_mesh([1, 1, 1], size);
+    let model = ThermoviscousFe::new(
+        &mesh,
+        &positions,
+        air(),
+        &boundaries(&mesh, &positions, size, false),
+        limits(),
+        &mut || false,
+    )
+    .unwrap();
+    let calls = Cell::new(0usize);
+    let force = model
+        .volume_force_source(
+            4,
+            &mut |_, x| {
+                calls.set(calls.get() + 1);
+                Ok::<_, ThermoviscousError>([(1.0 + x[0] / size[0]) / volume, 0.0, 0.0])
+            },
+            &mut || false,
+        )
+        .unwrap();
+    let heat = model
+        .volume_heat_source(4, &mut |_, _| Ok(1.0 / volume), &mut || false)
+        .unwrap();
+    let sampled = calls.get();
+    let prepared = prepare(&model, 2e-5, &[&force], &[&heat]);
+    let initial = prepared
+        .step(
+            &prepared.zero_state(),
+            &[0.02, -0.01],
+            &[],
+            &[-1e-6],
+            &[2e-4],
+            &mut || false,
+        )
+        .unwrap()
+        .field
+        .state;
+    let original = initial.clone();
+    let traction = [0.3, -0.2];
+    let forces = [3e-6];
+    let heating = [-1e-4];
+    let actual = prepared
+        .step(&initial, &traction, &[], &forces, &heating, &mut || false)
+        .unwrap();
+    // Reversed ordering detects loss of source columns and any diagonal-only
+    // substitute for the complete coupled original port matrix.
+    let ports = [1usize, 0usize];
+    let (free, mobility) = prepared
+        .average_relations(
+            &initial,
+            &[f64::NAN; 2],
+            &[],
+            &forces,
+            &heating,
+            &ports,
+            &mut || false,
+        )
+        .unwrap();
+    for (row, &port) in ports.iter().enumerate() {
+        let predicted = free[row]
+            + ports
+                .iter()
+                .enumerate()
+                .map(|(col, &other)| mobility[row * 2 + col] * traction[other])
+                .sum::<f64>();
+        close(predicted, actual.field.mean_inward_flow_m3_s[port]);
+        let mut partial = traction;
+        partial[port] = f64::NAN;
+        let (one_free, one_mobility) = prepared
+            .average_relation(
+                &initial,
+                &partial,
+                &[],
+                &forces,
+                &heating,
+                port,
+                &mut || false,
+            )
+            .unwrap();
+        close(
+            one_free + one_mobility * traction[port],
+            actual.field.mean_inward_flow_m3_s[port],
+        );
+        assert_eq!(one_mobility, mobility[row * 2 + row]);
+    }
+    let (undriven, unchanged_mobility) = prepared
+        .average_relations(
+            &initial,
+            &[0.0; 2],
+            &[],
+            &[0.0],
+            &[0.0],
+            &ports,
+            &mut || false,
+        )
+        .unwrap();
+    assert_eq!(mobility, unchanged_mobility);
+    assert!(free.iter().zip(&undriven).any(|(a, b)| a != b));
+    assert_eq!(initial, original);
+    assert_eq!(calls.get(), sampled);
+    for selected in [&[][..], &[0, 0][..], &[2][..]] {
+        assert!(
+            prepared
+                .average_relations(
+                    &initial,
+                    &traction,
+                    &[],
+                    &forces,
+                    &heating,
+                    selected,
+                    &mut || false,
+                )
+                .is_err()
+        );
+    }
+    assert!(
+        prepared
+            .average_relations(&initial, &traction, &[], &[], &heating, &ports, &mut || {
+                false
+            },)
+            .is_err()
+    );
+    assert!(
+        prepared
+            .average_relation(
+                &initial,
+                &[0.0, f64::NAN],
+                &[],
+                &forces,
+                &heating,
+                0,
+                &mut || false,
+            )
+            .is_err()
+    );
+    assert!(
+        prepared
+            .average_relations(
+                &initial,
+                &traction,
+                &[],
+                &[f64::NAN],
+                &heating,
+                &ports,
+                &mut || false,
+            )
+            .is_err()
+    );
+    assert!(matches!(
+        prepared.average_relations(
+            &initial,
+            &traction,
+            &[],
+            &forces,
+            &heating,
+            &ports,
+            &mut || true,
+        ),
+        Err(ThermoviscousTimeError::Fluid(ThermoviscousError::Cancelled))
+    ));
+}

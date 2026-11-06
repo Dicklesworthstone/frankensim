@@ -37,6 +37,9 @@ use fs_math::c64::C64;
 /// Finite solid-wall patches evaluated by the original material owner.
 pub mod wall;
 
+/// Original distributed force and heat mechanisms in fields and duct networks.
+pub mod volume_source;
+
 /// Retains the original material, finite-element and duct-composition refusals.
 #[derive(Debug)]
 pub enum ThermoviscousSourceError {
@@ -545,7 +548,7 @@ impl<'c, S> ThermoviscousInterior<'c, S> {
     }
 
     /// Factor the original resolved owner once for repeated coherent traction,
-    /// structural-force and distributed-heat drives in exp(+i omega t).
+    /// structural-force, body-force and distributed-heat drives in exp(+i omega t).
     /// Material Cp and the declared source band are applied before factoring;
     /// molecular phase is converted from its original exp(-i omega t) law.
     /// The returned owner borrows this source and reuses its original LU.
@@ -563,7 +566,7 @@ impl<'c, S> ThermoviscousInterior<'c, S> {
     /// Factor loaded source-bound fields once in the FE's exp(+i omega t)
     /// convention, with positive real pressure/flow resistances [Pa s/m^3].
     /// The original owner recovers internal-source outgoing waves and complete
-    /// work from the same loaded LU; heat and wall drives remain coherent with
+    /// work from the same loaded LU; volume and wall drives remain coherent with
     /// incident power waves. Unlike `duct_scattering`, this native field API
     /// performs no conjugation of its inputs or outputs.
     pub fn prepare_scattering<'a>(

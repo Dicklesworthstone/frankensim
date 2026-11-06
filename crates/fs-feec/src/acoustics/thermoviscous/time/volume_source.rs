@@ -161,6 +161,83 @@ impl<'c> PreparedThermoviscousVolumeTime<'_, 'c> {
         self.fields.conductive_wall_layouts()
     }
 
+    /// Upper frequency retained by the original finite-wall depth model.
+    #[must_use]
+    pub fn maximum_wall_frequency_hz(&self) -> Option<f64> {
+        self.fields.maximum_wall_frequency_hz()
+    }
+
+    /// Original in-plane solid conductivity, when spatial walls were requested.
+    #[must_use]
+    pub fn tangential_wall_conductivity(&self) -> Option<&[TangentialWallConductivity]> {
+        self.fields.tangential_wall_conductivity()
+    }
+
+    /// Exact interval-mean pressure-port relation with all original volume drives.
+    /// The selected traction slot is ignored; every force, heat input and
+    /// complete initial field contributes to the free inward flow. Preparation
+    /// already computed these maps, so this performs no trial propagation.
+    #[allow(clippy::too_many_arguments)]
+    pub fn average_relation(
+        &self,
+        initial: &ThermoviscousTimeState,
+        traction_pa: &[f64],
+        wall_forces_n_per_sqrt_kg: &[f64],
+        force_drive_n: &[f64],
+        heat_drive_w: &[f64],
+        selected_port: usize,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(f64, f64), ThermoviscousTimeError> {
+        let (free, mobility) = self.average_relations(
+            initial,
+            traction_pa,
+            wall_forces_n_per_sqrt_kg,
+            force_drive_n,
+            heat_drive_w,
+            &[selected_port],
+            cancelled,
+        )?;
+        Ok((free[0], mobility[0]))
+    }
+
+    /// Complete `Q = free + mobility * pressure` relation in selected-port order.
+    /// Every cross-port term and every original force/heat column is retained.
+    /// Selected traction slots are ignored (and may be NaN); all other drives
+    /// must be finite and complete. No source is resampled or state changed.
+    #[allow(clippy::too_many_arguments)]
+    pub fn average_relations(
+        &self,
+        initial: &ThermoviscousTimeState,
+        traction_pa: &[f64],
+        wall_forces_n_per_sqrt_kg: &[f64],
+        force_drive_n: &[f64],
+        heat_drive_w: &[f64],
+        selected_ports: &[usize],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(Vec<f64>, Vec<f64>), ThermoviscousTimeError> {
+        poll(cancelled)?;
+        if traction_pa.len() != self.fields.model.loads.len()
+            || wall_forces_n_per_sqrt_kg.len() != self.fields.wall_scale.len()
+            || force_drive_n.len() != self.force_count
+            || heat_drive_w.len() != self.heat_count
+        {
+            return Err(invalid(
+                "complete original pressure, structural, body-force and heat drives required",
+            ));
+        }
+        self.fields.average_relations_from_inputs(
+            initial,
+            &[
+                traction_pa,
+                wall_forces_n_per_sqrt_kg,
+                force_drive_n,
+                heat_drive_w,
+            ],
+            selected_ports,
+            cancelled,
+        )
+    }
+
     /// One complete candidate under real held mechanical and thermal inputs.
     ///
     /// Body forces [N] and heating [W] multiply their original spatial profiles.
