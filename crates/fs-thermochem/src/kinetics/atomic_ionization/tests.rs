@@ -544,3 +544,5 @@ fn transformed_caloric_references_cannot_silently_reinterpret_raw_level_constant
         Err(AtomicIonizationErrorV1::Invalid(_))
     ));
 }
+
+mod photoionization;

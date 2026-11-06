@@ -30,6 +30,9 @@
 //! `R*q*ln(Kc*c_A/(c_I*c_e)) >= 0`, independently of Th. Heavy translational
 //! temperature factors cancel because one heavy atom becomes one heavy ion.
 
+/// Original-source single-photon ionization on the validated atomic channel.
+pub mod photoionization;
+
 use super::{
     ElectronImpactRateV1, ElementaryReactionV1, ForwardRateV1, IdealGasKineticsV1, KineticsErrorV1,
     net_rate, rate_from_log,

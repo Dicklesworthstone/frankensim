@@ -3420,3 +3420,28 @@ close a finite H/O solvent ledger or include calcium ion pairing, other phases,
 CO2 exchange, kinetics, passivation, thermal evolution or specimen qualification.
 Sources, original values, model equations and normal workspace commands are in
 `data/matdb/seed-v1/MINING_LIMESTONE_SULFATE.md`.
+
+## Atomic photon-ionization source
+
+`kinetics::atomic_ionization::photoionization::AtomicPhotoionizationV1` binds
+a single-photon event cross section to the original validated ground-state
+atom/ion/electron channel. The first original table sample declares its physical
+onset, which may have nonzero cross section. The effective onset cannot lie
+below the original chemical energy gap; the original samples and provenance
+remain unchanged. No upper-energy extrapolation or missing-source zero is used.
+
+Discrete photon groups carry photon energy in joules and bandwidth-integrated
+number flux in m^-2 s^-1. An allocation-free, bounded evaluation returns the
+event rate and absorbed, chemical-storage and photoelectron powers per neutral.
+Chemical storage uses the original source gap once. Local angular illumination
+uses angle-integrated number intensity, not net vector flux. Compensated sums
+retain input order and cancellation is checked every 32 groups and before return.
+
+This L1 law performs no population update, attenuation, thermalization or
+radiative-recombination evolution. A finite-volume consumer must conserve
+photons and neutral inventory, and an electron-temperature consumer must account
+for the changing electron population. The source assumes one ground-state
+ionization event per absorbed photon and stationary heavy targets; it does not
+infer excited-state, multielectron, recoil, secondary-ionization or nonthermal
+photoelectron behavior. Focused tests specify edge/support refusal, independent
+event/energy moments and in-loop cancellation.
