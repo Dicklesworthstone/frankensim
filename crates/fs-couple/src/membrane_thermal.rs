@@ -1,9 +1,9 @@
 //! Nonlinear membrane damping heat on the original finite enthalpy timeline.
 //!
-//! Original triangles, reference mass, Kelvin--Voigt source rows, inertia and
-//! nonlinear mechanical stepping remain with fs-solid. The native thermal owner
-//! chooses every conductive/event/source interval; the membrane supplies its
-//! analytically integrated physical loss on that same interval. The original
+//! Original triangles, reference mass, Kelvin--Voigt source rows or Maxwell
+//! histories, inertia and nonlinear mechanical stepping remain with fs-solid.
+//! The native thermal owner chooses every conductive/event/source interval;
+//! the membrane supplies its native physical loss on that same interval. The original
 //! SheetCaloric law converts stored energy to temperature, including variable
 //! heat capacity. Numerical mechanical defects never become thermal sources.
 //!
@@ -13,13 +13,17 @@
 //! stress-free geometry, thermoelastic exchange or phase-dependent mechanics is
 //! inferred. Thermal transport retains its native explicit order and CFL limits.
 
+/// Native finite-strain Maxwell relaxation heat on the same enthalpy timeline.
+pub mod visco;
+
 use fs_exec::CancelGate;
 use fs_material::phase::PhaseStateError;
 use fs_material::sheet::thermal::SheetCaloric;
 use fs_solid::membrane::{
-    MembraneError,
-    dynamics::viscosity::{DampedMembraneMotion, DampedMembraneStep, MembraneDampingError},
+    MembraneError, MembranePatch,
+    dynamics::viscosity::{DampedMembraneMotion, MembraneDampingError},
     inertia::p1_reference_row_masses,
+    visco::FiniteViscoMembraneError,
 };
 use fs_thermal::enthalpy::{
     CellId, DepositedCell, DepositionError, DepositionObserver, DepositionSimulation, EnergyAudit,
@@ -56,6 +60,7 @@ pub enum MembraneThermalError<E> {
     Invalid(&'static str),
     Membrane(MembraneError),
     Damping(MembraneDampingError),
+    Viscoelastic(FiniteViscoMembraneError),
     Thermal(DepositionError),
     Phase(PhaseStateError),
     Observer(E),
@@ -79,6 +84,92 @@ impl<E: core::fmt::Debug> core::fmt::Display for MembraneThermalError<E> {
 impl<E: std::error::Error + 'static> std::error::Error for MembraneThermalError<E> {}
 type Result<T, E> = core::result::Result<T, MembraneThermalError<E>>;
 
+// Both native mechanical owners supply their own physics and accepted history.
+// This common interface only carries the work/heat needed by the original
+// thermal timeline, receiver admission and conservative handoff below.
+trait ThermalMotion: Clone {
+    fn patch(&self) -> &MembranePatch;
+    fn time_s(&self) -> f64;
+    fn strain_energy_j(&self) -> f64;
+    fn kinetic_energy_j(&self) -> f64;
+    fn max_step_s(&self) -> f64;
+    fn source_temperature_k(&self, element: usize) -> Option<f64>;
+    fn element_dissipated_j(&self) -> &[f64];
+    fn advance<E>(
+        &mut self,
+        dt_s: f64,
+        dead_load_n: &[[f64; 3]],
+        cancelled: &mut dyn FnMut() -> bool,
+    ) -> Result<MechanicalInterval, E>;
+}
+
+#[derive(Clone)]
+struct MechanicalInterval {
+    time_s: f64,
+    dissipated_j: f64,
+    mechanical_work_j: f64,
+    // Delta physical mechanical storage + physical heat - external work.
+    // It includes signed integration defects, never an extra thermal source.
+    energy_defect_j: f64,
+    // Sum of absolute constituent defects; opposite numerical terms may not
+    // cancel before the whole-call error allowance is checked.
+    absolute_energy_defect_j: f64,
+    numerical_kinetic_loss_j: f64,
+    support_impulse_n_s: [f64; 3],
+}
+
+impl ThermalMotion for DampedMembraneMotion<'_, '_> {
+    fn patch(&self) -> &MembranePatch {
+        self.viscosity().patch()
+    }
+    fn time_s(&self) -> f64 {
+        self.motion().time_s()
+    }
+    fn strain_energy_j(&self) -> f64 {
+        self.motion().strain_energy_j()
+    }
+    fn kinetic_energy_j(&self) -> f64 {
+        self.motion().kinetic_energy_j()
+    }
+    fn max_step_s(&self) -> f64 {
+        self.budget().max_step_s
+    }
+    fn source_temperature_k(&self, element: usize) -> Option<f64> {
+        self.viscosity().laws()[element]
+            .source()
+            .state_coordinate("T")
+    }
+    fn element_dissipated_j(&self) -> &[f64] {
+        DampedMembraneMotion::element_dissipated_j(self)
+    }
+    fn advance<E>(
+        &mut self,
+        dt_s: f64,
+        dead_load_n: &[[f64; 3]],
+        cancelled: &mut dyn FnMut() -> bool,
+    ) -> Result<MechanicalInterval, E> {
+        let step = self
+            .step(dt_s, dead_load_n, cancelled)
+            .map_err(MembraneThermalError::Damping)?;
+        Ok(MechanicalInterval {
+            time_s: step.time_s,
+            dissipated_j: step.dissipated_j,
+            mechanical_work_j: step.dead_load_work_j,
+            energy_defect_j: step.energy_defect_j,
+            absolute_energy_defect_j: step.energy_defect_j.abs(),
+            numerical_kinetic_loss_j: 0.0,
+            support_impulse_n_s: step.support_impulse_n_s,
+        })
+    }
+}
+
+struct NativeCandidate<'thermal, M, O> {
+    motion: M,
+    thermal: DepositionSimulation<'thermal>,
+    observer: O,
+    report: MembraneThermalReport,
+}
+
 /// Generated heat is INTERNAL to the combined system. The raw thermal audit
 /// counts it as incoming heat; external_thermal_heat_j removes that transfer.
 #[derive(Clone, Debug)]
@@ -98,6 +189,9 @@ pub struct MembraneThermalReport {
     pub mechanical_residual_j: f64,
     /// Sum of the native signed numerical defects; never deposited as heat.
     pub mechanical_numerical_defect_j: f64,
+    /// Nonnegative time-discretization loss, never deposited into thermal cells.
+    /// Zero for the original Verlet/damping composition; explicit for Maxwell BE.
+    pub numerical_kinetic_loss_j: f64,
     /// Sum of absolute substep defects, so opposite errors cannot cancel.
     pub absolute_mechanical_defect_j: f64,
     pub heat_handoff_residual_j: f64,
@@ -288,9 +382,38 @@ pub fn advance_candidate<'model, 'patch, 'thermal, O: DepositionObserver>(
     config: MembraneThermalConfig,
     gate: &CancelGate,
 ) -> Result<MembraneThermalCandidate<'model, 'patch, 'thermal, O>, O::Error> {
+    let candidate = advance_native(
+        motion,
+        thermal,
+        observer,
+        target_s,
+        dead_load_n,
+        cells,
+        config,
+        gate,
+    )?;
+    Ok(MembraneThermalCandidate {
+        motion: candidate.motion,
+        thermal: candidate.thermal,
+        observer: candidate.observer,
+        report: candidate.report,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn advance_native<'thermal, M: ThermalMotion, O: DepositionObserver>(
+    motion: &M,
+    thermal: &DepositionSimulation<'thermal>,
+    observer: &O,
+    target_s: f64,
+    dead_load_n: &[[f64; 3]],
+    cells: &[ElementThermalCell<'_>],
+    config: MembraneThermalConfig,
+    gate: &CancelGate,
+) -> Result<NativeCandidate<'thermal, M, O>, O::Error> {
     check(gate)?;
-    let patch = motion.viscosity().patch();
-    if motion.motion().time_s().to_bits() != thermal.time_s().to_bits()
+    let patch = motion.patch();
+    if motion.time_s().to_bits() != thermal.time_s().to_bits()
         || !target_s.is_finite()
         || target_s <= thermal.time_s()
         || !config.energy_tolerance_j.is_finite()
@@ -330,13 +453,10 @@ pub fn advance_candidate<'model, 'patch, 'thermal, O: DepositionObserver>(
                 "unique receivers, original complete sheet sources and positive temperature intervals required",
             ));
         }
-        if let Some(source_t) = motion.viscosity().laws()[index]
-            .source()
-            .state_coordinate("T")
-        {
+        if let Some(source_t) = motion.source_temperature_k(index) {
             if !(low..=high).contains(&source_t) {
                 return Err(MembraneThermalError::Invalid(
-                    "frozen viscous source temperature lies outside the admitted interval",
+                    "frozen mechanical source temperature lies outside the admitted interval",
                 ));
             }
         }
@@ -375,6 +495,7 @@ pub fn advance_candidate<'model, 'patch, 'thermal, O: DepositionObserver>(
         deposited_heat_j: Sum::default(),
         supplied_work_j: Sum::default(),
         mechanical_defect_j: Sum::default(),
+        numerical_kinetic_loss_j: Sum::default(),
         absolute_mechanical_defect_j: Sum::default(),
         absolute_handoff_defect_j: Sum::default(),
         support_impulse_n_s: [Sum::default(); 3],
@@ -387,8 +508,7 @@ pub fn advance_candidate<'model, 'patch, 'thermal, O: DepositionObserver>(
                 Ok(())
             }
         })?;
-    if coupled.pending.is_some() || coupled.motion.motion().time_s().to_bits() != target_s.to_bits()
-    {
+    if coupled.pending.is_some() || coupled.motion.time_s().to_bits() != target_s.to_bits() {
         return Err(MembraneThermalError::Invalid(
             "membrane and thermal endpoints did not publish one clock",
         ));
@@ -398,10 +518,10 @@ pub fn advance_candidate<'model, 'patch, 'thermal, O: DepositionObserver>(
     let mechanical_work_j = coupled.supplied_work_j.value()?;
     let mut change = Sum::default();
     for value in [
-        coupled.motion.motion().strain_energy_j(),
-        -motion.motion().strain_energy_j(),
-        coupled.motion.motion().kinetic_energy_j(),
-        -motion.motion().kinetic_energy_j(),
+        coupled.motion.strain_energy_j(),
+        -motion.strain_energy_j(),
+        coupled.motion.kinetic_energy_j(),
+        -motion.kinetic_energy_j(),
     ] {
         change.add(value)?;
     }
@@ -411,6 +531,7 @@ pub fn advance_candidate<'model, 'patch, 'thermal, O: DepositionObserver>(
     mechanical.add_account(&coupled.supplied_work_j, -1.0)?;
     let mechanical_residual_j = mechanical.value()?;
     let mechanical_numerical_defect_j = coupled.mechanical_defect_j.value()?;
+    let numerical_kinetic_loss_j = coupled.numerical_kinetic_loss_j.value()?;
     let absolute_mechanical_defect_j = coupled.absolute_mechanical_defect_j.value()?;
     let mut defect_agreement = mechanical;
     defect_agreement.add_account(&coupled.mechanical_defect_j, -1.0)?;
@@ -451,7 +572,7 @@ pub fn advance_candidate<'model, 'patch, 'thermal, O: DepositionObserver>(
         *out = sum.value()?;
     }
     check(gate)?;
-    Ok(MembraneThermalCandidate {
+    Ok(NativeCandidate {
         motion: coupled.motion.into_owned(),
         thermal: next_thermal,
         observer: coupled.inner,
@@ -465,6 +586,7 @@ pub fn advance_candidate<'model, 'patch, 'thermal, O: DepositionObserver>(
             mechanical_energy_change_j,
             mechanical_residual_j,
             mechanical_numerical_defect_j,
+            numerical_kinetic_loss_j,
             absolute_mechanical_defect_j,
             heat_handoff_residual_j,
             absolute_heat_handoff_defect_j,
@@ -479,14 +601,14 @@ struct Pending {
     start_s: f64,
     dt_s: f64,
     end_s: f64,
-    step: DampedMembraneStep,
+    step: MechanicalInterval,
     deposited_j: f64,
     handoff_defect_j: f64,
 }
 
 #[derive(Clone)]
-struct HeatObserver<'call, 'model, 'patch, 'm, 'g, O> {
-    motion: Cow<'call, DampedMembraneMotion<'model, 'patch>>,
+struct HeatObserver<'call, 'm, 'g, M: ThermalMotion, O> {
+    motion: Cow<'call, M>,
     inner: O,
     receivers: Vec<Receiver<'m>>,
     dead_load_n: &'g [[f64; 3]],
@@ -498,11 +620,12 @@ struct HeatObserver<'call, 'model, 'patch, 'm, 'g, O> {
     deposited_heat_j: Sum,
     supplied_work_j: Sum,
     mechanical_defect_j: Sum,
+    numerical_kinetic_loss_j: Sum,
     absolute_mechanical_defect_j: Sum,
     absolute_handoff_defect_j: Sum,
     support_impulse_n_s: [Sum; 3],
 }
-impl<O: DepositionObserver> HeatObserver<'_, '_, '_, '_, '_, O> {
+impl<M: ThermalMotion, O: DepositionObserver> HeatObserver<'_, '_, '_, M, O> {
     fn admit(&self, thermal: &DepositionSimulation<'_>) -> Result<(), O::Error> {
         for receiver in &self.receivers {
             check(self.gate)?;
@@ -511,7 +634,9 @@ impl<O: DepositionObserver> HeatObserver<'_, '_, '_, '_, '_, O> {
         Ok(())
     }
 }
-impl<O: DepositionObserver> DepositionObserver for HeatObserver<'_, '_, '_, '_, '_, O> {
+impl<M: ThermalMotion, O: DepositionObserver> DepositionObserver
+    for HeatObserver<'_, '_, '_, M, O>
+{
     type Error = MembraneThermalError<O::Error>;
     fn begin(&mut self) -> Result<(), O::Error> {
         self.inner.begin().map_err(MembraneThermalError::Observer)
@@ -580,7 +705,7 @@ impl<O: DepositionObserver> DepositionObserver for HeatObserver<'_, '_, '_, '_, 
         proposed_s: f64,
         checkpoint: &mut dyn FnMut() -> core::result::Result<(), DepositionError>,
     ) -> Result<f64, O::Error> {
-        let capped = proposed_s.min(self.motion.budget().max_step_s);
+        let capped = proposed_s.min(self.motion.max_step_s());
         let dt = self
             .inner
             .limit_timestep_s(thermal, capped, checkpoint)
@@ -602,7 +727,7 @@ impl<O: DepositionObserver> DepositionObserver for HeatObserver<'_, '_, '_, '_, 
     ) -> Result<BTreeMap<CellId, f64>, O::Error> {
         checkpoint()?;
         self.admit(thermal)?;
-        if self.pending.is_some() || self.motion.motion().time_s().to_bits() != start_s.to_bits() {
+        if self.pending.is_some() || self.motion.time_s().to_bits() != start_s.to_bits() {
             return Err(MembraneThermalError::Invalid(
                 "membrane interval already pending or stale",
             ));
@@ -616,8 +741,7 @@ impl<O: DepositionObserver> DepositionObserver for HeatObserver<'_, '_, '_, '_, 
         let step = self
             .motion
             .to_mut()
-            .step(dt_s, self.dead_load_n, || self.gate.is_requested())
-            .map_err(MembraneThermalError::Damping)?;
+            .advance(dt_s, self.dead_load_n, &mut || self.gate.is_requested())?;
         if step.time_s.to_bits() != end_s.to_bits() {
             return Err(MembraneThermalError::Invalid(
                 "membrane/thermal interval clock is not exactly representable",
@@ -676,9 +800,7 @@ impl<O: DepositionObserver> DepositionObserver for HeatObserver<'_, '_, '_, '_, 
         Ok(rates)
     }
     fn event(&mut self, event: &Event, thermal: &DepositionSimulation<'_>) -> Result<(), O::Error> {
-        if self.pending.is_some()
-            || self.motion.motion().time_s().to_bits() != thermal.time_s().to_bits()
-        {
+        if self.pending.is_some() || self.motion.time_s().to_bits() != thermal.time_s().to_bits() {
             return Err(MembraneThermalError::Invalid(
                 "event outside the shared accepted clock",
             ));
@@ -697,7 +819,7 @@ impl<O: DepositionObserver> DepositionObserver for HeatObserver<'_, '_, '_, '_, 
         checkpoint: &mut dyn FnMut() -> core::result::Result<(), DepositionError>,
     ) -> Result<(), O::Error> {
         let pending = self.pending.take().ok_or(MembraneThermalError::Invalid(
-            "thermal step lacks its original damped membrane interval",
+            "thermal step lacks its original membrane interval",
         ))?;
         if pending.start_s.to_bits() != start_s.to_bits()
             || pending.dt_s.to_bits() != dt_s.to_bits()
@@ -721,10 +843,12 @@ impl<O: DepositionObserver> DepositionObserver for HeatObserver<'_, '_, '_, '_, 
         }
         self.material_heat_j.add(pending.step.dissipated_j)?;
         self.deposited_heat_j.add(pending.deposited_j)?;
-        self.supplied_work_j.add(pending.step.dead_load_work_j)?;
+        self.supplied_work_j.add(pending.step.mechanical_work_j)?;
         self.mechanical_defect_j.add(pending.step.energy_defect_j)?;
+        self.numerical_kinetic_loss_j
+            .add(pending.step.numerical_kinetic_loss_j)?;
         self.absolute_mechanical_defect_j
-            .add(pending.step.energy_defect_j.abs())?;
+            .add(pending.step.absolute_energy_defect_j)?;
         self.absolute_handoff_defect_j
             .add(pending.handoff_defect_j)?;
         balance(self.absolute_mechanical_defect_j.value()?, self.tolerance_j)?;

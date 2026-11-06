@@ -1,5 +1,34 @@
 ## Physical nonlinear and hysteretic electrodes with finite heat
 
+## Finite-strain Maxwell membrane relaxation into original enthalpy cells
+
+`membrane_thermal::visco::advance_candidate` composes the native
+`FiniteViscoMembraneMotion` with the existing finite enthalpy timeline. Each
+actual transport, observer or event interval advances the original momentum
+equation and Maxwell histories once. Physical per-triangle interval loss is
+handed to the matching original caloric receiver before cumulative-ledger
+rounding; variable heat capacity, original graded reference mass and volume,
+source identity, fully solid phase and the declared temperature interval retain
+the existing membrane thermal admission.
+
+The Kelvin--Voigt and Maxwell entry points share the same private receiver,
+timeline and heat-handoff implementation; each mechanical owner retains its
+native physics. Backward-Euler kinetic loss is reported separately from heat.
+Material endpoint defects, pressure path/endpoint work differences and inertial
+or equilibrium residuals contribute to an absolute numerical allowance without
+cancelling one another. Held supports must have their accepted displacement and
+zero velocity throughout the coupled call. Dead loads and admitted current-area
+pressure remain held.
+
+The result publishes motion, thermal inventory and observer together. A late
+observer refusal, source/inventory mismatch, work refusal or cancellation
+preserves all accepted inputs. Mechanical coefficients remain frozen over the
+explicitly admitted fully solid interval: this is one-way self-heating, not
+temperature-driven coefficient or natural-reference evolution.
+`tests/visco_membrane_thermal.rs` covers regional Maxwell heat into variable-Cp
+enthalpy, exclusion of numerical kinetic loss, event/continuation history and
+whole-call refusal behavior.
+
 `SpatialMagneticThermalNetwork` supplies `step_nonlinear_voltage_candidate` and
 `step_nonlinear_current_candidate`. With `magnetic-hysteresis`, the corresponding
 `step_hysteretic_voltage_candidate` and `step_hysteretic_current_candidate`
