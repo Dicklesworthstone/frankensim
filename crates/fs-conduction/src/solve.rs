@@ -68,7 +68,10 @@ mod maximum;
 pub use maximum::{LinearMaximumPolish, MaximumPhysicalGateRefusal, polish_linear_maximum};
 
 mod neumann;
-pub use neumann::{MeanTemperatureConfig, solve_mean_temperature};
+pub use neumann::{
+    MeanTemperatureConfig, MeanTemperatureNewtonConfig, solve_mean_temperature,
+    solve_mean_temperature_newton,
+};
 
 /// The pieces a conduction solve needs, borrowed together.
 #[derive(Debug, Clone, Copy)]
@@ -1265,7 +1268,9 @@ fn initial_free(
                 }
                 TemperatureSpan::Unbounded => preferred.unwrap_or(0.0),
             };
-            if problem.element_materials.is_none() && problem.boundary.surface_heat_conduction().is_empty() {
+            if problem.element_materials.is_none()
+                && problem.boundary.surface_heat_conduction().is_empty()
+            {
                 let span = problem.material.temperature_span();
                 if matches!(span, TemperatureSpan::Sampled { low, high } if low > high) {
                     return Err(ConductionError::Conductivity {
@@ -1308,7 +1313,9 @@ fn initial_free(
                     let span = spans[vertex as usize].intersect(sheet.temperature_span());
                     if matches!(span, TemperatureSpan::Sampled { low, high } if low > high) {
                         return Err(ConductionError::Conductivity {
-                            what: "incident bulk and film sources have disjoint temperature support".into(),
+                            what:
+                                "incident bulk and film sources have disjoint temperature support"
+                                    .into(),
                         });
                     }
                     spans[vertex as usize] = span;
