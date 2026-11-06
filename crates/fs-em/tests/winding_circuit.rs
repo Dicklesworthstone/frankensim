@@ -4,7 +4,10 @@ use common::{config, limits, material, near};
 use fs_em::{
     planar::{MagneticError, PlanarMagnetostatics},
     transfer::{CellSample, PlanarFrame},
-    winding::{PlanarWindingBasis, WindingConfig, WindingError},
+    winding::{
+        PlanarWindingBasis, WindingConfig, WindingError,
+        end::{EndWindingError, EndWindingInductance, EndWindingMode},
+    },
 };
 use fs_phs::circuit::{Branch, CircuitGraph};
 use fs_rep_mesh::{Metric2, TriComplex2};
@@ -220,6 +223,122 @@ fn expected_currents(l: &[f64], step: f64, source: f64) -> [f64; 2] {
 }
 
 #[test]
+fn shared_end_flux_drives_native_transformer_current_with_reciprocal_polarity() {
+    // G1/G3: the independently known P1 active block plus one authored end
+    // path must govern the actual Kirchhoff step, not only a matrix accessor.
+    for sign in [1.0, -1.0] {
+        let (problem, mut profiles, boundary) = square(2e-4, 0.5);
+        for value in &mut profiles[1] {
+            *value *= sign;
+        }
+        let ends = EndWindingInductance::new(
+            vec![0.002, 0.003],
+            vec![EndWindingMode {
+                inductance_h: 0.02,
+                turns: vec![1.0, 2.0 * sign],
+            }],
+        )
+        .unwrap();
+        let winding = PlanarWindingBasis::new_with_end_modes(
+            &problem,
+            profiles,
+            &boundary,
+            ends.clone(),
+            winding_config(),
+            config(),
+            &mut || false,
+        )
+        .unwrap();
+        let l = [
+            1.0 / 28.0 + 0.002 + 0.02,
+            sign * (1.0 / 28.0 + 0.04),
+            sign * (1.0 / 28.0 + 0.04),
+            1.0 / 14.0 + 0.003 + 0.08,
+        ];
+        for (&actual, expected) in winding.inductance_h().iter().zip(l) {
+            near(actual, expected);
+        }
+        assert_eq!(winding.end_inductance_model(), &ends);
+        assert_eq!(winding.end_inductance_h(), &[0.002, 0.003]);
+        assert_eq!(winding.end_inductance_matrix_h(), ends.matrix_h());
+        let currents = [0.7, -0.2 * sign];
+        let flux = winding.flux_linkages_wb(&currents).unwrap();
+        let field = winding
+            .field_for_currents(&currents, &mut || false)
+            .unwrap();
+        let active_flux = winding
+            .pair_flux_linkages_wb(field.potential_wb_m(), &mut || false)
+            .unwrap();
+        let mode_current: f64 = currents[0] + 2.0 * sign * currents[1];
+        let end_energy = 0.5
+            * (0.002 * currents[0].powi(2)
+                + 0.003 * currents[1].powi(2)
+                + 0.02 * mode_current.powi(2));
+        near(
+            flux[0],
+            active_flux[0] + 0.002 * currents[0] + 0.02 * mode_current,
+        );
+        near(
+            flux[1],
+            active_flux[1] + 0.003 * currents[1] + 0.04 * sign * mode_current,
+        );
+        near(
+            0.5 * (currents[0] * flux[0] + currents[1] * flux[1]),
+            field.energy_j() + end_energy,
+        );
+
+        let circuit = winding
+            .into_circuit(graph(), vec![4, 2], &mut || false)
+            .unwrap();
+        let initial = circuit
+            .consistent_initial_state(&[1.0, 0.0], &[0.0], &[1.4], &mut || false)
+            .unwrap();
+        let (record, defect) = circuit.dae().step_audited(&initial, &[1.4], 0.01).unwrap();
+        let actual = circuit.currents_a(&record.x).unwrap();
+        let expected = expected_currents(&l, 0.01, 1.4);
+        near(actual[0], expected[0]);
+        near(actual[1], expected[1]);
+        assert!(
+            actual[1] * sign < 0.0,
+            "secondary must oppose increasing shared flux"
+        );
+        near(record.delta_h + record.dissipated, record.supplied);
+        assert!(defect < 1e-9);
+    }
+}
+
+#[test]
+fn shared_end_model_requires_original_winding_count_and_cancellable_preparation() {
+    let (problem, profiles, boundary) = square(2e-4, 0.5);
+    let ends = EndWindingInductance::new(vec![0.0], vec![]).unwrap();
+    assert!(
+        PlanarWindingBasis::new_with_end_modes(
+            &problem,
+            profiles.clone(),
+            &boundary,
+            ends,
+            winding_config(),
+            config(),
+            &mut || false,
+        )
+        .is_err()
+    );
+    let ends = EndWindingInductance::new(vec![0.0; 2], vec![]).unwrap();
+    assert!(matches!(
+        PlanarWindingBasis::new_with_end_modes(
+            &problem,
+            profiles,
+            &boundary,
+            ends,
+            winding_config(),
+            config(),
+            &mut || true,
+        ),
+        Err(WindingError::Magnetic(MagneticError::Cancelled))
+    ));
+}
+
+#[test]
 fn material_data_changes_actual_mutual_circuit_dynamics_and_source_heat_energy_balance() {
     let mut outcomes = Vec::new();
     for mu in [2e-4, 4e-4] {
@@ -371,7 +490,7 @@ fn dependent_windings_need_declared_physical_leakage_and_bad_bindings_refuse() {
             config(),
             &mut || false
         ),
-        Err(WindingError::Invalid(_))
+        Err(WindingError::End(EndWindingError::Invalid(_)))
     ));
     let mut exhausted = winding_config();
     exhausted.max_basis_values = 1;

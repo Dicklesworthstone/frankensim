@@ -1,5 +1,6 @@
 //! G1/G3 canonical material replacement in an actual mutually coupled circuit.
 use super::*;
+use fs_em::winding::end::{EndWindingInductance, EndWindingMode};
 use fs_em::winding::{circuit::WindingCircuit, ohmic::WindingMaterialRebindControls};
 use fs_phs::circuit::{Branch, CircuitGraph};
 
@@ -29,6 +30,81 @@ fn custom_circuit<'a>(
     .unwrap()
     .into_circuit(graph, branches, &mut || false)
     .unwrap()
+}
+
+#[test]
+fn material_replacement_cannot_change_shared_end_flux_with_unchanged_self_diagonals() {
+    // G3/G4: neither identical independent ends nor identical full diagonal
+    // entries establish the same signed mutual-flux model.
+    let electrical = ElectricalPropertyBasis::Resistivity;
+    let cards = [
+        card(2e-5, 0.0, 2e-4, electrical),
+        card(3e-5, 0.0, 2e-4, electrical),
+    ];
+    let (problem, profiles, boundary) = problem(&cards, electrical, 0.5);
+    let prepare = |sign| {
+        let ends = EndWindingInductance::new(
+            vec![0.002, 0.003],
+            vec![EndWindingMode {
+                inductance_h: 0.01,
+                turns: vec![1.0, sign],
+            }],
+        )
+        .unwrap();
+        PlanarWindingBasis::new_with_end_modes(
+            &problem,
+            profiles.clone(),
+            &boundary,
+            ends,
+            winding_config(),
+            linear(),
+            &mut || false,
+        )
+        .unwrap()
+        .into_circuit(graph(), vec![4, 2], &mut || false)
+        .unwrap()
+    };
+    let original = prepare(1.0);
+    let same = prepare(1.0);
+    let reversed = prepare(-1.0);
+    let state = OhmicWindingCircuit::new(
+        &original,
+        sources(&original, electrical),
+        0.0,
+        &[1.0, 0.25],
+        &[0.2],
+        &[1.4],
+        &mut || false,
+    )
+    .unwrap();
+    let before = state.state().to_vec();
+    let (retained, receipt) = state
+        .rebind_material_candidate(
+            &same,
+            sources(&same, electrical),
+            &[1.4],
+            rebind_controls(),
+            &mut || false,
+        )
+        .unwrap();
+    near(receipt.supplied_work_j, 0.0);
+    assert_eq!(retained.state(), state.state());
+    assert_eq!(
+        original.basis().end_inductance_h(),
+        reversed.basis().end_inductance_h()
+    );
+    assert!(matches!(
+        state.rebind_material_candidate(
+            &reversed,
+            sources(&reversed, electrical),
+            &[1.4],
+            rebind_controls(),
+            &mut || false
+        ),
+        Err(OhmicWindingError::Invalid(_))
+    ));
+    assert_eq!(state.state(), before);
+    assert_eq!(state.time_s(), 0.0);
 }
 
 #[test]

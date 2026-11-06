@@ -63,7 +63,7 @@ fn same_fixed_model(
         || ma.faces().len() != mb.faces().len()
         || a.prescribed_vertices() != b.prescribed_vertices()
         || a.winding_count() != b.winding_count()
-        || a.end_inductance_h() != b.end_inductance_h()
+        || a.end_inductance_model() != b.end_inductance_model()
         || before.branch_indices() != after.branch_indices()
         || before.flux_coordinates() != after.flux_coordinates()
         || before.graph().node_count != after.graph().node_count

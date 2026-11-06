@@ -10,14 +10,15 @@
 //! int(A_j.J_i dV) for EVERY ordered pair. Only the small reciprocal terminal
 //! matrix enters the existing mutual-inductance circuit assembler. Neither the
 //! field solver, magnetic inverse, Kirchhoff equations nor time step is copied.
-//! Full 3D end geometry is represented where meshed; any omitted series self
-//! inductance is explicit. No saturation, remanence, thermal refresh, moving
+//! Full 3D end geometry is represented where meshed; omitted self and shared
+//! end-flux storage is explicit. No saturation, remanence, thermal refresh, moving
 //! winding, skin/proximity current or unbounded-exterior accuracy is inferred.
 
 use super::{
     SpatialMagneticError, SpatialMagneticMaterial, SpatialVectorField, SpatialVectorMagnetostatics,
     VectorMagneticBoundary, VectorMagneticControls, apply, dot, poll,
 };
+use crate::winding::end::{EndWindingError, EndWindingInductance};
 use fs_phs::{
     StepRecord,
     circuit::{
@@ -43,6 +44,7 @@ pub struct SpatialWindingConfig {
 pub enum SpatialWindingError {
     Magnetic(SpatialMagneticError),
     Circuit(CircuitError),
+    End(EndWindingError),
     Invalid(&'static str),
     Pairing {
         source: usize,
@@ -65,6 +67,11 @@ impl From<SpatialMagneticError> for SpatialWindingError {
 impl From<CircuitError> for SpatialWindingError {
     fn from(e: CircuitError) -> Self {
         Self::Circuit(e)
+    }
+}
+impl From<EndWindingError> for SpatialWindingError {
+    fn from(e: EndWindingError) -> Self {
+        Self::End(e)
     }
 }
 type Result<T> = core::result::Result<T, SpatialWindingError>;
@@ -112,7 +119,7 @@ pub struct SpatialWindingBasis<'m> {
     loads_per_a: Vec<Vec<f64>>,
     active_inductance_h: Vec<f64>,
     inductance_h: Vec<f64>,
-    external_inductance_h: Vec<f64>,
+    end_model: EndWindingInductance,
     maximum_pairing_defect_h: f64,
     controls: VectorMagneticControls,
 }
@@ -129,6 +136,32 @@ impl<'m> SpatialWindingBasis<'m> {
         profiles_per_m2: Vec<Vec<[f64; 3]>>,
         boundary: VectorMagneticBoundary,
         external_inductance_h: Vec<f64>,
+        config: SpatialWindingConfig,
+        controls: VectorMagneticControls,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self> {
+        poll(cancelled)?;
+        Self::new_with_end_modes(
+            problem,
+            profiles_per_m2,
+            boundary,
+            EndWindingInductance::new(external_inductance_h, vec![])?,
+            config,
+            controls,
+            cancelled,
+        )
+    }
+
+    /// Prepare the original 3D fields with explicit passive shared end flux.
+    /// Signed mode participation follows the same physical terminal orientation
+    /// as the distributed profiles. Include only flux omitted by the mesh;
+    /// the original factors retain cancellation in end linkage and energy.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_end_modes(
+        problem: &'m SpatialVectorMagnetostatics,
+        profiles_per_m2: Vec<Vec<[f64; 3]>>,
+        boundary: VectorMagneticBoundary,
+        end_model: EndWindingInductance,
         config: SpatialWindingConfig,
         controls: VectorMagneticControls,
         cancelled: &mut impl FnMut() -> bool,
@@ -152,10 +185,7 @@ impl<'m> SpatialWindingBasis<'m> {
             || count > config.max_windings
             || config.max_windings > 16
             || values.is_none_or(|v| v > config.max_basis_values)
-            || external_inductance_h.len() != count
-            || external_inductance_h
-                .iter()
-                .any(|v| !v.is_finite() || *v < 0.0)
+            || end_model.winding_count() != count
             || !config.pairing_tolerance_h.is_finite()
             || config.pairing_tolerance_h < 0.0
             || !controls.current_tolerance_a.is_finite()
@@ -235,8 +265,10 @@ impl<'m> SpatialWindingBasis<'m> {
             }
         }
         let mut inductance_h = active_inductance_h.clone();
-        for (i, &external) in external_inductance_h.iter().enumerate() {
-            inductance_h[i * count + i] = finite(inductance_h[i * count + i] + external)?;
+        for (total, &end) in inductance_h.iter_mut().zip(end_model.matrix_h()) {
+            *total = finite(*total + end)?;
+        }
+        for i in 0..count {
             if inductance_h[i * count + i] <= 0.0 {
                 return Err(invalid(
                     "winding has no represented positive magnetic energy",
@@ -251,7 +283,7 @@ impl<'m> SpatialWindingBasis<'m> {
             loads_per_a,
             active_inductance_h,
             inductance_h,
-            external_inductance_h,
+            end_model,
             maximum_pairing_defect_h,
             controls,
         })
@@ -276,7 +308,15 @@ impl<'m> SpatialWindingBasis<'m> {
         &self.inductance_h
     }
     pub fn external_inductance_h(&self) -> &[f64] {
-        &self.external_inductance_h
+        self.end_model.diagonal_h()
+    }
+    /// Complete symmetric row-major unresolved end inductance [H].
+    pub fn end_inductance_matrix_h(&self) -> &[f64] {
+        self.end_model.matrix_h()
+    }
+    /// Original passive end factors, not a refit of the total field matrix.
+    pub fn end_inductance_model(&self) -> &EndWindingInductance {
+        &self.end_model
     }
     pub const fn maximum_pairing_defect_h(&self) -> f64 {
         self.maximum_pairing_defect_h
@@ -290,14 +330,18 @@ impl<'m> SpatialWindingBasis<'m> {
     }
     pub fn flux_linkages_wb(&self, currents: &[f64]) -> Result<Vec<f64>> {
         self.admit_currents(currents)?;
-        self.inductance_h
-            .chunks(self.winding_count())
-            .map(|row| {
-                row.iter()
-                    .zip(currents)
-                    .try_fold(0.0, |sum, (&l, &i)| finite(l.mul_add(i, sum)))
-            })
-            .collect()
+        let mut flux = self.end_model.flux_linkages_wb(currents)?;
+        for (value, row) in flux
+            .iter_mut()
+            .zip(self.active_inductance_h.chunks(self.winding_count()))
+        {
+            let active = row
+                .iter()
+                .zip(currents)
+                .try_fold(0.0, |sum, (&l, &i)| finite(l.mul_add(i, sum)))?;
+            *value = finite(active + *value)?;
+        }
+        Ok(flux)
     }
     /// Exact original Whitney source functional on a complete edge potential.
     /// This diagnoses gauge invariance; it does not admit an arbitrary potential
@@ -440,10 +484,7 @@ impl<'m> SpatialWindingBasis<'m> {
             ));
         }
         let flux_linkages_wb = self.flux_linkages_wb(currents)?;
-        let mut external_energy_j = 0.0;
-        for (&l, &i) in self.external_inductance_h.iter().zip(currents) {
-            external_energy_j = finite((0.5 * l * i).mul_add(i, external_energy_j))?;
-        }
+        let external_energy_j = self.end_model.stored_energy_j(currents)?;
         let source_pairing_j = pairing(&potential_wb, &loads, cancelled)?;
         let stored_energy_j = finite(field_energy_j + external_energy_j)?;
         let terminal_energy_j = finite(0.5 * pairing(currents, &flux_linkages_wb, cancelled)?)?;

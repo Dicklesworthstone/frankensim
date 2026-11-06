@@ -12,6 +12,7 @@ use fs_em::{
     winding::{
         PlanarWindingBasis, WindingConfig, WindingError,
         circuit::WindingCircuit,
+        end::{EndWindingInductance, EndWindingMode},
         ohmic::{
             OhmicWindingCircuit, OhmicWindingControls, OhmicWindingError, WindingConductor,
             WindingMaterialRebindControls,
@@ -200,6 +201,62 @@ fn basis<'a>(
         &mut || false,
     )
     .unwrap()
+}
+
+#[test]
+fn shared_end_modes_leave_permanent_flux_and_recoil_field_with_the_original_owner() {
+    let problem = problem(Some(0.8), 1e6);
+    let profiles = vec![profile(PROFILE), profile(-0.5 * PROFILE)];
+    let diagonal = vec![0.002, 0.003];
+    let reference = basis(&problem, profiles.clone(), diagonal.clone());
+    let ends = EndWindingInductance::new(
+        diagonal,
+        vec![EndWindingMode {
+            inductance_h: 0.01,
+            turns: vec![1.0, -2.0],
+        }],
+    )
+    .unwrap();
+    let winding = PlanarWindingBasis::new_with_fixed_remanence_and_end_modes(
+        &problem,
+        profiles,
+        &BOUNDARY,
+        ends,
+        winding_config(),
+        1e-9,
+        config(),
+        &mut || false,
+    )
+    .unwrap();
+    assert_eq!(
+        winding.bias_flux_linkages_wb(),
+        reference.bias_flux_linkages_wb()
+    );
+    assert_eq!(winding.bias_energy_j(), reference.bias_energy_j());
+    let currents = [0.2, -0.1];
+    let before = reference
+        .field_for_currents(&currents, &mut || false)
+        .unwrap();
+    let after = winding
+        .field_for_currents(&currents, &mut || false)
+        .unwrap();
+    assert_eq!(
+        after.magnetic_flux_density_t(),
+        before.magnetic_flux_density_t()
+    );
+    let flux = winding.flux_linkages_wb(&currents).unwrap();
+    let original = reference.flux_linkages_wb(&currents).unwrap();
+    near(
+        flux[0] - original[0],
+        0.01 * (currents[0] - 2.0 * currents[1]),
+    );
+    near(
+        flux[1] - original[1],
+        -0.02 * (currents[0] - 2.0 * currents[1]),
+    );
+    let recovered = winding.currents_a(&flux).unwrap();
+    near(recovered[0], currents[0]);
+    near(recovered[1], currents[1]);
 }
 fn graph() -> CircuitGraph {
     CircuitGraph {

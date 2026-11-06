@@ -1,5 +1,29 @@
 # fs-em contract
 
+## Shared end flux in linear planar and three-dimensional winding bases
+
+`PlanarWindingBasis::new_with_end_modes`, its fixed-remanence counterpart and
+`SpatialWindingBasis::new_with_end_modes` retain the original
+`EndWindingInductance`. The resolved field Gram matrix and the complete passive
+end matrix supply the native circuit's self/mutual block. End modes represent
+only flux outside the resolved geometry; they cannot change the mesh fields,
+permanent-flux offset, source admission or recoil operating envelope.
+
+Physical linkage evaluates the original signed end factors separately from the
+active field matrix, retaining cancellation of shared flux. Three-dimensional
+field reconstruction also evaluates external stored energy through those factors.
+Legacy constructors retain independent diagonal ends; their diagonal accessors
+exclude shared-mode self terms. The complete matrix and original mode model are
+separately inspectable. Singular terminal blocks still obey the original circuit
+admission; no numerical leakage or regularization is introduced.
+
+Planar Ohmic material replacement requires the complete original end model to
+match. Equal independent diagonals or equal matrix diagonals cannot authorize a
+change in mutual-flux orientation. G1/G3/G4 regression cases in `winding_circuit`,
+`spatial_winding`, `winding_permanent` and `winding_ohmic` cover independent
+two-coil evolution and power balance, polarity reversal, field/terminal energy,
+unchanged permanent bias, full-model replacement and cancelled preparation.
+
 ## Spatial hysteresis with resolved eddy-current diffusion
 
 The default-off `magnetic-hysteresis` feature also exposes

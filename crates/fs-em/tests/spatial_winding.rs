@@ -10,6 +10,7 @@ use fs_em::spatial::{
         winding::{SpatialWindingBasis, SpatialWindingConfig, SpatialWindingError},
     },
 };
+use fs_em::winding::end::{EndWindingInductance, EndWindingMode};
 use fs_feec::weighted::WeightedAssemblyLimits;
 use fs_phs::circuit::{Branch, CircuitGraph};
 use fs_solver::CheckedCgConfig;
@@ -301,6 +302,96 @@ fn graph() -> CircuitGraph {
         ],
         transformers: vec![],
     }
+}
+
+#[test]
+fn shared_3d_end_flux_preserves_field_energy_and_changes_native_circuit_evolution() {
+    // G1/G3: field geometry is identical; only explicitly omitted magnetic
+    // flux changes. The circuit must see its full signed two-coil matrix.
+    let problem = cube(2.0);
+    let reference = basis(&problem, profiles(&problem), vec![0.0; 2]);
+    let ends = EndWindingInductance::new(
+        vec![0.02, 0.03],
+        vec![EndWindingMode {
+            inductance_h: 0.04,
+            turns: vec![1.0, -2.0],
+        }],
+    )
+    .unwrap();
+    let winding = SpatialWindingBasis::new_with_end_modes(
+        &problem,
+        profiles(&problem),
+        boundary(&problem),
+        ends.clone(),
+        config(),
+        controls(),
+        &mut || false,
+    )
+    .unwrap();
+    assert_eq!(
+        winding.active_inductance_h(),
+        reference.active_inductance_h()
+    );
+    assert_eq!(winding.external_inductance_h(), &[0.02, 0.03]);
+    assert_eq!(winding.end_inductance_model(), &ends);
+    let added = [0.06, -0.08, -0.08, 0.19];
+    let l: Vec<_> = reference
+        .active_inductance_h()
+        .iter()
+        .zip(added)
+        .map(|(&field, end)| field + end)
+        .collect();
+    for (&actual, &expected) in winding.inductance_h().iter().zip(&l) {
+        near(actual, expected);
+    }
+    let currents: [f64; 2] = [0.7, -0.2];
+    let field = winding
+        .field_for_currents(&currents, &mut || false)
+        .unwrap();
+    let original = reference
+        .field_for_currents(&currents, &mut || false)
+        .unwrap();
+    assert_eq!(field.flux_density_t, original.flux_density_t);
+    let end_energy = 0.5
+        * (0.02 * currents[0].powi(2)
+            + 0.03 * currents[1].powi(2)
+            + 0.04 * (currents[0] - 2.0 * currents[1]).powi(2));
+    near(field.external_energy_j, end_energy);
+    near(field.stored_energy_j, original.field_energy_j + end_energy);
+    near(field.energy_residual_j, 0.0);
+    for i in 0..2 {
+        near(
+            field.flux_linkages_wb[i],
+            l[2 * i] * currents[0] + l[2 * i + 1] * currents[1],
+        );
+    }
+
+    let circuit = winding
+        .into_circuit(graph(), vec![5, 2], &mut || false)
+        .unwrap();
+    let inputs = [1.3, 17.0, -0.6];
+    let initial = circuit
+        .consistent_initial_state(&currents, &[0.08], &[0.06], &inputs, &mut || false)
+        .unwrap();
+    let dt = 0.005;
+    let a = l[0] + 0.5 * dt * 1.1;
+    let d = l[3] + 0.5 * dt * 0.7;
+    let rhs = [
+        (l[0] - 0.5 * dt * 1.1) * currents[0] + l[1] * currents[1] - dt * 0.6,
+        l[2] * currents[0] + (l[3] - 0.5 * dt * 0.7) * currents[1] + dt * 1.3,
+    ];
+    let determinant = a * d - l[1] * l[2];
+    let expected = [
+        (d * rhs[0] - l[1] * rhs[1]) / determinant,
+        (a * rhs[1] - l[2] * rhs[0]) / determinant,
+    ];
+    let (step, _) = circuit
+        .step_audited(&initial, &inputs, dt, &mut || false)
+        .unwrap();
+    let actual = circuit.currents_a(&step.x).unwrap();
+    near(actual[0], expected[0]);
+    near(actual[1], expected[1]);
+    near(step.delta_h + step.dissipated, step.supplied);
 }
 
 #[test]

@@ -6,15 +6,15 @@
 //! density is flux LINKAGE [Wb], including the problem's actual axial length.
 //! Each profile must balance outgoing and return current on EVERY connected
 //! cross-section component (each has its own constant-potential gauge).
-//! End closure is outside this 2-D model: callers explicitly supply nonnegative
-//! series end/leakage self-inductances [H], including zero when neglected.
+//! End closure is outside this 2-D model: callers explicitly supply passive
+//! self-inductances and signed shared end-flux modes, including zero when neglected.
 //!
 //! Unit-current solves reuse the existing FEEC operator. The symmetric magnetic
 //! energy Gram matrix supplies active-section self/mutual inductance. Every
 //! entry is compared with the independently evaluated A.J_unit pairing before
 //! publication; the residual is an estimate, not a discretization certificate.
 //! Geometry/material state stays fixed. No moving winding, nonlinear magnetic
-//! law, skin/proximity loss, end mutual coupling or temperature-work law is
+//! law, skin/proximity loss or temperature-work law is
 //! inferred. The optional `ohmic` owner derives intrinsic series resistance
 //! from the same spatial material/profile data and retains explicit graph losses.
 
@@ -28,6 +28,7 @@ pub mod nonlinear;
 /// Spatial material-derived winding resistance and native-circuit Joule heat.
 pub mod ohmic;
 
+use self::end::{EndWindingError, EndWindingInductance};
 use crate::{
     planar::{MagneticError, PlanarField, PlanarMagnetostatics, poll},
     transfer::{CellSample, PlanarFrame},
@@ -61,6 +62,8 @@ pub struct WindingConfig {
 pub enum WindingError {
     /// Existing material/FEEC/field-solve refusal.
     Magnetic(MagneticError),
+    /// Invalid or unrepresentable original end-flux storage.
+    End(EndWindingError),
     /// Invalid winding, correspondence, limits or unrepresentable arithmetic.
     Invalid(&'static str),
     /// Unit-field energy and original source pairing do not agree.
@@ -90,6 +93,11 @@ impl std::error::Error for WindingError {}
 impl From<MagneticError> for WindingError {
     fn from(error: MagneticError) -> Self {
         Self::Magnetic(error)
+    }
+}
+impl From<EndWindingError> for WindingError {
+    fn from(error: EndWindingError) -> Self {
+        Self::End(error)
     }
 }
 impl From<fs_phs::circuit::CircuitError> for WindingError {
@@ -130,7 +138,7 @@ pub struct PlanarWindingBasis<'a> {
     active_inductance_h: Vec<f64>,
     inductance_h: Vec<f64>,
     inverse_inductance_per_h: Vec<f64>,
-    end_inductance_h: Vec<f64>,
+    end_model: EndWindingInductance,
     net_turns_by_component: Vec<Vec<f64>>,
     maximum_pairing_defect_h: f64,
     inverse_residual: f64,
@@ -153,11 +161,36 @@ impl<'a> PlanarWindingBasis<'a> {
         linear: CheckedCgConfig,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Self, WindingError> {
+        poll(cancelled)?;
+        Self::new_with_end_modes(
+            problem,
+            profiles_per_m2,
+            prescribed_vertices,
+            EndWindingInductance::new(end_inductance_h, vec![])?,
+            config,
+            linear,
+            cancelled,
+        )
+    }
+
+    /// Extract the same unit fields with explicitly authored shared end flux.
+    /// Only flux outside the resolved section belongs in `end_model`. Its signed
+    /// factors supply the full terminal matrix, linkage and passive end energy;
+    /// they do not alter the resolved fields or invent series regularization.
+    pub fn new_with_end_modes(
+        problem: &'a PlanarMagnetostatics,
+        profiles_per_m2: Vec<Vec<f64>>,
+        prescribed_vertices: &[usize],
+        end_model: EndWindingInductance,
+        config: WindingConfig,
+        linear: CheckedCgConfig,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self, WindingError> {
         Self::new_impl(
             problem,
             profiles_per_m2,
             prescribed_vertices,
-            end_inductance_h,
+            end_model,
             config,
             None,
             linear,
@@ -184,6 +217,33 @@ impl<'a> PlanarWindingBasis<'a> {
         linear: CheckedCgConfig,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Self, WindingError> {
+        poll(cancelled)?;
+        Self::new_with_fixed_remanence_and_end_modes(
+            problem,
+            profiles_per_m2,
+            prescribed_vertices,
+            EndWindingInductance::new(end_inductance_h, vec![])?,
+            config,
+            bias_stationarity_tolerance_wb,
+            linear,
+            cancelled,
+        )
+    }
+
+    /// Fixed-remanence affine response with the same passive shared end model.
+    /// End modes carry current-dependent flux only; the original source-admitted
+    /// permanent-field offset and its operating envelopes are unchanged.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_fixed_remanence_and_end_modes(
+        problem: &'a PlanarMagnetostatics,
+        profiles_per_m2: Vec<Vec<f64>>,
+        prescribed_vertices: &[usize],
+        end_model: EndWindingInductance,
+        config: WindingConfig,
+        bias_stationarity_tolerance_wb: f64,
+        linear: CheckedCgConfig,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self, WindingError> {
         if !bias_stationarity_tolerance_wb.is_finite() || bias_stationarity_tolerance_wb < 0.0 {
             return Err(WindingError::Invalid(
                 "fixed-remanence stationarity allowance must be finite and nonnegative",
@@ -193,7 +253,7 @@ impl<'a> PlanarWindingBasis<'a> {
             problem,
             profiles_per_m2,
             prescribed_vertices,
-            end_inductance_h,
+            end_model,
             config,
             Some(bias_stationarity_tolerance_wb),
             linear,
@@ -206,7 +266,7 @@ impl<'a> PlanarWindingBasis<'a> {
         problem: &'a PlanarMagnetostatics,
         profiles_per_m2: Vec<Vec<f64>>,
         prescribed_vertices: &[usize],
-        end_inductance_h: Vec<f64>,
+        end_model: EndWindingInductance,
         config: WindingConfig,
         bias_stationarity_tolerance_wb: Option<f64>,
         linear: CheckedCgConfig,
@@ -246,7 +306,7 @@ impl<'a> PlanarWindingBasis<'a> {
             || config.max_windings == 0
             || config.max_windings > MAX_WINDINGS
             || values.is_none_or(|n| n > config.max_basis_values)
-            || end_inductance_h.len() != count
+            || end_model.winding_count() != count
             || prescribed_vertices.len() > vertices
             || !config.pairing_tolerance_h.is_finite()
             || config.pairing_tolerance_h < 0.0
@@ -255,15 +315,17 @@ impl<'a> PlanarWindingBasis<'a> {
             || !(config.inverse_residual_tolerance.is_finite()
                 && config.inverse_residual_tolerance > 0.0
                 && config.inverse_residual_tolerance < 1.0)
-            || end_inductance_h.iter().any(|v| !v.is_finite() || *v < 0.0)
         {
             return Err(WindingError::Invalid(
                 "winding count, storage, end model or tolerances are invalid",
             ));
         }
         let net_turns_by_component = admit_profiles(
-            problem.mesh(), &profiles_per_m2, thickness_m,
-            config.current_balance_tolerance_turns, cancelled,
+            problem.mesh(),
+            &profiles_per_m2,
+            thickness_m,
+            config.current_balance_tolerance_turns,
+            cancelled,
         )?;
         let boundary: Vec<_> = prescribed_vertices.iter().map(|&v| (v, 0.0)).collect();
         let bias_field = if has_bias {
@@ -357,9 +419,8 @@ impl<'a> PlanarWindingBasis<'a> {
             }
         }
         let mut inductance_h = active.clone();
-        for i in 0..count {
-            inductance_h[i * count + i] =
-                finite(inductance_h[i * count + i] + end_inductance_h[i])?;
+        for (total, &end) in inductance_h.iter_mut().zip(end_model.matrix_h()) {
+            *total = finite(*total + end)?;
         }
         let (inverse_inductance_per_h, inverse_residual) = inverse(
             &inductance_h,
@@ -381,7 +442,7 @@ impl<'a> PlanarWindingBasis<'a> {
             active_inductance_h: active,
             inductance_h,
             inverse_inductance_per_h,
-            end_inductance_h,
+            end_model,
             net_turns_by_component,
             maximum_pairing_defect_h,
             inverse_residual,
@@ -431,7 +492,7 @@ impl<'a> PlanarWindingBasis<'a> {
     pub fn active_inductance_h(&self) -> &[f64] {
         &self.active_inductance_h
     }
-    /// Total row-major inductance [H], including explicit end/leakage diagonals.
+    /// Total row-major inductance [H], including explicit self/mutual end flux.
     pub fn inductance_h(&self) -> &[f64] {
         &self.inductance_h
     }
@@ -439,9 +500,17 @@ impl<'a> PlanarWindingBasis<'a> {
     pub fn inverse_inductance_per_h(&self) -> &[f64] {
         &self.inverse_inductance_per_h
     }
-    /// Declared series end/leakage self-inductance [H], not a fitted field result.
+    /// Independent series end self-inductance [H], before shared-mode terms.
     pub fn end_inductance_h(&self) -> &[f64] {
-        &self.end_inductance_h
+        self.end_model.diagonal_h()
+    }
+    /// Complete symmetric row-major end inductance [H].
+    pub fn end_inductance_matrix_h(&self) -> &[f64] {
+        self.end_model.matrix_h()
+    }
+    /// Original passive factors, retained for linkage, energy and model identity.
+    pub fn end_inductance_model(&self) -> &EndWindingInductance {
+        &self.end_model
     }
     /// Measured signed closure residual [turns] for each winding and connected
     /// component. Components are ordered by their first mesh vertex.
@@ -471,7 +540,18 @@ impl<'a> PlanarWindingBasis<'a> {
         &self,
         currents_a: &[f64],
     ) -> Result<Vec<f64>, WindingError> {
-        multiply(&self.inductance_h, currents_a, self.winding_count())
+        let mut flux = self.end_model.flux_linkages_wb(currents_a)?;
+        for (value, row) in flux
+            .iter_mut()
+            .zip(self.active_inductance_h.chunks(self.winding_count()))
+        {
+            let active = row
+                .iter()
+                .zip(currents_a)
+                .try_fold(0.0, |sum, (&l, &i)| finite(l.mul_add(i, sum)))?;
+            *value = finite(active + *value)?;
+        }
+        Ok(flux)
     }
     /// Terminal current i=L^-1*(lambda-lambda0) [A] from TOTAL physical linkage.
     pub fn currents_a(&self, flux_linkages_wb: &[f64]) -> Result<Vec<f64>, WindingError> {
@@ -731,7 +811,9 @@ fn admit_profiles(
     for profile in profiles {
         poll(cancelled)?;
         if profile.len() != mesh.faces().len() || profile.iter().any(|v| !v.is_finite()) {
-            return Err(WindingError::Invalid("one finite current density per triangle is required"));
+            return Err(WindingError::Invalid(
+                "one finite current density per triangle is required",
+            ));
         }
         let mut net = vec![0.0; component_count];
         let mut positive = vec![0.0; component_count];
@@ -741,17 +823,25 @@ fn admit_profiles(
             let component = components[mesh.faces()[cell][0] as usize];
             let turns = finite(density * (mesh.face_measure(cell).unwrap() / thickness_m))?;
             net[component] = finite(net[component] + turns)?;
-            if turns > 0.0 { positive[component] = finite(positive[component] + turns)?; }
-            if turns < 0.0 { negative[component] = finite(negative[component] - turns)?; }
+            if turns > 0.0 {
+                positive[component] = finite(positive[component] + turns)?;
+            }
+            if turns < 0.0 {
+                negative[component] = finite(negative[component] - turns)?;
+            }
         }
         if positive.iter().all(|&v| v == 0.0) {
-            return Err(WindingError::Invalid("winding needs nonzero outgoing and return current"));
+            return Err(WindingError::Invalid(
+                "winding needs nonzero outgoing and return current",
+            ));
         }
         for component in 0..component_count {
             if (positive[component] > 0.0) != (negative[component] > 0.0)
                 || net[component].abs() > current_balance_tolerance_turns
             {
-                return Err(WindingError::Invalid("unit current must close separately on every connected mesh component"));
+                return Err(WindingError::Invalid(
+                    "unit current must close separately on every connected mesh component",
+                ));
             }
         }
         result.push(net);
