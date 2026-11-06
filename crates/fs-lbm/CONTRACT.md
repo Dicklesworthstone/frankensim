@@ -14251,3 +14251,41 @@ reference, the inviscid limit, conservation, policy/call rollback and domain
 stops. Material regressions keep the original dynamic/kinematic viscosity
 sources and compare the same native trajectory. Model restrictions remain
 axisymmetric, periodic, slender, Newtonian and pre-pinch-off.
+
+## Native free-surface loads on submerged solid objects
+
+`FreeSurface3::step_with_submerged_solid_loads` advances the original VOF
+owner once and returns per-object pressure and viscous reaction from its
+actual outgoing/reflected populations. `submerged_solid_load_candidate`
+retains the same result unpublished for coupled acceptance. Each object is
+a selected group of original permanently solid tiles; several objects share
+one fluid step. Native `StationaryWallMomentum3` carries the impulse on each
+object and its moment at actual halfway links about the declared origin.
+The liquid receives the opposite impulse and angular impulse. Stationary
+boundaries do zero mechanical work; no caloric deposition is inferred.
+
+Every exposed D3Q19 link must remain surrounded by full liquid before and
+after the step. Gas, interface cells, another touching object, domain-wall
+contact, duplicate tiles and missing solid geometry refuse. Complete closed
+surfaces cancel a uniform pressure datum, so resultant force and torque need
+no invented absolute pressure. Canonical compensated sums retain small
+buoyancy and drag contributions against the opposing background pressures.
+Explicit tile/link and relative mass-defect bounds, physical low-Mach checks,
+finite loads and cancellation complete before candidate publication.
+
+The material entries retain the original source, dx/dt scaling and scenario
+speed bound, and finish SI force/torque and mass admission before committing
+the same native candidate. Auxiliary reaction storage is proportional to
+selected tiles and objects; no second collision or population buffer is added
+by the measurement. The ordinary unobserved stream keeps its arithmetic.
+
+Five native and two material regression definitions cover Archimedes force,
+center-of-buoyancy torque, uniform-pressure cancellation, analytical initial
+drag, continued free-surface trajectory parity, multiple objects and joined
+tile assemblies, shifted origins, SI scaling/source identity, and refused
+or cancelled publication. All seven changed Rust files passed rustfmt parsing;
+the four new source/test files were formatted. Full crate compilation and
+execution remain outstanding because DSR/RCH are unavailable and the shared
+filesystem is full. These are reaction ports for fixed, fully flooded voxel
+geometry, not complete MR69 moving-boundary coupling, partial-wetting geometry,
+body inertia, finite-speed piston work or a fluid kinetic/thermal energy certificate.

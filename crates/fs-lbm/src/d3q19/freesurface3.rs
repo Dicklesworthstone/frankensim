@@ -68,6 +68,8 @@ mod impulse;
 pub use conversion_momentum::ConversionMomentumReport3;
 mod geometry;
 mod motion;
+mod solid_loads;
+pub use solid_loads::{SubmergedSolid3, SubmergedSolidLoadControls3, SubmergedSolidLoads3};
 pub use motion::{
     PlanarPistonRemapReport3, PlanarRigidWallMotion3, PlanarRigidWallReport3,
     PlanarWallFaceExchange3, PlanarWallFieldControls3, PlanarWallFieldReport3,
@@ -1245,10 +1247,22 @@ impl FreeSurface3 {
     fn step_inner_with_wall(
         &mut self,
         gate: &CancelGate,
+        transport: Option<&mut MassTransport3>,
+        local_tau: Option<&BTreeMap<(u64, usize), f64>>,
+        gas_pressure: Option<&pressure::GasPressure3<'_>>,
+        moving_wall: Option<&mut motion::PlanarWallStep3>,
+    ) -> Result<(), FreeSurfaceError3> {
+        self.step_inner_with_boundaries(gate, transport, local_tau, gas_pressure, moving_wall, None)
+    }
+
+    fn step_inner_with_boundaries(
+        &mut self,
+        gate: &CancelGate,
         mut transport: Option<&mut MassTransport3>,
         local_tau: Option<&BTreeMap<(u64, usize), f64>>,
         gas_pressure: Option<&pressure::GasPressure3<'_>>,
         mut moving_wall: Option<&mut motion::PlanarWallStep3>,
+        mut solid_loads: Option<&mut solid_loads::SolidLoadStep3<'_>>,
     ) -> Result<(), FreeSurfaceError3> {
         check_cancel(gate)?;
         self.admit_body_acceleration_mode()?;
@@ -1426,10 +1440,14 @@ impl FreeSurface3 {
                         match self.grid.resolve_source(sx, sy, sz) {
                         None => {
                             let outgoing = post[&key][lane][OPP3[q]];
-                            match moving_wall.as_deref_mut() {
+                            let incoming = match moving_wall.as_deref_mut() {
                                 Some(wall) => wall.reflect([sx, sy, sz], q, rho_pre, outgoing)?,
                                 None => outgoing,
+                            };
+                            if let Some(loads) = solid_loads.as_deref_mut() {
+                                loads.record([cx, cy, cz], [sx, sy, sz], q, incoming, outgoing)?;
                             }
+                            incoming
                         },
                         Some((src_slot, src_lane)) => {
                             let src_key = self.grid.active_keys()[src_slot];

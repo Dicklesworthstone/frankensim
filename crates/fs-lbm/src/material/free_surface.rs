@@ -41,6 +41,9 @@ pub use two_dimensional::{
 };
 mod pressure;
 pub use pressure::MaterialGasPressureLink3;
+mod solid_loads;
+pub use solid_loads::{MaterialSubmergedSolid3, MaterialSubmergedSolidLoad3,
+    MaterialSubmergedSolidLoads3, SubmergedSolidLoadControls3};
 mod motion;
 pub use motion::{
     MaterialPlanarRigidWallMotion3, MaterialPlanarRigidWallReport3,
