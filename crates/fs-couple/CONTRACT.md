@@ -1565,6 +1565,32 @@ enthalpy, an independent two-capacity heat oracle after export, unchanged
 mechanical history, no duplicate or retroactive removal, original cumulative
 bounds, and transactional patch/registration/cancellation refusals.
 
+### Adaptive prescribed sliding with hardness, wear and finite heat
+
+`PlasticSlidingHeatContact::march_prescribed_velocity_candidate` refines a
+constant actual per-cell velocity span with the original normal boundary held.
+A full interval and two native half intervals start from the same accepted
+history; only the half-step candidates and their original source payloads may
+advance. Componentwise differences control thermal-cell energy, interface
+temperature, pressure, approach, indentation, each body's recession, accumulated
+slip and physical work. Relative scales use changes from the interval origin.
+No extrapolated material, contact or thermal state is manufactured.
+
+The adapter uses zero tangential body compliance. Subdividing a released body
+displacement while retaining nonzero compliance would change the motion problem
+and is not supported. Whole-span contact, thermal and combined work gates are
+independent of per-step residual tolerances and substep count. Compensated sums
+use native incremental storage and preserve signed parameter work, friction,
+direct plastic heat and nonthermal plastic work separately. They do not supply
+a full body thermodynamic or passivity theorem.
+
+Attempt and accepted-receipt budgets bound work and storage. Source, numerical,
+coverage, inventory or cancellation refusal publishes no partial span, including
+after private accepted intervals. Native failures remain explicit; only excessive
+coarse/fine defects trigger refinement. No thermal event or material export is
+consumed, and cumulative removal limits/checkpoints survive. The defect is a
+local estimate for the first-order coupled split, not a global error bound.
+
 ### Spatial magnetic hysteresis and finite enthalpy
 
 The opt-in `hysteretic-eddy-heating` feature connects the original

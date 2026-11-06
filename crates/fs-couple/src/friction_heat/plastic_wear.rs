@@ -7,6 +7,8 @@
 //! re-equilibrates the worn normal contact. Thermal coefficients are implicit
 //! endpoint values; wear geometry uses the native beginning-pressure split and
 //! requires physical step refinement. This is not a fully implicit wear solve.
+//! `adaptive` supplies full-versus-two-half-step refinement for prescribed actual
+//! sliding velocities, retaining only original native half-step candidates.
 //!
 //! Two uniform bulk temperatures and one interface temperature cover the native
 //! active cells. The default requires a fixed active footprint. The evolving-area
@@ -35,6 +37,9 @@
 
 /// Conservative export of actual worn mass and its original enthalpy.
 pub mod removal;
+
+/// Adaptive time refinement for prescribed actual sliding velocities.
+pub mod adaptive;
 
 use core::convert::Infallible;
 use std::cell::Cell;

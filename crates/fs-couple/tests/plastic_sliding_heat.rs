@@ -8,6 +8,9 @@ mod area;
 #[path = "plastic_sliding_heat/removal.rs"]
 mod wear_export;
 
+#[path = "plastic_sliding_heat/adaptive.rs"]
+mod adaptive;
+
 #[path = "../../fs-contact/tests/source_point/common.rs"]
 mod source_common;
 
