@@ -246,6 +246,30 @@ thermal and circuit state unchanged. These whole-consumer tests were not
 executed in this change because the real asupersync dependency build exceeded
 the available memory; numerical-leaf results do not substitute for them.
 
+## Source-dependent finite-solid heat capacity and adiabatic waves
+
+`FiniteSolidMaterial::adiabatic_acoustic_state_with_coefficients` and the
+corresponding `ConservativeThermalField` element view retain the original
+Neo-Hookean E(T)/nu(T) source derivative owner alongside the existing caloric
+chart, density, expansion path and manufacturing reference. The selected
+model, complete fixed context, card and actual temperature must match. These
+are the same prepared mechanical states used by the ordinary fixed-coefficient
+path; the added source capability supplies their thermal derivatives.
+
+The shared native thermoelastic potential combines coefficient curvature,
+expansion derivatives and their mixed terms. Its `-T Psi_TT` enters total
+fixed-F capacity once, together with the original source capacity at the
+actual state and reference density. The full beta=dP/dT and positive total
+capacity then feed the existing compressible adiabatic acoustic tensor,
+signed modes and energy velocities. Original source receipts remain borrowed
+by the result. Nonpositive capacity, foreign evidence, unsupported smooth
+neighborhoods and unresolved states refuse.
+
+The original stress-free zero-pressure caloric convention remains explicit.
+This is a local reversible full-compressible response; constrained mixed or
+incompressible projections, finite-temperature parameter evolution, heat
+transport and attenuation require their existing separate owners.
+
 ## Circuit-driven spatial hysteresis and finite heat
 
 The `hysteretic-eddy-heating` feature is an alias of `magnetic-hysteresis`;

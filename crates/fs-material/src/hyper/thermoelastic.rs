@@ -2,8 +2,9 @@
 //!
 //! With H=G(T)^-1, Fe=F H and Jg=det(G), the original-volume Helmholtz
 //! potential is Psi(F,T)=Jg We(Fe). Native energy, Piola stress and Hessian
-//! supply its exact chain rule. All elastic coefficients are held fixed;
-//! the declared G, dG/dT and d2G/dT2 own the temperature dependence.
+//! supply its exact chain rule. The ordinary entry holds elastic coefficients
+//! fixed; the source child additionally carries the original Neo-Hookean
+//! coefficient derivatives without replacing this natural-map chain rule.
 //!
 //! Mechanical entropy is -Psi_T, internal energy is Psi-T Psi_T, and the
 //! mechanical contribution to fixed-F heat capacity is -T Psi_TT. These
@@ -21,6 +22,9 @@ use super::acoustic::HyperelasticAcousticState;
 use super::reference::ReferenceDeformation;
 use super::{Hyperelastic, det3};
 use crate::MaterialError;
+
+/// Original elastic-source derivatives for the admitted Neo-Hookean model.
+pub mod source;
 
 const IDENTITY: [f64; 9] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
 
@@ -46,6 +50,15 @@ fn trace(a: &[f64; 9]) -> f64 {
 }
 fn dot(a: &[f64; 9], b: &[f64; 9]) -> f64 {
     a.iter().zip(b).fold(0.0, |sum, (x, y)| x.mul_add(*y, sum))
+}
+
+// Partial derivatives at fixed Fe, supplied only by the admitted source owner.
+// The natural-reference derivatives below remain with this shared chain rule.
+#[derive(Default)]
+struct ElasticTemperatureDerivatives {
+    energy_j_m3_k: f64,
+    energy_j_m3_k2: f64,
+    piola_pa_k: [f64; 9],
 }
 
 /// A local natural deformation and its first two temperature derivatives.
@@ -116,12 +129,28 @@ impl FiniteThermoelasticState {
     /// rule. The elastic stretch envelope applies to Fe=F G^-1; total F has
     /// its own orientation/representability gate. Caloric capacity is not
     /// needed to observe mechanical entropy/internal energy.
-    #[allow(clippy::too_many_lines)]
     pub fn try_new(
         law: &Hyperelastic,
         total_deformation_gradient: &[f64; 9],
         temperature_k: f64,
         reference_jet: ThermalReferenceJet,
+    ) -> Result<Self, MaterialError> {
+        Self::with_elastic_temperature_derivatives(
+            law,
+            total_deformation_gradient,
+            temperature_k,
+            reference_jet,
+            |_| Ok(ElasticTemperatureDerivatives::default()),
+        )
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn with_elastic_temperature_derivatives(
+        law: &Hyperelastic,
+        total_deformation_gradient: &[f64; 9],
+        temperature_k: f64,
+        reference_jet: ThermalReferenceJet,
+        derivatives: impl FnOnce(&[f64; 9]) -> Result<ElasticTemperatureDerivatives, MaterialError>,
     ) -> Result<Self, MaterialError> {
         if !temperature_k.is_finite() || temperature_k <= 0.0 {
             return Err(invalid("positive finite absolute temperature required"));
@@ -146,6 +175,14 @@ impl FiniteThermoelasticState {
         let elastic_piola = law.piola(&elastic_deformation_gradient)?;
         let elastic_tangent = law.tangent(&elastic_deformation_gradient)?;
         let elastic_energy = law.energy(&elastic_deformation_gradient);
+        let partial = derivatives(&elastic_deformation_gradient)?;
+        if [partial.energy_j_m3_k, partial.energy_j_m3_k2]
+            .iter()
+            .chain(&partial.piola_pa_k)
+            .any(|value| !value.is_finite())
+        {
+            return Err(unrepresentable());
+        }
         let jg = reference.volume_ratio();
         let free_energy_j_m3 = jg * elastic_energy;
         let first_piola_pa = reference.pullback_piola(&elastic_piola);
@@ -167,10 +204,20 @@ impl FiniteThermoelasticState {
         let elastic_piola_t: [f64; 9] =
             core::array::from_fn(|row| dot(&elastic_tangent[row], &elastic_t));
         let elastic_work_t = dot(&elastic_piola, &elastic_t);
-        let psi_t = jg_t * elastic_energy + jg * elastic_work_t;
-        let psi_tt = jg_tt * elastic_energy
+        let mut psi_t = jg_t * elastic_energy + jg * elastic_work_t;
+        let mut psi_tt = jg_tt * elastic_energy
             + 2.0 * jg_t * elastic_work_t
             + jg * (dot(&elastic_t, &elastic_piola_t) + dot(&elastic_piola, &elastic_tt));
+        let variable_coefficients = partial.energy_j_m3_k != 0.0
+            || partial.energy_j_m3_k2 != 0.0
+            || partial.piola_pa_k.iter().any(|value| *value != 0.0);
+        if variable_coefficients {
+            // Psi=Jg W(Fe,T): include the partial thermal response and both
+            // mixed reference/coefficient terms, without re-differencing G.
+            psi_t += jg * partial.energy_j_m3_k;
+            psi_tt += 2.0 * jg_t * partial.energy_j_m3_k
+                + jg * (2.0 * dot(&partial.piola_pa_k, &elastic_t) + partial.energy_j_m3_k2);
+        }
         let entropy_j_m3_k = -psi_t;
         let internal_energy_j_m3 = temperature_k.mul_add(entropy_j_m3_k, free_energy_j_m3);
         let mechanical_heat_capacity_j_m3_k = -temperature_k * psi_tt;
@@ -184,8 +231,17 @@ impl FiniteThermoelasticState {
             });
             elastic_piola_t[ij] - inverse_work
         }));
-        let stress_temperature_derivative_pa_k =
+        let mut stress_temperature_derivative_pa_k =
             core::array::from_fn(|ij| trace_b.mul_add(first_piola_pa[ij], pulled_rate[ij]));
+        if variable_coefficients {
+            let coefficient_rate = reference.pullback_piola(&partial.piola_pa_k);
+            for (derivative, increment) in stress_temperature_derivative_pa_k
+                .iter_mut()
+                .zip(coefficient_rate)
+            {
+                *derivative += increment;
+            }
+        }
         if [
             elastic_energy,
             jg_t,

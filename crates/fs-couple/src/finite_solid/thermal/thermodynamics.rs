@@ -16,6 +16,8 @@
 //! smooth thermal/caloric paths do not certify two-sided mechanical derivatives
 //! at a fiber-activation boundary.
 
+mod coefficients;
+
 use super::conservative::ConservativeThermalField;
 use super::{
     ExpansionThermalFrame, ExpansionThermalReference, FiniteSolidMaterial, ThermalReference,
@@ -24,6 +26,9 @@ pub use crate::solid_enthalpy::finite_plastic::CaloricReference;
 use fs_material::MaterialError;
 use fs_material::hyper::acoustic::DirectionalHyperelasticWaves;
 use fs_material::hyper::reference::ReferenceDeformation;
+use fs_material::hyper::thermoelastic::source::{
+    NeoHookeanThermalSourceError, ResolvedNeoHookeanThermalCoefficients,
+};
 use fs_material::hyper::thermoelastic::{
     AdiabaticHyperelasticState, FiniteThermoelasticState, ThermalReferenceJet,
 };
@@ -37,6 +42,7 @@ pub enum FiniteThermoelasticSourceError {
     Material(MaterialError),
     Caloric(PhaseStateError),
     Expansion(ThermalTransportError),
+    Coefficients(NeoHookeanThermalSourceError),
 }
 
 impl core::fmt::Display for FiniteThermoelasticSourceError {
@@ -260,6 +266,7 @@ pub struct FiniteSolidAdiabaticState<'a> {
     phase: EquilibriumPhaseState,
     before_thermal: ReferenceDeformation,
     native: AdiabaticHyperelasticState,
+    coefficients: Option<&'a ResolvedNeoHookeanThermalCoefficients>,
 }
 
 impl FiniteSolidMaterial {
@@ -284,12 +291,41 @@ impl FiniteSolidMaterial {
         specific_h_j_kg: f64,
         caloric_reference: CaloricReference,
     ) -> Result<FiniteSolidAdiabaticState<'a>, FiniteThermoelasticSourceError> {
+        self.adiabatic_acoustic_state_inner(
+            total_f,
+            before_thermal,
+            caloric,
+            specific_h_j_kg,
+            caloric_reference,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn adiabatic_acoustic_state_inner<'a>(
+        &'a self,
+        total_f: &[f64; 9],
+        before_thermal: ReferenceDeformation,
+        caloric: &'a ResolvedHeatCapacityCurve,
+        specific_h_j_kg: f64,
+        caloric_reference: CaloricReference,
+        coefficients: Option<&'a ResolvedNeoHookeanThermalCoefficients>,
+    ) -> Result<FiniteSolidAdiabaticState<'a>, FiniteThermoelasticSourceError> {
         let Some(ThermalReference::Expansion(expansion)) = self.thermal_reference() else {
             return Err(invalid(
                 "finite thermoelastic source derivatives require a prepared expansion path; mean-coefficient endpoint evidence is insufficient",
             ));
         };
         let temperature = expansion.geometry().temperature_k();
+        if coefficients.is_some_and(|source| {
+            source.model() != self.law()
+                || source.material().card_identity() != self.density().card_identity()
+                || source.temperature_k() != temperature
+        }) {
+            return Err(invalid(
+                "thermal coefficient derivatives must retain the exact original material/model/context at its actual temperature",
+            ));
+        }
         let jet = expansion_jet(expansion, before_thermal)?;
         let (phase, capacity) = caloric_capacity(
             self,
@@ -298,9 +334,13 @@ impl FiniteSolidMaterial {
             temperature,
             caloric_reference,
         )?;
-        let potential =
-            FiniteThermoelasticState::try_new(self.law().law(), total_f, temperature, jet)
-                .map_err(FiniteThermoelasticSourceError::Material)?;
+        let potential = match coefficients {
+            Some(source) => source
+                .thermoelastic_state(total_f, jet)
+                .map_err(FiniteThermoelasticSourceError::Coefficients)?,
+            None => FiniteThermoelasticState::try_new(self.law().law(), total_f, temperature, jet)
+                .map_err(FiniteThermoelasticSourceError::Material)?,
+        };
         let native = potential
             .adiabatic_acoustics(self.reference_density_kg_m3(), capacity)
             .map_err(FiniteThermoelasticSourceError::Material)?;
@@ -310,6 +350,7 @@ impl FiniteSolidMaterial {
             phase,
             before_thermal,
             native,
+            coefficients,
         })
     }
 }
@@ -343,6 +384,11 @@ impl ConservativeThermalField {
 }
 
 impl<'a> FiniteSolidAdiabaticState<'a> {
+    /// Original E(T)/nu(T) evidence when the coefficient-dependent path was
+    /// explicitly selected; absent on the existing fixed-coefficient path.
+    pub const fn thermal_coefficients(&self) -> Option<&'a ResolvedNeoHookeanThermalCoefficients> {
+        self.coefficients
+    }
     pub const fn material(&self) -> &'a FiniteSolidMaterial {
         self.material
     }

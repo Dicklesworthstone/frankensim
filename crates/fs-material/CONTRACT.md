@@ -15527,6 +15527,38 @@ the full bulk energy overflows while the remainder endpoint stays finite and
 matches `kappa=1e3` bit for bit. These are isothermal material accounts; neither
 the incremental potential nor a signed numerical work defect is heat.
 
+## Original elastic-source derivatives in finite thermoelastic storage
+
+`hyper::thermoelastic::source::ResolvedNeoHookeanThermalCoefficients` binds the
+selected native compressible Neo-Hookean model to the original same-card,
+same-context Young's-modulus and Poisson-ratio sources at the actual absolute
+temperature. Pinned source lines retain every answer and receipt. Both paths
+must be affine over an explicit smooth two-sided interval, with E positive
+and nu in (-1,1/2). The derived current mu and lambda must be finite and match
+the selected model to roundoff. Missing evidence, source kinks, different
+contexts, unsupported model families and inconsistent coefficients refuse.
+The caller qualifies these sources as thermally relaxed infinitesimal moduli;
+a prestressed tangent measurement is not silently reinterpreted.
+
+Exact rational first and second derivatives of mu(E,nu) and lambda(E,nu)
+supply the original native energy's partial W_T, W_TT and P_T at fixed elastic
+deformation. The existing `FiniteThermoelasticState` natural-map chain rule
+then includes both mixed expansion/coefficient terms in the original-volume
+Helmholtz derivative. It derives mechanical entropy, internal energy,
+fixed-total-F capacity `-T Psi_TT` and the complete stress-temperature tangent
+from that one potential. Signed derivative coefficients are used only in the
+derivative of the original energy; they are not substitute mechanical laws.
+The existing fixed-coefficient entry and exact constant-source limit remain.
+
+This immutable local snapshot retains current energy, stress and isothermal
+tangent. It does not automatically update model parameters along a finite
+thermal trajectory or supply a heat integrator. The original caloric owner
+and reference density still supply base storage; total capacity must remain
+positive before the existing adiabatic acoustic response is admitted. Focused
+native checks compare independent potential/entropy/internal-energy and stress
+derivatives under simultaneous changing coefficients and noncommuting natural
+maps, constant limits, coefficient-curvature Cp and actual wave responses.
+
 ## Objective discrete-gradient elastic work
 
 `hyper::discrete_gradient::DiscreteGradientPoint` freezes an accepted deformation

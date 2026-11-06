@@ -1,5 +1,8 @@
 //! G0/G1/G3: finite thermal strain, entropy and adiabatic waves share one potential.
 
+#[path = "hyper_thermoelastic/source.rs"]
+mod source;
+
 use fs_material::hyper::acoustic::HyperelasticAcousticState;
 use fs_material::hyper::cards::HyperelasticMaterial;
 use fs_material::hyper::reference::{ReferenceDeformation, ReferencedHyperelastic};
