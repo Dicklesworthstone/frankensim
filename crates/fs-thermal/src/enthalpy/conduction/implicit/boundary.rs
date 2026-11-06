@@ -25,7 +25,9 @@ pub use surface::{ImplicitGraySurfaceLaw, ImplicitGraySurfaceState};
 /// Original energy and actual exterior-temperature gray source response.
 #[path = "boundary/exterior.rs"]
 mod exterior;
-pub use exterior::{ImplicitGrayExteriorLaw, ImplicitGrayExteriorState};
+pub use exterior::{
+    ImplicitGrayExteriorFluxState, ImplicitGrayExteriorLaw, ImplicitGrayExteriorState,
+};
 
 /// Original centre-to-face geometry and the external film/contact resistance.
 /// Area is the actual reservoir coverage or exposed ambient area. Resistance

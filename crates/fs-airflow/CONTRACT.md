@@ -636,6 +636,48 @@ store, and each correlation still requires its own supported property convention
 algebra, signed expansion, source-only viscosity substitutions in accepted
 backward-Euler finite-body balances, retained claims and atomic refusals.
 
+### Original liquid convection on implicit conductive surfaces
+
+`medium::convection::implicit::ImplicitLiquidConvection` now implements the
+native `ImplicitGrayExteriorLaw` on the same bulk caloric object consumed by
+`IntegratedCaloricGrayBoundary::with_exterior_law`. The existing owner closes
+the original k(T) half-cell, optional coating, convection and gray radiation
+at one actual exterior temperature. It retains separate bath powers, energy,
+entropy and the original implicit heat timeline; this adapter adds no thermal
+store, material resistance or second surface solve.
+
+Preparation retains the original liquid card, selected claims, fixed pressure/
+composition and source receipts. Supported laws are original linear temperature
+curves and constant scalars with explicit thermal validity. Each native segment
+is prepared once; its derivative is taken from original source coefficients,
+not differences between clipped endpoint queries. Surface trials use bounded
+binary searches and the existing evidence-bearing correlation evaluator,
+without re-querying the material database. Sampled source surfaces, discrete
+sources, augmented bundles and unsupported spans refuse rather than being
+fitted into replacement temperature laws.
+
+Mean-film transport includes the factor one half in every temperature chain.
+Sieder-Tate and Whitaker retain reservoir Re/Pr/k and differentiate only their
+same-source wall viscosity. A kinematic-viscosity source keeps the complete
+rho(T)*nu(T) derivative. Natural geometries retain signed original expansion
+(from the admitted density path or selected beta claim), full surface/bath
+contrast and the original stable/unstable selector. Moving-input partials,
+source kinks and empirical regime endpoints are not guessed. Dittus-Boelter
+also checks its declared heating/cooling convention against the actual drive.
+Finite plate strips and mixed aiding laws are not exposed by this adapter.
+
+The native flux-state override admits the natural sphere's original Ra=0,
+Nu=2 equal-temperature limit with total heat tangent 2k/D, without claiming a
+finite derivative of the singular coefficient. Identically zero driving from
+zero gravity or locally constant zero expansion retains the same sphere
+conduction branch. Other natural geometries retain their positive card minima.
+Fluid and exterior support intervals remain distinct; actual bulk/film and wall-viscosity
+property coordinates are admitted on each trial. The targeted
+`material_cell_convection::film_source::implicit` regressions cover analytic
+film and wall-viscosity chains, signed natural geometry, source refusals,
+sphere equilibrium, integrated half-cell heat and the native backward-Euler
+energy and separate-bath entropy accounts.
+
 `source::observer::SourceConvectionObserver` supplies these heat rates to the
 original explicit `DepositionSimulation::advance_observed` timeline and composes
 with other `DepositionObserver` owners. Every actual substep reads its starting

@@ -12,7 +12,7 @@ use crate::thermal::conduction::{
 use fs_thermal::enthalpy::backward_euler::PrescribedBathHeat;
 use fs_thermal::enthalpy::conduction::implicit::boundary::{
     GrayTwoBathResponse, ImplicitBoundaryExchangeLaw, ImplicitBoundaryExchangeState,
-    ImplicitBoundaryGeometry, ImplicitGrayExteriorLaw, ImplicitGrayExteriorState,
+    ImplicitBoundaryGeometry, ImplicitGrayExteriorFluxState, ImplicitGrayExteriorLaw,
     ImplicitGraySurfaceLaw, ImplicitGraySurfaceState,
 };
 use fs_thermal::enthalpy::{DepositionError, ThermalLaw};
@@ -287,7 +287,7 @@ impl<'l, 'a, 'm> IntegratedCaloricGrayBoundary<'l, 'a, 'm> {
                         // interval and polls around every callback. Its saved
                         // payload carries the final partials without a second
                         // source query after convergence.
-                        let source = exterior.law.state_at_surface(
+                        let source = exterior.law.flux_state_at_surface(
                             specific_energy_j_kg,
                             surface,
                             gas_temperature_k,
@@ -295,7 +295,12 @@ impl<'l, 'a, 'm> IntegratedCaloricGrayBoundary<'l, 'a, 'm> {
                         source.admit()?;
                         self.exterior_source_exchange(surface, gas_temperature_k, source)
                     } else {
-                        self.exterior_exchange(surface, gas_temperature_k, coefficients)
+                        self.exterior_exchange(
+                            surface,
+                            gas_temperature_k,
+                            coefficients,
+                            coefficients.convection_w_m2_k,
+                        )
                     }
                 },
                 &mut *checkpoint,
@@ -396,11 +401,13 @@ impl<'l, 'a, 'm> IntegratedCaloricGrayBoundary<'l, 'a, 'm> {
         surface: f64,
         gas: f64,
         source: ImplicitGraySurfaceState,
+        convection_temperature_tangent_w_m2_k: f64,
     ) -> Result<([f64; 2], [f64; 2], SurfaceTangent), DepositionError> {
         let area = self.geometry.area_m2;
         let gas_delta = surface - gas;
         let radiation_delta = surface - self.radiative_temperature_k;
         let convection_g = finite(area * source.convection_w_m2_k)?;
+        let convection_slope = finite(area * convection_temperature_tangent_w_m2_k)?;
         let mut radiation_g = 0.0;
         let mut radiation_slope = 0.0;
         let mut radiation_energy = 0.0;
@@ -436,7 +443,7 @@ impl<'l, 'a, 'm> IntegratedCaloricGrayBoundary<'l, 'a, 'm> {
             [convection, radiation],
             [convection_g, radiation_g],
             SurfaceTangent {
-                temperature_derivative_w_k: finite(convection_g + radiation_slope)?,
+                temperature_derivative_w_k: finite(convection_slope + radiation_slope)?,
                 energy_derivative_w_kg_j: finite(convection_energy + radiation_energy)?,
             },
         ))
@@ -446,17 +453,18 @@ impl<'l, 'a, 'm> IntegratedCaloricGrayBoundary<'l, 'a, 'm> {
         &self,
         surface: f64,
         gas: f64,
-        source: ImplicitGrayExteriorState,
+        source: ImplicitGrayExteriorFluxState,
     ) -> Result<([f64; 2], [f64; 2], SurfaceTangent), DepositionError> {
-        let (powers, conductances, mut tangent) =
-            self.exterior_exchange(surface, gas, source.coefficients)?;
+        // Form the convective flux tangent directly. Reconstructing it from
+        // dh/dTs would reject valid equilibrium limits or subtract large,
+        // nearly cancelling coefficient contributions.
+        let (powers, conductances, mut tangent) = self.exterior_exchange(
+            surface,
+            gas,
+            source.coefficients,
+            source.convection_temperature_tangent_w_m2_k,
+        )?;
         let area = self.geometry.area_m2;
-        if source.convection_temperature_derivative_w_m2_k2 != 0.0 {
-            tangent.temperature_derivative_w_k = finite(
-                finite(area * source.convection_temperature_derivative_w_m2_k2)?
-                    .mul_add(surface - gas, tangent.temperature_derivative_w_k),
-            )?;
-        }
         if source.emissivity_temperature_derivative_per_k != 0.0 {
             // Factored fourth-power difference also retains the source tangent
             // at epsilon=0. No quotient by emissivity or radiative power occurs.

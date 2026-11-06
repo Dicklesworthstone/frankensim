@@ -374,8 +374,10 @@ None.
   The cylinder's Prandtl box is explicitly an implementation policy. Numeric
   range endpoints are admitted inclusively. The unstable plate selects the
   laminar card at Ra=8e6 and turbulent above, retaining the approximately 4.46%
-  empirical jump. Each fixed card has local input partials; no derivative or
-  continuity is claimed across selection. Signed-expansion orientation follows
+  empirical jump. `evaluate_with_sensitivities` shares this same signed
+  geometry selector and the existing analytic input-partial owner; it does not
+  duplicate a geometry decision or freeze material inputs. Each fixed card has
+  local input partials; no derivative or continuity is claimed across selection. Signed-expansion orientation follows
   the Boussinesq force direction, not experimental validation of anomalous
   liquids. No low-Rayleigh extrapolation, enclosure, mixed-convection blend,
   or confidence interval is invented. The new tests check exact power-law

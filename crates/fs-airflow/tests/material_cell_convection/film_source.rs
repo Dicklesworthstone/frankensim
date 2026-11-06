@@ -13,6 +13,8 @@ mod sphere;
 mod enclosure;
 #[path = "film_source/plate_sections.rs"]
 mod plate_sections;
+#[path = "film_source/implicit.rs"]
+mod implicit;
 use fs_airflow::graph::thermal::medium::convection::deposition::source::*;
 use fs_evidence::ValidityDomain;
 use fs_matdb::{

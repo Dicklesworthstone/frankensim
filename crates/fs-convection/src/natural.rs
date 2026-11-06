@@ -53,8 +53,28 @@ impl NaturalConvectionGeometry {
         signed_rayleigh: f64,
         prandtl: f64,
     ) -> Result<NusseltEvaluation, CorrelationError> {
+        evaluate(
+            self.correlation(signed_rayleigh),
+            CorrelationInputs::natural(signed_rayleigh.abs(), prandtl),
+        )
+    }
+
+    /// Evaluate the SAME signed-buoyancy selection with analytic input partials.
+    /// Missing partials retain the existing source-knot and validity-endpoint
+    /// meaning; this does not extrapolate a tangent across the horizontal-plate
+    /// branch switch or regularize a singular zero-Rayleigh derivative.
+    pub fn evaluate_with_sensitivities(
+        self,
+        signed_rayleigh: f64,
+        prandtl: f64,
+    ) -> Result<NusseltEvaluation, CorrelationError> {
+        CorrelationInputs::natural(signed_rayleigh.abs(), prandtl)
+            .evaluate_with_sensitivities(self.correlation(signed_rayleigh))
+    }
+
+    fn correlation(self, signed_rayleigh: f64) -> CorrelationId {
         let magnitude = signed_rayleigh.abs();
-        let id = match self {
+        match self {
             Self::VerticalPlate => CorrelationId::ChurchillChuVerticalPlate,
             Self::HorizontalCylinder => CorrelationId::ChurchillChuHorizontalCylinder,
             Self::Sphere => CorrelationId::ChurchillSphere,
@@ -71,7 +91,6 @@ impl NaturalConvectionGeometry {
                     CorrelationId::HorizontalPlateUnstableTurbulent
                 }
             }
-        };
-        evaluate(id, CorrelationInputs::natural(magnitude, prandtl))
+        }
     }
 }

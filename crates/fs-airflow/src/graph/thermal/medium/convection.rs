@@ -51,6 +51,9 @@ pub use free_surface::{
     PlanarFreeSurfaceSection, PlanarFreeSurfaceSections,
 };
 
+/// Original liquid curves and exact tangents on the native implicit exterior surface.
+pub mod implicit;
+
 /// Geometry and heat-flow direction required by the selected forced correlation.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ForcedConvectionSettings {
