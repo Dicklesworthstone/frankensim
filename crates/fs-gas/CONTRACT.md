@@ -5922,3 +5922,68 @@ arithmetic evidence; native Rust execution and typechecking were unavailable.
 The semidiscrete face identity and these runtime gates do not establish a
 general finite-step invariant-domain theorem or moving-contact pressure
 equilibrium guarantee.
+
+
+### Closed entropy-consistent reacting-flow composition
+
+`ReactingEuler1d::step_entropy_consistent` and
+`step_entropy_consistent_with_dissipation` connect the original source-derived
+inviscid and molecular fluxes to the existing coupled C-A-C / D-C-A-C-D owner.
+The original fixed-U,V chemistry retains its source identity, kinetic laws,
+selected implicit method, positivity, element/charge/mass, energy, local-error,
+entropy and work admission. Chemical heat release enters through the original
+species-energy gauge update exactly once. No second reactor or split integrator
+is introduced.
+
+Every accepted component uses one actual duration. If the middle inviscid step
+shortens for acoustic or entropy admission, the existing retry loop restores
+accepted state and replays all chemical and molecular halves. Both optional
+SSP-RK2 molecular halves use original source-conjugate Maxwell-Stefan, Fourier,
+viscous and authored reciprocal Soret/Dufour transport. Their finite-duration
+entropy gates remain active. Only the middle transport advances physical time.
+
+The complete candidate has a separate original-to-final entropy and species
+source check inside that same retryable attempt, before field/clock publication.
+Write the existing state basis as S=F+sum(alpha_i*m_i/M_i). Chemical species
+changes Q_i are physical, so the admitted whole change is
+Delta F+sum(alpha_i*Q_i/M_i). The original source change is
+Delta F+sum(alpha_i*Delta m_i/M_i); their difference
+sum(alpha_i*(Delta m_i-Q_i)/M_i) is only the numerical continuity-reference
+defect. Removing the entire species reference term would incorrectly remove
+genuine reaction entropy. Adding chemistry-only entropy to the complete endpoint
+would instead count chemical change twice; neither shortcut is used.
+
+Q_i and its absolute throughput are observed from each actual original
+before/after chemical cell row, with double-double differences before volume
+multiplication and accumulation. Each species residual Delta m_i-Q_i is bounded
+relative to original inventory plus the sum of absolute chemical changes across
+cells and halves. Production and consumption cannot cancel this scale. A species
+absent initially can be created; zero original inventory and zero throughput
+still require exactly zero drift. Each retry clears trial transfers and restores
+immutable original temperatures. The final state decode also checks the original
+chemistry temperature interval after molecular transport, sharing that pass with
+the whole entropy calculation.
+
+`ReactiveEntropyStepReport` retains the original conservative coupled report,
+direct `ReactiveEntropyReport`, middle flow entropy and optional
+`SplitMolecularEntropyReport`. Component receipts do not replace complete-state
+admission. One caller allowance applies directly to the entire accepted step;
+component allowances are not added into a larger final allowance. Every report
+reduction, original balance check and final cancellation poll precedes native
+publication. Existing non-entropy compositions retain their original entry
+signatures and dispatch.
+
+The new scope is first-order space, fixed constant area, periodic or two
+stationary reflecting ends, with common species support at active transport
+faces. Open boundary entropy, moving geometry and higher-order reconstruction
+are not inferred. Symmetric splitting does not change the selected chemistry
+method's order or establish an unconditional positivity/entropy theorem.
+
+Four regression definitions cover reaction-created species and heat-release
+duration replay, variable-Cp reacting/molecular flow with a nonzero original
+species entropy datum, independent endpoint entropy and energy balances, late
+cancellation/reuse and unsupported spatial/boundary scope. An independent
+fixed-energy polynomial example gives Delta S=0.09976352648220975 J/K, including
+0.04494595720774408 J/K of real chemical source-reference contribution. These
+arithmetic checks and source parsing do not claim native Rust execution or
+typechecking, which were unavailable.

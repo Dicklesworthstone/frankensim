@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::multicomponent::dissipation::{
+    MolecularEntropyControl, MolecularEntropyReport,
     StabilizedDissipationControl, StabilizedDissipationReport,
 };
 
@@ -103,6 +104,10 @@ pub struct StabilizedReactiveIntervalReport {
 
 pub(super) enum MolecularMethod<'a> {
     Explicit(DissipationControl),
+    EntropyExplicit {
+        controls: DissipationControl,
+        entropy: MolecularEntropyControl,
+    },
     Stabilized {
         controls: StabilizedDissipationControl,
         evaluations: &'a mut usize,
@@ -111,6 +116,7 @@ pub(super) enum MolecularMethod<'a> {
 pub(super) struct MolecularHalf {
     physical: DissipationReport,
     stabilized: Option<StabilizedDissipationReport>,
+    pub(super) entropy: Option<MolecularEntropyReport>,
 }
 impl MolecularMethod<'_> {
     pub(super) fn advance<L: TransportLaw>(
@@ -127,7 +133,23 @@ impl MolecularMethod<'_> {
                     flow, duration, *controls, reservoirs, cancelled,
                 )?,
                 stabilized: None,
+                entropy: None,
             }),
+            Self::EntropyExplicit { controls, entropy } => {
+                if reservoirs.iter().any(Option::is_some) {
+                    return Err(ReactiveError::Invalid(
+                        "entropy-consistent composition requires closed molecular boundaries",
+                    ));
+                }
+                let (physical, report) = operator.advance_entropy_consistent_for(
+                    flow, duration, *controls, *entropy, cancelled,
+                )?;
+                Ok(MolecularHalf {
+                    physical,
+                    stabilized: None,
+                    entropy: Some(report),
+                })
+            }
             Self::Stabilized {
                 controls,
                 evaluations,
@@ -143,6 +165,7 @@ impl MolecularMethod<'_> {
                 Ok(MolecularHalf {
                     physical: report.transport,
                     stabilized: Some(report),
+                    entropy: None,
                 })
             }
         }

@@ -10,7 +10,7 @@ use crate::multicomponent::dissipation::{
 use fs_qty::DynViscosity;
 use fs_thermochem::transport::kinetic::ThermalConductivityQuantityV1;
 
-fn molecular(
+pub(super) fn molecular(
     flow: &MixtureEuler1d,
     diffusion: f64,
     viscosity: f64,

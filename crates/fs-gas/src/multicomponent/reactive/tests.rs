@@ -1,6 +1,7 @@
 use super::*;
 
 mod cell;
+mod entropy;
 mod molecular;
 mod piston;
 mod spatial_cell;

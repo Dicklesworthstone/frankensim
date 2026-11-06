@@ -22,6 +22,8 @@ pub use fs_thermochem::kinetics::IdealGasKineticsV1;
 
 mod cell;
 pub use cell::CellChemistry;
+mod entropy;
+pub use entropy::{ReactiveEntropyReport, ReactiveEntropyStepReport, SplitMolecularEntropyReport};
 mod reservoir;
 mod stabilized;
 pub use stabilized::{
@@ -375,10 +377,34 @@ impl ReactingEuler1d {
         &mut self,
         maximum_duration: Time,
         controls: ReactiveStepControl,
+        operator: Option<&mut DissipationOperator<L>>,
+        molecular: stabilized::MolecularMethod<'_>,
+        reservoirs: [Option<Cell<'_>>; 2],
+        interval_budget: Option<&mut stabilized::CouplingBudget>,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<(ReactiveStepReport, Option<SplitStabilizedDissipationReport>), ReactiveError> {
+        self.step_inner(
+            maximum_duration,
+            controls,
+            operator,
+            molecular,
+            reservoirs,
+            interval_budget,
+            None,
+            cancelled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn step_inner<L: TransportLaw>(
+        &mut self,
+        maximum_duration: Time,
+        controls: ReactiveStepControl,
         mut operator: Option<&mut DissipationOperator<L>>,
         mut molecular: stabilized::MolecularMethod<'_>,
         reservoirs: [Option<Cell<'_>>; 2],
         mut interval_budget: Option<&mut stabilized::CouplingBudget>,
+        mut entropy: Option<&mut entropy::CoupledEntropy>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<(ReactiveStepReport, Option<SplitStabilizedDissipationReport>), ReactiveError> {
         poll(&mut cancelled)?;
@@ -418,6 +444,9 @@ impl ReactingEuler1d {
                 ));
             }
             self.trial.copy_physical_with_motion_from(&self.accepted, &mut cancelled)?;
+            if let Some(account) = entropy.as_deref_mut() {
+                account.begin_attempt();
+            }
             let mut report = ChemistryReport::default();
             let attempt = (|| {
                 let first = match operator.as_deref_mut() {
@@ -430,26 +459,44 @@ impl ReactingEuler1d {
                     )?),
                     None => None,
                 };
-                react_cells(
+                react_cells_inner(
                     &mut self.trial,
                     &mut self.reactor,
                     &mut self.amounts,
                     0.5 * duration,
                     &mut report,
+                    entropy.as_deref_mut(),
                     &mut cancelled,
                 )?;
-                let transport = self.trial.step_with_reservoirs(
-                    Time::new(duration), controls.transport, reservoirs, &mut cancelled,
-                )?;
+                let (transport, transport_entropy) = if let Some(account) = entropy.as_deref_mut() {
+                    let (transport, measured) = self.trial.step_entropy_consistent(
+                        Time::new(duration),
+                        controls.transport,
+                        account.controls(),
+                        &mut cancelled,
+                    )?;
+                    (transport, Some(measured))
+                } else {
+                    (
+                        self.trial.step_with_reservoirs(
+                            Time::new(duration),
+                            controls.transport,
+                            reservoirs,
+                            &mut cancelled,
+                        )?,
+                        None,
+                    )
+                };
                 if transport.elapsed.value() != duration {
                     return Ok((transport, false, None, None));
                 }
-                react_cells(
+                react_cells_inner(
                     &mut self.trial,
                     &mut self.reactor,
                     &mut self.amounts,
                     0.5 * duration,
                     &mut report,
+                    entropy.as_deref_mut(),
                     &mut cancelled,
                 )?;
                 let second = match operator.as_deref_mut() {
@@ -462,7 +509,7 @@ impl ReactingEuler1d {
                     )?),
                     None => None,
                 };
-                if second.is_some() {
+                if second.is_some() && entropy.is_none() {
                     // The molecular source bank can admit a wider temperature
                     // path than the reactor. In particular, viscous heating
                     // after the last chemistry solve can leave that path.
@@ -482,6 +529,28 @@ impl ReactingEuler1d {
                             ));
                         }
                     }
+                }
+                if let Some(account) = entropy.as_deref_mut() {
+                    let temperature_bounds = second.as_ref().map(|_| {
+                        let chemistry = self.reactor.controls();
+                        [
+                            chemistry.minimum_temperature_k,
+                            chemistry.maximum_temperature_k,
+                        ]
+                    });
+                    account.check_candidate(
+                        &self.accepted,
+                        &self.trial,
+                        temperature_bounds,
+                        transport_entropy.ok_or(ReactiveError::Invalid(
+                            "missing reacting advection entropy receipt",
+                        ))?,
+                        [
+                            first.as_ref().and_then(|half| half.entropy),
+                            second.as_ref().and_then(|half| half.entropy),
+                        ],
+                        &mut cancelled,
+                    )?;
                 }
                 let (dissipation, stabilized) = stabilized::split_halves(first, second);
                 Ok::<_, ReactiveError>((transport, true, dissipation, stabilized))
@@ -620,8 +689,25 @@ fn react_cells(
     report: &mut ChemistryReport,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(), ReactiveError> {
+    react_cells_inner(flow, reactor, amounts, duration, report, None, cancelled)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn react_cells_inner(
+    flow: &mut MixtureEuler1d,
+    reactor: &mut IsochoricReactor,
+    amounts: &mut [Amount],
+    duration: f64,
+    report: &mut ChemistryReport,
+    mut entropy: Option<&mut entropy::CoupledEntropy>,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(), ReactiveError> {
     let width = flow.gas.species_count() + 2;
+    let mut previous = [0.0; MAX_COMPONENTS];
     for i in 0..flow.cell_count() {
+        if entropy.is_some() {
+            previous[..width].copy_from_slice(&flow.states[i * width..(i + 1) * width]);
+        }
         react_cell(
             &flow.gas,
             &mut flow.states[i * width..(i + 1) * width],
@@ -633,6 +719,14 @@ fn react_cells(
             report,
             cancelled,
         )?;
+        if let Some(account) = entropy.as_deref_mut() {
+            account.observe_chemistry_row(
+                &previous[..width],
+                &flow.states[i * width..(i + 1) * width],
+                flow.mesh.volumes()[i],
+                cancelled,
+            )?;
+        }
     }
     flow.validate_states(cancelled)?;
     poll(cancelled)

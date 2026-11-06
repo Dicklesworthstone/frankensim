@@ -30,6 +30,7 @@ use fs_qty::{Temperature, Time};
 use fs_thermochem::UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K as R;
 
 mod reservoir;
+pub(in crate::multicomponent) mod reactive;
 mod stabilized;
 use reservoir::ReservoirEntropyAccount;
 
@@ -453,15 +454,28 @@ impl EntropyTracker {
     }
 
     fn inventory(&self, n: usize, whole: bool) -> Result<f64, FlowError> {
+        self.inventory_with_reaction(n, whole, None)
+    }
+
+    fn inventory_with_reaction(
+        &self,
+        n: usize,
+        whole: bool,
+        reaction: Option<(&[Dd; MAX_SPECIES], &[Dd; MAX_SPECIES])>,
+    ) -> Result<f64, FlowError> {
         let mut maximum = 0.0_f64;
         for k in 0..n {
-            let transfer = self.boundary.as_ref().map_or(Dd::ZERO, |b| {
+            let mut transfer = self.boundary.as_ref().map_or(Dd::ZERO, |b| {
                 if whole { b.total.species[k] } else { b.trial.species[k] }
             });
-            let throughput = self.boundary.as_ref().map_or(Dd::ZERO, |b| {
+            let mut throughput = self.boundary.as_ref().map_or(Dd::ZERO, |b| {
                 if whole { b.total.throughput[k] }
                 else { b.total.throughput[k] + b.trial.throughput[k] }
             });
+            if let Some((change, absolute)) = reaction {
+                transfer = transfer + change[k];
+                throughput = throughput + absolute[k];
+            }
             let residual = scalar(self.trial_mass[k] - transfer)?;
             let scale = scalar(Dd::from_f64(self.original_mass[k]) + throughput)?;
             let tolerance = self.controls.relative_species_tolerance * scale;
@@ -652,18 +666,8 @@ impl EntropyTracker {
                 tolerance_j_k: self.controls.absolute_tolerance_j_k,
             });
         }
-        let mut reference = Dd::ZERO;
-        let mut reference_residual = Dd::ZERO;
-        for (k, model) in gas.source().models().iter().enumerate() {
-            poll(cancelled)?;
-            reference = reference
-                + self.trial_mass[k] / Dd::from_f64(model.molar_mass().value())
-                    * Dd::from_f64(self.reference_entropy[k]);
-            let transfer = self.boundary.as_ref().map_or(Dd::ZERO, |b| b.total.species[k]);
-            reference_residual = reference_residual
-                + (self.trial_mass[k] - transfer) / Dd::from_f64(model.molar_mass().value())
-                    * Dd::from_f64(self.reference_entropy[k]);
-        }
+        let (reference, reference_residual, _) =
+            self.reference_changes(gas, None, cancelled)?;
         let mut report = self.report;
         report.entropy_change_j_k = scalar(self.trial_entropy)?;
         report.reference_entropy_residual_j_k = scalar(reference_residual)?;
@@ -671,6 +675,38 @@ impl EntropyTracker {
         report.maximum_relative_species_residual =
             report.maximum_relative_species_residual.max(relative);
         Ok(report)
+    }
+
+    /// Original source constants on the total change, continuity defect and
+    /// actual chemical source, respectively. A chemical species change is
+    /// physical and must not be removed with the numerical continuity defect.
+    fn reference_changes(
+        &self,
+        gas: &MixtureGas,
+        reaction: Option<&[Dd; MAX_SPECIES]>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(Dd, Dd, Dd), FlowError> {
+        let mut reference = Dd::ZERO;
+        let mut reference_residual = Dd::ZERO;
+        let mut reaction_reference = Dd::ZERO;
+        for (k, model) in gas.source().models().iter().enumerate() {
+            poll(cancelled)?;
+            reference = reference
+                + self.trial_mass[k] / Dd::from_f64(model.molar_mass().value())
+                    * Dd::from_f64(self.reference_entropy[k]);
+            let transfer = self.boundary.as_ref().map_or(Dd::ZERO, |b| b.total.species[k]);
+            let mut residual = self.trial_mass[k] - transfer;
+            if let Some(change) = reaction {
+                residual = residual - change[k];
+                reaction_reference = reaction_reference
+                    + change[k] / Dd::from_f64(model.molar_mass().value())
+                        * Dd::from_f64(self.reference_entropy[k]);
+            }
+            reference_residual = reference_residual
+                + residual / Dd::from_f64(model.molar_mass().value())
+                    * Dd::from_f64(self.reference_entropy[k]);
+        }
+        Ok((reference, reference_residual, reaction_reference))
     }
 }
 
