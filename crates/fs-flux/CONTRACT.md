@@ -5970,6 +5970,39 @@ publishes no candidate. This Lie split and the donor transport are first order:
 CFL subcycling alone does not control splitting error or numerical interfacial
 mixing. The caller must refine the macro interval and spatial discretization.
 
+`miscibility::transport::adaptive` advances the COMPLETE prescribed stirring
+and demixing operator with one full Lie step versus two half steps, accepting
+the latter. Both independently represented species and their retained low
+words participate in the local composition estimate. Every trial uses exactly
+one donor advection step, so the macro step is restricted by the original
+outgoing-volume CFL limit. This prevents a subcycled coarse path from becoming
+identical to its two half paths and falsely reporting zero advection error.
+The original time-step minimum may refuse that restriction; a final shorter
+remainder must satisfy the same accuracy and conservation checks. The frozen
+prepared flow and fixed-volume reference frame remain unchanged.
+
+The adaptive result retains separate accepted advection and diffusion face
+transfers, their combined species transfers, each operator's free-energy
+increment, accepted diffusion dissipation, and completed trial work. Rejected
+and coarse trials contribute only to work counts. A final independent species
+and cell-capacity audit uses the stricter original amount allowance ONCE over
+the requested interval. Accepted diffusion and the direct total energy change
+minus accounted advection must each satisfy the original diffusion-energy
+allowance once; total free energy may rise under imposed stirring. The reported
+advection increment is neither heat nor mechanical work. No trajectory history
+is retained; bounded attempts and scalar solves use O(cells+faces) payload
+within the original graph workspace admission. Cancellation or any failed
+final audit publishes no partial field or flux account.
+
+Focused G0/G1/G3/G4 tests compare the coupled trajectory with independently
+integrated three-cell chemical-potential equations, exercise the CFL-alias
+failure against an exact counterflow solution, and cover tolerance refinement,
+zero-flow diffusion, pure and trace species, unequal volumes, positive energy
+under stirring, separate integrated flux closure, endpoint clocks and atomic
+refusals. The estimate remains local and the accepted method remains first
+order; it does not bound spatial donor mixing or establish a global error
+certificate, evolving momentum, thermal feedback or measured material validity.
+
 Prepared flow data and reused O(cells+faces) transaction scratch fit the original
 graph payload budget. Work is linear per advection substep. These are fixed
 geometry, isothermal, equal-partial-molar-volume fields. A prescribed volume

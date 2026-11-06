@@ -8,6 +8,9 @@
 //! Only the diffusion stage carries the original dissipation inequality; the
 //! complete report does not identify energy change with heat or mechanical work.
 
+/// Temporal refinement of the complete stirring and demixing operator.
+pub mod adaptive;
+
 use super::advection::{
     BinaryMiscibilityAdvection, BinaryMiscibilityAdvectionControls, BinaryMiscibilityAdvectionStep,
 };
