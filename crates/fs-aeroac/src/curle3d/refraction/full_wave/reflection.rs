@@ -42,6 +42,7 @@ pub use quadrupole::{
     FULL_WAVE_REFLECTED_QUADRUPOLE_SCOPE, FULL_WAVE_TOTAL_QUADRUPOLE_SCOPE,
     PreparedReflectedFullWaveQuadrupole,
 };
+pub(super) use quadrupole::{apply as apply_quadrupole, quadrupole_channels};
 
 /// The returned field excludes the direct source contribution.
 pub const FULL_WAVE_REFLECTED_MONOPOLE_SCOPE: &str = "Prescribed stationary compact 3D volume \

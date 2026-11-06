@@ -38,6 +38,12 @@ pub use force::{
     PreparedLayeredReflectedFullWaveForce,
 };
 
+mod quadrupole;
+pub use quadrupole::{
+    FULL_WAVE_LAYER_REFLECTED_QUADRUPOLE_SCOPE, FULL_WAVE_LAYER_TOTAL_QUADRUPOLE_SCOPE,
+    PreparedLayeredReflectedFullWaveQuadrupole,
+};
+
 /// Applicability of the returning field, excluding the original direct field.
 pub const FULL_WAVE_LAYER_REFLECTED_MONOPOLE_SCOPE: &str = "Prescribed stationary compact \
 3D volume source; reflected spherical-wave field from one infinite planar homogeneous \

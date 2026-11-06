@@ -21,7 +21,8 @@ use super::super::{
     nonfinite, poll, positive,
 };
 use super::{
-    ReflectionCoordinates, ReflectionKernel, exact_reflection, field, line, singular_total,
+    ReflectionCoordinates, ReflectionKernel, ReflectionSpectralWeight, exact_reflection, field,
+    line, singular_total,
 };
 use crate::AeroacError;
 use crate::curle3d::CoherentCompactField;
@@ -278,7 +279,10 @@ impl PreparedReflectedFullWaveQuadrupole {
     }
 }
 
-fn apply(transfer: &Transfer, source: QuadrupolePhasor) -> Result<[C64; 4], AeroacError> {
+pub(in crate::curle3d::refraction::full_wave) fn apply(
+    transfer: &Transfer,
+    source: QuadrupolePhasor,
+) -> Result<[C64; 4], AeroacError> {
     if source.stress_moment_n_m.iter().any(|v| !finite(*v)) {
         return Err(nonfinite("reflected quadrupole stress moment"));
     }
@@ -366,51 +370,67 @@ impl Spectrum<14> for ReflectionQuadrupoleKernel {
         <ReflectionKernel as Spectrum<3>>::resolved(&self.common, region, lower, upper)
     }
     fn sample(&self, region: usize, x: f64) -> Result<[C64; 14], AeroacError> {
-        let weight = self.common.sample_weight(region, x)?;
-        let argument = weight.q * self.common.coordinates.range;
-        if !argument.is_finite() {
-            return Err(nonfinite("reflected quadrupole Bessel argument"));
-        }
-        let zero = j0(argument);
-        let one = j1(argument);
-        let ratio = j1_over_argument(argument, one);
-        let derivative = zero - ratio;
-        let second_ratio = j2_over_argument(argument, zero, ratio);
-        let third = one - second_ratio;
-        let q_log = det::ln(weight.q);
-        let magnitude = weight.zeta.abs();
-        let z_log = det::ln(magnitude);
-        let z = if magnitude == 0.0 {
-            C64::ZERO
-        } else {
-            C64::new(weight.zeta.re / magnitude, weight.zeta.im / magnitude)
-        };
-        let zz = z * z;
-        let i = C64::new(0.0, 1.0);
-        let p = self.log_pressure;
-        let v = self.log_velocity;
-        // Scale physical derivatives BEFORE exponentiation. Even q³ or zeta³
-        // can restore a representable field after the bare decay underflows.
-        // Preserve the original four pressure and TEN velocity diagnostics.
-        let values = [
-            weight.scaled(-i, p + 2.0 * q_log, derivative),
-            weight.scaled(-i, p + 2.0 * q_log, ratio),
-            weight.scaled(z, p + q_log + z_log, SQRT_2 * one),
-            weight.scaled(-i * zz, p + 2.0 * z_log, zero),
-            weight.scaled(C64::ONE, v + 3.0 * q_log, third),
-            weight.scaled(C64::ONE, v + 3.0 * q_log, second_ratio),
-            weight.scaled(-i * z, v + 2.0 * q_log + z_log, SQRT_2 * derivative),
-            weight.scaled(zz, v + q_log + 2.0 * z_log, one),
-            weight.scaled(C64::ONE, v + 3.0 * q_log, SQRT_2 * second_ratio),
-            weight.scaled(-i * z, v + 2.0 * q_log + z_log, SQRT_2 * ratio),
-            weight.scaled(i * z, v + 2.0 * q_log + z_log, derivative),
-            weight.scaled(i * z, v + 2.0 * q_log + z_log, ratio),
-            weight.scaled(-zz, v + q_log + 2.0 * z_log, SQRT_2 * one),
-            weight.scaled(i * zz * z, v + 3.0 * z_log, zero),
-        ];
-        if values.iter().any(|value| !finite(*value)) {
-            return Err(nonfinite("reflected quadrupole spectrum"));
-        }
-        Ok(values)
+        quadrupole_channels(
+            self.common.sample_weight(region, x)?,
+            self.common.coordinates.range,
+            self.log_pressure,
+            self.log_velocity,
+        )
     }
+}
+
+/// Shared original source Hessian and returning receiver derivative. A planar
+/// layer changes only the reflected scalar weight, never these angular signs,
+/// physical shear factors or logarithmically balanced derivative products.
+pub(in crate::curle3d::refraction::full_wave) fn quadrupole_channels(
+    weight: ReflectionSpectralWeight,
+    range: f64,
+    log_pressure: f64,
+    log_velocity: f64,
+) -> Result<[C64; 14], AeroacError> {
+    let argument = weight.q * range;
+    if !argument.is_finite() {
+        return Err(nonfinite("reflected quadrupole Bessel argument"));
+    }
+    let zero = j0(argument);
+    let one = j1(argument);
+    let ratio = j1_over_argument(argument, one);
+    let derivative = zero - ratio;
+    let second_ratio = j2_over_argument(argument, zero, ratio);
+    let third = one - second_ratio;
+    let q_log = det::ln(weight.q);
+    let magnitude = weight.zeta.abs();
+    let z_log = det::ln(magnitude);
+    let z = if magnitude == 0.0 {
+        C64::ZERO
+    } else {
+        C64::new(weight.zeta.re / magnitude, weight.zeta.im / magnitude)
+    };
+    let zz = z * z;
+    let i = C64::new(0.0, 1.0);
+    let p = log_pressure;
+    let v = log_velocity;
+    // Scale physical derivatives BEFORE exponentiation. Even q³ or zeta³
+    // can restore a representable field after the bare decay underflows.
+    // Preserve the original four pressure and TEN velocity diagnostics.
+    let values = [
+        weight.scaled(-i, p + 2.0 * q_log, derivative),
+        weight.scaled(-i, p + 2.0 * q_log, ratio),
+        weight.scaled(z, p + q_log + z_log, SQRT_2 * one),
+        weight.scaled(-i * zz, p + 2.0 * z_log, zero),
+        weight.scaled(C64::ONE, v + 3.0 * q_log, third),
+        weight.scaled(C64::ONE, v + 3.0 * q_log, second_ratio),
+        weight.scaled(-i * z, v + 2.0 * q_log + z_log, SQRT_2 * derivative),
+        weight.scaled(zz, v + q_log + 2.0 * z_log, one),
+        weight.scaled(C64::ONE, v + 3.0 * q_log, SQRT_2 * second_ratio),
+        weight.scaled(-i * z, v + 2.0 * q_log + z_log, SQRT_2 * ratio),
+        weight.scaled(i * z, v + 2.0 * q_log + z_log, derivative),
+        weight.scaled(i * z, v + 2.0 * q_log + z_log, ratio),
+        weight.scaled(-zz, v + q_log + 2.0 * z_log, SQRT_2 * one),
+        weight.scaled(i * zz * z, v + 3.0 * z_log, zero),
+    ];
+    if values.iter().any(|value| !finite(*value)) {
+        return Err(nonfinite("reflected quadrupole spectrum"));
+    }
+    Ok(values)
 }

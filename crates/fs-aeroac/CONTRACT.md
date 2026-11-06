@@ -2758,3 +2758,9 @@ pressure cancellation with surviving velocity and measured correlation changes;
 and source-domain, clock, shape, aggregate-work and cancellation refusals.
 Pinned Rust formatting/parser checks and bounded source/API review passed.
 Native Cargo tests were authored but not executed in the shared editing environment.
+
+## Finite-layer reflected and incident-total compact quadrupoles
+
+`curle3d::refraction::full_wave::layer::reflection::PreparedLayeredReflectedFullWaveQuadrupole` propagates the original six symmetric stress moments [N m] to pressure and all three particle-velocity components in the incident fluid. The native layer reflection denominator retains every coherent internal return, critical and evanescent contributions, and the original physical shear and trace conventions. Source Hessians and receiving derivatives share the original fourteen returning angular channels and logarithmically scaled products; this owner introduces no product finite differences or second wave solver.
+
+Preparation caches reflected and, where finite, coherent direct-plus-return Cartesian transfers. Warm application uses fixed-order DD contraction before signed active/reactive intensity. A coincident source and receiver has a finite returned field but refuses the singular total point-source field. A vanished layer or absent second face delegates exactly to the native single-interface owner. Four pressure and ten velocity diagnostics retain bounded native quadrature, quadratic/cubic analytic tails, cancellation, and work limits. Total-field error estimates are absolute reflected-field estimates and give no relative guarantee at interference nulls. The existing stationary, lossless, infinite-plane, nontrapping-layer and prescribed-source applicability limits remain in force.
