@@ -18314,6 +18314,29 @@ Integration regressions cover adiabatic demixing across an original Cp knot,
 unequal-temperature phase/homogeneous mixing against independent H/S oracles,
 actual per-phase properties and volumes, final-source refusal and cancellation.
 
+### Source-bound thermal endpoints with liquid phase discovery
+
+`MulticomponentLiquidCaloricLaw::add_heat_discovered` and `mix_discovered`
+delegate to the original bounded thermochemical discovery/caloric owner, so
+accepted thermal endpoints may contain a different number of liquid phases.
+Every input retains its complete original material, pure-Cp and fixed-pressure
+binding. All numerical temperature samples use the same declared discovery
+policy and actual phase H/S; only the accepted endpoint refreshes material
+sources. The original phase resolver queries each actual final composition
+and temperature and retains its receipts, density, viscosity, conductivity,
+mass and volume. No averaged phase transport law is introduced.
+
+The material balance retains the exact numerical candidate, original final
+discovery report, bounded work and thermal/entropy accounts. Source refusal
+for a newly appearing phase, foreign input binding, exhausted numerical work
+or last-poll cancellation publishes no partial result. Finite discovery remains
+qualified local evidence, not global stability, a continuous phase trajectory,
+a latent-heat plateau or nucleation kinetics. Focused integration regressions
+cover three-to-one heating and one-to-three cooling against independent H/S
+integrals, unequal-temperature mixing of actual separated/homogeneous inputs,
+source refresh and conservation, newly discovered phases outside the original
+material chart, foreign references and final publication cancellation.
+
 ### Full three-dimensional piezoelectric thermal storage
 
 `piezoelectric::thermal::ThermalTensorPiezoelectric` binds complete affine original stress-charge stiffness, signed coupling and clamped-permittivity source tensors over a positive absolute-temperature interval with constant reference density. It preserves full source selections, nonthermal context and the fixed frame transformation. At fixed full Mandel strain and Cartesian electric displacement, the native tensor/factor owner supplies Helmholtz energy, exact entropy, internal energy and nonpositive field heat capacity, without scalar projection or fresh response-time factorization. Complete endpoint tensor admission establishes affine-source stability. A rotation-invariant norm bound supplies a conservative whole-interval capacity floor under explicit strain/displacement envelopes; consuming caloric owners must add their actual capacity and enforce those bounds. Reversible thermal exchange is separate from material loss. No pyroelectric offset, expansion, hysteresis, phase transition, depoling or measured-material validation is implied. Focused synthetic G0/G1/G3 regression sources cover independent diagonal/dense potentials, co-rotation and domain refusal; native execution remains a separate verification obligation.

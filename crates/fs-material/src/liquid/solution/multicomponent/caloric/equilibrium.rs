@@ -4,7 +4,11 @@
 //! sensible-plus-mixing enthalpy. Only its accepted final equilibrium refreshes
 //! material properties. Phase count and support stay fixed: continuation is
 //! seeded numerical evidence, not global equilibrium or a phase-onset model.
+//! The explicit [`discovery`] child supplies changing-count endpoints through
+//! the original bounded phase search and retains that search's qualifications.
 
+/// Original-source endpoints from bounded phase-count discovery.
+pub mod discovery;
 /// Original-source homogeneous relaxation and unequal-temperature phase mixing.
 pub mod transactions;
 

@@ -4,6 +4,8 @@ use super::*;
 use fs_thermochem::solution::multicomponent::caloric::MulticomponentCaloricSolveV1;
 use fs_thermochem::solution::multicomponent::caloric::equilibrium::MulticomponentEquilibriumCaloricSolveV1;
 
+#[path = "discovery.rs"]
+mod discovery;
 #[path = "transactions.rs"]
 mod transactions;
 

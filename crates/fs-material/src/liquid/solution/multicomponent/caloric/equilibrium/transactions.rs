@@ -37,7 +37,7 @@ impl<'a> From<&'a ResolvedMulticomponentLiquidEquilibriumCaloricState>
     }
 }
 impl<'a> MulticomponentLiquidCaloricInventoryRef<'a> {
-    fn numeric(self) -> MulticomponentCaloricInventoryRefV1<'a> {
+    pub(super) fn numeric(self) -> MulticomponentCaloricInventoryRefV1<'a> {
         match self {
             Self::Homogeneous(state) => state.caloric_state().into(),
             Self::Equilibrium(state) => state.caloric_state().into(),
@@ -103,7 +103,7 @@ impl MulticomponentLiquidCaloricLaw<'_, '_> {
         self.resolve_equilibrium_balance(balance, &mut cancelled)
     }
 
-    fn admit_phase_inventory(
+    pub(super) fn admit_phase_inventory(
         &self,
         input: MulticomponentLiquidCaloricInventoryRef<'_>,
     ) -> Result<()> {
