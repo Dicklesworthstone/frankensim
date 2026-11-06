@@ -449,3 +449,31 @@ stretching or continue through pinch-off. A neck limit is a model stop.
 Four focused native G0/G1/G3 tests exercise nonlinear shape/velocity changes,
 volume and momentum conservation, velocity-dependent residence and necking,
 early neck-limit publication, zero flight, budget rollback and successful retry.
+
+## Source-driven viscosity during a physical pour
+
+`MaterialRheologyPour` adds generalized-Newtonian source viscosity to the
+same admitted SI weir pour. An explicit `IsothermalRheologyLaw` retains the
+original material card, selected claims, fixed temperature and context.
+Each incoming wet-cell Guo-corrected stress closes physical shear against
+that source through the shared native bounded root. The resulting per-cell
+tau drives the existing BGK collision and conservative VOF integration.
+
+Geometry, capillary admission, prescribed rotating-frame motion, endpoint
+speed/density limits and SI mass-per-depth reporting are shared with
+`MaterialPour`. The simulation mass buffer remains the rendering field.
+A read-only preparation can be retried; cancellation or source/native refusal
+returns no partial pour. Frozen `MaterialPour` retains its existing rejection
+of evolving sources.
+
+The accepted result exposes `pour()` and `last_collision()`. Complete
+material receipts and physical rates describe the last collision input,
+before streaming and conversion, not a second source sweep of the final field.
+Rates are objective physical shear; the speed envelope is in the vessel frame.
+Pressure-dependent rheology, temperature evolution, viscoelastic memory and
+yield history remain outside this explicit fixed-temperature shear owner.
+
+Focused synthetic regressions specify exact constant-source parity under both
+contact models and actual changes to the native pour field and speed when the
+original viscosity curve varies with physical shear. They do not establish
+measured-fluid calibration, a laminar transition threshold or 3-D breakup.

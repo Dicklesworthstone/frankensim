@@ -420,6 +420,24 @@ fn run_pour_motion_observed<E: From<PourError>>(
     contact: ContactModel,
     law: Rheology,
     pivot: Option<[f64; 2]>,
+    observe: impl FnMut(&FreeSurface, u32) -> Result<(), E>,
+) -> Result<PourOutcome, E> {
+    run_pour_motion_integrated(
+        rig,
+        contact,
+        pivot,
+        |sim, step| advance_pour_liquid(sim, law, step).map_err(E::from),
+        observe,
+    )
+}
+
+// Constitutive bindings provide one native advance; geometry, frame motion,
+// endpoint observation and outcome construction remain shared by every pour.
+fn run_pour_motion_integrated<E: From<PourError>>(
+    rig: &PourRig,
+    contact: ContactModel,
+    pivot: Option<[f64; 2]>,
+    mut advance: impl FnMut(&mut FreeSurface, u32) -> Result<(), E>,
     mut observe: impl FnMut(&FreeSurface, u32) -> Result<(), E>,
 ) -> Result<PourOutcome, E> {
     if rig.steps == 0 {
@@ -478,7 +496,7 @@ fn run_pour_motion_observed<E: From<PourError>>(
                 -rig.g0 * fs_math::det::cos(theta),
             ];
         }
-        advance_pour_liquid(&mut sim, law, step)?;
+        advance(&mut sim, step)?;
         observe(&sim, step + 1)?;
         mass_drift = mass_drift.max(((sim.ledger_mass() - m0) / m0).abs());
     }

@@ -12,16 +12,20 @@
 //! Speeds are relative to the rotating vessel, the frame used by the native
 //! lattice Mach admission.
 
+/// Evolving source viscosity on the same physical pour trajectory.
+pub mod rheology;
+
 use fs_exec::CancelGate;
 use fs_lbm::Cell;
 use fs_lbm::film::{FilmError, material::MaterialFilmLiquid};
 use fs_lbm::freesurface::{ContactModel, FreeSurface};
 use fs_lbm::material::MaterialLbmError;
+use fs_lbm::material::free_surface::rheology::FreeSurfaceRheologyError;
 use fs_lbm::material::free_surface::{MaterialFreeSurfaceScaling, plan_free_surface_from_material};
 use fs_lbm::rheology::{Rheology, TAU_CAP, TAU_FLOOR};
 use fs_material::liquid::surface::ResolvedLiquidSurfaceState;
 
-use super::{PourError, PourOutcome, PourRig, run_pour_motion_observed};
+use super::{PourError, PourOutcome, PourRig, advance_pour_liquid, run_pour_motion_integrated};
 
 /// Grid-aligned weir geometry and physical motion, with numerical limits.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -56,6 +60,7 @@ pub enum MaterialPourError {
     Liquid(FilmError),
     Scaling(MaterialLbmError),
     Pour(PourError),
+    Rheology(FreeSurfaceRheologyError),
     Cancelled,
     /// An actual wet-cell observation exceeded a declared physical envelope.
     State {
@@ -72,6 +77,7 @@ impl core::fmt::Display for MaterialPourError {
             Self::Liquid(error) => write!(f, "material pour liquid: {error}"),
             Self::Scaling(error) => write!(f, "material pour scaling: {error}"),
             Self::Pour(error) => write!(f, "material pour: {error}"),
+            Self::Rheology(error) => write!(f, "material pour rheology: {error}"),
             Self::Cancelled => f.write_str("material pour cancelled"),
             Self::State { step, cell, reason } => {
                 write!(f, "material pour after step {step}, cell {cell}: {reason}")
@@ -83,6 +89,11 @@ impl std::error::Error for MaterialPourError {}
 impl From<PourError> for MaterialPourError {
     fn from(error: PourError) -> Self {
         Self::Pour(error)
+    }
+}
+impl From<FreeSurfaceRheologyError> for MaterialPourError {
+    fn from(error: FreeSurfaceRheologyError) -> Self {
+        Self::Rheology(error)
     }
 }
 impl From<MaterialLbmError> for MaterialPourError {
@@ -134,6 +145,23 @@ impl<'a> MaterialPour<'a> {
         material: &'a ResolvedLiquidSurfaceState,
         spec: MaterialPourSpec,
     ) -> Result<Self, MaterialPourError> {
+        Self::prepare(spec, || {
+            MaterialFilmLiquid::try_new(material).map_err(MaterialPourError::Liquid)?;
+            Ok(plan_free_surface_from_material(
+                material,
+                spec.cell_size_m,
+                spec.timestep_s,
+                spec.maximum_speed_m_s,
+            )?)
+        })
+    }
+
+    // Both constitutive paths share geometry, SI units, motion and envelope
+    // admission. Only the explicitly selected source owner supplies scaling.
+    fn prepare(
+        spec: MaterialPourSpec,
+        plan: impl FnOnce() -> Result<MaterialFreeSurfaceScaling<'a>, MaterialPourError>,
+    ) -> Result<Self, MaterialPourError> {
         let [nx, ny] = spec.cells;
         let [lip_x, lip_h] = spec.lip;
         let cells = nx.checked_mul(ny).ok_or(MaterialPourError::Invalid(
@@ -166,13 +194,8 @@ impl<'a> MaterialPour<'a> {
                 "invalid physical motion or liquid envelope",
             ));
         }
-        MaterialFilmLiquid::try_new(material).map_err(MaterialPourError::Liquid)?;
-        let scaling = plan_free_surface_from_material(
-            material,
-            spec.cell_size_m,
-            spec.timestep_s,
-            spec.maximum_speed_m_s,
-        )?;
+        let scaling = plan()?;
+        let material = scaling.material();
         if !(TAU_FLOOR..=TAU_CAP).contains(&scaling.flow().tau) {
             return Err(MaterialPourError::Invalid(
                 "source viscosity exceeds the native pour relaxation range; rescale dx/dt",
@@ -251,6 +274,24 @@ impl<'a> MaterialPour<'a> {
         contact: ContactModel,
         gate: &CancelGate,
     ) -> Result<MaterialPourOutcome<'a>, MaterialPourError> {
+        self.run_with(contact, gate, |sim, step| {
+            advance_pour_liquid(
+                sim,
+                Rheology::Newtonian {
+                    nu: self.scaling.flow().viscosity,
+                },
+                step,
+            )
+            .map_err(Into::into)
+        })
+    }
+
+    fn run_with(
+        &self,
+        contact: ContactModel,
+        gate: &CancelGate,
+        advance: impl FnMut(&mut FreeSurface, u32) -> Result<(), MaterialPourError>,
+    ) -> Result<MaterialPourOutcome<'a>, MaterialPourError> {
         checkpoint(gate)?;
         let mut report = MaterialPourReport {
             duration_s: f64::from(self.spec.steps) * self.spec.timestep_s,
@@ -260,13 +301,11 @@ impl<'a> MaterialPour<'a> {
             peak_speed_m_s: 0.0,
             maximum_density_excursion: 0.0,
         };
-        let native = run_pour_motion_observed(
+        let native = run_pour_motion_integrated(
             &self.rig,
             contact,
-            Rheology::Newtonian {
-                nu: self.scaling.flow().viscosity,
-            },
             Some(self.pivot),
+            advance,
             |sim, step| {
                 checkpoint(gate)?;
                 self.observe(sim, step, &mut report)?;

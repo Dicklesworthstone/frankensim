@@ -1,6 +1,9 @@
 //! G0/G1/G3/G4 source-to-pour regressions with synthetic material inputs.
 //! These exercise dimensional wiring and native coupling, not measured fluids.
 
+#[path = "material_pour/rheology.rs"]
+mod rheology;
+
 use fs_evidence::ValidityDomain;
 use fs_exec::CancelGate;
 use fs_lbm::freesurface::ContactModel;
