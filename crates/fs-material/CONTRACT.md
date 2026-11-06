@@ -17062,3 +17062,27 @@ threshold, transverse versus longitudinal loading, mixed signed loading,
 retained unassessed shear, deterministic ties, stress-unit scaling, original
 source/temperature refresh, missing data, units and arithmetic refusal. All
 coefficients are manufactured; no measured-material validation is asserted.
+
+### Oriented magnetic permeability and reluctivity
+
+`field_storage::spatial::SpatialMagneticLaw` admits either the original isotropic
+absolute permeability or all three `magnetic_permeability_1/2/3` source values in
+H/m with an explicit fixed orthonormal material frame. Every principal source
+retains the shared fixed-condition admission; relative or porous permeability,
+missing components, and field/frequency/strain/stress-dependent sources refuse.
+The law supplies the complete symmetric positive tensor, including off-diagonal
+flux, and retains its principal values and axes. `SpatialPermeability` applies
+`B=mu H`, resolves `H=mu^-1 B` through those original principal directions, and
+prepares inverse weights by rotating reciprocal principal values instead of
+inverting a rounded matrix. Rounded tensors that lose positive definiteness
+refuse; field assembly retains its own interval-SPD check.
+
+The scalar path keeps its original multiply/divide arithmetic. Coefficients are
+prepared once, and evaluation allocates nothing. The fixed-frame
+`reluctivity_change_action` computes `(nu_next-nu_old)B` directly from principal
+changes and returns exactly zero for held values. It does not itself authorize
+source refresh or account for thermal entropy; those remain consumer duties.
+No anisotropic saturation, history, gyrotropy, frequency loss, mechanical stress
+or measured-source qualification is inferred. Focused G0/G3 regressions compare
+full fields, inverse response, energy and parameter changes with independent
+principal-frame calculations, source substitutions and source/domain refusals.

@@ -6,6 +6,13 @@
 //! permittivity is inferred. This is a fixed-condition lossless snapshot, not
 //! a dispersive, nonlinear, moving-material or thermal-work law.
 
+/// Source-backed oriented magnetic permeability and its inverse response.
+pub mod magnetic;
+pub use magnetic::{
+    PRINCIPAL_MAGNETIC_PERMEABILITY_PROPERTIES, SpatialMagneticFrame, SpatialMagneticLaw,
+    SpatialPermeability,
+};
+
 use super::{
     ELECTRIC_PERMITTIVITY_DIMS, ELECTRIC_PERMITTIVITY_PROPERTY, FieldStorageError, coefficient,
 };
