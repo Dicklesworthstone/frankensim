@@ -33,6 +33,9 @@ use super::{
 use crate::irradiation::GroupFlux;
 use crate::{FissionError, nonnegative, positive, sum};
 
+/// Shared absolute-time rate histories for deterministic and discrete transport.
+pub mod schedule;
+
 /// Directed transfer of the same nuclide between two represented compartments.
 /// Each coefficient is a finite nonnegative per-donor-nucleus rate [1/s].
 /// Repeated endpoints are distinct additive paths with separate lifetime counts.

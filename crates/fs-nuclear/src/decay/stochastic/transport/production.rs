@@ -7,14 +7,15 @@
 //! nor movement invents heat, carrier mass or enthalpy.
 //!
 //! Schedules supply independent Poisson intensities, with the same explicit
-//! interpretation as the standalone production owner. Rate changes win exact
-//! ties, then original decay/movement order, then births in compartment/node
-//! order. Unchanged rates and observation boundaries never redraw clocks. Clone
+//! interpretation as the standalone production owner. Movement changes win exact
+//! ties, then source changes, original decay/movement order and births in
+//! compartment/node order. Unchanged rates and observations never redraw clocks. Clone
 //! retains the entire cohort, supply history and all future random events.
 
 use std::sync::Arc;
 
 use super::super::production::PoissonSource;
+use super::schedule::StochasticDecayTransportSchedule;
 use super::{
     DecayError, MAX_STOCHASTIC_NUCLEI, StochasticDecayInventory, StochasticDecayTransportBudget,
     StochasticDecayTransportState, StochasticDecayTransportStep, ceiling,
@@ -119,6 +120,26 @@ impl StochasticDecayProductionTransportState {
             sources,
             source_clock_count,
         })
+    }
+
+    /// Bind or replace movement rates at the current time without touching any
+    /// pending source clock or birth counter. The original combined storage bound
+    /// includes one movement schedule slot, which is reused on later rebindings.
+    pub fn with_transport_schedule(
+        mut self,
+        schedule: Arc<StochasticDecayTransportSchedule>,
+    ) -> Result<Self, DecayError> {
+        let total_clocks = self
+            .transport
+            .clock_count
+            .checked_add(usize::from(self.transport.transport_schedule().is_none()))
+            .and_then(|count| count.checked_add(self.source_clock_count))
+            .ok_or(DecayError::Budget("stochastic production transport clocks"))?;
+        if total_clocks > self.transport.limits.maximum_clocks {
+            return Err(DecayError::Budget("stochastic production transport clocks"));
+        }
+        self.transport = self.transport.with_transport_schedule(schedule)?;
+        Ok(self)
     }
 
     #[must_use]

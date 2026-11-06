@@ -12,8 +12,9 @@
 //! Only hazards whose donor population changed are resampled, at the actual
 //! compensated event time. Observation endpoints never redraw clocks. Clone
 //! retains the complete future trajectory, including movement clocks and counts.
-//! Exact clock ties retain compartment/node order before authored movement-path
-//! order. The shared finite-grid clock and branch limitations still apply.
+//! Authored movement changes precede all tied events, followed by source changes,
+//! original compartment/node decay order, movement-path order and then births.
+//! The shared finite-grid clock and branch limitations still apply.
 
 use std::{collections::BTreeSet, sync::Arc};
 
@@ -26,8 +27,10 @@ use super::{
     checked, defect_bound, export_channels, increment, nonnegative, sample_clock,
 };
 use crate::{EnergyChannels, channel_values};
+use schedule::TransportScheduleCursor;
 
 pub mod production;
+pub mod schedule;
 
 /// Construction bounds for the complete cohort, including inactive clocks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -36,7 +39,7 @@ pub struct StochasticDecayTransportLimits {
     /// Every authored transfer/outflow path times the original nuclide count.
     pub maximum_rate_coefficients: usize,
     /// Per-cell decay clocks plus every per-path, per-nuclide movement clock.
-    /// The production extension also charges bound arrival and schedule slots.
+    /// Bound arrival clocks and movement/production schedule slots also count.
     pub maximum_clocks: usize,
 }
 
@@ -81,6 +84,8 @@ pub struct StochasticDecayTransportStep {
     pub decay: Vec<StochasticDecayStep>,
     pub decay_events: u64,
     pub movement_events: u64,
+    /// Authored movement changes traversed, including identical-rate frames.
+    pub transport_changes: usize,
     /// Authored path order, then original nuclide order. Circulation is counted.
     pub transfer_counts: Vec<Vec<u64>>,
     pub outflow_counts: Vec<Vec<u64>>,
@@ -92,14 +97,17 @@ pub struct StochasticDecayTransportStep {
 
 /// An independent physical checkpoint of the original inventories and movement.
 ///
-/// Rates remain constant for this owner. There is no external supply, inferred
-/// flow, bulk-mass evolution or transported sensible/latent heat. Construction
-/// bounds the complete retained population by 2^53; outflow can only reduce it.
+/// Rates remain constant unless an explicit movement schedule is bound. This
+/// owner infers no flow, bulk-mass evolution or transported sensible/latent heat.
+/// Construction bounds retained population by 2^53; outflow can only reduce it.
+/// The production extension supplies external arrivals on the same event race.
 /// Trial cloning and reports allocate once per call. Events reuse that storage.
 #[derive(Clone, Debug, PartialEq)]
 pub struct StochasticDecayTransportState {
     inventories: Vec<StochasticDecayInventory>,
+    // Original ordered topology; scheduled rates are borrowed from their frame.
     transport: Arc<NuclideTransport>,
+    transport_schedule: Option<TransportScheduleCursor>,
     outgoing_paths: Arc<Vec<Vec<usize>>>,
     movement_clocks: Vec<EventClock>,
     movement_rng: StreamCheckpoint,
@@ -112,6 +120,7 @@ pub struct StochasticDecayTransportState {
 
 #[derive(Clone, Copy)]
 enum Event {
+    TransportChange,
     Change { compartment: usize },
     Decay { compartment: usize, node: usize },
     Movement { path: usize, node: usize },
@@ -201,6 +210,7 @@ impl StochasticDecayTransportState {
             transfers: vec![vec![0; nodes]; transport.transfers.len()],
             outflows: vec![vec![0; nodes]; transport.outflows.len()],
             transport: Arc::new(transport),
+            transport_schedule: None,
             nodes,
             clock_count,
             limits,
@@ -223,7 +233,10 @@ impl StochasticDecayTransportState {
         &self.inventories
     }
     pub fn transport(&self) -> &NuclideTransport {
-        &self.transport
+        match &self.transport_schedule {
+            Some(bound) => bound.active(),
+            None => &self.transport,
+        }
     }
     pub fn limits(&self) -> StochasticDecayTransportLimits {
         self.limits
@@ -304,6 +317,7 @@ impl StochasticDecayTransportState {
                 .collect(),
             decay_events: 0,
             movement_events: 0,
+            transport_changes: 0,
             transfer_counts: vec![vec![0; self.nodes]; self.transfers.len()],
             outflow_counts: vec![vec![0; self.nodes]; self.outflows.len()],
             energy_roundoff_j: 0.0,
@@ -326,6 +340,9 @@ impl StochasticDecayTransportState {
                     break;
                 }
                 match event {
+                    Event::TransportChange => {
+                        next.apply_transport_change(time, &mut report, budget, &mut checkpoint)?;
+                    }
                     Event::Change { compartment } => {
                         let context = production.as_deref_mut().ok_or(DecayError::Arithmetic)?;
                         if context.schedule_changes == context.maximum_schedule_changes {
@@ -473,9 +490,11 @@ impl StochasticDecayTransportState {
         &self,
         sources: &[Option<PoissonSource>],
     ) -> Option<(Event, Accumulator)> {
-        let mut next: Option<(Event, Accumulator)> = None;
-        // All changes precede a tied nuclear/movement event or source arrival,
-        // including a birth in an earlier compartment at the same actual time.
+        let mut next = self
+            .next_transport_change()
+            .map(|time| (Event::TransportChange, time));
+        // Movement changes precede source changes, then tied nuclear/movement
+        // events and births, regardless of the compartment of the arrival.
         for (compartment, source) in sources.iter().enumerate() {
             if let Some(time) = source.as_ref().and_then(PoissonSource::next_change_time)
                 && next.is_none_or(|(_, earliest)| before(time, earliest))
@@ -579,11 +598,12 @@ impl StochasticDecayTransportState {
         node: usize,
         time: Accumulator,
     ) -> Result<(), DecayError> {
-        let (from, rate) = if path < self.transport.transfers.len() {
-            let transfer = &self.transport.transfers[path];
+        let frame = self.transport();
+        let (from, rate) = if path < frame.transfers.len() {
+            let transfer = &frame.transfers[path];
             (transfer.from_compartment, transfer.rates_per_s[node])
         } else {
-            let outflow = &self.transport.outflows[path - self.transport.transfers.len()];
+            let outflow = &frame.outflows[path - frame.transfers.len()];
             (outflow.compartment, outflow.rates_per_s[node])
         };
         self.movement_clocks[path * self.nodes + node] = sample_clock(

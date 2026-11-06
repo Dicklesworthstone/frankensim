@@ -499,7 +499,7 @@ explicit manufactured source pulses, shutdown decay and complete restart.
 
 `decay::stochastic::transport::StochasticDecayTransportState` advances a complete
 cohort of integer radioactive inventories using the existing `NuclideTransport`
-description. Each directed path's constant coefficient is an authored per-nucleus
+description. Each directed path's coefficient is an authored per-nucleus
 hazard in 1/s; the donor's current integer population determines the actual event
 intensity. All cells share the exact original model Arc and absolute time, with
 distinct logical decay streams and a separate explicit movement stream. This
@@ -553,8 +553,9 @@ times. This is one combined trajectory, without production/transport splitting
 at rounded endpoints. A supplied parent can move, produce daughters, lose those
 daughters through outflow or release their decay heat in another compartment
 within the same observation interval. Source shutdown stops births while
-retained nuclei continue moving and decaying. At exact ties, schedule changes
-precede the original decay/movement ordering, followed by births, with fixed
+retained nuclei continue moving and decaying. At exact ties, movement-rate
+changes precede source changes and the original decay/movement ordering,
+followed by births, with fixed
 compartment/nuclide tie order. Unchanged source rates retain pending clocks.
 
 The standalone production owner and the combined owner share source scheduling
@@ -585,6 +586,43 @@ report through `report()` and its original local emission through `decay()`.
 The manufactured `stochastic_production_transport` example demonstrates a source
 pulse feeding a downstream compartment with daughter decay, outflow, integer
 balance and exact cloned restart.
+
+## Scheduled circulation, valves and extraction of discrete radionuclides
+
+`decay::stochastic::transport::schedule::StochasticDecayTransportSchedule`
+binds a bounded, right-continuous movement history to the original model,
+compartments and ordered transfer/outflow paths. Each change replaces the
+per-nuclide hazards at an absolute time. Zero rates close a path; reopening or
+changing selective extraction needs no new inventory or scheduler. Opposite
+directed paths describe circulation or reversal while retaining separate
+cumulative movement accounts.
+
+`burnup::transport::schedule::NuclideTransportTimeline` owns the common frame
+representation and validation. The deterministic thermal transport schedule
+reuses it and retains its existing public API and model/volume admission.
+Histories reject nonfinite or negative coefficients, reordered paths, changed
+coefficient shapes, nonpositive or unordered change times and excess frames.
+Admission polls cancellation within bounded coefficient chunks; retained
+frames are borrowed without copying rate vectors during event processing.
+
+Both the standalone and Poisson-supplied integer transport owners accept
+`with_transport_schedule`. Binding at a later time installs the currently
+active rates without replaying earlier changes. Only movement clocks whose
+rates actually change are resampled on the original movement stream at the
+true change time. Nuclear clocks, source clocks, lifetime emissions and
+unchanged path clocks are preserved. Closing an exactly tied movement clock
+therefore prevents that old-rate movement; a movement strictly before the
+boundary still occurs even when their outward floating-point endpoints match.
+
+The complete event race includes movement changes, source changes, decay,
+transfer/outflow and births. `transport_changes` records installed frames;
+the existing clock-work budget charges the retained schedule slot, inspected
+coefficients and resampled clocks. No-op frames consume bounded schedule work
+without consuming randomness. Admission, arithmetic, work or cancellation
+failure publishes none of the candidate clocks, counters or populations.
+Whole/split observation and cloned restart retain the same accepted history.
+The existing thermal cohort adapter clips at these same rate boundaries and
+keeps all nuclear heat at the compartment of the actual decay event.
 
 ## Stochastic decay events on the shared thermal timeline
 
