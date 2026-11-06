@@ -7,6 +7,10 @@
 //! A compact force ON the fluid F [N] has `p=-F.grad(G)` and
 //! `u=-Hessian(G)F/(i*omega*rho)`. Its pressure contains no extra density;
 //! its angular derivative retains velocity even at a pressure-directivity null.
+//! A physical stress quadrupole Q [N m] has p=Q:Hessian(G); its analytic
+//! third derivatives supply the full particle velocity, including transverse
+//! motion at pressure nulls. Source stress, not a squared velocity phasor, is
+//! the input. The original body solve supplies the boundary response once.
 //! On a stationary wall, `v_total=-Y*p_total`, hence the scattered solve's
 //! drive is `-v_incident-Y*p_incident`. Both original BM rows receive it.
 //!
@@ -23,10 +27,14 @@ use std::f64::consts::PI;
 mod traces;
 pub use traces::IncidentTraces;
 
+#[path = "helmholtz_incident_quadrupole.rs"]
+mod quadrupole;
+pub use quadrupole::StressQuadrupole;
+
 /// Maximum number of coherent point sources in one incident field.
 pub const MAX_MONOPOLES: usize = near_field::MAX_RECEIVERS;
 
-/// Maximum total number of coherent plane-wave, volume and force source terms.
+/// Maximum total number of coherent plane-wave, volume, force and stress terms.
 pub const MAX_INCIDENT_SOURCES: usize = MAX_MONOPOLES;
 
 /// Ideal point emitter in the same stationary medium as the scatterer.
@@ -56,6 +64,8 @@ pub enum IncidentSource {
     PlaneWave(PlaneWave),
     Monopole(Monopole),
     ForceDipole(ForceDipole),
+    /// Physical symmetric Lighthill stress moment [N m], including its trace.
+    StressQuadrupole(StressQuadrupole),
 }
 
 /// Coherent incident field. Sources are summed before scattering; their
@@ -154,6 +164,7 @@ impl IncidentField<'_> {
                         IncidentSource::ForceDipole(source) => {
                             Self::ForceDipoles(std::slice::from_ref(source)).validate()?;
                         }
+                        IncidentSource::StressQuadrupole(source) => source.validate()?,
                     }
                 }
             }
@@ -306,17 +317,20 @@ impl IncidentField<'_> {
                 let mut pressure = ComplexSum::default();
                 let mut velocity = [ComplexSum::default(); 3];
                 for source in sources {
-                    let field = match source {
-                        IncidentSource::PlaneWave(plane) => Self::PlaneWave(*plane),
-                        IncidentSource::Monopole(source) => {
-                            Self::Monopoles(std::slice::from_ref(source))
-                        }
-                        IncidentSource::ForceDipole(source) => {
-                            Self::ForceDipoles(std::slice::from_ref(source))
+                    let sample = match source {
+                        IncidentSource::PlaneWave(plane) => Self::PlaneWave(*plane)
+                            .sample_wave(k, omega_rho, lossless_impedance, point, cancelled)?,
+                        IncidentSource::Monopole(source) => Self::Monopoles(std::slice::from_ref(source))
+                            .sample_wave(k, omega_rho, lossless_impedance, point, cancelled)?,
+                        IncidentSource::ForceDipole(source) => Self::ForceDipoles(std::slice::from_ref(source))
+                            .sample_wave(k, omega_rho, lossless_impedance, point, cancelled)?,
+                        IncidentSource::StressQuadrupole(source) => {
+                            if cancelled() {
+                                return Err(HelmholtzError::Cancelled);
+                            }
+                            source.sample_wave(k, omega_rho, point)?
                         }
                     };
-                    let sample =
-                        field.sample_wave(k, omega_rho, lossless_impedance, point, cancelled)?;
                     pressure.add(sample.pressure_pa);
                     for (component, value) in velocity.iter_mut().zip(sample.velocity_m_s) {
                         component.add(value);
@@ -352,6 +366,7 @@ impl IncidentField<'_> {
                 .filter_map(|s| match s {
                     IncidentSource::Monopole(s) => Some(s.position_m),
                     IncidentSource::ForceDipole(s) => Some(s.position_m),
+                    IncidentSource::StressQuadrupole(s) => Some(s.position_m),
                     IncidentSource::PlaneWave(_) => None,
                 })
                 .collect(),
@@ -584,6 +599,9 @@ impl ScatteredField<'_, '_> {
                         source.position_m,
                         C64::new(0.0, -trace.k / (4.0 * PI)) * axial.finish(),
                     )
+                }
+                IncidentSource::StressQuadrupole(source) => {
+                    (source.position_m, source.far_field_unphased(trace.k, direction))
                 }
                 IncidentSource::PlaneWave(_) => unreachable!("plane waves refused above"),
             };

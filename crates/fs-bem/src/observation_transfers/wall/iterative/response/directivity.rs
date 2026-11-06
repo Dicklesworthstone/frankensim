@@ -2,7 +2,8 @@
 //!
 //! Finite radiator solutions already contain the complete outgoing field.
 //! Point-source solutions contain scattered traces, so their analytic outgoing
-//! volume monopole or force dipole is added exactly once. Complex source drives are summed before
+//! volume monopole, force dipole or stress quadrupole is added exactly once.
+//! Complex source drives are summed before
 //! angular projection; summing individual source powers would lose interference.
 
 use super::IterativeBoundaryResponse;
@@ -206,6 +207,11 @@ impl IterativeBoundaryResponse<'_, '_> {
                             *component = *component * drive;
                         }
                     }
+                    IncidentSource::StressQuadrupole(source) => {
+                        for component in &mut source.stress_moment_n_m {
+                            *component = *component * drive;
+                        }
+                    }
                     IncidentSource::PlaneWave(_) => {
                         return Err(invalid("a plane wave has no outgoing total far field"));
                     }
@@ -295,6 +301,9 @@ fn add_compact_sources(
                         sum + source.force_on_fluid_n[axis].scale(direction[axis])
                     });
                     (source.position_m, force_factor * axial)
+                }
+                IncidentSource::StressQuadrupole(source) => {
+                    (source.position_m, source.far_field_unphased(k, direction))
                 }
                 IncidentSource::PlaneWave(_) => {
                     return Err(HelmholtzError::BadParameter {
