@@ -2930,6 +2930,38 @@ this operator. Native source-linked
 checks are supplementary: `dsr quality --tool frankensim` is unavailable here
 (`dsr: command not found`), so no workspace DSR verdict is claimed.
 
+### Source-conjugate molecular entropy through finite networks
+
+`NetworkDissipationOperator::advance_entropy_consistent_for` applies the original
+axial source-conjugate molecular kernels at both branch interiors and finite
+plenum ports. Divided source enthalpies and logarithmic chemical efforts retain
+the original Maxwell--Stefan, Fourier, reciprocal Soret/Dufour and viscous-work
+laws. Actual plenum mixing lengths define gradients. Both finite storage owners
+receive opposite species/energy transfers; fixed plenum supports receive axial
+impulse without mechanical work or a second viscous-heating source.
+
+One original-source entropy account covers all branch cells and finite plenums.
+Every synchronized SSPRK2 substep and the direct original-to-final interval
+must satisfy the same declared entropy allowance and individual species
+continuity bounds before publication. Internal ports supply no exterior entropy.
+Only the source-reference contribution of numerical species drift is excluded
+from admission; full source entropy is reported separately. Native candidate
+temperature inversions are reused, with no flattened original field copy or
+per-substep allocation. The flow clock remains unchanged. Final refusal,
+exhausted work and cancellation preserve all accepted fields and receipts.
+
+`advance_for_with_entropy` measures the original engineering faces with this
+same account and retains their accepted native trajectory. It can refuse an
+energy-conserving face with a negative spatial entropy rate. The conjugate entry
+requires each species to be positive on both sides of a face or absent on both;
+one-sided absence refuses without a floor or alternate flux. These closed,
+stationary constant-area entries exclude external baths, moving volumes,
+chemistry, advection and RKL2 composition. Measured finite-step admission is not
+a fully discrete entropy or invariant-domain theorem. Focused G0/G1/G3/G4
+regressions exercise negative-entropy repair, variable-Cp storage and support
+work, orientation/reference invariance, native-trajectory parity, the complete
+interval allowance, species support and final-poll cancellation/reuse.
+
 ### Stabilized molecular intervals with finite plenum storage
 
 `NetworkDissipationOperator::advance_stabilized_for` opts the original complete

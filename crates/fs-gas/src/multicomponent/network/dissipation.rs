@@ -24,6 +24,7 @@ use fs_qty::{Length, Time};
 use fs_thermochem::transport::maxwell_stefan::{MaxwellStefanV1, MaxwellStefanWorkspaceV1};
 
 mod adaptive;
+mod entropy;
 mod evolve;
 mod stabilized;
 

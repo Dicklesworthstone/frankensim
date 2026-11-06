@@ -4,6 +4,7 @@ use super::{
     Totals, TransportLaw, poll, positive,
 };
 use crate::multicomponent::dissipation::evolve as molecular;
+use crate::multicomponent::dissipation::entropy::EntropyTracker;
 use crate::multicomponent::dissipation::reservoir::ReservoirTrace;
 use crate::multicomponent::evolve::totals;
 use crate::multicomponent::{Cell, MAX_SPECIES, sum};
@@ -20,6 +21,32 @@ pub(super) fn advance<L: TransportLaw>(
     duration: Time,
     controls: DissipationControl,
     reservoirs: Option<&[[Option<Cell<'_>>; 2]]>,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<NetworkDissipationReport, DissipationError> {
+    advance_inner::<false, L>(owner, network, duration, controls, reservoirs, None, cancelled)
+}
+
+pub(super) fn advance_with_entropy<const ENTROPY_FACES: bool, L: TransportLaw>(
+    owner: &mut NetworkDissipationOperator<L>,
+    network: &mut MixtureNetwork1d,
+    duration: Time,
+    controls: DissipationControl,
+    entropy: &mut EntropyTracker,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<NetworkDissipationReport, DissipationError> {
+    advance_inner::<ENTROPY_FACES, L>(
+        owner, network, duration, controls, None, Some(entropy), cancelled,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn advance_inner<const ENTROPY_FACES: bool, L: TransportLaw>(
+    owner: &mut NetworkDissipationOperator<L>,
+    network: &mut MixtureNetwork1d,
+    duration: Time,
+    controls: DissipationControl,
+    reservoirs: Option<&[[Option<Cell<'_>>; 2]]>,
+    mut entropy: Option<&mut EntropyTracker>,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<NetworkDissipationReport, DissipationError> {
     let (before, active_reservoirs) =
@@ -47,7 +74,9 @@ pub(super) fn advance<L: TransportLaw>(
                     rejected_steps,
                 });
             }
-            let a = spatial(owner, Input::Current, controls, reservoirs, cancelled)?;
+            let a = spatial_with_scheme::<ENTROPY_FACES, L>(
+                owner, Input::Current, controls, reservoirs, cancelled,
+            )?;
             if a.rate > 0.0 {
                 step = step.min(controls.parabolic_cfl / a.rate);
             }
@@ -61,9 +90,14 @@ pub(super) fn advance<L: TransportLaw>(
                     last: Box::new(last),
                 });
             }
+            if let Some(account) = entropy.as_deref_mut() {
+                account.begin_attempt(&owner.work.primitive);
+            }
             let attempt = (|| {
                 forward(owner, Input::Current, step, cancelled)?;
-                let b = spatial(owner, Input::Stage, controls, reservoirs, cancelled)?;
+                let b = spatial_with_scheme::<ENTROPY_FACES, L>(
+                    owner, Input::Stage, controls, reservoirs, cancelled,
+                )?;
                 let number = step * a.rate.max(b.rate);
                 if !number.is_finite()
                     || number > controls.parabolic_cfl * (1.0 + 8.0 * f64::EPSILON)
@@ -85,10 +119,17 @@ pub(super) fn advance<L: TransportLaw>(
                         cancelled,
                     )?;
                 }
+                if let Some(account) = entropy.as_deref_mut() {
+                    super::entropy::collect_candidate(owner, account, cancelled)?;
+                    account.check_attempt(owner.gas.species_count(), &a, &b, step, [0.0; 2], cancelled)?;
+                }
                 Ok::<_, DissipationError>(b)
             })();
             match attempt {
                 Ok(b) => {
+                    if let Some(account) = entropy.as_deref_mut() {
+                        account.accept_attempt(owner.gas.species_count())?;
+                    }
                     for (index, shape) in owner.branches.iter().enumerate() {
                         poll(cancelled)?;
                         let area = shape.mesh.face_areas()[0];
@@ -144,6 +185,9 @@ pub(super) fn advance<L: TransportLaw>(
                 last: Box::new(last),
             });
         }
+    }
+    if let Some(account) = entropy {
+        super::entropy::finish(owner, network, account, cancelled)?;
     }
     finish(
         owner,
@@ -399,6 +443,16 @@ pub(super) fn spatial<L: TransportLaw>(
     reservoirs: Option<&[[Option<Cell<'_>>; 2]]>,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<molecular::Stage, DissipationError> {
+    spatial_with_scheme::<false, L>(owner, input, controls, reservoirs, cancelled)
+}
+
+fn spatial_with_scheme<const ENTROPY_FACES: bool, L: TransportLaw>(
+    owner: &mut NetworkDissipationOperator<L>,
+    input: Input,
+    controls: DissipationControl,
+    reservoirs: Option<&[[Option<Cell<'_>>; 2]]>,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<molecular::Stage, DissipationError> {
     let NetworkDissipationOperator {
         gas,
         branches,
@@ -440,7 +494,7 @@ pub(super) fn spatial<L: TransportLaw>(
                 }
             })
         });
-        let stage = molecular::spatial(
+        let stage = molecular::spatial_with_wall_motion::<ENTROPY_FACES, L>(
             gas,
             &shape.mesh,
             shape.molecular_boundaries,
@@ -457,6 +511,7 @@ pub(super) fn spatial<L: TransportLaw>(
             &mut work.binary_diffusivities,
             &mut work.diffusion,
             controls.diffusion,
+            [0.0; 2],
             cancelled,
         )?;
         aggregate.gradient_residual = aggregate.gradient_residual.max(stage.gradient_residual);
@@ -506,7 +561,7 @@ pub(super) fn spatial<L: TransportLaw>(
                 "molecular port distance overflow",
             ));
         }
-        let rate = molecular::interior_face(
+        let rate = molecular::interior_face_with_scheme::<ENTROPY_FACES, L>(
             gas,
             law,
             maxwell_stefan,

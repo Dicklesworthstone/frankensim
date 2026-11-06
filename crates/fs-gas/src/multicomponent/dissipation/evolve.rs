@@ -492,7 +492,7 @@ pub(in crate::multicomponent) fn spatial<L: TransportLaw>(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn spatial_with_wall_motion<const ENTROPY_FACES: bool, L: TransportLaw>(
+pub(in crate::multicomponent) fn spatial_with_wall_motion<const ENTROPY_FACES: bool, L: TransportLaw>(
     gas: &MixtureGas,
     mesh: &Mesh1d,
     boundaries: Boundaries,
@@ -764,7 +764,7 @@ pub(in crate::multicomponent) fn interior_face<L: TransportLaw>(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn interior_face_with_scheme<const ENTROPY_FACES: bool, L: TransportLaw>(
+pub(in crate::multicomponent) fn interior_face_with_scheme<const ENTROPY_FACES: bool, L: TransportLaw>(
     gas: &MixtureGas,
     law: &mut L,
     diffusion: &MaxwellStefanV1,

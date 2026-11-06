@@ -689,7 +689,7 @@ impl EntropyTracker {
         Ok(maximum)
     }
 
-    pub(super) fn check_attempt(
+    pub(in crate::multicomponent) fn check_attempt(
         &mut self,
         n: usize,
         a: &super::evolve::Stage,
@@ -719,7 +719,7 @@ impl EntropyTracker {
         check
     }
 
-    pub(super) fn accept_attempt(&mut self, n: usize) -> Result<(), FlowError> {
+    pub(in crate::multicomponent) fn accept_attempt(&mut self, n: usize) -> Result<(), FlowError> {
         let input = self.boundary.as_ref().map_or(Dd::ZERO, |b| b.trial.input);
         let change = scalar(self.trial_entropy - input)?;
         if let Some(boundary) = &mut self.boundary { boundary.accept(n)?; }
@@ -771,31 +771,60 @@ impl EntropyTracker {
     ) -> Result<(), FlowError> {
         let n = gas.species_count();
         let m = n + 2;
+        self.finish_cells(
+            gas,
+            original.chunks_exact(m).zip(final_state.chunks_exact(m)).zip(volumes)
+                .map(|((old, new), &volume)| (
+                    super::super::cell(old, n), super::super::cell(new, n), volume,
+                )),
+            cancelled,
+        )
+    }
+
+    /// Direct complete-interval reduction over the original storage owners.
+    /// Networks retain separate branch and compact-volume fields; borrowing
+    /// their cells here avoids a flattened rollback copy or a second EOS solve.
+    pub(in crate::multicomponent) fn finish_cells<'a, 'b>(
+        &mut self,
+        gas: &MixtureGas,
+        cells: impl IntoIterator<Item = (Cell<'a>, Cell<'b>, f64)>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(), FlowError> {
+        if !self.matches_source(gas) {
+            return Err(FlowError::EntropyDomain("entropy final source mismatch"));
+        }
+        let n = gas.species_count();
         self.trial_entropy = Dd::ZERO;
         self.trial_mass.fill(Dd::ZERO);
-        for (i, (old, new)) in original
-            .chunks_exact(m)
-            .zip(final_state.chunks_exact(m))
-            .enumerate()
-        {
+        let mut count = 0;
+        for (i, (old, new, volume)) in cells.into_iter().enumerate() {
             poll(cancelled)?;
+            if i >= self.initial_temperature.len() || !positive(volume)
+                || old.partial_densities.len() != n || new.partial_densities.len() != n
+            {
+                return Err(FlowError::EntropyDomain("entropy final storage dimensions"));
+            }
             let temperature = self.current_temperature[i];
             let change = cell_change(
                 gas,
                 &self.reference_density,
                 self.reference_temperature,
-                old,
-                new,
+                old.partial_densities,
+                new.partial_densities,
                 self.initial_temperature[i],
                 temperature,
                 cancelled,
             )?;
-            let volume = Dd::from_f64(volumes[i]);
+            let volume = Dd::from_f64(volume);
             self.trial_entropy = self.trial_entropy + volume * change;
             for k in 0..n {
-                self.trial_mass[k] =
-                    self.trial_mass[k] + volume * (Dd::from_f64(new[k]) - Dd::from_f64(old[k]));
+                self.trial_mass[k] = self.trial_mass[k] + volume
+                    * (Dd::from_f64(new.partial_densities[k]) - Dd::from_f64(old.partial_densities[k]));
             }
+            count += 1;
+        }
+        if count != self.initial_temperature.len() {
+            return Err(FlowError::EntropyDomain("entropy final storage count"));
         }
         let report = self.complete_report(gas, cancelled)?;
         let reservoir_report = if self.boundary.is_some() {
