@@ -4175,3 +4175,30 @@ gray spectrum is introduced. Finite-window coverage remains explicit and
 unrenormalized; nonabsorbing faces create no fictitious emission source.
 Original sheet sources, gas sources, numerical work, spectral diagnostics and
 actual material/gas heat remain in the returned report.
+
+### Implicit original-inventory heating of transmitting sheets
+
+`radiation::sheets::thermal` advances the original
+`fs_thermal::enthalpy::DepositionSimulation` through its native
+`BackwardEulerStep`. Both optical faces of each sheet must bind the SAME
+active `CellId`. Their actual absorbed-minus-emitted powers are summed once
+into that cell's endpoint source. No sheet mass or caloric law is duplicated.
+Unpaired opaque faces may bind existing cells or explicit prescribed baths.
+
+The candidate solves energy increments for every original active cell, also
+retaining cells without an optical face, original conductive links, material
+domains, authored sources and latent plateaus. Immutable old history is reused
+for all nonlinear probes. A bounded dense Newton workspace admits at most 256
+cells; source-domain refusals shrink finite-difference probes and line-search
+steps under explicit evaluation/iteration limits. Local and total native joule
+residuals, plus the actually applied cell/gas/bath energy balance, gate
+acceptance. Cancellation or refusal leaves the input thermal inventory intact.
+
+The returned material endpoint already includes the reported cell radiant
+powers. Apply its original gas powers once and retain the explicit prescribed
+bath debits when accepting the coupled owners. Gas temperatures, optical
+geometry and sourced sheet coefficients are held over this interval; gas is
+not advanced here. Native thermal clock/event admission remains in force:
+interior events refuse and accepted endpoint events remain pending until
+joint-owner acceptance. These are algebraic and energy checks, not a temporal
+accuracy or through-thickness isothermal certificate.

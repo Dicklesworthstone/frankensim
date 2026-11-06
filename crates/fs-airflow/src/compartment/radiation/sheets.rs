@@ -366,5 +366,8 @@ fn coefficients(
     (reflection, transmission, partner)
 }
 
+/// Implicit radiation heating of the original finite thermal inventory.
+pub mod thermal;
+
 #[cfg(test)]
 mod tests;
