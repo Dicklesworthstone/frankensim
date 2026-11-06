@@ -1369,13 +1369,12 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
             });
         }
         let mut material_free_norm = 0.0;
-        let mut current_inertia_potential = 0.0;
         if let Some(inertia) = inertia {
             material_free_norm = free_force_norm(&state.internal, &free);
             inertia
                 .add_force(&u, &mut state.internal, cx)
                 .map_err(inertia_error)?;
-            current_inertia_potential = inertia.potential(&u, cx).map_err(inertia_error)?;
+            inertia.potential(&u, cx).map_err(inertia_error)?;
         }
         let nonsymmetric = matches!(pressure, Some((_, pressure::TetPressure::PerFace(_))));
         let mut scaled_faces = Vec::new();
@@ -1664,11 +1663,15 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
                         && evaluated.internal.iter().all(|value| value.is_finite())
                     {
                         let mut trial_material_free_norm = 0.0;
-                        let trial_inertia_potential = if let Some(inertia) = inertia {
+                        let trial_inertia_change = if let Some(inertia) = inertia {
                             trial_material_free_norm = free_force_norm(&evaluated.internal, &free);
                             let evaluated_inertia = (|| {
                                 inertia.add_force(&trial, &mut evaluated.internal, cx)?;
-                                inertia.potential(&trial, cx)
+                                if energy_globalization {
+                                    inertia.potential_increment(&u, &trial, cx)
+                                } else {
+                                    inertia.potential(&trial, cx).map(|_| 0.0)
+                                }
                             })();
                             match evaluated_inertia {
                                 Ok(value) => value,
@@ -1711,8 +1714,7 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
                                 });
                             let material_change = evaluated.energy_change
                                 .expect("Armijo trial has an original potential increment");
-                            let inertia_change = Dd::from_f64(trial_inertia_potential)
-                                - Dd::from_f64(current_inertia_potential);
+                            let inertia_change = Dd::from_f64(trial_inertia_change);
                             let pressure_change = match applied_pressure {
                                 Some((
                                     surface,
@@ -1749,7 +1751,7 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
                                     .max(gravity_change.to_f64().abs())
                                     .max(cavity_change.to_f64().abs())
                                     .max((alpha * slope).abs());
-                            // These owners still supply endpoint potentials.
+                            // Gravity and cavity still supply endpoint potentials.
                             // An unresolved subtraction must require actual
                             // residual decrease, never a tolerance set by a
                             // large datum. The true equilibrium gate is unchanged.
@@ -1762,10 +1764,6 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
                             endpoint_roundoff += 64.0 * f64::EPSILON * load
                                 * current_cavity.as_ref().map_or(0.0, |s| s.potential_change_j.abs())
                                     .max(trial_cavity.as_ref().map_or(0.0, |s| s.potential_change_j.abs()));
-                            if inertia.is_some() {
-                                endpoint_roundoff += 64.0 * f64::EPSILON
-                                    * current_inertia_potential.abs().max(trial_inertia_potential.abs());
-                            }
                             let armijo_bound = 1e-4 * alpha * slope + roundoff;
                             // Elastic and gravity work can each be large while
                             // their NET decrement is tiny. The relevant scale
@@ -1828,7 +1826,6 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
                                 trial_gravity_potential,
                                 trial_cavity,
                                 trial_material_free_norm,
-                                trial_inertia_potential,
                             ));
                             break;
                         }
@@ -1843,7 +1840,6 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
                     trial_gravity_potential,
                     trial_cavity,
                     trial_material_free_norm,
-                    trial_inertia_potential,
                 )) = accepted
                 else {
                     return Err(HyperTetError::NewtonStalled {
@@ -1857,7 +1853,6 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
                 current_gravity_potential = trial_gravity_potential;
                 current_cavity = trial_cavity;
                 material_free_norm = trial_material_free_norm;
-                current_inertia_potential = trial_inertia_potential;
             }
             if !converged {
                 return Err(HyperTetError::NewtonStalled {

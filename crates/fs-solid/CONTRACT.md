@@ -5031,15 +5031,28 @@ potential change in the existing trial force sweep. Dead-load work and the
 combined potential difference use compensated arithmetic; the Armijo tolerance
 depends on the actual changes and work, so an additive material energy datum
 does not relax the decision. Uniform, affine, free-surface and stratified
-pressure all use their original pressure owner's direct work. Gravity, cavity
-and backward-Euler inertia still expose endpoint potentials here: when their
-subtraction cannot resolve the decision, an actual residual decrease is
-required. Custom material adapters that retain the default endpoint subtraction
+pressure all use their original pressure owner's direct work. Gravity and cavity
+sources still expose endpoint potentials here: when their subtraction cannot
+resolve the decision, an actual residual decrease is required. Custom material
+adapters that retain the default endpoint subtraction
 retain its precision limits. Force equilibrium and material/load admission are
 unchanged. Numerical solve regressions retain the same nonlinear path with a
 `1e20 Pa` material energy offset and resolve a pressure-loaded small cell beside
 an immobile cell of approximately `1.7e20 m3` whose rounded global volume does
 not change.
+
+Backward-Euler globalization also consumes a direct increment of its original
+held-predictor quadratic potential. With `q=(u-u_old)/dt-v_old`, compensated
+polarization evaluates `Delta Psi=mean(q)^T M Delta q`, retaining small work
+beneath a large predictor baseline. Both endpoint quadratic forms retain their
+finite/nonnegative admission and previous floating-point reduction order.
+Those endpoint values and the direct increment share one traversal of the
+original consistent reference mass, including all signed quadratic-element
+entries and cross terms. No lumped mass, copied tangent or second sparse sweep
+is introduced. Physical kinetic energy, numerical loss, material dissipation
+and the Backward-Euler scheme retain their existing meanings. Original-owner
+tests cover weak predictor-relative work, common-offset invariance, independent
+rational P2 mass work, reversal/subdivision, endpoint compatibility and refusal.
 
 `HyperelasticLawField::Uniform` and `PerElement` use this same owner. A
 per-element field follows tetrahedron connectivity order and must cover the

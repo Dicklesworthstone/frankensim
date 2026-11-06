@@ -799,19 +799,102 @@ impl<'a> BackwardEulerInertia<'a> {
     /// This reduced kinetic potential is for Newton globalization, and is
     /// distinct from endpoint physical kinetic energy and plastic dissipation.
     pub(crate) fn potential(&self, u: &[f64], cx: &Cx<'_>) -> Result<f64, InertiaError> {
+        Ok(self.evaluate_potential(u, None, cx)?.0)
+    }
+
+    /// Change of the SAME held-predictor quadratic potential between Newton
+    /// iterates. With `q=(u-u_old)/dt-v_old`, symmetry of the original consistent
+    /// mass gives `Delta Psi = mean(q) dot M Delta q`. Form the increment from
+    /// the original displacements, before the large predictor can round it out.
+    /// Both original endpoint potentials retain their finite/nonnegative gates.
+    /// This is neither physical kinetic-energy change nor backward-Euler loss.
+    pub(crate) fn potential_increment(
+        &self,
+        before_u: &[f64],
+        after_u: &[f64],
+        cx: &Cx<'_>,
+    ) -> Result<f64, InertiaError> {
+        Ok(self.evaluate_potential(after_u, Some(before_u), cx)?.1)
+    }
+
+    /// Endpoint storage and optional direct change share one original CSR
+    /// traversal. The f64 endpoint reductions retain the previous potential's
+    /// action/dot order; only the interval uses compensated polarization.
+    fn evaluate_potential(
+        &self,
+        u: &[f64],
+        before: Option<&[f64]>,
+        cx: &Cx<'_>,
+    ) -> Result<(f64, f64), InertiaError> {
+        use fs_math::dd::Dd;
+
+        checkpoint(cx)?;
         self.check_length(u)?;
+        if let Some(before) = before {
+            self.check_length(before)?;
+        }
         let delta: Vec<_> = u
             .iter()
             .zip(self.old_u)
             .zip(self.old_v)
             .map(|((&u, &old_u), &old_v)| finite((u - old_u) * self.inverse_dt - old_v))
             .collect::<Result<_, _>>()?;
-        let impulse = self.action(&delta, cx)?;
-        let potential = finite(0.5 * dot(&delta, &impulse))?;
-        if potential < 0.0 {
+        let interval = before
+            .map(|before| {
+                let mut paired = Vec::with_capacity(u.len());
+                for i in 0..u.len() {
+                    if i % 256 == 0 {
+                        checkpoint(cx)?;
+                    }
+                    let prior =
+                        finite((before[i] - self.old_u[i]) * self.inverse_dt - self.old_v[i])?;
+                    let change = (Dd::from_f64(u[i]) - Dd::from_f64(before[i]))
+                        * Dd::from_f64(self.inverse_dt);
+                    finite(change.to_f64())?;
+                    paired.push((prior, change));
+                }
+                Ok::<_, InertiaError>(paired)
+            })
+            .transpose()?;
+        let mut twice_potential = 0.0;
+        let mut twice_before = 0.0;
+        let mut change = Dd::ZERO;
+        for row in 0..u.len() {
+            if row % 256 == 0 {
+                checkpoint(cx)?;
+            }
+            let (columns, values) = self.mass.matrix.row(row);
+            let mut impulse = 0.0;
+            let mut before_impulse = 0.0;
+            let mut impulse_change = Dd::ZERO;
+            for (&column, &value) in columns.iter().zip(values) {
+                impulse = value.mul_add(delta[column], impulse);
+                if let Some(interval) = &interval {
+                    before_impulse = value.mul_add(interval[column].0, before_impulse);
+                    impulse_change = impulse_change + Dd::from_f64(value) * interval[column].1;
+                }
+            }
+            twice_potential = delta[row].mul_add(finite(impulse)?, twice_potential);
+            if let (Some(before), Some(interval)) = (before, &interval) {
+                twice_before = interval[row]
+                    .0
+                    .mul_add(finite(before_impulse)?, twice_before);
+                let old_u = Dd::from_f64(self.old_u[row]);
+                let half = Dd::from_f64(0.5);
+                let mean = ((Dd::from_f64(before[row]) - old_u) * half
+                    + (Dd::from_f64(u[row]) - old_u) * half)
+                    * Dd::from_f64(self.inverse_dt)
+                    - Dd::from_f64(self.old_v[row]);
+                change = change + mean * impulse_change;
+            }
+        }
+        let potential = finite(0.5 * twice_potential)?;
+        let potential_before = finite(0.5 * twice_before)?;
+        if potential < 0.0 || potential_before < 0.0 {
             return Err(invalid("consistent inertial potential must be nonnegative"));
         }
-        Ok(potential)
+        checkpoint(cx)?;
+        Ok((potential, finite(change.to_f64())?))
     }
 
     /// Preserve the original three-component result for existing solid owners.
@@ -1229,6 +1312,44 @@ mod density_tests {
         });
     }
 
+    // G1/G3: the weak change is below the predictor's velocity ulp, as well
+    // as the ulp of either absolute potential. Rigid reference offsets cancel.
+    #[test]
+    fn backward_euler_potential_retains_work_below_predictor_resolution() {
+        with_cx(|cx| {
+            let mass = graded(cx);
+            let speed = 2.0_f64.powi(40);
+            let travel = 2.0_f64.powi(-20);
+            let old_v = [[speed, 0.0, 0.0]; 4];
+            let velocity_change = 4.0 * travel;
+            let expected = -speed * velocity_change + 0.5 * velocity_change * velocity_change;
+            for datum in [0.0, 2.0_f64.powi(30)] {
+                let before = [datum; 12];
+                let mut after = before;
+                for node in 0..4 {
+                    after[3 * node] += travel;
+                }
+                let inertia =
+                    BackwardEulerInertia::new(&mass, &before, old_v.as_flattened(), 0.25, cx)
+                        .unwrap();
+                assert_eq!(
+                    inertia.potential(&after, cx).unwrap(),
+                    inertia.potential(&before, cx).unwrap(),
+                );
+                let change = inertia.potential_increment(&before, &after, cx).unwrap();
+                assert!((change - expected).abs() < 8.0 * f64::EPSILON * expected.abs());
+                assert_eq!(
+                    inertia.potential_increment(&after, &before, cx).unwrap(),
+                    -change,
+                );
+                assert_eq!(
+                    inertia.potential_increment(&before, &before, cx).unwrap(),
+                    0.0
+                );
+            }
+        });
+    }
+
     #[test]
     fn uniform_nodal_admission_keeps_existing_mass_bits_and_invalid_fields_refuse() {
         with_cx(|cx| {
@@ -1388,6 +1509,84 @@ mod tet10_tests {
             ];
             let v = positions.as_flattened();
             close(0.5 * dot(v, &mass.action(v, cx).unwrap()), 3.0 / 20.0);
+        });
+    }
+
+    // G1/G3: independent rational P2 integrals retain the signed vertex-edge
+    // mass entries. Lumping or replacing those entries by magnitudes fails.
+    #[test]
+    fn backward_euler_potential_increment_retains_signed_mass_and_subdivision() {
+        with_cx(false, |cx| {
+            let mass = mass(cx);
+            let old_u: [f64; 30] = core::array::from_fn(|i| (i as f64 - 9.0) / 32.0);
+            let old_v: [f64; 30] = core::array::from_fn(|i| ((7 * i % 11) as f64 - 5.0) / 16.0);
+            let before: [f64; 30] = core::array::from_fn(|i| old_u[i] + (i as f64 - 8.0) / 64.0);
+            let after: [f64; 30] =
+                core::array::from_fn(|i| old_u[i] + ((5 * i % 13) as f64 - 6.0) / 32.0);
+            let midpoint: [f64; 30] = core::array::from_fn(|i| 0.5 * before[i] + 0.5 * after[i]);
+            let inertia = BackwardEulerInertia::new(&mass, &old_u, &old_v, 0.125, cx).unwrap();
+            let exact = |u: &[f64; 30]| {
+                let q: [f64; 30] = core::array::from_fn(|i| 8.0 * (u[i] - old_u[i]) - old_v[i]);
+                let mut potential = 0.0;
+                for a in 0..10 {
+                    for b in 0..10 {
+                        for axis in 0..3 {
+                            potential +=
+                                0.5 * exact_entry(a, b) * q[3 * a + axis] * q[3 * b + axis];
+                        }
+                    }
+                }
+                potential
+            };
+            let change = inertia.potential_increment(&before, &after, cx).unwrap();
+            close(change, exact(&after) - exact(&before));
+            close(
+                inertia.potential_increment(&after, &before, cx).unwrap(),
+                -change,
+            );
+            close(
+                inertia.potential_increment(&before, &midpoint, cx).unwrap()
+                    + inertia.potential_increment(&midpoint, &after, cx).unwrap(),
+                change,
+            );
+            for u in [&before, &midpoint, &after] {
+                let q: [f64; 30] = core::array::from_fn(|i| 8.0 * (u[i] - old_u[i]) - old_v[i]);
+                let original = 0.5 * dot(&q, &mass.action(&q, cx).unwrap());
+                assert_eq!(
+                    inertia.potential(u, cx).unwrap().to_bits(),
+                    original.to_bits()
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn backward_euler_potential_increment_retains_endpoint_and_cancel_refusals() {
+        with_cx(false, |cx| {
+            let mass = mass(cx);
+            let zero = [0.0; 30];
+            let inertia = BackwardEulerInertia::new(&mass, &zero, &zero, 0.125, cx).unwrap();
+            assert!(inertia.potential_increment(&zero[..29], &zero, cx).is_err());
+            assert!(inertia.potential_increment(&zero, &zero[..29], cx).is_err());
+            assert!(
+                inertia
+                    .potential_increment(&[f64::NAN; 30], &zero, cx)
+                    .is_err()
+            );
+            assert!(
+                inertia
+                    .potential_increment(&zero, &[f64::INFINITY; 30], cx)
+                    .is_err()
+            );
+            // Zero change cannot admit endpoint potentials that overflow.
+            let huge = [1e200; 30];
+            assert!(inertia.potential_increment(&huge, &huge, cx).is_err());
+            with_cx(true, |cancelled| {
+                assert!(matches!(
+                    inertia.potential_increment(&zero, &zero, cancelled),
+                    Err(InertiaError::Cancelled),
+                ));
+            });
         });
     }
 
