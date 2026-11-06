@@ -9,6 +9,32 @@ use crate::tensor::{deviator, trace};
 use crate::{MaterialError, Tangent6, Voigt};
 use fs_math::det;
 
+/// Optional concave isotropic strength on the same accumulated flow coordinate.
+/// Stable increments/remainders avoid subtracting nearby large yield radii.
+/// Implementations are native, immutable and allocation-free.
+pub(in crate::plastic) trait SaturatingHardening {
+    fn strength(&self, alpha: f64) -> f64;
+    fn tangent(&self, alpha: f64) -> f64;
+    fn increment(&self, alpha: f64, increment: f64) -> f64;
+    fn curvature_remainder(&self, alpha: f64, increment: f64) -> f64;
+}
+
+struct NoSaturation;
+impl SaturatingHardening for NoSaturation {
+    fn strength(&self, _: f64) -> f64 {
+        0.0
+    }
+    fn tangent(&self, _: f64) -> f64 {
+        0.0
+    }
+    fn increment(&self, _: f64, _: f64) -> f64 {
+        0.0
+    }
+    fn curvature_remainder(&self, _: f64, _: f64) -> f64 {
+        0.0
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(in crate::plastic) struct ReturnParameters {
     pub bulk: f64,
@@ -92,6 +118,20 @@ impl ReturnParameters {
         alpha: f64,
         yield_roundoff: f64,
     ) -> Result<PressureReturn, MaterialError> {
+        self.response_with_saturation(elastic, alpha, yield_roundoff, &NoSaturation)
+    }
+
+    /// The scalar pressure/deviatoric return and analytic tensor derivative
+    /// remain shared with the linear law. A nonnegative, nonincreasing added
+    /// hardening slope brackets its root between the initial-slope and linear
+    /// limits. History/domain admission still belongs to the original caller.
+    pub fn response_with_saturation(
+        &self,
+        elastic: &Voigt,
+        alpha: f64,
+        yield_roundoff: f64,
+        saturation: &impl SaturatingHardening,
+    ) -> Result<PressureReturn, MaterialError> {
         if elastic.iter().any(|x| !x.is_finite())
             || !(alpha.is_finite() && alpha >= 0.0)
             || !(yield_roundoff.is_finite() && yield_roundoff >= 0.0)
@@ -107,8 +147,13 @@ impl ReturnParameters {
         let qn = q_trial / root_c;
         let pn = (self.sensitivity / root_c) * p_trial;
         let phi_trial = hypot(qn, pn);
-        let y0 = self.yield_stress + self.hardening * alpha;
-        if !phi_trial.is_finite() || !positive(y0) || s_trial.iter().any(|x| !x.is_finite()) {
+        let y0 = self.yield_stress + self.hardening * alpha + saturation.strength(alpha);
+        let added_slope = saturation.tangent(alpha);
+        if !phi_trial.is_finite()
+            || !positive(y0)
+            || !(added_slope.is_finite() && added_slope >= 0.0)
+            || s_trial.iter().any(|x| !x.is_finite())
+        {
             return Err(invalid("trial stress or yield strength is unrepresentable"));
         }
         if phi_trial - y0 <= yield_roundoff {
@@ -131,7 +176,13 @@ impl ReturnParameters {
             (false, true) => (self.vol_return, self.vol_return),
             _ => return Err(invalid("nonzero yielding requires a represented stress")),
         };
-        let mut lower = (phi_trial - y0) / (self.hardening + maximum);
+        let initial_modulus = self.hardening + maximum + added_slope;
+        if !positive(initial_modulus) {
+            return Err(invalid(
+                "initial hardening/return modulus is unrepresentable",
+            ));
+        }
+        let mut lower = (phi_trial - y0) / initial_modulus;
         let mut upper = (phi_trial - y0) / (self.hardening + minimum);
         if !lower.is_finite() || !positive(upper) {
             return Err(invalid("return bracket is unrepresentable"));
@@ -140,11 +191,20 @@ impl ReturnParameters {
         let mut dl = lower;
         let mut solved = false;
         for _ in 0..96 {
-            let dd = y0 + (self.hardening + self.dev_return) * dl;
-            let dp = y0 + (self.hardening + self.vol_return) * dl;
+            let added = saturation.increment(alpha, dl);
+            let slope = self.hardening + saturation.tangent(alpha + dl);
+            let dd = y0 + (self.hardening + self.dev_return) * dl + added;
+            let dp = y0 + (self.hardening + self.vol_return) * dl + added;
             let (u, v) = (qn / dd, pn / dp);
             let value = hypot(u, v);
-            if !(positive(dd) && positive(dp) && value.is_finite()) {
+            if !(positive(dd)
+                && positive(dp)
+                && value.is_finite()
+                && added.is_finite()
+                && added >= 0.0
+                && slope.is_finite()
+                && slope >= 0.0)
+            {
                 return Err(invalid("scalar return left the finite set"));
             }
             let residual = value - 1.0;
@@ -157,8 +217,8 @@ impl ReturnParameters {
             } else {
                 upper = dl;
             }
-            let derivative = -(u * u * ((self.hardening + self.dev_return) / dd)
-                + v * v * ((self.hardening + self.vol_return) / dp))
+            let derivative = -(u * u * ((slope + self.dev_return) / dd)
+                + v * v * ((slope + self.vol_return) / dp))
                 / value;
             let newton = dl - residual / derivative;
             dl = if newton.is_finite() && newton > lower && newton < upper {
@@ -170,9 +230,11 @@ impl ReturnParameters {
         if !solved {
             return Err(invalid("bounded scalar return did not converge"));
         }
-        let y = y0 + self.hardening * dl;
-        let dd = y0 + (self.hardening + self.dev_return) * dl;
-        let dp = y0 + (self.hardening + self.vol_return) * dl;
+        let added = saturation.increment(alpha, dl);
+        let slope = self.hardening + saturation.tangent(alpha + dl);
+        let y = y0 + self.hardening * dl + added;
+        let dd = y0 + (self.hardening + self.dev_return) * dl + added;
+        let dp = y0 + (self.hardening + self.vol_return) * dl + added;
         let theta_d = y / dd;
         let theta_p = y / dp;
         let sd = s_trial.map(|v| v / dd);
@@ -195,7 +257,9 @@ impl ReturnParameters {
             theta_d * s_trial[i] + if i < 3 { theta_p * p_trial } else { 0.0 }
         });
         // h=.5[(qn/Dd)^2+(pn/Dp)^2-1]; h_lambda=-denominator,
-        // h_strain=v, stress_lambda=-Y0*v. Tensor-Voigt shear columns weigh two.
+        // h_strain=v, stress_lambda=-(Y-lambda*Y')*v. For concave saturation,
+        // Y-lambda*Y'=Y0 + Delta R-lambda*R' >= Y0; evaluate the last remainder
+        // without cancellation. Tensor-Voigt shear columns weigh two.
         let v: Voigt = core::array::from_fn(|i| {
             (self.dev_return / dd) * sd[i]
                 + if i < 3 {
@@ -204,15 +268,16 @@ impl ReturnParameters {
                     0.0
                 }
         });
-        let denominator = (qn / dd).powi(2) * ((self.hardening + self.dev_return) / dd)
-            + (pn / dp).powi(2) * ((self.hardening + self.vol_return) / dp);
-        if !positive(denominator) {
+        let denominator = (qn / dd).powi(2) * ((slope + self.dev_return) / dd)
+            + (pn / dp).powi(2) * ((slope + self.vol_return) / dp);
+        let transverse = y0 + saturation.curvature_remainder(alpha, dl);
+        if !positive(denominator) || !positive(transverse) {
             return Err(invalid("consistent return derivative is singular"));
         }
         let mut tangent = bulk_shear_stiffness(self.bulk * theta_p, self.shear * theta_d);
         for (i, row) in tangent.iter_mut().enumerate() {
             for (j, value) in row.iter_mut().enumerate() {
-                *value -= (y0 / denominator) * v[i] * v[j] * if j < 3 { 1.0 } else { 2.0 };
+                *value -= (transverse / denominator) * v[i] * v[j] * if j < 3 { 1.0 } else { 2.0 };
             }
         }
         let elastic_deviator = deviator(elastic);
@@ -220,8 +285,8 @@ impl ReturnParameters {
         let elastic_strain = core::array::from_fn(|i| {
             theta_d * elastic_deviator[i] + if i < 3 { theta_p * elastic_mean } else { 0.0 }
         });
-        let yield_residual =
-            hypot(qn * theta_d, pn * theta_p) - (self.yield_stress + self.hardening * next_alpha);
+        let yield_residual = hypot(qn * theta_d, pn * theta_p)
+            - (self.yield_stress + self.hardening * next_alpha + saturation.strength(next_alpha));
         if stress
             .iter()
             .chain(tangent.iter().flatten())

@@ -6,7 +6,7 @@
 //! energy and dissipation refer to the original volume. A small-strain foam
 //! curve or Cauchy yield value cannot silently select this finite law.
 //!
-//! All nine coefficients and limits are mandatory. The dimensionless pressure
+//! All nine base coefficients and limits are mandatory. The dimensionless pressure
 //! sensitivity is the normalized Deshpande--Fleck ellipse parameter, not
 //! porosity. Zero sensitivity explicitly selects its J2 limit; zero hardening
 //! explicitly selects perfect plasticity. The retained inverse plastic metric
@@ -19,6 +19,12 @@
 //! authorize transferring history, changing mass, or discarding parameter work.
 //! Evolving porosity, densification, thermal response and measured validation
 //! remain outside the original law's claim.
+//!
+//! `finite-porous-voce-hencky-kirchhoff` explicitly adds energetic isotropic
+//! saturation Q*(1-exp(-b*alpha)), requiring `voce_saturation_pa` [Pa] and
+//! dimensionless `voce_rate_per_strain`. Q is the added strength, not the final
+//! yield radius. Its native primitive is recoverable storage; yield heat stays
+//! Y0*delta_alpha. The original linear selector refuses both extra parameters.
 
 use super::{FinitePorous, FinitePorousLimits, FinitePorousMaterial, FinitePorousParameters};
 use crate::MaterialError;
@@ -27,6 +33,8 @@ use fs_qty::Dims;
 
 /// Exact model selector, including finite kinematics and stress convention.
 pub const FINITE_POROUS_LAW_ID: &str = "finite-porous-hencky-kirchhoff";
+/// Same finite porous law with explicitly authored energetic Voce saturation.
+pub const FINITE_POROUS_VOCE_LAW_ID: &str = "finite-porous-voce-hencky-kirchhoff";
 
 const PA: Dims = Dims([-1, 1, -2, 0, 0, 0]);
 const PARAMETERS: [&str; 9] = [
@@ -40,6 +48,7 @@ const PARAMETERS: [&str; 9] = [
     "maximum_plastic_log_strain",
     "maximum_accumulated_plastic_strain",
 ];
+const VOCE_PARAMETERS: [&str; 2] = ["voce_saturation_pa", "voce_rate_per_strain"];
 
 /// Immutable source and fixed context for the same finite compaction owner.
 #[derive(Clone, Debug, PartialEq)]
@@ -135,25 +144,33 @@ fn parameter(card: &ConstitutiveModelCard, name: &str, dims: Dims) -> Result<f64
 fn parse_law(card: &ConstitutiveModelCard) -> Result<FinitePorous, MaterialError> {
     card.validate()
         .map_err(|error| refusal(error.to_string()))?;
-    if card.law.0 != FINITE_POROUS_LAW_ID
-        || card.law_version != 1
+    let selected_voce = match card.law.0.as_str() {
+        FINITE_POROUS_LAW_ID => false,
+        FINITE_POROUS_VOCE_LAW_ID => true,
+        _ => {
+            return Err(refusal(format!(
+                "unsupported finite porous law {}; expected {FINITE_POROUS_LAW_ID} or {FINITE_POROUS_VOCE_LAW_ID}",
+                card.law.0
+            )));
+        }
+    };
+    if card.law_version != 1
         || card.state_schema_version != 1
         || card.initial_state != InitialStatePolicy::ZeroInternalState
     {
-        return Err(refusal(format!(
-            "finite porous cards require {FINITE_POROUS_LAW_ID}, law/state v1 and virgin plastic history"
-        )));
+        return Err(refusal(
+            "finite porous cards require law/state v1 and virgin plastic history",
+        ));
     }
-    if let Some(name) = card
-        .parameters
-        .keys()
-        .find(|name| !PARAMETERS.contains(&name.as_str()))
-    {
+    if let Some(name) = card.parameters.keys().find(|name| {
+        !PARAMETERS.contains(&name.as_str())
+            && !(selected_voce && VOCE_PARAMETERS.contains(&name.as_str()))
+    }) {
         return Err(refusal(format!(
             "unrecognized finite porous parameter {name}; coefficients and native limits must be explicit"
         )));
     }
-    FinitePorous::new(
+    let law = FinitePorous::new(
         FinitePorousParameters {
             shear_modulus_pa: parameter(card, "shear_modulus_pa", PA)?,
             bulk_modulus_pa: parameter(card, "bulk_modulus_pa", PA)?,
@@ -176,5 +193,18 @@ fn parse_law(card: &ConstitutiveModelCard) -> Result<FinitePorous, MaterialError
         refusal(format!(
             "inadmissible finite porous coefficients/domain: {error}"
         ))
-    })
+    })?;
+    if selected_voce {
+        law.with_voce_hardening(
+            parameter(card, "voce_saturation_pa", PA)?,
+            parameter(card, "voce_rate_per_strain", Dims::NONE)?,
+        )
+        .map_err(|error| {
+            refusal(format!(
+                "inadmissible finite porous Voce hardening: {error}"
+            ))
+        })
+    } else {
+        Ok(law)
+    }
 }

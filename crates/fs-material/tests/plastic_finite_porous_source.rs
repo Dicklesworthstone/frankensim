@@ -240,3 +240,52 @@ fn source_limits_reach_the_native_compression_and_history_owner() {
         assert_eq!(old, source.law().initial_state());
     }
 }
+
+#[test]
+fn explicit_voce_source_preserves_native_saturation_and_refuses_implicit_selection() {
+    use fs_material::plastic::finite::porous::source::FINITE_POROUS_VOCE_LAW_ID;
+    let mut card = fixture();
+    card.parameters.insert(
+        "voce_saturation_pa".into(),
+        LawParameter {
+            value: 12e6,
+            dims: PA,
+        },
+    );
+    card.parameters.insert(
+        "voce_rate_per_strain".into(),
+        LawParameter {
+            value: 3.0,
+            dims: Dims::NONE,
+        },
+    );
+    assert!(ResolvedFinitePorous::try_from_model_card(&card).is_err());
+    card.law = LawId(FINITE_POROUS_VOCE_LAW_ID.into());
+    let resolved = ResolvedFinitePorous::try_from_model_card(&card).unwrap();
+    let native = ResolvedFinitePorous::try_from_model_card(&fixture())
+        .unwrap()
+        .law()
+        .clone()
+        .with_voce_hardening(12e6, 3.0)
+        .unwrap();
+    assert_eq!(resolved.model_card(), &card);
+    assert_eq!(resolved.law(), &native);
+    assert_eq!(
+        resolved
+            .law()
+            .response(&dilation(0.8), &native.initial_state())
+            .unwrap(),
+        native
+            .response(&dilation(0.8), &native.initial_state())
+            .unwrap()
+    );
+    for name in ["voce_saturation_pa", "voce_rate_per_strain"] {
+        let mut missing = card.clone();
+        missing.parameters.remove(name);
+        assert!(ResolvedFinitePorous::try_from_model_card(&missing).is_err());
+        let mut mistyped = card.clone();
+        let parameter = mistyped.parameters.get_mut(name).unwrap();
+        parameter.dims = if parameter.dims == PA { Dims::NONE } else { PA };
+        assert!(ResolvedFinitePorous::try_from_model_card(&mistyped).is_err());
+    }
+}

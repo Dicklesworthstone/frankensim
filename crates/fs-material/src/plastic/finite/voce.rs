@@ -25,6 +25,26 @@ pub struct FiniteVoceHardening {
 }
 
 impl FiniteVoceHardening {
+    /// Shared coefficient admission for native finite J2 and porous laws.
+    pub(super) fn new(saturation_pa: f64, rate_per_strain: f64) -> Result<Self, FiniteJ2Error> {
+        let slope = saturation_pa * rate_per_strain;
+        if !saturation_pa.is_finite()
+            || saturation_pa < 0.0
+            || !rate_per_strain.is_finite()
+            || rate_per_strain <= 0.0
+            || !slope.is_finite()
+            || (saturation_pa > 0.0 && slope == 0.0)
+        {
+            return Err(FiniteJ2Error::Parameters(
+                "finite Voce requires finite Q >= 0, b > 0 and a representable initial slope",
+            ));
+        }
+        Ok(Self {
+            saturation_pa,
+            rate_per_strain,
+        })
+    }
+
     /// Added asymptotic isotropic strength Q [Pa].
     pub const fn saturation_pa(self) -> f64 {
         self.saturation_pa
@@ -104,18 +124,9 @@ impl FiniteJ2 {
         saturation_pa: f64,
         rate_per_strain: f64,
     ) -> Result<Self, FiniteJ2Error> {
-        let voce = FiniteVoceHardening {
-            saturation_pa,
-            rate_per_strain,
-        };
+        let voce = FiniteVoceHardening::new(saturation_pa, rate_per_strain)?;
         let slope = saturation_pa * rate_per_strain;
-        if !saturation_pa.is_finite()
-            || saturation_pa < 0.0
-            || !rate_per_strain.is_finite()
-            || rate_per_strain <= 0.0
-            || !slope.is_finite()
-            || (saturation_pa > 0.0 && slope == 0.0)
-            || self.parameters.yield_stress_pa <= 0.0
+        if self.parameters.yield_stress_pa <= 0.0
             || !(3.0 * self.parameters.shear_modulus_pa
                 + self.parameters.hardening_modulus_pa
                 + slope)
@@ -158,7 +169,9 @@ impl FiniteJ2 {
         q_trial: f64,
         kinetics: Option<&FiniteOverstressJ2>,
     ) -> Result<ReturnMap, FiniteJ2Error> {
-        let voce = self.voce.expect("saturated return has admitted coefficients");
+        let voce = self
+            .voce
+            .expect("saturated return has admitted coefficients");
         let radius_old = self.yield_radius(old.alpha);
         let elastic = 3.0 * self.parameters.shear_modulus_pa;
         let excess = q_trial - radius_old;
@@ -221,7 +234,9 @@ impl FiniteJ2 {
         alpha: f64,
         kinetics: Option<&FiniteOverstressJ2>,
     ) -> Result<f64, FiniteJ2Error> {
-        let voce = self.voce.expect("saturated return has admitted coefficients");
+        let voce = self
+            .voce
+            .expect("saturated return has admitted coefficients");
         let a = 3.0 * self.parameters.shear_modulus_pa + self.parameters.hardening_modulus_pa;
         let solve_linear = |modulus| match kinetics {
             Some(law) => law.solve(excess, modulus).map(|flow| flow.increment),

@@ -17292,7 +17292,7 @@ parsing/formatting passed, while compiled execution remains outstanding.
 
 `plastic::finite::porous::FinitePorous` adds multiplicative
 pressure-sensitive plasticity with quadratic Hencky elastic storage and
-linear energetic hardening. Its explicit coefficients act on Kirchhoff
+linear or explicitly selected Voce energetic hardening. Its coefficients act on Kirchhoff
 stress; energy and yield heat are per original reference volume. An authored
 finite law is required: a small-strain or Cauchy-yield calibration is not
 silently reinterpreted.
@@ -17328,6 +17328,19 @@ hydrostatic volume/storage/heat, all nine tangent columns and potential
 gradient after mixed history, objectivity and exact holds, native J2,
 logarithmic small-strain correspondence, unit scaling and refusals.
 
+`FinitePorous::with_voce_hardening(Q,b)` adds the same native finite-J2
+saturation `Q*(1-exp(-b*alpha))`, with Q an added strength in Pa and b per unit
+work-conjugate accumulation. Its stable primitive is recoverable storage;
+physical yield heat remains `Y0*delta_alpha`. The existing pressure/deviatoric
+return uses a bracketed scalar solve and its exact nonlinear derivative,
+including the stable `Y-lambda*Y'` curvature term. The zero-Q case retains the
+linear path. No new history variable, tensor Newton solver, source query or
+allocation is added to the constitutive return. G0/G1 cases in
+`plastic_finite_porous_voce` check independent hydrostatic compression and
+unloading, all nine tangent columns, incremental-energy gradients, native
+Voce-J2 equivalence at zero pressure sensitivity, scaling and refusals. This
+is isotropic saturation, not evolving pore fraction or cell-wall densification.
+
 ### Source-defined finite porous compression
 
 `plastic::finite::porous::source::ResolvedFinitePorous` binds the explicit
@@ -17339,6 +17352,12 @@ Virgin history means the identity inverse plastic metric, including its volume,
 and zero accumulated work-conjugate strain. Unknown parameters, nonvirgin
 initialization, evolving mechanical/rate coordinates, or a Cauchy/small-strain
 law selector refuse. No measured stress-strain table is silently converted.
+
+The separate `finite-porous-voce-hencky-kirchhoff` selector additionally requires
+`voce_saturation_pa` [Pa] and dimensionless `voce_rate_per_strain`, retaining the
+same law/state version and virgin-history convention. The linear selector
+rejects these extra coefficients. Source resolution invokes the native
+saturation constructor; structural consumers retain the complete selected law.
 
 `FinitePorousMaterial` lets structural consumers borrow either this source or
 the authored native law. Source admission occurs once; existing frozen-history

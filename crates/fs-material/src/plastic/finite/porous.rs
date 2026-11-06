@@ -7,7 +7,7 @@
 //!
 //! The exponential/logarithmic construction follows the isotropic return-map
 //! family of Simo (1992), doi:10.1016/0045-7825(92)90123-2. The normalized
-//! Deshpande--Fleck ellipse and energetic linear hardening are shared with
+//! Deshpande--Fleck ellipse and energetic hardening are shared with
 //! plastic::porous::return_map. This is an explicitly authored finite law:
 //! small-strain or Cauchy-yield calibration is not silently promoted to it.
 //!
@@ -18,6 +18,10 @@
 
 /// Explicit source binding for the native finite pressure-sensitive law.
 pub mod source;
+
+mod voce;
+
+use super::voce::FiniteVoceHardening;
 
 use super::{
     FiniteJ2Error, IDENTITY6, ROUND_OFF, Spectrum, determinant, deviator, dot,
@@ -68,6 +72,7 @@ pub struct FinitePorous {
     parameters: FinitePorousParameters,
     limits: FinitePorousLimits,
     kernel: ReturnParameters,
+    voce: Option<FiniteVoceHardening>,
 }
 
 /// Borrow the same native law from an authored or source-resolved material.
@@ -249,6 +254,7 @@ impl FinitePorous {
             parameters,
             limits,
             kernel,
+            voce: None,
         })
     }
 
@@ -375,7 +381,8 @@ impl FinitePorous {
         let p = &self.parameters;
         let result = p.shear_modulus_pa * dot(&dev, &dev)
             + 0.5 * p.bulk_modulus_pa * trace(&e).powi(2)
-            + 0.5 * p.hardening_modulus_pa * alpha * alpha;
+            + 0.5 * p.hardening_modulus_pa * alpha * alpha
+            + self.voce.map_or(0.0, |v| v.stored_energy(alpha));
         if !result.is_finite() {
             Err(FinitePorousError::Numerical(
                 "stored energy is unrepresentable",
@@ -429,9 +436,7 @@ impl FinitePorous {
                     0.0
                 }
         }));
-        let residual_pa = self.equivalent(&stress)
-            - (self.parameters.yield_stress_pa
-                + self.parameters.hardening_modulus_pa * state.alpha);
+        let residual_pa = self.equivalent(&stress) - self.yield_radius(state.alpha);
         if !residual_pa.is_finite() {
             return Err(FinitePorousError::Numerical(
                 "accepted yield residual is unrepresentable",
@@ -460,8 +465,14 @@ impl FinitePorous {
             * f64::EPSILON
             * (2.0 * p.shear_modulus_pa)
                 .max(p.bulk_modulus_pa)
-                .max(p.yield_stress_pa + p.hardening_modulus_pa * old.alpha);
-        let pressure = self.kernel.response(&trial.elastic, old.alpha, zero)?;
+                .max(self.yield_radius(old.alpha));
+        let pressure = match self.voce {
+            Some(ref saturation) => {
+                self.kernel
+                    .response_with_saturation(&trial.elastic, old.alpha, zero, saturation)?
+            }
+            None => self.kernel.response(&trial.elastic, old.alpha, zero)?,
+        };
         self.elastic_bound(&pressure.elastic_strain)?;
         bound(
             "accumulated plastic strain",
