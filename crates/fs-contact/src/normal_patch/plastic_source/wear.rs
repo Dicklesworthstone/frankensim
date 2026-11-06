@@ -13,6 +13,8 @@ pub mod drive;
 pub mod integration;
 /// Prescribed-load wear without intermediate indentation histories.
 pub mod load;
+/// Actual source Coulomb sliding drives local recession and pressure feedback.
+pub mod sliding;
 /// Prescribed-temperature continuation with both original wear inventories.
 pub mod temperature;
 

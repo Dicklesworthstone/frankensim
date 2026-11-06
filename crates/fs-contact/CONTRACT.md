@@ -3238,3 +3238,50 @@ accuracy and performance measurements remain separate.
 The isolated discrete-convolution construction follows the influence-coefficient
 and zero-padding distinction in Liu, Wang and Liu, Wear 243 (2000), 101-111,
 DOI: 10.1016/S0043-1648(00)00427-0.
+
+
+## Original-source sliding drives hardness-dependent surface removal
+
+`normal_patch::plastic_source::wear::sliding::SourcePlasticSlidingWear`
+connects the retained hardness-limited pressure patch to the existing sourced
+Coulomb and Archard owners. Each original cell supplies its beginning pressure
+times cell area to the native tangential law. The caller supplies released
+two-axis relative displacement and a nonnegative isotropic held-force body
+response. The native law resolves sticking or actual sliding; only the length
+of that actual incremental slip advances per-body removal. Released elastic
+motion and the norm of accumulated signed travel are not wear distances.
+
+The same cell loop serves held approach, maintained normal force and a held
+loading spring. Original recession methods then re-equilibrate the new surface
+against the original accepted indentation history. Ordinary approach, load and
+device-position changes preserve both removal inventories, both recession
+fields and every native signed shear checkpoint. Reversal can return net signed
+travel to zero while the two positive sliding paths still remove material.
+
+Binding retains the identical ordered dry interface and fixed source coordinates,
+quantities, original claims and per-body hardness tests. Friction may add an
+explicit local-pressure coordinate; selected coefficients are queried at actual
+loaded cell pressures. Equal pressure samples share source receipts, and a
+pressure-independent law resolves once per step. Detached cells require no
+coefficient query at unsupported zero pressure and claim no such source sample;
+their native zero-load branch still validates motion, duration and controls.
+
+The result retains local traction, solved slip, branch, native residuals, source
+samples, summed frictional dissipation, separate Archard volumes/profiles, and
+the original normal continuation and load/drive receipts. Late source, cell,
+wear, normal-equilibrium, domain or cancellation failure publishes none of the
+candidate shear, indentation or removal histories.
+
+This is an explicit beginning-pressure split at held material/interface
+conditions. Motion refinement is required when pressure redistributes. Tangent
+axes and material-to-grid registration stay fixed; body-response storage belongs
+to the external mechanical owner. Cross-cell tangential elasticity, partial-slip
+Mindlin response, moving registration, speed/history-dependent source closure and
+autonomous thermal evolution are not supplied by this adapter. Friction work,
+normal plastic work, spring transfer and recession parameter work remain separate;
+no implicit heat allocation or combined-energy theorem is introduced.
+
+Six synthetic regressions specify sticking/no wear, hardness-dependent traction
+and actual slip, neighboring indentation caused by removal, all three normal
+boundaries, load changes with retained shear history, reversal-path removal,
+pressure-dependent original sources and transactional refusal.
