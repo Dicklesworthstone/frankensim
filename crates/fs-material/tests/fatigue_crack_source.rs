@@ -2,6 +2,9 @@
 //! Synthetic fits verify implementation, not measured material or component life.
 #![deny(unsafe_code)]
 
+#[path = "fatigue_crack_source/net_section.rs"]
+mod net_section;
+
 use std::sync::Arc;
 
 use fs_blake3::ContentHash;

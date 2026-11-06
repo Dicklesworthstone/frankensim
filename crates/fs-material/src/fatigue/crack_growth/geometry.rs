@@ -48,6 +48,7 @@ pub struct TabulatedCrackGeometry {
     context: CrackGeometryTableContext,
     points: Vec<CrackGeometryPoint>,
     log_slopes: Vec<f64>,
+    centre_crack: Option<FiniteWidthCentreCrack>,
 }
 
 impl TabulatedCrackGeometry {
@@ -107,6 +108,7 @@ impl TabulatedCrackGeometry {
             context,
             points,
             log_slopes,
+            centre_crack: None,
         })
     }
 
@@ -115,6 +117,11 @@ impl TabulatedCrackGeometry {
     }
     pub fn points(&self) -> &[CrackGeometryPoint] {
         &self.points
+    }
+    /// Original physical geometry, retained only by the typed centre-crack
+    /// constructor. A caller's table description cannot establish plate width.
+    pub fn finite_width_centre_crack(&self) -> Option<FiniteWidthCentreCrack> {
+        self.centre_crack
     }
     pub fn length_bounds(&self) -> (f64, f64) {
         (

@@ -16,9 +16,11 @@ use crate::loads3::TetLoadCase3;
 use fs_blake3::ContentHash;
 use fs_exec::Cx;
 use fs_material::fatigue::crack_growth::{
-    CrackGeometry, CrackGrowthForecast, CrackGrowthState, CrackGrowthStep, ParisLaw,
+    CentreCrackTensileLimit, CrackGeometry, CrackGrowthForecast, CrackGrowthState, CrackGrowthStep,
+    ParisLaw,
 };
 use fs_material::state_point::ResolvedMaterialStatePoint;
+use fs_material::strength::IsotropicTensileLimit;
 
 #[derive(Debug)]
 pub struct TetTransientCrackGrowthStep3 {
@@ -96,6 +98,33 @@ impl<'g, 'm, 'p, 's> TetTransientCrackGrowthRun3<'g, 'm, 'p, 's> {
     }
     pub fn material_source(&self, gauge: usize) -> Option<&ResolvedMaterialStatePoint> {
         self.observation.material_source(gauge)
+    }
+
+    /// Attach before the first consumed growth block. The actual initial/native
+    /// stress is checked immediately; refusal preserves mechanics and history.
+    pub fn set_net_section_tensile_limit(
+        &mut self,
+        gauge: usize,
+        limit: IsotropicTensileLimit,
+        cx: &Cx<'_>,
+    ) -> Result<(), TetCrackGrowthError> {
+        self.observation
+            .set_net_section_tensile_limit(gauge, limit, cx)
+    }
+    pub fn net_section_tensile_limit(&self, gauge: usize) -> Option<&CentreCrackTensileLimit> {
+        self.observation.net_section_tensile_limit(gauge)
+    }
+
+    /// Conditional read-only exposure to the selected average ligament limit,
+    /// using this run's fully sampled unconsumed cycle. No mechanical trajectory
+    /// or actual rupture is predicted, and unsupported forecast targets refuse.
+    pub fn cycles_to_net_section_tensile_limit(
+        &self,
+        gauge: usize,
+        cx: &Cx<'_>,
+    ) -> Result<CrackGrowthForecast, TetCrackGrowthError> {
+        self.observation
+            .cycles_to_net_section_tensile_limit(gauge, cx)
     }
 
     /// Conditional exposure forecast from a fully sampled, still unconsumed

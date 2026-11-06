@@ -51,6 +51,10 @@ pub use geometry::{
     CrackGeometry, CrackGeometryPoint, CrackGeometryTableContext, FiniteWidthCentreCrack,
     TabulatedCrackGeometry,
 };
+mod strength;
+pub use strength::{
+    CentreCrackTensileAssessment, CentreCrackTensileError, CentreCrackTensileLimit,
+};
 
 /// A normalized Paris fit; lengths are metres and N counts full cycles.
 #[derive(Debug, Clone, Copy, PartialEq)]

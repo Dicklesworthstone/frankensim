@@ -30,10 +30,12 @@ use fs_blake3::ContentHash;
 use fs_exec::Cx;
 use fs_material::fatigue::NormalStressDirection;
 use fs_material::fatigue::crack_growth::{
-    CrackGeometry, CrackGrowthError, CrackGrowthForecast, CrackGrowthLimits, CrackGrowthState,
-    CrackGrowthStep, ParisCrackGrowth, ParisLaw, StressCycle,
+    CentreCrackTensileError, CentreCrackTensileLimit, CrackGeometry, CrackGrowthError,
+    CrackGrowthForecast, CrackGrowthLimits, CrackGrowthState, CrackGrowthStep, ParisCrackGrowth,
+    ParisLaw, StressCycle,
 };
 use fs_material::state_point::ResolvedMaterialStatePoint;
+use fs_material::strength::IsotropicTensileLimit;
 use fs_math::det;
 
 use super::{TetFatigueError, bind_material, stress_tensor};
@@ -116,6 +118,10 @@ pub enum TetCrackGrowthError {
     Gauge {
         gauge: usize,
         error: CrackGrowthError,
+    },
+    NetSectionTensile {
+        gauge: usize,
+        error: CentreCrackTensileError,
     },
     Cycle {
         gauge: usize,
@@ -223,6 +229,21 @@ impl<'p, 'm> TetCrackGrowthPath<'p, 'm> {
     pub fn material_source(&self, gauge: usize) -> Option<&ResolvedMaterialStatePoint> {
         self.observation.material_source(gauge)
     }
+    /// Attach the selected sourced net-ligament tensile limit before consuming
+    /// any growth. The original typed centre geometry and complete native
+    /// material query must match. Already observed stress is checked on attach.
+    pub fn set_net_section_tensile_limit(
+        &mut self,
+        gauge: usize,
+        limit: IsotropicTensileLimit,
+        cx: &Cx<'_>,
+    ) -> Result<(), TetCrackGrowthError> {
+        self.observation
+            .set_net_section_tensile_limit(gauge, limit, cx)
+    }
+    pub fn net_section_tensile_limit(&self, gauge: usize) -> Option<&CentreCrackTensileLimit> {
+        self.observation.net_section_tensile_limit(gauge)
+    }
     pub fn observed_samples(&self) -> u64 {
         self.observation.samples
     }
@@ -325,6 +346,18 @@ impl<'p, 'm> TetCrackGrowthPath<'p, 'm> {
             .cycles_to_length(gauge, target_length_m, cx)
     }
 
+    /// Read-only cycles to the selected average net-section limit under the
+    /// fully observed unconsumed cycle. This is conditional exposure, not a
+    /// fracture-toughness or component-life claim; unsupported targets refuse.
+    pub fn cycles_to_net_section_tensile_limit(
+        &self,
+        gauge: usize,
+        cx: &Cx<'_>,
+    ) -> Result<CrackGrowthForecast, TetCrackGrowthError> {
+        self.observation
+            .cycles_to_net_section_tensile_limit(gauge, cx)
+    }
+
     /// Require all sampled excursions to have been explicitly closed. A lone
     /// initial/last-closure endpoint contributes no invented partial cycle.
     pub fn finish(&mut self, cx: &Cx<'_>) -> Result<Vec<CrackGrowthState>, TetCrackGrowthError> {
@@ -338,6 +371,7 @@ struct GaugeState {
     normal: NormalStressDirection,
     material_source: Option<Arc<ResolvedMaterialStatePoint>>,
     growth: ParisCrackGrowth,
+    net_section_tensile_limit: Option<CentreCrackTensileLimit>,
     closure: CrackStressTolerance,
     mode_i: CrackStressTolerance,
     window: Option<CycleWindow>,
@@ -459,6 +493,7 @@ impl TetCrackGrowthObserver {
                 normal,
                 material_source: gauge.material_source,
                 growth,
+                net_section_tensile_limit: None,
                 closure: gauge.closure,
                 mode_i: gauge.mode_i,
                 window: None,
@@ -498,6 +533,93 @@ impl TetCrackGrowthObserver {
         self.gauges
             .get(gauge)
             .and_then(|g| g.material_source.as_deref())
+    }
+
+    pub(crate) fn net_section_tensile_limit(
+        &self,
+        gauge: usize,
+    ) -> Option<&CentreCrackTensileLimit> {
+        self.gauges
+            .get(gauge)
+            .and_then(|g| g.net_section_tensile_limit.as_ref())
+    }
+
+    pub(crate) fn set_net_section_tensile_limit(
+        &mut self,
+        gauge: usize,
+        limit: IsotropicTensileLimit,
+        cx: &Cx<'_>,
+    ) -> Result<(), TetCrackGrowthError> {
+        self.check_event(cx)?;
+        let observed = self
+            .gauges
+            .get_mut(gauge)
+            .ok_or(TetCrackGrowthError::Invalid("unknown crack-growth gauge"))?;
+        if observed.growth.state().blocks != 0 || observed.net_section_tensile_limit.is_some() {
+            return Err(TetCrackGrowthError::Invalid(
+                "attach the net-section limit once, before the first consumed growth block",
+            ));
+        }
+        let material = observed
+            .material_source
+            .as_deref()
+            .ok_or(TetCrackGrowthError::Invalid(
+                "net-section strength requires the original native material bundle",
+            ))?;
+        let resolved = limit.resolved();
+        if material.card_identity() != resolved.card_identity()
+            || material.material() != resolved.material()
+            || material.query_point() != resolved.query_point()
+            || material.axis_quantities() != resolved.axis_quantities()
+        {
+            return Err(TetCrackGrowthError::Invalid(
+                "net-section strength differs from the original native card, material or typed query",
+            ));
+        }
+        let guard = CentreCrackTensileLimit::try_new(&observed.growth, limit)
+            .map_err(|error| TetCrackGrowthError::NetSectionTensile { gauge, error })?;
+        if let Some(window) = observed.window {
+            guard
+                .check(observed.growth.state().crack_length_m, window.maximum)
+                .map_err(|error| TetCrackGrowthError::NetSectionTensile { gauge, error })?;
+        }
+        poll(cx)?;
+        observed.net_section_tensile_limit = Some(guard);
+        Ok(())
+    }
+
+    pub(crate) fn cycles_to_net_section_tensile_limit(
+        &self,
+        gauge: usize,
+        cx: &Cx<'_>,
+    ) -> Result<CrackGrowthForecast, TetCrackGrowthError> {
+        self.check_event(cx)?;
+        let observed = self
+            .gauges
+            .get(gauge)
+            .ok_or(TetCrackGrowthError::Invalid("unknown crack-growth gauge"))?;
+        let guard =
+            observed
+                .net_section_tensile_limit
+                .as_ref()
+                .ok_or(TetCrackGrowthError::Invalid(
+                    "no net-section tensile limit was selected",
+                ))?;
+        let window = observed.window.ok_or(TetCrackGrowthError::Cycle {
+            gauge,
+            what: "no native stress has been observed",
+        })?;
+        let cycle = window.cycle(observed.closure, gauge)?;
+        let forecast = guard
+            .cycles_to_limit_with_cancel(
+                &observed.growth,
+                cycle.minimum_pa,
+                cycle.maximum_pa,
+                &mut || cx.checkpoint().is_err(),
+            )
+            .map_err(|error| TetCrackGrowthError::NetSectionTensile { gauge, error })?;
+        poll(cx)?;
+        Ok(forecast)
     }
 
     pub(crate) fn cycles_to_length(
@@ -599,6 +721,14 @@ impl TetCrackGrowthObserver {
                     shear_pa: shear,
                     allowance_pa: allowance,
                 });
+            }
+            if let Some(guard) = &gauge.net_section_tensile_limit {
+                guard
+                    .check(gauge.growth.state().crack_length_m, normal_stress)
+                    .map_err(|error| TetCrackGrowthError::NetSectionTensile {
+                        gauge: index,
+                        error,
+                    })?;
             }
             gauge
                 .growth
@@ -778,13 +908,22 @@ fn close_gauges(
         })?;
         let mut cycle = window.cycle(gauge.closure, index)?;
         cycle.cycles = full_cycles;
-        let step = gauge
-            .growth
-            .advance_with_cancel(cycle, &mut || cx.checkpoint().is_err())
-            .map_err(|error| TetCrackGrowthError::Gauge {
-                gauge: index,
-                error,
-            })?;
+        let step = if let Some(guard) = &gauge.net_section_tensile_limit {
+            guard
+                .advance_with_cancel(&mut gauge.growth, cycle, &mut || cx.checkpoint().is_err())
+                .map_err(|error| TetCrackGrowthError::NetSectionTensile {
+                    gauge: index,
+                    error,
+                })?
+        } else {
+            gauge
+                .growth
+                .advance_with_cancel(cycle, &mut || cx.checkpoint().is_err())
+                .map_err(|error| TetCrackGrowthError::Gauge {
+                    gauge: index,
+                    error,
+                })?
+        };
         gauge.window = Some(CycleWindow::new(window.last));
         steps.push(step);
     }

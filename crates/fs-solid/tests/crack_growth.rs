@@ -1,6 +1,9 @@
 //! G0/G1/G4: actual native stress cycles, analytical growth and atomic refusal.
 //! Every coefficient is a synthetic implementation fixture, not measured life data.
 
+#[path = "crack_growth/net_section.rs"]
+mod net_section;
+
 use std::sync::Arc;
 
 use fs_alloc::{ArenaConfig, ArenaPool};
@@ -852,14 +855,18 @@ fn paris_source_fixture(revision: u32) -> ParisSourceFixture {
         QuantityKind::AbsoluteTemperature,
         ValueForm::Static,
     ));
+    let humidity = QuantitySpec::semantic(SemanticType::new(
+        QuantityKind::Moisture(fs_qty::semantic::MoistureBasis::RelativeHumidity),
+        ValueForm::Static,
+    ));
     let request = paris_source_request();
     let external_domain = ValidityDomain::unconstrained()
         .with_quantity(&request.temperature_axis, temperature, 290.0, 330.0)
-        .with_quantity("humidity", QuantitySpec::dimensional(Dims::NONE), 0.0, 1.0);
+        .with_quantity("humidity", humidity, 0.0, 1.0);
     let native_point = QueryPoint::new()
         .with_quantity(&request.temperature_axis, temperature, 300.0)
         .unwrap()
-        .with_quantity("humidity", QuantitySpec::dimensional(Dims::NONE), 0.2)
+        .with_quantity("humidity", humidity, 0.2)
         .unwrap();
     let fit_domain = external_domain
         .clone()
@@ -904,6 +911,16 @@ fn paris_source_fixture(revision: u32) -> ParisSourceFixture {
         (
             PropertyKey::new("poisson_ratio", Dims::NONE),
             0.0,
+            external_domain.clone(),
+        ),
+        (
+            PropertyKey::new("selected_net_section_limit", Pressure::DIMS),
+            12e6,
+            external_domain.clone(),
+        ),
+        (
+            PropertyKey::new("low_net_section_limit", Pressure::DIMS),
+            2e6,
             external_domain,
         ),
         (
@@ -1106,11 +1123,7 @@ fn g0_sourced_native_paris_retains_original_card_and_refuses_foreign_operating_c
         foreign_bundle.material_source = Some(foreign.bundle);
         let mut foreign_fit = bound.clone();
         foreign_fit.law = foreign.law;
-        let other_context = source
-            .fit_point
-            .clone()
-            .with_quantity("humidity", QuantitySpec::dimensional(Dims::NONE), 0.8)
-            .unwrap();
+        let other_context = source.fit_point.clone().with("humidity", 0.8).unwrap();
         let mut foreign_context = bound;
         foreign_context.law = Arc::new(
             resolve_paris(

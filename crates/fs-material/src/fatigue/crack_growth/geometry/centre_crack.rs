@@ -118,7 +118,10 @@ impl FiniteWidthCentreCrack {
                 "remote uniform gross-section tensile stress normal to the crack; long elastic plate"
                     .into(),
         };
-        TabulatedCrackGeometry::new_with_cancel(context, points, maximum_points, cancelled)
+        let mut table =
+            TabulatedCrackGeometry::new_with_cancel(context, points, maximum_points, cancelled)?;
+        table.centre_crack = Some(*self);
+        Ok(table)
     }
 
     /// Choose samples for a declared relative geometry-factor interpolation
