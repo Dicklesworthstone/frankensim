@@ -1939,22 +1939,55 @@ new force, stiffness, energy, mode, clock or solver. Native initial admission
 and accepted-step gates enforce it after the original kinetic pullback;
 generic copied bodies retain it and a failed trial publishes no partial state.
 
-`SupportedStrings::tensile_assessment` diagnoses a complete candidate in the
-original support coordinates without enforcing its selected strength limit;
-`MaterialSupportRun::tensile_assessment` reads accepted native state. In this
-longitudinal lane `StringTensileAssessment::tension_n` is the upper local
-elastic tension bound, not the mean. The envelope can be conservative when
-axial and bending maxima occur at different positions. It remains a fixed-state
-elastic normal-stress estimate, with no viscous stress, shear failure,
-fracture evolution or guarantee between accepted temporal samples. A positive
-hereditary arm on a guarded wire is refused until actual layer memory stresses
-can participate; copying a body cannot bypass that boundary.
+`SupportedStrings::tensile_assessment` diagnoses elastic candidates in the
+original support coordinates without enforcing their selected strength limit.
+`MaterialSupportRun::tensile_assessment` and
+`ImpactSystem::support_tensile_assessment(body, wire)` read accepted native
+state, including actual source-bound axial material histories when selected.
+The diagnostic uses the original material-memory offsets even when other
+bodies or contact coordinates precede the supported strings. Displacement-only
+assessment refuses when the selected criterion needs hereditary histories.
+`StringTensileAssessment::tension_n` is the upper local tension bound: elastic
+in the original lane, and complete equilibrium-plus-Maxwell tension in the
+source-bound axial-memory lane.
 
-G0/G1/G3 cases in `tests/material_string_nonlinear/tensile/supported.rs` specify
-independent sparse-wave and endpoint-extension formulas, two-plane rotation
-and bonded-layer load sharing, continuous-span sample containment, native and
-prepared rollback on an actual axial tensile crossing, unchanged admitted
-mechanics, malformed-coordinate refusals and the hereditary boundary.
+`with_material_longitudinal_relaxation` retains every active arm's original
+layer index, modulus increment, physical area and normalized memory address.
+For each layer and retained cosine coefficient, it first sums the signed
+equilibrium and actual Maxwell stresses. Only then does it take the
+continuous-span harmonic envelope. Its mean includes the original maintained
+preload `E_i * T0 / EA`; a branch contributes
+`DeltaE_i,a * (epsilon_j - z_i,a,j / sqrt(c_i,a,j))`, where
+`c_i,a,0 = DeltaE_i,a * A_i * L` and nonzero cosine channels use half that
+value. Layer stresses can reinforce or cancel, and aggregate force divided
+by equilibrium EA is not substituted for their load sharing.
+
+The same common tensile kernel adds each layer's elastic outer-fibre bending
+stress and compares the result with its selected static source limit. Guarded
+axial memory is checked in the original memory acceptance gate, after actual
+candidate histories are available, without an earlier elastic-only tensile
+refusal. Initial and failed trial admission preserve the original transaction
+semantics. The layer projection adds no physical force, stiffness, energy,
+state, clock or integration method. Public aggregate-EA arms without original
+layer authority remain refused for selected tensile criteria.
+
+The envelope can be conservative when axial and bending maxima occur at
+different positions. It remains a fixed-condition normal-stress estimate,
+with no viscous bending stress, shear failure, fracture evolution or guarantee
+between accepted temporal samples. Source bending-memory variants still
+require their actual bending-history stresses. Positive independently selected
+axial viscosity with a hereditary tensile criterion also refuses until its
+actual per-layer dashpot stresses are available; adding viscosity after memory
+cannot bypass that boundary.
+
+G0/G1/G3 cases in `tests/material_string_nonlinear/tensile/supported.rs` and
+its `hereditary.rs` child specify independent sparse-wave and endpoint-extension
+formulas, two-plane rotation, bonded-layer load sharing, relaxed and unrelaxed
+memory stresses, continuous-span containment, original body/history offsets,
+source mismatch refusals, and native/prepared rollback on an actual Maxwell
+tensile crossing that the elastic-only criterion would miss. The native memory
+strength unit regression specifies signed coefficient cancellation before the
+spatial bound. Native test execution remains a separate verification obligation.
 
 
 ### Coupled sustained plastic/creep shell contact and finite interface heat

@@ -13,14 +13,15 @@ use super::{ImpactError, StringPotential, det, invalid};
 use fs_material::section::strength::AxialTensileCapacity;
 use std::sync::Arc;
 
-/// Elastic tensile demand on a homogeneous or perfectly bonded string section.
+/// Tensile demand on a homogeneous or perfectly bonded string section.
 /// A crossed conservative envelope can refuse a cancelling modal shape even
 /// when its actual maximum is lower. No material state is altered.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct StringTensileAssessment {
-    /// Axial tension used for the elastic envelope [N]. This is the original
+    /// Axial tension used for the envelope [N]. This is the original
     /// uniform KC tension, or the continuous-span upper tension bound when
-    /// the original support retains longitudinal waves.
+    /// the original support retains longitudinal waves. Source-bound axial
+    /// memory uses the complete accepted hereditary tension.
     pub tension_n: f64,
     /// Continuous-span upper envelope of the transverse curvature norm [1/m].
     pub curvature_bound_per_m: f64,
@@ -28,7 +29,7 @@ pub struct StringTensileAssessment {
     pub governing_layer: usize,
     /// Tensile normal-stress envelope in the governing layer [Pa].
     pub governing_tensile_stress_bound_pa: f64,
-    /// Governing elastic normal-stress envelope divided by its sourced limit.
+    /// Governing normal-stress envelope divided by its sourced limit.
     pub utilization: f64,
 }
 
@@ -75,6 +76,13 @@ impl StringTensileGuard {
         tension_n: f64,
     ) -> Result<(), ImpactError> {
         let assessment = self.assess(q, planes, tension_n)?;
+        self.admit_assessment(assessment)
+    }
+
+    pub(in crate::render::plate::impact) fn admit_assessment(
+        &self,
+        assessment: StringTensileAssessment,
+    ) -> Result<(), ImpactError> {
         if assessment.exceeds_limit() {
             return Err(ImpactError::Owner(format!(
                 "string tensile envelope exceeds '{}' in layer {}: {} Pa, utilization {}",
@@ -93,6 +101,30 @@ impl StringTensileGuard {
         planes: usize,
         tension_n: f64,
     ) -> Result<StringTensileAssessment, ImpactError> {
+        let section = self.capacity.section();
+        let axial_strain = tension_n / section.axial_stiffness_n();
+        if !axial_strain.is_finite() || (tension_n != 0.0 && axial_strain == 0.0) {
+            return Err(invalid("string tensile axial strain is unrepresentable"));
+        }
+        self.assess_normal_stress(q, planes, tension_n, |index, bending_strain| {
+            let strain = axial_strain + bending_strain;
+            let stress = section.layer_integrals()[index].young_modulus_pa() * strain.max(0.0);
+            if strain > 0.0 && stress == 0.0 {
+                return Err(invalid("string tensile stress is unrepresentable"));
+            }
+            Ok(stress)
+        })
+    }
+
+    // The hereditary owner supplies complete signed layer stress. Curvature,
+    // source limits and governing-layer selection remain the same shared law.
+    pub(in crate::render::plate::impact) fn assess_normal_stress(
+        &self,
+        q: &[f64],
+        planes: usize,
+        tension_n: f64,
+        mut normal_stress: impl FnMut(usize, f64) -> Result<f64, ImpactError>,
+    ) -> Result<StringTensileAssessment, ImpactError> {
         let modes = self.curvature_scales.len();
         let mut curvature = 0.0;
         for (mode, &scale) in self.curvature_scales.iter().enumerate() {
@@ -108,12 +140,8 @@ impl StringTensileGuard {
             curvature += contribution;
         }
         let section = self.capacity.section();
-        let axial_strain = tension_n / section.axial_stiffness_n();
-        if !curvature.is_finite()
-            || !axial_strain.is_finite()
-            || (tension_n != 0.0 && axial_strain == 0.0)
-        {
-            return Err(invalid("string tensile curvature or axial strain overflow"));
+        if !curvature.is_finite() || !tension_n.is_finite() {
+            return Err(invalid("string tensile curvature or tension overflow"));
         }
         let mut result = StringTensileAssessment {
             tension_n,
@@ -122,10 +150,9 @@ impl StringTensileGuard {
             governing_tensile_stress_bound_pa: 0.0,
             utilization: 0.0,
         };
-        for (index, ((layer, integrals), &limit)) in section
+        for (index, (layer, &limit)) in section
             .layers()
             .iter()
-            .zip(section.layer_integrals())
             .zip(self.capacity.layer_limits_pa())
             .enumerate()
         {
@@ -133,12 +160,14 @@ impl StringTensileGuard {
             if curvature > 0.0 && bending_strain == 0.0 {
                 return Err(invalid("string tensile bending strain is unrepresentable"));
             }
-            let strain = axial_strain + bending_strain;
-            let stress = integrals.young_modulus_pa() * strain.max(0.0);
+            let signed_stress = normal_stress(index, bending_strain)?;
+            if !signed_stress.is_finite() {
+                return Err(invalid("string tensile layer stress is unrepresentable"));
+            }
+            let stress = signed_stress.max(0.0);
             let utilization = stress / limit;
             if !stress.is_finite()
                 || !utilization.is_finite()
-                || (strain > 0.0 && stress == 0.0)
                 || (stress > 0.0 && utilization == 0.0)
             {
                 return Err(invalid(

@@ -745,10 +745,16 @@ impl SupportedStrings {
     /// This diagnoses an overlimit trial without enforcing its tensile limit;
     /// the original finite, slope, strain and positive-tension domain still
     /// applies. It adds no viscous stress, fracture law or new time owner.
+    /// With a selected hereditary tensile criterion, displacement alone is
+    /// insufficient: use ImpactSystem::support_tensile_assessment to retain the
+    /// actual accepted material histories.
     pub fn tensile_assessment(&self,wire:usize,z:&[f64])
         ->Result<Option<StringTensileAssessment>,ImpactError>
     {
         let potential=self.0.potentials.get(wire).ok_or_else(||invalid("unknown supported wire"))?;
+        if self.has_memory_tensile(wire) {
+            return Err(invalid("hereditary supported tensile assessment requires actual material histories"));
+        }
         let mut q=[0.0;MAX_IMPACT_MODES];
         if !self.relative(z,&mut q[..self.support_coordinate()]) {
             return Err(invalid("invalid supported tensile state"));

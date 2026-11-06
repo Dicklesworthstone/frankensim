@@ -39,6 +39,11 @@ impl SupportedMaterialStrings {
     /// including the hereditary tangent's strain-history envelope. The clock
     /// must resolve every tau. The original time owner refuses a history outside
     /// its admitted envelope or total hereditary stress that loses local tension.
+    /// Selected source tensile limits use every layer's signed equilibrium and
+    /// actual memory stress before bounding the spatial maximum. The existing
+    /// elastic bending envelope remains; no bending-history stress is inferred.
+    /// Positive independently selected axial viscosity with this criterion
+    /// refuses until its actual per-layer viscous stresses are also available.
     pub fn with_material_longitudinal_relaxation(mut self,
         selections:Vec<LongitudinalRelaxationSelection>, initial:InitialMemory,
         maximum_states:usize, gate:&CancelGate) -> Result<Self,ImpactError>
@@ -52,6 +57,7 @@ impl SupportedMaterialStrings {
             return Err(invalid("supported material memory needs distinct cold selections and a 1..=256 state budget"));
         }
         let mut sections=Vec::with_capacity(selections.len());let mut arms=Vec::new();
+        let mut arm_layers=Vec::new();
         let dt=1.0/f64::from(self.sample_rate_hz);
         for (index,selection) in selections.iter().enumerate() {
             poll(gate)?;
@@ -68,17 +74,20 @@ impl SupportedMaterialStrings {
                 || !same(section.elastic().axial_stiffness_n(),source.axial_rigidity_n()) {
                 return Err(invalid("supported memory must preserve original solid inertia and equilibrium rigidity"));
             }
-            for (spectrum,geometry) in section.spectra().iter().zip(section.elastic().layer_integrals()) {
+            for (layer,(spectrum,geometry)) in section.spectra().iter()
+                .zip(section.elastic().layer_integrals()).enumerate() {
                 for &(delta,tau) in &spectrum.terms {
                     if dt/tau>2.0 {return Err(invalid("source clock does not resolve supported material memory"));}
                     if delta==0.0 {continue;}
                     arms.push(SupportedRelaxationArm {string:selection.string,
                         axial_rigidity_n:delta*geometry.area_m2(),relaxation_time_s:tau});
+                    arm_layers.push((layer,delta));
                 }
             }
             sections.push(section);
         }
-        let supported=self.supported.clone().with_longitudinal_relaxation(arms,initial,maximum_states)?;
+        let supported=self.supported.clone().with_longitudinal_layer_relaxation(
+            arms,&arm_layers,initial,maximum_states)?;
         let mut upper=supported.clock_bounds().iter().copied().fold(0.0_f64,f64::max);
         for body in self.bodies.iter().skip(1) {
             let BodyPotential::Linear(omegas)=&body.potential else {

@@ -5,6 +5,8 @@
 use super::*;
 use crate::render::plate::impact::relaxation::InitialMemory;
 use fs_phs::{MappedRelaxationBranch, RelaxationStrainMap};
+mod strength;
+use strength::MemoryTensile;
 
 /// One positive relaxing axial rigidity from a physical layer and its time.
 /// Geometry and equilibrium EA remain in the original supported string.
@@ -24,6 +26,7 @@ pub(in crate::render::plate::impact) struct SupportedRelaxation {
     // (complete source omega ceiling, exact source step). This is retained on
     // copied bodies so generic impact composition cannot discard authority.
     source_domain: Option<(f64,f64)>,
+    tensile: Vec<Option<MemoryTensile>>,
 }
 
 impl SupportedStrings {
@@ -80,6 +83,7 @@ impl SupportedStrings {
         }
         data.axial_relaxation=Some(SupportedRelaxation {
             arms,initial,states,stiffness_bound:bound,source_domain:None,
+            tensile:vec![None;data.wires.len()],
         });
         Ok(self)
     }
@@ -123,7 +127,23 @@ impl SupportedStrings {
     pub(in crate::render::plate::impact) fn admit_memory(&self, offset:usize,state:&[f64],
         memory:&[f64]) -> Result<(),ImpactError>
     {
-        let Some(config)=&self.0.axial_relaxation else {return Ok(());};
+        self.assess_memory(offset,state,memory,None).map(|_|())
+    }
+    pub(in crate::render::plate::impact) fn tensile_assessment_with_memory(&self,
+        wire:usize,offset:usize,state:&[f64],memory:&[f64])
+        ->Result<Option<StringTensileAssessment>,ImpactError>
+    {
+        if wire>=self.wire_count() {return Err(invalid("unknown supported wire"));}
+        self.assess_memory(offset,state,memory,Some(wire))
+    }
+    fn assess_memory(&self,offset:usize,state:&[f64],memory:&[f64],query:Option<usize>)
+        ->Result<Option<StringTensileAssessment>,ImpactError>
+    {
+        let Some(config)=&self.0.axial_relaxation else {return Ok(None);};
+        if config.tensile.iter().enumerate().any(|(wire,binding)|binding.is_some()
+            && self.0.axial_viscosity_n_s.as_ref().is_some_and(|loss|loss[wire]>0.0)) {
+            return Err(invalid("hereditary tensile admission also needs actual layer axial viscous stresses"));
+        }
         if memory.len()!=config.states || memory.iter().any(|v|!v.is_finite()) {
             return Err(invalid("supported material history requires every finite original coordinate"));
         }
@@ -162,7 +182,24 @@ impl SupportedStrings {
             || t[0]-t[1..].iter().map(|v|v.abs()).sum::<f64>()<=0.0) {
             return Err(invalid("complete hereditary support stress loses local string tension"));
         }
-        Ok(())
+        let mut result=None;
+        for (wire,binding) in config.tensile.iter().enumerate() {
+            if query.is_some_and(|selected|selected!=wire) {continue;}
+            if let Some(binding)=binding {
+                let SupportedPotential::Longitudinal(p)=&self.0.potentials[wire] else {unreachable!()};
+                let mut local=[0.0;MAX_IMPACT_MODES];
+                let count=self.local_coordinates(wire,&q,z[self.support_coordinate()]*self.0.weight,&mut local);
+                let tension=&tensions[wire];
+                let maximum=tension[0]+tension[1..].iter().map(|v|v.abs()).sum::<f64>();
+                let assessment=binding.assess(p,&local[..count],&strains[wire],maximum,memory)?;
+                if query.is_none() {binding.guard.admit_assessment(assessment)?;}
+                else {result=Some(assessment);}
+            }
+        }
+        if let Some(wire)=query {
+            if result.is_none() {return self.tensile_assessment(wire,&z);}
+        }
+        Ok(result)
     }
 }
 impl SupportedRelaxation {

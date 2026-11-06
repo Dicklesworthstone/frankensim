@@ -135,6 +135,32 @@ impl Memory {
     }
 }
 impl ImpactSystem {
+    /// Selected tensile envelope on an accepted supported wire. Explicit
+    /// source-bound axial memory uses its actual original pHS histories and
+    /// layer load sharing, including when other bodies or contact histories
+    /// precede the support. Bending remains the selected elastic curvature law;
+    /// viscous bending, torsional failure and fracture evolution are absent.
+    /// A non-support body or an unselected criterion returns None.
+    pub fn support_tensile_assessment(&self,body:usize,wire:usize)
+        ->Result<Option<super::string::StringTensileAssessment>,ImpactError>
+    {
+        let Some((_,offset,support))=self.supports.iter().find(|(index,_,_)|*index==body) else {
+            return Ok(None);
+        };
+        if let Some(memory)=&self.relaxation {
+            if let Some((_,_,start,count))=memory.supports.iter().find(|(first,_,_,_)|first==offset) {
+                let history=self.x.get(memory.base_dim+start..memory.base_dim+start+count)
+                    .ok_or_else(||invalid("supported tensile history prefix is incomplete"))?;
+                return support.tensile_assessment_with_memory(wire,*offset,&self.x,history);
+            }
+        }
+        let mut q=[0.0;super::MAX_IMPACT_MODES];
+        for (i,value) in q[..support.mode_count()].iter_mut().enumerate() {
+            *value=self.x[2*(offset+i)];
+        }
+        support.tensile_assessment(wire,&q[..support.mode_count()])
+    }
+
     /// A later load needs a new complete strain/history and source-band bound.
     /// Preserve the old linear-memory composition path; the mapped supported
     /// path must not silently reuse authority from its previous operator.

@@ -17,6 +17,7 @@ use fs_couple::render::plate::impact::{
 use fs_exec::{CancelGate, Cx};
 
 const RATE: u32 = 1_536_000;
+mod hereditary;
 
 fn rail(position: f64) -> TranslatingSupport {
     TranslatingSupport {
