@@ -13,6 +13,13 @@
 
 use fs_rand::StreamKey;
 
+/// Exact scalar-transfer transport and physical mass-density opacity.
+pub mod opacity;
+pub use opacity::{
+    DensityAbsorption, TransferTransportPixel, render_density_transmittance,
+    render_transfer_transport,
+};
+
 /// SI absorption and local-equilibrium emission along surface-tracer rays.
 #[cfg(feature = "tracer")]
 pub mod transport;
@@ -107,6 +114,12 @@ pub enum DvrError {
         /// Linear x-major field index.
         index: usize,
     },
+    /// SI density/length units or the mass absorption coefficient are invalid.
+    InvalidDensityAbsorption,
+    /// Background radiance is negative or non-finite.
+    InvalidBackgroundRadiance,
+    /// Accumulated or composited source radiance cannot be represented.
+    UnrepresentableRadiance,
     /// Ray coordinates or parameter bounds are invalid.
     InvalidRay,
     /// The Woodcock majorant is negative or non-finite.

@@ -8446,3 +8446,35 @@ Steady and transient consumers share the original area-raster lane worker and ty
 Finite exposures use each source's retarded interval mean on frozen transport, then the existing detector/exposure owners supply mean CIE pixels, mean QE rates, integrated spectral energy and photoelectron counts per m² sr. Pixel etendue, gain, saturation and noise remain separate. The area-sample wrapper preserves original per-lane radiance and work across detector conversion. No extra spectral paths, temporal quadrature traces or delay reconstruction are introduced.
 
 Two focused regression groups cover complete static CIE/QE parity, one-versus-three-channel shared work, large-epoch chromatic camera-plus-connection group clocks, native QE energy/photon conversion, late source failure with deterministic replay, and cancellation. Formatter/parser checks passed; native numerical execution was unavailable in the editing environment.
+
+
+### Exact scalar-transfer opacity and physical density calibration
+
+The volumes feature exposes render_transfer_transport for orthographic
+piecewise-constant scalar fields. Each cell contributes its analytically
+integrated source radiance through the actual foreground optical depth.
+TransferTransportPixel retains emitted linear RGB, transmittance, optical
+depth and independently evaluated expm1 opacity. Its background compositor
+uses L_out = L_emitted + T L_background; source and background radiance remain
+representable behind subnormal unit-radiance transmission where possible.
+There is no sampling seed, null-collision budget or opacity cutoff in this
+path. Work is proportional to admitted pixel/cell intersections, independent
+of extinction magnitude. The existing named Woodcock APIs retain their
+sampling semantics.
+
+render_density_transmittance borrows the original density buffer and uses
+explicit kg/m³ per field unit, metres per grid unit and m²/kg mass absorption.
+It produces monochromatic direct-beam transmission without allocating an
+intermediate coefficient field. No wavelength response, density conversion,
+surface coverage, scattering, refraction or material calibration is inferred.
+
+Both paths admit output pixels, input cells and full cell visits before
+integration, validate finite geometry/fields, and use the existing integer
+pixel-centre ownership. Transfer opacity uses expm1 for thin cells, optical
+depth and emission use compensated sums, and extreme positive products have
+a logarithmic range-recovery path. Analytic regressions cover ordered slabs,
+radiance balance, thin/opaque/vacuum limits, spatial subdivision, translations,
+SI unit changes, bright sources behind thick foregrounds, and admission
+refusals. These are representation-level arithmetic checks; there is no claim
+of continuous-field preintegration, lateral antialiasing, experimental optical
+calibration, scattering transport or measured performance.
