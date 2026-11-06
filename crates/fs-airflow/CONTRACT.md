@@ -10,6 +10,12 @@ relative enthalpy integral. Source knots, pressure/composition context,
 identity, receipts and uncertainty remain with the immutable material law.
 Cloning shares that law and its prepared caloric index.
 
+The relative temperature increment is retained through the original heat
+integral, and the conductance-weighted mean temperature is integrated directly.
+This keeps weak exchange accurate without amplifying rounded absolute-outlet
+temperatures through division by a tiny conductance. Nonzero exchange below
+the representable outlet-temperature resolution still refuses.
+
 The Robin reference uses the same actual watts as the stream. `solve`,
 `solve_from` and `solve_iqn` reuse the existing conjugate driver's response
 admission, region ownership, fixed/Aitken/IQN acceleration, cancellation,
@@ -23,8 +29,8 @@ composition, mass flow and heat-transfer coefficient. It adds no hydraulic
 feedback, pressure work, temperature-dependent h, mixing junctions or adjoint.
 Walls may be outside the fluid's caloric support; the actual traversed fluid
 temperatures may not. A source refusal returns no partial march or solution.
-Tests compare constant/affine-Cp analytic channels, heating and cooling across
-source knots, segment refinement, datum independence, support refusal and a
+Tests compare constant/affine-Cp analytic channels, weak exchange, heating and
+cooling across source knots, segment refinement, datum independence, support refusal and a
 power-driven coupled solid/stream balance.
 
 ## Transient original Carreau hydraulic networks and storage

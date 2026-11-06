@@ -22,6 +22,15 @@ pub(super) struct CapacityCurve<'a, K> {
     knots: &'a [K],
 }
 
+/// Heat and exchange mean retain the solved relative travel, before absolute
+/// temperatures are rounded. Capacity units determine the energy units.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct CapacityExchange {
+    pub temperature: f64,
+    pub energy_change: f64,
+    pub mean_temperature: f64,
+}
+
 /// Prepared search coordinates for repeated caloric queries from one fixed datum.
 ///
 /// The coordinates locate an original capacity segment; they do not replace
@@ -304,6 +313,16 @@ impl<'a, K: CapacityKnot> CapacityCurve<'a, K> {
         reservoir: f64,
         exposure: f64,
     ) -> Result<f64, ThermalTransportError> {
+        self.linear_heat_exchange(initial, reservoir, exposure)
+            .map(|answer| answer.temperature)
+    }
+
+    pub(super) fn linear_heat_exchange(
+        &self,
+        initial: f64,
+        reservoir: f64,
+        exposure: f64,
+    ) -> Result<CapacityExchange, ThermalTransportError> {
         self.check_temperature(initial)?;
         if !positive(reservoir) || !exposure.is_finite() || exposure < 0.0 {
             return Err(invalid(
@@ -311,9 +330,14 @@ impl<'a, K: CapacityKnot> CapacityCurve<'a, K> {
             ));
         }
         if exposure == 0.0 || initial == reservoir {
-            return Ok(initial);
+            return Ok(CapacityExchange {
+                temperature: initial,
+                energy_change: 0.0,
+                mean_temperature: initial,
+            });
         }
         let heating = reservoir > initial;
+        let direction = if heating { 1.0 } else { -1.0 };
         let mut index = if heating {
             self.segment(initial)
         } else {
@@ -324,6 +348,8 @@ impl<'a, K: CapacityKnot> CapacityCurve<'a, K> {
         let mut current = initial;
         let mut cumulative = 0.0;
         let mut correction = 0.0;
+        let (mut energy, mut energy_correction) = (0.0, 0.0);
+        let (mut mean_travel, mut mean_correction) = (0.0, 0.0);
         for _ in 0..self.knots.len() - 1 {
             let end = if heating {
                 self.knots[index + 1].temperature().min(reservoir)
@@ -333,21 +359,68 @@ impl<'a, K: CapacityKnot> CapacityCurve<'a, K> {
             if end == current {
                 break;
             }
-            let amount = self.exchange_integral(index, current, end, reservoir)?;
+            let segment = ExchangeSegment {
+                distance: (reservoir - current).abs(),
+                width: (end - current).abs(),
+                initial_capacity: self.on_segment(index, current),
+                end_capacity: self.on_segment(index, end),
+            };
+            let amount = segment.exposure(segment.width)?;
             let corrected = amount - correction;
             let next = cumulative + corrected;
-            if exposure <= next {
-                let temperature = if exposure == next {
+            let finished = exposure <= next;
+            let local_exposure = if finished {
+                exposure - cumulative
+            } else {
+                amount
+            };
+            let travel = if !finished || exposure == next {
+                segment.width
+            } else {
+                segment.inverse(local_exposure)?
+            };
+            let heat = (0.5 * segment.initial_capacity + 0.5 * segment.capacity(travel)) * travel;
+            if !heat.is_finite() || !positive(local_exposure) {
+                return Err(invalid(
+                    "heat-exchange energy or exposure is not representable",
+                ));
+            }
+            let local_mean = segment.mean_travel(travel, local_exposure, heat);
+            compensated_add(&mut energy, &mut energy_correction, heat);
+            compensated_add(
+                &mut mean_travel,
+                &mut mean_correction,
+                (local_exposure / exposure) * ((current - initial).abs() + local_mean),
+            );
+            if finished {
+                let temperature = if travel == segment.width {
                     end
+                } else if travel <= 0.5 * segment.distance {
+                    current + direction * travel
                 } else {
-                    self.exchange_inverse(index, current, end, reservoir, exposure - cumulative)?
+                    reservoir - direction * (segment.distance - travel)
                 };
                 if temperature == initial {
                     return Err(invalid(
                         "nonzero heat exchange is below temperature resolution",
                     ));
                 }
-                return Ok(temperature);
+                let mean_temperature = initial + direction * mean_travel;
+                if !positive(energy)
+                    || !positive(temperature)
+                    || !positive(mean_temperature)
+                    || mean_temperature < initial.min(temperature)
+                    || mean_temperature > initial.max(temperature)
+                    || temperature < current.min(end)
+                    || temperature > current.max(end)
+                {
+                    return Err(invalid("heat-exchange state or mean is not representable"));
+                }
+                return Ok(CapacityExchange {
+                    temperature,
+                    energy_change: direction * energy,
+                    mean_temperature,
+                });
             }
             correction = (next - cumulative) - corrected;
             cumulative = next;
@@ -369,10 +442,7 @@ impl<'a, K: CapacityKnot> CapacityCurve<'a, K> {
         ))
     }
 
-    // In distance x=|reservoir-T|, C is still affine and the positive exchange
-    // integral is integral C(x)/x dx from the nearer to the farther endpoint.
-    // Carry the temperature width separately: subtracting two large reservoir
-    // distances can erase a small, representable fluid-temperature change.
+    #[cfg(test)]
     fn exchange_integral(
         &self,
         index: usize,
@@ -380,94 +450,13 @@ impl<'a, K: CapacityKnot> CapacityCurve<'a, K> {
         final_t: f64,
         reservoir: f64,
     ) -> Result<f64, ThermalTransportError> {
-        if initial == final_t {
-            return Ok(0.0);
-        }
-        if final_t == reservoir {
-            return Ok(f64::INFINITY);
-        }
-        let [near, far] = entropy_weights_with_width(
-            (reservoir - final_t).abs(),
-            (reservoir - initial).abs(),
-            (final_t - initial).abs(),
-        );
-        let amount = self.on_segment(index, final_t) * near + self.on_segment(index, initial) * far;
-        if amount.is_nan() || amount < 0.0 {
-            return Err(invalid("heat-exchange integral is not representable"));
-        }
-        // Infinity is a valid upper bracket for finite exposure. An underflowed
-        // zero can likewise bracket a trial; the final temperature must move.
-        Ok(amount)
-    }
-
-    fn exchange_inverse(
-        &self,
-        index: usize,
-        initial: f64,
-        end: f64,
-        reservoir: f64,
-        exposure: f64,
-    ) -> Result<f64, ThermalTransportError> {
-        let initial_c = self.on_segment(index, initial);
-        let exponential = exponential_exchange(initial, reservoir, exposure / initial_c);
-        let inside = |value: f64, a: f64, b: f64| value > a.min(b) && value < a.max(b);
-        if self.knots[index].capacity() == self.knots[index + 1].capacity() {
-            if exponential.is_finite()
-                && exponential >= initial.min(end)
-                && exponential <= initial.max(end)
-            {
-                return Ok(exponential);
-            }
-            return Err(invalid(
-                "constant-capacity exchange left its admitted segment",
-            ));
-        }
-        // Brackets are ordered by travel, so cooling uses exactly the same
-        // monotone positive integral and convergence rule as heating.
-        let (mut lower, mut upper) = (initial, end);
-        let (mut low_value, mut high_value) =
-            (0.0, self.exchange_integral(index, initial, end, reservoir)?);
-        let mut trial = if inside(exponential, lower, upper) {
-            exponential
-        } else {
-            lower + 0.5 * (upper - lower)
+        let segment = ExchangeSegment {
+            distance: (reservoir - initial).abs(),
+            width: (final_t - initial).abs(),
+            initial_capacity: self.on_segment(index, initial),
+            end_capacity: self.on_segment(index, final_t),
         };
-        for iteration in 0..128 {
-            let value = self.exchange_integral(index, initial, trial, reservoir)?;
-            if value == exposure {
-                return Ok(trial);
-            }
-            if value < exposure {
-                lower = trial;
-                low_value = value;
-            } else {
-                upper = trial;
-                high_value = value;
-            }
-            if lower.min(upper).next_up() >= lower.max(upper) {
-                return Ok(if exposure - low_value <= high_value - exposure {
-                    lower
-                } else {
-                    upper
-                });
-            }
-            let midpoint = lower + 0.5 * (upper - lower);
-            let direction = if reservoir > initial { 1.0 } else { -1.0 };
-            let newton = trial
-                + direction
-                    * ((exposure - value) / self.on_segment(index, trial))
-                    * (reservoir - trial).abs();
-            // At least every other iteration bisects, bounding work even when
-            // the affine capacity changes strongly or Newton overflows.
-            trial = if iteration % 2 == 0 && inside(newton, lower, upper) {
-                newton
-            } else {
-                midpoint
-            };
-        }
-        Err(invalid(
-            "heat-exchange inverse exceeded its bounded iteration budget",
-        ))
+        segment.exposure(segment.width)
     }
 
     /// Bounded segment traversal followed by a scaled quadratic inverse.
@@ -609,12 +598,138 @@ fn entropy_weights_with_width(low: f64, high: f64, width: f64) -> [f64; 2] {
     [logarithm - hot, hot]
 }
 
-fn exponential_exchange(initial: f64, reservoir: f64, exposure_over_capacity: f64) -> f64 {
-    if exposure_over_capacity < 0.5 {
-        initial + (reservoir - initial) * -(-exposure_over_capacity).exp_m1()
-    } else {
-        reservoir + (initial - reservoir) * (-exposure_over_capacity).exp()
+// Positive travel toward the reservoir, with the original affine capacity.
+// Solving in travel preserves small heat that an absolute-T inverse quantizes.
+struct ExchangeSegment {
+    distance: f64,
+    width: f64,
+    initial_capacity: f64,
+    end_capacity: f64,
+}
+
+impl ExchangeSegment {
+    fn capacity(&self, travel: f64) -> f64 {
+        let fraction = travel / self.width;
+        (1.0 - fraction) * self.initial_capacity + fraction * self.end_capacity
     }
+
+    fn exposure(&self, travel: f64) -> Result<f64, ThermalTransportError> {
+        if travel == 0.0 {
+            return Ok(0.0);
+        }
+        if travel == self.distance {
+            return Ok(f64::INFINITY);
+        }
+        let [near, far] = entropy_weights_with_width(self.distance - travel, self.distance, travel);
+        let amount = self.capacity(travel) * near + self.initial_capacity * far;
+        if amount.is_nan() || amount < 0.0 {
+            return Err(invalid("heat-exchange integral is not representable"));
+        }
+        Ok(amount)
+    }
+
+    fn inverse(&self, exposure: f64) -> Result<f64, ThermalTransportError> {
+        let exponential = self.distance * -(-exposure / self.initial_capacity).exp_m1();
+        if self.initial_capacity == self.end_capacity {
+            if exponential.is_finite() && exponential >= 0.0 && exponential <= self.width {
+                return Ok(exponential);
+            }
+            return Err(invalid(
+                "constant-capacity exchange left its admitted segment",
+            ));
+        }
+        let (mut lower, mut upper) = (0.0, self.width);
+        let (mut low_value, mut high_value) = (0.0, self.exposure(self.width)?);
+        let mut trial = if exponential > lower && exponential < upper {
+            exponential
+        } else {
+            0.5 * upper
+        };
+        for iteration in 0..128 {
+            let value = self.exposure(trial)?;
+            if value == exposure || (value - exposure).abs() <= 4.0 * f64::EPSILON * exposure {
+                return Ok(trial);
+            }
+            if value < exposure {
+                lower = trial;
+                low_value = value;
+            } else {
+                upper = trial;
+                high_value = value;
+            }
+            if lower.next_up() >= upper {
+                // Finite exposure can place the solution closer to equilibrium
+                // than a representable travel. The exact supplied exposure still
+                // owns the mean below; never integrate a rounded infinite log.
+                return Ok(
+                    if upper == self.distance || high_value - exposure < exposure - low_value {
+                        upper
+                    } else {
+                        lower
+                    },
+                );
+            }
+            let newton =
+                trial + ((exposure - value) / self.capacity(trial)) * (self.distance - trial);
+            trial = if iteration % 2 == 0 && newton > lower && newton < upper {
+                newton
+            } else {
+                lower + 0.5 * (upper - lower)
+            };
+        }
+        Err(invalid(
+            "heat-exchange inverse exceeded its bounded iteration budget",
+        ))
+    }
+
+    fn mean_travel(&self, travel: f64, exposure: f64, heat: f64) -> f64 {
+        let heat_per_exposure = heat / exposure;
+        if heat_per_exposure <= 0.75 * self.distance {
+            // Well-conditioned for strong exchange, including rounded equilibrium.
+            return self.distance - heat_per_exposure;
+        }
+        let [a0, a1, b0, b1] = exchange_moment_weights(travel / self.distance);
+        let end_capacity = self.capacity(travel);
+        let scale = self.initial_capacity.max(end_capacity);
+        let (c0, c1) = (self.initial_capacity / scale, end_capacity / scale);
+        travel * ((c0 * b0 + c1 * b1) / (c0 * a0 + c1 * a1))
+    }
+}
+
+// Integrals of (1-y), y, y(1-y), y² over 1-z*y on [0,1].
+// Their positive series preserve the weak-exchange limit without subtracting
+// nearly equal logarithmic primitives; high-z forms keep the inlet weights finite.
+fn exchange_moment_weights(z: f64) -> [f64; 4] {
+    if z <= 0.5 {
+        let (mut result, mut power) = ([0.0; 4], 1.0);
+        let terms = if z < 0.125 { 18 } else { 64 };
+        for n in 0..terms {
+            let n = f64::from(n);
+            result[0] += power / ((n + 1.0) * (n + 2.0));
+            result[1] += power / (n + 2.0);
+            result[2] += power / ((n + 2.0) * (n + 3.0));
+            result[3] += power / (n + 3.0);
+            power *= z;
+        }
+        result
+    } else {
+        let l = -(-z).ln_1p();
+        let z2 = z * z;
+        let z3 = z2 * z;
+        [
+            (z - (1.0 - z) * l) / z2,
+            (l - z) / z2,
+            (z - 0.5 * z2 - (1.0 - z) * l) / z3,
+            (l - z - 0.5 * z2) / z3,
+        ]
+    }
+}
+
+fn compensated_add(sum: &mut f64, correction: &mut f64, value: f64) {
+    let increment = value - *correction;
+    let next = *sum + increment;
+    *correction = (next - *sum) - increment;
+    *sum = next;
 }
 
 fn invalid(reason: &'static str) -> ThermalTransportError {
@@ -689,6 +804,77 @@ mod tests {
                 .temperature_after_linear_exchange(initial, 800.0, f64::from_bits(1))
                 .is_err()
         );
+    }
+
+    #[test]
+    fn g1_weak_exchange_retains_relative_heat_and_direct_mean() {
+        for slope in [0.0, 2.0] {
+            let intercept = if slope == 0.0 { 1000.0 } else { 800.0 };
+            let knots = [
+                [200.0, intercept + slope * 200.0],
+                [800.0, intercept + slope * 800.0],
+            ];
+            let curve = CapacityCurve::new(&knots);
+            for initial in [300.0, 500.0] {
+                let reservoir = 400.0;
+                let gap = reservoir - initial;
+                let cp = intercept + slope * initial;
+                for ntu in [1e-9, 1e-12] {
+                    let exposure = cp * ntu;
+                    // Independent second-order inverse of
+                    // x=z+(1+slope*gap/cp)*z²/2+O(z³).
+                    // O(x³) is below f64 relative heat resolution here.
+                    let delta = gap * ntu * (1.0 - 0.5 * (1.0 + slope * gap / cp) * ntu);
+                    let heat = cp * delta + 0.5 * slope * delta * delta;
+                    let answer = curve
+                        .linear_heat_exchange(initial, reservoir, exposure)
+                        .unwrap();
+                    assert!(
+                        (answer.energy_change - heat).abs() <= 64.0 * f64::EPSILON * heat.abs(),
+                        "slope={slope} initial={initial} ntu={ntu}: heat {} != {heat}",
+                        answer.energy_change
+                    );
+                    assert!(
+                        (answer.temperature - (initial + delta)).abs() <= f64::EPSILON * initial
+                    );
+                    let mean = initial + 0.5 * gap * ntu;
+                    assert!((answer.mean_temperature - mean).abs() <= 2.0 * f64::EPSILON * initial);
+                    assert!(
+                        (answer.energy_change - exposure * (reservoir - answer.mean_temperature))
+                            .abs()
+                            <= 8.0 * f64::EPSILON * exposure * initial.max(reservoir)
+                    );
+                    assert!(answer.mean_temperature >= initial.min(answer.temperature));
+                    assert!(answer.mean_temperature <= initial.max(answer.temperature));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn g1_exchange_heat_and_mean_cross_knots_and_retain_finite_saturation() {
+        let knots = [
+            [200.0, 1200.0],
+            [300.0, 1400.0],
+            [400.0, 1800.0],
+            [600.0, 1000.0],
+        ];
+        let curve = CapacityCurve::new(&knots);
+        for (initial, reservoir) in [(250.0, 550.0), (550.0, 250.0)] {
+            for exposure in [500.0, 2000.0, 1e6, 1e12] {
+                let answer = curve
+                    .linear_heat_exchange(initial, reservoir, exposure)
+                    .unwrap();
+                let heat = curve.energy_change(initial, answer.temperature).unwrap();
+                assert!((answer.energy_change - heat).abs() <= 32.0 * f64::EPSILON * heat.abs());
+                assert!(
+                    (answer.energy_change - exposure * (reservoir - answer.mean_temperature)).abs()
+                        <= 8.0 * f64::EPSILON * exposure * initial.max(reservoir)
+                );
+                assert!(answer.mean_temperature >= initial.min(answer.temperature));
+                assert!(answer.mean_temperature <= initial.max(answer.temperature));
+            }
+        }
     }
 
     #[test]

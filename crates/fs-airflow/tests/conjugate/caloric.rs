@@ -121,6 +121,74 @@ fn original_constant_cp_recovers_native_channel_in_heating_and_cooling() {
 }
 
 #[test]
+fn weak_exchange_retains_heat_and_robin_mean_before_rounding_absolute_temperature() {
+    for (intercept, slope) in [(1000.0, 0.0), (800.0, 2.0)] {
+        let law = source(
+            &[
+                (250.0, intercept + slope * 250.0),
+                (650.0, intercept + slope * 650.0),
+            ],
+            300.0,
+        );
+        for (inlet, wall) in [(300.0, 400.0), (550.0, 280.0)] {
+            let cp = intercept + slope * inlet;
+            let driving = wall - inlet;
+            let curvature = slope * driving / cp;
+            for ntu in [1e-9, 1e-12] {
+                let conductance = cp * ntu;
+                let path = CaloricAirPath::new(
+                    inlet,
+                    1.0,
+                    law.clone(),
+                    vec![AirSegment::new("weak wall", 1.0, conductance).unwrap()],
+                )
+                .unwrap();
+                let result = path.march(&[wall]).unwrap();
+                let state = &result.segments[0];
+
+                // Independent local solution of dz/dn=(1-z)/(1+b*z), where
+                // z=(T-Tin)/(Tw-Tin), n=UA/(mass_flow*Cp(Tin)), and
+                // b=Cp'(Tin)*(Tw-Tin)/Cp(Tin). The omitted relative heat
+                // term is O(n^3), far below f64 rounding at these exposures.
+                let expected_heat =
+                    conductance * driving * (1.0 - 0.5 * ntu + (1.0 + curvature) * ntu * ntu / 6.0);
+                let expected_mean = inlet
+                    + driving
+                        * ntu
+                        * (0.5 - (1.0 + curvature) * ntu / 6.0
+                            + (1.0 + curvature) * (1.0 + 3.0 * curvature) * ntu * ntu / 24.0);
+                let expected_outlet = inlet
+                    + driving
+                        * ntu
+                        * (1.0 - 0.5 * (1.0 + curvature) * ntu
+                            + (1.0 + curvature) * (1.0 + 3.0 * curvature) * ntu * ntu / 6.0);
+                let temperature_rounding = 8.0 * f64::EPSILON * inlet.max(wall);
+                let heat_rounding = 2e-12 * expected_heat.abs();
+                near(state.heat_rate_w, expected_heat, heat_rounding);
+                near(result.total_heat_rate_w, expected_heat, heat_rounding);
+                near(
+                    state.reference_temperature_k,
+                    expected_mean,
+                    temperature_rounding,
+                );
+                near(
+                    state.outlet_temperature_k,
+                    expected_outlet,
+                    temperature_rounding,
+                );
+                near(
+                    conductance * (wall - state.reference_temperature_k),
+                    state.heat_rate_w,
+                    heat_rounding + conductance * temperature_rounding,
+                );
+                assert!(state.reference_temperature_k >= inlet.min(state.outlet_temperature_k));
+                assert!(state.reference_temperature_k <= inlet.max(state.outlet_temperature_k));
+            }
+        }
+    }
+}
+
+#[test]
 fn affine_cp_matches_independent_channel_integral_and_conserves_heat() {
     // Cp(T) = 800 + 2T. The exact exchange primitive is
     // (800 + 2Tw) ln(|Tw-Tin|/|Tw-Tout|) - 2(Tout-Tin).

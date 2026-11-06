@@ -68,6 +68,21 @@ pub struct IsobaricHeatCapacityLaw {
     identity: ContentHash,
 }
 
+/// One source-exact passive exchange with a fixed-temperature reservoir.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LinearHeatExchange {
+    /// Final absolute material temperature [K], rounded only after inversion.
+    pub temperature_k: f64,
+    /// Signed integral Cp dT [J/kg], retaining the solved relative temperature
+    /// increment before rounding its absolute endpoint. Positive means heating.
+    pub specific_enthalpy_change_j_kg: f64,
+    /// Conductance-weighted mean material temperature [K]. With positive
+    /// exposure X, delta_h = X * (reservoir - mean_temperature) up to rounding.
+    /// Computed directly for weak exchange, not by subtracting delta_h/X from
+    /// the reservoir. At zero exchange this is the initial temperature.
+    pub mean_temperature_k: f64,
+}
+
 impl IsobaricHeatCapacityLaw {
     /// Admit the complete typed Cp path and source pressure, preserving all
     /// breakpoints. Cp must be positive throughout every affine segment.
@@ -314,13 +329,14 @@ impl IsobaricHeatCapacityLaw {
     ///
     /// Source breakpoints and affine Cp laws are integrated without resampling
     /// or freezing capacity. Constant-Cp intervals use the analytic exponential;
-    /// the last varying-Cp interval uses a bounded solve to adjacent floating-
-    /// point temperatures. Zero exposure or equal temperatures preserve the
+    /// the last varying-Cp interval solves relative temperature travel to
+    /// floating-point resolution. Zero exposure or equal temperatures preserve the
     /// initial temperature. The reservoir may lie outside source support, but
     /// the entire material temperature path must remain inside it.
     ///
-    /// Heat transferred is the original `specific_enthalpy_change_j_kg`, not
-    /// endpoint Cp times temperature change. There is no source-uncertainty or
+    /// Use [`Self::linear_heat_exchange`] to retain the integrated heat and
+    /// exchange mean without reconstructing them from rounded endpoints.
+    /// There is no source-uncertainty or
     /// heat-transfer-model error bound implied by this numerical inversion.
     ///
     /// # Errors
@@ -337,6 +353,31 @@ impl IsobaricHeatCapacityLaw {
             reservoir_k,
             conductance_time_over_mass_j_kg_k,
         )
+    }
+
+    /// The same exchange with its signed source-Cp enthalpy integral and direct
+    /// conductance-weighted mean temperature. These use the retained relative
+    /// travel through every original source interval, preserving weak exchange
+    /// that subtracting two rounded absolute temperatures would distort.
+    /// Admission and refusal semantics are identical to
+    /// [`Self::temperature_after_linear_exchange`], including refusal of nonzero
+    /// exchange when the absolute outlet temperature cannot move at this scale.
+    pub fn linear_heat_exchange(
+        &self,
+        initial_k: f64,
+        reservoir_k: f64,
+        conductance_time_over_mass_j_kg_k: f64,
+    ) -> Result<LinearHeatExchange, ThermalTransportError> {
+        let answer = CapacityCurve::new(&self.knots).linear_heat_exchange(
+            initial_k,
+            reservoir_k,
+            conductance_time_over_mass_j_kg_k,
+        )?;
+        Ok(LinearHeatExchange {
+            temperature_k: answer.temperature,
+            specific_enthalpy_change_j_kg: answer.energy_change,
+            mean_temperature_k: answer.mean_temperature,
+        })
     }
 }
 

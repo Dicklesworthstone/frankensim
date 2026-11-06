@@ -101,14 +101,15 @@ impl CaloricAirPath {
                 .specific_heat_cp_j_kg_k(inlet)
                 .map_err(AirflowError::CaloricSource)?;
             let ntu = finite_positive("caloric inlet NTU", exposure / cp)?;
-            let outlet = self
+            let exchange = self
                 .caloric
-                .temperature_after_linear_exchange(inlet, wall, exposure)
+                .linear_heat_exchange(inlet, wall, exposure)
                 .map_err(AirflowError::CaloricSource)?;
-            let heat = self
-                .caloric
-                .specific_enthalpy_change_j_kg(inlet, outlet)
-                .map_err(AirflowError::CaloricSource)?;
+            let outlet = exchange.temperature_k;
+            // Retain the source integral on the relative temperature change.
+            // Recovering heat from an already rounded absolute outlet amplifies
+            // that rounding when a weak exchange forms its Robin reference.
+            let heat = exchange.specific_enthalpy_change_j_kg;
             let heat_rate_w =
                 finite_coupling("source-caloric heat rate", self.mass_flow_kg_per_s() * heat)?;
             if heat != 0.0 && heat_rate_w == 0.0 {
@@ -125,7 +126,7 @@ impl CaloricAirPath {
             };
             let reference = finite_positive(
                 "source-caloric Robin reference",
-                wall - heat_rate_w / conductance,
+                exchange.mean_temperature_k,
             )?;
             // This reference is a positive-weight mean of the actual stream
             // temperatures. Reject a resolved inconsistency without clipping heat.
