@@ -178,7 +178,7 @@ impl MixtureNetwork1d {
         Ok(moving)
     }
 
-    fn admit_reservoirs(
+    pub(super) fn admit_reservoirs(
         &mut self,
         reservoirs: &[[Option<Cell<'_>>; 2]],
         cancelled: &mut impl FnMut() -> bool,
@@ -390,7 +390,7 @@ impl MixtureNetwork1d {
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<f64, Error> {
         if let Some(account) = entropy.as_deref_mut() {
-            account.begin_closed_attempt();
+            account.begin_network_attempt();
         }
         // Admit actual, represented geometry before evaluating either stage.
         for (i, plenum) in self.plenums.iter().enumerate() {
@@ -419,7 +419,15 @@ impl MixtureNetwork1d {
         admit_cfl(b, dt, cfl)?;
         self.forward_stage(true, dt, volume_rates, entropy.as_deref_mut(), cancelled)?;
         if let Some(account) = entropy {
-            account.admit_single_step(self.gas(), cancelled)?;
+            let stages = self.branches.iter().enumerate().filter_map(|(index, branch)| {
+                let mask = self.entropy_exterior_ends(index);
+                mask.into_iter().any(|end| end).then(|| (
+                    &self.work.stages_a[index], &self.work.stages_b[index],
+                    [branch.mesh.face_areas()[0], branch.mesh.face_areas()[branch.cell_count()]],
+                    mask,
+                ))
+            });
+            account.admit_network_transport_step(self.gas(), dt, stages, cancelled)?;
         }
         Ok(a.max(b))
     }

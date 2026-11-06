@@ -7646,8 +7646,17 @@ original Cp/T integrals extend each frozen composition away from the anchor.
 Native source/transport regressions cover equal- and unequal-temperature
 mixing, pressure changes, incompatible anchor temperatures and large positive
 and negative species entropy-reference shifts. This closure is for stationary
-nonreacting species; it does not supply reaction affinity or selective phase
-outlet entropy.
+nonreacting species; it does not supply reaction affinity or phase selection.
+
+The same original gas source can bind a selective stream through thermal
+`SelectiveOutletLaw`. Its declared composition, enthalpy reference and actual
+outgoing enthalpy must agree with that source law. The stream uses its own
+temperature and entropy, including pure-species outlets, and its boundary
+enthalpy and entropy are removed once. Signed separation contributions remain
+visible; an isothermal separator's entropy deficit is not supplied with
+invented work or reservoir heat. Native NASA regressions cover separate stream
+temperatures, an independent energy/entropy balance, incompatible composition,
+cancellation and large positive and negative species entropy-reference shifts.
 
 
 ## Molecular sublimation with evolving gas energy

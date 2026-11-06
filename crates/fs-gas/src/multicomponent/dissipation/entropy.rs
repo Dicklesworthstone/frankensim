@@ -372,8 +372,8 @@ pub(in crate::multicomponent) struct EntropyTracker {
     report: MolecularEntropyReport,
     boundary: Option<ReservoirEntropyAccount>,
     completed_reservoir_report: Option<ReservoirMolecularEntropyReport>,
-    // At most one account. Keep cached exterior efforts off the closed-lane
-    // stack and allocate this bounded storage only for open transport.
+    // One pair per accounted native branch. Keep cached exterior efforts off
+    // the closed-lane stack; open networks retain their common source basis.
     exterior: Vec<advection::ExteriorEntropyAccount>,
     completed_exterior_report: Option<ExteriorMixtureEntropyReport>,
 }
@@ -572,7 +572,7 @@ impl EntropyTracker {
     /// Retry a complete closed native step from its original accepted storage.
     /// Network primitive scratch may contain a rejected stage; initial admitted
     /// temperatures remain the entropy anchors until publication.
-    pub(in crate::multicomponent) fn begin_closed_attempt(&mut self) {
+    pub(in crate::multicomponent) fn begin_network_attempt(&mut self) {
         self.current_temperature
             .copy_from_slice(&self.initial_temperature);
         self.trial_entropy = Dd::ZERO;

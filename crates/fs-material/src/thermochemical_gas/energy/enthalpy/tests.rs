@@ -6,6 +6,9 @@ use fs_thermal::enthalpy::{
     Event, MaterialId, StepConfig, TimedEvent,
 };
 
+#[path = "tests/selective.rs"]
+mod selective;
+
 fn controls() -> GasEnergySolve {
     GasEnergySolve { minimum_temperature_k: 280.0, maximum_temperature_k: 360.0,
         energy_tolerance_j_kg: 1e-8, maximum_iterations: 64 }

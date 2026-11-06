@@ -1,10 +1,10 @@
-//! Closed-network entropy admission on original branch and compact-volume storage.
+//! Source and reservoir entropy on original branch and compact-volume storage.
 
 use super::MixtureNetwork1d;
 use crate::multicomponent::dissipation::entropy::EntropyTracker;
 use crate::multicomponent::{
-    Boundaries, Boundary, Error, MixtureEntropyControl, MixtureEntropyReport, StepControl, cell,
-    poll,
+    Boundaries, Boundary, Cell, Error, ExteriorMixtureEntropyReport, MixtureEntropyControl,
+    MixtureEntropyReport, StepControl, cell, poll,
 };
 use fs_qty::Time;
 
@@ -40,7 +40,7 @@ impl MixtureNetwork1d {
         entropy: MixtureEntropyControl,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<(super::NetworkStepReport, MixtureEntropyReport), Error> {
-        let mut account = self.closed_entropy_account(entropy, &mut cancelled)?;
+        let mut account = self.entropy_account(entropy, None, &mut cancelled)?;
         let report = self.step_impl(
             maximum_duration,
             controls,
@@ -68,7 +68,7 @@ impl MixtureNetwork1d {
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<(super::NetworkStepReport, MixtureEntropyReport), Error> {
         let moving = self.admit_volume_rates(volume_rates_m3_s, &mut cancelled)?;
-        let mut account = self.closed_entropy_account(entropy, &mut cancelled)?;
+        let mut account = self.entropy_account(entropy, None, &mut cancelled)?;
         let report = self.step_impl(
             maximum_duration,
             controls,
@@ -80,9 +80,105 @@ impl MixtureNetwork1d {
         Ok((report, account.report()))
     }
 
-    fn closed_entropy_account(
+    /// Advance the native pressure-reservoir network with complete entropy
+    /// admission over all branch cells and finite plenums.
+    ///
+    /// Reservoir placement, stationarity, source compatibility and characteristic
+    /// fluxes are those of [`Self::step_with_reservoirs`]. Every unconnected end
+    /// without a reservoir must be a stationary reflecting wall. Internal finite
+    /// plenums and periodic faces stay inside the accounting boundary.
+    ///
+    /// The original exterior entropy variables contract each actual signed SSP
+    /// species, momentum and referenced-energy transfer, including the advective
+    /// entropy potential. For these stationary reservoirs this is the reservoir's
+    /// heat/chemical effort on its total enthalpy exchange. Pressure-flow work is
+    /// already in transported enthalpy; no additional p*dV or heat is added.
+    /// Outflow uses the prescribed receiving reservoir's thermodynamics, so the
+    /// measured generation includes irreversibility of that reservoir coupling.
+    /// A nonzero species transfer at zero reservoir activity refuses at either
+    /// stage, even if opposite stage transfers would cancel.
+    ///
+    /// The returned boundary entries sum all left and all right physical ends,
+    /// respectively, in retained branch order. Every species residual is checked
+    /// against original inventory plus absolute throughput at BOTH stages and
+    /// all external ends. Only the source-reference effect of that numerical
+    /// residual is removed from the single global entropy gate; actual entropy
+    /// transported by species remains in the state and boundary reports.
+    ///
+    /// Rejected attempts restart the entire native network. No partial fields,
+    /// clocks, geometry or accepted reports publish on refusal/cancellation.
+    /// All-None sources execute the closed entropy path. This is measured
+    /// finite-step admission of the existing engineering flux, not a fully
+    /// discrete entropy or invariant-domain theorem. The allowance is per call.
+    pub fn step_with_reservoirs_and_entropy(
+        &mut self,
+        maximum_duration: Time,
+        controls: StepControl,
+        reservoirs: &[[Option<Cell<'_>>; 2]],
+        entropy: MixtureEntropyControl,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<(super::NetworkStepReport, ExteriorMixtureEntropyReport), Error> {
+        let active = self.admit_reservoirs(reservoirs, &mut cancelled)?;
+        let reservoirs = active.then_some(reservoirs);
+        let mut account = self.entropy_account(entropy, reservoirs, &mut cancelled)?;
+        let report = self.step_impl(
+            maximum_duration,
+            controls,
+            None,
+            reservoirs,
+            Some(&mut account),
+            cancelled,
+        )?;
+        Ok((report, account.exterior_report()))
+    }
+
+    /// Combine the same prescribed-reservoir entropy account with simultaneous
+    /// finite-plenum motion. Native -p*dV pressure work changes extensive energy
+    /// and the actual caloric state, but supplies no entropy. Accepted endpoint
+    /// volumes enter the state account; transported exterior enthalpy remains
+    /// separate from the network report's mechanical boundary work.
+    ///
+    /// All-None sources retain [`Self::step_with_volume_rates_and_entropy`];
+    /// all-zero rates retain [`Self::step_with_reservoirs_and_entropy`].
+    pub fn step_with_reservoirs_and_volume_rates_and_entropy(
+        &mut self,
+        maximum_duration: Time,
+        controls: StepControl,
+        reservoirs: &[[Option<Cell<'_>>; 2]],
+        volume_rates_m3_s: &[f64],
+        entropy: MixtureEntropyControl,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<(super::NetworkStepReport, ExteriorMixtureEntropyReport), Error> {
+        let active = self.admit_reservoirs(reservoirs, &mut cancelled)?;
+        let moving = self.admit_volume_rates(volume_rates_m3_s, &mut cancelled)?;
+        let reservoirs = active.then_some(reservoirs);
+        let mut account = self.entropy_account(entropy, reservoirs, &mut cancelled)?;
+        let report = self.step_impl(
+            maximum_duration,
+            controls,
+            moving.then_some(volume_rates_m3_s),
+            reservoirs,
+            Some(&mut account),
+            cancelled,
+        )?;
+        Ok((report, account.exterior_report()))
+    }
+
+    /// Topology, not the presence of a reservoir, selects the physical boundary.
+    /// Unowned exterior walls must still carry no species or energy at either
+    /// SSP stage; internal ports are excluded even when their transfers are large.
+    pub(super) fn entropy_exterior_ends(&self, branch: usize) -> [bool; 2] {
+        if self.branches[branch].boundaries == Boundaries::Periodic {
+            [false; 2]
+        } else {
+            self.endpoint_connections[branch].map(|connection| connection.is_none())
+        }
+    }
+
+    fn entropy_account(
         &self,
         controls: MixtureEntropyControl,
+        reservoirs: Option<&[[Option<Cell<'_>>; 2]]>,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<EntropyTracker, Error> {
         poll(cancelled)?;
@@ -91,10 +187,11 @@ impl MixtureNetwork1d {
             if let Boundaries::Ends { left, right } = branch.boundaries {
                 for (end, boundary) in [left, right].into_iter().enumerate() {
                     if self.endpoint_connections[index][end].is_none()
+                        && reservoirs.is_none_or(|sources| sources[index][end].is_none())
                         && boundary != Boundary::Reflecting
                     {
                         return Err(Error::EntropyDomain(
-                            "closed network entropy requires stationary reflecting exterior ends",
+                            "network entropy requires a reservoir or stationary reflecting exterior end",
                         ));
                     }
                 }
@@ -124,6 +221,24 @@ impl MixtureNetwork1d {
                     .iter()
                     .map(|plenum| (plenum.state(), plenum.volume_m3())),
             );
-        EntropyTracker::from_cells(gas, count, controls, None, cells, cancelled)
+        let mut account = EntropyTracker::from_cells(gas, count, controls, None, cells, cancelled)?;
+        if let Some(reservoirs) = reservoirs {
+            let count = (0..self.branches.len())
+                .filter(|&index| self.entropy_exterior_ends(index).into_iter().any(|end| end))
+                .count();
+            let exterior = reservoirs.iter().enumerate().filter_map(|(index, pair)| {
+                self.entropy_exterior_ends(index)
+                    .into_iter()
+                    .any(|end| end)
+                    .then(|| {
+                        core::array::from_fn(|end| {
+                            pair[end]
+                                .map(|state| (state, self.work.reservoir_primitive[index][end]))
+                        })
+                    })
+            });
+            account.prepare_exterior_pairs(gas, count, exterior, cancelled)?;
+        }
+        Ok(account)
     }
 }

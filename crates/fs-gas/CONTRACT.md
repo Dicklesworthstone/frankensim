@@ -4084,6 +4084,47 @@ negative semidiscrete rate can exhaust retries. The tolerance is per accepted
 call; accumulated multi-step allowances remain caller-owned. Open reservoirs,
 chemistry, thermal sources and moving branch walls need their own entropy inputs.
 
+### Prescribed reservoir entropy through complete moving networks
+
+`MixtureNetwork1d::step_with_reservoirs_and_entropy` and
+`step_with_reservoirs_and_volume_rates_and_entropy` extend that same native
+transaction to prescribed stationary pressure reservoirs. One global source
+basis covers every stored branch cell and finite plenum. The existing
+`ExteriorEntropyEffort` contracts the actual signed SSP species, momentum and
+referenced-energy transfers with the original reservoir entropy variables and
+advective entropy potential. For stationary reservoirs this reduces to their
+heat/chemical effort on transported total enthalpy. Pressure-flow work is
+already included in enthalpy; moving-plenum `-p*dV` work remains a separate
+mechanical energy exchange with zero entropy supply.
+
+Topology selects external physical ends. Internal finite-plenum ports and
+periodic faces contribute no boundary entropy or external species throughput.
+Unconnected ends without reservoirs must be reflecting walls and carry zero
+species/energy at both stages. Nonzero transfer of a species with zero reservoir
+activity refuses at either stage; opposite transfers cannot hide it. Cached
+efforts are prepared once per call in the complete network's fixed reference
+basis. Retries reuse them and the native numerical workspace.
+
+`ExteriorMixtureEntropyReport::boundary_entropy_input_j_k` sums all left and all
+right physical ends, respectively, in retained branch order. One global gate
+checks state entropy minus this supply; it does not sum branch-local allowances.
+Each species continuity check subtracts the actual boundary transfer and scales
+by original inventory plus absolute throughput from both stages and every
+external end. Only the numerical continuity reference contribution is removed;
+physical entropy datums carried by entering/leaving species remain in state and
+boundary reports. Receiving reservoirs retain their own thermodynamics, so the
+reported generation includes irreversibility of the imposed reservoir coupling.
+
+Focused regressions independently invert polynomial-Cp states, reconstruct
+reservoir chemical/enthalpy entropy from accepted native transfers, close moving
+work, admit entropy-decreasing outflow with positive combined generation, retain
+large incoming-species entropy datums, and check whole-network retry, rollback,
+late cancellation, topology, zero activity and closed/zero-motion identities.
+The accepted duration may be shortened. No field, geometry, clock or accepted
+receipt publishes on failure. This remains measured finite-step admission of
+the existing characteristic engineering flux, without a fully discrete entropy
+or invariant-domain theorem or finite-reservoir depletion model.
+
 ### Frozen-composition chambers with wall and gravity coupling
 
 `dynamics::network::GasNetwork1d::step_with_volume_rates` supplies the same

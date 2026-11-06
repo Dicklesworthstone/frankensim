@@ -21,6 +21,8 @@ pub struct ExteriorMixtureEntropyReport {
     /// Entropy supplied to the gas at the left and right prescribed exteriors
     /// [J/K], using their actual species, momentum and referenced-energy
     /// transfers and advective entropy potentials. Positive means into the gas.
+    /// Network receipts sum each end class in retained branch order; internal
+    /// finite-plenum ports and periodic faces are excluded from both entries.
     pub boundary_entropy_input_j_k: [f64; 2],
     /// State change minus exterior input, with only the separately bounded
     /// numerical species-continuity reference defect removed [J/K].
@@ -138,6 +140,7 @@ impl ExteriorEntropyAccount {
         b: &Stage,
         dt: f64,
         areas: [f64; 2],
+        accounted_ends: [bool; 2],
         reference_entropy: &[f64; MAX_SPECIES],
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<(EntropyExchange, ExteriorTransportInventory), FlowError> {
@@ -154,6 +157,14 @@ impl ExteriorEntropyAccount {
         };
         for end in 0..2 {
             poll(cancelled)?;
+            if !accounted_ends[end] {
+                if self.ends[end].is_some() {
+                    return Err(FlowError::EntropyDomain(
+                        "prescribed exterior cannot be an internal network port",
+                    ));
+                }
+                continue;
+            }
             let (first, second, sign) = if end == 0 {
                 (&a.left, &b.left, 1.0)
             } else {
@@ -267,13 +278,42 @@ impl EntropyTracker {
     ) -> Result<Self, FlowError> {
         let mut account = Self::new(flow, controls, cancelled)?;
         if exterior.iter().any(Option::is_some) {
-            account.exterior.try_reserve_exact(1).map_err(|_| FlowError::Allocation)?;
-            account.exterior.push(ExteriorEntropyAccount::new(
-                flow.gas(), account.reference_temperature, &account.reference_density,
-                exterior, cancelled,
-            )?);
+            account.prepare_exterior_pairs(flow.gas(), 1, [exterior], cancelled)?;
         }
         Ok(account)
+    }
+
+    /// Cache each admitted physical branch end in the SAME complete-storage
+    /// basis. A pair may contain only stationary walls; the native reducer must
+    /// still reject unowned species/energy there. Topology supplies the mask
+    /// excluding internal finite-volume ports and periodic faces at admission.
+    pub(in crate::multicomponent) fn prepare_exterior_pairs<'a>(
+        &mut self,
+        gas: &MixtureGas,
+        count: usize,
+        exterior: impl IntoIterator<Item = [Option<(Cell<'a>, Primitive)>; 2]>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(), FlowError> {
+        poll(cancelled)?;
+        if self.boundary.is_some() || self.accepted != 0 || !self.exterior.is_empty()
+            || !self.matches_source(gas)
+        {
+            return Err(FlowError::EntropyDomain("exterior entropy requires a fresh source account"));
+        }
+        self.exterior.try_reserve_exact(count).map_err(|_| FlowError::Allocation)?;
+        for pair in exterior {
+            poll(cancelled)?;
+            if self.exterior.len() == count {
+                return Err(FlowError::EntropyDomain("exterior entropy branch count"));
+            }
+            self.exterior.push(ExteriorEntropyAccount::new(
+                gas, self.reference_temperature, &self.reference_density, pair, cancelled,
+            )?);
+        }
+        if self.exterior.len() != count {
+            return Err(FlowError::EntropyDomain("exterior entropy branch count"));
+        }
+        Ok(())
     }
 
     /// One complete native candidate uses the original endpoint reducer and
@@ -298,38 +338,9 @@ impl EntropyTracker {
         }
         let completion = (|| {
             let (exchange, inventory) = exterior.stage_pair(
-                gas, a, b, dt, areas, &self.reference_entropy, cancelled,
+                gas, a, b, dt, areas, [true; 2], &self.reference_entropy, cancelled,
             )?;
-            // These shared reducers accept an additional physical species
-            // source independently of the state-entropy basis. Here that source
-            // is the actual exterior transfer, not a chemical reaction.
-            let relative = self.inventory_with_reaction(
-                gas.species_count(), true,
-                Some((&exchange.species, &exchange.throughput)),
-            )?;
-            let generation = self.trial_entropy - exchange.input;
-            let change = scalar(generation)?;
-            if change < -self.controls.absolute_tolerance_j_k {
-                return Err(FlowError::EntropyDecrease {
-                    change_j_k: change,
-                    tolerance_j_k: self.controls.absolute_tolerance_j_k,
-                });
-            }
-            let (reference, reference_residual, _) =
-                self.reference_changes(gas, Some(&exchange.species), cancelled)?;
-            Ok((ExteriorMixtureEntropyReport {
-                source_entropy_change_j_k: scalar(self.trial_entropy + reference)?,
-                boundary_entropy_input_j_k: [
-                    scalar(exchange.source_input[0])?,
-                    scalar(exchange.source_input[1])?,
-                ],
-                entropy_generation_j_k: change,
-                source_entropy_generation_j_k: scalar(generation + reference_residual)?,
-                reference_entropy_residual_j_k: scalar(reference_residual)?,
-                minimum_step_entropy_generation_j_k: change,
-                maximum_relative_species_residual: relative,
-                rejected_entropy_steps: self.report.rejected_entropy_steps,
-            }, inventory))
+            Ok((self.exterior_step_report(gas, &exchange, cancelled)?, inventory))
         })();
         match completion {
             Ok((report, inventory)) => {
@@ -348,6 +359,110 @@ impl EntropyTracker {
                 Err(error)
             }
         }
+    }
+
+    /// Admit all actual native branch-stage transfers against one network state
+    /// increment. Each pair's mask selects only the physical accounting boundary;
+    /// finite-plenum ports cancel inside the state inventory, never as supplies.
+    /// No branch-local entropy allowance is added to the global allowance.
+    pub(in crate::multicomponent) fn admit_network_transport_step<'a>(
+        &mut self,
+        gas: &MixtureGas,
+        dt: f64,
+        stages: impl IntoIterator<Item = (&'a Stage, &'a Stage, [f64; 2], [bool; 2])>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(), FlowError> {
+        if self.exterior.is_empty() {
+            return self.admit_single_step(gas, cancelled);
+        }
+        if self.boundary.is_some() || self.accepted != 0 {
+            return Err(FlowError::EntropyDomain(
+                "network exterior admission requires a fresh inviscid account",
+            ));
+        }
+        let completion = (|| {
+            let mut total = EntropyExchange::default();
+            let mut count = 0;
+            for (index, (a, b, areas, mask)) in stages.into_iter().enumerate() {
+                poll(cancelled)?;
+                let exterior = self.exterior.get(index).ok_or(FlowError::EntropyDomain(
+                    "network exterior entropy stage count",
+                ))?;
+                let (exchange, _) = exterior.stage_pair(
+                    gas, a, b, dt, areas, mask, &self.reference_entropy, cancelled,
+                )?;
+                total.input = total.input + exchange.input;
+                scalar(total.input)?;
+                for end in 0..2 {
+                    total.source_input[end] = total.source_input[end] + exchange.source_input[end];
+                    scalar(total.source_input[end])?;
+                }
+                for k in 0..gas.species_count() {
+                    poll(cancelled)?;
+                    total.species[k] = total.species[k] + exchange.species[k];
+                    total.throughput[k] = total.throughput[k] + exchange.throughput[k];
+                    scalar(total.species[k])?;
+                    scalar(total.throughput[k])?;
+                }
+                count += 1;
+            }
+            if count != self.exterior.len() {
+                return Err(FlowError::EntropyDomain("network exterior entropy stage count"));
+            }
+            self.exterior_step_report(gas, &total, cancelled)
+        })();
+        match completion {
+            Ok(report) => {
+                self.completed_exterior_report = Some(report);
+                self.accepted = 1;
+                Ok(())
+            }
+            Err(error) => {
+                if matches!(
+                    &error,
+                    FlowError::EntropyDecrease { .. } | FlowError::SpeciesInventoryDrift { .. }
+                ) {
+                    self.report.rejected_entropy_steps += 1;
+                }
+                Err(error)
+            }
+        }
+    }
+
+    fn exterior_step_report(
+        &self,
+        gas: &MixtureGas,
+        exchange: &EntropyExchange,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<ExteriorMixtureEntropyReport, FlowError> {
+        // Subtract actual boundary transfer before applying source reference
+        // constants; physical entropy carried by entering/leaving species stays.
+        let relative = self.inventory_with_reaction(
+            gas.species_count(), true,
+            Some((&exchange.species, &exchange.throughput)),
+        )?;
+        let generation = self.trial_entropy - exchange.input;
+        let change = scalar(generation)?;
+        if change < -self.controls.absolute_tolerance_j_k {
+            return Err(FlowError::EntropyDecrease {
+                change_j_k: change,
+                tolerance_j_k: self.controls.absolute_tolerance_j_k,
+            });
+        }
+        let (reference, reference_residual, _) =
+            self.reference_changes(gas, Some(&exchange.species), cancelled)?;
+        Ok(ExteriorMixtureEntropyReport {
+            source_entropy_change_j_k: scalar(self.trial_entropy + reference)?,
+            boundary_entropy_input_j_k: [
+                scalar(exchange.source_input[0])?, scalar(exchange.source_input[1])?,
+            ],
+            entropy_generation_j_k: change,
+            source_entropy_generation_j_k: scalar(generation + reference_residual)?,
+            reference_entropy_residual_j_k: scalar(reference_residual)?,
+            minimum_step_entropy_generation_j_k: change,
+            maximum_relative_species_residual: relative,
+            rejected_entropy_steps: self.report.rejected_entropy_steps,
+        })
     }
 
     /// Only a fully admitted native SSP candidate can supply a coupled owner.

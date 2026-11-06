@@ -3,6 +3,8 @@ use super::*;
 use crate::multicomponent::{MixtureEntropyControl, Reconstruction};
 use fs_thermochem::{Nasa9RegionV1, Nasa9StandardStateModelV1};
 
+mod reservoir;
+
 fn first_order() -> StepControl {
     StepControl {
         reconstruction: Reconstruction::FirstOrder,
