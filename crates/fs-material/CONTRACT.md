@@ -11652,7 +11652,18 @@ unchanged, and original-law increments cancel common formation datums before
 rounding. Unsupported source states, unrepresented coordinates, cancellation
 and energy mismatch return no changed parcel.
 
-This method is a coordinate adapter, not an extra heat/work integrator. Its
+`ClosedGasParcel::stored_energy_change_to` compares two admitted endpoints of
+that same inventory directly through the original species caloric increments.
+It cancels common formation references before summation and permits volume and
+temperature changes while requiring exact mass, complete source/composition
+model and auxiliary-query identity. The original caloric owner admits the full
+temperature interval. Changed sources, inventory or auxiliary conditions refuse;
+cancellation publishes no changed parcel. This is a state difference, not a heat
+input, an adiabatic-path assertion or a new thermodynamic closure. Focused
+regressions cover temperature-dependent calorics beside a large formation datum,
+reversal, volume changes and source/inventory/context mismatch.
+
+The volume/energy method is a coordinate adapter, not an extra heat/work integrator. Its
 enclosing mechanical/thermal owner must close actual gas energy against its
 native boundary work and heat. The deformable-cavity owner in fs-couple does so
 using the original tetrahedral pressure footprint and retained Newmark state.

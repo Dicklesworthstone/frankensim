@@ -85,6 +85,53 @@ impl ClosedGasParcel {
     /// without introducing a second gas state or changing accepted storage.
     #[must_use]
     pub const fn model(&self) -> &ThermochemicalGasModel { &self.parcel.model }
+
+    /// Actual stored-energy change to another accepted endpoint of this parcel.
+    ///
+    /// Mass, the complete composition/source model, and every auxiliary query
+    /// coordinate and quantity convention must agree. Temperature, pressure and
+    /// volume may change. The original species calorics integrate Cv between
+    /// those temperatures, canceling common formation references before the
+    /// reduction; no absolute stored-energy subtraction or fixed-Cv surrogate
+    /// is used. This is a state difference, not an assertion that the path was
+    /// adiabatic or that the enclosing mechanical/thermal balance closed.
+    ///
+    /// Both endpoints have already passed their source/transport admission.
+    /// The caloric owner still admits the complete temperature interval. Source
+    /// replacement and mass exchange require their separate physical owners.
+    pub fn stored_energy_change_to(
+        &self, after: &Self, mut cancelled: impl FnMut() -> bool,
+    ) -> Result<f64, GasEnergyError> {
+        poll(&mut cancelled)?;
+        fn auxiliary(point: &QueryPoint) -> impl Iterator<Item = (&str, u64)> {
+            point.axes().iter()
+                .filter(|(axis, _)| axis.as_str() != "temperature" && axis.as_str() != "pressure")
+                .map(|(axis, value)| (axis.as_str(), value.to_bits()))
+        }
+        if self.mass_kg().to_bits() != after.mass_kg().to_bits()
+            || self.model() != after.model()
+            || self.point().axis_quantities() != after.point().axis_quantities()
+            || !auxiliary(self.point()).eq(auxiliary(after.point()))
+        {
+            return Err(GasEnergyError::Invalid(
+                "stored gas increment needs unchanged mass, source model and auxiliary conditions",
+            ));
+        }
+        let before_t = self.state().state().temperature;
+        let after_t = after.state().state().temperature;
+        let change = self.mass_kg() * self.model().thermodynamics()
+            .specific_internal_energy_change(
+                fs_qty::Temperature::new(before_t), fs_qty::Temperature::new(after_t),
+            ).map_err(|error| crate::thermochemical_gas::failure(
+                "closed gas endpoint energy increment", error,
+            ))?.value();
+        if !change.is_finite() || (before_t != after_t && change == 0.0) {
+            return Err(GasEnergyError::Invalid("stored gas energy increment is unrepresentable"));
+        }
+        poll(&mut cancelled)?;
+        Ok(change)
+    }
+
     /// Prescribed signed heat at the CURRENT held volume. The existing energy
     /// closure, source-domain checks and atomic publication are unchanged.
     pub fn add_heat(&mut self, heat_j: f64, controls: GasEnergySolve, cancelled: impl FnMut() -> bool)

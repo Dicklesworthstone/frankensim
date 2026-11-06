@@ -159,3 +159,67 @@ fn unchanged_volume_is_noop_but_does_not_bypass_admission() {
     let fixed = parcel.into_isochoric();
     assert_eq!(ClosedGasParcel::from_isochoric(fixed), saved);
 }
+
+#[test]
+fn g1_stored_endpoint_increment_retains_variable_cv_work_under_formation_datums() {
+    use crate::thermochemical_gas::tests::species_with_energy_reference;
+    use fs_thermochem::mixture::FrozenIdealGasMixtureModelV1;
+    use fs_thermochem::UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K as R;
+
+    let mut values = Vec::new();
+    for datum in [0.0, 1e24] {
+        let original = model(vec![0.75, 0.25], 0.001);
+        let thermo = FrozenIdealGasMixtureModelV1::new(
+            vec![species_with_energy_reference("A", 0.028, 3.5, 0.001, datum),
+                species_with_energy_reference("B", 0.004, 2.5, 0.0, datum)],
+            original.thermodynamics().declared_composition().clone(),
+        ).unwrap();
+        let source = ThermochemicalGasModel::new(thermo, original.transport.clone(), None).unwrap();
+        let before = ClosedGasParcel::new(source,
+            point(500.0, 100000.0).with("material-lot", 12.0).unwrap(), 0.01).unwrap();
+        let (after, _) = before.at_temperature(500.0 + 1e-7).unwrap();
+        let (t0, t1) = (before.state().state().temperature, after.state().state().temperature);
+        // Independent integral of Cv/R = 2.25 + 0.00075 T for this binary mixture.
+        let expected = before.mass_kg() * R / 0.022
+            * (t1 - t0) * (2.25 + 0.000375 * (t1 + t0));
+        let change = before.stored_energy_change_to(&after, || false).unwrap();
+        assert!((change / expected - 1.0).abs() < 2e-14);
+        assert!(change > 0.0);
+        close(after.stored_energy_change_to(&before, || false).unwrap(), -change);
+        assert_eq!(before.stored_energy_change_to(&before, || false).unwrap(), 0.0);
+        if datum != 0.0 {
+            let rounded = before.mass_kg() * (after.state().specific_internal_energy_j_kg()
+                - before.state().specific_internal_energy_j_kg());
+            assert!((rounded - expected).abs() > 0.5 * expected.abs());
+        }
+        values.push(change);
+    }
+    assert_eq!(values[0], values[1]);
+}
+
+#[test]
+fn g0_stored_endpoint_increment_preserves_inventory_sources_conditions_and_cancellation() {
+    let before = parcel(0.001);
+    let mut after = before.clone();
+    let work = after.set_volume_isentropic(0.008, entropy_controls(), || false).unwrap();
+    close(before.stored_energy_change_to(&after, || false).unwrap(), work.stored_energy_change_j);
+    let saved = after.clone();
+    for mutation in 0..4 {
+        let mut foreign = after.clone();
+        match mutation {
+            0 => foreign.parcel.mass_kg *= 1.01,
+            1 => foreign.parcel.model = model(vec![0.75, 0.25], 0.0),
+            2 => foreign.parcel.point = foreign.parcel.point.with("material-lot", 13.0).unwrap(),
+            _ => foreign.parcel.point = foreign.parcel.point.with("unowned-condition", 1.0).unwrap(),
+        }
+        assert!(matches!(before.stored_energy_change_to(&foreign, || false),
+            Err(GasEnergyError::Invalid(_))));
+    }
+    for cancel_at in [1, 2] {
+        let mut polls = 0;
+        assert!(matches!(before.stored_energy_change_to(&after, || {
+            polls += 1; polls == cancel_at
+        }), Err(GasEnergyError::Cancelled)));
+    }
+    assert_eq!(after, saved);
+}
