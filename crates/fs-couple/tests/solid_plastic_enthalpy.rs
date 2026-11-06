@@ -20,6 +20,8 @@ mod voce;
 mod chaboche;
 #[path = "solid_plastic_enthalpy/chaboche_dynamics.rs"]
 mod chaboche_dynamics;
+#[path = "solid_plastic_enthalpy/shell.rs"]
+mod shell;
 
 use std::collections::BTreeMap;
 

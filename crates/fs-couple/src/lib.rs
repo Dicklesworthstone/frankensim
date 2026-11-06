@@ -201,6 +201,8 @@ pub mod scenario_wall_velocity;
 pub mod selector;
 /// Independent characterized sheet bending and inertia on the original DKT owner.
 pub mod sheet_plate;
+/// Retained plastic shell histories with reciprocal source-bound layer heat.
+pub mod shell_plastic_enthalpy;
 /// Accepted Euler wall impulses on the original structural pressure surfaces.
 #[cfg(feature = "experimental-shock-loading")]
 pub mod shock_loading;
