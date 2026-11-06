@@ -43,12 +43,12 @@ pub struct PlaneWavePortControls {
 /// The full guide section may include a rigid part: its area must be at least
 /// the selected moving-face area. All moving faces must share one outward plane.
 pub struct PlaneWaveAcousticPort<'a> {
-    model: &'a TetPiezoelectricModel<'a>,
-    faces: Vec<[usize; 3]>,
+    pub(in crate::piezoelectric::spatial) model: &'a TetPiezoelectricModel<'a>,
+    pub(in crate::piezoelectric::spatial) faces: Vec<[usize; 3]>,
     weights_m2: Vec<(usize, f64)>,
     moving_area_m2: f64,
     section_area_m2: f64,
-    controls: PlaneWavePortControls,
+    pub(in crate::piezoelectric::spatial) controls: PlaneWavePortControls,
 }
 
 impl PlaneWaveAcousticPort<'_> {

@@ -14,8 +14,9 @@
 //! midpoint value. The accepted energy account is kinetic + elastic + electric
 //! storage plus independently recovered material heat against
 //! `F_mid . delta_u + phi_mid . delta_Q`. Optional source-bound Maxwell and
-//! Debye memories share the same midpoint solve. There is no numerical
-//! damping, inferred loss spectrum, radiation, thermal update, or automatic
+//! Debye memories share the same midpoint solve. Explicit acoustic guide ports
+//! retain signed wave outflow separately from ceramic heat. There is no numerical
+//! damping, inferred loss spectrum, thermal update, or automatic
 //! time/mesh-error certificate. Small-strain geometry and material coefficients
 //! stay fixed. A candidate never mutates the accepted body.
 
@@ -29,6 +30,8 @@ use fs_exec::Cx;
 use fs_material::piezoelectric::tensor::relaxation::RelaxingTensorPiezoelectric;
 use std::sync::Arc;
 
+/// Reciprocal guide loading and real incident acoustic waves on this solve.
+pub mod acoustic;
 /// Source-bound resistive loads and prescribed electrode currents on this solve.
 pub mod load;
 /// Source-bound intrinsic ceramic memories on the original spatial operators.
@@ -125,6 +128,9 @@ pub struct TetPiezoelectricTransientStep {
     pub support_work_j: f64,
     /// Midpoint potential dotted with actual free-charge change [J].
     pub electrical_work_j: f64,
+    /// Signed work entering attached acoustic guides [J], negative when incoming
+    /// sound supplies the body. Outgoing wave energy is never ceramic heat.
+    pub acoustic_outward_work_j: f64,
     /// Consistent-mass kinetic energy change [J].
     pub kinetic_energy_change_j: f64,
     /// Elastic, electric and retained material memory storage change [J].
@@ -138,7 +144,8 @@ pub struct TetPiezoelectricTransientStep {
     /// Retained material memory storage before and after the step [J]. This
     /// subaccount is already included in the body's internal stored energy.
     pub material_memory_energy_j: [f64; 2],
-    /// Total energy change plus material heat minus external supplies [J].
+    /// Total energy change plus material heat and signed acoustic outflow,
+    /// minus mechanical and electrical supplies [J].
     pub energy_residual_j: f64,
     /// Independently reconstructed midpoint momentum residual [N].
     pub maximum_force_residual_n: f64,
@@ -156,6 +163,7 @@ pub struct TetPiezoelectricTransientCandidate<'model, 'mesh> {
     body: TetPiezoelectricTransient<'model, 'mesh>,
     step: TetPiezoelectricTransientStep,
     midpoint_support_force_n: Vec<[f64; 3]>,
+    acoustic_ports: Vec<acoustic::TransientAcousticPortResponse>,
 }
 
 impl<'model, 'mesh> TetPiezoelectricTransientCandidate<'model, 'mesh> {
@@ -172,6 +180,10 @@ impl<'model, 'mesh> TetPiezoelectricTransientCandidate<'model, 'mesh> {
     /// including inertia, rather than the endpoint elastic internal force.
     pub fn midpoint_support_force_n(&self) -> &[[f64; 3]] {
         &self.midpoint_support_force_n
+    }
+    /// Incoming/outgoing waves and physical work at each original guide port.
+    pub fn acoustic_ports(&self) -> &[acoustic::TransientAcousticPortResponse] {
+        &self.acoustic_ports
     }
     /// Transfer the complete accepted candidate to its owner.
     pub fn into_parts(
@@ -415,6 +427,40 @@ impl<'model, 'mesh> TetPiezoelectricTransient<'model, 'mesh> {
         Vec<load::ElectrodeLoadHeat>,
         load::reactive::ReactiveUpdate,
     )> {
+        self.advance_with_acoustic_loads(
+            dt_s,
+            endpoint_support_velocities_m_s,
+            endpoint_electrode_conditions,
+            loads,
+            reactive_loads,
+            reactive_states,
+            &[],
+            midpoint_nodal_forces_n,
+            endpoint_nodal_free_charge_c,
+            controls,
+            cx,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn advance_with_acoustic_loads(
+        &self,
+        dt_s: f64,
+        endpoint_support_velocities_m_s: Option<&[(usize, f64)]>,
+        endpoint_electrode_conditions: &[ElectrodeCondition],
+        loads: &[load::ResistiveElectrodeLoad],
+        reactive_loads: &[load::reactive::ReactiveElectrodeLoad],
+        reactive_states: &[load::reactive::ReactiveElectrodeState],
+        acoustic_ports: &[acoustic::TransientAcousticPort<'_>],
+        midpoint_nodal_forces_n: &[[f64; 3]],
+        endpoint_nodal_free_charge_c: &[f64],
+        controls: TetPiezoelectricControls,
+        cx: &Cx<'_>,
+    ) -> Result<(
+        TetPiezoelectricTransientCandidate<'model, 'mesh>,
+        Vec<load::ElectrodeLoadHeat>,
+        load::reactive::ReactiveUpdate,
+    )> {
         poll(cx)?;
         validate_controls(controls)?;
         let n = self.model.nodes_m.len();
@@ -440,6 +486,7 @@ impl<'model, 'mesh> TetPiezoelectricTransient<'model, 'mesh> {
                 "representable positive timestep and complete finite source values required",
             ));
         }
+        let acoustic_ports = acoustic::prepare(self.model, acoustic_ports, cx)?;
         for (old, next) in self
             .state
             .electrode_conditions
@@ -544,6 +591,7 @@ impl<'model, 'mesh> TetPiezoelectricTransient<'model, 'mesh> {
             cx,
         )?);
         relaxation::stamp(self, dt_s, &mut boundary, &mut load_entries, cx)?;
+        acoustic::stamp(&acoustic_ports, dt_s, &mut boundary, &mut load_entries, cx)?;
         let (matrix, rhs) =
             self.model
                 .reduced_system(&boundary, mass_coefficient, &load_entries, cx)?;
@@ -652,6 +700,20 @@ impl<'model, 'mesh> TetPiezoelectricTransient<'model, 'mesh> {
         } else {
             None
         };
+        let acoustic_responses = acoustic::recover(
+            &acoustic_ports,
+            dt_s,
+            &full_increment,
+            &self.state.field.displacement_m,
+            &displacement,
+            &mut effective_force,
+            controls.energy_tolerance_j,
+            cx,
+        )?;
+        let acoustic_outward_work_j = acoustic_responses
+            .iter()
+            .map(|port| port.net_outward_work_j)
+            .sum::<f64>();
         let midpoint_electrodes = electrode_views(&self.boundary, &midpoint_conditions);
         let mut midpoint = self.model.recover(
             &full_midpoint,
@@ -734,6 +796,7 @@ impl<'model, 'mesh> TetPiezoelectricTransient<'model, 'mesh> {
         let kinetic_energy_change_j = kinetic_energy_j - self.state.kinetic_energy_j;
         let stored_energy_change_j = field.stored_energy_j - self.state.field.stored_energy_j;
         let energy_residual_j = kinetic_energy_change_j + stored_energy_change_j + material_heat_j
+            + acoustic_outward_work_j
             - mechanical_work_j
             - electrical_work_j;
         if [
@@ -741,6 +804,7 @@ impl<'model, 'mesh> TetPiezoelectricTransient<'model, 'mesh> {
             applied_force_work_j,
             support_work_j,
             electrical_work_j,
+            acoustic_outward_work_j,
             kinetic_energy_change_j,
             stored_energy_change_j,
             material_heat_j,
@@ -753,7 +817,7 @@ impl<'model, 'mesh> TetPiezoelectricTransient<'model, 'mesh> {
         }
         if energy_residual_j.abs() > controls.energy_tolerance_j {
             return Err(TetPiezoelectricError::Balance(
-                "kinetic and material storage plus intrinsic heat do not match supplied work",
+                "kinetic and material storage, intrinsic heat and acoustic outflow do not match supplied work",
             ));
         }
         let step = TetPiezoelectricTransientStep {
@@ -762,6 +826,7 @@ impl<'model, 'mesh> TetPiezoelectricTransient<'model, 'mesh> {
             applied_force_work_j,
             support_work_j,
             electrical_work_j,
+            acoustic_outward_work_j,
             kinetic_energy_change_j,
             stored_energy_change_j,
             material_heat_j,
@@ -799,6 +864,7 @@ impl<'model, 'mesh> TetPiezoelectricTransient<'model, 'mesh> {
                 },
                 step,
                 midpoint_support_force_n,
+                acoustic_ports: acoustic_responses,
             },
             load_heat,
             reactive,

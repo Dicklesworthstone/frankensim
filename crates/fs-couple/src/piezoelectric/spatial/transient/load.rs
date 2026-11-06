@@ -51,8 +51,9 @@ pub struct LoadedPiezoelectricStep {
     pub electrical_source_work_j: f64,
     /// Sum of actual conductor losses [J].
     pub joule_heat_j: f64,
-    /// Delta(all body storage) + conductor and intrinsic material heat
-    /// - mechanical/source work [J]. The body's step reports ceramic heat.
+    /// Delta(all body storage) + conductor and intrinsic material heat + signed
+    /// acoustic outflow - mechanical/source work [J]. Native reports keep each
+    /// physical heat receiver and outgoing wave energy distinct.
     pub energy_residual_j: f64,
     /// One source-bound record per input resistor, in original order.
     pub loads: Vec<ElectrodeLoadHeat>,
@@ -138,15 +139,38 @@ impl<'model, 'mesh> TetPiezoelectricTransient<'model, 'mesh> {
         TetPiezoelectricTransientCandidate<'model, 'mesh>,
         LoadedPiezoelectricStep,
     )> {
+        self.advance_loaded_with_acoustic_candidate(
+            dt_s, endpoint_support_velocities_m_s, &[], drives, loads,
+            midpoint_nodal_forces_n, endpoint_nodal_free_charge_c, controls, cx,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn advance_loaded_with_acoustic_candidate(
+        &self,
+        dt_s: f64,
+        endpoint_support_velocities_m_s: Option<&[(usize, f64)]>,
+        acoustic_ports: &[acoustic::TransientAcousticPort<'_>],
+        drives: &[ElectrodeDrive],
+        loads: &[ResistiveElectrodeLoad],
+        midpoint_nodal_forces_n: &[[f64; 3]],
+        endpoint_nodal_free_charge_c: &[f64],
+        controls: TetPiezoelectricControls,
+        cx: &Cx<'_>,
+    ) -> Result<(
+        TetPiezoelectricTransientCandidate<'model, 'mesh>,
+        LoadedPiezoelectricStep,
+    )> {
         poll(cx)?;
         let endpoints = endpoint_conditions(self, dt_s, drives, cx)?;
-        let (candidate, heat, _) = self.advance_with_loads(
+        let (candidate, heat, _) = self.advance_with_acoustic_loads(
             dt_s,
             endpoint_support_velocities_m_s,
             &endpoints,
             loads,
             &[],
             &[],
+            acoustic_ports,
             midpoint_nodal_forces_n,
             endpoint_nodal_free_charge_c,
             controls,
@@ -173,6 +197,7 @@ impl<'model, 'mesh> TetPiezoelectricTransient<'model, 'mesh> {
         let energy_residual_j = next.total_energy_j() - self.state.total_energy_j()
             + joule_heat_j
             + candidate.step.material_heat_j
+            + candidate.step.acoustic_outward_work_j
             - candidate.step.mechanical_work_j
             - electrical_source_work_j;
         if [electrical_source_work_j, joule_heat_j, energy_residual_j]
@@ -185,7 +210,7 @@ impl<'model, 'mesh> TetPiezoelectricTransient<'model, 'mesh> {
         }
         if energy_residual_j.abs() > controls.energy_tolerance_j {
             return Err(TetPiezoelectricError::Balance(
-                "body energy, actual load heat and external source work disagree",
+                "body energy, physical heat, acoustic outflow and external source work disagree",
             ));
         }
         poll(cx)?;

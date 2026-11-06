@@ -344,6 +344,8 @@ impl<'model, 'mesh> ReactivePiezoelectricTransient<'model, 'mesh> {
             body,
             step: body_step,
             midpoint_support_force_n,
+            // This reactive entry point invokes the solve without acoustic ports.
+            acoustic_ports: _,
         } = candidate;
         // Repeat endpoint admission before publishing: a charge/voltage defect
         // cannot be concealed by the total energy account.
