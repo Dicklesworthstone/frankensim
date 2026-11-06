@@ -18,27 +18,46 @@ use super::{
     Branch, CircuitDae, CircuitError, CircuitGraph, MutualInductance,
     assemble_circuit_with_mutual_inductance,
 };
+use super::{
+    inductance::InductorCurve,
+    scalar::{CurveError, ScalarCurve},
+};
 use crate::{ConstitutiveDiscreteGradient, QuadraticStorage, Storage, linear_exact::QuadraticPart};
-use std::sync::Arc;
 
 /// Prepared reciprocal multi-terminal storage on the original charge states.
 pub mod block;
 pub use block::CapacitanceBlock;
 
 /// Maximum retained knots per capacitor, bounding each crossed-segment sum.
-pub const MAX_CAPACITOR_KNOTS: usize = 4096;
+pub const MAX_CAPACITOR_KNOTS: usize = super::scalar::MAX_SCALAR_KNOTS;
 
 fn invalid(what: &'static str) -> CircuitError {
     CircuitError::Invalid { what }
+}
+
+fn curve_error(error: CurveError) -> CircuitError {
+    invalid(match error {
+        CurveError::Knots => "bounded finite capacitor charge/voltage knots required",
+        CurveError::ZeroKnot => "capacitor curve requires an explicit uncharged (0,0) knot",
+        CurveError::Polarities => "capacitor curve must support both charge polarities",
+        CurveError::PositiveSlope => {
+            "capacitor knots require positive representable differential capacitance"
+        }
+        CurveError::Arithmetic => "capacitor constitutive arithmetic is not representable",
+        CurveError::Energy => "capacitor energy is not representable",
+        CurveError::StoredEnergy => "capacitor stored energy is not representable",
+        CurveError::CoordinateSupport => "capacitor charge is outside the supplied curve support",
+        CurveError::EffortSupport => "capacitor voltage is outside the supplied curve support",
+        CurveError::Effort => "capacitor voltage is not representable",
+        CurveError::Coordinate => "capacitor charge is not representable",
+    })
 }
 
 fn finite(value: f64) -> Result<f64, CircuitError> {
     if value.is_finite() {
         Ok(value)
     } else {
-        Err(invalid(
-            "capacitor constitutive arithmetic is not representable",
-        ))
+        Err(curve_error(CurveError::Arithmetic))
     }
 }
 
@@ -51,9 +70,7 @@ fn finite(value: f64) -> Result<f64, CircuitError> {
 /// so material/thermal circuit trials do not copy the constitutive tables.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CapacitorChargeCurve {
-    knots: Arc<[(f64, f64)]>,
-    inverse_capacitance: Arc<[f64]>,
-    energy_at_knots: Arc<[f64]>,
+    pub(super) scalar: ScalarCurve,
 }
 
 impl CapacitorChargeCurve {
@@ -61,211 +78,47 @@ impl CapacitorChargeCurve {
     /// strictly inside the support. Every segment must have a positive,
     /// representable differential capacitance and stored energy.
     pub fn try_new(knots: Vec<(f64, f64)>) -> Result<Self, CircuitError> {
-        if !(3..=MAX_CAPACITOR_KNOTS).contains(&knots.len())
-            || knots.iter().any(|(q, v)| !q.is_finite() || !v.is_finite())
-        {
-            return Err(invalid(
-                "bounded finite capacitor charge/voltage knots required",
-            ));
-        }
-        let zero = knots
-            .iter()
-            .position(|&(q, v)| q == 0.0 && v == 0.0)
-            .ok_or_else(|| invalid("capacitor curve requires an explicit uncharged (0,0) knot"))?;
-        if zero == 0 || zero + 1 == knots.len() {
-            return Err(invalid(
-                "capacitor curve must support both charge polarities",
-            ));
-        }
-        let mut inverse_capacitance = Vec::with_capacity(knots.len() - 1);
-        for pair in knots.windows(2) {
-            let dq = finite(pair[1].0 - pair[0].0)?;
-            let dv = finite(pair[1].1 - pair[0].1)?;
-            let slope = dv / dq;
-            if dq <= 0.0
-                || dv <= 0.0
-                || !slope.is_finite()
-                || slope <= 0.0
-                || !slope.recip().is_finite()
-                || slope.recip() <= 0.0
-            {
-                return Err(invalid(
-                    "capacitor knots require positive representable differential capacitance",
-                ));
-            }
-            inverse_capacitance.push(slope);
-        }
-        let mut energy_at_knots = vec![0.0; knots.len()];
-        for i in zero..knots.len() - 1 {
-            let area = f64::midpoint(knots[i].1, knots[i + 1].1) * (knots[i + 1].0 - knots[i].0);
-            energy_at_knots[i + 1] = finite(energy_at_knots[i] + area)?;
-            if area <= 0.0 || energy_at_knots[i + 1] <= 0.0 {
-                return Err(invalid("capacitor energy is not representable"));
-            }
-        }
-        for i in (0..zero).rev() {
-            let area = f64::midpoint(knots[i].1, knots[i + 1].1) * (knots[i + 1].0 - knots[i].0);
-            energy_at_knots[i] = finite(energy_at_knots[i + 1] - area)?;
-            if area >= 0.0 || energy_at_knots[i] <= 0.0 {
-                return Err(invalid("capacitor energy is not representable"));
-            }
-        }
         Ok(Self {
-            knots: knots.into(),
-            inverse_capacitance: inverse_capacitance.into(),
-            energy_at_knots: energy_at_knots.into(),
+            scalar: ScalarCurve::try_new(knots).map_err(curve_error)?,
         })
     }
 
     /// Original (charge [C], voltage [V]) knots, without resampling.
     pub fn knots(&self) -> &[(f64, f64)] {
-        &self.knots
+        self.scalar.knots()
     }
 
     /// Closed source support [C]; stepping may need room for Newton probes.
     pub fn charge_range_c(&self) -> (f64, f64) {
-        (self.knots[0].0, self.knots[self.knots.len() - 1].0)
-    }
-
-    fn segment(&self, charge: f64) -> Result<usize, CircuitError> {
-        let (lo, hi) = self.charge_range_c();
-        if !charge.is_finite() || charge < lo || charge > hi {
-            return Err(invalid(
-                "capacitor charge is outside the supplied curve support",
-            ));
-        }
-        Ok(self
-            .knots
-            .partition_point(|&(q, _)| q <= charge)
-            .saturating_sub(1)
-            .min(self.knots.len() - 2))
+        self.scalar.range()
     }
 
     /// Actual terminal voltage dH/dq at the stored charge.
     pub fn voltage_v(&self, charge_c: f64) -> Result<f64, CircuitError> {
-        let i = self.segment(charge_c)?;
-        if charge_c == self.knots[i + 1].0 {
-            return Ok(self.knots[i + 1].1);
-        }
-        let anchor = if charge_c < 0.0 { i + 1 } else { i };
-        let value = finite(
-            self.inverse_capacitance[i]
-                .mul_add(charge_c - self.knots[anchor].0, self.knots[anchor].1),
-        )?;
-        if charge_c != 0.0 && value == 0.0 {
-            return Err(invalid("capacitor voltage is not representable"));
-        }
-        Ok(value)
+        self.scalar.effort(charge_c).map_err(curve_error)
     }
 
     /// Initialize charge from voltage using the SAME monotone relation.
     pub fn charge_c(&self, voltage_v: f64) -> Result<f64, CircuitError> {
-        if !voltage_v.is_finite()
-            || voltage_v < self.knots[0].1
-            || voltage_v > self.knots[self.knots.len() - 1].1
-        {
-            return Err(invalid(
-                "capacitor voltage is outside the supplied curve support",
-            ));
-        }
-        let i = self
-            .knots
-            .partition_point(|&(_, v)| v <= voltage_v)
-            .saturating_sub(1)
-            .min(self.knots.len() - 2);
-        if voltage_v == self.knots[i + 1].1 {
-            return Ok(self.knots[i + 1].0);
-        }
-        let anchor = if voltage_v < 0.0 { i + 1 } else { i };
-        let charge = finite(
-            (voltage_v - self.knots[anchor].1) / self.inverse_capacitance[i] + self.knots[anchor].0,
-        )?;
-        if voltage_v != 0.0 && charge == 0.0 {
-            return Err(invalid("capacitor charge is not representable"));
-        }
-        self.segment(charge)?;
-        Ok(charge)
+        self.scalar.coordinate(voltage_v).map_err(curve_error)
     }
 
     /// dq/dV [F]. At an interior knot the right segment is returned; the last
     /// knot uses its left segment. No derivative continuity is claimed there.
     pub fn differential_capacitance_f(&self, charge_c: f64) -> Result<f64, CircuitError> {
-        Ok(self.inverse_capacitance[self.segment(charge_c)?].recip())
+        self.scalar.inverse_slope(charge_c).map_err(curve_error)
     }
 
     /// Integral from zero to q of V(s) ds [J], with the uncharged datum fixed.
     pub fn stored_energy_j(&self, charge_c: f64) -> Result<f64, CircuitError> {
-        let i = self.segment(charge_c)?;
-        // Evaluate from the knot nearer zero: subtracting almost all the
-        // energy of a negative knot would erase small negative-charge energy.
-        let anchor = if charge_c < 0.0 { i + 1 } else { i };
-        let dq = charge_c - self.knots[anchor].0;
-        let voltage = self.voltage_v(charge_c)?;
-        let energy = finite(
-            self.energy_at_knots[anchor] + dq * f64::midpoint(self.knots[anchor].1, voltage),
-        )?;
-        if energy < 0.0 || charge_c != 0.0 && energy == 0.0 {
-            return Err(invalid("capacitor stored energy is not representable"));
-        }
-        Ok(energy)
-    }
-
-    // Integral_base^end (V(q)-V(base)) dq. Walking outwards from base adds
-    // positive segment areas without subtracting large biased endpoint energies.
-    fn relative_energy(&self, base: f64, end: f64) -> Result<f64, CircuitError> {
-        let mut i = self.segment(base)?;
-        self.segment(end)?;
-        let mut position = base;
-        let mut voltage_change = 0.0;
-        let mut area = 0.0;
-        while position != end {
-            if end < position && position == self.knots[i].0 {
-                i -= 1;
-            }
-            let next = if end > position {
-                end.min(self.knots[i + 1].0)
-            } else {
-                end.max(self.knots[i].0)
-            };
-            let dq = next - position;
-            let dv = finite(self.inverse_capacitance[i] * dq)?;
-            area = finite(area + dq * (voltage_change + 0.5 * dv))?;
-            voltage_change = finite(voltage_change + dv)?;
-            position = next;
-            if position != end && end > position {
-                i += 1;
-            }
-        }
-        Ok(area)
-    }
-
-    fn midpoint_remainder(
-        &self,
-        before: f64,
-        after: f64,
-        midpoint: f64,
-    ) -> Result<f64, CircuitError> {
-        let a = self.segment(before)?;
-        let b = self.segment(after)?;
-        let m = self.segment(midpoint)?;
-        if a == b && a == m {
-            // Includes the supplied represented midpoint's rounding error.
-            return finite(
-                (after - before)
-                    * (0.5 * self.inverse_capacitance[m])
-                    * ((before - midpoint) + (after - midpoint)),
-            );
-        }
-        finite(self.relative_energy(midpoint, after)? - self.relative_energy(midpoint, before)?)
+        self.scalar.energy(charge_c).map_err(curve_error)
     }
 
     /// Stable energy difference across any retained segments [J].
     pub fn energy_change_j(&self, before_c: f64, after_c: f64) -> Result<f64, CircuitError> {
-        let midpoint = f64::midpoint(before_c, after_c);
-        finite(
-            self.voltage_v(midpoint)? * (after_c - before_c)
-                + self.midpoint_remainder(before_c, after_c, midpoint)?,
-        )
+        self.scalar
+            .energy_change(before_c, after_c)
+            .map_err(curve_error)
     }
 
     /// Work-conjugate mean voltage over this capacitor's OWN charge change.
@@ -274,19 +127,9 @@ impl CapacitorChargeCurve {
     /// Same-segment arithmetic retains a rounded midpoint's missing offset;
     /// no squared charge increment can underflow and erase a knot correction.
     pub fn discrete_voltage_v(&self, before_c: f64, after_c: f64) -> Result<f64, CircuitError> {
-        let a = self.segment(before_c)?;
-        let b = self.segment(after_c)?;
-        let mid = f64::midpoint(before_c, after_c);
-        let voltage = self.voltage_v(mid)?;
-        if before_c == after_c {
-            return Ok(voltage);
-        }
-        let correction = if a == b {
-            (0.5 * self.inverse_capacitance[a]) * ((before_c - mid) + (after_c - mid))
-        } else {
-            self.midpoint_remainder(before_c, after_c, mid)? / (after_c - before_c)
-        };
-        finite(voltage + correction)
+        self.scalar
+            .discrete_effort(before_c, after_c)
+            .map_err(curve_error)
     }
 
     /// Derivative of [`Self::discrete_voltage_v`] with respect to its end
@@ -299,15 +142,9 @@ impl CapacitorChargeCurve {
         before_c: f64,
         after_c: f64,
     ) -> Result<f64, CircuitError> {
-        let a = self.segment(before_c)?;
-        let b = self.segment(after_c)?;
-        if before_c == after_c || a == b {
-            return finite(0.5 * self.inverse_capacitance[b]);
-        }
-        let change = after_c - before_c;
-        // Integral_a^b [V(b)-V(q)]dq / (b-a)^2, evaluated relative to V(b)
-        // without subtracting two nearly equal voltages or squaring a tiny dq.
-        finite((-self.midpoint_remainder(before_c, after_c, after_c)? / change) / change)
+        self.scalar
+            .discrete_effort_end_derivative(before_c, after_c)
+            .map_err(curve_error)
     }
 
     /// Integral of `V(q)-V(reference_c)` from `before_c` to `after_c` [J].
@@ -320,7 +157,9 @@ impl CapacitorChargeCurve {
         after_c: f64,
         reference_c: f64,
     ) -> Result<f64, CircuitError> {
-        self.midpoint_remainder(before_c, after_c, reference_c)
+        self.scalar
+            .midpoint_remainder(before_c, after_c, reference_c)
+            .map_err(curve_error)
     }
 }
 
@@ -334,7 +173,7 @@ pub struct CapacitorCurve {
 #[derive(Clone)]
 struct CurveStorage {
     linear: QuadraticStorage,
-    curves: Vec<(usize, CapacitorChargeCurve)>,
+    curves: Vec<(usize, ScalarCurve)>,
 }
 
 impl Storage for CurveStorage {
@@ -347,7 +186,7 @@ impl Storage for CurveStorage {
             .iter()
             .find(|(i, _)| *i == coordinate)
             .map(|(_, curve)| {
-                let (lo, hi) = curve.charge_range_c();
+                let (lo, hi) = curve.range();
                 lo.abs().max(hi.abs())
             })
     }
@@ -360,14 +199,14 @@ impl Storage for CurveStorage {
         self.curves
             .iter()
             .fold(self.linear.hamiltonian(x), |sum, (i, curve)| {
-                sum + curve.stored_energy_j(x[*i]).unwrap_or(f64::NAN)
+                sum + curve.energy(x[*i]).unwrap_or(f64::NAN)
             })
     }
 
     fn gradient(&self, x: &[f64], out: &mut [f64]) {
         self.linear.gradient(x, out);
         for (i, curve) in &self.curves {
-            out[*i] = curve.voltage_v(x[*i]).unwrap_or(f64::NAN);
+            out[*i] = curve.effort(x[*i]).unwrap_or(f64::NAN);
         }
     }
 
@@ -393,7 +232,7 @@ impl ConstitutiveDiscreteGradient for CurveStorage {
     fn evaluate(&self, a: &[f64], b: &[f64], mid: &[f64], out: &mut [f64]) {
         self.linear.mean_gradient(a, b, mid, out);
         for (i, curve) in &self.curves {
-            out[*i] = curve.discrete_voltage_v(a[*i], b[*i]).unwrap_or(f64::NAN);
+            out[*i] = curve.discrete_effort(a[*i], b[*i]).unwrap_or(f64::NAN);
         }
     }
 
@@ -406,7 +245,7 @@ impl ConstitutiveDiscreteGradient for CurveStorage {
     ) -> bool {
         self.linear.mean_end_jacobian_action(direction, out);
         for (i, curve) in &self.curves {
-            let (lo, hi) = curve.charge_range_c();
+            let (lo, hi) = curve.range();
             if !a[*i].is_finite()
                 || !b[*i].is_finite()
                 || a[*i] < lo
@@ -420,7 +259,7 @@ impl ConstitutiveDiscreteGradient for CurveStorage {
                 0.0
             } else {
                 curve
-                    .discrete_voltage_end_derivative(a[*i], b[*i])
+                    .discrete_effort_end_derivative(a[*i], b[*i])
                     .unwrap_or(f64::NAN)
                     * direction[*i]
             };
@@ -466,7 +305,19 @@ pub fn assemble_circuit_with_capacitance_blocks(
     curves: &[CapacitorCurve],
     mutual: &[MutualInductance],
 ) -> Result<CircuitDae, CircuitError> {
-    let mut ordered: Vec<_> = curves.iter().collect();
+    assemble_storage_curves(graph, blocks, curves, &[], mutual)
+}
+
+// One storage owner composes both scalar laws with the remaining quadratic
+// block. A scalar branch must never erase a reciprocal cross term.
+pub(super) fn assemble_storage_curves(
+    graph: &CircuitGraph,
+    blocks: &[CapacitanceBlock],
+    capacitors: &[CapacitorCurve],
+    inductors: &[InductorCurve],
+    mutual: &[MutualInductance],
+) -> Result<CircuitDae, CircuitError> {
+    let mut ordered: Vec<_> = capacitors.iter().collect();
     ordered.sort_by_key(|entry| entry.branch);
     if ordered
         .windows(2)
@@ -482,8 +333,35 @@ pub fn assemble_circuit_with_capacitance_blocks(
             "capacitor curves require distinct existing capacitor branch indices",
         ));
     }
+    let mut ordered_inductors: Vec<_> = inductors.iter().collect();
+    ordered_inductors.sort_by_key(|entry| entry.branch);
+    if ordered_inductors
+        .windows(2)
+        .any(|pair| pair[0].branch == pair[1].branch)
+        || ordered_inductors.iter().any(|entry| {
+            !graph
+                .branches
+                .get(entry.branch)
+                .is_some_and(|b| matches!(b.2, Branch::Inductor { .. }))
+        })
+    {
+        return Err(invalid(
+            "inductor curves require distinct existing inductor branch indices",
+        ));
+    }
+    if mutual.iter().any(|link| {
+        [link.branches.0, link.branches.1].iter().any(|branch| {
+            ordered_inductors
+                .binary_search_by_key(branch, |entry| entry.branch)
+                .is_ok()
+        })
+    }) {
+        return Err(invalid(
+            "scalar inductor curves cannot share a mutual-inductance link",
+        ));
+    }
     let mut dae = assemble_circuit_with_mutual_inductance(graph, mutual)?;
-    if ordered.is_empty() && blocks.is_empty() {
+    if ordered.is_empty() && ordered_inductors.is_empty() && blocks.is_empty() {
         return Ok(dae);
     }
     let n = dae.system.state_dim();
@@ -494,11 +372,11 @@ pub fn assemble_circuit_with_capacitance_blocks(
         .expect("native circuit storage is quadratic")
         .to_vec();
     block::stamp(graph, &dae, blocks, &ordered, &mut matrix)?;
-    if ordered.is_empty() {
+    if ordered.is_empty() && ordered_inductors.is_empty() {
         dae.system.storage = Box::new(QuadraticStorage::new(matrix, n)?);
         return Ok(dae);
     }
-    let mut bound = Vec::with_capacity(ordered.len());
+    let mut bound = Vec::with_capacity(ordered.len() + ordered_inductors.len());
     for entry in ordered {
         let slot = graph.branches[..entry.branch]
             .iter()
@@ -506,7 +384,16 @@ pub fn assemble_circuit_with_capacitance_blocks(
             .count();
         let coordinate = dae.charge_index[slot];
         matrix[coordinate * n + coordinate] = 0.0;
-        bound.push((coordinate, entry.curve.clone()));
+        bound.push((coordinate, entry.curve.scalar.clone()));
+    }
+    for entry in ordered_inductors {
+        let slot = graph.branches[..entry.branch]
+            .iter()
+            .filter(|b| matches!(b.2, Branch::Inductor { .. }))
+            .count();
+        let coordinate = dae.flux_index[slot];
+        matrix[coordinate * n + coordinate] = 0.0;
+        bound.push((coordinate, entry.curve.scalar.clone()));
     }
     dae.system.storage = Box::new(CurveStorage {
         linear: QuadraticStorage::new(matrix, n)?,

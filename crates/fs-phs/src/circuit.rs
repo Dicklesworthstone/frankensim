@@ -54,6 +54,9 @@ pub mod capacitance;
 pub mod conductance;
 /// Averaged synchronous bridge conversion on original flux/charge coordinates.
 pub mod converter;
+/// Bounded current/flux laws on the original inductor coordinates.
+pub mod inductance;
+mod scalar;
 use conductance::ConductanceBlock;
 
 /// One circuit branch between two node indices (node 0 is GROUND).

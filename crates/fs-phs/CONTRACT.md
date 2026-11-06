@@ -2583,3 +2583,43 @@ storage, with analytic/finite-difference agreement and atomic cancellation.
 This gas case retains prescribed same-species/temperature reservoirs and the
 isothermal free-energy convention; it adds no isolated thermal balance, finite
 reservoir inventory or automatic time-accuracy guarantee.
+
+## Reversible nonlinear inductor storage in native circuits
+
+`circuit::inductance::InductorFluxCurve` admits a bounded, strictly monotone
+piecewise-affine current/linkage law I(lambda), with an interior (0,0), both
+polarities and positive representable differential inductance. Its original
+knots own current, inverse linkage, differential L, the exact integral
+H=int I d(lambda), stable finite work and the analytic mean-current endpoint
+derivative. Source support is never extrapolated. At a knot the declared
+right-linkage derivative applies, except at the final endpoint.
+
+The private scalar integral kernel is shared with the existing nonlinear
+capacitor V(q) law. Immutable knots, slopes and integrals are shared across
+clones. Segment queries use binary search; finite work crosses only the
+intersected segments. Small physical increments do not subtract large stored
+energies. Each nonlinear branch keeps its own discrete work and analytic action;
+unchanged reciprocal charge and flux blocks keep their original quadratic
+efforts.
+
+`assemble_circuit_with_storage_curves` composes nonlinear L and C with
+reciprocal capacitance blocks and disjoint mutual-inductance links in the
+original Kirchhoff descriptor. Flux/charge coordinates, ports, resistors,
+ideal transformers, initialization and time integration retain their existing
+owners. Empty nonlinear bindings preserve exact-quadratic access. A bounded
+constant curve retains its support instead of becoming unrestricted storage.
+
+Every mutual link touching a nonlinear scalar inductor refuses, including a
+zero-valued link: a scalar curve does not define a coupled nonlinear potential.
+Duplicate ownership, wrong branch kinds, nonfinite data and unsupported state
+queries also refuse. This reversible numerical law supplies no hysteresis,
+remanence, thermal entropy or measured material authority.
+
+Focused regressions cover exact saturating RL trajectories and mH/microhenry
+scaling, nonlinear LC component work, simultaneous nonlinear L/C with reciprocal
+blocks, composed analytic actions beside a held energy bias, a loaded ideal
+transformer with saturating magnetizing storage, constant-law parity and source
+refusals. The actual scalar kernel passed seven independent native tests,
+including 2,000 work/derivative cases and exact piecewise-exponential transients.
+The enclosing integration tests are authored but were not executed because
+the available dependency environment could not link fs-la.
