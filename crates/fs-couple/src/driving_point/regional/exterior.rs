@@ -77,6 +77,27 @@ impl RegionalDuct {
             wall,
         )
     }
+
+    pub(super) fn terminal_response_with_holes_and_ports(
+        &self,
+        terminal: &Region,
+        omega: f64,
+        loss: LossModel,
+        termination: Termination,
+        wall: WallModel<'_>,
+        ports: usize,
+    ) -> Result<(DuctResponse, Vec<OpenHoleFlow>, Vec<fs_math::c64::C64>), DuctError> {
+        fs_duct::exterior::input_impedance_holes_and_ports(
+            &terminal.duct,
+            &terminal.gas,
+            self.exterior_gas(),
+            omega,
+            loss,
+            termination,
+            wall,
+            ports,
+        )
+    }
 }
 
 #[cfg(test)]

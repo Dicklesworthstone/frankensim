@@ -1439,6 +1439,200 @@ pub(crate) fn open_hole_flows(
     Ok(flows)
 }
 
+/// Most open holes whose orifices can be coupled as ports of one network.
+pub const MAX_ORIFICE_PORTS: usize = 3;
+
+/// One block of the nodal ladder behind [`open_hole_port_admittance`].
+enum LadderBlock {
+    /// A coupled port's T-junction (index into the port list).
+    Port(usize),
+    /// A block with no series part: a pure shunt admittance on the node it touches.
+    Shunt(C64),
+    /// A block with a series part: its 2 x 2 admittance between two nodes.
+    Series([C64; 4]),
+}
+
+/// The shunt admittance of a block that is a pure shunt (`I + S` singular: pressure is continuous across it),
+/// such as a sealed tone hole without series length; `None` for every block that has an admittance matrix.
+fn pure_shunt_admittance(block: &TwoPort) -> Option<C64> {
+    let s = block.scattering;
+    let plus = [C64::ONE + s[0], s[1], s[2], C64::ONE + s[3]];
+    let det = plus[0] * plus[3] - plus[1] * plus[2];
+    let scale = (plus[0] * plus[3]).abs() + (plus[1] * plus[2]).abs();
+    if !(scale > 0.0) || det.abs() > 1.0e-9 * scale {
+        return None;
+    }
+    // Reflection of a lone shunt y' = Y Z0 on matched lines: S11 = -y' / (2 + y').
+    let mean = (s[0] + s[3]).scale(0.5);
+    let denominator = C64::ONE + mean;
+    if denominator.abs() < 1.0e-12 {
+        return None;
+    }
+    let y_norm = (mean.scale(-2.0)) / denominator;
+    Some(y_norm.scale(1.0 / block.reference_impedance))
+}
+
+/// Admittance of the LINEAR network seen at the orifice terminals of the first `ports` open holes
+/// (row-major, `m * m` with `m = ports.min(open_holes.len())`): `U_i = - sum_j Y_ij dp_j`, `U_i` the
+/// volume flow leaving the bore through hole `i`'s open chimney fraction and `dp_j` the pressure drop
+/// across hole `j`'s orifice, which sits in series with that chimney fraction. Every other hole stays
+/// linear, the inlet is the chain's matched reference and the load is `z_load`, exactly as in
+/// [`open_hole_port_reflection`]. For one port `1 / Y_11 = Z_net` of that function. Reciprocal and passive.
+///
+/// The chain is a ladder of the blocks' own admittances (`TwoPort::admittance`, finite for an opaque line);
+/// a port hole's T-junction is split into its two series halves, a node and the hole branch, so no
+/// block is inverted and no ABCD product is formed.
+pub(crate) fn open_hole_port_admittance(
+    chain: &PreparedChain,
+    open_holes: &[PreparedOpenHole],
+    ports: usize,
+    z_load: Option<C64>,
+    options: ComposeOptions,
+) -> Result<Vec<C64>, DuctError> {
+    if ports > MAX_ORIFICE_PORTS {
+        return Err(bad("at most three open holes can carry a coupled orifice"));
+    }
+    let m = ports.min(open_holes.len());
+    if m == 0 {
+        return Ok(Vec::new());
+    }
+    let holes = &open_holes[..m];
+    let reference = chain.reference_impedance;
+    let n = chain.blocks.len();
+    let mut port_of = vec![None; n];
+    for (j, hole) in holes.iter().enumerate() {
+        if hole.block_index >= n || port_of[hole.block_index].is_some() {
+            return Err(bad("coupled open holes need distinct blocks inside the chain"));
+        }
+        port_of[hole.block_index] = Some(j);
+    }
+    // One node after every block that has a series part, two more nodes for a port junction whose series
+    // halves do not vanish, none for a pure shunt (a sealed hole without series length) or a port whose
+    // series halves vanish: those sit on the node they touch.
+    let mut ladder: Vec<LadderBlock> = Vec::with_capacity(n);
+    let mut size = 1usize;
+    for (i, block) in chain.blocks.iter().enumerate() {
+        match port_of[i] {
+            Some(j) => {
+                if holes[j].half_series_impedance != C64::ZERO {
+                    size += 2;
+                }
+                ladder.push(LadderBlock::Port(j));
+            }
+            None => match pure_shunt_admittance(block) {
+                Some(g) => ladder.push(LadderBlock::Shunt(g)),
+                None => {
+                    let (ym, condition) = block.admittance(options.maximum_condition)?;
+                    bound(condition, options.maximum_condition)?;
+                    size += 1;
+                    ladder.push(LadderBlock::Series(ym));
+                }
+            },
+        }
+    }
+    let mut y = vec![C64::ZERO; size * size];
+    let stamp = |y: &mut [C64], a: usize, b: usize, m2: [C64; 4]| {
+        y[a * size + a] = y[a * size + a] + m2[0];
+        y[a * size + b] = y[a * size + b] + m2[1];
+        y[b * size + a] = y[b * size + a] + m2[2];
+        y[b * size + b] = y[b * size + b] + m2[3];
+    };
+    let (mut left, mut next) = (0usize, 1usize);
+    let mut internal = vec![0usize; m];
+    for item in &ladder {
+        match item {
+            LadderBlock::Series(ym) => {
+                stamp(&mut y, left, next, *ym);
+                left = next;
+                next += 1;
+            }
+            LadderBlock::Shunt(g) => {
+                y[left * size + left] = y[left * size + left] + *g;
+            }
+            LadderBlock::Port(j) => {
+                let z = holes[*j].half_series_impedance;
+                if z == C64::ZERO {
+                    internal[*j] = left;
+                } else {
+                    let g = z.recip();
+                    let series = [g, -g, -g, g];
+                    stamp(&mut y, left, next, series);
+                    stamp(&mut y, next, next + 1, series);
+                    internal[*j] = next;
+                    left = next + 1;
+                    next += 2;
+                }
+            }
+        }
+    }
+    debug_assert_eq!(next, size);
+    y[0] = y[0] + C64::from_re(1.0 / reference);
+    match z_load {
+        None => {}
+        Some(z) if finite(z) && z != C64::ZERO => y[left * size + left] = y[left * size + left] + z.recip(),
+        _ => return Err(DuctError::Singular),
+    }
+    let mut c_hat = Vec::with_capacity(m);
+    for (j, hole) in holes.iter().enumerate() {
+        let open = C64::from_re(hole.sigma) / hole.open_chimney_impedance;
+        let [closed_p, closed_u] = hole.closed_return_coordinates;
+        if closed_p == C64::ZERO && closed_u != C64::ZERO {
+            return Err(DuctError::Singular);
+        }
+        let closed = if closed_u == C64::ZERO {
+            C64::ZERO
+        } else {
+            closed_u / closed_p.scale(hole.shunt_port_reference_pa_s_m3)
+        };
+        if !finite(open) || !finite(closed) {
+            return Err(DuctError::Singular);
+        }
+        let node = internal[j];
+        y[node * size + node] = y[node * size + node] + open + closed;
+        c_hat.push(open);
+    }
+    let lu = lu_complex(&y, size).map_err(|_| DuctError::Singular)?;
+    let mut port = vec![C64::ZERO; m * m];
+    for j in 0..m {
+        let mut v = vec![C64::ZERO; size];
+        v[internal[j]] = v[internal[j]] + c_hat[j];
+        lu.solve(&mut v);
+        for i in 0..m {
+            let delta = if i == j { C64::ONE } else { C64::ZERO };
+            let entry = -(c_hat[i] * (v[internal[i]] - delta));
+            if !finite(entry) {
+                return Err(DuctError::Singular);
+            }
+            port[i * m + j] = entry;
+        }
+    }
+    Ok(port)
+}
+
+/// [`evaluate_in_exterior_and_holes`] plus the orifice-terminal admittance of the first `ports` open holes.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn evaluate_in_exterior_holes_and_ports(
+    duct: &Duct, state: &GasState, exterior: &GasState, omega: f64, loss: LossModel,
+    load: LoadSpec, wall: WallModel<'_>, ports: usize,
+) -> Result<(DuctResponse, Vec<OpenHoleFlow>, Vec<C64>), DuctError> {
+    let options = exterior_options(duct, state, exterior);
+    let (chain, open_holes) =
+        duct_chain_in_exterior(duct, state, exterior, omega, loss, wall, options, true, || false)?;
+    let radius = duct
+        .segments
+        .last()
+        .ok_or(DuctError::EmptyDuct)?
+        .outlet_radius();
+    let (z_load, _) = match load {
+        LoadSpec::Analytic(t) => crate::termination_impedance(t, state, radius, omega)?,
+        LoadSpec::Fixed(z) => (Some(z), omega * radius / state.sound_speed),
+    };
+    let response = evaluate_prepared_chain(duct, state, omega, loss, load, wall, options, &chain)?;
+    let flows = open_hole_flows(&chain, &open_holes, z_load, options)?;
+    let admittance = open_hole_port_admittance(&chain, &open_holes, ports, z_load, options)?;
+    Ok((response, flows, admittance))
+}
+
 pub(crate) fn evaluate(
     duct: &Duct,
     state: &GasState,
@@ -1581,3 +1775,6 @@ fn evaluate_prepared_chain(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod port_tests;

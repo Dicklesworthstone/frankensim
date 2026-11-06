@@ -303,6 +303,17 @@ masses to interior equivalent lengths with `rho_exterior/rho_interior`.
 Identical media retain the original arithmetic. Different hole media cannot
 fall back to the old single-medium ABCD path.
 
+`exterior::input_impedance_holes_and_ports` returns `input_impedance_and_holes` plus, for the first `ports`
+(`MAX_ORIFICE_PORTS` = 3) open holes, the row-major `ports x ports` admittance `Y` of the LINEAR network seen at their
+orifice terminals: `U_i = - sum_j Y_ij dp_j`, `U_i` the flow leaving the bore through hole `i`'s open chimney fraction
+and `dp_j` the pressure drop across hole `j`'s orifice, in series with that chimney. Every other hole stays linear, the
+inlet is the chain's matched reference and the load is the termination's own. It is built as a nodal ladder of the
+blocks' admittances (a port's T-junction split into its two series halves around a node, a block with no series part
+such as a sealed hole stamped as a shunt on its node), so no block is inverted and no ABCD product is formed. `Y` is
+reciprocal and passive; for one port `1 / Y_11` is the `Z_net` of `OpenHoleFlow::shunt_port_reflection`, and `Y_11` does
+not depend on how many further holes are made ports. More ports than open holes use all of them; more than
+`MAX_ORIFICE_PORTS` refuses. The coupled orifice law that consumes it lives in `fs-couple` (`open_hole_orifice N`).
+
 The flanged aperture's radiation matrix and piston term use exterior density
 and sound speed. Its eliminated duct modes retain the local density, sound
 speed and axial wavenumber. `flanged_pipe_impedance_with_exterior` therefore

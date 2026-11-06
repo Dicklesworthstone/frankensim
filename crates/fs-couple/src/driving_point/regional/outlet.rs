@@ -1387,5 +1387,8 @@ fn rayleigh_filter(kernel: Vec<f64>, rate: u32) -> Result<DelayedFilter, OutletE
         .map_err(|error| DrivingPointError::Discrete(error).into())
 }
 
+mod orifice_ports;
+pub use orifice_ports::{RegisterHoleOrificePorts, RegisterHoleShunt};
+
 #[cfg(test)]
 mod tests;

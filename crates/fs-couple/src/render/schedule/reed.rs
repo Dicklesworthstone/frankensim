@@ -38,6 +38,10 @@
 //! see `ReedBoreVoice::set_constriction_noise`). It is an extrapolation in size, speed and shape, from dampers and
 //! plates in a 300 mm duct to a reed slit; the printed law fixes neither the jet speed nor the pressure drop to use
 //! for a viscous slit (they span 40 dB here), and the row takes the Bernoulli speed of the total drop as the brass row does.
+//! Optional `open_hole_orifice N` (N = 1..=3) after those rows, before `compile_limits`, solves the quasi-steady
+//! sharp-edged orifice law of the first N open tone holes TOGETHER, coupled through the bore, instead of the first hole
+//! alone. N = 1, or no row, is the unchanged first-hole shunt; the row needs a constant-medium bore (no `gas_field`,
+//! no molecular bore).
 //! Legacy `listener_m` selects bore pressure plus the compact-jet proxy.
 //! `baffled_outlet` selects Rayleigh observation of the admitted openings.
 //! Neither is measured calibration; the underlying reed mechanics are shared.
@@ -948,6 +952,22 @@ impl ReedPerformance {
             card.validate().map_err(|what| bad(line, what))?;
             Some(card)
         } else { None };
+        // `open_hole_orifice N`: the coupled orifice law on the first N open holes (1 = the first-hole shunt alone).
+        let open_hole_orifice = if r.lines.clone().next()
+            .and_then(|line| line.split_ascii_whitespace().next()) == Some("open_hole_orifice") {
+            let mut row = r.row("open_hole_orifice")?;
+            let line = row.line;
+            let ports = row.count(fs_duct::exterior::MAX_ORIFICE_PORTS)?;
+            row.finish()?;
+            if ports == 0 {
+                return Err(bad(line, "open_hole_orifice takes 1..=3 holes"));
+            }
+            if ports > 1 && (gas_field.is_some() || molecular.is_some()) {
+                return Err(bad(line,
+                    "open_hole_orifice above 1 needs a constant-medium bore: no gas_field and no molecular bore"));
+            }
+            ports
+        } else { 1 };
         let mut row = r.row("compile_limits")?;
         let max_work: u64 = row.parse()?;
         let max_controls = row.count(MAX_CONTROLS)?;
@@ -1142,7 +1162,7 @@ impl ReedPerformance {
                 rate,
                 samples as usize,
                 observer.receipt().delay_speed_m_s.unwrap_or(medium.sound_speed),
-                declared_law.as_ref(), &gas_records,
+                declared_law.as_ref(), &gas_records, open_hole_orifice,
             )?;
             (voice, terminal, observer, omission)
         };
@@ -1654,3 +1674,6 @@ mod lay_tests;
 
 #[cfg(test)]
 mod viscous_tests;
+
+#[cfg(test)]
+mod orifice_tests;

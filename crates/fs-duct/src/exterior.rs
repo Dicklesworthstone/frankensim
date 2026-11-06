@@ -12,6 +12,9 @@ use crate::{
 use fs_material::gas::GasState;
 use fs_math::c64::C64;
 
+/// Most open holes whose orifice terminals [`input_impedance_holes_and_ports`] exposes at once.
+pub use crate::compose::MAX_ORIFICE_PORTS;
+
 pub(crate) fn admit(interior: &GasState, exterior: &GasState) -> Result<(), DuctError> {
     crate::validate_gas(interior)?;
     crate::validate_gas(exterior)?;
@@ -111,6 +114,31 @@ pub fn input_impedance_and_holes(
         response.mouth_ka = ka;
     }
     Ok((response, holes))
+}
+
+/// [`input_impedance_and_holes`] plus the admittance of the linear network at the orifice terminals of
+/// the first `ports` open holes (at most [`compose::MAX_ORIFICE_PORTS`]): row-major `m * m` with
+/// `U_i = - sum_j Y_ij dp_j`; see `compose::open_hole_port_admittance`. A coupled orifice needs its
+/// own network, so the cross-hole terms the one-port reflections of [`OpenHoleFlow`] do not carry live here.
+#[allow(clippy::too_many_arguments)]
+pub fn input_impedance_holes_and_ports(
+    duct: &Duct,
+    interior: &GasState,
+    exterior: &GasState,
+    omega: f64,
+    loss: LossModel,
+    termination: Termination,
+    wall: WallModel<'_>,
+    ports: usize,
+) -> Result<(DuctResponse, Vec<OpenHoleFlow>, Vec<C64>), DuctError> {
+    let (load, ka) = load(duct, interior, exterior, omega, termination)?;
+    let (mut response, holes, admittance) = compose::evaluate_in_exterior_holes_and_ports(
+        duct, interior, exterior, omega, loss, load, wall, ports,
+    )?;
+    if let Some(ka) = ka {
+        response.mouth_ka = ka;
+    }
+    Ok((response, holes, admittance))
 }
 
 /// Direct inlet reflection of the same two-medium chain. The characteristic

@@ -274,7 +274,7 @@ pub struct ReedBoreVoice {
     line: fs_vfit::discretize::DelayedFilter,
     line_realization: crate::driving_point::LineRealization,
     molecular_driving_point: Option<Box<crate::driving_point::molecular::MolecularDrivingPoint>>,
-    register_shunt: Option<crate::driving_point::regional::outlet::RegisterHoleShuntLine>,
+    register_shunt: Option<crate::driving_point::regional::outlet::RegisterHoleShunt>,
     plates: PlateBank,
     reed: BeatingReed,
     lay: Option<Obstacle>,
@@ -760,7 +760,7 @@ impl ReedBoreVoice {
 
     pub(crate) fn set_register_shunt(
         &mut self,
-        shunt: crate::driving_point::regional::outlet::RegisterHoleShuntLine,
+        shunt: crate::driving_point::regional::outlet::RegisterHoleShunt,
     ) {
         self.register_shunt = Some(shunt);
     }
@@ -998,7 +998,7 @@ impl ReedBoreVoice {
                 .as_ref()
                 .map_or(
                     0.0,
-                    crate::driving_point::regional::outlet::RegisterHoleShuntLine::s12_history,
+                    crate::driving_point::regional::outlet::RegisterHoleShunt::s12_history,
                 );
             boundary.history += shunt_incoming;
             let u_body = self.plates.volume_velocity();

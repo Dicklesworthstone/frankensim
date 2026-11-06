@@ -144,9 +144,10 @@ impl ObservationInput {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn build(self, duct: &Duct, gases: &[GasState], reed: BeatingReed,
         termination: Termination, rate: u32, samples: usize, delay_speed_m_s: f64,
-        declared_law: Option<&DeclaredObserverLaw>, records: &[GasRecord])
+        declared_law: Option<&DeclaredObserverLaw>, records: &[GasRecord], orifice_ports: usize)
         -> Result<(ReedBoreVoice, Option<TerminalObservation>), ReedPerformanceError> {
         let regional = RegionalDuct::new(duct, gases)
+            .and_then(|regional| regional.with_open_hole_orifice_ports(orifice_ports))
             .map_err(|error| ReedPerformanceError::Model(map_drive(DrivingPointError::Duct(error))))?;
         self.build_regional(duct, regional, reed, termination, rate, samples, delay_speed_m_s,
             declared_law, records)
@@ -232,8 +233,11 @@ impl ObservationInput {
                         .map_err(map_drive)
                 }).map_err(ReedPerformanceError::Model)?;
             let grid = voice.line.history().len();
-            if let Some(mut shunt) = regional
+            let single = regional
                 .register_hole_shunt_line(rate, grid, fs_duct::WallModel::from_pin(None))
+                .map_err(ReedPerformanceError::Outlet)?;
+            if let Some(mut shunt) = regional
+                .select_register_hole_shunt(single, rate, grid, fs_duct::WallModel::from_pin(None))
                 .map_err(ReedPerformanceError::Outlet)?
             {
                 shunt
@@ -296,7 +300,10 @@ impl ObservationInput {
             hole.step(voice.p_plus_prev)
                 .map_err(ReedPerformanceError::Outlet)?;
         }
-        if let Some(mut shunt) = shunt {
+        if let Some(mut shunt) = regional
+            .select_register_hole_shunt(shunt, rate, grid, fs_duct::WallModel::from_pin(None))
+            .map_err(ReedPerformanceError::Outlet)?
+        {
             shunt
                 .prime(voice.p_plus_prev)
                 .map_err(|error| ReedPerformanceError::Outlet(OutletError::Transfer(error)))?;

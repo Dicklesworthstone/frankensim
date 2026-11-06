@@ -836,3 +836,38 @@ estimate remains asymptotic, without a global-error guarantee.
 
 G1/G4 regression definitions cover coupled mean/difference modes, stationary
 vapor with opposing transfers, ID permutations and late stage-budget failure.
+
+## Coupled orifice law on the first N open tone holes (`open_hole_orifice N`)
+
+The optional reed-card record `open_hole_orifice N` (N = 1..=3; after `constriction_noise`, before `compile_limits`; once
+only) solves the quasi-steady sharp-edged orifice law `delta_p_i = K_i |U_i| U_i` (`K = rho / (2 C_vc^2 A_h^2)`, the
+first-hole shunt's own law and coefficient) of the first N open tone holes TOGETHER instead of the first alone
+(`RegionalDuct::with_open_hole_orifice_ports`; `RegisterHoleOrificePorts` in `regional/outlet/orifice_ports.rs`). The
+holes couple through the bore, so the per-sample solve is an N-vector one, a damped Newton on `U = u_th - A Phi(U)` with
+`A = R^-1 (I - D)(I + D)^-1`, `D` the direct taps of the N x N reflection kernels `S = (I + R Y)^-1 (I - R Y)` and `R`
+the holes' numerical port references (the ordering `R Y`, not `Y R`, matters as soon as the references differ). `Y` is
+the admittance of the linear TMM chain seen at the N orifice terminals
+(`fs_duct::exterior::input_impedance_holes_and_ports`: a nodal ladder of the blocks' own admittances, a pure-shunt
+block such as a sealed hole without series length sitting on its node; every other hole stays linear), and it equals the
+inverse of the one-port network impedance for N = 1. The reed receives the sum of the N `s12` kernels applied to the
+accepted drops; radiated hole sound still comes from the linear network, as for the first-hole shunt.
+
+An absent row or `N = 1` runs the unchanged first-hole shunt, bit for bit (`RegisterHoleShunt::Single`), and an N above
+the number of open holes uses all of them. For N >= 2 the realized matrix is made passive by bounding the matrix
+itself: the direct matrix is clamped to power-wave norm 0.999 and the whole tail scaled by the largest factor (found by
+bisection, 2^-14 resolution) for which `max_w || D + lambda T(w) ||` stays at most 0.999 on the 2n grid. The
+first-hole line's own rule, `|D| + max_w |T(w)| <= 0.999`, ignores the phase between `D` and `T`: it costs 0.1 % of the
+tail for one port but 0.4 % for two and 3.3 % for three on the test bore; with it the coupled flows departed from the TMM
+chain by up to 15 % at 100 Hz on a 4096 grid, with the bisected rule by at most 3.4 %. That legacy rule is kept (`PassivityRule::Triangle`) only so the N = 1 equivalence
+test is exact; N = 1 in the card never reaches it. The row needs one constant-medium run: a `gas_field` or molecular
+bore refuses by name at parse (N > 1) and a multi-region duct refuses at build. Cost: `N^2 + 2N` kernels of the grid
+length instead of 3, and one more frequency sweep at build.
+
+Evidence (G0/G1): `fs-duct` `compose::port_tests` (the ladder's admittance is the inverse of the one-port network
+impedance to 1e-9, reciprocal, passive, independent of the port count, and the sign of its off-diagonal term fixed by a
+coincident-pair test); `orifice_ports::tests` (the solver's residual over 600 random passive systems and a stiff drive;
+the realized matrix is passive and is the admittance scattering, not its transpose; the time-domain steady state with
+linear drops equals the network built from the realized kernels to 1e-14 and the TMM chain to a few percent at a 4096
+grid; the general solver run as one port follows the first-hole line through a strongly nonlinear drive to 1e-6);
+card level `reed::orifice_tests` (an absent row and `open_hole_orifice 1` are bit-identical in audio and reed state, a
+one-hole duct ignores the count, 2 and 3 differ from 1 and from each other, bad counts refuse).

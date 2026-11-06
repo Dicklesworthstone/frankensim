@@ -56,6 +56,8 @@ pub struct RegionalDuct {
     exterior_gas: Option<GasState>,
     inlet_gas_override: Option<GasState>,
     continuous: Option<fs_duct::profile::gas_field::GasFieldDuct>,
+    /// Open holes (first `n` in bore order) whose orifice law is solved together; `1` = the first hole only.
+    orifice_ports: usize,
 }
 
 fn invalid(what: &'static str) -> DuctError { DuctError::BadParameter { what } }
@@ -129,8 +131,25 @@ impl RegionalDuct {
             return Err(invalid("regional travel time must be positive and finite"));
         }
         Ok(Self { regions, gases: gases.to_vec(), one_way_time_s, exterior_gas: None,
-            inlet_gas_override: None, continuous: None })
+            inlet_gas_override: None, continuous: None, orifice_ports: 1 })
     }
+
+    /// Solve the quasi-steady orifice law of the first `ports` open holes together (card row
+    /// `open_hole_orifice N`). `1`, the default, is the first-hole shunt alone.
+    ///
+    /// # Errors
+    /// `ports` outside `1..=fs_duct::exterior::MAX_ORIFICE_PORTS`.
+    pub fn with_open_hole_orifice_ports(mut self, ports: usize) -> Result<Self, DuctError> {
+        if ports == 0 || ports > fs_duct::exterior::MAX_ORIFICE_PORTS {
+            return Err(invalid("open_hole_orifice takes 1..=3 holes"));
+        }
+        self.orifice_ports = ports;
+        Ok(self)
+    }
+
+    /// Number of open holes whose orifice law is solved together (`1` = first hole only).
+    #[must_use]
+    pub const fn open_hole_orifice_ports(&self) -> usize { self.orifice_ports }
 
     /// Resolved media in authored segment order, including hole records.
     /// For a continuous field these are exact authored-segment INLET samples;
@@ -208,6 +227,32 @@ impl RegionalDuct {
             response.min_shear_number = response.min_shear_number.min(upstream.min_shear_number);
         }
         Ok(response)
+    }
+
+    /// [`Self::response_with_wall_and_holes`] plus the row-major `ports x ports` admittance of the first
+    /// `ports` open holes' orifice terminals (`U = u_0 - Y delta_p`).
+    ///
+    /// # Errors
+    /// A multi-region or continuous-field binding refuses: the coupled orifice ports need the one
+    /// constant-medium run that holds every open hole and its terminal.
+    pub fn response_with_wall_holes_and_ports(
+        &self,
+        omega: f64,
+        loss: LossModel,
+        termination: Termination,
+        wall: WallModel<'_>,
+        ports: usize,
+    ) -> Result<(DuctResponse, Vec<OpenHoleFlow>, Vec<fs_math::c64::C64>), DuctError> {
+        self.admit_wall_override(wall)?;
+        if !omega.is_finite() || omega <= 0.0 {
+            return Err(invalid("frequency must be positive and finite"));
+        }
+        if self.continuous.is_some() || self.regions.len() != 1 {
+            return Err(invalid("coupled orifice ports need one constant-medium run without a continuous field"));
+        }
+        let terminal = &self.regions[0];
+        self.terminal_response_with_holes_and_ports(terminal, omega, loss, termination,
+            Self::region_wall(terminal, wall), ports)
     }
 
     /// [`Self::response_with_wall`] plus outward volume-velocity transfers at every
