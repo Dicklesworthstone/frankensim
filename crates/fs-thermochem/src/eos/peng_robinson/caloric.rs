@@ -5,6 +5,8 @@
 //! the attraction differences; density integrals are prepared once. These are
 //! homogeneous endpoint changes, not heat, boundary work or latent phase heat.
 
+mod gradient;
+
 use super::{
     Density, MAX_PENG_ROBINSON_COMPONENTS_V1, MixingRecord, MolarMass,
     PengRobinsonDensityCaloricEvaluationV1, PengRobinsonErrorV1, PengRobinsonMixtureV1,
@@ -44,6 +46,8 @@ pub struct PengRobinsonCaloricChangeV1 {
     internal_energy_j_mol: f64,
     enthalpy_j_mol: f64,
     entropy_at_density_j_mol_k: f64,
+    coordinate_internal_energy_j_mol: [f64; 2],
+    coordinate_entropy_at_density_j_mol_k: [f64; 2],
 }
 
 impl PengRobinsonCaloricChangeV1 {
@@ -66,6 +70,29 @@ impl PengRobinsonCaloricChangeV1 {
     pub const fn residual_entropy_at_density_change_j_mol_k(&self) -> f64 {
         self.entropy_at_density_j_mol_k
     }
+    /// Symmetric coordinate increments (temperature, molar volume) of U^R
+    /// [J/mol]. Each leg averages the two coordinate orderings on the original
+    /// fixed-composition EOS. Their sum is the residual internal-energy change.
+    /// The source's ideal internal-energy increment belongs in the first leg.
+    #[must_use]
+    pub const fn coordinate_internal_energy_changes_j_mol(&self) -> (f64, f64) {
+        (self.coordinate_internal_energy_j_mol[0], self.coordinate_internal_energy_j_mol[1])
+    }
+    /// Symmetric coordinate increments (temperature, molar volume) of S^R
+    /// [J/(mol K)] relative to ideal gas at the SAME density. Add the original
+    /// ideal Cv/T integral to the first leg and the ideal density correction to
+    /// the second. Finite reference constants cancel before either leg is rounded.
+    #[must_use]
+    pub const fn coordinate_entropy_changes_j_mol_k(&self) -> (f64, f64) {
+        (self.coordinate_entropy_at_density_j_mol_k[0], self.coordinate_entropy_at_density_j_mol_k[1])
+    }
+    /// Ideal volume entropy -R ln(rho1/rho0) [J/(mol K)], for a temperature
+    /// contribution already evaluated as the original Cv/T integral.
+    #[must_use]
+    pub fn ideal_isochoric_entropy_density_correction_j_mol_k(&self) -> f64 {
+        -R * self.log_density_ratio
+    }
+
     /// Add this to an ideal-reference entropy change evaluated at UNCHANGED
     /// pressure: -R*[ln(T1/T0)+ln(rho1/rho0)]. Together with the density
     /// departure this gives total entropy, without cancellation of R ln Z
@@ -234,10 +261,11 @@ impl PengRobinsonCaloricReferenceV1<'_> {
             t0 * initial.parameters.da_mix_dt - initial.parameters.a_mix,
             t1 * final_state.parameters.da_mix_dt - final_state.parameters.a_mix,
         );
-        let internal_energy_j_mol = sum(&[
+        let coordinate_internal_energy_j_mol = [
             mean_integral * energy_factor.value(),
             mean_energy * self.density.integral,
-        ]);
+        ];
+        let internal_energy_j_mol = sum(&coordinate_internal_energy_j_mol);
         let enthalpy_j_mol = sum(&[
             internal_energy_j_mol,
             R * self.density.mean_excluded_volume * (t1 - t0),
@@ -246,6 +274,15 @@ impl PengRobinsonCaloricReferenceV1<'_> {
             -mean(initial.parameters.a_mix, final_state.parameters.a_mix)
                 * self.density.attractive_volume,
         ]);
+        let coordinate_entropy_at_density_j_mol_k = [
+            mean_integral * derivative.value(),
+            sum(&[
+                R * self.density.log_free_volume,
+                mean(initial.parameters.da_mix_dt, final_state.parameters.da_mix_dt)
+                    * self.density.integral,
+            ]),
+        ];
+        // Preserve the original total's operation tree for existing consumers.
         let entropy_at_density_j_mol_k = sum(&[
             R * self.density.log_free_volume,
             mean_integral * derivative.value(),
@@ -258,6 +295,10 @@ impl PengRobinsonCaloricReferenceV1<'_> {
             internal_energy_j_mol,
             enthalpy_j_mol,
             entropy_at_density_j_mol_k,
+            coordinate_internal_energy_j_mol[0],
+            coordinate_internal_energy_j_mol[1],
+            coordinate_entropy_at_density_j_mol_k[0],
+            coordinate_entropy_at_density_j_mol_k[1],
         ]
         .iter()
         .any(|value| !value.is_finite())
@@ -271,6 +312,8 @@ impl PengRobinsonCaloricReferenceV1<'_> {
             internal_energy_j_mol,
             enthalpy_j_mol,
             entropy_at_density_j_mol_k,
+            coordinate_internal_energy_j_mol,
+            coordinate_entropy_at_density_j_mol_k,
         })
     }
 }
