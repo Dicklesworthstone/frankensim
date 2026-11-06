@@ -4,6 +4,8 @@ use super::*;
 
 #[path = "forchheimer/rotated.rs"]
 mod rotated;
+#[path = "forchheimer/vector_speed.rs"]
+mod vector_speed;
 
 const BETA_DIMS: Dims = Dims([-1, 0, 0, 0, 0, 0]);
 const BETA_NAMES: [&str; 3] = [
@@ -152,8 +154,8 @@ fn material_beta_and_signed_axis_permutation_drive_motion_and_cubic_heat() {
                     let resistance = epoch.forchheimer_resistance.as_ref().unwrap()[cell]
                         .as_ref()
                         .unwrap();
-                    assert_eq!(resistance.principal_kg_m4(), &beta);
-                    assert_eq!(resistance.material_axes_in_world(), &axes);
+                    assert_eq!(resistance.principal_kg_m4(), Some(&beta));
+                    assert_eq!(resistance.material_axes_in_world(), Some(&axes));
                     assert_eq!(
                         epoch.porous_samples[cell].material.forchheimer_beta_per_m(),
                         Some(&beta)

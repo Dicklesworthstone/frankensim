@@ -6741,6 +6741,36 @@ Rotated nonlinear fixtures independently reduce eight-tuple circulation in
 all three coordinate planes, and exercise principal-speed and open-port
 refusal without changing accepted heat or motion.
 
+### Source-bound isotropic vector-speed porous inertia
+
+`PermeabilityTemperatureLaw::with_isotropic_forchheimer` selects the distinct
+force law `-rho beta |u| u`, with Euclidean superficial speed. The same original
+material/temperature binding and momentum/heat transaction consume its scalar
+beta; an anisotropic Darcy tensor remains independent. Neither equal
+directional beta entries nor isotropic permeability select this convention.
+`ForchheimerResistance::try_isotropic` retains the scalar coefficient without
+a material frame. Its scalar accessor and the optional principal/frame
+accessors identify the selected law without inventing directional coefficients.
+
+The same eight native face tuples use the convex potential
+`Phi = V/8 sum_tuples rho beta |u_tuple|^3/3`. Each momentum row freezes the
+current full speed in a nonnegative implicit diagonal; all components still
+participate in that speed. Independent face-force and cell-power traversals
+close `sum face_force*face_velocity = 3 Phi`. This physical heat enters the
+original caloric store once, with Darcy loss and backward-Euler numerical
+loss retaining their separate meanings. The actual maximum tuple norm is
+checked against the source's Euclidean-speed limit. Opposing face values
+cannot cancel that limit or the dissipated heat through a cell average.
+
+Exactly zero beta takes the unchanged Darcy path. Positive vector-speed cells
+retain the existing coupled residual checks and require clear fluid before
+inlet/pressure openings; the stationary skeleton, density and heat-model
+limits above still apply. Focused regressions cover arbitrary uniform-vector
+rotation, an independent potential derivative, native circulation in all
+coordinate planes, source-only beta changes, exact zero-beta recovery,
+temperature feedback, physical/numerical work balance and atomic full-speed
+refusal. These are discrete synthetic oracles, not experimental validation.
+
 ### Tetrahedral liquid geometry and momentum enter native VOF
 
 `material::free_surface::transfer` connects the same resolved liquid scaling to

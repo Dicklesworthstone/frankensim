@@ -17185,3 +17185,28 @@ No anisotropic saturation, history, gyrotropy, frequency loss, mechanical stress
 or measured-source qualification is inferred. Focused G0/G3 regressions compare
 full fields, inverse response, energy and parameter changes with independent
 principal-frame calculations, source substitutions and source/domain refusals.
+
+### Source-bound isotropic vector-speed Forchheimer coefficients
+
+`PermeabilityTemperatureLaw::with_isotropic_forchheimer` binds one exact scalar
+beta key from the original resolved material bundle to `f = -rho beta |u| u`,
+with Euclidean superficial speed and no factor one half. Beta is finite,
+nonnegative and dimensionally inverse metres. This explicit convention is
+independent of the intrinsic-permeability frame and is not inferred from equal
+separable coefficients or isotropic permeability. One permeability law admits
+only one inertia convention.
+
+`ResolvedPermeability::isotropic_forchheimer_beta_per_m` identifies the scalar
+vector law; the original directional accessor continues to identify separable
+inertia. The retained positive finite speed bound applies to the full Euclidean
+norm for the scalar law and to each principal component for the separable law.
+Temperature continuation preserves that convention, all selected source claims
+and all other original material conditions. Zero beta remains exactly zero.
+
+Consumers enforce the declared speed norm on the same velocities used by their
+force and dissipation quadrature. The native MAC coupling uses its original
+eight face tuples for force, physical heat and support checks. No pore-speed
+conversion, second thermal store, moving skeleton, saturation, turbulence or
+compressibility closure is inferred. Focused synthetic regressions cover source
+continuation, distinct conventions, unsupported calibration and source-switching
+refusal; they do not establish experimental validity.

@@ -6,7 +6,8 @@ use fs_matdb::{
     PropertyValue, Provenance, QueryPoint, UncertaintyModel,
 };
 use fs_material::porous::permeability::{
-    INTRINSIC_PERMEABILITY_DIMS, temperature::PermeabilityTemperatureLaw,
+    INTRINSIC_PERMEABILITY_DIMS,
+    temperature::{FORCHHEIMER_BETA_DIMS, PermeabilityTemperatureLaw},
 };
 use fs_material::state_point::{
     DENSITY_PROPERTY, MaterialPropertySelection, ResolvedMaterialStatePoint, ScalarAdmissibility,
@@ -16,6 +17,7 @@ use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
 use fs_qty::{Density, QuantitySpec, Temperature};
 
 const K_NAMES: [&str; 3] = ["intrinsic-k1", "intrinsic-k2", "intrinsic-k3"];
+const BETA_NAME: &str = "forchheimer-beta";
 const AXES: [[f64; 3]; 3] = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
 
 fn absolute_temperature() -> QuantitySpec {
@@ -48,6 +50,7 @@ fn card(split_source: Option<&str>, first_values: [f64; 2]) -> MaterialCard {
         (K_NAMES[1], INTRINSIC_PERMEABILITY_DIMS, [8e-6, 16e-6]),
         (K_NAMES[2], INTRINSIC_PERMEABILITY_DIMS, [18e-6, 36e-6]),
         (DENSITY_PROPERTY, Density::DIMS, [2000.0, 2000.0]),
+        (BETA_NAME, FORCHHEIMER_BETA_DIMS, [200.0, 400.0]),
     ] {
         let mut claim = PropertyClaim {
             key: PropertyKey::new(name, dims),
@@ -113,6 +116,14 @@ fn resolve(card: &MaterialCard, point: &QueryPoint) -> ResolvedMaterialStatePoin
             DENSITY_PROPERTY,
             Density::DIMS,
             ScalarAdmissibility::StrictlyPositive,
+        )
+        .unwrap(),
+    );
+    requirements.push(
+        ScalarPropertyRequirement::try_new(
+            BETA_NAME,
+            FORCHHEIMER_BETA_DIMS,
+            ScalarAdmissibility::NonNegative,
         )
         .unwrap(),
     );
@@ -255,4 +266,84 @@ fn wrong_card_quantity_frame_and_unsupported_temperature_refuse() {
     }
     assert_eq!(law.reference().material(), &material);
     assert!(law.at_temperature(Temperature::new(350.0)).is_ok());
+}
+
+#[test]
+fn isotropic_vector_beta_retains_its_norm_source_and_temperature_continuation() {
+    let card = card(None, [2e-6, 4e-6]);
+    let material = resolve(&card, &point());
+    let beta = PropertyKey::new(BETA_NAME, FORCHHEIMER_BETA_DIMS);
+    let base =
+        PermeabilityTemperatureLaw::try_new(&card, material.clone(), keys(), AXES, "T").unwrap();
+    let vector = base
+        .clone()
+        .with_isotropic_forchheimer(beta.clone(), 3.0)
+        .unwrap();
+    let hot = vector.at_temperature(Temperature::new(350.0)).unwrap();
+    assert_eq!(hot.isotropic_forchheimer_beta_per_m(), Some(300.0));
+    assert_eq!(hot.forchheimer_beta_per_m(), None);
+    assert_eq!(hot.maximum_superficial_speed_m_s(), Some(3.0));
+    assert_eq!(hot.material().card_identity(), card.content_hash());
+    assert_eq!(hot.material().query(), point().with("T", 350.0).unwrap());
+    assert_eq!(
+        hot.material()
+            .property(BETA_NAME)
+            .unwrap()
+            .answer()
+            .receipt
+            .selected,
+        material
+            .property(BETA_NAME)
+            .unwrap()
+            .answer()
+            .receipt
+            .selected
+    );
+    assert_eq!(
+        hot.permeability(),
+        base.at_temperature(Temperature::new(350.0))
+            .unwrap()
+            .permeability()
+    );
+    // Equal source coefficients still explicitly choose a different law.
+    let separable = base
+        .with_forchheimer([beta.clone(), beta.clone(), beta.clone()], 3.0)
+        .unwrap();
+    let directional = separable.at_temperature(Temperature::new(350.0)).unwrap();
+    assert_eq!(directional.forchheimer_beta_per_m(), Some(&[300.0; 3]));
+    assert_eq!(directional.isotropic_forchheimer_beta_per_m(), None);
+    assert!(
+        vector
+            .clone()
+            .with_forchheimer([beta.clone(), beta.clone(), beta.clone()], 3.0)
+            .is_err()
+    );
+    assert!(separable.with_isotropic_forchheimer(beta, 3.0).is_err());
+}
+
+#[test]
+fn vector_beta_refuses_invalid_support_wrong_quantity_and_source_switching() {
+    let card = card(Some(BETA_NAME), [2e-6, 4e-6]);
+    let base =
+        PermeabilityTemperatureLaw::try_new(&card, resolve(&card, &point()), keys(), AXES, "T")
+            .unwrap();
+    let beta = PropertyKey::new(BETA_NAME, FORCHHEIMER_BETA_DIMS);
+    for speed in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+        assert!(
+            base.clone()
+                .with_isotropic_forchheimer(beta.clone(), speed)
+                .is_err()
+        );
+    }
+    for key in [
+        keys()[0].clone(),
+        PropertyKey::new("missing-beta", FORCHHEIMER_BETA_DIMS),
+    ] {
+        assert!(base.clone().with_isotropic_forchheimer(key, 3.0).is_err());
+    }
+    let law = base.with_isotropic_forchheimer(beta, 3.0).unwrap();
+    let reference = law.reference().clone();
+    assert!(law.at_temperature(Temperature::new(375.0)).is_err());
+    assert!(law.at_temperature(Temperature::new(325.0)).is_ok());
+    assert_eq!(law.reference(), &reference);
 }

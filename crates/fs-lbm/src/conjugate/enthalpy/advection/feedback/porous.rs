@@ -42,14 +42,18 @@ where
     /// the intended participating heat capacity; this binding invents no extra
     /// skeleton store or mass. Fixed geometry/density and linear Darcy flow
     /// remain assumptions unless the original source explicitly attaches
-    /// calibrated Forchheimer beta. Its actual material axes enter an eight-
-    /// tuple cubic potential on the native MAC faces. Signed grid permutations
-    /// retain the exact original half-cell action; oblique frames use the
-    /// derivative of that same potential for both momentum and physical heat.
-    /// Equal beta entries retain the frame of this separable constitutive law.
+    /// calibrated Forchheimer beta. Separable coefficients retain their actual
+    /// material axes in an eight-tuple cubic potential on the native MAC faces.
+    /// Signed grid permutations retain the exact original half-cell action;
+    /// oblique frames use the derivative of that same potential for momentum
+    /// and physical heat. Equal beta entries retain this separable convention.
+    /// An explicitly attached isotropic source instead supplies `rho beta |u|u`
+    /// through the Euclidean norm of those same tuples, independently of K's
+    /// frame. Neither convention is inferred from the other.
     /// Its cubic work heats this cell once in a separate physical-loss account.
-    /// Explicit speed support is checked on every principal component of the
-    /// SAME eight tuples. Oblique nonlinear cells need clear fluid before an
+    /// Explicit speed support is checked on every principal component or full
+    /// Euclidean speed, according to the source convention, of the SAME tuples.
+    /// Oblique and vector-speed nonlinear cells need clear fluid before an
     /// opening, even if their linear permeability is isotropic. Sealed axes refuse
     /// without a velocity constraint.
     /// Attach once before the first advance; no live skeleton replacement or
@@ -116,31 +120,68 @@ where
     ) -> Result<(), MaterialFlowError<O::Error>> {
         for sample in samples {
             check_gate(self.gate, check)?;
-            let Some(beta) = sample.material.forchheimer_beta_per_m() else {
+            let Some(resistance) = self.forchheimer_resistance(&sample.material)? else {
                 continue;
             };
-            if beta.iter().all(|value| *value == 0.0) {
-                continue;
-            }
             let maximum = sample
                 .material
                 .maximum_superficial_speed_m_s()
                 .expect("source beta carries a speed domain");
-            let resistance = ForchheimerResistance::try_new(
-                beta.map(|value| self.density_kg_m3 * value),
-                *sample.material.permeability().material_axes_in_world(),
-            )?;
             let faces = std::array::from_fn(|a| {
                 std::array::from_fn(|side| {
                     let flux = flow.field.outward(self.domain, sample.voxel, 2 * a + side);
                     (if side == 0 { -flux } else { flux }) / self.domain.face_area(sample.voxel, a)
                 })
             });
-            if resistance.maximum_component_speed(faces)? > maximum {
-                return Err(invalid("native superficial principal tuple speed exceeds the original Forchheimer calibration").into());
+            if resistance.maximum_calibrated_speed(faces)? > maximum {
+                return Err(invalid(
+                    "native superficial tuple speed exceeds the original Forchheimer calibration",
+                )
+                .into());
             }
         }
         Ok(())
+    }
+
+    // One source-to-native conversion serves momentum, heat and speed admission.
+    // Zero beta never allocates nonlinear rows or changes Darcy arithmetic.
+    fn forchheimer_resistance(
+        &self,
+        material: &ResolvedPermeability,
+    ) -> Result<Option<ForchheimerResistance>, MaterialFlowError<O::Error>> {
+        let coefficient = |beta: f64| {
+            let value = self.density_kg_m3 * beta;
+            if !value.is_finite() || (beta > 0.0 && value <= 0.0) {
+                Err(invalid(
+                    "source-bound Forchheimer resistance is not representable",
+                ))
+            } else {
+                Ok(value)
+            }
+        };
+        if let Some(beta) = material.forchheimer_beta_per_m() {
+            if beta.iter().all(|value| *value == 0.0) {
+                return Ok(None);
+            }
+            let principal = [
+                coefficient(beta[0])?,
+                coefficient(beta[1])?,
+                coefficient(beta[2])?,
+            ];
+            Ok(Some(ForchheimerResistance::try_new(
+                principal,
+                *material.permeability().material_axes_in_world(),
+            )?))
+        } else if let Some(beta) = material.isotropic_forchheimer_beta_per_m() {
+            if beta == 0.0 {
+                return Ok(None);
+            }
+            Ok(Some(ForchheimerResistance::try_isotropic(coefficient(
+                beta,
+            )?)?))
+        } else {
+            Ok(None)
+        }
     }
 
     pub(super) fn porous_drag(
@@ -185,32 +226,16 @@ where
                 })?;
             let permeability = material.permeability();
             let principal = permeability.principal_m2();
-            let nonlinear = material
-                .forchheimer_beta_per_m()
-                .filter(|beta| beta.iter().any(|value| *value != 0.0));
             for &k in principal {
                 if !k.is_finite() || k <= 0.0 {
                     return Err(invalid("native Darcy drag requires positive intrinsic permeability; sealed axes need explicit constraints").into());
                 }
             }
             if let Some(transport) = sample.transport.mobile_transport() {
-                if let Some(beta) = nonlinear {
+                if let Some(resistance) = self.forchheimer_resistance(&material)? {
                     let coefficients =
                         quadratic.get_or_insert_with(|| vec![None; self.domain.cell_count()]);
-                    let principal = beta.map(|value| self.density_kg_m3 * value);
-                    for i in 0..3 {
-                        let value = principal[i];
-                        if !value.is_finite() || (beta[i] > 0.0 && value <= 0.0) {
-                            return Err(invalid(
-                                "source-bound Forchheimer resistance is not representable",
-                            )
-                            .into());
-                        }
-                    }
-                    coefficients[sample.voxel] = Some(ForchheimerResistance::try_new(
-                        principal,
-                        *permeability.material_axes_in_world(),
-                    )?);
+                    coefficients[sample.voxel] = Some(resistance);
                 }
                 let resistance = principal.map(|k| transport.dynamic_viscosity_pa_s() / k);
                 if resistance

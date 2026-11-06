@@ -136,8 +136,8 @@ fn rotated_material_data_controls_signed_flow_and_cubic_heat_in_all_planes() {
                         let native = epoch.forchheimer_resistance.as_ref().unwrap()[cell]
                             .as_ref()
                             .unwrap();
-                        assert_eq!(native.principal_kg_m4(), &beta);
-                        assert_eq!(native.material_axes_in_world(), &axes(plane, sign));
+                        assert_eq!(native.principal_kg_m4(), Some(&beta));
+                        assert_eq!(native.material_axes_in_world(), Some(&axes(plane, sign)));
                         let sample = &epoch.porous_samples[cell].material;
                         assert_eq!(sample.material().card_identity(), skeleton.content_hash());
                         assert_eq!(sample.forchheimer_beta_per_m(), Some(&beta));
@@ -240,10 +240,10 @@ fn rotating_nonlinear_sources_evolve_on_the_same_transient_energy_timeline() {
         let native = epoch.forchheimer_resistance.as_ref().unwrap()[cell as usize]
             .as_ref()
             .unwrap();
-        near(native.principal_kg_m4()[0], beta[0] * beta_factor);
+        near(native.principal_kg_m4().unwrap()[0], beta[0] * beta_factor);
         assert_eq!(
             native.material_axes_in_world(),
-            sample.permeability().material_axes_in_world()
+            Some(sample.permeability().material_axes_in_world())
         );
         let endpoint = &second.endpoint_porous_samples()[cell as usize].material;
         near(
