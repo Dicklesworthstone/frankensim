@@ -13,12 +13,17 @@
 //! area, detector etendue and exposure. It does not solve retarded geometry,
 //! transform surface normals, move existing scene instances, debit thermal
 //! storage, or treat a dielectric/moving-medium path as vacuum.
+//! [`retarded`] selects the original thermal history and emitting hemisphere
+//! at the source event supplied by a uniform-worldline light-cone solution.
 
 use super::{DiffuseThermalSurface, ThermalSurfaceError, planck_radiance_w_m2_sr_nm};
 use crate::spectral::{
     detector::{QuantumEfficiencySensor, SpectralSensorError},
     doppler::{DopplerError, VacuumDoppler},
 };
+
+/// Original source histories selected on the retarded material proper clock.
+pub mod retarded;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ThermalDopplerError {

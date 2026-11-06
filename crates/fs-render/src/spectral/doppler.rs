@@ -12,12 +12,15 @@
 //! into radiance a second time. See Younsi, Wu & Fuerst (2012), equations 9–13,
 //! <https://doi.org/10.1051/0004-6361/201219599>.
 //!
-//! This is a local photon-frame transform, not a spacetime intersection solver.
-//! Callers supply the direction and endpoint velocities at the actual emission
-//! and reception events. No instantaneous-position approximation, moving-medium
-//! index, gravitational shift, scattering recoil or polarization is inferred.
+//! This local type uses the direction and endpoint velocities at the actual
+//! emission and reception events. [`retarded`] constructs those events for an
+//! admitted uniform source worldline. No moving-medium index, gravitational
+//! shift, scattering recoil or polarization is inferred.
 
-use fs_math::det;
+use fs_math::{dd::Dd, det};
+
+/// Past-light-cone geometry and proper clocks for uniform source motion.
+pub mod retarded;
 
 /// Exact SI speed of light in vacuum, metres per second.
 pub const VACUUM_LIGHT_SPEED_M_S: f64 = 299_792_458.0;
@@ -58,9 +61,25 @@ impl VacuumDoppler {
         source_velocity_m_s: [f64; 3],
         receiver_velocity_m_s: [f64; 3],
     ) -> Result<Self, DopplerError> {
+        Self::with_frames(
+            world_propagation_direction,
+            FrameVelocity::try_new(source_velocity_m_s)?,
+            FrameVelocity::try_new(receiver_velocity_m_s)?,
+        )
+    }
+
+    fn with_frames(
+        world_propagation_direction: [f64; 3],
+        source: FrameVelocity,
+        receiver: FrameVelocity,
+    ) -> Result<Self, DopplerError> {
         let direction = unit(world_propagation_direction)?;
-        let (source_frequency, source_direction) = in_frame(direction, source_velocity_m_s)?;
-        let (receiver_frequency, receiver_direction) = in_frame(direction, receiver_velocity_m_s)?;
+        let (source_frequency, source_direction) = source.in_frame(direction)?;
+        let (receiver_frequency, receiver_direction) = if source == receiver {
+            (source_frequency, source_direction)
+        } else {
+            receiver.in_frame(direction)?
+        };
         let frequency_ratio = positive(receiver_frequency / source_frequency)?;
         Ok(Self {
             frequency_ratio,
@@ -158,33 +177,64 @@ fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
     a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
 }
 
-fn in_frame(direction: [f64; 3], velocity_m_s: [f64; 3]) -> Result<(f64, [f64; 3]), DopplerError> {
-    if velocity_m_s.iter().any(|x| !x.is_finite()) {
-        return Err(DopplerError::InvalidVelocity);
+/// One physical SI velocity admission, shared by ray transforms and clocks.
+/// DD keeps c²-v² and the null-vector subtraction coherent near light speed.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct FrameVelocity {
+    beta: [Dd; 3],
+    inverse_gamma: Dd,
+}
+
+impl FrameVelocity {
+    fn try_new(velocity_m_s: [f64; 3]) -> Result<Self, DopplerError> {
+        if velocity_m_s.iter().any(|x| !x.is_finite()) {
+            return Err(DopplerError::InvalidVelocity);
+        }
+        if velocity_m_s == [0.0; 3] {
+            return Ok(Self {
+                beta: [Dd::ZERO; 3],
+                inverse_gamma: Dd::ONE,
+            });
+        }
+        let c = Dd::from_f64(VACUUM_LIGHT_SPEED_M_S);
+        let beta = velocity_m_s.map(|x| Dd::from_f64(x) / c);
+        let speed_squared = dd_dot(beta, beta);
+        if !speed_squared.hi.is_finite() || !speed_squared.lt(Dd::ONE) {
+            return Err(DopplerError::InvalidVelocity);
+        }
+        Ok(Self {
+            beta,
+            inverse_gamma: (Dd::ONE - speed_squared).sqrt(),
+        })
     }
-    let beta = velocity_m_s.map(|x| x / VACUUM_LIGHT_SPEED_M_S);
-    let speed = det::sqrt(dot(beta, beta));
-    if !speed.is_finite() || speed >= 1.0 {
-        return Err(DopplerError::InvalidVelocity);
+
+    fn in_frame(self, direction: [f64; 3]) -> Result<(f64, [f64; 3]), DopplerError> {
+        if self.beta == [Dd::ZERO; 3] {
+            return Ok((1.0, direction));
+        }
+        // Renormalize the f64 ray in DD before the almost-parallel subtraction;
+        // a one-ulp unit-vector error must not masquerade as superluminality.
+        let direction = direction.map(Dd::from_f64);
+        let norm = dd_dot(direction, direction).sqrt();
+        let direction = direction.map(|x| x / norm);
+        let projection = dd_dot(direction, self.beta);
+        let denominator = Dd::ONE - projection;
+        let frequency = positive((denominator / self.inverse_gamma).to_f64())?;
+        // Rotation-free boost, with gamma factored out. This avoids forming
+        // gamma-sized vectors: n' = [g*n + (beta.n/(1+g)-1)*beta]/(1-beta.n).
+        let factor = projection / (Dd::ONE + self.inverse_gamma) - Dd::ONE;
+        let aberrated = core::array::from_fn(|i| {
+            ((self.inverse_gamma * direction[i] + factor * self.beta[i]) / denominator).to_f64()
+        });
+        Ok((
+            frequency,
+            unit(aberrated).map_err(|_| DopplerError::NumericalRange)?,
+        ))
     }
-    if speed == 0.0 {
-        return Ok((1.0, direction));
-    }
-    let axis = beta.map(|x| x / speed);
-    // Inputs have been normalized; this clamp removes only dot-product
-    // roundoff at parallel/antiparallel endpoints, never a physical speed cap.
-    let cosine = dot(direction, axis).clamp(-1.0, 1.0);
-    let inverse_gamma = det::sqrt((1.0 - speed) * (1.0 + speed));
-    let denominator = (1.0 - speed) + speed * (1.0 - cosine);
-    let frequency = positive(denominator / inverse_gamma)?;
-    let longitudinal = (cosine - speed) / denominator;
-    let transverse = inverse_gamma / denominator;
-    // Parallel/perpendicular decomposition avoids subtracting gamma-sized
-    // vectors when a ray follows a nearly light-speed frame.
-    let aberrated = core::array::from_fn(|i| {
-        (direction[i] - cosine * axis[i]) * transverse + axis[i] * longitudinal
-    });
-    Ok((frequency, unit(aberrated)?))
+}
+
+fn dd_dot(a: [Dd; 3], b: [Dd; 3]) -> Dd {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
 }
 
 #[cfg(test)]

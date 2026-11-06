@@ -8770,3 +8770,53 @@ opaque-cell transport, tail admission, endpoint temperature rollback, original
 report/binding integrity, pump-scattering refusal, work bounds and cancellation.
 Pinned formatter/parser checks and independent source review passed. These new
 native integration tests have not been executed in the shared editing environment.
+
+## Retarded vacuum geometry and material proper-time histories
+
+`spectral::doppler::retarded::UniformVacuumWorldline` admits one uniformly
+translating material point with paired reference coordinate/proper clocks and
+an explicit closed proper-time source history. `VacuumReception` describes an
+independent receiver event and its instantaneous subluminal velocity in the
+same world frame. The receiver need not move uniformly away from that event.
+
+`observe` solves the unique past-light-cone quadratic analytically. Its scaled
+discriminant and rationalized recession branch avoid squaring large ranges or
+subtracting almost equal roots. Coordinate and material clocks use the
+original `fs_math::dd::Dd` owner. The emitted position, path length and null
+residual are recomputed from the published DD emission event; a delay lost at
+an unresolved clock epoch is refused. Residual tolerance is an explicit
+absolute distance in metres. It is a numerical admission criterion, not an
+interval certificate for uncertain geometry. The same tolerance separately
+bounds the loss from publishing the material proper-clock offset, converted to
+equivalent coordinate seconds times c. An unresolved material epoch therefore
+cannot silently select the wrong source history. A source-history miss, zero-flight
+coincidence, invalid frame or unrepresentable arithmetic remains an error.
+
+`RetardedVacuumRay` retains the physical propagation direction, emission and
+reception events, source proper clock, flight time, range and the original
+`VacuumDoppler`. Its coordinate-clock rate is dt_source/dt_receiver; its proper
+clock rate is d(tau_source)/d(tau_receiver) and equals the observed/source
+frequency ratio. SI velocity admission, c²-v² and the gamma-factored Lorentz
+boost share DD arithmetic so near-light-speed source clocks and photon frames
+use the same physical velocity. Zero-velocity and identical-frame paths avoid
+unneeded frame transforms. Evaluation has fixed work and no allocation.
+
+With `tracer`, `thermal_surface::doppler::retarded::RetardedThermalSurface`
+calls the original source-history callback once at the admitted emission
+proper time. Invalid geometry and expired history do not access that callback.
+`ThermalEmissionState` carries the original diffuse thermal source and a normal
+in its material rest frame. The aberrated source-frame photon direction checks
+the emitting hemisphere. The returned cosine does not multiply diffuse
+radiance again. `RetardedThermalDetector` retains that ray and delegates directly
+to the existing observed surface and `QuantumEfficiencySensor`, preserving
+source identity, finite wavelength support, receiver-frame proposals and
+receiver photon-energy conversion. No shifted source table is allocated.
+
+G1/G3 regressions cover stationary and approaching/receding events, the
+oblique retarded ray of a presently transverse source, independent clock
+derivatives along a moving receiver, DD epoch limits, velocities one SI float
+below c, source-history admission, proper-time thermal state selection,
+aberrated emitting sides and the original QE rate path. This route supplies
+neither scene visibility/surface intersection nor apparent projected areas,
+finite-source geometry, accelerated source motion, moving dielectric transport,
+gravitational shifts, polarization or a second debit to thermal storage.
