@@ -11,6 +11,9 @@ use crate::fusion_neutrons::{
 use fs_qty::{Amount, Energy, Time};
 use fs_thermochem::fusion::neutrons::FusionNeutronEmissionV1;
 
+#[path = "adaptive_tests.rs"]
+mod adaptive_tests;
+
 fn neutron_budget() -> NeutronKineticBudget {
     NeutronKineticBudget {
         diffusion: DiffusionBudget {

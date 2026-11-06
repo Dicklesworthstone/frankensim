@@ -138,44 +138,55 @@ impl AdaptiveNuclearHeatSource for DiffusionCellSource {
             let a = &coarse.spatial().neutrons;
             let b = &first.spatial().neutrons;
             let c = &second.spatial().neutrons;
-            for (a, b, c) in [
-                (&a.reaction_counts, &b.reaction_counts, &c.reaction_counts),
-                (
-                    &a.link_a_to_b_counts,
-                    &b.link_a_to_b_counts,
-                    &c.link_a_to_b_counts,
-                ),
-                (
-                    &a.link_b_to_a_counts,
-                    &b.link_b_to_a_counts,
-                    &c.link_b_to_a_counts,
-                ),
-                (&a.leakage_counts, &b.leakage_counts, &c.leakage_counts),
-                (&a.delayed_decays, &b.delayed_decays, &c.delayed_decays),
-                (
-                    &a.injected_neutron_counts,
-                    &b.injected_neutron_counts,
-                    &c.injected_neutron_counts,
-                ),
-                (
-                    &a.injected_precursor_counts,
-                    &b.injected_precursor_counts,
-                    &c.injected_precursor_counts,
-                ),
-                (
-                    &a.precursor_transfer_counts,
-                    &b.precursor_transfer_counts,
-                    &c.precursor_transfer_counts,
-                ),
-                (
-                    &a.precursor_outflow_counts,
-                    &b.precursor_outflow_counts,
-                    &c.precursor_outflow_counts,
-                ),
-            ] {
-                metric.particle_counts(a, b, c)?;
-            }
+            neutron_steps(&mut metric, a, b, c)?;
         }
         Ok(metric.error)
     }
+}
+
+/// Original extensive neutron accounts, compared once per complete cohort.
+pub(super) fn neutron_steps(
+    metric: &mut Comparison<'_>,
+    a: &crate::diffusion::DiffusionStep,
+    b: &crate::diffusion::DiffusionStep,
+    c: &crate::diffusion::DiffusionStep,
+) -> Result<(), FissionThermalError> {
+    for (a, b, c) in [
+        (&a.reaction_counts, &b.reaction_counts, &c.reaction_counts),
+        (
+            &a.link_a_to_b_counts,
+            &b.link_a_to_b_counts,
+            &c.link_a_to_b_counts,
+        ),
+        (
+            &a.link_b_to_a_counts,
+            &b.link_b_to_a_counts,
+            &c.link_b_to_a_counts,
+        ),
+        (&a.leakage_counts, &b.leakage_counts, &c.leakage_counts),
+        (&a.delayed_decays, &b.delayed_decays, &c.delayed_decays),
+        (
+            &a.injected_neutron_counts,
+            &b.injected_neutron_counts,
+            &c.injected_neutron_counts,
+        ),
+        (
+            &a.injected_precursor_counts,
+            &b.injected_precursor_counts,
+            &c.injected_precursor_counts,
+        ),
+        (
+            &a.precursor_transfer_counts,
+            &b.precursor_transfer_counts,
+            &c.precursor_transfer_counts,
+        ),
+        (
+            &a.precursor_outflow_counts,
+            &b.precursor_outflow_counts,
+            &c.precursor_outflow_counts,
+        ),
+    ] {
+        metric.particle_counts(a, b, c)?;
+    }
+    Ok(())
 }

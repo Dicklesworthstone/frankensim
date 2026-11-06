@@ -25,6 +25,9 @@ use fs_qty::{Amount, Energy, Frequency, Time};
 use fs_thermochem::decay::DecayLawV1;
 use fs_thermochem::fusion::neutrons::{FusionNeutronEmissionV1, FusionNeutronIntervalV1};
 
+#[path = "adaptive_tests.rs"]
+mod adaptive_tests;
+
 fn activation_budget() -> FusionNeutronActivationBudget {
     FusionNeutronActivationBudget {
         spatial: DiffusionBurnupBudget {

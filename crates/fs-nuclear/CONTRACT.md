@@ -151,6 +151,31 @@ or guarantee a representable stiff propagator. G1/G3/G4 thermal regressions
 cover material heating against direct native activation, delayed heat with no
 remaining neutrons, restart and whole-cohort refusal/cancellation.
 
+## Adaptive fusion and material evolution
+
+`NeutronKineticCellSource` and `FusionNeutronActivationCellSource` implement
+the existing `AdaptiveNuclearHeatSource` interface. `advance_adaptive_to`
+therefore refines their original `NuclearHeating` transactions against one
+coarse and two fine physical intervals, publishing only the fine trajectory.
+The shared driver retains source transitions, material events, native CFL cuts,
+bounded work and atomic cancellation. No second adaptive controller or physical
+source solver is introduced.
+
+Comparisons use each original neutron group, finite nuclide population,
+stored neutron energy, reaction count and current-interval energy channel.
+Kinetic and nuclear releases are also compared separately, so opposing changes
+cannot conceal a temporal defect in their combined heat. Full spatial transfer,
+leakage and injection accounts are compared once per cohort, in original order;
+small late releases are never reconstructed from lifetime-account subtraction.
+
+These are local time-error estimates, separate from numerical energy/count
+allowances. They do not certify a global error, increase the underlying order,
+refine the authored source spectrum, or waive a native physical-domain refusal.
+The maximum step must still admit the original stiff neutron propagator.
+G1/G3/G4 checks cover analytic post-pulse capture with material cooling, finite
+activation and temperature-feedback refinement, and unchanged accepted states
+after exhausted work or late cancellation.
+
 ## Prescribed fission, finite inventory and delayed energy
 
 `fs-nuclear` is an L3 source owner. The source kernel uses the shared deterministic
