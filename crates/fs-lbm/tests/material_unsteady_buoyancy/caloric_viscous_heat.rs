@@ -172,6 +172,11 @@ fn circulating_material_heat_retains_native_kinetic_history_and_excludes_time_lo
         assert_eq!(pair[0].end_s.to_bits(), pair[1].start_s.to_bits());
     }
     let march = &result.thermal.convection.march;
+    assert_eq!(march.flow.records.len(), result.mechanical_steps.len());
+    for (flow, mechanical) in march.flow.records.iter().zip(&result.mechanical_steps) {
+        assert_eq!(flow.kinetic_energy_j.to_bits(), mechanical.final_kinetic_energy_j.to_bits(),
+            "flow reports must retain the kinetic storage used by physical heat");
+    }
     let actual_storage: f64 = march.temperature.iter().enumerate()
         .map(|(cell, &t)| domain.volume(cell) * h(t)).sum();
     close(actual_storage, result.heating.generated_heat_j, 1e-8);

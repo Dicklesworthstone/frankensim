@@ -428,20 +428,7 @@ impl MaterialMomentum {
                 )
             })
             .transpose()?;
-        let mut kinetic_energy_j = 0.0;
-        for c in 0..domain.cell_count() {
-            if c % 256 == 0 {
-                poll(gate)?;
-            }
-            if domain.is_fluid(c) {
-                let v = solver.cell_velocity(c);
-                kinetic_energy_j += 0.5
-                    * fluid.density_kg_m3
-                    * domain.volume(c)
-                    * v.iter().map(|component| component * component).sum::<f64>();
-            }
-        }
-        finite("material_unsteady.kinetic_energy_j", kinetic_energy_j)?;
+        let kinetic_energy_j = solver.kinetic_energy_j(gate)?;
         let state = solver.momentum_state();
         let flow = solver.finish_projected(fluid, inner_iterations, residuals);
         let record = FlowStepRecord {

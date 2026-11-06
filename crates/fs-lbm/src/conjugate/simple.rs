@@ -1833,6 +1833,43 @@ impl<'a> Solver<'a> {
         })
     }
 
+    /// Kinetic energy of the staggered velocity field inside the fluid domain.
+    /// Interior faces own both adjacent half cells, using the same inertia as
+    /// the closed-domain mechanical work account. Exposed inlet/outlet faces
+    /// own only their inner half cell; an outlet's mirrored ghost cell is not
+    /// physical fluid volume. Fixed solid and impermeable faces carry no motion.
+    pub(super) fn kinetic_energy_j(&self, gate: &CancelGate) -> Result<f64, ChtError> {
+        let mut energy = 0.0;
+        for axis in 0..3 {
+            for (index, kind) in self.comps[axis].kind.iter().enumerate() {
+                if index.is_multiple_of(256) {
+                    poll(gate)?;
+                }
+                let mass = match kind {
+                    Kind::Unknown(_) => self.interior_face_mass_kg(axis, index),
+                    Kind::Fixed(_) | Kind::Outlet(_) => {
+                        let mut cell = self.comps[axis].coords(index);
+                        if cell[axis] == self.n[axis] {
+                            cell[axis] -= 1;
+                        } else if cell[axis] != 0 {
+                            continue;
+                        }
+                        let cell = cell_of(self.n, cell);
+                        if !self.domain.is_fluid(cell) {
+                            continue;
+                        }
+                        0.5 * self.rho * self.domain.volume(cell)
+                    }
+                };
+                let velocity = self.vel[axis][index];
+                energy += 0.5 * mass * velocity * velocity;
+            }
+        }
+        finite("simple.kinetic_energy_j", energy)?;
+        poll(gate)?;
+        Ok(energy)
+    }
+
     /// A diverging iteration refuses here, before non-finite coefficients
     /// reach an incomplete factorization.
     pub(super) fn guard_finite(&self) -> Result<(), ChtError> {
@@ -1870,7 +1907,6 @@ impl<'a> Solver<'a> {
     /// Native inertia of an interior staggered face, shared by kinetic storage
     /// and the explicit stationary-support capture law. Both adjacent cells
     /// must belong to the original mobile domain.
-    #[cfg(feature = "enthalpy-coupling")]
     fn interior_face_mass_kg(&self, axis: usize, index: usize) -> f64 {
         let plus = self.comps[axis].coords(index);
         self.rho
@@ -3148,3 +3184,7 @@ mod turbulence_tests;
 #[cfg(test)]
 #[path = "simple/pressure_tests.rs"]
 mod pressure_tests;
+
+#[cfg(test)]
+#[path = "simple/kinetic_tests.rs"]
+mod kinetic_tests;

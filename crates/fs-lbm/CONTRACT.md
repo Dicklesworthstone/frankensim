@@ -3542,6 +3542,19 @@ consumption, and source/clock/resolution/topology/work/cancellation refusals.
 
 ### Transient finite-volume momentum and heat
 
+`FlowStepRecord::kinetic_energy_j` uses the original staggered face velocities
+and their fluid half-cell masses. Interior faces own the adjacent half cells;
+exposed inlet and outlet faces own only the inner half cell, excluding mirrored
+ghost volume. Stationary solid and impermeable faces contribute zero. Squaring
+cell-centred averaged velocities would discard resolved kinetic storage, even
+for a divergence-free circulation. Both the ordinary and source-material
+marches now use the same allocation-free face norm. In closed domains its
+interior inertia and summation order agree with the existing physical
+viscous-heating account. This diagnostic does not promote the ordinary open
+flow discretization to a total-energy-conservative scheme or create heat from
+numerical kinetic losses. Analytical vortex, graded-boundary, uniform-motion
+and solid-occupancy regressions exercise the norm and its march integration.
+
 `conjugate::simple_unsteady_with_sgs` and `march_conjugate_with_sgs` select the
 same full-gradient Smagorinsky/WALE kernel through explicit `FvSgsConfig`.
 The physical filter width is the declared factor times `cell_volume^(1/3)`;

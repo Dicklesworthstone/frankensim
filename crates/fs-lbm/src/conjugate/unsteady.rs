@@ -185,7 +185,9 @@ pub struct FlowStepRecord {
     pub momentum_residual: f64,
     /// Velocity of the probe cell, m/s (zeros without a probe).
     pub probe_velocity_m_s: [f64; 3],
-    /// Kinetic energy `sum rho |u|^2 V / 2` of the fluid, J.
+    /// Staggered kinetic energy `sum m_face * u_face^2 / 2`, J. Each face
+    /// owns the adjacent fluid half cells; exposed faces own only the inner
+    /// half cell. Cell-centred velocity averaging is not applied to this norm.
     pub kinetic_energy_j: f64,
 }
 
@@ -308,7 +310,6 @@ fn converge_step(
 struct Marcher<'a> {
     solver: Solver<'a>,
     domain: &'a VoxelDomain,
-    rho: f64,
     unsteady: &'a UnsteadyConfig,
     records: Vec<FlowStepRecord>,
     mean: Vec<[f64; 3]>,
@@ -330,7 +331,6 @@ impl<'a> Marcher<'a> {
         Self {
             solver,
             domain,
-            rho: fluid.density_kg_m3,
             unsteady,
             records: Vec::with_capacity(unsteady.steps),
             mean: vec![[0.0; 3]; domain.cell_count()],
@@ -375,25 +375,21 @@ impl<'a> Marcher<'a> {
         inner: usize,
         gate: &CancelGate,
     ) -> Result<(), ChtError> {
-        let mut kinetic = 0.0;
+        let kinetic = self.solver.kinetic_energy_j(gate)?;
         let averaging = step >= self.unsteady.average_from_step;
-        for c in 0..self.domain.cell_count() {
-            if c.is_multiple_of(256) {
-                poll(gate)?;
-            }
-            if !self.domain.is_fluid(c) {
-                continue;
-            }
-            let v = self.solver.cell_velocity(c);
-            kinetic +=
-                0.5 * self.rho * self.domain.volume(c) * (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
-            if averaging {
+        if averaging {
+            for c in 0..self.domain.cell_count() {
+                if c.is_multiple_of(256) {
+                    poll(gate)?;
+                }
+                if !self.domain.is_fluid(c) {
+                    continue;
+                }
+                let v = self.solver.cell_velocity(c);
                 for a in 0..3 {
                     self.mean[c][a] += v[a];
                 }
             }
-        }
-        if averaging {
             self.averaged += 1;
             let field = self.solver.field();
             let faces = field.face_arrays();
