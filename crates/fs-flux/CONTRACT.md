@@ -1219,6 +1219,65 @@ physical density-weighted acceleration and traction pressure, recovery of the
 original uniform-density Oseen matrix/load, and cancellation, CFL, invalid-source
 and unrepresentable-history refusals.
 
+### Conservative SSPRK2 density stages and accepted flux weights
+
+`ns::transport::density::ssprk2` adds bounded second-order TIME integration of
+the original fixed-advector spatially discrete density/inventory problem.
+Each physical subinterval evaluates the original positive donor-cell Euler
+map twice, `U1=E_h(U0)` and `U2=E_h(U1)`, then accepts `0.5*(U0+U2)` in
+EXTENSIVE coordinates `(mass, mass*specific[0..N])`. The fixed mesh, depth,
+original divergence-free BDM volume advector and exterior donor states remain
+unchanged throughout the macro interval. P0 spatial transport still has its
+original first-order mixing; this owner neither sharpens interfaces nor raises
+the temporal order of a caller's native BDF1 momentum step.
+
+Both stages satisfy the original outgoing-volume Courant cap in `(0,1)`.
+The accepted extensive convex combination preserves density positivity and
+the original donor-specific bounds up to represented-state roundoff. Specific
+values are not averaged, and small mass fractions are not formed before
+inventory products: representable light-donor inventories survive even when
+the corresponding mass fraction underflows. The blend uses compensated actual
+physical mass-times-specific products and their FMA remainders, switching to
+safe half-sums when unweighted sums overflow. Equal specific values copy
+exactly. Original Euler arithmetic and its admission range are unchanged;
+this does not claim to admit every state accepted by the isolated blend.
+
+Accepted directional face amounts are half-sums of the two actual stage
+transfers, accumulated over physical subintervals. The two stages do NOT count
+as two full physical intervals of boundary exchange. Robust pair midpoints
+retain two equal subnormal amounts and near-cancelling signed inventories.
+Macro reports reuse the original endpoint and physical boundary audit, with
+RK-weighted absolute boundary exchange as the signed-inventory residual scale.
+They distinguish physical substep count, exactly twice as many Euler stage
+evaluations, stage Courant and macro Courant.
+
+The mean of the two PRE-Euler donor densities per physical subinterval has
+exactly the same RK weights as the accepted face amounts. Its existing
+scale-normalized compensated accumulator avoids raw density-sum overflow or
+premature division underflow. One original compatible mass-flux reconstruction
+then retains macro density-divergence compatibility and quadratic native
+kinetic moments, up to represented-state, summation and reconstruction error.
+The existing `mass_flux::momentum` action remains the momentum convection owner;
+no separate convection discretization is introduced.
+
+Equal dyadic physical subintervals, representable duration splits and a caller
+maximum count bound work. One workspace allowance covers original Euler
+scratch, all three state buffers, first-stage transfers, accepted transfer
+sums and donor averages. Warm advances allocate no heap storage. Cancellation
+or refusal leaves caller output unchanged, invalidates accepted views and
+allows retry. A reconstructed mass-flux operator retains its separate explicit
+storage allowance. No complete nonlinear transport adjoint is claimed.
+
+G1/G3 regression sources compare counterflow and throughflow against independent
+RK matrix polynomials, verify second-order temporal refinement on a FIXED
+spatial mesh, check all extensive/directional/boundary accounts and one
+compatible macro flux, exercise admitted high-contrast stages and subnormal
+face weights, and cover work/storage/final-poll refusal and exact retry. Private
+blend tests separately cover an extreme density ratio whose direct mass fraction
+underflows. Native Rust execution remains a validation gate; source inspection
+does not establish a runtime or performance result.
+
+
 ### Density subcycles with one native macro momentum solve
 
 `ns::boundary::conservative::subcycle` adds

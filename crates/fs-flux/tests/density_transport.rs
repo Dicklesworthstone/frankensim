@@ -17,6 +17,9 @@ mod momentum;
 #[path = "density_transport/subcycle.rs"]
 mod subcycle;
 
+#[path = "density_transport/ssprk2.rs"]
+mod ssprk2;
+
 fn near(actual: f64, expected: f64, tolerance: f64) {
     assert!(
         (actual - expected).abs() <= tolerance,

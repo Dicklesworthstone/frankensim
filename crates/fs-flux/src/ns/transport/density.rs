@@ -20,6 +20,9 @@ use crate::{FluxSystem, TriMesh};
 /// Bounded density substeps with one compatible time-averaged mass flux.
 pub mod subcycle;
 
+/// Conservative second-order time stages with the original donor-cell flux.
+pub mod ssprk2;
+
 /// Cell-average density and N quantities per unit mass. Components may have
 /// different units: velocity gives momentum, specific enthalpy gives enthalpy,
 /// and mass fractions give component masses. Their reference convention and

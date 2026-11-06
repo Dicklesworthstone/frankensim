@@ -61,12 +61,12 @@ pub struct DensitySubcycleWorkspace<'p, 'm, const N: usize> {
 }
 
 #[derive(Clone, Copy, Default)]
-struct Mean {
+pub(super) struct Mean {
     scale: f64,
     sum: Sum,
 }
 impl Mean {
-    fn add(&mut self, density: f64) -> Result<()> {
+    pub(super) fn add(&mut self, density: f64) -> Result<()> {
         if self.scale == 0.0 {
             self.scale = density;
             self.sum.add(1.0)?;
@@ -84,7 +84,7 @@ impl Mean {
         Ok(())
     }
 
-    fn value(self, count: usize) -> Result<f64> {
+    pub(super) fn value(self, count: usize) -> Result<f64> {
         positive_value(
             self.scale * (self.sum.value()? / count as f64),
             "time-averaged donor density",
@@ -93,7 +93,7 @@ impl Mean {
 }
 
 #[derive(Clone, Copy)]
-struct TransferSum<const N: usize> {
+pub(super) struct TransferSum<const N: usize> {
     mass: [Sum; 2],
     carried: [[Sum; N]; 2],
 }
@@ -106,7 +106,7 @@ impl<const N: usize> Default for TransferSum<N> {
     }
 }
 impl<const N: usize> TransferSum<N> {
-    fn add(&mut self, transfer: &EdgeDensityTransfer<N>) -> Result<()> {
+    pub(super) fn add(&mut self, transfer: &EdgeDensityTransfer<N>) -> Result<()> {
         for direction in 0..2 {
             self.mass[direction].add(transfer.mass_kg[direction])?;
             for component in 0..N {
@@ -116,7 +116,7 @@ impl<const N: usize> TransferSum<N> {
         Ok(())
     }
 
-    fn value(self) -> Result<EdgeDensityTransfer<N>> {
+    pub(super) fn value(self) -> Result<EdgeDensityTransfer<N>> {
         let mut value = EdgeDensityTransfer::default();
         for direction in 0..2 {
             value.mass_kg[direction] = self.mass[direction].value()?;
@@ -361,7 +361,7 @@ impl<'m, const N: usize> DensitySubcycleWorkspace<'_, 'm, N> {
 // over the whole interval. Summing relative microstep residuals or subtracting
 // two large total inventories would hide the physical macro accounting scale.
 #[allow(clippy::too_many_arguments)]
-fn audit<const N: usize>(
+pub(super) fn audit<const N: usize>(
     plan: &PreparedDensityTransport<'_>,
     old: &[DensityTransportCell<N>],
     new: &[DensityTransportCell<N>],
