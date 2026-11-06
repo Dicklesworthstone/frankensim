@@ -22,6 +22,9 @@ use crate::material_state::gas_scattering::pressure_temperature::{
 };
 use fs_qty::{Pressure, Temperature};
 
+/// Original per-species partial densities and mixed-gas mesh propagation.
+pub mod composition;
+
 impl<'a> P1ConductionMesh<'a> {
     /// Propagate an original isobaric gas through its exact thermal mesh.
     /// Reference temperature prepares the original molecular coefficients;

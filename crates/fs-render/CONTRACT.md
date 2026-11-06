@@ -8071,3 +8071,27 @@ and an actual molecular ambient in the same camera; and original reference,
 absorption, prepared wavelength, capability, domain and work refusals. Native
 Rust execution is unavailable in this environment; these authored regressions
 are distinguished from scoped parser/format checks and source/math review.
+
+## Original gas composition on native tetrahedral meshes
+
+Under `material-state,volumes`,
+`thermo_optic::transient::mesh::gas::composition` borrows original nodal
+partial densities in the molecular model's exact order and declared mass or
+molecule-number basis. One native barycentric query supplies every component
+and its unsmoothed P1 gradient. Original molecular polarizabilities, dispersion,
+phase/group indices and nonlinear optical Hessians drive native rays and
+angular bundles, including composition-driven bending at constant total density.
+
+Preparation validates the borrowed source once. Each propagation prepares one
+wavelength and retains a private two-element polynomial cache; stage queries
+allocate nothing. Original mesh events, complete collars, crossing-time
+corrections, spectral domains, work budgets and cancellation remain authoritative.
+Continuous internal faces create no Fresnel event; duplicated contact topology
+and exterior faces stop. Zero species and vacuum stay explicit. No fraction
+normalization, new EOS, cell-average reconstruction, moving-medium model,
+absorption or scattered-radiance integration is inferred.
+
+Five G1/G3 regression groups cover both density bases, original P1 derivatives
+and optical Hessians, chromatic bending and group paths, concentration-jump
+bundle variations, constant-index/vacuum limits, and source/topology/work
+refusals. Native execution is reported separately from source/format checks.
