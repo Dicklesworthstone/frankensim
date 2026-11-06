@@ -202,3 +202,61 @@ fn opposing_motion_still_requires_its_actual_doppler_bandwidth() {
     let resolved = MovingPressureConfig { receiver_bandwidth_hz: 100.0, ..config() };
     assert!(MovingCompactRenderer::with_moving_receiver(&sources, resolved, budget(), &mut || false).is_ok());
 }
+
+#[test]
+fn receding_native_history_renders_at_its_contracted_receiver_bandwidth() {
+    let source = path(-0.5, 0.5, 0.0, -120.0, 0.0);
+    let receiver = path(0.0, 0.125, 100.0, 0.0, 0.0);
+    let motion = pair(&source, &receiver);
+    let accepted = history(-256, 256);
+    let sources = [CompactSourceHistory {
+        motion: &motion,
+        samples: &accepted,
+        source_bandwidth_hz: 40.0,
+    }];
+    let config = MovingPressureConfig {
+        receiver_bandwidth_hz: 29.0,
+        ..config()
+    };
+    assert!(40.0 * motion.maximum_source_time_rate() < config.receiver_bandwidth_hz);
+    let build = || {
+        MovingCompactRenderer::with_moving_receiver(&sources, config, budget(), &mut || false)
+            .unwrap()
+    };
+    let mut renderer = build();
+    let mut pressure = [0.0; 65];
+    renderer.block(&mut pressure).unwrap();
+    // Independent axial pressure including convection/induction. The accepted
+    // Hermite history converges to this analytic tone, it is not a pitch filter.
+    let mut error_square = 0.0;
+    let mut reference_square = 0.0;
+    for (i, &actual) in pressure.iter().enumerate() {
+        let t = i as f64 / 512.0;
+        let tau = (300.0 * t - 100.0) / 420.0;
+        let r = 100.0 + 120.0 * tau;
+        let q = strength(tau);
+        let m = -0.4_f64;
+        let kappa = 1.0 - m;
+        let expected = 1.2 / (4.0 * core::f64::consts::PI)
+            * (q.volume_flow_rate_m3_s2 / (r * kappa * kappa)
+                + q.volume_flow_m3_s * 300.0 * (m - m * m)
+                    / (r * r * kappa * kappa * kappa));
+        error_square += (actual - expected).powi(2);
+        reference_square += expected * expected;
+    }
+    assert!((error_square / reference_square).sqrt() < 1e-3);
+    let mut partitioned = build();
+    let mut chunks = [0.0; 65];
+    for chunk in chunks.chunks_mut(7) {
+        partitioned.block(chunk).unwrap();
+    }
+    assert_eq!(pressure.map(f64::to_bits), chunks.map(f64::to_bits));
+    // A contracted clock still needs enough receiver bandwidth for its tone.
+    let unresolved = MovingPressureConfig {
+        receiver_bandwidth_hz: 28.0,
+        ..config
+    };
+    assert!(MovingCompactRenderer::with_moving_receiver(
+        &sources, unresolved, budget(), &mut || false,
+    ).is_err());
+}

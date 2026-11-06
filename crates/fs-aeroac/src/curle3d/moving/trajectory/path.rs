@@ -19,6 +19,9 @@ pub(super) struct KinematicSegment {
     pub(super) polynomial: QuinticSegment,
     // Relative to polynomial.first.kinematics.position_m, as in the compiler.
     pub(super) position_bounds: [[Interval; 3]; 6],
+    // Complete accepted velocity hull for THIS span, including exact knots.
+    // Retained once so a receiver window need not inherit unrelated motion.
+    pub(super) velocity_mach_bounds: [Interval; 3],
 }
 
 /// Finite C2 motion with a whole-path, strictly subsonic speed bound.
@@ -46,7 +49,7 @@ impl PreparedKinematicTrajectory {
     /// Compile the original accepted knots and admit speed over every span.
     ///
     /// `maximum_payload_bytes` counts this owner and its retained segment
-    /// payload, including the original interval position controls. Allocator
+    /// payload, including interval position controls and span velocity hulls. Allocator
     /// metadata and the fixed, at most 33-node preparation stack are excluded.
     /// The root cap is retained for use when this path is a source.
     pub fn new(
@@ -155,6 +158,13 @@ impl PreparedKinematicTrajectory {
             // Arrival fields belong only to the fixed-receiver adapter. The
             // shared polynomial evaluator never reads these placeholders.
             let (polynomial, bounds, stationary) = QuinticSegment::compile(first, last, 0.0, 0.0)?;
+            let mut segment_velocity = first.kinematics.velocity_m_s.map(|v| {
+                if v == 0.0 {
+                    Interval::point(0.0)
+                } else {
+                    Interval::point(v) / Interval::point(c)
+                }
+            });
             let bound = admit_speed(
                 bounds,
                 stationary,
@@ -162,7 +172,7 @@ impl PreparedKinematicTrajectory {
                 maximum_mach,
                 budget,
                 &mut visited,
-                &mut velocity_mach_bounds,
+                &mut segment_velocity,
                 cancelled,
             )?;
             admitted_mach = admitted_mach.max(bound);
@@ -174,11 +184,13 @@ impl PreparedKinematicTrajectory {
                 } else {
                     Interval::point(*value) / Interval::point(c)
                 };
-                velocity_mach_bounds[axis] = velocity_mach_bounds[axis].hull(endpoint);
+                segment_velocity[axis] = segment_velocity[axis].hull(endpoint);
+                velocity_mach_bounds[axis] = velocity_mach_bounds[axis].hull(segment_velocity[axis]);
             }
             segments.push(KinematicSegment {
                 polynomial,
                 position_bounds: bounds.position,
+                velocity_mach_bounds: segment_velocity,
             });
             first = last;
         }

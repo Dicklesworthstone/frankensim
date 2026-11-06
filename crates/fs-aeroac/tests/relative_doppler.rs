@@ -195,3 +195,62 @@ fn interior_velocity_extrema_and_admitted_subdivisions_enter_the_bound() {
     assert!(owner.prepare_receiver(0.126, &mut || false).is_err());
     assert_eq!(owner.maximum_source_time_rate(), retained);
 }
+
+#[test]
+fn directional_bound_preserves_receding_redshift_on_every_axis() {
+    for axis in 0..3 {
+        for sign in [-1.0, 1.0] {
+            let mut position = [0.0; 3];
+            let mut velocity = [0.0; 3];
+            position[axis] = sign * 100.0;
+            velocity[axis] = -sign * 120.0;
+            let source = path(&knots([-0.5, 0.5], |t| straight(t, [0.0; 3], velocity)), 0.8);
+            let receiver = path(&knots([0.0, 0.125], |t| straight(t, position, [0.0; 3])), 0.8);
+            let owner = pair(&source, &receiver);
+            let expected = 300.0 / 420.0;
+            assert!(owner.maximum_source_time_rate() >= expected);
+            close(owner.maximum_source_time_rate(), expected);
+            assert!(owner.maximum_source_time_rate() < 1.0);
+            check_window(&owner);
+            for t in [0.0, 0.0625, 0.125] {
+                let sample = owner.prepare_receiver(t, &mut || false).unwrap();
+                close(sample.observed_source_time_rate, expected);
+                close(sample.pressure.source_time_s(), (300.0 * t - 100.0) / 420.0);
+            }
+        }
+    }
+}
+
+#[test]
+fn moving_microphone_recession_keeps_its_own_clock_numerator() {
+    let source = path(&knots([-0.5, 0.5], |t| straight(t, [0.0; 3], [0.0; 3])), 0.8);
+    let receiver = path(
+        &knots([0.0, 0.125], |t| straight(t, [100.0, 0.0, 0.0], [120.0, 0.0, 0.0])),
+        0.8,
+    );
+    let owner = pair(&source, &receiver);
+    close(owner.maximum_source_time_rate(), 0.6);
+    check_window(&owner);
+    let sample = owner.prepare_receiver(0.0625, &mut || false).unwrap();
+    close(sample.observed_source_time_rate, 0.6);
+    // Source radiation is still Eulerian; receiver Doppler is not an
+    // amplitude multiplier or a replacement for the source's kappa.
+    close(sample.pressure.source_time_rate(), 1.0);
+}
+
+#[test]
+fn unused_future_source_spans_do_not_impose_their_approach_bandwidth() {
+    let source_samples = [
+        TimedSourceKinematics { source_time_s: -0.5, kinematics: straight(-0.5, [0.0; 3], [-120.0, 0.0, 0.0]) },
+        TimedSourceKinematics { source_time_s: 0.0, kinematics: straight(0.0, [0.0; 3], [-120.0, 0.0, 0.0]) },
+        TimedSourceKinematics { source_time_s: 0.5, kinematics: straight(0.0, [0.0; 3], [120.0, 0.0, 0.0]) },
+    ];
+    let source = path(&source_samples, 0.95);
+    let receiver = path(
+        &knots([0.0, 0.125], |t| straight(t, [100.0, 0.0, 0.0], [0.0; 3])),
+        0.8,
+    );
+    let owner = pair(&source, &receiver);
+    close(owner.maximum_source_time_rate(), 300.0 / 420.0);
+    check_window(&owner);
+}

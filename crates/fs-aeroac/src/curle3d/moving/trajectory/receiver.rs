@@ -304,7 +304,7 @@ impl<'a> PreparedMovingReceiverSource<'a> {
         if !maximum_source_time_rate.is_finite() || maximum_source_time_rate <= 0.0 {
             return Err(invalid("moving receiver Doppler bound is unrepresentable"));
         }
-        let owner = Self {
+        let mut owner = Self {
             source,
             receiver,
             image,
@@ -321,7 +321,8 @@ impl<'a> PreparedMovingReceiverSource<'a> {
         if last != first {
             owner.prepare_receiver(last, cancelled)?;
         }
-        admit_clearance(&owner, budget, work, cancelled)?;
+        let directional_rate = admit_clearance(&owner, budget, work, cancelled)?;
+        owner.maximum_source_time_rate = owner.maximum_source_time_rate.min(directional_rate);
         poll(cancelled)?;
         Ok(owner)
     }
@@ -338,10 +339,11 @@ impl<'a> PreparedMovingReceiverSource<'a> {
     pub const fn config(&self) -> MovingReceiverConfig {
         self.config
     }
-    /// Continuous upper observed source-clock rate. Intersects the original
-    /// independent-speed bound with a signed relative-velocity hull bound;
-    /// common translation therefore does not imply opposing-motion Doppler.
-    /// The bound includes velocities at DIFFERENT emission/receiver times.
+    /// Continuous upper observed source-clock rate over the admitted window.
+    /// Intersects speed and relative-velocity bounds with causal directional
+    /// bounds from the original position and per-span velocity hulls. Receding
+    /// paths can therefore retain a rate below one. Velocities are evaluated
+    /// at DIFFERENT emission/receiver times, including all interior extrema.
     /// Additional geometric amplitude modulation still needs a bandwidth limit.
     pub const fn maximum_source_time_rate(&self) -> f64 {
         self.maximum_source_time_rate
@@ -633,12 +635,16 @@ fn admit_clearance(
     budget: MovingReceiverBudget,
     work: &mut ReceiverPreparationWork,
     cancelled: &mut impl FnMut() -> bool,
-) -> Result<(), AeroacError> {
+) -> Result<f64, AeroacError> {
     let [first, last] = owner.config.receiver_time_interval_s;
     let window = Interval::new(first, last);
     let c = Interval::point(owner.source.medium().sound_speed_m_s());
     let tolerance = owner.config.maximum_time_residual_s;
     let residual_interval = Interval::new(-tolerance, tolerance);
+    let mut maximum_rate = 0.0_f64;
+    let receiver_mach = owner.image.map_or(owner.receiver.maximum_mach(), |image| {
+        image.maximum_mach(owner.receiver.maximum_mach())
+    });
     let first_segment = owner
         .receiver
         .segments
@@ -649,6 +655,9 @@ fn admit_clearance(
         if r.first.source_time_s > last {
             break;
         }
+        let receiver_velocity = owner.image.map_or(receiver.velocity_mach_bounds, |image| {
+            image.vector_bounds(receiver.velocity_mach_bounds)
+        });
         for source in &owner.source.segments {
             poll(cancelled)?;
             if work.pairs >= budget.maximum_segment_pairs {
@@ -712,14 +721,25 @@ fn admit_clearance(
                 }
                 let causal_distance =
                     Interval::new(travel_time.lo().max(0.0), travel_time.hi().max(0.0)) * c;
-                if causal_distance.lo() >= owner.config.minimum_distance_m {
+                let displacement = displacement_hull(&node, origin_delta);
+                let distance = distance_hull(displacement);
+                let Some(causal_range) = distance.intersect(causal_distance) else {
                     continue;
-                }
-                let distance = distance_hull(&node, origin_delta);
-                if distance.lo() >= owner.config.minimum_distance_m
-                    || causal_distance.hi() < distance.lo()
-                    || distance.hi() < causal_distance.lo()
-                {
+                };
+                if causal_range.lo() >= owner.config.minimum_distance_m {
+                    // This is the SAME continuous leaf that admits clearance.
+                    // No endpoint-only direction sampling or extra subdivision
+                    // is used to reduce the source-clock bandwidth requirement.
+                    let rate = doppler::directional_maximum_rate(
+                        displacement,
+                        causal_range,
+                        source.velocity_mach_bounds,
+                        receiver_velocity,
+                        owner.source.maximum_mach(),
+                        receiver_mach,
+                        owner.maximum_source_time_rate,
+                    );
+                    maximum_rate = maximum_rate.max(rate);
                     continue;
                 }
                 if node.depth >= budget.maximum_subdivision_depth {
@@ -770,19 +790,28 @@ fn admit_clearance(
             }
         }
     }
-    Ok(())
+    // Empty/inconclusive auxiliary coverage must never relax admission.
+    Ok(if maximum_rate > 0.0 {
+        maximum_rate
+    } else {
+        owner.maximum_source_time_rate
+    })
 }
 
-fn distance_hull(node: &PairNode, origin_delta: [Interval; 3]) -> Interval {
-    let components: [Interval; 3] = core::array::from_fn(|axis| {
+fn displacement_hull(node: &PairNode, origin_delta: [Interval; 3]) -> [Interval; 3] {
+    core::array::from_fn(|axis| {
         let mut source = node.source_position[0][axis];
         let mut receiver = node.receiver_position[0][axis];
         for i in 1..6 {
             source = source.hull(node.source_position[i][axis]);
             receiver = receiver.hull(node.receiver_position[i][axis]);
         }
-        (origin_delta[axis] + receiver - source).abs()
-    });
+        origin_delta[axis] + receiver - source
+    })
+}
+
+fn distance_hull(displacement: [Interval; 3]) -> Interval {
+    let components = displacement.map(Interval::abs);
     let scale = components.iter().fold(0.0_f64, |a, b| a.max(b.hi()));
     if !scale.is_finite() {
         return Interval::new(0.0, f64::INFINITY);
