@@ -32,6 +32,9 @@ pub mod kapitza;
 /// Energy-accounted, homogeneous growth and decay of an isotropic vortex tangle.
 pub mod vinen;
 
+/// Continuous authored isobaric calorics and compatible two-fluid references.
+pub mod caloric;
+
 /// Normal-component drag against stationary walls at authored permeability.
 pub mod normal_wall;
 pub use normal_wall::{NormalViscousWall, NormalWallRelaxation, NormalWallStep};
