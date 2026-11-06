@@ -20,6 +20,8 @@ pub mod source;
 /// Calibrated Mode-I Paris crack growth with evolving stress intensity.
 pub mod crack_growth;
 pub mod critical_plane;
+/// Read accepted stress and complete history from original cyclic metal laws.
+pub mod cyclic;
 /// Bounded Coffin-Manson-Basquin total mechanical strain-life estimates.
 pub mod strain_life;
 

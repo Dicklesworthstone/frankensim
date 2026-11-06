@@ -3134,6 +3134,33 @@ requested path before printing successful output. Its explicit
 the catalog's compression-reference tests exercise four actual foam grades
 and reinforced PEEK through the production compiler and this owner.
 
+## Accepted-state fatigue observation for cyclic metal laws
+
+`fatigue::cyclic::SourceBoundFatigueLaw` admits the original source-bound
+J2/Prager, Voce and Chaboche laws, including one through eight independently
+resolved recovery branches and borrowed native laws. Static dispatch retains
+the actual associated state and complete immutable material receipts. The
+common elastic/initial-yield backbone serves calibration binding and accepted
+stress recovery; it never replaces the native nonlinear constitutive update.
+
+Accepted physical stress is the original elastic map of total mechanical strain
+minus accepted plastic strain. Backstresses translate the yield surface and
+are not subtracted from that physical stress. Consumers that already retain
+native stress use that tensor directly. Observation performs no return map,
+state update, source query or per-sample source clone. Native history validation
+retains finite/strain/plastic bounds and every Chaboche branch's deviatoric,
+reachable and saturation bounds. Equilibrium and yield convergence remain
+owned by the native solve, without an invented observation tolerance.
+
+The interface is sealed to these fixed-condition laws. Thermal eigenstrain,
+creep, viscous histories and changing-temperature calibrations require their
+own admitted mechanical-strain decomposition and are not silently included.
+Focused regressions in `plastic_chaboche_source` and
+`plastic_chaboche_branches` compare accepted physical stress to native updates,
+exercise nonproportional/reversed strain and borrowed sources, and reject
+unreachable histories including an invalid last branch in an eight-branch law.
+Synthetic numerical checks do not establish measured fatigue life.
+
 ## Source-resolved strain-life calibration
 
 `fatigue::strain_life::source::resolve_cmb` resolves the original elastic modulus

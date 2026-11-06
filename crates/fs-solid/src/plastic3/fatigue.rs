@@ -1,10 +1,11 @@
-//! Bounded strain-life observation on the native source-bound J2 load path.
+//! Bounded strain-life observation on native source-bound cyclic J2 load paths.
 //!
 //! Each accepted load factor uses the original `solve_from` owner and retains
-//! its plastic strain and isotropic/kinematic history. Gauges observe signed
+//! its plastic strain and complete isotropic/kinematic history, including Voce
+//! saturation and every Chaboche recovery branch. Gauges observe signed
 //! TOTAL MECHANICAL strain in a fixed reference plane, not accumulated plastic
-//! strain or unsigned equivalent stress. `ResolvedJ2Plasticity` has no thermal
-//! eigenstrain: its source temperature and coefficients stay fixed throughout.
+//! strain or unsigned equivalent stress. The admitted laws have no thermal
+//! eigenstrain: source temperature and coefficients stay fixed throughout.
 //! Thermal-wrapped laws and changing-temperature paths need their own admitted
 //! mechanical-strain transfer and cannot enter this fixed-state adapter.
 //!
@@ -20,13 +21,14 @@
 //! retaining engineering-shear amplitude and its named normal-stress policy. Local tensor closure
 //! alone does not establish plastic stabilization or repeatable component life.
 //! Fatigue damage changes neither stiffness, heat nor failure topology. Native
-//! small-strain/P1 and linear-hardening limits remain in force. Resolve every
+//! small-strain/P1 and each source law's limits remain in force. Resolve every
 //! physical turning point in `load_path`; no extrema between targets are inferred.
 
 use std::sync::Arc;
 
 use fs_blake3::ContentHash;
 use fs_exec::Cx;
+use fs_material::SmallStrainLaw;
 use fs_material::fatigue::critical_plane::fatemi_socie::{
     FatemiSocieCalibration, FatemiSocieCycle, FatemiSocieCycleResult, FatemiSocieError,
     FatemiSocieLimits,
@@ -38,12 +40,12 @@ use fs_material::fatigue::critical_plane::{
     CriticalPlaneError, CriticalPlaneLimits, CycleClosureTolerance, SwtCycle, SwtCycleResult,
     TensorFatigueSample,
 };
+use fs_material::fatigue::cyclic::SourceBoundFatigueLaw;
 use fs_material::fatigue::strain_life::{
     PairedStrainLifeMiner, StrainLifeCurve, StrainLifeMeanStress, StrainLifeMiner,
     StrainLifeSummary, StrainStressSample,
 };
 use fs_material::fatigue::{FatigueError, NormalStressDirection, RainflowLimits};
-use fs_material::plastic::J2State;
 use fs_material::plastic::source::ResolvedJ2Plasticity;
 use fs_material::state_point::{
     POISSON_RATIO_PROPERTY, YIELD_STRESS_PROPERTY, YOUNG_MODULUS_PROPERTY,
@@ -290,22 +292,24 @@ pub(super) struct J2FatigueCheckpoint {
 /// a requested block only after every mechanical increment and gauge accepts.
 /// Cloning retains the complete current plastic and unresolved cycle histories.
 /// Only the latest native increment record is retained, not the whole trace.
+/// The default law preserves the original linear J2 API; source-bound Voce and
+/// Chaboche laws retain their complete native state through the same observer.
 #[derive(Debug, Clone)]
-pub struct J2FatiguePath<'p, 'm> {
-    problem: &'p SmallStrainTetProblem<'m, ResolvedJ2Plasticity>,
-    solution: SmallStrainTetSolution<J2State>,
+pub struct J2FatiguePath<'p, 'm, L: SourceBoundFatigueLaw = ResolvedJ2Plasticity> {
+    problem: &'p SmallStrainTetProblem<'m, L>,
+    solution: SmallStrainTetSolution<L::State>,
     observer: J2FatigueObserver,
     accepted_increments: usize,
 }
 
-impl<'p, 'm> J2FatiguePath<'p, 'm> {
+impl<'p, 'm, L: SourceBoundFatigueLaw> J2FatiguePath<'p, 'm, L> {
     /// Solve the real virgin, zero-load state and accept it as the first
     /// observation. The declared load path then supplies absolute targets.
     /// Source identities, labels, fixed positive T and modulus must agree with
     /// the actual resolved constitutive field. No thermal strain is subtracted
     /// or guessed, and no pre-existing plastic/fatigue history is fabricated.
     pub fn new(
-        problem: &'p SmallStrainTetProblem<'m, ResolvedJ2Plasticity>,
+        problem: &'p SmallStrainTetProblem<'m, L>,
         mesh_frame: ContentHash,
         gauges: Vec<J2FatigueGauge>,
         config: J2FatigueConfig,
@@ -319,7 +323,7 @@ impl<'p, 'm> J2FatiguePath<'p, 'm> {
     /// After conditioning, explicitly restart its cycle at an accepted native
     /// checkpoint; no supplied tensor or imported constitutive state is accepted.
     pub fn new_with_critical_planes(
-        problem: &'p SmallStrainTetProblem<'m, ResolvedJ2Plasticity>,
+        problem: &'p SmallStrainTetProblem<'m, L>,
         mesh_frame: ContentHash,
         gauges: Vec<J2FatigueGauge>,
         critical: Vec<J2CriticalPlaneGauge>,
@@ -341,7 +345,7 @@ impl<'p, 'm> J2FatiguePath<'p, 'm> {
     /// same actual J2 trajectory. Every declared bank begins at the native
     /// zero-load state and participates in the existing atomic cycle lifecycle.
     pub fn new_with_fatemi_socie(
-        problem: &'p SmallStrainTetProblem<'m, ResolvedJ2Plasticity>,
+        problem: &'p SmallStrainTetProblem<'m, L>,
         mesh_frame: ContentHash,
         gauges: Vec<J2FatigueGauge>,
         critical: Vec<J2CriticalPlaneGauge>,
@@ -365,7 +369,7 @@ impl<'p, 'm> J2FatiguePath<'p, 'm> {
     /// existing fixed-plane and representative-cycle fatigue banks.
     #[allow(clippy::too_many_arguments)]
     pub fn new_with_variable_amplitude(
-        problem: &'p SmallStrainTetProblem<'m, ResolvedJ2Plasticity>,
+        problem: &'p SmallStrainTetProblem<'m, L>,
         mesh_frame: ContentHash,
         gauges: Vec<J2FatigueGauge>,
         critical: Vec<J2CriticalPlaneGauge>,
@@ -422,7 +426,7 @@ impl<'p, 'm> J2FatiguePath<'p, 'm> {
     pub fn remaining_increments(&self) -> usize {
         self.problem.load_path.len() - self.accepted_increments
     }
-    pub fn solution(&self) -> &SmallStrainTetSolution<J2State> {
+    pub fn solution(&self) -> &SmallStrainTetSolution<L::State> {
         &self.solution
     }
     pub fn summaries(&self) -> Vec<StrainLifeSummary> {
@@ -443,7 +447,7 @@ impl<'p, 'm> J2FatiguePath<'p, 'm> {
         self.observer.curve(gauge)
     }
     /// Original complete property receipts and native constitutive metadata.
-    pub fn material(&self, gauge: usize) -> Option<&ResolvedJ2Plasticity> {
+    pub fn material(&self, gauge: usize) -> Option<&L> {
         self.observer.material(self.problem, gauge)
     }
 
@@ -560,8 +564,8 @@ impl<'p, 'm> J2FatiguePath<'p, 'm> {
 }
 
 impl J2FatigueObserver {
-    pub(super) fn new(
-        problem: &SmallStrainTetProblem<'_, ResolvedJ2Plasticity>,
+    pub(super) fn new<L: SourceBoundFatigueLaw>(
+        problem: &SmallStrainTetProblem<'_, L>,
         mesh_frame: ContentHash,
         gauges: Vec<J2FatigueGauge>,
         critical: Vec<J2CriticalPlaneGauge>,
@@ -734,9 +738,13 @@ impl J2FatigueObserver {
         poll(cx)?;
         let mut summaries = Vec::with_capacity(self.gauges.len());
         for (index, gauge) in self.gauges.iter().enumerate() {
-            let summary = gauge.counter
+            let summary = gauge
+                .counter
                 .preview_finish(&mut || cx.checkpoint().is_err())
-                .map_err(|error| J2FatigueError::Gauge { gauge: index, error })?;
+                .map_err(|error| J2FatigueError::Gauge {
+                    gauge: index,
+                    error,
+                })?;
             summaries.push(summary);
         }
         poll(cx)?;
@@ -748,11 +756,11 @@ impl J2FatigueObserver {
     pub(super) fn curve(&self, gauge: usize) -> Option<&StrainLifeCurve> {
         self.gauges.get(gauge).map(|g| g.counter.curve())
     }
-    pub(super) fn material<'a>(
+    pub(super) fn material<'a, L: SourceBoundFatigueLaw>(
         &self,
-        problem: &'a SmallStrainTetProblem<'_, ResolvedJ2Plasticity>,
+        problem: &'a SmallStrainTetProblem<'_, L>,
         gauge: usize,
-    ) -> Option<&'a ResolvedJ2Plasticity> {
+    ) -> Option<&'a L> {
         self.gauges.get(gauge).map(|g| problem.laws.at(g.element))
     }
     pub(super) fn critical_plane_results(&self) -> Vec<Option<SwtCycleResult>> {
@@ -788,16 +796,22 @@ impl J2FatigueObserver {
         poll(cx)?;
         let mut results = Vec::with_capacity(self.variable_amplitude.len());
         for (index, gauge) in self.variable_amplitude.iter().enumerate() {
-            let result = gauge.counter
+            let result = gauge
+                .counter
                 .preview_finish_with_cancel(&mut || cx.checkpoint().is_err())
-                .map_err(|error| J2FatigueError::VariableAmplitude { gauge: index, error })?;
+                .map_err(|error| J2FatigueError::VariableAmplitude {
+                    gauge: index,
+                    error,
+                })?;
             results.push(result);
         }
         poll(cx)?;
         Ok(results)
     }
     pub(super) fn variable_amplitude_curve(&self, gauge: usize) -> Option<&StrainLifeCurve> {
-        self.variable_amplitude.get(gauge).map(|g| g.counter.curve())
+        self.variable_amplitude
+            .get(gauge)
+            .map(|g| g.counter.curve())
     }
     pub(super) fn checkpoint(&self) -> J2FatigueCheckpoint {
         J2FatigueCheckpoint {
@@ -846,9 +860,9 @@ impl J2FatigueObserver {
         Ok(())
     }
 
-    pub(super) fn restart_critical_plane_cycle(
+    pub(super) fn restart_critical_plane_cycle<S>(
         &mut self,
-        solution: &SmallStrainTetSolution<J2State>,
+        solution: &SmallStrainTetSolution<S>,
         cx: &Cx<'_>,
     ) -> Result<(), J2FatigueError> {
         self.require_critical(cx)?;
@@ -944,10 +958,10 @@ impl J2FatigueObserver {
     }
     /// Called inside the owning native block transaction, or before the initial
     /// state is published. The native owner restores its checkpoint on refusal.
-    pub(super) fn observe(
+    pub(super) fn observe<L: SourceBoundFatigueLaw>(
         &mut self,
-        problem: &SmallStrainTetProblem<'_, ResolvedJ2Plasticity>,
-        solution: &SmallStrainTetSolution<J2State>,
+        problem: &SmallStrainTetProblem<'_, L>,
+        solution: &SmallStrainTetSolution<L::State>,
         cx: &Cx<'_>,
     ) -> Result<(), J2FatigueError> {
         self.check_sample(cx)?;
@@ -1004,10 +1018,10 @@ impl J2FatigueObserver {
     }
 }
 
-fn push_critical(
+fn push_critical<S>(
     gauge: &mut CriticalGaugeState,
     index: usize,
-    solution: &SmallStrainTetSolution<J2State>,
+    solution: &SmallStrainTetSolution<S>,
     cx: &Cx<'_>,
 ) -> Result<(), J2FatigueError> {
     gauge
@@ -1025,10 +1039,10 @@ fn push_critical(
         })
 }
 
-fn push_variable_amplitude(
+fn push_variable_amplitude<S>(
     gauge: &mut VariableAmplitudeGaugeState,
     index: usize,
-    solution: &SmallStrainTetSolution<J2State>,
+    solution: &SmallStrainTetSolution<S>,
     cx: &Cx<'_>,
 ) -> Result<(), J2FatigueError> {
     gauge
@@ -1046,10 +1060,10 @@ fn push_variable_amplitude(
         })
 }
 
-fn push_fatemi_socie(
+fn push_fatemi_socie<S>(
     gauge: &mut FatemiSocieGaugeState,
     index: usize,
-    solution: &SmallStrainTetSolution<J2State>,
+    solution: &SmallStrainTetSolution<S>,
     cx: &Cx<'_>,
 ) -> Result<(), J2FatigueError> {
     gauge
@@ -1069,8 +1083,8 @@ fn push_fatemi_socie(
 
 // SourceMismatch uses fixed, SWT, Fatemi-Socie, then variable-amplitude indexing.
 
-fn bind_curve(
-    problem: &SmallStrainTetProblem<'_, ResolvedJ2Plasticity>,
+fn bind_curve<L: SourceBoundFatigueLaw>(
+    problem: &SmallStrainTetProblem<'_, L>,
     index: usize,
     element: usize,
     identity: ContentHash,
@@ -1082,7 +1096,7 @@ fn bind_curve(
         ));
     }
     let law = problem.laws.at(element);
-    let material = law.material();
+    let material = law.fatigue_source();
     let scope = curve.scope();
     if identity != material.identity()
         || scope.material != material.material().chemistry
@@ -1097,7 +1111,7 @@ fn bind_curve(
         .source()
         .map_or("T", |source| source.request().temperature_axis.as_str());
     if material.state_coordinate(temperature_axis) != Some(scope.temperature_k)
-        || curve.parameters().youngs_modulus_pa != law.law().elastic.youngs
+        || curve.parameters().youngs_modulus_pa != law.fatigue_backbone().elastic.youngs
     {
         return Err(J2FatigueError::SourceMismatch {
             gauge: index,
@@ -1127,8 +1141,8 @@ fn bind_curve(
     Ok(())
 }
 
-fn bind_fatemi_socie(
-    problem: &SmallStrainTetProblem<'_, ResolvedJ2Plasticity>,
+fn bind_fatemi_socie<L: SourceBoundFatigueLaw>(
+    problem: &SmallStrainTetProblem<'_, L>,
     index: usize,
     element: usize,
     identity: ContentHash,
@@ -1140,7 +1154,7 @@ fn bind_fatemi_socie(
         ));
     }
     let law = problem.laws.at(element);
-    let material = law.material();
+    let material = law.fatigue_source();
     let scope = calibration.scope();
     let parameters = calibration.parameters();
     if identity != material.identity()
@@ -1156,8 +1170,8 @@ fn bind_fatemi_socie(
         .source()
         .map_or("T", |source| source.request().temperature_axis.as_str());
     if material.state_coordinate(temperature_axis) != Some(scope.temperature_k)
-        || parameters.shear_modulus_pa != law.law().elastic.lame().1
-        || parameters.initial_yield_stress_pa != law.law().yield_stress
+        || parameters.shear_modulus_pa != law.fatigue_backbone().elastic.lame().1
+        || parameters.initial_yield_stress_pa != law.fatigue_backbone().yield_stress
     {
         return Err(J2FatigueError::SourceMismatch {
             gauge: index,
@@ -1195,10 +1209,10 @@ pub(super) fn poll(cx: &Cx<'_>) -> Result<(), J2FatigueError> {
     cx.checkpoint().map_err(|_| J2FatigueError::Cancelled)
 }
 
-pub(super) fn with_path<'a>(
-    problem: &'a SmallStrainTetProblem<'_, ResolvedJ2Plasticity>,
+pub(super) fn with_path<'a, L: SmallStrainLaw>(
+    problem: &'a SmallStrainTetProblem<'_, L>,
     path: &'a [f64],
-) -> SmallStrainTetProblem<'a, ResolvedJ2Plasticity> {
+) -> SmallStrainTetProblem<'a, L> {
     SmallStrainTetProblem {
         nodes_m: problem.nodes_m,
         tetrahedra: problem.tetrahedra,
@@ -1214,9 +1228,9 @@ pub(super) fn with_path<'a>(
     }
 }
 
-fn observe(
-    problem: &SmallStrainTetProblem<'_, ResolvedJ2Plasticity>,
-    solution: &SmallStrainTetSolution<J2State>,
+fn observe<L: SourceBoundFatigueLaw>(
+    problem: &SmallStrainTetProblem<'_, L>,
+    solution: &SmallStrainTetSolution<L::State>,
     gauges: &mut [GaugeState],
     cx: &Cx<'_>,
 ) -> Result<(), J2FatigueError> {
@@ -1231,21 +1245,22 @@ fn observe(
         ));
     }
     // Enforce the original law's actual componentwise tensor-Voigt envelope at
-    // EVERY element, including unobserved ones. The generic native solver
-    // deliberately leaves this model-domain obligation to its owning caller.
+    // EVERY element, including unobserved ones and every Chaboche branch. The
+    // generic native solver leaves this model-domain obligation to its caller.
+    // Validate the accepted history without re-running a return map; fatigue
+    // continues to use the actual stress tensors stored by the native solver.
     for (index, strain) in solution.element_strain.iter().enumerate() {
         if index % 256 == 0 {
             poll(cx)?;
         }
-        let limit = problem.laws.at(index).law().elastic.strain_limit.min(0.05);
+        let law = problem.laws.at(index);
+        let limit = law.fatigue_backbone().elastic.strain_limit.min(0.05);
         let state = &solution.element_states[index];
         if strain.iter().any(|x| !x.is_finite() || x.abs() > limit)
             || solution.element_stress[index]
                 .iter()
                 .any(|x| !x.is_finite())
-            || !state.alpha.is_finite()
-            || state.alpha < 0.0
-            || state.plastic_strain.iter().any(|x| !x.is_finite())
+            || law.validate_fatigue_history(strain, state).is_err()
         {
             return Err(J2FatigueError::Invalid(
                 "native response exceeds the admitted J2 small-strain/finite-state domain",

@@ -96,6 +96,85 @@ fn near(actual: f64, expected: f64) {
     );
 }
 
+// G1/G3: accepted fatigue observation must preserve the original physical
+// stress, including the part translated by cyclic hardening. Re-running a
+// return map or reporting effective stress would change these observations.
+fn check_accepted_fatigue<L: fs_material::fatigue::cyclic::SourceBoundFatigueLaw>(law: &L) {
+    use fs_material::fatigue::cyclic::SourceBoundFatigueLaw;
+    let mut state = law.initial_state();
+    for strain in [
+        [0.0, 0.0, 0.0, 0.01, 0.0, 0.0],
+        [0.0, 0.0, 0.0, -0.012, 0.0, 0.0],
+        [0.004, -0.002, -0.002, 0.008, 0.003, 0.0],
+        [-0.003, 0.0015, 0.0015, -0.009, 0.0, 0.002],
+    ] {
+        let physical = law.stress(&strain, &state);
+        let next = law.update_state(&strain, &state);
+        let before = next.clone();
+        let sample = law.accepted_fatigue_sample(&strain, &next).unwrap();
+        assert_eq!(sample.total_mechanical_strain, strain);
+        for (actual, expected) in sample.stress_pa.into_iter().zip(physical) {
+            near(actual, expected);
+        }
+        assert_eq!(next, before);
+        let borrowed =
+            <&L as SourceBoundFatigueLaw>::accepted_fatigue_sample(&law, &strain, &next).unwrap();
+        assert_eq!(borrowed, sample);
+        assert!(std::ptr::eq(
+            <&L as SourceBoundFatigueLaw>::fatigue_source(&law),
+            law.fatigue_source(),
+        ));
+        state = next;
+    }
+}
+
+#[test]
+fn accepted_fatigue_uses_original_stress_for_j2_voce_and_chaboche() {
+    use fs_material::fatigue::cyclic::SourceBoundFatigueLaw;
+    let source = card(properties());
+    let law = resolve(&source, MIXED);
+    check_accepted_fatigue(law.backbone().backbone());
+    check_accepted_fatigue(law.backbone());
+    check_accepted_fatigue(&law);
+    assert_eq!(law.fatigue_source().card_identity(), source.content_hash());
+    let strain = [0.0, 0.0, 0.0, 0.01, 0.0, 0.0];
+    let state = law.update_state(&strain, &law.initial_state());
+    let sample = law.accepted_fatigue_sample(&strain, &state).unwrap();
+    let shift = state.backstress_pa[0][3]
+        + (2.0 / 3.0)
+            * law.fatigue_backbone().kinematic_hardening
+            * state.plastic.plastic_strain[3];
+    assert!(shift > 0.1);
+    let effective_shear = sample.stress_pa[3] - shift;
+    let radius =
+        3.0 + 40.0 * state.plastic.alpha + 2.0 * (1.0 - (-80.0 * state.plastic.alpha).exp());
+    near(3.0_f64.sqrt() * effective_shear, radius);
+    assert!((sample.stress_pa[3] - effective_shear).abs() > 0.1);
+}
+
+#[test]
+fn fatigue_admission_retains_native_plastic_and_backstress_bounds() {
+    use fs_material::fatigue::cyclic::SourceBoundFatigueLaw;
+    let law = resolve(&card(properties()), MIXED);
+    let strain = [0.0, 0.0, 0.0, 0.01, 0.0, 0.0];
+    let state = law.update_state(&strain, &law.initial_state());
+    law.validate_fatigue_history(&strain, &state).unwrap();
+    let mut invalid = state.clone();
+    invalid.plastic.alpha = 0.0;
+    assert!(law.accepted_fatigue_sample(&strain, &invalid).is_err());
+    invalid = state.clone();
+    invalid.backstress_pa[0][0] += 1.0;
+    assert!(law.accepted_fatigue_sample(&strain, &invalid).is_err());
+    invalid = state;
+    invalid.backstress_pa[0] = [100.0, -100.0, 0.0, 0.0, 0.0, 0.0];
+    assert!(law.accepted_fatigue_sample(&strain, &invalid).is_err());
+    let outside = [0.05, 0.0, 0.0, 0.0, 0.0, 0.0];
+    assert!(
+        law.accepted_fatigue_sample(&outside, &law.initial_state())
+            .is_err()
+    );
+}
+
 #[test]
 fn independently_sourced_recovery_drives_cyclic_history_without_changing_the_voce_split() {
     let source = card(properties());

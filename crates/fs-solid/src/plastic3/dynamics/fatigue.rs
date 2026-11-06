@@ -1,8 +1,9 @@
 //! Source-bound strain life on the original physical-time inelastic solve.
 //!
 //! Each accepted interval calls `advance_backward_euler` with the complete
-//! previous displacement, velocity and J2/Prager history. Every actual native
-//! stress and total mechanical strain sample enters the same fixed-plane
+//! previous displacement, velocity and complete cyclic plastic history. Voce
+//! saturation and every Chaboche recovery branch stay with the native law.
+//! Every actual native stress and total mechanical strain sample enters the same fixed-plane
 //! observer used by the quasistatic J2 path, including separately calibrated
 //! Fatemi-Socie shear-strain life and tensile SWT. Initial velocity can therefore
 //! produce fatigue with no applied force; load factors are not fatigue samples.
@@ -11,7 +12,8 @@
 //! conditions, mesh and support DOFs stay fixed. Absolute endpoint load factors
 //! scale the original prescribed displacement and dead-force patterns. This
 //! adapter supplies no thermal eigenstrain, evolving-temperature law, arbitrary
-//! imported state, nonproportional cyclic hardening or fatigue-to-stiffness feedback.
+//! imported state or fatigue-to-stiffness feedback. The original constitutive
+//! law determines the admitted hardening and recovery response.
 //!
 //! Backward Euler has numerical damping. Its original inertial energy receipt
 //! remains distinct from physical plastic dissipation and Miner damage. The
@@ -27,8 +29,8 @@ use fs_material::fatigue::critical_plane::fatemi_socie::{
     FatemiSocieCalibration, FatemiSocieCycleResult,
 };
 use fs_material::fatigue::critical_plane::miner::CriticalPlaneMinerResult;
+use fs_material::fatigue::cyclic::SourceBoundFatigueLaw;
 use fs_material::fatigue::strain_life::{StrainLifeCurve, StrainLifeSummary};
-use fs_material::plastic::J2State;
 use fs_material::plastic::source::ResolvedJ2Plasticity;
 use fs_material::state_point::DENSITY_PROPERTY;
 use fs_qty::{Density, QuantitySpec};
@@ -72,9 +74,9 @@ pub struct J2DynamicFatigueStep {
 /// Only the latest native solution/energy receipt is retained; source density
 /// is shared immutably and no external stress/strain arrays can be injected.
 #[derive(Debug, Clone)]
-pub struct J2DynamicFatigueRun<'p, 'm> {
-    problem: &'p SmallStrainTetProblem<'m, ResolvedJ2Plasticity>,
-    solution: SmallStrainTetSolution<J2State>,
+pub struct J2DynamicFatigueRun<'p, 'm, L: SourceBoundFatigueLaw = ResolvedJ2Plasticity> {
+    problem: &'p SmallStrainTetProblem<'m, L>,
+    solution: SmallStrainTetSolution<L::State>,
     velocity_mps: Vec<[f64; 3]>,
     reference_density_kg_m3: Arc<[f64]>,
     observer: J2FatigueObserver,
@@ -84,7 +86,7 @@ pub struct J2DynamicFatigueRun<'p, 'm> {
     last_step: Option<J2DynamicFatigueStep>,
 }
 
-impl<'p, 'm> J2DynamicFatigueRun<'p, 'm> {
+impl<'p, 'm, L: SourceBoundFatigueLaw> J2DynamicFatigueRun<'p, 'm, L> {
     /// Admit the real virgin zero-load native solution as sample zero, with an
     /// explicit finite initial nodal velocity and nonnegative time origin.
     /// Prescribed DOFs initially have zero displacement AND zero velocity.
@@ -94,7 +96,7 @@ impl<'p, 'm> J2DynamicFatigueRun<'p, 'm> {
     /// source-resolved SI density at the same frozen external conditions.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        problem: &'p SmallStrainTetProblem<'m, ResolvedJ2Plasticity>,
+        problem: &'p SmallStrainTetProblem<'m, L>,
         mesh_frame: ContentHash,
         gauges: Vec<J2FatigueGauge>,
         config: J2DynamicFatigueConfig,
@@ -120,7 +122,7 @@ impl<'p, 'm> J2DynamicFatigueRun<'p, 'm> {
     /// checkpoint after warm-up; supplied stress/strain histories cannot enter.
     #[allow(clippy::too_many_arguments)]
     pub fn new_with_critical_planes(
-        problem: &'p SmallStrainTetProblem<'m, ResolvedJ2Plasticity>,
+        problem: &'p SmallStrainTetProblem<'m, L>,
         mesh_frame: ContentHash,
         gauges: Vec<J2FatigueGauge>,
         critical: Vec<J2CriticalPlaneGauge>,
@@ -147,7 +149,7 @@ impl<'p, 'm> J2DynamicFatigueRun<'p, 'm> {
     /// accepted tensor samples, conditioning restart and atomic cycle closure.
     #[allow(clippy::too_many_arguments)]
     pub fn new_with_fatemi_socie(
-        problem: &'p SmallStrainTetProblem<'m, ResolvedJ2Plasticity>,
+        problem: &'p SmallStrainTetProblem<'m, L>,
         mesh_frame: ContentHash,
         gauges: Vec<J2FatigueGauge>,
         critical: Vec<J2CriticalPlaneGauge>,
@@ -175,7 +177,7 @@ impl<'p, 'm> J2DynamicFatigueRun<'p, 'm> {
     /// accepted native inertial J2 trajectory as the existing fatigue banks.
     #[allow(clippy::too_many_arguments)]
     pub fn new_with_variable_amplitude(
-        problem: &'p SmallStrainTetProblem<'m, ResolvedJ2Plasticity>,
+        problem: &'p SmallStrainTetProblem<'m, L>,
         mesh_frame: ContentHash,
         gauges: Vec<J2FatigueGauge>,
         critical: Vec<J2CriticalPlaneGauge>,
@@ -259,7 +261,7 @@ impl<'p, 'm> J2DynamicFatigueRun<'p, 'm> {
     pub fn remaining_steps(&self) -> usize {
         self.maximum_steps - self.accepted_steps
     }
-    pub fn solution(&self) -> &SmallStrainTetSolution<J2State> {
+    pub fn solution(&self) -> &SmallStrainTetSolution<L::State> {
         &self.solution
     }
     pub fn velocity_mps(&self) -> &[[f64; 3]] {
@@ -288,7 +290,7 @@ impl<'p, 'm> J2DynamicFatigueRun<'p, 'm> {
         self.observer.curve(gauge)
     }
     /// Complete original constitutive and density source receipts.
-    pub fn material(&self, gauge: usize) -> Option<&ResolvedJ2Plasticity> {
+    pub fn material(&self, gauge: usize) -> Option<&L> {
         self.observer.material(self.problem, gauge)
     }
 
@@ -480,8 +482,8 @@ impl<'p, 'm> J2DynamicFatigueRun<'p, 'm> {
     }
 }
 
-fn source_density(
-    problem: &SmallStrainTetProblem<'_, ResolvedJ2Plasticity>,
+fn source_density<L: SourceBoundFatigueLaw>(
+    problem: &SmallStrainTetProblem<'_, L>,
     cx: &Cx<'_>,
 ) -> Result<Vec<f64>, J2FatigueError> {
     let mut densities = Vec::with_capacity(problem.tetrahedra.len());
@@ -492,7 +494,7 @@ fn source_density(
         let density = problem
             .laws
             .at(element)
-            .material()
+            .fatigue_source()
             .property(DENSITY_PROPERTY)
             .ok_or(J2FatigueError::Invalid(
                 "every original J2 material needs one unambiguous source density",

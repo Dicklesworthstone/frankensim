@@ -122,6 +122,47 @@ fn near(actual: f64, expected: f64) {
     );
 }
 
+fn accepted_fatigue_branches<const N: usize>() {
+    use fs_material::fatigue::cyclic::SourceBoundFatigueLaw;
+    let schema = names::<N>();
+    let values = core::array::from_fn(|i| (80.0 + 10.0 * i as f64, 40.0 + 30.0 * i as f64));
+    let source = card(properties(&schema, &values));
+    let law = resolve(&source, schema);
+    let mut state = law.initial_state();
+    let mut final_strain = [0.0; 6];
+    for shear in [0.012, -0.014, 0.016, -0.009] {
+        let strain = [0.0, 0.0, 0.0, shear, 0.0, 0.0];
+        let physical = law.stress(&strain, &state);
+        let next = law.update_state(&strain, &state);
+        let sample = law.accepted_fatigue_sample(&strain, &next).unwrap();
+        for (actual, expected) in sample.stress_pa.into_iter().zip(physical) {
+            near(actual, expected);
+        }
+        let independent_shift = (2.0 / 3.0) * HK * next.plastic.plastic_strain[3]
+            + next.backstress_pa.iter().map(|a| a[3]).sum::<f64>();
+        let radius = SY + H * next.plastic.alpha + 2.0 * (1.0 - (-80.0 * next.plastic.alpha).exp());
+        near(
+            3.0_f64.sqrt() * (sample.stress_pa[3] - independent_shift).abs(),
+            radius,
+        );
+        state = next;
+        final_strain = strain;
+    }
+    assert_eq!(law.fatigue_source().card_identity(), source.content_hash());
+    assert_eq!(law.fatigue_source().properties().len(), 7 + 2 * N);
+    // Poison the LAST branch: collapsing or inspecting only the first branch
+    // would incorrectly accept a state that its own native law cannot reach.
+    state.backstress_pa[N - 1] = [100.0, -100.0, 0.0, 0.0, 0.0, 0.0];
+    assert!(law.accepted_fatigue_sample(&final_strain, &state).is_err());
+}
+
+#[test]
+fn fatigue_preserves_one_two_and_eight_independent_cyclic_branches() {
+    accepted_fatigue_branches::<1>();
+    accepted_fatigue_branches::<2>();
+    accepted_fatigue_branches::<8>();
+}
+
 fn cyclic<const N: usize>(values: [(f64, f64); N]) {
     let schema = names();
     let source = card(properties(&schema, &values));

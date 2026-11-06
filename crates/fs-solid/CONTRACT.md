@@ -1984,7 +1984,9 @@ unexecuted without the complete workspace dependency closure.
 
 `plastic3::dynamics::fatigue::J2DynamicFatigueRun` owns accepted physical time,
 displacement, velocity, native plastic history and bounded fatigue observation
-while borrowing the original source-resolved J2 problem. It initializes through
+while borrowing the original source-resolved cyclic plasticity problem. The
+law parameter defaults to `ResolvedJ2Plasticity` and also admits native Voce
+and Chaboche histories through `SourceBoundFatigueLaw`. It initializes through
 the real zero-load solve, admits explicit velocity compatible with the original
 supports, and freezes reference density from each original material bundle.
 Every strictly increasing endpoint calls the existing `advance_backward_euler`
@@ -2018,21 +2020,28 @@ mean-stress policies, continuation, source admission and atomic rollback.
 
 `plastic3::fatigue::J2FatiguePath` owns the latest native solution and one
 scalar or paired strain-life counter per fixed-plane gauge while borrowing the original
-`SmallStrainTetProblem<ResolvedJ2Plasticity>`. The real virgin zero-load solve
+`SmallStrainTetProblem<L>`, with `ResolvedJ2Plasticity` as the default law and
+source-bound Voce/Chaboche laws admitted without changing their native state.
+The real virgin zero-load solve
 is the first observation. Every original absolute load target goes through
-`solve_from`; its plastic strain, accumulated isotropic history and Prager
-backstress continue from the preceding accepted state. The observer projects
+`solve_from`; its plastic strain, accumulated isotropic history, Voce saturation,
+Prager shift and every Chaboche recovery branch continue from the preceding
+accepted state as applicable to the original law. The observer projects
 the returned tensor-Voigt total mechanical strain and signed normal stress.
 It does not substitute nondecreasing equivalent plastic strain, unsigned von
 Mises stress or a second constitutive approximation.
 
 Each calibration must match its original resolved material-state identity,
 chemistry, process, fixed temperature and Young's modulus. Original material
-receipts remain inspectable through the path. The adapter accepts only the
-source-resolved J2 owner, which has no thermal eigenstrain; thermal-wrapped
+receipts remain inspectable through the path. The admitted original cyclic
+laws have no thermal eigenstrain; thermal-wrapped
 laws and changing-temperature histories require a separately admitted transfer.
 Every accepted element, including ungauged ones, must remain within the native
-law's finite-state and componentwise small-strain envelope.
+law's finite-state and componentwise small-strain envelope, including every
+Chaboche branch's native history bounds. Physical fatigue stress is the original
+solver's accepted stress tensor, with no backstress subtraction or second
+constitutive evaluation. Complete source receipts, fixed modulus and initial
+yield references bind the existing CMB, SWT and Fatemi-Socie calibrations.
 
 `advance(count)` observes every intermediate target and commits the whole
 requested block only after mechanics and all gauges accept. Cancellation,
@@ -2049,6 +2058,15 @@ G0/G1/G3/G4 tests in `tests/plastic_fatigue.rs` compare the actual cyclic J2 cou
 with independent one-dimensional Prager equations and an analytical strain-life
 damage sum, and check continuation, source admission, budgets and rollback.
 Their data are synthetic numerical references, not held-out material evidence.
+
+Four further regressions in `tests/plastic_cyclic_fatigue.rs` exercise Voce
+against an independent scalar consistency equation and analytic strain-life
+count, three-branch reversal against the native exact axial restriction,
+variable-amplitude critical planes, original inertial stress/velocity/energy,
+and late static/dynamic refusal preserving every branch and fatigue counter.
+The existing fixed-plane, representative-cycle and variable-amplitude fatigue
+algorithms retain their original calibration and closure limits; native cyclic
+hardening alone does not validate ratcheting, stabilization or component life.
 
 
 ## Fatigue from accepted inertial stress histories
