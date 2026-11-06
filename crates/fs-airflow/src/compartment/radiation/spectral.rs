@@ -38,6 +38,7 @@
 //! particles and gas share the supplied layer temperature.
 
 use super::sheets::{SheetPair, admit_axis};
+use super::slabs::{self, MAX_SLAB_LAYERS, SlabPair};
 use super::soot::RayleighSoot;
 use super::{
     LayerAbsorption, MAX_RADIATION_SURFACES, ParticipatingEnclosure, RadiationError,
@@ -53,7 +54,7 @@ pub const MAX_SPECTRAL_BANDS: usize = 256;
 /// Hard ceiling on wavelength evaluations in one returned result.
 pub const MAX_SPECTRAL_EVALUATIONS: usize = 65_536;
 const MAX_DEPTH: usize = 24;
-const MAX_CHANNELS: usize = 2 * MAX_RADIATION_SURFACES + 3;
+const MAX_CHANNELS: usize = 2 * MAX_RADIATION_SURFACES + 3 + MAX_SLAB_LAYERS;
 /// Explicit molecular/background absorption over a finite wavelength interval.
 /// Adjacent bands must touch exactly; gaps are never assumed transparent.
 #[derive(Clone, Debug, PartialEq)]
@@ -138,6 +139,7 @@ pub struct SpectralOptics<'a> {
     // copying a report must not reallocate every band's per-surface strings.
     surface_bands: Option<Arc<[Vec<BandSurfaceEmissivity>]>>,
     sheet_bands: Option<Arc<[Vec<SheetPair>]>>,
+    slab_bands: Option<Arc<[Vec<SlabPair>]>>,
     varying: bool,
 }
 impl<'a> SpectralOptics<'a> {
@@ -162,6 +164,7 @@ impl<'a> SpectralOptics<'a> {
             gray_surface_assumption,
             surface_bands: None,
             sheet_bands: None,
+            slab_bands: None,
             varying,
         })
     }
@@ -192,6 +195,7 @@ impl<'a> SpectralOptics<'a> {
             gray_surface_assumption: String::new(),
             surface_bands: Some(surface_bands.into()),
             sheet_bands: None,
+            slab_bands: None,
             varying,
         })
     }
@@ -243,6 +247,51 @@ impl<'a> SpectralOptics<'a> {
         }
         optics.sheet_bands = Some(sheet_bands.into());
         Ok(optics)
+    }
+
+    /// Source-bearing non-isothermal slabs on the common wavelength partition.
+    ///
+    /// Surface sources cover ONLY non-port faces in increasing enclosure order;
+    /// no fictitious emissivity is attached to a transmitting material port.
+    /// Every band retains the same pairs, layer order and physical thicknesses.
+    /// Absorption and source temperature support may vary between bands.
+    pub fn new_with_slab_bands(
+        bands: Vec<SpectralBand>,
+        soot: [Option<SootPopulation<'a>>; 2],
+        surface_bands: Vec<Vec<BandSurfaceEmissivity>>,
+        slab_bands: Vec<Vec<SlabPair>>,
+    ) -> Result<Self, RadiationError> {
+        let varying = Self::admit_bands(&bands, &soot)?;
+        if slab_bands.len() != bands.len() || surface_bands.len() != bands.len()
+            || slab_bands.first().is_none_or(Vec::is_empty)
+        {
+            return Err(RadiationError::Invalid("provide slab and non-port sources on every common band"));
+        }
+        let n = surface_bands[0].len() + 2 * slab_bands[0].len();
+        if !(2..=MAX_RADIATION_SURFACES).contains(&n) {
+            return Err(RadiationError::Invalid("invalid spectral slab surface axis"));
+        }
+        for (band, pairs) in slab_bands.iter().enumerate() {
+            slabs::admit_axis(n, pairs)?;
+            if surface_bands[band].len() != surface_bands[0].len()
+                || pairs.len() != slab_bands[0].len()
+                || pairs.iter().zip(&slab_bands[0]).any(|(a, b)| {
+                    a.surfaces != b.surfaces || a.optics.layer_count() != b.optics.layer_count()
+                        || a.optics.layers().iter().zip(b.optics.layers()).any(|(x, y)| {
+                            x.thickness_m() != y.thickness_m()
+                        })
+                })
+            {
+                return Err(RadiationError::Invalid(
+                    "spectral slabs need fixed ordered port/layer axes and physical thicknesses",
+                ));
+            }
+        }
+        Ok(Self {
+            bands, soot, gray_surface_assumption: String::new(),
+            surface_bands: Some(surface_bands.into()), sheet_bands: None,
+            slab_bands: Some(slab_bands.into()), varying,
+        })
     }
 
     fn admit_bands(
@@ -297,6 +346,7 @@ impl<'a> SpectralOptics<'a> {
     }
 
     /// Original spectral surface inputs in band-then-surface order, if selected.
+    /// With slab bands, these cover only non-port faces in increasing order.
     pub fn surface_emissivity_bands(&self) -> Option<&[Vec<BandSurfaceEmissivity>]> {
         self.surface_bands.as_deref()
     }
@@ -305,6 +355,12 @@ impl<'a> SpectralOptics<'a> {
     /// The same ordered face pairs are retained across every band.
     pub fn sheet_bands(&self) -> Option<&[Vec<SheetPair>]> {
         self.sheet_bands.as_deref()
+    }
+
+    /// Original slab sources in band-then-stack order, if selected.
+    /// Layer temperatures must be supplied to `evaluate_spectral_with_slabs`.
+    pub fn slab_bands(&self) -> Option<&[Vec<SlabPair>]> {
+        self.slab_bands.as_deref()
     }
 
     /// Whether the optical transfer operator changes within a declared band
@@ -348,9 +404,11 @@ impl<'a> SpectralOptics<'a> {
 pub struct SpectralSolve {
     /// Original algebraic gates, also applied to the final integrated balance.
     pub algebraic: RadiationSolve,
-    /// Absolute estimated quadrature error per signed gas/surface power [W].
+    /// Absolute estimated WAVELENGTH quadrature error per signed gas, surface
+    /// or material-layer power [W]. Prepared slab angular coefficient
+    /// diagnostics remain separate in each slab's `quadrature()` report.
     pub heat_tolerance_w: f64,
-    /// Absolute estimated quadrature error per integrated radiosity [W/m²].
+    /// Absolute estimated wavelength quadrature error per radiosity [W/m²].
     pub radiosity_tolerance_w_m2: f64,
     /// Largest allowed omitted blackbody fraction for any participating node.
     /// This gates spectral coverage, not the unknown omitted net heat exchange.
@@ -396,11 +454,11 @@ pub struct SpectralRadiationReport<'a> {
     pub gas_heat_power: [Power; 2],
     /// Outgoing surface radiosities integrated over the wavelength window [W/m²].
     pub surface_radiosity_w_m2: Vec<f64>,
-    /// Estimated absolute quadrature errors for each surface heat power [W].
+    /// Estimated absolute wavelength quadrature errors for each surface heat power [W].
     pub surface_heat_error_estimate_w: Vec<f64>,
-    /// Estimated absolute quadrature errors for lower/upper gas powers [W].
+    /// Estimated absolute wavelength quadrature errors for lower/upper gas powers [W].
     pub gas_heat_error_estimate_w: [f64; 2],
-    /// Estimated absolute quadrature errors for each radiosity [W/m²].
+    /// Estimated absolute wavelength quadrature errors for each radiosity [W/m²].
     pub radiosity_error_estimate_w_m2: Vec<f64>,
     /// Applied original gray cards; empty when `optics` retains the actual
     /// band-resolved surface inputs instead. No unused gray source is reported.
@@ -409,6 +467,16 @@ pub struct SpectralRadiationReport<'a> {
     pub optics: SpectralOptics<'a>,
     /// Coverage diagnostics in original surface order, then lower and upper gas.
     pub coverage: Vec<SpectralCoverage>,
+    /// Actual material state and heating in stack-then-layer order. Slab ports
+    /// have zero surface thermal power; do not deposit their net flux again.
+    pub layer_temperatures: Vec<Vec<Temperature>>,
+    pub layer_heat_power: Vec<Vec<Power>>,
+    /// Wavelength quadrature error estimates per layer power [W]. Zero for
+    /// fixed bands does not remove the independently prepared angular error;
+    /// retain each source slab's `optics.quadrature()` diagnostics separately.
+    pub layer_heat_error_estimate_w: Vec<Vec<f64>>,
+    /// Omitted-spectrum diagnostics at each layer's actual temperature.
+    pub layer_coverage: Vec<Vec<SpectralCoverage>>,
     /// Integrated absolute surface-equation defect estimate [W/m²].
     pub surface_residual_integral_w_m2: f64,
     /// Actual signed sum of all integrated powers [W], never redistributed.
@@ -423,7 +491,8 @@ pub struct SpectralRadiationReport<'a> {
 }
 impl SpectralRadiationReport<'_> {
     /// Add the identical gas powers atomically to the existing source account.
-    /// Apply corresponding surface powers to their wall owners exactly once.
+    /// Apply corresponding surface AND material layer powers to their thermal
+    /// owners exactly once; slab ports receive no additional heat credit.
     pub fn add_gas_heat(&self, rates: &mut [LayerRates; 2]) -> Result<(), RadiationError> {
         let mut candidate = *rates;
         for (rate, &heat) in candidate.iter_mut().zip(&self.gas_heat_power) {
@@ -518,6 +587,81 @@ impl ParticipatingEnclosure {
         work: &mut SpectralWorkspace,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<SpectralRadiationReport<'a>, RadiationError> {
+        if optics.slab_bands.is_some() {
+            return Err(RadiationError::Invalid(
+                "slab spectra require explicit layer temperatures through evaluate_spectral_with_slabs",
+            ));
+        }
+        self.evaluate_spectral_state(
+            surface_temperatures, emissivities, &[], gas_temperatures,
+            optics, controls, work, &mut cancelled,
+        )
+    }
+
+    /// Use original room temperatures with explicit material layer states.
+    #[allow(clippy::too_many_arguments)]
+    pub fn evaluate_room_spectral_with_slabs<'a>(
+        &self,
+        room: &TwoZone,
+        surface_temperatures: &[Temperature],
+        emissivities: &[SurfaceEmissivity],
+        layer_temperatures: &[Vec<Temperature>],
+        optics: &SpectralOptics<'a>,
+        controls: SpectralSolve,
+        work: &mut SpectralWorkspace,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<SpectralRadiationReport<'a>, RadiationError> {
+        for path in self.paths() {
+            checkpoint(&mut cancelled)?;
+            for segment in &path.segments {
+                if segment.length.value() > 0.0 && room.layer(segment.layer).volume().value() == 0.0 {
+                    return Err(RadiationError::Invalid("optical path crosses an absent gas layer"));
+                }
+            }
+        }
+        self.evaluate_spectral_with_slabs(
+            surface_temperatures, emissivities, layer_temperatures,
+            [room.layer(Layer::Lower).temperature(), room.layer(Layer::Upper).temperature()],
+            optics, controls, work, cancelled,
+        )
+    }
+
+    /// Resolve each original material layer at its own temperature.
+    /// Gray cards must be empty: slab spectra retain compact non-port band
+    /// sources. The returned layer powers belong to the original material cells.
+    #[allow(clippy::too_many_arguments)]
+    pub fn evaluate_spectral_with_slabs<'a>(
+        &self,
+        surface_temperatures: &[Temperature],
+        emissivities: &[SurfaceEmissivity],
+        layer_temperatures: &[Vec<Temperature>],
+        gas_temperatures: [Temperature; 2],
+        optics: &SpectralOptics<'a>,
+        controls: SpectralSolve,
+        work: &mut SpectralWorkspace,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<SpectralRadiationReport<'a>, RadiationError> {
+        if optics.slab_bands.is_none() {
+            return Err(RadiationError::Invalid("slab spectra require original slab source bands"));
+        }
+        self.evaluate_spectral_state(
+            surface_temperatures, emissivities, layer_temperatures, gas_temperatures,
+            optics, controls, work, cancelled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn evaluate_spectral_state<'a>(
+        &self,
+        surface_temperatures: &[Temperature],
+        emissivities: &[SurfaceEmissivity],
+        layer_temperatures: &[Vec<Temperature>],
+        gas_temperatures: [Temperature; 2],
+        optics: &SpectralOptics<'a>,
+        controls: SpectralSolve,
+        work: &mut SpectralWorkspace,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<SpectralRadiationReport<'a>, RadiationError> {
         let gray = optics.surface_bands.is_none();
         if !gray && !emissivities.is_empty() {
             return Err(RadiationError::Invalid(
@@ -543,16 +687,24 @@ impl ParticipatingEnclosure {
         }
         let n = self.geometry().len();
         let m = n + 2;
+        let original_slabs = optics.slab_bands().map_or(&[] as &[SlabPair], |bands| bands[0].as_slice());
+        let (ports, layer_count) = slabs::admit_axis(n, original_slabs)?;
+        let mut source_index = [0; MAX_RADIATION_SURFACES];
+        let mut sources = 0;
+        for i in 0..n {
+            if !ports[i] { source_index[i] = sources; sources += 1; }
+        }
         if let Some(bands) = &optics.surface_bands {
             for band in bands.iter() {
                 checkpoint(&mut cancelled)?;
-                if band.len() != n {
+                if band.len() != sources {
                     return Err(RadiationError::Invalid(
                         "spectral surface axis differs from enclosure",
                     ));
                 }
-                for (source, temperature) in band.iter().zip(surface_temperatures) {
-                    let [lo, hi] = source.temperature_range.map(Temperature::value);
+                for (i, temperature) in surface_temperatures.iter().enumerate() {
+                    if ports[i] { continue; }
+                    let [lo, hi] = band[source_index[i]].temperature_range.map(Temperature::value);
                     if !(lo..=hi).contains(&temperature.value()) {
                         return Err(RadiationError::Invalid(
                             "surface temperature is outside spectral emissivity validity",
@@ -566,7 +718,13 @@ impl ParticipatingEnclosure {
                 self.admit_sheet_state(sheets, surface_temperatures, None, &mut cancelled)?;
             }
         }
-        let channels = m + n + 1;
+        if let Some(bands) = &optics.slab_bands {
+            for pairs in bands.iter() {
+                self.admit_slab_state(surface_temperatures, pairs, layer_temperatures, &mut cancelled)?;
+            }
+        }
+        let layer_begin = m + n + 1;
+        let channels = layer_begin + layer_count;
         let wavelengths = optics.wavelengths();
         let log_range = finite(wavelengths[1].value().ln() - wavelengths[0].value().ln())?;
         let mut temperatures = [0.0; MAX_RADIATION_SURFACES + 2];
@@ -584,10 +742,10 @@ impl ParticipatingEnclosure {
             // temperature cannot choose the subtracted background or reject
             // the wavelength window for emission that is identically zero.
             let participating = if i < n {
-                optics
+                !ports[i] && optics
                     .surface_bands
                     .as_ref()
-                    .is_none_or(|bands| bands.iter().any(|band| band[i].value > 0.0))
+                    .is_none_or(|bands| bands.iter().any(|band| band[source_index[i]].value > 0.0))
             } else {
                 optics.participating(i - n)
                     && self.paths().iter().any(|p| {
@@ -603,6 +761,27 @@ impl ParticipatingEnclosure {
                     maximum_omitted.max(record.shortwave_fraction + record.longwave_fraction);
             }
             coverage.push(record);
+        }
+        let mut layer_values = [0.0; MAX_SLAB_LAYERS];
+        let mut layer_coverage = Vec::with_capacity(original_slabs.len());
+        let mut offset = 0;
+        for (stack, temperatures) in layer_temperatures.iter().enumerate() {
+            let mut records = Vec::with_capacity(temperatures.len());
+            for (layer, &temperature) in temperatures.iter().enumerate() {
+                checkpoint(&mut cancelled)?;
+                let active = optics.slab_bands().is_some_and(|bands| bands.iter().any(|pairs| {
+                    pairs[stack].optics.layers()[layer].optical_depth() > 0.0
+                }));
+                layer_values[offset] = temperature.value();
+                offset += 1;
+                let record = coverage_at(wavelengths, temperature, active)?;
+                if active {
+                    reference = reference.min(temperature.value());
+                    maximum_omitted = maximum_omitted.max(record.shortwave_fraction + record.longwave_fraction);
+                }
+                records.push(record);
+            }
+            layer_coverage.push(records);
         }
         if !reference.is_finite() {
             return Err(RadiationError::Invalid(
@@ -626,8 +805,8 @@ impl ParticipatingEnclosure {
             checkpoint(&mut cancelled)?;
             let mut values = [0.0; MAX_RADIATION_SURFACES];
             if let Some(bands) = &optics.surface_bands {
-                for (value, source) in values.iter_mut().zip(&bands[band]) {
-                    *value = source.value;
+                for i in 0..n {
+                    if !ports[i] { values[i] = bands[band][source_index[i]].value; }
                 }
             } else {
                 for (value, source) in values.iter_mut().zip(emissivities) {
@@ -637,16 +816,21 @@ impl ParticipatingEnclosure {
             let sheets = optics
                 .sheet_bands()
                 .map_or(&[] as &[SheetPair], |bands| bands[band].as_slice());
+            let slabs = optics.slab_bands().map_or(&[] as &[SlabPair], |bands| bands[band].as_slice());
             let begin = source.wavelengths[0].value().ln();
             let end = source.wavelengths[1].value().ln();
             if !optics.requires_wavelength_sampling() {
-                self.prepare_sheet_optics(
-                    &values[..n],
-                    sheets,
-                    optics.coefficients(band, source.wavelengths[0])?,
-                    &mut work.radiation,
-                    &mut cancelled,
-                )?;
+                if slabs.is_empty() {
+                    self.prepare_sheet_optics(
+                        &values[..n], sheets, optics.coefficients(band, source.wavelengths[0])?,
+                        &mut work.radiation, &mut cancelled,
+                    )?;
+                } else {
+                    self.prepare_slab_optics(
+                        &values[..n], slabs, optics.coefficients(band, source.wavelengths[0])?,
+                        &mut work.radiation, &mut cancelled,
+                    )?;
+                }
                 factorizations += 1;
 
                 // With wavelength-independent opacity and emissivity, the
@@ -680,13 +864,28 @@ impl ParticipatingEnclosure {
                         })?
                     };
                 }
-                let (residual, _) = self.solve_sheet_emission(
-                    &values[..n],
-                    sheets,
-                    controls.algebraic,
-                    &mut work.radiation,
-                    &mut cancelled,
-                )?;
+                let mut offset = 0;
+                for slab in slabs {
+                    for layer in slab.optics.layers() {
+                        work.radiation.layer_emission[offset] = if layer.optical_depth() == 0.0 {
+                            0.0
+                        } else {
+                            blackbody.difference(layer_values[offset], reference).map_err(|_| {
+                                RadiationError::Invalid("shared slab blackbody band evaluation refused")
+                            })?
+                        };
+                        offset += 1;
+                    }
+                }
+                let (residual, _) = if slabs.is_empty() {
+                    self.solve_sheet_emission(
+                        &values[..n], sheets, controls.algebraic, &mut work.radiation, &mut cancelled,
+                    )?
+                } else {
+                    self.solve_slab_emission(
+                        &values[..n], slabs, controls.algebraic, &mut work.radiation, &mut cancelled,
+                    )?
+                };
                 for i in 0..m {
                     let y = finite(work.radiation.powers[i] - work.corrections[i])?;
                     let next = finite(work.totals[i] + y)?;
@@ -704,6 +903,13 @@ impl ParticipatingEnclosure {
                     work.corrections[channel] = (next - work.totals[channel]) - y;
                     work.totals[channel] = next;
                 }
+                for i in 0..layer_count {
+                    let channel = layer_begin + i;
+                    let y = finite(work.radiation.layer_powers[i] - work.corrections[channel])?;
+                    let next = finite(work.totals[channel] + y)?;
+                    work.corrections[channel] = (next - work.totals[channel]) - y;
+                    work.totals[channel] = next;
+                }
                 work.totals[m + n] = finite(work.totals[m + n] + residual)?;
                 continue;
             }
@@ -711,6 +917,8 @@ impl ParticipatingEnclosure {
                 enclosure: self,
                 emissivities: &values[..n],
                 sheets,
+                slabs,
+                layer_temperatures: &layer_values[..layer_count],
                 optics,
                 temperatures: &temperatures[..m],
                 reference,
@@ -761,8 +969,8 @@ impl ParticipatingEnclosure {
                         &mut cancelled,
                     )?;
                     let share = (panel.upper - panel.lower) / log_range;
-                    let resolved = (0..m + n).all(|i| {
-                        let tolerance = if i < m {
+                    let resolved = (0..channels).filter(|&i| i != m + n).all(|i| {
+                        let tolerance = if i < m || i >= layer_begin {
                             controls.heat_tolerance_w
                         } else {
                             controls.radiosity_tolerance_w_m2
@@ -803,7 +1011,8 @@ impl ParticipatingEnclosure {
                 left = right;
             }
         }
-        let balance = finite(work.totals[..m].iter().sum())?;
+        let balance = finite(work.totals[..m].iter()
+            .chain(&work.totals[layer_begin..channels]).copied().sum())?;
         let surface_residual = work.totals[m + n];
         if balance.abs() > controls.algebraic.energy_residual_w
             || surface_residual > controls.algebraic.surface_residual_w_m2
@@ -814,6 +1023,13 @@ impl ParticipatingEnclosure {
             });
         }
         checkpoint(&mut cancelled)?;
+        let mut offset = layer_begin;
+        let layer_heat_error_estimate_w = original_slabs.iter().map(|slab| {
+            let end = offset + slab.optics.layer_count();
+            let values = work.errors[offset..end].to_vec();
+            offset = end;
+            values
+        }).collect();
         Ok(SpectralRadiationReport {
             surface_heat_power: work.totals[..n].iter().copied().map(Power::new).collect(),
             gas_heat_power: [Power::new(work.totals[n]), Power::new(work.totals[n + 1])],
@@ -824,6 +1040,10 @@ impl ParticipatingEnclosure {
             surface_emissivities: emissivities.to_vec(),
             optics: optics.clone(),
             coverage,
+            layer_temperatures: layer_temperatures.to_vec(),
+            layer_heat_power: slabs::layer_powers(original_slabs, &work.totals[layer_begin..channels]),
+            layer_heat_error_estimate_w,
+            layer_coverage,
             surface_residual_integral_w_m2: surface_residual,
             energy_residual_w: balance,
             wavelength_evaluations: evaluations,
@@ -837,6 +1057,8 @@ struct SpectralSample<'a, 'b> {
     enclosure: &'a ParticipatingEnclosure,
     emissivities: &'a [f64],
     sheets: &'a [SheetPair],
+    slabs: &'a [SlabPair],
+    layer_temperatures: &'a [f64],
     optics: &'a SpectralOptics<'b>,
     temperatures: &'a [f64],
     reference: f64,
@@ -864,13 +1086,17 @@ impl SpectralSample<'_, '_> {
                 checkpoint(cancelled)?;
                 let wavelength = finite((midpoint + sign * half * node).exp())?;
                 if self.optics.requires_wavelength_sampling() {
-                    self.enclosure.prepare_sheet_optics(
-                        self.emissivities,
-                        self.sheets,
-                        self.optics.coefficients(band, Length::new(wavelength))?,
-                        work,
-                        cancelled,
-                    )?;
+                    if self.slabs.is_empty() {
+                        self.enclosure.prepare_sheet_optics(
+                            self.emissivities, self.sheets,
+                            self.optics.coefficients(band, Length::new(wavelength))?, work, cancelled,
+                        )?;
+                    } else {
+                        self.enclosure.prepare_slab_optics(
+                            self.emissivities, self.slabs,
+                            self.optics.coefficients(band, Length::new(wavelength))?, work, cancelled,
+                        )?;
+                    }
                     *factorizations += 1;
                 }
                 let reference_emission = planck_log_emission(wavelength, self.reference)?;
@@ -883,13 +1109,26 @@ impl SpectralSample<'_, '_> {
                         planck_log_difference(wavelength, temperature, self.reference)?
                     };
                 }
-                let (residual, _) = self.enclosure.solve_sheet_emission(
-                    self.emissivities,
-                    self.sheets,
-                    self.controls,
-                    work,
-                    cancelled,
-                )?;
+                let mut offset = 0;
+                for slab in self.slabs {
+                    for layer in slab.optics.layers() {
+                        work.layer_emission[offset] = if layer.optical_depth() == 0.0 {
+                            0.0
+                        } else {
+                            planck_log_difference(wavelength, self.layer_temperatures[offset], self.reference)?
+                        };
+                        offset += 1;
+                    }
+                }
+                let (residual, _) = if self.slabs.is_empty() {
+                    self.enclosure.solve_sheet_emission(
+                        self.emissivities, self.sheets, self.controls, work, cancelled,
+                    )?
+                } else {
+                    self.enclosure.solve_slab_emission(
+                        self.emissivities, self.slabs, self.controls, work, cancelled,
+                    )?
+                };
                 *evaluations += 1;
                 let measure = half * weight;
                 for i in 0..m {
@@ -903,6 +1142,10 @@ impl SpectralSample<'_, '_> {
                     out[m + i] = finite(measure.mul_add(radiosity, out[m + i]))?;
                 }
                 out[m + n] = finite(measure.mul_add(residual, out[m + n]))?;
+                for i in 0..self.layer_temperatures.len() {
+                    let channel = m + n + 1 + i;
+                    out[channel] = finite(measure.mul_add(work.layer_powers[i], out[channel]))?;
+                }
             }
         }
         Ok(())
