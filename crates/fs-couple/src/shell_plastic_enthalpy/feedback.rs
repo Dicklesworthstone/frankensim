@@ -3,6 +3,9 @@
 use super::*;
 use fs_material::plastic::energy::EnergyTolerances;
 use fs_material::plastic::thermal::MAX_FEEDBACK_ITERATIONS;
+use fs_solid::plastic_shell::contact::{
+    PlasticShellContacts, ShellContactControls, ShellContactReport, ShellContactStep,
+};
 use fs_thermal::enthalpy::{DepositionObserver, Event, StepConfig};
 use fs_thermal::observers::{CoupledObservers, ObserverCouplingError};
 use std::collections::BTreeMap;
@@ -94,17 +97,22 @@ impl<'m, 't, O, S: ThermalSectionSourceFamily<'m>> ShellThermoplasticCandidate<'
     }
 }
 
-struct Mechanical<S> {
-    solution: SmallStrainShellSolution<S>,
-    temperatures_k: Vec<f64>,
-    heat: BTreeMap<CellId, ShellLayerHeat>,
-    energy: ShellThermoplasticEnergy,
-    motion: Option<ShellThermoplasticMotion>,
+#[derive(Clone)]
+pub(super) struct Mechanical<S> {
+    pub(super) solution: SmallStrainShellSolution<S>,
+    pub(super) temperatures_k: Vec<f64>,
+    pub(super) heat: BTreeMap<CellId, ShellLayerHeat>,
+    pub(super) energy: ShellThermoplasticEnergy,
+    pub(super) motion: Option<ShellThermoplasticMotion>,
+    pub(super) contacts: Option<(
+        Vec<ShellContactReport>,
+        fs_contact::sustained::solve::SolveReport,
+    )>,
 }
 
 impl<'a, S: ThermalSectionSourceFamily<'a>> ThermoplasticShell<'a, S> {
     #[allow(clippy::too_many_arguments)]
-    fn mechanics<E>(
+    pub(super) fn mechanics<E>(
         &self,
         enthalpies: &[Vec<f64>],
         prescribed: &[(usize, f64)],
@@ -113,6 +121,11 @@ impl<'a, S: ThermalSectionSourceFamily<'a>> ThermoplasticShell<'a, S> {
         config: ThermoplasticConfig,
         duration_s: f64,
         motion: Option<(&[[f64; 6]], &PlasticShellReferenceInertia<'_>)>,
+        contact: Option<(
+            &PlasticShellContacts<'_>,
+            &[ShellContactStep],
+            ShellContactControls,
+        )>,
         cx: &Cx<'_>,
     ) -> Result<Mechanical<History<'a, S>>, ShellThermoplasticError<E>> {
         let d = self.discretization;
@@ -150,38 +163,77 @@ impl<'a, S: ThermalSectionSourceFamily<'a>> ThermoplasticShell<'a, S> {
             budget: d.shell_budget,
             settings,
         };
-        let (solution, drilling, motion) = if let Some((velocity, reference)) = motion {
-            let solved = problem
-                .advance_backward_euler_with_reference_drilling(
-                    Some(&self.solution),
-                    velocity,
-                    reference,
-                    &self.reference_drilling,
-                    duration_s,
-                    cx,
+        let (solution, drilling, motion, contacts) =
+            if let Some((contacts, steps, controls)) = contact {
+                let solved = if let Some((velocity, reference)) = motion {
+                    problem.advance_backward_euler_with_contacts(
+                        Some(&self.solution),
+                        velocity,
+                        reference,
+                        &self.reference_drilling,
+                        contacts,
+                        steps,
+                        duration_s,
+                        controls,
+                        cx,
+                    )
+                } else {
+                    problem.solve_from_with_contacts(
+                        &self.solution.coordinates,
+                        &self.solution.section_states,
+                        &self.reference_drilling,
+                        contacts,
+                        steps,
+                        controls,
+                        cx,
+                    )
+                }
+                .map_err(ShellThermoplasticError::Contact)?;
+                (
+                    solved.solution,
+                    solved.drilling,
+                    solved.motion.map(|m| ShellThermoplasticMotion {
+                        velocity: m.velocity,
+                        inertia: m.inertia,
+                    }),
+                    Some((solved.contacts, solved.contact_solve)),
                 )
-                .map_err(ShellThermoplasticError::Solid)?;
-            (
-                solved.solution,
-                solved.drilling,
-                Some(ShellThermoplasticMotion {
-                    velocity: solved.velocity,
-                    inertia: solved.inertia,
-                }),
-            )
-        } else {
-            let solved = problem
-                .solve_from_with_reference_drilling(
-                    &self.solution.coordinates,
-                    &self.solution.section_states,
-                    &self.reference_drilling,
-                    cx,
+            } else if let Some((velocity, reference)) = motion {
+                let solved = problem
+                    .advance_backward_euler_with_reference_drilling(
+                        Some(&self.solution),
+                        velocity,
+                        reference,
+                        &self.reference_drilling,
+                        duration_s,
+                        cx,
+                    )
+                    .map_err(ShellThermoplasticError::Solid)?;
+                (
+                    solved.solution,
+                    solved.drilling,
+                    Some(ShellThermoplasticMotion {
+                        velocity: solved.velocity,
+                        inertia: solved.inertia,
+                    }),
+                    None,
                 )
-                .map_err(ShellThermoplasticError::Solid)?;
-            (solved.solution, solved.drilling, None)
-        };
+            } else {
+                let solved = problem
+                    .solve_from_with_reference_drilling(
+                        &self.solution.coordinates,
+                        &self.solution.section_states,
+                        &self.reference_drilling,
+                        cx,
+                    )
+                    .map_err(ShellThermoplasticError::Solid)?;
+                (solved.solution, solved.drilling, None, None)
+            };
         let mut energy = ShellThermoplasticEnergy {
             drilling,
+            contact_work_j: finite(contacts.as_ref().map_or(0.0, |(reports, _)| {
+                reports.iter().map(|report| report.shell_work_j).sum()
+            }))?,
             inertial_work_j: motion
                 .as_ref()
                 .map_or(0.0, |m| m.inertia.total.inertial_work_j),
@@ -267,6 +319,7 @@ impl<'a, S: ThermalSectionSourceFamily<'a>> ThermoplasticShell<'a, S> {
             heat,
             energy,
             motion,
+            contacts,
         })
     }
 
@@ -402,6 +455,7 @@ impl<'a, S: ThermalSectionSourceFamily<'a>> ThermoplasticShell<'a, S> {
                 config,
                 dt,
                 motion,
+                None,
                 cx,
             )?;
             let rates = trial
@@ -431,6 +485,7 @@ impl<'a, S: ThermalSectionSourceFamily<'a>> ThermoplasticShell<'a, S> {
                 config,
                 dt,
                 motion,
+                None,
                 cx,
             )?;
             let applied_heat_j = finite(trial.heat.values().map(|q| q.total_j()).sum())?;
@@ -588,6 +643,7 @@ fn coupled_error<E>(
             ShellThermoplasticError::Material(e) => ShellThermoplasticError::Material(e),
             ShellThermoplasticError::Section(e) => ShellThermoplasticError::Section(e),
             ShellThermoplasticError::Solid(e) => ShellThermoplasticError::Solid(e),
+            ShellThermoplasticError::Contact(e) => ShellThermoplasticError::Contact(e),
             ShellThermoplasticError::Thermal(e) => e.into(),
             ShellThermoplasticError::Observer(e) => match e {},
             ShellThermoplasticError::Cancelled => ShellThermoplasticError::Cancelled,

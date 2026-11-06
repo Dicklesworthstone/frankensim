@@ -16,6 +16,8 @@
 //! delamination or evolving thermal geometry. Refine physical intervals, native
 //! thermal substeps, facet cells and thickness integration independently.
 
+/// Sustained shell contact, bulk plastic heat and finite two-body heat transfer.
+pub mod contact;
 mod feedback;
 
 use std::collections::BTreeSet;
@@ -78,6 +80,7 @@ pub enum ShellThermoplasticError<E = Infallible> {
     Material(ThermalSectionSourceError),
     Section(ThermoplasticSectionError),
     Solid(SmallStrainTetError),
+    Contact(fs_solid::plastic_shell::contact::ShellContactError),
     Thermal(DepositionError),
     Observer(E),
     Cancelled,
@@ -481,6 +484,10 @@ pub struct ShellThermoplasticEnergy {
     pub drilling: ShellDrillingEnergy,
     pub dead_load_work_j: f64,
     pub support_work_j: f64,
+    /// Work of actual solved normal and tangential forces on the shell.
+    /// A coupled interface replaces this port by obstacle work and the distinct
+    /// physical friction/numerical approach accounts; it is not all heat.
+    pub contact_work_j: f64,
     /// Signed endpoint inertia work; physical and gauge kinetics are separately
     /// exposed in the dynamic candidate. No inertial numerical loss is heat.
     pub inertial_work_j: f64,
@@ -488,7 +495,7 @@ pub struct ShellThermoplasticEnergy {
 }
 impl ShellThermoplasticEnergy {
     pub fn external_work_j(&self) -> f64 {
-        self.dead_load_work_j + self.support_work_j
+        self.dead_load_work_j + self.support_work_j + self.contact_work_j
     }
 }
 

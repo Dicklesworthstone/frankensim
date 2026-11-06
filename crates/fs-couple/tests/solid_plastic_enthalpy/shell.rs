@@ -4,6 +4,8 @@
 mod dynamics;
 #[path = "shell/creep.rs"]
 mod creep;
+#[path = "shell/contact.rs"]
+mod contact;
 
 use super::*;
 use fs_couple::shell_plastic_enthalpy::{
