@@ -1,4 +1,7 @@
 //! Time-error admission and whole-request accounting on both original owners.
+#[path = "timeline_tests.rs"]
+mod timeline;
+
 use super::*;
 use crate::evaporation::gas::implicit::adaptive::{
     AdaptiveImplicitGasControls, AdaptiveImplicitGasError, advance_deposition_with_gas_adaptive,
