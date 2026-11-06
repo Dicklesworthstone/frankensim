@@ -1751,6 +1751,32 @@ No new Krylov solve or uniform injection-density assumption is introduced.
 reaction-based voltage scaling. The basis is valid only for its fixed source,
 geometry and contact state; material feedback must prepare a replacement.
 
+`conduction::matrix::PlanarConductanceMatrix` extends the same source-bound
+operator to arbitrary disjoint complete exterior-edge electrodes. Exactly N-1
+native solves prepare a symmetric energy Gram matrix, independently checked
+against terminal reactions and the common-voltage nullspace. Every physical
+body needs an electrode, and all terminals must connect through bulk, finite
+contacts or shared ideal electrodes. Scalar and admitted tensor sources use
+the same path. No pair-resistor fit is imposed on the full terminal matrix.
+
+Voltage and balanced total-current drives reuse the original potential basis;
+mixed voltage/current partitions factor their equilibrated current block once.
+A zero-total-current electrode floats while its local surface currents remain
+free to transfer charge. Terminal zero can itself be current-controlled.
+Common voltage bias is removed before field/current/heat arithmetic. Native
+recovery computes bulk and contact heat together with all simultaneous-drive
+cross terms, then independently checks actual terminal reactions and I.V.
+Preparation bounds terminal count, native solves, dense work and response
+storage; factorization, triangular solves and recovery poll cancellation.
+Source/material/contact changes require a new prepared response.
+
+Five native regression groups cover analytic three-terminal bulk/contact
+networks, contact heat cross terms under reordered terminals, floating/mixed
+controls, disconnected/work refusals and late cancellation/reuse. Three
+isolated checks executed the actual matrix module and small native Cholesky
+against an analytical field scaffold; complete FEEC integration remains
+unexecuted where dependency compilation is blocked by shared resource limits.
+
 Temperature, composition and fixed pressure act through original resolved
 source queries. New supported material snapshots require a newly prepared
 operator. Both independent electrical source bases use the common scalar

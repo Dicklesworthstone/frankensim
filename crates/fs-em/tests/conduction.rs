@@ -3,6 +3,8 @@
 mod common;
 #[path = "conduction/contacts.rs"]
 mod contacts;
+#[path = "conduction/matrix.rs"]
+mod matrix;
 #[path = "conduction/response.rs"]
 mod response;
 

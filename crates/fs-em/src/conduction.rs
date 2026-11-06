@@ -20,6 +20,12 @@
 mod contact;
 pub(crate) use contact::admit_contact_source;
 pub use contact::{ConductionContact, ConductionContactResponse};
+/// Reusable multi-electrode resistance with voltage, current and floating controls.
+pub mod matrix;
+pub use matrix::{
+    PlanarConductanceControls, PlanarConductanceMatrix, PlanarMixedConductance,
+    PlanarMixedConductanceControls,
+};
 pub mod motion;
 /// Memoryless source response at the actual spatial electric/current fields.
 pub mod response;
