@@ -82,6 +82,9 @@ pub use reflection::{ModalReflectionResponse, ModalSourceResponse};
 mod load;
 pub use load::{AxisymmetricMouthBasis, ModalMouthImpedance};
 
+mod equivalent;
+pub use equivalent::{MouthKernel, MouthKernelSpec, equivalent_plane_mouth_impedance, plane_mouth_kernel};
+
 /// Continuous multimodal propagation on smooth profiles (M2.1-W3b).
 mod riccati;
 pub use riccati::{

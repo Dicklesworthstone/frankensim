@@ -2608,6 +2608,53 @@ propagators, full field work conservation, cutoff continuity and a 1/2/4-mode
 resonance-frequency/linewidth ladder. Mode and axial refinement remain
 separate convergence axes; a single retained order is not continuum truth.
 
+## Plane-mode equivalent of the flanged mouth
+
+`modal::equivalent_plane_mouth_impedance` is the one load a plane-wave interior
+(the nonlinear Euler bore) can take in place of the complete flanged mouth:
+`Z_eq = p_0 / U_0` at the actual last station, with `p = Z_rad U_mouth`, `Z_rad`
+the flanged matrix of that radius and `U_mouth = flow_map[:, 0]` the original
+mouth flows of a plane inlet flow (higher inlet flows zero, the `Z00` source
+closure of the line bank). Convention `e^{-i omega t}` like every modal and scalar
+impedance here, so a flanged piston has negative reactance. One mode returns
+the baffled piston at the actual mouth radius exactly (a test pins it to 1e-10).
+
+`modal::plane_mouth_kernel` realizes it as causal real weights in the form of the
+nonlinear bore's piston radiation, `p = Z_inf (U_t - sum_j w_j U_{t-j})`, `sum w_j = 1`.
+The target is `Re Z_eq` (the even part fixes the causal kernel, so causality is
+exact; the reactance follows by Kramers-Kronig and is checked against `Z_eq`).
+The resistance omitted above the evaluation would leak into the reactance as an
+error growing with frequency, so `Z_eq` is evaluated up to the flanged radiation
+limit (`ka = 24`) and the builder REFUSES a step whose Nyquist frequency stops
+that short of 0.9 of it, and a claimed band above a third of the evaluation.
+Measured on a cylinder with a Bessel bell to 40 mm (claim 4 kHz, bins 10 Hz): a
+12.5 us step matches `Z_eq` at off-grid midpoints to 3.5e-5 `Z_inf`; the 25 us step
+that stops at 19.6 kHz missed 1e-3 (1.36e-3) and is therefore refused.
+
+Passivity is measured, not certified: `Re Z_eq / Z_inf` stays above +3e-3 from 40 to
+3000 Hz on the tenor-trombone slide and bell. On a uniform cylinder the plane
+transfer matrix terminated with `Z_eq` is the multimodal input impedance to
+rounding (the plane mode decouples from the higher modes inside a uniform tube).
+
+Not claimed, measured: a plane-wave interior has no evanescent higher modes at
+radius steps and in the flare (the step end correction), and `Z_eq` cannot supply
+them. On the Braden tenor-trombone slide and four-horn bell (two radius steps,
+64 cones, mouth 108 mm, three modes, Bessel loss) the plane bore terminated with
+`Z_eq` sits sharp of the multimodal flanged bore at its first eight impedance peaks
+(42, 122, 189, 256, 326, 391, 455, 530 Hz) by +0.4, +0.9, +1.8, +2.4, +3.6, +5.6,
++4.6 and +5.2 cents, and in `|Z|` by +0.04, +0.03, +0.04, +0.25, +0.96, +1.8, +1.6
+and +5.3 %. It is not the multimodal reference's own cone staircase: at 1, 2 and 4
+slices per cone the worst is 5.59, 5.51 and 5.49 cents. The mouth load carries
+about 1 cent of the 5 to 6 cents the multimodal bore shifts at the sixth peak.
+A bound of 5 cents fixed before the run was missed, and no test asserts this
+remainder. The receiver is separate: a plane-wave interior carries no higher mouth
+modes, so the finite-distance observation of every signed mouth mode of the linear
+brass path is not available to it.
+
+`modal/equivalent/tests.rs` checks the one-mode piston, the resistance floor, the
+uniform-cylinder equality, the kernel's sum, tail energy and off-grid accuracy, and
+the refusals.
+
 ## Full physical modal mouth matrices
 
 `modal::ModalMouthImpedance` admits one original row-major boundary matrix
