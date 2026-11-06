@@ -2311,3 +2311,63 @@ cover format, component meaning, SI conversion, interpolation, reference-only
 refusal, numerical range, resource limits and cancellation. This is not a full
 workspace Cargo gate or independent validation of an evaluated isotope.
 Format and physical distinctions follow [ENDF-102 (2023), section 1.5](https://www.nndc.bnl.gov/endfdocs/ENDF-102-2023.pdf).
+
+## Reaction-weighted fission energy and original burnup assembly
+
+`endf::fission_energy::model::PreparedFissionEnergy` prepares all nine original
+components over an explicit incident-energy domain. Reference-only components
+require an explicit `ReferenceEnergyTreatment`: refusal, a caller-declared
+constant approximation, or the ENDF-102 (2023) Sher--Beck prescription. The last
+requires a same-evaluation prompt/total neutron-yield law and an independently
+supplied nu(0); no missing zero-energy value is extrapolated. Component tables
+take precedence. The 2023 neutrino correction is -0.100 E. Source ER and ET
+remain independently observed totals, without normalization to component sums.
+
+Histogram/linear tables, linear polynomials and piecewise Sher--Beck laws retain
+their original interpolation and jumps. Higher polynomials use bounded adaptive
+linearization with the h^2 max|q''| / 8 interpolation bound; signed coefficients,
+nonnegative physical values, work limits and subdivision limits are enforced.
+The reported per-component bound concerns the interpolation in exact arithmetic,
+not evaluated-data uncertainty or a certified floating-point error bound.
+Preparation and later condensation are separate, allowing immutable curves to
+be reused. All energy ordinates passed to the original dimensionless integrator
+are explicitly energy / 1 eV; the public physical results restore joules.
+
+`PreparedFissionEnergy::collapse` reuses `collapse_reaction_weighted` to retain
+integral(sigma_f phi E_component) / integral(sigma_f phi) for each component and
+a separate incident-energy mean. No representative group energy substitutes for
+that integral. Zero-fission groups have undefined means (`None`). The uniform
+interpolation bound also bounds its contribution to a positive weighted mean.
+Group flux amplitudes may subsequently vary; within-group spectral shape and
+the processed cross-section state must remain applicable.
+
+`CollapsedFissionEnergy::prompt_products` routes fragment, prompt-neutron and
+prompt-photon energy to explicit deposited, radiation or escaped destinations.
+It separately reports outgoing product energy, incident energy, signed prompt Q,
+interpolation error and an outward-rounded numerical routing account. Outgoing
+kinetic energy includes incident-neutron kinetic input. A coupled neutron-energy
+owner must retire that input and avoid crediting transported outgoing neutrons
+twice; a prescribed population-only flux has an external kinetic-energy supply.
+
+`append_prompt_products_to_burnup` assembles these coefficients through the
+original `FissionYieldCollapse::append_to_burnup`. Delayed neutron, photon, beta
+and neutrino components are not released at the fission event. Product decay,
+shutdown heat, inventory histories and thermal coupling retain their original
+owners; MT458 cannot supply missing decay lifetimes. Both condensations must
+match full original pointwise cross-section/spectrum data, interpolation laws,
+processed metadata, grids and numerical group results. Matching labels and
+group averages alone do not establish matching spectra. Shared original source
+arrays use a pointer fast path; independent arrays are checked in cancellable
+batches. A caller-specified routing allowance is in J/fission, separate from the
+original runtime accounting budgets and the interpolation approximation.
+
+The native pinned-rustc build of the actual complete nuclear core test root
+compiled 281 owning tests without diagnostics. The focused run passed all 23
+new fission-energy tests (nine importer, eight preparation/condensation, six
+burnup integration), plus six affected original fission-yield tests. Coverage
+includes analytic weighted integrals, discontinuities, nonlinear refinement,
+source-shape mismatch despite equal group averages, irradiation/shutdown heat
+counted once, bounded work and cancellation. Original applicable numerical
+implementations were used; unavailable constellation dependencies prevent a full
+workspace Cargo/DSR result. This increment does not establish thermal-feature,
+facade/example compilation or empirical evaluated-isotope accuracy.

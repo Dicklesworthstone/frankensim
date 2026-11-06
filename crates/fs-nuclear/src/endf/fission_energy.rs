@@ -24,6 +24,12 @@ use crate::cross_sections::NeutronReaction;
 use crate::irradiation::NuclideId;
 use crate::{FissionError, nonnegative};
 
+/// Explicit energy dependence and conservative reaction-weighted group means.
+pub mod model;
+
+/// Prompt outgoing products on the original fission-product burnup owner.
+pub mod burnup;
+
 /// Original MF1/MT458 component identity, in source IFC order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FissionEnergyComponent {
@@ -451,3 +457,6 @@ fn invalid(reason: &'static str) -> EndfError {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod model_tests;

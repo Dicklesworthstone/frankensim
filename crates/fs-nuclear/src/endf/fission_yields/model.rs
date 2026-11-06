@@ -50,6 +50,8 @@ pub struct FissionYieldCollapse {
     parent: NuclideId,
     products: Arc<[NuclideId]>,
     weighted: ReactionWeightedCollapse,
+    source_cross_section: PointwiseCrossSection,
+    source_spectrum: FluxSpectrum,
 }
 
 impl FissionYieldEvaluation {
@@ -161,11 +163,26 @@ impl FissionYieldEvaluation {
             parent: self.metadata.nuclide,
             products: Arc::clone(&self.products),
             weighted,
+            source_cross_section: cross_section.clone(),
+            source_spectrum: spectrum.clone(),
         })
     }
 }
 
 impl FissionYieldCollapse {
+    /// Original pointwise reaction, shared so subsequent energy/data assembly
+    /// can verify full source correspondence rather than relying on labels.
+    #[must_use]
+    pub fn source_cross_section(&self) -> &PointwiseCrossSection {
+        &self.source_cross_section
+    }
+
+    /// Original incident spectrum, including its within-group shape.
+    #[must_use]
+    pub fn source_spectrum(&self) -> &FluxSpectrum {
+        &self.source_spectrum
+    }
+
     #[must_use]
     pub fn evaluation_data_id(&self) -> &str {
         &self.evaluation_data_id
