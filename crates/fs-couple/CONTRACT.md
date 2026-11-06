@@ -436,3 +436,43 @@ RK-weighted six-face transfers contribute to the fixed whole-window water
 budget. Rejected probes and accepted prefixes of a later failed call remain
 private. Focused regressions specify the analytic error ratio, stiff-drying
 recovery, complete-stage charging and late work-limit refusal.
+
+## Simultaneous finite-wall, condensate and gas endpoints
+
+`WallFilmThermalEnvironment::advance_implicit` couples original wall enthalpy,
+volatile inventory and gas temperature in one shared Newton solve. The material
+wall-film endpoint owns saturation, dry/wet complementarity, upstream vapor
+enthalpy and finite-gas storage. The conduction endpoint owns wall calorics,
+convection, radiation, source conductivity and the original Biot gate. Neither
+an inner gas inversion nor an inner wall solve is performed during nonlinear
+trials. After convergence each original caloric owner is reconstructed once,
+and the complete phase/heat residual is checked again against both actual
+returned states before the joint candidate is returned.
+
+The finite wall receives condensation heat and supplies evaporation heat through
+the same source-relative port as the material endpoint. Sensible gas-wall heat
+has one reciprocal debit and credit; radiation remains an external enclosure.
+Existing and newly formed film storage uses the liquid's original chart, never
+the wall heat capacity. Exactly dry film has no thermal storage. At complete
+evaporation, outgoing vapor still carries the wall-temperature-dependent
+enthalpy. Wall melting/freezing plateaus remain primary-enthalpy states: latent
+storage can change phase fraction at constant temperature without introducing
+an apparent heat capacity or a duplicate heat source.
+
+Numerical controls bound the shared Newton iterations and residual evaluations,
+including the predictor, fresh converged trial and reconstruction rechecks.
+Physical source, temperature, donor, mass and energy allowances remain those
+of the original environment. Signed and absolute wall/film/gas balances retain
+source-combination and boundary-port rounding; independent physical gates apply
+after the numerical norm converges. Failure, source refusal, exhausted work or
+cancellation returns no partial wall, film or gas state.
+
+This opt-in endpoint path leaves the existing split advance and its continuation
+semantics unchanged. It is first-order in physical time. The film exhaustion
+time freezes the endpoint rate and requires timestep refinement for an accurate
+continuous event time. Fully wetting, pure-liquid, fixed-area, fixed-gas-volume
+and uniform-wall assumptions remain explicit. It does not add nucleation,
+boiling, drainage, spatial gas gradients, displacement work or an entropy
+theorem. Focused coupled regressions check actual finite-wall/gas feedback,
+complete dry-out, retained latent wall storage and transactional refusal.
+

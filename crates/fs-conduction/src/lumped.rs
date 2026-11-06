@@ -35,6 +35,8 @@
 //! rung deliberately has no power vocabulary of its own.
 
 pub mod interference;
+/// Prepared original uniform-body residual for coupled endpoint solves.
+pub mod endpoint;
 
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_exec::Cx;

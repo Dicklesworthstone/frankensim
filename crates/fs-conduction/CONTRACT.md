@@ -3529,6 +3529,17 @@ authority.
   the march identity includes both. Setting both temperatures equal recovers
   the shared-temperature model. Directional illumination and view-factor
   networks are outside this rung.
+  `LumpedThermalEnvironment::prepare_endpoint` exposes the same native
+  backward-Euler storage and boundary powers to a simultaneous coupled solve.
+  Preparation retains the original body, phase curve, transport and Biot
+  admission once; `LumpedEnthalpyEndpoint::evaluate` queries actual represented
+  wall enthalpy and endpoint fluid temperature without an inner thermal root.
+  Internal heat remains an explicit complete source supplied by the caller.
+  Sharp phase plateaus remain in the original enthalpy relation. The samples
+  are unaccepted residuals, and the enclosing owner must close the opposite
+  finite-store accounts. The original `advance` still supplies the accepted
+  wall trajectory, followed by the enclosing owner's actual-endpoint recheck.
+  This seam adds no wall heat-capacity approximation or independent source law.
   `solve_lumped_contact_step` adds finite-body exchange with signed supplied heat through
   the existing `SeriesThermalResistance`. Backward Euler solves one signed
   heat transfer jointly with both supplied energies and returns both enthalpy/temperature/phase states together;

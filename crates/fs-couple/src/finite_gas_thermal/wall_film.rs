@@ -14,6 +14,8 @@
 
 /// Bounded shared-clock continuation with explicit whole-window balances.
 pub mod window;
+/// Simultaneous original wall, finite gas and zero-capable film endpoint.
+pub mod implicit;
 
 use crate::cavity_phs::piston::thermal::{HeatExchangeSolve, feedback};
 use fs_conduction::{

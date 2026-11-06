@@ -10,6 +10,12 @@ mod fixture;
 use fixture::*;
 
 mod window;
+#[path = "wall_film_thermal/implicit.rs"]
+mod implicit;
+#[path = "wall_film_thermal/implicit_plateau.rs"]
+mod implicit_plateau;
+#[path = "wall_film_thermal/implicit_time.rs"]
+mod implicit_time;
 
 #[test]
 fn dry_condensation_warms_finite_wall_and_retains_actual_film_capacity() {
