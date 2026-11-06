@@ -769,3 +769,27 @@ All 23 exact native water-cell tests passed, including the five additions and
 18 existing regressions. The source closure uses original feedback helpers and
 genuine native material, duct and thermal dependencies; no whole-workspace
 Cargo/DSR pass is implied.
+
+## Finite-rate water compression in reciprocal cavity networks
+
+`cavity_phs::relaxation::RelaxingWaterCavity` retains the original
+`RelaxingRegionalWater` and `HelmholtzCavity` geometry. Native neck inertia uses
+the exact thermal density and declared end corrections. Original equilibrium
+bulk storage and one positive compression arm enter the existing
+`RelaxationBranch` and `PreparedExactZoh` owners. Pressure and volume flow remain
+reciprocal, including through native mechanical transformers.
+
+Fixed-volume net inflow gives first-order excess mass and density. Pressure,
+neck flow, storage and instantaneous compression/neck losses come from the
+accepted native state. Relaxed or explicit frozen memory is supported. Native
+prepared stepping retains integrated input work and dissipation with reusable
+warm scratch.
+
+This homogeneous small-signal lumped model retains caller-established
+relaxation kinetics, explicit neck resistance and end geometry. It does not
+evolve nonlinear phase inventory or temperature or infer exterior radiation
+or viscosity. Four focused native regressions pass: original 100 kPa/20 MPa
+density and inertia; independent refined mass/momentum/memory ODE plus
+work/heat; actual mechanical-transformer power and total energy; native
+admission and tiny density perturbations. Exact-source tests used genuine
+material and pHS owners; no full workspace Cargo/DSR pass is claimed.

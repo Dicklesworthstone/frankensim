@@ -14,6 +14,9 @@ pub mod membrane;
 /// Nonlinear closed-gas cavity coupled to an inertial moving wall.
 pub mod piston;
 
+/// Finite-rate original water compression in a reciprocal lumped cavity.
+pub mod relaxation;
+
 use crate::acoustic_realize::AcousticRealizeError;
 use crate::air_path::{GasAbsorptionModel, propagate_pressure_history_with_model};
 use crate::thin_plate::certified_radiators;
