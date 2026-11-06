@@ -289,10 +289,13 @@ impl<'a> BrittleTetMotion<'a> {
                 "midpoint must retain physical nonnegative energy without numerical kinetic loss",
             ));
         }
+        self.solid
+            .require_released_faces(&solution.displacement_m, cx)?;
         let solid = BrittleTetSolid {
             geometry: self.solid.geometry,
             materials: self.solid.materials,
             bands: Arc::clone(&self.solid.bands),
+            released_faces: Arc::clone(&self.solid.released_faces),
             budget: self.solid.budget,
             solution,
             stored_energy_j: stored_after,

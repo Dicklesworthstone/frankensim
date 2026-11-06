@@ -11,9 +11,11 @@
 //! re-equilibrating. The [`initiation`] path preserves elastic preload while
 //! selecting fixed planes from a sourced tensile predictor. The [`dynamics`]
 //! path retains reference mass and velocity through physical-time fracture.
-//! Fixed planes do not rotate; finite kinematics, contact and limit-load
-//! tracking are absent. The caller resolves loading reversals and softening
-//! with physical endpoints.
+//! The [`fracture`] path releases explicitly completed traction-free faces and
+//! retains their history through native continuation. Fixed planes do not
+//! rotate; closing released faces require an explicit contact response. Finite
+//! kinematics and limit-load tracking are absent. The caller resolves loading
+//! reversals and softening with physical endpoints.
 
 /// Checked temperature/source transfer followed by native mechanical equilibration.
 pub mod temperature;
@@ -29,6 +31,9 @@ pub mod dynamics;
 
 /// Joint sourced thermal eigenstrain and native mechanical equilibrium.
 pub mod expansion;
+
+/// Traction-free release of completed crack bands into retained physical fragments.
+pub mod fracture;
 
 use std::sync::Arc;
 
@@ -103,6 +108,7 @@ pub struct BrittleTetSolid<'a> {
     geometry: &'a TetLoadGeometry3<'a>,
     materials: &'a [ResolvedBrittleCrackBand],
     bands: Arc<[TetCrackBandGeometry]>,
+    released_faces: Arc<[fracture::ReleasedBrittleFace]>,
     budget: TetAssemblyBudget,
     solution: SmallStrainTetSolution<BrittleState<'a>>,
     stored_energy_j: f64,
@@ -142,6 +148,13 @@ pub enum BrittleTetError {
         account: &'static str,
         defect_j: f64,
         tolerance_j: f64,
+    },
+    /// A released face needs a contact response before this endpoint can pass.
+    ReleasedFaceClosure {
+        face: u64,
+        vertex: usize,
+        opening_m: f64,
+        tolerance_m: f64,
     },
     Cancelled,
 }
@@ -233,6 +246,7 @@ impl<'a> BrittleTetSolid<'a> {
             geometry,
             materials,
             bands: bands.into(),
+            released_faces: Arc::from([]),
             budget,
             solution,
             stored_energy_j: 0.0,
@@ -327,6 +341,7 @@ impl<'a> BrittleTetSolid<'a> {
             settings,
         };
         let solution = problem.solve_from(old_u, &self.solution.element_states, cx)?;
+        self.require_released_faces(&solution.displacement_m, cx)?;
         let (mut energy, element_energy, cumulative_loss) = self.material_energy(&solution, cx)?;
         let new_u = solution.displacement_m.as_flattened();
         for &(dof, force) in nodal_forces_n {
@@ -384,6 +399,7 @@ impl<'a> BrittleTetSolid<'a> {
                 geometry: self.geometry,
                 materials: self.materials,
                 bands: Arc::clone(&self.bands),
+                released_faces: Arc::clone(&self.released_faces),
                 budget: self.budget,
                 solution,
                 stored_energy_j: energy.stored_after_j,

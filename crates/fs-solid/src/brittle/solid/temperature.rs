@@ -264,6 +264,7 @@ impl<'a> BrittleTetSolid<'a> {
             geometry: self.geometry,
             materials: next_materials,
             bands: Arc::clone(&self.bands),
+            released_faces: Arc::clone(&self.released_faces),
             budget: self.budget,
             solution: SmallStrainTetSolution {
                 displacement_m: self.solution.displacement_m.clone(),

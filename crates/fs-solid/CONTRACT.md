@@ -1,5 +1,32 @@
 # fs-solid CONTRACT
 
+## Completed brittle fracture and native fragment continuation
+
+`BrittleTetSolid::split_fracture` releases explicitly selected conforming faces
+only after BOTH incident source-bound bands have completely failed, align with
+the physical face and carry no compressive contact or unresolved face traction.
+Original element/local-corner order, coordinates, V/A widths, strain, stress,
+source ownership, stored energy and cumulative fracture loss are preserved.
+Every previously dissipated band inventory remains charged once; a selected face
+does not replace it with a fresh Gc*A. This is connectivity release of the native
+damaged bulk, not conversion to intact elastic fragments with new cohesive laws.
+
+`BrittleTetMotion::split_fracture` additionally duplicates actual velocity,
+reconstructs the original consistent mass on split nodal stars and checks native
+kinetic storage against independent P1 mass/momentum/energy inventories. Original
+density, physical time and used/remaining step budgets survive. A cut is neither
+an impulse nor a physical timestep. Subsequent cuts remap retained face guards
+by original element-local corners, preserving earlier nonzero openings.
+
+All native static, backward-Euler, midpoint and temperature continuation keeps
+the released matching-face guard: affine fixed-normal opening is checked at all
+three paired vertices before publication. Closing endpoints require contact and
+refuse atomically. This is not arbitrary collision detection, finite sliding,
+loaded partial-damage surface insertion or a mesh-objective crack-path theorem.
+Six native structural regressions cover actual continued solves and motion,
+conserved material/inertia, thermal history, sequential partial fronts, closure
+and cancellation/refusal retry, supplementing five material-release checks.
+
 ## Temperature-dependent brittle midpoint continuation
 
 `BrittleTetMotion::advance_midpoint_at_temperature` reuses the original private

@@ -12,7 +12,9 @@
 //! damping is not fracture dissipation or heat. First-order time and fixed-plane
 //! small-strain limitations remain. The [`time`] path refines native timesteps
 //! against local state comparisons, damage jumps and numerical-loss budgets.
-//! This adds no crack topology, fragment contact or finite-strain mass mapping.
+//! The [`fracture`] path preserves this same motion through explicitly completed
+//! traction-free cuts. Closing released faces requires a contact response;
+//! arbitrary fragment contact and finite-strain mass mapping are absent.
 
 /// Analytic material path work with centered inertia and no numerical kinetic loss.
 pub mod midpoint;
@@ -22,6 +24,9 @@ pub mod temperature;
 
 /// Native step doubling with bounded damage, state error and numerical losses.
 pub mod time;
+
+/// Conservative continuation after complete traction-free fracture cuts.
+pub mod fracture;
 
 use std::sync::Arc;
 
@@ -209,6 +214,7 @@ impl<'a> BrittleTetMotion<'a> {
             geometry: solid.geometry,
             materials: solid.materials,
             bands: Arc::clone(&solid.bands),
+            released_faces: Arc::clone(&solid.released_faces),
             budget: solid.budget,
             solution: solid.solution.clone(),
             stored_energy_j: solid.stored_energy_j,
@@ -428,10 +434,13 @@ impl<'a> BrittleTetMotion<'a> {
                 "finite nonnegative physical storage and fracture loss required",
             ));
         }
+        self.solid
+            .require_released_faces(&step.solution.displacement_m, cx)?;
         let solid = BrittleTetSolid {
             geometry: self.solid.geometry,
             materials: self.solid.materials,
             bands: Arc::clone(&self.solid.bands),
+            released_faces: Arc::clone(&self.solid.released_faces),
             budget: self.solid.budget,
             solution: step.solution,
             stored_energy_j: material.stored_after_j,
