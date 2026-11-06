@@ -105,7 +105,7 @@ Fourier flux with its relaxed normal gradient, compare the assembled operator,
 and check rigid rotations, normal reversal, isotropic/rank-one limits and
 finite-output scaling.
 
-This declared linear sheet law adds no material-source authority, temperature
+The constant constructors add no material-source authority, temperature
 dependence, finite through-thickness resistance or film-property derivative.
 Continuum mean verification explicitly refuses active coatings until its flux
 model represents tangential transport. Regressions in
@@ -118,6 +118,42 @@ analytic decay mode, rank-one null directions and input admission. These are
 discrete numerical references, not experimental material validation or a
 continuum-error certificate. Tensor transport uses fixed-size stack arithmetic
 and the same nine triplets per face; no throughput improvement is claimed.
+
+### Temperature-dependent tangential film conductivity
+
+`SurfaceHeatConduction::from_isotropic_conductivity` and
+`from_orthotropic_conductivity` retain the original positive `ConductivityTable`
+sources with a fixed positive thickness. Orthotropic principal axes remain fixed
+in the face plane; no coupled bulk-tensor reduction is inferred. Source knots,
+support and receipts remain accessible through `conductivity_tables`; declared
+inputs gain no sourced authority. The immutable tables are shared by `Arc`,
+so boundary histories clone their identity without copying the tables. The
+surface carrier is now `Clone`, with borrowed read-only accessors.
+`on_boundary_face` shares the same source allocation across a coating mesh;
+it preserves caller-declared nodal ordering and frame, with target face/frame
+admission deferred to the original boundary binder.
+
+The original B-spline moment kernel integrates the full P1 face temperature,
+including every crossed source knot, using the triangle's three-node simplex
+density. Its analytic columns are `<lambda_c dk/dT>`, not `k'(mean(T))/3`.
+The shared boundary owner assembles `A*g_a.<K_s>g_b` or the full tangent
+`J_ac=A*g_a.<K_s>g_c+A*g_a.<lambda_c K_s'>grad_s(T)`. Coefficient derivative
+columns sum to zero; internal film transport adds no reservoir power. The same
+nine entries use the existing sparse graph, and the original enthalpy owner
+column-scales the complete tangent by `dT/dh`. Surface storage stays separate.
+
+Steady initialization intersects incident bulk and film temperature support.
+Linear-only time/adjoint/publication paths refuse temperature-dependent films;
+native nonlinear steady, backward-Euler, enthalpy and Robin response paths use
+the full current law. Classical derivative admission refuses source endpoints
+and a uniform true material kink. Nonuniform crossed-knot integration remains
+smooth. Film thickness, source-selection and frame derivatives are not inferred.
+
+G1/G3 definitions in `surface_heat_capacity/nonlinear.rs` compare independently
+integrated directional flux/Jacobian values, a manufactured nonlinear endpoint
+with ordinary and enthalpy storage, flat-table equivalence and adjoint admission.
+Three std-only production moment tests cover triangle/subtriangle integrals,
+coincident or adjacent temperatures and the original tetrahedral density.
 
 ## Retained pointwise-radiation and contact enthalpy endpoints
 

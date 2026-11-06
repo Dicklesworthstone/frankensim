@@ -214,7 +214,7 @@ fn rank_one_sheets_admit_insulated_directions_and_refuse_nonphysical_laws() {
         );
         assert!(
             base.clone()
-                .with_surface_heat_conduction(cx, &mesh, &[rank_one, rank_one])
+                .with_surface_heat_conduction(cx, &mesh, &[rank_one.clone(), rank_one])
                 .is_err()
         );
         let zero = SurfaceHeatConduction::uniform_tensor(face, AXES, [[0.0; 2]; 2]).unwrap();

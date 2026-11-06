@@ -29,6 +29,10 @@ pub(crate) fn material_is_smooth(
     temperature: &[f64],
 ) -> Result<bool, ConductionError> {
     let mut smooth = true;
+    for (slot, sheet) in problem.boundary.surface_heat_conduction().iter().enumerate() {
+        poll(cx, slot)?;
+        smooth &= sheet.is_smooth(problem.mesh, temperature)?;
+    }
     for element in 0..problem.mesh.element_count() {
         poll(cx, element)?;
         let model = match problem.element_materials {

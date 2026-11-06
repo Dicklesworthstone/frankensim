@@ -334,6 +334,7 @@ fn admit_linear(linear: LinearConfig) -> Result<(), ConductionError> {
 }
 
 fn temperature_dependent(cx: &Cx<'_>, problem: ConductionProblem<'_>) -> Result<bool, ConductionError> {
+    if problem.boundary.has_temperature_dependent_surface_conduction() { return Ok(true); }
     if let Some(materials) = problem.element_materials {
         materials.validate_for(problem.mesh)?;
         let mut dependent = false;

@@ -491,6 +491,12 @@ pub(crate) fn admit_linear_models(
     cx: &Cx<'_>,
     problem: ConductionProblem<'_>,
 ) -> Result<(), ConductionError> {
+    if problem.boundary.has_temperature_dependent_surface_conduction() {
+        return Err(ConductionError::Config {
+            parameter: "surface conductivity",
+            what: "the theta scheme and its state-independent adjoint require constant sheet conductivity; use the nonlinear enthalpy or backward-Euler owner".into(),
+        });
+    }
     if let Some(materials) = problem.element_materials {
         materials.validate_for(problem.mesh)?;
     }
@@ -522,6 +528,16 @@ pub(crate) fn validate_material_temperature(
     temperature: &[f64],
 ) -> Result<(), ConductionError> {
     storage.validate_capacity_temperature(cx, temperature)?;
+    for (slot, sheet) in problem.boundary.surface_heat_conduction().iter().enumerate() {
+        if slot % 512 == 0 {
+            cx.checkpoint().map_err(|_| ConductionError::Cancelled {
+                stage: "transient-film-domain", at: slot,
+            })?;
+        }
+        for vertex in problem.mesh.boundary()[sheet.boundary_face()].vertices {
+            sheet.temperature_span().check(temperature[vertex as usize])?;
+        }
+    }
     for (element, tet) in problem.mesh.complex().tets.iter().enumerate() {
         if element % 512 == 0 {
             cx.checkpoint().map_err(|_| ConductionError::Cancelled {

@@ -224,6 +224,10 @@ impl<'h, 'm> ThermalHistoryRun<'h, 'm> {
         }
         let time_s = problem.boundary.initial_time_s();
         let boundary = problem.boundary.at(cx, time_s)?;
+        if matches!(method, ThermalHistoryMethod::Linear)
+            && boundary.has_temperature_dependent_surface_conduction() {
+            return Err(invalid("history run requires an explicit nonlinear method for temperature-dependent sheet conductivity"));
+        }
         for (i, &(vertex, prescribed)) in boundary.dirichlet().iter().enumerate() {
             if i % 512 == 0 { poll(cx, i)?; }
             if initial[vertex] != prescribed {

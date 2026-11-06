@@ -1262,7 +1262,7 @@ fn initial_free(
                 }
                 TemperatureSpan::Unbounded => preferred.unwrap_or(0.0),
             };
-            let Some(materials) = problem.element_materials else {
+            if problem.element_materials.is_none() && problem.boundary.surface_heat_conduction().is_empty() {
                 let span = problem.material.temperature_span();
                 if matches!(span, TemperatureSpan::Sampled { low, high } if low > high) {
                     return Err(ConductionError::Conductivity {
@@ -1271,7 +1271,7 @@ fn initial_free(
                     });
                 }
                 return Ok(vec![guess_in_span(span); n]);
-            };
+            }
 
             // A shared P1 vertex belongs to every incident material. Initialize
             // inside their intersection, never from the unused uniform fallback.
@@ -1279,7 +1279,10 @@ fn initial_free(
             // single global temperature supported by all of them.
             let mut spans = vec![TemperatureSpan::Unbounded; problem.mesh.vertex_count()];
             for (element, tet) in problem.mesh.complex().tets.iter().enumerate() {
-                let material_span = materials.model_for(element)?.temperature_span();
+                let material_span = match problem.element_materials {
+                    Some(materials) => materials.model_for(element)?.temperature_span(),
+                    None => problem.material.temperature_span(),
+                };
                 for &vertex in tet {
                     let vertex = vertex as usize;
                     let span = spans[vertex].intersect(material_span);
@@ -1292,6 +1295,20 @@ fn initial_free(
                         });
                     }
                     spans[vertex] = span;
+                }
+            }
+            // Film support is local to its original trace, just like each
+            // incident bulk law. A constant bulk must not seed a sampled film
+            // with an unsupported default of zero kelvin.
+            for sheet in problem.boundary.surface_heat_conduction() {
+                for vertex in problem.mesh.boundary()[sheet.boundary_face()].vertices {
+                    let span = spans[vertex as usize].intersect(sheet.temperature_span());
+                    if matches!(span, TemperatureSpan::Sampled { low, high } if low > high) {
+                        return Err(ConductionError::Conductivity {
+                            what: "incident bulk and film sources have disjoint temperature support".into(),
+                        });
+                    }
+                    spans[vertex as usize] = span;
                 }
             }
             Ok(dofs

@@ -63,6 +63,9 @@ impl ConductionSolution {
             }
         }
         problem.source.validate("volumetric source", n)?;
+        if problem.boundary.has_temperature_dependent_surface_conduction() {
+            return Err(invalid("linear field publication cannot freeze temperature-dependent sheet conductivity"));
+        }
         let materials = problem.element_materials;
         if let Some(assigned) = materials { assigned.validate_for(problem.mesh)?; }
         if self.report.material_provenance != materials.map_or_else(

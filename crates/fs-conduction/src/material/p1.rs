@@ -33,12 +33,12 @@ fn scalar(
 /// Integrate a positive piecewise-linear scalar law over a P1 coordinate.
 /// The coordinate may be temperature or specific enthalpy; units and complete
 /// source support are owned by the caller. No temperature table is synthesized.
-pub(crate) fn integrate_scalar_path(
+pub(crate) fn integrate_scalar_path<const N: usize>(
     cx: Option<&Cx<'_>>,
     knots: &[(f64, f64)],
-    nodal: [f64; 4],
+    nodal: [f64; N],
     with_derivatives: bool,
-) -> Result<(f64, [f64; 4]), ConductionError> {
+) -> Result<(f64, [f64; N]), ConductionError> {
     moments::integrate_table(nodal, knots, with_derivatives, |interval| {
         if let Some(cx) = cx {
             cx.checkpoint().map_err(|_| ConductionError::Cancelled {

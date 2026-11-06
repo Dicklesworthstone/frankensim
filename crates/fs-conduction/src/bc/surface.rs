@@ -6,29 +6,35 @@
 //! the original surface-capacity owner and omit a separately meshed layer.
 
 use std::collections::BTreeSet;
+use std::sync::Arc;
 
 use fs_exec::Cx;
 
 use super::ThermalBoundary;
 use crate::{ConductionError, ConductionMesh};
 
-/// Temperature-independent sheet conductance on one original face.
+mod temperature;
+
+/// Tangential sheet conductance on one original face.
 /// Coefficients follow that face's vertex order and are interpolated with P1
 /// basis functions. Tensor laws use an explicitly supplied orthonormal tangent
-/// frame; they are intrinsic sheet laws, not unqualified bulk tensors.
-#[derive(Debug, Clone, Copy, PartialEq)]
+/// frame; they are intrinsic sheet laws, not unqualified bulk tensors. Optional
+/// conductivity tables retain their original sources and are integrated over
+/// the actual P1 temperature field. Clones share these immutable tables.
+#[derive(Debug, Clone, PartialEq)]
 pub struct SurfaceHeatConduction {
     boundary_face: usize,
     law: SheetLaw,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 enum SheetLaw {
     Isotropic([f64; 3]),
     Tensor {
         axes: [[f64; 3]; 2],
         nodal: [[[f64; 2]; 2]; 3],
     },
+    Temperature(Arc<temperature::TemperatureSheet>),
 }
 
 impl SurfaceHeatConduction {
@@ -182,50 +188,65 @@ impl SurfaceHeatConduction {
 
     /// Slot in the original mesh boundary table.
     #[must_use]
-    pub const fn boundary_face(self) -> usize {
+    pub const fn boundary_face(&self) -> usize {
         self.boundary_face
+    }
+
+    /// Assign this same immutable law to another original boundary face.
+    /// Table-backed laws share their source allocation. Nodal ordering and
+    /// world-space tangent axes remain caller-declared; this does not reorder
+    /// coefficients, rotate frames or infer a geometric remap. Binding to the
+    /// target boundary performs the original face/frame admission checks.
+    #[must_use]
+    pub fn on_boundary_face(&self, boundary_face: usize) -> Self {
+        Self {
+            boundary_face,
+            law: self.law.clone(),
+        }
     }
 
     /// Original isotropic P1 sheet conductances [W/K], or `None` for a tensor
     /// law. A directional tensor is never silently replaced by a scalar mean.
     #[must_use]
-    pub const fn nodal_conductance_w_per_k(self) -> Option<[f64; 3]> {
-        match self.law {
-            SheetLaw::Isotropic(values) => Some(values),
-            SheetLaw::Tensor { .. } => None,
+    pub const fn nodal_conductance_w_per_k(&self) -> Option<[f64; 3]> {
+        match &self.law {
+            SheetLaw::Isotropic(values) => Some(*values),
+            SheetLaw::Tensor { .. } | SheetLaw::Temperature(_) => None,
         }
     }
 
     /// Declared world-space tangent axes, or `None` for an isotropic law.
     #[must_use]
-    pub const fn tangent_axes(self) -> Option<[[f64; 3]; 2]> {
-        match self.law {
-            SheetLaw::Tensor { axes, .. } => Some(axes),
+    pub fn tangent_axes(&self) -> Option<[[f64; 3]; 2]> {
+        match &self.law {
+            SheetLaw::Tensor { axes, .. } => Some(*axes),
             SheetLaw::Isotropic(_) => None,
+            SheetLaw::Temperature(law) => law.axes,
         }
     }
 
     /// Original P1 sheet tensors [W/K] in the declared tangent frame.
     #[must_use]
-    pub const fn nodal_tensor_conductance_w_per_k(self) -> Option<[[[f64; 2]; 2]; 3]> {
-        match self.law {
-            SheetLaw::Tensor { nodal, .. } => Some(nodal),
-            SheetLaw::Isotropic(_) => None,
+    pub const fn nodal_tensor_conductance_w_per_k(&self) -> Option<[[[f64; 2]; 2]; 3]> {
+        match &self.law {
+            SheetLaw::Tensor { nodal, .. } => Some(*nodal),
+            SheetLaw::Isotropic(_) | SheetLaw::Temperature(_) => None,
         }
     }
 
-    fn active(self) -> bool {
-        match self.law {
+    fn active(&self) -> bool {
+        match &self.law {
             SheetLaw::Isotropic(values) => values.iter().any(|&value| value > 0.0),
             SheetLaw::Tensor { nodal, .. } => nodal
                 .iter()
                 .any(|tensor| tensor[0][0] > 0.0 || tensor[1][1] > 0.0),
+            SheetLaw::Temperature(_) => true,
         }
     }
 
-    fn mean_action(self, gradient: [f64; 3]) -> [f64; 3] {
-        match self.law {
-            SheetLaw::Isotropic(values) => gradient.map(|g| mean(values) * g),
+    fn mean_action(&self, gradient: [f64; 3]) -> Result<[f64; 3], ConductionError> {
+        Ok(match &self.law {
+            SheetLaw::Isotropic(values) => gradient.map(|g| mean(*values) * g),
             SheetLaw::Tensor { axes, nodal } => {
                 let a = mean(nodal.map(|k| k[0][0]));
                 let b = mean(nodal.map(|k| k[0][1]));
@@ -234,14 +255,19 @@ impl SurfaceHeatConduction {
                 let q = [a.mul_add(g[0], b * g[1]), b.mul_add(g[0], c * g[1])];
                 std::array::from_fn(|i| axes[0][i].mul_add(q[0], axes[1][i] * q[1]))
             }
-        }
+            SheetLaw::Temperature(_) => {
+                return Err(invalid(
+                    "table-backed sheet requires its actual face temperature",
+                ));
+            }
+        })
     }
 
     /// Exact face-average tangential flux -<K_s> grad_s(T_h), in W/m.
     /// A constant temperature has exactly zero gradient, independently of its
     /// Kelvin baseline. This is not the bulk flux density in W/m².
     pub fn mean_heat_flux_w_per_m(
-        self,
+        &self,
         mesh: &ConductionMesh,
         temperature: &[f64],
     ) -> Result<[f64; 3], ConductionError> {
@@ -263,7 +289,8 @@ impl SurfaceHeatConduction {
                 (values[2] - values[0]) * gradients[2][axis],
             )
         });
-        let flux = self.mean_action(gradient).map(|q| -q);
+        let frozen = self.at_temperature(None, values, false)?.0;
+        let flux = frozen.mean_action(gradient)?.map(|q| -q);
         for value in flux {
             crate::require_finite("surface heat flux", value)?;
         }
@@ -274,15 +301,24 @@ impl SurfaceHeatConduction {
     /// pairs determine the diagonal, retaining the constant-temperature null
     /// mode and symmetric internal transfer without adding a reservoir load.
     pub(crate) fn matrix(
-        self,
+        &self,
         mesh: &ConductionMesh,
     ) -> Result<([usize; 3], [[f64; 3]; 3]), ConductionError> {
         let (vertices, gradients, area) = self.geometry(mesh)?;
+        self.matrix_on(vertices, gradients, area)
+    }
+
+    fn matrix_on(
+        &self,
+        vertices: [usize; 3],
+        gradients: [[f64; 3]; 3],
+        area: f64,
+    ) -> Result<([usize; 3], [[f64; 3]; 3]), ConductionError> {
         // Preserve the scalar arithmetic path; tensor faces add only fixed-size
         // stack work and the same nine COO entries/unchanged sparse graph.
-        let isotropic_scale = match self.law {
+        let isotropic_scale = match &self.law {
             SheetLaw::Isotropic(values) => {
-                let scale = area * mean(values);
+                let scale = area * mean(*values);
                 crate::require_finite("surface conductivity moment", scale)?;
                 if self.active() && scale == 0.0 {
                     return Err(invalid(
@@ -292,12 +328,18 @@ impl SurfaceHeatConduction {
                 Some(scale)
             }
             SheetLaw::Tensor { .. } => None,
+            SheetLaw::Temperature(_) => {
+                return Err(invalid(
+                    "table-backed sheet requires its actual face temperature",
+                ));
+            }
         };
-        let actions = if isotropic_scale.is_none() {
-            gradients.map(|gradient| self.mean_action(gradient))
-        } else {
-            [[0.0; 3]; 3]
-        };
+        let mut actions = [[0.0; 3]; 3];
+        if isotropic_scale.is_none() {
+            for (action, gradient) in actions.iter_mut().zip(gradients) {
+                *action = self.mean_action(gradient)?;
+            }
+        }
         let mut block = [[0.0; 3]; 3];
         for a in 0..3 {
             for b in (a + 1)..3 {
@@ -318,7 +360,7 @@ impl SurfaceHeatConduction {
     }
 
     fn geometry(
-        self,
+        &self,
         mesh: &ConductionMesh,
     ) -> Result<([usize; 3], [[f64; 3]; 3], f64), ConductionError> {
         let face = mesh.boundary().get(self.boundary_face).ok_or_else(|| {
@@ -332,7 +374,7 @@ impl SurfaceHeatConduction {
         // The canonical vertex order, not the outward-normal sign, determines
         // this orientation. Gradients therefore remain correct on either side.
         let normal = cross(first, second).map(|v| v * inverse_twice_area);
-        if let SheetLaw::Tensor { axes, .. } = self.law {
+        if let Some(axes) = self.tangent_axes() {
             if axes
                 .iter()
                 .any(|&axis| dot(axis, normal).abs() > FRAME_TOLERANCE)
@@ -378,7 +420,7 @@ impl ThermalBoundary {
             .map(|s| s.boundary_face)
             .collect();
         let mut active = 0usize;
-        for (index, &surface) in surfaces.iter().enumerate() {
+        for (index, surface) in surfaces.iter().enumerate() {
             if index % crate::assemble::ASSEMBLY_TILE == 0 {
                 poll(cx, index)?;
             }
@@ -395,14 +437,17 @@ impl ThermalBoundary {
                     "surface conduction face is declared more than once",
                 ));
             }
-            surface.matrix(mesh)?;
+            surface.geometry(mesh)?;
+            if !matches!(surface.law, SheetLaw::Temperature(_)) {
+                surface.matrix(mesh)?;
+            }
             active += 1;
         }
         self.surface_conduction
             .try_reserve(active)
             .map_err(|_| invalid("surface conduction allocation refused"))?;
         self.surface_conduction
-            .extend(surfaces.iter().copied().filter(|s| s.active()));
+            .extend(surfaces.iter().filter(|s| s.active()).cloned());
         poll(cx, surfaces.len())?;
         Ok(self)
     }

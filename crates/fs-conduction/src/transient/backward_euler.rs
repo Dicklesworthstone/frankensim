@@ -281,6 +281,9 @@ impl<'m> BackwardEuler<'m> {
         interfaces: Option<&ThermalInterfaces>, old: &[f64], dt_s: f64,
         config: StepConfig, dofs: DofMap) -> Result<StepSolution, ConductionError>
     {
+        if problem.boundary.has_temperature_dependent_surface_conduction() {
+            return Err(invalid("linear backward Euler requires temperature-independent sheet conductivity; use advance_nonlinear"));
+        }
         for e in 0..self.mesh.element_count() {
             if e % 512 == 0 { poll(cx, e)?; }
             let model = match problem.element_materials {

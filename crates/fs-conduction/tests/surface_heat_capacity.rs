@@ -7,6 +7,9 @@ mod enthalpy;
 #[path = "surface_heat_capacity/tensor.rs"]
 mod tensor;
 
+#[path = "surface_heat_capacity/nonlinear.rs"]
+mod nonlinear;
+
 use fs_conduction::assemble::{assemble_jacobian, assemble_operator, full_residual};
 use fs_conduction::bc::history::ThermalBoundaryHistory;
 use fs_conduction::bc::history::march::{
@@ -857,16 +860,16 @@ fn coating_zero_duplicate_invalid_and_cancelled_inputs_preserve_admission() {
         let film = SurfaceHeatConduction::uniform(0, 3.0).unwrap();
         assert!(
             base.clone()
-                .with_surface_heat_conduction(cx, &mesh, &[film, film])
+                .with_surface_heat_conduction(cx, &mesh, &[film.clone(), film.clone()])
                 .is_err()
         );
         let coated = base
             .clone()
-            .with_surface_heat_conduction(cx, &mesh, &[film])
+            .with_surface_heat_conduction(cx, &mesh, std::slice::from_ref(&film))
             .unwrap();
         assert!(
             coated
-                .with_surface_heat_conduction(cx, &mesh, &[film])
+                .with_surface_heat_conduction(cx, &mesh, std::slice::from_ref(&film))
                 .is_err()
         );
         let absent = SurfaceHeatConduction::uniform(mesh.boundary().len(), 1.0).unwrap();

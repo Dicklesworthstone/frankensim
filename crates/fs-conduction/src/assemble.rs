@@ -478,7 +478,8 @@ pub(crate) fn assemble_operator_with_material_tensors(
                 Some(tensors) => tensors.tensor(e),
                 None => {
                     let model = conductivity_model(material, element_materials, e)?;
-                    checked_element_conductivity(Some(cx), mesh, e, model, temperature, false)?.tensor
+                    checked_element_conductivity(Some(cx), mesh, e, model, temperature, false)?
+                        .tensor
                 }
             };
             let mut ke = element_stiffness(mesh, e, &k);
@@ -499,7 +500,7 @@ pub(crate) fn assemble_operator_with_material_tensors(
         start = end;
     }
 
-    assemble_boundary(cx, mesh, boundary, &mut coo, &mut load)?;
+    assemble_boundary(cx, mesh, boundary, temperature, false, &mut coo, &mut load)?;
     if let Some(interfaces) = interfaces {
         interfaces.assemble_into(cx, &mut coo)?;
     }
@@ -579,6 +580,8 @@ fn assemble_boundary(
     cx: &Cx<'_>,
     mesh: &ConductionMesh,
     boundary: &ThermalBoundary,
+    temperature: &[f64],
+    jacobian: bool,
     coo: &mut Coo,
     load: &mut [f64],
 ) -> Result<(), ConductionError> {
@@ -641,11 +644,11 @@ fn assemble_boundary(
                 parameter: "surface conduction staging",
                 what: "coating triplet storage exceeds addressable allocation".into(),
             })?;
-        for (index, &surface) in coatings.iter().enumerate() {
+        for (index, surface) in coatings.iter().enumerate() {
             if index % ASSEMBLY_TILE == 0 {
                 checkpoint(cx, "assemble-surface-conduction", index)?;
             }
-            let (vertices, block) = surface.matrix(mesh)?;
+            let (vertices, block) = surface.matrix_at(cx, mesh, temperature, jacobian)?;
             for a in 0..3 {
                 for b in 0..3 {
                     coo.push(vertices[a], vertices[b], block[a][b]);
@@ -659,7 +662,8 @@ fn assemble_boundary(
 /// Assemble the Newton Jacobian `J = ∂R/∂T` of `R(T) = A(T)T − b`.
 ///
 /// `J^e_ac = V gᵀ_a <K> g_c + V gᵀ_a <λ_c K'> ∇T_h` plus the
-/// (temperature-independent) Robin block. The second term is what makes
+/// (temperature-independent) Robin block and the analogous surface-conduction
+/// tangent. The second term is what makes
 /// `J` NONSYMMETRIC, which is why the Newton path runs FGMRES rather
 /// than CG.
 ///
@@ -988,7 +992,15 @@ fn assemble_transport_jacobian(
         // the temperature chart. A bulk phase multiplier cannot scale a Robin
         // face or a contact transfer law.
         let mut boundary_coo = Coo::new(n, n);
-        assemble_boundary(cx, mesh, boundary, &mut boundary_coo, &mut discard)?;
+        assemble_boundary(
+            cx,
+            mesh,
+            boundary,
+            temperature,
+            true,
+            &mut boundary_coo,
+            &mut discard,
+        )?;
         if let Some(interfaces) = interfaces {
             interfaces.assemble_into(cx, &mut boundary_coo)?;
         }
@@ -1010,7 +1022,15 @@ fn assemble_transport_jacobian(
             }
         }
     } else {
-        assemble_boundary(cx, mesh, boundary, &mut coo, &mut discard)?;
+        assemble_boundary(
+            cx,
+            mesh,
+            boundary,
+            temperature,
+            true,
+            &mut coo,
+            &mut discard,
+        )?;
         if let Some(interfaces) = interfaces {
             interfaces.assemble_into(cx, &mut coo)?;
         }

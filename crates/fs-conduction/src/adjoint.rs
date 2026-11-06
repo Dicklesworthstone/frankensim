@@ -113,6 +113,11 @@ impl<'m> ConductivityDesign<'m> {
         problem: ConductionProblem<'m>,
         linear: LinearConfig,
     ) -> Result<ConductivityDesign<'m>, ConductionError> {
+        if problem.boundary.has_temperature_dependent_surface_conduction() {
+            return Err(ConductionError::Conductivity {
+                what: "the linear IFT hook requires temperature-independent sheet conductivity; use the nonlinear Jacobian response".into(),
+            });
+        }
         let materials = problem.element_materials;
         if let Some(assigned) = materials {
             assigned.validate_for(problem.mesh)?;
@@ -154,6 +159,11 @@ impl<'m> ConductivityDesign<'m> {
             element_tensors.push(model.tensor_at(reference(span)?)?);
             for &vertex in &problem.mesh.complex().tets[e] {
                 vertex_spans[vertex as usize] = vertex_spans[vertex as usize].intersect(span);
+            }
+        }
+        for sheet in problem.boundary.surface_heat_conduction() {
+            for vertex in problem.mesh.boundary()[sheet.boundary_face()].vertices {
+                vertex_spans[vertex as usize] = vertex_spans[vertex as usize].intersect(sheet.temperature_span());
             }
         }
         let reference_temperature = vertex_spans
