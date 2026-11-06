@@ -21,7 +21,7 @@ experimental-mann-inflow = ["experimental-compressible", "dep:fs-atmo", "dep:fs-
 experimental-miscibility = ["dep:fs-thermochem", "dep:fs-qty"]
 experimental-miscibility-material = ["experimental-miscibility", "dep:fs-material"]
 # Reuse the same authored local closures as LBM and conjugate finite volumes.
-experimental-sgs = ["experimental-compressible", "dep:fs-lbm", "dep:fs-thermochem"]
+experimental-sgs = ["experimental-compressible", "dep:fs-lbm", "dep:fs-math", "dep:fs-thermochem"]
 
 [dependencies]
 fs-atmo = { path = "../fs-atmo", optional = true }

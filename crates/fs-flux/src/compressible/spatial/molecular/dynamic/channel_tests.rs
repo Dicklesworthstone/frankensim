@@ -148,8 +148,17 @@ fn assert_faces(
         let left = flow.grid.index(c);
         let pl = active.work.primitive[left];
         let pr = active.work.primitive[cell];
-        let mu = 0.5 * pl.density * momentum.viscosities()[left]
-            + 0.5 * pr.density * momentum.viscosities()[cell];
+        let mu = face_viscosity_reference(
+            active,
+            [
+                momentum.coefficient_squared(left).unwrap(),
+                momentum.coefficient_squared(cell).unwrap(),
+            ],
+            momentum.filter_width(),
+            left,
+            cell,
+            axis,
+        );
         let rho_alpha = 0.5 * pl.density * heat.diffusivities()[left]
             + 0.5 * pr.density * heat.diffusivities()[cell];
         let ts = tangents(axis);

@@ -6983,3 +6983,19 @@ The focused G1/G3 regressions in `conservative_density_momentum/gravity.rs`
 cover transported-density free fall and reference-density invariance, layered
 hydrostatic rest and pressure, sinking/rising under lateral density contrast,
 gravity reversal, exact zero-gravity compatibility, and invalid/cancelled input.
+
+## Dynamic SGS on conservative gas faces
+
+Periodic, independently fitted thermal and planar-channel dynamic SGS now
+retain the nonnegative Germano coefficient independently of the cell strain.
+Each conservative face evaluates `mu_t = rho_face C_s_face² Delta² |S_face|`
+using the same normal velocity difference and transverse traces as its stress
+flux. Density and coefficient are averaged separately. The existing cache is
+reused, with no additional arrays or change to its storage budget. The face
+viscosity feeds the original total-energy flux, fixed-Prandtl heat transport,
+ratio admission and parabolic timestep bound. Independently fitted scalar heat
+transport keeps its original model. This fixes loss of modeled face shear
+when adjacent centered gradients vanish; it does not resolve unrepresented
+scales or validate a turbulent flow. Regression sources include a positive
+Germano-fit field with zero adjacent centered strains, Cartesian face-flux
+references, channel references and conservative evolution.

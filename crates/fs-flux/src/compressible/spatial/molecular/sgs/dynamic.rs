@@ -43,7 +43,7 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
 
     /// Fit periodic subgrid stress at every SSP stage and retry. The budget
     /// covers all added SGS Vec capacities, including density/velocity staging
-    /// and the face viscosity cache; original molecular workspaces are outside
+    /// and the fitted coefficient cache; original molecular workspaces are outside
     /// this budget. Preparation and stepping never allocate inside the filter.
     pub fn with_dynamic_sgs(
         flow: &Euler3d,
@@ -127,25 +127,29 @@ impl SubgridTransport {
             density: allocated(n, 0.0)?,
             velocity: allocated(n, [0.0; 3])?,
         };
-        let dynamic_viscosity = allocated(n, 0.0)?;
+        let dynamic_coefficient_squared = allocated(n, 0.0)?;
         let bytes = dynamic.filter.workspace_bytes()
             + dynamic.density.capacity() * core::mem::size_of::<f64>()
             + dynamic.velocity.capacity() * core::mem::size_of::<[f64; 3]>()
-            + dynamic_viscosity.capacity() * core::mem::size_of::<f64>();
+            + dynamic_coefficient_squared.capacity() * core::mem::size_of::<f64>();
         admit_bytes(bytes, maximum_bytes)?;
         Ok(Self {
             closure: SubgridClosure::Dynamic(dynamic),
             wall_models: [None; 6],
-            dynamic_viscosity,
+            dynamic_coefficient_squared,
         })
     }
 }
 
 impl DynamicTransport {
+    pub(super) fn filter_width(&self) -> f64 {
+        self.filter.filter_width()
+    }
+
     pub(super) fn prepare(
         &mut self,
         primitive: &[Primitive],
-        dynamic_viscosity: &mut [f64],
+        dynamic_coefficient_squared: &mut [f64],
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<(), MolecularError> {
         for (cell, p) in primitive.iter().enumerate() {
@@ -161,21 +165,15 @@ impl DynamicTransport {
             &self.velocity,
             &mut *cancelled,
         )?;
-        for (cell, ((p, &nu), mu)) in primitive
-            .iter()
-            .zip(self.filter.viscosities())
-            .zip(dynamic_viscosity)
+        for (cell, (coefficient, fitted)) in dynamic_coefficient_squared
+            .iter_mut()
+            .zip(self.filter.coefficients_squared())
             .enumerate()
         {
             if cell % 64 == 0 {
                 poll(cancelled)?;
             }
-            *mu = p.density * nu;
-            if !mu.is_finite() {
-                return Err(MolecularError::Invalid(
-                    "unrepresentable dynamic subgrid viscosity",
-                ));
-            }
+            *coefficient = fitted;
         }
         poll(cancelled)?;
         Ok(())

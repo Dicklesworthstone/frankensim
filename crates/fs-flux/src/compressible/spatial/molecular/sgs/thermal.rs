@@ -121,25 +121,29 @@ impl SubgridTransport {
             heat: PeriodicDynamicScalar::new(flow.grid.shape, maximum_bytes)?,
             work: ThermalWorkspace::new(n)?,
         };
-        let dynamic_viscosity = allocated(n, 0.0)?;
+        let dynamic_coefficient_squared = allocated(n, 0.0)?;
         let bytes = closure.momentum.workspace_bytes()
             + closure.heat.workspace_bytes()
             + closure.work.workspace_bytes()
-            + dynamic_viscosity.capacity() * core::mem::size_of::<f64>();
+            + dynamic_coefficient_squared.capacity() * core::mem::size_of::<f64>();
         dynamic::admit_bytes(bytes, maximum_bytes)?;
         Ok(Self {
             closure: SubgridClosure::DynamicThermal(closure),
             wall_models: [None; 6],
-            dynamic_viscosity,
+            dynamic_coefficient_squared,
         })
     }
 }
 
 impl DynamicThermalTransport {
+    pub(super) fn filter_width(&self) -> f64 {
+        self.momentum.filter_width()
+    }
+
     pub(super) fn prepare(
         &mut self,
         primitive: &[Primitive],
-        dynamic_viscosity: &mut [f64],
+        dynamic_coefficient_squared: &mut [f64],
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<(), MolecularError> {
         self.work.stage(primitive, cancelled)?;
@@ -154,9 +158,9 @@ impl DynamicThermalTransport {
         )?;
         self.work.store_transport(
             primitive,
-            self.momentum.viscosities(),
+            self.momentum.coefficients_squared(),
             self.heat.diffusivities(),
-            dynamic_viscosity,
+            dynamic_coefficient_squared,
             cancelled,
         )
     }
@@ -227,23 +231,23 @@ impl ThermalWorkspace {
     pub(super) fn store_transport(
         &mut self,
         primitive: &[Primitive],
-        viscosity: &[f64],
+        coefficients: impl ExactSizeIterator<Item = f64>,
         diffusivity: &[f64],
-        dynamic_viscosity: &mut [f64],
+        dynamic_coefficient_squared: &mut [f64],
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<(), MolecularError> {
-        for (cell, ((p, &nu), mu)) in primitive
+        for (cell, ((p, fitted), coefficient)) in primitive
             .iter()
-            .zip(viscosity)
-            .zip(dynamic_viscosity)
+            .zip(coefficients)
+            .zip(dynamic_coefficient_squared)
             .enumerate()
         {
             if cell % 64 == 0 {
                 poll(cancelled)?;
             }
-            *mu = p.density * nu;
+            *coefficient = fitted;
             self.rho_diffusivity[cell] = p.density * diffusivity[cell];
-            if !mu.is_finite() || !self.rho_diffusivity[cell].is_finite() {
+            if !self.rho_diffusivity[cell].is_finite() {
                 return Err(MolecularError::Invalid(
                     "unrepresentable dynamic thermal SGS transport",
                 ));

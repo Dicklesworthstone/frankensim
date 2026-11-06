@@ -185,26 +185,30 @@ impl SubgridTransport {
             heat: ChannelDynamicScalar::new(flow.grid.shape, normal, maximum_bytes)?,
             work: thermal::ThermalWorkspace::new(n)?,
         };
-        let dynamic_viscosity = allocated(n, 0.0)?;
+        let dynamic_coefficient_squared = allocated(n, 0.0)?;
         let bytes = closure.momentum.workspace_bytes()
             + closure.heat.workspace_bytes()
             + closure.work.workspace_bytes()
-            + dynamic_viscosity.capacity() * core::mem::size_of::<f64>();
+            + dynamic_coefficient_squared.capacity() * core::mem::size_of::<f64>();
         dynamic::admit_bytes(bytes, maximum_bytes)?;
         Ok(Self {
             closure: SubgridClosure::ChannelDynamicThermal(closure),
             wall_models: [None; 6],
-            dynamic_viscosity,
+            dynamic_coefficient_squared,
         })
     }
 }
 
 impl ChannelDynamicThermalTransport {
+    pub(super) fn filter_width(&self) -> f64 {
+        self.momentum.filter_width()
+    }
+
     pub(super) fn prepare(
         &mut self,
         primitive: &[Primitive],
         walls: &[MolecularWall3d; 6],
-        dynamic_viscosity: &mut [f64],
+        dynamic_coefficient_squared: &mut [f64],
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<(), MolecularError> {
         let (wall_velocity, wall_scalar) = channel_wall_values(self.momentum.normal_axis(), walls)?;
@@ -222,9 +226,9 @@ impl ChannelDynamicThermalTransport {
         )?;
         self.work.store_transport(
             primitive,
-            self.momentum.viscosities(),
+            self.momentum.coefficients_squared(),
             self.heat.diffusivities(),
-            dynamic_viscosity,
+            dynamic_coefficient_squared,
             cancelled,
         )
     }

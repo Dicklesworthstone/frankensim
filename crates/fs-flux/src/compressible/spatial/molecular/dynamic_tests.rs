@@ -50,6 +50,39 @@ fn prepare<L: TransportLaw>(op: &mut MolecularTransport3d<L>, flow: &Euler3d) ->
     .unwrap()
 }
 
+// Independent constitutive evaluation on the FV face, with the supplied
+// fitted coefficients. No production face-gradient or SGS evaluator is used.
+fn face_viscosity_reference<L: TransportLaw>(
+    op: &MolecularTransport3d<L>,
+    coefficients: [f64; 2],
+    filter_width: f64,
+    left: usize,
+    right: usize,
+    axis: usize,
+) -> f64 {
+    let pl = op.work.primitive[left];
+    let pr = op.work.primitive[right];
+    let g: [[f64; 3]; 3] = std::array::from_fn(|i| {
+        std::array::from_fn(|j| {
+            if j == axis {
+                (pr.velocity[i] - pl.velocity[i]) / op.grid.spacing[axis]
+            } else {
+                0.5 * op.work.gradient[left][i][j] + 0.5 * op.work.gradient[right][i][j]
+            }
+        })
+    });
+    let mut strain_squared = 0.0;
+    for i in 0..3 {
+        for j in 0..3 {
+            strain_squared += (0.5 * (g[i][j] + g[j][i])).powi(2);
+        }
+    }
+    (0.5 * pl.density + 0.5 * pr.density)
+        * (0.5 * coefficients[0] + 0.5 * coefficients[1])
+        * filter_width.powi(2)
+        * (2.0 * strain_squared).sqrt()
+}
+
 #[test]
 fn g0_g5_uniform_dynamic_model_preserves_the_original_coupled_trajectory() {
     for averaging in [DynamicAveraging::Domain, DynamicAveraging::LocalBox] {
@@ -120,8 +153,17 @@ fn g0_dynamic_favre_viscosity_drives_the_original_stress_heat_and_conservative_u
         let left = flow.grid.index(left);
         let pl = active.work.primitive[left];
         let pr = active.work.primitive[i];
-        let mu_t =
-            0.5 * rho[left] * core.viscosities()[left] + 0.5 * rho[i] * core.viscosities()[i];
+        let mu_t = face_viscosity_reference(
+            &active,
+            [
+                core.coefficient_squared(left).unwrap(),
+                core.coefficient_squared(i).unwrap(),
+            ],
+            core.filter_width(),
+            left,
+            i,
+            0,
+        );
         if mu_t == 0.0 {
             continue;
         }
@@ -651,8 +693,17 @@ fn g1_cartesian_dynamic_stress_and_heat_use_physical_faces_and_conserve() {
                 let mut left = c;
                 left[axis] = (c[axis] + shape[axis] - 1) % shape[axis];
                 let left = flow.grid.index(left);
-                let mu_t = 0.5 * rho[left] * core.viscosities()[left]
-                    + 0.5 * rho[i] * core.viscosities()[i];
+                let mu_t = face_viscosity_reference(
+                    &active,
+                    [
+                        core.coefficient_squared(left).unwrap(),
+                        core.coefficient_squared(i).unwrap(),
+                    ],
+                    core.filter_width(),
+                    left,
+                    i,
+                    axis,
+                );
                 let k_t = if independent_heat {
                     3.5 * (0.5 * rho[left] * heat.diffusivities()[left]
                         + 0.5 * rho[i] * heat.diffusivities()[i])
@@ -731,5 +782,101 @@ fn g1_cartesian_dynamic_stress_and_heat_use_physical_faces_and_conserve() {
         }
         assert!(report.accepted_steps >= 2);
         assert!(report.maximum_parabolic_number <= 0.40000000000001);
+    }
+}
+
+#[test]
+fn dynamic_face_strain_retains_shear_hidden_from_both_cell_centers() {
+    // A fixed LCG field supplies a real positive domain Germano fit. The
+    // edited four-cell stripe has zero centered gradients on both sides of
+    // one face, but its adjacent transverse velocities differ by 0.02.
+    let n = 6;
+    let at = |x: usize, y: usize, z: usize| (z * n + y) * n + x;
+    let mut state = 1u32;
+    let mut velocity = vec![[0.0; 3]; n * n * n];
+    for u in &mut velocity {
+        for component in u {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            *component = 0.03 * (2.0 * (state >> 8) as f64 / 16_777_216.0 - 1.0);
+        }
+    }
+    for x in 0..4 {
+        velocity[at(x, 1, 1)] = [0.0, if x % 2 == 0 { -0.01 } else { 0.01 }, 0.0];
+    }
+    for x in [1, 2] {
+        for [y, z] in [[0, 1], [2, 1], [1, 0], [1, 2]] {
+            velocity[at(x, y, z)] = [0.0; 3];
+        }
+    }
+    for independent_heat in [false, true] {
+        let mut flow = field(
+            gas(0.0),
+            CartesianGrid::new(n, n, n, 1.0, 1.0, 1.0).unwrap(),
+            PERIODIC,
+            |p| {
+                let cell = at(p[0] as usize, p[1] as usize, p[2] as usize);
+                let u = velocity[cell];
+                [1.0 + 0.1 * (cell % 7) as f64 / 6.0, u[0], u[1], u[2], 2.0]
+            },
+        );
+        let controls = config(DynamicAveraging::Domain);
+        let mut active = if independent_heat {
+            MolecularTransport3d::with_dynamic_thermal_sgs(
+                &flow,
+                law(flow.gas(), 0.01, 0.0, 0.004),
+                DynamicThermalSubgridConfig {
+                    momentum: controls.model,
+                    heat: thermal_config().heat,
+                },
+                usize::MAX,
+                || false,
+            )
+        } else {
+            MolecularTransport3d::with_dynamic_sgs(
+                &flow,
+                law(flow.gas(), 0.01, 0.0, 0.004),
+                controls,
+                usize::MAX,
+                || false,
+            )
+        }
+        .unwrap();
+        let mut base =
+            MolecularTransport3d::new(&flow, law(flow.gas(), 0.01, 0.0, 0.004), || false)
+                .unwrap();
+        let base_rate = prepare(&mut base, &flow);
+        let active_rate = prepare(&mut active, &flow);
+        assert!(active_rate > base_rate);
+        let left = at(1, 1, 1);
+        let right = at(2, 1, 1);
+        for cell in [left, right] {
+            assert!(active.work.gradient[cell].iter().flatten().all(|g| g.abs() < 1e-15));
+        }
+        let density: Vec<_> = active.work.primitive.iter().map(|p| p.density).collect();
+        let resolved: Vec<_> = active.work.primitive.iter().map(|p| p.velocity).collect();
+        let mut fit = PeriodicDynamicSgs::new([n; 3], 1.0, usize::MAX).unwrap();
+        fit.prepare(controls.model, &density, &resolved, || false).unwrap();
+        // Independent full-tensor, physical-unit evaluation of this fixed field.
+        let expected_coefficient = 0.079_783_248_957_537_02;
+        for cell in [left, right] {
+            close(fit.coefficient_squared(cell).unwrap(), expected_coefficient, 2e-13);
+            assert!(fit.viscosities()[cell] < 1e-14);
+        }
+        let expected_mu = 1.025 * expected_coefficient * 0.02;
+        let face = flow.grid.cell_face(0, [2, 1, 1]);
+        close(
+            active.work.flux[0][face].transverse_momentum[0]
+                - base.work.flux[0][face].transverse_momentum[0],
+            0.02 * expected_mu,
+            2e-13,
+        );
+        let initial = flow.totals();
+        let report = active
+            .advance(&mut flow, Time::new(0.001), MolecularControl::default(), || false)
+            .unwrap();
+        close(flow.totals().energy, initial.energy, 2e-12);
+        for residual in report.conservation_residual.array() {
+            close(residual, 0.0, 2e-12);
+        }
     }
 }

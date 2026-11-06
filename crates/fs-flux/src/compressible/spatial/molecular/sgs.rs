@@ -6,6 +6,10 @@
 //! uses the adjacent velocities, exactly as the stress does; transverse
 //! derivatives use the two cell traces. Cell-centered central differences alone
 //! miss alternating-cell shear and must not select the local face viscosity.
+//! Dynamic fits also retain C_s squared independently of cell strain and
+//! evaluate `mu_t = rho_face C_s_face^2 Delta^2 |S_face|` on this same face
+//! tensor. Density and the nonnegative coefficient are interpolated separately;
+//! a zero centered strain therefore cannot erase a resolved face shear.
 //! Face stress adds `mu_t = rho nu_t` only to the
 //! deviatoric viscosity; bulk viscosity remains the original molecular law.
 //! Gradient-diffusion heat adds `k_t = mu_t cp(T)/Pr_t`, using the original
@@ -127,8 +131,9 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
 pub(super) struct SubgridTransport {
     closure: SubgridClosure,
     wall_models: [Option<EquilibriumWallConfig>; 6],
-    // Reused at every stage. No allocation in the per-cell/face hot path.
-    dynamic_viscosity: Vec<f64>,
+    // Reused at every stage. Store C_s squared independently of cell strain,
+    // so the conservative face selects its own viscosity. No hot allocation.
+    dynamic_coefficient_squared: Vec<f64>,
 }
 
 enum SubgridClosure {
@@ -162,7 +167,7 @@ impl SubgridTransport {
                 widths,
                 filter_width,
             },
-            dynamic_viscosity: allocated(flow.states.len(), 0.0)?,
+            dynamic_coefficient_squared: allocated(flow.states.len(), 0.0)?,
         })
     }
 
@@ -175,13 +180,13 @@ impl SubgridTransport {
         match &mut self.closure {
             SubgridClosure::Local { .. } => Ok(()),
             SubgridClosure::Dynamic(dynamic) => {
-                dynamic.prepare(primitive, &mut self.dynamic_viscosity, cancelled)
+                dynamic.prepare(primitive, &mut self.dynamic_coefficient_squared, cancelled)
             }
             SubgridClosure::DynamicThermal(dynamic) => {
-                dynamic.prepare(primitive, &mut self.dynamic_viscosity, cancelled)
+                dynamic.prepare(primitive, &mut self.dynamic_coefficient_squared, cancelled)
             }
             SubgridClosure::ChannelDynamicThermal(dynamic) => {
-                dynamic.prepare(primitive, walls, &mut self.dynamic_viscosity, cancelled)
+                dynamic.prepare(primitive, walls, &mut self.dynamic_coefficient_squared, cancelled)
             }
         }
     }
@@ -226,7 +231,35 @@ impl SubgridTransport {
             .map_err(MolecularError::Subgrid)?;
             (0.5 * primitive[left].density + 0.5 * primitive[right].density) * nu
         } else {
-            0.5 * self.dynamic_viscosity[left] + 0.5 * self.dynamic_viscosity[right]
+            let coefficient = 0.5 * self.dynamic_coefficient_squared[left]
+                + 0.5 * self.dynamic_coefficient_squared[right];
+            if coefficient == 0.0 {
+                0.0
+            } else {
+                let width = match &self.closure {
+                    SubgridClosure::Local { filter_width, .. } => *filter_width,
+                    SubgridClosure::Dynamic(dynamic) => dynamic.filter_width(),
+                    SubgridClosure::DynamicThermal(dynamic) => dynamic.filter_width(),
+                    SubgridClosure::ChannelDynamicThermal(dynamic) => dynamic.filter_width(),
+                };
+                let g = face_gradient(
+                    primitive[left].velocity,
+                    primitive[right].velocity,
+                    gradient[left],
+                    gradient[right],
+                    axis,
+                    distance,
+                );
+                let nu = eddy_viscosity(
+                    SgsModel::Smagorinsky {
+                        cs: fs_math::det::sqrt(coefficient),
+                    },
+                    width,
+                    g,
+                )
+                .map_err(MolecularError::Subgrid)?;
+                (0.5 * primitive[left].density + 0.5 * primitive[right].density) * nu
+            }
         };
         let (prandtl, maximum_ratio) = match &self.closure {
             SubgridClosure::Local { config, .. } => {
