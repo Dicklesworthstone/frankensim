@@ -343,12 +343,26 @@ where claimed below.
   order for the held linear law. The numerical trace bound
   `tr(I^-1 D)` admits only half-stage relaxation numbers at most two, avoiding
   unresolved midpoint sign reversals; it is not an interval certificate or a
-  replacement for decay/phase refinement. The reference environment is
-  stationary. Nonlinear drag, dry friction, moving baths, varying tensors,
-  internal rotors and discrete adjoints are outside this API. G0/G1/G3 tests
+  replacement for decay/phase refinement. The basic step entry uses a
+  stationary reference environment. Nonlinear drag, dry friction, varying
+  tensors, internal rotors and discrete adjoints remain outside this API. G0/G1/G3 tests
   in `tests/viscous_rigid_body.rs` specify exponential spin/phase/heat
   refinement, passivity, material-frame covariance, the native zero-drag
   limit and invalid/unresolved-input refusals.
+- `ViscousRigidBodyStepper::step_in_rotating_bath` holds a prescribed angular
+  velocity in space, transforms it at both accepted endpoint attitudes, and
+  reuses the same cached midpoint factor for
+  `tau_drag = -D (omega - R^-1 Omega)`. `ViscousRotatingBathStep` retains the
+  body receipt and adds signed bath source work
+  `sum(tau_drag dot Omega dt)`; heat is the nonnegative relative-slip
+  quadratic form. The bath receives the opposite drag impulse. Body kinetic
+  change closes against drive plus bath work minus heat and the native drift
+  defect. Exactly zero bath uses the original stationary arithmetic. Four
+  physical groups cover independent coaxial entrainment/reversal work and heat,
+  full Euler/quaternion RK4 refinement, joint material/spatial covariance, and
+  co-rotation, work extraction, parity and refusal. This is a prescribed source:
+  finite bath inertia, changing bath laws, translational drag and thermal
+  allocation are not inferred.
 - `galpha::GeneralizedAlpha::new(m, c, k, n, h, rho_inf)` +
   `galpha_step(ga, q, v, a, f_next)` — Chung–Hulbert: αm = (2ρ−1)/(ρ+1),
   αf = ρ/(ρ+1), γ = ½ − αm + αf, β = ¼(1 − αm + αf)²; one prefactored

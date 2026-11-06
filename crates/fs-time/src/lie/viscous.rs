@@ -1,9 +1,11 @@
 //! Full-tensor viscous torque on a rigid body, with prepared implicit stages.
 //!
-//! The body-frame law is tau = drive - D omega. Two implicit midpoint torque
-//! stages surround the existing compensated free rigid-body flow. This keeps
-//! gyroscopic transport in its original owner and physical viscous heat
-//! separate from the free flow's numerical energy defect.
+//! The body-frame law is tau = drive - D (omega - Omega_bath). Two implicit
+//! midpoint torque stages surround the existing compensated free rigid-body
+//! flow. The stationary entry sets Omega_bath = 0; the rotating-bath entry
+//! holds its prescribed spin in space and reports its signed source work.
+//! Gyroscopic transport stays in its original owner. Relative-slip heat,
+//! applied work and the free flow's numerical energy defect remain separate.
 //!
 //! The Euler equation I omega' + omega cross (I omega) = tau follows
 //! Lynch and Park, Modern Robotics, section 8.2:
@@ -23,10 +25,10 @@ type Vector = [Dd; 3];
 /// and use two Cholesky solves; no per-step eigensolve or numerical Jacobian
 /// is introduced. Zero drag needs no factorization.
 ///
-/// This is linear viscous drag relative to a stationary environment, not dry
-/// friction, quadratic aerodynamic drag or a general feedback controller.
-/// D is fixed in the body's material axes; a changing external drag tensor
-/// requires a different model/preparation.
+/// This is linear viscous drag relative to a stationary or prescribed rotating
+/// environment, not dry friction, quadratic aerodynamic drag or a general
+/// feedback controller. D is fixed in the body's material axes; a changing
+/// external drag tensor requires a different model/preparation.
 #[derive(Debug, Clone)]
 pub struct ViscousRigidBodyStepper {
     inertia: InertiaTensor3,
@@ -57,16 +59,33 @@ pub struct ViscousRigidBodyStep {
     pub angular_momentum_residual_space: Vec3,
     /// Signed drive work at the two implicit-stage mean angular rates [J].
     pub drive_work_j: f64,
-    /// Nonnegative sum(dt_stage * omega_mid^T D omega_mid) [J].
-    /// Numerical integration and free-flow errors are never assigned heat.
+    /// Nonnegative sum(dt_stage * relative_spin_mid^T D relative_spin_mid) [J].
+    /// Relative spin is omega for the stationary entry and omega - Omega_bath
+    /// for the rotating-bath entry. This is mechanical loss, with no automatic
+    /// thermal destination. Numerical and free-flow errors are never heat.
     pub dissipated_energy_j: f64,
     /// Actual kinetic change between the supplied and returned momentum [J].
     pub kinetic_energy_change_j: f64,
     /// Kinetic change during the native torque-free drift alone [J].
     pub drift_energy_defect_j: f64,
-    /// Kinetic change - drive work + heat - drift defect [J].
-    /// Retains the measured final-state rounding defect; no energy projection.
+    /// Kinetic change - drive work - bath work + heat - drift defect [J].
+    /// Bath work is zero for `step`; `step_in_rotating_bath` reports it in
+    /// the enclosing receipt. Retains final-state rounding; no projection.
     pub work_energy_residual_j: f64,
+}
+
+/// A body coupled to an externally prescribed, spatially held bath spin.
+///
+/// The bath receives the opposite of `motion.drag_angular_impulse_space`.
+/// Its maintaining actuator supplies `bath_work_j`; a negative value means
+/// it extracts work. The body's drag work is bath work minus relative-slip
+/// heat. This is an infinite prescribed source, not a finite-inertia body.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ViscousRotatingBathStep {
+    /// Original body motion and balances, including bath work in the residual.
+    pub motion: ViscousRigidBodyStep,
+    /// Sum(tau_drag_body dot Omega_bath_body * dt_stage) [J].
+    pub bath_work_j: f64,
 }
 
 impl InertiaTensor3 {
@@ -113,7 +132,9 @@ impl InertiaTensor3 {
             return Err(invalid("positive viscous rigid-body relaxation mobility"));
         }
         if scalar(half_s * rate, "viscous rigid-body relaxation number")? > 2.0 {
-            return Err(invalid("viscous rigid-body interval does not resolve relaxation"));
+            return Err(invalid(
+                "viscous rigid-body interval does not resolve relaxation",
+            ));
         }
         let mut matrix = self.matrix().m;
         for (entry, damping) in matrix.iter_mut().zip(damping_body.m) {
@@ -125,7 +146,10 @@ impl InertiaTensor3 {
         let factor_scale = matrix.iter().map(|x| x.abs()).fold(0.0_f64, f64::max);
         let factor = if any_drag {
             let normalized = matrix.map(|x| x / factor_scale);
-            Some(cholesky(&normalized, 3).map_err(|_| invalid("viscous rigid-body factor not SPD"))?)
+            Some(
+                cholesky(&normalized, 3)
+                    .map_err(|_| invalid("viscous rigid-body factor not SPD"))?,
+            )
         } else {
             None
         };
@@ -168,29 +192,90 @@ impl ViscousRigidBodyStepper {
     /// Torque impulse tails remain in DD through native free rotation.
     /// The fixed number of 3-vector operations has no unbounded iteration.
     /// All state is supplied by value; every refusal leaves it unchanged.
-    /// No contact, changing inertia, moving bath, internal rotor or adjoint
-    /// is inferred. The returned numerical residuals are not error bounds.
+    /// This entry uses a stationary bath. No contact, changing inertia,
+    /// internal rotor or adjoint is inferred. Residuals are not error bounds.
     pub fn step(
         &self,
         rotation: So3,
         momentum_body: Vec3,
         drive: HeldTorque,
     ) -> Result<ViscousRigidBodyStep, LieStepError> {
-        let initial = held::finite_vector(momentum_body, "viscous rigid-body momentum")?;
-        let first = self.stage(initial, drive_at(rotation, drive)?)?;
-        let (rotation_after, drifted) = self.inertia.compensated_momentum_step(
-            rotation,
-            first.momentum,
-            self.duration_s,
+        Ok(self.advance(rotation, momentum_body, drive, None)?.motion)
+    }
+
+    /// Couple the body to a bath with constant spatial angular velocity [rad/s].
+    ///
+    /// Each implicit stage uses tau_drag = -D (omega_mid - R^-1 Omega_space).
+    /// The prescribed bath spin is transformed at BOTH accepted endpoint
+    /// attitudes. Its work is tau_drag dot Omega_bath times stage duration;
+    /// the nonnegative relative-slip quadratic form is the dissipated energy.
+    /// A faster bath can therefore accelerate the body while producing heat.
+    ///
+    /// Uses the same cached factor and symmetric second-order composition.
+    /// Exactly zero bath spin or zero damping takes the stationary arithmetic.
+    /// Body and bath spin must be resolved by timestep refinement, in addition
+    /// to the preparation-time relaxation limit. No finite bath inertia,
+    /// changing bath law, translational drag, heat partition or adjoint is
+    /// inferred. All supplied state remains unchanged on refusal.
+    pub fn step_in_rotating_bath(
+        &self,
+        rotation: So3,
+        momentum_body: Vec3,
+        drive: HeldTorque,
+        bath_angular_velocity_space: Vec3,
+    ) -> Result<ViscousRotatingBathStep, LieStepError> {
+        let bath = held::finite_vector(
+            bath_angular_velocity_space,
+            "viscous spatial bath angular velocity",
         )?;
-        let second = self.stage(drifted, drive_at(rotation_after, drive)?)?;
+        let bath = if self.factor.is_none()
+            || components(bath_angular_velocity_space)
+                .iter()
+                .all(|x| *x == 0.0)
+        {
+            None
+        } else {
+            Some(bath)
+        };
+        self.advance(rotation, momentum_body, drive, bath)
+    }
+
+    fn advance(
+        &self,
+        rotation: So3,
+        momentum_body: Vec3,
+        drive: HeldTorque,
+        bath_space: Option<Vector>,
+    ) -> Result<ViscousRotatingBathStep, LieStepError> {
+        let initial = held::finite_vector(momentum_body, "viscous rigid-body momentum")?;
+        let first = self.stage(
+            initial,
+            drive_at(rotation, drive)?,
+            bath_at(rotation, bath_space)?,
+        )?;
+        let (rotation_after, drifted) =
+            self.inertia
+                .compensated_momentum_step(rotation, first.momentum, self.duration_s)?;
+        let second = self.stage(
+            drifted,
+            drive_at(rotation_after, drive)?,
+            bath_at(rotation_after, bath_space)?,
+        )?;
         let momentum_after_body = rounded(second.momentum, "viscous rigid-body output momentum")?;
         let accepted = held::finite_vector(momentum_after_body, "viscous accepted momentum")?;
-        let angular_velocity_after_body =
-            rounded(velocity(self.inertia, accepted)?, "viscous output angular velocity")?;
+        let angular_velocity_after_body = rounded(
+            velocity(self.inertia, accepted)?,
+            "viscous output angular velocity",
+        )?;
         let kinetic_change = energy(self.inertia, accepted)? - energy(self.inertia, initial)?;
         let drift_defect = energy(self.inertia, drifted)? - energy(self.inertia, first.momentum)?;
         let drive_work = first.drive_work + second.drive_work;
+        let bath_work = first.bath_work + second.bath_work;
+        let source_work = if bath_space.is_some() {
+            drive_work + bath_work
+        } else {
+            drive_work
+        };
         let heat = first.heat + second.heat;
         let drive_impulse = add(
             to_space(rotation, first.drive_impulse)?,
@@ -201,10 +286,13 @@ impl ViscousRigidBodyStepper {
             to_space(rotation_after, second.drag_impulse)?,
         );
         let balance = subtract(
-            subtract(to_space(rotation_after, accepted)?, to_space(rotation, initial)?),
+            subtract(
+                to_space(rotation_after, accepted)?,
+                to_space(rotation, initial)?,
+            ),
             add(drive_impulse, drag_impulse),
         );
-        Ok(ViscousRigidBodyStep {
+        let motion = ViscousRigidBodyStep {
             rotation_after,
             momentum_after_body,
             angular_velocity_after_body,
@@ -216,17 +304,26 @@ impl ViscousRigidBodyStepper {
             kinetic_energy_change_j: scalar(kinetic_change.to_f64(), "viscous kinetic change")?,
             drift_energy_defect_j: scalar(drift_defect.to_f64(), "viscous free-flow defect")?,
             work_energy_residual_j: scalar(
-                (kinetic_change - drive_work + heat - drift_defect).to_f64(),
+                (kinetic_change - source_work + heat - drift_defect).to_f64(),
                 "viscous work balance",
             )?,
+        };
+        Ok(ViscousRotatingBathStep {
+            motion,
+            bath_work_j: scalar(bath_work.to_f64(), "viscous bath work")?,
         })
     }
 
-    fn stage(&self, momentum: Vector, drive: Vector) -> Result<Stage, LieStepError> {
+    fn stage(
+        &self,
+        momentum: Vector,
+        drive: Vector,
+        bath: Option<Vector>,
+    ) -> Result<Stage, LieStepError> {
         let before = velocity(self.inertia, momentum)?;
         let mut midpoint = before;
         if let Some(factor) = &self.factor {
-            let initial_drag = apply(self.damping_body, before)?;
+            let initial_drag = apply(self.damping_body, relative(before, bath))?;
             let rhs = subtract(drive, initial_drag).map(|x| dd(self.half_s) * x);
             let mut change = [0.0; 3];
             for i in 0..3 {
@@ -241,7 +338,7 @@ impl ViscousRigidBodyStepper {
             }
         }
         let drive_impulse = drive.map(|x| dd(self.half_s) * x);
-        let trial_drag = apply(self.damping_body, midpoint)?;
+        let trial_drag = apply(self.damping_body, relative(midpoint, bath))?;
         let impulse = subtract(drive, trial_drag).map(|x| dd(self.half_s) * x);
         let mut after = [Dd::ZERO; 3];
         for i in 0..3 {
@@ -249,7 +346,8 @@ impl ViscousRigidBodyStepper {
         }
         let after_velocity = velocity(self.inertia, after)?;
         let mean = core::array::from_fn(|i| dd(0.5) * before[i] + dd(0.5) * after_velocity[i]);
-        let drag = apply(self.damping_body, mean)?;
+        let slip = relative(mean, bath);
+        let drag = apply(self.damping_body, slip)?;
         let drag_impulse = drag.map(|x| dd(-self.half_s) * x);
         let actual = subtract(after, momentum);
         for i in 0..3 {
@@ -267,13 +365,19 @@ impl ViscousRigidBodyStepper {
             }
         }
         let drive_work = dd(self.half_s) * dot(mean, drive);
-        let heat = dd(self.half_s) * dot(mean, drag);
+        let bath_work = bath.map_or(Dd::ZERO, |spin| dot(drag_impulse, spin));
+        let source_work = if bath.is_some() {
+            drive_work + bath_work
+        } else {
+            drive_work
+        };
+        let heat = dd(self.half_s) * dot(slip, drag);
         if scalar(heat.to_f64(), "viscous dissipative work")? < 0.0 {
             return Err(invalid("nonnegative viscous dissipative work"));
         }
         let kinetic_change = dot(actual, mean);
         let work_residual = scalar(
-            (kinetic_change - drive_work + heat).to_f64(),
+            (kinetic_change - source_work + heat).to_f64(),
             "viscous stage work residual",
         )?;
         // Opposing cross-axis work can cancel in the net dot product.
@@ -282,10 +386,26 @@ impl ViscousRigidBodyStepper {
         let mut scale = 0.0_f64;
         for i in 0..3 {
             for component_impulse in [actual[i], drive_impulse[i], drag_impulse[i]] {
-                scale = scale.max(scalar(
-                    (component_impulse * mean[i]).to_f64(),
-                    "viscous component work",
-                )?.abs());
+                scale = scale.max(
+                    scalar(
+                        (component_impulse * mean[i]).to_f64(),
+                        "viscous component work",
+                    )?
+                    .abs(),
+                );
+            }
+        }
+        if let Some(spin) = bath {
+            for i in 0..3 {
+                for rate in [spin[i], slip[i]] {
+                    scale = scale.max(
+                        scalar(
+                            (drag_impulse[i] * rate).to_f64(),
+                            "viscous bath/slip component work",
+                        )?
+                        .abs(),
+                    );
+                }
             }
         }
         if work_residual.abs() > 12288.0 * f64::EPSILON * scale {
@@ -296,6 +416,7 @@ impl ViscousRigidBodyStepper {
             drive_impulse,
             drag_impulse,
             drive_work,
+            bath_work,
             heat,
         })
     }
@@ -306,6 +427,7 @@ struct Stage {
     drive_impulse: Vector,
     drag_impulse: Vector,
     drive_work: Dd,
+    bath_work: Dd,
     heat: Dd,
 }
 
@@ -334,9 +456,7 @@ fn admit_damping(input: Mat3) -> Result<Mat3, LieStepError> {
             return Err(invalid("positive-semidefinite viscous damping tensor"));
         }
         for j in i + 1..3 {
-            if (matrix[3 * i + i] == 0.0 || matrix[3 * j + j] == 0.0)
-                && matrix[3 * i + j] != 0.0
-            {
+            if (matrix[3 * i + i] == 0.0 || matrix[3 * j + j] == 0.0) && matrix[3 * i + j] != 0.0 {
                 return Err(invalid("positive-semidefinite viscous damping tensor"));
             }
             let minor = dd(matrix[3 * i + i]) * dd(matrix[3 * j + j])
@@ -347,8 +467,7 @@ fn admit_damping(input: Mat3) -> Result<Mat3, LieStepError> {
         }
     }
     let [a, b, c, _, d, e, _, _, f] = matrix.map(dd);
-    let determinant = a * (d * f - e * e) - b * (b * f - c * e)
-        + c * (b * e - c * d);
+    let determinant = a * (d * f - e * e) - b * (b * f - c * e) + c * (b * e - c * d);
     if negative(determinant) {
         return Err(invalid("positive-semidefinite viscous damping tensor"));
     }
@@ -380,6 +499,16 @@ fn drive_at(rotation: So3, drive: HeldTorque) -> Result<Vector, LieStepError> {
             held::finite_vector(value, "viscous spatial drive torque")?,
         ),
     }
+}
+
+fn bath_at(rotation: So3, bath_space: Option<Vector>) -> Result<Option<Vector>, LieStepError> {
+    bath_space
+        .map(|spin| compensated::spatial_vector_to_body(rotation, spin))
+        .transpose()
+}
+
+fn relative(spin: Vector, bath: Option<Vector>) -> Vector {
+    bath.map_or(spin, |value| subtract(spin, value))
 }
 
 fn to_space(rotation: So3, value: Vector) -> Result<Vector, LieStepError> {
@@ -418,7 +547,11 @@ fn subtract(a: Vector, b: Vector) -> Vector {
 
 fn rounded(value: Vector, context: &'static str) -> Result<Vec3, LieStepError> {
     let [x, y, z] = value.map(Dd::to_f64);
-    Ok(Vec3::new(scalar(x, context)?, scalar(y, context)?, scalar(z, context)?))
+    Ok(Vec3::new(
+        scalar(x, context)?,
+        scalar(y, context)?,
+        scalar(z, context)?,
+    ))
 }
 
 fn components(value: Vec3) -> [f64; 3] {
@@ -430,7 +563,11 @@ fn dd(value: f64) -> Dd {
 }
 
 fn scalar(value: f64, context: &'static str) -> Result<f64, LieStepError> {
-    if value.is_finite() { Ok(value) } else { Err(invalid(context)) }
+    if value.is_finite() {
+        Ok(value)
+    } else {
+        Err(invalid(context))
+    }
 }
 
 fn invalid(context: &'static str) -> LieStepError {
