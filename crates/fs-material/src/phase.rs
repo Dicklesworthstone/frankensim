@@ -1502,6 +1502,11 @@ impl EquilibriumEnthalpyPhaseCurve {
     /// Apply a signed specific-energy increment and resolve the resulting
     /// phase state. No heat source, boundary flux, or work term is invented;
     /// the caller owns that energy balance.
+    ///
+    /// A nonzero increment that rounds entirely away at the current enthalpy
+    /// datum refuses. Partially rounded increments remain admissible; the caller
+    /// must compare the represented enthalpy change with its energy budget.
+    /// A zero increment preserves the accepted state, including its identity.
     pub fn advance_specific_energy(
         &self,
         current: EquilibriumPhaseState,
@@ -1513,9 +1518,15 @@ impl EquilibriumEnthalpyPhaseCurve {
         if !net_specific_energy_j_kg.is_finite() {
             return Err(PhaseStateError::NonFiniteSpecificEnergyIncrement);
         }
+        if net_specific_energy_j_kg == 0.0 {
+            return Ok(current);
+        }
         let next = current.specific_enthalpy_j_kg() + net_specific_energy_j_kg;
         if !next.is_finite() {
             return Err(PhaseStateError::NonFiniteSpecificEnthalpy);
+        }
+        if next == current.specific_enthalpy_j_kg() {
+            return Err(PhaseStateError::LostSpecificEnergyIncrement);
         }
         self.state_at_specific_enthalpy(next)
     }
@@ -1750,6 +1761,8 @@ pub enum PhaseStateError {
     MixingVolumeCancelled,
     /// A signed energy increment was not finite.
     NonFiniteSpecificEnergyIncrement,
+    /// A nonzero signed energy increment rounded completely away in stored enthalpy.
+    LostSpecificEnergyIncrement,
     /// Evaluation would extrapolate beyond the source-provided curve.
     OutsideEnthalpyDomain {
         /// Refused query [J/kg].
@@ -1919,6 +1932,84 @@ mod tests {
         assert_eq!(liquid.phase(), SolidLiquidPhase::Liquid);
         assert_eq!(liquid.temperature_k().to_bits(), 700.0_f64.to_bits());
         assert_eq!(liquid.liquid_mass_fraction().to_bits(), 1.0_f64.to_bits());
+    }
+
+    #[test]
+    fn g0_specific_energy_increments_cannot_disappear_on_a_latent_plateau() {
+        let make_curve = |datum| {
+            EquilibriumEnthalpyPhaseCurve::try_new(
+                ContentHash([0x76; 32]),
+                [0.0, 1.0]
+                    .into_iter()
+                    .map(|fraction| EnthalpyPhaseKnot {
+                        specific_enthalpy_j_kg: datum + 4096.0 * fraction,
+                        temperature_k: 600.0,
+                        liquid_mass_fraction: fraction,
+                        bulk_density_kg_m3: 1000.0,
+                    })
+                    .collect(),
+            )
+            .unwrap()
+        };
+        let ordinary = make_curve(0.0);
+        let ordinary_initial = ordinary.state_at_specific_enthalpy(2048.0).unwrap();
+        for heat in [-1.0, 1.0] {
+            let state = ordinary
+                .advance_specific_energy(ordinary_initial, heat)
+                .unwrap();
+            assert_eq!(state.specific_enthalpy_j_kg() - 2048.0, heat);
+            assert_eq!(state.temperature_k(), 600.0);
+            assert_eq!(state.liquid_mass_fraction(), (2048.0 + heat) / 4096.0);
+        }
+
+        for datum in [-2.0_f64.powi(60), 2.0_f64.powi(60)] {
+            let curve = make_curve(datum);
+            let initial = curve.state_at_specific_enthalpy(datum + 2048.0).unwrap();
+            for heat in [-1.0, 1.0] {
+                assert_eq!(
+                    curve.advance_specific_energy(initial, heat),
+                    Err(PhaseStateError::LostSpecificEnergyIncrement)
+                );
+            }
+            // Partial rounding remains visible to the caller's energy budget.
+            for (heat, represented) in [
+                (-300.0, -256.0),
+                (-256.0, -256.0),
+                (256.0, 256.0),
+                (300.0, 256.0),
+            ] {
+                let state = curve.advance_specific_energy(initial, heat).unwrap();
+                assert_eq!(
+                    state.specific_enthalpy_j_kg() - initial.specific_enthalpy_j_kg(),
+                    represented
+                );
+                assert_eq!(state.temperature_k(), 600.0);
+                assert_eq!(state.liquid_mass_fraction(), 0.5 + represented / 4096.0);
+            }
+        }
+    }
+
+    #[test]
+    fn g0_zero_specific_energy_preserves_state_identity_and_curve_admission() {
+        let curve = plateau_curve();
+        let other =
+            EquilibriumEnthalpyPhaseCurve::try_new(ContentHash([0x77; 32]), curve.knots().to_vec())
+                .unwrap();
+        for enthalpy in [-0.0, 0.0, 42_500.0] {
+            let initial = curve.state_at_specific_enthalpy(enthalpy).unwrap();
+            for heat in [-0.0, 0.0] {
+                let state = curve.advance_specific_energy(initial, heat).unwrap();
+                assert_eq!(state, initial);
+                assert_eq!(
+                    state.specific_enthalpy_j_kg().to_bits(),
+                    initial.specific_enthalpy_j_kg().to_bits()
+                );
+                assert_eq!(
+                    other.advance_specific_energy(initial, heat),
+                    Err(PhaseStateError::StateCurveMismatch)
+                );
+            }
+        }
     }
 
     #[test]
