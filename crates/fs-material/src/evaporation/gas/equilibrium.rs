@@ -117,7 +117,10 @@ impl<'a> EquilibriumEvaporation<'a> {
 
     // Numeric original-source evaluation avoids constructing/hashing a phase
     // identity during the shared film preparation. Reports retain full states.
-    fn caloric(self, h: f64) -> Result<LiquidCaloricState, GasEvaporationError> {
+    pub(in crate::evaporation::gas) fn caloric(
+        self,
+        h: f64,
+    ) -> Result<LiquidCaloricState, GasEvaporationError> {
         let state = self.curve().values_at_specific_enthalpy(h).map_err(|_| {
             invalid("original solid/liquid enthalpy chart refused the evaporation state")
         })?;

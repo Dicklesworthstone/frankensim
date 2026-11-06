@@ -18,16 +18,19 @@
 //! adds no nucleation, film exhaustion or hydrodynamics. The opt-in [`heat`]
 //! path solves reciprocal sensible exchange before this joint phase interval.
 
+/// Several original fusion inventories exchanging through authored liquid area.
+pub mod equilibrium;
 /// Reciprocal sensible heat for all retained films, then one joint phase step.
 pub mod heat;
 
 use std::collections::BTreeMap;
 
+use super::equilibrium::{EquilibriumEvaporation, PhaseInventoryStep};
 use super::{
     ClosedGasParcel, EvaporationError, EvaporationLaw, GasEvaporationError, GasEvaporationSolve,
     GasLiquidBinding, GasSpeciesBoundaryCandidate, LiquidSurfaceState, PreparedGasLiquidSurface,
     SpeciesBoundaryRelativeTransfer, SpeciesId, ThermochemicalGasModel, check_surface_endpoint,
-    poll, prepare_surface, validate_controls,
+    poll, prepare_surface, prepare_surface_with_caloric, validate_controls,
 };
 
 /// One existing positive liquid inventory and its explicit original sources.
@@ -40,6 +43,38 @@ pub struct GasLiquidChamberSurface<'a> {
     pub liquid: LiquidSurfaceState,
     pub temperature_from_enthalpy: &'a dyn Fn(f64) -> Result<f64, EvaporationError>,
     pub mass_transfer_coefficient_m_s: f64,
+}
+
+// Phase admission varies; ordering, species accumulation, gas reconstruction
+// and whole-chamber budgets stay in one owner. Collect directly into the one
+// canonical work vector, without a second normalized roster or boxed callbacks.
+#[derive(Clone, Copy)]
+enum ChamberCaloric<'a> {
+    Liquid(&'a dyn Fn(f64) -> Result<f64, EvaporationError>),
+    Equilibrium(EquilibriumEvaporation<'a>),
+}
+
+#[derive(Clone, Copy)]
+struct ChamberSurface<'a> {
+    id: u64,
+    law: &'a dyn EvaporationLaw,
+    binding: &'a GasLiquidBinding,
+    liquid: LiquidSurfaceState,
+    caloric: ChamberCaloric<'a>,
+    mass_transfer_coefficient_m_s: f64,
+}
+
+impl<'a> From<GasLiquidChamberSurface<'a>> for ChamberSurface<'a> {
+    fn from(surface: GasLiquidChamberSurface<'a>) -> Self {
+        Self {
+            id: surface.id,
+            law: surface.law,
+            binding: surface.binding,
+            liquid: surface.liquid,
+            caloric: ChamberCaloric::Liquid(surface.temperature_from_enthalpy),
+            mass_transfer_coefficient_m_s: surface.mass_transfer_coefficient_m_s,
+        }
+    }
 }
 
 /// Original physical/caloric controls plus an explicit allocation/work ceiling.
@@ -252,9 +287,37 @@ pub fn advance_chamber_with_gas_mass_selection<'catalog>(
     catalog: &'catalog ThermochemicalGasModel,
     duration_s: f64,
     controls: GasLiquidChamberSolve,
+    select_mass: impl FnMut(u64, f64) -> Result<f64, GasEvaporationError>,
+    cancelled: impl FnMut() -> bool,
+) -> Result<GasLiquidChamberCandidate<'catalog>, GasEvaporationError> {
+    advance_chamber(
+        surfaces.iter().copied().map(ChamberSurface::from),
+        gas,
+        catalog,
+        duration_s,
+        controls,
+        select_mass,
+        cancelled,
+    )
+    .map(|(exchange, _)| exchange)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn advance_chamber<'surface, 'catalog>(
+    surfaces: impl ExactSizeIterator<Item = ChamberSurface<'surface>>,
+    gas: &ClosedGasParcel,
+    catalog: &'catalog ThermochemicalGasModel,
+    duration_s: f64,
+    controls: GasLiquidChamberSolve,
     mut select_mass: impl FnMut(u64, f64) -> Result<f64, GasEvaporationError>,
     mut cancelled: impl FnMut() -> bool,
-) -> Result<GasLiquidChamberCandidate<'catalog>, GasEvaporationError> {
+) -> Result<
+    (
+        GasLiquidChamberCandidate<'catalog>,
+        Vec<equilibrium::EquilibriumChamberPhaseStep>,
+    ),
+    GasEvaporationError,
+> {
     poll(&mut cancelled)?;
     validate_controls(controls.surface, duration_s, 0.0)?;
     if controls.maximum_surfaces == 0 || surfaces.len() > controls.maximum_surfaces {
@@ -262,7 +325,7 @@ pub fn advance_chamber_with_gas_mass_selection<'catalog>(
             "joint liquid surface count exceeds its positive work ceiling",
         ));
     }
-    let mut ordered: Vec<_> = surfaces.iter().collect();
+    let mut ordered: Vec<_> = surfaces.collect();
     ordered.sort_unstable_by_key(|surface| surface.id);
     if ordered.windows(2).any(|pair| pair[0].id == pair[1].id) {
         return Err(invalid("joint liquid surfaces require unique stable IDs"));
@@ -271,21 +334,40 @@ pub fn advance_chamber_with_gas_mass_selection<'catalog>(
     let initial_temperature = gas.state().state().temperature;
     let mut accounts = BTreeMap::<SpeciesId, SpeciesAccount>::new();
     let mut prepared = Vec::with_capacity(ordered.len());
+    let mut partitioned_surfaces = 0usize;
     for surface in &ordered {
         poll(&mut cancelled)?;
-        let proposal = prepare_surface(
-            surface.law,
-            surface.binding,
-            surface.liquid,
-            gas,
-            catalog,
-            surface.temperature_from_enthalpy,
-            surface.mass_transfer_coefficient_m_s,
-            duration_s,
-            controls.surface,
-            |mass| select_mass(surface.id, mass),
-            &mut cancelled,
-        )?;
+        let proposal = match surface.caloric {
+            ChamberCaloric::Liquid(temperature) => prepare_surface(
+                surface.law,
+                surface.binding,
+                surface.liquid,
+                gas,
+                catalog,
+                temperature,
+                surface.mass_transfer_coefficient_m_s,
+                duration_s,
+                controls.surface,
+                |mass| select_mass(surface.id, mass),
+                &mut cancelled,
+            )?,
+            ChamberCaloric::Equilibrium(inventory) => {
+                partitioned_surfaces += 1;
+                prepare_surface_with_caloric(
+                    surface.law,
+                    surface.binding,
+                    surface.liquid,
+                    gas,
+                    catalog,
+                    |h| inventory.caloric(h),
+                    surface.mass_transfer_coefficient_m_s,
+                    duration_s,
+                    controls.surface,
+                    |mass| select_mass(surface.id, mass),
+                    &mut cancelled,
+                )?
+            }
+        };
         let species = &surface.binding.species;
         if !accounts.contains_key(species) {
             accounts.insert(
@@ -334,6 +416,7 @@ pub fn advance_chamber_with_gas_mass_selection<'catalog>(
         &mut cancelled,
     )?;
     let mut reports = Vec::with_capacity(prepared.len());
+    let mut phase_reports = Vec::with_capacity(partitioned_surfaces);
     let mut liquid_mass_change = Total::default();
     let mut absolute_mass_defect = Total::default();
     let mut liquid_energy = Total::default();
@@ -354,11 +437,29 @@ pub fn advance_chamber_with_gas_mass_selection<'catalog>(
             duration_s,
             controls.surface,
         )?;
+        let phase_inventory = match surface.caloric {
+            ChamberCaloric::Liquid(_) => None,
+            ChamberCaloric::Equilibrium(inventory) => Some(inventory.partition_step(
+                proposal.original,
+                proposal.liquid,
+                proposal.dm,
+                controls.surface.gas.mass_tolerance_kg,
+            )?),
+        };
         let account = &accounts[&surface.binding.species];
         let carried_energy =
             finite(proposal.dm * account.reference_h_j_kg + proposal.relative_energy_into_gas_j)?;
         liquid_mass_change.add(proposal.liquid.mass_kg - proposal.original.mass_kg)?;
         absolute_mass_defect.add(proposal.liquid_mass_residual_kg.abs())?;
+        if let Some(phase) = &phase_inventory {
+            // Reconstructed constituent inventories spend the same chamber
+            // allowance; adding bodies cannot multiply partition tolerance.
+            absolute_mass_defect.add(phase.liquid_partition_residual_kg.abs())?;
+            phase_reports.push(equilibrium::EquilibriumChamberPhaseStep {
+                id: surface.id,
+                phase: *phase,
+            });
+        }
         liquid_energy.add(proposal.liquid_enthalpy_change_j)?;
         latent_energy.add(proposal.latent_energy_j)?;
         energy_defect.add(proposal.liquid_energy_residual_j)?;
@@ -438,11 +539,14 @@ pub fn advance_chamber_with_gas_mass_selection<'catalog>(
         species: species_reports,
     };
     poll(&mut cancelled)?;
-    Ok(GasLiquidChamberCandidate {
-        gas: endpoint,
-        surfaces: reports,
-        step,
-    })
+    Ok((
+        GasLiquidChamberCandidate {
+            gas: endpoint,
+            surfaces: reports,
+            step,
+        },
+        phase_reports,
+    ))
 }
 
 #[cfg(test)]

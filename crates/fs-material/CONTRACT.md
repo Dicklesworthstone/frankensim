@@ -12296,6 +12296,21 @@ neither failure nor cancellation publishes either original owner's candidate.
 
 ### Several retained films sharing one finite atmosphere
 
+`evaporation::gas::chamber::equilibrium` extends the original chamber reduction
+to several sharp solid/liquid inventories with explicitly exposed liquid area.
+Each original chart supplies pure-liquid constituent compatibility, density and
+the actual liquid donor inventory; its bulk enthalpy retains sensible and fusion
+storage. Only caloric preparation differs from the existing pure-liquid lane.
+One canonical work vector, compensated species sums, original old-vapor withdrawal
+gates and one original gas reconstruction remain shared. Per-body phase reports
+retain source identity and distinguish freezing from signed vapor transfer.
+Their constituent mass defects spend the same chamber-wide mass allowance;
+the original sum of absolute caloric defects shares one energy allowance.
+No concurrent evaporation finances excessive condensation elsewhere. Accepted
+bodies retain a liquid seed; terminal freezing and reciprocal gas heat require
+their explicit owners. This frozen-rate step requires timestep refinement and
+does not infer surface coverage, nucleation or moving geometry.
+
 `evaporation::gas::chamber` advances multiple positive liquid inventories against
 one original gas snapshot. It reuses the single-surface Stefan-film preparation,
 liquid caloric update and endpoint checks. Stable surface IDs canonicalize input
