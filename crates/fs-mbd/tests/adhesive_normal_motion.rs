@@ -3,6 +3,9 @@
 #[path = "../../fs-contact/tests/adhesive_dmt_coupled/common.rs"]
 mod common;
 
+#[path = "adhesive_normal_motion/driven.rs"]
+mod driven;
+
 use core::f64::consts::PI;
 use fs_contact::normal_patch::dmt::{SourceDmtSphereContact, coupled::*};
 use fs_exec::CancelGate;

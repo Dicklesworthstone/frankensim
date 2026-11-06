@@ -5,6 +5,9 @@
 //! entries of the actual point-force mobility enter the same midpoint solve.
 //! Attraction across a finite gap changes native momentum and normal storage;
 //! it never creates a solid shear area or friction heat.
+//! Held COM forces and body-frame COM torques enter that same full load line
+//! through the actual native acceleration. Their work uses accepted midpoint
+//! COM/angular travel, independently of normal storage and junction heat.
 //!
 //! This is a fixed-Jacobian momentum phase. The binding's collinear geometry
 //! markers and immutable approach datum authenticate the initial normal state.
@@ -20,7 +23,7 @@
 //! spin is free. No torque, artificial stopping impulse or numerical heat is
 //! supplied for an unrepresented physical coordinate.
 
-use crate::{DynamicsError, MassProperties, PointKinematics, RigidBodyState, Vec3};
+use crate::{DynamicsError, MassProperties, PointKinematics, RigidBodyState, Vec3, Wrench};
 use fs_contact::interface_binding::adhesive_shear::SourceAdhesiveShear;
 use fs_contact::normal_patch::dmt::{
     SourceDmtSphereContact,
@@ -30,12 +33,14 @@ use fs_contact::normal_patch::dmt::{
     },
 };
 use fs_exec::CancelGate;
+use fs_math::dd::Dd;
 use fs_tribo::partial_slip::TangentFrame;
 
-use super::super::hertz::{
-    RigidHertzError, apply_pair_wrench, point_response, points, relative_point, relative_spin,
+use super::super::hertz::{RigidHertzError, point_response, points, relative_point, relative_spin};
+use super::super::{
+    ResultantImpulse, RigidContactBinding, RigidFrictionError, add_components, magnitude, poll,
+    rounded_components, vector,
 };
-use super::super::{RigidContactBinding, RigidFrictionError, magnitude, poll, vector};
 
 /// Original source ordering, geometry markers and held contact discretization.
 #[derive(Clone, Copy, Debug)]
@@ -87,10 +92,12 @@ pub struct RigidDmtAudit {
     pub marker_normal_displacement_residual_m: f64,
     /// Largest initial/final marker-versus-reaction normal-rate difference.
     pub marker_normal_velocity_residual_m_s: f64,
-    /// Actual native kinetic change minus actual contact-impulse work [J].
+    /// Actual native kinetic change minus contact and external work [J].
     pub work_energy_residual_j: f64,
-    /// Delta K + original normal potential change + physical shear heat [J].
+    /// Delta K + original normal potential change + shear heat - external work [J].
     pub total_energy_residual_j: f64,
+    /// Each native body's independently recovered impulse/work residual [J].
+    pub body_work_energy_residual_j: [f64; 2],
     /// Largest positive shear-force work at either physical endpoint [J].
     pub maximum_assisting_work_j: f64,
     /// Actual minus commanded linear impulse, in original A/B order.
@@ -101,6 +108,10 @@ pub struct RigidDmtAudit {
     pub linear_momentum_change_ns: Vec3,
     /// Complete orbital plus spin angular-momentum change [N m s].
     pub angular_momentum_change_nms: Vec3,
+    /// Pair momentum change minus the actual external force impulses [N s].
+    pub linear_momentum_residual_ns: Vec3,
+    /// Pair orbital-plus-spin change minus actual external wrench impulse [N m s].
+    pub angular_momentum_residual_nms: Vec3,
 }
 
 /// Native normal/shear motion and independently reevaluated source path.
@@ -114,6 +125,8 @@ pub struct RigidDmtReport {
     pub applied_mean_force_n: [f64; 3],
     /// Paired point impulse applied to body A; body B receives its opposite.
     pub force_impulse_on_a_world_ns: Vec3,
+    /// Held world-frame COM forces and body-frame COM torques, in A/B order.
+    pub external_wrenches: [Wrench; 2],
     /// Actual initial/final relative reaction-point rates in normal/shear order.
     pub relative_velocity_m_s: [[f64; 3]; 2],
     /// Actual initial/final relative spin about the original normal.
@@ -122,6 +135,9 @@ pub struct RigidDmtReport {
     pub relative_displacement_m: [f64; 3],
     /// COM travel for the surrounding pose owner, in original A/B order [m].
     pub body_displacement_world_m: [Vec3; 2],
+    /// Integrated angular velocity in the held body frame [rad]. This is a
+    /// fixed-Jacobian twist, not a finite orientation update.
+    pub angular_displacement_body_rad: [Vec3; 2],
     /// Fixed-Jacobian geometry-marker travel for that owner, in A/B order [m].
     pub marker_displacement_world_m: [Vec3; 2],
     /// Fixed-Jacobian reaction-point travel, in original A/B order [m].
@@ -130,6 +146,8 @@ pub struct RigidDmtReport {
     pub kinetic_energy_change_j: f64,
     /// Signed contact impulse work on actual mean endpoint velocities [J].
     pub midpoint_impulse_work_j: f64,
+    /// Actual COM-force and body-torque work on the accepted midpoint travel [J].
+    pub external_work_j: f64,
     /// Original normal-potential change on the actual approach path [J].
     pub normal_storage_change_j: f64,
     /// Physical source-owned junction loss, unpartitioned [J].
@@ -375,10 +393,24 @@ impl<'a> PreparedRigidDmtPair<'a> {
     /// Resolve one source-owned path and independently replay it on actual body
     /// motion. The enclosing owner must apply the returned geometry travel and
     /// refresh the Jacobian before continuing from the advanced normal state.
-    #[allow(clippy::too_many_lines)]
     pub fn advance(
         &mut self,
         previous: DmtCoupledState,
+        gate: &CancelGate,
+    ) -> Result<RigidDmtCandidate, RigidDmtError> {
+        self.advance_with_wrenches(previous, [Wrench::ZERO; 2], gate)
+    }
+
+    /// Resolve contact and held external wrenches in one midpoint phase.
+    /// Forces act at each actual COM in world coordinates; torques are about
+    /// that COM in the held body frame, in original A/B order. All normal/shear
+    /// cross responses remain in the original load line. External and contact
+    /// impulses are accumulated before either original momentum is rounded.
+    #[allow(clippy::too_many_lines)]
+    pub fn advance_with_wrenches(
+        &mut self,
+        previous: DmtCoupledState,
+        wrenches: [Wrench; 2],
         gate: &CancelGate,
     ) -> Result<RigidDmtCandidate, RigidDmtError> {
         poll(gate)?;
@@ -398,21 +430,91 @@ impl<'a> PreparedRigidDmtPair<'a> {
         let previous = self
             .load_line
             .with_endpoint_velocity(previous, [rates_before[1], rates_before[2]])?;
-        let free = core::array::from_fn(|i| old[i] + dt * rates_before[i]);
+        let mut external_point_acceleration = [Vec3::ZERO; 2];
+        for i in 0..2 {
+            wrenches[i].validate()?;
+            let angular_acceleration =
+                self.properties[i].angular_velocity_body_checked(wrenches[i].torque_body)?;
+            external_point_acceleration[i] = wrenches[i]
+                .force_world
+                .scale(self.properties[i].mass().recip())
+                .add(
+                    self.before[i]
+                        .pose()
+                        .orientation()
+                        .rotate_body_to_world(angular_acceleration.cross(self.reaction_arms[i])),
+                );
+        }
+        let relative_acceleration =
+            external_point_acceleration[0].sub(external_point_acceleration[1]);
+        let external_acceleration = axes.map(|axis| relative_acceleration.dot(axis));
+        if external_acceleration
+            .into_iter()
+            .any(|value| !value.is_finite())
+        {
+            return Err(RigidDmtError::Invalid(
+                "unrepresentable external point acceleration",
+            ));
+        }
+        let free = core::array::from_fn(|i| {
+            old[i] + dt * (rates_before[i] + 0.5 * dt * external_acceleration[i])
+        });
         let trial = self.load_line.trial(previous, free, dt, gate)?;
         let applied = trial.mean_force_n;
         let impulse = axes[0]
             .scale(-dt * applied[0])
             .add(axes[1].scale(-dt * applied[1]))
             .add(axes[2].scale(-dt * applied[2]));
-        let after = apply_pair_wrench(
-            self.before,
-            self.properties,
-            self.reaction_arms,
-            impulse,
-            Vec3::ZERO,
-            gate,
-        )?;
+        let mut after = self.before;
+        let mut kinetic = Dd::ZERO;
+        let mut linear = [Dd::ZERO; 3];
+        let mut angular = [Dd::ZERO; 3];
+        let mut external_linear = [Dd::ZERO; 3];
+        let mut external_angular = [Dd::ZERO; 3];
+        let mut body_linear = [Vec3::ZERO; 2];
+        let mut body_angular = [Vec3::ZERO; 2];
+        let mut body_work_residual = [0.0; 2];
+        for (i, sign) in [(0, 1.0), (1, -1.0)] {
+            poll(gate)?;
+            let body = self.before[i];
+            let orientation = body.pose().orientation();
+            let external_impulse = wrenches[i].force_world.scale(dt);
+            let external_torque = wrenches[i].torque_body.scale(dt);
+            let mut resultant = ResultantImpulse::default();
+            resultant.add(body, self.reaction_arms[i], impulse.scale(sign), Vec3::ZERO);
+            add_components(&mut resultant.linear, external_impulse);
+            add_components(&mut resultant.angular, external_torque);
+            let receipt = body.apply_momentum_impulse(
+                self.properties[i],
+                rounded_components(resultant.linear),
+                rounded_components(resultant.angular),
+            )?;
+            after[i] = receipt.state_after;
+            kinetic = kinetic + Dd::from_f64(receipt.work.kinetic_energy_change_j);
+            body_linear[i] = receipt.linear_residual_world;
+            body_angular[i] = receipt.angular_residual_body;
+            body_work_residual[i] = receipt.work.work_energy_residual_j;
+            add_components(&mut linear, receipt.linear_increment_world);
+            add_components(&mut external_linear, external_impulse);
+            add_components(
+                &mut angular,
+                body.pose()
+                    .position_world()
+                    .cross(receipt.linear_increment_world),
+            );
+            add_components(
+                &mut angular,
+                orientation.rotate_body_to_world(receipt.angular_increment_body),
+            );
+            add_components(
+                &mut external_angular,
+                body.pose().position_world().cross(external_impulse),
+            );
+            add_components(
+                &mut external_angular,
+                orientation.rotate_body_to_world(external_torque),
+            );
+        }
         let reaction_after = points(after, self.properties, self.reaction_arms)?;
         let marker_arms = [
             self.contact.binding.arm_a_body,
@@ -465,22 +567,13 @@ impl<'a> PreparedRigidDmtPair<'a> {
         let state_after = self
             .load_line
             .with_endpoint_velocity(actual.state(), [rates_after[1], rates_after[2]])?;
-        let mut kinetic = 0.0;
-        let mut linear = Vec3::ZERO;
-        let mut angular = Vec3::ZERO;
-        let mut body_linear = [Vec3::ZERO; 2];
-        let mut body_angular = [Vec3::ZERO; 2];
         let mut body_travel = [Vec3::ZERO; 2];
+        let mut angular_travel = [Vec3::ZERO; 2];
         let mut marker_travel = [Vec3::ZERO; 2];
         let mut reaction_travel = [Vec3::ZERO; 2];
-        for (i, sign) in [(0, 1.0), (1, -1.0)] {
+        let mut external_work = Dd::ZERO;
+        for i in 0..2 {
             poll(gate)?;
-            let dp = after[i]
-                .linear_momentum_world()
-                .sub(self.before[i].linear_momentum_world());
-            let dl = after[i]
-                .angular_momentum_body()
-                .sub(self.before[i].angular_momentum_body());
             let mean_v = mean(
                 self.reaction_before[i].center_of_mass_velocity_world,
                 reaction_after[i].center_of_mass_velocity_world,
@@ -489,8 +582,11 @@ impl<'a> PreparedRigidDmtPair<'a> {
                 self.reaction_before[i].angular_velocity_body,
                 reaction_after[i].angular_velocity_body,
             );
-            kinetic += dp.dot(mean_v) + dl.dot(mean_w);
             body_travel[i] = mean_v.scale(dt);
+            angular_travel[i] = mean_w.scale(dt);
+            external_work = external_work
+                + dot_work(wrenches[i].force_world, body_travel[i])
+                + dot_work(wrenches[i].torque_body, angular_travel[i]);
             marker_travel[i] = mean(
                 self.markers_before[i].point_velocity_world,
                 markers_after[i].point_velocity_world,
@@ -501,17 +597,12 @@ impl<'a> PreparedRigidDmtPair<'a> {
                 reaction_after[i].point_velocity_world,
             )
             .scale(dt);
-            let orientation = self.before[i].pose().orientation();
-            let expected = impulse.scale(sign);
-            body_linear[i] = dp.sub(expected);
-            body_angular[i] =
-                dl.sub(self.reaction_arms[i].cross(orientation.rotate_world_to_body(expected)));
-            linear = linear.add(dp);
-            angular = angular
-                .add(self.before[i].pose().position_world().cross(dp))
-                .add(orientation.rotate_body_to_world(dl));
         }
-        let work = finite(impulse.dot(mean(initial, endpoint)))?;
+        let work = dot_work(impulse, mean(initial, endpoint));
+        let linear_residual =
+            rounded_components(core::array::from_fn(|i| linear[i] - external_linear[i]));
+        let angular_residual =
+            rounded_components(core::array::from_fn(|i| angular[i] - external_angular[i]));
         let marker_normal = marker_travel[0].sub(marker_travel[1]).dot(axes[0]);
         let marker_rate_residual = (relative_point(self.markers_before).dot(axes[0])
             - rates_before[0])
@@ -522,22 +613,29 @@ impl<'a> PreparedRigidDmtPair<'a> {
                 delta[i] - (trial.state().position_m()[i] - old[i])
             }),
             velocity_residual_m_s: core::array::from_fn(|i| {
-                rates_after[i] - rates_before[i]
+                rates_after[i] - rates_before[i] - dt * external_acceleration[i]
                     + dt * (0..3)
                         .map(|j| self.mobility[i][j] * applied[j])
                         .sum::<f64>()
             }),
             marker_normal_displacement_residual_m: marker_normal - delta[0],
             marker_normal_velocity_residual_m_s: marker_rate_residual,
-            work_energy_residual_j: kinetic - work,
-            total_energy_residual_j: kinetic
-                + actual.path.normal_work_j
-                + actual.friction_dissipation_j,
+            work_energy_residual_j: finite((kinetic - work - external_work).to_f64())?,
+            total_energy_residual_j: finite(
+                (kinetic
+                    + Dd::from_f64(actual.path.normal_work_j)
+                    + Dd::from_f64(actual.friction_dissipation_j)
+                    - external_work)
+                    .to_f64(),
+            )?,
+            body_work_energy_residual_j: body_work_residual,
             maximum_assisting_work_j: assisting,
             body_linear_momentum_residual_ns: body_linear,
             body_angular_momentum_residual_nms: body_angular,
-            linear_momentum_change_ns: linear,
-            angular_momentum_change_nms: angular,
+            linear_momentum_change_ns: rounded_components(linear),
+            angular_momentum_change_nms: rounded_components(angular),
+            linear_momentum_residual_ns: linear_residual,
+            angular_momentum_residual_nms: angular_residual,
         };
         if audit
             .displacement_residual_m
@@ -551,17 +649,19 @@ impl<'a> PreparedRigidDmtPair<'a> {
                 .any(|v| !v.is_finite() || v.abs() > controls.velocity_tolerance_m_s)
             || [audit.work_energy_residual_j, audit.total_energy_residual_j]
                 .into_iter()
+                .chain(body_work_residual)
                 .any(|v| !v.is_finite() || v.abs() > controls.energy_tolerance_j)
             || body_linear
                 .into_iter()
-                .chain([linear])
+                .chain([linear_residual])
                 .any(|v| !v.is_finite() || magnitude(v) > controls.linear_momentum_tolerance_ns)
             || body_angular
                 .into_iter()
-                .chain([angular])
+                .chain([angular_residual])
                 .any(|v| !v.is_finite() || magnitude(v) > controls.angular_momentum_tolerance_nms)
             || body_travel
                 .into_iter()
+                .chain(angular_travel)
                 .chain(marker_travel)
                 .chain(reaction_travel)
                 .any(|v| !v.is_finite())
@@ -577,14 +677,17 @@ impl<'a> PreparedRigidDmtPair<'a> {
                 mobility_per_kg: self.mobility,
                 applied_mean_force_n: applied,
                 force_impulse_on_a_world_ns: impulse,
+                external_wrenches: wrenches,
                 relative_velocity_m_s: [rates_before, rates_after],
                 relative_spin_rad_s: spin,
                 relative_displacement_m: delta,
                 body_displacement_world_m: body_travel,
+                angular_displacement_body_rad: angular_travel,
                 marker_displacement_world_m: marker_travel,
                 reaction_displacement_world_m: reaction_travel,
-                kinetic_energy_change_j: kinetic,
-                midpoint_impulse_work_j: work,
+                kinetic_energy_change_j: finite(kinetic.to_f64())?,
+                midpoint_impulse_work_j: finite(work.to_f64())?,
+                external_work_j: finite(external_work.to_f64())?,
                 normal_storage_change_j: actual.path.normal_work_j,
                 dissipated_energy_j: actual.friction_dissipation_j,
                 iterations: trial.iterations,
@@ -606,8 +709,33 @@ pub fn prepare_rigid_dmt_contact(
     controls: RigidDmtControls,
     gate: &CancelGate,
 ) -> Result<RigidDmtCandidate, RigidDmtError> {
+    prepare_rigid_dmt_contact_with_wrenches(
+        bodies,
+        properties,
+        contact,
+        previous,
+        [Wrench::ZERO; 2],
+        dt_s,
+        controls,
+        gate,
+    )
+}
+
+/// Stage the original DMT path with held external COM forces and body torques.
+/// Wrenches use original contact A/B order, not indices into the body array.
+#[allow(clippy::too_many_arguments)]
+pub fn prepare_rigid_dmt_contact_with_wrenches(
+    bodies: &[RigidBodyState],
+    properties: &[MassProperties],
+    contact: RigidDmtContact<'_>,
+    previous: DmtCoupledState,
+    wrenches: [Wrench; 2],
+    dt_s: f64,
+    controls: RigidDmtControls,
+    gate: &CancelGate,
+) -> Result<RigidDmtCandidate, RigidDmtError> {
     PreparedRigidDmtPair::new(bodies, properties, contact, dt_s, controls, gate)?
-        .advance(previous, gate)
+        .advance_with_wrenches(previous, wrenches, gate)
 }
 
 /// Publish both original body momenta and source history after final admission.
@@ -623,8 +751,35 @@ pub fn apply_rigid_dmt_contact(
     controls: RigidDmtControls,
     gate: &CancelGate,
 ) -> Result<RigidDmtReport, RigidDmtError> {
-    let candidate =
-        prepare_rigid_dmt_contact(bodies, properties, contact, *history, dt_s, controls, gate)?;
+    apply_rigid_dmt_contact_with_wrenches(
+        bodies,
+        properties,
+        contact,
+        history,
+        [Wrench::ZERO; 2],
+        dt_s,
+        controls,
+        gate,
+    )
+}
+
+/// Atomically publish driven native momenta and their original DMT history.
+/// Failed source/work admission or cancellation leaves every input unchanged.
+/// Poses remain held; consume the reported travel before continuing geometry.
+#[allow(clippy::too_many_arguments)]
+pub fn apply_rigid_dmt_contact_with_wrenches(
+    bodies: &mut [RigidBodyState],
+    properties: &[MassProperties],
+    contact: RigidDmtContact<'_>,
+    history: &mut DmtCoupledState,
+    wrenches: [Wrench; 2],
+    dt_s: f64,
+    controls: RigidDmtControls,
+    gate: &CancelGate,
+) -> Result<RigidDmtReport, RigidDmtError> {
+    let candidate = prepare_rigid_dmt_contact_with_wrenches(
+        bodies, properties, contact, *history, wrenches, dt_s, controls, gate,
+    )?;
     poll(gate)?;
     bodies[contact.binding.body_a] = candidate.bodies_after[0];
     bodies[contact.binding.body_b] = candidate.bodies_after[1];
@@ -634,6 +789,11 @@ pub fn apply_rigid_dmt_contact(
 
 fn mean(a: Vec3, b: Vec3) -> Vec3 {
     a.scale(0.5).add(b.scale(0.5))
+}
+fn dot_work(effort: Vec3, motion: Vec3) -> Dd {
+    Dd::from_f64(effort.x) * Dd::from_f64(motion.x)
+        + Dd::from_f64(effort.y) * Dd::from_f64(motion.y)
+        + Dd::from_f64(effort.z) * Dd::from_f64(motion.z)
 }
 fn finite(value: f64) -> Result<f64, RigidDmtError> {
     if value.is_finite() {
