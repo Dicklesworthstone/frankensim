@@ -14110,3 +14110,32 @@ integration on periodic Cartesian domains, with explicit authored timescales,
 nonnegative emitted transport and signed history. No adaptive-timescale
 calibration, wall/inflow memory, scalar variance, reaction-rate, SGS energy or
 DNS/turbulence-accuracy qualification is supplied.
+
+## Dense source-resolved shear rheology
+
+`MaterialFreeSurfaceRheology2` binds the original `IsothermalRheologyLaw`
+and bounded constitutive root to an existing dense BGK `FreeSurface`.
+Incoming Guo-corrected stress closes physical shear against the selected
+source viscosity. Temperature, reference density and uniform sourced
+capillarity remain fixed. Source selections are pinned by the same resolver
+used by sparse isothermal material flow.
+
+Two reusable source buffers retain the most recent accepted collision input,
+before streaming and interface conversion. Their samples are not relabeled
+as final-field constitutive evaluations. The admitted tau field enters the
+original conservative momentum candidate through one preparation hook,
+without a second lattice clone or an alternative collision/VOF integrator.
+
+Source, root-convergence, declared-speed, native-flow and cancellation
+refusals publish neither the supplied liquid nor the accepted receipt epoch.
+Pressure-evolving sources and non-BGK collision models refuse. There is no
+viscosity clipping, analytic material fit, temperature evolution or extra
+endpoint source sweep. The original law retains sourced surface tension;
+its internal shear-only reference omits that field, so dense scaling uses
+the same explicit capillary override as the sparse owner.
+
+Focused regressions cover constant-source native parity for both contact
+models, an independently derived quadratic rate/viscosity root that changes
+the native collision, and late source-domain refusal preserving flow and
+prior receipts. These are synthetic constitutive checks, not measurements
+or a whole-scheme nonlinear stability certificate.

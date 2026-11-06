@@ -1,5 +1,8 @@
 //! Synthetic material data exercise the native VOF, not experimental accuracy.
 
+#[path = "material_free_surface_rheology/two_dimensional.rs"]
+mod two_dimensional;
+
 #[path = "material_free_surface_rheology/impulse.rs"]
 mod impulse;
 

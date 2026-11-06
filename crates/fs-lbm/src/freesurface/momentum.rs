@@ -181,6 +181,23 @@ impl FreeSurface {
         self.momentum_candidate_with_stream(gate, |candidate| candidate.stream_step(Some(gate)))
     }
 
+    // A material owner may install already admitted collision coefficients in
+    // this same private candidate, without adding a second lattice clone or
+    // taking ownership of streaming, mass exchange or conservative conversion.
+    pub(crate) fn momentum_candidate_with_preparation<Error>(
+        &self,
+        gate: &CancelGate,
+        prepare: impl FnOnce(&mut crate::core2::Grid) -> Result<(), Error>,
+    ) -> Result<(Self, ConversionMomentumReport2), Error>
+    where
+        Error: From<FreeSurfaceMomentumError2>,
+    {
+        self.momentum_candidate_with_stream(gate, |candidate| {
+            prepare(&mut candidate.grid)?;
+            candidate.stream_step(Some(gate)).map_err(Into::into)
+        })
+    }
+
     pub(crate) fn angular_momentum_candidate(
         &self,
         gate: &CancelGate,

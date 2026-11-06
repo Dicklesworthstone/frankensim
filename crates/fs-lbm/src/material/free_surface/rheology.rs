@@ -1,4 +1,4 @@
-//! Isothermal source rheology on the actual sparse VOF trajectory.
+//! Isothermal source rheology on the actual sparse and dense VOF trajectories.
 //!
 //! The same local constitutive solve as thermal flow closes physical strain
 //! rate against source viscosity. Native collision, streaming, mass exchange,
@@ -31,12 +31,16 @@ pub use crate::material::transport::rheology::RheologySolve;
 
 mod impulse;
 mod motion;
+mod two_dimensional;
+
+pub use two_dimensional::MaterialFreeSurfaceRheology2;
 
 /// Source, native flow or bounded constitutive solve refused this candidate.
 #[derive(Clone, Debug, PartialEq)]
 pub enum FreeSurfaceRheologyError {
     Material(MaterialStatePointError),
     Flow(MaterialLbmError),
+    DenseFlow(crate::freesurface::FreeSurfaceMomentumError2),
     Convergence {
         coordinates: [usize; 3],
         iterations: usize,
@@ -49,6 +53,7 @@ impl core::fmt::Display for FreeSurfaceRheologyError {
         match self {
             Self::Material(e) => write!(f, "isothermal free-surface source: {e}"),
             Self::Flow(e) => write!(f, "isothermal free-surface flow: {e}"),
+            Self::DenseFlow(e) => write!(f, "isothermal dense free-surface flow: {e}"),
             Self::Convergence {
                 coordinates,
                 iterations,
@@ -75,6 +80,11 @@ impl From<MaterialLbmError> for FreeSurfaceRheologyError {
 impl From<FreeSurfaceError3> for FreeSurfaceRheologyError {
     fn from(e: FreeSurfaceError3) -> Self {
         Self::Flow(e.into())
+    }
+}
+impl From<crate::freesurface::FreeSurfaceMomentumError2> for FreeSurfaceRheologyError {
+    fn from(e: crate::freesurface::FreeSurfaceMomentumError2) -> Self {
+        Self::DenseFlow(e)
     }
 }
 type Error = FreeSurfaceRheologyError;
