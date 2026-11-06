@@ -82,6 +82,167 @@ fn series_current(a: [f64; 2], b: [f64; 2], voltage: f64) -> (f64, [f64; 2]) {
 }
 
 #[test]
+fn damped_source_coordinates_close_strong_passive_resistance_under_both_drive_types() {
+    // rho(J)=a+b|J| at fixed E, and its dual sigma(E)=a+b|E| at
+    // fixed J, both reduce independently to a*x+b*x^2=1. The pure Picard
+    // derivative is almost -1; small residuals cannot be obtained in 128
+    // undamped trials despite a unique positive physical solution.
+    let a = 0.01_f64;
+    let b = 100.0_f64;
+    let expected = 2.0 / (a + (a * a + 4.0 * b).sqrt());
+    for current_control in [false, true] {
+        let (basis, coordinate) = if current_control {
+            (
+                ElectricalPropertyBasis::Conductivity,
+                ConductorMagnitude::ElectricField,
+            )
+        } else {
+            (
+                ElectricalPropertyBasis::Resistivity,
+                ConductorMagnitude::CurrentDensity,
+            )
+        };
+        let source = response(basis, coordinate, a, b, 200.0);
+        let original = specimen(source.clone(), source, 0.2);
+        let relaxed = original.clone().with_relaxation(0.5).unwrap();
+        for sign in [-1.0, 1.0] {
+            let voltage = ends(sign);
+            let solve = |model: &PlanarConductionResponse| {
+                if current_control {
+                    model.solve_current_candidate(
+                        &[2, 5],
+                        &[0, 3],
+                        sign * 0.2,
+                        limits(),
+                        controls(),
+                        policy(),
+                        &mut || false,
+                    )
+                } else {
+                    model.solve_candidate(
+                        &voltage,
+                        &[],
+                        limits(),
+                        controls(),
+                        policy(),
+                        &mut || false,
+                    )
+                }
+            };
+            assert!(matches!(
+                solve(&original),
+                Err(ConductionResponseError::NotConverged { .. })
+            ));
+            let candidate = solve(&relaxed).unwrap();
+            let report = candidate.report();
+            assert!(report.field_solves < 32);
+            assert_eq!(report.source_evaluations, 4 * (2 * report.field_solves - 1));
+            assert_eq!(candidate.problem().relaxation(), 0.5);
+            for cell in 0..4 {
+                let (e, j) = if current_control {
+                    (expected, 1.0)
+                } else {
+                    (1.0, expected)
+                };
+                near(report.electric_field_v_m[cell][0], -sign * e);
+                near(report.current_density_a_m2[cell][0], -sign * j);
+                near(report.cell_power_w[cell], 0.05 * e * j);
+                near(
+                    report.evaluated[cell].conductor.material().query().axes()["operating"],
+                    expected,
+                );
+                assert!(report.evaluated[cell].conductivity_defect_s_m.abs() < 1e-11);
+                assert!(report.evaluated[cell].power_defect_w.abs() < 1e-10);
+                assert_eq!(
+                    report.evaluated[cell]
+                        .conductor
+                        .source_property()
+                        .answer()
+                        .receipt
+                        .selected,
+                    original.conductors()[cell]
+                        .source_property()
+                        .answer()
+                        .receipt
+                        .selected,
+                );
+            }
+            near(report.power_w, 0.2 * expected);
+            near(report.power_balance_residual_w, 0.0);
+            near(report.boundary_current_a, 0.0);
+        }
+    }
+}
+
+#[test]
+fn relaxed_resistance_retains_domain_iteration_and_cancellation_gates() {
+    let source = response(
+        ElectricalPropertyBasis::Resistivity,
+        ConductorMagnitude::CurrentDensity,
+        0.01,
+        100.0,
+        200.0,
+    );
+    let original = specimen(source.clone(), source, 0.2);
+    for weight in [0.0, -0.5, 1.1, f64::NAN, f64::INFINITY] {
+        assert!(original.clone().with_relaxation(weight).is_err());
+    }
+    let model = original.clone().with_relaxation(0.5).unwrap();
+    let before = model.conductors().to_vec();
+    let mut calls = 0;
+    let accepted = model
+        .solve_candidate(&ends(1.0), &[], limits(), controls(), policy(), &mut || {
+            calls += 1;
+            false
+        })
+        .unwrap();
+    let mut interrupted = 0;
+    assert!(matches!(
+        model.solve_candidate(&ends(1.0), &[], limits(), controls(), policy(), &mut || {
+            interrupted += 1;
+            interrupted == calls / 2
+        },),
+        Err(ConductionResponseError::Cancelled),
+    ));
+    assert_eq!(model.conductors(), before);
+    let retry = model
+        .solve_candidate(&ends(1.0), &[], limits(), controls(), policy(), &mut || {
+            false
+        })
+        .unwrap();
+    assert_eq!(retry.report().voltage_v, accepted.report().voltage_v);
+    assert_eq!(retry.report().cell_power_w, accepted.report().cell_power_w);
+    let limited = ConductionResponseControls {
+        maximum_iterations: 2,
+        ..policy()
+    };
+    assert!(matches!(
+        model.solve_candidate(&ends(1.0), &[], limits(), controls(), limited, &mut || {
+            false
+        }),
+        Err(ConductionResponseError::NotConverged { iterations: 2, .. }),
+    ));
+    // A supported final root is insufficient: an unsupported actual trial
+    // must refuse, rather than clipping the source coordinate to its domain.
+    let bounded = response(
+        ElectricalPropertyBasis::Resistivity,
+        ConductorMagnitude::CurrentDensity,
+        0.01,
+        100.0,
+        1.0,
+    );
+    let bounded = specimen(bounded.clone(), bounded, 0.2)
+        .with_relaxation(0.5)
+        .unwrap();
+    assert!(matches!(
+        bounded.solve_candidate(&ends(1.0), &[], limits(), controls(), policy(), &mut || {
+            false
+        }),
+        Err(ConductionResponseError::Material(_)),
+    ));
+}
+
+#[test]
 fn nonlinear_source_queries_use_current_driven_fields_below_common_voltage_spacing() {
     let model = specimen(
         response(

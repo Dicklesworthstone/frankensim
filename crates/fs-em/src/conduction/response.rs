@@ -3,8 +3,10 @@
 //! Each bounded iteration assembles the SAME FEEC conductivity operator, solves
 //! its original voltage/current traces, and refreshes complete pinned sources at
 //! actual |E| and |J|. Applied/evaluated conductivity, current and power must all
-//! agree. Iteration error is never heat. This Picard closure need not converge
-//! for every positive source curve and proves neither uniqueness nor stability.
+//! agree. Optional relaxation requeries original sources at damped E/J
+//! coordinates; it never blends conductivities or adds iteration error as heat.
+//! This Picard closure need not converge for every positive source curve and
+//! proves neither uniqueness nor stability.
 
 use super::*;
 use fs_material::conductor::{ConductorError, response::ScalarConductorResponse};
@@ -81,6 +83,7 @@ impl From<ConductorError> for ConductionResponseError {
 pub struct PlanarConductionResponse {
     native: PlanarConduction,
     sources: Arc<[ScalarConductorResponse]>,
+    relaxation: f64,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -121,7 +124,8 @@ pub struct ConductionResponseReport {
     pub evaluated: Vec<ConductionResponseSample>,
     /// Every native spatial solve, including discarded constitutive trials.
     pub field_solves: usize,
-    /// Complete actual-field source queries, excluding initial binding admission.
+    /// Complete actual-field AND relaxed-coordinate source queries, excluding
+    /// initial binding admission. Full steps and fixed sources add no queries.
     pub source_evaluations: usize,
 }
 
@@ -203,7 +207,31 @@ impl PlanarConductionResponse {
         Ok(Self {
             native,
             sources: sources.into(),
+            relaxation: 1.0,
         })
+    }
+
+    /// Use a fixed coordinate-relaxation weight in `(0, 1]` for subsequent
+    /// nonlinear solves. One is the original undamped iteration. A smaller
+    /// weight can stabilize alternating positive-resistance laws; it is not a
+    /// guarantee of convergence and does not weaken any physical residual gate.
+    ///
+    /// Trials requery the pinned source at interpolated owned E/J magnitudes.
+    /// They never interpolate conductivity, temperature or phase. The existing
+    /// iteration limit bounds both field solves and extra source queries.
+    pub fn with_relaxation(mut self, weight: f64) -> Result<Self, ConductionResponseError> {
+        if !(positive(weight) && weight <= 1.0) {
+            return Err(ConductionResponseError::Invalid(
+                "source-coordinate relaxation must be in (0, 1]",
+            ));
+        }
+        self.relaxation = weight;
+        Ok(self)
+    }
+
+    /// Numerical weight retained across accepted source-response candidates.
+    pub fn relaxation(&self) -> f64 {
+        self.relaxation
     }
 
     pub fn mesh(&self) -> &TriComplex2 {
@@ -270,6 +298,8 @@ impl PlanarConductionResponse {
     /// coupled owner. The operator alone is only a frozen linearization and
     /// cannot be advanced as a nonlinear material. Rejoin the same parts with
     /// [`Self::from_frozen_parts`] before every source-response solve.
+    /// These physical parts omit numerical relaxation; retain [`Self::relaxation`]
+    /// separately and reapply it after rebinding when that policy is desired.
     pub fn into_frozen_parts(self) -> (PlanarConduction, Arc<[ScalarConductorResponse]>) {
         (self.native, self.sources)
     }
@@ -293,7 +323,11 @@ impl PlanarConductionResponse {
             poll(cancelled)?;
             source.admit(conductor)?;
         }
-        Ok(Self { native, sources })
+        Ok(Self {
+            native,
+            sources,
+            relaxation: 1.0,
+        })
     }
 
     /// Solve the original voltage/current traces at this fixed external context.
@@ -583,6 +617,7 @@ impl PlanarConductionResponse {
             source.admit(seed).map_err(ConductionResponseError::from)?;
         }
         let mut applied = seeds.clone();
+        let mut relaxation_queries = 0usize;
         let (mut maximum_sigma, mut maximum_current, mut absolute_power) =
             (0.0_f64, 0.0_f64, 0.0_f64);
         for iteration in 1..=controls.maximum_iterations {
@@ -687,20 +722,39 @@ impl PlanarConductionResponse {
                     linear: field.report().cloned(),
                     evaluated,
                     field_solves: iteration,
-                    source_evaluations: iteration.checked_mul(seeds.len()).ok_or(
-                        ConductionResponseError::Invalid("source evaluation count overflows"),
-                    )?,
+                    source_evaluations: iteration
+                        .checked_mul(seeds.len())
+                        .and_then(|count| count.checked_add(relaxation_queries))
+                        .ok_or(ConductionResponseError::Invalid(
+                            "source evaluation count overflows",
+                        ))?,
                 };
                 return Ok((
                     ConductionResponseCandidate {
                         problem: Self {
                             native,
                             sources: self.sources.clone(),
+                            relaxation: self.relaxation,
                         },
                         report,
                     },
                     driver,
                 ));
+            }
+            if iteration < controls.maximum_iterations && self.relaxation < 1.0 {
+                for ((source, current), following) in
+                    self.sources.iter().zip(native.conductors()).zip(&mut next)
+                {
+                    poll(cancelled).map_err(ConductionResponseError::from)?;
+                    if !source.axes().is_empty() {
+                        *following = source
+                            .relax_operating_point(current, following, self.relaxation)
+                            .map_err(ConductionResponseError::from)?;
+                        relaxation_queries = relaxation_queries.checked_add(1).ok_or(
+                            ConductionResponseError::Invalid("source evaluation count overflows"),
+                        )?;
+                    }
+                }
             }
             applied = next;
         }

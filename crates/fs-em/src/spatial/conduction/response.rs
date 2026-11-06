@@ -3,8 +3,9 @@
 //! Each bounded Picard iteration uses the original native bulk/contact operator.
 //! Only potentials are combined inside a frozen terminal response; the entire
 //! response is rebuilt after a conductivity change. Nonlinear fields cannot be
-//! scaled to another drive. Positive source values do not guarantee convergence
-//! or uniqueness of this fixed point.
+//! scaled to another drive. Optional coordinate relaxation requeries the same
+//! original source; no coefficient blending or numerical heat is introduced.
+//! Positive source values do not guarantee convergence or uniqueness.
 
 use super::*;
 use fs_material::conductor::{ConductorError, response::ScalarConductorResponse};
@@ -88,6 +89,7 @@ impl<'a> From<&'a SpatialConductionBoundary> for SpatialConductionResponseDrive<
 pub struct SpatialConductionResponse {
     native: SpatialConduction,
     sources: Arc<[ScalarConductorResponse]>,
+    relaxation: f64,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -110,6 +112,8 @@ pub struct SpatialConductionResponseReport {
     pub iterations: usize,
     /// Includes every basis solve in discarded constitutive iterations.
     pub field_solves: usize,
+    /// Actual-field and damped-coordinate source queries, excluding initial
+    /// binding. Full steps and fixed sources need no extra damping queries.
     pub source_evaluations: usize,
 }
 
@@ -189,7 +193,29 @@ impl SpatialConductionResponse {
         Ok(Self {
             native,
             sources: sources.into(),
+            relaxation: 1.0,
         })
+    }
+
+    /// Select a fixed source-coordinate relaxation weight in `(0, 1]`.
+    /// One preserves the original undamped Picard path. Smaller weights can
+    /// stabilize alternating resistance responses by requerying original laws
+    /// at interpolated owned E/J magnitudes. Temperature/phase, source pins and
+    /// all actual-field current/energy acceptance gates remain unchanged.
+    /// No global convergence or uniqueness claim follows from relaxation.
+    pub fn with_relaxation(mut self, weight: f64) -> Result<Self> {
+        if !(super::terminals::positive(weight) && weight <= 1.0) {
+            return Err(SpatialConductionResponseError::Invalid(
+                "source-coordinate relaxation must be in (0, 1]",
+            ));
+        }
+        self.relaxation = weight;
+        Ok(self)
+    }
+
+    /// Numerical weight retained across accepted source-response candidates.
+    pub fn relaxation(&self) -> f64 {
+        self.relaxation
     }
 
     pub fn mesh(&self) -> &TetComplex {
@@ -260,6 +286,7 @@ impl SpatialConductionResponse {
         let seeds = self.native.conductors();
         let mut applied = seeds.to_vec();
         let mut field_solves = 0usize;
+        let mut relaxation_queries = 0usize;
         let (mut maximum_sigma, mut maximum_current, mut absolute_power) =
             (0.0_f64, 0.0_f64, 0.0_f64);
         for iteration in 1..=controls.maximum_iterations {
@@ -370,19 +397,37 @@ impl SpatialConductionResponse {
                     evaluated,
                     iterations: iteration,
                     field_solves,
-                    source_evaluations: iteration.checked_mul(seeds.len()).ok_or(
-                        SpatialConductionResponseError::Invalid(
+                    source_evaluations: iteration
+                        .checked_mul(seeds.len())
+                        .and_then(|count| count.checked_add(relaxation_queries))
+                        .ok_or(SpatialConductionResponseError::Invalid(
                             "source evaluation count overflows",
-                        ),
-                    )?,
+                        ))?,
                 };
                 return Ok(SpatialConductionResponseCandidate {
                     problem: Self {
                         native,
                         sources: self.sources.clone(),
+                        relaxation: self.relaxation,
                     },
                     report,
                 });
+            }
+            if iteration < controls.maximum_iterations && self.relaxation < 1.0 {
+                for ((source, current), following) in
+                    self.sources.iter().zip(native.conductors()).zip(&mut next)
+                {
+                    check(cancelled)?;
+                    if !source.axes().is_empty() {
+                        *following =
+                            source.relax_operating_point(current, following, self.relaxation)?;
+                        relaxation_queries = relaxation_queries.checked_add(1).ok_or(
+                            SpatialConductionResponseError::Invalid(
+                                "source evaluation count overflows",
+                            ),
+                        )?;
+                    }
+                }
             }
             applied = next;
         }

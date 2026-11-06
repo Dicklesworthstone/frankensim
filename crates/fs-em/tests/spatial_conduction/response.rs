@@ -6,7 +6,22 @@ use fs_material::conductor::response::{ConductorMagnitude, ScalarConductorRespon
 use std::collections::BTreeSet;
 
 fn law(coordinate: Option<ConductorMagnitude>, beta: f64, upper: f64) -> ScalarConductorResponse {
-    let basis = ElectricalPropertyBasis::Conductivity;
+    law_with_basis(
+        coordinate,
+        ElectricalPropertyBasis::Conductivity,
+        1.0,
+        beta,
+        upper,
+    )
+}
+
+fn law_with_basis(
+    coordinate: Option<ConductorMagnitude>,
+    basis: ElectricalPropertyBasis,
+    intercept: f64,
+    beta: f64,
+    upper: f64,
+) -> ScalarConductorResponse {
     let key = PropertyKey::new(basis.property_name(), basis.dimensions());
     let mut claims = ClaimSet::new();
     let mut query = QueryPoint::new();
@@ -18,7 +33,7 @@ fn law(coordinate: Option<ConductorMagnitude>, beta: f64, upper: f64) -> ScalarC
             PropertyValue::Curve {
                 abscissa: "operating".into(),
                 abscissa_dims: magnitude.quantity().dims(),
-                knots: vec![(0.0, 1.0), (upper, 1.0 + beta * upper)],
+                knots: vec![(0.0, intercept), (upper, intercept + beta * upper)],
                 dims: basis.dimensions(),
             },
             ValidityDomain::unconstrained().with_quantity(
@@ -33,7 +48,7 @@ fn law(coordinate: Option<ConductorMagnitude>, beta: f64, upper: f64) -> ScalarC
     } else {
         (
             PropertyValue::Scalar {
-                value: 1.0,
+                value: intercept,
                 dims: basis.dimensions(),
             },
             ValidityDomain::unconstrained(),
@@ -107,6 +122,124 @@ fn rotate(positions: &mut [[f64; 3]]) {
     // A proper cyclic rotation puts the entire axial field in its THIRD component.
     for p in positions {
         *p = [p[1], p[2], p[0]];
+    }
+}
+
+#[test]
+fn relaxed_three_dimensional_resistance_closes_strong_voltage_and_current_feedback() {
+    let a = 0.01_f64;
+    let b = 100.0_f64;
+    let expected = 2.0 / (a + (a * a + 4.0 * b).sqrt());
+    for current_control in [false, true] {
+        let (basis, coordinate) = if current_control {
+            (
+                ElectricalPropertyBasis::Conductivity,
+                ConductorMagnitude::ElectricField,
+            )
+        } else {
+            (
+                ElectricalPropertyBasis::Resistivity,
+                ConductorMagnitude::CurrentDensity,
+            )
+        };
+        let source = law_with_basis(Some(coordinate), basis, a, b, 200.0);
+        let (mut positions, tets) = slab(&[0.0, 1.0]);
+        rotate(&mut positions);
+        let original =
+            SpatialConductionResponse::new(positions, tets, vec![source; 6], limits(), &mut || {
+                false
+            })
+            .unwrap();
+        let relaxed = original.clone().with_relaxation(0.5).unwrap();
+        let faces = face_sets(&original, &[0.0, 1.0]);
+        for sign in [-1.0, 1.0] {
+            let mut boundary = SpatialConductionBoundary {
+                voltage: faces[0]
+                    .iter()
+                    .map(|&face| ConductionVoltageFace {
+                        face,
+                        voltage_v: [0.0; 3],
+                    })
+                    .collect(),
+                current: Vec::new(),
+            };
+            if current_control {
+                boundary.current = faces[1]
+                    .iter()
+                    .map(|&face| ConductionCurrentFace {
+                        face,
+                        inward_current_density_a_m2: sign,
+                    })
+                    .collect();
+            } else {
+                boundary
+                    .voltage
+                    .extend(faces[1].iter().map(|&face| ConductionVoltageFace {
+                        face,
+                        voltage_v: [sign; 3],
+                    }));
+            }
+            assert!(matches!(
+                original.solve_candidate(
+                    &boundary,
+                    limits(),
+                    controls(),
+                    response_controls(),
+                    &mut || false,
+                ),
+                Err(SpatialConductionResponseError::NotConverged { .. }),
+            ));
+            let candidate = relaxed
+                .solve_candidate(
+                    &boundary,
+                    limits(),
+                    controls(),
+                    response_controls(),
+                    &mut || false,
+                )
+                .unwrap();
+            let report = candidate.report();
+            assert!(report.iterations < 32);
+            assert_eq!(report.field_solves, report.iterations);
+            assert_eq!(report.source_evaluations, 6 * (2 * report.iterations - 1));
+            assert_eq!(candidate.problem().relaxation(), 0.5);
+            let (e, j) = if current_control {
+                (expected, 1.0)
+            } else {
+                (1.0, expected)
+            };
+            for cell in 0..6 {
+                near(report.field.electric_field_v_m[cell][2], -sign * e);
+                near(report.field.current_density_a_m2[cell][2], -sign * j);
+                near(report.field.cell_power_w[cell], e * j / 6.0);
+                near(
+                    report.evaluated[cell].conductor.material().query().axes()["operating"],
+                    expected,
+                );
+                assert!(
+                    report.evaluated[cell]
+                        .current_density_defect_a_m2
+                        .iter()
+                        .all(|v| v.abs() < 1e-10)
+                );
+                assert!(report.evaluated[cell].power_defect_w.abs() < 1e-9);
+            }
+            near(report.field.power_w, expected);
+            near(report.field.supplied_power_w, expected);
+            near(report.field.current_residual_a, 0.0);
+            let budget = SpatialConductionResponseControls {
+                maximum_field_solves: 2,
+                ..response_controls()
+            };
+            assert!(matches!(
+                relaxed.solve_candidate(&boundary, limits(), controls(), budget, &mut || false),
+                Err(SpatialConductionResponseError::FieldSolveBudget { completed: 2, .. }),
+            ));
+        }
+        for weight in [0.0, -0.5, 1.1, f64::NAN, f64::INFINITY] {
+            assert!(original.clone().with_relaxation(weight).is_err());
+        }
+        assert_eq!(original.conductors(), relaxed.conductors());
     }
 }
 

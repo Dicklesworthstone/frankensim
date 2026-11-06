@@ -247,6 +247,63 @@ impl ScalarConductorResponse {
         self.at_field_components(seed, electric_field_v_m, current_density_a_m2)
     }
 
+    /// Prepare a damped fixed-point trial by requerying the ORIGINAL source at
+    /// `(1-weight) * applied_coordinate + weight * evaluated_coordinate`.
+    /// Only the explicitly owned E/J magnitudes move. Temperature, phase and
+    /// every other context coordinate must agree exactly between the inputs.
+    ///
+    /// This interpolates operating coordinates, never material coefficients or
+    /// source receipts. The full query must still lie in the admitted source
+    /// support; even a segment between two supported points may leave a
+    /// nonconvex domain and must then refuse. An accepted physical state still
+    /// requires an independent source evaluation at its ACTUAL fields.
+    ///
+    /// `weight` must be finite and in `(0, 1]`. A full step, or a source without
+    /// E/J coordinates, returns the evaluated state unchanged and does not
+    /// perform another source query. Otherwise this performs one complete query.
+    pub fn relax_operating_point(
+        &self,
+        applied: &ResolvedConductorState,
+        evaluated: &ResolvedConductorState,
+        weight: f64,
+    ) -> Result<ResolvedConductorState, ConductorError> {
+        if !(weight.is_finite() && weight > 0.0 && weight <= 1.0) {
+            return Err(invalid("conductor response relaxation must be in (0, 1]"));
+        }
+        self.admit(applied)?;
+        self.admit(evaluated)?;
+        let mut query = applied.material().query();
+        for ((axis, before), (_, after)) in applied
+            .material()
+            .query_point()
+            .iter()
+            .zip(evaluated.material().query_point())
+        {
+            if self.axes.iter().any(|(owned, _)| owned == axis) {
+                // Both magnitudes are nonnegative and finite. Their difference
+                // cannot overflow, and this form avoids summing two large
+                // weighted values. Explicit endpoints retain exact full steps.
+                let value = if weight == 1.0 {
+                    *after
+                } else {
+                    weight.mul_add(after - before, *before)
+                };
+                query = query
+                    .with(axis, value)
+                    .map_err(|_| invalid("representable relaxed conductor coordinate"))?;
+            } else if before.to_bits() != after.to_bits() {
+                return Err(invalid(
+                    "conductor relaxation must preserve every non-electrical coordinate",
+                ));
+            }
+        }
+        if weight == 1.0 || self.axes.is_empty() {
+            Ok(evaluated.clone())
+        } else {
+            self.at_query_point(&query)
+        }
+    }
+
     fn at_field_components<const N: usize>(
         &self,
         seed: &ResolvedConductorState,

@@ -9185,6 +9185,17 @@ claim pins, coordinate quantities and external context. Conductivity and
 resistivity remain distinct source bases. Every original electrical response
 coordinate must be owned; frequency, strain and other unowned responses refuse.
 
+`ScalarConductorResponse::relax_operating_point` prepares a nonlinear solver
+trial by interpolating only those owned E/J magnitudes and querying the same
+complete source again. Both inputs retain the original source/role/claim
+identity and exactly equal non-electrical context. It never interpolates
+resistivity or conductivity values. The intermediate query must independently
+belong to the admitted support, including nonconvex multiaxis support; supported
+endpoints alone do not authorize their connecting segment. A full step or a
+source without operating coordinates requires no additional query. This helper
+does not accept a physical state: the field owner must still evaluate the source
+at actual E/J and satisfy its original current, conductivity and work gates.
+
 The shared multiple-owned-coordinate predicate preserves the existing static
 external-coordinate rules; it provides no evolution law itself. The electrical
 response adapter is an isotropic, passive, memoryless rung, with no tensor, Hall,

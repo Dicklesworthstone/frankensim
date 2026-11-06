@@ -171,6 +171,68 @@ fn actual_rotational_invariants_refresh_one_complete_pinned_material_bundle() {
 }
 
 #[test]
+fn relaxation_requeries_owned_coordinates_without_blending_source_coefficients_or_context() {
+    let (card, original) = fixture(false);
+    let law = ScalarConductorResponse::new(
+        &card,
+        original.clone(),
+        &[
+            ("field", ConductorMagnitude::ElectricField),
+            ("current", ConductorMagnitude::CurrentDensity),
+        ],
+    )
+    .unwrap();
+    let seed = law
+        .at_query_point(&original.material().query().with("T", 350.0).unwrap())
+        .unwrap();
+    let applied = law.at_fields(&seed, [1.0, 0.0], [2.0, 0.0]).unwrap();
+    let evaluated = law.at_fields(&seed, [9.0, 0.0], [18.0, 0.0]).unwrap();
+    let relaxed = law
+        .relax_operating_point(&applied, &evaluated, 0.25)
+        .unwrap();
+    let expected = law.at_fields(&seed, [0.0, -3.0], [-6.0, 0.0]).unwrap();
+    assert_eq!(relaxed, expected);
+    assert_eq!(relaxed.material().query().axes()["T"], 350.0);
+    assert_eq!(relaxed.material().query().axes()["field"], 3.0);
+    assert_eq!(relaxed.material().query().axes()["current"], 6.0);
+    assert_eq!(
+        relaxed.material().properties().len(),
+        original.material().properties().len()
+    );
+    assert_eq!(relaxed.source_key(), original.source_key());
+    assert_eq!(
+        relaxed.source_property().answer().receipt.selected,
+        original.source_property().answer().receipt.selected,
+    );
+    // Interpolating the stored resistivity would produce another material law.
+    let blended_resistivity =
+        0.75 * applied.resistivity_ohm_m() + 0.25 * evaluated.resistivity_ohm_m();
+    assert!((relaxed.resistivity_ohm_m() - blended_resistivity).abs() > 0.01);
+    assert_eq!(
+        law.relax_operating_point(&applied, &evaluated, 1.0)
+            .unwrap(),
+        evaluated
+    );
+    for weight in [0.0, -0.5, 1.1, f64::NAN, f64::INFINITY] {
+        assert!(
+            law.relax_operating_point(&applied, &evaluated, weight)
+                .is_err()
+        );
+    }
+    let other_temperature = law
+        .at_query_point(&evaluated.material().query().with("T", 400.0).unwrap())
+        .unwrap();
+    assert!(
+        law.relax_operating_point(&applied, &other_temperature, 0.5)
+            .is_err()
+    );
+    assert!(
+        law.relax_operating_point(&applied, &other_temperature, 1.0)
+            .is_err()
+    );
+}
+
+#[test]
 fn multiple_owned_axes_do_not_admit_unowned_or_retyped_conditions() {
     let (card, original) = fixture(false);
     let e = ConductorMagnitude::ElectricField;

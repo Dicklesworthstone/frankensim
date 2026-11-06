@@ -978,6 +978,16 @@ and simultaneous voltage/current/floating electrodes use the same field owner,
 including actual source work and unsmoothed bulk/contact Joule heat. Nonlinear
 operating points are never scaled as fixed resistances.
 
+`with_relaxation(weight)` optionally damps owned E/J source coordinates between
+iterations, using the same source-query helper as the planar owner. The default
+weight is one; a weight in `(0,1)` requeries the original source at intermediate
+coordinates without blending coefficients or moving external context. Actual
+source support and all final physical gates remain mandatory. The original
+iteration and field-solve budgets still bound work; source evaluation counts
+include extra damping queries. Strong positive current-dependent resistivity
+and its current-driven conductivity dual are checked against independent
+quadratic roots with the entire field in the third spatial component.
+
 Acceptance separately gates conductivity, source-evaluated current density and
 the sum of absolute cellwise constitutive power defects, alongside native
 current/Hodge/work balance. Every N-1 terminal basis solve is charged across
@@ -1613,6 +1623,15 @@ heat; the spatial report is not an additional loss. Complete material snapshots
 and actual extruded volumes remain accessible for an explicit receiving thermal
 cell map. This electrical owner neither advances thermal state nor invents a
 heat partition between unrelated bodies.
+
+`PlanarResistance::field_at_current` reuses that same prepared linear field for
+signed total-current sweeps, including zero. Preparation retains the original
+electrode pair and its reference reaction; each recovery independently checks
+both terminal currents and authored I*V against the recovered bulk/contact heat.
+No new Krylov solve or uniform injection-density assumption is introduced.
+`solve_current_with_reference_voltage` uses this same recovery, retaining its
+reaction-based voltage scaling. The basis is valid only for its fixed source,
+geometry and contact state; material feedback must prepare a replacement.
 
 Temperature, composition and fixed pressure act through original resolved
 source queries. New supported material snapshots require a newly prepared
@@ -2531,6 +2550,21 @@ Independent conductivity and current-density defects, plus the sum of absolute
 cell power defects, must pass alongside native algebraic/current/work gates.
 Numerical iteration defects are not Joule heat. Rejected sources, budgets,
 nonconvergence and cancellation leave the accepted owner unchanged.
+
+`with_relaxation(weight)` selects optional fixed under-relaxation of the owned
+E/J operating coordinates. Each damped trial requeries the complete original
+source, including its actual support, pins and other material roles; temperature,
+phase and all other context coordinates are unchanged. No coefficient averaging
+or relaxed physical acceptance is allowed. The default weight one retains the
+undamped arithmetic and query count. Smaller weights can close strongly
+alternating positive-resistance laws; they do not establish global convergence.
+The existing iteration budget bounds trials and `source_evaluations` counts
+both actual-field and damped-coordinate queries. Accepted candidates retain the
+selected weight. `into_frozen_parts` transfers physical source/operator state
+only; a coupled owner retains and reapplies numerical relaxation separately.
+Independent regressions demonstrate unique passive resistance/conductivity
+roots that fail the undamped budget but converge with weight one-half, and
+preserve signed drive, local heat, source-domain refusal and cancellation/retry.
 
 This fixed-geometry scalar memoryless rung accepts prescribed native voltage and
 current-density traces. A nonlinear equipotential total-current terminal needs
