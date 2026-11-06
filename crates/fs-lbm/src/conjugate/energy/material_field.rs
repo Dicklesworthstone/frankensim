@@ -131,6 +131,103 @@ impl EnergyConfig {
             Some(enthalpy), None, gate)
     }
 
+    /// Evaluate the supplied material fields at an unchanged steady endpoint.
+    ///
+    /// The existing assembly checks both algebraic and local physical heat
+    /// residuals, then returns its boundary, sink and fixed-cell accounting.
+    /// No Krylov solve or temperature update is performed. A nonlinear owner
+    /// supplies its original h(T), Cp(T) and conductivity at this same endpoint;
+    /// this method does not resolve or extrapolate a material source.
+    ///
+    /// Face contacts must already be resolved into `face_contacts`; an
+    /// unresolved source-contact iteration is not an endpoint evaluation.
+    /// Fluid enthalpy anchors must exactly match the endpoint temperatures.
+    /// Prescribed cell temperatures must match their exact imposed values.
+    /// Compact aliases must retain the same temperature as their junction.
+    /// Original field, flow, boundary, cancellation and residual refusals apply.
+    #[allow(clippy::too_many_arguments)]
+    pub fn evaluate_with_enthalpy(
+        &self,
+        domain: &VoxelDomain,
+        fluid: &FluidProperties,
+        solids: &[SolidMaterial],
+        flow: &FlowField,
+        setup: &ThermalSetup,
+        molecular_w_m_k: &[[f64; 3]],
+        enthalpy: AdvectiveEnthalpyField<'_>,
+        temperature_k: &[f64],
+        gate: &CancelGate,
+    ) -> Result<EnergySolution, ChtError> {
+        super::super::poll(gate)?;
+        admit_molecular_field(domain, solids, molecular_w_m_k, gate)?;
+        let invalid = |reason: &str| ChtError::InvalidInput {
+            field: "thermal.material_endpoint",
+            reason: reason.into(),
+        };
+        if temperature_k.len() != domain.cell_count() {
+            return Err(invalid("one endpoint temperature per cell is required"));
+        }
+        for (cell, &temperature) in temperature_k.iter().enumerate() {
+            if cell.is_multiple_of(4096) {
+                super::super::poll(gate)?;
+            }
+            if !temperature.is_finite() || temperature <= 0.0 {
+                return Err(invalid(
+                    "endpoint temperatures must be finite positive kelvin",
+                ));
+            }
+            // The native field admission still owns malformed shapes and
+            // fluid/solid slots. Never extrapolate a valid fluid tangent here.
+            if enthalpy.cells.len() == temperature_k.len()
+                && domain.is_fluid(cell)
+                && let Some(h) = enthalpy.cells[cell]
+                && h.temperature_k != temperature
+            {
+                return Err(invalid(
+                    "fluid enthalpy anchors must equal their endpoint temperatures",
+                ));
+            }
+        }
+        for (index, &(cell, imposed)) in setup.fixed_temperature.iter().enumerate() {
+            if index.is_multiple_of(4096) {
+                super::super::poll(gate)?;
+            }
+            if temperature_k.get(cell) != Some(&imposed) {
+                return Err(invalid(
+                    "fixed-cell endpoint temperatures must equal their prescribed values",
+                ));
+            }
+        }
+        if !setup.source_face_contacts.is_empty() {
+            return Err(invalid(
+                "endpoint evaluation requires already resolved face contact coefficients",
+            ));
+        }
+        // The explicit molecular field replaces solid conductivity scales;
+        // only the immutable temperature member of this native input is used.
+        let solution = solve_energy_field(
+            domain,
+            fluid,
+            solids,
+            flow,
+            setup,
+            self,
+            None,
+            Some((&[], Some(temperature_k))),
+            Some(molecular_w_m_k),
+            Some(enthalpy),
+            true,
+            gate,
+        )?;
+        if solution.temperature.as_slice() != temperature_k {
+            return Err(invalid(
+                "compact aliases must retain their unchanged junction temperature",
+            ));
+        }
+        super::super::poll(gate)?;
+        Ok(solution)
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn solve_with_fields(
         &self,
@@ -152,29 +249,7 @@ impl EnergyConfig {
                 )
             });
         }
-        if molecular_w_m_k.len() != domain.cell_count() {
-            return Err(ChtError::InvalidInput {
-                field: "thermal.molecular_conductivity",
-                reason: "needs exactly one grid-aligned conductivity triple per cell".into(),
-            });
-        }
-        for (cell, values) in molecular_w_m_k.iter().enumerate() {
-            if cell.is_multiple_of(4096) {
-                super::super::poll(gate)?;
-            }
-            if values.iter().any(|k| !k.is_finite() || *k <= 0.0) {
-                return Err(ChtError::InvalidInput {
-                    field: "thermal.molecular_conductivity",
-                    reason: format!("cell {cell}: all conductivities must be finite and positive"),
-                });
-            }
-        }
-        if solids.iter().any(|s| !s.conductivity_table.is_empty()) {
-            return Err(ChtError::InvalidInput {
-                field: "thermal.molecular_conductivity",
-                reason: "explicit resolved field cannot also use authored conductivity tables".into(),
-            });
-        }
+        admit_molecular_field(domain, solids, molecular_w_m_k, gate)?;
         let solution = solve_energy_field(
             domain, fluid, solids, flow, setup, self, step, None,
             Some(molecular_w_m_k), enthalpy, false, gate,
@@ -331,6 +406,37 @@ impl EnergyConfig {
     }
 }
 
+fn admit_molecular_field(
+    domain: &VoxelDomain,
+    solids: &[SolidMaterial],
+    molecular_w_m_k: &[[f64; 3]],
+    gate: &CancelGate,
+) -> Result<(), ChtError> {
+    if molecular_w_m_k.len() != domain.cell_count() {
+        return Err(ChtError::InvalidInput {
+            field: "thermal.molecular_conductivity",
+            reason: "needs exactly one grid-aligned conductivity triple per cell".into(),
+        });
+    }
+    for (cell, values) in molecular_w_m_k.iter().enumerate() {
+        if cell.is_multiple_of(4096) {
+            super::super::poll(gate)?;
+        }
+        if values.iter().any(|k| !k.is_finite() || *k <= 0.0) {
+            return Err(ChtError::InvalidInput {
+                field: "thermal.molecular_conductivity",
+                reason: format!("cell {cell}: all conductivities must be finite and positive"),
+            });
+        }
+    }
+    if solids.iter().any(|s| !s.conductivity_table.is_empty()) {
+        return Err(ChtError::InvalidInput {
+            field: "thermal.molecular_conductivity",
+            reason: "explicit resolved field cannot also use authored conductivity tables".into(),
+        });
+    }
+    Ok(())
+}
 
 impl EnergySolution {
     /// Re-evaluate ONLY a resolved conductivity change on this temperature

@@ -20,6 +20,210 @@ use fs_qty::{Density, QuantitySpec, Temperature};
 #[path = "source_enthalpy/transient.rs"]
 mod transient;
 
+#[test]
+fn g1_source_caloric_endpoint_checks_actual_heat_without_changing_temperature() {
+    use fs_lbm::conjugate::{
+        AdvectiveEnthalpyField, AffineSpecificEnthalpy, ChtError, FlowFace, FlowField,
+        FluidProperties,
+    };
+    let domain = VoxelDomain::from_fn(3, 1, 1, 1.0, |_| Voxel::Fluid).unwrap();
+    let flow = FlowField::from_face_velocity(
+        &domain,
+        [
+            FlowFace::Fixed,
+            FlowFace::Fixed,
+            FlowFace::Wall,
+            FlowFace::Wall,
+            FlowFace::Wall,
+            FlowFace::Wall,
+        ],
+        |axis, _| if axis == 0 { 1.0 } else { 0.0 },
+    )
+    .unwrap();
+    let mut faces = [ThermalFace::Adiabatic; 6];
+    faces[0] = ThermalFace::Inflow { temperature: 300.0 };
+    faces[1] = ThermalFace::Outflow {
+        backflow_temperature: 300.0,
+    };
+    let mut setup = ThermalSetup::new(faces);
+    // h(theta)=theta+theta^2, Cp=1+2*theta. For theta=[1,3,4], the
+    // independent conduction/upwind balances require sources [2,11,9] W.
+    // Heat leaving is 2*theta[0] + h(theta[2]) = 22 W.
+    setup.power_w = vec![2.0, 11.0, 9.0];
+    let temperature = [301.0, 303.0, 304.0];
+    let cells = temperature.map(|t| {
+        let theta = t - 300.0;
+        Some(AffineSpecificEnthalpy {
+            temperature_k: t,
+            enthalpy_j_kg: theta + theta * theta,
+            heat_capacity_j_kg_k: 1.0 + 2.0 * theta,
+        })
+    });
+    let field = AdvectiveEnthalpyField {
+        cells: &cells,
+        boundary_j_kg: [Some(0.0), Some(0.0), None, None, None, None],
+    };
+    let fluid = FluidProperties {
+        density_kg_m3: 1.0,
+        specific_heat_j_kg_k: 999.0,
+        conductivity_w_m_k: 1.0,
+        kinematic_viscosity_m2_s: 1.0,
+    };
+    let config = EnergyConfig {
+        scheme: ConvectionScheme::Upwind,
+        ..EnergyConfig::default()
+    };
+    let evaluate = |values: &[f64], field, gate: &CancelGate| {
+        config.evaluate_with_enthalpy(
+            &domain,
+            &fluid,
+            &[],
+            &flow,
+            &setup,
+            &[[1.0; 3]; 3],
+            field,
+            values,
+            gate,
+        )
+    };
+    let result = evaluate(&temperature, field, &CancelGate::new()).unwrap();
+    assert_eq!(result.temperature, temperature);
+    assert_eq!(result.report.iterations, 0);
+    near(result.report.balance.source_w, 22.0, 1e-14);
+    near(result.report.balance.advective_outflow_w, 20.0, 1e-14);
+    near(result.report.balance.boundary_outflow_w, 22.0, 1e-14);
+    assert!(result.report.balance.residual_w.abs() < 1e-13);
+    // Re-anchoring the same tangent preserves every endpoint enthalpy and
+    // heat prediction, but an endpoint audit must still refuse extrapolation.
+    let stale = cells.map(|h| {
+        h.map(|h| AffineSpecificEnthalpy {
+            temperature_k: h.temperature_k - 1.0,
+            enthalpy_j_kg: h.enthalpy_j_kg - h.heat_capacity_j_kg_k,
+            ..h
+        })
+    });
+    for (cell, &t) in temperature.iter().enumerate() {
+        assert_eq!(
+            stale[cell].unwrap().at_temperature(t),
+            cells[cell].unwrap().enthalpy_j_kg,
+        );
+    }
+    assert!(matches!(
+        evaluate(
+            &temperature,
+            AdvectiveEnthalpyField {
+                cells: &stale,
+                ..field
+            },
+            &CancelGate::new()
+        ),
+        Err(ChtError::InvalidInput {
+            field: "thermal.material_endpoint",
+            ..
+        })
+    ));
+    // Matching anchors do not replace the independent native heat residual:
+    // h(theta)=theta, Cp=1 cannot supply the required nonlinear heat fluxes.
+    let wrong_law = temperature.map(|t| {
+        Some(AffineSpecificEnthalpy {
+            temperature_k: t,
+            enthalpy_j_kg: t - 300.0,
+            heat_capacity_j_kg_k: 1.0,
+        })
+    });
+    assert!(matches!(
+        evaluate(
+            &temperature,
+            AdvectiveEnthalpyField {
+                cells: &wrong_law,
+                ..field
+            },
+            &CancelGate::new()
+        ),
+        Err(ChtError::SolverNotConverged { .. })
+    ));
+    assert!(evaluate(&temperature[..2], field, &CancelGate::new()).is_err());
+    let gate = CancelGate::new();
+    gate.request();
+    assert!(matches!(
+        evaluate(&temperature, field, &gate),
+        Err(ChtError::Cancelled)
+    ));
+    assert_eq!(temperature, [301.0, 303.0, 304.0]);
+}
+
+#[test]
+fn g0_source_caloric_endpoint_preserves_imposed_and_compact_temperatures() {
+    use fs_lbm::Face3;
+    use fs_lbm::conjugate::{
+        AdvectiveEnthalpyField, ChtError, CompactComponent, FlowField, FluidProperties,
+    };
+    let domain = VoxelDomain::from_fn(1, 1, 4, 1.0, |_| Voxel::Solid(0)).unwrap();
+    let flow = FlowField::quiescent(&domain);
+    let solids = [SolidMaterial::new("synthetic compact surroundings", 1.0)];
+    let fluid = FluidProperties {
+        density_kg_m3: 1.0,
+        specific_heat_j_kg_k: 1.0,
+        conductivity_w_m_k: 1.0,
+        kinematic_viscosity_m2_s: 1.0,
+    };
+    let mut faces = [ThermalFace::Adiabatic; 6];
+    faces[4] = ThermalFace::Temperature(300.0);
+    faces[5] = ThermalFace::Temperature(300.0);
+    let mut setup = ThermalSetup::new(faces);
+    setup.fixed_temperature.push((0, 300.0));
+    setup.compact_components.push(CompactComponent {
+        lo: [0, 0, 1],
+        hi: [1, 1, 3],
+        board_face: Face3::ZMin,
+        power_w: 0.0,
+        junction_to_case_k_w: 1.0,
+        junction_to_board_k_w: 1.0,
+        heat_capacity_j_k: None,
+    });
+    let before = setup.clone();
+    let config = EnergyConfig {
+        scheme: ConvectionScheme::Upwind,
+        ..EnergyConfig::default()
+    };
+    let evaluate = |temperature| {
+        config.evaluate_with_enthalpy(
+            &domain,
+            &fluid,
+            &solids,
+            &flow,
+            &setup,
+            &[[1.0; 3]; 4],
+            AdvectiveEnthalpyField {
+                cells: &[None; 4],
+                boundary_j_kg: [None; 6],
+            },
+            temperature,
+            &CancelGate::new(),
+        )
+    };
+    let result = evaluate(&[300.0; 4]).unwrap();
+    assert_eq!(result.temperature, [300.0; 4]);
+    assert_eq!(result.junctions[0].temperature_k, 300.0);
+    assert_eq!(result.report.iterations, 0);
+    // Both perturbations fit inside the linear residual tolerance, but an
+    // endpoint audit may neither relax a prescribed value nor rewrite aliases.
+    for cell in [0, 2] {
+        let mut temperature = [300.0; 4];
+        temperature[cell] = f64::from_bits(300.0_f64.to_bits() + 1);
+        let unchanged = temperature;
+        assert!(matches!(
+            evaluate(&temperature),
+            Err(ChtError::InvalidInput {
+                field: "thermal.material_endpoint",
+                ..
+            })
+        ));
+        assert_eq!(temperature, unchanged);
+    }
+    assert_eq!(setup, before);
+}
+
 fn absolute() -> QuantitySpec {
     QuantitySpec::semantic(SemanticType::new(
         QuantityKind::AbsoluteTemperature,

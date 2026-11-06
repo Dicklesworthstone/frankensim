@@ -1197,6 +1197,17 @@ still owns continuity/inertia, and the existing rho AND Cp departure bounds
 remain enforced; no physical approximation gate is bypassed.
 
 `EnergyConfig::solve_with_enthalpy` supplies the steady affine operator.
+`EnergyConfig::evaluate_with_enthalpy` applies that same native assembly to an
+unchanged candidate supplied with its source enthalpy/Cp and molecular
+conductivity fields. It checks the original algebraic and local physical heat
+residuals and returns boundary, sink and fixed-cell heat accounting without a
+Krylov solve. The caller owns original-law evaluation and nonlinear convergence;
+enthalpy anchors differing from their endpoint temperatures, unresolved source
+contacts, differing prescribed cell temperatures and compact aliases that would
+be rewritten refuse. Field, flow and cancellation admission
+remain shared. The public `source_caloric_endpoint` regressions cover nonlinear
+enthalpy heat, stale-law refusal and unchanged prescribed/compact temperatures.
+
 The material owner re-evaluates the true caloric chart at the returned state
 and requires both the maximum individual face-heat defect and the maximum
 cell net-heat defect to meet the explicit tolerance, alongside its original
