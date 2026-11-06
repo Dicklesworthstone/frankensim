@@ -1333,6 +1333,59 @@ execution remains a validation gate; no runtime, convergence-order improvement
 or performance certification is inferred from source inspection.
 
 
+### SSPRK2 density inventories with one original BDF1 momentum solve
+
+`ns::boundary::conservative::ssprk2` adds
+`assemble_density_momentum_ssprk2_bdf1` and
+`density_momentum_ssprk2_bdf1_step`. Their names and reports distinguish the
+second-order fixed-advector density/inventory stages from the original
+FIRST-ORDER native BDF1 macro momentum update. `DensityMomentumSspRk2Controls`
+retains original physical controls and a maximum physical density-subinterval
+count; each subinterval has two original Euler evaluations. The density stage
+report records both counts, stage Courant and the complete physical macro
+inventory/boundary report.
+
+Density, all passive extensive inventories and accepted physical face amounts
+use the same SSPRK2 weights. The one compatible mass-flux reconstruction uses
+the corresponding PRE-stage donor-density mean. Original initial density,
+full-interval final density, macro timestep and that single flux enter the
+existing shared conservative native assembly tail without modification.
+There is one native momentum/pressure assembly and one original global solve
+per convenience-step call, independent of density-stage count. Endpoint force
+and viscosity laws see the final transported cells; no native solve or source
+sampling is performed at density stages.
+
+The original affine BDM velocity space, pressure normalization, boundary
+policies, reaction rows and native transpose surface remain in use. Macro
+mass-divergence compatibility and quadratic kinetic face moments retain the
+original free-stream and conservative kinetic balances up to represented
+state and reconstruction error. Old-density temporal loss and macro upwind
+loss remain separate numerical observations; they are not deposited into
+passive thermal inventories. Physical boundary mass/carried amounts retain
+the actual RK weights and are not doubled with the stage count. The existing
+`mass_flux::momentum` operator is unchanged.
+
+The original per-owner storage allowances, immutable caller history and
+no-candidate-on-refusal/cancellation behavior remain in effect. Complete
+density-stage scratch is admitted together. Native matrix/factor memory
+remains separately owned, and the synchronous linear solve is polled before
+and after rather than claimed interruptible. P0 spatial mixing and the
+frozen-advector BDF1 momentum coupling remain first order. No second-order
+fully coupled flow claim, interface reconstruction, moving geometry, EOS,
+phase source, diffusion or complete nonlinear adjoint is added.
+
+G1/G3 regression sources in `tests/density_momentum/ssprk2.rs` check weighted
+macro free streams across a large density contrast and multiple physical
+reference densities, mechanical pressure and boundary momentum/energy
+accounts, closed macro kinetic/wall balances and an independent one-mode
+BDF1 solution. Uniform density recovers the existing Euler-subcycled native
+macro matrix, RHS, solved field and kinetic observations exactly. Force-call
+counts remain one original cell quadrature independent of RK stages. Work,
+source and cancellation refusals publish no partial coupled candidate.
+Native Rust compilation and execution remain validation gates; no runtime or
+performance result is claimed from source inspection.
+
+
 ### Fixed stratified density in native Stokes inertia
 
 `assemble_stokes_mixed_bdf1_variable_density` adds the spatially weighted

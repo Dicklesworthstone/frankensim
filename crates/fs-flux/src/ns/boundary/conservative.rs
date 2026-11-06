@@ -35,6 +35,9 @@ use fs_sparse::Coo;
 /// Bounded density subcycling with one original native macro momentum solve.
 pub mod subcycle;
 
+/// Conservative SSPRK2 density stages with one original BDF1 momentum solve.
+pub mod ssprk2;
+
 /// Physical normalization and explicit density-transport allowances.
 #[derive(Clone, Copy, Debug)]
 pub struct DensityMomentumControls {

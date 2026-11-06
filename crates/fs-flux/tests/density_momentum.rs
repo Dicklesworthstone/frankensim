@@ -16,6 +16,9 @@ use fs_solid::Mesh2;
 #[path = "density_momentum/subcycle.rs"]
 mod subcycle;
 
+#[path = "density_momentum/ssprk2.rs"]
+mod ssprk2;
+
 fn controls(reference: f64, depth: f64) -> Controls {
     Controls {
         reference_density_kg_m3: reference,
