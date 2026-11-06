@@ -54,8 +54,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 VolumeLoad3::None, &[], &cx)?;
             path.advance(f64::from(sample), &load, &cx)?;
         }
+        let committed = path.summaries()[0];
+        let provisional = path.preview_fatigue(&cx)?[0];
+        // A live display can include the final half cycles without closing the
+        // observation. Subsequent native load steps can still be accepted.
+        assert_eq!(path.summaries()[0], committed);
         let summary = path.finish(&cx)?[0];
+        assert_eq!(provisional, summary);
         println!("SYNTHETIC demonstration, not validated component life");
+        println!("live_committed_damage={:.12} damage_if_stopped_now={:.12}",
+            committed.miner_damage, provisional.miner_damage);
         println!("samples={} full_cycles={} half_cycles={}", summary.samples, summary.full_cycles, summary.half_cycles);
         println!("miner_damage={:.12} analytic_expected={:.12}", summary.miner_damage, f64::from(cycles)*0.002);
         Ok(())

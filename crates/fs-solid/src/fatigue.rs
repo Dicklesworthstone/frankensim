@@ -281,6 +281,14 @@ impl<'p, 'm> TetFatiguePath<'p, 'm> {
         self.observation.summaries()
     }
 
+    /// S-N damage if the accepted native history ended now, including endpoint
+    /// half cycles. Returned `finished` flags describe hypothetical summaries;
+    /// mechanics, live counters and Findley windows remain unchanged. This does
+    /// not solve another load, sample a duplicate stress or close a Findley cycle.
+    pub fn preview_fatigue(&self, cx: &Cx<'_>) -> Result<Vec<FatigueSummary>, TetFatigueError> {
+        self.observation.preview_fatigue(cx)
+    }
+
     pub fn findley_results(&self) -> Vec<Option<FindleyCycleResult>> {
         self.observation.findley_results()
     }
@@ -563,6 +571,22 @@ impl TetFatigueObserver {
 
     pub(crate) fn summaries(&self) -> Vec<FatigueSummary> {
         self.gauges.iter().map(|g| g.counter.summary()).collect()
+    }
+
+    pub(crate) fn preview_fatigue(
+        &self,
+        cx: &Cx<'_>,
+    ) -> Result<Vec<FatigueSummary>, TetFatigueError> {
+        poll(cx)?;
+        let mut summaries = Vec::with_capacity(self.gauges.len());
+        for (index, gauge) in self.gauges.iter().enumerate() {
+            let summary = gauge.counter
+                .preview_finish_with_cancel(&mut || cx.checkpoint().is_err())
+                .map_err(|error| TetFatigueError::Gauge { gauge: index, error })?;
+            summaries.push(summary);
+        }
+        poll(cx)?;
+        Ok(summaries)
     }
 
     pub(crate) fn findley_results(&self) -> Vec<Option<FindleyCycleResult>> {

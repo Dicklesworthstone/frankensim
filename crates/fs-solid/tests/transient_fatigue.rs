@@ -263,6 +263,11 @@ fn g3_processing_chunks_and_checkpoint_forks_preserve_open_cycles_bitwise() {
                 chunked.advance(&load, 0.01, cx).unwrap();
             }
             let before = chunked.summaries();
+            let motion = chunked.mechanics().state().clone();
+            let preview = chunked.preview_fatigue(cx).unwrap();
+            assert_eq!(preview, chunked.clone().finish(cx).unwrap());
+            assert_eq!(chunked.preview_fatigue(cx).unwrap(), preview);
+            assert_eq!(chunked.mechanics().state(), &motion);
             chunked.recover_response(cx).unwrap();
             chunked.recover_response(cx).unwrap();
             assert_eq!(chunked.summaries(), before); // observing is not sampling again

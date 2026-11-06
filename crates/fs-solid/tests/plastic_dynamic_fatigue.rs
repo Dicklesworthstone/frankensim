@@ -384,7 +384,12 @@ fn g1_native_closed_tensor_cycle_selects_rotated_critical_plane_and_preserves_fi
         )
         .unwrap();
         assert_eq!(observed.critical_plane_results(), vec![None, None]);
-        observed.advance_cycle(3, cx).unwrap();
+        observed.advance(2, cx).unwrap();
+        let committed = observed.summaries();
+        assert!(observed.preview_fatigue(cx).unwrap()[0].miner_damage > 0.0);
+        assert_eq!(observed.summaries(), committed);
+        assert_eq!(observed.critical_plane_results(), vec![None, None]);
+        observed.advance_cycle(1, cx).unwrap();
         native.advance(3, cx).unwrap();
         assert_eq!(observed.solution(), native.solution());
         assert_eq!(observed.summaries(), native.summaries());
@@ -929,6 +934,11 @@ fn g3_chunks_clones_and_late_gauge_refusal_preserve_whole_native_motion() {
         let mut chunks = whole.clone();
         whole.advance(&targets, cx).unwrap();
         chunks.advance(&targets[..2], cx).unwrap();
+        let before_preview = chunks.clone();
+        let preview = chunks.preview_fatigue(cx).unwrap();
+        assert_eq!(preview, before_preview.clone().finish(cx).unwrap());
+        assert_eq!(chunks.preview_fatigue(cx).unwrap(), preview);
+        same_state(&chunks, &before_preview);
         let mut restored = chunks.clone();
         chunks.advance(&targets[2..], cx).unwrap();
         for target in &targets[2..] {

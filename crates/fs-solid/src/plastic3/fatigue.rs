@@ -225,6 +225,15 @@ impl GaugeCounter {
             Self::Paired(c) => c.summary(),
         }
     }
+    fn preview_finish(
+        &self,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<StrainLifeSummary, FatigueError> {
+        match self {
+            Self::Scalar(c) => c.preview_finish_with_cancel(cancelled),
+            Self::Paired(c) => c.preview_finish_with_cancel(cancelled),
+        }
+    }
     fn push(
         &mut self,
         sample: J2FatigueSample,
@@ -419,6 +428,14 @@ impl<'p, 'm> J2FatiguePath<'p, 'm> {
     pub fn summaries(&self) -> Vec<StrainLifeSummary> {
         self.observer.summaries()
     }
+
+    /// Fixed-plane strain-life damage if the accepted native history ended now.
+    /// Includes endpoint half cycles with the original mean-stress policy.
+    /// Hypothetical `finished` summaries do not change plastic state, the live
+    /// fatigue counters, or open SWT/Fatemi-Socie representative-cycle windows.
+    pub fn preview_fatigue(&self, cx: &Cx<'_>) -> Result<Vec<StrainLifeSummary>, J2FatigueError> {
+        self.observer.preview_fatigue(cx)
+    }
     pub fn samples(&self) -> Vec<J2FatigueSample> {
         self.observer.samples()
     }
@@ -447,6 +464,15 @@ impl<'p, 'm> J2FatiguePath<'p, 'm> {
     }
     pub fn variable_amplitude_results(&self) -> Vec<Option<CriticalPlaneMinerResult>> {
         self.observer.variable_amplitude_results()
+    }
+    /// Provisional most-damaging plane for each variable-amplitude gauge, using
+    /// all accepted samples and each plane's unresolved half cycles. The query
+    /// neither adds samples nor finalizes any gauge or representative window.
+    pub fn preview_variable_amplitude_fatigue(
+        &self,
+        cx: &Cx<'_>,
+    ) -> Result<Vec<CriticalPlaneMinerResult>, J2FatigueError> {
+        self.observer.preview_variable_amplitude_fatigue(cx)
     }
     pub fn variable_amplitude_curve(&self, gauge: usize) -> Option<&StrainLifeCurve> {
         self.observer.variable_amplitude_curve(gauge)
@@ -701,6 +727,21 @@ impl J2FatigueObserver {
     pub(super) fn summaries(&self) -> Vec<StrainLifeSummary> {
         self.gauges.iter().map(|g| g.counter.summary()).collect()
     }
+    pub(super) fn preview_fatigue(
+        &self,
+        cx: &Cx<'_>,
+    ) -> Result<Vec<StrainLifeSummary>, J2FatigueError> {
+        poll(cx)?;
+        let mut summaries = Vec::with_capacity(self.gauges.len());
+        for (index, gauge) in self.gauges.iter().enumerate() {
+            let summary = gauge.counter
+                .preview_finish(&mut || cx.checkpoint().is_err())
+                .map_err(|error| J2FatigueError::Gauge { gauge: index, error })?;
+            summaries.push(summary);
+        }
+        poll(cx)?;
+        Ok(summaries)
+    }
     pub(super) fn samples(&self) -> Vec<J2FatigueSample> {
         self.gauges.iter().map(|g| g.sample).collect()
     }
@@ -739,6 +780,21 @@ impl J2FatigueObserver {
             .iter()
             .map(|g| g.counter.result().cloned())
             .collect()
+    }
+    pub(super) fn preview_variable_amplitude_fatigue(
+        &self,
+        cx: &Cx<'_>,
+    ) -> Result<Vec<CriticalPlaneMinerResult>, J2FatigueError> {
+        poll(cx)?;
+        let mut results = Vec::with_capacity(self.variable_amplitude.len());
+        for (index, gauge) in self.variable_amplitude.iter().enumerate() {
+            let result = gauge.counter
+                .preview_finish_with_cancel(&mut || cx.checkpoint().is_err())
+                .map_err(|error| J2FatigueError::VariableAmplitude { gauge: index, error })?;
+            results.push(result);
+        }
+        poll(cx)?;
+        Ok(results)
     }
     pub(super) fn variable_amplitude_curve(&self, gauge: usize) -> Option<&StrainLifeCurve> {
         self.variable_amplitude.get(gauge).map(|g| g.counter.curve())

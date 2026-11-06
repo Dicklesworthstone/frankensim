@@ -70,6 +70,17 @@ fn native_tension_compression_retains_signed_cycles_and_original_mechanics() {
                     Default::default(), ContentHash([9; 32]), 0.01, cx).unwrap();
                 assert_eq!(step.mechanics.stress, original.stress);
                 assert_eq!(step.mechanics.displacement, original.displacement);
+                let committed = path.summaries();
+                let preview = path.preview_fatigue(cx).unwrap();
+                for item in &preview {
+                    assert_eq!(item.samples, sample as u64 + 1);
+                    assert!(item.finished);
+                    close(item.miner_damage, sample as f64 * 0.001, 1e-10);
+                }
+                assert_eq!(path.preview_fatigue(cx).unwrap(), preview);
+                assert_eq!(path.summaries(), committed);
+                assert_eq!(path.observed_samples(), sample as u64 + 1);
+                assert_eq!(path.last_time_s(), Some(sample as f64));
             }
             let result = path.finish(cx).unwrap();
             for item in &result {
@@ -133,6 +144,8 @@ fn a_later_gauge_refusal_rolls_back_the_entire_sample_and_finalization() {
             gauge: 1, error: FatigueError::AmplitudeOutsideCurve { .. } })));
         assert_eq!(path.summaries(), before);
         assert_eq!(path.last_time_s(), Some(2.0));
+        assert!(matches!(path.preview_fatigue(cx), Err(TetFatigueError::Gauge { gauge: 1, .. })));
+        assert_eq!(path.summaries(), before);
         assert!(matches!(path.finish(cx), Err(TetFatigueError::Gauge { gauge: 1, .. })));
         assert_eq!(path.summaries(), before);
         assert!(path.summaries().iter().all(|s| !s.finished));
@@ -185,6 +198,7 @@ fn cancelled_or_foreign_mesh_steps_preserve_the_last_accepted_time() {
                 seed: 58, kernel_id: 58, tile: 0, iteration: 0,
             }, fs_exec::Budget::INFINITE, fs_exec::ExecMode::Deterministic);
             assert!(matches!(path.advance(1.0, &load, &stopped), Err(TetFatigueError::Cancelled)));
+            assert!(matches!(path.preview_fatigue(&stopped), Err(TetFatigueError::Cancelled)));
             assert!(matches!(path.finish(&stopped), Err(TetFatigueError::Cancelled)));
         });
         assert_eq!(path.summaries(), before);

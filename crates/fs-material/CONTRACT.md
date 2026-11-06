@@ -3022,6 +3022,18 @@ check explicit sample/residue limits, and publish samples, blocks and final
 endpoint half cycles transactionally. Finalization is idempotent. The original
 source or calibration remains shared through the immutable curve.
 
+`preview_finish` evaluates the accepted prefix as if observation ended now,
+including the pending endpoint and all residual half cycles. Its returned
+summary describes that hypothetical finalized prefix (`finished = true`);
+the live counter's summary, residue, sample budget and continuation are unchanged.
+The cancellable form uses the same cycle admission and life law as `finish`.
+Unsupported provisional amplitudes still return the original domain error.
+The query neither commits provisional cycles nor estimates unobserved future
+loading. Stress-life, scalar and paired strain-life, and variable-amplitude
+critical-plane counters share this meaning. Critical-plane previews compare
+the complete provisional damage of every declared plane without closing any
+plane's live history.
+
 The total-strain law is `epsilon_a = sigma_f'/E*(2*N_f)^b + epsilon_f'*(2*N_f)^c`:
 amplitude is half the signed range, `N_f` is full cycles and `2*N_f` is reversals.
 Both empirical contributions use the supplied calibration and finite life domain;

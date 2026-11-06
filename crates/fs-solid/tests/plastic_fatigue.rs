@@ -268,6 +268,17 @@ fn g3_chunking_and_cloning_preserve_plastic_and_open_cycle_histories() {
         whole.advance(5, cx).unwrap();
         split.advance(2, cx).unwrap();
         assert_eq!(split.finish(cx), Err(J2FatigueError::PathIncomplete));
+        let committed = split.summaries();
+        let solution = split.solution().clone();
+        let preview = split.preview_fatigue(cx).unwrap();
+        // 0,+a,-a: one a/2 half cycle and one a half cycle, using actual
+        // mechanical strain despite the retained irreversible plastic state.
+        close(preview[0].miner_damage, 1.25 * AMPLITUDE.powi(2) / 0.05_f64.powi(2), 1e-12);
+        assert!(preview[0].finished);
+        assert_eq!(split.preview_fatigue(cx).unwrap(), preview);
+        assert_eq!(split.solution(), &solution);
+        assert_eq!(split.summaries(), committed);
+        assert_eq!(split.accepted_increments(), 2);
         let mut resumed = split.clone();
         split.advance(3, cx).unwrap();
         resumed.advance(1, cx).unwrap();
@@ -326,6 +337,7 @@ fn g4_cancellation_and_constitutive_strain_bound_roll_back() {
         path.advance(1, cx).unwrap();
         let before = path.clone();
         gate.request();
+        assert_eq!(path.preview_fatigue(cx), Err(J2FatigueError::Cancelled));
         assert_eq!(path.advance(1, cx), Err(J2FatigueError::Cancelled));
         assert_eq!(path.solution(), before.solution());
         assert_eq!(path.summaries(), before.summaries());

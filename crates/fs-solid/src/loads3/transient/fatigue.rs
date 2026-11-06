@@ -129,6 +129,14 @@ impl<'g, 'm, 'p, 's> TetTransientFatigueRun3<'g, 'm, 'p, 's> {
         self.observation.summaries()
     }
 
+    /// S-N damage of the accepted inertial trajectory if it ended now, with its
+    /// unresolved endpoint half cycles. Hypothetical `finished` summaries leave
+    /// time, motion, sample budgets, live residues and Findley windows unchanged.
+    /// No mechanical step, stress recovery or extra sample is performed.
+    pub fn preview_fatigue(&self, cx: &Cx<'_>) -> Result<Vec<FatigueSummary>, TetFatigueError> {
+        self.observation.preview_fatigue(cx)
+    }
+
     pub fn observed_samples(&self) -> u64 {
         self.observation.observed_samples()
     }

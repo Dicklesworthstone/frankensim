@@ -274,6 +274,13 @@ impl<'p, 'm> J2DynamicFatigueRun<'p, 'm> {
     pub fn summaries(&self) -> Vec<StrainLifeSummary> {
         self.observer.summaries()
     }
+
+    /// Strain-life damage if the accepted native motion ended now, including
+    /// endpoint half cycles. The returned `finished` summaries are hypothetical;
+    /// native time, motion, plastic state and all live fatigue windows are unchanged.
+    pub fn preview_fatigue(&self, cx: &Cx<'_>) -> Result<Vec<StrainLifeSummary>, J2FatigueError> {
+        self.observer.preview_fatigue(cx)
+    }
     pub fn samples(&self) -> Vec<J2FatigueSample> {
         self.observer.samples()
     }
@@ -301,6 +308,15 @@ impl<'p, 'm> J2DynamicFatigueRun<'p, 'm> {
     }
     pub fn variable_amplitude_results(&self) -> Vec<Option<CriticalPlaneMinerResult>> {
         self.observer.variable_amplitude_results()
+    }
+    /// Most-damaging plane of each variable-amplitude gauge if this accepted
+    /// trajectory ended now. Uses the original paired samples and includes open
+    /// endpoint half cycles without advancing or finalizing any observation.
+    pub fn preview_variable_amplitude_fatigue(
+        &self,
+        cx: &Cx<'_>,
+    ) -> Result<Vec<CriticalPlaneMinerResult>, J2FatigueError> {
+        self.observer.preview_variable_amplitude_fatigue(cx)
     }
     /// Discard only the critical window/result and begin at the current accepted
     /// native state. Physical time, velocity, plastic history and all fixed-gauge

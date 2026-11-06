@@ -1451,6 +1451,20 @@ or evolve fatigue damage into stiffness, heat, fracture topology, or crack
 growth. The existing fixed-temperature small-strain J2 and source-validity
 limits remain authoritative.
 
+## Provisional observation of native fatigue histories
+
+The quasistatic and inertial elastic/J2 fatigue owners expose `preview_fatigue`
+on their accepted histories. It includes current endpoint half cycles and uses
+the same fixed-plane life owners as finalization. J2 owners additionally expose
+`preview_variable_amplitude_fatigue` for their critical-plane Miner banks.
+Returned summaries describe a hypothetical finalized prefix;
+the native trajectory and all live counters remain unchanged, so loading may
+continue after a preview. No mechanical solve, extra stress/strain sample,
+source requery or representative SWT/Fatemi–Socie cycle closure is performed.
+Cancellation or unsupported provisional cycles leave the accepted state intact.
+This is an estimate of the observed prefix, not a prediction of future loading
+or a rule for changing stiffness, heat, fracture or remaining service life.
+
 ## Shear-strain Fatemi–Socie life from native J2 cycles
 
 The shared quasistatic and inertial J2 fatigue observer now admits

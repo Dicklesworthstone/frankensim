@@ -734,6 +734,11 @@ fn variable_amplitude_critical_plane_matches_the_actual_native_j2_tensor_history
             run.advance(1, cx).unwrap();
             assert_eq!(run.solution(), &native);
             assert_eq!(run.variable_amplitude_results(), vec![None]);
+            let preview = run.preview_variable_amplitude_fatigue(cx).unwrap();
+            assert_eq!(preview, vec![independent.preview_finish().unwrap()]);
+            assert_eq!(run.preview_variable_amplitude_fatigue(cx).unwrap(), preview);
+            assert_eq!(run.variable_amplitude_results(), vec![None]);
+            assert_eq!(run.solution(), &native);
         }
 
         let expected = independent.finish().unwrap();
@@ -828,6 +833,11 @@ fn inertial_variable_amplitude_damage_matches_independent_native_endpoint_sampli
             assert_eq!(run.solution(), &motion.solution);
             assert_eq!(run.velocity_mps(), motion.velocity_mps);
             assert_eq!(run.variable_amplitude_results(), vec![None]);
+            let preview = run.preview_variable_amplitude_fatigue(cx).unwrap();
+            assert_eq!(preview, vec![independent.preview_finish().unwrap()]);
+            assert_eq!(run.variable_amplitude_results(), vec![None]);
+            assert_eq!(run.solution(), &motion.solution);
+            assert_eq!(run.velocity_mps(), motion.velocity_mps);
             native = motion.solution;
             velocity = motion.velocity_mps;
             previous_time = target.time_s;
