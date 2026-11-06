@@ -316,8 +316,8 @@ fn g3_si_similarity_preserves_the_dimensionless_trajectory() {
     )
     .unwrap();
     let scale: f64 = 0.001;
-    let rho = 1000.0;
-    let sigma = 0.072;
+    let rho: f64 = 1000.0;
+    let sigma: f64 = 0.072;
     let time_scale = (rho * scale * scale * scale / sigma).sqrt();
     let physical_radius: Vec<f64> = radius.iter().map(|h| scale * h).collect();
     let physical_velocity: Vec<f64> = velocity.iter().map(|u| scale / time_scale * u).collect();
@@ -427,4 +427,53 @@ fn g0_invalid_inputs_and_initial_domain_refuse() {
     assert_eq!(report.accepted_substeps, 0);
     assert_eq!(report.before, report.after);
     assert_eq!(jet.time_s(), 0.0);
+}
+
+#[test]
+fn g1_moving_velocity_wave_has_second_order_smooth_transport() {
+    let gate = CancelGate::new_clock_free();
+    let mut errors = Vec::new();
+    let mean = 0.4;
+    let amplitude = 1e-5;
+    let duration = 0.5;
+    let wavenumber = 0.5;
+    for n in [64, 128] {
+        let length = 2.0 * core::f64::consts::PI / wavenumber;
+        let phase = |i: usize| 2.0 * core::f64::consts::PI * (i as f64 + 0.5) / n as f64;
+        let velocity: Vec<f64> = (0..n)
+            .map(|i| mean + amplitude * fs_math::det::sin(phase(i)))
+            .collect();
+        let mut jet = PeriodicSlenderJet::new(
+            liquid(0.0, 0.0),
+            length,
+            &vec![1.0; n],
+            &velocity,
+            limits(),
+            &gate,
+        )
+        .unwrap();
+        let report = jet.advance(duration, budget(), &gate).unwrap();
+        assert_eq!(report.outcome, SlenderJetOutcome::Completed);
+        let mut sine = 0.0;
+        let mut cosine = 0.0;
+        for (i, u) in jet.velocities_m_s().enumerate() {
+            sine += (u - mean) * fs_math::det::sin(phase(i));
+            cosine += (u - mean) * fs_math::det::cos(phase(i));
+        }
+        sine *= 2.0 / n as f64;
+        cosine *= 2.0 / n as f64;
+        // Linearized pressureless transport translates u'(z) at mean speed.
+        let expected_phase = mean * wavenumber * duration;
+        let sine_error = sine - amplitude * fs_math::det::cos(expected_phase);
+        let cosine_error = cosine + amplitude * fs_math::det::sin(expected_phase);
+        errors.push((sine_error * sine_error + cosine_error * cosine_error).sqrt());
+        assert!(report.upwind_dissipation_j >= 0.0);
+        near(
+            report.after.axial_momentum_kg_m_s,
+            report.before.axial_momentum_kg_m_s,
+            3e-13,
+        );
+    }
+    assert!(errors[0] < 0.001 * amplitude, "{errors:?}");
+    assert!(errors[1] < 0.4 * errors[0], "{errors:?}");
 }

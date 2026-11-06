@@ -11,11 +11,12 @@
 //! A*kappa_z=(A*kappa-2*h/sqrt(1+h_z^2))_z.
 //!
 //! A is a cell value; q and u live at faces i+1/2. Centered curvature and
-//! viscosity preserve the circular geometry. Mass-consistent donor-cell
-//! momentum transport has explicit numerical dissipation. SSPRK3 advances
+//! viscosity preserve the circular geometry. Mass-consistent upwind
+//! momentum transport uses a minmod-limited linear reconstruction and exposes
+//! its numerical dissipation. SSPRK3 advances
 //! both conserved fields; adaptive steps obey advection, drainage, viscosity
-//! and a capillary-Jacobian rate bound. Space is first order in nonlinear
-//! advection and second order in smooth capillary/viscous terms.
+//! and a capillary-Jacobian rate bound. Smooth transport, capillary and viscous
+//! terms are second order in space; the limiter reduces order at extrema.
 //!
 //! All coefficients are constant. The liquid is incompressible/Newtonian,
 //! its exterior has negligible inertia/viscosity, and the domain is periodic.
@@ -114,7 +115,7 @@ pub struct SlenderJetAdvance {
     pub after: SlenderJetDiagnostics,
     /// RK quadrature of 3*pi*rho*nu*integral(A*u_z^2 dz), not evolved heat.
     pub viscous_dissipation_j: f64,
-    /// RK quadrature of donor-cell momentum dissipation; not material viscosity.
+    /// RK quadrature of limited-upwind momentum dissipation; not material viscosity.
     pub upwind_dissipation_j: f64,
     /// E_after-E_before plus both accounted losses. Signed truncation/roundoff
     /// remainder; the full nonlinear discretization is not energy exact.
@@ -142,7 +143,12 @@ impl std::error::Error for NonlinearJetError {}
 
 /// Shared evolution interface for native and material-bound jet owners.
 pub trait SlenderJetEvolution {
+    /// Return the accepted state whose constant coefficients this owner retains.
     fn state(&self) -> &PeriodicSlenderJet;
+
+    /// Advance that same state. Errors preserve the full pre-call state; a
+    /// domain-limit report retains only completed, admitted substeps. The
+    /// returned report and state must describe the same physical trajectory.
     fn advance(
         &mut self,
         duration_s: f64,
@@ -659,18 +665,26 @@ fn evaluate(
         // update. A uniform velocity therefore remains uniform under pure
         // advection; upwinding dissipates kinetic energy instead of creating it.
         let mass_flux = average(fields.q[l], fields.q[i]);
-        let advected_u = if mass_flux >= 0.0 {
-            spatial.u[l]
+        let velocity_jump = spatial.u[i] - spatial.u[l];
+        let limited_slope = if mass_flux >= 0.0 {
+            minmod(spatial.u[l] - spatial.u[previous(l, n)], velocity_jump)
         } else {
-            spatial.u[i]
+            minmod(velocity_jump, spatial.u[r] - spatial.u[i])
         };
-        let strain = (spatial.u[i] - spatial.u[l]) / dx;
+        let advected_u = if mass_flux >= 0.0 {
+            spatial.u[l] + 0.5 * limited_slope
+        } else {
+            spatial.u[i] - 0.5 * limited_slope
+        };
+        let strain = velocity_jump / dx;
         let viscous_stress = 3.0 * p.kinematic_viscosity_m2_s * a * strain;
         spatial.flux[i] =
             finite(mass_flux * advected_u + coefficient * capillary_stress - viscous_stress)?;
         viscous.add(viscous_stress * strain);
-        let velocity_jump = spatial.u[i] - spatial.u[l];
-        upwind.add((0.5 * mass_flux.abs()) * velocity_jump * velocity_jump);
+        // minmod shares the jump's sign and has no larger magnitude, so this
+        // kinetic loss is nonnegative. Reconstruction stays between the
+        // upwind velocity and their centered average; it adds no material nu.
+        upwind.add((0.5 * mass_flux.abs()) * velocity_jump * (velocity_jump - limited_slope));
         rhs.a[i] = finite(-(fields.q[i] - fields.q[l]) / dx)?;
         drainage_rate = drainage_rate.max(finite(rhs.a[i].abs() / a)?);
     }
@@ -734,6 +748,15 @@ fn previous(i: usize, n: usize) -> usize {
 }
 fn next(i: usize, n: usize) -> usize {
     if i + 1 == n { 0 } else { i + 1 }
+}
+fn minmod(a: f64, b: f64) -> f64 {
+    if a > 0.0 && b > 0.0 {
+        a.min(b)
+    } else if a < 0.0 && b < 0.0 {
+        a.max(b)
+    } else {
+        0.0
+    }
 }
 fn average(a: f64, b: f64) -> f64 {
     if a == b { a } else { 0.5 * a + 0.5 * b }

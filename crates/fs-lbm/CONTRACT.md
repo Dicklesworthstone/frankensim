@@ -13926,6 +13926,11 @@ Conservative mass and capillary/viscous/momentum flux differences preserve
 periodic liquid volume and axial momentum to floating-point roundoff.
 Physical cross-sectional area and volume flux retain their factors of pi.
 
+Minmod-limited MUSCL momentum reconstruction improves smooth translating
+disturbances while retaining mass-consistent dual-cell fluxes and nonnegative
+numerical kinetic loss. The moving-wave G1 test checks 64-to-128 refinement
+against independent pressureless transport; limiting remains active at extrema.
+
 The owner uses three-stage SSP Runge-Kutta, adaptive advection/viscous/capillary
 step limits and reusable O(N) buffers. Each caller supplies a maximum timestep,
 CFL factor, attempted-substep budget, neck radius, maximum slope and minimum
@@ -13940,6 +13945,14 @@ does not claim exact energy conservation or a certified error bound.
 Focused G1/G3 tests check the small-amplitude Rayleigh limit and refinement,
 nonlinear conservation, Newtonian extensional damping and SI similarity;
 G0/G4 cover model stops, refusal, rollback and deterministic retry.
+
+`jet::material::nonlinear::MaterialPeriodicSlenderJet` retains the exact
+resolved liquid source beside the evolving native state. Density, kinematic
+viscosity and tension are read from that same point with its original receipts.
+Both original viscosity bases are supported. Omitted active surface data and
+sources requiring evolving non-Newtonian rheology refuse construction.
+The shared `SlenderJetEvolution` trait lets downstream studies retain this
+source-bound owner without duplicating the PDE or exposing coefficient mutation.
 
 This is a constant-property incompressible Newtonian periodic cylinder with
 a passive exterior. It does not supply nozzle/end conditions, gravity-induced

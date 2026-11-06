@@ -38,6 +38,7 @@ pub mod race;
 pub mod robust;
 pub mod stability;
 
+pub use jet::nonlinear::{NonlinearFreeJet, NonlinearFreeJetOutcome, NonlinearFreeJetReport};
 pub use jet::{FreeJetReport, FreeJetStudy};
 pub use pour::{PourError, PourOutcome, PourRig, render_pour};
 pub use pour::material::{

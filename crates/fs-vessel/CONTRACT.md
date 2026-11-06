@@ -422,3 +422,30 @@ model, or turn two-dimensional connectivity into three-dimensional breakup.
 The focused regressions compare the exact native trajectory and render field,
 source-temperature response, physical unit conversion, cancellation and
 declared speed/density refusal.
+
+## Nonlinear cylindrical free flight
+
+`jet::nonlinear::NonlinearFreeJet<J>` composes the original periodic nonlinear
+slender-jet owner or its material-bound implementation. Initial radii are at
+cell centers and laboratory axial velocities at faces. The study derives
+transport speed from initial axial momentum divided by liquid mass; it accepts
+no contradictory second flow rate and applies no hidden reference-frame shift.
+
+The authored flight distance and that conserved mean speed define a nominal
+residence target. Each call advances the native PDE for an explicitly bounded
+time chunk, capped by remaining residence time. Reports distinguish ongoing
+flight, completion, and the original neck/slope/resolution stop. A domain stop
+retains the last admitted native state and terminates that flight; a subsequent
+call observes it without inventing further evolution. Numerical/cancellation/
+work-budget errors retain the pre-call state. Native volume, momentum,
+kinetic/surface energy and separate physical/numerical losses reach the result.
+
+The original owner and admitted initial profiles remain available. A material
+binding therefore preserves the same immutable source through all accepted
+chunks. This temporal-to-distance mapping uses bulk speed; it does not track
+each parcel's residence, impose nozzle/end conditions, resolve gravity-induced
+stretching or continue through pinch-off. A neck limit is a model stop.
+
+Four focused native G0/G1/G3 tests exercise nonlinear shape/velocity changes,
+volume and momentum conservation, velocity-dependent residence and necking,
+early neck-limit publication, zero flight, budget rollback and successful retry.

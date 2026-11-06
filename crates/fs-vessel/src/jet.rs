@@ -16,6 +16,9 @@
 //! retain the original material alongside the study. No runtime dispatch or
 //! duplicate free-flight calculation is introduced.
 
+/// Resumable nonlinear flight of the original native or source-bound jet.
+pub mod nonlinear;
+
 use fs_lbm::jet::{CapillaryJet, JetBandMaximum, JetDispersion, JetError};
 
 /// An authored SI free-flight study; no liquid or disturbance defaults.
@@ -250,12 +253,30 @@ mod tests {
         assert!(large.log_relative_amplitude > 1000.0);
         assert!(large.log_relative_amplitude.is_finite());
         for candidate in [
-            FreeJetStudy { volume_flow_m3_s: 0.0, ..study() },
-            FreeJetStudy { flight_length_m: -1.0, ..study() },
-            FreeJetStudy { initial_relative_amplitude: 0.0, ..study() },
-            FreeJetStudy { threshold_relative_amplitude: 1.0, ..study() },
-            FreeJetStudy { threshold_relative_amplitude: 1e-6, ..study() },
-            FreeJetStudy { wavenumbers_rad_m: [2000.0, 100.0], ..study() },
+            FreeJetStudy {
+                volume_flow_m3_s: 0.0,
+                ..study()
+            },
+            FreeJetStudy {
+                flight_length_m: -1.0,
+                ..study()
+            },
+            FreeJetStudy {
+                initial_relative_amplitude: 0.0,
+                ..study()
+            },
+            FreeJetStudy {
+                threshold_relative_amplitude: 1.0,
+                ..study()
+            },
+            FreeJetStudy {
+                threshold_relative_amplitude: 1e-6,
+                ..study()
+            },
+            FreeJetStudy {
+                wavenumbers_rad_m: [2000.0, 100.0],
+                ..study()
+            },
         ] {
             assert!(candidate.evaluate().is_err());
         }
@@ -269,7 +290,9 @@ mod tests {
         let inviscid = FreeJetStudy {
             wavenumbers_rad_m: [0.0, 300.0],
             ..base
-        }.evaluate().unwrap();
+        }
+        .evaluate()
+        .unwrap();
         let viscous_study = FreeJetStudy {
             jet: ViscousSlenderJet::new(0.001, 1000.0, 0.072, 0.001, 0.3).unwrap(),
             volume_flow_m3_s: base.volume_flow_m3_s,
@@ -292,9 +315,13 @@ mod tests {
                 > inviscid.linear_threshold_distance_m.unwrap()
         );
         assert!(!viscous.threshold_reached);
-        assert!(FreeJetStudy {
-            wavenumbers_rad_m: [0.0, 400.0],
-            ..viscous_study
-        }.evaluate().is_err());
+        assert!(
+            FreeJetStudy {
+                wavenumbers_rad_m: [0.0, 400.0],
+                ..viscous_study
+            }
+            .evaluate()
+            .is_err()
+        );
     }
 }

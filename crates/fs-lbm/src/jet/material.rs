@@ -7,6 +7,9 @@
 //! The viscous binding retains the source viscosity in the Newtonian slender
 //! model, with an explicit wavelength budget instead of an inviscid allowance.
 
+/// Source-bound conservative nonlinear slender-jet evolution.
+pub mod nonlinear;
+
 use super::viscous::ViscousSlenderJet;
 use super::{CapillaryJet, JetBandMaximum, JetDispersion, JetError};
 use fs_material::liquid::surface::ResolvedLiquidSurfaceState;
@@ -49,9 +52,11 @@ impl<'a> MaterialCapillaryJet<'a> {
                 "maximum Ohnesorge number must be finite and nonnegative",
             ));
         }
-        let sigma = material.surface_tension_n_m().ok_or(JetError::InvalidInput(
-            "a material capillary jet requires explicitly sourced surface tension",
-        ))?;
+        let sigma = material
+            .surface_tension_n_m()
+            .ok_or(JetError::InvalidInput(
+                "a material capillary jet requires explicitly sourced surface tension",
+            ))?;
         let jet = CapillaryJet::inviscid(radius_m, material.density_kg_m3(), sigma)?;
         // Logarithmic construction avoids overflowing rho*sigma*R or squaring
         // a small radius. It uses the same deterministic scalar math owner as
@@ -144,9 +149,11 @@ impl<'a> MaterialViscousSlenderJet<'a> {
                 "a constant Newtonian jet cannot freeze an evolving rheology source",
             ));
         }
-        let sigma = material.surface_tension_n_m().ok_or(JetError::InvalidInput(
-            "a material capillary jet requires explicitly sourced surface tension",
-        ))?;
+        let sigma = material
+            .surface_tension_n_m()
+            .ok_or(JetError::InvalidInput(
+                "a material capillary jet requires explicitly sourced surface tension",
+            ))?;
         let jet = ViscousSlenderJet::new(
             radius_m,
             material.density_kg_m3(),
