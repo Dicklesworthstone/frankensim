@@ -4,7 +4,8 @@
 //! A transformation selects one represented daughter. Branch probabilities and
 //! emitted energy are supplied by an identified dataset, never inferred from
 //! chemical species or an effective fission-energy reservoir. Counts are
-//! continuous expectations, not stochastic integer events.
+//! continuous expectations. The optional [`stochastic`] inventory samples
+//! integer events and daughter histories on this same immutable physical model.
 //!
 //! The numerical owner `fs_la::decay` integrates both daughter production and
 //! each parent's transformations. Energy uses those integrated counts, including
@@ -35,6 +36,9 @@ pub mod production;
 
 /// Radiative-capture products on the original neutron-irradiation history.
 pub mod activation;
+
+/// Finite integer populations, sampled lifetimes and replayable event histories.
+pub mod stochastic;
 
 /// A dataset-owned nuclide identity and its immutable admitted half-life law.
 #[derive(Clone, Debug, PartialEq)]

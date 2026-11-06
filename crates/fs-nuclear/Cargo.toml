@@ -18,6 +18,7 @@ thermal = ["dep:fs-thermal"]
 fs-la = { path = "../fs-la" }
 fs-math = { path = "../fs-math" }
 fs-qty = { path = "../fs-qty" }
+fs-rand = { path = "../fs-rand" }
 fs-thermochem = { path = "../fs-thermochem" }
 fs-thermal = { path = "../fs-thermal", optional = true }
 

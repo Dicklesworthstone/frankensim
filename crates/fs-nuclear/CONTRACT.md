@@ -239,6 +239,51 @@ using the unchanged production decay modules from `fs-la` and `fs-thermochem`
 and the real `fs-math` and `fs-qty` crates. This isolated the applicable owners
 from unavailable constellation dependencies; it is not a workspace Cargo gate.
 
+## Finite-population stochastic radioactive decay
+
+`decay::stochastic::StochasticDecayInventory` provides an integer realization of
+the original immutable `DecayModel`. This complements the continuous expectation
+in `DecayInventory`: a single nucleus survives or transforms, and daughters can
+transform only after their sampled birth times. The supplied total population
+and per-advance event limit are bounded by 2^53, retaining exact conversions to
+the existing floating-point observation accounts.
+
+Each occupied unstable nuclide retains an aggregate exponential clock with
+hazard `lambda * N`. A transformation selects an original ordered branch,
+decrements its parent, increments its daughter, and resamples only the affected
+clocks. Unaffected clocks remain scheduled. Branch closure must round to exactly
+one under compensated summation; probabilities are not normalized. Random draws
+use the original `fs_rand::Stream` and its 53-bit sampling resolution. There are
+no fixed time bins or per-event allocations. Event work scans the original
+bounded node list and one parent's branches.
+
+`new_at` accepts an explicit absolute time and caller-owned `StreamKey`. Cloning
+the entire inventory preserves populations, pending compensated event times,
+random-stream state, and per-event lifetime energy. Accepted observation
+partitions therefore preserve the sampled trajectory and accumulated-energy
+bits on the same ISA/toolchain. A random-stream checkpoint alone is not a
+complete inventory checkpoint. Stable/empty inventories draw nothing, and
+zero-duration observations are identities. Events at an accepted endpoint are
+processed exactly once. `next_event_time_s` returns the first representable
+endpoint containing the next event; positive sub-ULP waits retain their low
+part instead of becoming zero-time loops. A wait beyond every finite endpoint
+remains an unstable future event rather than changing the nuclide's law.
+
+`trial_to` returns an independent candidate and report; `advance_to` publishes
+only after every event, energy account, and final checkpoint succeeds.
+Underflow/nonprogress, counter or RNG exhaustion, work or energy limits, and
+callback refusal leave the original inventory and all future clocks intact.
+Per-branch energy retains the original model's authored mean-energy
+interpretation and its separate deposited, transportable, and escaped accounts.
+
+This lane models demographic fluctuations under constant rates in the original
+closed, acyclic, at-most-64-node model. It does not sample uncertain half-lives
+or emission spectra, add production/transport, or certify distributional
+forward error. Large populations should use the existing deterministic
+propagator when individual transformations are not required. The runnable
+`cargo run -p fs-nuclear --example stochastic_decay` uses explicitly
+manufactured coefficients and demonstrates a whole-inventory restart.
+
 ## Radioactive decay heat on the shared thermal timeline
 
 With the existing `thermal` feature, `decay::thermal::DecayHeating` binds each
