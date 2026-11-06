@@ -16,6 +16,8 @@ mod momentum;
 pub use boundary::ThermalVolumeBathFace;
 #[cfg(feature = "implicit-enthalpy-coupling")]
 pub use implicit::{
+    ImplicitConjugateThermalVolumeMomentumStep, ImplicitConjugateThermalVolumeReport,
+    ImplicitConjugateThermalVolumeStep, ThermalVolumeSolidCell, ThermalVolumeSolidEndpoint,
     ImplicitConductiveResistiveThermalVolumeMomentumStep, ImplicitResistanceHeatWork,
     ImplicitConductiveThermalVolumeMomentumStep, ImplicitConductiveThermalVolumeReport,
     ImplicitConductiveThermalVolumeStep, ImplicitConductiveViscousThermalVolumeMomentumStep,

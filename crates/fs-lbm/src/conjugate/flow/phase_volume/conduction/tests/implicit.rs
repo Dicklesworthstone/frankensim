@@ -1,6 +1,7 @@
 //! G1/G3/G4: independent stiff-grid, nonlinear-source and native-flow limits.
 
 mod viscous;
+mod solid;
 
 use super::*;
 use crate::conjugate::flow::ThermalVolumeMomentumInput;

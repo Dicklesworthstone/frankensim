@@ -13459,3 +13459,48 @@ phase densities, k(f), a nonzero throughflow, physical drag and a one-sided bath
 Independent Fourier, Darcy, material-energy and momentum formulas distinguish
 heat inside the implicit endpoint from a late heat deposit; the fixture also
 checks whole-call work exhaustion, late source/cancellation refusal and retry.
+
+## Finite solid storage in implicit phase-volume conduction
+
+With `implicit-enthalpy-coupling`, the conjugate thermal-volume and native
+momentum entries accept explicit `ThermalVolumeSolidCell` inventories alongside
+the original fluid inventory. Every selected fixed-solid voxel retains its
+actual held mass, original enthalpy/phase state, authored heat and borrowed
+`PreparedPhaseConductivity`. Its own caloric and k(T,f) laws, including analytic
+enthalpy tangents and latent plateaus, participate in the SAME sparse implicit
+graph as the fluid. Repeated material identities share a native law binding.
+
+Every face between participating fluid/solid or solid/solid cells uses the
+original area and both actual half distances. Optional `FaceContactResistance`
+adds an explicit nonnegative area-specific resistance in series; unlisted
+active interfaces are perfect contacts. Duplicate/reversed, nonadjacent,
+inactive and fluid-only contact assignments refuse. An existing prescribed
+fluid-face bath cannot also own a face coupled to finite solid storage.
+Unselected fixed solids and exposed solid surfaces remain insulated; authored
+solid heat provides explicit external input. No source-contact resistance law
+or additional contact iteration is inferred.
+
+One backward-Euler interval evaluates both temperatures and source conductivities
+at the coupled heat endpoint. Independently reconstructed face heat has opposite
+signs in the two receiving inventories. Local storage/physical-heat mismatches,
+addition roundoff and whole-graph balance share the original enthalpy-defect
+budget with subsequent fluid transport. `ImplicitConjugateThermalVolumeReport`
+retains the native whole-graph account, authored solid heat, actual solid energy
+change and signed solid-to-fluid transfer. Solid endpoint states and source
+identities are returned separately, in increasing voxel order. They never
+occupy the fluid mass, phase, heat-source or material-advection arrays.
+
+The native momentum variant applies only its original accepted pressure impulse
+and fluid mass routes. Both returned fluid and solid states are atomic on
+source, thermal, flow, budget or cancellation refusal. Empty solid/contact
+inputs retain the existing insulated-solid path. Workspace counts all fluid
+cells plus explicitly selected finite solids. Solid geometry, mass and occupancy
+remain fixed even if their caloric law crosses a latent interval; this is not
+wall melting motion, solid advection or thermal expansion. The original
+first-order heat/flow split and its time-refinement requirement remain.
+
+Focused regression sources cover an independently manufactured graded fluid/PCM
+wall with unequal half distances, finite contact resistance and k(f), a heated
+solid strip conducting through both solid/solid and fluid/solid faces, total
+fluid-plus-solid energy, unchanged solid mass, native momentum composition,
+empty-wall parity, exclusive face ownership and source/cancellation rollback.

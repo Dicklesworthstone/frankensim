@@ -103,6 +103,8 @@ pub mod enthalpy;
 mod flow;
 #[cfg(feature = "implicit-enthalpy-coupling")]
 pub use flow::{
+    ImplicitConjugateThermalVolumeMomentumStep, ImplicitConjugateThermalVolumeReport,
+    ImplicitConjugateThermalVolumeStep, ThermalVolumeSolidCell, ThermalVolumeSolidEndpoint,
     ImplicitConductiveResistiveThermalVolumeMomentumStep, ImplicitResistanceHeatWork,
     ImplicitConductiveThermalVolumeMomentumStep, ImplicitConductiveThermalVolumeReport,
     ImplicitConductiveThermalVolumeStep, ImplicitConductiveViscousThermalVolumeMomentumStep,

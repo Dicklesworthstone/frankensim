@@ -25,6 +25,11 @@ mod momentum;
 pub use momentum::ImplicitConductiveThermalVolumeMomentumStep;
 mod viscous;
 pub use viscous::ImplicitConductiveViscousThermalVolumeMomentumStep;
+mod solid;
+pub use solid::{
+    ImplicitConjugateThermalVolumeMomentumStep, ImplicitConjugateThermalVolumeReport,
+    ImplicitConjugateThermalVolumeStep, ThermalVolumeSolidCell, ThermalVolumeSolidEndpoint,
+};
 mod resistance;
 pub use resistance::{
     ImplicitConductiveResistiveThermalVolumeMomentumStep, ImplicitResistanceHeatWork,
@@ -90,6 +95,10 @@ struct ImplicitAdvance<T> {
     evolution: T,
     increments: Vec<f64>,
     report: ImplicitConductiveThermalVolumeReport,
+    solid_endpoints: Vec<ThermalVolumeSolidEndpoint>,
+    solid_authored_heat_j: f64,
+    solid_enthalpy_change_j: f64,
+    solid_to_fluid_heat_j: f64,
 }
 
 /// Original-state heat interval, before any pressure/material-flow trial.
@@ -97,6 +106,10 @@ struct PreparedImplicitHeat {
     combined: Vec<f64>,
     increments: Vec<f64>,
     report: ImplicitConductiveThermalVolumeReport,
+    solid_endpoints: Vec<ThermalVolumeSolidEndpoint>,
+    solid_authored_heat_j: f64,
+    solid_enthalpy_change_j: f64,
+    solid_to_fluid_heat_j: f64,
 }
 
 impl FlowField {
@@ -173,14 +186,52 @@ impl FlowField {
         advance: impl FnOnce(CoexistenceVolumeInput<'_>) -> Result<T, ChtError>,
         thermal: impl Fn(&T) -> &ThermalVolumeStep,
     ) -> Result<ImplicitAdvance<T>, ChtError> {
+        self.implicit_conjugate_then_advance(
+            domain,
+            conductivity,
+            baths,
+            &[],
+            &[],
+            input,
+            controls,
+            solve,
+            workspace,
+            gate,
+            advance,
+            thermal,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn implicit_conjugate_then_advance<T>(
+        &self,
+        domain: &VoxelDomain,
+        conductivity: &PreparedPhaseConductivity<'_>,
+        baths: &[ThermalVolumeBathFace],
+        solids: &[ThermalVolumeSolidCell<'_, '_>],
+        contacts: &[crate::conjugate::FaceContactResistance],
+        input: CoexistenceVolumeInput<'_>,
+        controls: ConductiveThermalVolumeControls,
+        solve: ImplicitThermalVolumeSolveControls,
+        workspace: &mut ImplicitThermalVolumeWorkspace,
+        gate: &CancelGate,
+        advance: impl FnOnce(CoexistenceVolumeInput<'_>) -> Result<T, ChtError>,
+        thermal: impl Fn(&T) -> &ThermalVolumeStep,
+    ) -> Result<ImplicitAdvance<T>, ChtError> {
         let PreparedImplicitHeat {
             combined,
             increments,
             mut report,
-        } = self.prepare_implicit_conductive_heat(
+            solid_endpoints,
+            solid_authored_heat_j,
+            solid_enthalpy_change_j,
+            solid_to_fluid_heat_j,
+        } = self.prepare_implicit_conjugate_heat(
             domain,
             conductivity,
             baths,
+            solids,
+            contacts,
             input,
             controls,
             solve,
@@ -220,6 +271,10 @@ impl FlowField {
             evolution,
             increments,
             report,
+            solid_endpoints,
+            solid_authored_heat_j,
+            solid_enthalpy_change_j,
+            solid_to_fluid_heat_j,
         })
     }
 
@@ -235,8 +290,71 @@ impl FlowField {
         workspace: &mut ImplicitThermalVolumeWorkspace,
         gate: &CancelGate,
     ) -> Result<PreparedImplicitHeat, ChtError> {
-        let PreparedInput { samples, baths } =
+        self.prepare_implicit_conjugate_heat(
+            domain,
+            conductivity,
+            baths,
+            &[],
+            &[],
+            input,
+            controls,
+            solve,
+            workspace,
+            gate,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_implicit_conjugate_heat(
+        &self,
+        domain: &VoxelDomain,
+        conductivity: &PreparedPhaseConductivity<'_>,
+        baths: &[ThermalVolumeBathFace],
+        solids: &[ThermalVolumeSolidCell<'_, '_>],
+        contacts: &[crate::conjugate::FaceContactResistance],
+        input: CoexistenceVolumeInput<'_>,
+        controls: ConductiveThermalVolumeControls,
+        solve: ImplicitThermalVolumeSolveControls,
+        workspace: &mut ImplicitThermalVolumeWorkspace,
+        gate: &CancelGate,
+    ) -> Result<PreparedImplicitHeat, ChtError> {
+        let PreparedInput { mut samples, baths } =
             prepare_input(domain, conductivity, baths, input, controls, gate)?;
+        let (wall_at, contact) = solid::prepare(
+            domain,
+            solids,
+            contacts,
+            &baths,
+            &mut samples,
+            controls.max_conductive_faces,
+            gate,
+        )?;
+        let wall = |cell: usize| wall_at.get(cell).copied().flatten().map(|i| &solids[i]);
+        let source = |cell| wall(cell).map_or(conductivity, |s| s.conductivity);
+        let mass = |cell| wall(cell).map_or(input.mass_kg[cell], |s| s.mass_kg);
+        let authored = |cell| {
+            wall(cell).map_or(input.net_enthalpy_increment_j[cell], |s| {
+                s.net_enthalpy_increment_j
+            })
+        };
+        // Pool source identities once; a large wall with one material adds one
+        // native material binding, rather than one binding per voxel.
+        let mut sources = Vec::new();
+        let mut material_ids = BTreeMap::new();
+        if !solids.is_empty() {
+            sources.push(conductivity);
+            material_ids.insert(conductivity.identity(), MaterialId(0));
+        }
+        for (index, solid) in solids.iter().enumerate() {
+            poll_every(gate, index)?;
+            if !material_ids.contains_key(&solid.conductivity.identity()) {
+                material_ids.insert(
+                    solid.conductivity.identity(),
+                    MaterialId(sources.len() as u64),
+                );
+                sources.push(solid.conductivity);
+            }
+        }
         let transport = controls.volume.thermal.volume.transport;
         let dt = transport.projection.duration_s;
         let budget = transport.maximum_enthalpy_defect_j;
@@ -252,19 +370,23 @@ impl FlowField {
             let mut end = center;
             start[0] -= 0.5 * domain.widths(c)[0];
             end[0] += 0.5 * domain.widths(c)[0];
-            let power = input.net_enthalpy_increment_j[c] / dt;
+            let power = authored(c) / dt;
             finite("flow.implicit_authored_power", power)?;
-            if power == 0.0 && input.net_enthalpy_increment_j[c] != 0.0 {
+            if power == 0.0 && authored(c) != 0.0 {
                 return Err(refuse("authored implicit heat power underflowed"));
             }
             events.push(TimedEvent {
                 time_s: 0.0,
                 event: Event::Birth(DepositedCell {
                     id: CellId(c as u64),
-                    material_id: MaterialId(0),
+                    material_id: if solids.is_empty() {
+                        MaterialId(0)
+                    } else {
+                        material_ids[&source(c).identity()]
+                    },
                     body_id: 0,
                     segment_id: c as u64,
-                    mass_kg: input.mass_kg[c],
+                    mass_kg: mass(c),
                     specific_h_j_kg: sample.specific_enthalpy_j_kg(),
                     geometry: CellGeometry {
                         start_m: start,
@@ -286,7 +408,7 @@ impl FlowField {
         let active = events.len();
         if active == 0 || workspace.cells() != active {
             return Err(refuse(
-                "implicit workspace needs one entry per active fluid cell",
+                "implicit workspace needs one entry per active fluid or finite-solid cell",
             ));
         }
         let mut covered = vec![0.0; n];
@@ -325,7 +447,10 @@ impl FlowField {
                         0.5 * domain.widths(c)[side / 2],
                         0.5 * domain.widths(other)[side / 2],
                     ],
-                    contact_resistance_m2_k_w: 0.0,
+                    contact_resistance_m2_k_w: contact
+                        .get(&(c.min(other), c.max(other)))
+                        .copied()
+                        .unwrap_or(0.0),
                 });
             }
         }
@@ -347,9 +472,29 @@ impl FlowField {
             }
         }
         let event_count = events.len();
+        let mut caloric_laws = Vec::with_capacity(sources.len());
+        let mut conductive_laws = Vec::with_capacity(sources.len());
+        let mut implicit_laws = Vec::with_capacity(sources.len());
+        for (index, &law) in sources.iter().enumerate() {
+            poll_every(gate, index)?;
+            let id = MaterialId(index as u64);
+            caloric_laws.push((id, law.caloric_curve() as &dyn ThermalLaw));
+            conductive_laws.push((id, law as &dyn ConductivityLaw));
+            implicit_laws.push((id, law as &dyn ImplicitConductionLaw));
+        }
+        let fluid_caloric = [(
+            MaterialId(0),
+            conductivity.caloric_curve() as &dyn ThermalLaw,
+        )];
+        let fluid_conductivity = [(MaterialId(0), conductivity as &dyn ConductivityLaw)];
+        let fluid_implicit = [(MaterialId(0), conductivity as &dyn ImplicitConductionLaw)];
         let initial = DepositionSimulation::new(
             events,
-            &[(MaterialId(0), conductivity.caloric_curve())],
+            if sources.is_empty() {
+                &fluid_caloric
+            } else {
+                &caloric_laws
+            },
             DepositionBudget {
                 max_cells: active,
                 max_links: links.len(),
@@ -370,7 +515,11 @@ impl FlowField {
             .map_err(|e| native_error(gate, e))?;
         let observer = ConductionObserver::new(
             &initial,
-            &[(MaterialId(0), conductivity as &dyn ConductivityLaw)],
+            if sources.is_empty() {
+                &fluid_conductivity
+            } else {
+                &conductive_laws
+            },
             &links,
             &[],
             || checkpoint(gate),
@@ -397,7 +546,11 @@ impl FlowField {
         let mut graph = ImplicitConductionGraph::new(
             &initial,
             &observer,
-            &[(MaterialId(0), conductivity as &dyn ImplicitConductionLaw)],
+            if sources.is_empty() {
+                &fluid_implicit
+            } else {
+                &implicit_laws
+            },
             solve.linear,
             || checkpoint(gate),
         )
@@ -434,7 +587,7 @@ impl FlowField {
         for (&CellId(cell), state) in endpoint.cells() {
             poll(gate)?;
             final_samples[cell as usize] = Some(
-                conductivity
+                source(cell as usize)
                     .state_at_specific_enthalpy(state.specific_h_j_kg)
                     .map_err(|e| refuse(e.to_string()))?,
             );
@@ -442,6 +595,7 @@ impl FlowField {
         let mut increments = vec![0.0; n];
         let mut assembly = Sum::default();
         let mut exchanged = Sum::default();
+        let mut solid_to_fluid = Sum::default();
         for (index, (&_, link)) in initial.links().iter().enumerate() {
             poll_every(gate, index)?;
             let a = link.a.0 as usize;
@@ -456,8 +610,14 @@ impl FlowField {
                 let rb = geometry.half_distances_m[1] / kb;
                 finite_positive("flow.implicit_half_resistance", ra)?;
                 finite_positive("flow.implicit_half_resistance", rb)?;
-                let largest = ra.max(rb);
-                let g = (link.area_m2 / largest) / (1.0 + ra.min(rb) / largest);
+                let rc = geometry.contact_resistance_m2_k_w;
+                let g = if rc == 0.0 {
+                    let largest = ra.max(rb);
+                    (link.area_m2 / largest) / (1.0 + ra.min(rb) / largest)
+                } else {
+                    let largest = ra.max(rb).max(rc);
+                    (link.area_m2 / largest) / (ra / largest + rb / largest + rc / largest)
+                };
                 finite_positive("flow.implicit_face_conductance", g)?;
                 let delta = final_samples[b].unwrap().temperature_k()
                     - final_samples[a].unwrap().temperature_k();
@@ -474,6 +634,9 @@ impl FlowField {
                 assembly.add(residual.abs());
             }
             exchanged.add(q.abs());
+            if domain.is_fluid(a) != domain.is_fluid(b) {
+                solid_to_fluid.add(if domain.is_fluid(a) { q } else { -q });
+            }
         }
         let mut boundary_heat = [Sum::default(); 6];
         let mut absolute_boundary_heat = Sum::default();
@@ -500,30 +663,52 @@ impl FlowField {
         let mut combined = vec![0.0; n];
         let mut balance = Sum::default();
         let mut endpoint_defect = Sum::default();
-        let bounds = conductivity.enthalpy_bounds_j_kg();
+        let mut solid_endpoints = Vec::with_capacity(solids.len());
+        let mut solid_authored = Sum::default();
+        let mut solid_change = Sum::default();
         for c in 0..n {
             poll_every(gate, c)?;
             balance.add(increments[c]);
-            let (heat, residual) = accounted_add(input.net_enthalpy_increment_j[c], increments[c])?;
+            let (heat, residual) = accounted_add(authored(c), increments[c])?;
             assembly.add(residual.abs());
             combined[c] = heat;
             if let Some(old) = samples[c] {
-                let advanced = conductivity
+                let law = source(c);
+                let bounds = law.enthalpy_bounds_j_kg();
+                let original = wall(c).map_or_else(|| input.phase_states[c].unwrap(), |s| s.phase);
+                let advanced = law
                     .caloric_curve()
-                    .advance_specific_energy(
-                        input.phase_states[c].unwrap(),
-                        heat / input.mass_kg[c],
-                    )
+                    .advance_specific_energy(original, heat / mass(c))
                     .map_err(|e| refuse(e.to_string()))?;
                 if !(bounds[0]..=bounds[1]).contains(&advanced.specific_enthalpy_j_kg()) {
                     return Err(refuse(
                         "implicit heated state leaves original conductivity source",
                     ));
                 }
-                let change = Dd::from_f64(input.mass_kg[c])
+                let change = Dd::from_f64(mass(c))
                     * (Dd::from_f64(final_samples[c].unwrap().specific_enthalpy_j_kg())
                         - Dd::from_f64(old.specific_enthalpy_j_kg()));
                 endpoint_defect.add((change - Dd::from_f64(heat)).to_f64().abs());
+                if let Some(solid) = wall(c) {
+                    solid_authored.add(solid.net_enthalpy_increment_j);
+                    solid_change.add(change.to_f64());
+                    solid_endpoints.push(ThermalVolumeSolidEndpoint {
+                        cell: c,
+                        mass_kg: solid.mass_kg,
+                        phase: law
+                            .caloric_curve()
+                            .state_at_specific_enthalpy(
+                                final_samples[c].unwrap().specific_enthalpy_j_kg(),
+                            )
+                            .map_err(|e| refuse(e.to_string()))?,
+                        conductivity_source_identity: law.identity(),
+                        conductive_enthalpy_increment_j: increments[c],
+                    });
+                    // Wall storage stays wholly outside the fluid's original
+                    // inventory arrays and its conservative material routes.
+                    combined[c] = 0.0;
+                    increments[c] = 0.0;
+                }
             }
         }
         let boundary_heat_j = boundary_heat.map(|sum| sum.value);
@@ -535,6 +720,13 @@ impl FlowField {
         let extra_defect = assembly.value + balance.value.abs() + endpoint_defect.value;
         finite("flow.implicit_heat_defect", extra_defect)?;
         finite("flow.implicit_internal_exchange", exchanged.value)?;
+        for value in [
+            solid_authored.value,
+            solid_change.value,
+            solid_to_fluid.value,
+        ] {
+            finite("flow.implicit_finite_solid_energy", value)?;
+        }
         finite(
             "flow.implicit_absolute_bath_heat",
             absolute_boundary_heat.value,
@@ -548,6 +740,10 @@ impl FlowField {
         Ok(PreparedImplicitHeat {
             combined,
             increments,
+            solid_endpoints,
+            solid_authored_heat_j: solid_authored.value,
+            solid_enthalpy_change_j: solid_change.value,
+            solid_to_fluid_heat_j: solid_to_fluid.value,
             report: ImplicitConductiveThermalVolumeReport {
                 conductivity_source_identity: conductivity.identity(),
                 conductive_faces: links.len(),
