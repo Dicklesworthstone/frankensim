@@ -10,6 +10,7 @@ use fs_couple::render::schedule::force::coupled::contact::adhesive_dmt::multiple
 };
 use fs_phs::RelaxationBranch;
 
+mod heat;
 mod temperature;
 
 fn gate() -> CancelGate {

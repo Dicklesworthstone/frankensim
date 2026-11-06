@@ -13,6 +13,8 @@ pub mod transient;
 
 /// Native DMT normal/shear motion and bounded frozen-footprint finite-body heat.
 pub mod dmt;
+/// Simultaneous native modal DMT junctions and shared finite-cell heat.
+pub mod dmt_modal;
 /// Original normal snap release and explicitly declared finite-cell heat.
 pub mod snap;
 
