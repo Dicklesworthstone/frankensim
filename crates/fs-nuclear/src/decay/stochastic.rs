@@ -32,6 +32,8 @@ use super::{
 };
 use crate::{EnergyChannels, channel_values};
 
+pub mod production;
+
 /// Largest admitted total integer population, exactly representable in binary64.
 /// Larger macroscopic inventories belong to the deterministic expectation owner.
 pub const MAX_STOCHASTIC_NUCLEI: u64 = 1_u64 << 53;
@@ -251,29 +253,7 @@ impl StochasticDecayInventory {
             if report.events == budget.maximum_events {
                 return Err(DecayError::Budget("stochastic decay events"));
             }
-            let branch_index = next.choose_branch(parent)?;
-            let branch = next.model.branches[branch_index];
-            next.populations[parent] = next.populations[parent]
-                .checked_sub(1)
-                .ok_or(DecayError::Arithmetic)?;
-            increment(&mut next.populations[branch.daughter])?;
-            increment(&mut next.decays[parent])?;
-            increment(&mut next.branch_decays[branch_index])?;
-            increment(&mut report.events)?;
-            increment(&mut report.decays[parent])?;
-            increment(&mut report.branch_decays[branch_index])?;
-            for ((interval, lifetime), value) in released
-                .iter_mut()
-                .zip(&mut next.released)
-                .zip(channel_array(branch.energy_per_decay))
-            {
-                add(&mut energy_error, add(interval, value)?.abs())?;
-                // Update the shared compensated energy account per actual event,
-                // never by a partition-dependent sum of interval reports.
-                add(&mut energy_error, add(lifetime, value)?.abs())?;
-            }
-            next.reschedule(parent, time)?;
-            next.reschedule(branch.daughter, time)?;
+            next.apply_decay(parent, time, &mut report, &mut released, &mut energy_error)?;
         }
         report.released = export_channels(released, &mut energy_error)?;
         checked(channel_values(next.released).total_j())?;
@@ -303,6 +283,42 @@ impl StochasticDecayInventory {
         Ok(report)
     }
 
+    /// Shared original-branch mutation for closed and externally supplied clocks.
+    /// The returned daughter lets another physical owner update affected hazards.
+    fn apply_decay(
+        &mut self,
+        parent: usize,
+        time: Accumulator,
+        report: &mut StochasticDecayStep,
+        released: &mut [Accumulator; 3],
+        energy_error: &mut Accumulator,
+    ) -> Result<usize, DecayError> {
+        let branch_index = self.choose_branch(parent)?;
+        let branch = self.model.branches[branch_index];
+        self.populations[parent] = self.populations[parent]
+            .checked_sub(1)
+            .ok_or(DecayError::Arithmetic)?;
+        increment(&mut self.populations[branch.daughter])?;
+        increment(&mut self.decays[parent])?;
+        increment(&mut self.branch_decays[branch_index])?;
+        increment(&mut report.events)?;
+        increment(&mut report.decays[parent])?;
+        increment(&mut report.branch_decays[branch_index])?;
+        for ((interval, lifetime), value) in released
+            .iter_mut()
+            .zip(&mut self.released)
+            .zip(channel_array(branch.energy_per_decay))
+        {
+            add(energy_error, add(interval, value)?.abs())?;
+            // Update the shared compensated energy account per actual event,
+            // never by a partition-dependent sum of interval reports.
+            add(energy_error, add(lifetime, value)?.abs())?;
+        }
+        self.reschedule(parent, time)?;
+        self.reschedule(branch.daughter, time)?;
+        Ok(branch.daughter)
+    }
+
     fn next_event(&self) -> Option<(usize, Accumulator)> {
         let mut next: Option<(usize, Accumulator)> = None;
         for (node, clock) in self.clocks.iter().enumerate() {
@@ -317,40 +333,12 @@ impl StochasticDecayInventory {
     }
 
     fn reschedule(&mut self, node: usize, origin: Accumulator) -> Result<(), DecayError> {
-        let rate = self.model.rates[node];
-        let nuclei = self.populations[node];
-        if nuclei == 0 || rate == 0.0 {
-            self.clocks[node] = EventClock::Inactive;
-            return Ok(());
-        }
-        let mut stream = self.stream_for_draw()?;
-        let unit_wait = stream.next_exponential();
-        self.rng = stream.checkpoint();
-        if !(unit_wait > 0.0) || !unit_wait.is_finite() {
-            // The RNG's finite grid includes zero. Do not invent a positive
-            // lifetime, or permit a nonprogressing event, for that boundary.
-            return Err(DecayError::Arithmetic);
-        }
-        // Count is exact and >=1. This order avoids overflowing lambda*N or
-        // unit_wait/lambda when the final physical wait is representable.
-        let wait = (unit_wait / nuclei as f64) / rate;
-        if wait.is_infinite() || (origin.hi + wait).is_infinite() {
-            self.clocks[node] = EventClock::BeyondFiniteTime;
-            return Ok(());
-        }
-        if wait == 0.0 {
-            return Err(DecayError::Arithmetic);
-        }
-        let mut time = origin;
-        add(&mut time, wait)?;
-        if !before(origin, time) {
-            return Err(DecayError::Arithmetic);
-        }
-        self.clocks[node] = if ceiling(time).is_finite() {
-            EventClock::Finite(time)
-        } else {
-            EventClock::BeyondFiniteTime
-        };
+        self.clocks[node] = sample_clock(
+            &mut self.rng,
+            self.model.rates[node],
+            self.populations[node],
+            origin,
+        )?;
         Ok(())
     }
 
@@ -359,7 +347,7 @@ impl StochasticDecayInventory {
         if choices.len() == 1 {
             return Ok(choices[0]);
         }
-        let mut stream = self.stream_for_draw()?;
+        let mut stream = stream_for_draw(self.rng)?;
         let draw = stream.next_f64();
         self.rng = stream.checkpoint();
         let mut cumulative = Accumulator::new(0.0);
@@ -373,16 +361,55 @@ impl StochasticDecayInventory {
         // repair an uncovered draw by assigning it to an arbitrary last branch.
         Err(DecayError::Arithmetic)
     }
+}
 
-    fn stream_for_draw(&self) -> Result<Stream, DecayError> {
-        // fs-rand intentionally wraps modulo 2^64. This physical owner refuses
-        // before wrap, so no accepted trajectory silently reuses its first draw.
-        if self.rng.index == u64::MAX {
-            return Err(DecayError::Budget("stochastic random stream exhausted"));
-        }
-        Stream::resume(self.rng)
-            .map_err(|_| DecayError::Invalid("unsupported stochastic random checkpoint"))
+/// The same admitted exponential clock arithmetic for decay, supply and movement.
+/// Callers own the physical rate/count admission and the selected random stream.
+fn sample_clock(
+    rng: &mut StreamCheckpoint,
+    rate: f64,
+    nuclei: u64,
+    origin: Accumulator,
+) -> Result<EventClock, DecayError> {
+    if nuclei == 0 || rate == 0.0 {
+        return Ok(EventClock::Inactive);
     }
+    let mut stream = stream_for_draw(*rng)?;
+    let unit_wait = stream.next_exponential();
+    *rng = stream.checkpoint();
+    if !(unit_wait > 0.0) || !unit_wait.is_finite() {
+        // The RNG's finite grid includes zero. Do not invent a positive
+        // lifetime, or permit a nonprogressing event, for that boundary.
+        return Err(DecayError::Arithmetic);
+    }
+    // Count is exact and >=1. This order avoids overflowing lambda*N or
+    // unit_wait/lambda when the final physical wait is representable.
+    let wait = (unit_wait / nuclei as f64) / rate;
+    if wait.is_infinite() || (origin.hi + wait).is_infinite() {
+        return Ok(EventClock::BeyondFiniteTime);
+    }
+    if wait == 0.0 {
+        return Err(DecayError::Arithmetic);
+    }
+    let mut time = origin;
+    add(&mut time, wait)?;
+    if !before(origin, time) {
+        return Err(DecayError::Arithmetic);
+    }
+    Ok(if ceiling(time).is_finite() {
+        EventClock::Finite(time)
+    } else {
+        EventClock::BeyondFiniteTime
+    })
+}
+
+fn stream_for_draw(rng: StreamCheckpoint) -> Result<Stream, DecayError> {
+    // fs-rand intentionally wraps modulo 2^64. This physical owner refuses
+    // before wrap, so no accepted trajectory silently reuses its first draw.
+    if rng.index == u64::MAX {
+        return Err(DecayError::Budget("stochastic random stream exhausted"));
+    }
+    Stream::resume(rng).map_err(|_| DecayError::Invalid("unsupported stochastic random checkpoint"))
 }
 
 fn increment(value: &mut u64) -> Result<(), DecayError> {

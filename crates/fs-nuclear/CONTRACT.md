@@ -341,6 +341,36 @@ propagator when individual transformations are not required. The runnable
 `cargo run -p fs-nuclear --example stochastic_decay` uses explicitly
 manufactured coefficients and demonstrates a whole-inventory restart.
 
+## Scheduled Poisson production of discrete radioactive inventories
+
+`decay::stochastic::production::StochasticDecayProduction::poisson` binds an
+existing integer inventory to the original model-specific
+`DecayProductionSchedule`. This constructor explicitly selects independent
+Poisson arrival intensities from the authored nuclei/s; deterministic dosing
+and correlated reaction products are not inferred from a mean rate vector.
+Binding starts at the supplied inventory's current time without replaying past
+source history. The exact model Arc must match.
+
+One compensated pending birth clock per nuclide races the original decay clocks
+and authored source transitions. Newly supplied nuclei and their daughters can
+decay during that same interval, with their actual sampled ages. Source changes
+at an exact tie precede old-clock events; event times differing only in their
+compensated low parts retain their physical ordering. Endpoint changes execute
+once. A no-op source change consumes transition work but neither changes pending
+clocks nor draws randomness. Shutting off supply leaves existing decay active.
+
+The original RNG, branch selection and per-event energy accounts remain shared.
+Births add no inferred creation energy, bulk carrier mass or incoming enthalpy.
+Integer per-nuclide birth counters and the original decay report remain separate.
+Population, birth, decay and schedule-work ceilings are explicit. The complete
+candidate, including source clocks and RNG, rolls back on any refusal. Whole
+and partitioned observations and full-owner clone/restart preserve the sampled
+history on the original ISA/toolchain; an all-zero schedule preserves the closed
+inventory's trajectory exactly. There are no per-event allocations.
+
+The example `cargo run -p fs-nuclear --example stochastic_production` demonstrates
+explicit manufactured source pulses, shutdown decay and complete restart.
+
 ## Stochastic decay events on the shared thermal timeline
 
 With the existing `thermal` feature, `thermal::StochasticDecayHeating` binds
