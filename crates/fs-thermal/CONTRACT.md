@@ -864,6 +864,25 @@ convection or contacts. The zero-heat method and split timeline retain their
 existing composition. Native regressions cover both signs of latent transfer,
 unchanged authored boundary data, invalid heat and final-checkpoint rollback.
 
+`advance_coupled_sublimating_to` composes native heat transport and the
+implicit solid/vapor endpoint on the same thermal substeps. Each step computes
+the original source, convection, bath and contact watts once; its selected
+solid consumes that signed heat in the latent solve, and every other cell
+receives the original explicit update. Internal contact heat cancels between
+its two owners. The original conductive CFL is recomputed after mass changes,
+and one total native substep budget spans all births and boundary events.
+No sensible-only phase intermediate is required. The new
+`CoupledSublimationAudit` reports complete open-system balances separately
+from the existing split operator's thermal subaccount.
+
+Both timeline routes use the same compensated relative-enthalpy account.
+The coupled route retains first-order explicit heat quadrature and implicit
+local phase feedback; nonlinear convergence does not establish temporal or
+spatial accuracy. Three native regressions cover authored heating/cooling,
+combined source/bath/contact exchange, birth/coverage timing, work exhaustion
+and final cancellation. Gas temperature, geometry and pure-solid admission
+retain their existing ownership.
+
 The whole-window audit uses compensated per-cell changes relative to each
 cell's starting or birth enthalpy, together with vapor enthalpy on that same
 relative reference. Mass conservation is checked separately. Unchanged large

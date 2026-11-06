@@ -1,8 +1,8 @@
 //! G0 conservation/transactionality and G1 coupling-refinement checks.
 use super::*;
 use crate::enthalpy::{
-    Boundary, CellGeometry, DepositedCell, DepositionBudget, MaterialId, Reservoir, ThermalLaw,
-    ThermalLink, ThermalStorageBasis, TimedEvent,
+    Boundary, CellGeometry, DepositedCell, DepositionBudget, Event, MaterialId, Reservoir,
+    ThermalLaw, ThermalLink, ThermalStorageBasis, TimedEvent,
 };
 use crate::sublimation::SublimationProperties;
 
@@ -680,23 +680,43 @@ fn sublimation_and_deposition_balance_ignore_unchanged_neighbor_energy() {
                 .0;
             let (expected, expected_gas, expected_audit) = reference
                 .advance_sublimating_to(
-                    CellId(1), &Ice, kinetics(), gas, 1.0, config(0.125), phase(), || Ok(()),
+                    CellId(1),
+                    &Ice,
+                    kinetics(),
+                    gas,
+                    1.0,
+                    config(0.125),
+                    phase(),
+                    || Ok(()),
                 )
                 .unwrap();
             let (next, next_gas, audit) = thermal
                 .advance_sublimating_to(
-                    CellId(1), &Ice, kinetics(), gas, 1.0, config(0.125), phase(), || Ok(()),
+                    CellId(1),
+                    &Ice,
+                    kinetics(),
+                    gas,
+                    1.0,
+                    config(0.125),
+                    phase(),
+                    || Ok(()),
                 )
                 .unwrap();
 
             assert_eq!(next.cells()[&CellId(2)], neighbor);
             assert_eq!(next.cells()[&CellId(1)], expected.cells()[&CellId(1)]);
             assert_eq!(next_gas, expected_gas);
-            assert_eq!(audit.transferred_mass_kg, expected_audit.transferred_mass_kg);
+            assert_eq!(
+                audit.transferred_mass_kg,
+                expected_audit.transferred_mass_kg
+            );
             assert_eq!(audit.latent_energy_j, expected_audit.latent_energy_j);
             assert_eq!(audit.vapor_energy_j, expected_audit.vapor_energy_j);
             assert_eq!(audit.phase_steps, expected_audit.phase_steps);
-            assert_eq!(audit.thermal.incoming_mass_kg, expected_audit.thermal.incoming_mass_kg);
+            assert_eq!(
+                audit.thermal.incoming_mass_kg,
+                expected_audit.thermal.incoming_mass_kg
+            );
             close(audit.energy_residual_j, 0.0, 1e-7);
             close(audit.mass_balance_residual_kg, 0.0, 1e-16);
             close(
@@ -839,10 +859,281 @@ fn heated_sublimation_refuses_invalid_heat_and_final_cancellation_atomically() {
                 phase(),
                 || Ok(()),
             ),
-            Err(ThermalSublimationError::Surface(SublimationError::Invalid(_)))
+            Err(ThermalSublimationError::Surface(SublimationError::Invalid(
+                _
+            )))
         ));
         assert_eq!(thermal.cells(), &before);
         assert_eq!(thermal.time_s(), 0.0);
         assert_eq!(gas, reservoir);
     }
+}
+
+#[test]
+fn coupled_authored_heat_sustains_latent_transfer_without_sensible_overshoot() {
+    let duration = 1000.0;
+    for pressure in [0.0, 200.0] {
+        let transfer = (0.018
+            / (2.0 * core::f64::consts::PI * crate::sublimation::MOLAR_GAS_CONSTANT * 250.0))
+            .sqrt()
+            * 0.01
+            * (100.0 - pressure)
+            * 0.001
+            * duration;
+        let heat = transfer * crate::sublimation::MOLAR_GAS_CONSTANT / 0.018 * 6000.0;
+        let thermal = initial(heat / duration);
+        let before = thermal.cells().clone();
+        let gas = VaporReservoir::Prescribed {
+            partial_pressure_pa: pressure,
+            temperature_k: 250.0,
+        };
+        // A full heat-only intermediate lies outside the admitted solid chart.
+        assert!(
+            thermal
+                .advance_sublimating_to(
+                    CellId(1),
+                    &Ice,
+                    kinetics(),
+                    gas,
+                    duration,
+                    config(duration),
+                    phase(),
+                    || Ok(()),
+                )
+                .is_err()
+        );
+        let (next, returned, audit) = thermal
+            .advance_coupled_sublimating_to(
+                CellId(1),
+                &Ice,
+                kinetics(),
+                gas,
+                duration,
+                config(duration),
+                phase(),
+                || Ok(()),
+            )
+            .unwrap();
+        assert_eq!(next.temperature_k(CellId(1)), Ok(250.0));
+        assert_eq!(next.time_s(), duration);
+        assert_eq!(audit.substeps, 1);
+        assert_eq!(audit.phase_steps, 1);
+        assert_eq!(audit.events, 0);
+        assert_eq!(returned, gas);
+        close(audit.transferred_mass_kg, transfer, 1e-16);
+        close(audit.external_heat_j, heat, 1e-10);
+        close(audit.latent_energy_j, heat, 1e-8);
+        close(audit.last_step.unwrap().supplied_heat_j, heat, 1e-10);
+        close(audit.energy_residual_j, 0.0, 1e-8);
+        close(audit.mass_balance_residual_kg, 0.0, 1e-17);
+        close(
+            next.energy_j() - thermal.energy_j() + audit.vapor_energy_j,
+            heat,
+            1e-8,
+        );
+        assert_eq!(
+            next.cells()[&CellId(1)].geometry,
+            before[&CellId(1)].geometry
+        );
+        assert_eq!(
+            next.cells()[&CellId(1)].boundary,
+            before[&CellId(1)].boundary
+        );
+        assert_eq!(thermal.cells(), &before);
+        assert_eq!(thermal.time_s(), 0.0);
+    }
+}
+
+#[test]
+fn coupled_source_baths_and_contact_debit_one_shared_heat_interval() {
+    let mut surface = cell(1, 0.0, 2.0);
+    surface.boundary.ambient_k = 260.0;
+    surface.boundary.htc_w_m2_k = 10.0;
+    surface.boundary.reservoir = Some(Reservoir {
+        area_m2: 0.0002,
+        conductance_w_k: 0.2,
+        temperature_k: 270.0,
+    });
+    let thermal = scheduled(
+        vec![
+            birth(0.0, surface),
+            birth(0.0, cell(2, 20_000.0, 0.0)),
+            TimedEvent {
+                time_s: 0.0,
+                event: Event::Contact(ThermalLink {
+                    id: 9,
+                    a: CellId(1),
+                    b: CellId(2),
+                    area_m2: 0.0001,
+                    conductance_w_k: 0.3,
+                }),
+            },
+        ],
+        4,
+    )
+    .advance_to(0.0, config(1.0), || Ok(()))
+    .unwrap()
+    .0;
+    let (next, _, audit) = thermal
+        .advance_coupled_sublimating_to(
+            CellId(1),
+            &Ice,
+            kinetics(),
+            vacuum(),
+            0.25,
+            config(0.25),
+            phase(),
+            || Ok(()),
+        )
+        .unwrap();
+    let step = audit.last_step.unwrap();
+    // Start-state powers: source 2, convection .07, bath 4, contact 3 W.
+    close(step.supplied_heat_j, 2.2675, 1e-14);
+    close(audit.external_heat_j, 1.5175, 1e-14);
+    close(
+        next.cells()[&CellId(2)].specific_h_j_kg,
+        20_000.0 - 0.75 / 0.02,
+        1e-12,
+    );
+    close(step.solid.area_m2, 0.0007, 1e-18);
+    assert_eq!(audit.substeps, 1);
+    close(audit.energy_residual_j, 0.0, 1e-7);
+    close(
+        next.energy_j() - thermal.energy_j() + audit.vapor_energy_j,
+        1.5175,
+        1e-7,
+    );
+
+    // Independent pressure/kinetic expression and scalar energy balance.
+    let residual = |t: f64| {
+        let p = 100.0 * (6000.0 * (1.0 / 250.0 - 1.0 / t)).exp();
+        let dm = 0.01
+            * (0.018 / (2.0 * core::f64::consts::PI * 8.314_462_618_153_24 * t)).sqrt()
+            * p
+            * 0.0007
+            * 0.25;
+        (
+            0.02 * 2000.0 * (t - 250.0) + dm * 8.314_462_618_153_24 / 0.018 * 6000.0 - 2.2675,
+            dm,
+        )
+    };
+    let (mut lower, mut upper) = (250.0, 251.0);
+    for _ in 0..64 {
+        let midpoint = lower + (upper - lower) * 0.5;
+        if residual(midpoint).0 > 0.0 {
+            upper = midpoint;
+        } else {
+            lower = midpoint;
+        }
+    }
+    let expected_t = lower + (upper - lower) * 0.5;
+    close(step.surface_temperature_k, expected_t, 1e-9);
+    close(step.transferred_mass_kg, residual(expected_t).1, 1e-14);
+}
+
+#[test]
+fn coupled_birth_coverage_and_global_budget_remain_atomic() {
+    let flux = 0.01
+        * (0.018 / (2.0 * core::f64::consts::PI * 8.314_462_618_153_24 * 250.0_f64)).sqrt()
+        * 100.0
+        * 0.001;
+    let power = flux * 8.314_462_618_153_24 / 0.018 * 6000.0;
+    let mut covered = boundary(0.0);
+    covered.reservoir = Some(Reservoir {
+        area_m2: 0.001,
+        conductance_w_k: 0.0,
+        temperature_k: 250.0,
+    });
+    let events = vec![
+        birth(0.25, cell(1, 0.0, power)),
+        TimedEvent {
+            time_s: 0.75,
+            event: Event::Boundary(CellId(1), covered),
+        },
+    ];
+    let thermal = scheduled(events.clone(), 6);
+    let mut polls = 0;
+    let (next, _, audit) = thermal
+        .advance_coupled_sublimating_to(
+            CellId(1),
+            &Ice,
+            kinetics(),
+            vacuum(),
+            1.0,
+            config(0.125),
+            phase(),
+            || {
+                polls += 1;
+                Ok(())
+            },
+        )
+        .unwrap();
+    assert_eq!(next.time_s(), 1.0);
+    assert_eq!(audit.substeps, 6);
+    assert_eq!(audit.phase_steps, 6);
+    assert_eq!(audit.events, 2);
+    assert_eq!(next.exposed_area_m2(CellId(1)), Ok(0.0));
+    assert_eq!(next.cells()[&CellId(1)].boundary.source_w, 0.0);
+    close(audit.external_heat_j, power * 0.5, 1e-13);
+    close(audit.transferred_mass_kg, flux * 0.5, 1e-17);
+    close(audit.energy_residual_j, 0.0, 1e-8);
+
+    let (at_birth, _, birth_audit) = scheduled(events.clone(), 0)
+        .advance_coupled_sublimating_to(
+            CellId(1),
+            &Ice,
+            kinetics(),
+            vacuum(),
+            0.25,
+            config(0.125),
+            phase(),
+            || Ok(()),
+        )
+        .unwrap();
+    assert_eq!(at_birth.cells().len(), 1);
+    assert_eq!(birth_audit.substeps, 0);
+    assert_eq!(birth_audit.phase_steps, 0);
+    assert_eq!(birth_audit.incoming_mass_kg, 0.02);
+
+    let limited = scheduled(events, 5);
+    assert!(matches!(
+        limited.advance_coupled_sublimating_to(
+            CellId(1),
+            &Ice,
+            kinetics(),
+            vacuum(),
+            1.0,
+            config(0.125),
+            phase(),
+            || Ok(()),
+        ),
+        Err(ThermalSublimationError::Thermal(DepositionError::Budget(_)))
+    ));
+    assert!(limited.cells().is_empty());
+    assert_eq!(limited.time_s(), 0.0);
+
+    let mut visits = 0;
+    assert!(matches!(
+        thermal.advance_coupled_sublimating_to(
+            CellId(1),
+            &Ice,
+            kinetics(),
+            vacuum(),
+            1.0,
+            config(0.125),
+            phase(),
+            || {
+                visits += 1;
+                if visits == polls {
+                    Err(DepositionError::Cancelled)
+                } else {
+                    Ok(())
+                }
+            },
+        ),
+        Err(ThermalSublimationError::Thermal(DepositionError::Cancelled))
+    ));
+    assert_eq!(visits, polls);
+    assert!(thermal.cells().is_empty());
+    assert_eq!(thermal.time_s(), 0.0);
 }
