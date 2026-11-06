@@ -30,6 +30,9 @@ use crate::graph::GraphSolution;
 
 pub mod sensitivity;
 pub mod recirculation;
+/// Original Cp(T), enthalpy-conserving junctions and shared-solid coupling on
+/// the same admitted directed hydraulic graph.
+pub mod caloric;
 /// Conservative fluid storage on the native enthalpy timeline.
 #[cfg(feature = "transient-transport")]
 pub mod transient;
@@ -464,14 +467,32 @@ impl<'a> TransportNetwork<'a> {
     fn march_once_with_nodes(&self, cx: &Cx<'_>, walls: Option<&[f64]>,
         inlets: &[Option<f64>], solved_nodes: Option<&[f64]>)
         -> Result<TransportMarch, TransportError> {
+        self.march_once_with_source(cx, walls, inlets, solved_nodes, None)
+    }
+
+    // Topology, branch orientation, region ownership and the watt ledger have
+    // one owner. A source path changes the transported coordinate to sensible
+    // enthalpy and supplies its own original channel law and inverse.
+    fn march_once_with_source(&self, cx: &Cx<'_>, walls: Option<&[f64]>,
+        inlets: &[Option<f64>], solved_nodes: Option<&[f64]>,
+        source: Option<caloric::CaloricContext<'_>>)
+        -> Result<TransportMarch, TransportError> {
         poll(cx)?;
+        if source.is_some() && (solved_nodes.is_some() || self.feedback.is_some() || self.circulation.is_some()) {
+            return Err(TransportError::InvalidInput("source-caloric transport requires the native once-through DAG"));
+        }
         let reference_k = inlets.iter().flatten().next().copied().unwrap_or(self.reference_k);
         let n = self.order.len();
         let mut mixers = vec![Mixer::default(); n];
         for (node, &temperature) in inlets.iter().enumerate() {
             poll(cx)?;
             if let Some(temperature) = temperature {
-                mixers[node].add(self.external_capacity[node], temperature)?;
+                if let Some(source) = source {
+                    mixers[node].add_coordinate(source.external_mass[node],
+                        source.enthalpy(reference_k, temperature)?)?;
+                } else {
+                    mixers[node].add(self.external_capacity[node], temperature)?;
+                }
             }
         }
         let mut result = TransportMarch {
@@ -485,34 +506,59 @@ impl<'a> TransportNetwork<'a> {
         let mut gross_external = 0.0;
         for &node in &self.order {
             poll(cx)?;
-            let temperature = if let Some(values) = solved_nodes {
+            let coordinate = if let Some(values) = solved_nodes {
                 let circulation = self.circulation.as_ref().expect("native circulation solve");
                 (circulation.incoming_capacities[node] > 0.0).then_some(values[node])
             } else { mixers[node].temperature };
-            let Some(temperature) = temperature else {
+            let Some(coordinate) = coordinate else {
                 if !self.outgoing[node].is_empty() {
                     return Err(TransportError::Node { node, reason: "active node has no thermally supplied incoming flow" });
                 }
                 continue;
             };
+            let temperature = match source {
+                Some(source) => source.temperature(reference_k, coordinate)?,
+                None => coordinate,
+            };
             result.node_temperatures_k[node] = Some(temperature);
-            let external = self.external_capacity[node];
             let entering_temperature = inlets[node].unwrap_or(temperature);
-            let external_heat = finite(-external * (if external > 0.0 { entering_temperature } else { temperature } - reference_k), "external sensible enthalpy")?;
+            let (external_heat, hydraulic_defect) = if let Some(source) = source {
+                let external = source.external_mass[node];
+                let specific_h = if external > 0.0 {
+                    source.enthalpy(reference_k, entering_temperature)?
+                } else { coordinate };
+                (finite(-external * specific_h, "external source enthalpy")?,
+                    finite(source.mass_residual[node] * coordinate, "hydraulic source energy defect")?)
+            } else {
+                let external = self.external_capacity[node];
+                (finite(-external * (if external > 0.0 { entering_temperature } else { temperature } - reference_k), "external sensible enthalpy")?,
+                    self.capacity_residual[node] * (temperature - reference_k))
+            };
             result.external_heat_gain_w = finite(result.external_heat_gain_w + external_heat, "external heat gain")?;
             gross_external = finite(gross_external + external_heat.abs(), "gross external enthalpy")?;
             result.hydraulic_energy_defect_w = finite(result.hydraulic_energy_defect_w
-                + self.capacity_residual[node] * (temperature - reference_k), "hydraulic energy defect")?;
+                + hydraulic_defect, "hydraulic energy defect")?;
             for &branch in &self.outgoing[node] {
                 poll(cx)?;
                 let mut outlet = temperature;
+                let mut outlet_coordinate = coordinate;
                 let mut air_march = None;
                 if let BranchThermalModel::Exchange(_) = &self.models[branch] {
                     let range = self.row_range(branch);
                     if let Some(walls) = walls {
-                        let marched = self.path(branch, temperature)?.march(&walls[range.clone()])?;
+                        let marched = match source {
+                            Some(source) => source.path(self, branch, temperature)?.march(&walls[range.clone()])?,
+                            None => self.path(branch, temperature)?.march(&walls[range.clone()])?,
+                        };
                         result.reference_temperatures_k[range].copy_from_slice(&marched.reference_temperatures_k());
                         outlet = marched.outlet_temperature_k;
+                        if source.is_some() {
+                            // Keep the original relative heat through junctions;
+                            // re-integrating rounded absolute endpoints would
+                            // erase weak but representable branch heat.
+                            outlet_coordinate = finite(coordinate + marched.total_heat_rate_w / self.mass_flows[branch],
+                                "advected source enthalpy")?;
+                        }
                         result.wall_heat_rate_w = finite(result.wall_heat_rate_w + marched.total_heat_rate_w, "total wall heat")?;
                         for segment in &marched.segments {
                             poll(cx)?;
@@ -524,7 +570,11 @@ impl<'a> TransportNetwork<'a> {
                     }
                 }
                 positive(outlet, "branch outlet temperature")?;
-                mixers[self.downstream[branch]].add(self.capacities[branch], outlet)?;
+                if source.is_some() {
+                    mixers[self.downstream[branch]].add_coordinate(self.mass_flows[branch], outlet_coordinate)?;
+                } else {
+                    mixers[self.downstream[branch]].add(self.capacities[branch], outlet)?;
+                }
                 result.branches[branch] = BranchTransport {
                     inlet_temperature_k: Some(temperature), outlet_temperature_k: Some(outlet), march: air_march,
                 };
@@ -562,14 +612,23 @@ struct Mixer { capacity: f64, temperature: Option<f64> }
 
 impl Mixer {
     fn add(&mut self, capacity: f64, temperature: f64) -> Result<(), TransportError> {
-        positive(capacity, "mixing capacity")?;
         positive(temperature, "mixed stream temperature")?;
+        self.add_coordinate(capacity, temperature)?;
+        positive(self.temperature.expect("added stream"), "mixed node temperature")?;
+        Ok(())
+    }
+
+    // The source-caloric path mixes signed relative enthalpy with MASS flow.
+    // The frozen-Cp path retains its original positive temperature coordinate.
+    fn add_coordinate(&mut self, capacity: f64, coordinate: f64) -> Result<(), TransportError> {
+        positive(capacity, "mixing flow weight")?;
+        finite(coordinate, "mixed stream coordinate")?;
         let total = positive(self.capacity + capacity, "total mixing capacity")?;
         // Incremental convex averaging avoids overflowing capacity * absolute K.
-        self.temperature = Some(positive(match self.temperature {
-            Some(previous) => previous + (temperature - previous) * (capacity / total),
-            None => temperature,
-        }, "mixed node temperature")?);
+        self.temperature = Some(finite(match self.temperature {
+            Some(previous) => previous + (coordinate - previous) * (capacity / total),
+            None => coordinate,
+        }, "mixed node coordinate")?);
         self.capacity = total;
         Ok(())
     }

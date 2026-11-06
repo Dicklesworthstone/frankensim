@@ -16,7 +16,7 @@ use fs_couple::iqn_ils::{IqnIls, IqnIlsConfig};
 use fs_exec::Cx;
 
 use crate::AirflowError;
-use crate::conjugate::{ConjugateConfig, RegionBalance, Relaxation, SolidRegionState, solve_conjugate_from};
+use crate::conjugate::{AirPath, ConjugateConfig, RegionBalance, Relaxation, SolidRegionState, solve_conjugate_from};
 use super::transport::{TransportError, TransportMarch, TransportNetwork};
 use super::{admit, checked, checked_sum, iqn_error};
 
@@ -37,6 +37,35 @@ pub struct CoupledTransportSolution {
     pub iterations: usize,
     /// Maximum unrelaxed reference residual of the accepted exchange, K.
     pub max_reference_change_k: f64,
+}
+
+// Only the stream law differs. The native fixed-point loop still owns solid
+// callbacks, region admission, branch-local watt gates and cancellation.
+pub(super) trait CoupledTransportModel {
+    fn topology(&self) -> &TransportNetwork<'_>;
+    fn initial_references(&self, cx: &Cx<'_>) -> Result<Vec<f64>, TransportError>;
+    fn march(&self, cx: &Cx<'_>, walls: &[f64]) -> Result<TransportMarch, TransportError>;
+    fn admission_path(&self, branch: usize, inlet: f64) -> Result<AirPath, TransportError>;
+    fn probe(&self, cx: &Cx<'_>, branch: usize, path: &AirPath, config: &ConjugateConfig,
+        references: &[f64], states: &[SolidRegionState]) -> Result<Vec<RegionBalance>, TransportError>;
+}
+
+impl CoupledTransportModel for TransportNetwork<'_> {
+    fn topology(&self) -> &TransportNetwork<'_> { self }
+    fn initial_references(&self, cx: &Cx<'_>) -> Result<Vec<f64>, TransportError> {
+        TransportNetwork::initial_references(self, cx)
+    }
+    fn march(&self, cx: &Cx<'_>, walls: &[f64]) -> Result<TransportMarch, TransportError> {
+        TransportNetwork::march(self, cx, walls)
+    }
+    fn admission_path(&self, branch: usize, inlet: f64) -> Result<AirPath, TransportError> {
+        self.path(branch, inlet)
+    }
+    fn probe(&self, cx: &Cx<'_>, _branch: usize, path: &AirPath, config: &ConjugateConfig,
+        references: &[f64], states: &[SolidRegionState]) -> Result<Vec<RegionBalance>, TransportError> {
+        Ok(solve_conjugate_from(cx, path, config, references,
+            |_, _| Ok(states.to_vec()))?.balance.regions)
+    }
 }
 
 /// Solve wall temperatures and air mixing together under a frozen hydraulic
@@ -110,14 +139,16 @@ where F: FnMut(&Cx<'_>, &[f64]) -> Result<Vec<SolidRegionState>, AirflowError>,
     solve_driver(cx, network, config, initial_references_k, Some(acceleration), solid)
 }
 
-fn solve_driver<F>(
-    cx: &Cx<'_>, network: &TransportNetwork<'_>, config: &ConjugateConfig,
+pub(super) fn solve_driver<N, F>(
+    cx: &Cx<'_>, model: &N, config: &ConjugateConfig,
     initial_references_k: &[f64], acceleration: Option<IqnIlsConfig>, mut solid: F,
 ) -> Result<CoupledTransportSolution, TransportError>
-where F: FnMut(&Cx<'_>, &[f64]) -> Result<Vec<SolidRegionState>, AirflowError>,
+where N: CoupledTransportModel,
+    F: FnMut(&Cx<'_>, &[f64]) -> Result<Vec<SolidRegionState>, AirflowError>,
 {
     checkpoint(cx, 0, initial_references_k)?;
-    let seed = network.initial_references(cx)
+    let network = model.topology();
+    let seed = model.initial_references(cx)
         .map_err(|error| at_iteration(error, 0, initial_references_k))?;
     let mut active = Vec::new();
     let mut admission_paths = Vec::new();
@@ -125,7 +156,7 @@ where F: FnMut(&Cx<'_>, &[f64]) -> Result<Vec<SolidRegionState>, AirflowError>,
         checkpoint(cx, 0, initial_references_k)?;
         let range = network.row_range(branch);
         if !range.is_empty() {
-            admission_paths.push(network.path(branch, seed[range.start])?);
+            admission_paths.push(model.admission_path(branch, seed[range.start])?);
             active.push((branch, range));
         }
     }
@@ -161,7 +192,7 @@ where F: FnMut(&Cx<'_>, &[f64]) -> Result<Vec<SolidRegionState>, AirflowError>,
             return Err(AirflowError::SolidResponseArity { expected: reference.len(), found: response.len() }.into());
         }
         let walls: Vec<f64> = response.iter().map(|state| state.mean_wall_temperature_k).collect();
-        let transport = network.march(cx, &walls)
+        let transport = model.march(cx, &walls)
             .map_err(|error| at_iteration(error, iteration, &reference))?;
         let next = &transport.reference_temperatures_k;
         let mut accepted = true;
@@ -173,16 +204,16 @@ where F: FnMut(&Cx<'_>, &[f64]) -> Result<Vec<SolidRegionState>, AirflowError>,
             checkpoint(cx, iteration, &reference)?;
             let inlet = transport.branches[*branch].inlet_temperature_k
                 .ok_or(TransportError::Branch { branch: *branch, reason: "heated branch has no transported inlet" })?;
-            let path = network.path(*branch, inlet)?;
+            let path = model.admission_path(*branch, inlet)?;
             let states = &response[range.clone()];
-            match solve_conjugate_from(cx, &path, &probe_config, &reference[range.clone()], |_, _| Ok(states.to_vec())) {
-                Ok(probe) => balances.extend(probe.balance.regions),
-                Err(AirflowError::ConjugateNotConverged { .. }) => accepted = false,
-                Err(error @ AirflowError::ConjugateBalanceUnclosed { .. }) => {
+            match model.probe(cx, *branch, &path, &probe_config, &reference[range.clone()], states) {
+                Ok(regions) => balances.extend(regions),
+                Err(TransportError::Airflow(AirflowError::ConjugateNotConverged { .. })) => accepted = false,
+                Err(TransportError::Airflow(error @ AirflowError::ConjugateBalanceUnclosed { .. })) => {
                     accepted = false;
                     unclosed = Some(error);
                 }
-                Err(error) => return Err(at_iteration(TransportError::Airflow(error), iteration, &reference)),
+                Err(error) => return Err(at_iteration(error, iteration, &reference)),
             }
             let total_area = checked_sum("transport branch wetted area", path.segments().iter().map(|segment| segment.area_m2()))?;
             let mut scalar = 0.0;

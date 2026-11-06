@@ -1,5 +1,34 @@
 # CONTRACT: fs-airflow
 
+## Source-caloric thermal networks
+
+`graph::thermal::transport::caloric::CaloricTransportNetwork` binds one
+immutable `IsobaricHeatCapacityLaw` to the original solved hydraulic DAG.
+All supplies, branch exchanges and junctions share the same fixed-composition
+isobar. Junctions mix mass-weighted relative enthalpy and recover temperature
+with the original source inverse. Branches reuse `CaloricAirPath`, including
+its retained weak-exchange heat and directly integrated Robin mean.
+
+The original graph walk, actual flow orientation, region ownership, cancellation
+and whole-network watt ledger remain shared with constant-Cp transport. The
+ledger advects retained enthalpy, including hydraulic mass residual energy;
+it does not reconstruct branch heat from rounded outlet temperatures. The
+explicit physical reference temperature selects the Cp accompanying the
+fixed density snapshot independently of the source's arbitrary energy datum.
+
+`solve`, `solve_from`, `solve_iqn` and `solve_iqn_from` use the existing
+shared-solid driver and source-aware branch balance probes. Fixed/Aitken/IQN
+acceleration, temperature convergence and per-region watt gates retain their
+native owner. Source/domain or balance refusal returns no partial field.
+
+Hydraulic flow, density and film coefficients remain prescribed. This path is
+steady, single-phase, once-through and acyclic. Recirculation, closed-loop
+affine-temperature solvers, composition mixing, pressure work, density/flow
+feedback and their adjoints are not added by this source-caloric specialization.
+Focused regressions exercise real hydraulic split/merge and reverse-flow
+solutions, nonlinear mixing, source/datum invariance, weak heat, shared-solid
+power balance, hydraulic defects, cancellation and source refusals.
+
 ## Source-specific heat in steady conjugate channels
 
 `conjugate::caloric::CaloricAirPath` binds the original
