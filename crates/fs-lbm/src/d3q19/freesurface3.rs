@@ -76,6 +76,9 @@ pub use motion::{
 pub(crate) mod thermocapillary;
 pub(crate) mod transport;
 pub(crate) mod wetting;
+#[cfg(test)]
+#[path = "freesurface3/wetting/smoothing_tests.rs"]
+mod wetting_smoothing_tests;
 use transport::{MassLocation3, MassTransport3};
 
 /// Free-surface mass/geometry semantics, independent of the D3Q19 core.
@@ -92,7 +95,10 @@ use transport::{MassLocation3, MassTransport3};
 /// for every constructor, including ordinary and pressure-driven stepping.
 /// Explicit `LegacyGlobal` replay retains its historical conversion and gas
 /// reconstruction arithmetic.
-pub const FREE_SURFACE3_BIT_SEMANTICS_VERSION: u32 = 6;
+/// Version 7 extends imposed planar-angle ghosts through raw-fill smoothing,
+/// preventing artificial curvature at an affine contact interface. Neutral
+/// and unassigned walls retain their original averaging arithmetic.
+pub const FREE_SURFACE3_BIT_SEMANTICS_VERSION: u32 = 7;
 
 /// Conversion semantics for new simulations versus historical trajectory replay.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -1004,10 +1010,20 @@ impl FreeSurface3 {
     // Geometric equilibrium closure: with n_w pointing from wall into fluid,
     // outward liquid normal n = -grad(phi)/|grad(phi)| must satisfy
     // n.n_w = cos(theta). Thus d(phi)/d(n_w) = -|grad_t(phi)| cot(theta).
-    // Extend the smoothed fill into the wall without clipping its derivative.
-    // This supplies the normal in the existing sigma*curvature pressure
-    // reconstruction; tracked liquid mass is never edited here.
+    // Extend the fill into the wall without clipping its derivative.
+    // The same closure acts on raw fractions before smoothing and on the
+    // smoothed geometry during curvature reconstruction. Omitting raw wall
+    // samples first bends an affine interface at the prescribed angle.
+    // Tracked liquid mass is never edited here.
     fn planar_angle_ghost(&self, position: [i64; 3]) -> Option<f64> {
+        self.planar_angle_ghost_in(position, &self.fill_smooth)
+    }
+
+    fn planar_angle_ghost_in(
+        &self,
+        position: [i64; 3],
+        fill: &BTreeMap<u64, [f64; TILE_CELLS]>,
+    ) -> Option<f64> {
         let contact = self.planar_contact_at(position)?;
         if contact.cotangent == 0.0 {
             return None;
@@ -1032,7 +1048,7 @@ impl FreeSurface3 {
         base[axis] = edge;
         let sample = |p: [i64; 3]| -> Option<f64> {
             let (slot, lane) = self.grid.resolve_source(p[0], p[1], p[2])?;
-            Some(self.fill_smooth[&self.grid.active_keys()[slot]][lane])
+            Some(fill[&self.grid.active_keys()[slot]][lane])
         };
         let value = sample(base)?;
         let mut tangent_squared = 0.0;
@@ -1055,15 +1071,20 @@ impl FreeSurface3 {
         Some(value + distance as f64 * tangent_squared.sqrt() * contact.cotangent)
     }
 
-    /// Refresh the smoothed fill field (average over self + non-wall
-    /// neighbors, 2-D port with the 18-neighbor stencil).
-    fn refresh_fill(&mut self, gate: &CancelGate) -> Result<(), FreeSurfaceError3> {
+    /// Refresh the smoothed fill field, including imposed planar-angle ghosts.
+    /// Return the same immutable raw fractions for pre-collision mass exchange.
+    /// Other walls retain their original non-wall averaging convention.
+    fn refresh_fill(
+        &mut self,
+        gate: &CancelGate,
+    ) -> Result<BTreeMap<u64, [f64; TILE_CELLS]>, FreeSurfaceError3> {
         let mut raw: BTreeMap<u64, [f64; TILE_CELLS]> = BTreeMap::new();
         for &key in self.tiles.keys() {
             check_cancel(gate)?;
             raw.insert(key, core::array::from_fn(|lane| self.fill(key, lane)));
         }
         let mut smooth = BTreeMap::new();
+        let has_planar_contact = self.planar_contact.is_some() || self.planar_contact_field.is_some();
         for &key in self.tiles.keys() {
             check_cancel(gate)?;
             let mut vals = [0.0; TILE_CELLS];
@@ -1071,10 +1092,24 @@ impl FreeSurface3 {
                 let mut acc = raw[&key][lane];
                 let mut count = 1.0;
                 for q in 1..Q3 {
-                    if let Neighbor::Active(nb_key, nb_lane, _) = self.neighbor_state(key, lane, q)
-                    {
-                        acc += raw[&nb_key][nb_lane];
-                        count += 1.0;
+                    match self.neighbor_state(key, lane, q) {
+                        Neighbor::Active(nb_key, nb_lane, _) => {
+                            acc += raw[&nb_key][nb_lane];
+                            count += 1.0;
+                        }
+                        Neighbor::Wall if has_planar_contact => {
+                            let (x, y, z) = Self::global_of(key, lane);
+                            let position = [
+                                x + i64::from(E3[q].0),
+                                y + i64::from(E3[q].1),
+                                z + i64::from(E3[q].2),
+                            ];
+                            if let Some(value) = self.planar_angle_ghost_in(position, &raw) {
+                                acc += value;
+                                count += 1.0;
+                            }
+                        }
+                        Neighbor::Wall => {}
                     }
                 }
                 *out = acc / count;
@@ -1082,7 +1117,7 @@ impl FreeSurface3 {
             smooth.insert(key, vals);
         }
         self.fill_smooth = smooth;
-        Ok(())
+        Ok(raw)
     }
 
     /// Capillary reference density before any imposed external gas load:
@@ -1221,7 +1256,7 @@ impl FreeSurface3 {
             self.admit_surface_tensions(field, gate)?;
         }
         let ledger_before = self.ledger_mass();
-        self.refresh_fill(gate)?;
+        let fills = self.refresh_fill(gate)?;
         let (model, _) = self.grid.collision();
 
         // Collide wet lanes into a post map (canonical order). Gas lanes
@@ -1267,18 +1302,6 @@ impl FreeSurface3 {
             }
             post.insert(key, tile_post);
         }
-
-        // Pre-collision fills (2-D uses fills computed before streaming).
-        let fills: BTreeMap<u64, [f64; TILE_CELLS]> = keys
-            .iter()
-            .map(|&key| {
-                let mut vals = [0.0; TILE_CELLS];
-                for (lane, v) in vals.iter_mut().enumerate() {
-                    *v = self.fill(key, lane);
-                }
-                (key, vals)
-            })
-            .collect();
 
         // Exchange + stream (canonical order), committing per wet lane.
         let mut new_populations: Vec<(u64, usize, [f64; Q3])> = Vec::new();
