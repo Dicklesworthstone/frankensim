@@ -18,12 +18,28 @@ pub(super) struct MomentumWork {
 impl MomentumWork {
     pub(super) fn add_compensated(&mut self, mean: [Dd; 3], momentum: [Dd; 3]) {
         for (mean, delta) in mean.into_iter().zip(momentum) {
-            self.leading = self.leading + Dd::from_f64(mean.hi) * Dd::from_f64(delta.hi);
-            self.cross = self.cross
-                + Dd::from_f64(mean.hi) * Dd::from_f64(delta.lo)
-                + Dd::from_f64(mean.lo) * Dd::from_f64(delta.hi);
-            self.trailing = self.trailing + Dd::from_f64(mean.lo) * Dd::from_f64(delta.lo);
+            self.add_product(mean, delta);
         }
+    }
+
+    fn add_product(&mut self, mean: Dd, delta: Dd) {
+        self.leading = self.leading + Dd::from_f64(mean.hi) * Dd::from_f64(delta.hi);
+        self.cross = self.cross
+            + Dd::from_f64(mean.hi) * Dd::from_f64(delta.lo)
+            + Dd::from_f64(mean.lo) * Dd::from_f64(delta.hi);
+        self.trailing = self.trailing + Dd::from_f64(mean.lo) * Dd::from_f64(delta.lo);
+    }
+
+    pub(super) fn merge(&mut self, other: Self) {
+        self.leading = self.leading + other.leading;
+        self.cross = self.cross + other.cross;
+        self.trailing = self.trailing + other.trailing;
+    }
+
+    pub(super) fn subtract(&mut self, other: Self) {
+        self.leading = self.leading - other.leading;
+        self.cross = self.cross - other.cross;
+        self.trailing = self.trailing - other.trailing;
     }
 
     pub(super) fn add_fixed_inertia(
@@ -152,6 +168,109 @@ pub(super) fn accumulate_spatial_change(
             ),
         );
     }
+}
+
+/// Original admitted mass properties, without a rounded origin-inertia matrix.
+#[derive(Clone, Copy)]
+pub(super) struct SpatialKineticMetric {
+    pub(super) mass: f64,
+    pub(super) center: [f64; 3],
+    pub(super) inertia: [f64; 9],
+}
+
+/// Finite storage defect of splitting an assembled link into its exact inventory.
+///
+/// Returns `K(retained) + K(payload) - K(loaded)` at the attachment geometry.
+/// The original native adjoint maps link twists to payload coordinates. Its
+/// coefficient pullback is differenced BEFORE multiplying the common twist,
+/// so an unchanged dominant spin cannot erase unrelated translational work.
+/// Actual returned payload velocities can differ from that compensated map;
+/// their independent polarized correction is retained, never forced to zero.
+/// The fixed-size arithmetic allocates nothing and constructs no tree matrix.
+pub(super) fn spatial_inventory_decomposition(
+    loaded: SpatialKineticMetric,
+    retained: SpatialKineticMetric,
+    payload: SpatialKineticMetric,
+    payload_from_link: [f64; 36],
+    link_twist: [f64; 6],
+    payload_twist: [f64; 6],
+) -> MomentumWork {
+    let half = Dd::from_f64(0.5);
+    let unit_column = |column: usize| -> [Dd; 6] {
+        core::array::from_fn(|row| Dd::from_f64(f64::from(row == column)))
+    };
+    let center_velocity = |twist: [Dd; 6], center: [f64; 3]| -> [Dd; 3] {
+        let [x, y, z] = center.map(Dd::from_f64);
+        [
+            twist[3] + twist[1] * z - twist[2] * y,
+            twist[4] + twist[2] * x - twist[0] * z,
+            twist[5] + twist[0] * y - twist[1] * x,
+        ]
+    };
+    let transformed: [[Dd; 6]; 6] = core::array::from_fn(|column| {
+        core::array::from_fn(|row| Dd::from_f64(payload_from_link[6 * row + column]))
+    });
+    let retained_center: [[Dd; 3]; 6] =
+        core::array::from_fn(|column| center_velocity(unit_column(column), retained.center));
+    let loaded_center: [[Dd; 3]; 6] =
+        core::array::from_fn(|column| center_velocity(unit_column(column), loaded.center));
+    let payload_center: [[Dd; 3]; 6] =
+        core::array::from_fn(|column| center_velocity(transformed[column], payload.center));
+    let link = link_twist.map(Dd::from_f64);
+    let mut change = MomentumWork::default();
+    for row in 0..6 {
+        for column in row..6 {
+            let mut coefficient = if row < 3 && column < 3 {
+                Dd::from_f64(retained.inertia[3 * row + column])
+                    - Dd::from_f64(loaded.inertia[3 * row + column])
+            } else {
+                Dd::ZERO
+            };
+            for axis in 0..3 {
+                coefficient = coefficient
+                    + (Dd::from_f64(retained.mass)
+                        * retained_center[row][axis]
+                        * retained_center[column][axis]
+                        - Dd::from_f64(loaded.mass)
+                            * loaded_center[row][axis]
+                            * loaded_center[column][axis])
+                    + Dd::from_f64(payload.mass)
+                        * payload_center[row][axis]
+                        * payload_center[column][axis];
+                for other in 0..3 {
+                    coefficient = coefficient
+                        + transformed[row][axis]
+                            * Dd::from_f64(payload.inertia[3 * axis + other])
+                            * transformed[column][other];
+                }
+            }
+            // Each symmetric off-diagonal appears twice in 1/2 u^T ΔM u.
+            let factor = if row == column { half } else { Dd::ONE };
+            change.add_product(link[row], factor * coefficient * link[column]);
+        }
+    }
+    let expected: [Dd; 6] = core::array::from_fn(|row| {
+        (0..6).fold(Dd::ZERO, |sum, column| {
+            sum + transformed[column][row] * link[column]
+        })
+    });
+    let actual = payload_twist.map(Dd::from_f64);
+    let old_center = center_velocity(expected, payload.center);
+    let new_center = center_velocity(actual, payload.center);
+    change.add_compensated(
+        core::array::from_fn(|i| half * old_center[i] + half * new_center[i]),
+        core::array::from_fn(|i| Dd::from_f64(payload.mass) * (new_center[i] - old_center[i])),
+    );
+    let angular_change: [Dd; 3] = core::array::from_fn(|i| actual[i] - expected[i]);
+    change.add_compensated(
+        core::array::from_fn(|i| half * expected[i] + half * actual[i]),
+        core::array::from_fn(|row| {
+            (0..3).fold(Dd::ZERO, |sum, column| {
+                sum + Dd::from_f64(payload.inertia[3 * row + column]) * angular_change[column]
+            })
+        }),
+    );
+    change
 }
 
 #[cfg(test)]
@@ -312,5 +431,170 @@ mod tests {
         }
         // 1/2[4(p+4)^2 + 2(p-8)^2 - 6p^2] = 96 J.
         assert_eq!(change.total().to_f64(), 96.0);
+    }
+}
+
+#[cfg(test)]
+mod inventory_tests {
+    use super::*;
+
+    fn sphere(mass: f64) -> SpatialKineticMetric {
+        SpatialKineticMetric {
+            mass,
+            center: [0.0; 3],
+            inertia: [mass, 0.0, 0.0, 0.0, mass, 0.0, 0.0, 0.0, mass],
+        }
+    }
+
+    fn identity() -> [f64; 36] {
+        core::array::from_fn(|i| f64::from(i / 6 == i % 6))
+    }
+
+    #[test]
+    fn original_inventory_retains_capture_and_release_beside_dominant_spin() {
+        let retained = sphere(2.0);
+        let payload = sphere(2.0);
+        let loaded = sphere(4.0);
+        let old = [0.0, 0.0, 1e18, 0.0, 0.0, 0.0];
+        let incoming = [0.0, 0.0, 1e18, 0.0, 0.0, 2.0];
+        let captured = [0.0, 0.0, 1e18, 0.0, 0.0, 1.0];
+        let mut capture = MomentumWork::default();
+        for (body, before) in [(retained, old), (payload, incoming)] {
+            accumulate_spatial_change(
+                &mut capture,
+                body.mass,
+                body.center,
+                body.inertia,
+                before,
+                body.inertia,
+                captured,
+            );
+        }
+        let decomposition = spatial_inventory_decomposition(
+            loaded,
+            retained,
+            payload,
+            identity(),
+            captured,
+            captured,
+        );
+        capture.subtract(decomposition);
+        assert_eq!(decomposition.total().to_f64(), 0.0);
+        assert_eq!(capture.total().to_f64(), -2.0);
+        let mut release = MomentumWork::default();
+        for (body, after) in [(retained, old), (payload, incoming)] {
+            accumulate_spatial_change(
+                &mut release,
+                body.mass,
+                body.center,
+                body.inertia,
+                captured,
+                body.inertia,
+                after,
+            );
+        }
+        release.merge(decomposition);
+        assert_eq!(release.total().to_f64(), 2.0);
+    }
+
+    #[test]
+    fn unresolved_assembly_coefficient_is_an_independent_signed_defect() {
+        let mut loaded = sphere(4.0);
+        loaded.inertia[0] += 2.0_f64.powi(-40);
+        let velocity = [1.0, 0.0, 1e18, 0.0, 0.0, 0.0];
+        let defect = spatial_inventory_decomposition(
+            loaded,
+            sphere(2.0),
+            sphere(2.0),
+            identity(),
+            velocity,
+            velocity,
+        );
+        assert_eq!(defect.total().to_f64(), -2.0_f64.powi(-41));
+        let mut small_payload = sphere(2.0);
+        small_payload.inertia = sphere(2.0_f64.powi(-54)).inertia;
+        let rounded = SpatialKineticMetric {
+            mass: 4.0,
+            ..sphere(2.0)
+        };
+        let velocity = [0.0, 0.0, 1e12, 0.0, 0.0, 0.0];
+        let defect = spatial_inventory_decomposition(
+            rounded,
+            sphere(2.0),
+            small_payload,
+            identity(),
+            velocity,
+            velocity,
+        );
+        assert_eq!(defect.total().to_f64(), 2.0_f64.powi(-55) * 1e12 * 1e12);
+    }
+
+    #[test]
+    fn rotated_full_tensor_offset_inventory_keeps_actual_payload_rounding() {
+        let retained = SpatialKineticMetric {
+            mass: 2.0,
+            center: [0.5, 0.0, 0.0],
+            inertia: [2.0, 0.25, 0.0, 0.25, 3.0, 0.0, 0.0, 0.0, 4.0],
+        };
+        let payload = SpatialKineticMetric {
+            mass: 2.0,
+            center: [0.0, 0.5, 0.0],
+            inertia: [3.0, 0.5, 0.0, 0.5, 4.0, 0.0, 0.0, 0.0, 5.0],
+        };
+        let loaded = SpatialKineticMetric {
+            mass: 4.0,
+            center: [0.5, 0.0, 0.0],
+            inertia: [6.0, -0.25, 0.0, -0.25, 6.0, 0.0, 0.0, 0.0, 9.0],
+        };
+        // Payload-to-link is a quarter-turn about z, translated by (1,0,0).
+        let payload_from_link = [
+            0., 1., 0., 0., 0., 0., -1., 0., 0., 0., 0., 0., 0., 0., 1., 0., 0., 0., 0., 0., 1.,
+            0., 1., 0., 0., 0., 0., -1., 0., 0., 0., -1., 0., 0., 0., 1.,
+        ];
+        let link = [2.0, -3.0, 4.0, -1.0, 2.0, 0.5];
+        let mut actual = [-3.0, -2.0, 4.0, 6.0, 1.0, 3.5];
+        assert_eq!(
+            spatial_inventory_decomposition(
+                loaded,
+                retained,
+                payload,
+                payload_from_link,
+                link,
+                actual,
+            )
+            .total()
+            .to_f64(),
+            0.0
+        );
+        actual[3] += 1.0;
+        // Payload COM x-speed really changes 4 -> 5 m/s at m=2.
+        assert_eq!(
+            spatial_inventory_decomposition(
+                loaded,
+                retained,
+                payload,
+                payload_from_link,
+                link,
+                actual,
+            )
+            .total()
+            .to_f64(),
+            9.0
+        );
+        let mut changed = loaded;
+        changed.inertia[0] += 0.125;
+        assert_eq!(
+            spatial_inventory_decomposition(
+                changed,
+                retained,
+                payload,
+                payload_from_link,
+                link,
+                actual,
+            )
+            .total()
+            .to_f64(),
+            8.75
+        );
     }
 }

@@ -32,13 +32,13 @@ use self::constraints::{
 };
 use super::super::prescribed::PrescribedBaseMotionState;
 use super::super::reconfigure::{self, ReconfigurationControls, ReconfigurationError};
-use super::super::{
-    MAX_FREE_FLOATING_STEP_LINKS, SpatialSum, kinetic_link_increment, sum_products,
-};
+use super::super::{MAX_FREE_FLOATING_STEP_LINKS, SpatialSum, sum_products};
 use super::{
-    PayloadAttachment, PayloadError, PayloadState, account_boost, add_wrench, combine_inertias,
-    energy_in_frame, finite, payload_at_link, poll, replace_link_inertia, twist_in_frame,
+    PayloadAttachment, PayloadError, PayloadState, account_boost, accumulate_body_change,
+    add_wrench, attachment_decomposition, combine_inertias, energy_in_frame, finite,
+    payload_at_link, poll, replace_link_inertia, twist_in_frame,
 };
+use crate::MomentumWork;
 use crate::articulated::motion::reconfigure::constraints::JointConstraint;
 use crate::articulated::motion::spatial_loads::implicit::distance::{
     BilateralImpulseConfig, BilateralLoop,
@@ -96,6 +96,9 @@ pub struct SupportedPayloadBalance {
     pub maximum_normalized_momentum_residual: f64,
     /// Actual lab-frame kinetic change or passive-release decomposition defect, J.
     pub kinetic_energy_change_j: f64,
+    /// Signed lab-frame assembled/split inertia representation defect, J.
+    /// This storage contribution is neither supplied work nor physical loss.
+    pub inventory_decomposition_j: f64,
     /// Support impulse paired with the unchanged prescribed base twist, J.
     pub support_work_j: f64,
     /// Constant world velocity of the inertial energy-accounting frame, m/s.
@@ -106,6 +109,8 @@ pub struct SupportedPayloadBalance {
     pub kinetic_after_j: f64,
     /// Actual common-frame kinetic change or passive-release decomposition defect, J.
     pub accounting_kinetic_energy_change_j: f64,
+    /// The inventory representation defect in the same accounting frame, J.
+    pub accounting_inventory_decomposition_j: f64,
     /// Support work paired with the base twist in that same frame, J.
     pub accounting_support_work_j: f64,
     /// Common-frame kinetic change minus support/separation and release-reaction
@@ -212,6 +217,13 @@ fn capture_evaluated(
         link_from_payload,
     )?;
     let model_after = replace_link_inertia(model, target_link, loaded_inertia)?;
+    let attachment = PayloadAttachment {
+        target_link,
+        retained_link: model.links()[target_link].clone(),
+        loaded_inertia,
+        link_from_payload,
+        payload_inertia: payload.inertia,
+    };
     let attached_before =
         payload_at_link(&before, target_link, link_from_payload, payload.inertia)?;
     let mismatch = payload
@@ -310,8 +322,8 @@ fn capture_evaluated(
     poll(&mut cancelled)?;
 
     let mut change = SpatialSum::default();
-    let mut kinetic_change = Dd::ZERO;
-    let mut centered_change = Dd::ZERO;
+    let mut kinetic_change = MomentumWork::default();
+    let mut centered_change = MomentumWork::default();
     let mut removed = Dd::ZERO;
     // Negated physical increments are external inputs to zero-bias RNEA,
     // which subtracts them and therefore projects the positive increments.
@@ -331,16 +343,13 @@ fn capture_evaluated(
             &[pose.translation()],
         );
         projected.push(negate(impulse));
-        kinetic_change =
-            kinetic_change + kinetic_link_increment(link.inertia(), pose, old, pose, new)?;
-        centered_change = centered_change
-            + kinetic_link_increment(
-                link.inertia(),
-                pose,
-                twist_in_frame(old, pose, boost)?,
-                pose,
-                twist_in_frame(new, pose, boost)?,
-            )?;
+        accumulate_body_change(&mut kinetic_change, link.inertia(), old, new);
+        accumulate_body_change(
+            &mut centered_change,
+            link.inertia(),
+            twist_in_frame(old, pose, boost)?,
+            twist_in_frame(new, pose, boost)?,
+        );
         removed = removed + Dd::from_f64(link.inertia().kinetic_energy(delta)?);
     }
     let payload_delta = payload_after.twist_body.minus(payload.twist_body);
@@ -360,22 +369,39 @@ fn capture_evaluated(
         projected[target_link],
         negate(payload_impulse.transform_by(&link_from_payload)),
     );
-    kinetic_change = kinetic_change
-        + kinetic_link_increment(
-            payload.inertia,
-            payload.world_from_body,
-            payload.twist_body,
-            payload.world_from_body,
-            payload_after.twist_body,
-        )?;
-    centered_change = centered_change
-        + kinetic_link_increment(
-            payload.inertia,
-            payload.world_from_body,
-            twist_in_frame(payload.twist_body, payload.world_from_body, boost)?,
-            payload.world_from_body,
-            twist_in_frame(payload_after.twist_body, payload.world_from_body, boost)?,
-        )?;
+    accumulate_body_change(
+        &mut kinetic_change,
+        payload.inertia,
+        payload.twist_body,
+        payload_after.twist_body,
+    );
+    let centered_payload_after = twist_in_frame(
+        payload_after.twist_body,
+        payload_after.world_from_body,
+        boost,
+    )?;
+    accumulate_body_change(
+        &mut centered_change,
+        payload.inertia,
+        twist_in_frame(payload.twist_body, payload.world_from_body, boost)?,
+        centered_payload_after,
+    );
+    let decomposition = attachment_decomposition(
+        &attachment,
+        after.body_twist[target_link],
+        payload_after.twist_body,
+    )?;
+    let centered_decomposition = attachment_decomposition(
+        &attachment,
+        twist_in_frame(
+            after.body_twist[target_link],
+            after.world_from_link[target_link],
+            boost,
+        )?,
+        centered_payload_after,
+    )?;
+    kinetic_change.subtract(decomposition);
+    centered_change.subtract(centered_decomposition);
     removed = removed + Dd::from_f64(payload.inertia.kinetic_energy(payload_delta)?);
     poll(&mut cancelled)?;
     let mut joint_momentum_residual = inverse_dynamics(
@@ -445,7 +471,7 @@ fn capture_evaluated(
     // final-rate pairing J_constraint dot v_after as an admitted defect.
     // Its separately bounded midpoint work is not subtracted from this Q.
     let energy_residual_j = finite(
-        (centered_change - support_work + removed).to_f64(),
+        (centered_change.total() - support_work + removed).to_f64(),
         "supported_payload.energy_residual",
     )?;
     if energy_residual_j.abs() > controls.energy_tolerance_j {
@@ -468,16 +494,24 @@ fn capture_evaluated(
         joint_momentum_residual,
         maximum_normalized_momentum_residual,
         kinetic_energy_change_j: finite(
-            kinetic_change.to_f64(),
+            kinetic_change.total().to_f64(),
             "supported_payload.kinetic_change",
+        )?,
+        inventory_decomposition_j: finite(
+            -decomposition.total().to_f64(),
+            "supported_payload.inventory_decomposition",
         )?,
         support_work_j: response.support_work,
         accounting_boost_world: boost,
         kinetic_before_j,
         kinetic_after_j,
         accounting_kinetic_energy_change_j: finite(
-            centered_change.to_f64(),
+            centered_change.total().to_f64(),
             "supported_payload.centered_change",
+        )?,
+        accounting_inventory_decomposition_j: finite(
+            -centered_decomposition.total().to_f64(),
+            "supported_payload.centered_inventory_decomposition",
         )?,
         accounting_support_work_j: finite(
             support_work.to_f64(),
@@ -491,13 +525,7 @@ fn capture_evaluated(
             capture: SupportedPayloadCapture {
                 model_after,
                 state_after,
-                attachment: PayloadAttachment {
-                    target_link,
-                    retained_link: model.links()[target_link].clone(),
-                    loaded_inertia,
-                    link_from_payload,
-                    payload_inertia: payload.inertia,
-                },
+                attachment,
                 payload_after,
                 removed_relative_energy_j,
                 balance,

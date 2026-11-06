@@ -11,8 +11,9 @@ use super::super::release::{
     SeparationImpulse, admit_attachment, admit_separation_impulse, separation_impulses,
 };
 use super::super::{
-    PayloadAttachment, PayloadError, PayloadState, account_boost, energy_in_frame, finite,
-    payload_at_link, poll, replace_link_inertia, twist_in_frame,
+    PayloadAttachment, PayloadError, PayloadState, account_boost, accumulate_body_change,
+    attachment_decomposition, energy_in_frame, finite, payload_at_link, poll, replace_link_inertia,
+    twist_in_frame,
 };
 use super::bilateral::{self, SupportedBilateralPayloadReaction};
 use super::constraints::{
@@ -25,7 +26,7 @@ use crate::articulated::motion::reconfigure::constraints::JointConstraint;
 use crate::articulated::motion::spatial_loads::implicit::distance::{
     BilateralImpulseConfig, BilateralLoop,
 };
-use crate::articulated::motion::{SpatialSum, kinetic_link_increment, sum_products};
+use crate::articulated::motion::{SpatialSum, sum_products};
 use crate::articulated::{
     ArticulatedModel, BaseState, forward_kinematics, inverse_dynamics, momentum_from_kinematics,
     solve_floating_base_system, validate_twist, validate_wrench,
@@ -362,18 +363,12 @@ pub(super) fn release_evaluated(
         payload_before.world_from_body,
         boost,
     )?;
-    let decomposition = |target_velocity, payload_velocity| -> Result<Dd, PayloadError> {
-        let change = Dd::from_f64(retained.kinetic_energy(target_velocity)?)
-            + Dd::from_f64(payload_before.inertia.kinetic_energy(payload_velocity)?)
-            - Dd::from_f64(loaded.kinetic_energy(target_velocity)?);
-        finite(
-            change.to_f64(),
-            "supported_payload_release.energy_decomposition",
-        )?;
-        Ok(change)
-    };
-    let mut kinetic_change = decomposition(target_twist, payload_before.twist_body)?;
-    let mut centered_change = decomposition(centered_target, centered_payload)?;
+    let decomposition =
+        attachment_decomposition(attachment, target_twist, payload_before.twist_body)?;
+    let centered_decomposition =
+        attachment_decomposition(attachment, centered_target, centered_payload)?;
+    let mut kinetic_change = decomposition;
+    let mut centered_change = centered_decomposition;
     let mut supplied_work = Dd::ZERO;
     if !no_impulse {
         for (index, link) in model_after.links().iter().enumerate() {
@@ -396,16 +391,13 @@ pub(super) fn release_evaluated(
             } else {
                 projected[index] = negate(actual);
             }
-            kinetic_change =
-                kinetic_change + kinetic_link_increment(link.inertia(), pose, old, pose, new)?;
-            centered_change = centered_change
-                + kinetic_link_increment(
-                    link.inertia(),
-                    pose,
-                    twist_in_frame(old, pose, boost)?,
-                    pose,
-                    twist_in_frame(new, pose, boost)?,
-                )?;
+            accumulate_body_change(&mut kinetic_change, link.inertia(), old, new);
+            accumulate_body_change(
+                &mut centered_change,
+                link.inertia(),
+                twist_in_frame(old, pose, boost)?,
+                twist_in_frame(new, pose, boost)?,
+            );
         }
         let payload_delta = payload_after.twist_body.minus(payload_before.twist_body);
         let actual = payload_before.inertia.momentum(payload_delta)?;
@@ -419,22 +411,18 @@ pub(super) fn release_evaluated(
         for (sum, value) in local.iter_mut().zip(target_actual.to_array()) {
             *sum = *sum + Dd::from_f64(value);
         }
-        kinetic_change = kinetic_change
-            + kinetic_link_increment(
-                payload_before.inertia,
-                pose,
-                payload_before.twist_body,
-                pose,
-                payload_after.twist_body,
-            )?;
-        centered_change = centered_change
-            + kinetic_link_increment(
-                payload_before.inertia,
-                pose,
-                centered_payload,
-                pose,
-                twist_in_frame(payload_after.twist_body, pose, boost)?,
-            )?;
+        accumulate_body_change(
+            &mut kinetic_change,
+            payload_before.inertia,
+            payload_before.twist_body,
+            payload_after.twist_body,
+        );
+        accumulate_body_change(
+            &mut centered_change,
+            payload_before.inertia,
+            centered_payload,
+            twist_in_frame(payload_after.twist_body, pose, boost)?,
+        );
         supplied_work =
             (sum_products(
                 impulse_on_retained_link.to_array(),
@@ -533,7 +521,8 @@ pub(super) fn release_evaluated(
         )) * Dd::from_f64(0.5)
     });
     let energy_residual_j = finite(
-        (centered_change - centered_support_work - supplied_work - constraint_work).to_f64(),
+        (centered_change.total() - centered_support_work - supplied_work - constraint_work)
+            .to_f64(),
         "supported_payload_release.energy_residual",
     )?;
     if energy_residual_j.abs() > controls.energy_tolerance_j {
@@ -562,8 +551,12 @@ pub(super) fn release_evaluated(
         joint_momentum_residual,
         maximum_normalized_momentum_residual,
         kinetic_energy_change_j: finite(
-            kinetic_change.to_f64(),
+            kinetic_change.total().to_f64(),
             "supported_payload_release.kinetic_change",
+        )?,
+        inventory_decomposition_j: finite(
+            decomposition.total().to_f64(),
+            "supported_payload_release.inventory_decomposition",
         )?,
         support_work_j: finite(
             support_work.to_f64(),
@@ -573,8 +566,12 @@ pub(super) fn release_evaluated(
         kinetic_before_j,
         kinetic_after_j,
         accounting_kinetic_energy_change_j: finite(
-            centered_change.to_f64(),
+            centered_change.total().to_f64(),
             "supported_payload_release.centered_change",
+        )?,
+        accounting_inventory_decomposition_j: finite(
+            centered_decomposition.total().to_f64(),
+            "supported_payload_release.centered_inventory_decomposition",
         )?,
         accounting_support_work_j: finite(
             centered_support_work.to_f64(),

@@ -7,13 +7,15 @@
 
 use super::super::{
     PayloadAttachment, PayloadBalance, PayloadControls, PayloadError, PayloadState, account_boost,
-    bilateral, energy_in_frame, energy_in_frame_many, finish_common_frame_balance, finite,
-    payload_at_link, poll, system_totals, system_totals_many, validate_inputs,
+    accumulate_body_change, attachment_decomposition, bilateral, energy_in_frame,
+    energy_in_frame_many, finish_common_frame_balance, finite, payload_at_link, poll,
+    system_totals, system_totals_many, validate_inputs,
 };
 use super::{
     SeparationImpulse, add_joint_delta, admit_attachment_link, admit_separation_impulse, centered,
     separation_impulses,
 };
+use crate::MomentumWork;
 use crate::articulated::motion::reconfigure::constraints::{
     JointConstraint, PreparedJointConstraints, admit_constraints, apply_rows,
 };
@@ -308,6 +310,23 @@ pub(in crate::articulated::motion::inventory) fn release_evaluated(
         &mut cancelled,
     )?;
     let mut source_work = Dd::ZERO;
+    let mut kinetic_change = MomentumWork::default();
+    let mut decomposition = MomentumWork::default();
+    for (index, link) in model_after.links().iter().enumerate() {
+        if index % 64 == 0 {
+            poll(&mut cancelled)?;
+        }
+        accumulate_body_change(
+            &mut kinetic_change,
+            link.inertia(),
+            centered(
+                before.body_twist[index],
+                before.world_from_link[index],
+                boost,
+            )?,
+            centered(after.body_twist[index], after.world_from_link[index], boost)?,
+        );
+    }
     for (index, ((input, payload_before), output)) in inputs
         .iter()
         .zip(&payloads_before)
@@ -318,6 +337,30 @@ pub(in crate::articulated::motion::inventory) fn release_evaluated(
             poll(&mut cancelled)?;
         }
         let target = input.attachment.target_link;
+        let payload_before_centered = centered(
+            payload_before.twist_body,
+            payload_before.world_from_body,
+            boost,
+        )?;
+        accumulate_body_change(
+            &mut kinetic_change,
+            payload_before.inertia,
+            payload_before_centered,
+            centered(
+                output.payload_after.twist_body,
+                output.payload_after.world_from_body,
+                boost,
+            )?,
+        );
+        decomposition.merge(attachment_decomposition(
+            input.attachment,
+            centered(
+                before.body_twist[target],
+                before.world_from_link[target],
+                boost,
+            )?,
+            payload_before_centered,
+        )?);
         let pair = mean_work(
             output.impulse_on_retained_link,
             centered(
@@ -346,6 +389,7 @@ pub(in crate::articulated::motion::inventory) fn release_evaluated(
         output.supplied_work_j = finite(pair.to_f64(), "release pair midpoint work")?;
         source_work = source_work + pair;
     }
+    kinetic_change.merge(decomposition);
     let supplied_work_j = finite(source_work.to_f64(), "simultaneous release midpoint work")?;
     if supplied_work_j.abs() > controls.maximum_energy_exchange_j {
         return Err(PayloadError::EnergyExchange {
@@ -353,7 +397,7 @@ pub(in crate::articulated::motion::inventory) fn release_evaluated(
             maximum_j: controls.maximum_energy_exchange_j,
         });
     }
-    let constraint_work_j = if let Some(reaction) = &bilateral_reaction {
+    let constraint_work = if let Some(reaction) = &bilateral_reaction {
         bilateral::constraint_work(
             &reaction.constraint_body_impulses,
             &reaction.constraint_joint_impulses,
@@ -364,23 +408,22 @@ pub(in crate::articulated::motion::inventory) fn release_evaluated(
             boost,
             &mut cancelled,
         )?
-        .to_f64()
     } else {
         let rates_before = apply_rows(constraints, &state.joint_velocity, &mut cancelled)?;
         let rates_after = apply_rows(constraints, &state_after.joint_velocity, &mut cancelled)?;
-        let mut work = 0.0;
+        let mut work = Dd::ZERO;
         for ((&multiplier, &initial), &final_rate) in
             multipliers.iter().zip(&rates_before).zip(&rates_after)
         {
-            work = finite(
-                multiplier.mul_add(0.5 * initial + 0.5 * final_rate, work),
-                "release constraint work",
-            )?;
+            work = work
+                + Dd::from_f64(multiplier)
+                    * (Dd::from_f64(0.5 * initial) + Dd::from_f64(0.5 * final_rate));
         }
         work
     };
+    let constraint_work_j = finite(constraint_work.to_f64(), "release constraint work")?;
     let energy_residual_j = finite(
-        kinetic_after_j - kinetic_before_j - supplied_work_j - constraint_work_j,
+        (kinetic_change.total() - source_work - constraint_work).to_f64(),
         "release common-frame energy residual",
     )?;
     let balance = finish_common_frame_balance(
@@ -392,6 +435,8 @@ pub(in crate::articulated::motion::inventory) fn release_evaluated(
         boost,
         kinetic_before_j,
         kinetic_after_j,
+        kinetic_change.total().to_f64(),
+        decomposition.total().to_f64(),
         energy_residual_j,
         controls,
         &mut cancelled,

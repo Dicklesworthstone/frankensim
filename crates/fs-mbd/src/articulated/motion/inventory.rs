@@ -38,9 +38,13 @@ use super::spatial_loads::implicit::distance::BilateralLoopError;
 use super::{
     FreeFloatingMotionError, FreeFloatingMotionState, MAX_FREE_FLOATING_STEP_LINKS, SpatialSum,
 };
+use crate::MomentumWork;
 use crate::articulated::{
     ArticulatedError, ArticulatedModel, ArticulatedMomentum, BaseState, Kinematics, Link,
     SpatialInertia, inverse_dynamics, momentum_from_kinematics, validate_slice, validate_twist,
+};
+use crate::kinetic_energy::{
+    SpatialKineticMetric, accumulate_spatial_change, spatial_inventory_decomposition,
 };
 use core::fmt;
 use fs_ga::{GaError, Mat3, Se3, Twist, Vec3, Wrench};
@@ -151,6 +155,12 @@ pub struct PayloadBalance {
     pub kinetic_before_j: f64,
     /// Complete-system kinetic energy in the same translating frame after, J.
     pub kinetic_after_j: f64,
+    /// Actual signed common-frame storage change, retained before total rounding.
+    /// Includes the independently evaluated inventory decomposition defect.
+    pub kinetic_energy_change_j: f64,
+    /// Signed common-frame correction from original constituent storage to the
+    /// actual assembled/split model inventories, J. No part is heat or work.
+    pub inventory_decomposition_j: f64,
     /// Actual signed common-frame energy defect; no numerical defect is heat.
     pub energy_residual_j: f64,
 }
@@ -571,6 +581,48 @@ fn twist_in_frame(twist: Twist, pose: Se3, boost: Vec3) -> Result<Twist, Payload
     )))
 }
 
+fn accumulate_body_change(
+    change: &mut MomentumWork,
+    inertia: SpatialInertia,
+    before: Twist,
+    after: Twist,
+) {
+    let center = inertia.center_of_mass();
+    let tensor = inertia.inertia_com().m;
+    accumulate_spatial_change(
+        change,
+        inertia.mass(),
+        [center.x, center.y, center.z],
+        tensor,
+        before.to_array(),
+        tensor,
+        after.to_array(),
+    );
+}
+
+fn attachment_decomposition(
+    attachment: &PayloadAttachment,
+    link_twist: Twist,
+    payload_twist: Twist,
+) -> Result<MomentumWork, PayloadError> {
+    let metric = |inertia: SpatialInertia| {
+        let center = inertia.center_of_mass();
+        SpatialKineticMetric {
+            mass: inertia.mass(),
+            center: [center.x, center.y, center.z],
+            inertia: inertia.inertia_com().m,
+        }
+    };
+    Ok(spatial_inventory_decomposition(
+        metric(attachment.loaded_inertia),
+        metric(attachment.retained_inertia()),
+        metric(attachment.payload_inertia),
+        attachment.link_from_payload.inverse()?.adjoint().m,
+        link_twist.to_array(),
+        payload_twist.to_array(),
+    ))
+}
+
 fn energy_in_frame(
     model: &ArticulatedModel,
     kin: &Kinematics,
@@ -624,6 +676,8 @@ fn finish_common_frame_balance(
     boost: Vec3,
     kinetic_before_j: f64,
     kinetic_after_j: f64,
+    kinetic_energy_change_j: f64,
+    inventory_decomposition_j: f64,
     energy_residual_j: f64,
     controls: PayloadControls<'_>,
     cancelled: &mut impl FnMut() -> bool,
@@ -664,6 +718,11 @@ fn finish_common_frame_balance(
         "payload common-frame kinetic energy before",
     )?;
     finite(kinetic_after_j, "payload common-frame kinetic energy after")?;
+    finite(
+        kinetic_energy_change_j,
+        "payload common-frame kinetic change",
+    )?;
+    finite(inventory_decomposition_j, "payload inventory decomposition")?;
     finite(energy_residual_j, "payload common-frame energy residual")?;
     if energy_residual_j.abs() > controls.energy_tolerance_j {
         return Err(PayloadError::EnergyResidual {
@@ -684,6 +743,8 @@ fn finish_common_frame_balance(
         accounting_boost_world: boost,
         kinetic_before_j,
         kinetic_after_j,
+        kinetic_energy_change_j,
+        inventory_decomposition_j,
         energy_residual_j,
     })
 }

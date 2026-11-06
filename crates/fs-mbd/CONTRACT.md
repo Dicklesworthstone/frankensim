@@ -2077,6 +2077,27 @@ internal separation impulses cancel and only gear reactions change total
 projected joint momentum. Absolute separation-work and finite gear-work
 allowances are independent, and numerical residuals remain explicit.
 
+Capture and release retain `kinetic_energy_change_j` from every original
+retained link and physical payload through the shared compensated spatial
+kernel. Absolute common-frame energies remain diagnostics. Repeated-target
+inventory prefixes telescope at one accepted endpoint, without sequential
+dynamics. Supported entries retain the same calculation in laboratory and
+accounting frames.
+
+`inventory_decomposition_j` separately reports the signed finite difference
+between assembled and constituent storage. Original spatial coefficients are
+differenced before the velocity quadratic; the native payload adjoint and a
+polarized correction retain its actual rounded endpoint twist. Capture and
+release apply opposite decomposition signs. This gated numerical storage defect
+is never capture heat, release work or support work. The supported receipt also
+retains `accounting_inventory_decomposition_j`. Added accounting is linear in
+links plus payloads, with fixed stack storage per local decomposition.
+Three executed native kernel groups cover small signed exchange beside dominant
+spin, unresolved inertia coefficients, full tensors, offset COMs and payload
+transform rounding. Four integration groups specify free/locked, batch and
+driven-support lifecycles and assembly-defect refusal; those complete native
+integration tests remain unexecuted in this environment.
+
 Three focused native regressions verify zero-impulse release after native
 motion and continued motion of both outputs; a combined point-force/free-couple
 case with 0.99 J work under a billion-scale uniform velocity; locked-joint recoil

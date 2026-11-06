@@ -6,10 +6,11 @@
 
 use super::{
     PayloadAttachment, PayloadBalance, PayloadControls, PayloadError, PayloadState, account_boost,
-    bilateral, combine_inertias, energy_in_frame, energy_in_frame_many,
-    finish_common_frame_balance, finite, payload_at_link, poll, system_totals, system_totals_many,
-    twist_in_frame, validate_inputs,
+    accumulate_body_change, attachment_decomposition, bilateral, combine_inertias, energy_in_frame,
+    energy_in_frame_many, finish_common_frame_balance, finite, payload_at_link, poll,
+    system_totals, system_totals_many, twist_in_frame, validate_inputs,
 };
+use crate::MomentumWork;
 use crate::articulated::motion::reconfigure::constraints::{
     JointConstraint, PreparedJointConstraints, admit_constraints, apply_rows,
 };
@@ -342,6 +343,8 @@ pub(super) fn capture_evaluated(
     }
     let after = system_totals(&model_after, &state_after, &after_kin, None, &mut cancelled)?;
     let mut removed = Dd::ZERO;
+    let mut kinetic_change = MomentumWork::default();
+    let mut decomposition = MomentumWork::default();
     for (index, link) in model.links().iter().enumerate() {
         if index % 64 == 0 {
             poll(&mut cancelled)?;
@@ -351,8 +354,27 @@ pub(super) fn capture_evaluated(
                 + Dd::from_f64(link.inertia().kinetic_energy(
                     before_kin.body_twist[index].minus(after_kin.body_twist[index]),
                 )?);
+        accumulate_body_change(
+            &mut kinetic_change,
+            link.inertia(),
+            twist_in_frame(
+                before_kin.body_twist[index],
+                before_kin.world_from_link[index],
+                boost,
+            )?,
+            twist_in_frame(
+                after_kin.body_twist[index],
+                after_kin.world_from_link[index],
+                boost,
+            )?,
+        );
     }
-    for (index, (input, attached)) in inputs.iter().zip(&payloads_after).enumerate() {
+    for (index, ((input, attached), attachment)) in inputs
+        .iter()
+        .zip(&payloads_after)
+        .zip(&attachments)
+        .enumerate()
+    {
         if index % 64 == 0 {
             poll(&mut cancelled)?;
         }
@@ -363,7 +385,30 @@ pub(super) fn capture_evaluated(
                     .inertia
                     .kinetic_energy(input.payload.twist_body.minus(attached.twist_body))?,
             );
+        let centered_after = twist_in_frame(attached.twist_body, attached.world_from_body, boost)?;
+        accumulate_body_change(
+            &mut kinetic_change,
+            input.payload.inertia,
+            twist_in_frame(
+                input.payload.twist_body,
+                input.payload.world_from_body,
+                boost,
+            )?,
+            centered_after,
+        );
+        decomposition.merge(attachment_decomposition(
+            attachment,
+            twist_in_frame(
+                after_kin.body_twist[input.target_link],
+                after_kin.world_from_link[input.target_link],
+                boost,
+            )?,
+            centered_after,
+        )?);
     }
+    // The inventory folds telescope at ONE accepted endpoint, including
+    // repeated targets. Their finite assembly defect is separate from loss.
+    kinetic_change.subtract(decomposition);
     let removed_relative_energy_j = finite(removed.to_f64(), "payload removed relative energy")?;
     if removed_relative_energy_j < 0.0 {
         return Err(PayloadError::Invalid("negative capture relative energy"));
@@ -409,7 +454,7 @@ pub(super) fn capture_evaluated(
     // The loss is the complete passive projection onto the loaded tree and
     // admitted gear rows. Retain finite gear work separately, never as heat.
     let energy_residual_j = finite(
-        kinetic_after_j - kinetic_before_j + removed_relative_energy_j,
+        (kinetic_change.total() + removed).to_f64(),
         "payload common-frame capture energy residual",
     )?;
     let balance = finish_common_frame_balance(
@@ -421,6 +466,8 @@ pub(super) fn capture_evaluated(
         boost,
         kinetic_before_j,
         kinetic_after_j,
+        kinetic_change.total().to_f64(),
+        -decomposition.total().to_f64(),
         energy_residual_j,
         controls,
         &mut cancelled,
