@@ -283,6 +283,158 @@ fn g1_exothermic_uv_reactor_conserves_energy_and_reaches_independent_equilibrium
 }
 
 #[test]
+fn reactive_entropy_is_unchanged_by_accepted_extent_rebasing() {
+    for fixed_pressure in [false, true] {
+        let offset = 2.0_f64.powi(50);
+        let mechanism = mechanism(
+            vec![
+                source("A", 0.01, 4.0, 0.0, offset),
+                source("B", 0.01, 4.0, -12000.0, offset + 1.0),
+            ],
+            vec![1, 1],
+            vec![reaction("A-B", &[("A", 1)], &[("B", 1)], 5.0)],
+        );
+        let mut reactor = solve::Reactor::new(mechanism, controls(2e-5)).unwrap();
+        if fixed_pressure {
+            reactor.prepare_pressure().unwrap();
+        }
+        let volume = 0.01;
+        reactor
+            .initialize(
+                &[Amount::new(1.0), Amount::new(0.0)],
+                Volume::new(volume),
+                fixed_pressure.then(|| Pressure::new(R * 500.0 / volume)),
+                Temperature::new(500.0),
+                None,
+                &mut || false,
+            )
+            .unwrap();
+        let initial = reactor
+            .resolve(&[0.0], 500.0, Sum::default(), &mut || false)
+            .unwrap();
+        let mut state = initial;
+        for increment in [20.0, 10.0] {
+            let before = reactor
+                .resolve(
+                    &[increment],
+                    state.temperature.value(),
+                    Sum::default(),
+                    &mut || false,
+                )
+                .unwrap();
+            let concentrations = reactor.concentrations().to_vec();
+            reactor.rebase(&concentrations, &[increment]).unwrap();
+            state = reactor
+                .resolve(
+                    &[0.0],
+                    before.temperature.value(),
+                    Sum::default(),
+                    &mut || false,
+                )
+                .unwrap();
+            assert!((state.temperature.value() - before.temperature.value()).abs() < 1e-10);
+            assert!(
+                (state
+                    .entropy_increment_density_j_m3_k
+                    .difference(before.entropy_increment_density_j_m3_k)
+                    * volume)
+                    .abs()
+                    < 1e-11
+            );
+        }
+        let a = reactor.concentrations()[0] * volume;
+        let b = reactor.concentrations()[1] * volume;
+        let capacity_r = if fixed_pressure { 4.0 } else { 3.0 };
+        let expected = R
+            * (capacity_r * (state.temperature.value() / 500.0).ln() + b - a * a.ln() - b * b.ln());
+        let entropy = state
+            .entropy_increment_density_j_m3_k
+            .difference(initial.entropy_increment_density_j_m3_k)
+            * volume;
+        assert!((entropy - expected).abs() < 1e-10);
+    }
+}
+
+#[test]
+fn reactive_entropy_retains_mixing_and_affinity_under_conserved_reference_shifts() {
+    for method in [
+        IsochoricKineticsMethod::BackwardEuler,
+        IsochoricKineticsMethod::Sdirk2,
+    ] {
+        for fixed_pressure in [false, true] {
+            for entropy_difference_r in [0.0, 1.0] {
+                let mut baseline: Option<[f64; 4]> = None;
+                for offset in [0.0, 2.0_f64.powi(50), -2.0_f64.powi(50)] {
+                    let mechanism = mechanism(
+                        vec![
+                            source("A", 0.01, 4.0, 0.0, offset),
+                            source("B", 0.01, 4.0, 0.0, offset + entropy_difference_r),
+                        ],
+                        vec![1, 1],
+                        vec![reaction("A-B", &[("A", 1)], &[("B", 1)], 5.0)],
+                    );
+                    let controls = IsochoricKineticsSolve {
+                        method,
+                        ..controls(2e-5)
+                    };
+                    let (temperature, a, b, entropy, minimum_production) = if fixed_pressure {
+                        let result = crate::chemistry::isobaric::advance_adiabatic(
+                            &mechanism,
+                            &[(id("A"), Amount::new(1.0))],
+                            Pressure::new(R * 500.0 / 0.01),
+                            Temperature::new(500.0),
+                            Time::new(0.2),
+                            controls,
+                            || false,
+                        )
+                        .unwrap();
+                        (
+                            result.temperature().value(),
+                            result.amounts()[0].value(),
+                            result.amounts()[1].value(),
+                            result.balance().entropy_change_j_k,
+                            result.balance().minimum_step_entropy_production_j_k,
+                        )
+                    } else {
+                        let result = run(&mechanism, 500.0, 0.2, controls);
+                        (
+                            result.temperature().value(),
+                            result.amounts()[0].value(),
+                            result.amounts()[1].value(),
+                            result.balance().entropy_change_j_k,
+                            result.balance().minimum_step_entropy_production_j_k,
+                        )
+                    };
+                    // Equal heat capacities and formation energies keep T and N
+                    // fixed. Entropy consists only of the retained reaction
+                    // entropy and ideal mixing, irrespective of the datum.
+                    let expected_entropy = R * (b * entropy_difference_r - a * a.ln() - b * b.ln());
+                    assert!((temperature - 500.0).abs() < 2e-9);
+                    assert!(
+                        (entropy - expected_entropy).abs() < 2e-10,
+                        "{method:?}, fixed_p={fixed_pressure}, reference={offset}: S={entropy}, expected={expected_entropy}"
+                    );
+                    assert!(minimum_production >= -controls.entropy_tolerance_j_k);
+                    // An unequal species entropy shift changes detailed balance;
+                    // it must never be discarded as an elemental reference.
+                    let reverse = 5.0 * (-entropy_difference_r).exp();
+                    let expected_b = 5.0 / (5.0 + reverse) * (1.0 - (-(5.0 + reverse) * 0.2).exp());
+                    assert!((b - expected_b).abs() < 2e-3);
+                    let actual = [temperature, a, b, entropy];
+                    if let Some(original) = baseline {
+                        for (actual, original) in actual.into_iter().zip(original) {
+                            assert!((actual - original).abs() < 2e-10);
+                        }
+                    } else {
+                        baseline = Some(actual);
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn g3_reactive_temperature_tracks_actual_products_under_large_formation_references() {
     for reaction_energy_r in [1024.0, 2048.0] {
         let mut baseline: Option<(f64, f64)> = None;

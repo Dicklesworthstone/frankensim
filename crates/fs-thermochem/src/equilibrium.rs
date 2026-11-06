@@ -619,7 +619,7 @@ impl IdealGasReactionEquilibriumV1 {
         }
 
         let basis = ReactionCaloricBasis::new(temperature);
-        let (_, _, delta_g) = calorics.evaluate(&basis, delta_molecules);
+        let (_, _, delta_g, _) = calorics.evaluate(&basis, delta_molecules);
         if !delta_g.is_finite() {
             return Err(ReactionEquilibriumErrorV1::UnrepresentableArithmeticValue {
                 species: None,

@@ -875,8 +875,8 @@ subtracting two gross formation-energy totals. Source reaction energies are
 combined before polynomial evaluation by the same L1 kinetic owner. This
 preserves actual reaction binding energies and variable Cv while canceling
 conserved reference offsets. Rejected stages do not change the accumulated
-chemical energy. The prepared workspace retains one species and one reaction
-reference vector; nonlinear trials allocate no additional storage.
+chemical energy. The prepared workspace retains one species energy vector and
+reaction energy/entropy vectors; nonlinear trials allocate no additional storage.
 
 The physical `energy_residual_j` uses these source-integrated differences.
 `absolute_energy_residual_j` independently subtracts the original endpoint
@@ -904,8 +904,19 @@ ODEs. Both use estimated local errors rather than global accuracy certificates.
 Caller controls separately bound absolute energy, absolute amount, relative
 species/temperature error, relative element/charge/mass balance, numerical entropy
 decrease, minimum/initial/maximum time step and all nonlinear/root/attempt work.
-Every accepted step and the complete integration check actual ideal-mixture
-entropy. Final element, charge, molecular-mass and energy balances are checked again
+Every accepted step, SDIRK stage and complete integration check actual
+ideal-mixture entropy using compensated source-relative increments. Original
+reaction entropy coefficients cancel conserved elemental references before
+evaluation; genuine species entropy differences still change reaction affinity.
+Analytic Cv/T integrals, stable changes in c ln(c), the exact zero-population
+limit and actual volume expansion supply thermal and mixing contributions.
+Fixed-pressure evolution therefore retains both changing molecular count and
+expansion entropy. No large absolute source entropies are subtracted for the
+second-law gate. Independent isomer-mixing and dissociation formulas cover both
+time methods under positive and negative elemental entropy-reference shifts.
+Heating and cooling checks independently include the reservoir entropy change;
+rebasing accepted extents preserves the same parcel entropy and temperature.
+Final element, charge, molecular-mass and energy balances are checked again
 before publication. A budget exhaustion, unsupported source state, arithmetic
 failure or cancellation returns no partial integration. Zero duration preserves
 the admitted initial state. No ignition delay or empirical rate accuracy is

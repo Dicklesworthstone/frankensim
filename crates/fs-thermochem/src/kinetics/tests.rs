@@ -165,6 +165,60 @@ fn assert_equilibrium_caloric_crosswalk(
 }
 
 #[test]
+fn reaction_entropy_survives_conserved_references_and_gibbs_rounding() {
+    let temperature = Temperature::new(500.0);
+    for offset in [0.0, 2.0_f64.powi(50), -2.0_f64.powi(50)] {
+        for formation in [0.0, 2.0_f64.powi(70) * R] {
+            let mechanism = IdealGasKineticsV1::new(
+                thermo(
+                    vec![
+                        source("A", 0.01, 4.0, 0.0, offset),
+                        source("B", 0.01, 4.0, formation, offset + 1.0),
+                    ],
+                    vec![1, 1],
+                ),
+                "reaction-entropy-reference",
+                1,
+                vec![reaction(
+                    "A-B",
+                    &[("A", 1)],
+                    &[("B", 1)],
+                    rate(1.0, 0.0, 0.0),
+                )],
+                1e-12,
+            )
+            .unwrap();
+            let caloric = mechanism
+                .reaction_caloric_change_at(0, temperature, || false)
+                .unwrap();
+            close(caloric.molar_entropy.value(), R, 2e-12);
+            let mut entropy = [0.0];
+            mechanism
+                .reaction_entropies_at(temperature, &mut entropy, || false)
+                .unwrap();
+            close(entropy[0], R, 2e-12);
+            if formation != 0.0 {
+                // Delta h and Delta g round to the same value here. Recovering
+                // entropy through their difference would erase a real affinity.
+                assert_eq!(
+                    caloric.molar_enthalpy.value(),
+                    caloric.molar_gibbs_energy.value()
+                );
+            }
+            assert!(
+                mechanism
+                    .reaction_entropies_at(temperature, &mut [], || false)
+                    .is_err()
+            );
+            assert_eq!(
+                mechanism.reaction_entropies_at(temperature, &mut entropy, || true),
+                Err(KineticsErrorV1::Cancelled),
+            );
+        }
+    }
+}
+
+#[test]
 fn g3_reaction_calorics_cancel_only_conserved_formation_references() {
     // A and A2 carry one and two nuclei. The arbitrary elemental reference
     // cancels, while changing molecular count retains the ideal-gas RT term.

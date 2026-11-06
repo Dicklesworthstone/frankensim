@@ -623,8 +623,9 @@ fn advance_prepared_constraint<'a>(
             // (fine - full)/(2^p - 1); no Richardson extrapolation is applied
             // to the conserved state or its nonnegative species inventories.
             error /= controls.method.error_divisor();
-            let entropy_change = (fine_state.entropy_density_j_m3_k
-                - accepted.entropy_density_j_m3_k)
+            let entropy_change = fine_state
+                .entropy_increment_density_j_m3_k
+                .difference(accepted.entropy_increment_density_j_m3_k)
                 * volume.value();
             let entropy_production = entropy_change
                 - heat_exchange.map_or(Ok(0.0), |exchange| {
@@ -727,8 +728,10 @@ fn advance_prepared_constraint<'a>(
         - target.value())
         - balance.heat_input_j;
     balance.composition_reference_roundoff_j = reactor.composition_reference_roundoff_j();
-    balance.entropy_change_j_k =
-        (accepted.entropy_density_j_m3_k - initial.entropy_density_j_m3_k) * volume.value();
+    balance.entropy_change_j_k = accepted
+        .entropy_increment_density_j_m3_k
+        .difference(initial.entropy_increment_density_j_m3_k)
+        * volume.value();
     balance.entropy_transfer_j_k = heat_exchange.map_or(Ok(0.0), |exchange| {
         exchange.entropy_transfer(Sum::default(), accepted.heat_density_j_m3, volume.value())
     })?;

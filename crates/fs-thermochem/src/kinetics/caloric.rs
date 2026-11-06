@@ -4,10 +4,10 @@ use super::{BoundReaction, IdealGasKineticsV1, KineticsErrorV1, R, poll, positiv
 pub(super) use crate::caloric::ReactionCaloricBasis;
 use crate::caloric::ReactionCaloricSum;
 use crate::equilibrium::composition::IdealGasEquilibriumV1;
-use crate::{MolarEnergyQuantityV1, Nasa9StandardStateModelV1};
+use crate::{MolarEnergyQuantityV1, MolarThermalQuantityV1, Nasa9StandardStateModelV1};
 use fs_qty::Temperature;
 
-/// Original standard-state energy changes per mole of reaction progress.
+/// Original standard-state caloric changes per mole of reaction progress.
 /// Chemical formation differences remain; only conserved references cancel.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ReactionCaloricChangeV1 {
@@ -17,6 +17,8 @@ pub struct ReactionCaloricChangeV1 {
     pub molar_internal_energy: MolarEnergyQuantityV1,
     /// Delta g under the original standard-state pressure and entropy reference.
     pub molar_gibbs_energy: MolarEnergyQuantityV1,
+    /// Delta s from the original entropy coefficients, not (Delta h - Delta g)/T.
+    pub molar_entropy: MolarThermalQuantityV1,
 }
 
 impl IdealGasKineticsV1 {
@@ -108,6 +110,37 @@ impl IdealGasKineticsV1 {
         poll(&mut cancelled)
     }
 
+    /// Original standard-state reaction entropy changes, J/(mol K) of progress.
+    ///
+    /// Source coefficients are reduced before evaluation, cancelling conserved
+    /// elemental entropy references while retaining every reaction entropy
+    /// difference and explicit source correction. This does not subtract Gibbs
+    /// energy from enthalpy, which can lose entropy at large formation energies.
+    /// Ideal-gas concentration/mixing entropy remains the consumer's responsibility.
+    /// As with the energy queries, every original source is admitted and successful
+    /// calls allocate nothing; output follows `reactions()` and is scratch on error.
+    pub fn reaction_entropies_at(
+        &self,
+        temperature: Temperature,
+        out: &mut [f64],
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<(), KineticsErrorV1> {
+        poll(&mut cancelled)?;
+        if !positive(temperature.value()) || out.len() != self.bound.len() {
+            return Err(KineticsErrorV1::Invalid(
+                "reaction caloric temperature or output shape",
+            ));
+        }
+        let basis = self.admitted_caloric_basis(temperature, &mut cancelled)?;
+        for (reaction, value) in self.bound.iter().zip(out) {
+            poll(&mut cancelled)?;
+            *value = reaction_calorics(&self.thermodynamics, reaction, &basis)?
+                .molar_entropy
+                .value();
+        }
+        poll(&mut cancelled)
+    }
+
     // Full rate evaluation has already admitted these properties. Standalone
     // reaction queries enforce that same source semantics once per call.
     fn admitted_caloric_basis(
@@ -153,14 +186,15 @@ pub(super) fn reaction_calorics(
                 source,
             })?;
     }
-    let (h, u, g) = calorics.evaluate(basis, reaction.delta_molecules);
-    if !h.is_finite() || !u.is_finite() || !g.is_finite() {
+    let (h, u, g, s) = calorics.evaluate(basis, reaction.delta_molecules);
+    if !h.is_finite() || !u.is_finite() || !g.is_finite() || !s.is_finite() {
         return Err(KineticsErrorV1::Arithmetic("reaction caloric reduction"));
     }
     Ok(ReactionCaloricChangeV1 {
         molar_enthalpy: MolarEnergyQuantityV1::new(h),
         molar_internal_energy: MolarEnergyQuantityV1::new(u),
         molar_gibbs_energy: MolarEnergyQuantityV1::new(g),
+        molar_entropy: MolarThermalQuantityV1::new(s),
     })
 }
 

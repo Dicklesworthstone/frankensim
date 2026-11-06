@@ -45,6 +45,49 @@ fn check_first_law(result: &constant_pressure::IsobaricKineticsResult, initial_u
 }
 
 #[test]
+fn dissociation_entropy_retains_expansion_under_elemental_reference_shifts() {
+    for method in [
+        IsochoricKineticsMethod::BackwardEuler,
+        IsochoricKineticsMethod::Sdirk2,
+    ] {
+        for offset in [0.0, 2.0_f64.powi(50), -2.0_f64.powi(50)] {
+            let mechanism = mechanism(
+                vec![
+                    source("A", 0.01, 4.0, 0.0, offset + 10.0),
+                    source("A2", 0.02, 8.0, 0.0, 2.0 * offset),
+                ],
+                vec![1, 2],
+                vec![reaction("split", &[("A2", 1)], &[("A", 2)], 2.0).irreversible()],
+            );
+            let pressure = R * 500.0;
+            let result = constant_pressure::advance_adiabatic(
+                &mechanism,
+                &[(id("A2"), Amount::new(1.0))],
+                Pressure::new(pressure),
+                Temperature::new(500.0),
+                Time::new(0.2),
+                pressure_controls(method),
+                || false,
+            )
+            .unwrap();
+            let a = result.amounts()[0].value();
+            let a2 = result.amounts()[1].value();
+            let total = a + a2;
+            // Independent fixed-p ideal-gas entropy using mole fractions. The
+            // changing amount adds the standard-pressure term as well as mixing.
+            let expected = R
+                * (20.0 * (1.0 - a2)
+                    - a * (a / total).ln()
+                    - a2 * (a2 / total).ln()
+                    - (total - 1.0) * (pressure / 100000.0).ln());
+            assert!((result.temperature().value() - 500.0).abs() < 2e-9);
+            assert!((result.volume().value() - total).abs() < 2e-12);
+            assert!((result.balance().entropy_change_j_k - expected).abs() < 2e-10);
+        }
+    }
+}
+
+#[test]
 fn isothermal_dissociation_changes_volume_and_internal_energy_at_fixed_enthalpy() {
     let mechanism = isothermal_dimer(false, 2.0);
     for method in [

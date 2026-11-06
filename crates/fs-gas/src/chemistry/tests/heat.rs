@@ -134,6 +134,49 @@ fn check_balance(result: &Endpoint, initial_u: f64, bath_temperature: f64) {
 }
 
 #[test]
+fn reservoir_entropy_survives_conserved_source_entropy_offsets() {
+    for pressure in [false, true] {
+        let capacity = if pressure { 4.0 } else { 3.0 } * R;
+        for method in [
+            IsochoricKineticsMethod::BackwardEuler,
+            IsochoricKineticsMethod::Sdirk2,
+        ] {
+            for (initial, reservoir) in [(800.0, 300.0), (300.0, 900.0)] {
+                for offset in [2.0_f64.powi(50), -2.0_f64.powi(50)] {
+                    let mechanism = mechanism(
+                        vec![
+                            source("A", 0.01, 4.0, 0.0, offset),
+                            source("B", 0.01, 4.0, 0.0, offset),
+                        ],
+                        vec![1, 1],
+                        vec![reaction("A-B", &[("A", 1)], &[("B", 1)], 2.0).irreversible()],
+                    );
+                    let result = advance(
+                        mechanism,
+                        pressure,
+                        [Amount::new(0.0), Amount::new(1.0)],
+                        initial,
+                        0.1,
+                        bath(40.0, reservoir),
+                        IsochoricKineticsSolve {
+                            relative_tolerance: 2e-5,
+                            ..thermal_controls(method)
+                        },
+                    );
+                    let entropy = capacity * (result.temperature / initial).ln();
+                    assert!((result.balance.entropy_change_j_k - entropy).abs() < 1e-11);
+                    assert_eq!(
+                        result.balance.entropy_change_j_k.is_sign_positive(),
+                        initial < reservoir
+                    );
+                    check_balance(&result, 3.0 * R * initial, reservoir);
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn frozen_populations_heat_and_cool_with_actual_reservoir_entropy() {
     for pressure in [false, true] {
         let capacity = if pressure { 4.0 } else { 3.0 } * R;

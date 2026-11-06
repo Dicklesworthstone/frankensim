@@ -38,6 +38,8 @@ pub(super) struct ReactorState {
     /// Positive -dQ/dT of this implicit heat stage, separate from physical Cp/Cv.
     pub heat_feedback_density_j_m3_k: f64,
     pub entropy_density_j_m3_k: f64,
+    /// Physical entropy change with conserved source references cancelled.
+    pub entropy_increment_density_j_m3_k: Sum,
     pub heat_density_j_m3: Sum,
 }
 
@@ -78,8 +80,12 @@ struct CaloricReference {
     temperature: Temperature,
     species_energies: Vec<f64>,
     reaction_energies: Vec<f64>,
+    reaction_entropies: Vec<f64>,
+    initial_volume_ratio: f64,
     target_increment_density: f64,
     chemical_energy_density: Sum,
+    chemical_entropy_density: Sum,
+    mixing_entropy_density: Sum,
     composition_roundoff_density: Sum,
 }
 
@@ -110,6 +116,7 @@ impl Reactor {
             &self.origin,
             &self.caloric_reference.species_energies,
             &self.caloric_reference.reaction_energies,
+            &self.caloric_reference.reaction_entropies,
             &self.nu,
             &self.state.concentrations,
             &self.trial,
@@ -174,8 +181,12 @@ impl Reactor {
                 temperature: Temperature::new(1.0),
                 species_energies: zeros(ns)?,
                 reaction_energies: zeros(nr)?,
+                reaction_entropies: zeros(nr)?,
+                initial_volume_ratio: 1.0,
                 target_increment_density: 0.0,
                 chemical_energy_density: Sum::default(),
+                chemical_entropy_density: Sum::default(),
+                mixing_entropy_density: Sum::default(),
                 composition_roundoff_density: Sum::default(),
             },
             initial: zeros(ns)?,
@@ -281,8 +292,46 @@ impl Reactor {
                 &mut *cancelled,
             )?;
         }
+        self.mechanism.reaction_entropies_at(
+            temperature,
+            &mut self.caloric_reference.reaction_entropies,
+            &mut *cancelled,
+        )?;
+        // Work with amounts per reference volume. The initial actual volume
+        // anchors the concentration standard state; subsequent expansion is
+        // accounted for explicitly, including at fixed pressure.
+        let r = fs_thermochem::UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K;
+        let reference_pressure = self.mechanism.thermodynamics().models()[0]
+            .convention()
+            .reference_pressure()
+            .value();
+        let log_standard_concentration = fs_math::det::ln(r)
+            + fs_math::det::ln(temperature.value())
+            - fs_math::det::ln(reference_pressure)
+            - fs_math::det::ln(initial.volume_ratio);
+        let nr = self.caloric_reference.reaction_entropies.len();
+        for (j, entropy) in self
+            .caloric_reference
+            .reaction_entropies
+            .iter_mut()
+            .enumerate()
+        {
+            let mut molecules = Sum::default();
+            for row in self.nu.chunks_exact(nr) {
+                molecules.add(row[j]);
+            }
+            *entropy -= r * molecules.value() * log_standard_concentration;
+            if !entropy.is_finite() {
+                return Err(IsochoricKineticsError::Invalid(
+                    "unrepresentable reaction entropy reference",
+                ));
+            }
+        }
+        self.caloric_reference.initial_volume_ratio = initial.volume_ratio;
         self.caloric_reference.target_increment_density = increment;
         self.caloric_reference.chemical_energy_density = Sum::default();
+        self.caloric_reference.chemical_entropy_density = Sum::default();
+        self.caloric_reference.mixing_entropy_density = Sum::default();
         self.caloric_reference.composition_roundoff_density = Sum::default();
         self.origin.copy_from_slice(&self.initial);
         self.stats = Statistics::default();
@@ -396,11 +445,19 @@ impl Reactor {
         extents: &[f64],
     ) -> Result<(), IsochoricKineticsError> {
         let mut chemical = self.caloric_reference.chemical_energy_density;
+        let mut chemical_entropy = self.caloric_reference.chemical_entropy_density;
+        let mut mixing_entropy = self.caloric_reference.mixing_entropy_density;
         for (&extent, &energy) in extents
             .iter()
             .zip(&self.caloric_reference.reaction_energies)
         {
             chemical.add(extent * energy);
+        }
+        for (&extent, &entropy) in extents
+            .iter()
+            .zip(&self.caloric_reference.reaction_entropies)
+        {
+            chemical_entropy.add(extent * entropy);
         }
         // Independently compare represented species changes with the accepted
         // stoichiometric increments. An arbitrary formation reference must not
@@ -408,6 +465,7 @@ impl Reactor {
         // absolute-energy equivalent is retained rather than silently erased.
         let mut roundoff = self.caloric_reference.composition_roundoff_density;
         for (i, (&after, &before)) in concentrations.iter().zip(&self.origin).enumerate() {
+            add_mixing_entropy_change(&mut mixing_entropy, before, after);
             let mut discrepancy = Sum::default();
             discrepancy.add(after);
             discrepancy.add(-before);
@@ -416,13 +474,19 @@ impl Reactor {
             }
             roundoff.add(discrepancy.value() * self.caloric_reference.species_energies[i]);
         }
-        if !chemical.value().is_finite() || !roundoff.value().is_finite() {
+        if !chemical.value().is_finite()
+            || !roundoff.value().is_finite()
+            || !chemical_entropy.value().is_finite()
+            || !mixing_entropy.value().is_finite()
+        {
             return Err(IsochoricKineticsError::Invalid(
-                "unrepresentable chemical energy increment or inventory roundoff",
+                "unrepresentable chemical caloric increment or inventory roundoff",
             ));
         }
         self.origin.copy_from_slice(concentrations);
         self.caloric_reference.chemical_energy_density = chemical;
+        self.caloric_reference.chemical_entropy_density = chemical_entropy;
+        self.caloric_reference.mixing_entropy_density = mixing_entropy;
         self.caloric_reference.composition_roundoff_density = roundoff;
         Ok(())
     }
@@ -562,7 +626,10 @@ impl Reactor {
         heat_exchange: Option<HeatExchange<'_>>,
         step: f64,
     ) -> Result<(), IsochoricKineticsError> {
-        let change = (stage.entropy_density_j_m3_k - base.entropy_density_j_m3_k) * self.volume;
+        let change = stage
+            .entropy_increment_density_j_m3_k
+            .difference(base.entropy_increment_density_j_m3_k)
+            * self.volume;
         let production = change
             - heat_exchange.map_or(Ok(0.0), |exchange| {
                 exchange.entropy_transfer(
@@ -1322,6 +1389,7 @@ fn evaluate_state(
         heat_capacity_density_j_m3_k,
         heat_feedback_density_j_m3_k: 0.0,
         entropy_density_j_m3_k: physical.entropy_density_j_m3_k * volume_ratio,
+        entropy_increment_density_j_m3_k: Sum::default(),
         heat_density_j_m3: Sum::default(),
     };
     if !positive(state.mass_density_kg_m3)
@@ -1402,6 +1470,111 @@ fn evaluate_rates(
 
 #[allow(clippy::too_many_arguments)]
 fn resolve(
+    mechanism: &IdealGasKineticsV1,
+    controls: IsochoricKineticsSolve,
+    volume: f64,
+    caloric: &CaloricReference,
+    initial: &[f64],
+    nu: &[f64],
+    extents: &[f64],
+    hint: f64,
+    heat: HeatStage<'_>,
+    work: &mut StateWorkspace,
+    statistics: &mut Statistics,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<ReactorState, IsochoricKineticsError> {
+    let mut state = resolve_energy(
+        mechanism,
+        controls,
+        volume,
+        caloric,
+        initial,
+        nu,
+        extents,
+        hint,
+        heat,
+        work,
+        statistics,
+        &mut *cancelled,
+    )?;
+    let mut entropy = caloric.chemical_entropy_density;
+    for (&extent, &change) in extents.iter().zip(&caloric.reaction_entropies) {
+        entropy.add(extent * change);
+    }
+    entropy.add(caloric.mixing_entropy_density.sum);
+    entropy.add(caloric.mixing_entropy_density.correction);
+    let mut molecules = Sum::default();
+    for ((model, &before), &after) in mechanism
+        .thermodynamics()
+        .models()
+        .iter()
+        .zip(initial)
+        .zip(&work.concentrations)
+    {
+        poll(cancelled)?;
+        add_mixing_entropy_change(&mut entropy, before, after);
+        molecules.add(after);
+        if after != 0.0 {
+            let thermal = model
+                .molar_isochoric_entropy_change(caloric.temperature, state.temperature)
+                .map_err(|source| KineticsErrorV1::SpeciesEvaluation {
+                    species: model.species().clone(),
+                    source,
+                })?;
+            entropy.add(after * thermal.value());
+        }
+    }
+    entropy.add(
+        fs_thermochem::UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K
+            * molecules.value()
+            * log_ratio(state.volume_ratio, caloric.initial_volume_ratio),
+    );
+    if !entropy.value().is_finite() {
+        return Err(IsochoricKineticsError::Invalid(
+            "unrepresentable relative reactor entropy",
+        ));
+    }
+    state.entropy_increment_density_j_m3_k = entropy;
+    Ok(state)
+}
+
+// -R Delta(c ln c), retaining tiny composition changes and the exact c=0 limit.
+// Reference contributions use reaction extents; the represented populations
+// still own mixing, thermal entropy and the original element/charge audits.
+fn add_mixing_entropy_change(sum: &mut Sum, before: f64, after: f64) {
+    let r = fs_thermochem::UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K;
+    if before == after {
+        return;
+    }
+    if before == 0.0 {
+        sum.add(-r * after * fs_math::det::ln(after));
+    } else if after == 0.0 {
+        sum.add(r * before * fs_math::det::ln(before));
+    } else {
+        sum.add(-r * (after - before) * fs_math::det::ln(before));
+        sum.add(-r * after * log_ratio(after, before));
+    }
+}
+
+// Deterministic Kahan log1p identity; also avoids overflowing a/b.
+fn log_ratio(a: f64, b: f64) -> f64 {
+    if a == b {
+        return 0.0;
+    }
+    let (lo, hi, sign) = if a > b { (b, a, 1.0) } else { (a, b, -1.0) };
+    let delta = (hi - lo) / lo;
+    let rounded = 1.0 + delta;
+    sign * if rounded == 1.0 {
+        delta
+    } else if rounded.is_finite() {
+        fs_math::det::ln(rounded) * (delta / (rounded - 1.0))
+    } else {
+        fs_math::det::ln(hi) - fs_math::det::ln(lo)
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn resolve_energy(
     mechanism: &IdealGasKineticsV1,
     controls: IsochoricKineticsSolve,
     volume: f64,

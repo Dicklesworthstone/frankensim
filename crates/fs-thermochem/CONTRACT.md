@@ -1299,6 +1299,14 @@ policies and elemental reference cancellation remain authoritative. Focused
 G3 caloric tests compare the typed standalone query, prepared arrays and
 stoichiometrically conserved reference shifts.
 
+`reaction_caloric_change_at` also returns the directly reduced standard-state
+reaction entropy. `reaction_entropies_at` fills its canonical reaction array
+without successful-call allocation. The original entropy coefficients and
+explicit corrections are combined before evaluation: conserved elemental
+datum shifts cancel, but unequal reaction entropy differences remain. Entropy
+is never recovered by subtracting rounded Delta g from Delta h. These standard
+state values exclude the evolving parcel's ideal mixing and expansion entropy.
+
 
 > Status: ACTIVE, CODE-FIRST SLICES. This contract covers typed,
 > provenance-bound NASA-9 ideal-gas standard-state evaluation and bounded

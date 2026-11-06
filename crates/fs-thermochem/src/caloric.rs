@@ -114,13 +114,13 @@ impl ReactionCaloricSum {
         Ok(())
     }
 
-    // Original Delta h, Delta u and Delta g in J/mol of reaction progress.
+    // Original Delta h, Delta u, Delta g (J/mol) and Delta s (J/(mol K)).
     // The caller checks the results required by its physical formulation.
     pub(crate) fn evaluate(
         &self,
         basis: &ReactionCaloricBasis,
         delta_molecules: f64,
-    ) -> (f64, f64, f64) {
+    ) -> (f64, f64, f64, f64) {
         let (mut h, mut u, mut s) = (
             CaloricSum::default(),
             CaloricSum::default(),
@@ -145,7 +145,7 @@ impl ReactionCaloricSum {
         let h = UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K * h.value() + self.enthalpy_offset.value();
         let u = UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K * u.value() + self.enthalpy_offset.value();
         let s = UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K * s.value() + self.entropy_offset.value();
-        (h, u, h - basis.temperature * s)
+        (h, u, h - basis.temperature * s, s)
     }
 }
 
