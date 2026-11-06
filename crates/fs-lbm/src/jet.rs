@@ -20,6 +20,9 @@ pub mod material;
 /// Newtonian viscous slender-jet model with an explicit long-wave budget.
 pub mod viscous;
 
+/// Conservative nonlinear evolution of a periodic axisymmetric slender jet.
+pub mod nonlinear;
+
 /// Fixed-property cylindrical model consumed by physical free-flight studies.
 /// Implementations retain their own inviscid or long-wave admission boundaries.
 /// An admitted model has a finite positive radius and finite nonnegative growth;

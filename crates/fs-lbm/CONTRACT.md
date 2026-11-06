@@ -13878,3 +13878,33 @@ The SGS unit regressions cover a centered-strain null with nonzero native
 momentum stress, full affine tensors on graded grids, reciprocal coefficients,
 material endpoint refusal and cache reuse. These are discretization checks,
 without a developed turbulent-spectrum or wall-resolution claim.
+
+## Nonlinear periodic capillary jets
+
+`jet::nonlinear::PeriodicSlenderJet` evolves a uniform periodic grid of
+cell-centered squared radius and staggered axial momentum using the
+Newtonian Eggers-Dupont slender equations with full axisymmetric curvature.
+Conservative mass and capillary/viscous/momentum flux differences preserve
+periodic liquid volume and axial momentum to floating-point roundoff.
+Physical cross-sectional area and volume flux retain their factors of pi.
+
+The owner uses three-stage SSP Runge-Kutta, adaptive advection/viscous/capillary
+step limits and reusable O(N) buffers. Each caller supplies a maximum timestep,
+CFL factor, attempted-substep budget, neck radius, maximum slope and minimum
+radial resolution. A model-domain stop publishes only admitted substeps.
+Cancellation, invalid state or exhausted work budget leaves the entire
+pre-call physical state and time unchanged. Polling is bounded by 256 cells.
+
+The result exposes the evolved radii/velocities, volume, momentum, surface and
+kinetic energy, integrated physical viscous loss, separate upwind numerical
+loss and a signed energy-balance remainder. The full spatial discretization
+does not claim exact energy conservation or a certified error bound.
+Focused G1/G3 tests check the small-amplitude Rayleigh limit and refinement,
+nonlinear conservation, Newtonian extensional damping and SI similarity;
+G0/G4 cover model stops, refusal, rollback and deterministic retry.
+
+This is a constant-property incompressible Newtonian periodic cylinder with
+a passive exterior. It does not supply nozzle/end conditions, gravity-induced
+stretching, variable surface tension, non-Newtonian stress, active gas dynamics
+or post-pinch topology. Reaching an authored neck/resolution limit is not a
+resolved breakup or a measured droplet-size prediction.
