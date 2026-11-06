@@ -593,3 +593,13 @@ error certificate or experimental-material validation implied here. G1
 manufactured coupled relaxation, nonlinear flux/source and shared-inventory
 fixtures check the method; G0/G4 fixtures cover equilibrium, cancellation and
 stiff-stage refusal. Existing backward-Euler entry points retain their method.
+
+The finite-vapor Cartesian SDIRK path also provides
+`advance_cartesian_sdirk2_adaptive_to` for a complete requested duration.
+The existing controller checks moisture, RH and vapor mass independently with
+second-order local step-doubling scaling, charges both implicit stages per
+proposal, and sums only accepted physical half-interval RK transfers. Final
+water, carrier and total-mass checks admit both inventories together. Failed
+stages, rejected probes and a late work-limit failure publish no partial
+duration. G1/G4 fixtures independently check the coupled relaxation, all three
+error coordinates, stiff-stage retries and complete-stage work reservation.

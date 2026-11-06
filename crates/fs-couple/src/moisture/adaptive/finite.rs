@@ -4,7 +4,8 @@ use super::*;
 use crate::moisture::{
     atmosphere::{
         AtmosphereMoistureError, AtmosphereMoistureSolve, AtmosphereMoistureStep,
-        CartesianAtmosphereMoistureStep, DryBasisSorption, FiniteMoistureAtmosphere,
+        CartesianAtmosphereMoistureStep, CartesianAtmosphereSdirk2Step, DryBasisSorption,
+        FiniteMoistureAtmosphere,
     },
     solution::{
         CartesianSolutionMoistureStep, FiniteMoistureSolution, SolutionMoistureError,
@@ -176,6 +177,69 @@ impl FiniteMoistureAtmosphere {
             vapor_snapshot::<MoistureCartesian, 6>,
             cx,
         )?;
+        check_vapor(
+            self,
+            &atmosphere,
+            report.water_change_kg,
+            time.water_balance_tolerance_kg,
+            &mut report,
+            cx,
+        )?;
+        Ok((atmosphere, field, report))
+    }
+
+    /// Complete a duration with second-order diffusion and one evolving finite
+    /// vapor inventory. Every native SDIRK stage solves its own source-backed
+    /// RH, sorption and surface transfer together with the Cartesian field.
+    ///
+    /// The local error estimate checks content, vapor mass and RH separately,
+    /// with the second-order step-doubling factor and cubic growth rule. Both
+    /// implicit stages are charged even on rejected probes. Only accepted
+    /// physical half intervals contribute their RK-weighted face transfers;
+    /// diagnostic internal stages are never debited a second time.
+    ///
+    /// Native source/bracket admissibility and the isothermal model's scope
+    /// remain unchanged. A failed duration returns neither physical endpoint,
+    /// including when a work limit follows successful private intervals.
+    pub fn advance_cartesian_sdirk2_adaptive_to(
+        &self,
+        moisture: &MoistureCartesian,
+        target_s: f64,
+        faces: &[Option<DryBasisSorption>; 6],
+        transport: MoistureStepConfig,
+        nonlinear: MoistureNonlinearConfig,
+        physical: AtmosphereMoistureSolve,
+        time: MoistureTimeControls,
+        cx: &Cx<'_>,
+    ) -> Result<
+        (
+            Self,
+            MoistureCartesian,
+            MoistureAdvanceReport<CartesianAtmosphereSdirk2Step, 6>,
+        ),
+        MoistureAdvanceError<AtmosphereMoistureError>,
+    > {
+        checkpoint(cx)?;
+        let initial = (self.clone(), moisture.clone());
+        let ((atmosphere, field), report) = evolve_fields_with_method(
+            &initial,
+            target_s,
+            time,
+            TimeMethod::Sdirk2,
+            |state, dt| {
+                let (air, field, step) = state
+                    .0
+                    .advance_cartesian_sdirk2(
+                        &state.1, dt, faces, transport, nonlinear, physical, cx,
+                    )?
+                    .into_parts();
+                Ok(((air, field), OneReport(step)))
+            },
+            vapor_snapshot::<MoistureCartesian, 6>,
+            |_, _, _| Ok(0.0),
+            cx,
+        )?;
+        let mut report = report.summary.map_step(|step| step.0);
         check_vapor(
             self,
             &atmosphere,
