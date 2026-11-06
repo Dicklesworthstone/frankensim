@@ -14,6 +14,7 @@ use fs_em::{
     },
     winding::{
         WindingConfig,
+        end::{EndWindingInductance, EndWindingMode},
         incremental::{IncrementalWindingConfig, PlanarIncrementalWindingBasis},
         ohmic::WindingConductor,
     },
@@ -68,6 +69,30 @@ fn basis<'m>(
         &common::boundary(),
         vec![bias, 0.0],
         vec![0.02, 0.03],
+        &[0.0; 8],
+        incremental_config(),
+        common::material::controls().nonlinear,
+        &mut || false,
+    )
+    .unwrap()
+}
+fn shared_end_basis<'m>(
+    problem: &'m PlanarNonlinearMagnetostatics,
+    bias: f64,
+) -> PlanarIncrementalWindingBasis<'m> {
+    PlanarIncrementalWindingBasis::new_with_end_modes(
+        problem,
+        profiles(),
+        &common::boundary(),
+        vec![bias, 0.0],
+        EndWindingInductance::new(
+            vec![0.02, 0.03],
+            vec![EndWindingMode {
+                inductance_h: 0.12,
+                turns: vec![1.0, -2.0],
+            }],
+        )
+        .unwrap(),
         &[0.0; 8],
         incremental_config(),
         common::material::controls().nonlinear,
@@ -258,7 +283,7 @@ fn arbitrary_phases_close_spatial_heat_storage_and_terminal_power_without_double
 fn no_eddy_regions_reuse_dc_derivatives_and_preserve_explicit_end_storage() {
     let source = common::source(true, 18.0);
     let problem = common::problem(&source, 0.6);
-    let basis = basis(&problem, 2.0);
+    let basis = shared_end_basis(&problem, 2.0);
     let model = PlanarHarmonicWindings::new(
         &basis,
         vec![],
@@ -297,6 +322,74 @@ fn no_eddy_regions_reuse_dc_derivatives_and_preserve_explicit_end_storage() {
         response.mean_supplied_power_w,
         response.mean_winding_power_w,
     );
+}
+
+#[test]
+fn shared_end_flux_adds_phase_dependent_mutual_storage_without_spurious_heat() {
+    let depth = 0.6;
+    let sigma = 18.0;
+    let source = common::source(true, sigma);
+    let problem = common::problem(&source, depth);
+    let diagonal = basis(&problem, 2.0);
+    let shared = shared_end_basis(&problem, 2.0);
+    let diagonal_model = prepared(&diagonal, &source);
+    let shared_model = prepared(&shared, &source);
+    let end_turns = [1.0, -2.0];
+    for omega in [0.5, 13.0, 100.0] {
+        let reference = diagonal_model.at_frequency(omega, &mut || false).unwrap();
+        let frequency = shared_model.at_frequency(omega, &mut || false).unwrap();
+        // Independent one-mode field and a separate authored end magnetic path.
+        let field_l = C64::from_re(2.0 * depth) / C64::new(4.0, -omega * sigma / 144.0);
+        let field_z = C64::new(omega * field_l.im, -omega * field_l.re);
+        let field_turns = [1.0, -0.5];
+        for i in 0..2 {
+            for j in 0..2 {
+                let mut expected = field_z.scale(field_turns[i] * field_turns[j])
+                    + C64::new(0.0, -omega * 0.12 * end_turns[i] * end_turns[j]);
+                if i == j {
+                    expected = expected
+                        + C64::new([288.0, 72.0][i] * depth / sigma, -omega * [0.02, 0.03][i]);
+                }
+                complex_near(frequency.impedance_ohm()[2 * i + j], expected);
+                near(
+                    frequency.effective_inductance_h()[2 * i + j],
+                    -expected.im / omega,
+                );
+            }
+        }
+        for currents in [
+            [C64::new(0.2, -0.07), C64::new(-0.03, 0.09)],
+            [C64::new(0.25, -0.125), C64::new(0.125, -0.0625)],
+        ] {
+            let base = reference.response(&currents, &mut || false).unwrap();
+            let response = frequency.response(&currents, &mut || false).unwrap();
+            let projection = currents[0] - currents[1].scale(2.0);
+            let added_energy = 0.25 * 0.12 * projection.norm_sq();
+            near(
+                response.mean_magnetic_energy_j,
+                base.mean_magnetic_energy_j + added_energy,
+            );
+            near(response.mean_eddy_power_w, base.mean_eddy_power_w);
+            near(response.mean_winding_power_w, base.mean_winding_power_w);
+            near(response.mean_supplied_power_w, base.mean_supplied_power_w);
+            near(
+                response.reactive_power_var,
+                base.reactive_power_var - 2.0 * omega * added_energy,
+            );
+            assert_eq!(response.potential_wb_m, base.potential_wb_m);
+            for i in 0..2 {
+                let added_voltage = C64::new(
+                    omega * 0.12 * end_turns[i] * projection.im,
+                    -omega * 0.12 * end_turns[i] * projection.re,
+                );
+                complex_near(
+                    response.terminal_voltages_v[i],
+                    base.terminal_voltages_v[i] + added_voltage,
+                );
+            }
+            near(response.reactive_power_residual_var, 0.0);
+        }
+    }
 }
 
 #[test]
@@ -511,7 +604,7 @@ mod exposure {
         let sigma = 18.0;
         let source = common::source(true, sigma);
         let problem = common::problem(&source, depth);
-        let basis = basis(&problem, 0.4);
+        let basis = shared_end_basis(&problem, 0.4);
         let model = prepared(&basis, &source);
         let omegas = [13.0, 17.0];
         let frequencies = omegas.map(|w| model.at_frequency(w, &mut || false).unwrap());
@@ -546,6 +639,7 @@ mod exposure {
                 + (0..2)
                     .map(|k| 0.5 * end[k] * current(k, time).powi(2))
                     .sum::<f64>()
+                + 0.5 * 0.12 * (current(0, time) - 2.0 * current(1, time)).powi(2)
         };
         let voltage = |k: usize, time| {
             let turns = [1.0, -0.5][k];
@@ -554,6 +648,13 @@ mod exposure {
                 + end[k]
                     * (0..2)
                         .map(|j| velocity(currents[j][k], omegas[j], time))
+                        .sum::<f64>()
+                + 0.12
+                    * [1.0, -2.0][k]
+                    * (0..2)
+                        .map(|j| {
+                            velocity(currents[j][0] - currents[j][1].scale(2.0), omegas[j], time)
+                        })
                         .sum::<f64>()
         };
         for window in [

@@ -274,6 +274,7 @@ impl<'b, 'm> PlanarHarmonicWindings<'b, 'm> {
         }
         let unit_responses = self.solve_units(omega_rad_s, cancelled)?;
         let count = self.basis.winding_count();
+        let mut field_impedance = vec![C64::ZERO; count * count];
         let mut impedance = vec![C64::ZERO; count * count];
         for (j, response) in unit_responses.iter().enumerate() {
             for (i, load) in self.loads.iter().enumerate() {
@@ -282,9 +283,6 @@ impl<'b, 'm> PlanarHarmonicWindings<'b, 'm> {
                     poll(cancelled)?;
                     linkage = phasor(linkage + a.scale(value))?;
                 }
-                if i == j {
-                    linkage.re = finite(linkage.re + self.basis.end_inductance_h()[i])?;
-                }
                 let mut z = phasor(C64::new(
                     omega_rad_s * linkage.im,
                     -omega_rad_s * linkage.re,
@@ -292,6 +290,10 @@ impl<'b, 'm> PlanarHarmonicWindings<'b, 'm> {
                 if i == j {
                     z.re = finite(z.re + self.resistance_ohm[i])?;
                 }
+                field_impedance[i * count + j] = z;
+                z.im = finite(
+                    z.im - omega_rad_s * self.basis.end_inductance_matrix_h()[i * count + j],
+                )?;
                 impedance[i * count + j] = z;
             }
         }
@@ -348,9 +350,6 @@ impl<'b, 'm> PlanarHarmonicWindings<'b, 'm> {
                     magnetic = phasor(magnetic + a.conj() * C64::new(k_real[v], k_imaginary[v]))?;
                     loss = phasor(loss + a.conj() * C64::new(c_real[v], c_imaginary[v]))?;
                 }
-                if i == j {
-                    magnetic.re = finite(magnetic.re + self.basis.end_inductance_h()[i])?;
-                }
                 let mut from_field = phasor(
                     loss.scale(omega_rad_s).scale(omega_rad_s)
                         + C64::new(omega_rad_s * magnetic.im, -omega_rad_s * magnetic.re),
@@ -358,6 +357,14 @@ impl<'b, 'm> PlanarHarmonicWindings<'b, 'm> {
                 if i == j {
                     from_field.re = finite(from_field.re + self.resistance_ohm[i])?;
                 }
+                // Large end storage must not hide a failed active-field power
+                // identity through rounding of the complete terminal matrix.
+                maximum_power_pairing_defect_ohm = maximum_power_pairing_defect_ohm
+                    .max(phasor(from_field - field_impedance[i * count + j])?.abs());
+                from_field.im = finite(
+                    from_field.im
+                        - omega_rad_s * self.basis.end_inductance_matrix_h()[i * count + j],
+                )?;
                 maximum_power_pairing_defect_ohm = maximum_power_pairing_defect_ohm
                     .max(phasor(from_field - impedance[i * count + j])?.abs());
             }
@@ -375,6 +382,7 @@ impl<'b, 'm> PlanarHarmonicWindings<'b, 'm> {
         Ok(HarmonicWindingFrequency {
             prepared: self,
             omega_rad_s,
+            field_impedance_ohm: field_impedance,
             impedance_ohm: impedance,
             effective_inductance_h,
             unit_responses,

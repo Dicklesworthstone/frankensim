@@ -11,6 +11,7 @@ use fs_em::{
     },
     winding::{
         WindingConfig, WindingError,
+        end::{EndWindingInductance, EndWindingMode},
         incremental::{
             IncrementalWindingConfig, IncrementalWindingError, PlanarIncrementalWindingBasis,
         },
@@ -101,7 +102,7 @@ fn saturated_inductance_is_the_flux_derivative_not_secant_or_energy_equivalent()
 }
 
 #[test]
-fn signed_mutual_tangent_depth_and_end_storage_follow_the_same_nonlinear_field() {
+fn signed_mutual_tangent_and_shared_end_flux_follow_the_same_nonlinear_field() {
     let source = common::source(true, 2.0);
     for depth in [0.3, 0.9] {
         let problem = common::problem(&source, depth);
@@ -109,12 +110,22 @@ fn signed_mutual_tangent_depth_and_end_storage_follow_the_same_nonlinear_field()
         let profiles = vec![primary.clone(), primary.iter().map(|j| -3.0 * j).collect()];
         let currents = [2.6, 0.2]; // i_effective = 2 A, in the saturated segment.
         let ends = [0.02, 0.04];
-        let model = PlanarIncrementalWindingBasis::new(
+        let shared = 0.07;
+        let turns = [1.0, -2.0];
+        let end_model = EndWindingInductance::new(
+            ends.to_vec(),
+            vec![EndWindingMode {
+                inductance_h: shared,
+                turns: turns.to_vec(),
+            }],
+        )
+        .unwrap();
+        let model = PlanarIncrementalWindingBasis::new_with_end_modes(
             &problem,
             profiles.clone(),
             &common::boundary(),
             currents.to_vec(),
-            ends.to_vec(),
+            end_model.clone(),
             &[0.0; 8],
             config(),
             common::material::controls().nonlinear,
@@ -134,25 +145,39 @@ fn signed_mutual_tangent_depth_and_end_storage_follow_the_same_nonlinear_field()
             model.inductance_h()[1].to_bits(),
             model.inductance_h()[2].to_bits()
         );
-        near(model.inductance_h()[0], active + ends[0]);
-        near(model.inductance_h()[3], 9.0 * active + ends[1]);
+        let end_matrix = [
+            ends[0] + shared,
+            -2.0 * shared,
+            -2.0 * shared,
+            ends[1] + 4.0 * shared,
+        ];
+        for i in 0..4 {
+            near(model.end_inductance_matrix_h()[i], end_matrix[i]);
+            near(
+                model.inductance_h()[i],
+                model.active_inductance_h()[i] + end_matrix[i],
+            );
+        }
+        assert_eq!(model.end_inductance_h(), ends);
+        assert_eq!(model.end_inductance_model(), &end_model);
         let flux = common::linkage(2.0, depth, true);
+        let mode_current = currents[0] - 2.0 * currents[1];
         near(
             model.operating_flux_linkages_wb()[0],
-            flux + ends[0] * currents[0],
+            flux + ends[0] * currents[0] + shared * mode_current,
         );
         near(
             model.operating_flux_linkages_wb()[1],
-            -3.0 * flux + ends[1] * currents[1],
+            -3.0 * flux + ends[1] * currents[1] - 2.0 * shared * mode_current,
         );
         let voltage = model.voltage_from_current_rate_v(&[0.7, -0.2]).unwrap();
         near(
             voltage[0],
-            (active + ends[0]) * 0.7 + (-3.0 * active) * (-0.2),
+            (active + end_matrix[0]) * 0.7 + (-3.0 * active + end_matrix[1]) * (-0.2),
         );
         near(
             voltage[1],
-            (-3.0 * active) * 0.7 + (9.0 * active + ends[1]) * (-0.2),
+            (-3.0 * active + end_matrix[2]) * 0.7 + (9.0 * active + end_matrix[3]) * (-0.2),
         );
         // Independently perturb the full nonlinear solve, not the extracted L.
         for j in 0..2 {
@@ -174,7 +199,8 @@ fn signed_mutual_tangent_depth_and_end_storage_follow_the_same_nonlinear_field()
                     )
                     .unwrap();
                 for winding in 0..2 {
-                    let mut linkage = ends[winding] * i[winding];
+                    let mut linkage =
+                        ends[winding] * i[winding] + shared * turns[winding] * (i[0] - 2.0 * i[1]);
                     for (cell, face) in problem.mesh().faces().iter().enumerate() {
                         let sum: f64 = face
                             .iter()
@@ -201,6 +227,59 @@ fn signed_mutual_tangent_depth_and_end_storage_follow_the_same_nonlinear_field()
             near(recovered[i], delta_i[i]);
         }
     }
+}
+
+#[test]
+fn end_modes_keep_explicit_dimensions_and_do_not_hide_singular_terminal_coordinates() {
+    let source = common::source(false, 2.0);
+    let problem = common::problem(&source, 0.5);
+    let profile = common::profiles(1).remove(0);
+    let run = |end_model, cancelled: &mut dyn FnMut() -> bool| {
+        PlanarIncrementalWindingBasis::new_with_end_modes(
+            &problem,
+            vec![profile.clone(), profile.clone()],
+            &common::boundary(),
+            vec![0.0; 2],
+            end_model,
+            &[0.0; 8],
+            config(),
+            common::material::controls().nonlinear,
+            &mut || cancelled(),
+        )
+    };
+    assert!(matches!(
+        run(
+            EndWindingInductance::new(vec![0.1], vec![]).unwrap(),
+            &mut || false
+        ),
+        Err(IncrementalWindingError::Winding(WindingError::Invalid(_)))
+    ));
+    let mode = |turns| {
+        EndWindingInductance::new(
+            vec![0.0; 2],
+            vec![EndWindingMode {
+                inductance_h: 0.5,
+                turns,
+            }],
+        )
+        .unwrap()
+    };
+    // The field and this end mode both depend on I0+I1. No inverse exists.
+    assert!(matches!(
+        run(mode(vec![1.0, 1.0]), &mut || false),
+        Err(IncrementalWindingError::Winding(
+            WindingError::SingularInductance
+        ))
+    ));
+    // An authored independent end-flux path physically supplies the other mode.
+    let accepted = run(mode(vec![1.0, -1.0]), &mut || false).unwrap();
+    let flux = accepted.linearized_flux_increment_wb(&[0.2, -0.2]).unwrap();
+    near(flux[0], 0.2);
+    near(flux[1], -0.2);
+    assert!(run(mode(vec![1.0, -1.0]), &mut || true).is_err());
+    let diagonal = basis(&problem, 0.3, 0.1);
+    assert!(diagonal.end_inductance_model().modes().is_empty());
+    near(diagonal.end_inductance_matrix_h()[0], 0.1);
 }
 
 #[test]

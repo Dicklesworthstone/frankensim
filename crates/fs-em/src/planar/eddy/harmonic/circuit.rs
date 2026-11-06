@@ -530,12 +530,8 @@ impl HarmonicWindingFrequency<'_, '_, '_> {
             controls.relative_terminal_residual_tolerance,
             cancelled,
         )?;
-        let mut voltages = vec![C64::ZERO; count];
+        let voltages = self.terminal_voltages_v(&currents)?;
         for row in 0..count {
-            for column in 0..count {
-                voltages[row] =
-                    phasor(voltages[row] + impedance[row * count + column] * currents[column])?;
-            }
             input[sources.len() + row] = phasor(
                 C64::new(
                     voltages[row].re / reference[row],

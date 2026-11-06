@@ -14,8 +14,8 @@
 //! [ANSYS electromagnetic theory reference, section 5.5](https://ansyshelp.ansys.com/public/Views/Secured/corp/v251/en/ans_thry/thy_emg6.html).
 
 use super::{
-    MAX_WINDINGS, WindingConfig, WindingError, admit_profiles, finite, inverse, multiply,
-    pairing_on_mesh,
+    MAX_WINDINGS, WindingConfig, WindingError, admit_profiles, end::EndWindingInductance, finite,
+    inverse, multiply, pairing_on_mesh,
 };
 use crate::planar::{
     MagneticError, PlanarMagnetostatics, gradients,
@@ -119,7 +119,7 @@ pub struct PlanarIncrementalWindingBasis<'a> {
     active_inductance_h: Vec<f64>,
     inductance_h: Vec<f64>,
     inverse_inductance_per_h: Vec<f64>,
-    end_inductance_h: Vec<f64>,
+    end_model: EndWindingInductance,
     net_turns_by_component: Vec<Vec<f64>>,
     maximum_pairing_defect_h: f64,
     inverse_residual: f64,
@@ -147,6 +147,40 @@ impl<'a> PlanarIncrementalWindingBasis<'a> {
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Self> {
         poll(cancelled)?;
+        let end_model =
+            EndWindingInductance::new(end_inductance_h, vec![]).map_err(WindingError::from)?;
+        Self::new_with_end_modes(
+            problem,
+            profiles_per_m2,
+            boundary_potential_wb_m,
+            operating_currents_a,
+            end_model,
+            initial_potential_wb_m,
+            config,
+            controls,
+            cancelled,
+        )
+    }
+
+    /// Extract the same local field derivative with authored shared end flux.
+    ///
+    /// The fixed passive end model contributes its complete self/mutual block
+    /// to d(lambda)/di and its original signed modes to operating linkage.
+    /// Its flux must lie outside the resolved field domain; no omitted leakage
+    /// or measured authority is inferred. End modes stay linear at this bias.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_end_modes(
+        problem: &'a PlanarNonlinearMagnetostatics,
+        profiles_per_m2: Vec<Vec<f64>>,
+        boundary_potential_wb_m: &[(usize, f64)],
+        operating_currents_a: Vec<f64>,
+        end_model: EndWindingInductance,
+        initial_potential_wb_m: &[f64],
+        config: IncrementalWindingConfig,
+        controls: NonlinearMagneticControls,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self> {
+        poll(cancelled)?;
         let cfg = config.winding;
         let count = profiles_per_m2.len();
         let mesh = problem.mesh();
@@ -164,8 +198,7 @@ impl<'a> PlanarIncrementalWindingBasis<'a> {
             || values.is_none_or(|n| n > cfg.max_basis_values)
             || operating_currents_a.len() != count
             || operating_currents_a.iter().any(|i| !i.is_finite())
-            || end_inductance_h.len() != count
-            || end_inductance_h.iter().any(|l| !l.is_finite() || *l < 0.0)
+            || end_model.winding_count() != count
             || !cfg.pairing_tolerance_h.is_finite()
             || cfg.pairing_tolerance_h < 0.0
             || !cfg.current_balance_tolerance_turns.is_finite()
@@ -180,6 +213,9 @@ impl<'a> PlanarIncrementalWindingBasis<'a> {
                 WindingError::Invalid("invalid incremental winding data or budgets").into(),
             );
         }
+        let mut operating_flux_linkages_wb = end_model
+            .flux_linkages_wb(&operating_currents_a)
+            .map_err(WindingError::from)?;
         let net_turns_by_component = admit_profiles(
             mesh,
             &profiles_per_m2,
@@ -237,7 +273,6 @@ impl<'a> PlanarIncrementalWindingBasis<'a> {
             values,
         ));
         let mut responses = Vec::with_capacity(count);
-        let mut operating_flux_linkages_wb = Vec::with_capacity(count);
         for (winding, profile) in profiles_per_m2.iter().enumerate() {
             poll(cancelled)?;
             let mut rhs = vec![0.0; vertices];
@@ -283,9 +318,8 @@ impl<'a> PlanarIncrementalWindingBasis<'a> {
             });
             let active =
                 pairing_on_mesh(mesh, operating_field.potential_wb_m(), profile, cancelled)?;
-            operating_flux_linkages_wb.push(finite(
-                end_inductance_h[winding].mul_add(operating_currents_a[winding], active),
-            )?);
+            operating_flux_linkages_wb[winding] =
+                finite(operating_flux_linkages_wb[winding] + active)?;
         }
         let mut active = vec![0.0; count * count];
         let mut applied = vec![0.0; vertices];
@@ -335,8 +369,8 @@ impl<'a> PlanarIncrementalWindingBasis<'a> {
             }
         }
         let mut inductance_h = active.clone();
-        for i in 0..count {
-            inductance_h[i * count + i] = finite(active[i * count + i] + end_inductance_h[i])?;
+        for (total, &end) in inductance_h.iter_mut().zip(end_model.matrix_h()) {
+            *total = finite(*total + end)?;
         }
         let (inverse_inductance_per_h, inverse_residual) = inverse(
             &inductance_h,
@@ -355,7 +389,7 @@ impl<'a> PlanarIncrementalWindingBasis<'a> {
             active_inductance_h: active,
             inductance_h,
             inverse_inductance_per_h,
-            end_inductance_h,
+            end_model,
             net_turns_by_component,
             maximum_pairing_defect_h,
             inverse_residual,
@@ -394,7 +428,7 @@ impl<'a> PlanarIncrementalWindingBasis<'a> {
     pub fn active_inductance_h(&self) -> &[f64] {
         &self.active_inductance_h
     }
-    /// Differential inductance with the explicit linear end-storage diagonals.
+    /// Differential inductance with all explicitly authored end-storage terms.
     pub fn inductance_h(&self) -> &[f64] {
         &self.inductance_h
     }
@@ -402,9 +436,17 @@ impl<'a> PlanarIncrementalWindingBasis<'a> {
     pub fn inverse_inductance_per_h(&self) -> &[f64] {
         &self.inverse_inductance_per_h
     }
-    /// Caller-declared end/leakage self-inductances [H], not resolved fields.
+    /// Independent end/leakage diagonals [H], before shared-mode self terms.
     pub fn end_inductance_h(&self) -> &[f64] {
-        &self.end_inductance_h
+        self.end_model.diagonal_h()
+    }
+    /// Full symmetric row-major end self/mutual block [H].
+    pub fn end_inductance_matrix_h(&self) -> &[f64] {
+        self.end_model.matrix_h()
+    }
+    /// Original passive factors for unresolved end flux and magnetic storage.
+    pub fn end_inductance_model(&self) -> &EndWindingInductance {
+        &self.end_model
     }
     /// Signed current-closure residual [turns] per winding and mesh component.
     pub fn net_turns_by_component(&self) -> &[Vec<f64>] {
@@ -421,11 +463,19 @@ impl<'a> PlanarIncrementalWindingBasis<'a> {
 
     /// Local tangent delta_lambda = L_diff delta_i; not a finite-state update.
     pub fn linearized_flux_increment_wb(&self, current_increment_a: &[f64]) -> Result<Vec<f64>> {
-        Ok(multiply(
-            &self.inductance_h,
+        let mut flux = multiply(
+            &self.active_inductance_h,
             current_increment_a,
             self.winding_count(),
-        )?)
+        )?;
+        let end_flux = self
+            .end_model
+            .flux_linkages_wb(current_increment_a)
+            .map_err(WindingError::from)?;
+        for (value, end) in flux.iter_mut().zip(end_flux) {
+            *value = finite(*value + end)?;
+        }
+        Ok(flux)
     }
     /// Inverse local tangent, retaining all self and mutual winding terms.
     pub fn linearized_current_increment_a(&self, flux_increment_wb: &[f64]) -> Result<Vec<f64>> {

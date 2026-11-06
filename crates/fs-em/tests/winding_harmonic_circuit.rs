@@ -17,6 +17,7 @@ use fs_em::{
     },
     winding::{
         WindingConfig,
+        end::{EndWindingInductance, EndWindingMode},
         incremental::{IncrementalWindingConfig, PlanarIncrementalWindingBasis},
     },
 };
@@ -29,7 +30,16 @@ use fs_phs::{
 };
 
 fn basis(problem: &PlanarNonlinearMagnetostatics) -> PlanarIncrementalWindingBasis<'_> {
-    PlanarIncrementalWindingBasis::new(
+    basis_with_end_modes(
+        problem,
+        EndWindingInductance::new(vec![0.02, 0.03], vec![]).unwrap(),
+    )
+}
+fn basis_with_end_modes(
+    problem: &PlanarNonlinearMagnetostatics,
+    end_model: EndWindingInductance,
+) -> PlanarIncrementalWindingBasis<'_> {
+    PlanarIncrementalWindingBasis::new_with_end_modes(
         problem,
         vec![
             vec![24.0, 0.0, 0.0, 0.0, -24.0, 0.0, 0.0, 0.0],
@@ -37,7 +47,7 @@ fn basis(problem: &PlanarNonlinearMagnetostatics) -> PlanarIncrementalWindingBas
         ],
         &common::boundary(),
         vec![2.0, 0.0],
-        vec![0.02, 0.03],
+        end_model,
         &[0.0; 8],
         IncrementalWindingConfig {
             winding: WindingConfig {
@@ -143,20 +153,38 @@ fn two_port(z: &[C64], drive: C64, first_load: C64, second_load: C64) -> [C64; 2
 }
 
 #[test]
-fn voltage_source_and_secondary_load_follow_full_lossy_mutual_impedance() {
+fn voltage_source_and_secondary_load_follow_lossy_field_and_shared_end_impedance() {
     let source = common::source(true, 18.0);
     let problem = common::problem(&source, 0.7);
-    let basis = basis(&problem);
+    let basis = basis_with_end_modes(
+        &problem,
+        EndWindingInductance::new(
+            vec![0.02, 0.03],
+            vec![EndWindingMode {
+                inductance_h: 0.12,
+                turns: vec![1.0, -2.0],
+            }],
+        )
+        .unwrap(),
+    );
     let model = prepared(&basis, &source);
     let drive = C64::new(2.0, -0.7);
     for omega in [0.7, 13.0, 60.0] {
         let frequency = model.at_frequency(omega, &mut || false).unwrap();
-        let expected = two_port(
-            frequency.impedance_ohm(),
-            drive,
-            C64::from_re(1.7),
-            C64::from_re(4.2),
-        );
+        // Independent scalar field elimination, plus the signed omitted end
+        // flux. Circuit currents are not predicted from the produced Z matrix.
+        let field_l = C64::from_re(1.4) / C64::new(4.0, -omega * 18.0 / 144.0);
+        let field_z = C64::new(omega * field_l.im, -omega * field_l.re);
+        let independent_z = [
+            field_z + C64::new(288.0 * 0.7 / 18.0, -omega * 0.14),
+            field_z.scale(-0.5) + C64::new(0.0, omega * 0.24),
+            field_z.scale(-0.5) + C64::new(0.0, omega * 0.24),
+            field_z.scale(0.25) + C64::new(72.0 * 0.7 / 18.0, -omega * 0.51),
+        ];
+        for (&actual, expected) in frequency.impedance_ohm().iter().zip(independent_z) {
+            complex_near(actual, expected);
+        }
+        let expected = two_port(&independent_z, drive, C64::from_re(1.7), C64::from_re(4.2));
         let mut previous = None;
         for scale in [0.25, 1.0, 4.0] {
             let mut limits = controls();

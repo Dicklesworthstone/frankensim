@@ -1,5 +1,28 @@
 # fs-em contract
 
+## Shared end flux in nonlinear differential and harmonic winding response
+
+The planar and spatial incremental bases accept the same original passive
+`EndWindingInductance` through `new_with_end_modes`. Operating linkage and
+current-rate voltage evaluate its signed factors; the local differential matrix
+contains every end self/mutual term. The resolved nonlinear tangent, fixed bias,
+field source/gauge checks and singular-coordinate admission remain authoritative.
+These end parameters are fixed linear storage, not a new saturation or loss law.
+
+Planar harmonic winding impedance includes the complete end matrix. Its retained
+field/copper block and original end factors independently recover terminal voltage
+and phase-dependent cycle-mean storage, including native circuit replay. Large
+end terms cannot mask the separately checked active-field power pairing. Copper,
+solid-conductor and floating-conductor heat retain their original spatial owners.
+
+With `harmonic-exposure`, finite windows contract the original shared-mode
+currents before forming temporal products. Beat and carrier cross terms enter
+both end storage and its rate; modal payload and pair work count against the
+existing explicit budgets. Regression cases in `winding_incremental`,
+`spatial_incremental_winding`, `winding_harmonic` and `winding_harmonic_circuit`
+compare nonlinear finite differences, signed rank/cancellation, analytical lossy
+impedance, loaded circuits and independent real-time two-tone quadrature.
+
 ## Shared end flux in linear planar and three-dimensional winding bases
 
 `PlanarWindingBasis::new_with_end_modes`, its fixed-remanence counterpart and

@@ -21,9 +21,10 @@ use super::{
     SpatialNonlinearVectorMagnetostatics,
 };
 use crate::spatial::{
-    SpatialMagneticError, cross, dot, finite, invalid, nonlinear::SpatialNonlinearMaterial,
-    norm, poll, sub,
+    SpatialMagneticError, cross, dot, finite, invalid, nonlinear::SpatialNonlinearMaterial, norm,
+    poll, sub,
 };
+use crate::winding::end::{EndWindingError, EndWindingInductance};
 use fs_feec::{
     assembly::stiffness,
     weighted::{CellWeight, WeightedError, weighted_mass_matrix},
@@ -50,6 +51,7 @@ pub struct SpatialIncrementalWindingConfig {
 #[derive(Debug)]
 pub enum SpatialIncrementalWindingError {
     Magnetic(NonlinearVectorError),
+    End(EndWindingError),
     Pairing {
         source: usize,
         receiver: usize,
@@ -73,6 +75,11 @@ impl From<NonlinearVectorError> for SpatialIncrementalWindingError {
 impl From<SpatialMagneticError> for SpatialIncrementalWindingError {
     fn from(error: SpatialMagneticError) -> Self {
         Self::Magnetic(error.into())
+    }
+}
+impl From<EndWindingError> for SpatialIncrementalWindingError {
+    fn from(error: EndWindingError) -> Self {
+        Self::End(error)
     }
 }
 impl core::fmt::Display for SpatialIncrementalWindingError {
@@ -129,7 +136,7 @@ pub struct SpatialIncrementalWindingBasis<'m> {
     responses: Vec<SpatialIncrementalWindingResponse>,
     active_inductance_h: Vec<f64>,
     inductance_h: Vec<f64>,
-    external_inductance_h: Vec<f64>,
+    end_inductance: EndWindingInductance,
     maximum_pairing_defect_h: f64,
 }
 impl<'m> SpatialIncrementalWindingBasis<'m> {
@@ -145,6 +152,37 @@ impl<'m> SpatialIncrementalWindingBasis<'m> {
         boundary: VectorMagneticBoundary,
         operating_currents_a: Vec<f64>,
         external_inductance_h: Vec<f64>,
+        initial_potential_wb: &[f64],
+        config: SpatialIncrementalWindingConfig,
+        controls: NonlinearVectorControls,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self> {
+        poll(cancelled)?;
+        Self::new_with_end_modes(
+            problem,
+            profiles_per_m2,
+            boundary,
+            operating_currents_a,
+            EndWindingInductance::new(external_inductance_h, vec![])?,
+            initial_potential_wb,
+            config,
+            controls,
+            cancelled,
+        )
+    }
+
+    /// Extract the local differential field response with explicit passive
+    /// end-region self and shared mutual flux. The authored end model must
+    /// exclude flux already resolved by the field. Its original factors are
+    /// retained for operating linkages and current-rate response, including
+    /// cancelling modes that cannot be recovered from rounded matrix entries.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_end_modes(
+        problem: &'m SpatialNonlinearVectorMagnetostatics,
+        profiles_per_m2: Vec<Vec<[f64; 3]>>,
+        boundary: VectorMagneticBoundary,
+        operating_currents_a: Vec<f64>,
+        end_inductance: EndWindingInductance,
         initial_potential_wb: &[f64],
         config: SpatialIncrementalWindingConfig,
         controls: NonlinearVectorControls,
@@ -171,8 +209,7 @@ impl<'m> SpatialIncrementalWindingBasis<'m> {
             || values.is_none_or(|v| v > config.winding.max_basis_values)
             || operating_currents_a.len() != n
             || operating_currents_a.iter().any(|v| !v.is_finite())
-            || external_inductance_h.len() != n
-            || external_inductance_h.iter().any(|v| !v.is_finite() || *v < 0.0)
+            || end_inductance.winding_count() != n
             || boundary.potential.len() > faces
             || !config.winding.pairing_tolerance_h.is_finite()
             || config.winding.pairing_tolerance_h < 0.0
@@ -194,9 +231,7 @@ impl<'m> SpatialIncrementalWindingBasis<'m> {
             for face in &problem.geometry.faces {
                 poll(cancelled)?;
                 let jump = if face.cells.len() == 2 {
-                    std::array::from_fn(|k| {
-                        profile[face.cells[0]][k] - profile[face.cells[1]][k]
-                    })
+                    std::array::from_fn(|k| profile[face.cells[0]][k] - profile[face.cells[1]][k])
                 } else {
                     profile[face.cells[0]]
                 };
@@ -213,19 +248,22 @@ impl<'m> SpatialIncrementalWindingBasis<'m> {
             for (cell, vectors) in problem.cells.iter().enumerate() {
                 poll(cancelled)?;
                 for k in 0..3 {
-                    current[cell][k] =
-                        finite(amperes.mul_add(profile[cell][k], current[cell][k]))?;
+                    current[cell][k] = finite(amperes.mul_add(profile[cell][k], current[cell][k]))?;
                 }
                 for local in 0..6 {
                     let edge = vectors.edges[local];
-                    load[edge] =
-                        finite(load[edge] + dot(profile[cell], vectors.integrals[local]))?;
+                    load[edge] = finite(load[edge] + dot(profile[cell], vectors.integrals[local]))?;
                 }
             }
             loads_per_a.push(load);
         }
-        let operating_field =
-            problem.solve(&current, &boundary, initial_potential_wb, controls, cancelled)?;
+        let operating_field = problem.solve(
+            &current,
+            &boundary,
+            initial_potential_wb,
+            controls,
+            cancelled,
+        )?;
         admit_smooth_operating_point(
             &operating_field,
             config.minimum_smooth_field_margin_t,
@@ -247,7 +285,12 @@ impl<'m> SpatialIncrementalWindingBasis<'m> {
             geometry: &problem.geometry,
             cells: &problem.cells,
         }
-        .prepare_sources(&vec![[0.0; 3]; cells], &homogeneous, controls.field, cancelled)?;
+        .prepare_sources(
+            &vec![[0.0; 3]; cells],
+            &homogeneous,
+            controls.field,
+            cancelled,
+        )?;
         let mut weights = Vec::with_capacity(cells);
         for (cell, &b) in operating_field.flux_density_t().iter().enumerate() {
             poll(cancelled)?;
@@ -290,7 +333,8 @@ impl<'m> SpatialIncrementalWindingBasis<'m> {
         }
         let reduced = Csr::from_parts(sources.free.len(), sources.free.len(), rows, cols, vals);
         let mut responses = Vec::with_capacity(n);
-        let mut operating_flux_linkages_wb = Vec::with_capacity(n);
+        let mut operating_flux_linkages_wb =
+            end_inductance.flux_linkages_wb(&operating_currents_a)?;
         for (winding, load) in loads_per_a.iter().enumerate() {
             poll(cancelled)?;
             let rhs: Vec<_> = sources.free.iter().map(|&edge| load[edge]).collect();
@@ -370,8 +414,7 @@ impl<'m> SpatialIncrementalWindingBasis<'m> {
                     -1.0
                 };
                 for &cell in &face.cells {
-                    let flux =
-                        finite(face.area_m2 * dot(flux_density[cell], face.outward_normal))?;
+                    let flux = finite(face.area_m2 * dot(flux_density[cell], face.outward_normal))?;
                     maximum_flux_defect_h =
                         maximum_flux_defect_h.max(finite(flux - sign * face_flux[i])?.abs());
                 }
@@ -383,9 +426,8 @@ impl<'m> SpatialIncrementalWindingBasis<'m> {
                 .into());
             }
             let active = pairing(load, operating_field.potential_wb(), cancelled)?;
-            operating_flux_linkages_wb.push(finite(
-                external_inductance_h[winding].mul_add(operating_currents_a[winding], active),
-            )?);
+            operating_flux_linkages_wb[winding] =
+                finite(active + operating_flux_linkages_wb[winding])?;
             responses.push(SpatialIncrementalWindingResponse {
                 potential_per_current_h: potential,
                 face_flux_per_current_h: face_flux,
@@ -398,11 +440,16 @@ impl<'m> SpatialIncrementalWindingBasis<'m> {
         }
         let mut active_inductance_h = vec![0.0; n * n];
         for source in 0..n {
-            let applied =
-                apply(&full, responses[source].potential_per_current_h(), cancelled)?;
+            let applied = apply(
+                &full,
+                responses[source].potential_per_current_h(),
+                cancelled,
+            )?;
             for receiver in 0..=source {
                 let gram = pairing(
-                    responses[receiver].potential_per_current_h(), &applied, cancelled,
+                    responses[receiver].potential_per_current_h(),
+                    &applied,
+                    cancelled,
                 )?;
                 active_inductance_h[receiver * n + source] = gram;
                 active_inductance_h[source * n + receiver] = gram;
@@ -426,13 +473,14 @@ impl<'m> SpatialIncrementalWindingBasis<'m> {
             }
         }
         let mut inductance_h = active_inductance_h.clone();
-        for (i, &external) in external_inductance_h.iter().enumerate() {
-            inductance_h[i * n + i] = finite(inductance_h[i * n + i] + external)?;
+        for (total, &end) in inductance_h.iter_mut().zip(end_inductance.matrix_h()) {
+            *total = finite(*total + end)?;
+        }
+        for i in 0..n {
             if active_inductance_h[i * n + i] < 0.0 || inductance_h[i * n + i] <= 0.0 {
-                return Err(invalid(
-                    "positive self inductance without invented leakage required",
-                )
-                .into());
+                return Err(
+                    invalid("positive self inductance without invented leakage required").into(),
+                );
             }
         }
         poll(cancelled)?;
@@ -446,7 +494,7 @@ impl<'m> SpatialIncrementalWindingBasis<'m> {
             responses,
             active_inductance_h,
             inductance_h,
-            external_inductance_h,
+            end_inductance,
             maximum_pairing_defect_h,
         })
     }
@@ -477,12 +525,21 @@ impl<'m> SpatialIncrementalWindingBasis<'m> {
     pub fn active_inductance_h(&self) -> &[f64] {
         &self.active_inductance_h
     }
-    /// Full differential block including explicit series end self-inductance [H].
+    /// Full differential block including explicit end self and mutual flux [H].
     pub fn inductance_h(&self) -> &[f64] {
         &self.inductance_h
     }
+    /// Independent diagonal end contribution, excluding shared-mode self terms.
     pub fn external_inductance_h(&self) -> &[f64] {
-        &self.external_inductance_h
+        self.end_inductance.diagonal_h()
+    }
+    /// Fixed passive end storage in the original terminal ordering.
+    pub fn end_inductance_model(&self) -> &EndWindingInductance {
+        &self.end_inductance
+    }
+    /// Full symmetric end self/mutual matrix [H], before adding meshed flux.
+    pub fn end_inductance_matrix_h(&self) -> &[f64] {
+        self.end_inductance.matrix_h()
     }
     pub fn maximum_pairing_defect_h(&self) -> f64 {
         self.maximum_pairing_defect_h
@@ -511,19 +568,20 @@ impl<'m> SpatialIncrementalWindingBasis<'m> {
     pub fn linearized_flux_increment_wb(&self, current_increment_a: &[f64]) -> Result<Vec<f64>> {
         let n = self.winding_count();
         if current_increment_a.len() != n || current_increment_a.iter().any(|v| !v.is_finite()) {
-            return Err(invalid(
-                "one finite current increment per original winding required",
-            )
-            .into());
+            return Err(
+                invalid("one finite current increment per original winding required").into(),
+            );
         }
-        self.inductance_h
+        let end_flux = self.end_inductance.flux_linkages_wb(current_increment_a)?;
+        self.active_inductance_h
             .chunks_exact(n)
-            .map(|row| {
+            .zip(end_flux)
+            .map(|(row, end)| {
                 let mut value = 0.0;
                 for (&l, &i) in row.iter().zip(current_increment_a) {
                     value = finite(l.mul_add(i, value))?;
                 }
-                Ok(value)
+                Ok(finite(value + end)?)
             })
             .collect()
     }
@@ -586,8 +644,9 @@ fn admit_smooth_operating_point(
                 let h = field.field_strength_a_m()[cell];
                 let direction = law.direction();
                 let parallel = finite(dot(h, direction))?;
-                let transverse =
-                    finite(norm(std::array::from_fn(|k| h[k] - parallel * direction[k])))?;
+                let transverse = finite(norm(std::array::from_fn(|k| {
+                    h[k] - parallel * direction[k]
+                })))?;
                 let source = law.material();
                 let range = source.parallel_range_a_m();
                 if parallel <= range[0]

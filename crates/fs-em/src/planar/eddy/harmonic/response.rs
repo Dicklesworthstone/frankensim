@@ -27,17 +27,14 @@ impl HarmonicWindingFrequency<'_, '_, '_> {
         let mesh = model.basis.operating_field().problem().mesh();
         let n = mesh.vertices().len();
         let mut potential = vec![C64::ZERO; n];
-        let mut voltage = vec![C64::ZERO; count];
-        for (j, (&current, response)) in currents_a.iter().zip(&self.unit_responses).enumerate() {
+        let voltage = self.terminal_voltages_v(currents_a)?;
+        for (&current, response) in currents_a.iter().zip(&self.unit_responses) {
             for (value, &a) in potential
                 .iter_mut()
                 .zip(&response.potential_per_current_h_m)
             {
                 poll(cancelled)?;
                 *value = phasor(*value + a * current)?;
-            }
-            for (i, value) in voltage.iter_mut().enumerate() {
-                *value = phasor(*value + self.impedance_ohm[i * count + j] * current)?;
             }
         }
         let mut flux_density = Vec::with_capacity(mesh.faces().len());
@@ -62,10 +59,16 @@ impl HarmonicWindingFrequency<'_, '_, '_> {
                 mean_magnetic_energy_j = finite((0.25 * a).mul_add(ka, mean_magnetic_energy_j))?;
             }
         }
-        for (&current, &end) in currents_a.iter().zip(model.basis.end_inductance_h()) {
-            mean_magnetic_energy_j =
-                finite(mean_magnetic_energy_j + 0.25 * end * current.norm_sq())?;
-        }
+        let real_currents: Vec<_> = currents_a.iter().map(|i| i.re).collect();
+        let imaginary_currents: Vec<_> = currents_a.iter().map(|i| i.im).collect();
+        let end = model.basis.end_inductance_model();
+        // Peak phasors average to one half of each real component's quadratic
+        // storage. Original modes retain phase-dependent mutual cancellation.
+        mean_magnetic_energy_j = finite(
+            mean_magnetic_energy_j
+                + 0.5 * end.stored_energy_j(&real_currents)?
+                + 0.5 * end.stored_energy_j(&imaginary_currents)?,
+        )?;
         if mean_magnetic_energy_j < 0.0 {
             return Err(HarmonicWindingError::Balance(
                 "negative magnetic perturbation storage",

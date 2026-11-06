@@ -1,7 +1,9 @@
 //! Finite-time winding heat and magnetic work from the original AC fields.
 //!
 //! For real perturbations `a(t)=Re(sum a_j exp(-i omega_j t))`, the SAME
-//! differential field operator gives `U= a^T K_t a/2 + sum L_end i^2/2`.
+//! differential field operator gives `U= a^T K_t a/2 + i^T L_end i/2`.
+//! Shared end storage contracts its original signed flux modes before squaring;
+//! it never expands mutually cancelling currents into independent self energies.
 //! Its instantaneous power identity is `sum v i = integral sigma E^2 + dU/dt`.
 //! Each frequency retains its original skin/proximity current distribution;
 //! adding independent cycle-mean losses would discard both beat and carrier
@@ -95,13 +97,15 @@ struct SpectralLine {
     voltages_v: Vec<C64>,
     potential_wb_m: Vec<C64>,
     magnetic_rhs_a_m: Vec<C64>,
+    /// Original shared end-mode currents, projected before temporal products.
+    end_mode_currents_a: Vec<[Dd; 2]>,
     /// Total constitutive E, in original projected-conductor order.
     electric_v_m: Vec<[C64; 3]>,
 }
 
 /// Compact original field responses reused across arbitrarily many windows.
-/// Queries require O((F^2+1)*(vertices+eddy_cells+windings)+stranded_cells) work
-/// for F distinct frequencies, without field solves or per-cell trigonometry.
+/// Queries require O((F^2+1)*(vertices+eddy_cells+windings+end_modes)+stranded_cells)
+/// work for F distinct frequencies, without field solves or per-cell trigonometry.
 pub struct HarmonicWindingExposure<'p, 'b, 'm> {
     model: &'p PlanarHarmonicWindings<'b, 'm>,
     lines: Vec<SpectralLine>,
@@ -132,6 +136,13 @@ fn nonnegative(value: Dd) -> Result<f64> {
 fn derivative(value: C64, omega: f64) -> Result<C64> {
     phasor(C64::new(omega * value.im, -omega * value.re))
 }
+fn derivative_parts(value: [Dd; 2], omega: f64) -> Result<[Dd; 2]> {
+    let w = Dd::from_f64(omega);
+    let result = [w * value[1], -(w * value[0])];
+    real(result[0])?;
+    real(result[1])?;
+    Ok(result)
+}
 
 impl<'b, 'm> PlanarHarmonicWindings<'b, 'm> {
     /// Bind original frequency responses and authored current phases to one
@@ -148,6 +159,8 @@ impl<'b, 'm> PlanarHarmonicWindings<'b, 'm> {
         let l = tones.len();
         let n = self.tangent.nrows();
         let m = self.basis.winding_count();
+        let end_modes = self.basis.end_inductance_model().modes();
+        let k = end_modes.len();
         let e = self.eddy_conductors.len();
         let c = self.winding_conductors.len();
         if l > MAX_EXPOSURE_LINES || l > limits.maximum_lines || !positive(limits.power_tolerance_w)
@@ -159,12 +172,14 @@ impl<'b, 'm> PlanarHarmonicWindings<'b, 'm> {
         let products = l.checked_mul(l).and_then(|pairs| {
             n.checked_mul(2)
                 .and_then(|v| m.checked_mul(3).and_then(|w| v.checked_add(w)))
+                .and_then(|v| k.checked_mul(2).and_then(|w| v.checked_add(w)))
                 .and_then(|v| e.checked_mul(4).and_then(|w| v.checked_add(w)))
                 .and_then(|v| pairs.checked_mul(v))
         });
         let bytes = n
             .checked_mul(4)
             .and_then(|v| m.checked_mul(4).and_then(|w| v.checked_add(w)))
+            .and_then(|v| k.checked_mul(4).and_then(|w| v.checked_add(w)))
             .and_then(|v| e.checked_mul(6).and_then(|w| v.checked_add(w)))
             .and_then(|v| v.checked_mul(core::mem::size_of::<f64>()))
             .and_then(|v| v.checked_add(core::mem::size_of::<SpectralLine>()))
@@ -235,6 +250,21 @@ impl<'b, 'm> PlanarHarmonicWindings<'b, 'm> {
                 .map(|[re, im]| Ok(C64::new(real(re)?, real(im)?)))
                 .collect::<Result<_>>()?;
             let response = first.frequency.response(&currents, cancelled)?;
+            let mut end_mode_currents_a = Vec::with_capacity(k);
+            for mode in end_modes {
+                poll(cancelled)?;
+                let mut projected = [Dd::ZERO; 2];
+                if mode.inductance_h != 0.0 {
+                    for (&turns, &current) in mode.turns.iter().zip(&response.currents_a) {
+                        let weight = Dd::from_f64(turns);
+                        projected[0] = projected[0] + weight * Dd::from_f64(current.re);
+                        projected[1] = projected[1] + weight * Dd::from_f64(current.im);
+                    }
+                    real(projected[0])?;
+                    real(projected[1])?;
+                }
+                end_mode_currents_a.push(projected);
+            }
             let mut magnetic_rhs_a_m = Vec::with_capacity(n);
             for row in 0..n {
                 poll(cancelled)?;
@@ -272,6 +302,7 @@ impl<'b, 'm> PlanarHarmonicWindings<'b, 'm> {
                 voltages_v: response.terminal_voltages_v,
                 potential_wb_m: response.potential_wb_m,
                 magnetic_rhs_a_m,
+                end_mode_currents_a,
                 electric_v_m,
             });
         }
@@ -340,6 +371,32 @@ impl<'p, 'b, 'm> HarmonicWindingExposure<'p, 'b, 'm> {
                             * moment(kernel.mean_real_product_dd(
                                 a.currents_a[k],
                                 derivative(b.currents_a[k], b.omega_rad_s)?,
+                            ))?;
+                }
+                for (k, mode) in self
+                    .model
+                    .basis
+                    .end_inductance_model()
+                    .modes()
+                    .iter()
+                    .enumerate()
+                {
+                    poll(cancelled)?;
+                    if mode.inductance_h == 0.0 {
+                        continue;
+                    }
+                    let coefficient = Dd::from_f64(mode.inductance_h);
+                    let first = a.end_mode_currents_a[k];
+                    let second = b.end_mode_currents_a[k];
+                    energy = energy
+                        + Dd::from_f64(0.5)
+                            * coefficient
+                            * moment(kernel.mean_real_product_parts_dd(first, second))?;
+                    rate = rate
+                        + coefficient
+                            * moment(kernel.mean_real_product_parts_dd(
+                                first,
+                                derivative_parts(second, b.omega_rad_s)?,
                             ))?;
                 }
                 for (&ka, &b_potential) in a.magnetic_rhs_a_m.iter().zip(&b.potential_wb_m) {

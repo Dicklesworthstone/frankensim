@@ -13,6 +13,8 @@
 //! additionally resolve skin/proximity redistribution in driven solid sections,
 //! using their prescribed integrated current and the same conductivity operator.
 //! Stranded profiles stay fixed; their internal redistribution is not inferred.
+//! The original end-flux factors supply all mutual terminal induction and
+//! magnetic storage without attributing unresolved end flux to conductor heat.
 //!
 //! Geometry, temperature, boundary trace, remanence and DC bias stay fixed.
 //! These are infinitesimal perturbations, with incremental stored energy and
@@ -38,6 +40,7 @@ use crate::{
         nonlinear::{IsotropicMagneticMaterial, NonlinearMagneticError},
     },
     winding::{
+        end::EndWindingError,
         incremental::PlanarIncrementalWindingBasis,
         ohmic::{OhmicWindingError, WindingConductor, bind_sources},
     },
@@ -77,6 +80,7 @@ pub enum HarmonicWindingError {
     Magnetic(NonlinearMagneticError),
     Eddy(EddyError),
     Winding(OhmicWindingError),
+    End(EndWindingError),
     Nonconvergence(SolveReport),
     Balance(&'static str),
     Cancelled,
@@ -114,6 +118,11 @@ impl From<OhmicWindingError> for HarmonicWindingError {
             OhmicWindingError::Cancelled => Self::Cancelled,
             other => Self::Winding(other),
         }
+    }
+}
+impl From<EndWindingError> for HarmonicWindingError {
+    fn from(error: EndWindingError) -> Self {
+        Self::End(error)
     }
 }
 type Result<T> = core::result::Result<T, HarmonicWindingError>;
@@ -172,6 +181,9 @@ impl HarmonicWindingUnitResponse {
 pub struct HarmonicWindingFrequency<'p, 'b, 'm> {
     prepared: &'p PlanarHarmonicWindings<'b, 'm>,
     omega_rad_s: f64,
+    /// Resolved field plus spatial copper only; keep separate from potentially
+    /// large end terms so their cancelling modes cannot erase field response.
+    field_impedance_ohm: Vec<C64>,
     impedance_ohm: Vec<C64>,
     effective_inductance_h: Vec<f64>,
     unit_responses: Vec<HarmonicWindingUnitResponse>,
@@ -188,7 +200,7 @@ impl HarmonicWindingFrequency<'_, '_, '_> {
     pub fn impedance_ohm(&self) -> &[C64] {
         &self.impedance_ohm
     }
-    /// Row-major -Im(Z)/omega, including explicit end-storage diagonals.
+    /// Row-major -Im(Z)/omega, including all explicit end self/mutual storage.
     pub fn effective_inductance_h(&self) -> &[f64] {
         &self.effective_inductance_h
     }
@@ -203,6 +215,41 @@ impl HarmonicWindingFrequency<'_, '_, '_> {
     }
     pub fn maximum_cell_skin_ratio(&self) -> f64 {
         self.maximum_cell_skin_ratio
+    }
+
+    // Recover terminal drops from the resolved impedance and ORIGINAL end
+    // modes, rather than multiplying a cancellation-prone expanded end block.
+    // The native circuit replay uses exactly this same terminal relation.
+    fn terminal_voltages_v(&self, currents: &[C64]) -> Result<Vec<C64>> {
+        let count = self.prepared.basis.winding_count();
+        if currents.len() != count
+            || currents
+                .iter()
+                .any(|z| !z.re.is_finite() || !z.im.is_finite())
+        {
+            return Err(HarmonicWindingError::Invalid(
+                "one finite peak phasor per original winding required",
+            ));
+        }
+        let real: Vec<_> = currents.iter().map(|z| z.re).collect();
+        let imaginary: Vec<_> = currents.iter().map(|z| z.im).collect();
+        let end = self.prepared.basis.end_inductance_model();
+        let real_flux = end.flux_linkages_wb(&real)?;
+        let imaginary_flux = end.flux_linkages_wb(&imaginary)?;
+        let mut voltage = vec![C64::ZERO; count];
+        for (row, value) in voltage.iter_mut().enumerate() {
+            for (column, &current) in currents.iter().enumerate() {
+                *value = phasor(*value + self.field_impedance_ohm[row * count + column] * current)?;
+            }
+            *value = phasor(
+                *value
+                    + C64::new(
+                        self.omega_rad_s * imaginary_flux[row],
+                        -self.omega_rad_s * real_flux[row],
+                    ),
+            )?;
+        }
+        Ok(voltage)
     }
 }
 
@@ -336,7 +383,7 @@ impl<'b, 'm> PlanarHarmonicWindings<'b, 'm> {
             .and_then(|v| cells.checked_mul(m).and_then(|w| v.checked_add(w)))
             .and_then(|v| {
                 m.checked_mul(m)
-                    .and_then(|w| w.checked_mul(8))
+                    .and_then(|w| w.checked_mul(10))
                     .and_then(|w| v.checked_add(w))
             })
             .and_then(|v| histories.and_then(|h| v.checked_add(h)));
