@@ -66,11 +66,12 @@ impl<L: SgsLattice3<Q>, const Q: usize> Grid3<L, Q> {
         molecular: Option<&[L::Collision]>,
         workspace: &mut LagrangianSgsWorkspace3<L::Collision>,
     ) -> Result<DynamicSgsStepReport, SgsStepError<L::Error>> {
-        let (trial, dissipation) = self.prepare_lagrangian_sgs(
+        let (trial, dissipation) = self.prepare_lagrangian_sgs_with_forces(
             config,
             molecular,
             &mut workspace.local,
             &mut workspace.filter,
+            None,
             || cx.checkpoint().map_err(|_| GridError3::Cancelled),
         )?;
         self.step_serial_with_collisions(cx, workspace.local.collisions())?;
@@ -89,11 +90,12 @@ impl<L: SgsLattice3<Q>, const Q: usize> Grid3<L, Q> {
         molecular: Option<&[L::Collision]>,
         workspace: &mut LagrangianSgsWorkspace3<L::Collision>,
     ) -> Result<DynamicSgsStepReport, SgsStepError<L::Error>> {
-        let (trial, dissipation) = self.prepare_lagrangian_sgs(
+        let (trial, dissipation) = self.prepare_lagrangian_sgs_with_forces(
             config,
             molecular,
             &mut workspace.local,
             &mut workspace.filter,
+            None,
             || {
                 if gate.is_requested() {
                     Err(GridError3::Cancelled)
@@ -108,12 +110,15 @@ impl<L: SgsLattice3<Q>, const Q: usize> Grid3<L, Q> {
         Ok(DynamicSgsStepReport { fit, dissipation })
     }
 
-    fn prepare_lagrangian_sgs<'a>(
+    // Keep the fit, departure velocity and dissipation in the same accepted
+    // force frame. The endpoint force belongs to the native step alone.
+    pub(super) fn prepare_lagrangian_sgs_with_forces<'a>(
         &self,
         config: LagrangianSgsConfig,
         molecular: Option<&[L::Collision]>,
         local: &mut SgsWorkspace3<L::Collision>,
         filter: &'a mut LagrangianDynamicSgs,
+        forces: Option<&[[f64; 3]]>,
         mut checkpoint: impl FnMut() -> Result<(), GridError3<L::Error>>,
     ) -> Result<(LagrangianSgsTrial<'a>, SgsReport), SgsStepError<L::Error>> {
         checkpoint()?;
@@ -125,9 +130,10 @@ impl<L: SgsLattice3<Q>, const Q: usize> Grid3<L, Q> {
             || local.collisions.len() != cells
             || filter.shape() != self.dims
             || molecular.is_some_and(|field| field.len() != cells)
+            || forces.is_some_and(|field| field.len() != cells)
         {
             return Err(
-                GridError3::Input("Lagrangian SGS workspace or molecular field mismatch").into(),
+                GridError3::Input("Lagrangian SGS workspace, molecular or force field mismatch").into(),
             );
         }
         // The public clock is integral. A rounded floating clock must never
@@ -142,8 +148,9 @@ impl<L: SgsLattice3<Q>, const Q: usize> Grid3<L, Q> {
             if cell % 64 == 0 {
                 checkpoint()?;
             }
+            let force = forces.map_or(self.force, |field| field[cell]);
             let (density, velocity) =
-                macro_cell::<L, Q>(&self.f[cell], self.force, cell, self.budget.maximum_mach)?;
+                macro_cell::<L, Q>(&self.f[cell], force, cell, self.budget.maximum_mach)?;
             local.density[cell] = density;
             local.velocity[cell] = velocity;
         }

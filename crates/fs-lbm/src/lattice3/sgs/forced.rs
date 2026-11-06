@@ -18,6 +18,7 @@ use crate::sgs3::dynamic::DynamicSgsConfig;
 use crate::sgs3::dynamic::channel::ChannelDynamicSgsConfig;
 use crate::sgs3::{ChannelDynamicSgsWorkspace3, DynamicSgsStepReport, DynamicSgsWorkspace3};
 
+mod lagrangian;
 mod moving_walls;
 
 fn gate_checkpoint<E>(gate: &CancelGate) -> Result<(), GridError3<E>> {

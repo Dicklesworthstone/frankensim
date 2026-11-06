@@ -13739,3 +13739,18 @@ pressure-density misalignment, mass-unit invariance, SI conversion, invalid
 data, periodic agreement with native force-centered curl, and incomplete
 thermodynamic stencils (G0/G1/G3). Independent analytic checks were performed;
 native Rust execution was unavailable when this extension was introduced.
+
+## Lagrangian SGS with spatial and changing body forces
+
+`ForcedGrid3` composes the original periodic Lagrangian SGS workspace with
+spatial and time-dependent force fields. Fits, pathline departures and
+pre-step dissipation use the incoming per-cell Guo half-force velocity.
+Held-force and next-force serial/pooled steps retain the original force
+transaction, molecular collision fields and D3Q27 nonshear rates. Turbulence
+history publishes only after populations, force epoch and clock succeed.
+The adapters add no preparation arrays and retain the original workspace
+byte gate. Periodic all-fluid topology, explicit memory time, departure
+limits and exploratory-use restrictions remain; this adds no wall, inflow,
+scalar-flux or turbulence-validation claim. `tests/lagrangian_forcing.rs`
+contains independent-owner, force-epoch, worker-identity, endpoint-refusal
+and late-cancellation regression sources.
