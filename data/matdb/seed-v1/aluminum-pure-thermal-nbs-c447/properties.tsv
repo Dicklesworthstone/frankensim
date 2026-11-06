@@ -1,0 +1,14 @@
+frankensim.matdb-source.v1
+observation	c447-table67-aluminum-thermal	Aluminum (element, Al), NBS C447 Table 67 density and thermal columns	NBS Circular C447 Table 67 p.459, row Aluminum: density 2.70 g/cm3 at 20 C, and coefficient of linear thermal expansion 22.9 x 10^-6 per deg C, specific heat 0.226 cal/g/deg C and thermal conductivity 2.18 W cm^-1 deg C^-1, each printed at room temperature	Density at the printed 20 C = 293.15 K, converted at 1000 (kg/m3) per (g/cm3); room temperature admitted at T = 293.15 K, as for the Silver row of the same table (silver-pure-nbs-c447). Specific heat converted at 4.184 J/cal (the circular does not name its calorie; the 15-degree and international-table calories differ by under 0.1 percent, below the three printed figures), 0.226 cal/g/K = 945.584 J/kg/K; conductivity converted at 100 (W/m/K) per (W/cm/K). Read on a 400 dpi rendering of the scan (PDF page 465). These are the element's values: the table states no temper, and no source on file names the alloy or temper of a wound string's wrap. The same row's melting point and density are already in aluminum-pure-nbs-c447, whose density is stated at 293 K
+scalar	density	c447-table67-aluminum-thermal	density	2700	kg/m^3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	T	293.15	293.15	K
+scalar	thermal-expansion	c447-table67-aluminum-thermal	linear_thermal_expansion_coefficient	22.9e-6	K^-1	constant
+uncertainty	thermal-expansion	unstated	-	-	-	-
+validity	thermal-expansion	T	293.15	293.15	K
+scalar	specific-heat	c447-table67-aluminum-thermal	specific_heat_capacity	945.584	J/kg/K	constant
+uncertainty	specific-heat	unstated	-	-	-	-
+validity	specific-heat	T	293.15	293.15	K
+scalar	thermal-conductivity	c447-table67-aluminum-thermal	thermal_conductivity	218	W/m/K	constant
+uncertainty	thermal-conductivity	unstated	-	-	-	-
+validity	thermal-conductivity	T	293.15	293.15	K

@@ -6,6 +6,9 @@
 //! reproduced from the SI rows at the stated conversion factors; drawing raising the modulus above the annealed element's; Poisson's
 //! ratio in the metals' band; Dulong-Petit; and schema hygiene. The strength claim states no wire diameter (nothing sourced bounds the
 //! diameter effect), the packs hold no yield, and the strength lies below the stress any concert-pitch string carries.
+//!
+//! The aluminium end of the thermal rosin row's string surface, Table 67's Aluminum row in silver's form, passes the same schema
+//! gates, its printed values at the stated factors, Dulong-Petit, and the order against silver from the same table.
 
 use std::collections::BTreeMap;
 
@@ -105,4 +108,23 @@ fn silver_packs_pass_physicality_gates() {
     // short 0.4 m speaking length, already carries more.
     assert!(uts > 21.5 * MPA_PER_KSI * 1e6 && uts < 1e9);
     assert!(4.0 * 0.4_f64.powi(2) * 440.0_f64.powi(2) * s["density"] > uts);
+}
+
+#[test]
+fn aluminium_thermal_pack_passes_physicality_gates() {
+    // Table 67 p.459 row Aluminum, read like the Silver row: one admitted temperature, 293.15 K.
+    let a = scalars("aluminum-pure-thermal-nbs-c447", "nbscircular447.pdf");
+    let names: Vec<&str> = a.keys().map(String::as_str).collect();
+    assert_eq!(names, ["density", "linear_thermal_expansion_coefficient", "specific_heat_capacity", "thermal_conductivity"]);
+    // As printed: 2.70 g/cm3 at 20 deg C, 22.9e-6 per deg C, 0.226 cal/g/deg C at 4.184 J/cal, 2.18 W/cm/deg C.
+    assert_eq!(a["density"], 2_700.0);
+    assert_eq!(a["linear_thermal_expansion_coefficient"], 22.9e-6);
+    assert!((a["specific_heat_capacity"] / 4184.0 - 0.226).abs() < 1e-9);
+    assert_eq!(a["thermal_conductivity"], 218.0);
+    // Dulong-Petit with Table 67's atomic weight 26.97: 3R/M = 924.9 J/kg/K.
+    let dulong_petit = 3.0 * 8.314_462_618 / 0.026_97;
+    assert!((a["specific_heat_capacity"] / dulong_petit - 1.0).abs() < 0.05);
+    // Against silver from the same table: lighter, and a poorer conductor.
+    let s = scalars("silver-pure-nbs-c447", "nbscircular447.pdf");
+    assert!(a["density"] < s["density"] && a["thermal_conductivity"] < s["thermal_conductivity"]);
 }
