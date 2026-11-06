@@ -16763,11 +16763,13 @@ coordinates cannot silently acquire fracture calibration.
 Eight core tests and seven source regression definitions cover independent
 formula/analytic initiation, signed-factor admission, path irreversibility,
 rotation/scaling, restart, source meaning, typed domains, ambiguity pins and
-original material/context binding. The eight initiation tests now pass in the
-bounded actual-source numeric build described below; the source regressions
-remain unexecuted. Initiation alone adds no post-initiation softening, fracture
-energy, characteristic length, crack topology, mesh-objective failure, Lode
-dependence or experimentally validated component failure. Progressive small-
+original material/context binding. The original initiation and source tests
+now pass alongside the Lode additions: 20 native core tests and 19 material-source
+integration tests execute against the original numerical/source bodies and
+genuine dependencies. These focused builds are not a full-crate or workspace
+gate. Initiation alone adds no post-initiation softening, fracture energy,
+characteristic length, crack topology, mesh-objective failure or experimentally
+validated component failure. Progressive small-
 strain evolution is now provided by the separate owner below; broader fracture
 tasks remain open.
 
@@ -16866,8 +16868,9 @@ The tensile volumetric and deviatoric response degrade while compressive bulk
 stiffness remains intact. The stored potential is
 `g*psi_native + (1-g)*K/2*min(trace(strain),0)^2`. Physical stress and tangent
 differentiate this split consistently. The tangent includes native accumulated-
-plastic-strain sensitivity and moving onset, including triaxiality and rate
-effects during the crossing increment. Initiation remains endpoint quadrature;
+plastic-strain sensitivity and moving onset, including triaxiality, Lode parameter
+and rate effects during the crossing increment. Initiation remains endpoint
+quadrature;
 after its first accepted crossing the initiation observation freezes, while
 the original native plastic clock continues. Supported temperature is required
 even during elastic unloading. The tangent may be nonsymmetric and indefinite.
@@ -16892,26 +16895,69 @@ must match in both directions. Geometry supplies length explicitly; calibration
 cannot be overridden through numerical settings. Prepared runtime updates
 make no material-database queries or source-card copies.
 
-FACT (bounded actual-source numeric execution): all nine new evolution tests
-and all eight existing initiation tests pass. They exercise intact/native
-agreement, the independent hardening-work integral, all 36 tangent entries
-through coupled initiation and compressive reclosure, length/work scaling,
-irreversibility, plastic reversal energy balance, repeatability, transactional
-refusals and numerical-loss decay on sufficiently refined paths. A reproduced
-held-strain restart defect now replays the exact accepted state with zero
-incremental work; nonzero loading still obeys the original rate support. The build
-used the actual native J2, elasticity, tensor and energy bodies with genuine
-current dependencies. It excluded unrelated module declarations and source
-forwarding; this is not a full-crate or integrated structural build. Five new
-source-adapter regression definitions cover original receipts/context, physical
-response and source/domain refusal; those tests have not executed.
+FACT (bounded actual-source execution): all 20 core tests and all 19 material-source
+integration tests pass. They exercise intact/native agreement, independent
+hardening-work and Lode-dependent onset, all 36 tangent entries through coupled
+initiation and compressive reclosure, length/work scaling, irreversibility,
+plastic reversal work balance, repeatability, transactional refusals and
+numerical-loss decay on sufficiently refined paths. The exact held-strain
+restart preserves accepted state with zero incremental work; nonzero loading
+still obeys the original rate support. Source tests exercise original receipts,
+complete typed context, physical attenuation and source/domain refusals.
+
+The build uses the original native J2, elasticity, tensor, energy, ductile and
+source bodies with genuine numerical and material-data dependencies. It selects
+those modules without unrelated exports; this is not a full-crate, workspace or
+integrated structural gate. Structural execution is reported by fs-solid.
 
 This owner advances the post-initiation part of MR63
 (`frankensim-material-reality-ui2if.7.11`) without closing that broader bead.
 Characteristic-length scaling does not establish arbitrary-mesh crack-path
 objectivity. Finite deformation, crack topology, new-surface contact, erosion,
-fragments, history transfer, Lode dependence, heat partition and experimental
+fragments, history transfer, heat partition and experimental
 qualification remain outside this model.
+
+### Lode-dependent initiation and progressive softening
+
+The shared `ductile::DuctileStressState` carries tensile-positive triaxiality
+and `xi = (27/2) det(s) / q^3 = cos(3 theta)`. Both are invariant under rigid
+rotation and positive stress scaling. This convention is distinct from an
+angle in radians or `1 - 6 theta/pi`. Separate total-stress/deviator scaling
+avoids unnecessary overflow and loss of small deviators. Exactly hydrostatic
+stress supplies no invariant pair; positive plastic flow there still refuses.
+
+`DuctileInitiationLaw::fracture_strain_at` propagates the complete stress state
+through the original history owner and every consumer of that owner. Existing
+Johnson--Cook and one-dimensional tables keep their triaxiality-only response.
+Lode-dependent laws refuse the scalar entry point instead of inventing xi.
+The progressive J2 tangent includes the exact polynomial invariant derivative
+`d xi = [27/2 dev(U^2) - 9/2 xi U] : d sigma / q`, where `U = s/q`.
+It introduces no Lode-angle singularity at the tensile/compressive meridians,
+and it retains the original native return map and endpoint onset quadrature.
+
+`ductile::source::resolve_ductile_stress_locus` prepares the exact named
+fracture-plastic-strain property from an original `Surface2D` claim on
+`stress-triaxiality` and `stress-lode-parameter`. Either source-axis order is
+accepted. Original `LinearInside` triangles, samples, full typed query points
+and verified receipts remain attached. The existing `PreparedSurfaceResponse`
+owns values, exact support predicates and cached analytical cell gradients;
+holes and isolated samples gain no solver support from their bounding box.
+Shared edges use its explicit first-cell semismooth branch. Runtime evaluation
+performs no database query or source selection. Temperature remains fixed at
+the original observation, and the positive plastic-rate interval remains an
+applicability statement, not fitted rate dependence.
+
+The original `ResolvedDuctileLocus`, source-bound `DuctileHistory`, and
+`ResolvedDuctileJ2` bindings accept both curve and surface preparations.
+Card/state identity and fixed external context still match in both directions;
+only actual runtime stress invariants and plastic rate are excluded from that
+fixed-context comparison. Synthetic regressions cover equal-triaxiality stress
+states, rotation/scaling, all tangent entries, source holes and semantics,
+native softening, and assembled tetrahedral utilization. The 20 native core
+and 19 material-source tests execute successfully against the original bodies
+and genuine dependencies. Two assembled source-bound tetrahedron regressions
+also pass through the original J2, history and source-binding owners. These
+tests do not qualify an alloy or supply experimentally measured Lode calibration.
 
 ## Source-bound tensile initiation and elastic handoff
 

@@ -2,6 +2,9 @@
 //! Synthetic coefficients verify the numerical model, not a calibrated alloy.
 #![deny(unsafe_code)]
 
+#[path = "ductile_evolution/dynamics.rs"]
+mod dynamics;
+
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_material::IsotropicElastic;

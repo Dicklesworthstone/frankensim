@@ -8908,6 +8908,12 @@ budget exhaustion, minimum-interval refusal or cancellation returns no partially
 advanced interval and leaves the caller's accepted displacement and histories
 unchanged. Exact held-strain material replay prevents the native solver's
 initial assembly from inventing plastic flow from yield roundoff.
+The accepted displacement must reproduce each retained material strain using
+the exact native assembly operator. This is checked once before subdivision,
+without a constitutive trial. Inconsistent displacement/history pairs refuse
+even when zero stress at the requested endpoint would hide their missing
+initial energy from the external-work check. The dynamic adapter shares this
+admission, and both reuse the admitted material-law buffer across retries.
 
 Four regression definitions in `tests/ductile_evolution.rs` exercise actual
 native tetrahedral assembly: post-initiation reaction loss with bounded damage,
@@ -8915,9 +8921,14 @@ an independently calculated shear/work oracle, whole-interval rollback and
 deterministic restart, ordinary non-axis-aligned normal admission, foreign
 geometry/width refusal, and heterogeneous widths with distinct histories and
 projected-area work. Native API, lifetime and oracle review passed. These four
-structural tests have NOT executed. The underlying numerical material closure
-has 17 passing tests, including the reproduced-and-fixed exact-replay defect;
-that is not full-crate or integrated structural execution.
+structural tests and the five motion/restart regressions below now pass in a
+bounded actual-source integration build. It executes the original material,
+P1 geometry and assembly, consistent reference mass, native Newton/Krylov
+solvers, allocation arena, execution context and cancellation gates. Unrelated
+module exports and upstream timestamp serialization are omitted from that
+compilation root; no numerical or cancellation substitutes are used. All nine
+regressions execute successfully. This is integrated structural execution,
+not the full-workspace Cargo or DSR gate.
 
 This is quasistatic reference-geometry small-strain continuation with fixed
 mechanical coefficients. It adds no finite-deformation degradation, automatic
@@ -8925,6 +8936,50 @@ crack direction, crack insertion, geometric contact, erosion or fragment state.
 Directional length scaling and adaptive damage steps do not establish arbitrary-
 mesh fracture objectivity or experimentally calibrated component failure.
 MR63's broader topology/contact/post-failure-transfer requirements remain open.
+
+### Momentum continuation through ductile softening
+
+`ductile::evolution::dynamics::DuctileTetMotion` binds the original admitted
+ductile tetrahedral specimen to one immutable consistent reference-mass
+inventory. `advance_from` continues its actual displacement, velocity and
+plastic/damage histories through initiation and progressive softening using
+the native backward-Euler momentum solve. Reference density is admitted once;
+damage and temperature do not silently alter mass. Affine endpoint loads and
+prescribed motion use each actual accepted physical subinterval, and that same
+duration reaches the material law. Rejected trials retain the last accepted
+motion and history; whole-interval refusal leaves all caller inputs unchanged.
+Initial prescribed displacements must exactly match the declared starting
+load factor, so a different support origin cannot introduce an accidental jump.
+
+Complete external work includes native inertial support reactions. Independent
+receipts retain material storage, plastic dissipation, damage release and
+material numerical loss, alongside kinetic change and the consistent-mass
+`1/2 delta_v M delta_v` numerical loss. Inertial work is removed from the material
+work account exactly once. Material and kinetic numerical losses have separate
+whole-interval budgets allocated across accepted fractions; excessive loss
+refines the attempted interval. Compensated sums and per-fraction and final
+balance checks retain these distinctions. Neither numerical loss is physical
+heat or fracture work. Reused load/law buffers and the retained mass avoid
+rebuilding that inventory for each retry.
+
+The two source-bound tetrahedral regressions in `tests/ductile_source.rs` also
+pass through original J2/history/source-binding code, including the prepared
+Lode surface and transactional source-swap refusal. With the 20 core and 19
+material-source tests, these 11 structural checks give 50 focused passes.
+
+Regression definitions in `tests/ductile_evolution/dynamics.rs` cover an exactly
+accelerated free tetrahedron and momentum-preserving kinetic-loss refinement,
+an independently forced free shear DOF that solves consistent inertia and active
+ductile softening together, imposed shear through damage initiation with
+independently calculated stress and work under applied support forces, and
+bounded/cancelled continuation with
+exact deterministic replay. A shared restart regression refuses virgin history
+at a deformed displacement before unloading and replays the correct unchanged
+native state in both static and dynamic continuation. All five regressions
+pass in the actual-source build described above. This remains small-strain/rotation,
+held-temperature continuation with fixed reference geometry and directional
+length; it adds no finite-deformation damage, caloric feedback, crack topology,
+contact or fragment transfer. Loss budgets do not certify trajectory accuracy.
 
 ## Adaptive brittle load intervals
 

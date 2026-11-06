@@ -18,7 +18,7 @@ use core::fmt::Debug;
 use fs_exec::Cx;
 use fs_material::ductile::evolution::{
     DifferentiableDuctileInitiationLaw, DuctileEvolutionError, DuctileJ2, DuctileJ2Conditions,
-    DuctileJ2State,
+    DuctileJ2Law, DuctileJ2State,
 };
 
 use super::{DuctileStepConditions, DuctileTemperatures};
@@ -29,6 +29,9 @@ use crate::plastic3::{
     IncrementSettings, SmallStrainLawField, SmallStrainTetError, SmallStrainTetProblem,
     SmallStrainTetSolution,
 };
+
+/// Progressive softening with native consistent-mass momentum integration.
+pub mod dynamics;
 
 /// Explicit subdivision, numerical-loss and accepted-history budgets.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -262,24 +265,7 @@ where
                 "finite bounded original state, positive physical duration and a complete tetrahedral temperature field required",
             ));
         }
-        // Check original owner/history and the actual fixed temperature before
-        // a refinement loop, so a permanent source mismatch is not retried.
-        for (element, (model, state)) in self.materials.iter().zip(states).enumerate() {
-            if element % 256 == 0 {
-                checkpoint(cx)?;
-            }
-            if !model.owns_state(state) || !state.is_valid() {
-                return Err(DuctileTetEvolutionError::Invalid(
-                    "retained history belongs to a different material or characteristic length",
-                ));
-            }
-            model
-                .small_strain_law(DuctileJ2Conditions {
-                    duration_s: conditions.duration_s,
-                    temperature_k: conditions.temperatures_k.at(element),
-                })
-                .map_err(|source| DuctileTetEvolutionError::Material { element, source })?;
-        }
+        let mut laws = self.admit_history(displacement_m, states, conditions, cx)?;
 
         let mut current: Option<SmallStrainTetSolution<DuctileJ2State<'m, L>>> = None;
         let mut records = Vec::with_capacity(controls.maximum_accepted_steps.min(64));
@@ -312,7 +298,7 @@ where
             let old_u = current
                 .as_ref()
                 .map_or(displacement_m, |value| value.displacement_m.as_flattened());
-            let mut laws = Vec::with_capacity(count);
+            laws.clear();
             for (element, model) in self.materials.iter().enumerate() {
                 if element % 256 == 0 {
                     checkpoint(cx)?;
@@ -449,6 +435,66 @@ where
             duration_s: conditions.duration_s,
             energy,
         })
+    }
+
+    /// Admit a complete accepted pair once per requested interval, before any
+    /// trial can erase a mismatched initial deformation by unloading it. Native
+    /// strain arithmetic is reused exactly, so native restarts need no tolerance
+    /// and this check cannot itself evolve plasticity or damage.
+    fn admit_history(
+        &self,
+        displacement_m: &[f64],
+        states: &[DuctileJ2State<'m, L>],
+        conditions: DuctileStepConditions<'_>,
+        cx: &Cx<'_>,
+    ) -> Result<Vec<DuctileJ2Law<'m, L>>, DuctileTetEvolutionError> {
+        let mut laws = Vec::with_capacity(self.materials.len());
+        for (element, (model, state)) in self.materials.iter().zip(states).enumerate() {
+            if element % 256 == 0 {
+                checkpoint(cx)?;
+            }
+            if !model.owns_state(state) || !state.is_valid() {
+                return Err(DuctileTetEvolutionError::Invalid(
+                    "retained history belongs to a different material or characteristic length",
+                ));
+            }
+            let model: &'m DuctileJ2<L> = *model;
+            laws.push(
+                model
+                    .small_strain_law(DuctileJ2Conditions {
+                        duration_s: conditions.duration_s,
+                        temperature_k: conditions.temperatures_k.at(element),
+                    })
+                    .map_err(|source| DuctileTetEvolutionError::Material { element, source })?,
+            );
+        }
+        let problem = SmallStrainTetProblem {
+            nodes_m: self.geometry.nodes_m(),
+            tetrahedra: self.geometry.tetrahedra(),
+            laws: SmallStrainLawField::PerElement(&laws),
+            prescribed_m: self.prescribed_m,
+            nodal_forces_n: self.nodal_forces_n,
+            load_path: &[0.0],
+            budget: self.budget,
+            settings: self.settings,
+        };
+        let strains = problem
+            .strain_field(displacement_m, cx)
+            .map_err(|error| match error {
+                SmallStrainTetError::Cancelled => DuctileTetEvolutionError::Cancelled,
+                error => DuctileTetEvolutionError::Native(error),
+            })?;
+        for (element, (strain, state)) in strains.iter().zip(states).enumerate() {
+            if element % 256 == 0 {
+                checkpoint(cx)?;
+            }
+            if strain != state.strain() {
+                return Err(DuctileTetEvolutionError::Invalid(
+                    "accepted displacement must match the retained native ductile strain history",
+                ));
+            }
+        }
+        Ok(laws)
     }
 
     fn energy(

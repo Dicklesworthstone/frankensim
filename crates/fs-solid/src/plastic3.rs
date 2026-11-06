@@ -576,6 +576,39 @@ impl<L: SmallStrainLaw> SmallStrainTetProblem<'_, L> {
         self.tangent(&elements, states, displacement_m, None, None, cx)
     }
 
+    /// Exact accepted-strain convention for crate owners that bind retained
+    /// constitutive history to a displacement field. This is the same operator
+    /// and arithmetic as assembly and commit; no constitutive trial is made.
+    pub(crate) fn strain_field(
+        &self,
+        displacement_m: &[f64],
+        cx: &Cx<'_>,
+    ) -> Result<Vec<Voigt>, SmallStrainTetError> {
+        checkpoint(cx)?;
+        let elements = self.validate()?;
+        if displacement_m.len() != 3 * self.nodes_m.len()
+            || displacement_m.iter().any(|v| !v.is_finite())
+        {
+            return Err(SmallStrainTetError::InvalidInput {
+                what: "invalid displacement field for retained strain history".into(),
+            });
+        }
+        let mut strains = Vec::with_capacity(elements.len());
+        for (index, element) in elements.iter().enumerate() {
+            if index % 256 == 0 {
+                checkpoint(cx)?;
+            }
+            let strain = Self::strain(element, displacement_m);
+            if strain.iter().any(|v| !v.is_finite()) {
+                return Err(SmallStrainTetError::InvalidInput {
+                    what: "non-finite native strain in retained displacement".into(),
+                });
+            }
+            strains.push(strain);
+        }
+        Ok(strains)
+    }
+
     /// Reference displacement gradients from the same P1 shape gradients as
     /// the mechanical weak form. Coupled owners can bound small rotations as
     /// well as symmetric strain, without reconstructing a second FE geometry.
