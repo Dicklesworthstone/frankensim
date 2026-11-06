@@ -1,0 +1,468 @@
+//! Finite fusion-neutron activation with separately owned energy accounts.
+//!
+//! The original spatial burnup owner advances neutron populations, target
+//! depletion, activation products and their radioactive decay together. Kinetic
+//! accounting consumes that SAME accepted neutron step; there is no second
+//! neutron solve. Capture/downscatter kinetic losses and explicitly authored
+//! nuclear reaction/decay energy remain separate before their heat is combined.
+//!
+//! Every `BurnupReaction::energy_per_event` supplied here must exclude incident
+//! neutron kinetic energy. Capture entries also exclude subsequent product decay
+//! energy; the product's actual decay events release that energy later. No ENDF
+//! Q, product yield, charged-particle stopping or gamma deposition is inferred.
+//! Unbound neutron reactions remain explicitly fixed background interactions;
+//! their kinetic losses create no tracked activation or additional nuclear Q.
+//!
+//! The original spatial owner's interval-mean neutron flux and target population
+//! approximation remains in force. Reaction-count convergence does not resolve
+//! their within-step time correlation; refine physical intervals when needed.
+
+use std::sync::Arc;
+
+use super::{
+    FusionNeutronSource, NeutronKineticError, NeutronKineticModel, NeutronKineticState,
+    NeutronKineticStep, checked,
+};
+use crate::burnup::{BurnupInventory, BurnupRate};
+use crate::diffusion::burnup::{
+    DiffusionBurnupBudget, DiffusionBurnupError, DiffusionBurnupSources, DiffusionBurnupState,
+    DiffusionBurnupStep,
+};
+use crate::diffusion::{DiffusionModel, DiffusionState};
+use crate::{Accumulator, EnergyChannels, FissionError, nonnegative, sum};
+
+/// Original coupled particle/nuclide budgets and one combined energy allowance.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FusionNeutronActivationBudget {
+    /// Unchanged native diffusion, burnup and reaction-consistency limits.
+    pub spatial: DiffusionBurnupBudget,
+    /// Absolute sum of kinetic, nuclear, export and reaction-coupling defects
+    /// [J/step]. This is a numerical allowance, not a physical uncertainty.
+    pub energy_tolerance_j: f64,
+}
+
+/// One accepted neutron and finite-material history with explicit source energy.
+#[derive(Clone, Debug)]
+pub struct FusionNeutronActivationState {
+    spatial: DiffusionBurnupState,
+    // The native neutron checkpoint is cloned, not advanced independently. Its
+    // shared model and arrays are exactly the accepted spatial checkpoint.
+    kinetic: NeutronKineticState,
+    bound_reactions: Arc<[bool]>,
+    maximum_capture_energy_j: Arc<[f64]>,
+    nuclear_released: Vec<[Accumulator; 3]>,
+    released: Vec<[Accumulator; 3]>,
+}
+
+/// Native particle/material results and disjoint energy exports for one interval.
+#[derive(Clone, Debug)]
+pub struct FusionNeutronActivationStep {
+    /// Original finite-target/product report, including reaction-count defects.
+    pub spatial: DiffusionBurnupStep,
+    /// Incident kinetic-energy accounting of exactly `spatial.neutrons`.
+    /// Its neutron report is a retained copy, not another neutron solve.
+    pub kinetic: NeutronKineticStep,
+    /// Sum of the original per-cell burnup energy channels [J]. Includes only
+    /// actual authored capture and decay events, excluding incident kinetic energy.
+    pub nuclear_released: EnergyChannels,
+    /// Sum of actual nuclear-event energy generated in this interval [J]. Future
+    /// decay energy of products still present in the inventories is not included.
+    pub nuclear_generated_energy_j: f64,
+    /// Kinetic plus nuclear exports in original diffusion-cell order [J].
+    pub cell_released: Vec<EnergyChannels>,
+    /// Disjoint combined exports [J]. Only deposited_j is local material heat.
+    pub released: EnergyChannels,
+    /// Conservative energy weighting of native capture-count inconsistencies:
+    /// each cell's count defect times its largest authored capture-event energy.
+    pub reaction_energy_defect_j: f64,
+    /// Final neutron energy - initial + all exports - injected kinetic energy
+    /// - generated nuclear-event energy [J].
+    pub energy_balance_residual_j: f64,
+    /// Noncancelling energy-account and coupling defect total [J].
+    pub energy_roundoff_j: f64,
+}
+
+impl FusionNeutronActivationState {
+    /// Bind an existing finite-material checkpoint to its original energy model.
+    /// Only capture coefficients bound to the original burnup reactions may
+    /// differ from the original diffusion model. Group identity, effective
+    /// speeds, geometry, reaction order/kinds, fixed backgrounds, links and
+    /// leakage must match exactly. No input history is reset or replayed.
+    ///
+    /// Energy exports tracked by this adapter start at zero at binding; earlier
+    /// native inventory accounts remain accessible through `spatial()`.
+    /// Authored reaction energy must exclude incident neutron kinetic energy.
+    pub fn new(
+        model: Arc<NeutronKineticModel>,
+        spatial: DiffusionBurnupState,
+    ) -> Result<Self, FusionNeutronActivationError> {
+        let mut bound_reactions = vec![false; model.diffusion().reactions().len()];
+        for binding in spatial.bindings() {
+            let bound = bound_reactions.get_mut(binding.diffusion_reaction).ok_or(
+                FusionNeutronActivationError::Invalid(
+                    "activation binding outside original kinetic reaction layout",
+                ),
+            )?;
+            *bound = true;
+        }
+        admit_topology(
+            model.diffusion(),
+            spatial.neutrons().model(),
+            &bound_reactions,
+        )?;
+        let cells = spatial.inventories().len();
+        let maximum_capture_energy_j = spatial
+            .inventories()
+            .iter()
+            .map(|inventory| {
+                inventory
+                    .model()
+                    .reactions()
+                    .iter()
+                    .filter(|reaction| {
+                        matches!(
+                            reaction.rate,
+                            BurnupRate::Capture { .. } | BurnupRate::TabulatedCapture { .. }
+                        )
+                    })
+                    .map(|reaction| reaction.energy_per_event.total_j())
+                    .fold(0.0_f64, f64::max)
+            })
+            .collect::<Vec<_>>()
+            .into();
+        let kinetic = NeutronKineticState {
+            model,
+            neutrons: spatial.neutrons().clone(),
+            released: vec![[Accumulator::new(0.0); 3]; cells],
+        };
+        kinetic.kinetic_energy_j()?;
+        Ok(Self {
+            spatial,
+            kinetic,
+            bound_reactions: bound_reactions.into(),
+            maximum_capture_energy_j,
+            nuclear_released: vec![[Accumulator::new(0.0); 3]; cells],
+            released: vec![[Accumulator::new(0.0); 3]; cells],
+        })
+    }
+
+    /// Original energy/source interpretation, retained as cross sections evolve.
+    pub fn model(&self) -> &Arc<NeutronKineticModel> {
+        self.kinetic.model()
+    }
+
+    /// Original spatial and product-inventory owner at this accepted checkpoint.
+    pub const fn spatial(&self) -> &DiffusionBurnupState {
+        &self.spatial
+    }
+
+    /// Neutron checkpoint from the original coupled owner.
+    pub fn neutrons(&self) -> &DiffusionState {
+        self.spatial.neutrons()
+    }
+
+    /// Finite targets and products, including their accepted irradiation history.
+    pub fn inventories(&self) -> &[BurnupInventory] {
+        self.spatial.inventories()
+    }
+
+    /// Retained neutron kinetic energy [J], without a future nuclear-Q reservoir.
+    pub fn kinetic_energy_j(&self) -> Result<f64, NeutronKineticError> {
+        self.kinetic.kinetic_energy_j()
+    }
+
+    /// Kinetic exports for one original cell since this adapter was bound.
+    pub fn cell_kinetic_released(&self, cell: usize) -> Option<EnergyChannels> {
+        self.kinetic.cell_released(cell)
+    }
+
+    /// Nuclear-event exports for one original cell since this adapter was bound.
+    pub fn cell_nuclear_released(&self, cell: usize) -> Option<EnergyChannels> {
+        self.nuclear_released
+            .get(cell)
+            .copied()
+            .map(crate::channel_values)
+    }
+
+    /// Combined exports for one original cell since this adapter was bound.
+    pub fn cell_released(&self, cell: usize) -> Option<EnergyChannels> {
+        self.released.get(cell).copied().map(crate::channel_values)
+    }
+
+    /// All combined accepted exports in original diffusion-cell order.
+    pub fn cumulative_cell_released(&self) -> Vec<EnergyChannels> {
+        self.released
+            .iter()
+            .copied()
+            .map(crate::channel_values)
+            .collect()
+    }
+
+    /// Evolve constant extensive neutron rates [particles/s] on the original
+    /// coupled neutron/nuclide owner. There is no implicit target supply. Zero
+    /// rates continue absorption and product decay after fusion switches off.
+    /// Temperatures belong to the original inventory models and are frozen over
+    /// this interval, including evaluation of their processed capture tables.
+    pub fn trial_with_rates(
+        &self,
+        duration_s: f64,
+        temperatures_k: &[f64],
+        neutron_rates_s: &[f64],
+        budget: FusionNeutronActivationBudget,
+        mut checkpoint: impl FnMut() -> Result<(), FissionError>,
+    ) -> Result<(Self, FusionNeutronActivationStep), FusionNeutronActivationError> {
+        checkpoint()?;
+        if !nonnegative(budget.energy_tolerance_j) {
+            return Err(FusionNeutronActivationError::Invalid(
+                "finite nonnegative combined energy allowance required",
+            ));
+        }
+        if neutron_rates_s.len() != self.neutrons().neutron_counts().len() {
+            return Err(FusionNeutronActivationError::Invalid(
+                "one external neutron rate per original cell and group required",
+            ));
+        }
+        let sources = DiffusionBurnupSources {
+            neutron_rates_s: neutron_rates_s.to_vec(),
+            precursor_rates_s: vec![],
+            nuclide_rates_s: self
+                .inventories()
+                .iter()
+                .map(|inventory| vec![0.0; inventory.populations().len()])
+                .collect(),
+        };
+        let (spatial, spatial_step) = self.spatial.trial_with_sources(
+            duration_s,
+            temperatures_k,
+            &sources,
+            budget.spatial,
+            &mut checkpoint,
+        )?;
+        admit_topology(
+            self.model().diffusion(),
+            spatial.neutrons().model(),
+            &self.bound_reactions,
+        )?;
+        let (kinetic, kinetic_step) = self.kinetic.account_accepted_diffusion(
+            spatial.neutrons().clone(),
+            spatial_step.neutrons.clone(),
+            budget.energy_tolerance_j,
+            &mut checkpoint,
+        )?;
+        let mut defect = Accumulator::new(kinetic_step.energy_roundoff_j);
+        let mut generated = Accumulator::new(0.0);
+        let mut reaction_defect = Accumulator::new(0.0);
+        let mut nuclear_totals = [Accumulator::new(0.0); 3];
+        let mut totals = [Accumulator::new(0.0); 3];
+        let mut nuclear_released = self.nuclear_released.clone();
+        let mut released = self.released.clone();
+        let mut cell_released = Vec::with_capacity(spatial.inventories().len());
+        for (cell, nuclear) in spatial_step.burnup.iter().enumerate() {
+            checkpoint()?;
+            defect.add(nuclear.energy_roundoff_j)?;
+            defect.add(generated.add(nuclear.generated_energy_j)?.abs())?;
+            let count_defect = spatial_step.reaction_defect_by_cell[cell];
+            let event_energy = self.maximum_capture_energy_j[cell];
+            let coupling = checked(count_defect * event_energy)?;
+            reaction_defect.add(coupling)?;
+            defect.add(count_defect.mul_add(event_energy, -coupling).abs())?;
+            let nuclear_channels = channels(nuclear.released);
+            let kinetic_channels = channels(kinetic_step.cell_released[cell]);
+            let mut combined = [Accumulator::new(0.0); 3];
+            for channel in 0..3 {
+                defect.add(combined[channel].add(nuclear_channels[channel])?.abs())?;
+                defect.add(combined[channel].add(kinetic_channels[channel])?.abs())?;
+                defect.add(
+                    nuclear_released[cell][channel]
+                        .add(nuclear_channels[channel])?
+                        .abs(),
+                )?;
+                defect.add(
+                    released[cell][channel]
+                        .add(combined[channel].value())?
+                        .abs(),
+                )?;
+                defect.add(
+                    nuclear_totals[channel]
+                        .add(nuclear_channels[channel])?
+                        .abs(),
+                )?;
+                defect.add(totals[channel].add(combined[channel].value())?.abs())?;
+            }
+            crate::channel_values(nuclear_released[cell]).validate()?;
+            crate::channel_values(released[cell]).validate()?;
+            cell_released.push(crate::channel_values(combined));
+        }
+        defect.add(reaction_defect.value())?;
+        let exports = crate::channel_values(totals);
+        let energy_balance_residual_j = checked(sum(&[
+            kinetic_step.final_kinetic_energy_j,
+            -kinetic_step.initial_kinetic_energy_j,
+            exports.deposited_j,
+            exports.radiation_j,
+            exports.escaped_j,
+            -kinetic_step.injected_kinetic_energy_j,
+            -generated.value(),
+        ]))?;
+        defect.add(energy_balance_residual_j.abs())?;
+        if defect.value() > budget.energy_tolerance_j {
+            return Err(FusionNeutronActivationError::Balance(
+                "combined kinetic, nuclear and reaction-coupling energy account exceeds allowance",
+            ));
+        }
+        let report = FusionNeutronActivationStep {
+            spatial: spatial_step,
+            kinetic: kinetic_step,
+            nuclear_released: crate::channel_values(nuclear_totals),
+            nuclear_generated_energy_j: generated.value(),
+            cell_released,
+            released: exports,
+            reaction_energy_defect_j: reaction_defect.value(),
+            energy_balance_residual_j,
+            energy_roundoff_j: defect.value(),
+        };
+        checkpoint()?;
+        Ok((
+            Self {
+                spatial,
+                kinetic,
+                bound_reactions: Arc::clone(&self.bound_reactions),
+                maximum_capture_energy_j: Arc::clone(&self.maximum_capture_energy_j),
+                nuclear_released,
+                released,
+            },
+            report,
+        ))
+    }
+
+    /// Evolve complete original fusion emissions over their shared interval.
+    /// Their channel-mean, interval-uniform projection remains explicit, with
+    /// the original emissions retained in the returned kinetic report.
+    pub fn trial_with_fusion(
+        &self,
+        duration_s: f64,
+        temperatures_k: &[f64],
+        sources: &[FusionNeutronSource],
+        budget: FusionNeutronActivationBudget,
+        mut checkpoint: impl FnMut() -> Result<(), FissionError>,
+    ) -> Result<(Self, FusionNeutronActivationStep), FusionNeutronActivationError> {
+        checkpoint()?;
+        let mut rates = vec![Accumulator::new(0.0); self.neutrons().neutron_counts().len()];
+        let mut source_count = Accumulator::new(0.0);
+        let mut source_energy = Accumulator::new(0.0);
+        for source in sources {
+            checkpoint()?;
+            if source.model().as_ref() != self.model().as_ref()
+                || source.emission().duration().value() != duration_s
+            {
+                return Err(FusionNeutronActivationError::Invalid(
+                    "fusion source must match the original energy model and complete interval",
+                ));
+            }
+            source_count.add(source.emission().total_particle_count())?;
+            source_energy.add(source.emission().total_kinetic_energy().value())?;
+            for (rate, &value) in rates.iter_mut().zip(source.neutron_rates_s()) {
+                rate.add(value)?;
+            }
+        }
+        let rates: Vec<_> = rates.into_iter().map(Accumulator::value).collect();
+        let (next, mut report) =
+            self.trial_with_rates(duration_s, temperatures_k, &rates, budget, &mut checkpoint)?;
+        let number_residual =
+            checked(report.spatial.neutrons.injected_neutrons - source_count.value())?;
+        let energy_residual =
+            checked(report.kinetic.injected_kinetic_energy_j - source_energy.value())?;
+        report.kinetic.fusion_number_residual = number_residual;
+        report.kinetic.fusion_energy_residual_j = energy_residual;
+        report.kinetic.energy_roundoff_j =
+            checked(report.kinetic.energy_roundoff_j + energy_residual.abs())?;
+        report.energy_roundoff_j = checked(report.energy_roundoff_j + energy_residual.abs())?;
+        if number_residual.abs() + report.spatial.neutrons.population_roundoff
+            > budget.spatial.diffusion.population_tolerance
+            || report.energy_roundoff_j > budget.energy_tolerance_j
+        {
+            return Err(FusionNeutronActivationError::Balance(
+                "fusion-to-activation source number or energy account exceeds allowance",
+            ));
+        }
+        report.kinetic.fusion_sources = sources.to_vec();
+        checkpoint()?;
+        Ok((next, report))
+    }
+}
+
+/// Atomic source, topology, native propagation or combined-energy refusal.
+#[derive(Clone, Debug, PartialEq)]
+pub enum FusionNeutronActivationError {
+    Invalid(&'static str),
+    Balance(&'static str),
+    Kinetic(NeutronKineticError),
+    Spatial(DiffusionBurnupError),
+    Source(FissionError),
+}
+
+impl From<NeutronKineticError> for FusionNeutronActivationError {
+    fn from(error: NeutronKineticError) -> Self {
+        Self::Kinetic(error)
+    }
+}
+impl From<DiffusionBurnupError> for FusionNeutronActivationError {
+    fn from(error: DiffusionBurnupError) -> Self {
+        Self::Spatial(error)
+    }
+}
+impl From<FissionError> for FusionNeutronActivationError {
+    fn from(error: FissionError) -> Self {
+        Self::Source(error)
+    }
+}
+impl core::fmt::Display for FusionNeutronActivationError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "fusion neutron activation: {self:?}")
+    }
+}
+impl std::error::Error for FusionNeutronActivationError {}
+
+fn admit_topology(
+    original: &DiffusionModel,
+    current: &DiffusionModel,
+    bound_reactions: &[bool],
+) -> Result<(), FusionNeutronActivationError> {
+    let a = original.data();
+    let b = current.data();
+    if a.data_id != b.data_id
+        || a.groups != b.groups
+        || a.speeds_m_s != b.speeds_m_s
+        || a.cell_volumes_m3 != b.cell_volumes_m3
+        || a.delayed_groups != b.delayed_groups
+        || a.links != b.links
+        || a.leakage != b.leakage
+        || original.precursor_transport() != current.precursor_transport()
+        || a.reactions.len() != b.reactions.len()
+        || a.reactions.len() != bound_reactions.len()
+    {
+        return Err(FusionNeutronActivationError::Invalid(
+            "activation must retain original group, speed, geometry and transport identities",
+        ));
+    }
+    for ((a, b), &bound) in a.reactions.iter().zip(&b.reactions).zip(bound_reactions) {
+        if a.data_id != b.data_id
+            || a.cell != b.cell
+            || a.incident_group != b.incident_group
+            || a.kind != b.kind
+            || (!bound && a.macroscopic_cross_section_m_inv != b.macroscopic_cross_section_m_inv)
+        {
+            return Err(FusionNeutronActivationError::Invalid(
+                "only original burnup-bound capture coefficients may change",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn channels(value: EnergyChannels) -> [f64; 3] {
+    [value.deposited_j, value.radiation_j, value.escaped_j]
+}
+
+#[cfg(test)]
+mod tests;

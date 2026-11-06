@@ -1,5 +1,36 @@
 # fs-nuclear contract
 
+## Time-resolved fusion forcing across material cells
+
+`fusion_neutrons::history::FusionNeutronHistory` retains the original L1
+accepted intervals and their target cells. Every interval uses the existing
+number/energy-conserving source projection; no new neutron spectrum is inferred.
+Intervals in one cell cannot overlap, while different cells may emit together.
+A bounded construction sweep prepares right-continuous original-order rates
+without subtracting old intensities. Binary-search lookup borrows those rates;
+the declared interval and rate-storage limits bound preparation and retained data.
+
+`NeutronKineticState::trial_with_history` clips evolution at those source
+transitions and an explicit maximum transport step, reuses the original
+continuous-source neutron propagator and audits the whole requested interval.
+Fast neutron residence/interaction times can be resolved independently of the
+plasma recording intervals without changing speeds or material coefficients.
+It resumes from the supplied checkpoint clock,
+does not replay earlier births, and retains source-free slowing/capture after
+the last emission. Per-cell heat, radiation, leakage, source moments and global
+storage are accumulated independently. A late cancellation or exhausted work
+or account budget publishes no intermediate physical state.
+
+Accepted intervals resolve the evolving burn only to the supplied temporal
+resolution. Uniform emission within each retained interval and projection of
+each channel to its mean energy remain declared approximations. Refining burn
+steps is required when intra-step source variation affects neutron residence
+times or material heating. G1/G3 tests compare piecewise capture with its
+analytic solution, distinguish equal-yield sources with different timing,
+and check concurrent cells, restart, source-off evolution and atomic refusal.
+`fusion_neutron_history` runs two actual D-T histories through spatial neutron
+transport and a source-off tail using explicitly illustrative coefficients.
+
 ## Fusion-neutron transport and material heat
 
 `fusion_neutrons` binds the original spatial multigroup `DiffusionModel` to
@@ -35,8 +66,8 @@ continue. Complete distinct cell binding, shared accepted clock, original
 reference volumes, cancellation and atomic material/source publication remain
 mandatory. Only the local deposited channel becomes material heat.
 
-This is a bounded nonmultiplying kinetic-energy model with fixed authored
-group data. It supplies no nuclear capture Q, activation/depletion, changes
+`NeutronKineticState` alone is a bounded nonmultiplying kinetic-energy model
+with fixed authored group data. It supplies no nuclear capture Q, activation/depletion, changes
 of material mass/composition, temperature feedback to cross sections,
 upscatter, fission, delayed-neutron production or photon transport. Effective
 speeds/cross sections and representative energies must have compatible physical
@@ -56,6 +87,35 @@ connects an actual D-T burn to the existing neutron owner and finite IF97
 water receiver, checking the combined plasma/neutron/material energy account.
 Its neutron coefficients are explicitly illustrative, not evaluated water or
 blanket data; IF97 supplies the receiver's original caloric response.
+
+## Finite fusion-neutron activation and delayed energy
+
+`fusion_neutrons::activation::FusionNeutronActivationState` combines finite
+target depletion and radioactive products with incident neutron kinetic
+accounting. The original `DiffusionBurnupState` advances the neutron field and
+inventories once; kinetic accounting consumes that same accepted neutron report.
+Capture coefficients bound to the original inventories may evolve with target
+populations and authored temperature-dependent microscopic tables. Original
+group identity, effective speeds, geometry, reaction order, fixed backgrounds,
+face transfer and leakage remain unchanged.
+
+Every authored capture-event energy must exclude incident neutron kinetic
+energy and later product decay energy. Kinetic losses, actual nuclear-event
+release, local heat, outward radiation and escaping energy retain disjoint
+accounts. Products release decay energy only when they actually transform;
+source shutoff does not erase stored neutrons or activated inventories. No
+implicit target replenishment, isotope yields, capture Q, breeding reactions,
+photon transport, bulk mass update or evaluated-data inference is supplied.
+
+One combined allowance charges kinetic and native nuclear defects, channel
+export arithmetic, the global energy residual and energy-weighted capture-count
+inconsistencies without cancellation. Source, topology, temperature, work,
+nonconvergence and cancellation refusal publish no candidate. G1/G3 regressions
+compare the same native history, finite-depletion refinement against an analytic
+solution, source-free radioactive cooling, evolving capture data and spatial
+energy accounts. Interval-mean flux and target populations remain the original
+owner's approximations; convergence of reaction counts is not a temporal-error
+bound, and physical timestep refinement remains necessary.
 
 ## Prescribed fission, finite inventory and delayed energy
 

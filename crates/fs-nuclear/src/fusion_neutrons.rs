@@ -5,8 +5,10 @@
 //! authored representative energy to each group. Downscattering removes the
 //! group-energy difference; capture removes the incident kinetic energy. Each
 //! reaction explicitly partitions that removal between local heat and outgoing
-//! radiation. Leakage retains its outgoing neutron energy. Nuclear capture Q,
-//! activation, multiplication and photon transport are not supplied or inferred.
+//! radiation. Leakage retains its outgoing neutron energy. The kinetic owner
+//! infers no nuclear Q or activation; [`activation`] composes explicitly authored
+//! reaction energy and finite products on the original coupled history.
+//! Multiplication and photon transport are not supplied here.
 //!
 //! A fusion interval retains separate D-T and D-D-neutron counts and energies.
 //! `FusionNeutronSource::project_interval_mean` explicitly replaces each channel
@@ -23,6 +25,9 @@
 
 use std::sync::Arc;
 
+/// Accepted fusion intervals projected onto one original spatial neutron model.
+pub mod history;
+
 use fs_thermochem::fusion::neutrons::FusionNeutronEmissionV1;
 
 use crate::diffusion::{
@@ -30,6 +35,9 @@ use crate::diffusion::{
     DiffusionStep,
 };
 use crate::{Accumulator, EnergyChannels, FissionError, nonnegative, positive, sum};
+
+/// Finite target activation and reaction energy on the same neutron history.
+pub mod activation;
 
 /// Immutable energy interpretation of an original neutron-diffusion model.
 #[derive(Clone, Debug, PartialEq)]
@@ -360,6 +368,19 @@ impl NeutronKineticState {
             budget.diffusion,
             &mut checkpoint,
         )?;
+        self.account_accepted_diffusion(neutrons, diffusion, budget.energy_tolerance_j, checkpoint)
+    }
+
+    // Attach energy to an already accepted native history. The activation owner
+    // supplies its coupled neutron/burnup step here; no neutron propagator is
+    // run again and no fixed macroscopic coefficient replaces its finite stock.
+    fn account_accepted_diffusion(
+        &self,
+        neutrons: DiffusionState,
+        diffusion: DiffusionStep,
+        energy_tolerance_j: f64,
+        mut checkpoint: impl FnMut() -> Result<(), FissionError>,
+    ) -> Result<(Self, NeutronKineticStep), NeutronKineticError> {
         let groups = self.model.energies_j.len();
         let cells = self.model.diffusion.cell_count();
         let mut cell_exports = vec![[Accumulator::new(0.0); 3]; cells];
@@ -450,7 +471,7 @@ impl NeutronKineticState {
             -injected.value(),
         ]))?;
         defect.add(energy_balance_residual_j.abs())?;
-        if defect.value() > budget.energy_tolerance_j {
+        if defect.value() > energy_tolerance_j {
             return Err(NeutronKineticError::Balance(
                 "neutron kinetic energy account exceeds allowance",
             ));
