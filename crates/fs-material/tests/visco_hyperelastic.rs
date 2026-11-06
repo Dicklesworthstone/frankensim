@@ -122,6 +122,76 @@ fn hencky_uniaxial(e: f64) -> [f64; 9] {
 }
 
 #[test]
+fn nearly_relaxed_branches_retain_quadratic_storage() {
+    let energies = [
+        BranchEnergy::NeoHookean { mu_pa: 3.0e5 },
+        BranchEnergy::Ogden {
+            terms: vec![
+                OgdenTerm {
+                    mu_pa: 2.0e5,
+                    alpha: 1.3,
+                },
+                OgdenTerm {
+                    mu_pa: -8.0e4,
+                    alpha: -2.4,
+                },
+            ],
+        },
+    ];
+    let trial_strain = 0.15;
+    let f = hencky_uniaxial(trial_strain);
+    for energy in energies {
+        let shear = energy.shear_modulus_pa();
+        // A negligible positive equilibrium modulus isolates branch storage
+        // without subtracting two nearly equal total energies.
+        let law = ViscoHyperelastic::new(
+            nh_equilibrium(1.0e-60, 0.0),
+            vec![FiniteStrainBranch { energy, tau_s: 1.0 }],
+        )
+        .unwrap();
+        for dt in [1.0e8, 1.0e12, 1.0e16] {
+            let full = law.step_response(&law.initial_state(), &f, dt).unwrap();
+            let remainder = law
+                .step_remainder_response(&law.initial_remainder_state(), &f, dt)
+                .unwrap();
+            // The backward-Euler Maxwell limit is e = e_trial/(1 + dt/tau).
+            // Its incompressible uniaxial energy is (3/2) G e^2, and the
+            // axial-minus-lateral Kirchhoff stress is 3 G e. The remaining
+            // nonlinear correction is O(e), below 2e-9 on these fixtures.
+            let elastic_strain = trial_strain / (1.0 + dt);
+            let expected_storage = 1.5 * shear * elastic_strain * elastic_strain;
+            let expected_stress = 3.0 * shear * elastic_strain;
+            assert!(full.state.stored > 0.0);
+            close(
+                full.state.stored,
+                expected_storage,
+                expected_storage,
+                2.0e-8,
+            );
+            close(
+                deviatoric_axial(&full.first_piola_pa, &f, 1.0),
+                expected_stress,
+                expected_stress,
+                2.0e-8,
+            );
+            close(
+                remainder.state.stored,
+                expected_storage,
+                expected_storage,
+                2.0e-8,
+            );
+            close(
+                full.loading_work_pa,
+                full.state.stored + full.dissipated_pa,
+                full.loading_work_pa,
+                2.0e-13,
+            );
+            assert!(full.dissipated_pa >= 0.0);
+        }
+    }
+}
+
+#[test]
 fn g1_small_strain_limit_is_generalized_maxwell() {
     let t0 = Instant::now();
     let g_inf = 1.0e5;

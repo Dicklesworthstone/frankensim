@@ -500,22 +500,25 @@ impl BranchEnergy {
         }
     }
 
-    // Energy and the diagonal of its Hessian in the three principal
-    // logarithmic stretches x (full, unprojected).
+    // Energy on the volume-preserving plane and the diagonal of its
+    // unprojected Hessian in the three principal logarithmic stretches x.
+    // The linear exponential terms sum to zero on this plane. Remove them
+    // before summation so roundoff cannot overwhelm the quadratic storage
+    // of a nearly relaxed branch; the Hessian is unchanged.
     fn terms(&self, x: &[f64; 3]) -> (f64, [f64; 3]) {
         let mut psi = 0.0;
         let mut hess = [0.0; 3];
         match self {
             Self::NeoHookean { mu_pa } => {
                 for a in 0..3 {
-                    psi += 0.5 * mu_pa * det::expm1(2.0 * x[a]);
+                    psi += 0.5 * mu_pa * expm1_minus_x(2.0 * x[a]);
                     hess[a] = 2.0 * mu_pa * det::exp(2.0 * x[a]);
                 }
             }
             Self::Ogden { terms } => {
                 for t in terms {
                     for a in 0..3 {
-                        psi += t.mu_pa / t.alpha * det::expm1(t.alpha * x[a]);
+                        psi += t.mu_pa / t.alpha * expm1_minus_x(t.alpha * x[a]);
                         hess[a] += t.mu_pa * t.alpha * det::exp(t.alpha * x[a]);
                     }
                 }

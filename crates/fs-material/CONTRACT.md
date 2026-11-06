@@ -14865,6 +14865,13 @@ Nonfinite work/storage, negative relaxation loss, invalid histories and original
 constitutive refusals publish no candidate. No alternate material equation,
 fitted relaxation parameter or mechanical integration convention is introduced.
 
+Neo-Hookean and Ogden branch storage remove the analytically vanishing linear
+terms of the principal logarithmic strains before summation. Nearly relaxed
+branches therefore retain their positive quadratic elastic energy, consistent
+with the cancellation-free stress and loss calculations, in both full and
+remainder endpoints. This does not recover strain information already rounded
+out of the supplied deformation or stored inverse viscous metric.
+
 `tests/visco_incremental.rs` checks directional energy/stress/tangent consistency
 after nontrivial history, unchanged accepted states under repeated trial queries,
 and the distinct potential/storage/heat accounts during held-strain relaxation.
