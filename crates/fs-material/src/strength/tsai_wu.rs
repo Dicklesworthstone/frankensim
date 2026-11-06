@@ -11,7 +11,8 @@
 //! The complete normal interaction matrix must be positive definite; checking
 //! its three coefficients independently is insufficient in three dimensions.
 //! This selects a bounded convex strength surface. Open/degenerate surfaces
-//! require a different explicitly admitted model and refuse here.
+//! and determinants unresolved at the documented roundoff margin refuse here.
+//! Source coefficients are never clipped or automatically regularized.
 //!
 //! The positive homogeneous utilization is `(B + sqrt(B^2 + 4 A))/2`.
 //! Scaling ALL stresses by its reciprocal reaches the surface; this is not a
@@ -132,6 +133,19 @@ impl OrthotropicTsaiWu {
         let strengths_pa = core::array::from_fn(|i| values[i]);
         let interactions = [values[9], values[10], values[11]];
         let [f12, f23, f31] = interactions;
+        // A positive rounded Cholesky pivot alone can admit an indefinite
+        // source matrix arbitrarily close to singularity. Bound cancellation
+        // in the normalized determinant by a conservative arithmetic margin,
+        // before factorizing. This rejects unresolved input, not repairs it.
+        let triple = 2.0 * f12 * f23 * f31;
+        let squares = f12 * f12 + f23 * f23 + f31 * f31;
+        let determinant = (1.0 + triple) - squares;
+        let roundoff_margin = 64.0 * f64::EPSILON * (1.0 + triple.abs() + squares);
+        if determinant <= roundoff_margin {
+            return Err(invalid(
+                "3-D Tsai-Wu interaction determinant must be positive beyond its roundoff margin",
+            ));
+        }
         let r11 = sqrt((1.0 - f12) * (1.0 + f12));
         let r12 = (f23 - f12 * f31) / r11;
         let last_pivot = (1.0 - f31) * (1.0 + f31) - r12 * r12;

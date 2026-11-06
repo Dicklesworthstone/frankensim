@@ -1,31 +1,56 @@
-//! Direction-dependent tensile observation on the native solid stress field.
+//! Direction-dependent strength observation on the native solid stress field.
 //!
 //! The material axes are the same proper rotation used to assemble stiffness.
 //! Each actual stress sample is pulled back to those axes before applying the
-//! shared maximum material-normal-stress criterion. Stress principal axes are
+//! explicitly selected shared strength criterion. Stress principal axes are
 //! not material axes. Neither spatial averaging nor an isotropic eigenvalue
 //! criterion can substitute for this directional comparison.
 //!
-//! These small-strain observations do not implement a mixed-mode failure
-//! surface, shear/compressive strength, fracture evolution or a continuum peak
-//! bound. Named strengths must be applicable to the chosen material condition.
+//! Maximum material-normal tension and the full 3-D Tsai--Wu interaction use
+//! one sampling path. These small-strain observations do not evolve damage,
+//! change mechanics or bound unsampled continuum peaks. Named strengths must
+//! be applicable to the chosen material condition and stress convention.
+
+mod criterion;
+pub use criterion::{OrthotropicStrengthCriterion, OrthotropicStrengthObservation};
 
 use super::{TensileAssessmentError, admit_same_state, checkpoint};
 use crate::linear3::{QuadraticThermalResponse, TetElasticMaterial, TetThermalStressReport};
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_exec::Cx;
 use fs_material::state_point::OrthotropicElasticStatePoint;
-use fs_material::strength::{OrthotropicTensileAssessment, OrthotropicTensileLimit};
+use fs_material::strength::{
+    OrthotropicTensileAssessment, OrthotropicTensileLimit, OrthotropicTsaiWu,
+    OrthotropicTsaiWuAssessment,
+};
+
+/// Original tensile-only material-axis criterion.
+pub type OrthotropicTensileMaterialBinding =
+    OrthotropicStrengthMaterialBinding<OrthotropicTensileLimit>;
+/// Full normal/shear interaction with original source-defined strengths.
+pub type OrthotropicTsaiWuMaterialBinding = OrthotropicStrengthMaterialBinding<OrthotropicTsaiWu>;
+pub type OrthotropicTensileMaterialField<'a> =
+    OrthotropicStrengthMaterialField<'a, OrthotropicTensileLimit>;
+pub type OrthotropicTsaiWuMaterialField<'a> =
+    OrthotropicStrengthMaterialField<'a, OrthotropicTsaiWu>;
+pub type OrthotropicTensileStressSample =
+    OrthotropicStrengthStressSample<OrthotropicTensileAssessment>;
+pub type OrthotropicTsaiWuStressSample =
+    OrthotropicStrengthStressSample<OrthotropicTsaiWuAssessment>;
+pub type OrthotropicSolidTensileAssessment =
+    OrthotropicSolidStrengthAssessment<OrthotropicTensileAssessment>;
+pub type OrthotropicSolidTsaiWuAssessment =
+    OrthotropicSolidStrengthAssessment<OrthotropicTsaiWuAssessment>;
 
 /// Source-matched directional strength and the exact oriented elastic state.
 #[derive(Debug, Clone, PartialEq)]
-pub struct OrthotropicTensileMaterialBinding {
+pub struct OrthotropicStrengthMaterialBinding<C: OrthotropicStrengthCriterion> {
     material: TetElasticMaterial,
-    limit: OrthotropicTensileLimit,
+    limit: C,
     world_to_principal: [[f64; 3]; 3],
 }
 
-impl OrthotropicTensileMaterialBinding {
+impl<C: OrthotropicStrengthCriterion> OrthotropicStrengthMaterialBinding<C> {
     /// Bind the named limits to their source-derived orthotropic stiffness.
     ///
     /// `principal_to_world` has the material-axis unit vectors as columns in
@@ -34,7 +59,7 @@ impl OrthotropicTensileMaterialBinding {
     /// complete oriented stiffness identity is retained by native mechanics.
     pub fn try_from_resolved_orthotropic_state(
         state: &OrthotropicElasticStatePoint,
-        limit: OrthotropicTensileLimit,
+        limit: C,
         principal_to_world: [[f64; 3]; 3],
         orientation_identity: ContentHash,
     ) -> Result<Self, TensileAssessmentError> {
@@ -58,9 +83,9 @@ impl OrthotropicTensileMaterialBinding {
         &self.material
     }
 
-    /// Three explicitly selected strengths and their complete source receipts.
+    /// Explicitly selected criterion and its complete original source receipts.
     #[must_use]
-    pub const fn limit(&self) -> &OrthotropicTensileLimit {
+    pub const fn limit(&self) -> &C {
         &self.limit
     }
 
@@ -76,16 +101,23 @@ fn transpose(matrix: [[f64; 3]; 3]) -> [[f64; 3]; 3] {
 }
 
 /// Bindings in the original native response order, without homogenization.
-#[derive(Debug, Clone, Copy)]
-pub enum OrthotropicTensileMaterialField<'a> {
-    Uniform(&'a OrthotropicTensileMaterialBinding),
-    PerElement(&'a [OrthotropicTensileMaterialBinding]),
+#[derive(Debug)]
+pub enum OrthotropicStrengthMaterialField<'a, C: OrthotropicStrengthCriterion> {
+    Uniform(&'a OrthotropicStrengthMaterialBinding<C>),
+    PerElement(&'a [OrthotropicStrengthMaterialBinding<C>]),
     /// Flattened element-major, native-quadrature-point order. Each local
     /// temperature, process and material orientation must match the response.
-    PerPoint(&'a [OrthotropicTensileMaterialBinding]),
+    PerPoint(&'a [OrthotropicStrengthMaterialBinding<C>]),
 }
 
-impl<'a> OrthotropicTensileMaterialField<'a> {
+impl<C: OrthotropicStrengthCriterion> Copy for OrthotropicStrengthMaterialField<'_, C> {}
+impl<C: OrthotropicStrengthCriterion> Clone for OrthotropicStrengthMaterialField<'_, C> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<'a, C: OrthotropicStrengthCriterion> OrthotropicStrengthMaterialField<'a, C> {
     fn validate(self, elements: usize, points: usize) -> Result<(), TensileAssessmentError> {
         let valid = match self {
             Self::Uniform(_) => true,
@@ -96,12 +128,12 @@ impl<'a> OrthotropicTensileMaterialField<'a> {
             Ok(())
         } else {
             Err(TensileAssessmentError::Invalid(
-                "orthotropic tensile bindings must exactly cover the original response field",
+                "orthotropic strength bindings must exactly cover the original response field",
             ))
         }
     }
 
-    fn at(self, element: usize, point: usize) -> &'a OrthotropicTensileMaterialBinding {
+    fn at(self, element: usize, point: usize) -> &'a OrthotropicStrengthMaterialBinding<C> {
         match self {
             Self::Uniform(value) => value,
             Self::PerElement(values) => &values[element],
@@ -110,17 +142,17 @@ impl<'a> OrthotropicTensileMaterialField<'a> {
     }
 }
 
-/// Directional tensile assessment of one unaveraged native stress sample.
+/// Selected strength assessment of one unaveraged native stress sample.
 #[derive(Debug, Clone, PartialEq)]
-pub struct OrthotropicTensileStressSample {
+pub struct OrthotropicStrengthStressSample<A: OrthotropicStrengthObservation> {
     element: usize,
     quadrature_point: Option<usize>,
     material_state_identity: ContentHash,
     limit_source_identity: ContentHash,
-    assessment: OrthotropicTensileAssessment,
+    assessment: A,
 }
 
-impl OrthotropicTensileStressSample {
+impl<A: OrthotropicStrengthObservation> OrthotropicStrengthStressSample<A> {
     #[must_use]
     pub const fn element(&self) -> usize {
         self.element
@@ -144,29 +176,29 @@ impl OrthotropicTensileStressSample {
     }
 
     #[must_use]
-    pub const fn assessment(&self) -> &OrthotropicTensileAssessment {
+    pub const fn assessment(&self) -> &A {
         &self.assessment
     }
 }
 
 /// Atomic comparison of one original solid response with directional limits.
 #[derive(Debug, Clone, PartialEq)]
-pub struct OrthotropicSolidTensileAssessment {
+pub struct OrthotropicSolidStrengthAssessment<A: OrthotropicStrengthObservation> {
     response_identity: ContentHash,
-    samples: Vec<OrthotropicTensileStressSample>,
+    samples: Vec<OrthotropicStrengthStressSample<A>>,
     governing_sample: Option<usize>,
     identity: ContentHash,
 }
 
-impl OrthotropicSolidTensileAssessment {
+impl<A: OrthotropicStrengthObservation> OrthotropicSolidStrengthAssessment<A> {
     #[must_use]
-    pub fn samples(&self) -> &[OrthotropicTensileStressSample] {
+    pub fn samples(&self) -> &[OrthotropicStrengthStressSample<A>] {
         &self.samples
     }
 
-    /// First sample with largest utilization; each sample also names its axis.
+    /// First sample with largest utilization of its selected criterion.
     #[must_use]
-    pub fn governing_sample(&self) -> Option<&OrthotropicTensileStressSample> {
+    pub fn governing_sample(&self) -> Option<&OrthotropicStrengthStressSample<A>> {
         self.governing_sample.map(|i| &self.samples[i])
     }
 
@@ -196,6 +228,19 @@ impl TetThermalStressReport {
         maximum_samples: usize,
         cx: &Cx<'_>,
     ) -> Result<OrthotropicSolidTensileAssessment, TensileAssessmentError> {
+        self.assess_orthotropic_strength(materials, maximum_samples, cx)
+    }
+
+    /// Assess the explicitly selected material-axis criterion on every native
+    /// P1 stress, retaining its original material and orientation identity.
+    /// The criterion type determines whether only normal tension or the full
+    /// normal/shear interaction is assessed; no criterion is inferred.
+    pub fn assess_orthotropic_strength<C: OrthotropicStrengthCriterion>(
+        &self,
+        materials: OrthotropicStrengthMaterialField<'_, C>,
+        maximum_samples: usize,
+        cx: &Cx<'_>,
+    ) -> Result<OrthotropicSolidStrengthAssessment<C::Assessment>, TensileAssessmentError> {
         assess_samples(
             self.identity(),
             self.elements().len(),
@@ -227,6 +272,18 @@ impl QuadraticThermalResponse {
         maximum_samples: usize,
         cx: &Cx<'_>,
     ) -> Result<OrthotropicSolidTensileAssessment, TensileAssessmentError> {
+        self.assess_orthotropic_strength(materials, maximum_samples, cx)
+    }
+
+    /// Apply the selected strength surface to every original quadrature
+    /// stress. Each local temperature and material-axis orientation must match
+    /// its stiffness state. No element-average stress replaces these samples.
+    pub fn assess_orthotropic_strength<C: OrthotropicStrengthCriterion>(
+        &self,
+        materials: OrthotropicStrengthMaterialField<'_, C>,
+        maximum_samples: usize,
+        cx: &Cx<'_>,
+    ) -> Result<OrthotropicSolidStrengthAssessment<C::Assessment>, TensileAssessmentError> {
         checkpoint(cx)?;
         let mut points = 0_usize;
         for element in self.elements() {
@@ -264,28 +321,27 @@ impl QuadraticThermalResponse {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn assess_samples(
+fn assess_samples<C: OrthotropicStrengthCriterion>(
     response_identity: ContentHash,
     elements: usize,
     points: usize,
     stresses: impl Iterator<Item = (usize, Option<usize>, [f64; 6], ContentHash)>,
-    materials: OrthotropicTensileMaterialField<'_>,
+    materials: OrthotropicStrengthMaterialField<'_, C>,
     maximum_samples: usize,
     cx: &Cx<'_>,
-) -> Result<OrthotropicSolidTensileAssessment, TensileAssessmentError> {
+) -> Result<OrthotropicSolidStrengthAssessment<C::Assessment>, TensileAssessmentError> {
     checkpoint(cx)?;
     if points > maximum_samples {
         return Err(TensileAssessmentError::Budget);
     }
     materials.validate(elements, points)?;
-    let mut samples: Vec<OrthotropicTensileStressSample> = Vec::new();
+    let mut samples: Vec<OrthotropicStrengthStressSample<C::Assessment>> = Vec::new();
     samples
         .try_reserve_exact(points)
         .map_err(|_| TensileAssessmentError::Budget)?;
     let mut governing_sample = None;
     let mut largest = -1.0;
-    let mut identity =
-        DomainHasher::new("org.frankensim.fs-solid.orthotropic-tensile-assessment.v1");
+    let mut identity = DomainHasher::new(C::identity_domain());
     identity.update(response_identity.as_bytes());
     for (flat, (element, point, stress, material_state_identity)) in stresses.enumerate() {
         checkpoint(cx)?;
@@ -299,7 +355,7 @@ fn assess_samples(
         );
         let assessment = binding
             .limit
-            .assess_material_stress(&local_stress)
+            .assess(&local_stress)
             .map_err(TensileAssessmentError::Material)?;
         if assessment.utilization() > largest {
             largest = assessment.utilization();
@@ -308,17 +364,11 @@ fn assess_samples(
         let limit_source_identity = binding.limit.resolved().identity();
         identity.update(material_state_identity.as_bytes());
         identity.update(limit_source_identity.as_bytes());
-        for name in binding.limit.limit_properties() {
-            identity.update(&(name.len() as u64).to_le_bytes());
-            identity.update(name.as_bytes());
-        }
-        for value in binding.limit.limits_pa() {
-            identity.update(&value.to_bits().to_le_bytes());
-        }
+        binding.limit.update_identity(&mut identity);
         for value in local_stress {
             identity.update(&value.to_bits().to_le_bytes());
         }
-        samples.push(OrthotropicTensileStressSample {
+        samples.push(OrthotropicStrengthStressSample {
             element,
             quadrature_point: point,
             material_state_identity,
@@ -327,7 +377,7 @@ fn assess_samples(
         });
     }
     checkpoint(cx)?;
-    Ok(OrthotropicSolidTensileAssessment {
+    Ok(OrthotropicSolidStrengthAssessment {
         response_identity,
         samples,
         governing_sample,

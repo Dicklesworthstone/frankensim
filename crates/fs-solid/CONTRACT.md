@@ -9751,3 +9751,28 @@ Physical yield dissipation, signed material endpoint-work defect and numerical k
 The existing layered CST/DKT `solve_with_energy` and `advance_backward_euler_with_energy` paths accept native standalone or joint Norton creep through the shared section energy adapter. Primary strain resistance, signed creep strain and independent plastic history remain with their original constitutive owners. Every timed law must match the inertia interval. Layered stress/resultants, elastic/plastic-hardening storage and physical creep/plastic losses are integrated with the original thickness and surface rules; material/inertial numerical loss and drilling storage are never physical heat.
 
 Three new `plastic_shell/creep` regressions define an actual loaded primary-creep membrane followed by clamped relaxation and permanent unloading, a jointly creeping/yielding bending cantilever, and prescribed creep motion with an independent P1 kinetic integral and duration-mismatch refusal. Isothermal sections do not evolve temperature; sourced thermal feedback is owned by `fs-couple::shell_plastic_enthalpy`. Existing small-strain/rotation, quadrature and timestep limits apply. The regressions were not executed in the implementation environment; no performance or experimental prediction claim follows from formatting/source checks.
+
+## Full orthotropic strength interaction on native solid stresses
+
+`strength::orthotropic::OrthotropicTsaiWuMaterialBinding` binds the shared
+three-dimensional material criterion to its exact source-resolved, oriented
+stiffness. The native P1 and stiffness-quadrature response owners expose
+`assess_orthotropic_strength`; the existing tensile-only entry point uses the
+same shared sampler. The sealed criterion type retains its own assessment,
+ordered property interpretation and identity domain. No dynamic dispatch,
+second mechanical solve or intermediate full stress report is introduced.
+
+Actual Mandel stress is converted once to tensor shear and pulled back with
+the original material rotation. Each element or quadrature point retains its
+own source condition, orientation, complete normal/shear stress and selected
+strength surface. Neither averaged stress nor principal-stress axes replace
+the original samples. Missing/stale bindings, unresolved interaction convexity,
+sample budgets and cancellation refuse before a result is returned.
+
+Three new cases in `tests/orthotropic_tensile_strength/tsai_wu.rs` exercise a
+triaxial tensile crossing that independent axis checks miss, rigidly rotated
+native stress, local temperature/orientation at Q1 points, ordered-source
+identity and atomic refusals. The existing P1/Q1/Hex20/Hex27 tensile cases
+continue through the same sampler. These are manufactured model checks;
+the observations add no failure-mode selection, damage evolution, fracture
+energy, post-failure redistribution or continuum maximum bound.

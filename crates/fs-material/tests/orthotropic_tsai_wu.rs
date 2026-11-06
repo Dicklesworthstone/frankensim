@@ -208,7 +208,19 @@ fn g1_biaxial_tension_and_out_of_plane_shear_can_govern_before_uniaxial_limits()
 
 #[test]
 fn g0_full_convexity_is_checked_instead_of_three_independent_pair_bounds() {
-    for interactions in [[-0.75; 3], [-0.5; 3], [0.9, 0.9, -0.9], [1.0, 0.0, 0.0]] {
+    for interactions in [
+        [-0.75; 3],
+        [-0.5; 3],
+        [0.9, 0.9, -0.9],
+        [1.0, 0.0, 0.0],
+        // Exact determinant of these binary64 coefficients is negative;
+        // naive rounded Cholesky nevertheless returns a positive last pivot.
+        [
+            -0.6739246900508042,
+            0.8107497038216216,
+            -0.11389589534293731,
+        ],
+    ] {
         let card = card([100.0; 9], interactions, None, None, false);
         assert!(
             OrthotropicTsaiWu::resolve(&card, &point(300.0), STRENGTH, INTERACTION, SELECT)

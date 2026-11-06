@@ -18136,6 +18136,9 @@ refresh preserves these exact choices and rechecks the complete surface.
 
 The full normal interaction matrix must be positive definite. Three separate
 pair bounds do not establish that condition; open or singular surfaces refuse.
+The normalized determinant must exceed `64*epsilon` times the sum of the
+absolute determinant terms; positivity unresolved at roundoff also refuses,
+without clipping source coefficients or regularizing the strength surface.
 The fixed material-frame tensor-shear stress drives the original 3-D Tsai--Wu
 polynomial. A cached Cholesky factor, scaled norm and stable quadratic root
 return a nonnegative homogeneous utilization without squared dimensional

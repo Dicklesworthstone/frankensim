@@ -6,6 +6,8 @@ mod hex_support;
 #[allow(dead_code)]
 #[path = "tet10/support.rs"]
 mod tet_support;
+#[path = "orthotropic_tensile_strength/tsai_wu.rs"]
+mod tsai_wu;
 
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_blake3::ContentHash;
@@ -118,6 +120,26 @@ fn card(tag: u32) -> MaterialCard {
         );
         let limit = [1000., 100., 50.][axis];
         insert(LIMITS[axis], Pressure::DIMS, limit, 0.5 * limit);
+        insert(
+            ["compression_1", "compression_2", "compression_3"][axis],
+            Pressure::DIMS,
+            1.5 * limit,
+            0.75 * limit,
+        );
+        let shear = [100., 40., 25.][axis];
+        insert(
+            ["strength_12", "strength_23", "strength_31"][axis],
+            Pressure::DIMS,
+            shear,
+            0.5 * shear,
+        );
+        let interaction = [0.2, -0.3, 0.1][axis];
+        insert(
+            ["f12", "f23", "f31"][axis],
+            Dims::NONE,
+            interaction,
+            interaction,
+        );
     }
     MaterialCard::assemble(
         MaterialStateId {
