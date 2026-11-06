@@ -6,7 +6,10 @@
 //! `-K_e`. This resolves the retained mesh's elastic waves without replacing
 //! the material by a fitted actuator gain or a single oscillator.
 //!
-//! Supports and electrode topology/types are fixed. Prescribed voltages and
+//! Support coordinates and electrode topology/types are fixed. Supports may
+//! follow explicitly supplied endpoint velocities through the same midpoint
+//! kinematics. Their full inertial/constitutive reactions supply boundary work.
+//! Prescribed voltages and
 //! charges vary linearly between accepted endpoints; force is the caller's
 //! midpoint value. The accepted energy account is kinetic + elastic + electric
 //! storage plus independently recovered material heat against
@@ -59,7 +62,7 @@ impl TetPiezoelectricTransientState {
     pub fn displacement_m(&self) -> &[[f64; 3]] {
         &self.field.displacement_m
     }
-    /// Original mesh-node velocity [m/s]. Supported coordinates are zero.
+    /// Original mesh-node velocity [m/s], including prescribed support motion.
     pub fn velocity_m_s(&self) -> &[[f64; 3]] {
         &self.velocity_m_s
     }
@@ -113,8 +116,13 @@ pub struct TetPiezoelectricTransient<'model, 'mesh> {
 pub struct TetPiezoelectricTransientStep {
     /// Accepted time interval [s].
     pub time_step_s: f64,
-    /// Applied midpoint force dotted with actual displacement change [J].
+    /// Applied-force work plus work supplied by moving supports [J].
     pub mechanical_work_j: f64,
+    /// Applied midpoint nodal forces dotted with actual displacement change [J].
+    pub applied_force_work_j: f64,
+    /// Full midpoint support reactions dotted with support displacement change [J].
+    /// These reactions include consistent-mass inertia and material memory.
+    pub support_work_j: f64,
     /// Midpoint potential dotted with actual free-charge change [J].
     pub electrical_work_j: f64,
     /// Consistent-mass kinetic energy change [J].
@@ -147,6 +155,7 @@ pub struct TetPiezoelectricTransientStep {
 pub struct TetPiezoelectricTransientCandidate<'model, 'mesh> {
     body: TetPiezoelectricTransient<'model, 'mesh>,
     step: TetPiezoelectricTransientStep,
+    midpoint_support_force_n: Vec<[f64; 3]>,
 }
 
 impl<'model, 'mesh> TetPiezoelectricTransientCandidate<'model, 'mesh> {
@@ -157,6 +166,12 @@ impl<'model, 'mesh> TetPiezoelectricTransientCandidate<'model, 'mesh> {
     /// Independent work and residual report.
     pub const fn step(&self) -> &TetPiezoelectricTransientStep {
         &self.step
+    }
+    /// Interval-mean force exerted BY each prescribed support ON the body [N].
+    /// Free coordinates are zero. This is the complete dynamic reaction,
+    /// including inertia, rather than the endpoint elastic internal force.
+    pub fn midpoint_support_force_n(&self) -> &[[f64; 3]] {
+        &self.midpoint_support_force_n
     }
     /// Transfer the complete accepted candidate to its owner.
     pub fn into_parts(
@@ -332,6 +347,44 @@ impl<'model, 'mesh> TetPiezoelectricTransient<'model, 'mesh> {
     ) -> Result<TetPiezoelectricTransientCandidate<'model, 'mesh>> {
         self.advance_with_loads(
             dt_s,
+            None,
+            endpoint_electrode_conditions,
+            &[],
+            &[],
+            &[],
+            midpoint_nodal_forces_n,
+            endpoint_nodal_free_charge_c,
+            controls,
+            cx,
+        )
+        .map(|(candidate, _, _)| candidate)
+    }
+
+    /// Drive the original constrained coordinates by their endpoint velocities.
+    /// Supply each existing support DOF exactly once, including stationary ones;
+    /// entries need not be ordered. No free coordinate may be prescribed here.
+    ///
+    /// The step integrates `u_next = u_old + dt*(v_old + v_next)/2` at supports
+    /// and retains the complete mass/stiffness/coupling columns in the same
+    /// solve. Independent reaction work pays for the resulting motion, electrical
+    /// response and intrinsic material heat. This avoids differentiating an
+    /// arbitrary displacement trace or introducing a separate base-force model.
+    /// Ordinary fixed-support methods refuse a history with moving supports;
+    /// use this method again, with zero endpoint velocity for an explicit stop.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_support_motion_candidate(
+        &self,
+        dt_s: f64,
+        endpoint_support_velocities_m_s: &[(usize, f64)],
+        endpoint_electrode_conditions: &[ElectrodeCondition],
+        midpoint_nodal_forces_n: &[[f64; 3]],
+        endpoint_nodal_free_charge_c: &[f64],
+        controls: TetPiezoelectricControls,
+        cx: &Cx<'_>,
+    ) -> Result<TetPiezoelectricTransientCandidate<'model, 'mesh>> {
+        self.advance_with_loads(
+            dt_s,
+            Some(endpoint_support_velocities_m_s),
             endpoint_electrode_conditions,
             &[],
             &[],
@@ -348,6 +401,7 @@ impl<'model, 'mesh> TetPiezoelectricTransient<'model, 'mesh> {
     fn advance_with_loads(
         &self,
         dt_s: f64,
+        endpoint_support_velocities_m_s: Option<&[(usize, f64)]>,
         endpoint_electrode_conditions: &[ElectrodeCondition],
         loads: &[load::ResistiveElectrodeLoad],
         reactive_loads: &[load::reactive::ReactiveElectrodeLoad],
@@ -442,6 +496,13 @@ impl<'model, 'mesh> TetPiezoelectricTransient<'model, 'mesh> {
         boundary.prescribed.fill(0.0);
         boundary.rhs.fill(0.0);
         boundary.voltage_reference.fill(0.0);
+        prescribe_support_motion(
+            self,
+            dt_s,
+            endpoint_support_velocities_m_s,
+            &mut boundary,
+            cx,
+        )?;
         let momentum = mass_action(self.model, &self.state.velocity_m_s, cx)?;
         for node in 0..n {
             poll(cx)?;
@@ -500,7 +561,7 @@ impl<'model, 'mesh> TetPiezoelectricTransient<'model, 'mesh> {
         let mut displacement = vec![[0.0; 3]; n];
         let mut velocity = vec![[0.0; 3]; n];
         let mut acceleration = vec![[0.0; 3]; n];
-        let mut mechanical_work_j = 0.0;
+        let mut applied_force_work_j = 0.0;
         for node in 0..n {
             poll(cx)?;
             for axis in 0..3 {
@@ -514,13 +575,24 @@ impl<'model, 'mesh> TetPiezoelectricTransient<'model, 'mesh> {
                 acceleration[node][axis] = 2.0 * inverse_dt * (2.0 * inverse_dt * delta - old_v);
                 full_midpoint[dof] = midpoint_displacement[node][axis];
                 full_endpoint[dof] = displacement[node][axis];
-                mechanical_work_j +=
+                applied_force_work_j +=
                     midpoint_nodal_forces_n[node][axis] * (displacement[node][axis] - old_u);
             }
             full_midpoint[nu + node] =
                 self.state.relative_voltage_v[node] + full_increment[nu + node];
             full_endpoint[nu + node] =
                 self.state.relative_voltage_v[node] + 2.0 * full_increment[nu + node];
+        }
+        if let Some(supports) = endpoint_support_velocities_m_s {
+            for &(dof, endpoint_velocity) in supports {
+                poll(cx)?;
+                let (node, axis) = (dof / 3, dof % 3);
+                // Retain the supplied endpoint velocity without subtracting
+                // nearly equal values after its kinematic elimination.
+                velocity[node][axis] = endpoint_velocity;
+                acceleration[node][axis] =
+                    inverse_dt * (endpoint_velocity - self.state.velocity_m_s[node][axis]);
+            }
         }
         for (id, nodes) in self.boundary.electrode_nodes.iter().enumerate() {
             if let ElectrodeCondition::Voltage(value) = next_conditions[id] {
@@ -627,6 +699,21 @@ impl<'model, 'mesh> TetPiezoelectricTransient<'model, 'mesh> {
                 (0.0, 0.0, [0.0; 2])
             };
         let material_heat_j = mechanical_material_heat_j + dielectric_material_heat_j;
+        let mut midpoint_support_force_n = core::mem::take(&mut midpoint.support_force_n);
+        let mut support_work_j = 0.0;
+        for node in 0..n {
+            poll(cx)?;
+            for axis in 0..3 {
+                if self.boundary.map.index[3 * node + axis].is_none() {
+                    support_work_j += midpoint_support_force_n[node][axis]
+                        * (field.displacement_m[node][axis]
+                            - self.state.field.displacement_m[node][axis]);
+                } else {
+                    midpoint_support_force_n[node][axis] = 0.0;
+                }
+            }
+        }
+        let mechanical_work_j = applied_force_work_j + support_work_j;
         let mut electrical_work_j = 0.0;
         for node in 0..n {
             poll(cx)?;
@@ -651,6 +738,8 @@ impl<'model, 'mesh> TetPiezoelectricTransient<'model, 'mesh> {
             - electrical_work_j;
         if [
             mechanical_work_j,
+            applied_force_work_j,
+            support_work_j,
             electrical_work_j,
             kinetic_energy_change_j,
             stored_energy_change_j,
@@ -670,6 +759,8 @@ impl<'model, 'mesh> TetPiezoelectricTransient<'model, 'mesh> {
         let step = TetPiezoelectricTransientStep {
             time_step_s: dt_s,
             mechanical_work_j,
+            applied_force_work_j,
+            support_work_j,
             electrical_work_j,
             kinetic_energy_change_j,
             stored_energy_change_j,
@@ -707,11 +798,56 @@ impl<'model, 'mesh> TetPiezoelectricTransient<'model, 'mesh> {
                     intrinsic: material_update.map(|update| update.next),
                 },
                 step,
+                midpoint_support_force_n,
             },
             load_heat,
             reactive,
         ))
     }
+}
+
+fn prescribe_support_motion(
+    body: &TetPiezoelectricTransient<'_, '_>,
+    dt_s: f64,
+    endpoint: Option<&[(usize, f64)]>,
+    boundary: &mut BoundaryMap,
+    cx: &Cx<'_>,
+) -> Result<()> {
+    let nu = 3 * body.model.nodes_m.len();
+    let Some(endpoint) = endpoint else {
+        for dof in 0..nu {
+            poll(cx)?;
+            if boundary.index[dof].is_none()
+                && body.state.velocity_m_s[dof / 3][dof % 3] != 0.0
+            {
+                return Err(invalid(
+                    "moving supports require explicit endpoint support velocities",
+                ));
+            }
+        }
+        return Ok(());
+    };
+    if endpoint.len() != boundary.index[..nu].iter().filter(|i| i.is_none()).count() {
+        return Err(invalid("complete endpoint support velocities required"));
+    }
+    let mut seen = vec![false; nu];
+    for &(dof, velocity) in endpoint {
+        poll(cx)?;
+        if dof >= nu || boundary.index[dof].is_some() || seen[dof] || !velocity.is_finite() {
+            return Err(invalid(
+                "finite unique endpoint velocities on the original support DOFs required",
+            ));
+        }
+        seen[dof] = true;
+        let midpoint_velocity =
+            0.5 * body.state.velocity_m_s[dof / 3][dof % 3] + 0.5 * velocity;
+        let increment = 0.5 * dt_s * midpoint_velocity;
+        if !increment.is_finite() || midpoint_velocity != 0.0 && increment == 0.0 {
+            return Err(invalid("prescribed support increment is not representable"));
+        }
+        boundary.prescribed[dof] = increment;
+    }
+    Ok(())
 }
 
 fn electrode_views<'a>(

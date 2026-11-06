@@ -80,10 +80,69 @@ impl<'model, 'mesh> TetPiezoelectricTransient<'model, 'mesh> {
         TetPiezoelectricTransientCandidate<'model, 'mesh>,
         LoadedPiezoelectricStep,
     )> {
+        self.advance_loaded_candidate(
+            dt_s,
+            None,
+            drives,
+            loads,
+            midpoint_nodal_forces_n,
+            endpoint_nodal_free_charge_c,
+            controls,
+            cx,
+        )
+    }
+
+    /// Source-bound shunts with explicit motion of every original support DOF.
+    /// Support velocities use the same kinematics and reaction-work convention
+    /// as [`Self::step_with_support_motion_candidate`]. Resistor heat and direct
+    /// sensing back-reaction are solved simultaneously with that imposed motion.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_loaded_support_motion_candidate(
+        &self,
+        dt_s: f64,
+        endpoint_support_velocities_m_s: &[(usize, f64)],
+        drives: &[ElectrodeDrive],
+        loads: &[ResistiveElectrodeLoad],
+        midpoint_nodal_forces_n: &[[f64; 3]],
+        endpoint_nodal_free_charge_c: &[f64],
+        controls: TetPiezoelectricControls,
+        cx: &Cx<'_>,
+    ) -> Result<(
+        TetPiezoelectricTransientCandidate<'model, 'mesh>,
+        LoadedPiezoelectricStep,
+    )> {
+        self.advance_loaded_candidate(
+            dt_s,
+            Some(endpoint_support_velocities_m_s),
+            drives,
+            loads,
+            midpoint_nodal_forces_n,
+            endpoint_nodal_free_charge_c,
+            controls,
+            cx,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn advance_loaded_candidate(
+        &self,
+        dt_s: f64,
+        endpoint_support_velocities_m_s: Option<&[(usize, f64)]>,
+        drives: &[ElectrodeDrive],
+        loads: &[ResistiveElectrodeLoad],
+        midpoint_nodal_forces_n: &[[f64; 3]],
+        endpoint_nodal_free_charge_c: &[f64],
+        controls: TetPiezoelectricControls,
+        cx: &Cx<'_>,
+    ) -> Result<(
+        TetPiezoelectricTransientCandidate<'model, 'mesh>,
+        LoadedPiezoelectricStep,
+    )> {
         poll(cx)?;
         let endpoints = endpoint_conditions(self, dt_s, drives, cx)?;
         let (candidate, heat, _) = self.advance_with_loads(
             dt_s,
+            endpoint_support_velocities_m_s,
             &endpoints,
             loads,
             &[],

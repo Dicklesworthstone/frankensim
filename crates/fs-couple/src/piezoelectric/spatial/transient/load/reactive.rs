@@ -106,6 +106,9 @@ pub struct ReactiveElectrodeStep {
 pub struct ReactivePiezoelectricStep {
     /// Original spatial mechanical/electrical account, including net body work.
     pub body: TetPiezoelectricTransientStep,
+    /// Interval-mean force of prescribed supports on the body [N], including
+    /// inertia and intrinsic memory. Free mechanical coordinates are zero.
+    pub midpoint_support_force_n: Vec<[f64; 3]>,
     /// External prescribed-current/voltage and volume-charge work [J].
     pub electrical_source_work_j: f64,
     /// Sum of load capacitor/inductor energy at the original/accepted endpoints.
@@ -225,10 +228,59 @@ impl<'model, 'mesh> ReactivePiezoelectricTransient<'model, 'mesh> {
         controls: TetPiezoelectricControls,
         cx: &Cx<'_>,
     ) -> Result<ReactivePiezoelectricCandidate<'model, 'mesh>> {
+        self.advance_candidate(
+            dt_s,
+            None,
+            drives,
+            midpoint_nodal_forces_n,
+            endpoint_nodal_free_charge_c,
+            controls,
+            cx,
+        )
+    }
+
+    /// Advance the same body/R/L/C system with prescribed support velocities.
+    /// Each original constrained mechanical DOF must appear exactly once; its
+    /// displacement is integrated by the native midpoint kinematics. Complete
+    /// dynamic support work participates in the enclosing storage/heat audit.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_support_motion_candidate(
+        &self,
+        dt_s: f64,
+        endpoint_support_velocities_m_s: &[(usize, f64)],
+        drives: &[ElectrodeDrive],
+        midpoint_nodal_forces_n: &[[f64; 3]],
+        endpoint_nodal_free_charge_c: &[f64],
+        controls: TetPiezoelectricControls,
+        cx: &Cx<'_>,
+    ) -> Result<ReactivePiezoelectricCandidate<'model, 'mesh>> {
+        self.advance_candidate(
+            dt_s,
+            Some(endpoint_support_velocities_m_s),
+            drives,
+            midpoint_nodal_forces_n,
+            endpoint_nodal_free_charge_c,
+            controls,
+            cx,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn advance_candidate(
+        &self,
+        dt_s: f64,
+        endpoint_support_velocities_m_s: Option<&[(usize, f64)]>,
+        drives: &[ElectrodeDrive],
+        midpoint_nodal_forces_n: &[[f64; 3]],
+        endpoint_nodal_free_charge_c: &[f64],
+        controls: TetPiezoelectricControls,
+        cx: &Cx<'_>,
+    ) -> Result<ReactivePiezoelectricCandidate<'model, 'mesh>> {
         poll(cx)?;
         let endpoints = endpoint_conditions(&self.body, dt_s, drives, cx)?;
         let (candidate, resistors, reactive) = self.body.advance_with_loads(
             dt_s,
+            endpoint_support_velocities_m_s,
             &endpoints,
             &self.resistors,
             &self.loads,
@@ -288,7 +340,11 @@ impl<'model, 'mesh> ReactivePiezoelectricTransient<'model, 'mesh> {
                 "body and reactive storage, material/conductor heat and external source work disagree",
             ));
         }
-        let (body, body_step) = candidate.into_parts();
+        let TetPiezoelectricTransientCandidate {
+            body,
+            step: body_step,
+            midpoint_support_force_n,
+        } = candidate;
         // Repeat endpoint admission before publishing: a charge/voltage defect
         // cannot be concealed by the total energy account.
         admit(&body, &self.loads, &reactive.states, controls, cx)?;
@@ -302,6 +358,7 @@ impl<'model, 'mesh> ReactivePiezoelectricTransient<'model, 'mesh> {
             },
             step: ReactivePiezoelectricStep {
                 body: body_step,
+                midpoint_support_force_n,
                 electrical_source_work_j,
                 reactive_energy_j,
                 joule_heat_j,

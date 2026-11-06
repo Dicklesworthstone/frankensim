@@ -4,6 +4,8 @@ use fs_couple::piezoelectric::spatial::transient::TetPiezoelectricTransient as B
 
 #[path = "spatial_transient/relaxation.rs"]
 mod relaxation;
+#[path = "spatial_transient/support_motion.rs"]
+mod support_motion;
 
 fn zero_source(n: usize) -> (Vec<[f64; 3]>, Vec<f64>) {
     (vec![[0.0; 3]; n], vec![0.0; n])

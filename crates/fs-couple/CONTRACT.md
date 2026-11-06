@@ -353,3 +353,30 @@ repeated open-circuit frequency/charge, hidden interior excursions, and atomic
 cancellation/retry. Exactness applies to the fixed linear held-input model
 up to floating-point error; the existing spatial rod reduction, material
 validity and absence of a hard real-time benchmark remain explicit limits.
+
+
+### Moving-support spatial piezoelectric sensing and harvesting
+
+`TetPiezoelectricTransient::step_with_support_motion_candidate` accepts one
+endpoint velocity for every original constrained mechanical DOF. Support
+coordinates retain their topology, while displacement follows the same midpoint
+kinematics as the free coordinates. Full consistent-mass, constitutive and
+reciprocal electrical coupling columns remain in the original solve. The
+existing initializer still requires stationary supports initially.
+
+Independent mechanical supply is applied-force work plus support-reaction
+work. Returned midpoint support forces include inertia and intrinsic material
+memory, with zero entries on free coordinates. Missing, duplicate, free,
+nonfinite or unrepresentable support values refuse. Stationary APIs refuse
+to silently stop a moving support; an explicit endpoint velocity accounts
+for its deceleration and returned work.
+
+The same motion is available through the resistive load owner's
+`step_with_loaded_support_motion_candidate` and the reactive R/L/C owner's
+`step_with_support_motion_candidate`. Original resistor heat, reactive storage,
+field storage and source work participate in the enclosing balance. The
+separate finite-temperature spatial wrapper does not yet expose this input.
+G1/G4 definitions in spatial_transient/support_motion.rs cover analytic rigid
+inertia/reactions, independently condensed base-excited sensing, resistor and
+capacitor harvesting, and transactional refusals. Small-strain assumptions,
+source validity and temporal/spatial refinement obligations remain.
