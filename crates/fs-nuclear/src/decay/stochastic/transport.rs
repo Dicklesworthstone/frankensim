@@ -19,12 +19,15 @@ use std::{collections::BTreeSet, sync::Arc};
 
 pub use crate::burnup::transport::{NuclideOutflow, NuclideTransfer, NuclideTransport};
 
+use super::production::PoissonSource;
 use super::{
     Accumulator, DecayError, DecayModel, EventClock, MAX_STOCHASTIC_NUCLEI, StochasticDecayBudget,
     StochasticDecayInventory, StochasticDecayStep, StreamCheckpoint, StreamKey, before, ceiling,
     checked, defect_bound, export_channels, increment, nonnegative, sample_clock,
 };
 use crate::{EnergyChannels, channel_values};
+
+pub mod production;
 
 /// Construction bounds for the complete cohort, including inactive clocks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -33,6 +36,7 @@ pub struct StochasticDecayTransportLimits {
     /// Every authored transfer/outflow path times the original nuclide count.
     pub maximum_rate_coefficients: usize,
     /// Per-cell decay clocks plus every per-path, per-nuclide movement clock.
+    /// The production extension also charges bound arrival and schedule slots.
     pub maximum_clocks: usize,
 }
 
@@ -108,8 +112,10 @@ pub struct StochasticDecayTransportState {
 
 #[derive(Clone, Copy)]
 enum Event {
+    Change { compartment: usize },
     Decay { compartment: usize, node: usize },
     Movement { path: usize, node: usize },
+    Birth { compartment: usize, node: usize },
 }
 
 impl StochasticDecayTransportState {
@@ -244,6 +250,18 @@ impl StochasticDecayTransportState {
         &self,
         end_time_s: f64,
         budget: StochasticDecayTransportBudget,
+        checkpoint: impl FnMut() -> Result<(), DecayError>,
+    ) -> Result<(Self, StochasticDecayTransportStep), DecayError> {
+        self.trial_with_sources(end_time_s, budget, None, checkpoint)
+    }
+
+    /// One race and accounting path for closed or externally supplied cohorts.
+    /// A supply caller owns cloned candidate clocks; errors publish neither side.
+    fn trial_with_sources(
+        &self,
+        end_time_s: f64,
+        budget: StochasticDecayTransportBudget,
+        mut production: Option<&mut production::ProductionTrial<'_>>,
         mut checkpoint: impl FnMut() -> Result<(), DecayError>,
     ) -> Result<(Self, StochasticDecayTransportStep), DecayError> {
         checkpoint()?;
@@ -255,6 +273,15 @@ impl StochasticDecayTransportState {
             ));
         }
         let initial_total = population_total(&self.inventories)?;
+        let mut current_total = initial_total;
+        let clock_count = self
+            .clock_count
+            .checked_add(
+                production
+                    .as_ref()
+                    .map_or(0, |source| source.source_clock_count),
+            )
+            .ok_or(DecayError::Budget("stochastic production transport clocks"))?;
         let mut next = self.clone();
         let mut report = StochasticDecayTransportStep {
             start_time_s,
@@ -288,14 +315,35 @@ impl StochasticDecayTransportState {
         if end_time_s > start_time_s {
             loop {
                 checkpoint()?;
-                charge_clocks(&mut report, self.clock_count, budget.maximum_clock_checks)?;
-                let Some((event, time)) = next.next_event() else {
+                charge_clocks(&mut report, clock_count, budget.maximum_clock_checks)?;
+                let sources = production
+                    .as_deref()
+                    .map_or(&[][..], |source| &*source.sources);
+                let Some((event, time)) = next.next_event_with_sources(sources) else {
                     break;
                 };
                 if ceiling(time) > end_time_s {
                     break;
                 }
                 match event {
+                    Event::Change { compartment } => {
+                        let context = production.as_deref_mut().ok_or(DecayError::Arithmetic)?;
+                        if context.schedule_changes == context.maximum_schedule_changes {
+                            return Err(DecayError::Budget(
+                                "stochastic production schedule changes",
+                            ));
+                        }
+                        // Every source slot is visited, including unchanged rates.
+                        charge_clocks(&mut report, self.nodes, budget.maximum_clock_checks)?;
+                        context.sources[compartment]
+                            .as_mut()
+                            .ok_or(DecayError::Arithmetic)?
+                            .change_rates(&mut next.inventories[compartment].rng, time)?;
+                        context.schedule_changes = context
+                            .schedule_changes
+                            .checked_add(1)
+                            .ok_or(DecayError::Arithmetic)?;
+                    }
                     Event::Decay { compartment, node } => {
                         if report.decay_events == budget.decay.maximum_events {
                             return Err(DecayError::Budget("stochastic cohort decay events"));
@@ -326,7 +374,31 @@ impl StochasticDecayTransportState {
                             return Err(DecayError::Budget("stochastic cohort movements"));
                         }
                         next.apply_movement(path, node, time, &mut report, budget)?;
+                        if path >= next.transport.transfers.len() {
+                            current_total =
+                                current_total.checked_sub(1).ok_or(DecayError::Arithmetic)?;
+                        }
                         increment(&mut report.movement_events)?;
+                    }
+                    Event::Birth { compartment, node } => {
+                        let context = production.as_deref_mut().ok_or(DecayError::Arithmetic)?;
+                        if context.births == context.maximum_births {
+                            return Err(DecayError::Budget("stochastic production births"));
+                        }
+                        // The shared birth mutation reschedules decay then supply.
+                        charge_clocks(&mut report, 2, budget.maximum_clock_checks)?;
+                        context.sources[compartment]
+                            .as_mut()
+                            .ok_or(DecayError::Arithmetic)?
+                            .apply_birth(
+                                &mut next.inventories[compartment],
+                                node,
+                                time,
+                                &mut current_total,
+                                &mut context.produced_nuclei[compartment],
+                                &mut context.births,
+                            )?;
+                        next.reschedule_outgoing(compartment, node, time, &mut report, budget)?;
                     }
                 }
             }
@@ -363,7 +435,14 @@ impl StochasticDecayTransportState {
             .try_fold(0_u64, |sum, &count| {
                 sum.checked_add(count).ok_or(DecayError::Arithmetic)
             })?;
-        if initial_total.checked_sub(removed) != Some(population_total(&next.inventories)?) {
+        let supplied = production.as_ref().map_or(0, |source| source.births);
+        let final_total = population_total(&next.inventories)?;
+        if initial_total
+            .checked_add(supplied)
+            .and_then(|total| total.checked_sub(removed))
+            != Some(final_total)
+            || current_total != final_total
+        {
             return Err(DecayError::Arithmetic);
         }
         report.movement_rng_draws = next
@@ -387,7 +466,23 @@ impl StochasticDecayTransportState {
     }
 
     fn next_event(&self) -> Option<(Event, Accumulator)> {
+        self.next_event_with_sources(&[])
+    }
+
+    fn next_event_with_sources(
+        &self,
+        sources: &[Option<PoissonSource>],
+    ) -> Option<(Event, Accumulator)> {
         let mut next: Option<(Event, Accumulator)> = None;
+        // All changes precede a tied nuclear/movement event or source arrival,
+        // including a birth in an earlier compartment at the same actual time.
+        for (compartment, source) in sources.iter().enumerate() {
+            if let Some(time) = source.as_ref().and_then(PoissonSource::next_change_time)
+                && next.is_none_or(|(_, earliest)| before(time, earliest))
+            {
+                next = Some((Event::Change { compartment }, time));
+            }
+        }
         for (compartment, inventory) in self.inventories.iter().enumerate() {
             if let Some((node, time)) = inventory.next_event()
                 && next.is_none_or(|(_, earliest)| before(time, earliest))
@@ -406,6 +501,13 @@ impl StochasticDecayTransportState {
                     },
                     *time,
                 ));
+            }
+        }
+        for (compartment, source) in sources.iter().enumerate() {
+            if let Some((node, time)) = source.as_ref().and_then(PoissonSource::next_birth)
+                && next.is_none_or(|(_, earliest)| before(time, earliest))
+            {
+                next = Some((Event::Birth { compartment, node }, time));
             }
         }
         next

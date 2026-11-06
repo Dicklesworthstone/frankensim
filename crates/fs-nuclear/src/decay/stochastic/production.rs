@@ -66,11 +66,18 @@ pub struct StochasticDecayProductionStep {
 #[derive(Clone, Debug, PartialEq)]
 pub struct StochasticDecayProduction {
     inventory: StochasticDecayInventory,
+    source: PoissonSource,
+    total_population: u64,
+}
+
+/// Retained Poisson clocks shared by local and transported physical inventories.
+/// The receiving inventory remains the owner of the random stream and decay law.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct PoissonSource {
     schedule: Arc<DecayProductionSchedule>,
     rates_nuclei_s: Vec<f64>,
     clocks: Vec<EventClock>,
     produced_nuclei: Vec<u64>,
-    total_population: u64,
     next_change: usize,
 }
 
@@ -88,34 +95,16 @@ impl StochasticDecayProduction {
     /// inventory's current time initialize future clocks; earlier supply is not
     /// replayed. The original decay clocks survive. Zero supply consumes no draws.
     pub fn poisson(
-        inventory: StochasticDecayInventory,
+        mut inventory: StochasticDecayInventory,
         schedule: Arc<DecayProductionSchedule>,
     ) -> Result<Self, DecayError> {
-        if !Arc::ptr_eq(inventory.model(), schedule.model()) {
-            return Err(DecayError::Invalid(
-                "stochastic production schedule must share the original decay model",
-            ));
-        }
-        let time_s = inventory.time_s();
-        let rates_nuclei_s = schedule.rates_at(time_s)?.to_vec();
-        let nodes = rates_nuclei_s.len();
         let total_population = inventory.populations.iter().copied().sum();
-        let next_change = schedule
-            .changes()
-            .partition_point(|change| change.time_s <= time_s);
-        let mut result = Self {
+        let source = PoissonSource::new(&mut inventory, schedule)?;
+        Ok(Self {
             inventory,
-            schedule,
-            rates_nuclei_s,
-            clocks: vec![EventClock::Inactive; nodes],
-            produced_nuclei: vec![0; nodes],
+            source,
             total_population,
-            next_change,
-        };
-        for node in 0..nodes {
-            result.reschedule_birth(node, Accumulator::new(time_s))?;
-        }
-        Ok(result)
+        })
     }
 
     #[must_use]
@@ -125,12 +114,12 @@ impl StochasticDecayProduction {
 
     #[must_use]
     pub fn schedule(&self) -> &Arc<DecayProductionSchedule> {
-        &self.schedule
+        self.source.schedule()
     }
 
     #[must_use]
     pub fn cumulative_produced_nuclei(&self) -> &[u64] {
-        &self.produced_nuclei
+        self.source.cumulative_produced_nuclei()
     }
 
     /// First representable endpoint containing a birth, decay or rate change.
@@ -163,7 +152,7 @@ impl StochasticDecayProduction {
         }
         let mut next = self.clone();
         let mut report = StochasticDecayProductionStep {
-            produced_nuclei: vec![0; self.rates_nuclei_s.len()],
+            produced_nuclei: vec![0; self.inventory.populations.len()],
             births: 0,
             schedule_changes: 0,
             decay: StochasticDecayStep {
@@ -171,7 +160,7 @@ impl StochasticDecayProduction {
                 end_time_s,
                 duration_s: end_time_s - start_time_s,
                 events: 0,
-                decays: vec![0; self.rates_nuclei_s.len()],
+                decays: vec![0; self.inventory.populations.len()],
                 branch_decays: vec![0; self.inventory.model.branches.len()],
                 released: EnergyChannels::default(),
                 energy_roundoff_j: 0.0,
@@ -190,7 +179,7 @@ impl StochasticDecayProduction {
                     if report.schedule_changes == budget.maximum_schedule_changes {
                         return Err(DecayError::Budget("stochastic production schedule changes"));
                     }
-                    next.change_rates(time)?;
+                    next.source.change_rates(&mut next.inventory.rng, time)?;
                     report.schedule_changes += 1;
                 }
                 Event::Decay(parent) => {
@@ -209,16 +198,14 @@ impl StochasticDecayProduction {
                     if report.births == budget.maximum_births {
                         return Err(DecayError::Budget("stochastic production births"));
                     }
-                    if next.total_population == MAX_STOCHASTIC_NUCLEI {
-                        return Err(DecayError::Budget("stochastic population ceiling"));
-                    }
-                    increment(&mut next.total_population)?;
-                    increment(&mut next.inventory.populations[node])?;
-                    increment(&mut next.produced_nuclei[node])?;
-                    increment(&mut report.produced_nuclei[node])?;
-                    increment(&mut report.births)?;
-                    next.inventory.reschedule(node, time)?;
-                    next.reschedule_birth(node, time)?;
+                    next.source.apply_birth(
+                        &mut next.inventory,
+                        node,
+                        time,
+                        &mut next.total_population,
+                        &mut report.produced_nuclei,
+                        &mut report.births,
+                    )?;
                 }
             }
         }
@@ -253,44 +240,128 @@ impl StochasticDecayProduction {
 
     fn next_event(&self) -> Option<(Event, Accumulator)> {
         let mut next = self
-            .schedule
-            .changes()
-            .get(self.next_change)
-            .map(|change| (Event::Change, Accumulator::new(change.time_s)));
+            .source
+            .next_change_time()
+            .map(|time| (Event::Change, time));
         if let Some((node, time)) = self.inventory.next_event()
             && next.is_none_or(|(_, earliest)| before(time, earliest))
         {
             next = Some((Event::Decay(node), time));
         }
+        if let Some((node, time)) = self.source.next_birth()
+            && next.is_none_or(|(_, earliest)| before(time, earliest))
+        {
+            next = Some((Event::Birth(node), time));
+        }
+        next
+    }
+}
+
+impl PoissonSource {
+    pub(super) fn new(
+        inventory: &mut StochasticDecayInventory,
+        schedule: Arc<DecayProductionSchedule>,
+    ) -> Result<Self, DecayError> {
+        if !Arc::ptr_eq(inventory.model(), schedule.model()) {
+            return Err(DecayError::Invalid(
+                "stochastic production schedule must share the original decay model",
+            ));
+        }
+        let time_s = inventory.time_s();
+        let rates_nuclei_s = schedule.rates_at(time_s)?.to_vec();
+        let nodes = rates_nuclei_s.len();
+        let next_change = schedule
+            .changes()
+            .partition_point(|change| change.time_s <= time_s);
+        let mut source = Self {
+            schedule,
+            rates_nuclei_s,
+            clocks: vec![EventClock::Inactive; nodes],
+            produced_nuclei: vec![0; nodes],
+            next_change,
+        };
+        for node in 0..nodes {
+            source.reschedule_birth(&mut inventory.rng, node, Accumulator::new(time_s))?;
+        }
+        Ok(source)
+    }
+
+    pub(super) fn schedule(&self) -> &Arc<DecayProductionSchedule> {
+        &self.schedule
+    }
+
+    pub(super) fn cumulative_produced_nuclei(&self) -> &[u64] {
+        &self.produced_nuclei
+    }
+
+    pub(super) fn next_change_time(&self) -> Option<Accumulator> {
+        self.schedule
+            .changes()
+            .get(self.next_change)
+            .map(|change| Accumulator::new(change.time_s))
+    }
+
+    pub(super) fn next_birth(&self) -> Option<(usize, Accumulator)> {
+        let mut next = None;
         for (node, clock) in self.clocks.iter().enumerate() {
             if let EventClock::Finite(time) = clock
                 && next.is_none_or(|(_, earliest)| before(*time, earliest))
             {
-                next = Some((Event::Birth(node), *time));
+                next = Some((node, *time));
             }
         }
         next
     }
 
-    fn reschedule_birth(&mut self, node: usize, origin: Accumulator) -> Result<(), DecayError> {
-        self.clocks[node] = sample_clock(
-            &mut self.inventory.rng,
-            self.rates_nuclei_s[node],
-            1,
-            origin,
-        )?;
-        Ok(())
+    /// Retain the original local birth mutation and random-draw order. A cohort
+    /// supplies its complete current population and updates movement afterwards.
+    pub(super) fn apply_birth(
+        &mut self,
+        inventory: &mut StochasticDecayInventory,
+        node: usize,
+        time: Accumulator,
+        total_population: &mut u64,
+        produced_nuclei: &mut [u64],
+        births: &mut u64,
+    ) -> Result<(), DecayError> {
+        if *total_population == MAX_STOCHASTIC_NUCLEI {
+            return Err(DecayError::Budget("stochastic population ceiling"));
+        }
+        increment(total_population)?;
+        increment(&mut inventory.populations[node])?;
+        increment(&mut self.produced_nuclei[node])?;
+        increment(&mut produced_nuclei[node])?;
+        increment(births)?;
+        inventory.reschedule(node, time)?;
+        self.reschedule_birth(&mut inventory.rng, node, time)
     }
 
-    fn change_rates(&mut self, time: Accumulator) -> Result<(), DecayError> {
+    pub(super) fn change_rates(
+        &mut self,
+        rng: &mut super::StreamCheckpoint,
+        time: Accumulator,
+    ) -> Result<(), DecayError> {
         let change = &self.schedule.changes()[self.next_change];
         for (node, &rate) in change.rates_nuclei_s.iter().enumerate() {
             if rate != self.rates_nuclei_s[node] {
-                self.clocks[node] = sample_clock(&mut self.inventory.rng, rate, 1, time)?;
+                self.clocks[node] = sample_clock(rng, rate, 1, time)?;
                 self.rates_nuclei_s[node] = rate;
             }
         }
-        self.next_change += 1;
+        self.next_change = self
+            .next_change
+            .checked_add(1)
+            .ok_or(DecayError::Arithmetic)?;
+        Ok(())
+    }
+
+    fn reschedule_birth(
+        &mut self,
+        rng: &mut super::StreamCheckpoint,
+        node: usize,
+        origin: Accumulator,
+    ) -> Result<(), DecayError> {
+        self.clocks[node] = sample_clock(rng, self.rates_nuclei_s[node], 1, origin)?;
         Ok(())
     }
 }

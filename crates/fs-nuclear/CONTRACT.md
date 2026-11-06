@@ -508,9 +508,51 @@ cell ordering. Handles share the accepted state and report; a single designated
 handle advertises the cohort's next event without redundant all-clock scans.
 Event-local emissions enter the original atomic material/radiation transaction,
 so transfer alone produces no temperature change and rejected material updates
-publish neither movement nor decay history. The separately supplied stochastic
-production owner and this constant-rate transport owner are distinct surfaces;
-simultaneous stochastic external production plus transport is not yet composed.
+publish neither movement nor decay history. Scheduled Poisson supply composes
+with this same transport history through the owner described below.
+
+## Scheduled production and transport on one radioactive timeline
+
+`decay::stochastic::transport::production::StochasticDecayProductionTransportState`
+binds scheduled external supply to an existing integer transport cohort through
+the explicit `poisson` constructor. Its schedule vector has one optional original
+`DecayProductionSchedule` per compartment. Every supplied schedule shares the
+cohort's exact original model Arc. Binding uses rates active at the cohort's
+current time and preserves its existing decay/movement clocks; earlier source
+history is not replayed. Poisson source clocks share their compartment's original
+random stream, while movement retains its separate original stream.
+
+The original transport event kernel races authored source changes, sampled
+births, movement and radioactive transformations at their full compensated
+times. This is one combined trajectory, without production/transport splitting
+at rounded endpoints. A supplied parent can move, produce daughters, lose those
+daughters through outflow or release their decay heat in another compartment
+within the same observation interval. Source shutdown stops births while
+retained nuclei continue moving and decaying. At exact ties, schedule changes
+precede the original decay/movement ordering, followed by births, with fixed
+compartment/nuclide tie order. Unchanged source rates retain pending clocks.
+
+The standalone production owner and the combined owner share source scheduling
+and birth mutation; the original transport owner and combined owner share the
+transport trial kernel. The original source-free transport path retains its
+state and report, and a single supplied compartment without movement retains
+the standalone production history. Observations consume no random draws, and a
+complete combined-owner clone retains pending source/decay/movement events,
+schedule positions, all streams and cumulative integer/energy accounts.
+
+Every accepted interval checks the exact whole-cohort balance
+`retained_end = retained_start + births - outflows`. Construction and trial
+budgets include source clocks and schedule work alongside transport storage and
+clock work. Birth, schedule, decay and movement bounds apply across the complete
+cohort, and the retained population ceiling is enforced after each actual birth.
+All per-compartment source counters, original directed movement accounts and
+original local emission channels remain distinct. Supply and movement infer no
+creation heat or carrier enthalpy. Event processing allocates nothing, and any
+refusal retains the entire original history.
+
+The manufactured `stochastic_production_transport` example demonstrates a source
+pulse feeding a downstream compartment with daughter decay, outflow, integer
+balance and exact cloned restart.
 
 ## Stochastic decay events on the shared thermal timeline
 

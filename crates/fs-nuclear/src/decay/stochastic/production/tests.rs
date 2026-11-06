@@ -294,7 +294,7 @@ fn g1_shutdown_preserves_decay_and_binding_at_later_time_does_not_replay_supply(
             state.inventory.populations().iter().sum::<u64>(),
             produced[0]
         );
-        assert_eq!(state.clocks, [EventClock::Inactive; 2]);
+        assert_eq!(state.source.clocks, [EventClock::Inactive; 2]);
         surviving += state.inventory.populations()[0] as f64;
     }
     let expected = 8.0 / 0.7 * (1.0 - (-0.7_f64).exp()) * (-1.4_f64).exp();
@@ -387,8 +387,8 @@ fn g3_partition_clone_and_noop_changes_preserve_complete_future_history() {
     let report = right.advance_to(2.0, budget(), || Ok(())).unwrap();
     assert_eq!(report.schedule_changes, 1);
     assert_eq!(left.inventory, right.inventory);
-    assert_eq!(left.clocks, right.clocks);
-    assert_eq!(left.produced_nuclei, right.produced_nuclei);
+    assert_eq!(left.source.clocks, right.source.clocks);
+    assert_eq!(left.source.produced_nuclei, right.source.produced_nuclei);
 }
 
 #[test]
@@ -430,7 +430,7 @@ fn g0_compensated_births_precede_shutdown_and_exact_ties_install_new_rates_first
         StochasticDecayInventory::new_at(Arc::clone(&model), vec![0; 3], key(13), start).unwrap();
     let mut state = StochasticDecayProduction::poisson(inventory, Arc::clone(&schedule)).unwrap();
     // A known retained sub-ULP birth isolates boundary ordering from random draws.
-    state.clocks[0] = EventClock::Finite(Accumulator { hi: end, lo: -0.25 });
+    state.source.clocks[0] = EventClock::Finite(Accumulator { hi: end, lo: -0.25 });
     assert_eq!(state.next_transition_time_s(), Some(end));
     let original = state.clone();
     state.advance_to(start, budget(), || Ok(())).unwrap();
@@ -451,7 +451,7 @@ fn g0_compensated_births_precede_shutdown_and_exact_ties_install_new_rates_first
 
     let inventory = StochasticDecayInventory::new_at(model, vec![1, 0, 0], key(13), start).unwrap();
     let mut tied = StochasticDecayProduction::poisson(inventory, schedule).unwrap();
-    tied.clocks[0] = EventClock::Finite(Accumulator::new(end));
+    tied.source.clocks[0] = EventClock::Finite(Accumulator::new(end));
     tied.inventory.clocks[0] = EventClock::Finite(Accumulator::new(end));
     let report = tied.advance_to(end, budget(), || Ok(())).unwrap();
     assert_eq!(
@@ -475,7 +475,7 @@ fn g0_beyond_finite_arrivals_remain_pending_until_an_authored_rate_change() {
         .unwrap();
     let constant = schedule(&model, vec![1e-308, 0.0], vec![]);
     let mut state = supplied(&model, vec![0, 0], &constant, seed);
-    assert_eq!(state.clocks[0], EventClock::BeyondFiniteTime);
+    assert_eq!(state.source.clocks[0], EventClock::BeyondFiniteTime);
     assert!(state.next_transition_time_s().is_none());
     let report = state.advance_to(f64::MAX, budget(), || Ok(())).unwrap();
     assert_eq!(report.births, 0);
@@ -569,7 +569,7 @@ fn g4_work_population_counter_rng_and_callback_refusals_are_atomic() {
     for counter in [false, true] {
         let mut trial = supplied(&model, vec![0, 0], &schedule, 21);
         if counter {
-            trial.produced_nuclei[0] = u64::MAX;
+            trial.source.produced_nuclei[0] = u64::MAX;
         } else {
             trial.inventory.rng.index = u64::MAX;
         }
