@@ -8705,3 +8705,31 @@ Analytical regressions specify longitudinal/transverse motion, aberration and
 inverse boosts, D^5 spectral/D^4 integrated scaling, original source identity,
 finite-band admission, detector-frame photon conversion, nonuniform receiver
 proposals, stationary parity and amplified Wien-tail range recovery.
+
+
+## Directed transport of luminescent volume emission
+
+`scattering::luminescence::LuminescenceTransferOperator` supplies dimensionless
+directed transfer fractions for isotropic, uniform emission within explicitly
+selected original cells. It reuses native exact extinction and implicit-capture
+histories, supports uniform, palette and cell-local optics, retains self-absorption
+and every original-cell receiver, and separates escaped from unresolved radiant
+energy. Unlike LTE exchange, it neither weights emitters by absorptivity nor
+symmetrizes directed probabilities. Fractions apply to bin-integrated watts or
+joules without wavelength quadrature or a second solid-angle factor.
+
+Immutable optical/absorption identities and every positive-density material cell
+bind later thermal use. Independent deterministic emitter/lane/history streams
+and global segment, material, emitter and directed-link limits bound work.
+Public-report admission checks sorted mappings, nonnegative finite estimates,
+receiver/total absorption and unit-energy closure against an explicit fraction
+allowance. Fixed-sample standard errors are diagnostics, not confidence bounds;
+tails remain radiation. Source kinetics, reexcitation, heat conversion and
+wavelength redistribution belong to the caller. Transport is quasistatic,
+elastic, index-one and open-boundary.
+
+Seven focused regression groups specify transparent/opaque limits, independent
+finite-box and neighbor-absorption integrals, heterogeneous directed transfer,
+scattering tails, deterministic replay and conservation/budget/cancellation
+refusals. Pinned formatter/parser checks passed; native test execution was
+unavailable in the shared editing environment.

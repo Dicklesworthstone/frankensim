@@ -41,6 +41,8 @@ pub mod deposition;
 /// Reciprocal thermal volume/bath exchange over the same physical histories.
 pub mod exchange;
 pub mod field;
+/// Directed transport of isotropic nonthermal volume emission.
+pub mod luminescence;
 mod prepared;
 pub use field::{CellPhaseFunction, CellScatteringGrid};
 /// Physical homogeneous-sphere cross sections and resolved angular scattering.

@@ -549,7 +549,7 @@ fn estimate<const N: usize>(
 
 /// No rejection resampling or shifted origin: an unrepresentable source point
 /// is a named refusal rather than being moved into another physical cell.
-fn emitted_ray(
+pub(super) fn emitted_ray(
     geometry: &AbsorbingGrid<'_>,
     cell: usize,
     random: &mut impl FnMut() -> f64,
