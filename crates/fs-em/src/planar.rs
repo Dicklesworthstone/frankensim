@@ -6,6 +6,8 @@
 //! complete prescribed exterior edge. The solution is a discrete P1 Galerkin estimate,
 //! with a recomputed algebraic residual, not an error enclosure.
 
+/// Regularized cylindrical curl formulation for azimuthal currents and poloidal fields.
+pub mod axisymmetric;
 /// Retained planar induction and material eddy-current heat on this same mesh.
 pub mod eddy;
 /// Reversible nonlinear H(B) on the same mesh, Hodge and checked solver owners.

@@ -493,7 +493,10 @@ fn validate_geometry(
 
 /// Cancellable deterministic counterpart of COO assembly. Original entry
 /// ordinals break sort ties and preserve element-summation order.
-pub(crate) fn assemble_triplets(
+/// Entries target an `n` by `n` matrix; finite values and indices are checked,
+/// duplicate entries are added, and every sorting/assembly stage polls cancellation.
+/// Domain owners must admit their input extents before staging contributions.
+pub fn assemble_triplets(
     n: usize,
     entries: Vec<(usize, usize, f64)>,
     cancelled: &mut impl FnMut() -> bool,

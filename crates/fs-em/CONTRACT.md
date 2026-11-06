@@ -1,5 +1,50 @@
 # fs-em contract
 
+## Axisymmetric magnetic fields from azimuthal currents
+
+`planar::axisymmetric::AxisymmetricMagnetostatics` retains the original
+meridional `TriComplex2`, complete per-cell material state points and admitted
+linear isotropic permeability. Its continuous P1 unknown is
+`u = A_phi/r` [T]. The physical cylindrical curl is
+`B_r = -r u_z`, `B_z = 2u + r u_r`, and `A_phi = r u`.
+Finite axis values therefore allow nonzero axial B while A_phi and radial B
+vanish at r=0. No inverse radius or scalar-voltage gauge shift is used.
+
+The weak equation pairs `curl(r u e_phi)/mu` with
+`curl(r v e_phi)` under `dV = angular_span*r*dr*dz`; its source is
+`integral J_phi*r*v dV`. Exact cubic triangle moments integrate this
+operator, azimuthal-current load and recovered energy. Immutable preparation
+reuses the original cancellable deterministic sparse assembly, mesh trace
+admission and checked CG with a positive Jacobi diagonal. Explicit cell,
+coordinate and staged-entry limits bound preparation. Cancellation or failed
+material, trace or solver admission returns no field.
+
+Every connected component requires a complete prescribed exterior edge of
+positive swept area, with prescribed values of u. Axis-only and isolated-point
+traces refuse. Unprescribed physical edges carry homogeneous tangential H;
+the axis carries regularity. The angular span represents an azimuthally
+invariant sweep and scales extensive quantities without changing local fields.
+The caller supplies the finite outer boundary and its physical approximation.
+
+Returned fields borrow the original source owner and retain actual impressed
+currents. A_phi is quadratic, while B and H are affine within each triangle;
+one-sided material-interface values remain separate. Per-cell and total
+`W = integral B.H/2 dV`, the source pairing `integral J_phi*A_phi dV`,
+prescribed-boundary reaction work and the actual defect in
+`2W = source_pairing + boundary_work` are exposed with the native algebraic
+solver report. These static pairings do not claim a transient work history.
+
+`tests/axisymmetric_magnetic.rs` specifies uniform axial and source-free
+quadrupole fields, an exact azimuthal-current solution with energy/work and
+angular scaling, thick-solenoid refinement against independent Ampere-law
+fields with a permeable core, and trace/source/budget/cancellation refusals.
+Native execution has not yet completed in the available environment.
+
+This is a fixed-geometry, fixed-state, linear isotropic magnetostatic estimate.
+It supplies no nonlinear, anisotropic, recoil or hysteretic law, eddy currents,
+force qualification, automatic infinite-domain treatment, independent angular
+face excitation, experimental material validation or continuum error enclosure.
+
 ## Native winding circuits with spatial vector hysteresis
 
 The default-off `magnetic-hysteresis` feature exposes
