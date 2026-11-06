@@ -13,6 +13,10 @@
 //! across independent initial inventories and nonnegative injection vectors.
 //! A continuing source has fresh material even after old inventories exhaust:
 //! unrepresented source coefficients receive no vanished-tail exemption.
+//! Optional residence maps also integrate the populations under that source:
+//! integral(N) = J*N0 + (K/t)*injected, where J=integral(P) and
+//! K=integral((t-s)*P(s)). Zero-removal receivers retain their actual residence;
+//! the second integral is evaluated directly rather than dividing event counts.
 
 use super::{
     DecayError, DecayLimits, ReactionAdvance, ReactionEdge, ReactionPlan, Sum, charge, det, poll,
@@ -25,6 +29,7 @@ pub struct ReactionSourcePlan {
     homogeneous: ReactionPlan,
     source_population: Vec<f64>,
     source_removals: Vec<f64>,
+    source_population_integral: Option<Vec<f64>>,
 }
 
 impl ReactionSourcePlan {
@@ -38,13 +43,68 @@ impl ReactionSourcePlan {
         limits: DecayLimits,
         cancelled: impl FnMut() -> bool,
     ) -> Result<Self, DecayError> {
-        let (homogeneous, maps) =
-            ReactionPlan::prepare_impl(rates_per_s, edges, duration_s, limits, true, cancelled)?;
+        let (homogeneous, maps) = ReactionPlan::prepare_impl(
+            rates_per_s,
+            edges,
+            duration_s,
+            limits,
+            true,
+            false,
+            cancelled,
+        )?;
         let maps = maps.expect("source maps requested by this preparation");
         Ok(Self {
             homogeneous,
             source_population: maps.population,
             source_removals: maps.removals,
+            source_population_integral: None,
+        })
+    }
+
+    /// Also retain population-time maps for initial and uniformly injected
+    /// constituents, including stable receiving nodes. This opt-in prepares one
+    /// extra positive series block and semigroup product under the same limits;
+    /// ordinary source callers retain their original work and storage costs.
+    /// Preparation is independent of the initial inventory and injection totals.
+    pub fn prepare_with_population_integrals(
+        rates_per_s: &[f64],
+        edges: &[ReactionEdge],
+        duration_s: f64,
+        limits: DecayLimits,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, DecayError> {
+        let (mut homogeneous, maps) = ReactionPlan::prepare_impl(
+            rates_per_s,
+            edges,
+            duration_s,
+            limits,
+            true,
+            true,
+            &mut cancelled,
+        )?;
+        let maps = maps.expect("source maps requested by this preparation");
+        let n = homogeneous.nodes;
+        // One retained copy plus two dimensional scalings and independent
+        // removal/residence identities. Charge before allocating the copy.
+        charge(&mut homogeneous.work, 13 * n * n, limits.maximum_work)?;
+        homogeneous.population_integral = Some(homogeneous.scale_population_integral(
+            maps.population.clone(),
+            &homogeneous.integrated,
+            &mut cancelled,
+        )?);
+        let source_population_integral = homogeneous.scale_population_integral(
+            maps.residence
+                .expect("source residence requested by this preparation")
+                .population,
+            &maps.removals,
+            &mut cancelled,
+        )?;
+        poll(&mut cancelled)?;
+        Ok(Self {
+            homogeneous,
+            source_population: maps.population,
+            source_removals: maps.removals,
+            source_population_integral: Some(source_population_integral),
         })
     }
 
@@ -64,6 +124,85 @@ impl ReactionSourcePlan {
     #[must_use]
     pub fn source_removal_matrix(&self) -> &[f64] {
         &self.source_removals
+    }
+
+    /// Optional row-major J [s]: integrated population per initial constituent.
+    #[must_use]
+    pub fn population_integral_matrix(&self) -> Option<&[f64]> {
+        self.homogeneous.population_integral_matrix()
+    }
+
+    /// Optional row-major K/t [s]: integrated population per constituent
+    /// injected uniformly over the interval. At zero duration this map is zero.
+    #[must_use]
+    pub fn source_population_integral_matrix(&self) -> Option<&[f64]> {
+        self.source_population_integral.as_deref()
+    }
+
+    /// Return each node's population-time integral for the same constant source
+    /// used by `apply`. `injected` contains totals, not rates; zero duration
+    /// requires zero injection. This operation leaves both inputs unchanged.
+    pub fn integrate_populations(
+        &self,
+        populations: &[f64],
+        injected: &[f64],
+    ) -> Result<Vec<f64>, DecayError> {
+        self.integrate_populations_with_cancel(populations, injected, || false)
+    }
+
+    /// Checked source-aged residence with a checkpoint at each bounded row.
+    /// Initial and supplied contributions are accumulated separately without
+    /// subtracting endpoints or inheriting an exhausted-inventory exemption.
+    pub fn integrate_populations_with_cancel(
+        &self,
+        populations: &[f64],
+        injected: &[f64],
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Vec<f64>, DecayError> {
+        poll(&mut cancelled)?;
+        let plan = &self.homogeneous;
+        let initial_integral = plan
+            .population_integral_matrix()
+            .ok_or(DecayError::Invalid(
+                "population integral maps were not prepared",
+            ))?;
+        let source_integral =
+            self.source_population_integral_matrix()
+                .ok_or(DecayError::Invalid(
+                    "source population integral maps were not prepared",
+                ))?;
+        let n = plan.nodes;
+        if populations.len() != n
+            || injected.len() != n
+            || !populations
+                .iter()
+                .chain(injected)
+                .copied()
+                .all(positive_or_zero)
+        {
+            return Err(DecayError::Invalid(
+                "one finite nonnegative initial population and injection per reaction node required",
+            ));
+        }
+        if plan.duration_s == 0.0 && injected.iter().any(|&value| value > 0.0) {
+            return Err(DecayError::Invalid(
+                "zero duration cannot contain uniform reaction injection",
+            ));
+        }
+        let mut answer = Vec::with_capacity(n);
+        for i in 0..n {
+            poll(&mut cancelled)?;
+            let mut residence = Sum::default();
+            plan.add_population_integral(&mut residence, initial_integral, i, populations)?;
+            plan.add_population_integral(&mut residence, source_integral, i, injected)?;
+            let value = residence.total();
+            if !positive_or_zero(value) {
+                return Err(DecayError::Unrepresentable("integrated source population"));
+            }
+            answer.push(value);
+        }
+        poll(&mut cancelled)?;
+        Ok(answer)
     }
 
     /// Apply to initial populations and totals injected uniformly over the
@@ -156,16 +295,28 @@ pub(super) struct SourceTerms {
     removal_term: Vec<f64>,
     population_sum: Vec<Sum>,
     removal_sum: Vec<Sum>,
+    residence: Option<ResidenceTerms>,
+}
+
+// Normalized second integral K/t^2. A separate positive block is necessary
+// because a zero-rate receiver has residence but no corresponding removals.
+struct ResidenceTerms {
+    term: Vec<f64>,
+    sum: Vec<Sum>,
 }
 
 impl SourceTerms {
-    pub(super) fn new(nodes: usize) -> Self {
+    pub(super) fn new(nodes: usize, with_residence: bool) -> Self {
         Self {
             nodes,
             population_term: vec![0.0; nodes * nodes],
             removal_term: vec![0.0; nodes * nodes],
             population_sum: vec![Sum::default(); nodes * nodes],
             removal_sum: vec![Sum::default(); nodes * nodes],
+            residence: with_residence.then(|| ResidenceTerms {
+                term: vec![0.0; nodes * nodes],
+                sum: vec![Sum::default(); nodes * nodes],
+            }),
         }
     }
 
@@ -184,9 +335,22 @@ impl SourceTerms {
     ) -> Result<(), DecayError> {
         for i in 0..self.nodes {
             poll(cancelled)?;
-            charge(work, 16 * self.nodes, maximum_work)?;
+            charge(
+                work,
+                (16 + 8 * usize::from(self.residence.is_some())) * self.nodes,
+                maximum_work,
+            )?;
             for j in 0..self.nodes {
                 let at = i * self.nodes + j;
+                if let Some(residence) = &mut self.residence {
+                    // Use the preceding source-population term before it is
+                    // advanced: H_k=(mu*H_{k-1}+Fterm_{k-1})/k.
+                    let mut h = Sum::default();
+                    h.product(mu, residence.term[at]);
+                    h.add(self.population_term[at]);
+                    residence.term[at] = h.total() / k as f64;
+                    residence.sum[at].add(residence.term[at]);
+                }
                 let mut p = Sum::default();
                 p.product(mu, self.population_term[at]);
                 p.add(pterm[at]);
@@ -202,13 +366,19 @@ impl SourceTerms {
         Ok(())
     }
 
-    pub(super) fn converged(&self, tail: f64, tolerance: f64) -> bool {
+    pub(super) fn converged(&self, tail: f64, residence_tail: f64, tolerance: f64) -> bool {
         self.population_sum
             .iter()
             .chain(&self.removal_sum)
             .all(|entry| {
                 let value = entry.total();
                 value == 0.0 || tail <= tolerance * value
+            })
+            && self.residence.as_ref().is_none_or(|residence| {
+                residence.sum.iter().all(|entry| {
+                    let value = entry.total();
+                    value == 0.0 || residence_tail <= tolerance * value
+                })
             })
     }
 
@@ -233,6 +403,14 @@ impl SourceTerms {
                 .collect(),
             next_population: self.population_term,
             next_removals: self.removal_term,
+            residence: self.residence.map(|residence| ResidenceMap {
+                population: residence
+                    .sum
+                    .into_iter()
+                    .map(|entry| damping * entry.total())
+                    .collect(),
+                next_population: residence.term,
+            }),
         };
         maps.refresh_diagonals(rates, net_rates, cyclic, time)?;
         Ok(maps)
@@ -244,19 +422,33 @@ pub(super) struct SourceMaps {
     pub(super) removals: Vec<f64>,
     next_population: Vec<f64>,
     next_removals: Vec<f64>,
+    pub(super) residence: Option<ResidenceMap>,
+}
+
+pub(super) struct ResidenceMap {
+    pub(super) population: Vec<f64>,
+    next_population: Vec<f64>,
 }
 
 impl SourceMaps {
-    pub(super) fn identity(n: usize) -> Self {
+    pub(super) fn identity(n: usize, with_residence: bool) -> Self {
         let mut population = vec![0.0; n * n];
+        let mut residence = with_residence.then(|| ResidenceMap {
+            population: vec![0.0; n * n],
+            next_population: Vec::new(),
+        });
         for i in 0..n {
             population[i * n + i] = 1.0;
+            if let Some(residence) = &mut residence {
+                residence.population[i * n + i] = 0.5;
+            }
         }
         Self {
             population,
             removals: vec![0.0; n * n],
             next_population: Vec::new(),
             next_removals: Vec::new(),
+            residence,
         }
     }
 
@@ -273,6 +465,11 @@ impl SourceMaps {
                     self.population[i * rates.len() + i],
                     self.removals[i * rates.len() + i],
                 ) = source_diagonal(rates[i], net_rates[i], time)?;
+                if let Some(residence) = &mut self.residence {
+                    let at = i * rates.len() + i;
+                    residence.population[at] =
+                        source_residence_diagonal(self.population[at], net_rates[i], time)?;
+                }
             }
         }
         Ok(())
@@ -294,9 +491,24 @@ impl SourceMaps {
         let n = rates.len();
         for i in 0..n {
             poll(cancelled)?;
-            charge(work, n * (2 * n + 4), maximum_work)?;
+            charge(
+                work,
+                n * (2 * n + 4 + usize::from(self.residence.is_some()) * (n + 4)),
+                maximum_work,
+            )?;
             for j in 0..n {
                 let at = i * n + j;
+                if let Some(residence) = &mut self.residence {
+                    // K(2h)=K(h)+h*J(h)+P(h)*K(h). Divide by (2h)^2
+                    // while all terms are nonnegative and bounded in age.
+                    let mut h = Sum::default();
+                    h.add(residence.population[at]);
+                    h.add(self.population[at]);
+                    for k in 0..n {
+                        h.product(p[i * n + k], residence.population[k * n + j]);
+                    }
+                    residence.next_population[at] = 0.25 * h.total();
+                }
                 let mut f = Sum::default();
                 let mut cf = Sum::default();
                 f.add(self.population[at]);
@@ -313,6 +525,9 @@ impl SourceMaps {
         }
         core::mem::swap(&mut self.population, &mut self.next_population);
         core::mem::swap(&mut self.removals, &mut self.next_removals);
+        if let Some(residence) = &mut self.residence {
+            core::mem::swap(&mut residence.population, &mut residence.next_population);
+        }
         self.refresh_diagonals(rates, net_rates, cyclic, time)
     }
 }
@@ -323,10 +538,7 @@ impl SourceMaps {
 fn source_diagonal(rate: f64, net_rate: f64, time: f64) -> Result<(f64, f64), DecayError> {
     let x = net_rate * time;
     let (population, removals) = if x.abs() < 0.01 {
-        let phi2 = 0.5
-            + x * (-1.0 / 6.0
-                + x * (1.0 / 24.0
-                    + x * (-1.0 / 120.0 + x * (1.0 / 720.0 + x * (-1.0 / 5040.0 + x / 40320.0)))));
+        let phi2 = source_phi2_small(x);
         (1.0 - x * phi2, (rate * time) * phi2)
     } else {
         let phi1 = if x.is_infinite() && x > 0.0 {
@@ -342,6 +554,30 @@ fn source_diagonal(rate: f64, net_rate: f64, time: f64) -> Result<(f64, f64), De
         ));
     }
     Ok((population, removals))
+}
+
+fn source_phi2_small(x: f64) -> f64 {
+    0.5 + x
+        * (-1.0 / 6.0
+            + x * (1.0 / 24.0
+                + x * (-1.0 / 120.0 + x * (1.0 / 720.0 + x * (-1.0 / 5040.0 + x / 40320.0)))))
+}
+
+fn source_residence_diagonal(population: f64, net_rate: f64, time: f64) -> Result<f64, DecayError> {
+    let x = net_rate * time;
+    let value = if x.abs() < 0.01 {
+        source_phi2_small(x)
+    } else if x.is_infinite() && x > 0.0 {
+        (1.0 / net_rate) / time
+    } else {
+        (1.0 - population) / x
+    };
+    if !positive_or_zero(value) {
+        return Err(DecayError::Unrepresentable(
+            "scalar reaction-source population integral",
+        ));
+    }
+    Ok(value)
 }
 
 #[cfg(test)]

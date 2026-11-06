@@ -1063,3 +1063,20 @@ uniform-reaction-production tests and six new population-integral regressions.
 Numerical identities are admission checks, not certified floating-point
 forward-error bounds. Full workspace Cargo and cross-ISA verification remain
 separate gates.
+
+## Uniform-source population residence
+
+`ReactionSourcePlan::prepare_with_population_integrals` optionally retains the
+original J = integral exp(A s) ds [s] and source residence K/t [s], where
+K = integral (t-s) exp(A s) ds. For explicitly uniform injected totals I,
+`integrate_populations` returns J*N0 + (K/t)*I, including zero-removal receiving
+nodes. It does not treat the feed as an initial or endpoint dose. The existing
+positive shifted series and semigroup composition supply the additional block;
+no inverse generator, added numerical species or time quadrature is used.
+Source rates and initial inventories remain outside immutable preparation.
+
+The opt-in block has explicit storage/work charges, bounded cancellation, and
+range checks against independently integrated removals. Existing ordinary and
+source-only preparation retain their prior maps and work charges. Zero duration
+requires zero injection. The new analytic residence, source-age, stiff scalar,
+cycle and unequal-interval composition checks use the existing decay tests.

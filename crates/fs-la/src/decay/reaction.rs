@@ -139,6 +139,7 @@ impl ReactionPlan {
             duration_s,
             limits,
             false,
+            false,
             cancelled,
         )
         .map(|(plan, _)| plan)
@@ -163,15 +164,32 @@ impl ReactionPlan {
             duration_s,
             limits,
             true,
+            false,
             &mut cancelled,
         )?;
-        let mut integral = maps
+        let integral = maps
             .expect("source map requested for population integrals")
             .population;
         let n = plan.nodes;
         charge(&mut plan.work, 6 * n * n, limits.maximum_work)?;
+        plan.population_integral =
+            Some(plan.scale_population_integral(integral, &plan.integrated, &mut cancelled)?);
+        poll(&mut cancelled)?;
+        Ok(plan)
+    }
+
+    // Both J/t and K/t^2 become population-time maps after multiplying by
+    // duration. Their independent removal maps admit the same row identity.
+    fn scale_population_integral(
+        &self,
+        mut integral: Vec<f64>,
+        removals: &[f64],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Vec<f64>, DecayError> {
+        let n = self.nodes;
+        let duration_s = self.duration_s;
         for i in 0..n {
-            poll(&mut cancelled)?;
+            poll(cancelled)?;
             for j in 0..n {
                 let at = i * n + j;
                 let coefficient = integral[at];
@@ -179,7 +197,7 @@ impl ReactionPlan {
                 // is for ReactionSourcePlan. Do not amplify vanished or
                 // subnormal normalized entries into an apparently resolved J.
                 if duration_s > 1.0
-                    && plan.reachable[at]
+                    && self.reachable[at]
                     && (coefficient == 0.0 || coefficient.is_subnormal())
                 {
                     return Err(DecayError::Unrepresentable(
@@ -199,17 +217,15 @@ impl ReactionPlan {
                 // with residence where a real removal rate exists. Zero-rate
                 // rows keep the source owner's direct positive population map.
                 let mut residual = Sum::default();
-                residual.add(plan.integrated[at]);
-                residual.product(-plan.rates[i], value);
+                residual.add(removals[at]);
+                residual.product(-self.rates[i], value);
                 let mut scale = Sum::default();
-                scale.add(plan.integrated[at]);
-                scale.product(plan.rates[i], value);
-                admit_balance(i, j, residual.total(), scale.total(), plan.tolerance)?;
+                scale.add(removals[at]);
+                scale.product(self.rates[i], value);
+                admit_balance(i, j, residual.total(), scale.total(), self.tolerance)?;
             }
         }
-        plan.population_integral = Some(integral);
-        poll(&mut cancelled)?;
-        Ok(plan)
+        Ok(integral)
     }
 
     fn prepare_impl(
@@ -218,6 +234,7 @@ impl ReactionPlan {
         duration_s: f64,
         limits: DecayLimits,
         with_source: bool,
+        with_source_integrals: bool,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<(Self, Option<source::SourceMaps>), DecayError> {
         poll(&mut cancelled)?;
@@ -302,10 +319,17 @@ impl ReactionPlan {
         let shift = removal_rates_per_s.iter().copied().fold(0.0, f64::max);
         if duration_s == 0.0 || shift == 0.0 {
             if with_source {
-                charge(&mut plan.work, 2 * n * n, limits.maximum_work)?;
+                charge(
+                    &mut plan.work,
+                    (2 + usize::from(with_source_integrals)) * n * n,
+                    limits.maximum_work,
+                )?;
             }
             poll(&mut cancelled)?;
-            return Ok((plan, with_source.then(|| source::SourceMaps::identity(n))));
+            return Ok((
+                plan,
+                with_source.then(|| source::SourceMaps::identity(n, with_source_integrals)),
+            ));
         }
         let mut production = vec![0.0; n * n];
         let mut maximum_production = 0.0_f64;
@@ -430,8 +454,12 @@ impl ReactionPlan {
             sum_p[i * n + i].add(1.0);
         }
         let mut source_terms = if with_source {
-            charge(&mut plan.work, 6 * n * n, limits.maximum_work)?;
-            Some(source::SourceTerms::new(n))
+            charge(
+                &mut plan.work,
+                (6 + 3 * usize::from(with_source_integrals)) * n * n,
+                limits.maximum_work,
+            )?;
+            Some(source::SourceTerms::new(n, with_source_integrals))
         } else {
             None
         };
@@ -480,13 +508,14 @@ impl ReactionPlan {
             core::mem::swap(&mut term_p, &mut next_p);
             core::mem::swap(&mut term_c, &mut next_c);
             plan.series_terms = k;
+            let previous_norm_term = norm_term;
             norm_term *= block_norm / k as f64;
             let tail =
                 norm_term * (block_norm / (k + 1) as f64) / (1.0 - block_norm / (k + 2) as f64);
             // Requiring at least n+1 terms exposes every shortest path in both
             // blocks. A common absolute tail compared to every represented
             // positive entry avoids dropping small but resolved branches.
-            if k >= n + 1 + usize::from(with_source)
+            if k >= n + 1 + usize::from(with_source) + usize::from(with_source_integrals)
                 && sum_p.iter().chain(&sum_c).all(|entry| {
                     let value = entry.total();
                     value == 0.0 || tail <= base_tolerance * value
@@ -495,7 +524,11 @@ impl ReactionPlan {
                     // An integrated block's kth term is bounded by
                     // block_norm^(k-1)/(k-1)!, one order below P/C.
                     let source_tail = norm_term / (1.0 - block_norm / (k + 1) as f64);
-                    source.converged(source_tail, base_tolerance)
+                    // The second integral's first omitted term is bounded
+                    // by block_norm^(k-1)/(2*(k-1)!). Retaining the previous
+                    // norm term avoids dividing by a tiny or zero norm.
+                    let residence_tail = 0.5 * previous_norm_term / (1.0 - block_norm / k as f64);
+                    source.converged(source_tail, residence_tail, base_tolerance)
                 })
             {
                 converged = true;
@@ -518,7 +551,12 @@ impl ReactionPlan {
             .collect();
         restore_diagonals(&mut plan, &net_rates, &cyclic, time)?;
         if with_source {
-            charge(&mut plan.work, 2 * n * n + n, limits.maximum_work)?;
+            charge(
+                &mut plan.work,
+                (2 + usize::from(with_source_integrals)) * n * n
+                    + (1 + usize::from(with_source_integrals)) * n,
+                limits.maximum_work,
+            )?;
         }
         let mut source_maps = source_terms
             .map(|source| source.finish(&plan.rates, &net_rates, &cyclic, time, damping))
@@ -709,28 +747,7 @@ impl ReactionPlan {
         for i in 0..n {
             poll(&mut cancelled)?;
             let mut residence = Sum::default();
-            for (j, &initial) in populations.iter().enumerate() {
-                let at = i * n + j;
-                let coefficient = integral[at];
-                if self.duration_s > 0.0
-                    && initial > 0.0
-                    && self.reachable[at]
-                    && (coefficient == 0.0 || (initial > 1.0 && coefficient.is_subnormal()))
-                {
-                    return Err(DecayError::Unrepresentable(
-                        "inventory requires an unrepresented population integral coefficient",
-                    ));
-                }
-                let contribution = coefficient * initial;
-                if !positive_or_zero(contribution)
-                    || (coefficient > 0.0 && initial > 0.0 && contribution == 0.0)
-                {
-                    return Err(DecayError::Unrepresentable(
-                        "integrated population contribution",
-                    ));
-                }
-                residence.product(coefficient, initial);
-            }
+            self.add_population_integral(&mut residence, integral, i, populations)?;
             let value = residence.total();
             if !positive_or_zero(value) {
                 return Err(DecayError::Unrepresentable("integrated population"));
@@ -739,6 +756,41 @@ impl ReactionPlan {
         }
         poll(&mut cancelled)?;
         Ok(answer)
+    }
+
+    // Shared checked accumulation for initial and uniformly injected residence.
+    // The two vectors stay separate, including when a small feed would vanish
+    // if it were first added to a much larger initial population.
+    fn add_population_integral(
+        &self,
+        sum: &mut Sum,
+        integral: &[f64],
+        row: usize,
+        populations: &[f64],
+    ) -> Result<(), DecayError> {
+        for (j, &population) in populations.iter().enumerate() {
+            let at = row * self.nodes + j;
+            let coefficient = integral[at];
+            if self.duration_s > 0.0
+                && population > 0.0
+                && self.reachable[at]
+                && (coefficient == 0.0 || (population > 1.0 && coefficient.is_subnormal()))
+            {
+                return Err(DecayError::Unrepresentable(
+                    "inventory requires an unrepresented population integral coefficient",
+                ));
+            }
+            let contribution = coefficient * population;
+            if !positive_or_zero(contribution)
+                || (coefficient > 0.0 && population > 0.0 && contribution == 0.0)
+            {
+                return Err(DecayError::Unrepresentable(
+                    "integrated population contribution",
+                ));
+            }
+            sum.product(coefficient, population);
+        }
+        Ok(())
     }
 
     fn check_balance(
