@@ -97,6 +97,83 @@ fn symmetric_moment(p: &[f64; 9], f0: &[f64; 9], f1: &[f64; 9]) {
 }
 
 #[test]
+fn accepted_reference_change_retains_original_small_work_and_source_part() {
+    let identity = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+    let law = Hyperelastic::new(
+        HyperelasticModel::MooneyRivlin {
+            c10: 900.0,
+            c01: 600.0,
+            kappa: 1e24,
+        },
+        4.0,
+    )
+    .unwrap();
+    let same_law = law.clone();
+    let before = ReferenceDeformation::try_new(identity.map(|x| 2.0 * x)).unwrap();
+    let mut gradient = *before.deformation_gradient();
+    gradient[1] = 4e-7;
+    let after = ReferenceDeformation::try_new(gradient).unwrap();
+    let total = identity.map(|x| 4.0 * x);
+    let expected = 8.0 * 1500.0 * (2e-7_f64).powi(2);
+    for part in [EnergyPart::Full, EnergyPart::Remainder] {
+        let p0 =
+            DiscreteGradientPoint::try_new_with_reference(&law, part, &before, total, settings())
+                .unwrap();
+        let p1 = DiscreteGradientPoint::try_new_with_reference(
+            &same_law,
+            part,
+            &after,
+            total,
+            settings(),
+        )
+        .unwrap();
+        if part == EnergyPart::Full {
+            assert_eq!(p0.energy_before_pa(), p1.energy_before_pa());
+        }
+        close(
+            p0.energy_increment_to(&p1).unwrap(),
+            expected,
+            3e-12 * expected,
+        );
+        close(
+            p1.energy_increment_to(&p0).unwrap(),
+            -expected,
+            3e-12 * expected,
+        );
+        assert_eq!(p0.energy_increment_to(&p0).unwrap(), 0.0);
+        assert_eq!(p0.accepted_deformation(), &total);
+    }
+    let full = DiscreteGradientPoint::try_new(&law, EnergyPart::Full, total, settings()).unwrap();
+    let remainder =
+        DiscreteGradientPoint::try_new(&law, EnergyPart::Remainder, total, settings()).unwrap();
+    assert!(full.energy_increment_to(&remainder).is_err());
+}
+
+#[test]
+fn accepted_source_changes_retain_both_endpoint_potentials() {
+    let laws = laws();
+    let g = reference();
+    let before_f = multiply(&F0E, g.deformation_gradient());
+    for part in [EnergyPart::Full, EnergyPart::Remainder] {
+        let before =
+            DiscreteGradientPoint::try_new_with_reference(&laws[0], part, &g, before_f, settings())
+                .unwrap();
+        let after = DiscreteGradientPoint::try_new(&laws[1], part, F1E, settings()).unwrap();
+        let expected = after.energy_before_pa() - before.energy_before_pa();
+        close(before.energy_increment_to(&after).unwrap(), expected, 2e-8);
+        close(after.energy_increment_to(&before).unwrap(), -expected, 2e-8);
+    }
+    let bare0 =
+        DiscreteGradientPoint::try_new(&laws[0], EnergyPart::Full, F0E, settings()).unwrap();
+    let bare1 =
+        DiscreteGradientPoint::try_new(&laws[0], EnergyPart::Full, F1E, settings()).unwrap();
+    assert_eq!(
+        bare0.energy_increment_to(&bare1).unwrap(),
+        laws[0].energy_increment(&F0E, &F1E)
+    );
+}
+
+#[test]
 fn reference_work_torque_and_nonsymmetric_endpoint_tangent_retain_native_laws() {
     let g = reference();
     let f0 = multiply(&F0E, g.deformation_gradient());

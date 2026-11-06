@@ -12,6 +12,178 @@ const G: [f64; 9] = [1.12, 0.17, -0.04, 0.0, 0.93, 0.08, 0.0, 0.0, 1.07];
 const FE: [f64; 9] = [1.06, 0.09, -0.03, 0.02, 0.97, 0.06, -0.01, 0.03, 1.04];
 
 #[test]
+fn changing_reference_retains_weak_shear_work_beneath_bulk_storage() {
+    let law = Hyperelastic::new(
+        HyperelasticModel::MooneyRivlin {
+            c10: 900.0,
+            c01: 600.0,
+            kappa: 1e24,
+        },
+        4.0,
+    )
+    .unwrap();
+    let before = ReferenceDeformation::try_new(I.map(|x| 2.0 * x)).unwrap();
+    let mut gradient = *before.deformation_gradient();
+    gradient[1] = 4e-7;
+    let after = ReferenceDeformation::try_new(gradient).unwrap();
+    let total = I.map(|x| 4.0 * x);
+    let original = ReferencedHyperelastic::new(&law, before);
+    let changed = ReferencedHyperelastic::new(&law, after);
+    assert_eq!(
+        changed.energy_density(&total) - original.energy_density(&total),
+        0.0
+    );
+    // Fe_after = 2I - 4e-7 e_x (x) e_y, Jg=8, Je=8. The
+    // original isochoric Mooney-Rivlin energy is (c10+c01)*(2e-7)^2.
+    let expected = 8.0 * 1500.0 * (2e-7_f64).powi(2);
+    near(
+        original.energy_density_increment_to_reference(&total, &total, &after),
+        expected,
+        expected,
+        3e-12,
+    );
+    near(
+        changed.energy_density_increment_to_reference(&total, &total, &before),
+        -expected,
+        expected,
+        3e-12,
+    );
+    let invalid = [0.0; 9];
+    assert!(
+        original
+            .energy_density_increment_to_reference(&total, &invalid, &after)
+            .is_nan()
+    );
+    assert_eq!(
+        original.energy_density_increment_to_reference(&total, &total, &before),
+        original.energy_density_increment(&total, &total)
+    );
+}
+
+#[test]
+fn reference_volume_change_retains_original_lengths_and_density_source() {
+    let before = ReferenceDeformation::identity();
+    let epsilon = 2.0_f64.powi(-30);
+    let after =
+        ReferenceDeformation::try_new([1.0, epsilon, 0.0, epsilon, 1.0, 0.0, 0.0, 0.0, 1.0])
+            .unwrap();
+    assert_eq!(after.volume_ratio(), before.volume_ratio());
+    assert_eq!(before.volume_ratio_increment_to(&after), -epsilon * epsilon);
+    assert_eq!(after.volume_ratio_increment_to(&before), epsilon * epsilon);
+    let lengths = [1.0 + epsilon, 1.0 - epsilon, 1.0];
+    let axes = [[0.8, -0.6, 0.0], [0.6, 0.8, 0.0], [0.0, 0.0, 1.0]];
+    let principal = ReferenceDeformation::from_principal_stretches(lengths, axes).unwrap();
+    let unrotated = ReferenceDeformation::from_principal_stretches(
+        lengths,
+        [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+    )
+    .unwrap();
+    assert_eq!(principal.volume_ratio(), 1.0);
+    assert_eq!(
+        before.volume_ratio_increment_to(&principal),
+        -epsilon * epsilon
+    );
+    assert_eq!(principal.volume_ratio_increment_to(&unrotated), 0.0);
+
+    // The additive density belongs to this material, not its bare elastic
+    // coefficients. It does work when the prescribed relaxed volume changes.
+    struct OffsetEnergy<'a>(&'a Hyperelastic);
+    impl HyperelasticMaterial for OffsetEnergy<'_> {
+        fn hyperelastic(&self) -> &Hyperelastic {
+            self.0
+        }
+        fn energy_density(&self, f: &[f64; 9]) -> f64 {
+            2.0_f64.powi(60) + self.0.energy(f)
+        }
+        fn energy_density_increment(&self, before: &[f64; 9], after: &[f64; 9]) -> f64 {
+            self.0.energy_increment(before, after)
+        }
+    }
+    let law = law();
+    let source = OffsetEnergy(&law);
+    let material = ReferencedHyperelastic::new(&source, before);
+    let changed = ReferencedHyperelastic::new(&source, after);
+    assert_eq!(material.energy_density(&I), changed.energy_density(&I));
+    let work = material.energy_density_increment_to_reference(&I, &I, &after);
+    near(work, -1.0, 1.0, 2e-12);
+    near(
+        changed.energy_density_increment_to_reference(&I, &I, &before),
+        -work,
+        1.0,
+        2e-15,
+    );
+}
+
+#[test]
+fn changed_reference_potential_matches_finite_original_volume_work() {
+    let law = law();
+    let before = ReferenceDeformation::try_new(G).unwrap();
+    let after =
+        ReferenceDeformation::try_new([0.98, -0.11, 0.03, 0.0, 1.21, 0.14, 0.02, 0.0, 1.06])
+            .unwrap();
+    let original = ReferencedHyperelastic::new(&law, before);
+    let changed = ReferencedHyperelastic::new(&law, after);
+    let f0 = multiply(&FE, &G);
+    let f1 = multiply(&FE, after.deformation_gradient());
+    for end in [&f0, &f1] {
+        let expected = changed.energy_density(end) - original.energy_density(&f0);
+        let change = original.energy_density_increment_to_reference(&f0, end, &after);
+        near(change, expected, 1e6, 3e-14);
+        near(
+            changed.energy_density_increment_to_reference(end, &f0, &before),
+            -change,
+            1e6,
+            3e-14,
+        );
+    }
+}
+
+#[test]
+fn changing_reference_avoids_overflow_between_finite_original_energies() {
+    struct Prestressed<'a>(&'a Hyperelastic);
+    impl HyperelasticMaterial for Prestressed<'_> {
+        fn hyperelastic(&self) -> &Hyperelastic {
+            self.0
+        }
+        fn energy_density(&self, f: &[f64; 9]) -> f64 {
+            self.0.energy(f) + 1e300 * f[1]
+        }
+        fn energy_density_increment(&self, before: &[f64; 9], after: &[f64; 9]) -> f64 {
+            self.0.energy_increment(before, after) + 1e300 * (after[1] - before[1])
+        }
+        fn first_piola(&self, f: &[f64; 9]) -> Result<[f64; 9], fs_material::MaterialError> {
+            let mut p = self.0.piola(f)?;
+            p[1] += 1e300;
+            Ok(p)
+        }
+    }
+    let law = law();
+    let source = Prestressed(&law);
+    let before = ReferenceDeformation::try_new(I.map(|x| 1e100 * x)).unwrap();
+    let after = ReferenceDeformation::try_new(I.map(|x| 1e-100 * x)).unwrap();
+    let material = ReferencedHyperelastic::new(&source, before);
+    let changed = ReferencedHyperelastic::new(&source, after);
+    let f0 = *before.deformation_gradient();
+    let mut f1 = *after.deformation_gradient();
+    f1[1] = 1e-100;
+    assert_eq!(material.energy_density(&f0), 0.0);
+    let expected = changed.energy_density(&f1);
+    near(expected, 1.0, 1.0, 2e-15);
+    near(
+        material.energy_density_increment_to_reference(&f0, &f1, &after),
+        expected,
+        1.0,
+        2e-15,
+    );
+    near(
+        changed.energy_density_increment_to_reference(&f1, &f0, &before),
+        -expected,
+        1.0,
+        2e-15,
+    );
+}
+
+#[test]
 fn reference_energy_changes_preserve_original_volume_and_weak_work() {
     let law = Hyperelastic::new(
         HyperelasticModel::MooneyRivlin {

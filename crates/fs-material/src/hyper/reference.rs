@@ -18,6 +18,7 @@ use super::mixed::{
     MixedFiniteStrainPotential, PressurePotential, RemainderResponse, VolumetricTreatment, cofactor,
 };
 use crate::MaterialError;
+use fs_math::dd::Dd;
 
 const IDENTITY: [f64; 9] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
 
@@ -45,6 +46,9 @@ pub struct ReferenceDeformation {
     cofactor: [f64; 9],
     volume_ratio: f64,
     isotropic_stretch: Option<f64>,
+    // Principal construction owns its volume through the supplied lengths,
+    // not the rounded entries of their rotated gradient.
+    volume_stretches: Option<[f64; 3]>,
 }
 
 impl Default for ReferenceDeformation {
@@ -63,6 +67,7 @@ impl ReferenceDeformation {
             cofactor: IDENTITY,
             volume_ratio: 1.0,
             isotropic_stretch: Some(1.0),
+            volume_stretches: None,
         }
     }
 
@@ -100,6 +105,7 @@ impl ReferenceDeformation {
             cofactor,
             volume_ratio,
             isotropic_stretch,
+            volume_stretches: None,
         })
     }
 
@@ -176,6 +182,7 @@ impl ReferenceDeformation {
             cofactor,
             volume_ratio,
             isotropic_stretch: None,
+            volume_stretches: Some(stretches),
         })
     }
 
@@ -187,6 +194,51 @@ impl ReferenceDeformation {
     /// Relaxed volume per original reference volume, `det(G)`.
     pub const fn volume_ratio(&self) -> f64 {
         self.volume_ratio
+    }
+
+    /// Original finite change of relaxed volume, `det(G_after)-det(G_before)`.
+    ///
+    /// Determinant products propagate their changes before rounding absolute
+    /// volumes. Principal references retain their supplied length products:
+    /// rotating their axes alone cannot introduce spurious volume work.
+    pub fn volume_ratio_increment_to(&self, after: &Self) -> f64 {
+        let volume_gradient = |reference: &Self| {
+            reference.volume_stretches.map_or(reference.gradient, |s| {
+                [s[0], 0.0, 0.0, 0.0, s[1], 0.0, 0.0, 0.0, s[2]]
+            })
+        };
+        super::increment::determinant_change(&volume_gradient(self), &volume_gradient(after))
+    }
+
+    pub(super) fn original_density_increment_to(
+        &self,
+        after: &Self,
+        density_before: f64,
+        density_after: f64,
+        density_increment: f64,
+    ) -> f64 {
+        if self == after {
+            return self.volume_ratio * density_increment;
+        }
+        // Δ(Jg W) = min(Jg) ΔW + W_at_larger_Jg ΔJg. Factoring
+        // with the smaller volume avoids overflowing cross-products when Jg
+        // and W change by opposite scales but both original energies fit.
+        // Equal rounded volumes use the symmetric mean density, since the
+        // original determinant increment may still be nonzero below one ULP.
+        let (volume, density) = if self.volume_ratio < after.volume_ratio {
+            (self.volume_ratio, Dd::from_f64(density_after))
+        } else if self.volume_ratio > after.volume_ratio {
+            (after.volume_ratio, Dd::from_f64(density_before))
+        } else {
+            let half = Dd::from_f64(0.5);
+            (
+                self.volume_ratio,
+                half * Dd::from_f64(density_before) + half * Dd::from_f64(density_after),
+            )
+        };
+        (Dd::from_f64(volume) * Dd::from_f64(density_increment)
+            + density * Dd::from_f64(self.volume_ratio_increment_to(after)))
+        .to_f64()
     }
 
     /// Compose two prescribed maps in their declared order: apply `self`,
@@ -358,6 +410,45 @@ impl<'a, L: HyperelasticMaterial + ?Sized> ReferencedHyperelastic<'a, L> {
     /// The held reference used by every constitutive operation.
     pub const fn reference_deformation(&self) -> &ReferenceDeformation {
         &self.reference
+    }
+
+    /// Original-volume potential change with an explicitly changed reference.
+    ///
+    /// The same material, source binding and potential remain authoritative at
+    /// both endpoints. The supplied deformation and reference maps determine
+    /// `det(G_after) W(F_after G_after^-1) - det(G_before) W(F_before G_before^-1)`.
+    /// Invalid or unrepresentable endpoint energies/change return NaN, as for
+    /// the material energy interface. At fixed total F this is signed work by
+    /// the reference-changing source; it is not mechanical work or dissipation.
+    /// This method neither advances history nor supplies that source's law.
+    pub fn energy_density_increment_to_reference(
+        &self,
+        before: &[f64; 9],
+        after: &[f64; 9],
+        after_reference: &ReferenceDeformation,
+    ) -> f64 {
+        if self.reference == *after_reference {
+            return self.energy_density_increment(before, after);
+        }
+        let elastic_before = self.reference.elastic_deformation(before);
+        let elastic_after = after_reference.elastic_deformation(after);
+        let before_density = self.material.energy_density(&elastic_before);
+        let after_density = self.material.energy_density(&elastic_after);
+        let increment = self.reference.original_density_increment_to(
+            after_reference,
+            before_density,
+            after_density,
+            self.material
+                .energy_density_increment(&elastic_before, &elastic_after),
+        );
+        if (self.reference.volume_ratio * before_density).is_finite()
+            && (after_reference.volume_ratio * after_density).is_finite()
+            && increment.is_finite()
+        {
+            increment
+        } else {
+            f64::NAN
+        }
     }
 }
 

@@ -284,6 +284,38 @@ impl DiscreteBulkPoint {
         self.energy_before_pa
     }
 
+    /// Signed original-volume storage change between two admitted snapshots.
+    ///
+    /// Each point retains its own original bulk law, natural volume and TOTAL
+    /// mixed volume. This evaluates `Jg_after U_after(J_after/Jg_after)` minus
+    /// its before counterpart without subtracting rounded absolute energies.
+    /// Within one bulk family, finite changes of volume, natural volume and
+    /// modulus share the original two-point arithmetic. Distinct families use
+    /// their respective original potentials, with a compensated difference.
+    ///
+    /// A caller changing the prescribed reference or law must account for the
+    /// signed source work separately from mechanical pressure work. This query
+    /// neither transports history nor changes either point's admitted branch.
+    pub fn energy_increment_to(&self, after: &Self) -> Result<f64, MaterialError> {
+        self.check_volume(self.accepted_volume_ratio)?;
+        after.check_volume(after.accepted_volume_ratio)?;
+        let change = super::super::increment::referenced_bulk_change(
+            self.volume,
+            self.reference_volume_ratio,
+            self.accepted_volume_ratio,
+            after.volume,
+            after.reference_volume_ratio,
+            after.accepted_volume_ratio,
+        );
+        if change.is_finite() {
+            Ok(change)
+        } else {
+            Err(state_error(
+                "original bulk storage change is unrepresentable",
+            ))
+        }
+    }
+
     /// Original endpoint U'(Je_before), useful as a physical pressure predictor.
     pub fn endpoint_pressure_pa(&self) -> f64 {
         self.endpoint_pressure(self.accepted_volume_ratio)

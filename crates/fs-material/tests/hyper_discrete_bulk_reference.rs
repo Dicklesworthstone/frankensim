@@ -69,6 +69,148 @@ fn pressure(volume: Volumetric, je: f64) -> f64 {
 }
 
 #[test]
+fn g0_reference_and_modulus_work_resolves_second_order_change_under_large_preload() {
+    // At retained J=2, U0=k/2. Prescribe g1=1+h and k1=k(1+3h).
+    // Exact rational reduction gives
+    // U1-U0 = k h^2 (-5+3h)/(2(1+h)). The O(h) source terms cancel;
+    // neither rounded absolute endpoint can retain this physical change.
+    let kappa = 2.0_f64.powi(80);
+    let original = law(Volumetric::Quadratic { kappa });
+    let before = DiscreteBulkPoint::try_new(&original, 2.0, settings(kappa)).unwrap();
+    for exponent in [35, 40, 45] {
+        let h = 2.0_f64.powi(-exponent);
+        let next_kappa = kappa * (1.0 + 3.0 * h);
+        let changed = law(Volumetric::Quadratic { kappa: next_kappa });
+        let reference =
+            ReferenceDeformation::try_new([1.0 + h, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0])
+                .unwrap();
+        let after = DiscreteBulkPoint::try_new_with_reference(
+            &changed,
+            &reference,
+            2.0,
+            settings(next_kappa),
+        )
+        .unwrap();
+        let expected = 0.5 * kappa * h * h * (-5.0 + 3.0 * h) / (1.0 + h);
+        assert_eq!(after.energy_before_pa(), before.energy_before_pa());
+        close(
+            before.energy_increment_to(&after).unwrap(),
+            expected,
+            2e-12 * expected.abs(),
+        );
+        close(
+            after.energy_increment_to(&before).unwrap(),
+            -expected,
+            2e-12 * expected.abs(),
+        );
+        assert_eq!(before.energy_increment_to(&before).unwrap(), 0.0);
+        assert_eq!(
+            before.accepted_volume_ratio(),
+            after.accepted_volume_ratio()
+        );
+    }
+}
+
+#[test]
+fn g0_all_bulk_sources_retain_small_natural_volume_work_at_fixed_elastic_strain() {
+    let h = 2.0_f64.powi(-48);
+    let reference =
+        ReferenceDeformation::try_new([1.0 + h, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]).unwrap();
+    for volume in [
+        Volumetric::Quadratic { kappa: 1e24 },
+        Volumetric::LogSquared { kappa: 1e24 },
+        Volumetric::SimoTaylor { kappa: 1e24 },
+    ] {
+        let material = law(volume);
+        let before = DiscreteBulkPoint::try_new(&material, 2.0, settings(volume.kappa())).unwrap();
+        let after = DiscreteBulkPoint::try_new_with_reference(
+            &material,
+            &reference,
+            2.0 * (1.0 + h),
+            settings(volume.kappa()),
+        )
+        .unwrap();
+        // The elastic strain is unchanged, so only the relaxed volume scales
+        // the independent original stored-energy density.
+        let expected = h * energy(volume, 2.0);
+        close(
+            before.energy_increment_to(&after).unwrap(),
+            expected,
+            2e-14 * expected.abs(),
+        );
+        close(
+            after.energy_increment_to(&before).unwrap(),
+            -expected,
+            2e-14 * expected.abs(),
+        );
+    }
+}
+
+#[test]
+fn g1_reference_bulk_snapshot_changes_keep_each_original_constitutive_family() {
+    let before_reference =
+        ReferenceDeformation::try_new([1.2, 0.1, 0.0, 0.0, 1.1, 0.0, 0.0, 0.0, 0.9]).unwrap();
+    let after_reference =
+        ReferenceDeformation::try_new([0.9, 0.0, 0.0, 0.0, 1.3, 0.2, 0.0, 0.0, 1.1]).unwrap();
+    let families = [
+        Volumetric::Quadratic { kappa: 9e5 },
+        Volumetric::LogSquared { kappa: 7e5 },
+        Volumetric::SimoTaylor { kappa: 6e5 },
+    ];
+    for before_volume in families {
+        for after_volume in families {
+            let before_law = law(before_volume);
+            let after_law = law(after_volume);
+            let a = DiscreteBulkPoint::try_new_with_reference(
+                &before_law,
+                &before_reference,
+                1.4,
+                settings(before_volume.kappa()),
+            )
+            .unwrap();
+            let b = DiscreteBulkPoint::try_new_with_reference(
+                &after_law,
+                &after_reference,
+                0.8,
+                settings(after_volume.kappa()),
+            )
+            .unwrap();
+            let expected = after_reference.volume_ratio()
+                * energy(after_volume, 0.8 / after_reference.volume_ratio())
+                - before_reference.volume_ratio()
+                    * energy(before_volume, 1.4 / before_reference.volume_ratio());
+            close(a.energy_increment_to(&b).unwrap(), expected, 5e-10);
+            close(b.energy_increment_to(&a).unwrap(), -expected, 5e-10);
+        }
+    }
+}
+
+#[test]
+fn g0_opposing_reference_and_modulus_scales_do_not_overflow_finite_storage_change() {
+    let large =
+        ReferenceDeformation::try_new([1e200, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]).unwrap();
+    let small =
+        ReferenceDeformation::try_new([1e-200, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]).unwrap();
+    for family in [0, 1, 2] {
+        let volume = |kappa| match family {
+            0 => Volumetric::Quadratic { kappa },
+            1 => Volumetric::LogSquared { kappa },
+            _ => Volumetric::SimoTaylor { kappa },
+        };
+        let soft = law(volume(1e-200));
+        let stiff = law(volume(1e200));
+        let before =
+            DiscreteBulkPoint::try_new_with_reference(&soft, &large, 2e200, settings(1e-200))
+                .unwrap();
+        let after =
+            DiscreteBulkPoint::try_new_with_reference(&stiff, &small, 2e-200, settings(1e200))
+                .unwrap();
+        close(before.energy_increment_to(&after).unwrap(), 0.0, 3e-16);
+        close(after.energy_increment_to(&before).unwrap(), 0.0, 3e-16);
+    }
+}
+
+#[test]
 fn reference_bulk_secant_stores_total_j_and_original_energy_with_physical_pressure() {
     let g = ReferenceDeformation::try_new([1.7, 0.24, -0.17, 0.08, 1.3, 0.19, 0.14, -0.11, 1.5])
         .unwrap();

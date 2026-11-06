@@ -6681,6 +6681,29 @@ the source-bound Cauchy tensile-limit wrapper retains that same elastic owner.
 A held-reference adapter transforms both endpoints with its retained `G` and
 scales the change by `det(G)`, preserving original-reference work units.
 
+`ReferencedHyperelastic::energy_density_increment_to_reference` and
+`DiscreteGradientPoint::energy_increment_to` also evaluate explicit changes of
+the natural reference. Original storage is `det(G) W(F G^-1)`, including signed
+work of a source-owned constant density when relaxed volume changes. Direct
+determinant increments retain small natural-volume changes; principal-reference
+construction retains its supplied length products, so rotating their axes alone
+does no volume work. Native points require matching full/remainder energy parts.
+Equal native laws retain their finite-pair increments; different elastic laws
+use their own admitted endpoint potentials and cannot recover parameter changes
+already lost in those scalar energies. These events supply no history transport,
+heat closure or dissipative source law.
+
+`DiscreteBulkPoint::energy_increment_to` retains both snapshots' original bulk
+family, modulus, natural volume and physical mixed volume. Quadratic,
+log-squared and Simo--Taylor laws propagate reference, modulus and retained-volume
+changes through the same original finite-pair arithmetic. Distinct families
+retain their separate original potentials. Opposing source scales fall back to
+compensated endpoint products when symmetric cross-products overflow. The
+operation neither resets retained volume nor alters either admitted convex
+branch. Focused original-owner tests retain second-order reference/modulus work
+under a `2^80 Pa` bulk preload, small work at fixed elastic strain, finite family
+changes and finite storage across opposing `1e200`/`1e-200` source scales.
+
 Native finite-pair arithmetic carries small changes separately from absolute
 storage, using symmetric product/quotient identities, log1p/expm1 identities and
 the shared double-double invariant arithmetic. It retains the original

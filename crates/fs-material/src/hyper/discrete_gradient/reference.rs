@@ -11,6 +11,7 @@ use super::{
 use crate::MaterialError;
 use crate::hyper::Hyperelastic;
 use crate::hyper::reference::ReferenceDeformation;
+use fs_math::dd::Dd;
 
 #[derive(Clone, Copy, Debug)]
 pub(super) struct ReferenceBinding<'a> {
@@ -33,6 +34,44 @@ fn elastic_allowance(original: f64, reference_volume: f64) -> Result<f64, Materi
 }
 
 impl<'a> DiscreteGradientPoint<'a> {
+    /// Original stored-energy change between two admitted material points.
+    ///
+    /// Both points must select the same energy part. A change of reference G
+    /// is explicit and includes its relaxed-volume factor. Equal native laws
+    /// retain their original finite-pair potential increment independently of
+    /// absolute storage. Different laws retain their own admitted endpoint
+    /// potentials; that fallback cannot recover a parameter change lost in
+    /// either scalar endpoint energy.
+    ///
+    /// At fixed total F, the result is signed external work from the changed
+    /// reference or material source. It is not a strain work, discrete stress,
+    /// dissipation law or authorization to change an accepted history.
+    pub fn energy_increment_to(&self, after: &Self) -> Result<f64, MaterialError> {
+        if self.part != after.part {
+            return Err(error(
+                "stored-energy increment requires the same energy part",
+            ));
+        }
+        let elastic_increment = if core::ptr::eq(self.law, after.law) || self.law == after.law {
+            Potential::Material(self.law, self.part).increment(&self.accepted_f, &after.accepted_f)
+        } else {
+            (Dd::from_f64(after.energy_before_pa) - Dd::from_f64(self.energy_before_pa)).to_f64()
+        };
+        let identity = ReferenceDeformation::identity();
+        let before_reference = self.reference.map_or(&identity, |r| r.reference);
+        let after_reference = after.reference.map_or(&identity, |r| r.reference);
+        let increment = before_reference.original_density_increment_to(
+            after_reference,
+            self.energy_before_pa,
+            after.energy_before_pa,
+            elastic_increment,
+        );
+        if !increment.is_finite() {
+            return Err(error("stored-energy increment is unrepresentable"));
+        }
+        Ok(increment)
+    }
+
     /// Bind an admitted elastic law to one held reference deformation G.
     ///
     /// Accepted/trial deformations, energies, stresses, tangents and volume

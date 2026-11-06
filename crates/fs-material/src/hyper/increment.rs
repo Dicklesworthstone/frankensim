@@ -542,3 +542,53 @@ pub(super) fn determinant_change(before: &[f64; 9], after: &[f64; 9]) -> f64 {
         core::array::from_fn(|i| Pair::endpoints(Dd::from_f64(before[i]), Dd::from_f64(after[i])));
     super::det3(&f).change.to_f64()
 }
+
+/// Original-volume bulk storage across two prescribed source snapshots.
+/// The retained total volumes and reference volumes are independent inputs:
+/// changing the natural volume must not reset the actual mixed volume.
+pub(super) fn referenced_bulk_change(
+    before: Volumetric,
+    reference_before: f64,
+    volume_before: f64,
+    after: Volumetric,
+    reference_after: f64,
+    volume_after: f64,
+) -> f64 {
+    let pair = |a, b| Pair::endpoints(Dd::from_f64(a), Dd::from_f64(b));
+    let reference = pair(reference_before, reference_after);
+    let elastic = pair(volume_before, volume_after) / reference;
+    let normalized = match (before, after) {
+        (Volumetric::Quadratic { .. }, Volumetric::Quadratic { .. }) => {
+            Some(Volumetric::Quadratic { kappa: 1.0 })
+        }
+        (Volumetric::LogSquared { .. }, Volumetric::LogSquared { .. }) => {
+            Some(Volumetric::LogSquared { kappa: 1.0 })
+        }
+        (Volumetric::SimoTaylor { .. }, Volumetric::SimoTaylor { .. }) => {
+            Some(Volumetric::SimoTaylor { kappa: 1.0 })
+        }
+        _ => None,
+    };
+    let endpoint_difference = || {
+        // Each admitted endpoint has finite relaxed and original storage.
+        // Evaluate those products separately when unlike source scales would
+        // overflow the otherwise useful symmetric cross-products.
+        (reference * bulk(after, elastic)).after - (reference * bulk(before, elastic)).before
+    };
+    let change = if let Some(normalized) = normalized {
+        // All three laws are linear in kappa. Carry its finite change alongside
+        // Delta(J/Jg), retaining cancellation between reference and modulus work.
+        let change =
+            (reference * pair(before.kappa(), after.kappa()) * bulk(normalized, elastic)).change;
+        if change.to_f64().is_finite() {
+            change
+        } else {
+            endpoint_difference()
+        }
+    } else {
+        // A prescribed change of constitutive family has two distinct original
+        // potentials. Evaluate both in DD; no interpolated surrogate is implied.
+        endpoint_difference()
+    };
+    change.to_f64()
+}
