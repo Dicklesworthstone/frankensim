@@ -4132,3 +4132,27 @@ after multiple scattering. Existing thermal LayerAbsorption and Planck means
 receive no scattering coefficient. Preparation and beam queries allocate
 nothing, and overflow of a finite positive optical-depth product has the
 opaque limit. This is not a human-visibility or full radiative-transfer solver.
+
+## Diffuse transmission through participating-enclosure boundaries
+
+`radiation::sheets::SheetPair` binds two equal-area, equal-temperature faces
+to one source-bearing `ReciprocalSheetOptics`. `evaluate_with_sheets` and
+`evaluate_room_with_sheets` reuse the original reciprocal optical chords,
+gas absorption/emission, workspace and LU solver. Gray material cards are
+supplied only for unpaired opaque faces, in increasing view-factor order;
+sheet sources exclusively own the paired optical coefficients.
+
+Each outgoing sheet face contains its own emission and reflection plus
+irradiation transmitted from the opposite face. The original exchange matrix
+retains implicit self-return. Thermal face powers are actual absorbed minus
+emitted power; transmitted energy is never deposited in the sheet. Gas and
+opaque-boundary powers retain the original reciprocal difference operator.
+The report preserves the original sheet and opaque sources, physical equation
+residual and measured whole-enclosure energy closure, without redistribution.
+
+A directed dependency check rejects closed lossless optical components before
+factorization, including cycles formed by transmitting sheets. Pair overlap,
+unequal physical areas or temperatures and unsupported optical temperatures
+refuse. The no-sheet path retains the original opaque assembly and arithmetic.
+This is an isothermal diffuse, same-exterior-index model; specular windows and
+through-thickness temperature gradients require their own transfer model.

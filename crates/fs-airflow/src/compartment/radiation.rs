@@ -26,6 +26,9 @@ use fs_gas::multicomponent::compartment::{Layer, LayerRates, TwoZone, ZoneError}
 use fs_la::prepared_lu::{LuWorkspace, LuWorkspaceError};
 use fs_qty::{Area, Length, Power, Qty, Temperature};
 
+/// Reciprocal, source-bounded transmitting sheets on the same optical paths.
+pub mod sheets;
+
 /// Source-explicit Rayleigh soot absorption and its Planck-weighted gray mean.
 pub mod soot;
 
@@ -155,8 +158,12 @@ pub struct RadiationReport {
     pub gas_heat_power: [Power; 2],
     /// Outgoing surface radiosities, including reflected irradiation [W/m²].
     pub surface_radiosity_w_m2: Vec<f64>,
-    /// Original surface source objects used in this evaluation.
+    /// Original opaque surface sources in increasing unpaired-face order.
+    /// With no sheets this is the complete original view-factor axis.
     pub surface_emissivities: Vec<SurfaceEmissivity>,
+    /// Original paired sheet sources; their face powers contain thermal heat
+    /// only, excluding power transmitted to the opposite side.
+    pub sheets: Vec<sheets::SheetPair>,
     /// Actual supplied gas optical coefficients and sources.
     pub absorption: [LayerAbsorption; 2],
     /// Largest independent surface reflection-equation defect [W/m²].
@@ -417,9 +424,27 @@ impl ParticipatingEnclosure {
         work: &mut RadiationWorkspace,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<RadiationReport, RadiationError> {
+        self.evaluate_gray(
+            surface_temperatures, emissivities, &[], gas_temperatures,
+            absorption, controls, work, &mut cancelled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn evaluate_gray(
+        &self,
+        surface_temperatures: &[Temperature],
+        emissivities: &[SurfaceEmissivity],
+        sheets: &[sheets::SheetPair],
+        gas_temperatures: [Temperature; 2],
+        absorption: &[LayerAbsorption; 2],
+        controls: RadiationSolve,
+        work: &mut RadiationWorkspace,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<RadiationReport, RadiationError> {
         self.admit_state(
             surface_temperatures,
-            Some(emissivities),
+            sheets.is_empty().then_some(emissivities),
             gas_temperatures,
             controls,
             work,
@@ -428,11 +453,19 @@ impl ParticipatingEnclosure {
         let n = self.geometry.len();
         let m = n + 2;
         let mut values = [0.0; MAX_RADIATION_SURFACES];
-        for (value, emissivity) in values.iter_mut().zip(emissivities) {
-            *value = emissivity.value();
+        if sheets.is_empty() {
+            for (value, emissivity) in values.iter_mut().zip(emissivities) {
+                *value = emissivity.value();
+            }
+        } else {
+            self.gray_sheet_emissivities(
+                surface_temperatures, emissivities, sheets,
+                &mut values[..n], &mut cancelled,
+            )?;
         }
-        self.prepare_optics(
+        self.prepare_sheet_optics(
             &values[..n],
+            sheets,
             absorption.each_ref().map(|a| a.coefficient.value()),
             work,
             &mut cancelled,
@@ -441,7 +474,9 @@ impl ParticipatingEnclosure {
         // disconnected gas layer must not obscure adjacent surface temperatures.
         let mut reference = surface_temperatures
             .iter()
-            .map(|t| t.value())
+            .enumerate()
+            .filter(|(i, _)| values[*i] > 0.0)
+            .map(|(_, t)| t.value())
             .fold(f64::INFINITY, f64::min);
         for (layer, t) in gas_temperatures.iter().enumerate() {
             if work.exchange[(n + layer) * m..(n + layer + 1) * m]
@@ -457,10 +492,14 @@ impl ParticipatingEnclosure {
             .chain(gas_temperatures.iter())
             .enumerate()
         {
-            work.emission[i] = emission_difference(t.value(), reference)?;
+            work.emission[i] = if i < n && values[i] == 0.0 {
+                0.0
+            } else {
+                emission_difference(t.value(), reference)?
+            };
         }
         let (maximum, balance) =
-            self.solve_emission(&values[..n], controls, work, &mut cancelled)?;
+            self.solve_sheet_emission(&values[..n], sheets, controls, work, &mut cancelled)?;
         let mut radiosity = Vec::with_capacity(n);
         for &delta in &work.radiosity {
             let value = finite(reference_emission + delta)?;
@@ -475,6 +514,7 @@ impl ParticipatingEnclosure {
             gas_heat_power: [Power::new(work.powers[n]), Power::new(work.powers[n + 1])],
             surface_radiosity_w_m2: radiosity,
             surface_emissivities: emissivities.to_vec(),
+            sheets: sheets.to_vec(),
             absorption: (*absorption).clone(),
             maximum_surface_residual_w_m2: maximum,
             energy_residual_w: balance,
@@ -521,11 +561,9 @@ impl ParticipatingEnclosure {
         Ok(())
     }
 
-    // Both gray and spectral radiation use this exact optical operator. The
-    // retained factor can serve many emission spectra when band optics are fixed.
-    fn prepare_optics(
+    // The reciprocal path expansion is shared by opaque and sheet boundaries.
+    fn prepare_exchange(
         &self,
-        emissivities: &[f64],
         absorption: [f64; 2],
         work: &mut RadiationWorkspace,
         cancelled: &mut impl FnMut() -> bool,
@@ -571,6 +609,21 @@ impl ParticipatingEnclosure {
                 }
             }
         }
+        Ok(())
+    }
+
+    // Both gray and spectral radiation use this exact optical operator. The
+    // retained factor can serve many emission spectra when band optics are fixed.
+    fn prepare_optics(
+        &self,
+        emissivities: &[f64],
+        absorption: [f64; 2],
+        work: &mut RadiationWorkspace,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(), RadiationError> {
+        let n = self.geometry.len();
+        let m = n + 2;
+        self.prepare_exchange(absorption, work, cancelled)?;
         // Every reflective component needs a thermal anchor. Checking graph
         // reachability before LU also rejects a lossless cycle whose singular
         // pivot would otherwise appear nonzero through floating-point roundoff.
@@ -628,6 +681,36 @@ impl ParticipatingEnclosure {
         checkpoint(cancelled)
     }
 
+    // Gas and surface transport remains one reciprocal difference operator.
+    fn exchange_powers(
+        &self,
+        work: &mut RadiationWorkspace,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(), RadiationError> {
+        let n = self.geometry.len();
+        let m = n + 2;
+        work.powers.fill(0.0);
+        for i in 0..m {
+            checkpoint(cancelled)?;
+            let a = if i < n {
+                work.radiosity[i]
+            } else {
+                work.emission[i]
+            };
+            for j in i + 1..m {
+                let b = if j < n {
+                    work.radiosity[j]
+                } else {
+                    work.emission[j]
+                };
+                let into_i = finite(work.exchange[i * m + j] * (b - a))?;
+                work.powers[i] = finite(work.powers[i] + into_i)?;
+                work.powers[j] = finite(work.powers[j] - into_i)?;
+            }
+        }
+        Ok(())
+    }
+
     // `emission` contains the blackbody input minus one common background.
     // Pair powers are independent of that background at every wavelength.
     fn solve_emission(
@@ -653,25 +736,7 @@ impl ParticipatingEnclosure {
         work.lu
             .solve_factored_into(&work.rhs, &mut work.radiosity)?;
         checkpoint(cancelled)?;
-        work.powers.fill(0.0);
-        for i in 0..m {
-            checkpoint(cancelled)?;
-            let a = if i < n {
-                work.radiosity[i]
-            } else {
-                work.emission[i]
-            };
-            for j in i + 1..m {
-                let b = if j < n {
-                    work.radiosity[j]
-                } else {
-                    work.emission[j]
-                };
-                let into_i = finite(work.exchange[i * m + j] * (b - a))?;
-                work.powers[i] = finite(work.powers[i] + into_i)?;
-                work.powers[j] = finite(work.powers[j] - into_i)?;
-            }
-        }
+        self.exchange_powers(work, cancelled)?;
         let mut maximum = 0.0_f64;
         for i in 0..n {
             let e = emissivities[i];
