@@ -5616,3 +5616,16 @@ breakdown, switching strain, measured calibration or continuum error estimate.
 `tests/hysteretic_electrostatic.rs` compares analytical linear, volume-charge,
 floating-conductor and scalar-play accounts, rotated geometry and immutable
 refusal/retry behavior through the actual native field owner.
+
+`PlanarHystereticElectrostatics::at_source_queries` refreshes one original query
+per physical triangle while retaining exact field, charge, geometry, storage
+and polarization history. `HystereticElectrostaticCandidate::with_source_queries`
+performs that refresh on an owned unpublished proposal without cloning its
+physical field arrays or repeating Gauss. Every fit must remain exactly the
+same constant fit through the original source resolver. A short query batch,
+source-domain failure or cancellation cannot partly publish changed sources.
+The coupled thermal consumer still owns caloric identity, temperature intervals,
+receiving volumes and parameter-work admission; these methods do not infer a
+temperature-dependent switching law. Two additional spatial regressions retain
+poled memory through source refresh and reversal, and exercise refused partial
+batches with deterministic retry.

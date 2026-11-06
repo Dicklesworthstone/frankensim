@@ -27,6 +27,7 @@ use fs_material::{
     },
     state_point::MaterialPropertySelection,
 };
+use fs_qty::{QuantitySpec, Temperature};
 use fs_rep_mesh::{Metric2, TriComplex2};
 use fs_solver::CheckedCgConfig;
 use std::sync::Arc;
@@ -48,6 +49,33 @@ fn near(actual: f64, expected: f64, scale: f64) {
     );
 }
 fn source(epsilon: f64, switching: bool) -> ResolvedVectorDielectricHysteresis {
+    source_at_temperature(epsilon, switching, None)
+}
+fn temperature_query(temperature_k: f64) -> QueryPoint {
+    QueryPoint::new()
+        .with_quantity(
+            "T",
+            QuantitySpec::dimensional(Temperature::DIMS),
+            temperature_k,
+        )
+        .unwrap()
+}
+fn source_at_temperature(
+    epsilon: f64,
+    switching: bool,
+    temperature_k: Option<f64>,
+) -> ResolvedVectorDielectricHysteresis {
+    let query = temperature_k.map(temperature_query).unwrap_or_default();
+    let validity = if temperature_k.is_some() {
+        ValidityDomain::unconstrained().with_quantity(
+            "T",
+            QuantitySpec::dimensional(Temperature::DIMS),
+            280.0,
+            360.0,
+        )
+    } else {
+        ValidityDomain::unconstrained()
+    };
     let branch = DielectricHysteresisBranchSources {
         susceptibility: PropertyKey::new("switching_slope", ELECTRIC_PERMITTIVITY_DIMS),
         pinning_field: PropertyKey::new("pinning", ELECTRIC_FIELD_DIMS),
@@ -80,7 +108,7 @@ fn source(epsilon: f64, switching: bool) -> ResolvedVectorDielectricHysteresis {
             .insert_claim(PropertyClaim {
                 key,
                 value: PropertyValue::Scalar { value, dims },
-                validity: ValidityDomain::unconstrained(),
+                validity: validity.clone(),
                 interpolation: InterpolationPolicy::ConstantWithinValidity,
                 uncertainty: UncertaintyModel::Unstated,
                 observations: vec![],
@@ -106,7 +134,7 @@ fn source(epsilon: f64, switching: bool) -> ResolvedVectorDielectricHysteresis {
     ResolvedVectorDielectricHysteresis::from_isotropic_source(
         ResolvedDielectricHysteresis::resolve(
             Arc::new(card),
-            &QueryPoint::new(),
+            &query,
             roles,
             MaterialPropertySelection::SingleClaimOnly,
         )
@@ -486,4 +514,123 @@ fn cancellation_budgets_and_field_domain_leave_the_original_history_replayable()
         b.field().relative_voltage_v()
     );
     assert_eq!(a.step().cells, b.step().cells);
+}
+
+fn thermal_slab() -> PlanarHystereticElectrostatics {
+    PlanarHystereticElectrostatics::new(
+        mesh([1.0, 0.0]),
+        vec![source_at_temperature(EPS, true, Some(300.0)); 4],
+        &[&[0, 3], &[2, 5]],
+        local(),
+        limits(),
+        &mut || false,
+    )
+    .unwrap()
+}
+
+#[test]
+fn source_temperature_refresh_preserves_poled_field_and_pending_increment() {
+    let field = thermal_slab()
+        .solve_candidate(&[0.0; 4], &voltage(500.0), controls(), &mut || false)
+        .unwrap()
+        .into_parts()
+        .0;
+    let queries = [310.0, 315.0, 320.0, 325.0].map(temperature_query);
+    let refreshed = field.at_source_queries(&queries, &mut || false).unwrap();
+    assert!(std::ptr::eq(
+        field.problem().mesh(),
+        refreshed.problem().mesh()
+    ));
+    assert_eq!(field.relative_voltage_v(), refreshed.relative_voltage_v());
+    assert_eq!(field.terminal_charge_c(), refreshed.terminal_charge_c());
+    assert_eq!(
+        field.stored_energy_j().to_bits(),
+        refreshed.stored_energy_j().to_bits()
+    );
+    for (i, query) in queries.iter().enumerate() {
+        assert_eq!(field.cell_history(i), refreshed.cell_history(i));
+        assert_eq!(
+            refreshed.problem().materials()[i].material().query(),
+            *query
+        );
+        assert_eq!(
+            field.problem().materials()[i].material().query(),
+            temperature_query(300.0)
+        );
+    }
+    // The same constant fit must yield the same continued reversal trajectory.
+    let a = field
+        .solve_candidate(&[0.0; 4], &voltage(-300.0), controls(), &mut || false)
+        .unwrap();
+    let b = refreshed
+        .solve_candidate(&[0.0; 4], &voltage(-300.0), controls(), &mut || false)
+        .unwrap();
+    assert_eq!(a.step().cells, b.step().cells);
+    assert_eq!(a.field().terminal_charge_c(), b.field().terminal_charge_c());
+    let expected_memory: Vec<_> = (0..4)
+        .map(|i| a.field().cell_history(i).unwrap().clone())
+        .collect();
+    let expected_work = a.step().endpoint_source_work_j.to_bits();
+    let rebound = a.with_source_queries(&queries, &mut || false).unwrap();
+    assert_eq!(
+        rebound.step().endpoint_source_work_j.to_bits(),
+        expected_work
+    );
+    for (i, memory) in expected_memory.iter().enumerate() {
+        assert_eq!(rebound.field().cell_history(i).unwrap(), memory);
+        assert_eq!(
+            rebound.field().problem().materials()[i].material().query(),
+            queries[i]
+        );
+    }
+}
+
+#[test]
+fn incomplete_cancelled_and_out_of_domain_source_refreshes_are_atomic() {
+    let field = thermal_slab()
+        .solve_candidate(&[0.0; 4], &voltage(500.0), controls(), &mut || false)
+        .unwrap()
+        .into_parts()
+        .0;
+    let before: Vec<_> = (0..4)
+        .map(|i| field.cell_history(i).unwrap().clone())
+        .collect();
+    let queries = [310.0, 315.0, 320.0, 325.0].map(temperature_query);
+    assert!(
+        field
+            .at_source_queries(&queries[..3], &mut || false)
+            .is_err()
+    );
+    let mut invalid = queries.clone();
+    invalid[3] = temperature_query(361.0);
+    assert!(field.at_source_queries(&invalid, &mut || false).is_err());
+    let mut polls = 0;
+    assert!(
+        field
+            .at_source_queries(&queries, &mut || {
+                polls += 1;
+                polls > 3
+            })
+            .is_err()
+    );
+    assert!(
+        field
+            .solve_candidate(&[0.0; 4], &voltage(-300.0), controls(), &mut || false)
+            .unwrap()
+            .with_source_queries(&invalid, &mut || false)
+            .is_err()
+    );
+    for (i, memory) in before.iter().enumerate() {
+        assert_eq!(field.cell_history(i).unwrap(), memory);
+        assert_eq!(
+            field.problem().materials()[i].material().query(),
+            temperature_query(300.0)
+        );
+    }
+    let a = field.at_source_queries(&queries, &mut || false).unwrap();
+    let b = field.at_source_queries(&queries, &mut || false).unwrap();
+    assert_eq!(a.terminal_charge_c(), b.terminal_charge_c());
+    for i in 0..4 {
+        assert_eq!(a.cell_history(i), b.cell_history(i));
+    }
 }

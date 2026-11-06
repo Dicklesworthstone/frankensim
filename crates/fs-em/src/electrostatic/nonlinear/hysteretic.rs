@@ -13,6 +13,7 @@
 //! breakdown, continuum error bound or measured ferroelectric accuracy is implied.
 
 use super::*;
+use fs_matdb::QueryPoint;
 use fs_material::field_storage::dielectric::hysteresis::vector::{
     ResolvedVectorDielectricHysteresis, VectorDielectricHysteresisControls,
     VectorDielectricHysteresisError, VectorDielectricHysteresisState,
@@ -157,6 +158,7 @@ pub struct DielectricSwitchingCell {
 }
 
 /// Independent field and electrode/volume-charge work accounts of one increment.
+#[derive(Clone)]
 pub struct HystereticElectrostaticStep {
     pub cells: Vec<DielectricSwitchingCell>,
     pub stored_before_j: f64,
@@ -200,6 +202,18 @@ impl HystereticElectrostaticCandidate {
     }
     pub fn step(&self) -> &HystereticElectrostaticStep {
         &self.step
+    }
+    /// Recheck original sources at an accepted coupled endpoint without cloning
+    /// physical field arrays, repeating Gauss, or advancing polarization again.
+    /// The selected fit must remain exactly constant. Refusal consumes only
+    /// this private proposal; its original accepted input remains unchanged.
+    pub fn with_source_queries(
+        mut self,
+        queries: &[QueryPoint],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self, Error> {
+        self.field.refresh_source_queries(queries, cancelled)?;
+        Ok(self)
     }
     pub fn into_parts(self) -> (PlanarHystereticElectrostatics, HystereticElectrostaticStep) {
         (self.field, self.step)
@@ -276,6 +290,55 @@ impl PlanarHystereticElectrostatics {
             Some(DielectricMaterial::Hysteretic(law)) => Some(law.history()),
             _ => None,
         }
+    }
+
+    /// Recheck each cell's original constant fit at a new owned material query.
+    /// Geometry, electrode state, free charge, stored energy and all branch
+    /// memories are retained exactly. This adds no temperature-dependent law
+    /// or parameter work: the source adapter refuses any coefficient change.
+    /// Thermal consumers additionally own interval, caloric and physical-volume
+    /// admission. A refused refresh leaves this accepted field untouched.
+    pub fn at_source_queries(
+        &self,
+        queries: &[QueryPoint],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self, Error> {
+        poll(cancelled)?;
+        if queries.len() != self.problem.materials.len() {
+            return Err(invalid(
+                "one original source query per dielectric cell is required",
+            ));
+        }
+        let mut candidate = self.clone();
+        candidate.refresh_source_queries(queries, cancelled)?;
+        Ok(candidate)
+    }
+
+    // Only called on an owned unpublished candidate. Failure may discard that
+    // candidate, never partially update a caller's accepted physical history.
+    fn refresh_source_queries(
+        &mut self,
+        queries: &[QueryPoint],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(), Error> {
+        poll(cancelled)?;
+        if queries.len() != self.problem.materials.len() {
+            return Err(invalid(
+                "one original source query per dielectric cell is required",
+            ));
+        }
+        for (cell, (law, query)) in self.problem.materials.iter_mut().zip(queries).enumerate() {
+            poll(cancelled)?;
+            let DielectricMaterial::Hysteretic(law) = law else {
+                return Err(invalid("retained dielectric source correspondence changed"));
+            };
+            law.source = law
+                .source
+                .at_query_point(query)
+                .map_err(|error| history_error(cell, error))?;
+        }
+        poll(cancelled)?;
+        Ok(())
     }
 
     /// Solve mixed voltage/total-charge electrodes with the original matrix-free

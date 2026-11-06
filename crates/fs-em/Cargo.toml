@@ -14,7 +14,7 @@ layer = "L3"
 # Estimated fixed-condition vector play history on the original planar solver.
 magnetic-hysteresis = []
 # Estimated retained dielectric switching on the native nonlinear Gauss solver.
-dielectric-hysteresis = ["fs-material/experimental-dielectric-hysteresis"]
+dielectric-hysteresis = ["fs-material/experimental-dielectric-hysteresis", "dep:fs-matdb"]
 # Fixed-geometry total-current continuity with source-backed Ohmic leakage.
 resolved-leaky-dielectric = []
 plane-wave = ["dep:fs-fft", "dep:fs-matdb"]
