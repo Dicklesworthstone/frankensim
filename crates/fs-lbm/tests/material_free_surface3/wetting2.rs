@@ -7,6 +7,9 @@ use fs_lbm::material::free_surface::{MaterialFreeSurfaceDomain2, MaterialFreeSur
 #[path = "wetting2/pressure_momentum.rs"]
 mod pressure_momentum;
 
+#[path = "wetting2/molecular_kinetic.rs"]
+mod molecular_kinetic;
+
 fn domain2() -> MaterialFreeSurfaceDomain2 {
     MaterialFreeSurfaceDomain2 {
         cells: [20; 2],

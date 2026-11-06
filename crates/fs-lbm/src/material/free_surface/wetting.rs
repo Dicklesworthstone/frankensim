@@ -29,6 +29,12 @@ use fs_qty::{Dims, QuantitySpec};
 
 mod cox_voinov;
 pub use cox_voinov::{CoxVoinovControls, CoxVoinovLaw, CoxVoinovSample};
+mod molecular_kinetic;
+pub use molecular_kinetic::{
+    MolecularKineticControls, MolecularKineticError, MolecularKineticLaw, MolecularKineticSample,
+};
+mod molecular_binding;
+use molecular_binding::MolecularKineticWetting;
 mod equilibrium;
 use equilibrium::EquilibriumWetting;
 pub use fs_material::liquid::surface::adhesion::EquilibriumAngleOrigin;
@@ -76,6 +82,10 @@ pub struct FreeSurfaceWettingSample {
     pub equilibrium: Option<EquilibriumAngleOrigin>,
     /// Optional explicit hydrodynamic prediction, separate from static source claims.
     pub hydrodynamic: Option<CoxVoinovSample>,
+    /// Optional molecular-kinetic prediction using actual liquid temperature.
+    /// The pinned branch consumes model speed zero; signed_speed_m_s above
+    /// retains the measured geometric speed. Its loss is diagnostic, not heat.
+    pub molecular_kinetic: Option<MolecularKineticSample>,
     /// Explicit outer-phase transport source, including its own temperature,
     /// pressure and composition. Shared by this wall field, never substituted
     /// for the liquid/interface temperature. None for a declared fixed ratio.
@@ -94,6 +104,8 @@ pub enum FreeSurfaceWettingError {
     Flow(MaterialLbmError),
     /// Dense planar geometry, complete-field admission or cancellation.
     Planar2(crate::freesurface::ContactAngleError2),
+    /// Explicit molecular calibration, speed, temperature or angular-domain refusal.
+    MolecularKinetic(MolecularKineticError),
     Invalid(&'static str),
 }
 
@@ -104,6 +116,7 @@ impl core::fmt::Display for FreeSurfaceWettingError {
             Self::Query(e) => write!(f, "free-surface wetting query: {e}"),
             Self::Flow(e) => write!(f, "free-surface wetting: {e}"),
             Self::Planar2(e) => write!(f, "free-surface wetting: {e}"),
+            Self::MolecularKinetic(e) => write!(f, "free-surface wetting: {e}"),
             Self::Invalid(message) => write!(f, "free-surface wetting: {message}"),
         }
     }
@@ -127,6 +140,12 @@ impl From<crate::d3q19::freesurface3::FreeSurfaceError3> for FreeSurfaceWettingE
 impl From<crate::freesurface::ContactAngleError2> for FreeSurfaceWettingError {
     fn from(e: crate::freesurface::ContactAngleError2) -> Self {
         Self::Planar2(e)
+    }
+}
+
+impl From<MolecularKineticError> for FreeSurfaceWettingError {
+    fn from(error: MolecularKineticError) -> Self {
+        Self::MolecularKinetic(error)
     }
 }
 
@@ -163,6 +182,7 @@ pub(super) struct WettingPhysics<'m> {
     pub(super) source: ResolvedInterfaceStatePoint,
     pub(super) controls: FreeSurfaceWettingControls,
     hydrodynamic: Option<HydrodynamicWetting>,
+    molecular_kinetic: Option<MolecularKineticWetting>,
     equilibrium: Option<EquilibriumWetting>,
 }
 
@@ -292,6 +312,7 @@ impl<'m> WettingPhysics<'m> {
             source,
             controls,
             hydrodynamic: None,
+            molecular_kinetic: None,
             equilibrium: None,
         })
     }
@@ -389,8 +410,10 @@ impl WettingPhysics<'_> {
         gate: &CancelGate,
     ) -> Result<Self, Error> {
         checkpoint(gate)?;
-        if self.hydrodynamic.is_some() {
-            return Err(Error::Invalid("contact line already owns a Cox model"));
+        if self.hydrodynamic.is_some() || self.molecular_kinetic.is_some() {
+            return Err(Error::Invalid(
+                "contact line already owns a dynamic model; Cox and molecular kinetics cannot be stacked",
+            ));
         }
         if self.equilibrium.is_some() {
             return Err(Error::Invalid(
@@ -594,9 +617,9 @@ impl WettingPhysics<'_> {
         if let Some(equilibrium) = &self.equilibrium {
             return self.equilibrium_sample(equilibrium, geometric_angle_radians, temperature, gate);
         }
-        // A hydrodynamic prediction uses zero-speed endpoint measurements.
-        // Its rate dependence must never be laundered into a material receipt.
-        let query_speed = if self.hydrodynamic.is_some() {
+        // Both explicit rate laws use zero-speed endpoint measurements.
+        // Their rate dependence must never be laundered into a material receipt.
+        let query_speed = if self.hydrodynamic.is_some() || self.molecular_kinetic.is_some() {
             0.0
         } else {
             speed.abs()
@@ -659,6 +682,15 @@ impl WettingPhysics<'_> {
         } else {
             None
         };
+        let molecular_kinetic = if let Some(binding) = &self.molecular_kinetic {
+            binding.law.admit_angle(receding)?;
+            binding.law.admit_angle(advancing)?;
+            let prediction = binding.sample(applied_angle_radians, speed, regime, temperature)?;
+            applied_angle_radians = prediction.applied_angle_radians;
+            Some(prediction)
+        } else {
+            None
+        };
         Ok(FreeSurfaceWettingSample {
             signed_speed_m_s: speed,
             regime,
@@ -666,6 +698,7 @@ impl WettingPhysics<'_> {
             applied_angle_radians,
             equilibrium: None,
             hydrodynamic,
+            molecular_kinetic,
             outer_gas: self.hydrodynamic.as_ref().and_then(|binding| binding.outer_gas.clone()),
             material,
         })

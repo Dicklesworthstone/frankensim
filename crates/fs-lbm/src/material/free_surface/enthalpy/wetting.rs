@@ -19,7 +19,7 @@ use super::*;
 use crate::d3q19::freesurface3::PlanarWall3;
 use crate::material::free_surface::wetting::{
     CoxVoinovControls, CoxVoinovLaw, EquilibriumAngleOrigin, FreeSurfaceWettingControls,
-    FreeSurfaceWettingSample, WettingThermalPoint,
+    FreeSurfaceWettingSample, MolecularKineticLaw, WettingThermalPoint,
 };
 use fs_matdb::InterfaceSystemCard;
 use fs_material::state_point::{MaterialPropertySelection, ResolvedInterfaceStatePoint};
@@ -222,6 +222,50 @@ impl<'s, 'm> MaterialFreeSurfaceEnthalpy3<'s, 'm> {
         poll(gate)?;
         self.wetting = Some(binding);
         Ok(self)
+    }
+
+    /// Add molecular jump kinetics to an existing STATIC hysteresis binding.
+    ///
+    /// Every thermal preparation and endpoint uses its actual local liquid
+    /// temperature and the same tension as native pressure. The caller's jump
+    /// frequency and length stay constant only inside their declared calibration
+    /// interval. Dry numerical ghosts retain the original reference context.
+    /// Cox, another molecular model and measured rate curves cannot be combined
+    /// with this alternative closure. Model dissipation is reported per contact-
+    /// line length; this entry does not create a new heat source.
+    pub fn with_molecular_kinetic_wetting(
+        mut self,
+        law: MolecularKineticLaw,
+        gate: &CancelGate,
+    ) -> Result<Self, Error> {
+        poll(gate)?;
+        let binding = self
+            .wetting
+            .take()
+            .ok_or(Error::Invalid(
+                "molecular wetting requires a sourced static hysteresis binding",
+            ))?
+            .with_molecular_kinetic(
+                law,
+                self.law.temperature_axis(),
+                &self.flow.scaling,
+                gate,
+            )?;
+        let temperatures = temperatures(&self.states, self.law.temperature_axis(), gate)?;
+        let binding =
+            binding.at_temperatures(self.law.temperature_axis(), &temperatures, gate)?;
+        binding.install(&mut self.flow.lattice, gate)?;
+        poll(gate)?;
+        self.wetting = Some(binding);
+        Ok(self)
+    }
+
+    /// Calibration and admitted domain of the optional molecular rate law.
+    #[must_use]
+    pub fn molecular_kinetic_wetting_law(&self) -> Option<&MolecularKineticLaw> {
+        self.wetting
+            .as_ref()
+            .and_then(WettingBinding::molecular_kinetic_law)
     }
 
     /// Explicit physical matching scales and limits of the active Cox model.

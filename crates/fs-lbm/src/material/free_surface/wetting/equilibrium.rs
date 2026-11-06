@@ -85,6 +85,7 @@ impl<'m> WettingBinding<'m> {
                 maximum_wall_cells,
             },
             hydrodynamic: None,
+            molecular_kinetic: None,
             equilibrium: Some(EquilibriumWetting {
                 origin,
                 surface_tension_n_m: liquid.surface_tension_n_m(),
@@ -156,6 +157,7 @@ impl WettingPhysics<'_> {
             applied_angle_radians,
             equilibrium: Some(equilibrium.origin),
             hydrodynamic: None,
+            molecular_kinetic: None,
             outer_gas: None,
             material,
         })

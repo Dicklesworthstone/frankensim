@@ -14178,3 +14178,39 @@ enable/disable, unchanged held bits, quadratic-time second-order refinement,
 actual spatial vortical onset and retained vorticity after disabling,
 evolving density and source sampling, enthalpy/SGS closure and worker parity,
 and endpoint refusal/cancellation followed by deterministic retry.
+
+
+## Molecular-kinetic planar contact-line response
+
+The existing source-bound 2-D, sparse 3-D and thermal planar wetting owners
+can select `MolecularKineticLaw` as an alternative to the Cox closure.
+It inverts the full Blake-Haynes relation, with explicit calibrated jump
+length/frequency and explicit speed, temperature and angular domains.
+The selected static advancing/receding endpoint remains a zero-speed source
+query. The computed dynamic angle is a model prediction, not a new measurement.
+
+The named absolute-temperature coordinate and sourced surface tension belong
+to the original liquid. Thermal preparation and endpoint sampling use the
+actual local liquid temperature and the same sigma as native capillary
+pressure; genuinely dry numerical ghosts retain the reference context.
+Jump kinetics stay constant only over their declared temperature interval.
+No Arrhenius response, viscosity-based calibration or gas-wedge matching is
+inferred. Measured rate curves, an existing Cox law and duplicate molecular
+laws refuse composition. The observed speed must remain in the admitted
+domain even inside the numerical pinning deadband.
+
+The shared history owner supplies the signed geometric contact speed and
+installs the predicted angle in the original wall ghosts, curvature and
+pressure reconstruction. Static-source and native-step rollback remain
+unchanged. Local rate-dependent excess force relative to the chosen endpoint
+and its nonnegative force-times-speed loss are reported per contact-line
+length; neither is an evolved heat source, a total pinning-loss account, or
+a closed surface/flow energy balance. A pinned branch consumes model speed
+zero while retaining the measured geometric speed separately.
+
+The allocation-free scalar tests check the independent forward sinh law,
+linear-friction limit, advancing/receding reflection, exact stationary
+endpoints, temperature/tension/calibration changes and domain refusal.
+Integration regressions exercise actual original-source native wetting and
+thermal context. These are model/numerical checks, not experimental calibration
+or a resolved microscopic contact-line claim.

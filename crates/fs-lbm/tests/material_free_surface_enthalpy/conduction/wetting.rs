@@ -21,6 +21,9 @@ mod gas;
 #[path = "wetting/equilibrium.rs"]
 mod equilibrium;
 
+#[path = "wetting/molecular_kinetic.rs"]
+mod molecular_kinetic;
+
 const WALL_CELL: [usize; 3] = [0, 1, 3];
 
 fn wetting_controls() -> FreeSurfaceWettingControls {

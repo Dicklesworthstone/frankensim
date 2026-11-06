@@ -2,7 +2,7 @@
 
 use super::super::wetting::{
     CoxVoinovLaw, FreeSurfaceWettingControls, FreeSurfaceWettingError as Error,
-    FreeSurfaceWettingSample, WettingPhysics, checkpoint, contact_speed,
+    FreeSurfaceWettingSample, MolecularKineticLaw, WettingPhysics, checkpoint, contact_speed,
 };
 use super::{
     FreeSurface, MaterialFreeSurface2, MaterialFreeSurfaceMomentumError2,
@@ -97,6 +97,49 @@ impl MaterialFreeSurfaceWetting2<'_, '_> {
         self.physics = physics;
         self.samples = samples;
         Ok(self)
+    }
+
+    /// Apply molecular jump kinetics using this liquid's named temperature.
+    ///
+    /// Static endpoint receipts stay at zero speed. The molecular prediction
+    /// drives the original capillary ghosts; its per-length dissipation remains
+    /// a diagnostic. Existing Cox, molecular or measured rate laws refuse.
+    pub fn with_molecular_kinetic(
+        mut self,
+        law: MolecularKineticLaw,
+        temperature_axis: &str,
+        gate: &CancelGate,
+    ) -> Result<Self, Error> {
+        let physics = self.physics.clone().with_molecular_kinetic(
+            law,
+            temperature_axis,
+            &self.flow.scaling,
+            gate,
+        )?;
+        let mut samples = BTreeMap::new();
+        for (&position, current) in &self.geometry {
+            checkpoint(gate)?;
+            samples.insert(
+                position,
+                physics.sample(
+                    current.angle_radians,
+                    self.samples[&position].signed_speed_m_s,
+                    None,
+                    gate,
+                )?,
+            );
+        }
+        install(&mut self.flow.lattice, self.wall, &samples, gate)?;
+        checkpoint(gate)?;
+        self.physics = physics;
+        self.samples = samples;
+        Ok(self)
+    }
+
+    /// Calibration and admitted domain of the optional molecular rate law.
+    #[must_use]
+    pub fn molecular_kinetic_law(&self) -> Option<&MolecularKineticLaw> {
+        self.physics.molecular_kinetic_law()
     }
 
     /// Actual physical-unit flow and immutable native state.
