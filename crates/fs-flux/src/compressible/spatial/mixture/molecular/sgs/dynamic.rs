@@ -116,6 +116,7 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
         match &self.sgs.as_ref()?.closure {
             ViscosityClosure::Dynamic(dynamic) => Some(dynamic.config),
             ViscosityClosure::Local { .. }
+            | ViscosityClosure::Lagrangian(_)
             | ViscosityClosure::DynamicThermal(_)
             | ViscosityClosure::DynamicChannelThermal(_)
             | ViscosityClosure::DynamicSpecies(_)
@@ -124,7 +125,7 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
     }
 }
 
-fn admit_domain(flow: &MixtureEuler3d) -> Result<(), DissipationError> {
+pub(super) fn admit_domain(flow: &MixtureEuler3d) -> Result<(), DissipationError> {
     if (0..3).any(|axis| flow.boundaries.axis(axis) != AxisBoundaries::Periodic)
         || flow.grid.shape.into_iter().any(|n| n < 3)
     {

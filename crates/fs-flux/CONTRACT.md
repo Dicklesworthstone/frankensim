@@ -7267,3 +7267,29 @@ source/anchor/nonlinear refusals. Rustfmt parsing/formatting and bounded source
 review completed; these Rust tests were not compiled or executed here. This
 remains an exploratory frozen-material planar algebraic screen, without a
 three-dimensional turbulent cascade or Reynolds-averaged calibration.
+
+### Physical-time Lagrangian SGS in evolving mixtures
+
+The experimental spatial mixture MolecularEuler3d now attaches an explicit
+MixtureLagrangianSubgridConfig to a prepared molecular operator without an
+existing SGS closure. The shared Favre--Germano history samples the accepted
+physical start state once, holds its coefficient through both molecular halves,
+SSP/RKL stages and complete retries, and commits only with complete acceptance.
+Current face density, strain, composition, Cp/Cv, Maxwell--Stefan/Soret/Dufour
+transport, zero-net-mass common-Schmidt species flux and referenced partial
+enthalpy transport remain with the original conservative owners. No extra
+viscous or chemical heat source is added. The next history fit uses actual
+elapsed physical sample time after shortened intervals.
+
+Additional SGS numerical payload is 216 bytes/cell, and detached history
+capacity remains counted against the complete coupled budget during stepping.
+Prepared storage is reused. This is first-order pathline/coefficient integration
+on fully periodic Cartesian grids with at least three cells per axis. It binds
+the nonreacting physical owner; raw molecular advancement outside that prepared
+transaction refuses. Fixed authored Prandtl/Schmidt numbers provide no independent
+scalar-memory, reacting-history, wall/inflow, SGS-energy or shock qualification.
+
+Five focused regression groups cover conservative stress/species/heat/enthalpy,
+physical histories and formation-energy gauge, forced retries and cancellation,
+multistage RKL replay, and budget/admission/molecular-limit behavior. Rustfmt and
+bounded source review completed; Rust tests were not compiled or executed here.

@@ -2,6 +2,7 @@ use super::*;
 use fs_lbm::sgs3::dynamic::PeriodicDynamicSgs;
 
 mod channel;
+mod lagrangian;
 mod species;
 mod thermal;
 

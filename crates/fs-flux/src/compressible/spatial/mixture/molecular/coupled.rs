@@ -109,6 +109,95 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
             ))
     }
 
+    /// Additional numerical payload for Lagrangian SGS: 216 bytes per cell.
+    /// Add this to `required_workspace_bytes` or
+    /// `required_stabilized_workspace_bytes` for the molecular pair, plus any
+    /// supplied forcing workspace. Actual capacities are admitted after allocation.
+    #[cfg(feature = "experimental-sgs")]
+    pub fn required_lagrangian_dynamic_sgs_workspace_bytes(
+        flow: &MixtureEuler3d,
+    ) -> Result<usize, DissipationError> {
+        sgs::SubgridTransport::required_lagrangian_bytes(flow)
+    }
+
+    /// Bind periodic Lagrangian stress to the original complete nonreacting split.
+    ///
+    /// The supplied molecular operator must not already select an SGS closure.
+    /// Its Maxwell--Stefan/Soret/Dufour, original heat capacities and referenced
+    /// partial enthalpies remain the source of molecular and modeled transport.
+    /// Fixed turbulent Prandtl/Schmidt numbers do not imply scalar-memory fits.
+    ///
+    /// One fit samples the accepted physical START state. Both molecular halves,
+    /// every SSP/RKL stage and all whole-split retries use its held coefficient;
+    /// face density, strain and composition still follow each actual stage.
+    /// History/report publication occurs only with complete flow acceptance.
+    /// The pathline/coefficient update is first order in time. This constructor
+    /// starts a fresh history; no chemistry or reacting-history coupling is added.
+    ///
+    /// The byte cap covers the complete original pair and all additional SGS
+    /// capacities. Detaching the history during a step does not remove its
+    /// storage from that cap. No history/filter allocation occurs during stepping.
+    #[cfg(feature = "experimental-sgs")]
+    pub fn with_lagrangian_dynamic_sgs(
+        flow: MixtureEuler3d,
+        molecular: MolecularTransport3d<L>,
+        config: sgs::MixtureLagrangianSubgridConfig,
+        maximum_workspace_bytes: usize,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, DissipationError> {
+        poll(&mut cancelled)?;
+        config.validate()?;
+        if molecular.sgs.is_some() {
+            return Err(DissipationError::Invalid(
+                "Lagrangian mixture attachment requires a molecular operator without SGS",
+            ));
+        }
+        let required = Self::required_workspace_bytes(&flow, &molecular)?
+            .checked_add(Self::required_lagrangian_dynamic_sgs_workspace_bytes(
+                &flow,
+            )?)
+            .ok_or(DissipationError::Invalid(
+                "coupled Lagrangian mixture workspace size overflow",
+            ))?;
+        admit_workspace(required, maximum_workspace_bytes)?;
+        let sgs = sgs::SubgridTransport::new_lagrangian(&flow, config)?;
+        poll(&mut cancelled)?;
+        let mut result = Self::new(flow, molecular, maximum_workspace_bytes, &mut cancelled)?;
+        result.molecular.sgs = Some(sgs);
+        admit_workspace(result.workspace_bytes(), maximum_workspace_bytes)?;
+        poll(&mut cancelled)?;
+        Ok(result)
+    }
+
+    /// Explicit controls for the attached pathline closure; None for other models.
+    #[cfg(feature = "experimental-sgs")]
+    pub fn lagrangian_dynamic_subgrid_config(&self) -> Option<sgs::MixtureLagrangianSubgridConfig> {
+        self.molecular
+            .sgs
+            .as_ref()
+            .and_then(sgs::SubgridTransport::lagrangian_config)
+    }
+
+    /// Last committed START-state sample time, distinct from the flow endpoint.
+    /// None until a complete interval accepts or when no history model is selected.
+    #[cfg(feature = "experimental-sgs")]
+    pub fn lagrangian_subgrid_sample_time(&self) -> Option<Time> {
+        self.molecular
+            .sgs
+            .as_ref()
+            .and_then(sgs::SubgridTransport::lagrangian_sample_time)
+    }
+
+    /// Last committed start-state fit. Its cell diagnostics do not replace
+    /// the conservative face's stage-local strain and material admission.
+    #[cfg(feature = "experimental-sgs")]
+    pub fn lagrangian_subgrid_report(&self) -> Option<sgs::DynamicSgsReport> {
+        self.molecular
+            .sgs
+            .as_ref()
+            .and_then(sgs::SubgridTransport::lagrangian_report)
+    }
+
     /// Bind the original field and its already-prepared molecular operator.
     /// The stored complete budget also admits externally supplied forcing scratch,
     /// even for an exactly zero source. Both owners remain immutable to callers.
@@ -587,6 +676,67 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
 
     #[allow(clippy::too_many_arguments)]
     fn step_impl(
+        &mut self,
+        maximum_duration: Time,
+        controls: MolecularStepControl,
+        forcing: Option<forcing::Context<'_, '_>>,
+        stabilization: Option<&mut StepWork>,
+        accelerations: &[WallAcceleration3d],
+        profiles: Option<&mut Context<'_>>,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<MolecularStepReport3d, DissipationError> {
+        poll(&mut cancelled)?;
+        #[cfg(feature = "experimental-sgs")]
+        if let Some(mut filter) = self
+            .molecular
+            .sgs
+            .as_mut()
+            .and_then(sgs::SubgridTransport::take_lagrangian_filter)
+        {
+            // The trial borrows only this detached filter, leaving the complete
+            // conservative owner available. Its capacity is still budgeted.
+            // No fallible action follows complete flow/history acceptance.
+            let result = (|| {
+                let trial = self
+                    .molecular
+                    .sgs
+                    .as_mut()
+                    .expect("the Lagrangian mixture owner was just selected")
+                    .prepare_lagrangian(&mut filter, &self.accepted, &mut cancelled)?;
+                let fit = trial.report();
+                let report = self.step_prepared(
+                    maximum_duration,
+                    controls,
+                    forcing,
+                    stabilization,
+                    accelerations,
+                    profiles,
+                    &mut cancelled,
+                )?;
+                trial.commit();
+                Ok((report, fit))
+            })();
+            let committed_fit = result.as_ref().ok().map(|(_, fit)| *fit);
+            self.molecular
+                .sgs
+                .as_mut()
+                .expect("a coupled step retains its original mixture SGS owner")
+                .restore_lagrangian_filter(filter, committed_fit);
+            return result.map(|(report, _)| report);
+        }
+        self.step_prepared(
+            maximum_duration,
+            controls,
+            forcing,
+            stabilization,
+            accelerations,
+            profiles,
+            cancelled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn step_prepared(
         &mut self,
         maximum_duration: Time,
         controls: MolecularStepControl,

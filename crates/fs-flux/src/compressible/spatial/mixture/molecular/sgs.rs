@@ -9,6 +9,9 @@
 //! Dynamic stress applies the fitted C_s squared to the conservative face
 //! strain, with separately averaged density and coefficient. It never selects
 //! a face viscosity by interpolating cell-centered strain magnitudes.
+//! Lagrangian stress optionally holds that coefficient over one complete physical
+//! coupled step, committing its signed pathline history only with accepted flow.
+//! The existing stage-local composition, calorics and face strain remain active.
 //! An optional joint Germano fit supplies a common species diffusivity directly,
 //! independently of stress and heat; it retains this same mass-frame and
 //! referenced-enthalpy flux rather than prescribing a turbulent Schmidt number.
@@ -32,8 +35,8 @@ use super::*;
 use crate::compressible::spatial::molecular::sgs::face_gradient;
 pub use crate::compressible::spatial::molecular::sgs::{
     ChannelDynamicThermalSubgridConfig, DynamicAveraging, DynamicScalarConfig, DynamicSgsConfig,
-    DynamicSubgridConfig, DynamicThermalSubgridConfig, EquilibriumWallConfig, SgsModel, SgsUse,
-    SubgridConfig,
+    DynamicSgsReport, DynamicSubgridConfig, DynamicThermalSubgridConfig, EquilibriumWallConfig,
+    LagrangianSgsConfig, LagrangianSubgridConfig, SgsModel, SgsUse, SubgridConfig,
 };
 use fs_gas::multicomponent::dissipation::{MaxwellStefanSolveV1, TransportFaceReport};
 use fs_gas::multicomponent::{Error as FlowError, MAX_SPECIES};
@@ -42,6 +45,8 @@ use fs_qty::Temperature;
 use fs_thermochem::UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K as R;
 
 mod dynamic;
+mod lagrangian;
+pub use lagrangian::MixtureLagrangianSubgridConfig;
 mod wall;
 pub use dynamic::{
     ChannelDynamicComponentsConfig, DynamicComponentsConfig,
@@ -120,6 +125,7 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
         match &self.sgs.as_ref()?.closure {
             ViscosityClosure::Local { config, .. } => Some(*config),
             ViscosityClosure::Dynamic(_)
+            | ViscosityClosure::Lagrangian(_)
             | ViscosityClosure::DynamicThermal(_)
             | ViscosityClosure::DynamicChannelThermal(_)
             | ViscosityClosure::DynamicSpecies(_)
@@ -135,6 +141,7 @@ enum ViscosityClosure {
         filter_width: f64,
     },
     Dynamic(dynamic::DynamicTransport),
+    Lagrangian(lagrangian::LagrangianTransport),
     DynamicThermal(dynamic::DynamicThermalTransport),
     DynamicChannelThermal(channel::DynamicChannelThermalTransport),
     DynamicSpecies(dynamic::DynamicSpeciesTransport),
@@ -177,6 +184,7 @@ impl SubgridTransport {
             + match &self.closure {
                 ViscosityClosure::Local { .. } => 0,
                 ViscosityClosure::Dynamic(dynamic) => dynamic.workspace_bytes(),
+                ViscosityClosure::Lagrangian(dynamic) => dynamic.workspace_bytes(),
                 ViscosityClosure::DynamicThermal(dynamic) => dynamic.workspace_bytes(),
                 ViscosityClosure::DynamicChannelThermal(dynamic) => dynamic.workspace_bytes(),
                 ViscosityClosure::DynamicSpecies(dynamic) => dynamic.workspace_bytes(),
@@ -232,6 +240,11 @@ impl SubgridTransport {
                     return Ok(());
                 }
             }
+            ViscosityClosure::Lagrangian(dynamic) => {
+                if !dynamic.admit_prepared_step()? {
+                    return Ok(());
+                }
+            }
             ViscosityClosure::DynamicThermal(dynamic) => {
                 if !dynamic.prepare(primitive, cancelled)? {
                     for values in self.dynamic_coefficient_squared.chunks_mut(64) {
@@ -276,6 +289,7 @@ impl SubgridTransport {
                 // Local closures supply their authored coefficient at the face.
                 ViscosityClosure::Local { .. } => Some(0.0),
                 ViscosityClosure::Dynamic(dynamic) => dynamic.coefficient_squared(i),
+                ViscosityClosure::Lagrangian(_) => Some(self.dynamic_coefficient_squared[i]),
                 ViscosityClosure::DynamicThermal(dynamic) => dynamic.coefficient_squared(i),
                 ViscosityClosure::DynamicChannelThermal(dynamic) => dynamic.coefficient_squared(i),
                 ViscosityClosure::DynamicSpecies(dynamic) => dynamic.coefficient_squared(i),
@@ -364,6 +378,7 @@ impl SubgridTransport {
                 let width = match &self.closure {
                     ViscosityClosure::Local { filter_width, .. } => *filter_width,
                     ViscosityClosure::Dynamic(dynamic) => dynamic.filter_width(),
+                    ViscosityClosure::Lagrangian(dynamic) => dynamic.filter_width(),
                     ViscosityClosure::DynamicThermal(dynamic) => dynamic.filter_width(),
                     ViscosityClosure::DynamicChannelThermal(dynamic) => dynamic.filter_width(),
                     ViscosityClosure::DynamicSpecies(dynamic) => dynamic.filter_width(),
@@ -386,7 +401,9 @@ impl SubgridTransport {
                     width,
                     g,
                 )
-                .map_err(|_| DissipationError::Invalid("dynamic mixture face strain or viscosity"))?;
+                .map_err(|_| {
+                    DissipationError::Invalid("dynamic mixture face strain or viscosity")
+                })?;
                 (0.5 * primitive[left].density + 0.5 * primitive[right].density) * nu
             }
         };
@@ -423,6 +440,11 @@ impl SubgridTransport {
                 config.transport.maximum_eddy_to_molecular,
             ),
             ViscosityClosure::Dynamic(dynamic) => (
+                Some(dynamic.config.transport.turbulent_prandtl),
+                Some(dynamic.config.turbulent_schmidt),
+                dynamic.config.transport.model.maximum_eddy_to_molecular,
+            ),
+            ViscosityClosure::Lagrangian(dynamic) => (
                 Some(dynamic.config.transport.turbulent_prandtl),
                 Some(dynamic.config.turbulent_schmidt),
                 dynamic.config.transport.model.maximum_eddy_to_molecular,
