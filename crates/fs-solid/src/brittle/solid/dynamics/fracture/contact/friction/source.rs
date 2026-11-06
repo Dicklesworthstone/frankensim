@@ -4,6 +4,9 @@
 //! slip in the declared face frame. Source candidates and the mechanical
 //! successor are returned together only after the complete event is accepted.
 
+/// Original source histories through complete impact, sticking and release durations.
+pub mod time;
+
 use super::*;
 use fs_contact::interface_binding::thermal_friction::elliptic::impulse::{
     SourceFrictionConditions, SourceImpulseCoefficientRole, SourceImpulseError, SourceImpulseSample,

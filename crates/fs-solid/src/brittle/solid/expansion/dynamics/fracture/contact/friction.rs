@@ -8,6 +8,9 @@
 /// Native thermal midpoint motion with sustained static friction forces.
 pub mod sustained;
 
+/// Complete physical durations with directional impacts, static contact and release.
+pub mod time;
+
 use std::sync::Arc;
 
 use fs_contact::frictional_multicontact::elliptic::{

@@ -1,5 +1,39 @@
 # fs-solid CONTRACT
 
+## Source-held and thermal frictional trajectories
+
+The same complete-duration friction driver now accepts the original material
+interface sources and the native thermal brittle body. Impacts query the
+caller's explicitly selected static or kinetic role at each active row's actual
+incoming slip speed. Sustained sticking queries the same original source's
+Static role at the actual resting speed. The last accepted source candidate is
+retained by complete paired-row identity; numerical localization probes never
+publish their source samples.
+
+Returned source records identify the accepted physical event or interval and
+carry the original selected claims, coefficients and source state. Fixed external
+conditions and texture frames stay explicit. Physical travel, slip and the last
+finite-step contact temperature remain unchanged for these admitted modes.
+Neither force-derived pressure nor contact heat is inferred. A refusal after an
+accepted internal prefix discards the entire body/source transaction and leaves
+the caller's original histories available for retry.
+
+Thermal trajectories hold the current admitted bulk source snapshots over each
+call and use the original thermal midpoint for every candidate. Reference matter,
+total/mechanical strains, expansion reference and complete thermal work receipts
+remain with the actual body. Explicit thermal source transitions belong between
+calls; no intermediate material data is interpolated for localization. Both
+fixed-coefficient and sourced thermal entries reuse the same friction policy,
+constrained locator and complete physical work admission as the mechanical body.
+
+The source regression uses an inelastic oblique capture under the explicit
+kinetic role followed by static shear exceeding kinetic capacity, with exact
+native mass/energy expectations and late whole-duration rollback. The thermal
+regression continues a genuinely warmed fractured body under static shear,
+retaining its original reference density and signed moving-support work across
+multiple accepted intervals. These are manufactured implementation checks,
+not experimental material validation or a general finite-sliding claim.
+
 ## Frictional time evolution after brittle fracture
 
 The native mechanical released-face trajectory can now advance a complete

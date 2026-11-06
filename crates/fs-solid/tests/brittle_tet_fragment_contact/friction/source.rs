@@ -2,6 +2,8 @@
 
 #[path = "source/sustained.rs"]
 mod sustained;
+#[path = "source/time.rs"]
+mod time;
 
 use super::*;
 use fs_contact::interface_binding::bind_dry_interface_system_card;

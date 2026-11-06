@@ -5,6 +5,7 @@ use super::super::sustained::{sustained_controls as normal_controls, with_closed
 use super::*;
 use fs_contact::sustained::solve::SolveError;
 use fs_solid::brittle::solid::dynamics::fracture::contact::sustained::BrittleFaceSustainedError;
+use fs_solid::brittle::solid::dynamics::fracture::contact::time::BrittleFaceTimeControls;
 use fs_solid::brittle::solid::expansion::dynamics::fracture::contact::friction::sustained::{
     BrittleFaceSustainedFrictionControls, BrittleFaceSustainedFrictionError,
 };
@@ -272,5 +273,172 @@ fn warming_under_static_shear_keeps_original_matter_and_signed_thermal_support_w
             heated.motion.solid().solution().element_states
         );
         assert_eq!(retry.energy, heated.energy);
+
+        // Continue the warmed, moving specimen through two complete native
+        // intervals. At fixed350 K the mean bulk stress is now [6,6,-6], so
+        // the origin pressure is1 N, not the preceding thermal ramp's0.5 N.
+        let duration = 2.0 * INTERVAL;
+        let held_end: Vec<_> = supports
+            .iter()
+            .map(|&(dof, _)| {
+                (
+                    dof,
+                    heated
+                        .motion
+                        .solid()
+                        .solution()
+                        .displacement_m
+                        .as_flattened()[dof]
+                        + velocity[dof % 3] * duration,
+                )
+            })
+            .collect();
+        let mut held_forces = Vec::new();
+        for &node in &heated.motion.solid().released_faces()[0].paired_nodes[1] {
+            let x = geometry.nodes_m()[node];
+            let force = if x == [0.0; 3] {
+                [-1.0 - shear[0], -1.0 - shear[1]]
+            } else if x[0] == 1.0 {
+                [1.0, 0.0]
+            } else {
+                [0.0, 1.0]
+            };
+            for axis in 0..2 {
+                held_forces.push((3 * node + axis, [force[axis]; 2]));
+            }
+        }
+        let sustained = sustained_controls();
+        let mut approach = super::super::approach::approach_controls();
+        approach.activation_tolerance_m = sustained.contact.activation_tolerance_m;
+        approach.velocity_tolerance_mps = sustained.contact.velocity_tolerance_mps;
+        let mut impact = super::controls();
+        impact.activation_tolerance_m = approach.activation_tolerance_m;
+        impact.tangential_tolerance_m = sustained.contact.tangential_tolerance_m;
+        impact.velocity_tolerance_mps = approach.velocity_tolerance_mps;
+        let time = BrittleFaceTimeControls {
+            maximum_interval_s: INTERVAL,
+            maximum_intervals: 4,
+            maximum_impacts: 2,
+            maximum_trials: 2048,
+            approach,
+            impact,
+            total_energy_tolerance_j: 1e-10,
+        };
+        let continued = heated
+            .motion
+            .advance_released_face_time_frictional(
+                duration,
+                &held_end,
+                &held_forces,
+                &[0.0],
+                &friction,
+                ORIGIN,
+                settings(),
+                time,
+                sustained,
+                cx,
+            )
+            .unwrap();
+        assert_eq!(continued.intervals.len(), 2);
+        assert_eq!(continued.sustained.len(), 2);
+        assert!(continued.impacts.is_empty());
+        for (index, (interval, contact)) in continued
+            .intervals
+            .iter()
+            .zip(&continued.sustained)
+            .enumerate()
+        {
+            assert_eq!(
+                interval.start_time_s,
+                heated.motion.time_s() + index as f64 * INTERVAL
+            );
+            assert_eq!(interval.end_time_s, interval.start_time_s + INTERVAL);
+            assert_eq!(contact.start_time_s, interval.start_time_s);
+            assert_eq!(contact.end_time_s, interval.end_time_s);
+            for (row, force) in contact.rows.iter().zip(&contact.forces_n) {
+                let expected = if geometry.nodes_m()[row.nodes[0]] == [0.0; 3] {
+                    [1.0, shear[0], shear[1]]
+                } else {
+                    [0.0; 3]
+                };
+                for axis in 0..3 {
+                    close(force[axis], expected[axis], 2e-8);
+                }
+            }
+            close(interval.energy.dead_load_mean_work_j, -work, 2e-10);
+            close(interval.energy.support_mean_work_j, work, 2e-10);
+            close(interval.energy.parameter_work_j, 0.0, 1e-12);
+            close(interval.energy.eigenstrain_work_j, 0.0, 1e-12);
+            close(interval.energy.total_balance_error_j, 0.0, 1e-10);
+            close(contact.normal_contact_work_j, 0.0, 1e-10);
+            close(contact.tangential_contact_work_j, 0.0, 1e-10);
+        }
+        for (node, u) in continued
+            .motion
+            .solid()
+            .solution()
+            .displacement_m
+            .iter()
+            .enumerate()
+        {
+            for axis in 0..3 {
+                close(
+                    continued.motion.velocity_mps()[node][axis],
+                    velocity[axis],
+                    2e-8,
+                );
+                close(
+                    u[axis] - heated.motion.solid().solution().displacement_m[node][axis],
+                    velocity[axis] * duration,
+                    2e-10,
+                );
+            }
+        }
+        close(continued.energy.stored_before_j, 0.015, 2e-10);
+        close(continued.energy.stored_after_j, 0.015, 2e-10);
+        close(continued.energy.kinetic_change_j, 0.0, 2e-10);
+        close(continued.energy.dead_load_mean_work_j, -2.0 * work, 2e-10);
+        close(continued.energy.support_mean_work_j, 2.0 * work, 2e-10);
+        close(continued.energy.external_work_j(), 0.0, 2e-10);
+        close(continued.energy.parameter_work_j, 0.0, 1e-12);
+        close(continued.energy.eigenstrain_work_j, 0.0, 1e-12);
+        assert_eq!(continued.energy.contact_dissipation_j, 0.0);
+        assert_eq!(continued.energy.fracture_dissipation_j, 0.0);
+        close(continued.energy.normal_contact_work_j, 0.0, 1e-10);
+        close(continued.energy.tangential_contact_work_j, 0.0, 1e-10);
+        assert!(continued.energy.absolute_normal_contact_work_j <= 1e-10);
+        assert!(continued.energy.absolute_tangential_contact_work_j <= 1e-10);
+        close(continued.energy.total_balance_error_j, 0.0, 1e-10);
+        assert!(continued.energy.absolute_local_balance_error_j <= 1e-10);
+        let final_inventory = inventory(&continued.motion);
+        for axis in 0..3 {
+            close(final_inventory.0[axis], after.0[axis], 2e-9);
+            close(final_inventory.1[axis], after.1[axis], 2e-9);
+        }
+        close(final_inventory.2, after.2, 2e-10);
+        close(
+            continued.motion.kinetic_energy_j(),
+            final_inventory.2,
+            2e-12,
+        );
+        assert!(core::ptr::eq(
+            continued.motion.solid().materials().as_ptr(),
+            warm.as_ptr()
+        ));
+        assert!(core::ptr::eq(
+            continued.motion.reference_density_kg_m3().as_ptr(),
+            stopped.reference_density_kg_m3().as_ptr()
+        ));
+        assert_eq!(continued.motion.reference_density_kg_m3(), &[DENSITY; 2]);
+        close(continued.motion.reference_mass_kg(), 2.0, 1e-15);
+        close(continued.motion.solid().fracture_dissipation_j(), GC, 1e-13);
+        assert_eq!(
+            continued.motion.solid().released_faces(),
+            heated.motion.solid().released_faces()
+        );
+        assert_eq!(continued.motion.time_s(), heated.motion.time_s() + duration);
+        assert_eq!(continued.motion.accepted_steps(), 7);
+        assert_eq!(continued.motion.remaining_steps(), 1);
+        assert_eq!(heated.motion.accepted_steps(), 5);
     });
 }
