@@ -3,6 +3,8 @@
 mod common;
 #[path = "nonlinear_winding_circuit/current.rs"]
 mod current;
+#[path = "nonlinear_winding_circuit/end.rs"]
+mod end;
 #[path = "nonlinear_winding_circuit/thermal.rs"]
 mod thermal;
 

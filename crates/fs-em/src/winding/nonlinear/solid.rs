@@ -149,6 +149,7 @@ impl<'m> NonlinearWindingCircuit<'m> {
             graph,
             windings,
             vec![NonlinearWindingPort::CurrentInput; count],
+            Vec::new(),
             sources,
             solid_regions,
             initial,
@@ -172,11 +173,43 @@ impl<'m> NonlinearWindingCircuit<'m> {
         config: NonlinearWindingConfig,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Self> {
+        Self::new_with_solid_regions_and_end_modes(
+            field,
+            graph,
+            windings,
+            terminal_ports,
+            Vec::new(),
+            sources,
+            solid_regions,
+            initial,
+            config,
+            cancelled,
+        )
+    }
+
+    /// Retain source-normalized solid diffusion while adding explicit shared
+    /// end-flux storage outside the resolved conductor/field domain.
+    /// The same end model also survives conductivity reweighting and prescribed
+    /// conductor motion; its numerical loss is never part of physical Joule heat.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_solid_regions_and_end_modes(
+        field: PlanarNonlinearEddy<'m>,
+        graph: CircuitGraph,
+        windings: NonlinearWindings,
+        terminal_ports: Vec<NonlinearWindingPort>,
+        end_modes: Vec<EndWindingMode>,
+        sources: Vec<WindingConductor>,
+        solid_regions: Vec<SolidWindingRegion>,
+        initial: NonlinearWindingInitial,
+        config: NonlinearWindingConfig,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self> {
         Self::new_complete(
             field,
             graph,
             windings,
             terminal_ports,
+            end_modes,
             sources,
             solid_regions,
             initial,

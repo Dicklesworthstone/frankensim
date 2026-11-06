@@ -1,5 +1,7 @@
 //! Causal solid currents, native terminals and exact manufactured energy laws.
 //! These numeric materials are analytical fixtures, not measured material data.
+#[path = "nonlinear_winding_solid/end.rs"]
+mod end;
 
 #[path = "nonlinear_winding_circuit/common.rs"]
 mod common;

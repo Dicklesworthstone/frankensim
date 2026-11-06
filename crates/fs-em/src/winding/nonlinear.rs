@@ -27,6 +27,8 @@
 //! fitted inductance is used. The moving-conductor step keeps the stranded
 //! winding geometry fixed and resolves its motional feedback through this same
 //! terminal Newton solve, with signed Lorentz work in the combined account.
+//! Caller-declared shared end-flux modes add passive self/mutual storage outside
+//! the resolved field, including the solid and moving-conductor histories.
 //! The allocating native DAE must admit the declared terminal causality and
 //! initial current/voltage receipt; singular ideal-source topologies can refuse.
 
@@ -39,6 +41,7 @@ pub mod solid;
 use resistors::GraphResistorMaterial;
 use solid::SolidWindingRegion;
 
+use super::end::{EndWindingError, EndWindingInductance, EndWindingMode, EndWindingStep};
 use super::ohmic::{
     OhmicWindingError, WindingCellHeat, WindingConductor, WindingGraphResistorHeat,
 };
@@ -77,7 +80,8 @@ pub struct NonlinearWindings {
     pub branch_indices: Vec<usize>,
     /// Signed J_z / terminal current [1/m2], including turns and return paths.
     pub profiles_per_m2: Vec<Vec<f64>>,
-    /// Explicit unrepresented end/leakage self-inductance [H], including zero.
+    /// Independent unrepresented end/leakage self-inductance [H], including zero.
+    /// Shared end-flux modes are supplied separately to new_with_end_modes.
     pub end_inductance_h: Vec<f64>,
 }
 
@@ -154,6 +158,7 @@ pub enum NonlinearWindingError {
     Invalid(&'static str),
     Winding(WindingError),
     Conductor(OhmicWindingError),
+    End(EndWindingError),
     Field(NonlinearEddyError),
     Circuit(CircuitError),
     Newton(NewtonError),
@@ -203,6 +208,11 @@ impl From<NewtonError> for NonlinearWindingError {
         Self::Newton(e)
     }
 }
+impl From<EndWindingError> for NonlinearWindingError {
+    fn from(error: EndWindingError) -> Self {
+        Self::End(error)
+    }
+}
 type Result<T> = core::result::Result<T, NonlinearWindingError>;
 
 struct Layout {
@@ -218,6 +228,7 @@ struct Layout {
 #[derive(Clone)]
 pub struct NonlinearWindingCircuit<'m> {
     layout: Rc<Layout>,
+    end: Rc<EndWindingInductance>,
     graph_materials: Vec<GraphResistorMaterial>,
     field: PlanarNonlinearEddy<'m>,
     conductors: Vec<WindingConductor>,
@@ -262,6 +273,9 @@ pub struct NonlinearWindingStep<F = NonlinearEddyStep> {
     pub terminal_current_residual_a: Vec<f64>,
     pub stored_before_j: f64,
     pub stored_after_j: f64,
+    /// Native graph/field change plus the directly evaluated end-mode change.
+    /// End energy is never differenced across a large magnetic bias.
+    pub stored_change_j: f64,
     /// Actual solid/floating field + stranded + native graph heat, once each.
     pub heat_j: f64,
     /// Original external source work ONLY; private port work cancels internally.
@@ -343,10 +357,11 @@ fn impressed(
 fn linkages(
     field: &PlanarNonlinearEddy<'_>,
     profiles: &[Vec<f64>],
-    end_inductance_h: &[f64],
+    end: &EndWindingInductance,
     currents: &[f64],
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<Vec<f64>> {
+    let end_linkage = end.flux_linkages_wb(currents)?;
     profiles
         .iter()
         .enumerate()
@@ -357,7 +372,7 @@ fn linkages(
                 profile,
                 cancelled,
             )?;
-            finite(end_inductance_h[i].mul_add(currents[i], active))
+            finite(end_linkage[i] + active)
         })
         .collect()
 }
@@ -502,12 +517,6 @@ pub(crate) fn native_seed(dae: &CircuitDae, accepted: &[f64], input: &[f64]) -> 
     Ok(initialized)
 }
 
-fn end_energy(ends: &[f64], currents: &[f64]) -> Result<f64> {
-    ends.iter().zip(currents).try_fold(0.0, |total, (&l, &i)| {
-        finite((0.5 * l * i).mul_add(i, total))
-    })
-}
-
 impl<'m> NonlinearWindingCircuit<'m> {
     /// Bind actual accepted field history to original graph terminals. Bound
     /// inductor values are placeholders replaced by the field; unbound L and C
@@ -562,11 +571,40 @@ impl<'m> NonlinearWindingCircuit<'m> {
         config: NonlinearWindingConfig,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Self> {
+        Self::new_with_end_modes(
+            field,
+            graph,
+            windings,
+            terminal_ports,
+            Vec::new(),
+            sources,
+            initial,
+            config,
+            cancelled,
+        )
+    }
+
+    /// Add explicit shared end-flux modes to the original stranded history.
+    /// Each mode adds ell*n*n^T outside the resolved field, with signed winding
+    /// participation. Dependent modes require no invented leakage or inverse.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_end_modes(
+        field: PlanarNonlinearEddy<'m>,
+        graph: CircuitGraph,
+        windings: NonlinearWindings,
+        terminal_ports: Vec<NonlinearWindingPort>,
+        end_modes: Vec<EndWindingMode>,
+        sources: Vec<WindingConductor>,
+        initial: NonlinearWindingInitial,
+        config: NonlinearWindingConfig,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self> {
         Self::new_complete(
             field,
             graph,
             windings,
             terminal_ports,
+            end_modes,
             sources,
             vec![],
             initial,
@@ -581,6 +619,7 @@ impl<'m> NonlinearWindingCircuit<'m> {
         graph: CircuitGraph,
         windings: NonlinearWindings,
         terminal_ports: Vec<NonlinearWindingPort>,
+        end_modes: Vec<EndWindingMode>,
         sources: Vec<WindingConductor>,
         solid_regions: Vec<SolidWindingRegion>,
         initial: NonlinearWindingInitial,
@@ -620,6 +659,10 @@ impl<'m> NonlinearWindingCircuit<'m> {
                 "invalid winding geometry, end model, graph capacity or limits",
             ));
         }
+        let end = Rc::new(EndWindingInductance::new(
+            windings.end_inductance_h.clone(),
+            end_modes,
+        )?);
         let mesh = field.problem().mesh();
         let thickness = match mesh.metric() {
             fs_rep_mesh::Metric2::Planar { thickness } => thickness,
@@ -726,13 +769,7 @@ impl<'m> NonlinearWindingCircuit<'m> {
                 "every winding requires represented positive DC resistance",
             ));
         }
-        let flux_linkages_wb = linkages(
-            &field,
-            profiles,
-            &windings.end_inductance_h,
-            &initial.currents_a,
-            cancelled,
-        )?;
+        let flux_linkages_wb = linkages(&field, profiles, &end, &initial.currents_a, cancelled)?;
         let layout = Rc::new(Layout {
             graph,
             dae,
@@ -797,7 +834,7 @@ impl<'m> NonlinearWindingCircuit<'m> {
         let total = finite(
             field.energy_j()
                 + layout.dae.system.hamiltonian(&state)
-                + end_energy(&layout.windings.end_inductance_h, &initial.currents_a)?,
+                + end.stored_energy_j(&initial.currents_a)?,
         )?;
         if total < 0.0 {
             return Err(Invalid("negative initial field/circuit storage"));
@@ -805,6 +842,7 @@ impl<'m> NonlinearWindingCircuit<'m> {
         poll(cancelled)?;
         Ok(Self {
             layout,
+            end,
             graph_materials: Vec::new(),
             field,
             conductors,
@@ -837,8 +875,17 @@ impl<'m> NonlinearWindingCircuit<'m> {
             .map(Vec::as_slice)
             .unwrap_or(&self.layout.windings.profiles_per_m2)
     }
+    /// Independent diagonal contribution, before shared-mode self/mutual terms.
     pub fn end_inductance_h(&self) -> &[f64] {
         &self.layout.windings.end_inductance_h
+    }
+    /// Original end-flux model, retained through source and material refresh.
+    pub fn end_inductance(&self) -> &EndWindingInductance {
+        &self.end
+    }
+    /// Full row-major end self/mutual matrix in original winding order [H].
+    pub fn end_inductance_matrix_h(&self) -> &[f64] {
+        self.end.matrix_h()
     }
     pub fn terminal_ports(&self) -> &[NonlinearWindingPort] {
         &self.layout.terminal_ports
@@ -1082,7 +1129,7 @@ impl<'m> NonlinearWindingCircuit<'m> {
         let reference_linkages = linkages(
             &self.field,
             profiles,
-            self.end_inductance_h(),
+            &self.end,
             &self.currents_a,
             cancelled,
         )?;
@@ -1131,30 +1178,21 @@ impl<'m> NonlinearWindingCircuit<'m> {
                     .map_err(NonlinearWindingError::from)
                 })
                 .collect::<Result<Vec<_>>>()?;
+            let end = self.end.step(&self.currents_a, currents)?;
             let linkage = field_linkage_increments_wb
                 .iter()
                 .enumerate()
                 .map(|(i, &increment)| {
-                    finite(
-                        reference_linkages[i]
-                            + increment
-                            + self.end_inductance_h()[i] * (currents[i] - self.currents_a[i]),
-                    )
+                    finite(reference_linkages[i] + increment + end.flux_increment_wb[i])
                 })
                 .collect::<Result<Vec<_>>>()?;
             // A conductivity refresh changes the source functional itself.
             // Pair the new functional with delta(A); delta(F^T A) would create
             // voltage in a stationary biased field merely by changing sigma.
-            let inductive_voltage_v = currents
+            let inductive_voltage_v = field_linkage_increments_wb
                 .iter()
                 .enumerate()
-                .map(|(i, &current)| {
-                    finite(
-                        (field_linkage_increments_wb[i]
-                            + self.end_inductance_h()[i] * (current - self.currents_a[i]))
-                            / dt,
-                    )
-                })
+                .map(|(i, &increment)| finite((increment + end.flux_increment_wb[i]) / dt))
                 .collect::<Result<Vec<_>>>()?;
             let required_voltage = inductive_voltage_v
                 .iter()
@@ -1220,6 +1258,7 @@ impl<'m> NonlinearWindingCircuit<'m> {
             Ok(Trial {
                 native,
                 field,
+                end,
                 x0,
                 linkage,
                 field_linkage_increments_wb,
@@ -1325,23 +1364,11 @@ impl<'m> NonlinearWindingCircuit<'m> {
                 .map(|(i, v)| i * v)
                 .sum::<f64>(),
         )?;
-        let end_before = end_energy(self.end_inductance_h(), &self.currents_a)?;
-        let end_after = end_energy(self.end_inductance_h(), &solver.x)?;
-        let increments: Vec<_> = solver
-            .x
-            .iter()
-            .zip(&self.currents_a)
-            .map(|(a, b)| a - b)
-            .collect();
-        let end_numerical = end_energy(self.end_inductance_h(), &increments)?;
-        let end_work = finite(
-            self.end_inductance_h()
-                .iter()
-                .zip(&increments)
-                .zip(&solver.x)
-                .map(|((&l, &di), &i)| l * di * i)
-                .sum(),
-        )?;
+        let end_before = trial.end.stored_before_j;
+        let end_after = trial.end.stored_after_j;
+        let end_numerical = trial.end.numerical_dissipation_j;
+        let end_work = trial.end.endpoint_work_j;
+        let end_change = trial.end.stored_change_j;
         let field_work = finite(
             solver
                 .x
@@ -1363,12 +1390,14 @@ impl<'m> NonlinearWindingCircuit<'m> {
         let circuit_after = finite(dae.system.hamiltonian(&trial.native.x))?;
         let stored_before_j = finite(circuit_before + field_step.stored_before_j + end_before)?;
         let stored_after_j = finite(circuit_after + field_step.stored_after_j + end_after)?;
+        let field_change = finite(field_step.stored_after_j - field_step.stored_before_j)?;
+        let stored_change_j = finite(trial.native.delta_h + field_change + end_change)?;
         let heat_j = finite(winding_heat + graph_heat + field_step.heat_j)?;
         let numerical_dissipation_j = finite(field_step.numerical_dissipation_j + end_numerical)?;
         let parameter_work_j = field_step.parameter_work_j;
         let mechanical_work_j = field_step.mechanical_work_j;
         let energy_residual_j = finite(
-            stored_after_j - stored_before_j + heat_j + numerical_dissipation_j + mechanical_work_j
+            stored_change_j + heat_j + numerical_dissipation_j + mechanical_work_j
                 - external_work
                 - parameter_work_j,
         )?;
@@ -1380,7 +1409,7 @@ impl<'m> NonlinearWindingCircuit<'m> {
             field_work + field_step.uniform_drive_work_j + field_step.motional_drive_work_j
                 - field_step.supplied_work_j,
             motional_work - field_step.motional_drive_work_j,
-            end_after - end_before + end_numerical - end_work,
+            end_change + end_numerical - end_work,
             terminal_work
                 - field_work
                 - end_work
@@ -1427,6 +1456,7 @@ impl<'m> NonlinearWindingCircuit<'m> {
             terminal_current_residual_a: trial.current_residual,
             stored_before_j,
             stored_after_j,
+            stored_change_j,
             heat_j,
             supplied_work_j: external_work,
             numerical_dissipation_j,
@@ -1438,6 +1468,7 @@ impl<'m> NonlinearWindingCircuit<'m> {
         };
         let circuit = Self {
             layout: self.layout.clone(),
+            end: Rc::clone(&self.end),
             graph_materials: self.graph_materials.clone(),
             field,
             conductors,
@@ -1460,6 +1491,7 @@ impl<'m> NonlinearWindingCircuit<'m> {
 struct Trial<'m, F> {
     native: StepRecord,
     field: FieldTrial<'m, F>,
+    end: EndWindingStep,
     x0: Vec<f64>,
     linkage: Vec<f64>,
     field_linkage_increments_wb: Vec<f64>,

@@ -4926,3 +4926,32 @@ resistor reassembly and late cancellation. Six native kernel regressions
 plus five independent actual-source tests passed, including 1,000 expanded
 matrix/work comparisons. The enclosing field/circuit integration regressions
 are authored but could not be executed in the available dependency environment.
+
+### Shared end flux in planar, solid and moving winding histories
+
+`NonlinearWindingCircuit::new_with_end_modes` and
+`new_with_solid_regions_and_end_modes` use the same passive end model for
+stranded and source-normalized solid windings. Initial linkage, finite terminal
+induction, storage change and backward-Euler numerical dissipation all use the
+original signed flux factors. The independent diagonal, complete matrix and
+original modes remain inspectable.
+
+Graph-resistor reassembly, conductor/material refresh and prescribed-motion
+candidates retain the model and original field/circuit histories. Conductivity
+reweighting still pairs F_new with delta(A); changing source weights alone
+cannot invent voltage in a stationary biased field. Motional voltage and work
+remain the original solid-field transfers. The new `stored_change_j` receipt
+uses directly evaluated end-mode work instead of differencing large end-energy
+endpoints. End numerical dissipation remains separate from physical Joule heat.
+Legacy constructors retain diagonal-only end storage; end parameters stay fixed.
+
+Three focused new regressions cover coupled nonlinear loops with native
+capacitor storage, reversed mixed-causality windings through live hot-source
+refresh, and continued solid diffusion, conductivity reweighting and nonzero
+motion. Independent loop equations confirm both induced-current polarity and
+whole-system physical work, rather than merely matching two implementations.
+
+All changed source/test files passed native rustfmt. The shared end kernel's
+11 native tests remain the executed numerical evidence. The enclosing 3D and
+planar field/circuit tests could not run because the available fs-em dependency
+graph failed to load its production mesh/material/FEEC/solver crates.
