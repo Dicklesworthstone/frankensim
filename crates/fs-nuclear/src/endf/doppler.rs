@@ -29,6 +29,9 @@ use fs_math::det;
 use super::{EndfError, EndfInterpolation, EndfInterpolationRegion, PointwiseCrossSection, budget};
 use crate::{Accumulator, FissionError, nonnegative, positive};
 
+/// Adaptive output grids that resolve heated features before native collapse.
+pub mod adaptive;
+
 const BOLTZMANN_J_K: f64 = 1.380_649e-23;
 const INV_SQRT_PI: f64 = 0.564_189_583_547_756_3;
 const MAX_DEPTH: u8 = 32;

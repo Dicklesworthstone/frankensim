@@ -1984,3 +1984,51 @@ nonlocal absorption and radiation escape during irradiation and shutdown. Its
 CSV separates emitted, received, escaped and nonrecoverable energy; its closure
 checks include received radiation once. The full water example and `fs-couple`
 Cargo checks remain unexecuted because the constellation dependencies are absent.
+
+## Adaptive energy grids for Doppler-heated reactions
+
+`PreparedDopplerBroadening::tabulate_adaptive` constructs a native
+`PointwiseCrossSection` over an explicit positive energy interval. Its
+`endf::doppler::adaptive::DopplerGridAccuracy` controls interpolation separately
+from `DopplerAccuracy`, which still controls each original kernel integration.
+`AdaptiveDopplerTabulation` retains the existing tabulation's source identity,
+temperature, exterior laws and numerical-error reports, plus a sampled
+interpolation-error estimate and the count of actual point evaluations.
+
+Three interior probes compare the heated law with each candidate interval's
+linear-in-energy interpolant. The comparison includes both the probe's
+quadrature/tail uncertainty and the interpolated endpoint uncertainty. Cached
+endpoints and interior values are reused when intervals split. Wide energy
+ratios split geometrically to resolve inverse-speed tails without repeatedly
+bisecting a large linear energy range.
+
+Sampling alone could miss an off-center narrow resonance. A bounded binary
+search therefore checks the original source knots, including endpoints and
+duplicate-energy jumps, against the cell's retained thermal support. Where a
+knot is present, the accepted cell must span at most the configured amount of
+`sqrt(E/theta)` (default 0.5, maximum 1). Rationalized square-root differences
+retain narrow thermal windows at high incident energy. Source knots are searched
+without copying them into the output, so dense source data need not force the
+same number of heated output knots. Identically zero curves retain two endpoints.
+
+The interpolation estimate is **not an interval certificate**, a bound at every
+unprobed energy, or a certification of nuclear data or arbitrary-spectrum
+reaction rates. Integration error and grid error remain distinct. Both point
+and grid absolute tolerances should admit physically negligible or vanishing
+wings; a relative tolerance alone cannot resolve an exactly zero ordinate with
+a nonzero omitted-kernel bound. Tightened-grid convergence remains available
+through the original flat and spectrum-weighted collapse APIs.
+
+Source-knot searches, cell refinement and every point evaluation share one
+`DopplerLimits` work allowance. Output allocation is bounded by
+`max_output_points`, refinement depth is at most 64, and unrepresentable
+subdivision is refused. Cancellation and exhaustion return no partial curve
+and leave the source unchanged. At unchanged temperature, the requested domain
+must match the complete original domain, whose knots, interpolation laws and
+jumps are retained exactly without kernel work.
+
+Six public-path regressions parse manufactured ENDF sources and exercise
+off-center resonance discovery, inverse-speed tails, refinement of native
+flat/spectrum-weighted reaction rates, exact identity behavior, shared work,
+bounded output, cancellation and deterministic retry. They introduce no
+evaluated-isotope accuracy, resonance reconstruction or shielding claim.
