@@ -222,7 +222,7 @@ where
     // native motion's initial kinetic/bulk energies are the ORIGINAL energies.
     // Read bond storage, accrued fracture and caloric storage at both accepted
     // endpoints independently of the transfer/increment residuals.
-    let combined = mechanical.kinetic_after_j - mechanical.kinetic_before_j
+    let combined = mechanical.kinetic_energy_change_j
         + mechanical.bulk_stored_after_j
         - mechanical.bulk_stored_before_j
         + patch.area_m2() * (after.stored_energy_j_m2() - before.stored_energy_j_m2())

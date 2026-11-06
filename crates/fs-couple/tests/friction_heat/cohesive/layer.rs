@@ -164,6 +164,105 @@ fn reference(dt: f64, work: f64, before: [f64; 3]) -> [f64; 3] {
 }
 
 #[test]
+fn unchanged_inertial_mode_cannot_hide_native_bond_heat_from_the_finite_layer() {
+    struct TwoModes([f64; 2]);
+    impl LinearOp for TwoModes {
+        fn n(&self) -> usize {
+            2
+        }
+        fn apply(&self, x: &[f64], y: &mut [f64]) {
+            y[0] = self.0[0] * x[0];
+            y[1] = self.0[1] * x[1];
+        }
+    }
+    let (source, card) = material_and_card(true, Some(ADHESIVE));
+    let elastic = TwoModes([1000.0, 0.0]);
+    let mass = TwoModes([10.0, 2.0_f64.powi(80)]);
+    let patch = CohesivePatch::from_interface(
+        7,
+        1.0,
+        &source,
+        [
+            &source.surfaces()[0].material,
+            &source.surfaces()[1].material,
+        ],
+        vec![JumpTerm {
+            dof: 0,
+            local: [0.0, 1.0, 0.0],
+        }],
+    )
+    .unwrap();
+    let joint = CohesiveSystem::new(
+        &elastic,
+        vec![patch],
+        Budget {
+            max_dofs: 2,
+            max_patches: 1,
+            max_jump_terms: 1,
+            max_krylov_basis_entries: 128,
+        },
+    )
+    .unwrap();
+    let accepted = joint
+        .bonded_state()
+        .solve_over_time_controlled(
+            &[0.0; 2],
+            &[[-0.001, 0.0, 0.0]],
+            1.0,
+            dynamics().solve,
+            &mut || false,
+        )
+        .unwrap()
+        .state;
+    let thermal = layer_network();
+    let route = ThirdBodyHeatRoute::from_links(&thermal, LAYER, LINKS, K, R).unwrap();
+    let run = |speed| {
+        let motion = accepted
+            .clone()
+            .into_dynamics(&mass, vec![0.02, speed], 0.0, dynamics())
+            .unwrap();
+        propose_deformable_cohesive_layer_heat(
+            &motion,
+            &[0.0; 2],
+            &[[-0.001, 0.0, 0.0]],
+            1.0 / 128.0,
+            binding(&route, &card),
+            &thermal,
+            layer_controls(),
+            &[0.0; 3],
+            |_, _, _| Ok::<_, &'static str>(transport()),
+            &CancelGate::new_clock_free(),
+        )
+        .unwrap()
+    };
+    let reference = run(0.0);
+    // A separate, unchanged inertial mode has a large energy inventory while
+    // its exact dyadic motion stays inside the original displacement limits.
+    let candidate = run(0.125);
+    assert_eq!(
+        candidate.mechanical.kinetic_before_j,
+        candidate.mechanical.kinetic_after_j,
+    );
+    assert!(candidate.heat.dissipated_j > 0.0);
+    close(candidate.heat.dissipated_j, reference.heat.dissipated_j, 1e-13);
+    close(
+        candidate.mechanical.kinetic_energy_change_j,
+        reference.mechanical.kinetic_energy_change_j,
+        1e-13,
+    );
+    for id in [CellId(0), CellId(1), LAYER] {
+        close(
+            candidate.thermal.cells()[&id].specific_h_j_kg,
+            reference.thermal.cells()[&id].specific_h_j_kg,
+            1e-12,
+        );
+    }
+    assert_eq!(candidate.mechanical.motion.velocity_m_s()[1], 0.125);
+    close(candidate.combined_energy_residual_j, 0.0, 2e-10);
+    close(candidate.summed_energy_residual_j, 0.0, 2e-10);
+}
+
+#[test]
 fn native_bond_viscosity_retains_real_layer_heat_and_conducts_with_two_resistances() {
     let (source, card) = material_and_card(true, Some(ADHESIVE));
     let elastic = Scalar(1000.0);

@@ -224,7 +224,7 @@ pub fn propose_deformable_cohesive_heat<'s, 'a, 't, P, E>(
         gate,
     )?;
     let heat = &solved.heat;
-    let combined = mechanical.kinetic_after_j - mechanical.kinetic_before_j
+    let combined = mechanical.kinetic_energy_change_j
         + mechanical.bulk_stored_after_j
         - mechanical.bulk_stored_before_j
         + mechanical.cohesive_stored_after_j

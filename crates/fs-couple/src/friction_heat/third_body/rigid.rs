@@ -733,7 +733,6 @@ struct Prepared {
     angular_loads: [[Vec3; 2]; 2],
     mobility: [[f64; 2]; 2],
     shear_before: [f64; 2],
-    kinetic_before: f64,
 }
 struct Stage {
     bodies: [RigidBodyState; 2],
@@ -828,8 +827,6 @@ impl Prepared {
                     .cross(separation),
             );
         let shear_before = axes.map(|axis| relative.dot(axis));
-        let kinetic_before =
-            bodies[0].kinetic_energy(properties[0])? + bodies[1].kinetic_energy(properties[1])?;
         Ok(Self {
             before: *bodies,
             properties,
@@ -839,7 +836,6 @@ impl Prepared {
             angular_loads,
             mobility,
             shear_before,
-            kinetic_before,
         })
     }
 
@@ -907,9 +903,14 @@ impl Prepared {
             },
         )?;
         let force_residual_n = std::array::from_fn(|i| force[i] - constitutive.traction_n[i]);
-        let kinetic_after = bodies[0].kinetic_energy(self.properties[0])?
-            + bodies[1].kinetic_energy(self.properties[1])?;
-        let kinetic_energy_change_j = kinetic_after - self.kinetic_before;
+        // Retain both original bodies' products through the shared storage
+        // reduction. Rounding each body's large transfer before they cancel
+        // would erase the smaller layer storage and irreversible work.
+        let mut kinetic = fs_mbd::RigidKineticEnergyChange::new();
+        for side in 0..2 {
+            kinetic.add_body(self.properties[side], self.before[side], bodies[side])?;
+        }
+        let kinetic_energy_change_j = kinetic.finish()?;
         let mechanical_work_j = -(force[0] * slip[0] + force[1] * slip[1]);
         let total_energy_residual_j =
             kinetic_energy_change_j + constitutive.stored_change_j + constitutive.dissipated_j;

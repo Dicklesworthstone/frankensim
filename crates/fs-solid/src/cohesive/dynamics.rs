@@ -53,6 +53,8 @@ pub mod impulse;
 mod tangent;
 use tangent::StepJacobian;
 
+mod kinetic;
+
 /// Explicit numerical, trajectory and energy controls. These are not material
 /// coefficients or inferred small-strain validity limits.
 #[derive(Debug, Clone, Copy)]
@@ -62,7 +64,8 @@ pub struct DynamicsConfig {
     /// residuals and analytic Jacobian actions/preparation attempts. Numerical
     /// fallback actions count their two physical residuals. The independent
     /// final replay is included; the final energy audit additionally applies
-    /// each operator twice.
+    /// each operator twice for endpoint diagnostics and the mass once or twice
+    /// to retain the actual kinetic increment.
     pub solve: Config,
     /// Maximum-component displacement perturbation for numerical fallback only.
     pub difference_step_m: f64,
@@ -132,6 +135,9 @@ pub struct DynamicsStep<'m, 'a> {
     pub mean_traction_pa: Vec<[f64; 3]>,
     pub kinetic_before_j: f64,
     pub kinetic_after_j: f64,
+    /// Original mass applied to the actual accepted velocity increment, paired
+    /// with its compensated mean. Large unchanged storage is not subtracted.
+    pub kinetic_energy_change_j: f64,
     pub bulk_stored_before_j: f64,
     pub bulk_stored_after_j: f64,
     pub cohesive_stored_before_j: f64,
@@ -581,6 +587,12 @@ impl<'m, 'a> CohesiveMotion<'m, 'a> {
         let velocity = problem.velocity(body_solution)?;
         let kinetic_before_j = problem.quadratic(self.mass, &self.velocity_m_s)?;
         let kinetic_after_j = problem.quadratic(self.mass, &velocity)?;
+        let kinetic_energy_change_j = kinetic_change(
+            self.mass,
+            &self.velocity_m_s,
+            &velocity,
+            &mut || problem.poll().is_err(),
+        )?;
         let bulk_stored_before_j =
             problem.quadratic(self.state.system.elastic, &self.state.displacements)?;
         let bulk_stored_after_j = problem.quadratic(self.state.system.elastic, body_solution)?;
@@ -603,7 +615,7 @@ impl<'m, 'a> CohesiveMotion<'m, 'a> {
         }
         let energy_residual_j = finite(
             external_work_j + endpoint.prescribed_work
-                - (kinetic_after_j - kinetic_before_j)
+                - kinetic_energy_change_j
                 - (bulk_stored_after_j - bulk_stored_before_j)
                 - endpoint.energy.stored_change
                 - endpoint.energy.dissipated
@@ -667,6 +679,7 @@ impl<'m, 'a> CohesiveMotion<'m, 'a> {
             mean_traction_pa: endpoint.means,
             kinetic_before_j,
             kinetic_after_j,
+            kinetic_energy_change_j,
             bulk_stored_before_j,
             bulk_stored_after_j,
             cohesive_stored_before_j: endpoint.stored_before,
@@ -681,6 +694,28 @@ impl<'m, 'a> CohesiveMotion<'m, 'a> {
             energy_tolerance_j,
         })
     }
+}
+
+/// Fixed symmetric mass quadratic change from actual accepted velocities.
+/// Apply the original mass to the increment, never to the large common motion.
+/// The low difference word needs a second action only when subtraction rounded.
+/// Operator arithmetic remains the original mass owner's responsibility.
+fn kinetic_change(
+    mass: &dyn LinearOp,
+    before: &[f64],
+    after: &[f64],
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<f64, Error> {
+    if before.len() != after.len() || before.len() != mass.n() {
+        return Err(Error::Invalid(
+            "complete original kinetic coordinates required",
+        ));
+    }
+    kinetic::change(before, after, |x, y| mass.apply(x, y), cancelled).map_err(|error| match error {
+        kinetic::KineticError::Dimension => Error::Invalid("complete kinetic endpoints required"),
+        kinetic::KineticError::Cancelled => Error::Cancelled,
+        kinetic::KineticError::NonFinite => Error::Invalid("non-finite kinetic increment"),
+    })
 }
 
 struct StepProblem<'p, 'm, 'a> {

@@ -1031,7 +1031,7 @@ impl Balance {
         for value in [
             authored_work_j,
             step.prescribed_jump_work_j,
-            -(step.kinetic_after_j - step.kinetic_before_j),
+            -step.kinetic_energy_change_j,
             -(step.bulk_stored_after_j - step.bulk_stored_before_j),
             -step.cohesive_energy_j.stored_change,
             -step.cohesive_energy_j.dissipated,
@@ -1042,8 +1042,7 @@ impl Balance {
         }
         self.external.add(authored_work_j)?;
         self.prescribed.add(step.prescribed_jump_work_j)?;
-        self.kinetic
-            .add(finite(step.kinetic_after_j - step.kinetic_before_j)?)?;
+        self.kinetic.add(finite(step.kinetic_energy_change_j)?)?;
         self.bulk.add(finite(
             step.bulk_stored_after_j - step.bulk_stored_before_j,
         )?)?;

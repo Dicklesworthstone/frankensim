@@ -7451,6 +7451,20 @@ physical dissipation or routed to a thermal field. Signed roundoff-scale bulk
 energies are retained rather than clamped, with materially negative values
 refused under the explicit energy allowance.
 
+`DynamicsStep::kinetic_energy_change_j` retains the actual fixed-mass quadratic
+increment `mean(v) dot M delta(v)`. The original mass acts on compensated
+endpoint differences; a nonzero low word gets its own action. Mean-product
+layers are reduced before final rounding, so opposing transfers and a large
+unchanged mode cannot erase small accepted storage changes. The usual exact
+difference needs one mass action and two vector buffers. The mass owner's own
+action accuracy, symmetry and purity remain required. The native interval
+independently replays its original-to-final kinetic increment instead of
+subtracting total inventories or summing rounded substep changes. Absolute
+endpoint diagnostics, original force/constitutive work and physical losses
+remain separate. G0 tests cover a coupled mass counter-mode and a 1.5-joule
+exchange beside a large transferred inventory; the native interval regression
+retains a small oscillator exchange beside unchanged free motion.
+
 The accepted endpoint replay also reports `DynamicsPatchDissipation` in original
 patch order, with actual area-integrated fracture, viscosity and friction losses.
 Its sums use the same arithmetic as the global loss accounts. A downstream

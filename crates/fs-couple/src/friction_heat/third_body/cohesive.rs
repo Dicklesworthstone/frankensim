@@ -362,7 +362,7 @@ fn propose_deformable_cohesive_layer_heat_inner<'s, 'a, 't, P, E>(
     }
     let (thermal, source, heat) =
         evaluate(&solver.x, controls.audit_entropy)?.accept(controls.heat, check)?;
-    let combined = mechanical.kinetic_after_j - mechanical.kinetic_before_j
+    let combined = mechanical.kinetic_energy_change_j
         + mechanical.bulk_stored_after_j
         - mechanical.bulk_stored_before_j
         + mechanical.cohesive_stored_after_j

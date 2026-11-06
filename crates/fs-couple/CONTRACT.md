@@ -68,6 +68,26 @@ and are not exposed by this path. Caller-selected time steps must resolve the
 actual stress extrema and any rotating shear trajectory. A finite plane set
 and empirical Miner or Findley estimate do not establish component service life.
 
+## Retained kinetic changes through layer heat and cohesive motion
+
+The rigid third-body shear-layer owner evaluates accepted storage through
+`fs_mbd::RigidKineticEnergyChange`, reducing both original bodies before final
+rounding. Small layer elasticity and irreversible work survive large common
+translation. The finite layer's existing thermal feedback continues to consume
+its independent constitutive loss and original caloric inventory; storage does
+not define heat. The source-bound scalar, thermoelastic and tensor routes share
+this same native mechanical owner.
+
+Deformable cohesive heat, finite adhesive layers, prescribed source-temperature
+transfer, opening/cooling, accepted intervals and sustained/event trajectories
+consume the native `kinetic_energy_change_j`. They do not reconstruct it from
+absolute endpoint totals. Existing bulk/cohesive storage, fracture work, explicit
+heat-conversion fractions, source work and caloric loss accounts remain separate.
+The original fixed-mass, fixed-reference, source and topology limitations apply.
+G3 regression definitions carry actual rigid-layer heat/temperature feedback and
+deformable bond-viscosity heat through large unchanged kinetic inventories.
+Arithmetic-leaf tests alone do not qualify the complete coupled integrations.
+
 ## Original specific heat in coupled capacity admission
 
 Electrical, dielectric, magnetic, piezoelectric, thermoelastic, creep and

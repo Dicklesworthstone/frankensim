@@ -158,6 +158,58 @@ fn original_consistent_mass_and_cohesive_stiffness_have_second_order_motion() {
 }
 
 #[test]
+fn complete_native_interval_retains_small_kinetic_exchange_beside_unchanged_motion() {
+    use fs_solid::cohesive::dynamics::interval::IntervalConfig;
+    struct Modes([f64; 2]);
+    impl LinearOp for Modes {
+        fn n(&self) -> usize {
+            2
+        }
+        fn apply(&self, x: &[f64], y: &mut [f64]) {
+            y[0] = self.0[0] * x[0];
+            y[1] = self.0[1] * x[1];
+        }
+    }
+    let mass = Modes([0.1, 2.0_f64.powi(80)]);
+    let elastic = Modes([10.0, 0.0]);
+    let law = law();
+    let system = CohesiveSystem::new(&elastic, vec![patch(&law)], budget()).unwrap();
+    let mut controls = config();
+    controls.maximum_step_s = 1.0 / 128.0;
+    controls.relative_energy_tolerance = 0.0;
+    let incoming = system
+        .bonded_state()
+        .into_dynamics(&mass, vec![0.01, 0.125], 0.0, controls)
+        .unwrap();
+    let step = incoming
+        .advance_interval_controlled(
+            &[0.0; 2],
+            &[[0.0; 3]],
+            1.0 / 32.0,
+            IntervalConfig {
+                minimum_step_s: 1e-6,
+                reversal_time_tolerance_s: 1e-6,
+                maximum_trials: 8,
+                maximum_substeps: 4,
+                maximum_total_residual_evaluations: 32_000,
+                maximum_total_newton_iterations: 480,
+            },
+            &mut || false,
+        )
+        .unwrap();
+    assert_eq!(step.accepted_substeps, 4);
+    assert_eq!(step.kinetic_before_j, step.kinetic_after_j);
+    let speed = step.motion.velocity_m_s()[0];
+    // Only the scalar oscillator changes storage. This reference squares its
+    // small physical speed independently; the free mode carries no work.
+    let expected = 0.5 * 0.1 * (speed * speed - 0.01 * 0.01);
+    assert!(expected < 0.0);
+    close(step.kinetic_energy_change_j, expected, 1e-14);
+    assert_eq!(step.motion.velocity_m_s()[1], 0.125);
+    close(step.energy_residual_j, 0.0, 1e-12);
+}
+
+#[test]
 fn prescribed_jump_external_force_and_physical_viscosity_have_independent_work() {
     with_cx(|cx| {
         let assembled = scalar_tet(cx);

@@ -335,7 +335,7 @@ fn solve_actual_controlled<'m, 'a>(
         material.add(step.viscous_dissipated_j)?;
         material.add(step.friction_dissipated_j)?;
         body_work.push(BodyWork {
-            kinetic_change_j: finite(step.kinetic_after_j - step.kinetic_before_j)?,
+            kinetic_change_j: finite(step.kinetic_energy_change_j)?,
             bulk_change_j: finite(step.bulk_stored_after_j - step.bulk_stored_before_j)?,
             cohesive_change_j: step.cohesive_energy_j.stored_change,
             material_loss_j: material.total()?,

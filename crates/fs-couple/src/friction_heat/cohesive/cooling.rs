@@ -184,7 +184,7 @@ pub fn propose_deformable_cohesive_cooling<'s, 'a, 't>(
     }
     let mut balance = EnergySum::default();
     for term in [
-        mechanical.kinetic_after_j - mechanical.kinetic_before_j,
+        mechanical.kinetic_energy_change_j,
         mechanical.bulk_stored_after_j - mechanical.bulk_stored_before_j,
         mechanical.cohesive_stored_after_j - mechanical.cohesive_stored_before_j,
         heat.nonthermal_fracture_energy_j,

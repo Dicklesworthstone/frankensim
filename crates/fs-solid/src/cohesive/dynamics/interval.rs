@@ -8,7 +8,7 @@
 
 use super::{
     CohesiveEnergy, CohesiveMotion, DynamicsError, DynamicsPatchDissipation, DynamicsStep, Error,
-    finite, positive,
+    finite, kinetic_change, positive,
 };
 use fs_exec::Cx;
 
@@ -24,7 +24,9 @@ pub struct IntervalConfig {
     /// Each attempt reserves its remaining native residual allowance. Successful
     /// attempts refund unused evaluations; failures charge their full allowance.
     /// Each evaluation visits every original material patch. Native final energy
-    /// checks additionally use four mass/elastic operator applications per trial.
+    /// checks additionally use four endpoint mass/elastic actions and one or
+    /// two mass-increment actions per trial. The complete accepted interval
+    /// replays its own original-to-final kinetic increment once more.
     pub maximum_total_residual_evaluations: usize,
     /// The same conservative reservation policy applies to nonlinear iterations.
     pub maximum_total_newton_iterations: usize,
@@ -41,6 +43,9 @@ pub struct DynamicsInterval<'m, 'a> {
     pub maximum_force_residual_n: f64,
     pub kinetic_before_j: f64,
     pub kinetic_after_j: f64,
+    /// Independently evaluated from the complete interval's accepted velocities,
+    /// retaining small changes beside a large unchanged kinetic inventory.
+    pub kinetic_energy_change_j: f64,
     pub bulk_stored_before_j: f64,
     pub bulk_stored_after_j: f64,
     pub cohesive_stored_before_j: f64,
@@ -214,9 +219,15 @@ impl<'m, 'a> CohesiveMotion<'m, 'a> {
         result.attempted_substeps = work.trials;
         result.charged_residual_evaluations = work.residuals;
         result.charged_newton_iterations = work.iterations;
+        result.kinetic_energy_change_j = kinetic_change(
+            self.mass,
+            &self.velocity_m_s,
+            &result.motion.velocity_m_s,
+            cancelled,
+        )?;
         result.energy_residual_j = finite(
             result.external_work_j + result.prescribed_jump_work_j
-                - (result.kinetic_after_j - result.kinetic_before_j)
+                - result.kinetic_energy_change_j
                 - (result.bulk_stored_after_j - result.bulk_stored_before_j)
                 - (result.cohesive_stored_after_j - result.cohesive_stored_before_j)
                 - result.cohesive_energy_j.dissipated
@@ -299,6 +310,7 @@ impl<'m, 'a> DynamicsInterval<'m, 'a> {
             maximum_force_residual_n: s.maximum_force_residual_n,
             kinetic_before_j: s.kinetic_before_j,
             kinetic_after_j: s.kinetic_after_j,
+            kinetic_energy_change_j: s.kinetic_energy_change_j,
             bulk_stored_before_j: s.bulk_stored_before_j,
             bulk_stored_after_j: s.bulk_stored_after_j,
             cohesive_stored_before_j: s.cohesive_stored_before_j,

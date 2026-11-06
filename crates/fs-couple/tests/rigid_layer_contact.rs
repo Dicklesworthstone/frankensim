@@ -624,6 +624,74 @@ fn g1_joint_native_layer_heat_matches_finite_storage_and_temperature_feedback_re
 }
 
 #[test]
+fn g3_large_common_motion_preserves_layer_storage_heat_and_temperature_feedback() {
+    let thermal = thermal();
+    let route = ThirdBodyHeatRoute::from_links(&thermal, LAYER, [7, 8], K, [0.0; 2]).unwrap();
+    let properties = properties(false);
+    let original = bodies(false, Vec3::new(0.0, 1.0, 0.0));
+    let history = RigidLayerHistory::new(&source(300.0).law, geometry(), 0.0).unwrap();
+    let run = |bodies: &[RigidBodyState; 2]| {
+        step_heated_rigid_layer_candidate(
+            bodies,
+            properties,
+            &history,
+            &thermal,
+            &route,
+            0.1,
+            10.0,
+            law_solve(),
+            heat_controls(),
+            [0.0; 2],
+            &[0.0; 3],
+            |_, t| Ok::<_, &str>(source(t)),
+            || false,
+        )
+        .unwrap()
+    };
+    let reference = run(&original);
+    let common_speed = 2.0_f64.powi(30);
+    let boosted = std::array::from_fn(|i| {
+        RigidBodyState::new(
+            original[i].pose(),
+            original[i].linear_momentum_world().add(Vec3::new(
+                properties[i].mass() * common_speed,
+                0.0,
+                0.0,
+            )),
+            original[i].angular_momentum_body(),
+        )
+        .unwrap()
+    });
+    let candidate = run(&boosted);
+    let total = |bodies: &[RigidBodyState; 2]| {
+        bodies[0].kinetic_energy(properties[0]).unwrap()
+            + bodies[1].kinetic_energy(properties[1]).unwrap()
+    };
+    // Absolute f64 totals cannot resolve the actual elastic/plastic transfer.
+    assert_eq!(total(&boosted), total(candidate.bodies()));
+    let report = candidate.report();
+    assert!(report.mechanical.constitutive.stored_change_j > 0.0);
+    assert!(report.heat.dissipated_j > 0.0);
+    assert_eq!(report.heat.dissipated_j, reference.report().heat.dissipated_j);
+    assert_eq!(report.source, reference.report().source);
+    for cell in [CellId(0), CellId(1), LAYER] {
+        assert_eq!(
+            candidate.thermal().cells()[&cell].specific_h_j_kg,
+            reference.thermal().cells()[&cell].specific_h_j_kg,
+        );
+    }
+    close(
+        report.mechanical.kinetic_energy_change_j
+            + report.mechanical.constitutive.stored_change_j
+            + report.heat.dissipated_j,
+        0.0,
+        2e-10,
+    );
+    close(report.mechanical.work_energy_residual_j, 0.0, 2e-10);
+    close(report.combined_energy_residual_j, 0.0, 5e-10);
+}
+
+#[test]
 fn g4_late_failures_preserve_original_bodies_history_and_caloric_state() {
     let thermal = thermal();
     let route = ThirdBodyHeatRoute::from_links(&thermal, LAYER, [7, 8], K, [0.0; 2]).unwrap();
