@@ -5781,7 +5781,10 @@ impl Storage for DuffingStorage {
 
     fn quadratic_part(&self) -> Option<linear_exact::QuadraticPart> {
         Some(linear_exact::QuadraticPart {
-            matrix: vec![self.k, 0.0, 0.0, 1.0/self.m],
+            // A bistable spring has negative curvature around the barrier.
+            // Keep that term in the original nonlinear remainder: Q must be
+            // positive semidefinite for the passive linear-exact flow.
+            matrix: vec![self.k.max(0.0), 0.0, 0.0, 1.0/self.m],
             exact: self.k3 == 0.0,
         })
     }
@@ -5856,13 +5859,19 @@ impl ConstitutiveDiscreteGradient for DuffingStorage {
 /// k3 q^4/4`. Its symmetric polynomial discrete gradient retains spring
 /// work independently of kinetic storage, with allocation-free analytic
 /// continuous and endpoint tangents and stable original-energy accounting.
+/// Negative `k` is admitted when `k3 > 0`: the bounded double-well potential
+/// has equilibria at `q = +/- sqrt(-k/k3)` and a barrier of `k^2/(4 k3)`
+/// above either well. Its energy datum remains zero at `q = 0`, so the well
+/// energies are negative. The destabilizing quadratic term stays in the
+/// nonlinear remainder of a linear-exact split.
 ///
 /// # Errors
-/// Admission errors on nonfinite parameters, nonpositive mass or negative
-/// stiffness/damping. The admitted potential remains bounded below.
+/// Admission errors on nonfinite parameters, nonpositive mass, negative
+/// quartic stiffness/damping, or negative linear stiffness without a positive
+/// quartic term. The admitted potential remains bounded below.
 pub fn duffing_oscillator(m: f64, k: f64, k3: f64, c: f64) -> Result<PortHamiltonian, PhsError> {
     if [m, k, k3, c].iter().any(|value| !value.is_finite())
-        || m <= 0.0 || k < 0.0 || k3 < 0.0 || c < 0.0
+        || m <= 0.0 || k3 < 0.0 || (k < 0.0 && k3 == 0.0) || c < 0.0
     {
         return Err(PhsError::Unadmitted {
             what: "duffing parameters",

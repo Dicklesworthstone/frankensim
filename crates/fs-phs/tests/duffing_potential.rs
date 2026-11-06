@@ -3,6 +3,7 @@ use fs_phs::{
     PortHamiltonian, QuadraticStorage, StepWorkspace, discrete_gradient, duffing_oscillator,
     interconnect, step,
 };
+use fs_phs::linear_exact::{LinearSplitBudget, PreparedNonlinearZoh, split_quadratic};
 
 fn near(actual: f64, expected: f64, tolerance: f64) {
     assert!((actual - expected).abs() <= tolerance,
@@ -196,4 +197,161 @@ fn nonfinite_coefficients_refuse_and_linear_limits_remain_admitted() {
     }
     assert!(duffing_oscillator(1.0, 0.0, 0.0, 0.0).is_ok());
     assert!(duffing_oscillator(1.0, 0.0, 3.0, 0.0).is_ok());
+    assert!(duffing_oscillator(1.0, -4.0, 0.0, 0.0).is_err());
+    assert!(duffing_oscillator(1.0, -4.0, -1.0, 0.0).is_err());
+    assert!(duffing_oscillator(1.0, 4.0, -1.0, 0.0).is_err());
+    assert!(duffing_oscillator(1.0, -4.0, 4.0, -0.1).is_err());
+}
+
+fn double_well_potential(q: f64) -> f64 { q.powi(4) - 2.0 * q * q }
+
+fn double_well_energy(x: &[f64]) -> f64 { 0.5 * x[1] * x[1] + double_well_potential(x[0]) }
+
+#[test]
+fn double_well_keeps_stable_wells_unstable_barrier_and_the_original_energy_datum() {
+    let system = duffing_oscillator(1.0, -4.0, 4.0, 0.2).unwrap();
+    let tangent = system.storage().continuous_tangent().unwrap();
+    let mut curvature = [0.0; 2];
+    for q in [-1.0, 1.0] {
+        assert_eq!(system.hamiltonian(&[q, 0.0]), -1.0);
+        assert_eq!(system.effort(&[q, 0.0]), [0.0, 0.0]);
+        assert!(tangent.apply(&[q, 0.0], &[1.0, 0.0], &mut curvature));
+        assert_eq!(curvature, [8.0, 0.0]);
+        assert_eq!(step(&system, &[q, 0.0], &[0.0], 0.1).unwrap().x, [q, 0.0]);
+    }
+    assert_eq!(system.hamiltonian(&[0.0, 0.0]), 0.0);
+    assert!(tangent.apply(&[0.0, 0.0], &[1.0, 0.0], &mut curvature));
+    assert_eq!(curvature, [-4.0, 0.0]);
+
+    // The instability belongs to the original nonlinear storage, never a
+    // negative-energy linear oscillator or an absolute-value replacement.
+    let part = system.storage().quadratic_part().unwrap();
+    assert_eq!(part.matrix, [0.0, 0.0, 0.0, 1.0]);
+    assert!(!part.exact);
+    let budget = LinearSplitBudget { max_modes: 2, max_omega_dt: 2.0 };
+    assert!(split_quadratic(&system, budget).is_ok());
+    let mut exponential = PreparedNonlinearZoh::new_owned(system, 0.02, budget).unwrap();
+    for q in [-1.0, 1.0] {
+        let at_well = exponential.step(&[q, 0.0], &[0.0]).unwrap();
+        near(at_well.x[0], q, 1e-14);
+        near(at_well.x[1], 0.0, 1e-14);
+        near(at_well.dissipated, 0.0, 1e-28);
+    }
+    // A perturbation from the barrier accelerates towards the right well.
+    let falling = exponential.step(&[0.1, 0.0], &[0.0]).unwrap();
+    assert!(falling.x[0] > 0.1 && falling.x[1] > 0.0);
+    near(falling.delta_h, double_well_energy(&falling.x) - double_well_energy(&[0.1, 0.0]), 2e-13);
+    near(falling.balance_residual(), 0.0, 2e-13);
+}
+
+#[test]
+fn double_well_secant_retains_negative_spring_work_beside_large_kinetic_storage() {
+    let system = duffing_oscillator(1.0, -4.0, 4.0, 0.0).unwrap();
+    let a = [0.5, 1e9];
+    let b = [0.75, 1e9];
+    assert_eq!(system.hamiltonian(&a), system.hamiltonian(&b));
+    let effort = discrete_gradient(system.storage(), &a, &b);
+    assert_eq!(effort, [-1.484375, 1e9]);
+    assert_eq!(effort[0] * (b[0] - a[0]), -0.37109375);
+    assert_eq!(discrete_gradient(system.storage(), &b, &a), effort);
+    let mid = [0.625, 1e9];
+    let remainder = system.storage().midpoint_energy_remainder(&a, &b, &mid).unwrap();
+    assert_eq!(system.effort(&mid)[0] * (b[0] - a[0]) + remainder, -0.37109375);
+
+    let mut endpoint = [0.0; 2];
+    assert!(system.storage().discrete_gradient_rule().unwrap()
+        .end_jacobian_action(&[0.0, 0.0], &[0.0, 0.0], &[1.0, 0.0], &mut endpoint));
+    assert_eq!(endpoint, [-2.0, 0.0]);
+}
+
+// Independently eliminate momentum and bisect the original endpoint energies.
+// At this small clock, 2 - 2 dt^2 > 0 bounds the residual derivative below,
+// so the scalar root is unique even in the concave part of the potential.
+fn double_well_reference(a: [f64; 2], force: f64, damping: f64, dt: f64) -> [f64; 2] {
+    let secant = |q: f64| {
+        if q == a[0] { 4.0 * q.powi(3) - 4.0 * q }
+        else { (double_well_potential(q) - double_well_potential(a[0])) / (q - a[0]) }
+    };
+    let residual = |q: f64| (2.0 + damping * dt) * (q - a[0])
+        + dt * dt * secant(q) - 2.0 * dt * a[1] - dt * dt * force;
+    let (mut lo, mut hi) = (-3.0, 3.0);
+    assert!(residual(lo) < 0.0 && residual(hi) > 0.0);
+    for _ in 0..80 {
+        let q = f64::midpoint(lo, hi);
+        if residual(q) < 0.0 { lo = q; } else { hi = q; }
+    }
+    let q = f64::midpoint(lo, hi);
+    [q, a[1] + dt * (force - damping * (q - a[0]) / dt - secant(q))]
+}
+
+#[test]
+fn double_well_orbits_respect_the_physical_barrier_and_damping_work() {
+    let dt = 0.02;
+    for (initial_momentum, damping) in [(0.6, 0.0), (1.6, 0.0), (1.6, 0.2)] {
+        let system = duffing_oscillator(1.0, -4.0, 4.0, damping).unwrap();
+        let mut workspace = StepWorkspace::new(&system).unwrap();
+        workspace.set_iteration_limit(8).unwrap();
+        let mut a = [-1.0, initial_momentum];
+        let initial_energy = double_well_energy(&a);
+        let mut heat = 0.0;
+        let mut crossed_barrier = false;
+        for _ in 0..300 {
+            let reference = double_well_reference(a, 0.0, damping, dt);
+            let ordinary = step(&system, &a, &[0.0], dt).unwrap();
+            let (mut next, mut output) = ([0.0; 2], [0.0]);
+            let record = workspace.step_into_analytic(
+                &system, &a, &[0.0], dt, &mut next, &mut output,
+                &|_, _, _| panic!("double-well storage owns its endpoint tangent"),
+            ).unwrap();
+            for i in 0..2 {
+                near(next[i], reference[i], 2e-11);
+                near(ordinary.x[i], reference[i], 2e-11);
+            }
+            let velocity = 0.5 * (a[1] + next[1]);
+            near(record.dissipated, dt * damping * velocity * velocity, 2e-13);
+            near(record.delta_h, double_well_energy(&next) - double_well_energy(&a), 2e-12);
+            near(record.balance_residual(), 0.0, 2e-12);
+            heat += record.dissipated;
+            near(double_well_energy(&next) + heat, initial_energy, 2e-10);
+            if initial_energy < 0.0 { assert!(next[0] < 0.0); }
+            crossed_barrier |= next[0] > 0.0;
+            a = next;
+        }
+        if damping == 0.0 { assert_eq!(crossed_barrier, initial_energy > 0.0); }
+        else { assert!(heat > 0.5); }
+    }
+}
+
+#[test]
+fn double_well_exponential_split_retains_original_nonlinear_work_and_positive_heat() {
+    let dt = 0.02;
+    let budget = LinearSplitBudget { max_modes: 2, max_omega_dt: 2.0 };
+    for damping in [0.0, 0.2] {
+        let system = duffing_oscillator(1.0, -4.0, 4.0, damping).unwrap();
+        let mut exponential = PreparedNonlinearZoh::new_owned(system, dt, budget).unwrap();
+        let mut a = [-1.0, 1.6];
+        let initial_energy = double_well_energy(&a);
+        let mut heat = 0.0;
+        let mut supplied = 0.0;
+        for i in 0..150 {
+            let force = if i < 10 { 0.3 } else { 0.0 };
+            let next = exponential.step(&a, &[force]).unwrap();
+            if damping == 0.0 {
+                let reference = double_well_reference(a, force, 0.0, dt);
+                near(next.x[0], reference[0], 2e-11);
+                near(next.x[1], reference[1], 2e-11);
+            }
+            // Constant force does work along the actual coordinate increment,
+            // including when kinetic-only Q leaves the double well in H_rem.
+            near(next.supplied, force * (next.x[0] - a[0]), 2e-13);
+            near(next.delta_h, double_well_energy(&next.x) - double_well_energy(&a), 2e-12);
+            assert!(next.dissipated >= 0.0);
+            near(next.balance_residual(), 0.0, 2e-12);
+            heat += next.dissipated;
+            supplied += next.supplied;
+            near(double_well_energy(&next.x) + heat - supplied, initial_energy, 2e-10);
+            a.copy_from_slice(&next.x);
+        }
+        if damping > 0.0 { assert!(heat > 0.0); }
+    }
 }

@@ -601,11 +601,19 @@ accounting uses a complete analytic midpoint remainder for both potential and
 kinetic energy, including represented-midpoint rounding. The continuous
 Hessian and the secant's endpoint derivative are separate, allocation-free
 capabilities retained by existing direct-sum composition and prepared stepping.
-Finite parameters, positive mass and nonnegative stiffness/damping remain the
-admitted model; no double-well, material-identification or timestep-fidelity
+Finite parameters, positive mass, nonnegative damping and a bounded-below
+potential are required. Positive quartic stiffness also admits negative linear
+stiffness: the double well has minima at `q = +/- sqrt(-k/k3)` and barrier height
+`k²/(4 k3)`. Its original energy datum stays at the barrier, so negative well
+energy is physical stored energy relative to that datum. The linear-exact split
+keeps `max(k, 0)` in PSD Q and retains the destabilizing stiffness in the complete
+nonlinear remainder; it never replaces negative curvature with positive
+stiffness. Negative quartic stiffness and a negative linear stiffness without
+quartic stabilization refuse. No material-identification or timestep-fidelity
 claim is added. Focused `duffing_potential` regressions cover a 5e17 J kinetic
-background, independent scalar motion/work/heat references, rounded midpoints
-and analytic tangents. Native execution of this increment remains unverified.
+background, independent scalar motion/work/heat references, rounded midpoints,
+analytic tangents, equilibrium stability, barrier crossing and original-energy
+accounting through prepared analytic and nonlinear exponential stepping.
 
 A resistor whose terminals are the same node has zero incidence and contributes
 neither dissipation nor a ground connection. Its conductance is not stamped, and
