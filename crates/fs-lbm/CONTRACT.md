@@ -13473,14 +13473,15 @@ caloric object share a native law binding; separately allocated caloric curves
 retain distinct bindings even when their immutable contents are identical.
 
 Every face between participating fluid/solid or solid/solid cells uses the
-original area and both actual half distances. Optional `FaceContactResistance`
-adds an explicit nonnegative area-specific resistance in series; unlisted
-active interfaces are perfect contacts. Duplicate/reversed, nonadjacent,
+original area and both actual half distances. Optional `ThermalVolumeContact`
+selects a fixed `Resistance` or an original constitutive `Source`, adding one
+nonnegative area-specific resistance in series; unlisted active interfaces
+are perfect contacts. Duplicate/reversed, nonadjacent,
 inactive and fluid-only contact assignments refuse. A prescribed bath cannot
 also own any face between active thermal cells. Unselected fixed solids and
 unselected exposed faces remain insulated; authored solid heat and prescribed
-exposed-face baths provide explicit external input. No source-contact resistance
-law or additional contact iteration is inferred.
+exposed-face baths provide explicit external input. Source contact resistance
+and both enthalpy derivatives enter the existing native Newton system.
 
 One backward-Euler interval evaluates both temperatures and source conductivities
 at the coupled heat endpoint. Independently reconstructed face heat has opposite
@@ -13529,8 +13530,8 @@ meet the existing outer gates before either fluid or wall endpoint is returned.
 The accepted wall result travels with that trial's heat payload, while the
 whole-call residual/Krylov ceilings account for all attempted thermal solves.
 
-Both entries reuse the same fixed geometry, constant face-contact resistance,
-source bounds and finite-wall energy account as the base conjugate solver.
+Both entries reuse the same fixed geometry, fixed or source-owned contact
+resistance, source bounds and finite-wall energy account as the base solver.
 Only fluid heat enters native advection; no solid mass or momentum is routed.
 Existing fluid-only methods use empty wall/contact inputs through the same
 owners. These paths retain the original first-order heat/flow split and do not
@@ -13575,3 +13576,45 @@ authored wall heat. Native momentum composition, original source bounds,
 internal-face/duplicate/unbound refusal and exact retry supplement this balance.
 An equal-content/distinct-caloric-object case also closes an independent
 two-cell balance while preserving the native bath-law identity requirement.
+
+### Original interface sources in finite-wall conduction
+
+All four implicit conjugate entries take `ThermalVolumeContact` selections.
+`Resistance(FaceContactResistance)` retains the fixed-resistance path; an
+existing fixed selection can be converted with `.into()`. `Source { cells, law }`
+borrows an original `ImplicitContactLaw`, including `PreparedMaterialContact`
+from the existing material/interface owner. Fluid-only entry signatures remain
+unchanged. Every selected face must touch a participating finite solid.
+
+The source retains its original caloric objects, selected response, validity
+domain, material claim and fixed external conditions. Its two enthalpy
+derivatives include the original temperature/phase chain rule. Native
+`with_contacts` attaches it to the SAME implicit conduction graph; geometric
+contact resistance is zero on that link so the source contributes exactly once.
+There is no second thermal solve or additional contact iteration. If voxel
+numbering reverses source A/B order, caloric identities, enthalpy domains,
+trial values and both derivative components are reordered together. The
+original interface context and source receipt remain unchanged. External
+pressure remains the prepared source's pressure; fluid projection pressure
+does not silently replace it.
+
+Accepted heat is independently reconstructed with the same endpoint contact
+law and actual half-cell geometry, then deposited with opposite signs in the
+two inventories. Source bounds and state admission are checked even when a
+bulk side has zero conductivity. Rejected trials publish no wall history.
+The existing shared energy-defect and whole-call work budgets remain in force.
+Fixed-only and empty contact paths skip source attachment and preserve their
+existing endpoint resistance arithmetic.
+
+The focused regression source uses an original two-coordinate interface
+surface `R = 0.5 + f_wall - p/400000`, with wall A at voxel 1 and fluid B at
+voxel 0. At fixed pressure 100000 Pa, unequal masses, half widths and
+conductivities transfer 20 J into a latent wall: fluid/wall specific enthalpies
+change from 51/25 to 41/30 J/kg while the wall stays at 320 K. Freezing the
+initial resistance instead transfers 31/1.5 J. A second fixed-pressure root,
+both derivative components, original object order, conservation, native
+momentum forwarding, mixed contact duplicates, source-domain refusal and
+cancellation/retry supplement this physical distinction. These are synthetic
+constitutive regression sources, not experimental validation. Geometry,
+interfacial storage and external mechanical conditions do not evolve here;
+the original first-order heat/flow split remains authoritative.

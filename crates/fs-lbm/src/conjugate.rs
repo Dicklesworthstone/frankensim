@@ -111,8 +111,8 @@ pub use flow::{
     ImplicitConjugateThermalVolumeMomentumStep, ImplicitConjugateThermalVolumeReport,
     ImplicitConjugateThermalVolumeStep, ImplicitConjugateViscousThermalVolumeMomentumStep,
     ImplicitResistanceHeatWork, ImplicitThermalVolumeLinearControls,
-    ImplicitThermalVolumeSolveControls, ImplicitThermalVolumeWorkspace, ThermalVolumeSolidCell,
-    ThermalVolumeSolidEndpoint,
+    ImplicitThermalVolumeSolveControls, ImplicitThermalVolumeWorkspace, ThermalVolumeContact,
+    ThermalVolumeSolidCell, ThermalVolumeSolidEndpoint,
 };
 pub(crate) mod krylov;
 pub mod material_coupling;

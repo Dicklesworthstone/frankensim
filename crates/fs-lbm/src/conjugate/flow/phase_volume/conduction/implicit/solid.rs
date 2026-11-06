@@ -1,7 +1,6 @@
 //! Finite fixed-solid storage in the same fluid/wall implicit thermal graph.
 
 use super::*;
-use crate::conjugate::FaceContactResistance;
 use crate::conjugate::flow::{
     StaggeredBoundaryPressure, ThermalVolumeMomentumInput, ThermalVolumeMomentumStep,
 };
@@ -121,17 +120,18 @@ impl FlowField {
     /// advance the original phase-density volume and conservative fluid routes.
     ///
     /// Adjacent participating voxels conduct through both actual half cells
-    /// and any explicitly supplied constant face resistance. Each cell retains
-    /// its own source k(T,f), analytic tangent and original latent/sensible law.
+    /// and any explicitly supplied fixed or source-owned face resistance. Each
+    /// cell retains its source k(T,f), tangent and original latent/sensible law.
     /// Unlisted fixed solids and unselected exposed faces are insulated. Baths
     /// may heat or cool either fluid or explicitly bound solid cells through
     /// their own half-cell source law. A bath cannot also own an internal face
     /// between active bodies. Wall authored and boundary heat each enter once.
     ///
     /// Solid mass, geometry and occupancy stay fixed, including across a wall's
-    /// latent interval. No melting motion, thermal expansion, wall advection or
-    /// source-dependent contact-resistance iteration is inferred. The returned
-    /// walls are separate inventories; fluid solid-slot mass/h remain empty.
+    /// latent interval. Source contact tangents enter the same native Newton
+    /// system; external pressure and context stay with their original owner.
+    /// No melting motion, thermal expansion or wall advection is inferred.
+    /// Returned walls are separate inventories; fluid solid-slot mass/h remain empty.
     /// Workspace needs one entry per fluid cell plus explicitly supplied wall.
     /// The original clock, total heat budget and first-order heat/flow split
     /// remain authoritative. Empty solids/contacts preserve the existing path.
@@ -147,7 +147,7 @@ impl FlowField {
         conductivity: &PreparedPhaseConductivity<'_>,
         baths: &[ThermalVolumeBathFace],
         solids: &[ThermalVolumeSolidCell<'_, '_>],
-        contacts: &[FaceContactResistance],
+        contacts: &[ThermalVolumeContact<'_>],
         input: CoexistenceVolumeInput<'_>,
         controls: ConductiveThermalVolumeControls,
         solve: ImplicitThermalVolumeSolveControls,
@@ -203,7 +203,7 @@ impl FlowField {
         conductivity: &PreparedPhaseConductivity<'_>,
         baths: &[ThermalVolumeBathFace],
         solids: &[ThermalVolumeSolidCell<'_, '_>],
-        contacts: &[FaceContactResistance],
+        contacts: &[ThermalVolumeContact<'_>],
         input: ThermalVolumeMomentumInput<'_>,
         controls: ConductiveThermalVolumeMomentumControls,
         solve: ImplicitThermalVolumeSolveControls,
@@ -260,20 +260,17 @@ impl FlowField {
     }
 }
 
-#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub(super) fn prepare(
     domain: &VoxelDomain,
     solids: &[ThermalVolumeSolidCell<'_, '_>],
-    contacts: &[FaceContactResistance],
     samples: &mut [Option<PhaseConductivitySample>],
-    max_faces: usize,
     gate: &CancelGate,
-) -> Result<(Vec<Option<usize>>, BTreeMap<(usize, usize), f64>), ChtError> {
-    if solids.len() > domain.cell_count() || contacts.len() > max_faces {
-        return Err(refuse("finite-solid cell or contact work budget exhausted"));
+) -> Result<Vec<Option<usize>>, ChtError> {
+    if solids.len() > domain.cell_count() {
+        return Err(refuse("finite-solid cell work budget exhausted"));
     }
-    if solids.is_empty() && contacts.is_empty() {
-        return Ok((Vec::new(), BTreeMap::new()));
+    if solids.is_empty() {
+        return Ok(Vec::new());
     }
     let mut at = vec![None; domain.cell_count()];
     for (index, solid) in solids.iter().enumerate() {
@@ -299,27 +296,6 @@ pub(super) fn prepare(
                 .map_err(|e| refuse(e.to_string()))?,
         );
     }
-    let mut resistance = BTreeMap::new();
-    for (index, contact) in contacts.iter().enumerate() {
-        poll_every(gate, index)?;
-        let [a, b] = contact.cells;
-        let r = contact.resistance_m2_k_w;
-        if a >= domain.cell_count()
-            || b >= domain.cell_count()
-            || a == b
-            || !r.is_finite()
-            || r < 0.0
-            || samples[a].is_none()
-            || samples[b].is_none()
-            || (at[a].is_none() && at[b].is_none())
-            || !(0..6).any(|side| domain.neighbor(a, side) == Some(b))
-            || resistance.insert((a.min(b), a.max(b)), r).is_some()
-        {
-            return Err(refuse(
-                "finite-solid contacts need unique adjacent active faces and nonnegative resistance",
-            ));
-        }
-    }
     poll(gate)?;
-    Ok((at, resistance))
+    Ok(at)
 }

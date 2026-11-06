@@ -511,10 +511,10 @@ fn finite_wall_is_reheated_from_original_inventory_in_every_phase_drag_trial() {
         phase: curve.state_at_specific_enthalpy(116.5).unwrap(),
         net_enthalpy_increment_j: 0.0,
     }];
-    let contacts = [FaceContactResistance {
+    let contacts = [ThermalVolumeContact::Resistance(FaceContactResistance {
         cells: [0, 1],
         resistance_m2_k_w: 16.0 / 15.0,
-    }];
+    })];
     // At f_fluid*=3/4, k_f=5/16 and k_s=3/8. The actual half cells and
     // contact give R=8/5+4/3+16/15=4 K/W. At T_wall*=516, T_f*=500,
     // dt=1/4 the wall supplies exactly 1 J, so M_s*(116-116.5)=-1 J.

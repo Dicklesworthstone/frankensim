@@ -66,8 +66,8 @@ pub use phase_volume::{
     ImplicitConjugateThermalVolumeMomentumStep, ImplicitConjugateThermalVolumeReport,
     ImplicitConjugateThermalVolumeStep, ImplicitConjugateViscousThermalVolumeMomentumStep,
     ImplicitResistanceHeatWork, ImplicitThermalVolumeLinearControls,
-    ImplicitThermalVolumeSolveControls, ImplicitThermalVolumeWorkspace, ThermalVolumeSolidCell,
-    ThermalVolumeSolidEndpoint,
+    ImplicitThermalVolumeSolveControls, ImplicitThermalVolumeWorkspace, ThermalVolumeContact,
+    ThermalVolumeSolidCell, ThermalVolumeSolidEndpoint,
 };
 
 /// Mass-flow role of one domain face for flux construction and projection.

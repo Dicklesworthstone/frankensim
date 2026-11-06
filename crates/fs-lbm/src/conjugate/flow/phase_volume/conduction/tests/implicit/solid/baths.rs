@@ -38,10 +38,10 @@ fn finite_pcm_wall_baths_close_separate_wall_and_whole_system_energy() {
         phase: solid_curve.state_at_specific_enthalpy(48.0).unwrap(),
         net_enthalpy_increment_j: 5.0,
     }];
-    let contacts = [FaceContactResistance {
+    let contacts = [ThermalVolumeContact::Resistance(FaceContactResistance {
         cells: [0, 1],
         resistance_m2_k_w: 0.25,
-    }];
+    })];
     let baths = [
         bath(0, Face3::XMin, 314.0, 0.75),
         bath(1, Face3::XMax, 334.0, 0.5),

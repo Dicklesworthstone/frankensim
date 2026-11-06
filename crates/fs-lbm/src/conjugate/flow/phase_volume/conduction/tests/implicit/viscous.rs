@@ -280,10 +280,10 @@ fn molecular_heat_and_finite_wall_storage_close_before_the_one_fluid_route() {
         phase: caloric.state_at_specific_enthalpy(3.0).unwrap(),
         net_enthalpy_increment_j: 0.0,
     }];
-    let contacts = [FaceContactResistance {
+    let contacts = [ThermalVolumeContact::Resistance(FaceContactResistance {
         cells: [0, 1],
         resistance_m2_k_w: 0.5,
-    }];
+    })];
     let controls = super::super::momentum::coupled_controls(0.125);
     let result = field
         .advance_isotropic_implicit_conjugate_thermal_volume_momentum_with_viscosity_and_baths(

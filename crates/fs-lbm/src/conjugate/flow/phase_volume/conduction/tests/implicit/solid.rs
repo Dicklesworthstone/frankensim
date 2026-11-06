@@ -45,10 +45,10 @@ fn graded_fluid_pcm_contact_uses_both_sources_and_conserves_finite_storage() {
         phase: solid_curve.state_at_specific_enthalpy(25.0).unwrap(),
         net_enthalpy_increment_j: 0.0,
     }];
-    let contacts = [FaceContactResistance {
+    let contacts = [ThermalVolumeContact::Resistance(FaceContactResistance {
         cells: [0, 1],
         resistance_m2_k_w: 0.25,
-    }];
+    })];
     let gate = CancelGate::new_clock_free();
     let mut workspace = ImplicitThermalVolumeWorkspace::new(2).unwrap();
     let result = field
@@ -302,7 +302,7 @@ fn finite_wall_ownership_source_and_contact_refusals_are_atomic() {
     };
     let mut workspace = ImplicitThermalVolumeWorkspace::new(2).unwrap();
     let run = |walls: &[ThermalVolumeSolidCell<'_, '_>],
-               contacts: &[FaceContactResistance],
+               contacts: &[ThermalVolumeContact<'_>],
                baths: &[ThermalVolumeBathFace],
                workspace: &mut _,
                gate: &_| {
@@ -346,6 +346,7 @@ fn finite_wall_ownership_source_and_contact_refusals_are_atomic() {
             ..face
         }],
     ] {
+        let contacts: Vec<_> = contacts.into_iter().map(ThermalVolumeContact::from).collect();
         assert!(run(&[wall], &contacts, &[], &mut workspace, &gate).is_err());
     }
     // Both endpoints are active and workspace is sufficient: this refusal
@@ -356,7 +357,8 @@ fn finite_wall_ownership_source_and_contact_refusals_are_atomic() {
             &[FaceContactResistance {
                 cells: [0, 2],
                 ..face
-            }],
+            }
+            .into()],
             &[],
             &mut ImplicitThermalVolumeWorkspace::new(3).unwrap(),
             &gate,
@@ -403,10 +405,10 @@ fn finite_wall_ownership_source_and_contact_refusals_are_atomic() {
         Err(ChtError::Cancelled)
     ));
     let fresh = CancelGate::new_clock_free();
-    let accepted = run(&[wall], &[face], &[], &mut workspace, &fresh).unwrap();
+    let accepted = run(&[wall], &[face.into()], &[], &mut workspace, &fresh).unwrap();
     assert_eq!(
         accepted,
-        run(&[wall], &[face], &[], &mut workspace, &fresh).unwrap()
+        run(&[wall], &[face.into()], &[], &mut workspace, &fresh).unwrap()
     );
     assert_eq!(field, FlowField::quiescent(&domain));
     assert_eq!(wall.phase.specific_enthalpy_j_kg(), 50.0);

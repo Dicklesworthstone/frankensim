@@ -99,7 +99,7 @@ impl FlowField {
         conductivity: &PreparedPhaseConductivity<'_>,
         baths: &[ThermalVolumeBathFace],
         solids: &[ThermalVolumeSolidCell<'_, '_>],
-        contacts: &[crate::conjugate::FaceContactResistance],
+        contacts: &[ThermalVolumeContact<'_>],
         input: ThermalVolumeMomentumInput<'_>,
         viscosity: MaterialMomentumViscosityInput<'_>,
         controls: ConductiveThermalVolumeMomentumControls,

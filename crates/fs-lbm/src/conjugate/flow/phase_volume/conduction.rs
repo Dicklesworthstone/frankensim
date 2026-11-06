@@ -23,8 +23,8 @@ pub use implicit::{
     ImplicitConjugateThermalVolumeMomentumStep, ImplicitConjugateThermalVolumeReport,
     ImplicitConjugateThermalVolumeStep, ImplicitConjugateViscousThermalVolumeMomentumStep,
     ImplicitResistanceHeatWork, ImplicitThermalVolumeLinearControls,
-    ImplicitThermalVolumeSolveControls, ImplicitThermalVolumeWorkspace, ThermalVolumeSolidCell,
-    ThermalVolumeSolidEndpoint,
+    ImplicitThermalVolumeSolveControls, ImplicitThermalVolumeWorkspace, ThermalVolumeContact,
+    ThermalVolumeSolidCell, ThermalVolumeSolidEndpoint,
 };
 pub use momentum::{
     ConductiveResistiveThermalVolumeMomentumControls, ConductiveResistiveThermalVolumeMomentumStep,

@@ -23,6 +23,8 @@ pub use fs_conduction::enthalpy::conduction::implicit::{
 
 mod momentum;
 pub use momentum::ImplicitConductiveThermalVolumeMomentumStep;
+mod contact;
+pub use contact::ThermalVolumeContact;
 mod viscous;
 pub use viscous::{
     ImplicitConductiveViscousThermalVolumeMomentumStep,
@@ -217,7 +219,7 @@ impl FlowField {
         conductivity: &PreparedPhaseConductivity<'_>,
         baths: &[ThermalVolumeBathFace],
         solids: &[ThermalVolumeSolidCell<'_, '_>],
-        contacts: &[crate::conjugate::FaceContactResistance],
+        contacts: &[ThermalVolumeContact<'_>],
         input: CoexistenceVolumeInput<'_>,
         controls: ConductiveThermalVolumeControls,
         solve: ImplicitThermalVolumeSolveControls,
@@ -297,7 +299,7 @@ impl FlowField {
         conductivity: &PreparedPhaseConductivity<'_>,
         baths: &[ThermalVolumeBathFace],
         solids: &[ThermalVolumeSolidCell<'_, '_>],
-        contacts: &[crate::conjugate::FaceContactResistance],
+        contacts: &[ThermalVolumeContact<'_>],
         input: CoexistenceVolumeInput<'_>,
         controls: ConductiveThermalVolumeControls,
         solve: ImplicitThermalVolumeSolveControls,
@@ -318,11 +320,12 @@ impl FlowField {
             controls,
             gate,
         )?;
-        let (wall_at, contact) = solid::prepare(
+        let wall_at = solid::prepare(domain, solids, &mut samples, gate)?;
+        let contact = contact::PreparedContacts::new(
             domain,
-            solids,
             contacts,
-            &mut samples,
+            &samples,
+            &wall_at,
             controls.max_conductive_faces,
             gate,
         )?;
@@ -459,10 +462,7 @@ impl FlowField {
                         0.5 * domain.widths(c)[side / 2],
                         0.5 * domain.widths(other)[side / 2],
                     ],
-                    contact_resistance_m2_k_w: contact
-                        .get(&(c.min(other), c.max(other)))
-                        .copied()
-                        .unwrap_or(0.0),
+                    contact_resistance_m2_k_w: contact.fixed_resistance(c, other),
                 });
             }
         }
@@ -567,6 +567,12 @@ impl FlowField {
             || checkpoint(gate),
         )
         .map_err(|e| native_error(gate, e))?;
+        let contact_bindings = contact.bindings(&initial, gate)?;
+        if !contact_bindings.is_empty() {
+            graph = graph
+                .with_contacts(&initial, &contact_bindings, || checkpoint(gate))
+                .map_err(|e| native_error(gate, e))?;
+        }
         if !bath_sources.is_empty() {
             let mut bindings = Vec::with_capacity(bath_sources.len());
             for (index, (&cell, law)) in bath_sources.iter().enumerate() {
@@ -615,6 +621,19 @@ impl FlowField {
             let b = link.b.0 as usize;
             let ka = final_samples[a].unwrap().conductivity_w_m_k();
             let kb = final_samples[b].unwrap().conductivity_w_m_k();
+            let rc = if contact.has_sources() {
+                contact.resistance_at(
+                    a,
+                    b,
+                    [
+                        final_samples[a].unwrap().specific_enthalpy_j_kg(),
+                        final_samples[b].unwrap().specific_enthalpy_j_kg(),
+                    ],
+                    gate,
+                )?
+            } else {
+                links[index].contact_resistance_m2_k_w
+            };
             let q = if ka == 0.0 || kb == 0.0 {
                 0.0
             } else {
@@ -623,7 +642,6 @@ impl FlowField {
                 let rb = geometry.half_distances_m[1] / kb;
                 finite_positive("flow.implicit_half_resistance", ra)?;
                 finite_positive("flow.implicit_half_resistance", rb)?;
-                let rc = geometry.contact_resistance_m2_k_w;
                 let g = if rc == 0.0 {
                     let largest = ra.max(rb);
                     (link.area_m2 / largest) / (1.0 + ra.min(rb) / largest)
