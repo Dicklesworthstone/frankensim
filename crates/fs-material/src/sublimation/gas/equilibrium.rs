@@ -8,17 +8,24 @@
 //!
 //! Exposed SOLID area is explicitly authored. Liquid evaporation, nucleation,
 //! alloy mushy ranges, pressure-dependent melting and moving topology are not
-//! inferred. This scalar facade refuses an all-liquid endpoint; the shared
-//! chamber can report exact completion for a surrounding interface event owner.
+//! inferred. The default scalar facade requires a remaining solid interface.
+//! The opt-in [`boundary`] owner returns conservative complete melting and
+//! unconsumed time for an explicitly selected next interface owner.
 
-use super::{
-    ClosedGasParcel, GasSurfaceBinding, GasSurfaceCandidate, GasSurfaceError,
-    GasSurfaceSolve, SolidSurfaceState, SpeciesBoundaryRelativeTransfer, SublimationError,
-    SublimationLaw, ThermochemicalGasModel, admit_surface_inventory, finish_surface,
-    invalid, poll, positive, species_snapshot, validate_controls,
-};
+/// Conservative completion of the solid interface at its original fusion knot.
+pub mod boundary;
+
 use super::accommodation::{ReflectedHeatStep, ThermalAccommodation};
-use super::chamber::{GasChamberSurface, mixed::{self, CondensedInventory, SharpMeltingCaloric}};
+use super::chamber::{
+    GasChamberSurface,
+    mixed::{self, CondensedInventory, SharpMeltingCaloric},
+};
+use super::{
+    ClosedGasParcel, GasSpeciesSnapshot, GasSurfaceBinding, GasSurfaceCandidate, GasSurfaceError,
+    GasSurfaceSolve, PreparedSurface, SolidSurfaceState, SpeciesBoundaryRelativeTransfer,
+    SublimationError, SublimationLaw, ThermochemicalGasModel, admit_surface_inventory,
+    finish_surface, invalid, poll, positive, species_snapshot, validate_controls,
+};
 use crate::phase::{EquilibriumEnthalpyPhaseCurve, EquilibriumPhaseState};
 use std::collections::BTreeMap;
 
@@ -71,11 +78,22 @@ impl<'a> EquilibriumSublimation<'a> {
     /// Source-evaluated phase partition. This scalar lane requires a remaining
     /// solid seed; liquid mass is never silently available for sublimation.
     pub fn state(self, bulk: SolidSurfaceState) -> Result<PhaseInventoryState, GasSurfaceError> {
+        self.state_with_completion(bulk, false)
+    }
+
+    fn state_with_completion(
+        self,
+        bulk: SolidSurfaceState,
+        allow_completed: bool,
+    ) -> Result<PhaseInventoryState, GasSurfaceError> {
         if !bulk.area_m2.is_finite() || bulk.area_m2 < 0.0 {
             return Err(invalid("finite nonnegative exposed solid area required"));
         }
         let state = CondensedInventory::new(self.source, bulk)?;
-        if !positive(state.solid_mass_kg) {
+        let completed = allow_completed
+            && bulk.specific_enthalpy_j_kg == self.source.liquid_at_melting_h_j_kg()
+            && state.caloric.liquid_mass_fraction() == 1.0;
+        if !positive(state.solid_mass_kg) && !completed {
             return Err(invalid("solid phase is absent or its inventory is unrepresentable"));
         }
         Ok(PhaseInventoryState { equilibrium: state.caloric, mass_kg: bulk.mass_kg,
@@ -84,14 +102,34 @@ impl<'a> EquilibriumSublimation<'a> {
 
     /// Phase balances reconstructed from actual endpoints, not from gross rates.
     pub fn partition_step(
-        self, initial: SolidSurfaceState, final_bulk: SolidSurfaceState,
-        transferred_mass_kg: f64, mass_tolerance_kg: f64,
+        self,
+        initial: SolidSurfaceState,
+        final_bulk: SolidSurfaceState,
+        transferred_mass_kg: f64,
+        mass_tolerance_kg: f64,
+    ) -> Result<PhaseInventoryStep, GasSurfaceError> {
+        self.partition_step_with_completion(
+            initial,
+            final_bulk,
+            transferred_mass_kg,
+            mass_tolerance_kg,
+            false,
+        )
+    }
+
+    fn partition_step_with_completion(
+        self,
+        initial: SolidSurfaceState,
+        final_bulk: SolidSurfaceState,
+        transferred_mass_kg: f64,
+        mass_tolerance_kg: f64,
+        allow_completed: bool,
     ) -> Result<PhaseInventoryStep, GasSurfaceError> {
         if !positive(mass_tolerance_kg) || !transferred_mass_kg.is_finite() {
             return Err(invalid("finite transfer and positive partition mass tolerance required"));
         }
         let initial = self.state(initial)?;
-        let final_state = self.state(final_bulk)?;
+        let final_state = self.state_with_completion(final_bulk, allow_completed)?;
         let freezing_mass_kg = initial.liquid_mass_kg - final_state.liquid_mass_kg;
         let residual = (final_state.solid_mass_kg - initial.solid_mass_kg)
             + transferred_mass_kg - freezing_mass_kg;
@@ -141,9 +179,15 @@ impl<'curve, 'catalog> EquilibriumSurfaceCandidate<'curve, 'catalog> {
 /// All intermediate preparation is private; either both owners accept or neither.
 #[allow(clippy::too_many_arguments)]
 pub fn advance_equilibrium_surface<'curve, 'catalog>(
-    inventory: EquilibriumSublimation<'curve>, law: &dyn SublimationLaw, binding: &GasSurfaceBinding,
-    bulk: SolidSurfaceState, gas: &ClosedGasParcel, catalog: &'catalog ThermochemicalGasModel,
-    accommodation: Option<&ThermalAccommodation>, duration_s: f64, controls: GasSurfaceSolve,
+    inventory: EquilibriumSublimation<'curve>,
+    law: &dyn SublimationLaw,
+    binding: &GasSurfaceBinding,
+    bulk: SolidSurfaceState,
+    gas: &ClosedGasParcel,
+    catalog: &'catalog ThermochemicalGasModel,
+    accommodation: Option<&ThermalAccommodation>,
+    duration_s: f64,
+    controls: GasSurfaceSolve,
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<EquilibriumSurfaceCandidate<'curve, 'catalog>, GasSurfaceError> {
     poll(&mut cancelled)?;
@@ -162,6 +206,39 @@ pub fn advance_equilibrium_surface<'curve, 'catalog>(
     };
     let prepared = mixed::prepare(&surface, inventory.source, snapshot, catalog, controls,
         reflection.as_ref().map_or(0.0, |row| row.heat_into_gas_j))?;
+    finish_equilibrium_surface(
+        inventory,
+        binding,
+        bulk,
+        gas,
+        catalog,
+        gas_snapshot,
+        prepared,
+        reflection,
+        accommodation,
+        controls,
+        false,
+        cancelled,
+    )
+}
+
+// Scalar stepping and terminal melting publish through one original gas
+// reconstruction and the same phase, species and extensive conservation checks.
+#[allow(clippy::too_many_arguments)]
+fn finish_equilibrium_surface<'curve, 'catalog>(
+    inventory: EquilibriumSublimation<'curve>,
+    binding: &GasSurfaceBinding,
+    bulk: SolidSurfaceState,
+    gas: &ClosedGasParcel,
+    catalog: &'catalog ThermochemicalGasModel,
+    gas_snapshot: GasSpeciesSnapshot,
+    prepared: PreparedSurface,
+    reflection: Option<ReflectedHeatStep>,
+    accommodation: Option<&ThermalAccommodation>,
+    controls: GasSurfaceSolve,
+    allow_completed: bool,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<EquilibriumSurfaceCandidate<'curve, 'catalog>, GasSurfaceError> {
     let mut rows = BTreeMap::new();
     if let Some(reflection) = &reflection {
         for row in &reflection.species {
@@ -174,7 +251,7 @@ pub fn advance_equilibrium_surface<'curve, 'catalog>(
     let row = rows.entry(binding.species.clone()).or_insert_with(|| SpeciesBoundaryRelativeTransfer {
         species: binding.species.clone(), mass_into_gas_kg: 0.0, relative_energy_into_gas_j: 0.0,
     });
-    row.mass_into_gas_kg = snapshot.transferred_mass_kg;
+    row.mass_into_gas_kg = prepared.transferred_mass_kg;
     row.relative_energy_into_gas_j += prepared.phase_relative_energy_into_gas_j;
     let rows: Vec<_> = rows.into_values().collect();
     poll(&mut cancelled)?;
@@ -182,8 +259,13 @@ pub fn advance_equilibrium_surface<'curve, 'catalog>(
     if let Some(accommodation) = accommodation {
         accommodation.admit_temperatures(prepared.surface_temperature_k[1], endpoint.gas().state().state().temperature)?;
     }
-    let phase = inventory.partition_step(bulk, prepared.solid, prepared.transferred_mass_kg,
-        controls.gas.mass_tolerance_kg)?;
+    let phase = inventory.partition_step_with_completion(
+        bulk,
+        prepared.solid,
+        prepared.transferred_mass_kg,
+        controls.gas.mass_tolerance_kg,
+        allow_completed,
+    )?;
     let exchange = finish_surface(binding, bulk, gas, gas_snapshot, prepared, endpoint, controls, cancelled)?;
     Ok(EquilibriumSurfaceCandidate { inventory, exchange, phase, reflection })
 }

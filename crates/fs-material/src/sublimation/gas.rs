@@ -590,6 +590,26 @@ fn molecular_stream_energy(
     })
 }
 
+// Original condensed storage increment, evaluated relative to an authored h.
+// At the current bulk h this is the thermal update. At a terminal fusion h it
+// is the same balance's event denominator, without subtracting formation terms
+// or replaying a gas reconstruction.
+fn condensed_thermal_target(
+    snapshot: SurfaceSnapshot,
+    reference_enthalpy_j_kg: f64,
+    molecular_energy_difference_j_kg: f64,
+    reflected_heat_into_gas_j: f64,
+) -> f64 {
+    let caloric_change = snapshot.transferred_mass_kg
+        * (reference_enthalpy_j_kg
+            - snapshot.pure_solid_enthalpy_j_kg
+            - snapshot.latent_heat_j_kg
+            - snapshot.source_alignment_residual_j_kg
+            + 0.5 * snapshot.gas.specific_gas_constant * snapshot.temperature_k)
+        - snapshot.incoming_mass_kg * molecular_energy_difference_j_kg;
+    caloric_change - reflected_heat_into_gas_j
+}
+
 // Called only for finite, nonnegative gross transfers. Rounding the admitted
 // duration downward makes the returned bound conservative; zero means no
 // positive duration was representable under this original inventory budget.
@@ -665,22 +685,37 @@ fn prepare_surface_with_endpoint(
     reflected_heat_into_gas_j: f64,
     endpoint: impl FnOnce(f64) -> Result<(f64, SublimationProperties), GasSurfaceError>,
 ) -> Result<PreparedSurface, GasSurfaceError> {
+    prepare_surface_with_boundary(
+        binding,
+        snapshot,
+        controls,
+        reflected_heat_into_gas_j,
+        None,
+        endpoint,
+    )
+}
+
+// A terminal interface event may select the exact original fusion knot. Its
+// actual extensive energy defect still passes the same storage budget below;
+// all ordinary callers retain the original computed endpoint bit for bit.
+fn prepare_surface_with_boundary(
+    binding: &GasSurfaceBinding,
+    snapshot: SurfaceSnapshot,
+    controls: GasSurfaceSolve,
+    reflected_heat_into_gas_j: f64,
+    terminal_enthalpy_j_kg: Option<f64>,
+    endpoint: impl FnOnce(f64) -> Result<(f64, SublimationProperties), GasSurfaceError>,
+) -> Result<PreparedSurface, GasSurfaceError> {
     let energy = molecular_stream_energy(snapshot, reflected_heat_into_gas_j)?;
     let SurfaceSnapshot {
         solid,
-        stationary_equilibrium: _,
-        available_solid_mass_kg: _,
-        gas,
         temperature_k,
-        latent_heat_j_kg,
-        source_alignment_residual_j_kg,
-        pure_solid_enthalpy_j_kg,
-        partial_enthalpy_change_j_kg: _,
         outgoing_mass_kg,
         incoming_mass_kg,
         transferred_mass_kg,
         outgoing_specific_energy_j_kg,
         incoming_specific_energy_j_kg,
+        ..
     } = snapshot;
     let next_mass = solid.mass_kg - transferred_mass_kg;
     let mass_residual = (next_mass - solid.mass_kg) + transferred_mass_kg;
@@ -696,15 +731,17 @@ fn prepare_surface_with_endpoint(
     let offset = binding.solid_enthalpy_offset_j_kg;
     // The phase law supplies the already-admitted latent anchor. In a mixed
     // store only bulk-minus-pure-solid h is additional storage (fusion once).
-    let caloric_change = transferred_mass_kg
-        * (solid.specific_enthalpy_j_kg - pure_solid_enthalpy_j_kg
-            - latent_heat_j_kg - source_alignment_residual_j_kg
-            + 0.5 * gas.specific_gas_constant * temperature_k)
-        - incoming_mass_kg * energy.difference_j_kg;
-    let thermal_target = caloric_change - reflected_heat_into_gas_j;
+    let thermal_target = condensed_thermal_target(
+        snapshot,
+        solid.specific_enthalpy_j_kg,
+        energy.difference_j_kg,
+        reflected_heat_into_gas_j,
+    );
     let specific_change = thermal_target / next_mass;
-    let next_enthalpy = solid.specific_enthalpy_j_kg + specific_change;
+    let computed_enthalpy = solid.specific_enthalpy_j_kg + specific_change;
+    let next_enthalpy = terminal_enthalpy_j_kg.unwrap_or(computed_enthalpy);
     if !specific_change.is_finite()
+        || !computed_enthalpy.is_finite()
         || !next_enthalpy.is_finite()
         || (specific_change != 0.0 && next_enthalpy == solid.specific_enthalpy_j_kg)
     {

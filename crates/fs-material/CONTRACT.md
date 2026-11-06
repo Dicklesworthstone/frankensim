@@ -7944,6 +7944,28 @@ regressions cover analytic deposition/cooling/fusion balance, source-datum
 invariance, heat-contact freezing, fusion-onset crossing, source mismatch,
 complete melting, births, late cancellation and adaptive temporal refinement.
 
+### Conservative melting completion at an exposed solid interface
+
+`sublimation::gas::equilibrium::boundary::advance_to_melting` returns the original
+fully liquid fusion endpoint when molecular exchange and optional reflected gas
+heat complete melting. It reports consumed and unconsumed physical time, the
+same condensed/gas endpoint and its actual phase conversion. The event equation
+reuses the original source-relative extensive storage increment, including both
+gross molecular streams, the original latent alignment and reflected heat.
+Accepted-duration streams and heat pass the original initial-donor gates before
+one shared gas reconstruction. An exact source-knot endpoint must fit one
+sum-of-absolute condensed/gas energy allowance; no latent inventory is discarded.
+Deposited mass may also melt, so the converted solid mass can exceed the initial
+solid inventory without treating gas deposition as fusion.
+
+Ordinary scalar and timeline entry points retain their positive-solid admission.
+The completion API supplies an explicit handoff state; it does not select liquid
+coverage or replace molecular transport with continuum film transport. A caller
+continuing through a liquid owner must retain the original bulk chart, species
+and caloric-datum offset. Any external heat split must be retried as a complete
+interval at an earlier event. Frozen-rate event timing still requires physical
+timestep refinement and does not establish moving-interface geometry.
+
 ### State-dependent heat transport during deposition
 
 `sublimation::gas::timeline::observed` supplies pure-solid and sharp-equilibrium

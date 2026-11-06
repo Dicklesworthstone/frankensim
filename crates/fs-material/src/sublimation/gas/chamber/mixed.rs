@@ -16,16 +16,15 @@
 //! gas-volume assumptions still apply. Caloric/source admission is not phase-
 //! diagram validation: the caller must admit the solid/vapor coexistence regime.
 
-use std::collections::BTreeMap;
-use crate::phase::{EquilibriumEnthalpyPhaseCurve, EquilibriumPhaseState};
-use super::{GasChamberCandidate, GasChamberSolve, GasChamberSurface};
-use super::super::{
-    ClosedGasParcel, GasSpeciesSnapshot, GasSurfaceError, GasSurfaceSolve,
-    PreparedSurface, SolidSurfaceState, SurfaceSnapshot, ThermochemicalGasModel,
-    compatibility, invalid, phase_at, poll, positive, prepare_surface_with_endpoint,
-    snapshot_surface,
-};
 use super::super::accommodation::{ReflectedHeatStep, ThermalAccommodation};
+use super::super::{
+    ClosedGasParcel, GasSpeciesSnapshot, GasSurfaceError, GasSurfaceSolve, PreparedSurface,
+    SolidSurfaceState, SurfaceSnapshot, ThermochemicalGasModel, compatibility, invalid, phase_at,
+    poll, positive, prepare_surface_with_boundary, snapshot_surface,
+};
+use super::{GasChamberCandidate, GasChamberSolve, GasChamberSurface};
+use crate::phase::{EquilibriumEnthalpyPhaseCurve, EquilibriumPhaseState};
+use std::collections::BTreeMap;
 
 /// Borrowed original caloric source, admitted once without copying its knots.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -88,6 +87,10 @@ impl<'a> SharpMeltingCaloric<'a> {
     #[must_use]
     pub fn fusion_latent_heat_j_kg(&self) -> f64 {
         self.liquid_at_melting_h_j_kg - self.solid_at_melting_h_j_kg
+    }
+
+    pub(in crate::sublimation::gas) const fn liquid_at_melting_h_j_kg(&self) -> f64 {
+        self.liquid_at_melting_h_j_kg
     }
 
     /// Original-source state, including its identity. Exact all-liquid completion
@@ -206,26 +209,65 @@ pub(in crate::sublimation::gas) fn snapshot(
 // One extensive update shared with the pure-solid owner. Only the caloric
 // endpoint admission differs; no duplicate storage or fusion-energy arithmetic.
 pub(in crate::sublimation::gas) fn prepare(
-    surface: &GasChamberSurface<'_>, caloric: SharpMeltingCaloric<'_>, mut snapshot: SurfaceSnapshot,
-    catalog: &ThermochemicalGasModel, controls: GasSurfaceSolve, reflected_heat: f64,
+    surface: &GasChamberSurface<'_>,
+    caloric: SharpMeltingCaloric<'_>,
+    snapshot: SurfaceSnapshot,
+    catalog: &ThermochemicalGasModel,
+    controls: GasSurfaceSolve,
+    reflected_heat: f64,
+) -> Result<PreparedSurface, GasSurfaceError> {
+    prepare_with_boundary(
+        surface,
+        caloric,
+        snapshot,
+        catalog,
+        controls,
+        reflected_heat,
+        None,
+    )
+}
+
+pub(in crate::sublimation::gas) fn prepare_with_boundary(
+    surface: &GasChamberSurface<'_>,
+    caloric: SharpMeltingCaloric<'_>,
+    mut snapshot: SurfaceSnapshot,
+    catalog: &ThermochemicalGasModel,
+    controls: GasSurfaceSolve,
+    reflected_heat: f64,
+    terminal_enthalpy_j_kg: Option<f64>,
 ) -> Result<PreparedSurface, GasSurfaceError> {
     // Retain snapshot.pure_solid_enthalpy_j_kg and its latent anchor: the shared
     // update uses bulk-minus-pure h so fusion storage enters exactly once.
     snapshot.solid = surface.solid;
-    prepare_surface_with_endpoint(surface.binding, snapshot, controls, reflected_heat, |h| {
-        let final_state = caloric.resolve(h)?;
-        let temperature = final_state.temperature_k();
-        if (surface.temperature_from_enthalpy)(h)? != temperature {
-            return Err(invalid("endpoint callback disagrees with the original phase chart"));
-        }
-        let phase = phase_at(surface.law, temperature, snapshot.gas.molar_mass)?;
-        caloric.admit_density(final_state, phase.solid_density_kg_m3)?;
-        let vapor_h = catalog.species_specific_enthalpy_j_kg(&surface.binding.species, temperature)?;
-        compatibility(vapor_h, caloric.solid_enthalpy(final_state),
-            surface.binding.solid_enthalpy_offset_j_kg, phase.latent_heat_j_kg,
-            temperature, controls.latent_compatibility_tolerance_j_kg)?;
-        Ok((temperature, phase))
-    })
+    prepare_surface_with_boundary(
+        surface.binding,
+        snapshot,
+        controls,
+        reflected_heat,
+        terminal_enthalpy_j_kg,
+        |h| {
+            let final_state = caloric.resolve(h)?;
+            let temperature = final_state.temperature_k();
+            if (surface.temperature_from_enthalpy)(h)? != temperature {
+                return Err(invalid(
+                    "endpoint callback disagrees with the original phase chart",
+                ));
+            }
+            let phase = phase_at(surface.law, temperature, snapshot.gas.molar_mass)?;
+            caloric.admit_density(final_state, phase.solid_density_kg_m3)?;
+            let vapor_h =
+                catalog.species_specific_enthalpy_j_kg(&surface.binding.species, temperature)?;
+            compatibility(
+                vapor_h,
+                caloric.solid_enthalpy(final_state),
+                surface.binding.solid_enthalpy_offset_j_kg,
+                phase.latent_heat_j_kg,
+                temperature,
+                controls.latent_compatibility_tolerance_j_kg,
+            )?;
+            Ok((temperature, phase))
+        },
+    )
 }
 
 pub(in crate::sublimation::gas) fn phase_reports(
