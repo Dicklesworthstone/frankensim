@@ -7,27 +7,29 @@ use fs_material::thermal::conduction::phase::PhaseConductivitySample;
 use super::*;
 use crate::d3q19::Face3;
 
-/// A prescribed thermal bath covering one complete fluid-domain boundary face.
+/// A prescribed thermal bath covering one complete exposed thermal-cell face.
 ///
 /// The original Cartesian geometry owns the area and centre-to-surface distance
-/// (half the local width). The external resistance is additional to that fluid
-/// half cell. It may represent a declared wall layer, contact or heat-transfer
-/// film, without adding wall storage or substituting its material for the fluid.
-/// The face may adjoin the grid exterior or a fixed-solid voxel. An embedded
-/// solid supplies geometry only; its width and material do not enter this law.
+/// (half the local width). The external resistance is additional to that cell's
+/// own source-conducting half cell. It may represent a declared layer, contact
+/// or heat-transfer film, without adding storage or borrowing another material.
+/// Fluid-only entries admit fluid receivers adjoining the exterior or an
+/// unbound fixed-solid voxel. Implicit conjugate entries also admit explicitly
+/// bound finite solids. A bath never replaces a face between two active cells.
 /// Each `(cell, face)` may occur once; unlisted faces remain insulated.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ThermalVolumeBathFace {
-    /// Original fluid-cell index; fixed-solid cells cannot receive this law.
+    /// Original fluid-cell index, or explicitly bound finite-solid cell in an
+    /// implicit conjugate entry. An unbound fixed-solid receiver is refused.
     pub cell: usize,
-    /// Side adjoining the exterior or fixed solid, in the global Cartesian frame.
+    /// Exposed side in the global Cartesian frame.
     pub face: Face3,
     /// Held external absolute temperature [K], finite and strictly positive.
     /// This is not an incoming-fluid enthalpy or a finite bath's state.
     pub temperature_k: f64,
     /// Finite nonnegative resistance per area [m² K/W]. Zero imposes the
     /// temperature at the actual surface; positive values act in series with
-    /// the original fluid half cell. Omit the face to prescribe insulation.
+    /// the receiving cell's half cell. Omit the face to prescribe insulation.
     pub resistance_m2_k_w: f64,
 }
 
@@ -35,6 +37,24 @@ pub(super) fn prepare<'a>(
     domain: &VoxelDomain,
     baths: &'a [ThermalVolumeBathFace],
     maximum_faces: usize,
+    gate: &CancelGate,
+) -> Result<BTreeMap<(usize, usize), &'a ThermalVolumeBathFace>, ChtError> {
+    prepare_for_active_cells(
+        domain,
+        baths,
+        maximum_faces,
+        |cell| domain.is_fluid(cell),
+        gate,
+    )
+}
+
+/// Shared exclusive face admission. The caller owns which thermal inventories
+/// exist; geometry alone never makes an unbound solid a bath receiver.
+pub(super) fn prepare_for_active_cells<'a>(
+    domain: &VoxelDomain,
+    baths: &'a [ThermalVolumeBathFace],
+    maximum_faces: usize,
+    active: impl Fn(usize) -> bool,
     gate: &CancelGate,
 ) -> Result<BTreeMap<(usize, usize), &'a ThermalVolumeBathFace>, ChtError> {
     if baths.len() > maximum_faces {
@@ -47,12 +67,12 @@ pub(super) fn prepare<'a>(
         poll_every(gate, index)?;
         let side = bath.face as usize;
         if bath.cell >= domain.cell_count()
-            || !domain.is_fluid(bath.cell)
-            || domain
-                .neighbor(bath.cell, side)
-                .is_some_and(|neighbor| domain.is_fluid(neighbor))
+            || !active(bath.cell)
+            || domain.neighbor(bath.cell, side).is_some_and(&active)
         {
-            return Err(refuse("thermal bath requires a boundary fluid-cell face"));
+            return Err(refuse(
+                "thermal bath requires a boundary fluid-cell face or an exposed bound finite-solid face",
+            ));
         }
         finite_positive("flow.conductive_bath_temperature", bath.temperature_k)?;
         if !bath.resistance_m2_k_w.is_finite() || bath.resistance_m2_k_w < 0.0 {
@@ -61,7 +81,7 @@ pub(super) fn prepare<'a>(
             ));
         }
         if ordered.insert((bath.cell, side), bath).is_some() {
-            return Err(refuse("duplicate thermal bath on one fluid boundary face"));
+            return Err(refuse("duplicate thermal bath on one boundary face"));
         }
     }
     Ok(ordered)

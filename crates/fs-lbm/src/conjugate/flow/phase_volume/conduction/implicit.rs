@@ -103,6 +103,8 @@ struct ImplicitAdvance<T> {
     solid_authored_heat_j: f64,
     solid_enthalpy_change_j: f64,
     solid_to_fluid_heat_j: f64,
+    solid_boundary_heat_j: f64,
+    absolute_solid_boundary_heat_j: f64,
 }
 
 /// Original-state heat interval, before any pressure/material-flow trial.
@@ -114,6 +116,8 @@ struct PreparedImplicitHeat {
     solid_authored_heat_j: f64,
     solid_enthalpy_change_j: f64,
     solid_to_fluid_heat_j: f64,
+    solid_boundary_heat_j: f64,
+    absolute_solid_boundary_heat_j: f64,
 }
 
 impl FlowField {
@@ -230,6 +234,8 @@ impl FlowField {
             solid_authored_heat_j,
             solid_enthalpy_change_j,
             solid_to_fluid_heat_j,
+            solid_boundary_heat_j,
+            absolute_solid_boundary_heat_j,
         } = self.prepare_implicit_conjugate_heat(
             domain,
             conductivity,
@@ -279,6 +285,8 @@ impl FlowField {
             solid_authored_heat_j,
             solid_enthalpy_change_j,
             solid_to_fluid_heat_j,
+            solid_boundary_heat_j,
+            absolute_solid_boundary_heat_j,
         })
     }
 
@@ -296,17 +304,39 @@ impl FlowField {
         workspace: &mut ImplicitThermalVolumeWorkspace,
         gate: &CancelGate,
     ) -> Result<PreparedImplicitHeat, ChtError> {
-        let PreparedInput { mut samples, baths } =
-            prepare_input(domain, conductivity, baths, input, controls, gate)?;
+        // Retain the original fluid-only admission order and arithmetic when
+        // no wall inventory is bound. Conjugate baths need the complete active
+        // set so that neither an inactive receiver nor an internal face passes.
+        let PreparedInput {
+            mut samples,
+            baths: fluid_baths,
+        } = prepare_input(
+            domain,
+            conductivity,
+            if solids.is_empty() { baths } else { &[] },
+            input,
+            controls,
+            gate,
+        )?;
         let (wall_at, contact) = solid::prepare(
             domain,
             solids,
             contacts,
-            &baths,
             &mut samples,
             controls.max_conductive_faces,
             gate,
         )?;
+        let baths = if solids.is_empty() {
+            fluid_baths
+        } else {
+            boundary::prepare_for_active_cells(
+                domain,
+                baths,
+                controls.max_conductive_faces,
+                |cell| samples[cell].is_some(),
+                gate,
+            )?
+        };
         let wall = |cell: usize| wall_at.get(cell).copied().flatten().map(|i| &solids[i]);
         let source = |cell| wall(cell).map_or(conductivity, |s| s.conductivity);
         let mass = |cell| wall(cell).map_or(input.mass_kg[cell], |s| s.mass_kg);
@@ -315,21 +345,25 @@ impl FlowField {
                 s.net_enthalpy_increment_j
             })
         };
-        // Pool source identities once; a large wall with one material adds one
-        // native material binding, rather than one binding per voxel.
+        // Pool a source only when it retains the SAME original caloric object:
+        // native feedback admission checks that borrowed law by address. Equal
+        // content in separately allocated curves must keep separate bindings.
+        // Pointers are lookup keys only; material IDs follow input order and
+        // neither source identities nor returned diagnostics contain addresses.
+        let material_key = |law: &PreparedPhaseConductivity<'_>| {
+            (law.identity(), core::ptr::from_ref(law.caloric_curve()))
+        };
         let mut sources = Vec::new();
         let mut material_ids = BTreeMap::new();
         if !solids.is_empty() {
             sources.push(conductivity);
-            material_ids.insert(conductivity.identity(), MaterialId(0));
+            material_ids.insert(material_key(conductivity), MaterialId(0));
         }
         for (index, solid) in solids.iter().enumerate() {
             poll_every(gate, index)?;
-            if !material_ids.contains_key(&solid.conductivity.identity()) {
-                material_ids.insert(
-                    solid.conductivity.identity(),
-                    MaterialId(sources.len() as u64),
-                );
+            let key = material_key(solid.conductivity);
+            if !material_ids.contains_key(&key) {
+                material_ids.insert(key, MaterialId(sources.len() as u64));
                 sources.push(solid.conductivity);
             }
         }
@@ -360,7 +394,7 @@ impl FlowField {
                     material_id: if solids.is_empty() {
                         MaterialId(0)
                     } else {
-                        material_ids[&source(c).identity()]
+                        material_ids[&material_key(source(c))]
                     },
                     body_id: 0,
                     segment_id: c as u64,
@@ -509,7 +543,7 @@ impl FlowField {
             bath_sources
                 .entry(cell)
                 .or_insert_with(|| BathSource {
-                    conductivity,
+                    conductivity: source(cell),
                     faces: Vec::new(),
                 })
                 .faces
@@ -534,10 +568,11 @@ impl FlowField {
         )
         .map_err(|e| native_error(gate, e))?;
         if !bath_sources.is_empty() {
-            let bindings: Vec<_> = bath_sources
-                .iter()
-                .map(|(&cell, law)| (CellId(cell as u64), law as &dyn ImplicitHeatSourceLaw))
-                .collect();
+            let mut bindings = Vec::with_capacity(bath_sources.len());
+            for (index, (&cell, law)) in bath_sources.iter().enumerate() {
+                poll_every(gate, index)?;
+                bindings.push((CellId(cell as u64), law as &dyn ImplicitHeatSourceLaw));
+            }
             graph = graph
                 .with_heat_sources(&initial, &bindings, || checkpoint(gate))
                 .map_err(|e| native_error(gate, e))?;
@@ -618,6 +653,8 @@ impl FlowField {
         }
         let mut boundary_heat = [Sum::default(); 6];
         let mut absolute_boundary_heat = Sum::default();
+        let mut solid_boundary_heat = Sum::default();
+        let mut absolute_solid_boundary_heat = Sum::default();
         for (&cell, law) in &bath_sources {
             poll(gate)?;
             let sample = final_samples[cell].unwrap();
@@ -636,6 +673,10 @@ impl FlowField {
                 assembly.add(residual.abs());
                 boundary_heat[face.side].add(heat);
                 absolute_boundary_heat.add(heat.abs());
+                if wall(cell).is_some() {
+                    solid_boundary_heat.add(heat);
+                    absolute_solid_boundary_heat.add(heat.abs());
+                }
             }
         }
         let mut combined = vec![0.0; n];
@@ -702,6 +743,8 @@ impl FlowField {
             solid_authored.value,
             solid_change.value,
             solid_to_fluid.value,
+            solid_boundary_heat.value,
+            absolute_solid_boundary_heat.value,
         ] {
             finite("flow.implicit_finite_solid_energy", value)?;
         }
@@ -722,6 +765,8 @@ impl FlowField {
             solid_authored_heat_j: solid_authored.value,
             solid_enthalpy_change_j: solid_change.value,
             solid_to_fluid_heat_j: solid_to_fluid.value,
+            solid_boundary_heat_j: solid_boundary_heat.value,
+            absolute_solid_boundary_heat_j: absolute_solid_boundary_heat.value,
             report: ImplicitConductiveThermalVolumeReport {
                 conductivity_source_identity: conductivity.identity(),
                 conductive_faces: links.len(),

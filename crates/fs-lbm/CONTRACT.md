@@ -13468,17 +13468,19 @@ the original fluid inventory. Every selected fixed-solid voxel retains its
 actual held mass, original enthalpy/phase state, authored heat and borrowed
 `PreparedPhaseConductivity`. Its own caloric and k(T,f) laws, including analytic
 enthalpy tangents and latent plateaus, participate in the SAME sparse implicit
-graph as the fluid. Repeated material identities share a native law binding.
+graph as the fluid. Repeated source identities borrowing the same original
+caloric object share a native law binding; separately allocated caloric curves
+retain distinct bindings even when their immutable contents are identical.
 
 Every face between participating fluid/solid or solid/solid cells uses the
 original area and both actual half distances. Optional `FaceContactResistance`
 adds an explicit nonnegative area-specific resistance in series; unlisted
 active interfaces are perfect contacts. Duplicate/reversed, nonadjacent,
-inactive and fluid-only contact assignments refuse. An existing prescribed
-fluid-face bath cannot also own a face coupled to finite solid storage.
-Unselected fixed solids and exposed solid surfaces remain insulated; authored
-solid heat provides explicit external input. No source-contact resistance law
-or additional contact iteration is inferred.
+inactive and fluid-only contact assignments refuse. A prescribed bath cannot
+also own any face between active thermal cells. Unselected fixed solids and
+unselected exposed faces remain insulated; authored solid heat and prescribed
+exposed-face baths provide explicit external input. No source-contact resistance
+law or additional contact iteration is inferred.
 
 One backward-Euler interval evaluates both temperatures and source conductivities
 at the coupled heat endpoint. Independently reconstructed face heat has opposite
@@ -13486,7 +13488,8 @@ signs in the two receiving inventories. Local storage/physical-heat mismatches,
 addition roundoff and whole-graph balance share the original enthalpy-defect
 budget with subsequent fluid transport. `ImplicitConjugateThermalVolumeReport`
 retains the native whole-graph account, authored solid heat, actual solid energy
-change and signed solid-to-fluid transfer. Solid endpoint states and source
+change, prescribed solid-boundary heat and signed solid-to-fluid transfer.
+Solid endpoint states and source
 identities are returned separately, in increasing voxel order. They never
 occupy the fluid mass, phase, heat-source or material-advection arrays.
 
@@ -13539,3 +13542,36 @@ fluid/finite-wall phase-drag case with Q_wall=1 J and Q_drag=1/27 J. Nonzero
 fluid throughflow leaves the manufactured caloric endpoint unchanged, while
 solid transport stays absent. The latter requires multiple coupling trials
 and checks late cancellation followed by exact retry from original wall state.
+
+### Prescribed heating and cooling of finite solid walls
+
+`ThermalVolumeBathFace` can select an exposed face of an explicitly bound
+`ThermalVolumeSolidCell` in every implicit conjugate entry: thermal-volume,
+native momentum, molecular viscosity and phase resistance. The shared admission
+owner uses the actual participating thermal cells; an unbound solid receiver,
+duplicate face or bath facing any other active cell refuses. Original fluid-only
+entries retain their fluid-only receiver rule and empty-wall numerical path.
+
+Each bath uses the RECEIVING cell's original k(T,f), caloric law and analytic
+enthalpy tangent. Its conductance is `A/(d/k + R)` with actual face area and
+receiving half width, including on graded walls. Distinct hot and cold faces
+retain their individual temperatures and series resistances. Their powers and
+`d[G(h)(Tb-T(h))]/dh` enter the same sparse endpoint residual/Jacobian as bulk
+conduction and finite storage. There is no additional timestep or thermal solve.
+
+`solid_boundary_heat_j` is signed inward heat on finite solids;
+`absolute_solid_boundary_heat_j` is the non-cancelling sum of its face magnitudes.
+Both are subaccounts of the existing total boundary report, never extra deposits.
+Solid storage closes authored solid heat plus solid boundary heat minus
+`solid_to_fluid_heat_j`, within the shared energy-defect budget. Wall endpoint
+conductive increments already include their bath heat. Each coupled resistance
+trial resets original wall history and retains only its accepted boundary account.
+Numerical damping, pressure work, mass advection and momentum ownership are unchanged.
+
+The focused regression source independently manufactures a graded latent wall
+with k(f), finite contact resistance, simultaneous +12/-3 J wall baths and a
+separate +1 J fluid bath. Its fluid/wall storage changes are 7/8 J with 5 J
+authored wall heat. Native momentum composition, original source bounds,
+internal-face/duplicate/unbound refusal and exact retry supplement this balance.
+An equal-content/distinct-caloric-object case also closes an independent
+two-cell balance while preserving the native bath-law identity requirement.

@@ -26,6 +26,8 @@ pub struct ThermalVolumeSolidEndpoint {
     pub mass_kg: f64,
     pub phase: EquilibriumPhaseState,
     pub conductivity_source_identity: ContentHash,
+    /// Net physical heat from adjacent cells and prescribed baths, excluding
+    /// this wall cell's independently authored caloric increment [J].
     pub conductive_enthalpy_increment_j: f64,
 }
 
@@ -39,6 +41,12 @@ pub struct ImplicitConjugateThermalVolumeReport {
     pub solid_enthalpy_change_j: f64,
     /// Signed physical interface heat, positive from finite solids into fluid.
     pub solid_to_fluid_heat_j: f64,
+    /// Signed inward bath heat on explicitly bound solids [J], already included
+    /// in `conduction.boundary_heat_j`. Solid storage obeys authored heat plus
+    /// this boundary heat minus `solid_to_fluid_heat_j`, within the shared gate.
+    pub solid_boundary_heat_j: f64,
+    /// Sum of absolute solid-bath face heats, without cancellation [J].
+    pub absolute_solid_boundary_heat_j: f64,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -76,6 +84,8 @@ impl<T> ImplicitAdvance<T> {
                 solid_authored_heat_j: self.solid_authored_heat_j,
                 solid_enthalpy_change_j: self.solid_enthalpy_change_j,
                 solid_to_fluid_heat_j: self.solid_to_fluid_heat_j,
+                solid_boundary_heat_j: self.solid_boundary_heat_j,
+                absolute_solid_boundary_heat_j: self.absolute_solid_boundary_heat_j,
             },
         )
     }
@@ -99,6 +109,8 @@ impl PreparedImplicitHeat {
                 solid_authored_heat_j: self.solid_authored_heat_j,
                 solid_enthalpy_change_j: self.solid_enthalpy_change_j,
                 solid_to_fluid_heat_j: self.solid_to_fluid_heat_j,
+                solid_boundary_heat_j: self.solid_boundary_heat_j,
+                absolute_solid_boundary_heat_j: self.absolute_solid_boundary_heat_j,
             },
         )
     }
@@ -111,9 +123,10 @@ impl FlowField {
     /// Adjacent participating voxels conduct through both actual half cells
     /// and any explicitly supplied constant face resistance. Each cell retains
     /// its own source k(T,f), analytic tangent and original latent/sensible law.
-    /// Unlisted fixed solids and exposed wall faces are insulated. Existing
-    /// prescribed baths apply to fluid faces only and cannot also own a finite
-    /// solid contact. Wall authored heat is integrated once with fluid heat.
+    /// Unlisted fixed solids and unselected exposed faces are insulated. Baths
+    /// may heat or cool either fluid or explicitly bound solid cells through
+    /// their own half-cell source law. A bath cannot also own an internal face
+    /// between active bodies. Wall authored and boundary heat each enter once.
     ///
     /// Solid mass, geometry and occupancy stay fixed, including across a wall's
     /// latent interval. No melting motion, thermal expansion, wall advection or
@@ -252,7 +265,6 @@ pub(super) fn prepare(
     domain: &VoxelDomain,
     solids: &[ThermalVolumeSolidCell<'_, '_>],
     contacts: &[FaceContactResistance],
-    baths: &BTreeMap<(usize, usize), &ThermalVolumeBathFace>,
     samples: &mut [Option<PhaseConductivitySample>],
     max_faces: usize,
     gate: &CancelGate,
@@ -286,17 +298,6 @@ pub(super) fn prepare(
                 .state_at_specific_enthalpy(solid.phase.specific_enthalpy_j_kg())
                 .map_err(|e| refuse(e.to_string()))?,
         );
-    }
-    for &(cell, side) in baths.keys() {
-        poll(gate)?;
-        if domain
-            .neighbor(cell, side)
-            .is_some_and(|other| at[other].is_some())
-        {
-            return Err(refuse(
-                "one thermal face cannot own both a bath and a finite solid",
-            ));
-        }
     }
     let mut resistance = BTreeMap::new();
     for (index, contact) in contacts.iter().enumerate() {

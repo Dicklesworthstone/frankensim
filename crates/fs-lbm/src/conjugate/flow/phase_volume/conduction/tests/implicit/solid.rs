@@ -1,5 +1,7 @@
 //! Finite-wall calorimetry, native momentum and exclusive contact ownership.
 
+mod baths;
+
 use super::*;
 use crate::conjugate::FaceContactResistance;
 
