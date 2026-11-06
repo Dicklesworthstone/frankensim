@@ -56,6 +56,9 @@ pub(crate) mod equilibrium;
 pub mod pointwise;
 /// Local P1 emission coupled to reflected, patch-uniform irradiation.
 pub mod pointwise_enclosure;
+/// Source-bearing passive reciprocal optics for two-sided diffuse sheets.
+pub mod sheet;
+pub use sheet::{ReciprocalSheetOptics, SheetExchange};
 /// Explicit spectral surface data, shared Planck bands and spatial controls.
 pub mod spectral;
 pub use spectral::{

@@ -4879,3 +4879,27 @@ parallel-patch equations, open exchange with actual stage bath temperatures,
 and material/latent endpoint accounts with independent simplex and radiosity
 moments. Native energy trajectories, entropy signs, original storage, adaptive
 accepted-pair parity and independent bath heat are retained.
+
+## Reciprocal transmitting thermal sheets
+
+`radiation::sheet::ReciprocalSheetOptics` admits source-bearing, passive
+two-sided diffuse optical partitions. Each side may have different absorptance
+and reflectance; one reciprocal transmittance couples the two sides. Both
+faces must share one temperature and the same exterior radiometric / refractive
+index convention. Consumers bind equal physical face areas. Kirchhoff emission
+uses each side's own absorptance; visible alpha or gray emissivity does not
+silently become spectral data.
+
+Gray and finite-band evaluations report incident, absorbed, reflected,
+transmitted, emitted and outgoing power per area. Material heat is explicitly
+absorbed minus emitted. A single face's net incoming-minus-outgoing optical
+power includes transmission and must not be deposited into storage. The two
+thermal face powers belong to one physical sheet inventory.
+
+The finite-band path uses the original `BlackbodyBand` emission, fixed-endpoint
+analytic tangent and omitted-spectrum fractions without renormalization.
+Consumers retain their original spectral coverage admission. Invalid optical
+partitions and temperatures outside the declared source interval refuse.
+These scalar laws describe diffuse, isothermal sheets; coherent films,
+specular/refraction geometry and through-thickness temperature gradients
+remain separate models.
