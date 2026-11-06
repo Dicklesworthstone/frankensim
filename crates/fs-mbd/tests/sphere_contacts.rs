@@ -14,6 +14,9 @@ mod gravity;
 #[path = "sphere_contacts/forces.rs"]
 mod forces;
 
+#[path = "sphere_contacts/torques.rs"]
+mod torques;
+
 fn close(a: f64, b: f64) {
     assert!(
         (a - b).abs() < 3e-8 * a.abs().max(b.abs()).max(1.0),

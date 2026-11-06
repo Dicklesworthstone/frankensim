@@ -3255,7 +3255,37 @@ Gravity and additional centre-force work use actual accepted displacements. Line
 
 Four new G1/G3/G4 groups extend ten original collision/gravity cases: independently forced elastic entry with analytic gravity/force work and angular impulses; manufactured curved 3-D frictional entry with an independent original-inertia Coulomb impulse and post-impact trajectory; accelerated departure/return, permutation and split continuation; and late event-budget/cancellation rollback, deterministic retry and refusal of unresolved loaded resting pairs. These focused original-source native tests do not establish a Cargo/DSR workspace gate.
 
-This bounded floating analytic lane retains all-pairs discovery. It does not claim arbitrary shapes, interval-certified CCD, force fields, time-varying forces, imposed spin torque, persistent supports, rolling resistance, thermal allocation or full Moreau-Jean dynamics. Zero-speed contact requiring a sustained reaction refuses rather than integrating into overlap. The broader `frankensim-ext-contact-nonsmooth-lane-oh0i` remains open.
+This bounded floating analytic lane retains all-pairs discovery. It does not claim arbitrary shapes, interval-certified CCD, force fields, time-varying loads, body-held couples, persistent supports, rolling resistance, thermal allocation or full Moreau-Jean dynamics. Zero-speed contact requiring a sustained reaction refuses rather than integrating into overlap. The broader `frankensim-ext-contact-nonsmooth-lane-oh0i` remains open.
+
+### Applied world couples in automatic sphere collision trajectories
+
+`frictional_impact::spheres::advance_wrenched_sphere_contacts` accepts one
+held world couple about each sphere COM alongside the existing body-specific
+centre forces and common gravity. Prepared native `PreparedSpatialLoads`
+and `RigidBodyIntegrator::step_spatial` own the full-inertia endpoint torque
+kicks, gyroscopic rotation and couple work. Rotational substeps advance a pure
+spin factor; the original native constant-acceleration centre drift runs once
+per flight segment. Refining torque therefore does not perturb the analytic
+centre path used by the existing accelerated CCD queries. Torque-updated spin
+reaches the original simultaneous normal/Coulomb event, and post-impact spin
+starts the remaining forced flight.
+
+`SphereTorqueControls` supplies separate time and whole-call work bounds.
+The budget counts all bodies, event segments and outward root-bracket trials;
+zero couples retain original free-drift arithmetic and consume no torque
+steps. Angular phase and asymmetric-body energy accuracy still require
+refinement. Signed free-couple work and direct angular impulse remain separate
+from gravity/centre-force work, orbital force moments and unallocated impact
+loss. Native drift defect stays numerical. Both segment and full-trajectory
+work/momentum checks precede publication; late budget or cancellation refusal
+leaves every input body unchanged.
+
+Four physical groups cover analytic simultaneous three-sphere motor/friction
+coupling with gravity and centre-force work, body permutation and world-frame
+covariance, independent full-inertia Euler/quaternion refinement, and braking,
+zero-couple parity and atomic refusal. The API holds world couples over the
+declared interval; body-held or state-dependent torque, sustained supports,
+rolling resistance and thermal allocation remain outside this event lane.
 
 
 ### Sustained redundant support with the exact contact linearization

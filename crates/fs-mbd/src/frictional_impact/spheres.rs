@@ -4,7 +4,9 @@
 //! forces give a quadratic relative curve. The existing contact owners find
 //! its first entry and all distance extrema. All touching pairs then enter one
 //! simultaneous normal/Coulomb event. Native accelerated drift, free rotation
-//! and point impulses keep their original inertia and audits.
+//! and point impulses keep their original inertia and audits. Optional held
+//! world couples use the existing spatial-load owner between collision events,
+//! with independently bounded rotational steps and separate work/impulse.
 //! This floating analytic lane is not interval-certified general-shape CCD.
 
 use super::{
@@ -18,6 +20,12 @@ use fs_contact::frictional_multicontact::NormalVelocityLaw;
 use fs_contact::swept_sphere::accelerated::{AcceleratedSphereInput, sphere_path};
 use fs_contact::swept_sphere::{SweptSphereError, SweptSphereInput, first_sphere_contact};
 use fs_exec::CancelGate;
+use fs_math::dd::Dd;
+
+#[path = "spheres/torque.rs"]
+mod torque;
+pub use torque::SphereTorqueControls;
+use torque::TorqueFlight;
 
 /// A complete spherical boundary centred at the native centre of mass.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -173,8 +181,14 @@ pub struct SphereContactReport {
     /// Exact piecewise quadratic orbital torque integral of the centre forces.
     /// Individual collision impulses change this integral between events.
     pub centre_force_angular_impulse_nms: Vec3,
+    /// Signed work of the prescribed free world couples, including braking [J].
+    pub couple_work_j: f64,
+    /// Integrated free couples about the original COMs, separate from orbital moments.
+    pub couple_angular_impulse_nms: Vec3,
+    /// Native applied-torque steps used, including outward root-bracket trials.
+    pub torque_substeps: usize,
     pub unallocated_impact_loss_j: f64,
-    /// Measured native drift kinetic change minus all applied force work.
+    /// Measured native drift kinetic change minus all force AND couple work.
     pub drift_energy_defect_j: f64,
     pub total_energy_residual_j: f64,
     pub linear_momentum_residual_ns: Vec3,
@@ -193,6 +207,8 @@ pub enum SphereContactError {
         gap_m: f64,
     },
     EventBudget,
+    /// The whole-call native applied-torque substep budget was exhausted.
+    TorqueBudget,
     /// Root, native witness, or floating clock cannot resolve the next event.
     Unresolved(&'static str),
     Cancelled,
@@ -312,9 +328,88 @@ pub fn advance_forced_sphere_contacts(
     controls: SphereContactControls,
     gate: &CancelGate,
 ) -> Result<SphereContactReport, SphereContactError> {
+    advance_loaded_sphere_contacts(
+        bodies,
+        properties,
+        spheres,
+        laws,
+        gravity,
+        centre_forces_world_n,
+        duration_s,
+        controls,
+        None,
+        gate,
+    )
+}
+
+/// Advance native spheres under centre forces and held world-frame free couples.
+///
+/// Torque-updated spin enters each original simultaneous normal/Coulomb event,
+/// and the post-impact spin starts the remaining forced flight. Body inertia
+/// may be anisotropic and have any admitted material basis. The native
+/// `PreparedSpatialLoads` owner reevaluates world couples at both actual
+/// attitudes; freezing the initial body-frame torque would change the physics.
+///
+/// Centre paths retain exact constant-acceleration drift and existing analytic
+/// collision queries. Rotational refinement therefore cannot change the centre
+/// trajectory before impact. Full-inertia rotation uses second-order native
+/// spatial-load splitting with the explicit `torque_controls` time/work bounds.
+/// Work and angular-momentum gates do not replace phase refinement.
+///
+/// Signed free-couple work, its angular impulse and the native numerical drift
+/// defect are separate from force work and contact loss. Zero couples retain
+/// the original free-drift arithmetic. Time-varying or state-dependent loads,
+/// persistent support, rolling resistance and physical heat allocation require
+/// other owners. Every refusal, including late torque-budget exhaustion and
+/// cancellation during rotation, leaves the caller's bodies unchanged.
+#[allow(clippy::too_many_arguments)]
+pub fn advance_wrenched_sphere_contacts(
+    bodies: &mut [RigidBodyState],
+    properties: &[MassProperties],
+    spheres: &[ContactSphere],
+    laws: &[SpherePairLaw],
+    gravity: Gravity,
+    centre_forces_world_n: &[Vec3],
+    torques_world_nm: &[Vec3],
+    duration_s: f64,
+    controls: SphereContactControls,
+    torque_controls: SphereTorqueControls,
+    gate: &CancelGate,
+) -> Result<SphereContactReport, SphereContactError> {
+    advance_loaded_sphere_contacts(
+        bodies,
+        properties,
+        spheres,
+        laws,
+        gravity,
+        centre_forces_world_n,
+        duration_s,
+        controls,
+        Some((torques_world_nm, torque_controls)),
+        gate,
+    )
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn advance_loaded_sphere_contacts(
+    bodies: &mut [RigidBodyState],
+    properties: &[MassProperties],
+    spheres: &[ContactSphere],
+    laws: &[SpherePairLaw],
+    gravity: Gravity,
+    centre_forces_world_n: &[Vec3],
+    duration_s: f64,
+    controls: SphereContactControls,
+    torque_input: Option<(&[Vec3], SphereTorqueControls)>,
+    gate: &CancelGate,
+) -> Result<SphereContactReport, SphereContactError> {
     poll(gate)?;
     gravity.validate()?;
     let pairs = prepare(bodies, properties, spheres, laws, duration_s, controls)?;
+    let mut torques = match torque_input {
+        Some((values, controls)) => Some(TorqueFlight::new(values, bodies.len(), controls, gate)?),
+        None => None,
+    };
     if centre_forces_world_n.len() != bodies.len()
         || centre_forces_world_n.iter().any(|f| !f.is_finite())
     {
@@ -338,6 +433,7 @@ pub fn advance_forced_sphere_contacts(
     let mut minimum_gap = gaps(&staged, &pairs, gate)?;
     let mut loss = 0.0;
     let mut drift_defect = 0.0;
+    let mut couple_work = Dd::ZERO;
     let mut force_angular = Vec3::ZERO;
     loop {
         poll(gate)?;
@@ -367,12 +463,16 @@ pub fn advance_forced_sphere_contacts(
                     remaining,
                     gate,
                 )?);
-                let next = drift(
+                let Flight {
+                    states: next,
+                    couple_work_j,
+                } = drift(
                     &staged,
                     properties,
                     gravity,
                     centre_forces_world_n,
                     remaining,
+                    &mut torques,
                     gate,
                 )?;
                 minimum_gap = minimum_gap.min(gaps(&next, &pairs, gate)?);
@@ -383,9 +483,12 @@ pub fn advance_forced_sphere_contacts(
                     gravity,
                     centre_forces_world_n,
                     remaining,
+                    couple_work_j,
+                    couple_impulse(&torques, remaining)?,
                     controls,
                     gate,
                 )?;
+                couple_work = couple_work + Dd::from_f64(couple_work_j);
                 force_angular = force_angular.add(
                     centre_force_exchange(
                         &staged,
@@ -413,11 +516,23 @@ pub fn advance_forced_sphere_contacts(
         let mut candidate = None;
         for _ in 0..=64 {
             poll(gate)?;
-            let next = if h == 0.0 {
-                staged.clone()
+            let flight = if h == 0.0 {
+                Flight {
+                    states: staged.clone(),
+                    couple_work_j: 0.0,
+                }
             } else {
-                drift(&staged, properties, gravity, centre_forces_world_n, h, gate)?
+                drift(
+                    &staged,
+                    properties,
+                    gravity,
+                    centre_forces_world_n,
+                    h,
+                    &mut torques,
+                    gate,
+                )?
             };
+            let next = &flight.states;
             if let (Ok(gap), Ok(path_minimum)) = (
                 gaps(&next, &pairs, gate),
                 path_gap(&staged, &velocities, &accelerations, &pairs, h, gate),
@@ -425,7 +540,7 @@ pub fn advance_forced_sphere_contacts(
                 let (contacts, ids, maximum_gap, witnesses_nonnegative) =
                     contacts(&next, spheres, &pairs, controls, gate)?;
                 if !contacts.is_empty() && witnesses_nonnegative {
-                    candidate = Some((next, contacts, ids, maximum_gap, gap, path_minimum));
+                    candidate = Some((flight, contacts, ids, maximum_gap, gap, path_minimum));
                     break;
                 }
             }
@@ -434,11 +549,15 @@ pub fn advance_forced_sphere_contacts(
             }
             h = h.next_down();
         }
-        let Some((mut next, contacts, ids, maximum_gap, gap, path_minimum)) = candidate else {
+        let Some((flight, contacts, ids, maximum_gap, gap, path_minimum)) = candidate else {
             return Err(SphereContactError::Unresolved(
                 "event geometry or outward root bracket",
             ));
         };
+        let Flight {
+            states: mut next,
+            couple_work_j,
+        } = flight;
         minimum_gap = minimum_gap.min(path_minimum).min(gap);
         drift_defect += drift_audit(
             &staged,
@@ -447,9 +566,12 @@ pub fn advance_forced_sphere_contacts(
             gravity,
             centre_forces_world_n,
             h,
+            couple_work_j,
+            couple_impulse(&torques, h)?,
             controls,
             gate,
         )?;
+        couple_work = couple_work + Dd::from_f64(couple_work_j);
         force_angular = force_angular.add(
             centre_force_exchange(
                 &staged,
@@ -519,7 +641,9 @@ pub fn advance_forced_sphere_contacts(
     // Work and linear impulse are independent of event timing, but a body's
     // orbital force torque depends on its actual piecewise trajectory.
     forced.angular = force_angular;
-    let energy_residual = after - before - supplied.work - forced.work + loss;
+    let couple_work = crate::finite_derived(couple_work.to_f64(), "sphere_torque.total_work")?;
+    let couple_angular = couple_impulse(&torques, duration_s)?;
+    let energy_residual = after - before - supplied.work - forced.work - couple_work + loss;
     let linear = linear_after
         .sub(linear_before)
         .sub(supplied.impulse)
@@ -527,7 +651,8 @@ pub fn advance_forced_sphere_contacts(
     let angular = angular_after
         .sub(angular_before)
         .sub(supplied.angular)
-        .sub(forced.angular);
+        .sub(forced.angular)
+        .sub(couple_angular);
     if !energy_residual.is_finite()
         || !loss.is_finite()
         || !drift_defect.is_finite()
@@ -556,6 +681,9 @@ pub fn advance_forced_sphere_contacts(
         centre_force_work_j: forced.work,
         centre_force_impulse_ns: forced.impulse,
         centre_force_angular_impulse_nms: forced.angular,
+        couple_work_j: couple_work,
+        couple_angular_impulse_nms: couple_angular,
+        torque_substeps: torques.as_ref().map_or(0, |torques| torques.substeps),
         unallocated_impact_loss_j: loss,
         drift_energy_defect_j: drift_defect,
         total_energy_residual_j: energy_residual,
@@ -816,35 +944,65 @@ fn contacts(
     Ok((result, ids, maximum_gap, nonnegative))
 }
 
+struct Flight {
+    states: Vec<RigidBodyState>,
+    couple_work_j: f64,
+}
+
+fn couple_impulse(
+    torques: &Option<TorqueFlight>,
+    duration: f64,
+) -> Result<Vec3, SphereContactError> {
+    torques
+        .as_ref()
+        .map_or(Ok(Vec3::ZERO), |torques| torques.impulse(duration))
+}
+
+#[allow(clippy::too_many_arguments)]
 fn drift(
     bodies: &[RigidBodyState],
     properties: &[MassProperties],
     gravity: Gravity,
     centre_forces: &[Vec3],
     h: f64,
+    torques: &mut Option<TorqueFlight>,
     gate: &CancelGate,
-) -> Result<Vec<RigidBodyState>, SphereContactError> {
+) -> Result<Flight, SphereContactError> {
     let integrator = RigidBodyIntegrator::new(gravity);
-    bodies
-        .iter()
-        .zip(properties)
-        .zip(centre_forces)
-        .map(|((&b, &p), &force)| {
-            poll(gate)?;
-            Ok(integrator
-                .step(
-                    b,
-                    p,
-                    Wrench {
-                        force_world: force,
-                        torque_body: Vec3::ZERO,
-                    },
-                    h,
-                )?
-                .state_after)
-        })
-        .collect()
+    let mut states = Vec::with_capacity(bodies.len());
+    let mut work = Dd::ZERO;
+    for (index, ((&body, &property), &force)) in
+        bodies.iter().zip(properties).zip(centre_forces).enumerate()
+    {
+        poll(gate)?;
+        let (state, couple_work) = if let Some(torques) = torques {
+            torques.advance(index, body, property, gravity, force, h, gate)?
+        } else {
+            (
+                integrator
+                    .step(
+                        body,
+                        property,
+                        Wrench {
+                            force_world: force,
+                            torque_body: Vec3::ZERO,
+                        },
+                        h,
+                    )?
+                    .state_after,
+                0.0,
+            )
+        };
+        states.push(state);
+        work = work + Dd::from_f64(couple_work);
+    }
+    Ok(Flight {
+        states,
+        couple_work_j: crate::finite_derived(work.to_f64(), "sphere_torque.flight_work")?,
+    })
 }
+
+#[allow(clippy::too_many_arguments)]
 fn drift_audit(
     before: &[RigidBodyState],
     after: &[RigidBodyState],
@@ -852,6 +1010,8 @@ fn drift_audit(
     gravity: Gravity,
     centre_forces: &[Vec3],
     duration_s: f64,
+    couple_work: f64,
+    couple_angular_impulse: Vec3,
     c: SphereContactControls,
     gate: &CancelGate,
 ) -> Result<f64, SphereContactError> {
@@ -875,15 +1035,21 @@ fn drift_audit(
         duration_s,
         gate,
     )?;
-    let energy = b.0 - a.0 - supplied.work - forced.work;
+    let energy = b.0 - a.0 - supplied.work - forced.work - couple_work;
     if !energy.is_finite()
         || energy.abs() > c.drift_energy_tolerance_j
         || super::magnitude(b.1.sub(a.1).sub(supplied.impulse).sub(forced.impulse))
             > c.linear_momentum_tolerance_ns
-        || super::magnitude(b.2.sub(a.2).sub(supplied.angular).sub(forced.angular))
-            > c.angular_momentum_tolerance_nms
+        || super::magnitude(
+            b.2.sub(a.2)
+                .sub(supplied.angular)
+                .sub(forced.angular)
+                .sub(couple_angular_impulse),
+        ) > c.angular_momentum_tolerance_nms
     {
-        return Err(SphereContactError::Audit("native constant-force drift"));
+        return Err(SphereContactError::Audit(
+            "native constant-force/couple drift",
+        ));
     }
     Ok(energy)
 }
@@ -939,7 +1105,11 @@ fn gravity_exchange(
             )
             // The original closed-system mass moment also accelerates under
             // the constant sum of centre forces. Internal impulses cancel.
-            .add(centre_force.cross(g).scale((duration_s / 6.0) * duration_s * duration_s));
+            .add(
+                centre_force
+                    .cross(g)
+                    .scale((duration_s / 6.0) * duration_s * duration_s),
+            );
     }
     if !exchange.work.is_finite() || !exchange.impulse.is_finite() || !exchange.angular.is_finite()
     {
