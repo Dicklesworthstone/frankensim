@@ -2,6 +2,9 @@
 //! Independent hydrostatic formulas and rigid motions verify implementation;
 //! these synthetic coefficients do not establish measured foam accuracy.
 
+#[path = "hyper_porous_retained/dynamics.rs"]
+mod dynamics;
+
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_material::plastic::finite::porous::{

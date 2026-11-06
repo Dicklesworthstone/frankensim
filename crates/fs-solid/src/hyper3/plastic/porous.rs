@@ -11,8 +11,11 @@
 //! imply evolving porosity, cell-wall densification, asymmetric tension and
 //! compression, damage, pore-fluid pressure or measured foam calibration.
 //! Reference-volume physical yield loss is separate from the signed endpoint
-//! work defect. No contact, thermal coupling, inertia or mixed-pressure element
-//! is added here.
+//! work defect. [`dynamics`] adds the original consistent reference mass and
+//! backward-Euler momentum owner. No contact, thermal coupling or mixed-pressure
+//! element is added here.
+
+pub mod dynamics;
 
 use std::sync::Arc;
 
@@ -22,7 +25,7 @@ use fs_material::plastic::finite::porous::{
 };
 
 use super::{
-    FinitePlasticLawField, FinitePlasticStepControls, FinitePlasticTetEnergy,
+    AcceptedMotion, FinitePlasticLawField, FinitePlasticStepControls, FinitePlasticTetEnergy,
     FinitePlasticTetError, FinitePlasticTetState, IDENTITY, checkpoint, energy_gate, invalid,
     reference_size, validate_controls,
 };
@@ -272,7 +275,7 @@ impl<'a, L: FinitePorousMaterial> FinitePorousTetSolid<'a, L> {
     /// Requires one native load step and finite nonnegative work/yield bounds.
     /// Native material, geometry, equilibrium, cancellation and work refusals
     /// preserve the previously accepted solid.
-    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    #[allow(clippy::too_many_arguments)]
     pub fn advance(
         &self,
         prescribed_m: &[(usize, f64)],
@@ -282,6 +285,33 @@ impl<'a, L: FinitePorousMaterial> FinitePorousTetSolid<'a, L> {
         controls: FinitePlasticStepControls,
         cx: &Cx<'_>,
     ) -> Result<FinitePorousTetStep<'a, L>, FinitePorousTetError> {
+        self.advance_loaded(
+            prescribed_m,
+            nodal_forces_n,
+            body_force_n_m3,
+            settings,
+            controls,
+            None,
+            cx,
+        )
+        .map(|(step, _)| step)
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        clippy::too_many_lines,
+        clippy::type_complexity
+    )]
+    fn advance_loaded(
+        &self,
+        prescribed_m: &[(usize, f64)],
+        nodal_forces_n: &[(usize, f64)],
+        body_force_n_m3: [f64; 3],
+        settings: HyperTetSettings,
+        controls: FinitePlasticStepControls,
+        inertia: Option<&crate::inertia::BackwardEulerInertia<'_>>,
+        cx: &Cx<'_>,
+    ) -> Result<(FinitePorousTetStep<'a, L>, Option<AcceptedMotion>), FinitePorousTetError> {
         checkpoint(cx)?;
         validate_controls(settings, controls)?;
         for (element, state) in self.state.element_states.iter().enumerate() {
@@ -305,10 +335,14 @@ impl<'a, L: FinitePorousMaterial> FinitePorousTetSolid<'a, L> {
             nodal_forces_n,
             body_force_n_m3,
             settings,
-            None,
+            inertia,
             cx,
         )?;
         let new_u = equilibrium.displacement_m.as_flattened();
+        let motion = inertia
+            .map(|inertia| inertia.motion(new_u, cx))
+            .transpose()
+            .map_err(crate::hyper3::inertia_error)?;
         let mut element_states = Vec::with_capacity(self.state.elements.len());
         let mut element_deformation = Vec::with_capacity(self.state.elements.len());
         let mut element_first_piola_pa = Vec::with_capacity(self.state.elements.len());
@@ -368,7 +402,7 @@ impl<'a, L: FinitePorousMaterial> FinitePorousTetSolid<'a, L> {
             &force,
             &element_deformation,
             &element_first_piola_pa,
-            None,
+            motion.as_ref().map(|(_, account)| account.inertial_work_j),
             cx,
         )?;
         energy.internal_endpoint_work_j = work.internal_j;
@@ -409,25 +443,28 @@ impl<'a, L: FinitePorousMaterial> FinitePorousTetSolid<'a, L> {
             .into());
         }
         checkpoint(cx)?;
-        Ok(FinitePorousTetStep {
-            solid: Self {
-                material: self.material,
-                state: FinitePlasticTetState {
-                    nodes_m: self.state.nodes_m,
-                    tetrahedra: self.state.tetrahedra,
-                    elements: Arc::clone(&self.state.elements),
-                    budget: self.state.budget,
-                    displacement_m: equilibrium.displacement_m.clone(),
-                    element_deformation,
-                    element_states,
-                    element_first_piola_pa,
-                    stored_energy_j: energy.stored_after_j,
+        Ok((
+            FinitePorousTetStep {
+                solid: Self {
+                    material: self.material,
+                    state: FinitePlasticTetState {
+                        nodes_m: self.state.nodes_m,
+                        tetrahedra: self.state.tetrahedra,
+                        elements: Arc::clone(&self.state.elements),
+                        budget: self.state.budget,
+                        displacement_m: equilibrium.displacement_m.clone(),
+                        element_deformation,
+                        element_states,
+                        element_first_piola_pa,
+                        stored_energy_j: energy.stored_after_j,
+                    },
+                    jacobians,
+                    plastic_jacobians,
                 },
-                jacobians,
-                plastic_jacobians,
+                equilibrium,
+                energy,
             },
-            equilibrium,
-            energy,
-        })
+            motion,
+        ))
     }
 }
