@@ -8733,3 +8733,40 @@ finite-box and neighbor-absorption integrals, heterogeneous directed transfer,
 scattering tails, deterministic replay and conservation/budget/cancellation
 refusals. Pinned formatter/parser checks passed; native test execution was
 unavailable in the shared editing environment.
+
+
+## Luminescent-light absorption on the native thermal timeline
+
+`LuminescentOpticalHeating::try_new_with_emission_transport` couples the directed
+emission operator to the original finite-lifetime excitation stores and native
+enthalpy cells. An `AbsorbingLuminescenceEnvironment` explicitly declares passive
+emission-band absorbers. Every generated radiant joule is assigned once to its
+original receiving cell, escape, or a retained unresolved tail; self-return heats
+the emitter without deducting excitation twice. Total emitted energy remains a
+diagnostic, separate from external energy sinks. This is parasitic absorption,
+not an inferred fluorescence recycling channel; those mechanisms are physically
+distinct (Abebe et al., https://arxiv.org/abs/1804.02230, Fig. 1).
+
+The coupling uses analytically integrated emission over each accepted interval,
+not endpoint power multiplied by duration. It preserves exact pulse boundaries,
+dark-afterglow heating, native implicit retries and transactional rollback.
+Immutable prepared transfer data is shared across observer clones, with original
+receiver IDs compiled once. All positive-density optical cells carry explicit
+native thermal bindings and temperature-validity domains, including unpumped
+receivers and scatterers. The complete absorption/scattering/phase identity is
+checked; scattering at pump wavelengths refuses the absorption-only pump model,
+while elastic scattering of emitted light remains supported.
+
+Cumulative accounts separately expose emitted/escaped/unresolved radiation,
+passive absorption heat, prompt relaxation, nonradiative loss, radiative Stokes
+heat and excitation storage. Caller allowances separately admit probability-row
+roundoff, fixed-sample statistical diagnostics, cumulative unresolved joules and
+local/global energy defects. No tail is relabeled heat or escape. Quasistatic
+open index-one transport and fixed unsaturated pump absorption remain explicit.
+
+Nine focused regression groups specify two-cell and self-return energy closure,
+unpumped receiver heating during dark afterglow, split-clock agreement, actual
+opaque-cell transport, tail admission, endpoint temperature rollback, original
+report/binding integrity, pump-scattering refusal, work bounds and cancellation.
+Pinned formatter/parser checks and independent source review passed. These new
+native integration tests have not been executed in the shared editing environment.

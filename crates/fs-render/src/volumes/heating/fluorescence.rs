@@ -193,54 +193,16 @@ impl<const N: usize, const M: usize> FluorescentOpticalHeating<N, M> {
         power_tolerance_w: f64,
         mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<Self, OpticalHeatingError> {
-        checkpoint()?;
-        if medium.cell_count() > max_grid_cells
-            || deposition.cells.len() > medium.cell_count()
-            || cell_bindings.len() > deposition.cells.len()
-            || deposition.medium_identity != medium.content_identity()
-            || deposition.wavelength_bounds_nm != medium.wavelength_bounds_nm()
-            || !nonnegative(power_tolerance_w)
-            || deposition.scattered_power_w.iter().any(|p| *p != 0.0)
-            || deposition.wavelengths_nm.iter().any(|l| {
-                !l.is_finite()
-                    || !(source.excitation_bounds_nm.0..=source.excitation_bounds_nm.1).contains(l)
-            })
-        {
-            return Err(invalid(
-                "fluorescence requires the bound non-scattering pump and source domain",
-            ));
-        }
-        let bounds = medium.wavelength_bounds_nm();
-        if source
-            .wavelengths_nm
-            .iter()
-            .any(|l| !(bounds.0..=bounds.1).contains(l))
-        {
-            return Err(invalid(
-                "fluorescence wavelengths exceed the original absorption support",
-            ));
-        }
-        // A single uniform law is evaluated once. Indexed fields only repeat
-        // spectral work when their occupied optical model changes.
-        let mut previous = None;
-        for cell in 0..medium.cell_count() {
-            checkpoint()?;
-            if medium.cell_density_kg_m3(cell) == Some(0.0) {
-                continue;
-            }
-            let law = medium.absorption_at_cell(cell).map_err(optical_error)?;
-            if previous.is_some_and(|old| core::ptr::eq(old, law)) {
-                continue;
-            }
-            for &wavelength in &source.wavelengths_nm {
-                if law.at(wavelength).map_err(optical_error)? != 0.0 {
-                    return Err(invalid(
-                        "self-absorbing fluorescence requires secondary transport",
-                    ));
-                }
-            }
-            previous = Some(law);
-        }
+        validate_fluorescent_medium(
+            medium,
+            &source,
+            &deposition,
+            cell_bindings.len(),
+            max_grid_cells,
+            power_tolerance_w,
+            true,
+            &mut checkpoint,
+        )?;
         let mut sources = BTreeMap::<CellId, CheckedSum>::new();
         let bindings: BTreeMap<_, _> = cell_bindings.iter().copied().collect();
         let mut escaped = [CheckedSum::default(); M];
@@ -442,6 +404,82 @@ impl<const M: usize> FluorescencePower<M> {
 
 fn optical_error(_: VolumeTransportError) -> OpticalHeatingError {
     invalid("fluorescence requires the original source-supported absorption law")
+}
+
+/// Common pump/source admission. Only an owner with explicit secondary photon
+/// transport may set `require_transparent_escape` to false; the prompt owner
+/// always requires transparent escape. This does not construct an unphysical
+/// prompt heating report for a nontransparent medium.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn validate_fluorescent_medium<const N: usize, const M: usize>(
+    medium: &AbsorbingGrid<'_>,
+    source: &FluorescenceSource<M>,
+    deposition: &BeamPowerDeposition<N>,
+    binding_count: usize,
+    max_grid_cells: usize,
+    power_tolerance_w: f64,
+    require_transparent_escape: bool,
+    checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+) -> Result<(), OpticalHeatingError> {
+    checkpoint()?;
+    if medium.cell_count() > max_grid_cells
+        || deposition.cells.len() > medium.cell_count()
+        || binding_count > deposition.cells.len()
+        || deposition.medium_identity != medium.content_identity()
+        || deposition.wavelength_bounds_nm != medium.wavelength_bounds_nm()
+        || !nonnegative(power_tolerance_w)
+        || deposition.scattered_power_w.iter().any(|p| *p != 0.0)
+        || deposition.wavelengths_nm.iter().any(|l| {
+            !l.is_finite()
+                || !(source.excitation_bounds_nm.0..=source.excitation_bounds_nm.1).contains(l)
+        })
+    {
+        return Err(invalid(
+            "fluorescence requires the bound non-scattering pump and source domain",
+        ));
+    }
+    for cell in &deposition.cells {
+        checkpoint()?;
+        if cell.cell_index >= medium.cell_count() {
+            return Err(invalid(
+                "fluorescent deposition names a cell outside its medium",
+            ));
+        }
+    }
+    let bounds = medium.wavelength_bounds_nm();
+    if source
+        .wavelengths_nm
+        .iter()
+        .any(|l| !(bounds.0..=bounds.1).contains(l))
+    {
+        return Err(invalid(
+            "fluorescence wavelengths exceed the original absorption support",
+        ));
+    }
+    if require_transparent_escape {
+        // A uniform law is evaluated once. Indexed fields only repeat spectral
+        // work when their occupied optical model changes.
+        let mut previous = None;
+        for cell in 0..medium.cell_count() {
+            checkpoint()?;
+            if medium.cell_density_kg_m3(cell) == Some(0.0) {
+                continue;
+            }
+            let law = medium.absorption_at_cell(cell).map_err(optical_error)?;
+            if previous.is_some_and(|old| core::ptr::eq(old, law)) {
+                continue;
+            }
+            for &wavelength in &source.wavelengths_nm {
+                if law.at(wavelength).map_err(optical_error)? != 0.0 {
+                    return Err(invalid(
+                        "self-absorbing fluorescence requires secondary transport",
+                    ));
+                }
+            }
+            previous = Some(law);
+        }
+    }
+    Ok(())
 }
 
 // A tiny wavelength fraction can still carry representable watts. Evaluate

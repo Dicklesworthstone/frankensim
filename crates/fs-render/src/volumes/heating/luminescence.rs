@@ -7,21 +7,26 @@
 //! and final vibrational relaxation heat the same native cell exactly once.
 //!
 //! This is a linear, unsaturated emitting-state model, not a spin-transition,
-//! trap distribution, bleaching or stimulated-emission model. As in the prompt
-//! owner, the complete optical environment must be transparent at emission
-//! wavelengths, non-scattering, index one and open. No secondary absorption is
-//! silently assigned to heat. Supplied rates/spectra require their own source
-//! support; a long lifetime alone does not establish phosphorescence.
+//! trap distribution, bleaching or stimulated-emission model. The fast path
+//! requires transparent emission-band escape. An explicitly supplied directed
+//! transport operator also supports passive secondary absorption and elastic
+//! multiple scattering in an open, index-one medium. Unresolved photons remain
+//! separate from heat and escape. Supplied rates/spectra require their own
+//! source support; a long lifetime alone does not establish phosphorescence.
+
+pub mod absorption;
+pub use absorption::{AbsorbingLuminescenceEnvironment, LuminescenceAbsorptionTolerance};
 
 use super::feedback::OpticalFeedbackError;
-use super::fluorescence::{FluorescenceSource, FluorescentOpticalHeating, ratio_power};
+use super::fluorescence::{FluorescenceSource, ratio_power, validate_fluorescent_medium};
 use super::illumination::schedule::SpectralPowerSchedule;
 use super::{
-    CheckedSum, OpticalEnergyBudget, OpticalHeatingError, OpticalPowerBudget, finite, invalid,
-    nonnegative,
+    CheckedSum, OpticalEnergyBudget, OpticalHeating, OpticalHeatingError, OpticalPowerBudget,
+    finite, invalid, nonnegative,
 };
 use crate::volumes::transport::AbsorbingGrid;
 use crate::volumes::transport::deposition::BeamPowerDeposition;
+use crate::volumes::transport::scattering::ScatteringGrid;
 use fs_thermal::enthalpy::{
     CellId, DepositionError, DepositionObserver, DepositionSimulation, Event,
 };
@@ -111,7 +116,7 @@ impl<const M: usize> LuminescenceSource<M> {
 }
 
 /// Accepted radiation, thermal loss and excitation storage in joules.
-/// The three heat fields are already included in the native external-heat
+/// All heat fields are already included in the native external-heat
 /// audit. `stored_excitation_j` is separate from the thermal enthalpy store.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct LuminescenceEnergy<const M: usize> {
@@ -119,15 +124,23 @@ pub struct LuminescenceEnergy<const M: usize> {
     pub duration_s: f64,
     /// Escaped joules in the supplied discrete emission-node order.
     pub escaped_j: [f64; M],
+    /// Total radiation produced before propagation, including subsequently
+    /// absorbed light. This diagnostic is not an additional energy sink.
+    pub emitted_j: [f64; M],
+    /// Unassigned radiant energy from admitted transport cutoffs, joules.
+    /// It is not a physical excitation store or escaped radiation.
+    pub unresolved_radiation_j: [f64; M],
     /// Immediate pump-to-emitting-state relaxation heat, joules.
     pub prompt_heat_j: f64,
     /// Stored excitation released by nonradiative transitions, joules.
     pub nonradiative_heat_j: f64,
     /// Radiative-transition energy remaining after emitted photon energy, joules.
     pub relaxation_heat_j: f64,
+    /// Emitted radiation absorbed by explicitly passive receivers, joules.
+    pub secondary_absorption_heat_j: f64,
     /// Current nonthermal emitting-state store, joules.
     pub stored_excitation_j: f64,
-    /// Absorbed pump minus escaped light, all heat and current excitation.
+    /// Absorbed pump minus escape, unresolved light, all heat and excitation.
     pub residual_j: f64,
     /// Sum of absolute local energy defects over the accepted history.
     pub absolute_roundoff_j: f64,
@@ -151,9 +164,12 @@ struct Accounts<const N: usize, const M: usize> {
     absorbed: [CheckedSum; N],
     pump_residual: [CheckedSum; N],
     escaped: [CheckedSum; M],
+    emitted: [CheckedSum; M],
+    unresolved: [CheckedSum; M],
     prompt: CheckedSum,
     dark: CheckedSum,
     relaxation: CheckedSum,
+    secondary: CheckedSum,
     roundoff: CheckedSum,
 }
 
@@ -166,9 +182,12 @@ impl<const N: usize, const M: usize> Default for Accounts<N, M> {
             absorbed: [CheckedSum::default(); N],
             pump_residual: [CheckedSum::default(); N],
             escaped: [CheckedSum::default(); M],
+            emitted: [CheckedSum::default(); M],
+            unresolved: [CheckedSum::default(); M],
             prompt: CheckedSum::default(),
             dark: CheckedSum::default(),
             relaxation: CheckedSum::default(),
+            secondary: CheckedSum::default(),
             roundoff: CheckedSum::default(),
         }
     }
@@ -193,6 +212,7 @@ pub struct LuminescentOpticalHeating<const N: usize, const M: usize> {
     source: LuminescenceSource<M>,
     reference: OpticalPowerBudget<N>,
     cells: Vec<Cell<N>>,
+    emission_transport: Option<AbsorbingLuminescenceEnvironment<M>>,
     schedule: Option<SpectralPowerSchedule<N>>,
     time_s: f64,
     energy_tolerance_j: f64,
@@ -220,6 +240,100 @@ impl<const N: usize, const M: usize> LuminescentOpticalHeating<N, M> {
         max_grid_cells: usize,
         power_tolerance_w: f64,
         energy_tolerance_j: f64,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, OpticalHeatingError> {
+        Self::prepare(
+            medium,
+            source,
+            deposition,
+            cell_bindings,
+            thermal,
+            max_grid_cells,
+            power_tolerance_w,
+            energy_tolerance_j,
+            None,
+            checkpoint,
+        )
+    }
+
+    /// Transport emitted light through an explicitly passive absorbing and
+    /// possibly scattering environment. The original pump remains the bound
+    /// non-scattering beam. Every pumped emitter needs an operator row and the
+    /// same native binding in the environment. Reexcitation is not inferred
+    /// from absorption: the declared emission-band absorption channels relax
+    /// directly to heat. The prepared environment is shared across clones.
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_new_with_emission_transport(
+        medium: &ScatteringGrid<'_>,
+        source: LuminescenceSource<M>,
+        deposition: BeamPowerDeposition<N>,
+        cell_bindings: &[(usize, CellId)],
+        thermal: &DepositionSimulation<'_>,
+        max_grid_cells: usize,
+        power_tolerance_w: f64,
+        energy_tolerance_j: f64,
+        environment: AbsorbingLuminescenceEnvironment<M>,
+        mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, OpticalHeatingError> {
+        checkpoint()?;
+        let absorption = medium.absorption_grid();
+        if environment.operator().medium_identity != medium.content_identity()
+            || absorption.cell_count() > max_grid_cells
+        {
+            return Err(invalid(
+                "luminescence pump and emission transport snapshots differ",
+            ));
+        }
+        let mut previous = None;
+        for cell in 0..absorption.cell_count() {
+            checkpoint()?;
+            if absorption.cell_density_kg_m3(cell) == Some(0.0) {
+                continue;
+            }
+            let law = medium
+                .scattering_at_cell(cell)
+                .map_err(|_| invalid("invalid original pump scattering law"))?;
+            if previous.is_some_and(|old| core::ptr::eq(old, law)) {
+                continue;
+            }
+            for &wavelength in &deposition.wavelengths_nm {
+                if law
+                    .at(wavelength)
+                    .map_err(|_| invalid("pump exceeds scattering support"))?
+                    != 0.0
+                {
+                    return Err(invalid(
+                        "luminescence pump scattering requires a spatial scattering deposition owner",
+                    ));
+                }
+            }
+            previous = Some(law);
+        }
+        Self::prepare(
+            absorption,
+            source,
+            deposition,
+            cell_bindings,
+            thermal,
+            max_grid_cells,
+            power_tolerance_w,
+            energy_tolerance_j,
+            Some(environment),
+            checkpoint,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn prepare(
+        medium: &AbsorbingGrid<'_>,
+        source: LuminescenceSource<M>,
+        deposition: BeamPowerDeposition<N>,
+        cell_bindings: &[(usize, CellId)],
+        thermal: &DepositionSimulation<'_>,
+        max_grid_cells: usize,
+        power_tolerance_w: f64,
+        energy_tolerance_j: f64,
+        emission_transport: Option<AbsorbingLuminescenceEnvironment<M>>,
         mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<Self, OpticalHeatingError> {
         if !nonnegative(energy_tolerance_j) {
@@ -227,13 +341,30 @@ impl<const N: usize, const M: usize> LuminescentOpticalHeating<N, M> {
                 "finite nonnegative luminescence energy allowance required",
             ));
         }
-        let prompt = FluorescentOpticalHeating::try_new(
+        validate_fluorescent_medium(
             medium,
-            source.fluorescence,
+            &source.fluorescence,
+            &deposition,
+            cell_bindings.len(),
+            max_grid_cells,
+            power_tolerance_w,
+            emission_transport.is_none(),
+            &mut checkpoint,
+        )?;
+        if let Some(environment) = &emission_transport {
+            if environment.operator().absorption_identity != medium.content_identity()
+                || environment.operator().wavelengths_nm != *source.fluorescence.wavelengths_nm()
+            {
+                return Err(invalid(
+                    "luminescence source and secondary transport differ",
+                ));
+            }
+            environment.check_state(thermal, &mut checkpoint)?;
+        }
+        let pump = OpticalHeating::try_new(
             deposition.clone(),
             cell_bindings,
             thermal,
-            max_grid_cells,
             power_tolerance_w,
             &mut checkpoint,
         )?;
@@ -248,6 +379,9 @@ impl<const N: usize, const M: usize> LuminescentOpticalHeating<N, M> {
                 continue;
             }
             let thermal_cell = bindings[&deposited.cell_index];
+            if let Some(environment) = &emission_transport {
+                environment.check_emitter(deposited.cell_index, thermal_cell)?;
+            }
             source.decay_at_temperature(thermal.temperature_k(thermal_cell)?)?;
             let mut reservoir_pump_w = [0.0; N];
             let mut prompt_heat_w = [0.0; N];
@@ -274,8 +408,9 @@ impl<const N: usize, const M: usize> LuminescentOpticalHeating<N, M> {
         checkpoint()?;
         Ok(Self {
             source,
-            reference: *prompt.pump_power(),
+            reference: *pump.power(),
             cells,
+            emission_transport,
             schedule: None,
             time_s: thermal.time_s(),
             energy_tolerance_j,
@@ -333,6 +468,12 @@ impl<const N: usize, const M: usize> LuminescentOpticalHeating<N, M> {
         &self.pump_energy
     }
 
+    /// Shared source-to-receiver transport and its explicit sampling/tail
+    /// allowances. `None` denotes the validated transparent-escape fast path.
+    pub fn emission_transport(&self) -> Option<&AbsorbingLuminescenceEnvironment<M>> {
+        self.emission_transport.as_ref()
+    }
+
     /// Emitted integrated watts per original grid cell at the accepted endpoint.
     /// These remain positive during dark afterglow. No radiance/temperature or
     /// arbitrary spectral-bin width is inferred from these powers.
@@ -372,6 +513,9 @@ impl<const N: usize, const M: usize> LuminescentOpticalHeating<N, M> {
             }
             self.source
                 .decay_at_temperature(thermal.temperature_k(cell.thermal_cell)?)?;
+        }
+        if let Some(environment) = &self.emission_transport {
+            environment.check_state(thermal, checkpoint)?;
         }
         Ok(())
     }
@@ -505,9 +649,28 @@ impl<const N: usize, const M: usize> DepositionObserver for LuminescentOpticalHe
             }
             let mut mean = [0.0; M];
             for bin in 0..M {
-                accounts.escaped[bin].add(emitted[bin])?;
+                accounts.emitted[bin].add(emitted[bin])?;
                 balance.add(-emitted[bin])?;
                 mean[bin] = finite(emitted[bin] / duration_s)?;
+            }
+            if let Some(environment) = &self.emission_transport {
+                let routed = environment.route(
+                    cell.grid_cell,
+                    emitted,
+                    duration_s,
+                    &mut sources,
+                    checkpoint,
+                )?;
+                for bin in 0..M {
+                    accounts.escaped[bin].add(routed.escaped_j[bin])?;
+                    accounts.unresolved[bin].add(routed.unresolved_j[bin])?;
+                }
+                accounts.secondary.add(routed.heat_j)?;
+                accounts.roundoff.add(routed.absolute_roundoff_j)?;
+            } else {
+                for bin in 0..M {
+                    accounts.escaped[bin].add(emitted[bin])?;
+                }
             }
             accounts.roundoff.add(balance.value()?.abs())?;
             accounts.prompt.add(prompt)?;
@@ -515,6 +678,17 @@ impl<const N: usize, const M: usize> DepositionObserver for LuminescentOpticalHe
             accounts.relaxation.add(relaxation)?;
             stored_j.push(step.stored_energy_j);
             mean_cell_emission_w.push((cell.grid_cell, mean));
+        }
+        if let Some(environment) = &self.emission_transport {
+            let mut unresolved = CheckedSum::default();
+            for lane in accounts.unresolved {
+                unresolved.add(lane.value()?)?;
+            }
+            if unresolved.value()? > environment.tolerance().max_unresolved_energy_j {
+                return Err(invalid(
+                    "luminescence unresolved radiation exceeds the supplied energy allowance",
+                ));
+            }
         }
         if accounts.roundoff.value()? > self.energy_tolerance_j {
             return Err(invalid(
@@ -609,9 +783,12 @@ impl<const N: usize, const M: usize> Accounts<N, M> {
         let mut energy = LuminescenceEnergy {
             duration_s: self.duration.value()?,
             escaped_j: [0.0; M],
+            emitted_j: [0.0; M],
+            unresolved_radiation_j: [0.0; M],
             prompt_heat_j: self.prompt.value()?,
             nonradiative_heat_j: self.dark.value()?,
             relaxation_heat_j: self.relaxation.value()?,
+            secondary_absorption_heat_j: self.secondary.value()?,
             stored_excitation_j: stored_j,
             residual_j: 0.0,
             absolute_roundoff_j: self.roundoff.value()?,
@@ -621,6 +798,7 @@ impl<const N: usize, const M: usize> Accounts<N, M> {
             energy.prompt_heat_j,
             energy.nonradiative_heat_j,
             energy.relaxation_heat_j,
+            energy.secondary_absorption_heat_j,
         ] {
             heat.add(value)?;
         }
@@ -644,8 +822,11 @@ impl<const N: usize, const M: usize> Accounts<N, M> {
         balance.add(-stored_j)?;
         balance.add(-pump.thermal_input_j)?;
         for bin in 0..M {
+            energy.emitted_j[bin] = self.emitted[bin].value()?;
             energy.escaped_j[bin] = self.escaped[bin].value()?;
+            energy.unresolved_radiation_j[bin] = self.unresolved[bin].value()?;
             balance.add(-energy.escaped_j[bin])?;
+            balance.add(-energy.unresolved_radiation_j[bin])?;
         }
         energy.residual_j = balance.value()?;
         Ok((pump, energy))
