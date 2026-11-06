@@ -16,12 +16,16 @@
 //! with a resolved temperature path. The [`dynamics`] child retains the same
 //! material preparation and work recovery during physical motion. Neither owner
 //! supplies heat capacity, entropy, finite thermal expansion, automatic thermal
-//! substeps, new crack planes or fragment contact.
+//! substeps or new crack planes. The [`fracture`] child releases explicitly
+//! selected completed, traction-free cracks through the original topology owner.
 //! Large thermal jumps can cross a softening branch before Newton equilibrates;
 //! callers must resolve them with physical temperature/load endpoints.
 
 /// Retained source-bound motion with joint displacement and thermal eigenstrain.
 pub mod dynamics;
+
+/// Completed native fracture release retaining thermal source and strain history.
+pub mod fracture;
 
 use std::sync::Arc;
 
@@ -31,6 +35,7 @@ use fs_material::brittle::source::expansion::ResolvedThermalBrittle;
 use fs_material::brittle::{BrittleEnergy, BrittleState};
 use fs_material::tensor::contract;
 
+use super::fracture::ReleasedBrittleFace;
 use super::temperature::BrittleTetTemperatureElementEnergy;
 use super::{BrittleTetControls, BrittleTetError, checkpoint, energy_gate};
 use crate::brittle::TetCrackBandGeometry;
@@ -46,6 +51,7 @@ pub struct ThermalBrittleTetSolid<'a> {
     geometry: &'a TetLoadGeometry3<'a>,
     materials: &'a [ResolvedThermalBrittle],
     bands: Arc<[TetCrackBandGeometry]>,
+    released_faces: Arc<[ReleasedBrittleFace]>,
     budget: TetAssemblyBudget,
     solution: SmallStrainTetSolution<BrittleState<'a>>,
     stored_energy_j: f64,
@@ -219,6 +225,7 @@ impl<'a> ThermalBrittleTetSolid<'a> {
             geometry,
             materials,
             bands: bands.into(),
+            released_faces: Arc::from([]),
             budget,
             solution,
             stored_energy_j: 0.0,
@@ -381,6 +388,7 @@ impl<'a> ThermalBrittleTetSolid<'a> {
                 geometry: self.geometry,
                 materials: next_materials,
                 bands: Arc::clone(&self.bands),
+                released_faces: Arc::clone(&self.released_faces),
                 budget: self.budget,
                 solution,
                 stored_energy_j: energy.stored_after_j,
@@ -518,6 +526,7 @@ impl<'a> ThermalBrittleTetSolid<'a> {
             )
             .into());
         }
+        self.require_released_faces(&solution.displacement_m, cx)?;
         let mut energy = prepared.energy;
         let mut element_energy = Vec::with_capacity(next_materials.len());
         let mut cumulative_loss_j = 0.0;

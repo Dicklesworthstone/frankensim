@@ -230,6 +230,7 @@ impl<'a> ThermalBrittleTetMotion<'a> {
             geometry: self.solid.geometry,
             materials: next_materials,
             bands: Arc::clone(&self.solid.bands),
+            released_faces: Arc::clone(&self.solid.released_faces),
             budget: self.solid.budget,
             solution: step.solution,
             stored_energy_j: material.stored_after_j,

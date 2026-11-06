@@ -17,13 +17,16 @@
 //! the completed bands; the original V/A regularization is not recalibrated.
 
 use std::collections::BTreeSet;
+use std::sync::Arc;
 
 use fs_exec::Cx;
+use fs_material::brittle::{BrittleCrackBand, BrittleState};
 
 use super::{BrittleTetError, BrittleTetSolid, checkpoint, energy_gate};
 use crate::brittle::TetCrackBandGeometry;
 use crate::brittle::topology::{FractureTopologyError, TetFractureTopology};
 use crate::cohesive::p1::frame;
+use crate::linear3::TetAssemblyBudget;
 use crate::loads3::TetLoadGeometry3;
 use crate::plastic3::SmallStrainTetSolution;
 
@@ -122,175 +125,261 @@ impl<'a> BrittleTetSolid<'a> {
     where
         'a: 'next,
     {
-        checkpoint(cx)?;
-        if !controls.normal_alignment_tolerance.is_finite()
-            || !(0.0..1.0).contains(&controls.normal_alignment_tolerance)
-            || [
-                controls.traction_tolerance_pa,
-                controls.energy_tolerance_j,
-                controls.opening_tolerance_m,
-            ]
-            .iter()
-            .any(|x| !x.is_finite() || *x < 0.0)
-        {
-            return Err(BrittleTetFractureError::Invalid(
-                "finite nonnegative release gates required",
-            ));
-        }
-        self.require_split_geometry(topology, target_geometry, cx)?;
-        self.require_released_faces(&self.solution.displacement_m, cx)?;
-        let face_count = self
-            .released_faces
-            .len()
-            .checked_add(topology.seams().len())
-            .ok_or(BrittleTetFractureError::Invalid(
-                "released face count overflow",
-            ))?;
-        if topology.seams().is_empty() || face_count > self.materials.len().saturating_mul(2) {
-            return Err(BrittleTetFractureError::Invalid(
-                "nonempty bounded new fracture faces required",
-            ));
-        }
-        let mut released_faces = Vec::with_capacity(face_count);
-        let mut ids = BTreeSet::new();
-        for old in self.released_faces.iter() {
-            checkpoint(cx)?;
-            let mut next = *old;
-            for side in 0..2 {
-                let element = old.elements[side];
-                for vertex in 0..3 {
-                    let corner = self.geometry.tetrahedra()[element]
-                        .iter()
-                        .position(|node| *node == old.paired_nodes[side][vertex])
-                        .ok_or(BrittleTetFractureError::Invalid(
-                            "retained face lost its element corner",
-                        ))?;
-                    next.paired_nodes[side][vertex] = target_geometry.tetrahedra()[element][corner];
-                }
-            }
-            ids.insert(next.id);
-            released_faces.push(next);
-        }
-        for seam in topology.seams() {
-            checkpoint(cx)?;
-            if !ids.insert(seam.id) {
-                return Err(BrittleTetFractureError::Invalid(
-                    "fracture face ID was already released",
-                ));
-            }
-            let opposite = |side: usize, nodes: [usize; 3]| {
-                target_geometry.tetrahedra()[seam.elements[side]]
-                    .iter()
-                    .copied()
-                    .find(|node| !nodes.contains(node))
-                    .ok_or(BrittleTetFractureError::Invalid(
-                        "missing opposite fracture vertex",
-                    ))
-            };
-            let (axes, _) = frame(
-                target_geometry.nodes_m(),
-                seam.side_a,
-                opposite(0, seam.side_a)?,
-                opposite(1, seam.side_b)?,
-                0.0,
-            )
-            .map_err(|_| BrittleTetFractureError::Invalid("invalid native fracture face frame"))?;
-            for element in seam.elements {
-                let released = self.materials[element]
-                    .law()
-                    .release_failed_plane(
-                        &self.solution.element_states[element],
-                        axes[0],
-                        controls.normal_alignment_tolerance,
-                        controls.traction_tolerance_pa,
-                    )
-                    .map_err(|source| BrittleTetError::Material { element, source })?;
-                if released.stress_pa != self.solution.element_stress[element] {
-                    return Err(BrittleTetFractureError::Invalid(
-                        "release changed accepted native stress",
-                    ));
-                }
-            }
-            released_faces.push(ReleasedBrittleFace {
-                id: seam.id,
-                elements: seam.elements,
-                paired_nodes: [seam.side_a, seam.side_b],
-                normal: axes[0],
-                opening_tolerance_m: controls.opening_tolerance_m,
-            });
-        }
-        let mut displacement_m = Vec::with_capacity(target_geometry.nodes_m().len());
-        for (index, &node) in topology.original_nodes().iter().enumerate() {
-            if index % 256 == 0 {
-                checkpoint(cx)?;
-            }
-            displacement_m.push(self.solution.displacement_m[node]);
-        }
-        let mut bands = Vec::with_capacity(self.bands.len());
-        let mut stored = 0.0;
-        let mut loss = 0.0;
-        for (element, source) in self.materials.iter().enumerate() {
-            checkpoint(cx)?;
-            let band =
-                TetCrackBandGeometry::from_element(target_geometry, element, source.law().normal())
-                    .map_err(BrittleTetError::Geometry)?;
-            let old = self.bands[element];
-            if band.reference_volume_m3() != old.reference_volume_m3()
-                || band.projected_area_m2() != old.projected_area_m2()
-                || band.band_width_m() != old.band_width_m()
-            {
-                return Err(BrittleTetFractureError::Invalid(
-                    "release changed the original band geometry",
-                ));
-            }
-            let state = &self.solution.element_states[element];
-            stored = band
-                .reference_volume_m3()
-                .mul_add(state.stored_energy_j_m3(), stored);
-            loss = band
-                .reference_volume_m3()
-                .mul_add(state.dissipated_j_m3(), loss);
-            bands.push(band);
-        }
-        let energy = BrittleTetFractureEnergy {
-            stored_before_j: self.stored_energy_j,
-            stored_after_j: stored,
-            fracture_dissipation_before_j: self.fracture_dissipation_j,
-            fracture_dissipation_after_j: loss,
-            storage_defect_j: stored - self.stored_energy_j,
-            fracture_history_defect_j: loss - self.fracture_dissipation_j,
-        };
-        energy_gate(
-            "fracture topology storage",
-            energy.storage_defect_j,
-            controls.energy_tolerance_j,
-        )?;
-        energy_gate(
-            "fracture topology irreversible history",
-            energy.fracture_history_defect_j,
-            controls.energy_tolerance_j,
-        )?;
-        let solid = BrittleTetSolid {
-            geometry: target_geometry,
-            materials: self.materials,
-            bands: bands.into(),
-            released_faces: released_faces.into(),
-            budget: self.budget,
-            solution: SmallStrainTetSolution {
-                displacement_m,
-                element_strain: self.solution.element_strain.clone(),
-                element_stress: self.solution.element_stress.clone(),
-                element_states: self.solution.element_states.clone(),
-                increments: Vec::new(),
+        let transfer = split_completed_fracture(
+            BrittleFractureView {
+                geometry: self.geometry,
+                bands: &self.bands,
+                released_faces: &self.released_faces,
+                budget: self.budget,
+                solution: &self.solution,
+                stored_energy_j: self.stored_energy_j,
+                fracture_dissipation_j: self.fracture_dissipation_j,
             },
-            stored_energy_j: stored,
-            fracture_dissipation_j: loss,
-        };
-        solid.require_released_faces(&solid.solution.displacement_m, cx)?;
-        checkpoint(cx)?;
-        Ok(BrittleTetFractureStep { solid, energy })
+            |element| self.materials[element].law(),
+            topology,
+            target_geometry,
+            controls,
+            cx,
+        )?;
+        Ok(BrittleTetFractureStep {
+            solid: BrittleTetSolid {
+                geometry: target_geometry,
+                materials: self.materials,
+                bands: transfer.bands,
+                released_faces: transfer.released_faces,
+                budget: self.budget,
+                solution: transfer.solution,
+                stored_energy_j: transfer.energy.stored_after_j,
+                fracture_dissipation_j: transfer.energy.fracture_dissipation_after_j,
+            },
+            energy: transfer.energy,
+        })
     }
 
+    /// Fixed-reference matching trace guard, shared by every native integrator.
+    pub(crate) fn require_released_faces(
+        &self,
+        displacement_m: &[[f64; 3]],
+        cx: &Cx<'_>,
+    ) -> Result<(), BrittleTetError> {
+        require_released_faces(
+            self.geometry.nodes_m().len(),
+            &self.released_faces,
+            displacement_m,
+            cx,
+        )
+    }
+}
+
+/// Borrowed physical fields used by both the mechanical and thermal owners.
+/// Native states retain their own mechanical-strain semantics; FE total strain
+/// is transferred verbatim and is never replayed as a constitutive strain.
+#[derive(Debug)]
+pub(crate) struct BrittleFractureView<'body, 'material> {
+    pub geometry: &'body TetLoadGeometry3<'material>,
+    pub bands: &'body [TetCrackBandGeometry],
+    pub released_faces: &'body [ReleasedBrittleFace],
+    pub budget: TetAssemblyBudget,
+    pub solution: &'body SmallStrainTetSolution<BrittleState<'material>>,
+    pub stored_energy_j: f64,
+    pub fracture_dissipation_j: f64,
+}
+
+/// One admitted connectivity transfer without a replacement material owner.
+#[derive(Debug)]
+pub(crate) struct CompletedBrittleFracture<'a> {
+    pub bands: Arc<[TetCrackBandGeometry]>,
+    pub released_faces: Arc<[ReleasedBrittleFace]>,
+    pub solution: SmallStrainTetSolution<BrittleState<'a>>,
+    pub energy: BrittleTetFractureEnergy,
+}
+
+/// Original native release, geometry, history and work admission shared by all
+/// source wrappers. A borrowed law selector adds no material array or rebind.
+#[allow(clippy::too_many_lines)]
+pub(crate) fn split_completed_fracture<'material>(
+    body: BrittleFractureView<'_, 'material>,
+    law: impl Fn(usize) -> &'material BrittleCrackBand,
+    topology: &TetFractureTopology<'_>,
+    target_geometry: &TetLoadGeometry3<'_>,
+    controls: BrittleTetFractureControls,
+    cx: &Cx<'_>,
+) -> Result<CompletedBrittleFracture<'material>, BrittleTetFractureError> {
+    checkpoint(cx)?;
+    if !controls.normal_alignment_tolerance.is_finite()
+        || !(0.0..1.0).contains(&controls.normal_alignment_tolerance)
+        || [
+            controls.traction_tolerance_pa,
+            controls.energy_tolerance_j,
+            controls.opening_tolerance_m,
+        ]
+        .iter()
+        .any(|x| !x.is_finite() || *x < 0.0)
+    {
+        return Err(BrittleTetFractureError::Invalid(
+            "finite nonnegative release gates required",
+        ));
+    }
+    body.require_split_geometry(topology, target_geometry, cx)?;
+    require_released_faces(
+        body.geometry.nodes_m().len(),
+        body.released_faces,
+        &body.solution.displacement_m,
+        cx,
+    )?;
+    let element_count = body.solution.element_states.len();
+    let face_count = body
+        .released_faces
+        .len()
+        .checked_add(topology.seams().len())
+        .ok_or(BrittleTetFractureError::Invalid(
+            "released face count overflow",
+        ))?;
+    if topology.seams().is_empty() || face_count > element_count.saturating_mul(2) {
+        return Err(BrittleTetFractureError::Invalid(
+            "nonempty bounded new fracture faces required",
+        ));
+    }
+    let mut released_faces = Vec::with_capacity(face_count);
+    let mut ids = BTreeSet::new();
+    for old in body.released_faces {
+        checkpoint(cx)?;
+        let mut next = *old;
+        for side in 0..2 {
+            let element = old.elements[side];
+            for vertex in 0..3 {
+                let corner = body.geometry.tetrahedra()[element]
+                    .iter()
+                    .position(|node| *node == old.paired_nodes[side][vertex])
+                    .ok_or(BrittleTetFractureError::Invalid(
+                        "retained face lost its element corner",
+                    ))?;
+                next.paired_nodes[side][vertex] = target_geometry.tetrahedra()[element][corner];
+            }
+        }
+        ids.insert(next.id);
+        released_faces.push(next);
+    }
+    for seam in topology.seams() {
+        checkpoint(cx)?;
+        if !ids.insert(seam.id) {
+            return Err(BrittleTetFractureError::Invalid(
+                "fracture face ID was already released",
+            ));
+        }
+        let opposite = |side: usize, nodes: [usize; 3]| {
+            target_geometry.tetrahedra()[seam.elements[side]]
+                .iter()
+                .copied()
+                .find(|node| !nodes.contains(node))
+                .ok_or(BrittleTetFractureError::Invalid(
+                    "missing opposite fracture vertex",
+                ))
+        };
+        let (axes, _) = frame(
+            target_geometry.nodes_m(),
+            seam.side_a,
+            opposite(0, seam.side_a)?,
+            opposite(1, seam.side_b)?,
+            0.0,
+        )
+        .map_err(|_| BrittleTetFractureError::Invalid("invalid native fracture face frame"))?;
+        for element in seam.elements {
+            let released = law(element)
+                .release_failed_plane(
+                    &body.solution.element_states[element],
+                    axes[0],
+                    controls.normal_alignment_tolerance,
+                    controls.traction_tolerance_pa,
+                )
+                .map_err(|source| BrittleTetError::Material { element, source })?;
+            if released.stress_pa != body.solution.element_stress[element] {
+                return Err(BrittleTetFractureError::Invalid(
+                    "release changed accepted native stress",
+                ));
+            }
+        }
+        released_faces.push(ReleasedBrittleFace {
+            id: seam.id,
+            elements: seam.elements,
+            paired_nodes: [seam.side_a, seam.side_b],
+            normal: axes[0],
+            opening_tolerance_m: controls.opening_tolerance_m,
+        });
+    }
+    let mut displacement_m = Vec::with_capacity(target_geometry.nodes_m().len());
+    for (index, &node) in topology.original_nodes().iter().enumerate() {
+        if index % 256 == 0 {
+            checkpoint(cx)?;
+        }
+        displacement_m.push(body.solution.displacement_m[node]);
+    }
+    let mut bands = Vec::with_capacity(body.bands.len());
+    let mut stored = 0.0;
+    let mut loss = 0.0;
+    for (element, state) in body.solution.element_states.iter().enumerate() {
+        checkpoint(cx)?;
+        let band =
+            TetCrackBandGeometry::from_element(target_geometry, element, law(element).normal())
+                .map_err(BrittleTetError::Geometry)?;
+        let old = body.bands[element];
+        if band.reference_volume_m3() != old.reference_volume_m3()
+            || band.projected_area_m2() != old.projected_area_m2()
+            || band.band_width_m() != old.band_width_m()
+        {
+            return Err(BrittleTetFractureError::Invalid(
+                "release changed the original band geometry",
+            ));
+        }
+        stored = band
+            .reference_volume_m3()
+            .mul_add(state.stored_energy_j_m3(), stored);
+        loss = band
+            .reference_volume_m3()
+            .mul_add(state.dissipated_j_m3(), loss);
+        bands.push(band);
+    }
+    let energy = BrittleTetFractureEnergy {
+        stored_before_j: body.stored_energy_j,
+        stored_after_j: stored,
+        fracture_dissipation_before_j: body.fracture_dissipation_j,
+        fracture_dissipation_after_j: loss,
+        storage_defect_j: stored - body.stored_energy_j,
+        fracture_history_defect_j: loss - body.fracture_dissipation_j,
+    };
+    energy_gate(
+        "fracture topology storage",
+        energy.storage_defect_j,
+        controls.energy_tolerance_j,
+    )?;
+    energy_gate(
+        "fracture topology irreversible history",
+        energy.fracture_history_defect_j,
+        controls.energy_tolerance_j,
+    )?;
+    require_released_faces(
+        target_geometry.nodes_m().len(),
+        &released_faces,
+        &displacement_m,
+        cx,
+    )?;
+    let transfer = CompletedBrittleFracture {
+        bands: bands.into(),
+        released_faces: released_faces.into(),
+        solution: SmallStrainTetSolution {
+            displacement_m,
+            element_strain: body.solution.element_strain.clone(),
+            element_stress: body.solution.element_stress.clone(),
+            element_states: body.solution.element_states.clone(),
+            increments: Vec::new(),
+        },
+        energy,
+    };
+    checkpoint(cx)?;
+    Ok(transfer)
+}
+
+impl BrittleFractureView<'_, '_> {
     fn require_split_geometry(
         &self,
         topology: &TetFractureTopology<'_>,
@@ -301,7 +390,7 @@ impl<'a> BrittleTetSolid<'a> {
         let map = topology.original_nodes();
         if target.nodes_m().len() > self.budget.maximum_nodes
             || target.nodes_m().len().checked_mul(3).is_none()
-            || target.tetrahedra().len() != self.materials.len()
+            || target.tetrahedra().len() != self.solution.element_states.len()
             || target.nodes_m().len() != topology.nodes_m().len()
             || target.tetrahedra().len() != topology.tetrahedra().len()
             || map.len() != target.nodes_m().len()
@@ -339,37 +428,39 @@ impl<'a> BrittleTetSolid<'a> {
         }
         Ok(())
     }
+}
 
-    /// Fixed-reference matching trace guard, shared by every native integrator.
-    pub(crate) fn require_released_faces(
-        &self,
-        displacement_m: &[[f64; 3]],
-        cx: &Cx<'_>,
-    ) -> Result<(), BrittleTetError> {
-        if displacement_m.len() != self.geometry.nodes_m().len() {
-            return Err(BrittleTetError::Invalid(
-                "released-face displacement dimension",
-            ));
-        }
-        for face in self.released_faces.iter() {
-            checkpoint(cx)?;
-            for vertex in 0..3 {
-                let a = displacement_m[face.paired_nodes[0][vertex]];
-                let b = displacement_m[face.paired_nodes[1][vertex]];
-                let mut opening = 0.0;
-                for component in 0..3 {
-                    opening = face.normal[component].mul_add(b[component] - a[component], opening);
-                }
-                if !opening.is_finite() || opening < -face.opening_tolerance_m {
-                    return Err(BrittleTetError::ReleasedFaceClosure {
-                        face: face.id,
-                        vertex,
-                        opening_m: opening,
-                        tolerance_m: face.opening_tolerance_m,
-                    });
-                }
+/// Affine fixed-normal opening has its minimum at a paired P1 face vertex.
+/// Reused by native mechanical and thermal continuation without strain replay.
+pub(crate) fn require_released_faces(
+    node_count: usize,
+    released_faces: &[ReleasedBrittleFace],
+    displacement_m: &[[f64; 3]],
+    cx: &Cx<'_>,
+) -> Result<(), BrittleTetError> {
+    if displacement_m.len() != node_count {
+        return Err(BrittleTetError::Invalid(
+            "released-face displacement dimension",
+        ));
+    }
+    for face in released_faces {
+        checkpoint(cx)?;
+        for vertex in 0..3 {
+            let a = displacement_m[face.paired_nodes[0][vertex]];
+            let b = displacement_m[face.paired_nodes[1][vertex]];
+            let mut opening = 0.0;
+            for component in 0..3 {
+                opening = face.normal[component].mul_add(b[component] - a[component], opening);
+            }
+            if !opening.is_finite() || opening < -face.opening_tolerance_m {
+                return Err(BrittleTetError::ReleasedFaceClosure {
+                    face: face.id,
+                    vertex,
+                    opening_m: opening,
+                    tolerance_m: face.opening_tolerance_m,
+                });
             }
         }
-        Ok(())
     }
+    Ok(())
 }
