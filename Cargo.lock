@@ -3116,9 +3116,13 @@ name = "fs-vessel"
 version = "0.0.1"
 dependencies = [
  "fs-cheb",
+ "fs-evidence",
  "fs-exec",
  "fs-lbm",
+ "fs-matdb",
+ "fs-material",
  "fs-math",
+ "fs-qty",
  "fs-race",
  "fs-render",
  "fs-robust",

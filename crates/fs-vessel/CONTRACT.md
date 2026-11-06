@@ -391,3 +391,34 @@ dispersion reaching the final score, conserved volume flux, flow/length
 sensitivity, stable and neutral bands, zero transit, logarithmic large scores
 and structured refusal. The existing pour connectivity result keeps its
 original 2-D meaning.
+
+## Source-backed SI free-surface pours
+
+`pour::material::MaterialPour` binds an original resolved Newtonian liquid
+to the same rotating-frame weir solver used by `PourRig`. The shared native
+free-surface planner converts the source density, viscosity and surface tension
+at the requested cell size and timestep. The original source and its property
+selections remain borrowed by the accepted outcome; no material is reselected
+or numerical viscosity substituted.
+
+The authored physical scenario supplies gravity, pivot, tilt duration, grid
+geometry, contact-model bracket, allocation limit and velocity/density limits.
+Preparation enforces the native Mach, capillary and relaxation admissions.
+The observer checks actual vessel-frame wet-cell velocities, including the Guo
+half-force correction, and density excursions at initialization and every
+completed step. Cancellation or a failed envelope returns no partial outcome.
+The legacy lattice fixture uses a no-op observer on that same integration path.
+
+The accepted report exposes physical duration, vessel-frame speed and mass per metre of
+out-of-plane depth. The mass conversion is rho * dx²: this two-dimensional
+simulation does not infer a vessel depth or report kilograms. The original
+mass field remains the rendering field; physical mass values are available
+through a lazy iterator without a second field allocation.
+
+This binding holds one Newtonian source at its resolved conditions and refuses
+sources requiring evolving rheology. It does not solve thermal or composition
+evolution, certify laminar transition or substep extrema, calibrate the contact
+model, or turn two-dimensional connectivity into three-dimensional breakup.
+The focused regressions compare the exact native trajectory and render field,
+source-temperature response, physical unit conversion, cancellation and
+declared speed/density refusal.

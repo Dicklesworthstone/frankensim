@@ -9,6 +9,9 @@
 //! fs-render's exact slab absorption to the simulation's OWN mass buffer:
 //! the marketing shot and the physics are the same bytes.
 
+/// Original sourced liquid and SI scaling on this same native pour owner.
+pub mod material;
+
 use fs_lbm::core2::frame::{FrameForcingError2, RigidFrame2};
 use fs_lbm::freesurface::{ContactModel, FreeSurface};
 use fs_lbm::rheology::{Rheology, TAU_CAP, TAU_FLOOR, update_tau};
@@ -407,8 +410,20 @@ fn run_pour_motion(
     law: Rheology,
     pivot: Option<[f64; 2]>,
 ) -> Result<PourOutcome, PourError> {
+    run_pour_motion_observed(rig, contact, law, pivot, |_, _| Ok::<(), PourError>(()))
+}
+
+// One integration path for legacy fixtures and physically bound material pours.
+// An observer sees only completed native states; it cannot alter the trajectory.
+fn run_pour_motion_observed<E: From<PourError>>(
+    rig: &PourRig,
+    contact: ContactModel,
+    law: Rheology,
+    pivot: Option<[f64; 2]>,
+    mut observe: impl FnMut(&FreeSurface, u32) -> Result<(), E>,
+) -> Result<PourOutcome, E> {
     if rig.steps == 0 {
-        return Err(PourError::EmptySchedule);
+        return Err(PourError::EmptySchedule.into());
     }
     let (nx, ny) = (rig.nx, rig.ny);
     let mut grid = Grid::uniform(nx, ny, 0.55);
@@ -450,6 +465,7 @@ fn run_pour_motion(
     let mut sim = FreeSurface::new(grid, rig.surface_tension, contact);
     let m0 = sim.ledger_mass();
     let mut mass_drift = 0.0f64;
+    observe(&sim, 0)?;
     for step in 0..rig.steps {
         if let Some(origin) = pivot {
             rig.prepare_step(&mut sim.grid, step, origin)
@@ -463,6 +479,7 @@ fn run_pour_motion(
             ];
         }
         advance_pour_liquid(&mut sim, law, step)?;
+        observe(&sim, step + 1)?;
         mass_drift = mass_drift.max(((sim.ledger_mass() - m0) / m0).abs());
     }
     // Poured mass: fluid/interface mass right of the weir.

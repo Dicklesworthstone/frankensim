@@ -40,6 +40,9 @@ pub mod stability;
 
 pub use jet::{FreeJetReport, FreeJetStudy};
 pub use pour::{PourError, PourOutcome, PourRig, render_pour};
+pub use pour::material::{
+    MaterialPour, MaterialPourError, MaterialPourOutcome, MaterialPourReport, MaterialPourSpec,
+};
 pub use race::{
     LipScreenReport, SCREEN_JITTER_WIDTH, SCREEN_SCALE, ScreenError, declared_span,
     race_base_losses, screen_laminar_lips, screen_lips, screening_losses,
