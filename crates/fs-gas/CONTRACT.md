@@ -4986,11 +4986,14 @@ source body endpoints publish together. Source, cancellation, work and energy
 refusals publish neither endpoint.
 
 The existing backward-Euler/SDIRK2 chemical stages eliminate the finite body
-on its original piecewise-linear caloric segments. Binary segment lookup and
-analytic elimination introduce no second time integrator or nested iterative
-temperature root. The constrained gas Jacobian includes the body's changing
-temperature response. Latent plateaus retain their actual enthalpy and phase
-fraction; the adaptive comparison includes both body temperature and liquid
+on its original caloric intervals. Retained affine Cp(T) uses a scaled quadratic
+solve of h(T)+beta*T; authored affine T(h) and latent intervals retain their
+linear elimination. Binary segment lookup and analytic elimination introduce
+no second time integrator or nested iterative temperature root. The constrained
+gas Jacobian uses the original derivative at the accepted body temperature,
+including source Cp variation within compact two-knot charts. Latent plateaus
+retain their actual enthalpy and phase fraction; the adaptive comparison
+includes both body temperature and liquid
 fraction. Caloric bracketing respects both original source domains.
 
 Gas heat and body heat cancel once. The original material isobaric heat owner
@@ -5020,6 +5023,12 @@ Default-feature compilation and all six existing heat tests also passed.
 These are native fallback builds against compatible cached dependencies;
 DSR and required sibling checkouts were unavailable. They do not establish
 a full workspace verdict or measured-material validation.
+
+The `source_cp_body` regressions additionally cover increasing/decreasing Cp,
+original-interval heat closure and finite-difference feedback, shifted enthalpy
+datums, and independent two-body evolution through both reactor constraints and
+time methods. These new regressions are source/syntax checked but unexecuted;
+the current shared host stopped dependency compilation before this target.
 
 ### Finite support inertia in the original network wall transaction
 

@@ -1,6 +1,9 @@
 use super::*;
 use crate::chemistry::heat::material::FiniteHeatBody;
-use fs_material::phase::{EnthalpyPhaseKnot, EquilibriumEnthalpyPhaseCurve, SolidLiquidPhase};
+use crate::chemistry::heat::{HeatExchange, HeatStage};
+use fs_material::phase::{
+    EnthalpyPhaseKnot, EquilibriumEnthalpyPhaseCurve, HeatCapacityKnot, SolidLiquidPhase,
+};
 
 fn curve(datum: f64, latent: bool) -> EquilibriumEnthalpyPhaseCurve {
     // Authored G1 calorimeter, not a measured material or source-validation deck.
@@ -46,6 +49,40 @@ fn body<'a>(curve: &'a EquilibriumEnthalpyPhaseCurve, h: f64, g: f64) -> FiniteH
         ThermalConductance::new(g),
     )
     .unwrap()
+}
+
+fn source_cp_curve(datum: f64, cp: [f64; 2]) -> EquilibriumEnthalpyPhaseCurve {
+    let identity = source("manufactured-Cp-calorimeter", 1.0, 4.0, 0.0, 0.0).regions()[0]
+        .card()
+        .content_hash();
+    EquilibriumEnthalpyPhaseCurve::try_from_heat_capacity_exact(
+        identity,
+        SolidLiquidPhase::Solid,
+        datum,
+        &[
+            HeatCapacityKnot {
+                temperature_k: 200.0,
+                specific_heat_capacity_j_kg_k: cp[0],
+                bulk_density_kg_m3: 1000.0,
+            },
+            HeatCapacityKnot {
+                temperature_k: 1200.0,
+                specific_heat_capacity_j_kg_k: cp[1],
+                bulk_density_kg_m3: 1000.0,
+            },
+        ],
+    )
+    .unwrap()
+}
+
+// Independent source integrals, with no chart interpolation or inversion.
+fn source_cp_enthalpy(cp: [f64; 2], temperature: f64) -> f64 {
+    let delta = temperature - 200.0;
+    cp[0] * delta + 0.5 * ((cp[1] - cp[0]) / 1000.0) * delta * delta
+}
+
+fn source_cp_at(cp: [f64; 2], temperature: f64) -> f64 {
+    cp[0] + ((cp[1] - cp[0]) / 1000.0) * (temperature - 200.0)
 }
 
 #[derive(Clone, Copy)]
@@ -426,9 +463,17 @@ fn finite_body_constrained_jacobian_retains_both_caloric_feedbacks() {
         ],
     );
     for pressure in [false, true] {
-        for latent in [false, true] {
-            let chart = curve(0.0, latent);
-            let original = body(&chart, if latent { 25_000.0 } else { 3000.0 }, 1000.0);
+        for chart_kind in 0..3 {
+            let chart = if chart_kind == 2 {
+                source_cp_curve(0.0, [10.0, 110.0])
+            } else {
+                curve(0.0, chart_kind == 1)
+            };
+            let original = body(
+                &chart,
+                if chart_kind == 1 { 25_000.0 } else { 3000.0 },
+                1000.0,
+            );
             let mut reactor = solve::Reactor::new(
                 mechanism.clone(),
                 thermal_controls(IsochoricKineticsMethod::Sdirk2),
@@ -459,9 +504,135 @@ fn finite_body_constrained_jacobian_retains_both_caloric_feedbacks() {
             let numeric = (plus[0] - minus[0]) / 2e-6;
             assert!(
                 (numeric - derivative[0]).abs() < 2e-7 * numeric.abs().max(1.0),
-                "p={pressure}, latent={latent}: {numeric} != {}",
+                "p={pressure}, chart={chart_kind}: {numeric} != {}",
                 derivative[0]
             );
+        }
+    }
+}
+
+#[test]
+fn g1_g3_source_cp_body_stages_close_original_heat_and_tangent() {
+    for cp in [[10.0, 110.0], [110.0, 10.0]] {
+        for datum in [0.0, 1_048_576.0, -1_048_576.0] {
+            let chart = source_cp_curve(datum, cp);
+            assert_eq!(chart.knots().len(), 2);
+            for (initial, gas_temperature) in [(350.0, 800.0), (950.0, 1100.0), (900.0, 300.0)] {
+                let h0 = source_cp_enthalpy(cp, initial);
+                let original = body(&chart, datum + h0, 400.0);
+                let (volume, diagonal_step, forcing) = (2.0, 0.5, 20.0);
+                let mut fixed = Sum::default();
+                fixed.add(250.0);
+                let stage = HeatStage::implicit(
+                    fixed,
+                    Some(HeatExchange::Body(original)),
+                    volume,
+                    diagonal_step,
+                    forcing,
+                )
+                .unwrap();
+                let capacity = diagonal_step * original.conductance().value() / volume;
+                let beta = capacity * volume / original.mass().value();
+                let heat_fixed = fixed.value() + forcing;
+                // Independent bisection of the original material first law:
+                // h(Tb)-h(Tb0) + V/m*(q_fixed+a*(Tb-Tg)) = 0.
+                let (mut lo, mut hi) = (200.0, 1200.0);
+                for _ in 0..80 {
+                    let t = 0.5 * (lo + hi);
+                    let residual = source_cp_enthalpy(cp, t) - h0
+                        + volume / original.mass().value()
+                            * (heat_fixed + capacity * (t - gas_temperature));
+                    if residual < 0.0 {
+                        lo = t;
+                    } else {
+                        hi = t;
+                    }
+                }
+                let expected = 0.5 * (lo + hi);
+                let (heat, feedback) = stage.heat(gas_temperature).unwrap();
+                let body_h = original.state().specific_enthalpy_j_kg()
+                    - heat.value() * volume / original.mass().value();
+                let actual = chart.temperature_at_specific_enthalpy(body_h).unwrap();
+                assert!((actual - expected).abs() < 2e-10, "{actual} != {expected}");
+                let residual = heat.value() - heat_fixed - capacity * (actual - gas_temperature);
+                assert!(residual.abs() < 3e-8, "implicit heat residual {residual}");
+                let actual_capacity = source_cp_at(cp, actual);
+                let expected_feedback = capacity * actual_capacity / (actual_capacity + beta);
+                assert!((feedback - expected_feedback).abs() < 1e-10);
+                let epsilon = 0.001;
+                let plus = stage.heat(gas_temperature + epsilon).unwrap().0.value();
+                let minus = stage.heat(gas_temperature - epsilon).unwrap().0.value();
+                let difference = -(plus - minus) / (2.0 * epsilon);
+                assert!((feedback - difference).abs() < 2e-7 * feedback.max(1.0));
+                assert_eq!(original.state().specific_enthalpy_j_kg(), datum + h0);
+                assert!(stage.heat(-1000.0).is_err());
+            }
+        }
+    }
+}
+
+#[test]
+fn g1_source_cp_body_couples_both_reactors_to_independent_heat_evolution() {
+    let (duration, conductance) = (0.3, 40.0);
+    for pressure in [false, true] {
+        let gas_capacity = if pressure { 4.0 } else { 3.0 } * R;
+        for (cp, initial_gas, initial_body, binding, reacting) in [
+            ([10.0, 110.0], 800.0, 300.0, 512.0, true),
+            ([110.0, 10.0], 300.0, 900.0, 0.0, false),
+        ] {
+            let h0 = source_cp_enthalpy(cp, initial_body);
+            // The two-body continuum oracle uses only conservation, the
+            // authored Cp polynomial and independent scalar RK4 integration.
+            // A -> B releases binding*R*(1-exp(-2t)) exactly in this fixture.
+            let gas_temperature = |time: f64, body_temperature: f64| {
+                initial_gas
+                    + (binding * R * (1.0 - (-2.0 * time).exp())
+                        - (source_cp_enthalpy(cp, body_temperature) - h0))
+                        / gas_capacity
+            };
+            let rate = |time: f64, temperature: f64| {
+                conductance * (gas_temperature(time, temperature) - temperature)
+                    / source_cp_at(cp, temperature)
+            };
+            let mut expected_body = initial_body;
+            let dt = duration / 4096.0;
+            for step in 0..4096 {
+                let time = step as f64 * dt;
+                let a = rate(time, expected_body);
+                let b = rate(time + 0.5 * dt, expected_body + 0.5 * dt * a);
+                let c = rate(time + 0.5 * dt, expected_body + 0.5 * dt * b);
+                let d = rate(time + dt, expected_body + dt * c);
+                expected_body += dt * (a + 2.0 * b + 2.0 * c + d) / 6.0;
+            }
+            let expected_gas = gas_temperature(duration, expected_body);
+            let chart = source_cp_curve(0.0, cp);
+            let original = body(&chart, h0, conductance);
+            for method in [
+                IsochoricKineticsMethod::BackwardEuler,
+                IsochoricKineticsMethod::Sdirk2,
+            ] {
+                let result = run(
+                    pressure,
+                    method,
+                    initial_gas,
+                    duration,
+                    original,
+                    binding,
+                    reacting,
+                );
+                let tolerance = if method == IsochoricKineticsMethod::BackwardEuler {
+                    0.12
+                } else {
+                    0.002
+                };
+                assert!((result.gas_t - expected_gas).abs() < tolerance);
+                assert!((result.body_t - expected_body).abs() < tolerance);
+                let cp_slope = (cp[1] - cp[0]) / 1000.0;
+                let entropy = (cp[0] - 200.0 * cp_slope) * (result.body_t / initial_body).ln()
+                    + cp_slope * (result.body_t - initial_body);
+                assert!((result.body_entropy - entropy).abs() < 1e-10);
+                balances(result, 3.0 * R * initial_gas);
+            }
         }
     }
 }

@@ -149,10 +149,10 @@ impl<'m> FiniteHeatBody<'m> {
         Ok(temperature.max(phase))
     }
 
-    // q = fixed + a*(Tb(h)-Tg), h = h0 - V*q/m. On each original segment,
-    // h + beta*Tb(h) is affine and strictly increasing, including a plateau.
-    // Locate that segment by binary search, then eliminate h analytically.
-    // No added Newton coordinate, nested iterative root or apparent Cp exists.
+    // q = fixed + a*(Tb(h)-Tg), h = h0 - V*q/m. The strictly increasing
+    // h + beta*Tb(h) is affine on an authored T(h) segment or latent plateau;
+    // an original affine Cp(T) instead makes h(T) + beta*T quadratic in T.
+    // Binary source lookup and analytic elimination require no nested root.
     pub(super) fn stage_heat(
         self,
         fixed: Sum,
@@ -183,16 +183,54 @@ impl<'m> FiniteHeatBody<'m> {
             .partition_point(|knot| residual(knot) <= 0.0)
             .clamp(1, knots.len() - 1);
         let lower = knots[upper - 1];
-        let slope = (knots[upper].temperature_k - lower.temperature_k)
-            / (knots[upper].specific_enthalpy_j_kg - lower.specific_enthalpy_j_kg);
+        let h = if let Some(cp) = self.curve.sensible_heat_capacities_on_interval(upper - 1) {
+            let lower_residual = residual(&lower);
+            let upper_residual = residual(&knots[upper]);
+            // Invert from the nearer residual endpoint. Normalize Cp and beta
+            // before adding or squaring them, and rationalize the quadratic
+            // root. A strongly decreasing Cp then avoids cancellation too.
+            let from_upper = -lower_residual > upper_residual;
+            let (energy, cp) = if from_upper {
+                (upper_residual, [cp[1], cp[0]])
+            } else {
+                (-lower_residual, cp)
+            };
+            let width = knots[upper].temperature_k - lower.temperature_k;
+            let scale = cp[0].max(cp[1]).max(beta);
+            let a = cp[0] / scale + beta / scale;
+            let b = cp[1] / scale + beta / scale;
+            let energy = (energy / scale) / width;
+            let discriminant = (2.0 * (b - a)).mul_add(energy, a * a);
+            let fraction = if energy == 0.0 {
+                0.0
+            } else {
+                2.0 * energy / (a + discriminant.sqrt())
+            };
+            if !fraction.is_finite() || !(0.0..=1.0).contains(&fraction) {
+                return Err(IsochoricKineticsError::Invalid(
+                    "implicit finite-body state is outside its original caloric interval",
+                ));
+            }
+            let t = if from_upper {
+                (-width).mul_add(fraction, knots[upper].temperature_k)
+            } else {
+                width.mul_add(fraction, lower.temperature_k)
+            };
+            self.curve
+                .specific_enthalpy_on_sensible_interval(upper - 1, t)?
+        } else {
+            let slope = (knots[upper].temperature_k - lower.temperature_k)
+                / (knots[upper].specific_enthalpy_j_kg - lower.specific_enthalpy_j_kg);
+            lower.specific_enthalpy_j_kg - residual(&lower) / (1.0 + beta * slope)
+        };
+        let body_temperature = self.curve.temperature_at_specific_enthalpy(h)?;
+        let slope = self.curve.temperature_derivative_at_specific_enthalpy(h)?;
         let denominator = 1.0 + beta * slope;
         if !slope.is_finite() || !positive(denominator) {
             return Err(IsochoricKineticsError::Invalid(
                 "unrepresentable finite-body caloric slope or implicit denominator",
             ));
         }
-        let h = lower.specific_enthalpy_j_kg - residual(&lower) / denominator;
-        let body_temperature = self.curve.temperature_at_specific_enthalpy(h)?;
         let mut heat = fixed;
         heat.add(capacity * (body_temperature - temperature));
         let feedback = capacity / denominator;
