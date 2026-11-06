@@ -232,6 +232,9 @@ fn gas_and_potential(network: &GasNetwork1d) -> f64 {
             HydrostaticReference::Isentropic(r) => {
                 (r.acceleration.value(), r.reference_position.value())
             }
+            HydrostaticReference::LapseRate(r) => {
+                (r.acceleration.value(), r.reference_position.value())
+            }
         };
         for (i, q) in branch.states().iter().enumerate() {
             let x = 0.5 * (branch.mesh().positions()[i] + branch.mesh().positions()[i + 1]);

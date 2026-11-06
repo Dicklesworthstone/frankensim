@@ -121,6 +121,9 @@ fn storage(network: &GasNetwork1d) -> [f64; 3] {
             Some(HydrostaticReference::Isentropic(r)) => {
                 (r.acceleration.value(), r.reference_position.value())
             }
+            Some(HydrostaticReference::LapseRate(r)) => {
+                (r.acceleration.value(), r.reference_position.value())
+            }
             None => (0.0, 0.0),
         };
         for (i, q) in branch.states().iter().enumerate() {

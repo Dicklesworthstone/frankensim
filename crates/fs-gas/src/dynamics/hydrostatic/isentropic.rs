@@ -21,7 +21,7 @@ pub struct IsentropicAtmosphere {
     pub reference_position: Length,
 }
 
-/// Bounded preparation of conserved cell averages along the source isentrope.
+/// Bounded preparation of conserved cell averages along a source atmosphere.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct AtmosphereQuadrature {
     /// Relative change required between successive composite Gauss rules.
@@ -270,66 +270,14 @@ impl<'a> SourceIsentrope<'a> {
             poll(cancelled)?;
             return Ok(self.datum.0);
         }
-        let mut panels = 1;
-        let mut coarse = self.integrate(left, right, panels, cancelled)?;
-        while panels < control.maximum_panels {
-            panels = (2 * panels).min(control.maximum_panels);
-            let fine = self.integrate(left, right, panels, cancelled)?;
-            let density_tolerance = control.relative_tolerance * fine.density.abs();
-            let energy_tolerance = control.relative_tolerance * fine.energy.abs()
-                + fine.density * self.gas.domain().absolute_energy_tolerance;
-            if (fine.density - coarse.density).abs() <= density_tolerance
-                && (fine.energy - coarse.energy).abs() <= energy_tolerance
-            {
-                return Ok(fine);
-            }
-            coarse = fine;
-        }
-        Err(Error::Invalid(
-            "isentropic atmosphere quadrature budget exhausted",
-        ))
-    }
-
-    fn integrate(
-        &self,
-        left: f64,
-        right: f64,
-        panels: usize,
-        cancelled: &mut impl FnMut() -> bool,
-    ) -> Result<Conserved, Error> {
-        const NODES: [f64; 4] = [
-            -0.861_136_311_594_052_6,
-            -0.339_981_043_584_856_3,
-            0.339_981_043_584_856_3,
-            0.861_136_311_594_052_6,
-        ];
-        const WEIGHTS: [f64; 4] = [
-            0.347_854_845_137_453_9,
-            0.652_145_154_862_546_1,
-            0.652_145_154_862_546_1,
-            0.347_854_845_137_453_9,
-        ];
-        let mut sums = [0.0; 2];
-        let mut corrections = [0.0; 2];
-        let width = (right - left) / panels as f64;
-        for panel in 0..panels {
-            let middle = left + (panel as f64 + 0.5) * width;
-            for (node, weight) in NODES.into_iter().zip(WEIGHTS) {
-                let (q, _) = self.at(middle + 0.5 * width * node, cancelled)?;
-                let factor = weight / (2 * panels) as f64;
-                for (field, value) in [q.density, q.energy].into_iter().enumerate() {
-                    let y = factor * value - corrections[field];
-                    let next = sums[field] + y;
-                    corrections[field] = (next - sums[field]) - y;
-                    sums[field] = next;
-                }
-            }
-        }
-        Ok(Conserved {
-            density: sums[0],
-            momentum: 0.0,
-            energy: sums[1],
-        })
+        quadrature::average(
+            self.gas,
+            left,
+            right,
+            control,
+            &mut |x, cancelled| self.at(x, cancelled),
+            cancelled,
+        )
     }
 }
 

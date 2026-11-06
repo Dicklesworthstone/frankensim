@@ -3,6 +3,7 @@ use crate::compressible::tests::{close, gas};
 use fs_qty::{Acceleration, Pressure, Temperature};
 
 mod isentropic;
+mod lapse;
 
 const WALLS: AxisBoundaries = AxisBoundaries::Ends {
     lower: BoundaryCondition::Reflecting,

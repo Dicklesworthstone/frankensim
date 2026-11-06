@@ -6,11 +6,14 @@
 //! The evolving gas remains adiabatic and uses the original NASA calorics.
 //! See Käppeli and Mishra, JCP 259 (2014), doi:10.1016/j.jcp.2013.11.028,
 //! for hydrostatic reconstruction; this bounded implementation preserves only
-//! the declared isothermal or isentropic, constant-acceleration, constant-area
-//! reference. Isentropes retain the original variable heat capacity.
+//! the declared isothermal, isentropic or prescribed thermal-lapse reference
+//! at constant acceleration and area. Original variable heat capacity is retained.
 
 mod isentropic;
 pub use isentropic::{AtmosphereQuadrature, IsentropicAtmosphere};
+mod lapse;
+pub use lapse::LapseRateAtmosphere;
+mod quadrature;
 
 use super::{
     Boundaries, Conserved, Error, Euler1d, FaceFlux, FrozenGas, Mesh1d, Primitive, allocated, poll,
@@ -43,6 +46,8 @@ pub enum HydrostaticReference {
     Isothermal(IsothermalAtmosphere),
     /// Uniform specific entropy, with source-dependent temperature lapse.
     Isentropic(IsentropicAtmosphere),
+    /// Prescribed linear temperature lapse, with stable or unstable entropy stratification.
+    LapseRate(LapseRateAtmosphere),
 }
 
 impl HydrostaticReference {
@@ -50,6 +55,7 @@ impl HydrostaticReference {
         match self {
             Self::Isothermal(reference) => reference.acceleration.value(),
             Self::Isentropic(reference) => reference.acceleration.value(),
+            Self::LapseRate(reference) => reference.acceleration.value(),
         }
     }
 
@@ -57,6 +63,7 @@ impl HydrostaticReference {
         match self {
             Self::Isothermal(reference) => reference.reference_position.value(),
             Self::Isentropic(reference) => reference.reference_position.value(),
+            Self::LapseRate(reference) => reference.reference_position.value(),
         }
     }
 }
@@ -207,7 +214,7 @@ impl Euler1d {
     }
 
     /// Retained isothermal reference, if this is an isothermal atmosphere.
-    /// Use [`Self::hydrostatic_reference`] to inspect either supported family.
+    /// Use [`Self::hydrostatic_reference`] to inspect every supported family.
     pub fn atmosphere(&self) -> Option<IsothermalAtmosphere> {
         match self.hydrostatic_reference() {
             Some(HydrostaticReference::Isothermal(reference)) => Some(reference),

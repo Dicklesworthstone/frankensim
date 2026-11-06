@@ -1,6 +1,6 @@
 //! Axis-aligned hydrostatic reconstruction over the original gas reference.
 //!
-//! Isothermal and isentropic references share the original gas integration.
+//! Isothermal, isentropic and thermal-lapse references share the original gas integration.
 //! Perturbations evolve adiabatically with both momentum components and the
 //! retained variable-Cp caloric source; the reference is not a thermostat.
 //! Gravity work uses the shared mass flux, conserving gas plus midpoint
@@ -9,6 +9,7 @@
 use super::*;
 pub use fs_gas::dynamics::{
     AtmosphereQuadrature, HydrostaticReference, IsentropicAtmosphere, IsothermalAtmosphere,
+    LapseRateAtmosphere,
 };
 use fs_gas::dynamics::{Boundaries, Boundary, Euler1d, Mesh1d};
 use fs_qty::Length;
@@ -40,6 +41,14 @@ pub(super) fn reference_profile(
             ends,
             cancelled,
         )?,
+        HydrostaticReference::LapseRate(value) => Euler1d::new_lapse_rate_atmosphere(
+            gas.clone(),
+            mesh,
+            value,
+            quadrature,
+            ends,
+            cancelled,
+        )?,
     })
 }
 
@@ -47,6 +56,7 @@ pub(super) fn acceleration(reference: HydrostaticReference) -> f64 {
     match reference {
         HydrostaticReference::Isothermal(value) => value.acceleration.value(),
         HydrostaticReference::Isentropic(value) => value.acceleration.value(),
+        HydrostaticReference::LapseRate(value) => value.acceleration.value(),
     }
 }
 
@@ -54,6 +64,7 @@ pub(super) fn reference_position(reference: HydrostaticReference) -> f64 {
     match reference {
         HydrostaticReference::Isothermal(value) => value.reference_position.value(),
         HydrostaticReference::Isentropic(value) => value.reference_position.value(),
+        HydrostaticReference::LapseRate(value) => value.reference_position.value(),
     }
 }
 
@@ -308,6 +319,31 @@ impl Euler2d {
         )
     }
 
+    /// Initialize a mechanically balanced prescribed thermal lapse.
+    ///
+    /// Stable and unstable profiles use the original source Cp(T), integrated
+    /// conserved averages and shared gravity work. Only one O(n_axis) profile
+    /// is prepared; stepping retains the full planar Euler dynamics.
+    pub fn new_lapse_rate_atmosphere(
+        gas: FrozenGas,
+        grid: CartesianGrid,
+        axis: usize,
+        reference: LapseRateAtmosphere,
+        quadrature: AtmosphereQuadrature,
+        boundaries: Boundaries2d,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, Error> {
+        Self::new_hydrostatic_atmosphere(
+            gas,
+            grid,
+            axis,
+            HydrostaticReference::LapseRate(reference),
+            quadrature,
+            boundaries,
+            cancelled,
+        )
+    }
+
     fn new_hydrostatic_atmosphere(
         gas: FrozenGas,
         grid: CartesianGrid,
@@ -383,6 +419,25 @@ impl Euler2d {
         )
     }
 
+    /// Retain a prescribed thermal lapse around caller-authored perturbations.
+    /// This only binds an initial reference and never changes the gas averages.
+    /// It shares the same source-domain, cancellation and single-binding rules
+    /// as the isentropic and isothermal paths.
+    pub fn bind_lapse_rate_atmosphere(
+        &mut self,
+        axis: usize,
+        reference: LapseRateAtmosphere,
+        quadrature: AtmosphereQuadrature,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<(), Error> {
+        self.bind_hydrostatic_reference(
+            axis,
+            HydrostaticReference::LapseRate(reference),
+            quadrature,
+            cancelled,
+        )
+    }
+
     pub(super) fn bind_hydrostatic_reference(
         &mut self,
         axis: usize,
@@ -429,7 +484,7 @@ impl Euler2d {
     }
 
     /// Retained isothermal reference; use [`Self::hydrostatic_reference`] for
-    /// either physical family.
+    /// every supported physical family.
     pub fn atmosphere(&self) -> Option<(usize, IsothermalAtmosphere)> {
         match self.hydrostatic_reference() {
             Some((axis, HydrostaticReference::Isothermal(reference))) => Some((axis, reference)),
