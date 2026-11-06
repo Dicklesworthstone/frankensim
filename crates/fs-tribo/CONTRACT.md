@@ -152,6 +152,25 @@ force and tangent evaluation. A small relative sliding coordinate therefore
 survives a much larger common translation. Original wall rows remain queryable;
 unrepresentable derived rows refuse during construction.
 
+### Navier-slip walls
+
+`resistive_film::shear::slip::NavierSlipFilm` binds separate nonnegative lower
+and upper slip lengths to the original uniform-viscosity channel graph. Its
+single Navier/Stokes profile changes hydraulic mobility, Couette entrainment,
+wall tractions and the full geometry/rate tangent together. Pressure elimination
+retains the native graph, limits, datum and factorization. Prescribed pressure
+supplies and common Barus viscosity remain supported; slip lengths stay fixed
+when viscosity changes. This does not infer slip from material names or roughness.
+
+Channel power closes as `Q*delta_p + wall_power = bulk_heat + lower_slip_heat
++ upper_slip_heat`. Each term on the right is nonnegative; the two interface
+losses are explicit thermal-routing inputs, not automatically deposited into
+the fluid. All quantities use the same accepted solve, bounded stack storage
+and atomic outputs. Exact no-slip, equal/unequal-slip Couette and Poiseuille
+limits, independent local velocity/heat integration, Barus averaging and full
+force derivatives are tested. Stratified viscosity, tensor slip, rarefaction,
+cavitation and interfacial state evolution retain their separate owners.
+
 `ShearedFilm::with_layer_viscosities` continues the original uniform-channel or
 layered film with one positive coefficient per original layer. It retains graph
 geometry, wall rows, normalized interfaces, pressure limits and the common

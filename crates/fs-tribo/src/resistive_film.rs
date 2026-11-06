@@ -403,6 +403,30 @@ impl ResistiveFilm {
         reservoir_potential: &[f64],
         datum: pressure::PressureDatum,
     ) -> Result<Solution, FilmError> {
+        self.solve_with_mobility::<ENTRAINMENT, PRESSURIZED, false>(
+            q, v, entrainment, reservoir_potential, datum, &[],
+        )
+    }
+
+    // Boundary constitutive laws can change hydraulic mobility, but pressure
+    // incidence, admissibility, datum conversion and factorization stay here.
+    #[allow(clippy::too_many_arguments)]
+    fn solve_with_mobility<
+        const ENTRAINMENT: bool,
+        const PRESSURIZED: bool,
+        const CUSTOM_MOBILITY: bool,
+    >(
+        &self,
+        q: &[f64],
+        v: &[f64],
+        entrainment: &[f64],
+        reservoir_potential: &[f64],
+        datum: pressure::PressureDatum,
+        conductance: &[f64],
+    ) -> Result<Solution, FilmError> {
+        if CUSTOM_MOBILITY && conductance.len() != self.channels.len() {
+            return fail("film mobility must match the original channel count");
+        }
         if ENTRAINMENT
             && (entrainment.len() != self.channels.len()
                 || entrainment.iter().any(|flow| !flow.is_finite()))
@@ -417,8 +441,14 @@ impl ResistiveFilm {
         let mut s = Solution::new(n, minimum);
         for (k, (edge, factor)) in self.channels.iter().zip(&self.factors).enumerate() {
             let h = edge.gap.reference_m - dot(&edge.gap.closure, q);
-            let g = if h > 0.0 { factor * h * h * h } else { 0.0 };
-            if !g.is_finite() {
+            let g = if CUSTOM_MOBILITY {
+                conductance[k]
+            } else if h > 0.0 {
+                factor * h * h * h
+            } else {
+                0.0
+            };
+            if !g.is_finite() || g < 0.0 || (h <= 0.0 && g != 0.0) {
                 return fail("nonfinite film conductance");
             }
             s.conductance[k] = g;

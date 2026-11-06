@@ -1,4 +1,6 @@
-//! SI Newtonian no-slip, shear-free falling film on a locally planar wall.
+//! SI Newtonian film base flows and a shear-free long-wave screen.
+//! [`ShearedFilm`] admits prescribed surface traction at fixed thickness;
+//! [`NusseltFilm`] supplies the shear-free base and Benney screen below.
 //! q = g_t h^3/(3 nu), u(y) = g_t (h y - y^2/2)/nu, Re = q/nu (mean speed).
 //! For exp(s t + i(k x - omega t)), the linear Benney approximation is
 //! s = q k^2 [(6/5) Re - g_n/g_t - sigma k^2/(rho g_t)], omega = 3 (q/h) k.
@@ -6,7 +8,8 @@
 //! This near-onset long-wave surface mode is not turbulent transition or a
 //! free-surface Orr-Sommerfeld solve. Wavy films can remain laminar. Sampled
 //! decay proves neither global stability nor unsampled wavelengths. Side walls,
-//! curvature, gas shear, non-Newtonian response and contact lines are omitted.
+//! curvature, gas shear, non-Newtonian response and contact lines are omitted
+//! from that Nusselt/Benney screen.
 //! Source: Scheid et al., Phys. Fluids 14 (2002), DOI 10.1063/1.1515270,
 //! equation (7), zero thermal terms; their R = 3 Re. Author manuscript:
 //! <https://www.uni-muenster.de/Physik.TP/pauli/~thiele/Paper/SOCT2002pf.pdf>.

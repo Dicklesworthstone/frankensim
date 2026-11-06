@@ -34,6 +34,8 @@ pub use layer_work::MAX_LAYER_REPORTS;
 /// Prescribed pressure supplies combined with the original sliding-wall film.
 pub mod pressure;
 pub use pressure::PressureDrivenShearedFilm;
+/// Navier-slip wall friction with conservative bulk and interface heating.
+pub mod slip;
 
 use super::pressure::{PressureDatum, PressureDrivenReport, ReservoirPressures, barus_mean_at_datum, pressure_drop_at_datum};
 use super::stratified::{GapViscosityProfile, StratifiedFilm, ViscosityLayer};
