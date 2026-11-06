@@ -1844,3 +1844,290 @@ fn g1_spectral_heating_shares_feedback_admission_and_exact_source_energy() {
         || { polls += 1; polls == 20 },
     ), Err(ConductionError::Cancelled { .. })));
 }
+
+#[test]
+fn g1_discrete_gradient_contact_closes_original_caloric_entropy() {
+    use fs_conduction::lumped::{
+        LumpedContactStepConfig, solve_lumped_contact_step,
+        solve_lumped_contact_step_discrete_gradient,
+    };
+    let curve = phase_curve();
+    let body = enthalpy_body(&curve);
+    let resistance = contact_resistance();
+    let config = LumpedContactStepConfig {
+        specific_enthalpy_a_j_kg: 20_000.0,
+        specific_enthalpy_b_j_kg: 10_000.0,
+        supplied_heat_a_j: 0.0,
+        supplied_heat_b_j: 0.0,
+        duration_s: 100.0,
+        energy_tolerance_j: 1e-8,
+    };
+    with_cx(|cx| {
+        let solved = solve_lumped_contact_step_discrete_gradient(
+            cx, &body, &body, &resistance, config, 64,
+        ).unwrap();
+        let step = solved.step;
+        let [ta, tb] = solved.mean_temperatures_k;
+        // Independent constant-Cp logarithmic means on the actual sensible
+        // branch. Endpoint temperatures still come from the source h chart.
+        let final_a = step.state_a.temperature_k();
+        let final_b = step.state_b.temperature_k();
+        let expected_a = (final_a - 500.0) / (final_a / 500.0).ln();
+        let expected_b = (final_b - 400.0) / (final_b / 400.0).ln();
+        assert!((ta - expected_a).abs() < 1e-10);
+        assert!((tb - expected_b).abs() < 1e-10);
+        assert!((step.heat_a_to_b_j - 6668.71330353036).abs() < 1e-7);
+        assert!((step.heat_a_to_b_j - 100.0 * (ta - tb)).abs() <= 1e-8);
+        assert!(final_a > final_b);
+        assert!(step.energy_residual_j.abs() <= 1e-8);
+        assert!(step.contact_residual_j.abs() <= 1e-8);
+        assert!(solved.entropy_intervals > 0 && solved.entropy_intervals <= 64);
+        let entropy = step.entropy;
+        let independent = [
+            200.0 * (final_a / 500.0).ln(),
+            200.0 * (final_b / 400.0).ln(),
+        ];
+        for side in 0..2 {
+            assert!((entropy.storage_change_j_k[side] - independent[side]).abs() < 1e-10);
+            assert!(entropy.temporal_defect_j_k[side].abs() < 1e-12);
+        }
+        assert!(entropy.contact_generation_j_k > 0.0);
+        let storage = entropy.storage_change_j_k.into_iter().sum::<f64>();
+        let defect = entropy.temporal_defect_j_k.into_iter().sum::<f64>();
+        let algebraic = entropy.energy_residual_entropy_j_k.into_iter().sum::<f64>();
+        assert!((storage - entropy.contact_generation_j_k - defect - algebraic).abs() < 1e-12);
+        assert_eq!(entropy.supplied_heat_at_body_temperature_j_k, [0.0; 2]);
+        assert_eq!(step.state_a.phase_curve_identity(), curve.identity());
+        assert_eq!(step.state_b.phase_curve_identity(), curve.identity());
+
+        // The original unresolved-stiffness option retains its endpoint law.
+        let backward = solve_lumped_contact_step(cx, &body, &body, &resistance, config).unwrap();
+        assert!((backward.heat_a_to_b_j - 5000.0).abs() < 1e-8);
+        assert!(backward.entropy.temporal_defect_j_k.into_iter().sum::<f64>() > 0.6);
+    });
+}
+
+#[test]
+fn g3_discrete_gradient_contact_refines_at_second_order() {
+    use fs_conduction::lumped::{LumpedContactStepConfig, solve_lumped_contact_step_discrete_gradient};
+    let curve_a = phase_curve();
+    let curve_b = phase_curve_for(ContentHash([0x7d; 32]));
+    let a = enthalpy_body(&curve_a);
+    let b = LumpedEnthalpyBody::try_new(
+        "second source chart", 3.0, 0.01, 0.0, 0.0, 0.001, 35.0, &curve_b,
+    ).unwrap();
+    let resistance = contact_resistance();
+    // C_A=200 J/K, C_B=300 J/K, R=1 K/W: tau=120 s and T_eq=440 K.
+    let exact_a = 440.0 + 60.0 * (-1.0_f64).exp();
+    let errors: Vec<f64> = [8, 16, 32].into_iter().map(|steps| {
+        with_cx(|cx| {
+            let mut ha = 20_000.0;
+            let mut hb = 10_000.0;
+            for _ in 0..steps {
+                let result = solve_lumped_contact_step_discrete_gradient(
+                    cx, &a, &b, &resistance,
+                    LumpedContactStepConfig {
+                        specific_enthalpy_a_j_kg: ha,
+                        specific_enthalpy_b_j_kg: hb,
+                        supplied_heat_a_j: 0.0,
+                        supplied_heat_b_j: 0.0,
+                        duration_s: 120.0 / f64::from(steps),
+                        energy_tolerance_j: 1e-8,
+                    },
+                    128,
+                ).unwrap();
+                let step = result.step;
+                assert!(step.heat_a_to_b_j > 0.0);
+                assert!(step.state_a.temperature_k() >= step.state_b.temperature_k());
+                assert!(step.entropy.temporal_defect_j_k.iter().all(|v| v.abs() < 1e-10));
+                ha = step.state_a.specific_enthalpy_j_kg();
+                hb = step.state_b.specific_enthalpy_j_kg();
+            }
+            assert!((2.0 * ha + 3.0 * hb - 70_000.0).abs() < 1e-7);
+            (curve_a.temperature_at_specific_enthalpy(ha).unwrap() - exact_a).abs()
+        })
+    }).collect();
+    for pair in errors.windows(2) {
+        assert!((0.23..0.27).contains(&(pair[1] / pair[0])), "{errors:?}");
+    }
+}
+
+#[test]
+fn g1_discrete_gradient_contact_keeps_latent_heat_and_two_sources_on_one_balance() {
+    use fs_conduction::lumped::{LumpedContactStepConfig, solve_lumped_contact_step_discrete_gradient};
+    let curve = phase_curve();
+    let body = enthalpy_body(&curve);
+    let resistance = contact_resistance();
+    let config = LumpedContactStepConfig {
+        specific_enthalpy_a_j_kg: 70_000.0,
+        specific_enthalpy_b_j_kg: 30_000.0,
+        supplied_heat_a_j: 500.0,
+        supplied_heat_b_j: -200.0,
+        duration_s: 200.0,
+        energy_tolerance_j: 1e-8,
+    };
+    with_cx(|cx| {
+        let result = solve_lumped_contact_step_discrete_gradient(
+            cx, &body, &body, &resistance, config, 128,
+        ).unwrap();
+        let step = result.step;
+        assert_eq!(step.state_b.temperature_k(), 600.0);
+        assert_eq!(result.mean_temperatures_k[1], 600.0);
+        assert!(step.state_b.liquid_mass_fraction() > 0.0);
+        assert!(step.state_b.liquid_mass_fraction() < 1.0);
+        let net_b = step.heat_a_to_b_j - 200.0;
+        assert!((net_b - 2.0 * 25_000.0 * step.state_b.liquid_mass_fraction()).abs() < 1e-7);
+        assert!((step.entropy.storage_change_j_k[1] - net_b / 600.0).abs() < 1e-10);
+        assert_eq!(step.entropy.temporal_defect_j_k[1], 0.0);
+        assert_eq!(step.entropy.supplied_heat_at_body_temperature_j_k, [
+            500.0 / result.mean_temperatures_k[0], -200.0 / 600.0,
+        ]);
+        let entropy = step.entropy;
+        let accounted = entropy.contact_generation_j_k
+            + entropy.supplied_heat_at_body_temperature_j_k.into_iter().sum::<f64>()
+            + entropy.temporal_defect_j_k.into_iter().sum::<f64>()
+            + entropy.energy_residual_entropy_j_k.into_iter().sum::<f64>();
+        assert!((entropy.storage_change_j_k.into_iter().sum::<f64>() - accounted).abs() < 1e-12);
+        assert!(step.energy_residual_j.abs() <= 1e-8);
+        let reverse = solve_lumped_contact_step_discrete_gradient(
+            cx, &body, &body, &resistance,
+            LumpedContactStepConfig {
+                specific_enthalpy_a_j_kg: config.specific_enthalpy_b_j_kg,
+                specific_enthalpy_b_j_kg: config.specific_enthalpy_a_j_kg,
+                supplied_heat_a_j: config.supplied_heat_b_j,
+                supplied_heat_b_j: config.supplied_heat_a_j,
+                ..config
+            },
+            128,
+        ).unwrap();
+        assert!((reverse.step.heat_a_to_b_j + step.heat_a_to_b_j).abs() < 1e-8);
+        assert!((reverse.step.state_a.specific_enthalpy_j_kg()
+            - step.state_b.specific_enthalpy_j_kg()).abs() < 1e-8);
+        assert!((reverse.step.entropy.contact_generation_j_k
+            - step.entropy.contact_generation_j_k).abs() < 1e-12);
+    });
+}
+
+#[test]
+fn g4_discrete_gradient_contact_preserves_equilibrium_and_bounds_original_chart_work() {
+    use fs_conduction::lumped::{LumpedContactStepConfig, solve_lumped_contact_step_discrete_gradient};
+    let curve = phase_curve();
+    let body = enthalpy_body(&curve);
+    let resistance = contact_resistance();
+    let config = LumpedContactStepConfig {
+        specific_enthalpy_a_j_kg: 20_000.0,
+        specific_enthalpy_b_j_kg: 10_000.0,
+        supplied_heat_a_j: 0.0,
+        supplied_heat_b_j: 0.0,
+        duration_s: 100.0,
+        energy_tolerance_j: 1e-8,
+    };
+    with_cx(|cx| {
+        let budget = solve_lumped_contact_step_discrete_gradient(
+            cx, &body, &body, &resistance, config, 1,
+        ).unwrap_err();
+        assert!(budget.to_string().contains("original-interval budget"));
+        let too_coarse = solve_lumped_contact_step_discrete_gradient(
+            cx, &body, &body, &resistance,
+            LumpedContactStepConfig { duration_s: 300.0, ..config }, 128,
+        ).unwrap_err();
+        assert!(too_coarse.to_string().contains("crosses thermal equilibrium"));
+        for stationary in [
+            LumpedContactStepConfig { duration_s: 0.0, ..config },
+            LumpedContactStepConfig { specific_enthalpy_b_j_kg: 20_000.0, ..config },
+        ] {
+            let stopped = solve_lumped_contact_step_discrete_gradient(
+                cx, &body, &body, &resistance, stationary, 0,
+            ).unwrap();
+            assert_eq!(stopped.step.heat_a_to_b_j, 0.0);
+            assert_eq!(stopped.entropy_intervals, 0);
+            assert_eq!(stopped.step.entropy.storage_change_j_k, [0.0; 2]);
+        }
+        let mut ha = config.specific_enthalpy_a_j_kg;
+        let mut hb = config.specific_enthalpy_b_j_kg;
+        for _ in 0..3 {
+            let step = solve_lumped_contact_step_discrete_gradient(
+                cx, &body, &body, &resistance,
+                LumpedContactStepConfig {
+                    specific_enthalpy_a_j_kg: ha, specific_enthalpy_b_j_kg: hb, ..config
+                },
+                64,
+            ).unwrap().step;
+            assert!(step.state_a.temperature_k() >= step.state_b.temperature_k());
+            ha = step.state_a.specific_enthalpy_j_kg();
+            hb = step.state_b.specific_enthalpy_j_kg();
+        }
+        let mut hot_knots = curve.knots().to_vec();
+        for knot in &mut hot_knots {
+            knot.temperature_k += 500.0;
+        }
+        let hot_curve = EquilibriumEnthalpyPhaseCurve::try_new(
+            ContentHash([0x7f; 32]), hot_knots,
+        ).unwrap();
+        let hot = enthalpy_body(&hot_curve);
+        let outside = solve_lumped_contact_step_discrete_gradient(
+            cx, &hot, &body, &resistance,
+            LumpedContactStepConfig { specific_enthalpy_b_j_kg: 95_000.0, ..config },
+            64,
+        ).unwrap_err();
+        assert!(outside.to_string().contains("admitted enthalpy domain"));
+        let high_biot = LumpedEnthalpyBody::try_new(
+            "poor conductor", 2.0, 0.01, 0.0, 0.0, 0.1, 0.01, &curve,
+        ).unwrap();
+        assert!(solve_lumped_contact_step_discrete_gradient(
+            cx, &body, &high_biot, &resistance, config, 128,
+        ).is_err());
+    });
+    support::with_cancelled_cx(|cx| {
+        assert!(matches!(
+            solve_lumped_contact_step_discrete_gradient(
+                cx, &body, &body, &resistance, config, 128,
+            ),
+            Err(ConductionError::Cancelled { .. }),
+        ));
+    });
+}
+
+#[test]
+fn g1_discrete_gradient_support_callback_solves_source_and_contact_atomically() {
+    use fs_conduction::lumped::LumpedFiniteThermalContact;
+    let curve = phase_curve();
+    let support = enthalpy_body(&curve);
+    let resistance = contact_resistance();
+    let adapter = LumpedFiniteThermalContact {
+        support: &support,
+        support_state: curve.state_at_specific_enthalpy(10_000.0).unwrap(),
+        resistance: &resistance,
+        specimen_transport: LumpedThermalTransport::try_declared(35.0, 0.0).unwrap(),
+        energy_tolerance_j: 1e-8,
+    };
+    let input = fs_material::phase::UniformEnthalpyStepInput {
+        curve: &curve,
+        initial: curve.state_at_specific_enthalpy(90_000.0).unwrap(),
+        mass_kg: 2.0,
+        volume_m3: 0.0002,
+        surface_area_m2: 0.01,
+        internal_heat_j: 40_000.0,
+        duration_s: 200.0,
+    };
+    // A separate source-only update would exceed this original chart.
+    assert!(curve.advance_specific_energy(input.initial, 20_000.0).is_err());
+    let proposed = with_cx(|cx| adapter.advance_discrete_gradient(cx, input, 256).unwrap());
+    let contact = &proposed.report.contact;
+    assert!((contact.step.heat_a_to_b_j - 50_125.27796315004).abs() < 1e-7);
+    assert_eq!(proposed.external_heat_j, -contact.step.heat_a_to_b_j);
+    assert_eq!(proposed.report.internal_heat_j, 40_000.0);
+    assert!(proposed.report.total_energy_residual_j.abs() <= 1e-8);
+    assert!(contact.step.entropy.temporal_defect_j_k.iter().all(|v| v.abs() < 1e-10));
+    assert_eq!(proposed.state.phase_curve_identity(), curve.identity());
+    assert_eq!(adapter.support_state.specific_enthalpy_j_kg(), 10_000.0);
+    let foreign = phase_curve_for(ContentHash([0x7e; 32]));
+    assert!(with_cx(|cx| adapter.advance_discrete_gradient(
+        cx,
+        fs_material::phase::UniformEnthalpyStepInput {
+            initial: foreign.state_at_specific_enthalpy(90_000.0).unwrap(),
+            ..input
+        },
+        256,
+    )).is_err());
+}
