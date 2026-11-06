@@ -674,7 +674,7 @@ impl LipDescription {
                     let maximum_cell_m = f.positive()?;
                     let mechanics_per_output = f.count(16)? as u32;
                     let gas_steps_per_mechanics = f.count(64)? as u32;
-                    let wall_poles = f.count(64)? as usize;
+                    let wall_poles = f.count(128)? as usize;
                     let wall_band_hz = [f.positive()?, f.positive()?];
                     let wall_tolerance = f.positive()?;
                     if wall_band_hz[0] >= wall_band_hz[1] || wall_tolerance >= 1.0 {
@@ -2558,6 +2558,10 @@ mod tests {
             ("bore linear 0.0024\n", "expected nonlinear"),
             (
                 "bore nonlinear 0.0024 17 1 24 20 8000 1e-2\n",
+                "outside its admitted range",
+            ),
+            (
+                "bore nonlinear 0.0024 16 1 129 20 8000 1e-2\n",
                 "outside its admitted range",
             ),
             (

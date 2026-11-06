@@ -144,7 +144,7 @@ fn molecular_resolution_and_source_bands_are_explicit_and_bounded() {
         ),
         (
             "molecular_wall diffusive 16 0.0001 30000 0.05",
-            "molecular_wall diffusive 65 0.0001 30000 0.05",
+            "molecular_wall diffusive 129 0.0001 30000 0.05",
         ),
         (
             "molecular_wall diffusive 16 0.0001 30000 0.05",

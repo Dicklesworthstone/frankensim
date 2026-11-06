@@ -1124,6 +1124,52 @@ fn g3_small_amplitude_bore_matches_the_transfer_matrix_input_impedance() {
 }
 
 #[test]
+fn a_128_pole_wall_memory_admits_a_100_mm_bell_radius_on_the_full_band() {
+    // The old pole cap, 64, leaves the excess wall operators of a 0.1 m radius 28 % (complex) and 36 % (loss) off on
+    // 20-8000 Hz (fs-phs's own admission; the excess is a tiny part of the whole operator there); 128 poles bring it under 1 %.
+    let state = air();
+    let duct = Duct {
+        segments: vec![
+            Segment::Cylinder {
+                radius: 4.0e-3,
+                length: 0.3,
+            },
+            Segment::Cone {
+                inlet_radius: 4.0e-3,
+                outlet_radius: 105.0e-3,
+                length: 0.4,
+            },
+        ],
+    };
+    let build = |poles: usize, tolerance: f64| {
+        NonlinearBore::new(
+            &duct,
+            air_source(&state),
+            293.15,
+            101_325.0,
+            Some(wall_gas(&state)),
+            BoreSpec {
+                maximum_cell_m: 2.4e-3,
+                inlet_volume_m3: 0.0,
+                step_s: STEP_S,
+                cfl: 0.45,
+                wall: Some(WallMemory {
+                    poles,
+                    band_hz: [20.0, 8000.0],
+                    maximum_relative_error: tolerance,
+                }),
+            },
+        )
+    };
+    assert!(build(64, 1e-2).is_err(), "64 poles must not be admitted at 1 % on a 105 mm radius");
+    let bore = build(128, 1e-2).unwrap();
+    let receipt = bore.wall_receipt().unwrap();
+    println!("128-pole wall {receipt:?}");
+    assert!(receipt.maximum_complex_error < 1e-2 && receipt.maximum_loss_error < 1e-2);
+    assert_eq!(receipt.maximum_arms, 128);
+}
+
+#[test]
 fn g2_sinusoid_steepens_to_the_lossless_shock_distance() {
     let state = air();
     let duct = Duct {

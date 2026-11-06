@@ -24,7 +24,9 @@ use fs_la::eigen::jacobi_eigh;
 use fs_math::{c64::C64, det};
 
 /// Bounded cold eigensolve; a consumer must also admit its augmented state size.
-pub const MAX_ZK_DIFFUSIVE_POLES: usize = 64;
+/// 128 poles resolve the excess wall operators of radii up to about 0.1 m on 20 to 8000 Hz to 0.1 %;
+/// 64 leave 28 % (complex) and 36 % (loss) there, where the excess is a tiny part of the whole operator.
+pub const MAX_ZK_DIFFUSIVE_POLES: usize = 128;
 
 /// One positive term `g s/(s+p)` normalized by the inviscid L or C.
 #[derive(Clone, Copy, Debug, PartialEq)]
