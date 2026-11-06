@@ -197,81 +197,89 @@ fn every_thermal_boundary_preserves_the_pressure_solver_and_original_claims() {
         let cards = [material("A", 1.0e6, tag).0, material("B", 2.0e6, tag).0];
         let (normal, hardness) = sources([1.0e6, 2.0e6], tag, 0.0);
         let dense = build(normal, hardness, envelope(), cx).unwrap();
-        let law = rebuild(&dense, envelope(), MATRIX_FREE, cx).unwrap();
-        let dented = law.advance(&law.initial_state(), 5.0e-5, cx).unwrap();
-        let force = 0.005;
-        let elastic = law
-            .advance_at_load(&dented.candidate, force, boundary_controls(), cx)
-            .unwrap();
-        let before = elastic.candidate;
-        let saved = before.clone();
-        let drive = FiniteGapPlasticDrive {
-            stiffness_n_per_m: 1000.0,
-            position_m: before.contact_state().approach_m() + force / 1000.0,
-        };
-        // Constant-valued claims isolate reconstruction from changes in physics;
-        // the independently changed query coordinates still create new owners.
-        let hot = [313.15, 303.15];
-        let held = law
-            .refresh_at_temperatures(&before, [&cards[0], &cards[1]], hot, 308.15, cx)
-            .unwrap();
-        let loaded = law
-            .refresh_at_temperatures_at_load(
-                &before,
-                [&cards[0], &cards[1]],
-                hot,
-                308.15,
-                force,
-                boundary_controls(),
-                cx,
-            )
-            .unwrap();
-        let driven = law
-            .refresh_at_temperatures_with_drive(
-                &before,
-                [&cards[0], &cards[1]],
-                hot,
-                308.15,
-                drive,
-                boundary_controls(),
-                cx,
-            )
-            .unwrap();
-        for (source, candidate) in [
-            (held.source(), held.candidate()),
-            (loaded.source(), loaded.candidate()),
-            (driven.source(), driven.candidate()),
+        for selection in [
+            MATRIX_FREE,
+            FiniteGapPlasticLinearSolver::Fft {
+                maximum_iterations: 128,
+                maximum_corrections: 2,
+            },
         ] {
-            assert_eq!(source.model().linear_solver(), MATRIX_FREE);
-            assert_ne!(source.identity(), law.identity());
-            assert_eq!(
-                candidate.contact_state().plastic_depth_m(),
-                before.contact_state().plastic_depth_m()
-            );
-            assert_eq!(
-                candidate.contact_state().recession_m(),
-                before.contact_state().recession_m()
-            );
-            for side in 0..2 {
-                let original = &law.hardness_sources()[side];
-                let refreshed = &source.hardness_sources()[side];
-                assert_eq!(refreshed.key(), original.key());
+            let law = rebuild(&dense, envelope(), selection, cx).unwrap();
+            let dented = law.advance(&law.initial_state(), 5.0e-5, cx).unwrap();
+            let force = 0.005;
+            let elastic = law
+                .advance_at_load(&dented.candidate, force, boundary_controls(), cx)
+                .unwrap();
+            let before = elastic.candidate;
+            let saved = before.clone();
+            let drive = FiniteGapPlasticDrive {
+                stiffness_n_per_m: 1000.0,
+                position_m: before.contact_state().approach_m() + force / 1000.0,
+            };
+            // Constant-valued claims isolate reconstruction from changes in physics;
+            // the independently changed query coordinates still create new owners.
+            let hot = [313.15, 303.15];
+            let held = law
+                .refresh_at_temperatures(&before, [&cards[0], &cards[1]], hot, 308.15, cx)
+                .unwrap();
+            let loaded = law
+                .refresh_at_temperatures_at_load(
+                    &before,
+                    [&cards[0], &cards[1]],
+                    hot,
+                    308.15,
+                    force,
+                    boundary_controls(),
+                    cx,
+                )
+                .unwrap();
+            let driven = law
+                .refresh_at_temperatures_with_drive(
+                    &before,
+                    [&cards[0], &cards[1]],
+                    hot,
+                    308.15,
+                    drive,
+                    boundary_controls(),
+                    cx,
+                )
+                .unwrap();
+            for (source, candidate) in [
+                (held.source(), held.candidate()),
+                (loaded.source(), loaded.candidate()),
+                (driven.source(), driven.candidate()),
+            ] {
+                assert_eq!(source.model().linear_solver(), selection);
+                assert_ne!(source.identity(), law.identity());
                 assert_eq!(
-                    refreshed.resolved().card_identity(),
-                    original.resolved().card_identity()
+                    candidate.contact_state().plastic_depth_m(),
+                    before.contact_state().plastic_depth_m()
                 );
-                assert_eq!(refreshed.resolved().state_coordinate("T"), Some(hot[side]));
                 assert_eq!(
-                    refreshed.property().answer().receipt.selected,
-                    original.property().answer().receipt.selected
+                    candidate.contact_state().recession_m(),
+                    before.contact_state().recession_m()
+                );
+                for side in 0..2 {
+                    let original = &law.hardness_sources()[side];
+                    let refreshed = &source.hardness_sources()[side];
+                    assert_eq!(refreshed.key(), original.key());
+                    assert_eq!(
+                        refreshed.resolved().card_identity(),
+                        original.resolved().card_identity()
+                    );
+                    assert_eq!(refreshed.resolved().state_coordinate("T"), Some(hot[side]));
+                    assert_eq!(
+                        refreshed.property().answer().receipt.selected,
+                        original.property().answer().receipt.selected
+                    );
+                }
+                assert!(
+                    source
+                        .advance(candidate, candidate.contact_state().approach_m(), cx)
+                        .is_ok()
                 );
             }
-            assert!(
-                source
-                    .advance(candidate, candidate.contact_state().approach_m(), cx)
-                    .is_ok()
-            );
+            assert_eq!(before, saved);
         }
-        assert_eq!(before, saved);
     });
 }

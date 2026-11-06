@@ -3145,9 +3145,10 @@ typed refusal with free-set size, consumed iterations and measured residual.
 
 This lane removes the dense 2,048-free-cell ceiling without allocating a dense
 free matrix or factor. Kernel and vector storage scale with sampled grid size;
-the existing 16,384-total-cell bound remains. Operator applications still perform
-quadratic pair interactions. No FFT acceleration, runtime benchmark speedup,
-forward-error certificate or material-validation claim is made.
+the existing 16,384-total-cell bound remains. The direct `MatrixFree` choice
+still performs quadratic pair interactions; the optional `Fft` choice below
+accelerates repeated applications. No runtime benchmark speedup, forward-error
+certificate or material-validation claim is made.
 
 Finite spring stiffness K is incorporated as the rank-one compliance
 `C + (cell_area / K) 1 1^T`, with right-hand side
@@ -3196,3 +3197,44 @@ elastic loading, saturation, unloading and reloading; ownership by algorithm,
 budget and original test; retained depth/footprint limits; cancellation; and all
 three prescribed-temperature boundary modes. They do not alter the local
 pressure-saturation approximation or supply experimental qualification.
+
+
+## FFT applications for isolated hardness-limited contact
+
+`FiniteGapPlasticLinearSolver::Fft` selects the same bounded checked-CG free
+solve with cached discrete-convolution FFT applications. It retains the native
+pressure saturation law, original datum and histories, direct spring coupling,
+and all original-source temperature continuations. Dense and direct-matrix-free
+identities remain unchanged; FFT selection, its budgets and the shared transform
+bit semantics enter a separate numerical owner.
+
+The cached spectrum uses the exact canonical lower-triangle influence samples
+used by dense assembly, including mixed-sign offsets. Each axis is zero-padded
+to a power of two at least `2*n-1`; pressure outside the physical grid is zero,
+so the original-grid action includes no periodic images. Free vectors scatter
+to that grid, use the shared `fs-fft::FftNd` transform, and gather back. The
+rank-one loading spring remains a separate uniform compliance contribution.
+
+Immutable plans/spectrum are shared on clone. Per-solve padded work and reusable
+pencil buffers are retained across Krylov iterations and defect corrections.
+Contact sizes stay below the shared FFT's optional allocating six-step threshold;
+operator applications perform no heap allocation. Normalization bounds spectral
+arithmetic without changing the physical units of acceptance. Construction and
+applications preserve explicit grid/padding limits and bounded cancellation.
+
+A Krylov operator application takes O(P log P) work for P padded cells. The
+independent free-equation residual, original physical opening/KKT checks and
+active-set constrained terms still perform direct interactions. Thus this is an
+acceleration of repeated linear applications, not an end-to-end near-linear
+complexity or measured-speedup claim. Failed FFT/CG work cannot publish a partial
+pressure field or history.
+
+Synthetic tests specify isolated edge impulses, signed rectangular convolution,
+dense/direct-CG/FFT mixed-cap histories, coupled spring work, and a nonuniform
+2,115-free-cell manufactured patch. Original-source temperature fixtures also
+retain FFT selection under all three loading boundaries. Experimental contact
+accuracy and performance measurements remain separate.
+
+The isolated discrete-convolution construction follows the influence-coefficient
+and zero-padding distinction in Liu, Wang and Liu, Wear 243 (2000), 101-111,
+DOI: 10.1016/S0043-1648(00)00427-0.

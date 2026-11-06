@@ -12,6 +12,7 @@ use fs_la::factor::cholesky_cancellable;
 use fs_solver::{CheckedCgConfig, CheckedCgError, LinearOp, checked_cg, norm2};
 use fs_sparse::precond::IdentityPrecond;
 
+use super::fft::{FftCompliance, FftComplianceScratch};
 use super::{
     ComplianceKernel, FiniteGapPlasticError, FiniteGapPlasticModel,
     MAX_FINITE_GAP_PLASTIC_FREE_CELLS, checkpoint, factor_error, invalid,
@@ -41,6 +42,19 @@ pub enum FiniteGapPlasticLinearSolver {
         /// Zero disables correction but preserves recomputed-residual checks.
         maximum_corrections: usize,
     },
+    /// Checked CG with FFT-accelerated isolated-domain compliance applications.
+    ///
+    /// Uses zero padding and a cached discrete influence spectrum; the physical
+    /// kernel, pressure bounds and final direct residual checks remain unchanged.
+    /// Padded grid storage is bounded by the existing total-cell limit. Each
+    /// Krylov apply takes O(P log P) work for P padded cells; direct physical
+    /// verification and active-set bookkeeping still include pair interactions.
+    Fft {
+        /// Positive total CG iteration budget per free equality solve.
+        maximum_iterations: usize,
+        /// Maximum additional defect solves sharing that iteration budget.
+        maximum_corrections: usize,
+    },
 }
 
 impl FiniteGapPlasticLinearSolver {
@@ -48,6 +62,9 @@ impl FiniteGapPlasticLinearSolver {
         if matches!(
             self,
             Self::MatrixFree {
+                maximum_iterations: 0,
+                ..
+            } | Self::Fft {
                 maximum_iterations: 0,
                 ..
             }
@@ -135,6 +152,10 @@ impl FiniteGapPlasticModel {
             FiniteGapPlasticLinearSolver::MatrixFree {
                 maximum_iterations,
                 maximum_corrections,
+            }
+            | FiniteGapPlasticLinearSolver::Fft {
+                maximum_iterations,
+                maximum_corrections,
             } => self.solve_free_matrix_free(
                 free,
                 &rhs,
@@ -175,20 +196,33 @@ impl FiniteGapPlasticModel {
         if !diagonal.is_finite() || diagonal <= 0.0 {
             return Err(invalid("finite positive free compliance diagonal"));
         }
-        // Solve (C / d) q = rhs, q = d p. Normalizing the kernel once avoids
-        // division inside every pair interaction, without storing a free matrix.
-        let mut normalized = self.compliance.clone();
-        for chunk in normalized.values.chunks_mut(TILE) {
-            checkpoint(cx)?;
-            for value in chunk {
-                *value /= diagonal;
-                if !value.is_finite() {
-                    return Err(invalid("finite normalized free compliance"));
+        // Both operators solve (C / d) q = rhs, q = d p. Prepared FFT scratch
+        // belongs to this attempt and is reused throughout CG and corrections.
+        let backend = if let Some(convolution) = &self.fft_compliance {
+            FreeCompliance::Fft {
+                convolution,
+                diagonal,
+                work: RefCell::new(FftFreeWork {
+                    scratch: convolution.scratch(),
+                    scattered: vec![0.0; self.gap_m.len()],
+                    opening: vec![0.0; self.gap_m.len()],
+                }),
+            }
+        } else {
+            let mut normalized = self.compliance.clone();
+            for chunk in normalized.values.chunks_mut(TILE) {
+                checkpoint(cx)?;
+                for value in chunk {
+                    *value /= diagonal;
+                    if !value.is_finite() {
+                        return Err(invalid("finite normalized free compliance"));
+                    }
                 }
             }
-        }
+            FreeCompliance::Pairwise(normalized)
+        };
         let operator = PrincipalCompliance {
-            kernel: normalized,
+            backend,
             free,
             rank_one: rank_one / diagonal,
             cx,
@@ -267,8 +301,23 @@ impl FiniteGapPlasticModel {
     }
 }
 
+struct FftFreeWork {
+    scratch: FftComplianceScratch,
+    scattered: Vec<f64>,
+    opening: Vec<f64>,
+}
+
+enum FreeCompliance<'a> {
+    Pairwise(ComplianceKernel),
+    Fft {
+        convolution: &'a FftCompliance,
+        diagonal: f64,
+        work: RefCell<FftFreeWork>,
+    },
+}
+
 struct PrincipalCompliance<'a, 'scope> {
-    kernel: ComplianceKernel,
+    backend: FreeCompliance<'a>,
     free: &'a [usize],
     rank_one: f64,
     cx: &'a Cx<'scope>,
@@ -303,21 +352,54 @@ impl PrincipalCompliance<'_, '_> {
             }
         }
         y.fill(0.0);
-        for (row_tile, rows) in self.free.chunks(TILE).enumerate() {
-            for (col_tile, columns) in self.free.chunks(TILE).enumerate() {
-                checkpoint(self.cx)?;
-                for (row_offset, &i) in rows.iter().enumerate() {
-                    let row = row_tile * TILE + row_offset;
-                    for (col_offset, &j) in columns.iter().enumerate() {
-                        let col = col_tile * TILE + col_offset;
-                        // Exactly the lower-triangle mirroring used by dense
-                        // assembly, despite signed-offset rounding differences.
-                        let value = self.kernel.compliance(i.max(j), i.min(j));
-                        y[row] = value.mul_add(x[col], y[row]);
+        match &self.backend {
+            FreeCompliance::Pairwise(kernel) => {
+                for (row_tile, rows) in self.free.chunks(TILE).enumerate() {
+                    for (col_tile, columns) in self.free.chunks(TILE).enumerate() {
+                        checkpoint(self.cx)?;
+                        for (row_offset, &i) in rows.iter().enumerate() {
+                            let row = row_tile * TILE + row_offset;
+                            for (col_offset, &j) in columns.iter().enumerate() {
+                                let col = col_tile * TILE + col_offset;
+                                // Exactly the lower-triangle mirroring used by dense
+                                // assembly, despite signed-offset rounding differences.
+                                let value = kernel.compliance(i.max(j), i.min(j));
+                                y[row] = value.mul_add(x[col], y[row]);
+                            }
+                        }
                     }
                 }
             }
-            for row in &mut y[row_tile * TILE..row_tile * TILE + rows.len()] {
+            FreeCompliance::Fft {
+                convolution,
+                diagonal,
+                work,
+            } => {
+                let mut work = work.borrow_mut();
+                let FftFreeWork {
+                    scratch,
+                    scattered,
+                    opening,
+                } = &mut *work;
+                scattered.fill(0.0);
+                for (slot, &index) in self.free.iter().enumerate() {
+                    if slot % TILE == 0 {
+                        checkpoint(self.cx)?;
+                    }
+                    scattered[index] = x[slot];
+                }
+                convolution.apply_scaled(scattered, opening, *diagonal, scratch, self.cx)?;
+                for (slot, &index) in self.free.iter().enumerate() {
+                    if slot % TILE == 0 {
+                        checkpoint(self.cx)?;
+                    }
+                    y[slot] = opening[index];
+                }
+            }
+        }
+        for chunk in y.chunks_mut(TILE) {
+            checkpoint(self.cx)?;
+            for row in chunk {
                 *row += common;
                 if !row.is_finite() {
                     return Err(invalid("finite normalized free opening"));

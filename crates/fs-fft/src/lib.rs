@@ -43,6 +43,9 @@ mod simd_view;
 mod small;
 pub use small::SmallFft;
 
+mod nd_scratch;
+pub use nd_scratch::FftNdScratch;
+
 /// Joint harmonic estimation at caller-supplied frequencies, including
 /// records containing a non-integer number of fundamental periods.
 pub mod harmonic;
@@ -853,42 +856,12 @@ impl FftNd {
     }
 
     fn run(&self, data: &mut [C64], inverse: bool) {
-        let total = self.total();
-        assert_eq!(
-            data.len(),
-            total,
-            "buffer length {} must equal the product of dims {total}",
-            data.len()
-        );
-        for (ax, plan) in self.plans.iter().enumerate() {
-            let n = self.dims[ax];
-            if n == 1 {
-                continue; // a length-1 axis is the identity; skip the gather.
-            }
-            // Row-major stride of this axis = product of the trailing dims;
-            // `outer` counts the leading-index combinations.
-            let stride: usize = self.dims[ax + 1..].iter().product();
-            let outer: usize = self.dims[..ax].iter().product();
-            let mut line = vec![C64::default(); n];
-            let mut scratch = vec![C64::default(); n];
-            for o in 0..outer {
-                for i in 0..stride {
-                    let base = o * n * stride + i;
-                    // Gather the pencil (n samples at `stride`), transform,
-                    // scatter back — the pencil is contiguous in index space.
-                    for (t, slot) in line.iter_mut().enumerate() {
-                        *slot = data[base + t * stride];
-                    }
-                    if inverse {
-                        plan.inverse(&mut line, &mut scratch);
-                    } else {
-                        plan.forward(&mut line, &mut scratch);
-                    }
-                    for (t, &v) in line.iter().enumerate() {
-                        data[base + t * stride] = v;
-                    }
-                }
-            }
+        let mut scratch = self.scratch();
+        let result = self.run_with_scratch(data, &mut scratch, inverse, || {
+            Ok::<(), core::convert::Infallible>(())
+        });
+        if let Err(never) = result {
+            match never {}
         }
     }
 }

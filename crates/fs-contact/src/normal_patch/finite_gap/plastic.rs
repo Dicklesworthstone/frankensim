@@ -22,6 +22,7 @@ mod load;
 pub use load::*;
 mod linear;
 pub use linear::FiniteGapPlasticLinearSolver;
+mod fft;
 
 use core::fmt;
 
@@ -83,6 +84,7 @@ pub struct FiniteGapPlasticModel {
     gap_datum_m: f64,
     gap_m: Vec<f64>,
     compliance: ComplianceKernel,
+    fft_compliance: Option<fft::FftCompliance>,
 }
 
 impl fmt::Debug for FiniteGapPlasticModel {
@@ -342,6 +344,11 @@ impl FiniteGapPlasticModel {
             return Err(invalid("finite positive half-space compliance"));
         }
         checkpoint(cx)?;
+        let fft_compliance = if matches!(linear_solver, FiniteGapPlasticLinearSolver::Fft { .. }) {
+            Some(fft::FftCompliance::build(&compliance, cx)?)
+        } else {
+            None
+        };
         let identity = config_identity(&config, linear_solver);
         Ok(Self {
             config,
@@ -350,6 +357,7 @@ impl FiniteGapPlasticModel {
             gap_datum_m,
             gap_m,
             compliance,
+            fft_compliance,
         })
     }
 
@@ -982,6 +990,20 @@ fn config_identity(
             solver_bytes.extend_from_slice(&(maximum_corrections as u64).to_le_bytes());
             hash_domain(
                 "org.frankensim.fs-contact.finite-gap-plastic-matrix-free-model.v1",
+                &solver_bytes,
+            )
+        }
+        FiniteGapPlasticLinearSolver::Fft {
+            maximum_iterations,
+            maximum_corrections,
+        } => {
+            let mut solver_bytes = Vec::with_capacity(52);
+            solver_bytes.extend_from_slice(&reference_identity.0);
+            solver_bytes.extend_from_slice(&(maximum_iterations as u64).to_le_bytes());
+            solver_bytes.extend_from_slice(&(maximum_corrections as u64).to_le_bytes());
+            solver_bytes.extend_from_slice(&fs_fft::TRANSFORM_BIT_SEMANTICS_VERSION.to_le_bytes());
+            hash_domain(
+                "org.frankensim.fs-contact.finite-gap-plastic-fft-model.v1",
                 &solver_bytes,
             )
         }

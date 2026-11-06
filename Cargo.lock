@@ -1278,6 +1278,7 @@ dependencies = [
  "fs-dcontact",
  "fs-evidence",
  "fs-exec",
+ "fs-fft",
  "fs-ga",
  "fs-geom",
  "fs-ivl",

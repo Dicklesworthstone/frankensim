@@ -556,9 +556,9 @@ authority-policy receipt move.
   authority-admitted citations; an
   environment-invalid measurement fails closed rather than returning a green
   test with no admissible evidence.
-- The N-D transform is CORRECT and separable but not yet cache/execution
-  optimized: it gathers each pencil into a temporary line (allocated per axis,
-  reused across pencils) rather than blocking transposes or tiling on fs-exec.
+- The serial N-D transform is separable and gathers each pencil into reusable
+  line buffers rather than blocked transposes. Legacy calls allocate the two
+  buffers once per call; prepared `FftNdScratch` calls retain them across calls.
 - N-D real transforms (r2c/c2r with only the first axis half-length) are not
   shipped; N-D is complex-in/complex-out. Callers pack real fields as `C64`.
 - `Fft`, packed real transforms and N-D plans retain their power-of-two
@@ -955,3 +955,27 @@ input, clock, Welch-configuration, work/memory budget, cancellation, window,
 detrending, tail and factor-normalization rules remain unchanged; the estimator's
 arithmetic is unchanged. The distributed three-axis jet consumer uses this seam
 with source-major `[0,Fx,Fy,Fz]` channels and the original physical sample clock.
+
+
+## Reusable cancellable N-dimensional pencils
+
+`FftNd::scratch` creates two longest-axis buffers retained by the caller.
+`forward_with_scratch_cancellable` and `inverse_with_scratch_cancellable`
+reuse those buffers and return the caller's unchanged interruption reason.
+Checkpoints occur at entry/exit and before/after each 1D pencil. The individual
+1D transform is the smallest cancellation unit; bounded-latency consumers
+must bound axis length.
+
+Legacy serial forward/inverse use the same pencil loop with an infallible
+callback. Axis order, gather/scatter order, butterfly arithmetic and inverse
+normalization are unchanged. Scratch from a sufficiently large plan can be
+reused. Cancellation can leave transform data partially updated, so consumers
+that require atomic publication must stage their data; scratch can be reused
+after a refused attempt.
+
+The separable driver allocates nothing during a prepared call. The existing
+optional six-step 1D route can still allocate internally for sufficiently large
+axes; this interface makes no broader allocation or performance guarantee.
+Independent rectangular DFT/round-trip and interruption/retry fixtures cover
+the shared path. The hardness-contact consumer uses bounded padded axes below
+that six-step threshold and retains its own original physical residual checks.
