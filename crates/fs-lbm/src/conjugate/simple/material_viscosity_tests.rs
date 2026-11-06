@@ -224,6 +224,31 @@ fn closed_rotating_vortex_has_the_analytic_geostrophic_pressure_and_no_extra_hea
         }
         assert!(flow.report.max_divergence_m3_s < 1e-13);
         assert!(flow.report.momentum_residual <= config.tolerance);
+        if omega == 0.7 {
+            // A loose steady control must not admit a transient endpoint
+            // against a stricter requested momentum gate. Start from the
+            // returned solenoidal faces and perturb only the pressure epoch.
+            let mut loose = config.clone();
+            loose.tolerance = 1e-3;
+            let mut endpoint = Solver::new(&domain, &fluid, &loose);
+            endpoint.set_material_transport(
+                &vec![mu; domain.cell_count()], Some(&force), &CancelGate::new(),
+            ).unwrap();
+            endpoint.creeping = true;
+            for (axis, fluxes) in flow.field.face_arrays().into_iter().enumerate() {
+                for (index, &flux) in fluxes.iter().enumerate() {
+                    endpoint.vel[axis][index] = flux / endpoint.comp_face_area(axis, index);
+                }
+            }
+            endpoint.pressure = flow.pressure_pa.clone();
+            endpoint.pressure[0] += 1e-8;
+            let (actual, required) = endpoint.project_with_momentum_tolerance(
+                1e-12, &CancelGate::new(),
+            ).unwrap();
+            assert_eq!(required, 1e-12);
+            assert!(actual > required && actual < loose.tolerance,
+                "the projected defect {actual} must pass only the loose gate");
+        }
         assert!((power.supplied_body_power_w - power.heat_w).abs() < 1e-11);
         assert_eq!(power.darcy_heat_w, 0.0);
         assert_eq!(power.forchheimer_heat_w, 0.0);
@@ -356,4 +381,45 @@ fn rotating_material_momentum_retries_after_an_unconverged_step() {
     assert_eq!(owner.flow, fresh.flow);
     assert_eq!(owner.record, fresh.record);
     assert_eq!(owner.time_s, 0.1);
+}
+
+#[test]
+fn rotating_public_be_and_bdf2_publish_the_accepted_time_equations() {
+    use crate::conjugate::{UnsteadyConfig, simple_unsteady};
+
+    let domain = VoxelDomain::new(3, 3, 2, 0.25).unwrap();
+    let fluid = fluid();
+    let mut faces = [FvBoundary::wall(); 6];
+    faces[3] = FvBoundary::Wall { velocity: [0.01, 0.0, 0.0] };
+    for scheme in [TimeScheme::BackwardEuler, TimeScheme::Bdf2] {
+        for (simple_tolerance, inner_tolerance) in [(1e-4, 1e-11), (1e-11, 1e-4)] {
+            let mut config = config(faces);
+            config.tolerance = simple_tolerance;
+            config.coriolis_angular_velocity_rad_s = [0.3, -0.4, 0.5];
+            let mut time = UnsteadyConfig::new(0.02, 3);
+            time.scheme = scheme;
+            time.inner_iterations = 1000;
+            time.inner_tolerance = inner_tolerance;
+            let result = simple_unsteady(
+                &domain, &fluid, &config, &time, |_| 1.0, &CancelGate::new(),
+            ).unwrap();
+            let tolerance = simple_tolerance.min(inner_tolerance);
+            assert_eq!(result.records.len(), 3);
+            assert!(result.records.iter().all(|record| {
+                record.kinetic_energy_j > 0.0 && record.momentum_residual <= tolerance
+            }));
+            assert!(result.records.windows(2).any(|pair| {
+                (pair[1].kinetic_energy_j - pair[0].kinetic_energy_j).abs() > 1e-12
+            }), "the fixture must remain transient");
+            let last = result.records.last().unwrap();
+            assert_eq!(result.flow.report.momentum_residual.to_bits(),
+                last.momentum_residual.to_bits());
+            assert!(result.flow.report.max_divergence_m3_s < 1e-13);
+            assert!(result.flow.velocity_m_s.iter().flatten().all(|u| u.is_finite()));
+            // finish() sees history already prepared for the next interval.
+            // It must report this accepted endpoint, not solve or audit a
+            // fourth, unadvanced BE/BDF2 equation against the old velocities.
+            assert_eq!(last.time_s, 0.06);
+        }
+    }
 }

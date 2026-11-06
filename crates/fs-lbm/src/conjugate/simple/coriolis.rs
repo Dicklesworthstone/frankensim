@@ -38,7 +38,7 @@ impl SimpleConfig {
 }
 
 impl Solver<'_> {
-    pub(super) fn has_coriolis(&self) -> bool {
+    pub(in crate::conjugate) fn has_coriolis(&self) -> bool {
         self.config.coriolis_angular_velocity_rad_s != [0.0; 3]
     }
 

@@ -1746,6 +1746,22 @@ impl<'a> Solver<'a> {
         Ok(())
     }
 
+    /// Observe the SAME projected endpoint and time levels that a rotating
+    /// transient candidate will publish. Return its frozen momentum residual
+    /// and the stricter authored gate; the existing sweep budget decides
+    /// whether to accept or continue. No time history is advanced here.
+    pub(super) fn project_with_momentum_tolerance(
+        &mut self,
+        requested_tolerance: f64,
+        gate: &CancelGate,
+    ) -> Result<(f64, f64), ChtError> {
+        self.project_continuity(gate)?;
+        self.update_sgs(gate)?;
+        self.guard_finite()?;
+        let residual = self.coupled_darcy_residual(gate)?;
+        Ok((residual, requested_tolerance.min(self.config.tolerance)))
+    }
+
     fn project_continuity(&mut self, gate: &CancelGate) -> Result<(), ChtError> {
         poll(gate)?;
         self.guard_finite()?;
@@ -1819,7 +1835,7 @@ impl<'a> Solver<'a> {
 
     /// A diverging iteration refuses here, before non-finite coefficients
     /// reach an incomplete factorization.
-    fn guard_finite(&self) -> Result<(), ChtError> {
+    pub(super) fn guard_finite(&self) -> Result<(), ChtError> {
         let finite = self.vel.iter().all(|v| v.iter().all(|u| u.is_finite()))
             && self
                 .pressure

@@ -7057,6 +7057,14 @@ iterations; exhausted convergence refuses the candidate. The shared solver
 carries the same source through its original material convection and thermal
 accounts, without a second flow step or altered material-query ownership.
 
+Rotating transient convergence is admitted on the pressure-projected endpoint
+using the stricter of the requested inner momentum tolerance and the original
+flow tolerance. The refreshed frozen operator supplies the reported momentum
+residual; an excessive defect returns to the existing sweep budget. Accepted
+faces, pressure and receipts share the same time-level equations. Final march
+reporting reuses that accepted endpoint after history advancement, without
+auditing an unadvanced next step or applying another pressure correction.
+
 Focused regression definitions cover a manufactured rotating free-slip vortex
 and its pressure through the real momentum solve, arbitrary-axis graded-grid
 transpose/no-work identities, invalid/open/heterogeneous-inertia admission,

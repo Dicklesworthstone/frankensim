@@ -277,12 +277,22 @@ fn converge_step(
     gate: &CancelGate,
 ) -> Result<(usize, (f64, f64)), ChtError> {
     let mut residuals = (f64::INFINITY, f64::INFINITY);
+    let mut tolerance = unsteady.inner_tolerance;
     for inner in 1..=unsteady.inner_iterations {
         residuals = solver.sweep(gate)?;
         if !(residuals.0.is_finite() && residuals.1.is_finite()) {
             return Err(ChtError::FlowDiverged { step });
         }
         if residuals.0 <= unsteady.inner_tolerance && residuals.1 <= unsteady.inner_tolerance {
+            if solver.has_coriolis() {
+                let (projected, required) =
+                    solver.project_with_momentum_tolerance(unsteady.inner_tolerance, gate)?;
+                residuals.1 = projected;
+                tolerance = required;
+                if projected > required {
+                    continue;
+                }
+            }
             return Ok((inner, residuals));
         }
     }
@@ -290,7 +300,7 @@ fn converge_step(
         system: "unsteady flow step",
         iterations: unsteady.inner_iterations,
         relative_residual: residuals.0.max(residuals.1),
-        tolerance: unsteady.inner_tolerance,
+        tolerance,
     })
 }
 
@@ -350,8 +360,10 @@ impl<'a> Marcher<'a> {
         finite("unsteady.inlet_schedule", inflow)?;
         self.solver.scale_inlets(inflow);
         let (inner, residuals) = converge_step(&mut self.solver, self.unsteady, step, gate)?;
-        self.solver.project(gate)?;
-        self.solver.update_sgs(gate)?;
+        if !self.solver.has_coriolis() {
+            self.solver.project(gate)?;
+            self.solver.update_sgs(gate)?;
+        }
         self.sweeps += inner;
         self.residuals = residuals;
         Ok(inner)
@@ -424,9 +436,18 @@ impl<'a> Marcher<'a> {
             ),
             None => self.solver.field(),
         };
-        let flow = self
-            .solver
-            .finish(fluid, self.sweeps, self.residuals, gate)?;
+        let flow = if self.solver.has_coriolis() {
+            // The accepted endpoint already passed tight continuity and its
+            // frozen momentum gate. History has since rolled forward for the
+            // next interval; reassembling now would audit an unadvanced step.
+            poll(gate)?;
+            self.solver.guard_finite()?;
+            self.solver
+                .finish_projected(fluid, self.sweeps, self.residuals)
+        } else {
+            self.solver
+                .finish(fluid, self.sweeps, self.residuals, gate)?
+        };
         Ok(UnsteadyFlow {
             flow,
             records,

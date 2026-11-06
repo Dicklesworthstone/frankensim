@@ -412,7 +412,9 @@ impl MaterialMomentum {
         }
         solver.start_time(dt_s, TimeScheme::BackwardEuler);
         let (inner_iterations, residuals) = converge_step(&mut solver, &unsteady, 1, gate)?;
-        solver.project(gate)?;
+        if !solver.has_coriolis() {
+            solver.project(gate)?;
+        }
         let mechanical_step = self
             .heating
             .as_ref()
