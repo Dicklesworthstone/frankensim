@@ -679,11 +679,26 @@ The caller supplies compatible source pressure/work conditions and a nonreacting
 local-equilibrium, additive-volume model with no heat of mixing. Unsupported
 temperatures, nonpositive fractions and unresolved caloric coordinates refuse.
 A matrix with an ambiguous solid plateau is excluded; two melting constituents
-would require a separate phase-allocation closure. No confinement, conductivity
-mixture rule, evolving geometry or extra pressure-work solver is supplied.
-Manufactured controls cover latent energy, mass/volume fractions, original
-density laws, merged sensible breakpoints, entropy, independent datum shifts,
-and explicit/implicit native heating across the latent plateau.
+would require a separate phase-allocation closure. No confinement, evolving
+geometry or extra pressure-work solver is supplied. Manufactured controls cover
+latent energy, mass/volume fractions, original density laws, merged sensible
+breakpoints, entropy, independent datum shifts, and explicit/implicit native
+heating across the latent plateau.
+
+`thermal::conduction::composite::PreparedPcmConductivity` binds those exact
+original constituent caloric objects and their prepared material conductivity
+sources to the existing implicit conduction owner. The caller explicitly selects
+parallel or series layers; actual constituent volume fractions determine the
+directional conductivity, while mass fractions continue to determine storage.
+Analytic tangents include both original conductivity and density changes,
+including nonzero conductivity changes on an isothermal fusion plateau. Source
+knots retain one-sided derivatives inside the admitted composite domain. The
+shared adaptive observable reports total composite liquid mass fraction `w*f_pcm`,
+not a normalized PCM-only fraction. State evaluation requires no allocation,
+source lookup, new caloric chart, finite-difference query or extra latent source.
+These layered homogenizations do not claim isotropic foam morphology, interface
+resistance, percolation, melt convection or constituent thermal nonequilibrium.
+Reference geometry and expansion work remain with their original owners.
 
 ## Source calorics, kinetics and shrinkage for crystallization
 
@@ -7743,10 +7758,14 @@ on each sensible branch and the additive-specific-volume coexistence rule;
 specimen mass stays invariant and the consumer must account for the resulting
 volume change. Every selected Cp,
 density, melting-temperature and fusion-energy receipt is retained and bound
-into the curve identity. The declared sensible interpolation allowance is not a
-source-uncertainty claim. This admission does not infer a phase diagram, nucleation,
-kinetics, supercooling, hysteresis, moving geometry or a fixed-volume transport
-closure.
+into the curve identity. The declared interpolation allowance independently
+bounds sensible interpolation and the difference between the represented fusion
+plateau and its original sourced latent heat. Large enthalpy datums that distort
+the plateau beyond that allowance refuse; the sourced value and receipts are
+never silently replaced. This is not a combined chart-error bound, a bound on
+sensible-integration roundoff, or a source-uncertainty claim. This admission does
+not infer a phase diagram, nucleation, kinetics, supercooling, hysteresis, moving
+geometry or a fixed-volume transport closure.
 
 
 ### Prescribed wet-pore gas response

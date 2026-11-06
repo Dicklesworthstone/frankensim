@@ -14,7 +14,9 @@
 //! A fully melted PCM therefore leaves the matrix solid. No normalized
 //! solid/liquid chart or fictitious all-liquid endpoint is constructed.
 
-use super::{EnthalpyPhaseKnot, EquilibriumEnthalpyPhaseCurve, PhaseStateError};
+use super::{
+    EnthalpyPhaseKnot, EquilibriumEnthalpyPhaseCurve, PhaseIntervalDensityLaw, PhaseStateError,
+};
 use crate::thermal::solid::PureSolidThermalLaw;
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_thermal::enthalpy::{DepositionError, ThermalLaw};
@@ -57,6 +59,24 @@ pub struct PcmCompositeState {
     pub specific_volume_m3_kg: f64,
     /// Reciprocal of additive specific volume [kg/m3].
     pub bulk_density_kg_m3: f64,
+}
+
+/// Original state and its exact one-sided enthalpy derivatives.
+/// Interior knots select the right interval; the upper endpoint selects left.
+/// These generalized derivatives do not smooth a latent plateau or fit density.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PcmCompositeResponse {
+    pub state: PcmCompositeState,
+    /// dT/dH [kg K/J], exactly zero on a sharp PCM plateau.
+    pub temperature_slope_kg_k_j: f64,
+    /// d(h_matrix)/dH in the original constituent enthalpy coordinate.
+    pub matrix_enthalpy_derivative: f64,
+    /// d(h_PCM)/dH in the original constituent enthalpy coordinate.
+    pub pcm_enthalpy_derivative: f64,
+    /// Derivative of PCM volume fraction with respect to composite H [kg/J].
+    pub pcm_volume_fraction_slope_kg_j: f64,
+    /// Derivative of liquid mass / total composite mass [kg/J].
+    pub liquid_mass_fraction_slope_kg_j: f64,
 }
 
 /// Immutable, prepared law for a sensible solid matrix containing one PCM.
@@ -318,6 +338,83 @@ impl<'a> PcmComposite<'a> {
             .map(|state| state.temperature_k)
     }
 
+    /// Evaluate original state and analytic caloric/volume-fraction tangents.
+    ///
+    /// The matrix stores no sensible heat at fixed melting temperature:
+    /// d(h_matrix)/dH is zero and d(h_PCM)/dH is the inverse PCM mass fraction.
+    /// Volume fraction can still evolve because original phase densities differ.
+    /// Queries allocate nothing and search only the original knot arrays.
+    pub fn response_at_specific_enthalpy(
+        &self,
+        h: f64,
+    ) -> Result<PcmCompositeResponse, PhaseStateError> {
+        let state = self.values_at_specific_enthalpy(h)?;
+        let upper = self
+            .knots
+            .partition_point(|knot| knot.specific_enthalpy_j_kg <= h)
+            .min(self.knots.len() - 1);
+        let (a, b) = (self.knots[upper - 1], self.knots[upper]);
+        let dh = b.specific_enthalpy_j_kg - a.specific_enthalpy_j_kg;
+        let slope = |difference: f64| -> Result<f64, PhaseStateError> {
+            let value = difference / dh;
+            if !value.is_finite() || (difference != 0.0 && value == 0.0) {
+                return Err(composite_derivative_error());
+            }
+            Ok(value)
+        };
+        let temperature_slope = slope(b.temperature_k - a.temperature_k)?;
+        let matrix_slope =
+            slope(b.matrix_specific_enthalpy_j_kg - a.matrix_specific_enthalpy_j_kg)?;
+        let pcm_slope = slope(b.pcm_specific_enthalpy_j_kg - a.pcm_specific_enthalpy_j_kg)?;
+        let w = self.pcm_mass_fraction;
+        let matrix_volume_slope = (1.0 - w)
+            * constituent_volume_slope(
+                self.matrix.curve(),
+                a.matrix_specific_enthalpy_j_kg,
+                state.matrix.bulk_density_kg_m3,
+                matrix_slope,
+            )?;
+        let pcm_volume_slope = w * constituent_volume_slope(
+            self.pcm,
+            a.pcm_specific_enthalpy_j_kg,
+            state.pcm.bulk_density_kg_m3,
+            pcm_slope,
+        )?;
+        let phi = state.pcm_volume_fraction;
+        let fraction_slope = ((1.0 - phi) * pcm_volume_slope - phi * matrix_volume_slope)
+            / state.specific_volume_m3_kg;
+        // Select the original interval containing this complete composite span;
+        // this also selects left correctly at the composite's upper endpoint.
+        let original = self.pcm.knots();
+        let upper = original
+            .partition_point(|knot| knot.specific_enthalpy_j_kg <= a.pcm_specific_enthalpy_j_kg)
+            .min(original.len() - 1);
+        let (pa, pb) = (original[upper - 1], original[upper]);
+        let liquid_slope = w
+            * pcm_slope
+            * ((pb.liquid_mass_fraction - pa.liquid_mass_fraction)
+                / (pb.specific_enthalpy_j_kg - pa.specific_enthalpy_j_kg));
+        if ![
+            matrix_volume_slope,
+            pcm_volume_slope,
+            fraction_slope,
+            liquid_slope,
+        ]
+        .into_iter()
+        .all(f64::is_finite)
+        {
+            return Err(composite_derivative_error());
+        }
+        Ok(PcmCompositeResponse {
+            state,
+            temperature_slope_kg_k_j: temperature_slope,
+            matrix_enthalpy_derivative: matrix_slope,
+            pcm_enthalpy_derivative: pcm_slope,
+            pcm_volume_fraction_slope_kg_j: fraction_slope,
+            liquid_mass_fraction_slope_kg_j: liquid_slope,
+        })
+    }
+
     /// Free volume of the same fixed total mass [m3]; no inventory is rescaled.
     /// The receiving geometry/work owner decides how to use this volume.
     pub fn volume_m3(&self, h: f64, mass_kg: f64) -> Result<f64, PhaseStateError> {
@@ -410,6 +507,47 @@ impl<'a> PcmComposite<'a> {
         }
         Ok(mapped)
     }
+}
+
+fn composite_derivative_error() -> PhaseStateError {
+    PhaseStateError::InvalidCurve {
+        what: "original composite derivative is not representable",
+    }
+}
+
+/// d(v_constituent)/dH, retaining the original interval's density law.
+fn constituent_volume_slope(
+    curve: &EquilibriumEnthalpyPhaseCurve,
+    segment_start_h: f64,
+    density: f64,
+    enthalpy_slope: f64,
+) -> Result<f64, PhaseStateError> {
+    if enthalpy_slope == 0.0 {
+        return Ok(0.0);
+    }
+    let knots = curve.knots();
+    let upper = knots
+        .partition_point(|k| k.specific_enthalpy_j_kg <= segment_start_h)
+        .min(knots.len() - 1);
+    let (a, b) = (knots[upper - 1], knots[upper]);
+    let dh = b.specific_enthalpy_j_kg - a.specific_enthalpy_j_kg;
+    let slope = match curve.density_law_on_interval(upper - 1)? {
+        PhaseIntervalDensityLaw::AffineSpecificVolume => {
+            ((a.bulk_density_kg_m3 - b.bulk_density_kg_m3)
+                / a.bulk_density_kg_m3
+                / b.bulk_density_kg_m3
+                / dh)
+                * enthalpy_slope
+        }
+        PhaseIntervalDensityLaw::AffineDensity => {
+            ((a.bulk_density_kg_m3 - b.bulk_density_kg_m3) / dh / density / density)
+                * enthalpy_slope
+        }
+    };
+    if !slope.is_finite() || (a.bulk_density_kg_m3 != b.bulk_density_kg_m3 && slope == 0.0) {
+        return Err(composite_derivative_error());
+    }
+    Ok(slope)
 }
 
 impl ThermalLaw for PcmComposite<'_> {

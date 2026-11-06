@@ -24,6 +24,8 @@ pub use reservoir::{
     ReservoirLayerResponse,
 };
 
+/// Explicit constituent morphology on the original PCM composite enthalpy law.
+pub mod composite;
 /// Endpoint coefficients for the original conservative thermal network.
 pub mod network;
 /// Source-bound conductivity through sensible branches and latent plateaus.
