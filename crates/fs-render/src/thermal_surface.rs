@@ -39,6 +39,9 @@ pub(crate) use planck::{
 mod spectral;
 pub use spectral::{DiffuseThermalSurface, SpectralDiffuseThermalSurface, SpectralEmissivity};
 
+/// Original thermal spectra observed from moving inertial vacuum frames.
+pub mod doppler;
+
 mod coating_emission;
 pub use coating_emission::{CoatingEmissionError, CoatingEmissionSample, CoatingThermalEmission};
 

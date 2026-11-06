@@ -27,6 +27,9 @@ use fs_math::det;
 /// Source-bounded quantum-efficiency channels and wavelength importance sampling.
 pub mod detector;
 
+/// Vacuum photon frequencies, directions and radiance between inertial frames.
+pub mod doppler;
+
 pub(crate) mod reflectance;
 pub use reflectance::{LAMBDA_MAX, LAMBDA_MIN, SpectralReflectance, SpectralReflectanceError};
 

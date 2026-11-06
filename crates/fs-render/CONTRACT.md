@@ -8526,3 +8526,44 @@ lateral antialiasing, scattering, refraction, measured optical authority, or a
 per-call cancellation hook. The source convention remains `j = sigma * S`.
 See [Engel, Kraus and Ertl (2001)](https://doi.org/10.1145/383507.383515)
 for preintegration and interpolation-before-classification.
+
+## Vacuum Doppler observations of thermal emission
+
+`spectral::doppler::VacuumDoppler` prepares an allocation-free local Lorentz
+transform from a physical photon's world propagation direction and separate
+emitter and receiver SI velocities. Both velocities must be finite and strictly
+subluminal. The direction points from emission toward reception. The transform
+retains aberrated photon directions in both endpoint frames, the observed/source
+frequency ratio D, reciprocal wavelength mapping and the solid-angle Jacobian.
+It includes transverse time dilation. Spectral radiance per vacuum nanometre
+transforms as `I_receiver(lambda) = D^5 I_source(D lambda)`; the corresponding
+solid-angle ratio is D^-2 and must not be applied to radiance a second time.
+
+With `tracer`, `thermal_surface::doppler::ObservedThermalSurface` borrows the
+original spectral thermal surface or retains the original gray source value.
+Its emissivity is evaluated at the mapped SOURCE wavelength. Actual temperature,
+source identity and finite-band law remain unchanged. The equivalent Planck
+evaluation `epsilon(D lambda) B_lambda(lambda,D T)` avoids prematurely
+underflowing the rest-frame Wien tail; D T is only directional apparent color
+temperature. Closed finite source support is mapped into the receiver frame;
+out-of-band queries are refused rather than extrapolated.
+
+`with_sensor` prepares `ObservedThermalDetector` only after checking the complete
+original `QuantumEfficiencySensor` band against shifted source support. Its
+`sample` uses the detector's existing receiver-frame wavelength proposal and
+channel weights. It returns receiver and source wavelengths, physical spectral
+radiance, QE-weighted channel radiance and collected-electron rates per m² sr.
+Photon energy is h c / lambda_RECEIVER. No extra PDF Jacobian is introduced for
+a proposal already defined in receiver wavelengths. Averaging draws estimates
+the observed channel integrals. Per-query storage is fixed and no spectrum,
+response grid or source table is resampled or allocated.
+
+These are local directional vacuum observations before visibility, projected
+area, etendue and exposure. The caller supplies the physical propagation ray and
+endpoint velocities at emission/reception; the adapter does not solve retarded
+moving geometry, transform normals, infer dielectric/moving-medium shifts,
+propagate polarization, debit thermal storage or claim gravitational shifts.
+Analytical regressions specify longitudinal/transverse motion, aberration and
+inverse boosts, D^5 spectral/D^4 integrated scaling, original source identity,
+finite-band admission, detector-frame photon conversion, nonuniform receiver
+proposals, stationary parity and amplified Wien-tail range recovery.
