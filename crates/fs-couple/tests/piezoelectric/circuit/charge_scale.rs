@@ -124,3 +124,73 @@ fn g3_exact_circuit_tangent_preserves_material_envelope_and_retry() {
         2e-8, controls, || false).unwrap();
     assert_eq!(accepted.model(),retry.model());
 }
+
+// This oracle integrates the physical ceramic equations directly, without the
+// descriptor, source-response callbacks, transformed coordinates or cached flow.
+fn exact_reference(mut y: [f64; 4], d: f64, resistance: f64, force: f64, h: f64) -> [f64; 4] {
+    let mass = DENSITY * AREA * LENGTH / 3.0;
+    let stiffness = AREA / (COMPLIANCE * LENGTH);
+    let theta = d * stiffness;
+    let capacitance = (PERMITTIVITY - d * d / COMPLIANCE) * AREA / LENGTH;
+    let derivative = |state: [f64; 4]| {
+        let voltage = (state[2] - theta * state[0]) / capacitance;
+        [
+            state[1],
+            (force - stiffness * state[0] + theta * voltage) / mass,
+            -voltage / resistance,
+            voltage * voltage / resistance,
+        ]
+    };
+    y[3] = 0.0;
+    let dt = h / 512.0;
+    for _ in 0..512 {
+        let a = derivative(y);
+        let b = derivative(core::array::from_fn(|i| y[i] + 0.5 * dt * a[i]));
+        let c = derivative(core::array::from_fn(|i| y[i] + 0.5 * dt * b[i]));
+        let e = derivative(core::array::from_fn(|i| y[i] + dt * c[i]));
+        for i in 0..4 {
+            y[i] += dt * (a[i] + 2.0 * b[i] + 2.0 * c[i] + e[i]) / 6.0;
+        }
+    }
+    y
+}
+
+#[test]
+fn g1_prepared_ceramic_circuit_preserves_subfemtocoulomb_state_and_physical_loss() {
+    use fs_couple::material_circuit::piezoelectric::prepared::PreparedPiezoelectricCircuit;
+    use fs_phs::linear_exact::{DenseExponentialBudget, LinearSplitBudget};
+    let controls = MaterialCircuitSolve {
+        energy_tolerance_j: 1e-26,
+        power_tolerance_w: 1e-18,
+    };
+    for d in [-400e-12, 0.0, 400e-12] {
+        let mut prepared = PreparedPiezoelectricCircuit::new(
+            model(d, 1e9),
+            &[],
+            2e-8,
+            LinearSplitBudget {
+                max_modes: 8,
+                max_omega_dt: 3.0,
+            },
+            DenseExponentialBudget {
+                max_dimension: 16,
+                max_dense_bytes: 8 * 1024 * 1024,
+                max_multiply_terms: 100_000_000,
+            },
+            || false,
+        )
+        .unwrap();
+        let mut expected = [1e-10, 0.0, 6e-18, 0.0];
+        for _ in 0..8 {
+            expected = exact_reference(expected, d, 1e9, 1e-8, 2e-8);
+            let report = prepared.step(&[], 1e-8, controls, || false).unwrap();
+            relative(prepared.model().extension_m(), expected[0], 1e-10);
+            relative(prepared.model().velocity_m_s(), expected[1], 1e-3);
+            relative(prepared.model().charge_c(), expected[2], 1e-17);
+            relative(report.heat_j, expected[3], 1e-18);
+            assert_eq!(report.electrical_supply_j, 0.0);
+            assert!(report.energy_residual_j.abs() <= controls.energy_tolerance_j);
+            assert_eq!(prepared.resistor_heat().unwrap()[0].heat_j, report.heat_j);
+        }
+    }
+}

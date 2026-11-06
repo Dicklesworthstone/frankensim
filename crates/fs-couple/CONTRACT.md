@@ -716,3 +716,8 @@ saturating RL trajectory and physical/source refusals. Independent arithmetic
 checks over 10,000 varied geometries agree with the source potential within
 1.5e-15 relative error. Rustfmt parsed the implementation and tests; complete
 source-to-native circuit tests remain unexecuted in the dependency environment.
+
+
+### Prepared source-bound piezoelectric circuits
+
+`material_circuit::piezoelectric::prepared::PreparedPiezoelectricCircuit` caches the original fixed-material index-one Kirchhoff system for a fixed positive clock. Native algebraic elimination retains every differential flux, charge and mechanical coordinate. Native exact quadratic propagation and independently prepared physical source observations preserve resistor feedthrough, separate electrical/mechanical supply and per-resistor heat. Original endpoint Kirchhoff rows, source-domain limits, material conductor power and total stored-energy balance are checked before transactional publication. Warm stepping performs no owner allocation, factorization, exponential or Newton solve. Singular algebraic blocks refuse explicitly without reducing conserved state; ordinary descriptor stepping remains available. This is the linear held-input model up to floating-point error, with a conservative numerical whole-window domain bound, not measured material validation or a hard real-time guarantee.

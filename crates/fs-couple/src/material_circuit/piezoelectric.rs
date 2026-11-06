@@ -10,6 +10,9 @@
 //! parameter work for its caloric owner. Dielectric loss, depoling and nonlinear
 //! strain are not added.
 
+/// Prepared exact stepping of the original fixed material-bound circuit.
+pub mod prepared;
+
 use super::{MaterialCircuit, MaterialCircuitError, MaterialCircuitSolve,
     MaterialResistor, ResistorHeat, account_step, bind, extended, poll, positive};
 use crate::piezoelectric::{PiezoelectricCouplingError, PiezoelectricRod};
@@ -367,6 +370,9 @@ impl PiezoelectricCircuitStorage {
     }
 }
 impl Storage for PiezoelectricCircuitStorage {
+    fn quadratic_part(&self) -> Option<fs_phs::linear_exact::QuadraticPart> {
+        Some(fs_phs::linear_exact::QuadraticPart { matrix: self.quadratic.clone(), exact: true })
+    }
     fn exact_quadratic_matrix(&self) -> Option<&[f64]> { Some(&self.quadratic) }
     fn hamiltonian(&self, x: &[f64]) -> f64 {
         self.other.hamiltonian(x) + self.component_energy(x)
