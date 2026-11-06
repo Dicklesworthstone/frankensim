@@ -552,6 +552,42 @@ ternary feed with positive local curvature but lower three-phase free energy,
 unequal pair interactions, finite traces, exact absent species, pure feeds,
 spurious stationary/coincident roots, bounded work and atomic cancellation.
 
+### Homogeneous multicomponent liquid calorics
+
+`solution::multicomponent::caloric` binds every original species to one
+`PureLiquidHeatCapacityV1`, preserving the source knots, common sensible datum
+and common finite temperature domain. Explicit homogeneous inventories retain
+all component amounts, original mixing state, total enthalpy and exact isobaric
+capacity. Unequal-temperature mixing and signed heating/cooling solve the
+conserved total enthalpy with the same safeguarded temperature inverse used by
+the binary caloric owner. Original source Cp and Cp/T integrals handle every
+crossed knot; arbitrary sensible-reference offsets cancel before evaluation.
+
+The original A+B/T potential supplies nonideal enthalpy and entropy exactly
+once. At fixed homogeneous composition these terms have no temperature
+derivative, so each thermal trial evaluates only bounded pure-source integrals
+and the positive exact capacity tangent. Composition and pair interactions are
+prepared outside the inverse; thermal trials allocate no phase or composition
+state. Ideal mixing entropy uses a compensated relative-entropy formulation
+that retains trace and dominant-species contributions without species floors.
+
+The caller supplies finite root, energy, entropy and iteration budgets.
+Source mismatch, unsupported temperature, unrepresentable component addition,
+unbracketed heat, exhausted work and cancellation return no endpoint. A closed
+zero-heat transaction also refuses if its homogeneous endpoint decreases
+entropy beyond the explicit numerical tolerance. With prescribed nonzero
+heat, reported system entropy change requires the actual reservoir exchange
+before it can be interpreted as entropy production. This owner neither
+asserts equilibrium miscibility nor evolves phase splits, vapor, solids,
+nucleation or pressure changes; pressure and pure-liquid source qualification
+remain caller responsibilities.
+
+G1 regressions cover ternary unequal-temperature mixing with all pair H/S
+terms, invariance to large sensible-reference offsets, source Cp-knot heating
+and cooling, reduction to the original binary caloric owner, all 128 species
+with exact absences and a retained dilute inventory, an entropy-decreasing
+constrained homogeneous endpoint, source identity and atomic refusal.
+
 ### Closed isobaric liquid calorics
 
 `solution::caloric` combines that SAME pair law with explicitly ordered

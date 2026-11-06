@@ -28,6 +28,8 @@ use std::sync::Arc;
 
 /// Bounded deterministic phase-count and seed discovery.
 pub mod discovery;
+/// Conserved heat and entropy of explicitly homogeneous liquid inventories.
+pub mod caloric;
 /// Conserved finite-inventory phase splits at an explicit phase count and seed.
 pub mod equilibrium;
 /// Full-simplex local stability and finite tangent-plane comparisons.
