@@ -38,6 +38,7 @@ use fs_math::dd::Dd;
 
 const LIGHT_M_S: f64 = 299_792_458.0;
 
+pub mod exposure;
 #[cfg(feature = "volumes")]
 pub mod participating;
 
@@ -58,6 +59,8 @@ pub struct SurfaceEmissionQuery {
 pub enum SurfaceHistoryError {
     OutsideTimeDomain,
     OutsideSpectralDomain,
+    /// This source has no qualified finite-interval integration.
+    ExposureUnsupported,
     NumericalRange,
     Cancelled,
 }
@@ -75,6 +78,18 @@ impl From<fs_exec::Cancelled> for SurfaceHistoryError {
 /// the source owner's responsibility. No new random variates are requested.
 pub trait SurfaceEmissionHistory: Sync {
     fn sample(&self, cx: &Cx<'_>, query: SurfaceEmissionQuery) -> Result<f64, SurfaceHistoryError>;
+
+    /// Mean radiance multiplier over the complete source-clock interval.
+    /// The source owns exact integration or an explicitly qualified temporal
+    /// approximation. The camera never replaces this with point sampling.
+    fn average(
+        &self,
+        cx: &Cx<'_>,
+        _query: exposure::SurfaceExposureQuery,
+    ) -> Result<f64, SurfaceHistoryError> {
+        cx.checkpoint()?;
+        Err(SurfaceHistoryError::ExposureUnsupported)
+    }
 }
 
 /// One original finite emitting object and its complete immutable history.
@@ -89,6 +104,7 @@ pub struct SurfaceEmissionHistoryBinding<'a> {
 pub enum TransientCameraError {
     Camera(CameraRadianceError),
     InvalidObservationTime,
+    InvalidExposureWindow,
     /// Unknown, duplicate, nonauthored, volume or environment source binding.
     InvalidHistoryBinding {
         object_id: u64,
@@ -317,11 +333,35 @@ impl<'a, 's, 'm> TransientCurvedCameraScene<'a, 's, 'm> {
         observation_time_s: Dd,
         path: &CurvedPathResult,
     ) -> Result<f64, TransientCameraError> {
+        let Some((binding, query)) = self.source_query(cx, observation_time_s, path)? else {
+            return Ok(1.0);
+        };
+        let object_id = binding.object_id;
+        let scale = binding
+            .history
+            .sample(cx, query)
+            .map_err(|error| TransientCameraError::History { object_id, error })?;
+        cx.checkpoint()?;
+        if !scale.is_finite() || scale < 0.0 {
+            return Err(TransientCameraError::InvalidHistoryScale { object_id });
+        }
+        Ok(scale)
+    }
+
+    fn source_query(
+        &self,
+        cx: &Cx<'_>,
+        observation_time_s: Dd,
+        path: &CurvedPathResult,
+    ) -> Result<
+        Option<(SurfaceEmissionHistoryBinding<'a>, SurfaceEmissionQuery)>,
+        TransientCameraError,
+    > {
         let contact = path
             .last_contact()
             .ok_or(CameraRadianceError::NumericalRange)?;
         let Some(binding) = self.histories[contact.witness.boundary_id] else {
-            return Ok(1.0);
+            return Ok(None);
         };
         let emitter = self.camera.emitters[contact.witness.boundary_id]
             .ok_or(CameraRadianceError::NumericalRange)?;
@@ -330,7 +370,7 @@ impl<'a, 's, 'm> TransientCurvedCameraScene<'a, 's, 'm> {
         {
             // No emission from this original side, hence no history query or
             // group-delay requirement for an invisible source contribution.
-            return Ok(1.0);
+            return Ok(None);
         }
         cx.checkpoint()?;
         let object_id = binding.object_id;
@@ -339,39 +379,40 @@ impl<'a, 's, 'm> TransientCurvedCameraScene<'a, 's, 'm> {
             .filter(|length| length.is_finite() && *length >= 0.0)
             .ok_or(TransientCameraError::MissingGroupDelay { object_id })?;
         let group_delay_s = Dd::from_f64(group_m) / Dd::from_f64(LIGHT_M_S);
-        let emission_time_s = observation_time_s - group_delay_s;
-        let recovered = observation_time_s - emission_time_s;
-        let error = (recovered - group_delay_s).abs();
-        let allowance = group_delay_s * Dd::from_f64(64.0 * f64::EPSILON);
-        if !finite_dd(group_delay_s)
-            || !finite_dd(emission_time_s)
-            || (group_m > 0.0
-                && (group_delay_s.hi <= 0.0
-                    || !emission_time_s.lt(observation_time_s)
-                    || allowance.lt(error)))
-        {
+        if group_m > 0.0 && !Dd::ZERO.lt(group_delay_s) {
             return Err(TransientCameraError::UnresolvedClock { object_id });
         }
-        let scale = binding
-            .history
-            .sample(
-                cx,
-                SurfaceEmissionQuery {
-                    object_id,
-                    position_m: path.beam().ray().origin,
-                    wavelength_nm: path.beam().wavelength_nm(),
-                    observation_time_s,
-                    emission_time_s,
-                    group_delay_s,
-                },
-            )
-            .map_err(|error| TransientCameraError::History { object_id, error })?;
-        cx.checkpoint()?;
-        if !scale.is_finite() || scale < 0.0 {
-            return Err(TransientCameraError::InvalidHistoryScale { object_id });
-        }
-        Ok(scale)
+        let emission_time_s = retarded_time(observation_time_s, group_delay_s, object_id)?;
+        Ok(Some((
+            binding,
+            SurfaceEmissionQuery {
+                object_id,
+                position_m: path.beam().ray().origin,
+                wavelength_nm: path.beam().wavelength_nm(),
+                observation_time_s,
+                emission_time_s,
+                group_delay_s,
+            },
+        )))
     }
+}
+
+fn retarded_time(
+    observation_time_s: Dd,
+    group_delay_s: Dd,
+    object_id: u64,
+) -> Result<Dd, TransientCameraError> {
+    let emission_time_s = observation_time_s - group_delay_s;
+    let error = ((observation_time_s - emission_time_s) - group_delay_s).abs();
+    let allowance = group_delay_s * Dd::from_f64(64.0 * f64::EPSILON);
+    if !finite_dd(group_delay_s)
+        || !finite_dd(emission_time_s)
+        || (Dd::ZERO.lt(group_delay_s)
+            && (!emission_time_s.lt(observation_time_s) || allowance.lt(error)))
+    {
+        return Err(TransientCameraError::UnresolvedClock { object_id });
+    }
+    Ok(emission_time_s)
 }
 
 fn finite_dd(time: Dd) -> bool {

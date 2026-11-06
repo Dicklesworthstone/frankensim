@@ -8289,3 +8289,39 @@ per-wavelength scattered group delay against independent energy/photon sums,
 and late-history/work/cancellation refusal. Pinned Rust formatting/parser checks
 passed; these native tests were authored but not executed in the shared editing
 environment.
+
+
+## Finite shutters over original retarded surface-source histories
+
+`camera::transient::exposure` adds an explicit positive rectangular
+`ExposureWindow` on the original DD launch/pupil clock. Each encountered emitter
+receives both shutter endpoints shifted by its own native accumulated group delay.
+For frozen geometry, media and surface laws, linearity permits one original trace
+per spectral sample. `SurfaceEmissionHistory::average` supplies the source-owned
+interval mean; its default returns `ExposureUnsupported` rather than guessing an
+integral from instantaneous samples. Existing instantaneous observations retain
+the same shared source identity, group-delay admission and clock checks.
+
+Seeded and caller-sampled camera observations preserve original path and random
+work, yielding mean spectral radiance and its time integral in J/(m² sr nm).
+Unbound surface, volume/LTE and environment emission remains steady. Every
+source must complete a nonnegative finite interval mean; late source failure or
+cancellation refuses the entire observation. This owner does not infer motion,
+a shutter response curve, lens transit, fluorescence or sensor electronics.
+
+`PiecewiseLinearHistory` borrows the original strictly ordered nonnegative
+source knots and retains their DD epoch. It integrates every crossed segment
+of the declared interpolant, including clipped endpoints and narrow interior
+pulses, without resampling, query allocation, extrapolation or subtracting large
+cumulative integrals. Point lookup is logarithmic; interval work scales with
+crossed knots and polls cancellation. Normalized DD contributions and a scaled
+operation order preserve representable pulse area under extreme duration and
+intensity ranges. Exact interpolant integration does not assert measured-source
+bandwidth or physical calibration.
+
+Four G1/G3/G4 regression groups specify narrow/clipped pulse areas at ordinary
+and large epochs, extreme representable pulse means, original seeded/caller
+path replay, different delayed windows at two emitting encounters, invalid
+shutters/knots/domains, unsupported interval integration and late failures.
+Pinned Rust formatting/parser and source review passed. Native Rust execution
+was not performed in the shared editing environment.

@@ -1,5 +1,7 @@
 //! G1/G3: actual source histories, dispersive delays and original native paths.
 
+mod exposure;
+
 use super::*;
 use crate::charts::TriMesh;
 use crate::dielectric::{
