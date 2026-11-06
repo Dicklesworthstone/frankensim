@@ -28,8 +28,8 @@ pub(super) struct ShearElement {
     source: ConcentricShearSection,
     // Basic rotational compliance [1/(N m)], cached at source admission.
     pub(super) flexibility: f64,
-    bending_fraction: f64,
-    shear_fraction: f64,
+    pub(super) bending_fraction: f64,
+    pub(super) shear_fraction: f64,
 }
 
 fn invalid(what: &str) -> SolidError {
@@ -162,6 +162,8 @@ impl Frame2d {
     /// Sources must be constant at their retained temperatures and support all
     /// frequencies, as for `add_material_element`. No shear viscosity,
     /// warping, shear failure or three-dimensional stress recovery is inferred.
+    /// Explicit shear viscosity enters through `FrameViscousSection::try_new_with_shear`
+    /// and `add_material_viscous_element`, using this same interpolation.
     /// Longitudinal Maxwell/thermal adapters using Euler–Bernoulli strain
     /// traces refuse these members. Small corotational strains and fixed
     /// reference inertia retain their existing meanings.

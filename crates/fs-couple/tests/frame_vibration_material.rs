@@ -38,8 +38,10 @@ fn source(eta: f64, band: (f64, f64)) -> FrameViscousSection {
     for (name, value, dims) in [
         ("density", DENSITY, Density::DIMS),
         ("young_modulus", YOUNG, Pressure::DIMS),
+        ("shear_modulus", YOUNG / 2.5, Pressure::DIMS),
         ("axial_eta", eta, DynViscosity::DIMS),
         ("bending_eta", 0.0, DynViscosity::DIMS),
+        ("shear_eta", eta, DynViscosity::DIMS),
     ] {
         let mut validity = ValidityDomain::unconstrained().with("T", 300.0, 400.0);
         if name.ends_with("_eta") {
@@ -253,6 +255,79 @@ fn data_only_viscosity_changes_actual_ordinary_and_prepared_motion_and_loss() {
     close(final_energy[0], final_energy[1], initial);
     close(final_energy[2], final_energy[3], initial);
     assert!(final_energy[2] < final_energy[0]);
+}
+
+/// G1: native transverse material loss reaches both original coupled propagators.
+#[test]
+fn shear_viscosity_drives_coupled_motion_and_refuses_incomplete_thermal_partition() {
+    let length = 0.25_f64;
+    let correction = 0.85;
+    let eta = 2.0;
+    let section = source(eta, BAND).elastic().clone()
+        .with_shear_modulus("shear_modulus", correction).unwrap()
+        .with_transverse_viscosity("shear_eta").unwrap();
+    let section = FrameViscousSection::try_new_with_shear(section, "axial_eta", "bending_eta")
+        .unwrap();
+    let mut frame = Frame2d::with_mass_formulation(
+        Geometry::Linear, FrameMassFormulation::ConsistentReference);
+    frame.add_node(0.0, 0.0);
+    frame.add_node(length, 0.0);
+    frame.fix(0, [true; 3]);
+    frame.fix(1, [true, false, true]);
+    frame.add_material_viscous_element(0, 1, 5, section).unwrap();
+    let basis = FrameVibrationBasis::from_frame(&frame, 1,
+        FrameVibrationBudget { max_frame_dofs: 6, max_dense_entries: 36 }, || false).unwrap();
+    let component = || basis.coupled_component(RATE, &[0.0],
+        ModalAcousticTimeBudget::audible_reference(), 18, || false).unwrap();
+    let inertia = area() * RADIUS.powi(2) / 4.0;
+    let ei = YOUNG * inertia;
+    let ga = correction * (YOUNG / 2.5) * area();
+    let beta = 1.0 / (1.0 + 12.0 * ei / (ga * length * length));
+    let shear = 1.0 - beta;
+    let mass = DENSITY * (area() * length
+        * (13.0 * beta * beta / 35.0 + 0.7 * beta * shear + shear * shear / 3.0)
+        + inertia * 6.0 * beta * beta / (5.0 * length));
+    let stiffness = 12.0 * ei * beta / length.powi(3);
+    let damping = correction * eta * area() * shear * shear / length;
+    let (q0, v0) = (0.004, 0.03);
+    let initial = 0.5 * (stiffness * q0 * q0 + mass * v0 * v0);
+    for preparation in [None, Some(prepared())] {
+        let mut component = component();
+        let shape = basis.modes()[0].displacement[4];
+        component.restore_states(&[ModalAcousticState {
+            displacement_m_sqrt_kg: q0 / shape,
+            velocity_m_sqrt_kg_per_s: v0 / shape,
+        }]).unwrap();
+        assert_eq!(component.material_connections().len(), 3);
+        let (basis, mut system) = component.into_system(
+            config(), preparation, &CancelGate::new_clock_free()).unwrap();
+        let mut dissipated = 0.0;
+        for sample in 1..=64 {
+            let report = system.step(&[0.0]).unwrap().clone();
+            let (q, v) = free_oscillator(q0, v0, stiffness / mass, damping / (2.0 * mass),
+                f64::from(sample) / f64::from(RATE));
+            let (u, velocity) = physical(&basis, &system, 0);
+            close(u[4], q, 0.01);
+            close(velocity[4], v, 0.4);
+            dissipated += report.connection_dissipation_j;
+            close(dissipated, initial - 0.5 * (stiffness * q * q + mass * v * v), initial);
+            assert_eq!(report.component_dissipation_j, 0.0);
+        }
+        close(system.total_energy_j().unwrap() + dissipated, initial, initial);
+        assert!(dissipated > 0.0);
+    }
+
+    // The current heat owner partitions only axial/bending loss. Reject before
+    // source/cell routing can silently erase the original shear model.
+    use fs_couple::circuit_enthalpy::{CircuitEnthalpyError, material::MaterialNetwork};
+    use fs_thermal::enthalpy::{DepositionBudget, DepositionSimulation};
+    let thermal = DepositionSimulation::new(vec![], &[], DepositionBudget {
+        max_cells: 1, max_links: 1, max_events: 1, max_substeps: 1,
+    }).unwrap();
+    let network = MaterialNetwork { cells: &[], resistors: &[], links: &[] };
+    assert!(matches!(component().into_thermal_system(&thermal, &network, &[], config(), None,
+        &CancelGate::new_clock_free()), Err(CircuitEnthalpyError::Invalid(
+            "frame thermal feedback does not yet partition transverse shear viscosity"))));
 }
 
 fn chain_matrices() -> ([[f64; 2]; 2], [[f64; 2]; 2], [[f64; 2]; 2]) {

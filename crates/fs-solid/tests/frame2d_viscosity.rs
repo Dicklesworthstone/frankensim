@@ -17,21 +17,49 @@ use fs_solid::{DynamicHistory, Frame2d, Geometry, Rayleigh, SectionModel};
 
 const RHO: f64 = 1000.0;
 const YOUNG: f64 = 2e9;
+const SHEAR: f64 = 8e8;
+const SHEAR_CORRECTION: f64 = 0.85;
 const RADIUS: f64 = 0.02;
 const BAND: (f64, f64) = (0.0, 1e7);
 
 fn source(eta_axial: f64, eta_bending: f64, band: (f64, f64)) -> FrameViscousSection {
+    FrameViscousSection::try_new(
+        elastic_source(eta_axial, eta_bending, band, None),
+        "axial_eta",
+        "bending_eta",
+    )
+    .unwrap()
+}
+
+fn elastic_source(
+    eta_axial: f64,
+    eta_bending: f64,
+    band: (f64, f64),
+    transverse: Option<(f64, (f64, f64))>,
+) -> ConcentricElasticSection {
     let mut claims = ClaimSet::new();
     let mut requirements = Vec::new();
-    for (name, value, dims) in [
+    let mut properties = vec![
         ("density", RHO, Density::DIMS),
         ("young_modulus", YOUNG, Pressure::DIMS),
         ("axial_eta", eta_axial, DynViscosity::DIMS),
         ("bending_eta", eta_bending, DynViscosity::DIMS),
-    ] {
+    ];
+    if let Some((eta, _)) = transverse {
+        properties.extend([
+            ("shear_modulus", SHEAR, Pressure::DIMS),
+            ("shear_eta", eta, DynViscosity::DIMS),
+        ]);
+    }
+    for (name, value, dims) in properties {
         let mut validity = ValidityDomain::unconstrained().with("T", 300.0, 400.0);
         if name.ends_with("_eta") {
-            validity = validity.with("omega", band.0, band.1);
+            let interval = if name == "shear_eta" {
+                transverse.unwrap().1
+            } else {
+                band
+            };
+            validity = validity.with("omega", interval.0, interval.1);
         }
         claims
             .insert_claim(PropertyClaim {
@@ -63,10 +91,13 @@ fn source(eta_axial: f64, eta_bending: f64, band: (f64, f64)) -> FrameViscousSec
         vec![],
     )
     .unwrap();
+    let query_band = transverse.map_or(band, |(_, shear)| {
+        (band.0.max(shear.0), band.1.min(shear.1))
+    });
     let point = QueryPoint::new()
         .with("T", 300.0)
         .unwrap()
-        .with("omega", 0.5 * (band.0 + band.1))
+        .with("omega", 0.5 * (query_band.0 + query_band.1))
         .unwrap();
     let material = resolve_material_state_point(
         &card,
@@ -75,22 +106,39 @@ fn source(eta_axial: f64, eta_bending: f64, band: (f64, f64)) -> FrameViscousSec
         MaterialPropertySelection::SingleClaimOnly,
     )
     .unwrap();
-    let section = ConcentricElasticSection::try_new(
+    ConcentricElasticSection::try_new(
         0.0,
         vec![ConcentricMaterialLayer {
             outer_radius_m: RADIUS,
             material,
         }],
     )
-    .unwrap();
-    FrameViscousSection::try_new(section, "axial_eta", "bending_eta").unwrap()
+    .unwrap()
+}
+
+fn shear_source(
+    eta_axial: f64,
+    eta_bending: f64,
+    eta_shear: f64,
+    shear_band: (f64, f64),
+) -> FrameViscousSection {
+    let transverse = elastic_source(eta_axial, eta_bending, BAND, Some((eta_shear, shear_band)))
+        .with_shear_modulus("shear_modulus", SHEAR_CORRECTION)
+        .unwrap()
+        .with_transverse_viscosity("shear_eta")
+        .unwrap();
+    FrameViscousSection::try_new_with_shear(transverse, "axial_eta", "bending_eta").unwrap()
 }
 
 fn guided(section: FrameViscousSection, axis: usize) -> Frame2d {
+    guided_length(section, axis, 1.0)
+}
+
+fn guided_length(section: FrameViscousSection, axis: usize, length: f64) -> Frame2d {
     let mut frame =
         Frame2d::with_mass_formulation(Geometry::Linear, FrameMassFormulation::ConsistentReference);
     frame.add_node(0.0, 0.0);
-    frame.add_node(1.0, 0.0);
+    frame.add_node(length, 0.0);
     frame.fix(0, [true; 3]);
     frame.fix(
         1,
@@ -617,6 +665,186 @@ fn harmonic_viscosity_checks_original_frequency_band_and_counts_rayleigh_once() 
             (100.0, 5000.0)
         );
     });
+}
+
+/// G1/G3: independent section virtual work and rigid-motion invariance.
+#[test]
+fn timoshenko_viscous_forces_match_integrated_section_stress_rates() {
+    let section = shear_source(2e5, 4e6, 3e5, BAND);
+    let area = core::f64::consts::PI * RADIUS.powi(2);
+    let inertia = area * RADIUS.powi(2) / 4.0;
+    let ei = YOUNG * inertia;
+    let ga = SHEAR_CORRECTION * SHEAR * area;
+    for length in [0.05_f64, 1.0, 3.0] {
+        for angle in [0.0_f64, 0.63, 1.2] {
+            let (s, c) = angle.sin_cos();
+            let mut frame = Frame2d::with_mass_formulation(
+                Geometry::Linear,
+                FrameMassFormulation::ConsistentReference,
+            );
+            frame.add_node(0.0, 0.0);
+            frame.add_node(length * c, length * s);
+            frame.fix(0, [true; 3]);
+            frame.add_material_viscous_element(0, 1, 5, section.clone()).unwrap();
+            assert_eq!(frame.material_section(0), Some(section.elastic()));
+            assert_eq!(
+                frame.material_shear_section(0),
+                Some(section.transverse().unwrap().shear()),
+            );
+            assert!(frame.reference_strain_traces(0).is_err());
+            let operator = frame.material_damping_operator().unwrap().unwrap();
+            assert_eq!(operator.ports().len(), 3);
+            assert_eq!(
+                operator.sections()[0].1.transverse(),
+                section.transverse(),
+            );
+
+            // Independent static-equilibrium reconstruction: M'=-Q,
+            // theta'=M/EI, v'=theta+Q/GA. Solve Q from both end positions
+            // and rotations, then integrate viscosity against those rates.
+            // This does not use the implementation's beta or factor columns.
+            let rates = |velocity: [f64; 6]| {
+                let axial = (c * (velocity[3] - velocity[0])
+                    + s * (velocity[4] - velocity[1])) / length;
+                let transverse = -s * (velocity[3] - velocity[0])
+                    + c * (velocity[4] - velocity[1]);
+                let q = (transverse - 0.5 * length * (velocity[2] + velocity[5]))
+                    / (length / ga + length.powi(3) / (12.0 * ei));
+                let mean_curvature = (velocity[5] - velocity[2]) / length;
+                let offset = q * length / (2.0 * 3.0_f64.sqrt() * ei);
+                [axial, q / ga, mean_curvature - offset, mean_curvature + offset]
+            };
+            let virtual_work = |a: [f64; 4], b: [f64; 4]| {
+                length * (2e5 * area * a[0] * b[0]
+                    + SHEAR_CORRECTION * 3e5 * area * a[1] * b[1]
+                    + 0.5 * 4e6 * inertia * (a[2] * b[2] + a[3] * b[3]))
+            };
+            let matrix_scale = operator.entries().iter().copied().map(f64::abs)
+                .fold(0.0_f64, f64::max);
+            for velocity in [
+                [0.3, -0.7, 0.2, -0.1, 0.5, -0.9],
+                [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0, 0.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0, -s * length, c * length, 1.0],
+            ] {
+                for row in 0..6 {
+                    let virtual_velocity = core::array::from_fn(|i| if i == row { 1.0 } else { 0.0 });
+                    let expected = virtual_work(rates(velocity), rates(virtual_velocity));
+                    let actual = (0..6)
+                        .map(|col| operator.entries()[row * 6 + col] * velocity[col])
+                        .sum();
+                    near(actual, expected, 2e-12 * matrix_scale * length.max(1.0));
+                }
+                let port_power: f64 = operator.ports().iter().map(|port| {
+                    let rate: f64 = port.displacement_weights.iter().zip(velocity)
+                        .map(|(weight, v)| weight * v).sum();
+                    port.damping_n_s_m * rate * rate
+                }).sum();
+                near(port_power, virtual_work(rates(velocity), rates(velocity)),
+                    3e-12 * matrix_scale * length.max(1.0).powi(2));
+            }
+        }
+    }
+}
+
+/// G1: physical continuous oscillator and harmonic impedance, including heat.
+#[test]
+fn shear_only_viscosity_drives_native_decay_harmonic_phase_and_dissipation() {
+    let length = 0.05_f64;
+    let area = core::f64::consts::PI * RADIUS.powi(2);
+    let inertia = area * RADIUS.powi(2) / 4.0;
+    let ei = YOUNG * inertia;
+    let ga = SHEAR_CORRECTION * SHEAR * area;
+    let beta = 1.0 / (1.0 + 12.0 * ei / (ga * length * length));
+    let shear = 1.0 - beta;
+    // Integrals of the guided member's cubic translation and independent
+    // quadratic section rotation, including the original rotary inventory.
+    let mass = RHO * (area * length
+        * (13.0 * beta * beta / 35.0 + 0.7 * beta * shear + shear * shear / 3.0)
+        + inertia * 6.0 * beta * beta / (5.0 * length));
+    let stiffness = 12.0 * ei * beta / length.powi(3);
+    let omega = (stiffness / mass).sqrt();
+    let none = Rayleigh { a0: 0.0, a1: 0.0 };
+    for eta_shear in [0.0, 1e4] {
+        let mut frame = guided_length(shear_source(0.0, 0.0, eta_shear, BAND), 1, length);
+        let damping = SHEAR_CORRECTION * eta_shear * area * shear * shear / length;
+        near(frame.natural_frequencies().unwrap()[0], omega, 3e-11 * omega);
+        let operator = frame.material_damping_operator().unwrap().unwrap();
+        near(operator.entries()[4 * 6 + 4], damping, 2e-12 * damping.max(1.0));
+        assert_eq!(operator.ports()[0].damping_n_s_m, 0.0);
+        assert_eq!(operator.ports()[2].damping_n_s_m, 0.0);
+
+        with_harmonic_cx(|cx| {
+            use fs_math::c64::C64;
+            use fs_modal::harmonic::HarmonicResponseControls;
+            let frequency = 0.7 * omega;
+            let response = frame.prepare_harmonic_response(frequency, none,
+                HarmonicResponseControls {
+                    maximum_coordinates: 6,
+                    maximum_payload_bytes: 1 << 20,
+                    maximum_relative_residual: 1e-12,
+                }, cx).unwrap().solve(&[C64::ONE], cx).unwrap();
+            let expected = C64::ONE / C64::new(
+                stiffness - mass * frequency * frequency, -frequency * damping);
+            assert!((response.displacement[0] - expected).abs() < 4e-11 * expected.abs());
+            let heat = 0.5 * damping * frequency * frequency * expected.norm_sq();
+            near(response.average_viscous_power_w, heat, 4e-11 * heat.max(1e-30));
+            near(response.average_input_power_w, heat, 4e-11 * heat.max(1e-30));
+        });
+
+        let initial = 1e-6;
+        let initial_energy = 0.5 * stiffness * initial * initial;
+        frame.static_load(&[0.0, 0.0, 0.0, 0.0, stiffness * initial, 0.0], 1).unwrap();
+        near(frame.displacements()[4], initial, 3e-12 * initial);
+        let history = frame.newmark(&[0.0; 801], 0.01 / omega, (0.0, 0.0), none).unwrap();
+        let decay = damping / (2.0 * mass);
+        let wd = (omega * omega - decay * decay).sqrt();
+        for (time, displacement) in history.t.iter().zip(&history.u) {
+            let expected = initial * (-decay * time).exp()
+                * ((wd * time).cos() + decay / wd * (wd * time).sin());
+            near(displacement[4], expected, 8e-5 * initial);
+        }
+        let time = *history.t.last().unwrap();
+        let q = initial * (-decay * time).exp()
+            * ((wd * time).cos() + decay / wd * (wd * time).sin());
+        let v = -initial * (-decay * time).exp() * omega * omega / wd * (wd * time).sin();
+        let lost = initial_energy - 0.5 * (stiffness * q * q + mass * v * v);
+        near(*history.material_damping_energy.last().unwrap(), lost, 1e-4 * initial_energy);
+        assert_eq!(*history.rayleigh_damping_energy.last().unwrap(), 0.0);
+        if eta_shear == 0.0 {
+            assert_eq!(*history.material_damping_energy.last().unwrap(), 0.0);
+        } else {
+            assert!(*history.material_damping_energy.last().unwrap() > 0.5 * initial_energy);
+        }
+        closed_energy(&history, initial_energy);
+    }
+}
+
+/// G0: original transverse source domain survives every mechanical consumer.
+#[test]
+fn transverse_viscosity_retains_its_own_frequency_applicability() {
+    let band = (100.0, 5000.0);
+    let mut frame = guided(shear_source(2e5, 4e6, 3e5, band), 1);
+    let operator = frame.material_damping_operator().unwrap().unwrap();
+    assert_eq!(operator.omega_band_rad_s(), band);
+    assert_eq!(operator.sections()[0].1.transverse().unwrap().viscosity_property(), "shear_eta");
+    let none = Rayleigh { a0: 0.0, a1: 0.0 };
+    with_harmonic_cx(|cx| {
+        let controls = fs_modal::harmonic::HarmonicResponseControls {
+            maximum_coordinates: 6,
+            maximum_payload_bytes: 1 << 20,
+            maximum_relative_residual: 1e-12,
+        };
+        for frequency in [99.0, 5001.0] {
+            assert!(frame.prepare_harmonic_response(frequency, none, controls, cx).is_err());
+        }
+        for frequency in [100.0, 2500.0, 5000.0] {
+            assert!(frame.prepare_harmonic_response(frequency, none, controls, cx).is_ok());
+        }
+    });
+    let before = frame.displacements().to_vec();
+    assert!(frame.newmark(&[0.0; 2], 1e-3, (0.0, 0.0), none).is_err());
+    assert_eq!(frame.displacements(), before.as_slice());
 }
 
 /// G1: free translation and the elastic resonance coexist in the same source

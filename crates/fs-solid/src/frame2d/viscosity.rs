@@ -1,21 +1,26 @@
 //! Original material section viscosity on the native frame/Newmark trajectory.
 //!
-//! Integrate axial strain rate and cubic-Hermite curvature rate in the same
-//! reference member. The full assembled C retains joint and directional cross
-//! terms; heterogeneous members need not share one proportional damping ratio.
+//! Integrate axial, curvature and explicitly bound transverse shear strain
+//! rates in the same reference member. Shear-deformable members use the SAME
+//! static Timoshenko interpolation as their elastic and inertial owners.
+//! The full assembled C retains joint and directional cross terms;
+//! heterogeneous members need not share one proportional damping ratio.
 //! Material work is exported as dissipation, not silently deposited into heat.
 
 use super::{Frame2d, Geometry, SectionModel, SolidError};
 use fs_material::section::{
     ConcentricElasticSection, ConcentricKelvinVoigtSection, axial::ConcentricAxialViscosity,
+    transverse::ConcentricTransverseViscosity,
 };
 
-/// Explicit axial AND bending viscosities from one original material section.
+/// Explicit axial AND bending viscosities, with optional transverse shear,
+/// from one original material section.
 /// Each original layer/source and its frequency applicability remain attached.
 #[derive(Clone, Debug)]
 pub struct FrameViscousSection {
     axial: ConcentricAxialViscosity,
     bending: ConcentricKelvinVoigtSection,
+    transverse: Option<ConcentricTransverseViscosity>,
     band: (f64, f64),
 }
 
@@ -62,8 +67,10 @@ impl FrameMaterialDamping {
         &self.entries
     }
     /// Three exact positive-semidefinite factors per source-bound member:
-    /// axial, symmetric bending, antisymmetric bending. Explicit zero factors
-    /// are retained, and `C = sum(damping_n_s_m * weights * weights^T)`.
+    /// axial, symmetric bending/shear, antisymmetric bending. Shear and
+    /// symmetric curvature share one displacement coordinate; their physical
+    /// losses add in that factor. Explicit zero factors are retained, and
+    /// `C = sum(damping_n_s_m * weights * weights^T)`.
     pub fn ports(&self) -> &[FrameViscousPort] {
         &self.ports
     }
@@ -71,7 +78,7 @@ impl FrameMaterialDamping {
     pub fn free_dofs(&self) -> &[usize] {
         &self.free_dofs
     }
-    /// Original member index and both original layered source bindings.
+    /// Original member index and every original layered source binding.
     pub fn sections(&self) -> &[(usize, FrameViscousSection)] {
         &self.sections
     }
@@ -146,11 +153,38 @@ impl FrameViscousSection {
         Ok(Self {
             axial,
             bending,
+            transverse: None,
             band,
         })
     }
 
-    /// Same geometry, elastic stiffness and inertia used by both loss owners.
+    /// Bind a shear-deformable Kelvin--Voigt member. The transverse law supplies
+    /// its original shear modulus, correction and independently selected shear
+    /// viscosity; axial and bending viscosities come from that SAME section.
+    /// All three loss laws must have intersecting source frequency domains.
+    /// Explicit zero shear viscosity still retains transverse shear elasticity.
+    pub fn try_new_with_shear(
+        transverse: ConcentricTransverseViscosity,
+        axial_property: &str,
+        bending_property: &str,
+    ) -> Result<Self, SolidError> {
+        let mut section = Self::try_new(
+            transverse.shear().elastic().clone(),
+            axial_property,
+            bending_property,
+        )?;
+        let band = transverse.omega_band_rad_s();
+        section.band = (section.band.0.max(band.0), section.band.1.min(band.1));
+        if section.band.1 < section.band.0 {
+            return Err(invalid(
+                "axial, bending and transverse shear viscosity frequency domains do not intersect",
+            ));
+        }
+        section.transverse = Some(transverse);
+        Ok(section)
+    }
+
+    /// Same geometry, elastic stiffness and inertia used by every loss owner.
     pub const fn elastic(&self) -> &ConcentricElasticSection {
         self.axial.elastic()
     }
@@ -162,7 +196,11 @@ impl FrameViscousSection {
     pub const fn bending(&self) -> &ConcentricKelvinVoigtSection {
         &self.bending
     }
-    /// Intersection of both original coefficient bands [rad/s].
+    /// Original transverse shear stiffness/loss, when explicitly bound.
+    pub const fn transverse(&self) -> Option<&ConcentricTransverseViscosity> {
+        self.transverse.as_ref()
+    }
+    /// Intersection of all original coefficient bands [rad/s].
     pub const fn omega_band_rad_s(&self) -> (f64, f64) {
         self.band
     }
@@ -188,16 +226,27 @@ impl Frame2d {
         &self,
         element: usize,
     ) -> Result<([usize; 6], [[f64; 6]; 3], f64), SolidError> {
+        let coordinates = self.reference_member_coordinates(element)?;
+        if self.elements[element].transverse_shear.is_some() {
+            return Err(invalid(
+                "Euler-Bernoulli strain traces do not admit transverse shear",
+            ));
+        }
+        Ok(coordinates)
+    }
+
+    // Geometric displacement coordinates, not a constitutive strain law.
+    // Shear-deformable viscosity applies its own curvature/shear coefficients;
+    // the public longitudinal traces above retain their original refusal.
+    fn reference_member_coordinates(
+        &self,
+        element: usize,
+    ) -> Result<([usize; 6], [[f64; 6]; 3], f64), SolidError> {
         if self.geometry != Geometry::Linear {
             return Err(invalid("strain traces require linear reference geometry"));
         }
         let element = self.elements.get(element)
             .ok_or_else(|| invalid("strain trace member does not exist"))?;
-        if element.transverse_shear.is_some() {
-            return Err(invalid(
-                "Euler-Bernoulli strain traces do not admit transverse shear",
-            ));
-        }
         let (l, c, s) = (element.l0, element.cos0, element.sin0);
         if !l.is_finite() || l <= 0.0 || !c.is_finite() || !s.is_finite() {
             return Err(invalid("strain trace geometry is not finite"));
@@ -219,7 +268,9 @@ impl Frame2d {
     /// every later native Newmark call automatically includes these losses.
     /// The elastic coefficients retain `add_material_element`'s unrestricted
     /// frequency support, so static and ordinary undamped modal queries remain
-    /// valid. Both explicit viscosity laws retain their separate finite bands.
+    /// valid. Every explicit viscosity law retains its separate finite band.
+    /// A section built with `FrameViscousSection::try_new_with_shear` also uses
+    /// its original Timoshenko stiffness, consistent inertia and shear loss.
     ///
     /// This is frozen-temperature, small-strain linear geometry, with no
     /// Maxwell history, creep, thermal feedback or radiation model. All frame
@@ -245,7 +296,12 @@ impl Frame2d {
                 "source frame viscosity requires fixed linear geometry",
             ));
         }
-        let element = self.add_material_element(i, j, np, section.elastic().clone())?;
+        let element = match &section.transverse {
+            Some(transverse) => {
+                self.add_material_shear_element(i, j, np, transverse.shear().clone())?
+            }
+            None => self.add_material_element(i, j, np, section.elastic().clone())?,
+        };
         self.elements[element].viscous_section = Some(section);
         Ok(element)
     }
@@ -318,20 +374,50 @@ impl Frame2d {
             };
             sections.push((index, section.clone()));
             band = (band.0.max(section.band.0), band.1.min(section.band.1));
-            let (dofs, columns, l) = self.reference_strain_traces(index)?;
+            let (dofs, columns, l) = self.reference_member_coordinates(index)?;
             let ca = section.axial.viscous_rigidity_n_s() / l;
             let cb = section.bending.viscous_stiffness_n_m2_s() / l / l / l;
             if (section.axial.viscous_rigidity_n_s() > 0.0 && ca == 0.0)
                 || (section.bending.viscous_stiffness_n_m2_s() > 0.0 && cb == 0.0)
                 || !ca.is_finite()
-                || !(3.0 * cb).is_finite()
+                || !cb.is_finite()
             {
                 return Err(invalid(
                     "material section viscosity is unrepresentable on the member geometry",
                 ));
             }
+            let symmetric = match (&element.transverse_shear, &section.transverse) {
+                (Some(shear), Some(transverse)) => {
+                    // For x1 = 2*(v_i-v_j)+L*(theta_i+theta_j), the SAME
+                    // interpolation used by consistent_mass gives
+                    // gamma_dot = -s*x1_dot/(2L) and
+                    // kappa_dot = -(3*beta*(1-2*x/L)*x1_dot+x2_dot)/L².
+                    // Exact integration leaves three PSD factors, including
+                    // both independently sourced losses in the x1 factor.
+                    let beta = shear.bending_fraction;
+                    let fraction = shear.shear_fraction;
+                    let bending = (cb * beta) * (3.0 * beta);
+                    let shear_viscosity = transverse.viscous_rigidity_n_s();
+                    let transverse = (shear_viscosity * fraction / l) * (0.25 * fraction);
+                    if (cb > 0.0 && bending == 0.0)
+                        || (shear_viscosity > 0.0 && transverse == 0.0)
+                    {
+                        return Err(invalid(
+                            "Timoshenko section viscosity is unrepresentable on the member geometry",
+                        ));
+                    }
+                    bending + transverse
+                }
+                (None, None) => 3.0 * cb,
+                _ => return Err(invalid("frame shear stiffness and viscosity bindings differ")),
+            };
+            if !symmetric.is_finite() {
+                return Err(invalid(
+                    "material section viscosity is unrepresentable on the member geometry",
+                ));
+            }
             for (damping_n_s_m, displacement_weights) in
-                [ca, 3.0 * cb, cb].into_iter().zip(columns)
+                [ca, symmetric, cb].into_iter().zip(columns)
             {
                 ports.push(FrameViscousPort {
                     element: index,

@@ -697,7 +697,8 @@ independent section-rotation fields with exact positive four-point quadrature.
 The same native stiffness and inertia feed static equilibrium, modes, Newmark
 and harmonic/pole preparation. This is a convergent beam approximation;
 neither exact continuum dynamics nor resolved three-dimensional shear stress,
-shear failure, shear viscosity or thermal feedback is claimed. Legacy
+shear failure or thermal feedback is claimed. Explicit shear viscosity is
+available through the source-bound frame strain-rate path below. Legacy
 Euler–Bernoulli strain-trace consumers, including longitudinal Maxwell/thermal
 adapters, refuse shear-enabled members rather than silently misinterpreting
 their curvature. Frozen source-temperature and small-strain limits still apply.
@@ -6031,6 +6032,11 @@ are not refreshed across a damaged bond history.
 
 `FrameViscousSection::try_new` binds explicit axial and bending viscosity
 properties to the SAME original layered elastic section.
+`try_new_with_shear` additionally retains an original
+`ConcentricTransverseViscosity`: its shear stiffness, authored correction and
+independent shear viscosity use the same Timoshenko interpolation as native
+stiffness and consistent inertia. All participating source bands intersect;
+an explicit zero viscosity does not remove shear elasticity.
 `Frame2d::add_material_viscous_element` retains those sources, stiffness and
 reference inertia together. Every native Newmark call includes the complete
 physical damping matrix. Heterogeneous member losses retain directional,
@@ -6040,7 +6046,13 @@ rotational and inter-node terms; no common Rayleigh ratio is inferred.
 work-conjugate resistance ports per member. The native full matrix is assembled
 from those exact ports, which are also available to reduced receivers. Each
 port maps physical nodal displacement to an extension in metres; rotational
-weights therefore carry metres. `material_damping_energy` and
+weights therefore carry metres. In a shear-deformable member, symmetric
+curvature and constant shear share one displacement coordinate: their exact
+integrated loss coefficients add in that port. The other two ports retain
+axial and antisymmetric-curvature work. Public Euler–Bernoulli strain traces
+still refuse these members. Existing frame thermal feedback also refuses
+them until layer heat partition and temperature-dependent shear reconstruction
+are supported. `material_damping_energy` and
 `rayleigh_damping_energy` are separate parts of the existing total damping work,
 not additional heat sources.
 
@@ -6051,7 +6063,10 @@ below Nyquist even when a receiver retains fewer modes. Temperature and geometry
 remain frozen. It adds no hereditary loss, thermal deposition or acoustic
 radiation. `tests/frame2d_viscosity.rs` supplies continuous oscillator and
 heterogeneous two-coordinate references, physical-port work equivalence,
-continuation, and source/admission regressions.
+continuation, and source/admission regressions. Its shear checks independently
+reconstruct equilibrated section stress rates, integrate viscous virtual work,
+and compare native shear-damped decay and harmonic phase/power with the
+physical one-coordinate oscillator, including explicit zero shear viscosity.
 
 ## Complete frame material inventory for live thermoelastic consumers
 

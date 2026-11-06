@@ -29,8 +29,9 @@ pub struct FrameVibrationComponent {
 impl FrameVibrationBasis {
     /// Bind the same physical frame to the shared simultaneous modal owner.
     ///
-    /// Every member's original axial and bending viscosity enters as a positive
-    /// physical resistance port, retaining directional and inter-mode terms.
+    /// Every member's original axial, bending and explicitly bound transverse
+    /// shear viscosity enters through its physical resistance ports, retaining
+    /// directional and inter-mode terms.
     /// The source states/geometry stay frozen; material loss is exported by the
     /// original connection dissipation account, not deposited into a heat cell.
     /// `additional_damping_ratios` describes a separate authored mechanism; pass

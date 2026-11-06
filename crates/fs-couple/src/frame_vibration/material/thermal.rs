@@ -14,7 +14,9 @@
 //! first-order thermal/coefficient split; refine the shared clock for accuracy.
 //! A dashpot stores no energy, so changing eta adds no parameter-work impulse.
 //! Elastic thermal feedback and expansion use [`thermoelastic`]. Melting needs
-//! a different material/geometry owner.
+//! a different material/geometry owner. Shear-deformable frame ports are refused:
+//! their combined bending/shear work needs its own layer heat partition and
+//! temperature-dependent Timoshenko reconstruction.
 
 pub mod thermoelastic;
 /// Joint solid-layer viscosity/enthalpy feedback with complete exterior fluid memory.
@@ -325,14 +327,19 @@ fn bind_regions_with_links<'n, 'a>(
     if !source.resistors.is_empty() {
         return Err(invalid("frame heat needs a thermal-only material network"));
     }
+    let operator = basis
+        .material_damping()
+        .ok_or_else(|| invalid("frame heat requires its original material viscosity"))?;
+    if operator.sections().iter().any(|(_, section)| section.transverse().is_some()) {
+        return Err(invalid(
+            "frame thermal feedback does not yet partition transverse shear viscosity",
+        ));
+    }
     let binding = match additional_links {
         Some(links) => source.prepare_with_link_conductances(
             thermal, &[], links, || gate.is_requested()),
         None => source.prepare(thermal, || gate.is_requested()),
     }.map_err(network)?;
-    let operator = basis
-        .material_damping()
-        .ok_or_else(|| invalid("frame heat requires its original material viscosity"))?;
     let count: usize = operator
         .sections()
         .iter()
