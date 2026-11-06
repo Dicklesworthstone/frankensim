@@ -1,4 +1,7 @@
 //! Source-bound ceramic heat, separate conductor destinations and atomic thermal steps.
+#[path = "relaxation/support_motion.rs"]
+mod support_motion;
+
 use super::*;
 use crate::harmonic::relaxation::fixture as memory_fixture;
 use fs_couple::piezoelectric::spatial::transient::load::thermal::ThermalCeramicCell;
@@ -19,7 +22,20 @@ fn ceramic(
     TensorPiezoelectric,
     RelaxingTensorPiezoelectric,
 ) {
-    let (reference, memory) = memory_fixture(None, Some((POLE_INCREMENT_F_M, POLE_TIME_S)), FRAME);
+    ceramic_with_mechanical_memory(temperature_dependent_time, None)
+}
+
+fn ceramic_with_mechanical_memory(
+    temperature_dependent_time: bool,
+    mechanical: Option<(f64, f64)>,
+) -> (
+    MaterialCard,
+    ResolvedHeatCapacityCurve,
+    TensorPiezoelectric,
+    RelaxingTensorPiezoelectric,
+) {
+    let (reference, memory) =
+        memory_fixture(mechanical, Some((POLE_INCREMENT_F_M, POLE_TIME_S)), FRAME);
     let mut claims = ClaimSet::new();
     // Declare one complete synthetic card; all coupled owners then select
     // their original roles from that SAME card and typed physical context.
@@ -113,7 +129,7 @@ fn ceramic(
     let loss = RelaxingTensorPiezoelectric::resolve(
         base.clone(),
         &card,
-        vec![],
+        memory.mechanical_properties().to_vec(),
         memory.dielectric_properties().to_vec(),
         MaterialPropertySelection::SingleClaimOnly,
     )

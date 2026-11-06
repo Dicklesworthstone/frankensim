@@ -374,8 +374,25 @@ for its deceleration and returned work.
 The same motion is available through the resistive load owner's
 `step_with_loaded_support_motion_candidate` and the reactive R/L/C owner's
 `step_with_support_motion_candidate`. Original resistor heat, reactive storage,
-field storage and source work participate in the enclosing balance. The
-separate finite-temperature spatial wrapper does not yet expose this input.
+field storage and source work participate in the enclosing balance.
+
+The finite-temperature spatial owner exposes the same support motion through
+`step_with_thermal_support_motion_candidate` and
+`step_with_material_thermal_support_motion_candidate`. Every thermal proposal
+starts from the accepted mechanical, electrical and material-memory history.
+Actual support work enters joint supply once, while resistor and intrinsic
+ceramic losses reach their explicitly bound finite caloric cells. The report
+retains complete midpoint support reactions. Source-domain, inventory,
+unchanged-coefficient, cancellation and physical-energy gates govern joint
+publication. Without external resistors, nonlinear thermal trials reuse one
+immutable native moving-support candidate.
+
+The three synthetic journeys in
+`tests/piezoelectric/spatial_transient_load/thermal/relaxation/support_motion.rs`
+compare independent Maxwell/Debye, resistor-feedback, caloric and inertial
+references through acceleration, continuation, reversal and stopping. Native
+Rust compilation/execution remain unverified under the editing environment's
+disk/memory limits; syntax/format and independent analytic checks were completed.
 G1/G4 definitions in spatial_transient/support_motion.rs cover analytic rigid
 inertia/reactions, independently condensed base-excited sensing, resistor and
 capacitor harvesting, and transactional refusals. Small-strain assumptions,

@@ -58,6 +58,10 @@ pub struct SpatialPiezoelectricThermalStep {
     pub native: TetPiezoelectricTransientStep,
     /// Actual external electrical work and source-bound resistor losses.
     pub loads: LoadedPiezoelectricStep,
+    /// Midpoint support reactions, including inertia and intrinsic memory.
+    /// Free mechanical coordinates have zero entries. Their work is retained
+    /// separately in `native.support_work_j` and included in the joint supply.
+    pub midpoint_support_force_n: Vec<[f64; 3]>,
     /// Original material-network heat routes, in the same order as `loads.loads`.
     pub destinations: Vec<ResistorCell>,
     /// Complete original-tetrahedron to ceramic caloric-cell correspondence.
@@ -123,12 +127,15 @@ impl<'model, 'mesh> ThermalDriver for LoadDriver<'model, 'mesh> {
         }
     }
     fn into_parts(self) -> (Self::Model, Self::Step) {
-        let (body, native) = Arc::unwrap_or_clone(self.candidate).into_parts();
+        let mut candidate = Arc::unwrap_or_clone(self.candidate);
+        let midpoint_support_force_n = std::mem::take(&mut candidate.midpoint_support_force_n);
+        let (body, native) = candidate.into_parts();
         (
             body,
             SpatialPiezoelectricThermalStep {
                 native,
                 loads: self.loads,
+                midpoint_support_force_n,
                 destinations: self.destinations,
                 ceramic_destinations: self.ceramic_destinations.to_vec(),
             },
@@ -223,6 +230,52 @@ impl<'model, 'mesh> TetPiezoelectricTransient<'model, 'mesh> {
         )
     }
 
+    /// Prescribed-support excitation with physical resistor heating in the
+    /// original finite thermal network. Each original constrained DOF must have
+    /// one endpoint velocity, including stationary supports. Its displacement
+    /// follows the native midpoint kinematics; the full consistent mass and
+    /// reciprocal electroelastic response determine the actual support work.
+    ///
+    /// The native support reaction and work survive every thermal trial.
+    /// Resistor temperature feedback, heat conduction and joint acceptance use
+    /// that mechanical supply without treating it as an extra heat source.
+    /// Both accepted histories remain unchanged until the candidate is consumed.
+    /// The same fixed-coefficient ceramic scope as
+    /// [`Self::step_with_thermal_loads_candidate`] applies.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_thermal_support_motion_candidate<'thermal>(
+        &self,
+        thermal: &DepositionSimulation<'thermal>,
+        target_s: f64,
+        endpoint_support_velocities_m_s: &[(usize, f64)],
+        material: &PreparedMaterialNetwork<'_, '_>,
+        bindings: &[ThermalElectrodeLoad],
+        drives: &[ElectrodeDrive],
+        midpoint_nodal_forces_n: &[[f64; 3]],
+        endpoint_nodal_free_charge_c: &[f64],
+        field_controls: TetPiezoelectricControls,
+        thermal_controls: CircuitEnthalpySolve,
+        guess_j: &[f64],
+        cx: &Cx<'_>,
+    ) -> Result<SpatialPiezoelectricThermalCandidate<'thermal, 'model, 'mesh>> {
+        self.advance_material_thermal_candidate(
+            thermal,
+            target_s,
+            Some(endpoint_support_velocities_m_s),
+            material,
+            bindings,
+            &[],
+            "T",
+            drives,
+            midpoint_nodal_forces_n,
+            endpoint_nodal_free_charge_c,
+            field_controls,
+            thermal_controls,
+            guess_j,
+            cx,
+        )
+    }
+
     /// Evolve intrinsic ceramic heating, physical resistor losses and the
     /// original finite thermal network in one jointly accepted candidate.
     /// Every original tetrahedron needs one explicit ceramic destination when
@@ -252,6 +305,93 @@ impl<'model, 'mesh> TetPiezoelectricTransient<'model, 'mesh> {
         &self,
         thermal: &DepositionSimulation<'thermal>,
         target_s: f64,
+        material: &PreparedMaterialNetwork<'_, '_>,
+        bindings: &[ThermalElectrodeLoad],
+        ceramic_bindings: &[ThermalCeramicCell],
+        temperature_axis: &str,
+        drives: &[ElectrodeDrive],
+        midpoint_nodal_forces_n: &[[f64; 3]],
+        endpoint_nodal_free_charge_c: &[f64],
+        field_controls: TetPiezoelectricControls,
+        thermal_controls: CircuitEnthalpySolve,
+        guess_j: &[f64],
+        cx: &Cx<'_>,
+    ) -> Result<SpatialPiezoelectricThermalCandidate<'thermal, 'model, 'mesh>> {
+        self.advance_material_thermal_candidate(
+            thermal,
+            target_s,
+            None,
+            material,
+            bindings,
+            ceramic_bindings,
+            temperature_axis,
+            drives,
+            midpoint_nodal_forces_n,
+            endpoint_nodal_free_charge_c,
+            field_controls,
+            thermal_controls,
+            guess_j,
+            cx,
+        )
+    }
+
+    /// Prescribed-support excitation with both intrinsic ceramic losses and
+    /// physical shunt losses deposited into their original finite caloric cells.
+    ///
+    /// Support input has the same complete endpoint-velocity convention as
+    /// [`Self::step_with_support_motion_candidate`]. Each nonlinear proposal
+    /// restarts the accepted displacement, velocity, charge and material memory.
+    /// The original native solve retains support inertia and memory forces;
+    /// actual support work enters the combined electrical/mechanical/thermal
+    /// audit exactly once. Ceramic loss is internal transfer to its named cell.
+    ///
+    /// All source, inventory and unchanged-coefficient restrictions of
+    /// [`Self::step_with_material_thermal_loads_candidate`] still apply. A
+    /// cancelled, out-of-domain or unconverged proposal publishes neither body
+    /// nor heat state. When no resistors are present, thermal trials
+    /// reuse one immutable native moving-support candidate.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_material_thermal_support_motion_candidate<'thermal>(
+        &self,
+        thermal: &DepositionSimulation<'thermal>,
+        target_s: f64,
+        endpoint_support_velocities_m_s: &[(usize, f64)],
+        material: &PreparedMaterialNetwork<'_, '_>,
+        bindings: &[ThermalElectrodeLoad],
+        ceramic_bindings: &[ThermalCeramicCell],
+        temperature_axis: &str,
+        drives: &[ElectrodeDrive],
+        midpoint_nodal_forces_n: &[[f64; 3]],
+        endpoint_nodal_free_charge_c: &[f64],
+        field_controls: TetPiezoelectricControls,
+        thermal_controls: CircuitEnthalpySolve,
+        guess_j: &[f64],
+        cx: &Cx<'_>,
+    ) -> Result<SpatialPiezoelectricThermalCandidate<'thermal, 'model, 'mesh>> {
+        self.advance_material_thermal_candidate(
+            thermal,
+            target_s,
+            Some(endpoint_support_velocities_m_s),
+            material,
+            bindings,
+            ceramic_bindings,
+            temperature_axis,
+            drives,
+            midpoint_nodal_forces_n,
+            endpoint_nodal_free_charge_c,
+            field_controls,
+            thermal_controls,
+            guess_j,
+            cx,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn advance_material_thermal_candidate<'thermal>(
+        &self,
+        thermal: &DepositionSimulation<'thermal>,
+        target_s: f64,
+        endpoint_support_velocities_m_s: Option<&[(usize, f64)]>,
         material: &PreparedMaterialNetwork<'_, '_>,
         bindings: &[ThermalElectrodeLoad],
         ceramic_bindings: &[ThermalCeramicCell],
@@ -327,8 +467,9 @@ impl<'model, 'mesh> TetPiezoelectricTransient<'model, 'mesh> {
         let original_loads = bind_loads(original.resistors, bindings)?;
         let spatial_candidate = |loads: &[ResistiveElectrodeLoad]| {
             let (mut candidate, loads) = self
-                .step_with_loads_candidate(
+                .advance_loaded_candidate(
                     dt,
+                    endpoint_support_velocities_m_s,
                     drives,
                     loads,
                     midpoint_nodal_forces_n,
