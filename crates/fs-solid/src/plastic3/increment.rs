@@ -111,6 +111,15 @@ pub(crate) trait IncrementOperator {
         3
     }
 
+    /// Coordinate used only to set the connected equilibrium-force scale.
+    /// Translational operators remove a common translation. Shells retain
+    /// absolute director rotations: subtracting a common rotation alone is
+    /// not a rigid motion without its compatible translation field.
+    fn deformation_coordinate(&self, u: &[f64], row: usize, column: usize) -> f64 {
+        let components = self.components_per_node();
+        u[column] - u[components * (row / components) + column % components]
+    }
+
     /// Internal force and an upper cap on element stress forces on free rows.
     /// The cap alone must not normalize equilibrium: it can include stresses
     /// orthogonal to the row's work-conjugate strain direction.
@@ -204,9 +213,9 @@ pub(crate) fn solve_with_inertia<O: IncrementOperator>(
         settings,
     } = controls;
     let components = operator.components_per_node();
-    if !(1..=3).contains(&components) || !dofs.is_multiple_of(components) {
+    if !(1..=6).contains(&components) || !dofs.is_multiple_of(components) {
         return Err(SmallStrainTetError::InvalidInput {
-            what: "increment displacement layout requires one to three components per node".into(),
+            what: "increment coordinate layout requires one to six components per node".into(),
         });
     }
     let mut is_prescribed = vec![false; dofs];
@@ -289,7 +298,7 @@ pub(crate) fn solve_with_inertia<O: IncrementOperator>(
             let mut connected_scale = 0.0_f64;
             for (row, &dof) in free.iter().enumerate() {
                 let (cols, vals) = full.row(dof);
-                let mut deformation = [0.0_f64; 3];
+                let mut deformation = [0.0_f64; 6];
                 let mut lifting = 0.0_f64;
                 for (&c, &v) in cols.iter().zip(vals) {
                     if is_prescribed[c] {
@@ -300,7 +309,7 @@ pub(crate) fn solve_with_inertia<O: IncrementOperator>(
                     }
                     if inertia.is_none() && v != 0.0 {
                         let component = c % components;
-                        let difference = u[c] - u[components * (dof / components) + component];
+                        let difference = operator.deformation_coordinate(&u, dof, c);
                         deformation[component] = v.mul_add(difference, deformation[component]);
                     }
                 }

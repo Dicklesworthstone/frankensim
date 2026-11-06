@@ -66,6 +66,8 @@ pub mod mesh2;
 pub mod moving_load;
 /// History-dependent P1/Q1 plane-stress and plane-strain continua.
 pub mod plastic2;
+/// Retained membrane and bending plasticity on the native CST/DKT shell geometry.
+pub mod plastic_shell;
 /// Incremental small-strain inelasticity (J2 and any `SmallStrainLaw`) on tetrahedra.
 pub mod plastic3;
 /// Initial-stress vibration pencils from the existing thermal equilibrium owner.

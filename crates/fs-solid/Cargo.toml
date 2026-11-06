@@ -34,6 +34,7 @@ fs-matdb = { path = "../fs-matdb" }
 fs-math = { path = "../fs-math" }
 fs-mesh = { path = "../fs-mesh" }
 fs-phs = { path = "../fs-phs" }
+fs-plate = { path = "../fs-plate" }
 fs-qty = { path = "../fs-qty" }
 fs-scenario = { path = "../fs-scenario" }
 fs-solver = { path = "../fs-solver" }

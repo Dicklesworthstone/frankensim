@@ -9163,3 +9163,37 @@ This is bounded fixed-temperature, rate-independent associated porous
 plasticity on displacement P1 tetrahedra. It does not infer evolving porosity,
 cell-wall densification, asymmetric yield, damage, contact, pore-fluid pressure,
 thermal coupling, inertia, locking-free accuracy or experimental calibration.
+
+## Retained membrane and bending plasticity on native CST/DKT shells
+
+`plastic_shell::SmallStrainShellProblem` consumes the original
+`fs_plate::shell::ShellMesh` facet frames and `dkt_curvature_quadrature`.
+Every original midside point carries an independent
+`fs_material::plastic::section::LayeredPlaneStressState`, retaining all
+three-dimensional transverse strains and material histories through thickness.
+Native plane-stress return maps supply both stress resultants and the complete
+consistent membrane/bending tangent. Engineering shear, asymmetric stacks,
+yield-induced coupling and genuinely nonsymmetric native laws remain intact.
+
+The existing solid increment owner supplies sparse corrections, line search,
+frozen-history trials, physical load entries and atomic publication. Six
+physical translation/axial-rotation coordinates are normalized by an explicit
+positive length: `(u,L theta)` pairs with `(F,M/L)`. This preserves work and
+makes the equilibrium residual a force norm. Output coordinates and reactions
+retain their original metre/radian and newton/newton-metre meanings. Restart
+admission checks complete section histories against the same reference geometry.
+Small physical rotations, displacement slopes and material strains have
+separate explicit limits; a large rigid spin cannot pass as zero strain.
+
+The original drilling-spin penalty uses the virgin section shear stiffness,
+stays independent of yielding, and is numerical elastic storage. Generic
+force/history solves do not infer plastic heat. The lane does not claim
+finite-strain forming, evolving contact, transverse-shear response, material
+calibration, plastic-limit-load convergence or through-thickness error bounds.
+Refine the explicit thickness integration and physical load path as required.
+
+Five `plastic_shell` regressions cover the original full elastic stiffness
+in flat/oblique frames, eccentric physical layer signs and virtual work,
+free-DOF cantilever yielding and permanent shape after unloading, numerical
+coordinate-length invariance, complete restart and transactional refusal/
+cancellation. They are test definitions; execution requires the native build.

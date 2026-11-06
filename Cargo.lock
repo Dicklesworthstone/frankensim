@@ -2822,6 +2822,7 @@ dependencies = [
  "fs-mms",
  "fs-modal",
  "fs-phs",
+ "fs-plate",
  "fs-qty",
  "fs-rand",
  "fs-scenario",
