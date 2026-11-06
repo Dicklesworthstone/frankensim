@@ -9,7 +9,7 @@ mod vibration;
 use support::{block, with_cx};
 
 use fs_material::hyper::{Hyperelastic, HyperelasticModel};
-use fs_solid::hyper3::gravity::GravitySample3;
+use fs_solid::hyper3::gravity::{GravitySample3, ReferenceGravityDensity, StationaryGravity3};
 use fs_solid::hyper3::pressure::{ClosedTetPressureSurface, TetPressure};
 use fs_solid::{HyperTetError, HyperTetProblem, HyperTetSettings, HyperelasticLawField};
 
@@ -410,6 +410,164 @@ fn g1_potential_datum_cannot_reject_a_resolved_newton_decrement() {
             near(solution.strain_energy_j, 0.5, 2e-12);
             assert!(solution.steps.iter().all(|step| step.backtracks == 0));
         }
+    });
+}
+
+#[test]
+fn g1_direct_gravity_work_keeps_graded_pressure_newton_path_datum_invariant() {
+    let nodes = [
+        [0.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        [0.0, 0.0, 1.0],
+    ];
+    let tets = [[0, 1, 2, 3]];
+    let density = [3.0, 15.0, 3.0, 3.0];
+    let law = material();
+    let prescribed: Vec<_> = (0..12).filter(|&d| d != 3).map(|d| (d, 0.0)).collect();
+    let p = HyperTetProblem {
+        settings: HyperTetSettings {
+            load_steps: 3,
+            ..HyperTetSettings::default()
+        },
+        ..problem(&nodes, &tets, &law, &prescribed)
+    };
+    let stretch = 1.25_f64;
+    let gradient = 3.0;
+    let pressure = 0.2;
+    let piola = 2.0 * (stretch - 1.0 / stretch) + 3.0 * stretch.ln() / stretch;
+    // Exact graded mass moments on the original tetrahedron: M_1*=0.325,
+    // M_11=0.15. No cell-mean density can reproduce this finite-stretch load.
+    let a = ((piola + pressure) / 6.0 + gradient * 0.15 * stretch) / 0.325;
+    with_cx(|cx| {
+        let surface =
+            ClosedTetPressureSurface::new(&nodes, &tets, Default::default(), 4, cx).unwrap();
+        let mut reference = None;
+        for datum in [0.0, 1e20, -1e20] {
+            let field = |x: [f64; 3]| {
+                Ok(GravitySample3 {
+                    potential_j_kg: 0.5 * gradient * x[0] * x[0] - a * x[0] + datum,
+                    acceleration_m_s2: [a - gradient * x[0], 0.0, 0.0],
+                    acceleration_gradient_s2: [[-gradient, 0.0, 0.0], [0.0; 3], [0.0; 3]],
+                })
+            };
+            let increment_calls = std::cell::Cell::new(0);
+            let increment = |before: [f64; 3], after: [f64; 3]| {
+                increment_calls.set(increment_calls.get() + 1);
+                Ok((after[0] - before[0]) * (0.5 * gradient * (after[0] + before[0]) - a))
+            };
+            let solution = p
+                .solve_with_gravity_source(
+                    ReferenceGravityDensity::Nodal(&density),
+                    StationaryGravity3::with_potential_increment(&field, &increment),
+                    Some((&surface, TetPressure::Uniform(pressure))),
+                    cx,
+                )
+                .unwrap();
+            assert!(increment_calls.get() > 0);
+            near(solution.displacement_m[1][0], stretch - 1.0, 2e-10);
+            let u: Vec<_> = solution.displacement_m.iter().flatten().copied().collect();
+            let gravity = p
+                .gravity_load_with_nodal_density(&density, &u, &field, cx)
+                .unwrap();
+            let pressure_force = surface.force_n(&u, pressure, cx).unwrap();
+            let reaction: f64 = solution
+                .reactions_n
+                .iter()
+                .filter(|(d, _)| d % 3 == 0)
+                .map(|(_, value)| value)
+                .sum();
+            near(
+                reaction
+                    + (0..4)
+                        .map(|node| gravity.force_n[3 * node] + pressure_force[3 * node])
+                        .sum::<f64>(),
+                0.0,
+                2e-10,
+            );
+            if let Some(original) = &reference {
+                // This includes every residual, backtrack and linear solve,
+                // not merely the final displacement or convergence tolerance.
+                assert_eq!(&solution, original);
+            } else {
+                reference = Some(solution);
+            }
+        }
+    });
+}
+
+#[test]
+fn g0_static_gravity_increment_refusal_and_cancellation_cannot_use_endpoint_fallback() {
+    let nodes = [
+        [0.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        [0.0, 0.0, 1.0],
+    ];
+    let tets = [[0, 1, 2, 3]];
+    let law = Hyperelastic::new(
+        HyperelasticModel::NeoHookean {
+            mu: 6.0,
+            lambda: 3.0,
+        },
+        5.0,
+    )
+    .unwrap();
+    let prescribed: Vec<_> = (0..12).filter(|&d| d != 6).map(|d| (d, 0.0)).collect();
+    let p = HyperTetProblem {
+        settings: HyperTetSettings {
+            max_backtracks: 2,
+            ..HyperTetSettings::default()
+        },
+        ..problem(&nodes, &tets, &law, &prescribed)
+    };
+    let field = |x: [f64; 3]| {
+        Ok(GravitySample3 {
+            potential_j_kg: 1e20 - x[0],
+            acceleration_m_s2: [1.0, 0.0, 0.0],
+            acceleration_gradient_s2: [[0.0; 3]; 3],
+        })
+    };
+    with_cx(|cx| {
+        let legacy = p.solve_with_gravity(&[24.0], &field, cx).unwrap();
+        let endpoint_source = p
+            .solve_with_gravity_source(
+                ReferenceGravityDensity::PerElement(&[24.0]),
+                StationaryGravity3::from_samples(&field),
+                None,
+                cx,
+            )
+            .unwrap();
+        assert_eq!(legacy, endpoint_source);
+        near(endpoint_source.displacement_m[2][0], 1.0, 2e-12);
+        let refused_calls = std::cell::Cell::new(0);
+        let refused = |_, _| {
+            refused_calls.set(refused_calls.get() + 1);
+            Err(HyperTetError::InvalidInput {
+                what: "original source increment refused".into(),
+            })
+        };
+        assert!(matches!(
+            p.solve_with_gravity_source(
+                ReferenceGravityDensity::PerElement(&[24.0]),
+                StationaryGravity3::with_potential_increment(&field, &refused),
+                None,
+                cx,
+            ),
+            Err(HyperTetError::NewtonStalled { .. })
+        ));
+        assert_eq!(refused_calls.get(), p.settings.max_backtracks + 1);
+        assert!(matches!(
+            p.solve_with_gravity_source(
+                ReferenceGravityDensity::PerElement(&[24.0]),
+                StationaryGravity3::with_potential_increment(&field, &|_, _| Err(
+                    HyperTetError::Cancelled
+                )),
+                None,
+                cx,
+            ),
+            Err(HyperTetError::Cancelled)
+        ));
     });
 }
 

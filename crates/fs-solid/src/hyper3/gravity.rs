@@ -53,6 +53,51 @@ pub type GravityField3<'a> = dyn Fn([f64; 3]) -> Result<GravitySample3, HyperTet
 pub type GravityPotentialIncrement3<'a> =
     dyn Fn([f64; 3], [f64; 3]) -> Result<f64, HyperTetError> + 'a;
 
+/// One stationary conservative field and its optional direct potential change.
+///
+/// Both callbacks must describe the SAME source, parameters, domain and fixed
+/// datum. The increment is `phi(after) - phi(before)` from that original law,
+/// not midpoint acceleration work. It may cancel an arbitrary datum before
+/// rounding, while the field continues to admit and supply endpoint loads.
+/// Changed source poses or parameters require a separate source-work owner;
+/// they are not conservative static loads represented by this binding.
+#[derive(Clone, Copy)]
+pub struct StationaryGravity3<'a> {
+    field: &'a GravityField3<'a>,
+    potential_increment: Option<&'a GravityPotentialIncrement3<'a>>,
+}
+
+impl<'a> StationaryGravity3<'a> {
+    /// Retain an existing endpoint field without inventing a change formula.
+    /// Native equilibrium keeps its endpoint-roundoff safeguard for this case.
+    pub const fn from_samples(field: &'a GravityField3<'a>) -> Self {
+        Self {
+            field,
+            potential_increment: None,
+        }
+    }
+
+    /// Retain the field owner's direct difference alongside its endpoint field.
+    ///
+    /// The increment callback must admit both original endpoint positions and
+    /// propagate domain refusals. A failed increment is never replaced by
+    /// endpoint subtraction, a clamped field or a different force law.
+    pub const fn with_potential_increment(
+        field: &'a GravityField3<'a>,
+        potential_increment: &'a GravityPotentialIncrement3<'a>,
+    ) -> Self {
+        Self {
+            field,
+            potential_increment: Some(potential_increment),
+        }
+    }
+
+    /// The original endpoint field, including its domain and derivative data.
+    pub const fn field(self) -> &'a GravityField3<'a> {
+        self.field
+    }
+}
+
 /// Gravity integrated with the original tetrahedral reference mass inventory.
 #[derive(Debug)]
 pub struct TetGravityLoad3 {
@@ -68,6 +113,9 @@ pub(super) struct GravityEvaluation {
     pub force_n: Vec<f64>,
     pub tangent: Option<Csr>,
     pub potential_energy_j: f64,
+    /// Direct source-owned change, retained before final reduction rounding.
+    /// `None` means no before configuration or no original increment callback.
+    pub potential_energy_change_j: Option<Dd>,
 }
 
 /// Positive mass density per original reference volume, never current volume.
@@ -319,7 +367,7 @@ pub(super) fn potential_increment(
     finite(change.to_f64())
 }
 
-#[allow(clippy::too_many_arguments, clippy::needless_range_loop)]
+#[allow(clippy::too_many_arguments)]
 pub(super) fn evaluate(
     nodes_m: &[[f64; 3]],
     elements: &[Element],
@@ -329,12 +377,43 @@ pub(super) fn evaluate(
     with_tangent: bool,
     cx: &Cx<'_>,
 ) -> Result<GravityEvaluation, HyperTetError> {
+    evaluate_with_increment(
+        nodes_m,
+        elements,
+        mass_weights,
+        displacement_m,
+        StationaryGravity3::from_samples(field),
+        None,
+        with_tangent,
+        cx,
+    )
+}
+
+/// Evaluate the trial load and, when available, its direct source work in the
+/// SAME reference-mass quadrature. The caller has already admitted the before
+/// configuration through the original field. Trial endpoint sample admission
+/// always precedes its increment; no extra before sample or force vector is
+/// needed. A source without a direct increment keeps the original sample count
+/// and endpoint arithmetic exactly.
+#[allow(clippy::too_many_arguments, clippy::needless_range_loop)]
+pub(super) fn evaluate_with_increment(
+    nodes_m: &[[f64; 3]],
+    elements: &[Element],
+    mass_weights: &ReferenceGravityWeights,
+    displacement_m: &[f64],
+    source: StationaryGravity3<'_>,
+    before_m: Option<&[f64]>,
+    with_tangent: bool,
+    cx: &Cx<'_>,
+) -> Result<GravityEvaluation, HyperTetError> {
     checkpoint(cx)?;
     let dofs = 3 * nodes_m.len();
-    if displacement_m.len() != dofs || displacement_m.iter().any(|v| !v.is_finite()) {
-        return Err(invalid(
-            "gravity needs one finite xyz displacement per reference node",
-        ));
+    for displacement in std::iter::once(displacement_m).chain(before_m) {
+        if displacement.len() != dofs || displacement.iter().any(|v| !v.is_finite()) {
+            return Err(invalid(
+                "gravity needs one finite xyz displacement per reference node",
+            ));
+        }
     }
     let (element_count, point_count) = mass_weights.quadrature_size();
     if element_count != elements.len() {
@@ -344,6 +423,8 @@ pub(super) fn evaluate(
     }
     let mut force_n = vec![0.0; dofs];
     let mut potential_energy_j = 0.0;
+    let interval = before_m.zip(source.potential_increment);
+    let mut potential_energy_change_j = interval.map(|_| Dd::from_f64(0.0));
     let mut entries = with_tangent.then(|| Coo::new(dofs, dofs));
     for (element_index, element) in elements.iter().enumerate() {
         checkpoint(cx)?;
@@ -351,8 +432,15 @@ pub(super) fn evaluate(
         for point in 0..point_count {
             let (shape, weight) = mass_weights.point(element_index, point);
             let position = position_at(nodes_m, element, displacement_m, shape)?;
-            let sample = field(position)?.validate()?;
+            let sample = (source.field)(position)?.validate()?;
             potential_energy_j = finite(weight.mul_add(sample.potential_j_kg, potential_energy_j))?;
+            if let Some((before, increment)) = interval {
+                let before_position = position_at(nodes_m, element, before, shape)?;
+                let specific_change = finite(increment(before_position, position)?)?;
+                if let Some(change) = &mut potential_energy_change_j {
+                    *change = *change + Dd::from_f64(weight) * Dd::from_f64(specific_change);
+                }
+            }
             for a in 0..4 {
                 let share = weight * shape[a];
                 for i in 0..3 {
@@ -405,11 +493,15 @@ pub(super) fn evaluate(
             }
         }
     }
+    if let Some(change) = potential_energy_change_j {
+        finite(change.to_f64())?;
+    }
     checkpoint(cx)?;
     Ok(GravityEvaluation {
         force_n,
         tangent,
         potential_energy_j,
+        potential_energy_change_j,
     })
 }
 
@@ -788,6 +880,98 @@ mod nodal_density_tests {
                 .unwrap();
                 close(reverse, -expected);
                 assert!(change.abs() > 0.1);
+
+                let fused = evaluate_with_increment(
+                    &NODES,
+                    &[ELEMENT],
+                    &weights,
+                    &after,
+                    StationaryGravity3::with_potential_increment(&field, &increment),
+                    Some(&before),
+                    false,
+                    cx,
+                )
+                .unwrap();
+                close(fused.potential_energy_change_j.unwrap().to_f64(), expected);
+                assert_eq!(fused.force_n, b.force_n);
+                assert_eq!(fused.potential_energy_j, b.potential_energy_j);
+            }
+        });
+    }
+
+    #[test]
+    fn fused_gravity_work_keeps_one_sample_per_original_mass_point() {
+        with_cx(|cx| {
+            let sample_count = std::cell::Cell::new(0);
+            let increment_count = std::cell::Cell::new(0);
+            let field = |x| {
+                sample_count.set(sample_count.get() + 1);
+                affine(x)
+            };
+            // This exact polarization belongs to the original QUADRATIC
+            // potential; the nonlinear regression below uses its own quartic.
+            let increment = |a: [f64; 3], b: [f64; 3]| {
+                increment_count.set(increment_count.get() + 1);
+                let ga = affine(a)?.acceleration_m_s2;
+                let gb = affine(b)?.acceleration_m_s2;
+                Ok(-(0..3)
+                    .map(|i| (b[i] - a[i]) * (0.5 * ga[i] + 0.5 * gb[i]))
+                    .sum::<f64>())
+            };
+            let before = [0.0; 12];
+            let after = displacement();
+            for density in [
+                ReferenceGravityDensity::PerElement(&[6.0]),
+                ReferenceGravityDensity::Nodal(&[6.0; 4]),
+                ReferenceGravityDensity::Nodal(&DENSITY),
+            ] {
+                let weights = bind_reference_weights(&[ELEMENT], 4, density, cx).unwrap();
+                let points = weights.quadrature_size().1;
+                let original =
+                    evaluate(&NODES, &[ELEMENT], &weights, &after, &affine, true, cx).unwrap();
+                for (source, previous, expected_increments) in [
+                    (
+                        StationaryGravity3::from_samples(&field),
+                        Some(before.as_slice()),
+                        0,
+                    ),
+                    (
+                        StationaryGravity3::with_potential_increment(&field, &increment),
+                        None,
+                        0,
+                    ),
+                    (
+                        StationaryGravity3::with_potential_increment(&field, &increment),
+                        Some(before.as_slice()),
+                        points,
+                    ),
+                ] {
+                    sample_count.set(0);
+                    increment_count.set(0);
+                    let evaluated = evaluate_with_increment(
+                        &NODES,
+                        &[ELEMENT],
+                        &weights,
+                        &after,
+                        source,
+                        previous,
+                        true,
+                        cx,
+                    )
+                    .unwrap();
+                    assert_eq!(sample_count.get(), points);
+                    assert_eq!(increment_count.get(), expected_increments);
+                    assert_eq!(
+                        evaluated.potential_energy_change_j.is_some(),
+                        expected_increments > 0
+                    );
+                    assert_eq!(evaluated.force_n, original.force_n);
+                    assert_eq!(evaluated.tangent, original.tangent);
+                    assert_eq!(
+                        evaluated.potential_energy_j.to_bits(),
+                        original.potential_energy_j.to_bits()
+                    );
+                }
             }
         });
     }
@@ -827,6 +1011,70 @@ mod nodal_density_tests {
             let first = evaluate(&NODES, &[ELEMENT], &weights, &before, &field, false, cx).unwrap();
             let last = evaluate(&NODES, &[ELEMENT], &weights, &after, &field, false, cx).unwrap();
             close(change, last.potential_energy_j - first.potential_energy_j);
+            let shifted_field = |x| {
+                let mut sample = field(x)?;
+                sample.potential_j_kg += 1e20;
+                Ok(sample)
+            };
+            let fused = evaluate_with_increment(
+                &NODES,
+                &[ELEMENT],
+                &weights,
+                &after,
+                StationaryGravity3::with_potential_increment(&shifted_field, &increment),
+                Some(&before),
+                true,
+                cx,
+            )
+            .unwrap();
+            close(fused.potential_energy_change_j.unwrap().to_f64(), change);
+            assert_eq!(fused.force_n, last.force_n);
+            // Domain/sample validation is still mandatory, even if an
+            // increment callback would produce a finite number.
+            let outside = |_| Err(invalid("outside original field domain"));
+            assert!(
+                evaluate_with_increment(
+                    &NODES,
+                    &[ELEMENT],
+                    &weights,
+                    &after,
+                    StationaryGravity3::with_potential_increment(&outside, &increment),
+                    Some(&before),
+                    false,
+                    cx,
+                )
+                .is_err()
+            );
+            for refused in [f64::NAN, f64::INFINITY] {
+                assert!(
+                    evaluate_with_increment(
+                        &NODES,
+                        &[ELEMENT],
+                        &weights,
+                        &after,
+                        StationaryGravity3::with_potential_increment(&field, &|_, _| Ok(refused)),
+                        Some(&before),
+                        false,
+                        cx,
+                    )
+                    .is_err()
+                );
+            }
+            assert!(matches!(
+                evaluate_with_increment(
+                    &NODES,
+                    &[ELEMENT],
+                    &weights,
+                    &after,
+                    StationaryGravity3::with_potential_increment(&field, &|_, _| Err(
+                        HyperTetError::Cancelled
+                    )),
+                    Some(&before),
+                    false,
+                    cx,
+                ),
+                Err(HyperTetError::Cancelled)
+            ));
             assert!(
                 potential_increment(
                     &NODES,

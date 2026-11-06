@@ -2013,6 +2013,18 @@ entry preserves current-area pressure and its conservative/nonsymmetric split.
 If a large absolute gravity datum obscures a small potential increment, an
 actual residual decrease is required; equilibrium tolerance is not relaxed.
 
+`StationaryGravity3` can bind that same endpoint field to its own analytic
+potential increment. `solve_with_gravity_source` accepts this source with either
+elementwise or nodal reference density and optional native boundary pressure.
+Conservative trials accumulate the source increment in compensated precision
+in the existing force quadrature sweep, with no extra field sample, mass
+binding or tangent assembly. That direct change replaces endpoint subtraction
+in Armijo globalization; its tolerance scales with actual work, independently
+of the potential datum. Sample-only bindings retain the original residual
+safeguard. Domain refusals backtrack without switching laws, and cancellation
+propagates. The source remains responsible for the consistency of its two
+callbacks; this interface does not turn moving sources into static loads.
+
 Callbacks must supply derivatives of one stationary scalar potential. Finite
 values and gradient symmetry are checked; derivative consistency remains the
 field owner's contract. Domain exits refuse or backtrack, never clamp. This is
@@ -5031,9 +5043,11 @@ potential change in the existing trial force sweep. Dead-load work and the
 combined potential difference use compensated arithmetic; the Armijo tolerance
 depends on the actual changes and work, so an additive material energy datum
 does not relax the decision. Uniform, affine, free-surface and stratified
-pressure all use their original pressure owner's direct work. Gravity and cavity
-sources still expose endpoint potentials here: when their subtraction cannot
-resolve the decision, an actual residual decrease is required. Custom material
+pressure all use their original pressure owner's direct work. A bound gravity
+source can supply its direct potential change in the trial load sweep. Legacy
+gravity callbacks and cavity sources still expose endpoint potentials here:
+when their subtraction cannot resolve the decision, an actual residual decrease
+is required. Custom material
 adapters that retain the default endpoint subtraction
 retain its precision limits. Force equilibrium and material/load admission are
 unchanged. Numerical solve regressions retain the same nonlinear path with a

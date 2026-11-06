@@ -1259,6 +1259,46 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
         )
     }
 
+    /// Solve with a stationary gravity owner and its original potential change.
+    ///
+    /// This entry accepts either elementwise or nodal reference density and an
+    /// optional current-area pressure load. A source-owned potential increment
+    /// enters conservative Armijo globalization in the same quadrature sweep as
+    /// the trial gravity force, so a large arbitrary potential datum cannot hide
+    /// a small step's work. Samples still own the force, analytic tangent and
+    /// domain; the increment must describe that same stationary scalar field.
+    /// A sample-only source retains the existing endpoint uncertainty fallback.
+    ///
+    /// # Errors
+    /// Invalid density/source/pressure binding, source-domain exit or native
+    /// equilibrium refusal. Increment refusal backtracks the trial; cancellation
+    /// propagates without accepting another endpoint.
+    pub fn solve_with_gravity_source(
+        &self,
+        reference_density: gravity::ReferenceGravityDensity<'_>,
+        source: gravity::StationaryGravity3<'_>,
+        pressure: Option<(
+            &pressure::ClosedTetPressureSurface,
+            pressure::TetPressure<'_>,
+        )>,
+        cx: &Cx<'_>,
+    ) -> Result<HyperTetSolution, HyperTetError> {
+        checkpoint(cx)?;
+        let pressure = if let Some((surface, applied)) = pressure {
+            if !surface.matches_reference(self.nodes_m, self.tetrahedra) {
+                return Err(HyperTetError::InvalidInput {
+                    what: "the exact reference pressure surface is required".into(),
+                });
+            }
+            (!surface.validate_pressure(applied, cx)?).then_some((surface, applied))
+        } else {
+            None
+        };
+        self.solve_loaded_from_with_cavity(
+            None, None, pressure, Some((reference_density, source)), None, None, cx,
+        )
+    }
+
     fn solve_loaded(
         &self,
         pressure: Option<(
@@ -1290,7 +1330,9 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
         cx: &Cx<'_>,
     ) -> Result<HyperTetSolution, HyperTetError> {
         self.solve_loaded_from_with_cavity(
-            initial_displacement, prepared_elements, pressure, gravity, inertia, None, cx,
+            initial_displacement, prepared_elements, pressure,
+            gravity.map(|(density, field)| (density, gravity::StationaryGravity3::from_samples(field))),
+            inertia, None, cx,
         )
     }
 
@@ -1305,7 +1347,7 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
         )>,
         gravity: Option<(
             gravity::ReferenceGravityDensity<'_>,
-            &gravity::GravityField3<'_>,
+            gravity::StationaryGravity3<'_>,
         )>,
         inertia: Option<&crate::inertia::BackwardEulerInertia<'_>>,
         cavity: Option<pressure::cavity::equilibrium::AdiabaticCavity<'_>>,
@@ -1430,12 +1472,13 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
             // Accepted and trial states share one current-area load owner.
             // Its geometry admits the current volume together with the force;
             // interval pressure work is evaluated by that same owner below.
-            let loaded = |displacement: &[f64]| -> Result<
-                (Vec<f64>, f64, Option<pressure::cavity::TetCavityGasLoad>), HyperTetError,
+            let loaded = |displacement: &[f64], before: Option<&[f64]>| -> Result<
+                (Vec<f64>, f64, Option<Dd>, Option<pressure::cavity::TetCavityGasLoad>), HyperTetError,
             > {
                 let mut force = f_dead.clone();
                 let mut volume = 0.0;
                 let mut gravity_potential = 0.0;
+                let mut gravity_increment = None;
                 if let Some((surface, value)) = applied_pressure {
                     let (current_force, current_volume) =
                         surface.force_and_volume(displacement, value, cx)?;
@@ -1444,13 +1487,14 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
                     }
                     volume = current_volume;
                 }
-                if let Some((_, field)) = gravity {
-                    let sampled = gravity::evaluate(
+                if let Some((_, source)) = gravity {
+                    let sampled = gravity::evaluate_with_increment(
                         self.nodes_m,
                         elements,
                         gravity_weights.as_ref().expect("prepared gravity masses"),
                         displacement,
-                        field,
+                        source,
+                        before,
                         false,
                         cx,
                     )?;
@@ -1458,6 +1502,7 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
                         *total = load.mul_add(current, *total);
                     }
                     gravity_potential = sampled.potential_energy_j;
+                    gravity_increment = sampled.potential_energy_change_j;
                 }
                 // Keep the source evaluation and its sparse/rank-one tangent
                 // together: accepted trials need no second thermodynamic solve.
@@ -1476,9 +1521,9 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
                             .into(),
                     });
                 }
-                Ok((force, gravity_potential, cavity_load))
+                Ok((force, gravity_potential, gravity_increment, cavity_load))
             };
-            let (mut f_ext, mut current_gravity_potential, mut current_cavity) = loaded(&u)?;
+            let (mut f_ext, mut current_gravity_potential, _, mut current_cavity) = loaded(&u, None)?;
             let target: Vec<(usize, f64)> = self
                 .prescribed_m
                 .iter()
@@ -1507,13 +1552,13 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
                 let pressure_tangent = applied_pressure
                     .map(|(surface, value)| surface.force_tangent(&u, value, cx))
                     .transpose()?;
-                let gravity_tangent = if let Some((_, field)) = gravity {
+                let gravity_tangent = if let Some((_, source)) = gravity {
                     gravity::evaluate(
                         self.nodes_m,
                         elements,
                         gravity_weights.as_ref().expect("prepared gravity masses"),
                         &u,
-                        field,
+                        source.field(),
                         true,
                         cx,
                     )?
@@ -1687,8 +1732,8 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
                         } else {
                             0.0
                         };
-                        let (trial_ext, trial_gravity_potential, trial_cavity) =
-                            match loaded(&trial) {
+                        let (trial_ext, trial_gravity_potential, trial_gravity_increment, trial_cavity) =
+                            match loaded(&trial, energy_globalization.then_some(u.as_slice())) {
                                 Ok(value) => value,
                                 Err(HyperTetError::Cancelled) => {
                                     return Err(HyperTetError::Cancelled);
@@ -1736,8 +1781,10 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
                                 _ => 0.0,
                             };
                             let gravity_change = Dd::from_f64(load)
-                                * (Dd::from_f64(trial_gravity_potential)
-                                    - Dd::from_f64(current_gravity_potential));
+                                * trial_gravity_increment.unwrap_or_else(|| {
+                                    Dd::from_f64(trial_gravity_potential)
+                                        - Dd::from_f64(current_gravity_potential)
+                                });
                             let cavity_change = Dd::from_f64(load)
                                 * (Dd::from_f64(trial_cavity.as_ref().map_or(0.0, |s| s.potential_change_j))
                                     - Dd::from_f64(current_cavity.as_ref().map_or(0.0, |s| s.potential_change_j)));
@@ -1751,16 +1798,16 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
                                     .max(gravity_change.to_f64().abs())
                                     .max(cavity_change.to_f64().abs())
                                     .max((alpha * slope).abs());
-                            // Gravity and cavity still supply endpoint potentials.
-                            // An unresolved subtraction must require actual
-                            // residual decrease, never a tolerance set by a
-                            // large datum. The true equilibrium gate is unchanged.
-                            let mut endpoint_roundoff = 64.0
-                                * f64::EPSILON
-                                * load
-                                * current_gravity_potential
-                                    .abs()
-                                    .max(trial_gravity_potential.abs());
+                            // A legacy gravity callback and cavity endpoint
+                            // potentials may still have unresolved subtraction.
+                            // Require actual residual decrease in that case;
+                            // direct source increments need no datum-sized bound.
+                            let mut endpoint_roundoff = if trial_gravity_increment.is_some() {
+                                0.0
+                            } else {
+                                64.0 * f64::EPSILON * load
+                                    * current_gravity_potential.abs().max(trial_gravity_potential.abs())
+                            };
                             endpoint_roundoff += 64.0 * f64::EPSILON * load
                                 * current_cavity.as_ref().map_or(0.0, |s| s.potential_change_j.abs())
                                     .max(trial_cavity.as_ref().map_or(0.0, |s| s.potential_change_j.abs()));
@@ -1868,13 +1915,13 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
                 *total += current;
             }
         }
-        if let Some((_, field)) = gravity {
+        if let Some((_, source)) = gravity {
             let sampled = gravity::evaluate(
                 self.nodes_m,
                 elements,
                 gravity_weights.as_ref().expect("prepared gravity masses"),
                 &u,
-                field,
+                source.field(),
                 false,
                 cx,
             )?;
