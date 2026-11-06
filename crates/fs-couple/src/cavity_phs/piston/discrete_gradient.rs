@@ -8,9 +8,8 @@
 //! does not establish spatial accuracy or resolve a physical heat reservoir.
 
 use super::{
-    ClosedGasParcel, GasPiston, MechanicalTrial, PistonError, PistonInput,
-    PistonSolve, PistonSupport, ResolvedThermochemicalGasState,
-    impulse, invalid, poll, positive,
+    ClosedGasParcel, GasPiston, MechanicalTrial, PistonError, PistonInput, PistonSolve,
+    PistonSupport, ResolvedThermochemicalGasState, impulse, invalid, poll, positive,
 };
 use fs_material::thermochemical_gas::energy::parcel::discrete_gradient::{
     GasDiscreteGradientCandidate, GasDiscreteGradientStep,
@@ -50,13 +49,13 @@ pub struct DiscreteGradientPistonStep {
     pub material_trials: usize,
 }
 
-struct Trial {
-    gas: GasDiscreteGradientCandidate,
-    motion: MechanicalTrial,
+pub(super) struct Trial {
+    pub(super) gas: GasDiscreteGradientCandidate,
+    pub(super) motion: MechanicalTrial,
 }
 
 impl GasPiston<ClosedGasParcel> {
-    fn discrete_gradient_trial(
+    pub(super) fn discrete_gradient_trial(
         &self,
         volume_m3: f64,
         input: PistonInput,
@@ -65,16 +64,19 @@ impl GasPiston<ClosedGasParcel> {
     ) -> Result<impulse::Trial<Trial>, PistonError> {
         poll(cancelled)?;
         let gas = self.gas.discrete_gradient_heat_volume(
-            volume_m3, input.heat_j, controls.gas, &mut *cancelled,
+            volume_m3,
+            input.heat_j,
+            controls.gas,
+            &mut *cancelled,
         )?;
-        let motion = self.mechanical_trial(
-            volume_m3, gas.thermodynamic_mean().state().pressure, input,
-        )?;
+        let motion =
+            self.mechanical_trial(volume_m3, gas.thermodynamic_mean().state().pressure, input)?;
         let tangent = (2.0 * (self.mass_kg / self.area_m2)) / input.duration_s
-            - (input.duration_s * self.area_m2)
-                * gas.step().pressure_final_volume_derivative_pa_m3;
+            - (input.duration_s * self.area_m2) * gas.step().pressure_final_volume_derivative_pa_m3;
         if self.support == PistonSupport::Free && !positive(tangent) {
-            return Err(invalid("discrete-gradient piston impulse tangent is unrepresentable"));
+            return Err(invalid(
+                "discrete-gradient piston impulse tangent is unrepresentable",
+            ));
         }
         Ok(impulse::Trial {
             residual: motion.residual,
@@ -122,12 +124,17 @@ impl GasPiston<ClosedGasParcel> {
             || !positive(controls.energy_tolerance_j)
             || !(1..=128).contains(&controls.maximum_iterations)
         {
-            return Err(invalid("invalid discrete-gradient piston input, bracket or residual controls"));
+            return Err(invalid(
+                "invalid discrete-gradient piston input, bracket or residual controls",
+            ));
         }
         self.admit_linear_clock(self.gas.state(), self.gas.volume_m3(), input.duration_s)?;
         let (trial, iterations, material_trials) = if self.support == PistonSupport::Fixed {
             let trial = self.discrete_gradient_trial(
-                self.gas.volume_m3(), input, controls, &mut cancelled,
+                self.gas.volume_m3(),
+                input,
+                controls,
+                &mut cancelled,
             )?;
             (trial.value, 0, 1)
         } else {
@@ -137,35 +144,65 @@ impl GasPiston<ClosedGasParcel> {
             (solved.value, solved.iterations, solved.proposals)
         };
 
+        self.finish_discrete_gradient(
+            trial,
+            input,
+            controls,
+            iterations,
+            material_trials,
+            &mut cancelled,
+        )
+    }
+
+    // Shared accepted proposal finalization for one- and two-sided inertial
+    // walls. A coupled owner calls this only on its private primary candidate.
+    pub(super) fn finish_discrete_gradient(
+        &mut self,
+        trial: Trial,
+        input: PistonInput,
+        controls: PistonSolve,
+        iterations: usize,
+        material_trials: usize,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<DiscreteGradientPistonStep, PistonError> {
         let mean = trial.gas.thermodynamic_mean();
         let mean_volume = self.gas.mass_kg() / mean.state().density;
         self.admit_linear_clock(mean, mean_volume, input.duration_s)?;
         self.admit_linear_clock(
-            trial.gas.endpoint().state(), trial.gas.endpoint().volume_m3(), input.duration_s,
+            trial.gas.endpoint().state(),
+            trial.gas.endpoint().volume_m3(),
+            input.duration_s,
         )?;
         let before = self.velocity_m_s;
         let after = trial.motion.velocity;
         let kinetic = (0.5 * self.mass_kg * (after - before)) * (after + before);
-        let exterior = input.exterior_pressure_pa
-            * (trial.gas.endpoint().volume_m3() - self.gas.volume_m3());
+        let exterior =
+            input.exterior_pressure_pa * (trial.gas.endpoint().volume_m3() - self.gas.volume_m3());
         let external = input.external_force_n * trial.motion.displacement;
         let support = trial.motion.support_impulse * f64::midpoint(before, after);
         let force = self.area_m2 * (mean.state().pressure - input.exterior_pressure_pa)
             + input.external_force_n;
         let momentum = self.mass_kg * (after - before)
-            - input.duration_s * force - trial.motion.support_impulse;
+            - input.duration_s * force
+            - trial.motion.support_impulse;
         let gas_step = trial.gas.step();
-        let mechanical =
-            (kinetic - gas_step.work_by_gas_j) + exterior - external - support;
-        let total = (gas_step.stored_energy_change_j + kinetic)
-            + exterior - external - support - input.heat_j;
-        if ![kinetic, exterior, external, support, momentum, mechanical, total]
-            .iter().all(|value| value.is_finite())
+        let mechanical = (kinetic - gas_step.work_by_gas_j) + exterior - external - support;
+        let total = (gas_step.stored_energy_change_j + kinetic) + exterior
+            - external
+            - support
+            - input.heat_j;
+        if ![
+            kinetic, exterior, external, support, momentum, mechanical, total,
+        ]
+        .iter()
+        .all(|value| value.is_finite())
             || momentum.abs() > controls.momentum_tolerance_n_s
             || mechanical.abs() > controls.energy_tolerance_j
             || total.abs() > controls.energy_tolerance_j
         {
-            return Err(invalid("discrete-gradient piston impulse or total energy did not close"));
+            return Err(invalid(
+                "discrete-gradient piston impulse or total energy did not close",
+            ));
         }
         let thermodynamic_mean = mean.clone();
         let (gas, gas_step) = trial.gas.into_parts();
@@ -200,7 +237,8 @@ impl GasPiston<ClosedGasParcel> {
             [
                 crate::port_adoption::PortTransfer::work(external - exterior + support, true),
                 crate::port_adoption::PortTransfer::heat(
-                    input.heat_j, report.thermodynamic_mean.state().temperature,
+                    input.heat_j,
+                    report.thermodynamic_mean.state().temperature,
                 ),
             ],
         );

@@ -11,6 +11,8 @@ pub mod acoustic;
 pub mod electrical;
 /// Geometry-driven internal gas exchange on the same two-sided motion.
 pub mod valve;
+/// Original-source energy and entropy for both closed ideal-gas chambers.
+pub mod discrete_gradient;
 
 use super::{
     ClosedGasParcel, GasEnergySolve, GasHeatVolumeCandidate, GasHeatVolumeStep,
