@@ -25,6 +25,8 @@ pub mod network;
 pub use network::{
     EvaporatingCellBinding, EvaporatingCellSource, EvaporatingNetworkBackwardEulerAudit,
     EvaporatingNetworkBackwardEulerStep, EvaporatingNetworkBackwardEulerTrial,
+    EvaporatingNetworkVaporEnthalpyAudit, EvaporatingNetworkVaporEnthalpyTrial,
+    VaporEnthalpyStepCoefficients,
 };
 
 /// Bounded automatic nonlinear solves of this original endpoint residual.

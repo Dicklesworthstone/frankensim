@@ -68,6 +68,33 @@ pub struct EvaporatingNetworkBackwardEulerAudit {
     pub surfaces: BTreeMap<CellId, SurfaceStep>,
 }
 
+/// Original thermal sources plus complete vapor-stream enthalpy supplied by
+/// an external owner. Every selected cell must appear, including zero excess.
+pub struct VaporEnthalpyStepCoefficients<T> {
+    /// Physical heat sources only; exclude the vapor-carried energy below.
+    pub heat: BoundaryExchangeStepCoefficients<T>,
+    /// Complete signed-stream specific enthalpy minus `h_liquid + L` [J/kg],
+    /// with all terms expressed in that cell's retained liquid datum. The
+    /// value may have either sign. For condensation it includes any upstream
+    /// vapor sensible-enthalpy difference; source compatibility remains with
+    /// the gas/material owner rather than being inferred by this adapter.
+    pub vapor_enthalpy_excess_j_kg: BTreeMap<CellId, f64>,
+}
+
+/// Complete vapor-enthalpy account, deliberately distinct from the existing
+/// prescribed-film timeline account. Latent heat remains one subaccount of
+/// each full vapor receipt; the correction is never added to latent heat.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EvaporatingNetworkVaporEnthalpyAudit {
+    /// Full corrected local/global energy residuals and original mass gates.
+    /// Each surface's vapor_energy_j includes its correction exactly once.
+    pub thermal: EvaporatingNetworkBackwardEulerAudit,
+    /// Signed `transferred_mass * vapor_enthalpy_excess` [J] per selected cell.
+    /// Retained directly before adding an arbitrary liquid caloric reference,
+    /// rather than recovered by subtracting large vapor-enthalpy totals.
+    pub vapor_enthalpy_correction_j: BTreeMap<CellId, f64>,
+}
+
 struct PreparedSurface<'l, L: EvaporationLaw + ?Sized> {
     binding: EvaporatingCellBinding<'l, L>,
     branch: LiquidBranch,
@@ -273,7 +300,7 @@ impl<'s, 'm, 'l, L: EvaporationLaw + ?Sized> EvaporatingNetworkBackwardEulerStep
         self.evaluate_resolved(
             energy_increments_j,
             |_| Ok(None),
-            |thermal, liquids, _| resolve(thermal, liquids),
+            |thermal, liquids, _| resolve(thermal, liquids).map(|heat| (heat, None)),
             checkpoint,
         )
     }
@@ -308,9 +335,56 @@ impl<'s, 'm, 'l, L: EvaporationLaw + ?Sized> EvaporatingNetworkBackwardEulerStep
             |thermal| resolve_films(thermal).map(Some),
             |thermal, liquids, films| {
                 resolve_heat(thermal, liquids, films.expect("resolved endpoint films"))
+                    .map(|heat| (heat, None))
             },
             checkpoint,
         )
+    }
+
+    /// Evaluate original heat and phase mass transfer with source-owned
+    /// complete vapor enthalpy. Films are resolved first, then the callback
+    /// sees all proposed liquid masses and those exact films. It supplies
+    /// physical heat and a finite excess for EVERY selected cell, including
+    /// explicit zero values. The thermal view retains initial masses for the
+    /// native energy coordinates; no gas inventory or datum is guessed here.
+    ///
+    /// The reduced cell balance is `m0*(h1-h0) + dm*L + dm*excess = Q`.
+    /// Positive dm exports vapor and negative dm imports it. Latent heat stays
+    /// `dm*L`; full carried enthalpy becomes `dm*(h1+L+excess)`. Independent
+    /// heat-rate evaluation and every original local/global admission gate
+    /// are retained. No separate thermal solve or source query is added.
+    ///
+    /// This event-free trial has a distinct audit and acceptance type. Its
+    /// correction must enter an enclosing finite-gas balance explicitly;
+    /// existing prescribed-film adaptive timelines do not accept this type.
+    pub fn evaluate_with_vapor_enthalpy<T, E>(
+        &self,
+        energy_increments_j: &[f64],
+        resolve_films: impl FnOnce(&DepositionSimulation<'m>) -> Result<BTreeMap<CellId, GasFilm>, E>,
+        resolve_heat_and_vapor: impl FnOnce(
+            &DepositionSimulation<'m>,
+            &BTreeMap<CellId, LiquidSurfaceState>,
+            &BTreeMap<CellId, GasFilm>,
+        ) -> Result<VaporEnthalpyStepCoefficients<T>, E>,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<EvaporatingNetworkVaporEnthalpyTrial<'m, T>, E>
+    where
+        E: From<ThermalEvaporationError> + From<DepositionError>,
+    {
+        let inner = self.evaluate_resolved(
+            energy_increments_j,
+            |thermal| resolve_films(thermal).map(Some),
+            |thermal, liquids, films| {
+                let resolved = resolve_heat_and_vapor(
+                    thermal,
+                    liquids,
+                    films.expect("resolved endpoint films"),
+                )?;
+                Ok((resolved.heat, Some(resolved.vapor_enthalpy_excess_j_kg)))
+            },
+            checkpoint,
+        )?;
+        Ok(EvaporatingNetworkVaporEnthalpyTrial { inner })
     }
 
     fn evaluate_resolved<T, E>(
@@ -323,7 +397,13 @@ impl<'s, 'm, 'l, L: EvaporationLaw + ?Sized> EvaporatingNetworkBackwardEulerStep
             &DepositionSimulation<'m>,
             &BTreeMap<CellId, LiquidSurfaceState>,
             Option<&BTreeMap<CellId, GasFilm>>,
-        ) -> Result<BoundaryExchangeStepCoefficients<T>, E>,
+        ) -> Result<
+            (
+                BoundaryExchangeStepCoefficients<T>,
+                Option<BTreeMap<CellId, f64>>,
+            ),
+            E,
+        >,
         checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<EvaporatingNetworkBackwardEulerTrial<'m, T>, E>
     where
@@ -413,6 +493,17 @@ impl<'s, 'm, 'l, L: EvaporationLaw + ?Sized> EvaporatingNetworkBackwardEulerStep
                         },
                     );
                 }
+                let (resolved_heat, excess) = resolve(thermal, &liquids, films.as_ref())?;
+                let mut correction_energy = BTreeMap::new();
+                if let Some(excess) = &excess {
+                    validate_enthalpy_excess(self.surfaces.keys().copied(), excess, &mut poll)?;
+                    for (&id, surface) in &mut receipts {
+                        poll()?;
+                        let correction_j = finite(surface.transferred_mass_kg * excess[&id])?;
+                        surface.vapor_energy_j = finite(surface.vapor_energy_j + correction_j)?;
+                        correction_energy.insert(id, correction_j);
+                    }
+                }
                 let BoundaryExchangeStepCoefficients {
                     transport:
                         TransportStepCoefficients {
@@ -429,7 +520,7 @@ impl<'s, 'm, 'l, L: EvaporationLaw + ?Sized> EvaporatingNetworkBackwardEulerStep
                             transfers,
                         },
                     exchanges,
-                } = resolve(thermal, &liquids, films.as_ref())?;
+                } = resolved_heat;
                 let mut physical = thermal.clone();
                 physical.set_step_conductances(&conductances_w_k, &mut poll)?;
                 physical.add_step_sources(&sources_w, &mut poll)?;
@@ -451,6 +542,9 @@ impl<'s, 'm, 'l, L: EvaporationLaw + ?Sized> EvaporatingNetworkBackwardEulerStep
                             * finite(surface.liquid.specific_enthalpy_j_kg - old.specific_h_j_kg)?,
                     )?)?;
                     residual.add(surface.latent_energy_j)?;
+                    if let Some(&correction_j) = correction_energy.get(&id) {
+                        residual.add(correction_j)?;
+                    }
                     residual.add(-surface.supplied_heat_j)?;
                     surface.energy_residual_j = residual.value()?;
                     physical
@@ -458,7 +552,19 @@ impl<'s, 'm, 'l, L: EvaporationLaw + ?Sized> EvaporatingNetworkBackwardEulerStep
                         .get_mut(&id)
                         .expect("active liquid cell")
                         .mass_kg = surface.liquid.mass_kg;
-                    let phase_power_w = finite(surface.latent_energy_j / dt)?;
+                    let phase_energy_j = match correction_energy.get(&id) {
+                        Some(&correction_j) => finite(surface.latent_energy_j + correction_j)?,
+                        None => surface.latent_energy_j,
+                    };
+                    let phase_power_w = finite(phase_energy_j / dt)?;
+                    if phase_energy_j != 0.0 && phase_power_w == 0.0 {
+                        return Err(ThermalEvaporationError::from(
+                            EvaporationError::Unrepresentable(
+                                "nonzero vapor enthalpy transfer underflows to zero thermal power",
+                            ),
+                        )
+                        .into());
+                    }
                     if phase_power_w != 0.0 {
                         let source = sources_w.entry(id).or_insert(0.0);
                         *source = finite(*source - phase_power_w)?;
@@ -483,6 +589,9 @@ impl<'s, 'm, 'l, L: EvaporationLaw + ?Sized> EvaporatingNetworkBackwardEulerStep
                         surface.transferred_mass_kg * self.initial.cells[&id].specific_h_j_kg,
                     )?)?;
                     energy_residual.add(surface.latent_energy_j)?;
+                    if let Some(&correction_j) = correction_energy.get(&id) {
+                        energy_residual.add(correction_j)?;
+                    }
                     mass_residual.add(surface.transferred_mass_kg)?;
                 }
                 energy_residual.add(-external_heat_j)?;
@@ -500,7 +609,13 @@ impl<'s, 'm, 'l, L: EvaporationLaw + ?Sized> EvaporatingNetworkBackwardEulerStep
                             bulk: StepCoefficients {
                                 sources_w,
                                 conductances_w_k,
-                                payload: Endpoint { payload, audit },
+                                payload: Endpoint {
+                                    payload,
+                                    audit: EvaporatingNetworkVaporEnthalpyAudit {
+                                        thermal: audit,
+                                        vapor_enthalpy_correction_j: correction_energy,
+                                    },
+                                },
                             },
                             boundaries,
                         },
@@ -514,6 +629,32 @@ impl<'s, 'm, 'l, L: EvaporationLaw + ?Sized> EvaporatingNetworkBackwardEulerStep
         checkpoint.borrow_mut()()?;
         Ok(EvaporatingNetworkBackwardEulerTrial { heat })
     }
+}
+
+fn validate_enthalpy_excess(
+    ids: impl ExactSizeIterator<Item = CellId>,
+    excess: &BTreeMap<CellId, f64>,
+    checkpoint: &mut impl FnMut() -> Result<(), DepositionError>,
+) -> Result<(), ThermalEvaporationError> {
+    if excess.len() != ids.len() {
+        return Err(DepositionError::InvalidInput(
+            "vapor enthalpy excess must exactly match selected liquid cells",
+        )
+        .into());
+    }
+    for (index, id) in ids.enumerate() {
+        if index % 256 == 0 {
+            checkpoint()?;
+        }
+        if !excess.get(&id).is_some_and(|value| value.is_finite()) {
+            return Err(DepositionError::InvalidInput(
+                "finite vapor enthalpy excess required for every selected liquid cell",
+            )
+            .into());
+        }
+    }
+    checkpoint()?;
+    Ok(())
 }
 
 fn validate_films(
@@ -544,7 +685,7 @@ fn validate_films(
 
 struct Endpoint<T> {
     payload: T,
-    audit: EvaporatingNetworkBackwardEulerAudit,
+    audit: EvaporatingNetworkVaporEnthalpyAudit,
 }
 
 /// One speculative heat and multi-surface endpoint, with no published history.
@@ -564,7 +705,7 @@ impl<'m, T> EvaporatingNetworkBackwardEulerTrial<'m, T> {
             })
     }
     pub const fn audit(&self) -> &EvaporatingNetworkBackwardEulerAudit {
-        &self.heat.payload().audit
+        &self.heat.payload().audit.thermal
     }
     pub fn payload(&self) -> &T {
         &self.heat.payload().payload
@@ -579,12 +720,35 @@ impl<'m, T> EvaporatingNetworkBackwardEulerTrial<'m, T> {
         cell_tolerance_j: f64,
         total_tolerance_j: f64,
         mass_tolerance_kg: f64,
-        mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<
         (
             DepositionSimulation<'m>,
             T,
             EvaporatingNetworkBackwardEulerAudit,
+        ),
+        ThermalEvaporationError,
+    > {
+        let (next, payload, audit) = self.accept_complete(
+            cell_tolerance_j,
+            total_tolerance_j,
+            mass_tolerance_kg,
+            checkpoint,
+        )?;
+        Ok((next, payload, audit.thermal))
+    }
+
+    fn accept_complete(
+        self,
+        cell_tolerance_j: f64,
+        total_tolerance_j: f64,
+        mass_tolerance_kg: f64,
+        mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<
+        (
+            DepositionSimulation<'m>,
+            T,
+            EvaporatingNetworkVaporEnthalpyAudit,
         ),
         ThermalEvaporationError,
     > {
@@ -623,14 +787,14 @@ impl<'m, T> EvaporatingNetworkBackwardEulerTrial<'m, T> {
         let (mut next, endpoint, _) =
             self.heat
                 .accept(cell_tolerance_j, total_tolerance_j, &mut checkpoint)?;
-        for (&id, surface) in &endpoint.audit.surfaces {
+        for (&id, surface) in &endpoint.audit.thermal.surfaces {
             checkpoint()?;
             let mut proposed = next.cells[&id].clone();
             proposed.mass_kg = surface.liquid.mass_kg;
             next.materials[&proposed.material_id].validate_cell(&proposed)?;
         }
         checkpoint()?;
-        for (&id, surface) in &endpoint.audit.surfaces {
+        for (&id, surface) in &endpoint.audit.thermal.surfaces {
             next.cells
                 .get_mut(&id)
                 .expect("validated active liquid cell")
@@ -638,5 +802,49 @@ impl<'m, T> EvaporatingNetworkBackwardEulerTrial<'m, T> {
         }
         checkpoint()?;
         Ok((next, endpoint.payload, endpoint.audit))
+    }
+}
+
+/// Complete source-owned vapor enthalpy on the same speculative heat endpoint.
+/// This cannot be passed to the existing prescribed-film timeline machinery.
+pub struct EvaporatingNetworkVaporEnthalpyTrial<'m, T> {
+    inner: EvaporatingNetworkBackwardEulerTrial<'m, T>,
+}
+impl<'m, T> EvaporatingNetworkVaporEnthalpyTrial<'m, T> {
+    pub fn residual_j(&self) -> &[f64] {
+        self.inner.residual_j()
+    }
+    pub fn maximum_cell_residual_j(&self) -> f64 {
+        self.inner.maximum_cell_residual_j()
+    }
+    pub const fn audit(&self) -> &EvaporatingNetworkVaporEnthalpyAudit {
+        &self.inner.heat.payload().audit
+    }
+    pub fn payload(&self) -> &T {
+        self.inner.payload()
+    }
+
+    /// Preserve every native and corrected local/global balance, mass-rate,
+    /// material and cancellation gate before installing any proposed mass.
+    pub fn accept(
+        self,
+        cell_tolerance_j: f64,
+        total_tolerance_j: f64,
+        mass_tolerance_kg: f64,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<
+        (
+            DepositionSimulation<'m>,
+            T,
+            EvaporatingNetworkVaporEnthalpyAudit,
+        ),
+        ThermalEvaporationError,
+    > {
+        self.inner.accept_complete(
+            cell_tolerance_j,
+            total_tolerance_j,
+            mass_tolerance_kg,
+            checkpoint,
+        )
     }
 }

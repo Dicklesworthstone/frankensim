@@ -1829,6 +1829,21 @@ Mass-sensitive time accuracy detects changing humidity even when latent power
 keeps liquid temperature fixed. External source history must remain immutable;
 resolving films does not itself evolve or conserve a finite atmosphere.
 
+`evaluate_with_vapor_enthalpy` extends the same original network residual with
+an explicitly owned vapor-stream enthalpy excess above each cell's `h+L`.
+The complete finite map has exactly the selected cell identities and may contain
+positive, negative or zero excess. Its reduced balance is
+`m0*(h1-h0) + dm*(L+excess) = dt*P1`; `SurfaceStep::latent_energy_j` remains
+`dm*L`, while the complete vapor receipt includes `dm*excess` exactly once.
+This admits nonisothermal condensation carrying upstream gas sensible enthalpy
+without misreporting it as latent heat. The gas/material owner must establish
+source compatibility and debit the opposite full stream. Native exposure,
+represented mass, source errors, two original heat passes and local/global
+acceptance remain shared. A distinct corrected trial/audit retains every
+`dm*excess` before large caloric-reference sums; it cannot be consumed by the
+older prescribed-film timeline account. This event-free ingress supplies no
+gas equation of state, gas reconstruction or separate time-accuracy claim.
+
 Heating can turn initial equilibrium or condensation into evaporation. An
 exhausted endpoint now uses the larger initial/endpoint frozen evaporation
 rate for its finite retry estimate. The estimate remains advisory: a retry

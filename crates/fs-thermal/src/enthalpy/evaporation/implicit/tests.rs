@@ -20,6 +20,9 @@ mod films;
 #[path = "tests/resolved_timeline.rs"]
 mod resolved_timeline;
 
+#[path = "tests/enthalpy_correction.rs"]
+mod enthalpy_correction;
+
 use super::*;
 use crate::enthalpy::backward_euler::{
     BoundaryExchanges, BoundaryStepCoefficients, PrescribedBathHeat, StepCoefficients,
