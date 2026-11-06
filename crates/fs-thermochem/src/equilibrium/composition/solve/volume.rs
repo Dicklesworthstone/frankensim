@@ -17,6 +17,9 @@ use fs_qty::Volume;
 pub mod entropy;
 pub use entropy::EquilibriumVolumeEntropySolveV1;
 
+/// Reusable equilibrium inversion using source-relative internal energy.
+pub mod energy_path;
+
 /// Work and residual limits for a fixed-temperature, fixed-volume equilibrium.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct EquilibriumVolumeSolveV1 {
@@ -71,9 +74,9 @@ pub enum EquilibriumVolumeErrorV1 {
     },
     /// The temperature bracket does not contain the requested total energy.
     InternalEnergyNotBracketed {
-        /// Equilibrated internal energy at the lower temperature [J].
+        /// Equilibrated internal energy (or reference-relative change) at the lower temperature [J].
         lower_energy_j: f64,
-        /// Equilibrated internal energy at the upper temperature [J].
+        /// Equilibrated internal energy (or reference-relative change) at the upper temperature [J].
         upper_energy_j: f64,
     },
     /// Temperature work was exhausted without internal-energy closure.
@@ -289,95 +292,14 @@ impl IdealGasEquilibriumV1 {
             controls.minimum_temperature_k,
             controls.maximum_temperature_k,
         )?;
-        let mut counts = Counts::default();
-        let mut low = controls.minimum_temperature_k;
-        let mut high = controls.maximum_temperature_k;
-        let mut endpoints = [0.0; 2];
-        for (index, t) in [low, high].into_iter().enumerate() {
-            let temperature = Temperature::new(t);
-            let residual = work.solve_tv(
-                self,
-                temperature,
-                volume,
-                controls.volume,
-                &mut counts,
-                &mut cancelled,
-            )?;
-            endpoints[index] = work.internal_energy(temperature)?;
-            if (endpoints[index] - target.value()).abs() <= controls.energy_tolerance_j {
-                return work.publish_volume(
-                    self,
-                    temperature,
-                    volume,
-                    controls.volume,
-                    counts,
-                    0,
-                    Some(target),
-                    residual,
-                    &mut cancelled,
-                );
-            }
-        }
-        if !(endpoints[0] < target.value() && target.value() < endpoints[1]) {
-            return Err(EquilibriumVolumeErrorV1::InternalEnergyNotBracketed {
-                lower_energy_j: endpoints[0],
-                upper_energy_j: endpoints[1],
-            });
-        }
-        let mut t = low + 0.5 * (high - low);
-        let mut residual = endpoints[1] - target.value();
-        let mut steps = 0;
-        for step in 1..=controls.maximum_temperature_iterations {
-            steps = step;
-            let temperature = Temperature::new(t);
-            let volume_residual = work.solve_tv(
-                self,
-                temperature,
-                volume,
-                controls.volume,
-                &mut counts,
-                &mut cancelled,
-            )?;
-            residual = work.internal_energy(temperature)? - target.value();
-            if residual.abs() <= controls.energy_tolerance_j {
-                return work.publish_volume(
-                    self,
-                    temperature,
-                    volume,
-                    controls.volume,
-                    counts,
-                    step,
-                    Some(target),
-                    volume_residual,
-                    &mut cancelled,
-                );
-            }
-            if residual < 0.0 {
-                low = t;
-            } else {
-                high = t;
-            }
-            let response = work.response(
-                self,
-                temperature,
-                controls.volume.equilibrium,
-                &mut cancelled,
-            )?;
-            let next = t - residual / response.heat_capacity_v_j_k;
-            let margin = 0.01 * (high - low);
-            t = if next.is_finite() && next > low + margin && next < high - margin {
-                next
-            } else {
-                low + 0.5 * (high - low)
-            };
-            if t == low || t == high {
-                break;
-            }
-        }
-        Err(EquilibriumVolumeErrorV1::InternalEnergyNoConvergence {
-            iterations: steps,
-            residual_j: residual,
-        })
+        let (temperature, counts, steps, residual) = work.solve_internal_energy(
+            self, volume, target.value(), controls, None, &mut cancelled,
+            |work, t, _| Ok(work.internal_energy(t)?),
+        )?;
+        work.publish_volume(
+            self, temperature, volume, controls.volume, counts, steps,
+            Some(target), residual, &mut cancelled,
+        )
     }
 
     fn volume_workspace(

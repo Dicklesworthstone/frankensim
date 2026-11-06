@@ -25,7 +25,7 @@ pub struct EquilibriumIsentropeSampleV1 {
     pub temperature_iterations: usize,
 }
 
-struct Reference {
+pub(in crate::equilibrium::composition::solve) struct Reference {
     temperature: Temperature,
     pressure: Pressure,
     amounts: Vec<f64>,
@@ -35,6 +35,64 @@ struct Reference {
     total_amount: f64,
 }
 impl Reference {
+    pub(in crate::equilibrium::composition::solve) fn new(owner: &IdealGasEquilibriumV1,
+        work: &Workspace, temperature: Temperature, cancelled: &mut impl FnMut() -> bool)
+        -> Result<Self, EquilibriumExpansionErrorV1> {
+        let ns = work.n.len();
+        let mut reference = Reference {
+            temperature, pressure: work.pressure, amounts: allocated(ns, 0.0)?, log_amounts: allocated(ns, 0.0)?,
+            enthalpies: allocated(ns, 0.0)?, partial_entropies: allocated(ns, 0.0)?, total_amount: 0.0,
+        };
+        reference.amounts.copy_from_slice(&work.n);
+        reference.log_amounts.copy_from_slice(&work.log_n);
+        reference.enthalpies.copy_from_slice(&work.h);
+        let mut total = Sum::default();
+        for &i in &work.active { total.add(work.n[i]); }
+        reference.total_amount = total.value();
+        let log_total = ln(reference.total_amount);
+        for &i in &work.active {
+            poll(cancelled)?;
+            let p = owner.models[i].evaluate_properties(temperature)
+                .map_err(|source| owner.species_error(i, source))?;
+            reference.partial_entropies[i] = p.s().value() - UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K
+                * (work.log_n[i] - log_total + work.log_pressure_ratio);
+            if !reference.partial_entropies[i].is_finite() {
+                return Err(E::Arithmetic("reference partial entropy").into());
+            }
+        }
+        Ok(reference)
+    }
+
+    /// Actual extensive internal-energy change. Source integration precedes
+    /// composition-dependent reference terms; absolute energy totals are never
+    /// subtracted. Residual elemental-balance sensitivity remains physical.
+    pub(in crate::equilibrium::composition::solve) fn energy_change(
+        &self, owner: &IdealGasEquilibriumV1, work: &Workspace,
+        temperature: Temperature, cancelled: &mut impl FnMut() -> bool)
+        -> Result<f64, EquilibriumExpansionErrorV1> {
+        let r = UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K;
+        let mut du = Sum::default();
+        for &i in &work.active {
+            poll(cancelled)?;
+            let sensible = owner.models[i].molar_internal_energy_change(self.temperature, temperature)
+                .map_err(|source| owner.species_error(i, source))?.value();
+            du.add((work.n[i] - self.amounts[i]) * (self.enthalpies[i] - r * self.temperature.value()));
+            du.add(work.n[i] * sensible);
+        }
+        let value = du.value() * work.scale;
+        if !value.is_finite() {
+            return Err(E::Arithmetic("relative reacting internal energy").into());
+        }
+        Ok(value)
+    }
+
+    pub(in crate::equilibrium::composition::solve) fn entropy_change(
+        &self, owner: &IdealGasEquilibriumV1, work: &Workspace,
+        temperature: Temperature, cancelled: &mut impl FnMut() -> bool)
+        -> Result<f64, EquilibriumExpansionErrorV1> {
+        Ok(self.differences::<false>(owner, work, temperature, cancelled)?.1)
+    }
+
     fn differences<const WITH_ENTHALPY: bool>(&self, owner: &IdealGasEquilibriumV1, work: &Workspace,
         temperature: Temperature, cancelled: &mut impl FnMut() -> bool)
         -> Result<(f64, f64), EquilibriumExpansionErrorV1> {
@@ -109,28 +167,7 @@ impl<'a> EquilibriumIsentropeV1<'a> {
         if !feed_mass.is_finite() || feed_mass <= 0.0 {
             return Err(E::Arithmetic("original feed mass").into());
         }
-        let ns = work.n.len();
-        let mut reference = Reference {
-            temperature, pressure, amounts: allocated(ns, 0.0)?, log_amounts: allocated(ns, 0.0)?,
-            enthalpies: allocated(ns, 0.0)?, partial_entropies: allocated(ns, 0.0)?, total_amount: 0.0,
-        };
-        reference.amounts.copy_from_slice(&work.n);
-        reference.log_amounts.copy_from_slice(&work.log_n);
-        reference.enthalpies.copy_from_slice(&work.h);
-        let mut total = Sum::default();
-        for &i in &work.active { total.add(work.n[i]); }
-        reference.total_amount = total.value();
-        let log_total = ln(reference.total_amount);
-        for &i in &work.active {
-            poll(&mut cancelled)?;
-            let p = owner.models[i].evaluate_properties(temperature)
-                .map_err(|source| owner.species_error(i, source))?;
-            reference.partial_entropies[i] = p.s().value() - UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K
-                * (work.log_n[i] - log_total + work.log_pressure_ratio);
-            if !reference.partial_entropies[i].is_finite() {
-                return Err(E::Arithmetic("reference partial entropy").into());
-            }
-        }
+        let reference = Reference::new(owner, &work, temperature, &mut cancelled)?;
         let current = Some(EquilibriumIsentropeSampleV1 {
             temperature, pressure, response: reference_state.response(),
             specific_enthalpy_change_j_kg: 0.0, entropy_change_j_k: 0.0,

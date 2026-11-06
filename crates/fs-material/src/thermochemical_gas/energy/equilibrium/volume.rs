@@ -12,6 +12,9 @@ pub mod entropy;
 /// Prepared reversible reacting parcels and work-conjugate mechanical loads.
 pub mod reversible;
 
+/// Driven reacting parcels with original heat/work/energy/volume balances.
+pub mod driven;
+
 use super::{GasEquilibriumChamberError, ThermochemicalGasModel, equilibrium_feed_mass, poll};
 use crate::thermochemical_gas::energy::{
     IsochoricGasParcel, parcel::ClosedGasParcel, updated_point,
