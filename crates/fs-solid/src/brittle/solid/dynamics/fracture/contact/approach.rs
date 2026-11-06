@@ -294,7 +294,7 @@ pub(super) fn scan_released_faces(
     Ok(witness)
 }
 
-fn validate(
+pub(super) fn validate(
     duration_s: f64,
     start: f64,
     end: f64,

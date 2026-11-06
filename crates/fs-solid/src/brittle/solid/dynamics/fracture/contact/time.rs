@@ -1,4 +1,4 @@
-//! Complete physical intervals through native released-face impact events.
+//! Complete physical intervals through native released-face contact modes.
 //!
 //! Motion uses the original work-conjugate midpoint and immutable material
 //! history; contact uses the original simultaneous consistent-mass impulse.
@@ -8,11 +8,14 @@
 //! allowed to escape into the retained trajectory.
 
 use fs_contact::multicontact::MultiImpactResult;
+use fs_contact::sustained::solve::SolveReport;
 use fs_exec::Cx;
 
 use super::approach::{
     BrittleFaceApproachControls, BrittleFaceApproachError, BrittleFaceContactLocation,
+    scan_released_faces,
 };
+use super::sustained::{BrittleFaceSustainedControls, BrittleFaceSustainedError};
 use super::{
     BrittleFaceImpactControls, BrittleFaceImpactError, BrittleFaceImpactRow, SolidImpulseReport,
 };
@@ -25,13 +28,14 @@ use crate::plastic3::IncrementSettings;
 /// Bounds on the complete duration, with the original motion/contact controls.
 #[derive(Clone, Copy, Debug)]
 pub struct BrittleFaceTimeControls {
-    /// Largest free-flight interval proposed to the native prefix locator.
+    /// Largest free-flight or sustained-force interval proposed to native motion.
     /// This is a caller-selected temporal resolution, not an error estimate.
     pub maximum_interval_s: f64,
     pub maximum_intervals: usize,
     /// Includes instantaneous events at the original and final physical times.
     pub maximum_impacts: usize,
-    /// All native motion solves, including discarded localization trials.
+    /// All native motion solves, including discarded localization trials and
+    /// every sustained-force response when that path is enabled.
     pub maximum_trials: usize,
     pub approach: BrittleFaceApproachControls,
     pub impact: BrittleFaceImpactControls,
@@ -60,6 +64,21 @@ pub struct BrittleFaceTimedImpact {
     pub absolute_contact_couple_kg_m2_s: f64,
 }
 
+/// A loaded dwell or unloaded release on the original nonlinear body response.
+#[derive(Debug)]
+pub struct BrittleFaceTimedSustained {
+    pub start_time_s: f64,
+    pub end_time_s: f64,
+    pub solve: SolveReport,
+    pub rows: Vec<BrittleFaceImpactRow>,
+    /// Original total-load receipt; the matching interval uses external-only work.
+    pub native_energy: BrittleTetMidpointEnergy,
+    pub normal_contact_work_j: f64,
+    pub absolute_contact_work_j: f64,
+    pub contact_work_balance_error_j: f64,
+    pub absolute_contact_couple_n_m: f64,
+}
+
 /// Whole-duration physical work. Impact loss remains separate from fracture.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BrittleFaceTimeEnergy {
@@ -73,6 +92,10 @@ pub struct BrittleFaceTimeEnergy {
     pub fracture_dissipation_j: f64,
     /// Mechanical loss from the contact owner; no thermal allocation is inferred.
     pub contact_dissipation_j: f64,
+    /// Bounded numerical work at sustained normal constraints, never a loss
+    /// or an additional external-work port in the physical balance.
+    pub normal_contact_work_j: f64,
+    pub absolute_normal_contact_work_j: f64,
     pub dead_load_mean_work_j: f64,
     pub support_mean_work_j: f64,
     /// Signed reaction work at held, possibly moving velocity components.
@@ -98,19 +121,22 @@ pub struct BrittleFaceTimeStep<'a> {
     pub motion: BrittleTetMotion<'a>,
     pub intervals: Vec<BrittleFaceMotionRecord>,
     pub impacts: Vec<BrittleFaceTimedImpact>,
+    /// Also represented in `intervals` with external-only physical work.
+    pub sustained: Vec<BrittleFaceTimedSustained>,
     pub trials: usize,
     /// Completed native trial telemetry; a refused native solve has no receipt.
     pub numerical_tangent_evaluations: usize,
     pub energy: BrittleFaceTimeEnergy,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Debug)]
 pub enum BrittleFaceTimeError {
     Invalid(&'static str),
     Allocation,
     Motion(BrittleTetDynamicError),
     Approach(BrittleFaceApproachError),
     Impact(BrittleFaceImpactError),
+    Sustained(BrittleFaceSustainedError),
     WorkLimit {
         intervals: usize,
         impacts: usize,
@@ -171,6 +197,80 @@ impl<'a> BrittleTetMotion<'a> {
         controls: BrittleFaceTimeControls,
         cx: &Cx<'_>,
     ) -> Result<BrittleFaceTimeStep<'a>, BrittleFaceTimeError> {
+        self.released_face_time(
+            duration_s,
+            prescribed_end_m,
+            force_intervals_n,
+            restitution,
+            origin_m,
+            settings,
+            controls,
+            None,
+            cx,
+        )
+    }
+
+    /// Continue free motion, impacts, loaded contact and unloaded release.
+    ///
+    /// The same interval driver resolves approaching impacts first. At active,
+    /// normally resting pairs it invokes the original sustained-force response
+    /// instead of repeated zero-time impulses. All non-tied pairs participate
+    /// in that solve, and every loaded pair must satisfy its native dwell,
+    /// complementarity, geometry and work admission. Released pairs return to
+    /// the original free-flight path. Unresolved simultaneous arrival during
+    /// another pair's loaded dwell can still refuse and requires refinement.
+    ///
+    /// Previous normal forces seed only the next numerical solve; they are
+    /// cleared after impact and never become physical material history. The
+    /// whole native-response budget includes every force trial and final replay.
+    /// Original affine force means, prescribed support paths, immutable retry
+    /// and complete-duration energy admission remain shared with impact-only
+    /// time. Sustained normal work has an independent whole-duration absolute
+    /// gate and is never attributed to contact loss, fracture or heat.
+    ///
+    /// The force and approach activation/normal-velocity tolerances must match.
+    /// Fixed matching traces, small-strain source domains and caller-selected
+    /// temporal resolution remain in force; this supplies no global CCD,
+    /// finite sliding, friction or mixed-mode trajectory accuracy certificate.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_released_face_time_with_sustained(
+        &self,
+        duration_s: f64,
+        prescribed_end_m: &[(usize, f64)],
+        force_intervals_n: &[(usize, [f64; 2])],
+        restitution: &[f64],
+        origin_m: [f64; 3],
+        settings: IncrementSettings,
+        controls: BrittleFaceTimeControls,
+        sustained_controls: BrittleFaceSustainedControls,
+        cx: &Cx<'_>,
+    ) -> Result<BrittleFaceTimeStep<'a>, BrittleFaceTimeError> {
+        self.released_face_time(
+            duration_s,
+            prescribed_end_m,
+            force_intervals_n,
+            restitution,
+            origin_m,
+            settings,
+            controls,
+            Some(sustained_controls),
+            cx,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn released_face_time(
+        &self,
+        duration_s: f64,
+        prescribed_end_m: &[(usize, f64)],
+        force_intervals_n: &[(usize, [f64; 2])],
+        restitution: &[f64],
+        origin_m: [f64; 3],
+        settings: IncrementSettings,
+        controls: BrittleFaceTimeControls,
+        sustained_controls: Option<BrittleFaceSustainedControls>,
+        cx: &Cx<'_>,
+    ) -> Result<BrittleFaceTimeStep<'a>, BrittleFaceTimeError> {
         use BrittleFaceTimeError as E;
         checkpoint(cx)?;
         let target_time = self.time_s + duration_s;
@@ -191,10 +291,24 @@ impl<'a> BrittleTetMotion<'a> {
                 .iter()
                 .any(|e| !e.is_finite() || !(0.0..=1.0).contains(e))
             || origin_m.iter().any(|x| !x.is_finite())
+            || sustained_controls.is_some_and(|c| {
+                c.activation_tolerance_m != controls.approach.activation_tolerance_m
+                    || c.velocity_tolerance_mps != controls.approach.velocity_tolerance_mps
+            })
         {
             return Err(E::Invalid(
                 "positive bounded duration, compatible event gates and complete restitution required",
             ));
+        }
+        if sustained_controls.is_some() {
+            super::approach::validate(
+                duration_s,
+                self.time_s,
+                target_time,
+                settings,
+                controls.approach,
+            )
+            .map_err(E::Approach)?;
         }
         let duration = target_time - self.time_s;
         let initial_u = self.solid.solution.displacement_m.as_flattened();
@@ -231,10 +345,26 @@ impl<'a> BrittleTetMotion<'a> {
             }
             forces.push((dof, values));
         }
+        let mut mean_forces = buffer(if sustained_controls.is_some() {
+            forces.len()
+        } else {
+            0
+        })?;
+        if sustained_controls.is_some() {
+            mean_forces.extend(forces.iter().map(|&(dof, _)| (dof, 0.0)));
+        }
+        let mut normal_seeds = Vec::new();
         let mut current: Option<BrittleTetMotion<'a>> = None;
         let mut intervals = buffer(controls.maximum_intervals.min(32))?;
         let mut impacts: Vec<BrittleFaceTimedImpact> = buffer(controls.maximum_impacts.min(8))?;
+        let mut sustained = buffer(if sustained_controls.is_some() {
+            controls.maximum_intervals.min(8)
+        } else {
+            0
+        })?;
         let mut sums = [Sum::default(); 10];
+        let mut normal_work = Sum::default();
+        let mut absolute_normal_work = Sum::default();
         let mut trials = 0usize;
         let mut tangent_evaluations = 0usize;
         loop {
@@ -280,33 +410,109 @@ impl<'a> BrittleTetMotion<'a> {
                     interpolate(start, target, start_fraction),
                     interpolate(start, target, end_fraction),
                 ];
+                if let Some(mean) = mean_forces.get_mut(i) {
+                    mean.1 = interpolate(start, target, 0.5 * start_fraction + 0.5 * end_fraction);
+                }
             }
-            let mut approach_controls = controls.approach;
-            approach_controls.maximum_trials = approach_controls
-                .maximum_trials
-                .min(controls.maximum_trials - trials);
-            let prefix = accepted
-                .advance_toward_released_face_contact(
-                    end - accepted.time_s,
-                    &supports,
-                    &forces,
-                    settings,
-                    approach_controls,
+            let (advance, contact, calls, tangents) = if let Some(mut c) = sustained_controls
+                && resting_contact(accepted, controls.approach, cx)?
+            {
+                c.solve.maximum_response_evaluations = c
+                    .solve
+                    .maximum_response_evaluations
+                    .min(controls.maximum_trials - trials);
+                let step = accepted
+                    .advance_released_face_sustained_from(
+                        end - accepted.time_s,
+                        &supports,
+                        &mean_forces,
+                        if normal_seeds.is_empty() {
+                            None
+                        } else {
+                            Some(&normal_seeds)
+                        },
+                        settings,
+                        c,
+                        cx,
+                    )
+                    .map_err(E::Sustained)?;
+                if step.motion.time_s != end {
+                    return Err(E::Invalid(
+                        "sustained native clock did not reach its endpoint",
+                    ));
+                }
+                let contact = scan_released_faces(
+                    &step.motion,
+                    controls.approach.activation_tolerance_m,
+                    controls.approach.velocity_tolerance_mps,
                     cx,
                 )
                 .map_err(E::Approach)?;
+                let calls = step.solve.response_evaluations;
+                let tangents = step.numerical_tangent_evaluations;
+                normal_work.add(step.normal_contact_work_j);
+                absolute_normal_work.add(step.absolute_contact_work_j);
+                if !normal_work.value().is_finite() || !absolute_normal_work.value().is_finite() {
+                    return Err(E::Invalid(
+                        "complete normal contact work must be representable",
+                    ));
+                }
+                normal_seeds.clear();
+                if normal_seeds.capacity() < step.solve.forces_n.len() {
+                    normal_seeds
+                        .try_reserve(step.solve.forces_n.len())
+                        .map_err(|_| E::Allocation)?;
+                }
+                normal_seeds.extend(step.solve.forces_n.iter().map(|force| force[0]));
+                push(
+                    &mut sustained,
+                    BrittleFaceTimedSustained {
+                        start_time_s: accepted.time_s,
+                        end_time_s: step.motion.time_s,
+                        solve: step.solve,
+                        rows: step.rows,
+                        native_energy: step.native_energy,
+                        normal_contact_work_j: step.normal_contact_work_j,
+                        absolute_contact_work_j: step.absolute_contact_work_j,
+                        contact_work_balance_error_j: step.contact_work_balance_error_j,
+                        absolute_contact_couple_n_m: step.absolute_contact_couple_n_m,
+                    },
+                )?;
+                (Some((step.motion, step.energy)), contact, calls, tangents)
+            } else {
+                let mut approach_controls = controls.approach;
+                approach_controls.maximum_trials = approach_controls
+                    .maximum_trials
+                    .min(controls.maximum_trials - trials);
+                let prefix = accepted
+                    .advance_toward_released_face_contact(
+                        end - accepted.time_s,
+                        &supports,
+                        &forces,
+                        settings,
+                        approach_controls,
+                        cx,
+                    )
+                    .map_err(E::Approach)?;
+                (
+                    prefix.advance.map(|step| (step.motion, step.energy)),
+                    prefix.contact,
+                    prefix.trials,
+                    prefix.numerical_tangent_evaluations,
+                )
+            };
             trials = trials
-                .checked_add(prefix.trials)
+                .checked_add(calls)
                 .ok_or(E::Invalid("native trial count overflow"))?;
             tangent_evaluations = tangent_evaluations
-                .checked_add(prefix.numerical_tangent_evaluations)
+                .checked_add(tangents)
                 .ok_or(E::Invalid("native tangent count overflow"))?;
-            if prefix.advance.is_none() && prefix.contact.is_none() {
+            if advance.is_none() && contact.is_none() {
                 return Err(E::Invalid(
                     "prefix must advance physical time or resolve a contact",
                 ));
             }
-            if let Some(step) = prefix.advance {
+            if let Some((next, energy)) = advance {
                 if intervals.len() == controls.maximum_intervals {
                     return Err(E::WorkLimit {
                         intervals: intervals.len(),
@@ -314,12 +520,11 @@ impl<'a> BrittleTetMotion<'a> {
                         trials,
                     });
                 }
-                if step.motion.time_s <= accepted.time_s || step.motion.time_s > end {
+                if next.time_s <= accepted.time_s || next.time_s > end {
                     return Err(E::Invalid(
                         "native prefix escaped its requested physical interval",
                     ));
                 }
-                let energy = step.energy;
                 accumulate(
                     &mut sums,
                     [
@@ -339,13 +544,13 @@ impl<'a> BrittleTetMotion<'a> {
                     &mut intervals,
                     BrittleFaceMotionRecord {
                         start_time_s: accepted.time_s,
-                        end_time_s: step.motion.time_s,
+                        end_time_s: next.time_s,
                         energy,
                     },
                 )?;
-                current = Some(step.motion);
+                current = Some(next);
             }
-            if let Some(location) = prefix.contact {
+            if let Some(location) = contact {
                 let at_contact = current.as_ref().unwrap_or(self);
                 if location.time_s != at_contact.time_s
                     || impacts.last().is_some_and(|last| {
@@ -401,6 +606,7 @@ impl<'a> BrittleTetMotion<'a> {
                     },
                 )?;
                 current = Some(hit.motion);
+                normal_seeds.clear();
             }
         }
         let motion = current.ok_or(E::Invalid("no physical interval accepted"))?;
@@ -426,6 +632,8 @@ impl<'a> BrittleTetMotion<'a> {
             material_work_j: material,
             fracture_dissipation_j: fracture,
             contact_dissipation_j: contact,
+            normal_contact_work_j: normal_work.value(),
+            absolute_normal_contact_work_j: absolute_normal_work.value(),
             dead_load_mean_work_j: dead,
             support_mean_work_j: support,
             support_impulse_work_j: impulse_support,
@@ -473,16 +681,81 @@ impl<'a> BrittleTetMotion<'a> {
         ] {
             energy_gate(account, defect, tolerance)?;
         }
+        if let Some(c) = sustained_controls {
+            energy_gate(
+                "released-face time normal contact work",
+                energy.normal_contact_work_j,
+                c.contact_work_tolerance_j,
+            )?;
+            energy_gate(
+                "released-face time absolute normal contact work",
+                energy.absolute_normal_contact_work_j,
+                c.contact_work_tolerance_j,
+            )?;
+        }
         checkpoint(cx)?;
         Ok(BrittleFaceTimeStep {
             motion,
             intervals,
             impacts,
+            sustained,
             trials,
             numerical_tangent_evaluations: tangent_evaluations,
             energy,
         })
     }
+}
+
+// Inspect every paired trace: a later approach takes precedence over an
+// earlier resting pair, and no later overlap may be hidden by mode selection.
+fn resting_contact(
+    motion: &BrittleTetMotion<'_>,
+    controls: BrittleFaceApproachControls,
+    cx: &Cx<'_>,
+) -> Result<bool, BrittleFaceTimeError> {
+    let mut resting = false;
+    let mut approaching = false;
+    for face in motion.solid.released_faces.iter() {
+        checkpoint(cx)?;
+        for vertex in 0..3 {
+            let [a, b] = [face.paired_nodes[0][vertex], face.paired_nodes[1][vertex]];
+            if a == b {
+                continue;
+            }
+            let gap = super::dot(
+                face.normal,
+                core::array::from_fn(|axis| {
+                    motion.solid.solution.displacement_m[b][axis]
+                        - motion.solid.solution.displacement_m[a][axis]
+                }),
+            );
+            let speed = super::dot(
+                face.normal,
+                core::array::from_fn(|axis| {
+                    motion.velocity_mps[b][axis] - motion.velocity_mps[a][axis]
+                }),
+            );
+            if !gap.is_finite() || !speed.is_finite() {
+                return Err(BrittleFaceTimeError::Invalid(
+                    "finite paired geometry and speed required",
+                ));
+            }
+            if gap < 0.0 {
+                return Err(BrittleFaceTimeError::Approach(
+                    BrittleFaceApproachError::Overlap {
+                        face: face.id,
+                        vertex,
+                        gap_m: gap,
+                    },
+                ));
+            }
+            if gap <= controls.activation_tolerance_m {
+                approaching |= speed < -controls.velocity_tolerance_mps;
+                resting |= speed.abs() <= controls.velocity_tolerance_mps;
+            }
+        }
+    }
+    Ok(resting && !approaching)
 }
 
 fn buffer<T>(capacity: usize) -> Result<Vec<T>, BrittleFaceTimeError> {

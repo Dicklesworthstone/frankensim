@@ -1,5 +1,50 @@
 # fs-solid CONTRACT
 
+## Brittle time continuation through impact, sustained contact and release
+
+`advance_released_face_time_with_sustained` extends the original released-face
+time driver with its native nonlinear sustained-force owner. The impact-only
+entry retains its behavior through the same shared core. Approaching active
+pairs go through the existing simultaneous impact response first; normally
+resting active pairs use the original held-force complementarity solve. Unloaded
+separation returns to the free-flight path. A successful sustained endpoint is
+also scanned for a newly approaching pair, so an endpoint event is processed
+before accepting the requested final physical time.
+
+Every force interval uses the original global affine force mean and prescribed
+support path. Previous normal forces seed subsequent numerical solves in the
+stable retained row order, and seeds are cleared after impact. They are not
+material history or prescribed physical forces. All original force responses,
+including finite-difference probes and final replay, spend the same complete
+native-solve budget as contact localization. Only accepted motion intervals
+consume physical steps; impacts remain instantaneous. All original native source,
+material, mass, geometry, force-mode and work admission stays in force.
+
+The result retains compact force/contact records and the original total-load
+midpoint receipt beside each external-only interval account. Whole-duration
+compensated kinetic, elastic, fracture, external/support and impact-loss accounts
+remain shared with impact-only time. Signed and absolute sustained normal work
+have an additional whole-duration gate; this numerical constraint-work account
+is never added as external work, contact dissipation, fracture energy or heat.
+The final motion is published only after all intervals and global work checks
+succeed. Any late source, contact, geometry, budget or cancellation refusal
+leaves the original predecessor available for retry.
+
+Force/approach activation and normal-velocity tolerances must agree. The chosen
+maximum interval remains temporal resolution, not an adaptive error certificate.
+Fixed matching traces and native small-strain domains still bound the model.
+An unresolved new arrival while other pairs remain loaded may refuse and require
+interval refinement; arbitrary mixed-mode event trajectories, global CCD,
+finite sliding, friction and new-pair discovery are not claimed.
+
+G1/G3 cases in `tests/brittle_tet_fragment_contact/sustained/time.rs` check four
+loaded intervals without impulses or numerical damping; independently calculated
+accelerated approach, inelastic consistent-mass impact and sustained remainder;
+and affine load reversal through release into free flight. Original global-time
+force means, non-rigid fragment velocity, distinct impact loss, exact final clock
+and complete work are checked. All 18 tests in the existing fragment-contact
+target pass together in the focused native-source integration lane.
+
 ## Sustained contact between native brittle fragments
 
 `BrittleTetMotion::advance_released_face_sustained` solves simultaneous

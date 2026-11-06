@@ -7,7 +7,7 @@ use fs_solid::brittle::solid::dynamics::fracture::contact::time::{
     BrittleFaceTimeControls, BrittleFaceTimeError,
 };
 
-fn time_controls() -> BrittleFaceTimeControls {
+pub(super) fn time_controls() -> BrittleFaceTimeControls {
     let approach = approach_controls();
     let mut impact = impact_controls();
     impact.activation_tolerance_m = approach.activation_tolerance_m;
