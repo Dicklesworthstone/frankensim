@@ -412,15 +412,15 @@ pub(crate) fn validate(
     Ok(())
 }
 
-struct PrefixLoads<'a> {
+pub(super) struct PrefixLoads<'a> {
     initial_u: &'a [f64],
     prescribed_end: &'a [(usize, f64)],
     force_intervals: &'a [(usize, [f64; 2])],
-    prescribed: Vec<(usize, f64)>,
-    forces: Vec<(usize, f64)>,
+    pub(super) prescribed: Vec<(usize, f64)>,
+    pub(super) forces: Vec<(usize, f64)>,
 }
 impl<'a> PrefixLoads<'a> {
-    fn new(
+    pub(super) fn new(
         initial_u: &'a [f64],
         prescribed_end: &'a [(usize, f64)],
         force_intervals: &'a [(usize, [f64; 2])],
@@ -463,7 +463,11 @@ impl<'a> PrefixLoads<'a> {
         })
     }
 
-    fn at(&mut self, fraction: f64, cx: &Cx<'_>) -> Result<(), BrittleFaceApproachError> {
+    pub(super) fn at(
+        &mut self,
+        fraction: f64,
+        cx: &Cx<'_>,
+    ) -> Result<(), BrittleFaceApproachError> {
         for (entry, &(dof, end)) in self.prescribed.iter_mut().zip(self.prescribed_end) {
             checkpoint(cx)?;
             entry.1 = interpolate(self.initial_u[dof], end, fraction);

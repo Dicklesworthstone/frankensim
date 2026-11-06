@@ -8,6 +8,8 @@ use fs_solid::brittle::solid::dynamics::fracture::contact::sustained::{
 };
 use fs_solver::NewtonKrylovConfig;
 
+#[path = "sustained/approach.rs"]
+mod approach;
 #[path = "sustained/time.rs"]
 mod time;
 

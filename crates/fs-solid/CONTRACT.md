@@ -1,5 +1,37 @@
 # fs-solid CONTRACT
 
+## Brittle arrivals on an already loaded contact trajectory
+
+`advance_toward_released_face_contact_with_sustained` locates a new released-face
+arrival while initially resting, active, matched pairs retain the original
+nonlinear sustained-force response. Initially open or separating pairs receive
+no contact force during the search. Every complete candidate is scanned against
+all released openings; only an overlap on an unforced pair narrows the sampled
+endpoint bracket. Participating-row, material, solver, mode and work refusals
+remain terminal. No free-motion substitute, force across an open gap, state
+interpolation or position/velocity correction supplies an accepted prefix.
+
+The existing affine-load sampler gives each trial its actual prefix force mean
+and prescribed endpoint. All trials replay one accepted material/mass/history
+state. Warm starts map forces by complete paired-row identity, never subset
+position. Endpoint attempts and every native mechanical response have separate
+whole-search budgets, including discarded candidates and final force replays.
+Only the accepted prefix spends a physical timestep. An initially active
+approach returns a zero-time witness without a force solve.
+
+Accepted paths retain strict nonnegative paired openings, the original released
+face guard, native support work, and all normal complementarity, signed/absolute
+work and force-couple gates. The reported bracket concerns sampled native
+endpoints and the accepted affine trace, not globally earliest continuous
+collision detection. Fixed paired faces, small strain and frictionless normal
+response remain the declared model.
+
+G1/G3 tests in `tests/brittle_tet_fragment_contact/sustained/approach.rs` use a
+shared-mass, two-face fractured specimen. Independent consistent-mass equations
+check constrained acceleration, aggregate reactions at duplicated rows, contact
+time, external work and retained fracture history, with bounded atomic refusal
+and retry.
+
 ## Brittle time continuation through impact, sustained contact and release
 
 `advance_released_face_time_with_sustained` extends the original released-face

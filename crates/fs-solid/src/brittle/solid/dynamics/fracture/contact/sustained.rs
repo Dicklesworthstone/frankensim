@@ -6,6 +6,9 @@
 //! nonpenetrating candidate advances time. Normal forces are interval means,
 //! never impulses divided by time or artificial penalty springs.
 
+/// Loaded-contact prefixes localizing arrival of other released faces.
+pub mod approach;
+
 use fs_contact::sustained::NaturalMapScales;
 use fs_contact::sustained::solve::{MAX_CONTACTS, SolveControls, SolveError, SolveReport};
 use fs_exec::Cx;
@@ -45,7 +48,9 @@ pub struct BrittleFaceSustainedStep<'a> {
     /// Unmodified midpoint receipt including the applied contact nodal loads.
     pub native_energy: BrittleTetMidpointEnergy,
     pub solve: SolveReport,
-    /// Every non-tied released-face pair in retained face/vertex order.
+    /// Participating pairs in retained face/vertex order. The standalone solve
+    /// includes all non-tied pairs; constrained arrival prefixes include only
+    /// the pairs that were initially resting, active and tangentially matched.
     pub rows: Vec<BrittleFaceImpactRow>,
     pub normal_contact_work_j: f64,
     pub absolute_contact_work_j: f64,
@@ -145,26 +150,36 @@ impl<'a> BrittleTetMotion<'a> {
         controls: BrittleFaceSustainedControls,
         cx: &Cx<'_>,
     ) -> Result<BrittleFaceSustainedStep<'a>, BrittleFaceSustainedError> {
+        self.sustained_candidate(
+            dt_s,
+            prescribed_m,
+            mean_nodal_forces_n,
+            initial_normal_forces_n,
+            SustainedScope::Complete,
+            settings,
+            controls,
+            cx,
+        )
+    }
+
+    /// Private constrained response. InitialResting defers opening admission
+    /// only for unforced rows, which the arrival locator must check before
+    /// exposing a motion. All participating-row and physical work gates remain.
+    #[allow(clippy::too_many_arguments)]
+    fn sustained_candidate(
+        &self,
+        dt_s: f64,
+        prescribed_m: &[(usize, f64)],
+        mean_nodal_forces_n: &[(usize, f64)],
+        initial_normal_forces_n: Option<&[f64]>,
+        scope: SustainedScope,
+        settings: IncrementSettings,
+        controls: BrittleFaceSustainedControls,
+        cx: &Cx<'_>,
+    ) -> Result<BrittleFaceSustainedStep<'a>, BrittleFaceSustainedError> {
         use BrittleFaceSustainedError as E;
         checkpoint(cx)?;
-        if !controls.normal_scale_n_per_m.is_finite()
-            || controls.normal_scale_n_per_m <= 0.0
-            || [
-                controls.activation_tolerance_m,
-                controls.tangential_tolerance_m,
-                controls.velocity_tolerance_mps,
-                controls.force_tolerance_n,
-                controls.complementarity_tolerance_j,
-                controls.contact_work_tolerance_j,
-                controls.force_moment_tolerance_n_m,
-            ]
-            .iter()
-            .any(|v| !v.is_finite() || *v < 0.0)
-        {
-            return Err(E::Invalid(
-                "finite nonnegative physical gates and positive normal scale required",
-            ));
-        }
+        validate_controls(controls)?;
         let old_u = self.solid.solution.displacement_m.as_flattened();
         if mean_nodal_forces_n.len() > old_u.len() || prescribed_m.len() > old_u.len() {
             return Err(E::Invalid("load entries exceed original DOF count"));
@@ -192,11 +207,6 @@ impl<'a> BrittleTetMotion<'a> {
                 if nodes[0] == nodes[1] {
                     continue;
                 }
-                if rows.len() >= MAX_CONTACTS || rows.len() >= controls.solve.maximum_contacts {
-                    return Err(E::Invalid(
-                        "all non-tied released-face rows must fit the sustained solve budget",
-                    ));
-                }
                 let row = BrittleFaceImpactRow {
                     face_id: face.id,
                     vertex,
@@ -217,6 +227,14 @@ impl<'a> BrittleTetMotion<'a> {
                         vertex,
                         normal_speed_mps: geometry.speed,
                     });
+                }
+                if scope == SustainedScope::InitialResting && !resting(geometry, controls) {
+                    continue;
+                }
+                if rows.len() >= MAX_CONTACTS || rows.len() >= controls.solve.maximum_contacts {
+                    return Err(E::Invalid(
+                        "all participating released-face rows must fit the sustained solve budget",
+                    ));
                 }
                 rows.push(row);
                 normals.push(face.normal);
@@ -375,8 +393,10 @@ impl<'a> BrittleTetMotion<'a> {
                     .max(super::norm(super::cross(after.separation, physical_force))),
             );
         }
-        self.solid
-            .require_released_faces(&step.motion.solid.solution.displacement_m, cx)?;
+        if scope == SustainedScope::Complete {
+            self.solid
+                .require_released_faces(&step.motion.solid.solution.displacement_m, cx)?;
+        }
         let mut external_work = Sum::default();
         for &(dof, force) in mean_nodal_forces_n {
             checkpoint(cx)?;
@@ -466,6 +486,42 @@ impl<'a> BrittleTetMotion<'a> {
             numerical_tangent_evaluations: tangent_evaluations,
         })
     }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SustainedScope {
+    Complete,
+    InitialResting,
+}
+
+fn validate_controls(
+    controls: BrittleFaceSustainedControls,
+) -> Result<(), BrittleFaceSustainedError> {
+    if !controls.normal_scale_n_per_m.is_finite()
+        || controls.normal_scale_n_per_m <= 0.0
+        || [
+            controls.activation_tolerance_m,
+            controls.tangential_tolerance_m,
+            controls.velocity_tolerance_mps,
+            controls.force_tolerance_n,
+            controls.complementarity_tolerance_j,
+            controls.contact_work_tolerance_j,
+            controls.force_moment_tolerance_n_m,
+        ]
+        .iter()
+        .any(|v| !v.is_finite() || *v < 0.0)
+    {
+        return Err(BrittleFaceSustainedError::Invalid(
+            "finite nonnegative physical gates and positive normal scale required",
+        ));
+    }
+    Ok(())
+}
+
+fn resting(geometry: Pair, controls: BrittleFaceSustainedControls) -> bool {
+    geometry.gap <= controls.activation_tolerance_m
+        && geometry.speed.abs() <= controls.velocity_tolerance_mps
+        && geometry.tangent <= controls.tangential_tolerance_m
 }
 
 #[derive(Clone, Copy)]
