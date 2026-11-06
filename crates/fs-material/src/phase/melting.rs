@@ -61,9 +61,12 @@ impl ResolvedMeltingCurve {
     /// The declared enthalpy datum applies at the solid branch's lower endpoint.
     /// `maximum_interpolation_error_j_kg` bounds sensible-branch interpolation
     /// relative to the admitted piecewise-linear Cp laws, not source uncertainty
-    /// or floating-point roundoff. The combined chart retains the original
-    /// generated-knot budget. Fusion is an exact-temperature plateau in that
-    /// chart; its width must remain representable at the chosen enthalpy datum.
+    /// or sensible-integration roundoff. The same value separately bounds the
+    /// absolute difference between the represented plateau width and sourced
+    /// fusion energy. These independent checks do not bound the sum of all
+    /// chart errors. The combined chart retains the original generated-knot
+    /// budget. Fusion is an exact-temperature plateau whose width must remain
+    /// representable within that allowance at the chosen enthalpy datum.
     ///
     /// Density preserves its independently sourced rho(T) law on each sensible
     /// branch. The original chart interpolates specific volume through
@@ -146,6 +149,13 @@ impl ResolvedMeltingCurve {
                 "fusion energy is not representable at the selected enthalpy datum",
             ));
         }
+        if (represented_latent_heat - latent_heat_fusion_j_kg).abs()
+            > maximum_interpolation_error_j_kg
+        {
+            return Err(invalid(
+                "fusion energy rounding exceeds the declared enthalpy error allowance",
+            ));
+        }
         let liquid = ResolvedHeatCapacityCurve::try_new(
             card,
             query.liquid,
@@ -205,6 +215,7 @@ impl ResolvedMeltingCurve {
     }
 
     /// Admitted source value, before finite-precision addition to the datum.
+    /// The represented plateau width differs by at most the construction allowance.
     #[must_use]
     pub const fn latent_heat_fusion_j_kg(&self) -> f64 {
         self.latent_heat_fusion_j_kg

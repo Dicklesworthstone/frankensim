@@ -591,6 +591,72 @@ fn g0_finite_plateau_endpoints_cannot_hide_unrepresentable_latent_width() {
 }
 
 #[test]
+fn g0_finite_fusion_width_cannot_exceed_source_rounding_allowance() {
+    let query = Query::new();
+    let datum = 2.0_f64.powi(59);
+    let solid_end_h = datum + 128.0;
+    // The sensible branches are exact at this datum. Fusion alone rounds up
+    // from 100 to 128 J/kg, or down from 160 to 128 J/kg.
+    assert_eq!(solid_end_h - datum, 128.0);
+    for latent in [100.0, 160.0] {
+        let source = card_with_heat_capacities(Some(latent), true, false, [1.28; 2], [1.28; 2]);
+        assert_eq!((solid_end_h + latent) - solid_end_h, 128.0);
+        assert!(matches!(
+            ResolvedMeltingCurve::try_new(&source, query.query(), datum, 0.1),
+            Err(PhaseStateError::InvalidCurve {
+                what: "fusion energy rounding exceeds the declared enthalpy error allowance"
+            })
+        ));
+    }
+}
+
+#[test]
+fn g3_representable_datum_shifts_preserve_fusion_energy_and_phase() {
+    let source = card_with_heat_capacities(Some(256.0), true, false, [1.28; 2], [1.28; 2]);
+    let query = Query::new();
+    let original = ResolvedMeltingCurve::try_new(&source, query.query(), 0.0, 0.1).unwrap();
+    for datum in [-2.0_f64.powi(59), 2.0_f64.powi(59)] {
+        let shifted = ResolvedMeltingCurve::try_new(&source, query.query(), datum, 0.1).unwrap();
+        let [solid_h, liquid_h] = shifted.plateau_enthalpy_bounds_j_kg();
+        assert_eq!(liquid_h - solid_h, shifted.latent_heat_fusion_j_kg());
+        for h in [0.0, 128.0, 256.0, 384.0, 512.0] {
+            let a = original.curve().state_at_specific_enthalpy(h).unwrap();
+            let b = shifted
+                .curve()
+                .state_at_specific_enthalpy(datum + h)
+                .unwrap();
+            assert_eq!(a.temperature_k(), b.temperature_k());
+            assert_eq!(a.liquid_mass_fraction(), b.liquid_mass_fraction());
+            assert_eq!(a.bulk_density_kg_m3(), b.bulk_density_kg_m3());
+        }
+    }
+}
+
+#[test]
+fn g0_ordinary_fusion_rounding_within_allowance_remains_admissible() {
+    let source = card_with_heat_capacities(Some(100.1), true, false, [1000.0; 2], [1000.0; 2]);
+    let query = Query::new();
+    let allowance = 1e-9;
+    let model = ResolvedMeltingCurve::try_new(&source, query.query(), 0.0, allowance).unwrap();
+    let [solid_h, liquid_h] = model.plateau_enthalpy_bounds_j_kg();
+    let discrepancy = ((liquid_h - solid_h) - model.latent_heat_fusion_j_kg()).abs();
+    assert!(discrepancy > 0.0 && discrepancy < allowance);
+    assert_eq!(model.latent_heat_fusion_j_kg(), 100.1);
+}
+
+#[test]
+fn g0_looser_fusion_allowance_admits_rounding_without_rewriting_source() {
+    let source = card_with_heat_capacities(Some(100.0), true, false, [1.28; 2], [1.28; 2]);
+    let query = Query::new();
+    let datum = 2.0_f64.powi(59);
+    let model = ResolvedMeltingCurve::try_new(&source, query.query(), datum, 28.0).unwrap();
+    let [solid_h, liquid_h] = model.plateau_enthalpy_bounds_j_kg();
+    assert_eq!(liquid_h - solid_h, 128.0);
+    assert_eq!(model.latent_heat_fusion_j_kg(), 100.0);
+    assert_eq!((liquid_h - solid_h) - model.latent_heat_fusion_j_kg(), 28.0);
+}
+
+#[test]
 fn g0_transition_gaps_pressure_changes_and_phase_relabeling_refuse() {
     let source = card(Some(200_000.0), true, false);
     for (index, replacement) in [
