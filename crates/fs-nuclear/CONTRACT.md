@@ -1833,31 +1833,66 @@ All eleven passed in a standalone build of the actual response module using
 the pinned `nightly-2026-07-06` compiler. This validates the response equations
 and numerical boundaries, not external transport data or a workspace Cargo gate.
 
-## Evaluated fission-neutron multiplicities
+## Radiation deposition on the shared material thermal timeline
 
-`endf::neutron_yield::FissionNeutronYield` imports the distinct MF1/MT452 total,
-MT456 prompt and MT455 delayed neutron yields from supplied ENDF-6 text. Exact
-MAT, nuclide/isomer and metadata temperature select one section. The original
-bounded reader admits histogram/linear TAB1 laws, preserves multiplicities
-above one, converts incident energies to joules and rejects duplicate matching
-sections, truncation, unsupported interpolation and excess work or storage.
-MT455 with LDG=0 retains the ordered positive precursor decay constants in
-inverse seconds. Family abundances and outgoing neutron spectra are separate
-data; the importer does not infer either from these constants. Polynomial
-LNU=1 and energy-dependent delayed constants LDG=1 explicitly refuse.
+`NuclearHeating::with_radiation_response` binds the response to the complete
+original source collection and explicitly named `RadiationReceiver` materials.
+Response IDs use the original `CellId.0`. Receivers need no nuclear inventory;
+multiple emitters can heat one receiver, and a source can reabsorb its own
+outward radiation. Exact source/destination coverage is required. Receiver mass,
+geometry, body/segment identity, material, available caloric identity and storage
+basis retain the same correspondence checks as the original source bindings.
+Changed correspondence refuses, including on an idle call.
 
-MF1 yield data can come from an unreconstructed zero-temperature evaluation.
-The existing MF3 cross-section importer still requires reconstructed processed
-data at its declared positive temperature. `collapse` admits their common
-isotope, target mass and library/revision identity, retaining both metadata
-records. It reuses the original reaction-weighted integration to preserve
-`integral(sigma_f * phi * nu)`, with no representative-energy sampling or yield
-normalization. A zero-reaction group has an undefined yield (`None`), not an
-invented neutron multiplicity. The output retains prompt/delayed/total meaning.
+Each final native interval first trials the original nuclear owners. The
+response then partitions their integrated emitted joules. Local deposition and
+all radiation contributions are compensated together per physical receiver,
+then converted once to mean watts over that same interval. Authored boundary
+heat remains additive. Only accepted thermal steps publish nuclear histories;
+response, material-domain, energy-budget or checkpoint refusal discards the
+entire candidate. The caller's exact thermal checkpoint error is preserved.
+Source shutdown retains radiation released later by existing decay reservoirs.
 
-Synthetic regressions exercise raw evaluation import, isomers, native spatial
-prompt growth and delayed release against analytical solutions, weighted
-production, incompatible data, malformed/unsupported records and late
-cancellation. They establish format and equation behavior, not validation of
-an evaluated isotope. The format follows ENDF-102 (2023), sections 1.2–1.4,
-<https://www.nndc.bnl.gov/endfdocs/ENDF-102-2023.pdf>.
+The source `EnergyChannels` and lifetime emission accounts remain unchanged.
+`FissionHeatingAudit` additionally reports `radiation_deposited_j`,
+`radiation_escaped_j` and `radiation_roundoff_j`. Thermal credit now includes
+local deposition plus the received radiation. Nonrecoverable source export is
+never deposited. Without a response, all emitted radiation remains exported and
+the original direct heat-credit path is retained without extra response maps.
+Response, aggregation and heat-credit defects share the original whole-advance
+numerical energy allowance; accepted substeps cannot renew that allowance.
+
+All existing `NuclearHeatSource` families use this same response seam, including
+prescribed fission, irradiation, burnup, capture activation, radioactive decay,
+spatial diffusion and transported inventories. Adaptive execution compares all
+original thermal cells, including radiation-only receivers. It reuses the same
+response and accounting transaction on each trial. Immutable response/binding
+data are shared across clones. The `fs-couple/nuclear-thermal` fission facade
+re-exports `radiation`; the radioactive facade additionally exposes the shared
+`NuclearHeating<DecayCellSource>` route and its receiver/audit/error types.
+
+The fixed response assumes its full emitted-energy mix and material-domain
+applicability remain valid. No changing spectrum, scattering solution,
+flight-time storage, dose or automatic response refresh is inferred. A new
+externally supplied response may be attached for the same still-valid cell
+bindings at an accepted clock boundary without replaying earlier emission.
+Spatial thermal transport remains the
+original explicit uniform-cell approximation, with its original refinement and
+material-domain requirements.
+
+Seven focused integration regressions cover analytic prompt/delayed calorimetry,
+complete escape and self-return, multiple scheduled emitters and restart,
+receiver correspondence, rollback/cancellation/accounting refusal, original
+radioactive decay and adaptive receiver cooling against an independent ODE.
+All seven passed against the complete production `fs-nuclear` library compiled
+with `thermal` enabled, using the original applicable numerical and thermal
+production modules. The adaptive balance separately retains gross nuclear
+input, receiver storage and convective export. The broader test-library build
+was terminated by the environment (exit 137), so this is a focused public-API
+result, not a completed full-suite or workspace Cargo gate.
+
+The original IF97 water example now demonstrates explicit synthetic self-return,
+nonlocal absorption and radiation escape during irradiation and shutdown. Its
+CSV separates emitted, received, escaped and nonrecoverable energy; its closure
+checks include received radiation once. The full water example and `fs-couple`
+Cargo checks remain unexecuted because the constellation dependencies are absent.

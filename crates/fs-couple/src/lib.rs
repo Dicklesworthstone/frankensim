@@ -38,7 +38,7 @@ pub mod fission {
         DecayHeatGroup, EnergyChannels, FissionBudget, FissionError, FissionModel,
         FissionState, FissionStep,
     };
-    pub use fs_nuclear::{burnup, cross_sections, diffusion, endf, irradiation, kinetics};
+    pub use fs_nuclear::{burnup, cross_sections, diffusion, endf, irradiation, kinetics, radiation};
     pub use fs_nuclear::thermal::*;
 }
 
@@ -46,6 +46,7 @@ pub mod fission {
 #[cfg(feature = "nuclear-thermal")]
 pub mod radioactive {
     pub use fs_nuclear::EnergyChannels;
+    pub use fs_nuclear::radiation;
     pub use fs_nuclear::endf::decay::{
         DecayEvaluation, EndfDecayReadLimits, EndfDecaySelection,
     };
@@ -73,6 +74,7 @@ pub mod radioactive {
     pub use fs_nuclear::thermal::{
         CaptureActivationCellSource, CaptureActivationHeating,
         DecayProductionCellSource, DecayProductionHeating,
+        FissionHeatingAudit, FissionThermalError, NuclearHeating, RadiationReceiver,
     };
 }
 

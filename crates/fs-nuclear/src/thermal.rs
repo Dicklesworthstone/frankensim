@@ -1,8 +1,10 @@
 //! Nuclear source histories on the existing conservative thermal grid.
 //!
-//! Only the nuclear source's locally deposited energy is credited to its bound
-//! cell. Transportable radiation and nonrecoverable export remain separate in
-//! the source account. The original thermal law, contact exchange, boundaries,
+//! Locally deposited energy heats the source's bound cell. An optional explicit
+//! radiation response deposits outward radiation in its original material
+//! receivers, retaining the escaping fraction separately. Nuclear emission and
+//! nonrecoverable export remain unchanged in the source account.
+//! The original thermal law, contact exchange, boundaries,
 //! enthalpy/internal-energy basis and thermal audit retain their existing owners.
 //!
 //! Prescribed-event sources and multigroup neutron irradiation share one clock,
@@ -24,10 +26,14 @@ use crate::decay::DecayError;
 use crate::decay::activation::CaptureActivationError;
 use crate::diffusion::burnup::DiffusionBurnupError;
 use crate::kinetics::KineticsError;
+use crate::radiation::RadiationError;
 use crate::{EnergyChannels, FissionError, FissionState};
 
 mod source;
 pub use source::{FluxDrivenHeatSource, NuclearHeatSource};
+mod radiation;
+pub use radiation::RadiationReceiver;
+use radiation::BoundRadiation;
 mod irradiation;
 pub use irradiation::{
     IrradiationCellSource, IrradiationCellStep, IrradiationHeating, IrradiationHeatingBudget,
@@ -164,9 +170,17 @@ pub struct FissionCellSource {
 pub struct FissionHeatingAudit {
     /// Released channels, including channels deliberately not sent to heat.
     pub released: EnergyChannels,
+    /// Emitted radiation subsequently deposited in the bound material receivers.
+    /// This is a partition of `released.radiation_j`, not additional generation.
+    pub radiation_deposited_j: f64,
+    /// Emitted radiation leaving the represented receiver system. Without a
+    /// response this equals all outward radiation; neutrino-like export is separate.
+    pub radiation_escaped_j: f64,
+    /// Noncancelling response coefficient, product and reduction defects [J].
+    pub radiation_roundoff_j: f64,
     /// Actual `average_source_w * accepted_dt_s` delivered to the thermal owner.
     pub thermal_credit_j: f64,
-    /// Sum of absolute differences between source deposition and thermal credit.
+    /// Absolute cell-energy aggregation and actual heat-credit defects [J].
     pub coupling_roundoff_j: f64,
     /// Sum of nuclear numerical energy defects and declared source roundoff.
     pub nuclear_energy_defect_j: f64,
@@ -201,6 +215,8 @@ pub enum FissionThermalError {
     Activation(CaptureActivationError),
     /// Spatial neutron, finite-fuel or shared reaction-account refusal.
     Diffusion(DiffusionBurnupError),
+    /// Original radiation response, coverage, work or energy-account refusal.
+    Radiation(RadiationError),
     /// Malformed schedule, duplicate owner or inconsistent hook sequence.
     Invalid(&'static str),
     /// A source names a cell that has not been activated.
@@ -256,6 +272,11 @@ impl From<KineticsError> for FissionThermalError {
         Self::Kinetics(error)
     }
 }
+impl From<RadiationError> for FissionThermalError {
+    fn from(error: RadiationError) -> Self {
+        Self::Radiation(error)
+    }
+}
 impl From<DecayError> for FissionThermalError {
     fn from(error: DecayError) -> Self {
         Self::Decay(error)
@@ -299,6 +320,7 @@ impl std::error::Error for FissionThermalError {
             Self::Decay(error) => Some(error),
             Self::Activation(error) => Some(error),
             Self::Diffusion(error) => Some(error),
+            Self::Radiation(error) => Some(error),
             _ => None,
         }
     }
@@ -307,13 +329,72 @@ impl std::error::Error for FissionThermalError {
 #[derive(Clone, Debug)]
 struct BoundSource<S: NuclearHeatSource> {
     source: S,
+    binding: ThermalBinding,
+    last_step: Option<S::Step>,
+}
+
+// Sources and radiation-only receivers enforce the same original material and
+// physical-cell correspondence. A response never grants authority to change it.
+#[derive(Clone, Debug)]
+struct ThermalBinding {
+    material_id: MaterialId,
     mass_kg: f64,
     geometry: CellGeometry,
     body_id: u64,
     segment_id: u64,
     caloric_identity: Option<[u8; 32]>,
     storage_basis: ThermalStorageBasis,
-    last_step: Option<S::Step>,
+}
+
+impl ThermalBinding {
+    fn new(
+        thermal: &DepositionSimulation<'_>,
+        id: CellId,
+        material_id: MaterialId,
+    ) -> Result<Self, FissionThermalError> {
+        let cell = thermal.cells().get(&id).ok_or(FissionThermalError::InactiveCell(id))?;
+        if cell.material_id != material_id {
+            return Err(FissionThermalError::MaterialMismatch {
+                cell_id: id,
+                expected: material_id,
+                actual: cell.material_id,
+            });
+        }
+        Ok(Self {
+            material_id,
+            mass_kg: cell.mass_kg,
+            geometry: cell.geometry,
+            body_id: cell.body_id,
+            segment_id: cell.segment_id,
+            caloric_identity: thermal.material_caloric_identity(material_id)?,
+            storage_basis: thermal.material_storage_basis(material_id)?,
+        })
+    }
+
+    fn validate(
+        &self,
+        thermal: &DepositionSimulation<'_>,
+        id: CellId,
+    ) -> Result<(), FissionThermalError> {
+        let cell = thermal.cells().get(&id).ok_or(FissionThermalError::InactiveCell(id))?;
+        if cell.material_id != self.material_id {
+            return Err(FissionThermalError::MaterialMismatch {
+                cell_id: id,
+                expected: self.material_id,
+                actual: cell.material_id,
+            });
+        }
+        if cell.mass_kg != self.mass_kg
+            || cell.geometry != self.geometry
+            || cell.body_id != self.body_id
+            || cell.segment_id != self.segment_id
+            || thermal.material_caloric_identity(cell.material_id)? != self.caloric_identity
+            || thermal.material_storage_basis(cell.material_id)? != self.storage_basis
+        {
+            return Err(FissionThermalError::BindingChanged(id));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -337,6 +418,7 @@ struct PendingStep<S: NuclearHeatSource> {
 pub struct NuclearHeating<S: NuclearHeatSource> {
     time_s: f64,
     sources: BTreeMap<CellId, BoundSource<S>>,
+    radiation: Option<Arc<BoundRadiation>>,
     budget: S::Budget,
     pending: Option<PendingStep<S>>,
     account: Account,
@@ -363,20 +445,10 @@ impl<S: NuclearHeatSource> NuclearHeating<S> {
         let mut bound = BTreeMap::new();
         for source in sources {
             let id = source.cell_id();
-            let cell = thermal
-                .cells()
-                .get(&id)
-                .ok_or(FissionThermalError::InactiveCell(id))?;
-            if cell.material_id != source.material_id() {
-                return Err(FissionThermalError::MaterialMismatch {
-                    cell_id: id,
-                    expected: source.material_id(),
-                    actual: cell.material_id,
-                });
-            }
+            let binding = ThermalBinding::new(thermal, id, source.material_id())?;
             if source
                 .expected_volume_m3()
-                .is_some_and(|volume| volume != cell.geometry.volume_m3)
+                .is_some_and(|volume| volume != binding.geometry.volume_m3)
             {
                 return Err(FissionThermalError::BindingChanged(id));
             }
@@ -385,12 +457,7 @@ impl<S: NuclearHeatSource> NuclearHeating<S> {
             source.admit(thermal.time_s(), thermal.temperature_k(id)?, budget)?;
             let value = BoundSource {
                 source,
-                mass_kg: cell.mass_kg,
-                geometry: cell.geometry,
-                body_id: cell.body_id,
-                segment_id: cell.segment_id,
-                caloric_identity: thermal.material_caloric_identity(cell.material_id)?,
-                storage_basis: thermal.material_storage_basis(cell.material_id)?,
+                binding,
                 last_step: None,
             };
             if bound.insert(id, value).is_some() {
@@ -402,6 +469,7 @@ impl<S: NuclearHeatSource> NuclearHeating<S> {
         Ok(Self {
             time_s: thermal.time_s(),
             sources: bound,
+            radiation: None,
             budget,
             pending: None,
             account: Account::default(),
@@ -465,7 +533,11 @@ impl<S: NuclearHeatSource> NuclearHeating<S> {
     }
 
     fn admit_audit(&self, audit: &FissionHeatingAudit) -> Result<(), FissionThermalError> {
-        let defect = finite(audit.coupling_roundoff_j + audit.nuclear_energy_defect_j)?;
+        let mut defects = Sum::default();
+        defects.add(audit.coupling_roundoff_j)?;
+        defects.add(audit.nuclear_energy_defect_j)?;
+        defects.add(audit.radiation_roundoff_j)?;
+        let defect = defects.nonnegative_upper_bound()?;
         if defect > S::energy_tolerance_j(self.budget) {
             return Err(FissionThermalError::EnergyBudget {
                 defect_j: defect,
@@ -509,29 +581,13 @@ impl<S: NuclearHeatSource> NuclearHeating<S> {
             if index % 64 == 0 {
                 checkpoint()?;
             }
-            let cell = thermal
-                .cells()
-                .get(&id)
-                .ok_or(FissionThermalError::InactiveCell(id))?;
-            if cell.material_id != bound.source.material_id() {
-                return Err(FissionThermalError::MaterialMismatch {
-                    cell_id: id,
-                    expected: bound.source.material_id(),
-                    actual: cell.material_id,
-                });
-            }
-            if cell.mass_kg != bound.mass_kg
-                || cell.geometry != bound.geometry
-                || cell.body_id != bound.body_id
-                || cell.segment_id != bound.segment_id
-                || thermal.material_caloric_identity(cell.material_id)? != bound.caloric_identity
-                || thermal.material_storage_basis(cell.material_id)? != bound.storage_basis
-            {
-                return Err(FissionThermalError::BindingChanged(id));
-            }
+            bound.binding.validate(thermal, id)?;
             bound
                 .source
                 .validate_temperature(thermal.temperature_k(id)?)?;
+        }
+        if let Some(radiation) = &self.radiation {
+            radiation.validate(thermal, checkpoint)?;
         }
         Ok(())
     }
@@ -625,6 +681,12 @@ impl<S: NuclearHeatSource> DepositionObserver for NuclearHeating<S> {
         }
         let mut states = Vec::with_capacity(self.sources.len());
         let mut watts = BTreeMap::new();
+        let mut heat_j = BTreeMap::<CellId, Sum>::new();
+        let mut emitted_radiation = if self.radiation.is_some() {
+            Vec::with_capacity(self.sources.len())
+        } else {
+            Vec::new()
+        };
         let mut account = self.account.clone();
         for ((&id, bound), (state, report)) in self.sources.iter().zip(trials) {
             checkpoint()?;
@@ -633,11 +695,35 @@ impl<S: NuclearHeatSource> DepositionObserver for NuclearHeating<S> {
                     "nuclear collection changed material correspondence",
                 ));
             }
-            let power = finite(S::released(&report).deposited_j / duration_s)?;
-            let credit = finite(power * duration_s)?;
-            account.record::<S>(&report, credit)?;
-            watts.insert(id, power);
+            let released = S::released(&report);
+            account.record::<S>(&report)?;
+            if self.radiation.is_some() {
+                heat_j.entry(id).or_default().add(released.deposited_j)?;
+                emitted_radiation.push((id.0, released.radiation_j));
+            } else {
+                account.radiation_escaped.add(released.radiation_j)?;
+                // Keep the original one-map path when no response is attached.
+                let power = account.credit_heat(released.deposited_j, 0.0, duration_s)?;
+                watts.insert(id, power);
+            }
             states.push((id, state, report));
+        }
+        if let Some(radiation) = &self.radiation {
+            radiation.deposit(
+                &emitted_radiation,
+                S::energy_tolerance_j(self.budget),
+                &mut heat_j,
+                &mut account,
+                checkpoint,
+            )?;
+        }
+        // Combine direct deposition and radiation from every emitter in joules
+        // before converting ONCE per physical receiver to the native mean power.
+        // This also covers receivers with no nuclear inventory and self-return.
+        for (id, energy) in heat_j {
+            checkpoint()?;
+            let power = account.credit_heat(energy.value()?, energy.export_roundoff()?, duration_s)?;
+            watts.insert(id, power);
         }
         account.substeps = account
             .substeps
@@ -739,6 +825,9 @@ impl Sum {
 #[derive(Clone, Debug, Default)]
 struct Account {
     released: [Sum; 3],
+    radiation_deposited: Sum,
+    radiation_escaped: Sum,
+    radiation_roundoff: Sum,
     credit: Sum,
     coupling_roundoff: Sum,
     nuclear_defect: Sum,
@@ -750,18 +839,28 @@ struct Account {
     substeps: usize,
 }
 impl Account {
+    fn credit_heat(
+        &mut self,
+        deposited_j: f64,
+        aggregation_roundoff_j: f64,
+        duration_s: f64,
+    ) -> Result<f64, FissionThermalError> {
+        let power = finite(deposited_j / duration_s)?;
+        let credit = finite(power * duration_s)?;
+        self.credit.add(credit)?;
+        self.coupling_roundoff.add(aggregation_roundoff_j)?;
+        self.coupling_roundoff.add((credit - deposited_j).abs())?;
+        Ok(power)
+    }
+
     fn record<S: NuclearHeatSource>(
         &mut self,
         report: &S::Step,
-        credit: f64,
     ) -> Result<(), FissionThermalError> {
         let released = S::released(report);
         self.released[0].add(released.deposited_j)?;
         self.released[1].add(released.radiation_j)?;
         self.released[2].add(released.escaped_j)?;
-        self.credit.add(credit)?;
-        self.coupling_roundoff
-            .add((credit - released.deposited_j).abs())?;
         // The core's noncancelling roundoff already includes its residual.
         self.nuclear_defect.add(S::energy_roundoff_j(report))?;
         self.fissions.add(S::fissions(report))?;
@@ -781,14 +880,24 @@ impl Account {
         population_roundoff.add(self.fissions.export_roundoff()?)?;
         population_roundoff.add(self.captures.export_roundoff()?)?;
         let population_roundoff_nuclei = population_roundoff.nonnegative_upper_bound()?;
+        let mut radiation_roundoff = self.radiation_roundoff;
+        radiation_roundoff.add(self.radiation_deposited.export_roundoff()?)?;
+        radiation_roundoff.add(self.radiation_escaped.export_roundoff()?)?;
+        radiation_roundoff.add(self.released[1].export_roundoff()?)?;
+        let mut coupling_roundoff = self.coupling_roundoff;
+        coupling_roundoff.add(self.credit.export_roundoff()?)?;
+        coupling_roundoff.add(self.released[0].export_roundoff()?)?;
         Ok(FissionHeatingAudit {
             released: EnergyChannels {
                 deposited_j: self.released[0].value()?,
                 radiation_j: self.released[1].value()?,
                 escaped_j: self.released[2].value()?,
             },
+            radiation_deposited_j: self.radiation_deposited.value()?,
+            radiation_escaped_j: self.radiation_escaped.value()?,
+            radiation_roundoff_j: radiation_roundoff.nonnegative_upper_bound()?,
             thermal_credit_j: self.credit.value()?,
-            coupling_roundoff_j: self.coupling_roundoff.value()?,
+            coupling_roundoff_j: coupling_roundoff.nonnegative_upper_bound()?,
             nuclear_energy_defect_j: self.nuclear_defect.value()?,
             fissions: self.fissions.value()?,
             captures: self.captures.value()?,
