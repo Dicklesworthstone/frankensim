@@ -4,7 +4,12 @@
 //! discrete derivative `p = (U(b)-U(a))/(b-a)`. Its derivative with respect to
 //! `b` is `integral_0^1 t U''(a+t*(b-a)) dt`, so the inverse is unique on a
 //! strictly convex volume bracket. Quadratic bulk is inverted analytically;
-//! log-squared bulk retains its original energy on `0 < J < exp(1)`.
+//! log-squared bulk retains its original energy on `0 < Je < exp(1)`.
+//!
+//! A held reference deformation with Jg = det(G) retains TOTAL volume J and
+//! original-volume storage Jg U(J/Jg). Interval and endpoint pressures remain
+//! physical tensile pressures; d[Jg U(J/Jg)]/dJ = U'(Je). Volume compliance
+//! scales by Jg. The explicit branch settings always bound ELASTIC Je = J/Jg.
 //!
 //! This pressure is an interval work multiplier, not endpoint `U'(b)`. A mixed
 //! spatial owner retains `a` at each quadrature point and enforces its weak
@@ -20,16 +25,19 @@
 use fs_math::det;
 
 use super::super::mixed::{MixedFiniteStrainPotential, original_volume, pressure_potential};
+use super::super::reference::ReferenceDeformation;
 use super::super::{Hyperelastic, Volumetric};
 use crate::MaterialError;
 
 /// Hard upper bound on one local scalar solve; the caller selects its own cap.
 pub const MAX_BULK_SECANT_ITERATIONS: usize = 128;
 
-/// Explicit original-volume branch, scalar work cap and local error allowances.
+/// Explicit elastic-volume branch, scalar work cap and original-volume work allowances.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DiscreteBulkSettings {
+    /// Lower ELASTIC volume ratio Je = J_total / det(G), also for referenced points.
     pub minimum_volume_ratio: f64,
+    /// Upper ELASTIC volume ratio; log-squared storage additionally requires Je < e.
     pub maximum_volume_ratio: f64,
     pub maximum_iterations: usize,
     /// Absolute residual of the scalar pressure equation [Pa].
@@ -71,12 +79,13 @@ impl DiscreteBulkSettings {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DiscreteBulkResponse {
+    /// Endpoint TOTAL volume ratio relative to the original material reference.
     pub volume_ratio_after: f64,
     /// Original physical endpoint bulk storage per reference volume [Pa].
     pub energy_after_pa: f64,
     /// Original energy difference, evaluated without subtracting nearby squares.
     pub energy_change_pa: f64,
-    /// Original endpoint derivative U'(J_after), not the interval multiplier.
+    /// Original endpoint derivative U'(Je_after), not the interval multiplier.
     pub endpoint_pressure_pa: f64,
     /// dJ_after / d(interval pressure), positive on the admitted branch [Pa^-1].
     pub compliance_per_pa: f64,
@@ -92,6 +101,7 @@ pub struct DiscreteBulkResponse {
 #[derive(Clone, Copy, Debug)]
 pub struct DiscreteBulkPoint {
     volume: Volumetric,
+    reference_volume_ratio: f64,
     accepted_volume_ratio: f64,
     energy_before_pa: f64,
     settings: DiscreteBulkSettings,
@@ -166,16 +176,69 @@ impl DiscreteBulkPoint {
         Self::try_new(law, initial.volume_ratio, settings)
     }
 
+    /// Initialize a held-reference state from physical endpoint pressure.
+    /// The retained value is TOTAL J = det(G) Je, not elastic Je.
+    pub fn from_endpoint_pressure_with_reference(
+        law: &Hyperelastic,
+        reference: &ReferenceDeformation,
+        endpoint_pressure_pa: f64,
+        settings: DiscreteBulkSettings,
+    ) -> Result<Self, MaterialError> {
+        let volume = original_volume(law)?;
+        let initial = pressure_potential(volume, endpoint_pressure_pa)?;
+        Self::try_new_with_reference(
+            law,
+            reference,
+            reference.volume_ratio() * initial.volume_ratio,
+            settings,
+        )
+    }
+
     pub fn try_new(
         law: &Hyperelastic,
+        accepted_volume_ratio: f64,
+        settings: DiscreteBulkSettings,
+    ) -> Result<Self, MaterialError> {
+        Self::with_reference_volume(law, 1.0, accepted_volume_ratio, settings)
+    }
+
+    /// Retain a TOTAL accepted volume with one held prescribed reference G.
+    ///
+    /// The original law and its convex branch are unchanged. Settings bound
+    /// elastic Je = J_total/det(G), while storage, scalar work and their absolute
+    /// allowances are per ORIGINAL reference volume. G remains fixed through
+    /// response/rebind; changing it requires a signed reference-work owner.
+    pub fn try_new_with_reference(
+        law: &Hyperelastic,
+        reference: &ReferenceDeformation,
+        accepted_volume_ratio: f64,
+        settings: DiscreteBulkSettings,
+    ) -> Result<Self, MaterialError> {
+        Self::with_reference_volume(
+            law,
+            reference.volume_ratio(),
+            accepted_volume_ratio,
+            settings,
+        )
+    }
+
+    fn with_reference_volume(
+        law: &Hyperelastic,
+        reference_volume_ratio: f64,
         accepted_volume_ratio: f64,
         settings: DiscreteBulkSettings,
     ) -> Result<Self, MaterialError> {
         law.validate_mixed()?;
         let volume = original_volume(law)?;
         settings.validate(volume)?;
+        let minimum = reference_volume_ratio * settings.minimum_volume_ratio;
+        let maximum = reference_volume_ratio * settings.maximum_volume_ratio;
+        if !minimum.is_finite() || minimum <= 0.0 || !maximum.is_finite() || maximum <= minimum {
+            return Err(state_error("original-volume branch is unrepresentable"));
+        }
         let point = Self {
             volume,
+            reference_volume_ratio,
             accepted_volume_ratio,
             energy_before_pa: 0.0,
             settings,
@@ -183,6 +246,7 @@ impl DiscreteBulkPoint {
         point.rebind(accepted_volume_ratio)
     }
 
+    /// Retained TOTAL volume ratio, including the prescribed reference volume.
     pub fn accepted_volume_ratio(&self) -> f64 {
         self.accepted_volume_ratio
     }
@@ -191,16 +255,20 @@ impl DiscreteBulkPoint {
         self.energy_before_pa
     }
 
-    /// Original endpoint U'(J_before), useful as a physical pressure predictor.
+    /// Original endpoint U'(Je_before), useful as a physical pressure predictor.
     pub fn endpoint_pressure_pa(&self) -> f64 {
         self.endpoint_pressure(self.accepted_volume_ratio)
     }
 
-    /// Reuse the already admitted original law and controls at a new endpoint.
+    /// Reuse the admitted original law, held reference and controls at a new
+    /// TOTAL-volume endpoint.
     /// This creates a candidate; the accepted point is never modified.
     pub fn rebind(&self, volume_ratio: f64) -> Result<Self, MaterialError> {
         self.check_volume(volume_ratio)?;
-        let energy_before_pa = self.volume.energy(volume_ratio);
+        let energy_before_pa = self.reference_volume_ratio
+            * self
+                .volume
+                .energy(volume_ratio / self.reference_volume_ratio);
         if !energy_before_pa.is_finite() || !self.endpoint_pressure(volume_ratio).is_finite() {
             return Err(state_error(
                 "endpoint bulk storage or pressure is unrepresentable",
@@ -215,8 +283,8 @@ impl DiscreteBulkPoint {
 
     fn check_volume(&self, value: f64) -> Result<(), MaterialError> {
         if !value.is_finite()
-            || value < self.settings.minimum_volume_ratio
-            || value > self.settings.maximum_volume_ratio
+            || value < self.reference_volume_ratio * self.settings.minimum_volume_ratio
+            || value > self.reference_volume_ratio * self.settings.maximum_volume_ratio
         {
             Err(state_error(
                 "volume is outside the explicitly admitted branch",
@@ -227,6 +295,7 @@ impl DiscreteBulkPoint {
     }
 
     fn endpoint_pressure(&self, j: f64) -> f64 {
+        let j = j / self.reference_volume_ratio;
         self.volume.kappa()
             * match self.volume {
                 Volumetric::Quadratic { .. } => j - 1.0,
@@ -234,9 +303,11 @@ impl DiscreteBulkPoint {
             }
     }
 
-    // All entries normalized by kappa: secant, d(secant)/dJ_after and Delta U.
+    // Native entries per relaxed volume: secant/kappa, its derivative with
+    // respect to ELASTIC Je_after, and Delta U/kappa. Never replace the law.
     fn normalized_pair(&self, b: f64) -> (f64, f64, f64) {
-        let a = self.accepted_volume_ratio;
+        let a = self.accepted_volume_ratio / self.reference_volume_ratio;
+        let b = b / self.reference_volume_ratio;
         match self.volume {
             Volumetric::Quadratic { .. } => {
                 let secant = 0.5 * (a - 1.0) + 0.5 * (b - 1.0);
@@ -258,10 +329,11 @@ impl DiscreteBulkPoint {
         let secant_pa = kappa * secant;
         let response = DiscreteBulkResponse {
             volume_ratio_after: b,
-            energy_after_pa: self.volume.energy(b),
-            energy_change_pa: kappa * change,
+            energy_after_pa: self.reference_volume_ratio
+                * self.volume.energy(b / self.reference_volume_ratio),
+            energy_change_pa: self.reference_volume_ratio * (kappa * change),
             endpoint_pressure_pa: self.endpoint_pressure(b),
-            compliance_per_pa: (1.0 / kappa) / derivative,
+            compliance_per_pa: self.reference_volume_ratio * ((1.0 / kappa) / derivative),
             pressure_residual_pa: secant_pa - pressure_pa,
             work_pa: pressure_pa * (b - self.accepted_volume_ratio),
             work_defect_pa: 0.0,
@@ -313,8 +385,10 @@ impl DiscreteBulkPoint {
             return Err(state_error("interval pressure must be finite"));
         }
         if matches!(self.volume, Volumetric::Quadratic { .. }) {
-            let b = 1.0
-                + (2.0 * (pressure_pa / self.volume.kappa()) - (self.accepted_volume_ratio - 1.0));
+            let b = self.reference_volume_ratio
+                * (1.0
+                    + (2.0 * (pressure_pa / self.volume.kappa())
+                        - (self.accepted_volume_ratio / self.reference_volume_ratio - 1.0)));
             let (result, admitted) = self.candidate(pressure_pa, b, 0)?;
             return if admitted {
                 Ok(result)
@@ -331,8 +405,8 @@ impl DiscreteBulkPoint {
             }
         }
         let (mut lo, mut hi) = (
-            self.settings.minimum_volume_ratio,
-            self.settings.maximum_volume_ratio,
+            self.reference_volume_ratio * self.settings.minimum_volume_ratio,
+            self.reference_volume_ratio * self.settings.maximum_volume_ratio,
         );
         let (low, low_ok) = self.candidate(pressure_pa, lo, 0)?;
         let (high, high_ok) = self.candidate(pressure_pa, hi, 0)?;
@@ -349,9 +423,10 @@ impl DiscreteBulkPoint {
         }
         let (_, derivative, _) = self.normalized_pair(self.accepted_volume_ratio);
         let predictor = self.accepted_volume_ratio
-            + (pressure_pa / self.volume.kappa()
-                - self.endpoint_pressure_pa() / self.volume.kappa())
-                / derivative;
+            + self.reference_volume_ratio
+                * ((pressure_pa / self.volume.kappa()
+                    - self.endpoint_pressure_pa() / self.volume.kappa())
+                    / derivative);
         let mut b = if predictor > lo && predictor < hi {
             predictor
         } else {

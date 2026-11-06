@@ -33,6 +33,8 @@ use crate::MaterialError;
 /// Original finite-bulk storage and its work-conjugate interval pressure.
 pub mod bulk;
 
+mod reference;
+
 const SQRT_2: f64 = core::f64::consts::SQRT_2;
 
 /// The complete original elastic energy or its admitted bulk-free remainder.
@@ -47,8 +49,9 @@ pub enum EnergyPart {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DiscreteGradientSettings {
     /// Use the strain-midpoint limit when `|C1-C0| <= this*max(|C0|,|C1|)`.
+    /// For a held reference deformation these are ELASTIC Cauchy–Green strains.
     pub minimum_relative_strain_increment: f64,
-    /// Allowed absolute constitutive work defect per reference volume [Pa].
+    /// Allowed absolute constitutive work defect per ORIGINAL reference volume [Pa].
     pub absolute_work_tolerance_pa: f64,
     /// Additional allowance times max(|W0|, |W1|, |algorithmic work|).
     pub relative_work_tolerance: f64,
@@ -122,6 +125,7 @@ pub struct DiscreteGradientPoint<'a> {
     energy_before_pa: f64,
     volume_ratio_before: f64,
     settings: DiscreteGradientSettings,
+    reference: Option<reference::ReferenceBinding<'a>>,
 }
 
 #[derive(Clone, Copy)]
@@ -277,14 +281,19 @@ impl<'a> DiscreteGradientPoint<'a> {
             energy_before_pa,
             volume_ratio_before,
             settings,
+            reference: None,
         })
     }
 
+    /// Accepted TOTAL deformation, including any held reference deformation.
     pub fn accepted_deformation(&self) -> &[f64; 9] {
-        &self.accepted_f
+        self.reference
+            .as_ref()
+            .map_or(&self.accepted_f, |r| &r.accepted_total_f)
     }
+    /// Accepted storage per ORIGINAL reference volume [Pa].
     pub fn energy_before_pa(&self) -> f64 {
-        self.energy_before_pa
+        self.original_density(self.energy_before_pa)
     }
 
     pub fn state(&self, next_f: &[f64; 9]) -> Result<DiscreteGradientState, MaterialError> {
@@ -315,7 +324,7 @@ impl<'a> DiscreteGradientPoint<'a> {
 
     fn material_state(&self, pair: PairResponse) -> DiscreteGradientState {
         DiscreteGradientState {
-            energy_before_pa: self.energy_before_pa,
+            energy_before_pa: self.energy_before_pa(),
             energy_after_pa: pair.value_after,
             first_piola_pa: pair.gradient,
             work_pa: pair.work,
@@ -324,7 +333,8 @@ impl<'a> DiscreteGradientPoint<'a> {
         }
     }
 
-    /// Dimensionless absolute work allowance for J; material Pa allowance is not used.
+    /// Dimensionless absolute work allowance for TOTAL J; material Pa allowance
+    /// is not used. A held reference maps elastic Je back to J = det(G) Je.
     pub fn volume_state(
         &self,
         next_f: &[f64; 9],
@@ -361,7 +371,7 @@ impl<'a> DiscreteGradientPoint<'a> {
 
     fn volume_result(&self, next_f: &[f64; 9], pair: PairResponse) -> DiscreteVolumeState {
         DiscreteVolumeState {
-            volume_ratio_before: self.volume_ratio_before,
+            volume_ratio_before: self.original_density(self.volume_ratio_before),
             volume_ratio_after: pair.value_after,
             discrete_cofactor: pair.gradient,
             endpoint_cofactor: cofactor(next_f),
@@ -371,7 +381,7 @@ impl<'a> DiscreteGradientPoint<'a> {
         }
     }
 
-    fn evaluate(
+    fn evaluate_elastic(
         &self,
         next_f: &[f64; 9],
         potential: Potential<'_>,
