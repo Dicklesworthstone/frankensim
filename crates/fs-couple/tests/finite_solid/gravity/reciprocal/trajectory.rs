@@ -52,6 +52,87 @@ fn total_momentum(
 }
 
 #[test]
+fn reciprocal_potential_change_retains_small_relative_work_in_both_mass_inventories() {
+    with_cx(|_, cx| {
+        let material = bind(&source_card(6.0, 1.0, false, false));
+        for graded in [false, true] {
+            let rho = if graded { [3.0, 9.0, 12.0, 6.0] } else { [6.0; 4] };
+            let solid = if graded {
+                FiniteSolidBody::new_with_reference_density_field(
+                    problem(&material, &[], &[]),
+                    graded_density(rho),
+                    &[[0.0; 3]; 4],
+                    &[[5.0, 0.0, 0.0]; 4],
+                    0.0,
+                    Default::default(),
+                    cx,
+                )
+            } else {
+                FiniteSolidBody::new(
+                    problem(&material, &[], &[]),
+                    &[[0.0; 3]; 4],
+                    &[[5.0, 0.0, 0.0]; 4],
+                    0.0,
+                    Default::default(),
+                    cx,
+                )
+            }.unwrap();
+            let (base, properties) = source_at([-1e8, 0.0, 0.0]);
+            let source = RigidBodyState::new(base.pose(), Vec3::new(15.0, 0.0, 0.0), Vec3::ZERO).unwrap();
+            let mut c = step_controls(0.025);
+            c.gravity.gravitational_constant_m3_kg_s2 = 1e12;
+            for extended in [false, true] {
+                let (next, moved, report) = if extended {
+                    solid.reciprocal_quadrupole_gravity_step_candidate(
+                        source, properties, SOURCE_EXTENT, &[], [0.0; 3], None, c, cx,
+                    )
+                } else {
+                    solid.reciprocal_gravity_step_candidate(
+                        source, properties, &[], [0.0; 3], None, c, cx,
+                    )
+                }.unwrap();
+                let source_travel = moved.pose().position_world().sub(source.pose().position_world());
+                let displacement = next.displacement_m();
+                let mut expected = 0.0;
+                // Independently integrate the first analytic inverse-radius
+                // variation on the known four/eight-point reference rules.
+                // Relative travel/radius is < 4e-15, so omitted quadratic work
+                // and the nonspinning shape correction are both < 1e-24 J.
+                for q in 0..if graded { 8 } else { 4 } {
+                    let shape: [f64; 4] = std::array::from_fn(|a| {
+                        if graded {
+                            if q < 4 {
+                                if a == q { 1.0 } else { 0.0 }
+                            } else if a == q - 4 { 0.0 } else { 1.0 / 3.0 }
+                        } else if a == q {
+                            (5.0 + 3.0 * 5.0_f64.sqrt()) / 20.0
+                        } else {
+                            (5.0 - 5.0_f64.sqrt()) / 20.0
+                        }
+                    });
+                    let weight = if graded {
+                        let density: f64 = (0..4).map(|a| shape[a] * rho[a]).sum();
+                        VOLUME * density * if q < 4 { 1.0 / 40.0 } else { 9.0 / 40.0 }
+                    } else { VOLUME * rho[0] / 4.0 };
+                    let before = vector(std::array::from_fn(|i| (0..4).map(|a| shape[a] * NODES[a][i]).sum()));
+                    let after = vector(std::array::from_fn(|i| {
+                        (0..4).map(|a| shape[a] * (NODES[a][i] + displacement[a][i])).sum()
+                    }));
+                    let relative = before.sub(source.pose().position_world());
+                    let radius = relative.x.hypot(relative.y).hypot(relative.z);
+                    expected += weight * 3e12 / radius.powi(3)
+                        * relative.dot(after.sub(before).sub(source_travel));
+                }
+                near(report.interaction_potential_change_j, expected, 2e-19);
+                assert!(report.interaction_potential_change_j.abs() > 1e-11);
+                let rounded_totals = report.last_kick.potential_energy_j - report.first_kick.potential_energy_j;
+                assert!((rounded_totals - expected).abs() > 1e-14);
+            }
+        }
+    });
+}
+
+#[test]
 fn rotating_extended_source_matches_native_subflows_and_exchanges_actual_spin() {
     with_cx(|_, cx| {
         let material = bind(&source_card(6.0, 1.0, false, false));

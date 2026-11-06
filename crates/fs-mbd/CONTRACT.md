@@ -756,6 +756,18 @@ work accounting while keeping the original absolute diagnostic energies.
 The field, force stages and integrator are unchanged, and finite-step work
 residuals remain measured numerical defects rather than dissipation.
 
+Central and quadrupole sources also expose `specific_potential_increment_to`
+between two explicit source snapshots and two sampled material points. Both
+source and sample may move. Central snapshots retain G M and frame; quadrupole
+snapshots retain the original mass, full inertia, G, extent and frame. The
+shared rationalized radial increment includes source recoil before relative
+coordinate rounding, and each original quadrupole correction retains source
+orientation work separately from the monopole. Both endpoint domains remain
+active; source reaction wrenches and path clearance belong to their trajectory
+owner. Stationary increments delegate to this same native capability. New
+field regressions cover moved-source and transverse work, common translation
+with source rotation, reversal, isotropic reduction and changed-source refusal.
+
 `gravity::CentralGravity` owns frame-checked Newtonian acceleration and specific
 potential, with caller-supplied source position and G M. Rocket environments
 reuse this owner. `UniformGravity` binds the existing acceleration to an explicit

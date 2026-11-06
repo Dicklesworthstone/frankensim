@@ -118,6 +118,67 @@ impl QuadrupoleSourceGravity {
             isotropic: principal.x == principal.y && principal.y == principal.z,
         })
     }
+
+    /// Specific interaction-potential change between two source snapshots [J/kg].
+    ///
+    /// Both the source pose and sampled material point may move. Original mass,
+    /// full inertia, G, extent and inertial frame must remain unchanged. Each
+    /// endpoint satisfies the original far-field domain. The monopole increment
+    /// and source-orientation correction remain separate before the final sum,
+    /// retaining tidal work below the absolute binding energy's rounding.
+    ///
+    /// This accounts for translation and rotation of the same conservative
+    /// source, without a force-work approximation. It does not advance the
+    /// source, apply its reaction wrench, admit variable mass/inertia, or certify
+    /// the path between the two endpoint configurations.
+    pub fn specific_potential_increment_to(
+        &self,
+        source_after: &Self,
+        frame: u64,
+        before_world_m: Vec3,
+        after_world_m: Vec3,
+    ) -> Result<f64, GravityError> {
+        if self.properties != source_after.properties
+            || self.gravitational_constant_m3_kg_s2
+                != source_after.gravitational_constant_m3_kg_s2
+            || self.extent != source_after.extent
+        {
+            return Err(GravityError::Invalid(
+                "moving quadrupole source must retain original mass, inertia, G and extent",
+            ));
+        }
+        let correction_before = self.potential_correction(frame, before_world_m)?;
+        let correction_after = source_after.potential_correction(frame, after_world_m)?;
+        let central = self.central.specific_potential_change_to(
+            &source_after.central,
+            frame,
+            before_world_m,
+            after_world_m,
+        )?;
+        finite(
+            (central + (Dd::from_f64(correction_after) - Dd::from_f64(correction_before))).to_f64(),
+        )
+    }
+
+    fn potential_correction(&self, frame: u64, position: Vec3) -> Result<f64, GravityError> {
+        let (direction, radius, _) = self.central.radial(frame, position)?;
+        if self.extent.radius_m / radius > self.extent.maximum_radius_ratio {
+            return Err(GravityError::OutsideExpansionDomain);
+        }
+        if self.isotropic {
+            return Ok(0.0);
+        }
+        let g_over_r3 = finite((self.gravitational_constant_m3_kg_s2 / radius) / radius / radius)?;
+        Ok(quadrupole_correction(
+            self.pose,
+            self.properties,
+            direction,
+            radius,
+            g_over_r3,
+            self.trace,
+        )?
+        .potential_energy_j)
+    }
 }
 
 impl PointGravityField for QuadrupoleSourceGravity {
@@ -177,32 +238,11 @@ impl PointGravityField for QuadrupoleSourceGravity {
         before_world_m: Vec3,
         after_world_m: Vec3,
     ) -> Result<Option<f64>, GravityError> {
-        let mut correction = [0.0; 2];
-        for (value, position) in correction.iter_mut().zip([before_world_m, after_world_m]) {
-            let (direction, radius, _) = self.central.radial(frame, position)?;
-            if self.extent.radius_m / radius > self.extent.maximum_radius_ratio {
-                return Err(GravityError::OutsideExpansionDomain);
-            }
-            if !self.isotropic {
-                let g_over_r3 =
-                    finite((self.gravitational_constant_m3_kg_s2 / radius) / radius / radius)?;
-                *value = quadrupole_correction(
-                    self.pose,
-                    self.properties,
-                    direction,
-                    radius,
-                    g_over_r3,
-                    self.trace,
-                )?
-                .potential_energy_j;
-            }
-        }
-        let central =
-            self.central
-                .specific_potential_change(frame, before_world_m, after_world_m)?;
-        // Preserve the original correction before the monopole sum rounds it
-        // away; this uses the same native potential as force and tangent.
-        let change = central + (Dd::from_f64(correction[1]) - Dd::from_f64(correction[0]));
-        Ok(Some(finite(change.to_f64())?))
+        Ok(Some(self.specific_potential_increment_to(
+            self,
+            frame,
+            before_world_m,
+            after_world_m,
+        )?))
     }
 }

@@ -250,8 +250,44 @@ impl CentralGravity {
         before: Vec3,
         after: Vec3,
     ) -> Result<Dd, GravityError> {
+        self.specific_potential_change_to(self, frame, before, after)
+    }
+
+    /// Specific interaction-potential change between two source snapshots [J/kg].
+    ///
+    /// Both the source COM and sampled material point may move. The snapshots
+    /// must retain the same G M and inertial frame; this is not a variable-mass
+    /// source law. The original radial domains admit their own endpoints.
+    /// Direct relative coordinate increments retain source recoil and work below
+    /// the rounding of either absolute potential. No force-work quadrature,
+    /// source advance, reaction force or path-clearance guarantee is supplied.
+    pub fn specific_potential_increment_to(
+        &self,
+        source_after: &Self,
+        frame: u64,
+        before_world_m: Vec3,
+        after_world_m: Vec3,
+    ) -> Result<f64, GravityError> {
+        finite(
+            self.specific_potential_change_to(source_after, frame, before_world_m, after_world_m)?
+                .to_f64(),
+        )
+    }
+
+    fn specific_potential_change_to(
+        &self,
+        source_after: &Self,
+        frame: u64,
+        before: Vec3,
+        after: Vec3,
+    ) -> Result<Dd, GravityError> {
+        if self.gravitational_parameter_m3_s2 != source_after.gravitational_parameter_m3_s2 {
+            return Err(GravityError::Invalid(
+                "moving central source must retain the original G M",
+            ));
+        }
         let (_, radius_before, potential_before) = self.radial(frame, before)?;
-        let (_, radius_after, potential_after) = self.radial(frame, after)?;
+        let (_, radius_after, potential_after) = source_after.radial(frame, after)?;
         if radius_before < 0.5 * radius_after || radius_after < 0.5 * radius_before {
             // Well-separated radii have no cancellation. This branch also
             // avoids an unrepresentable ratio between two admitted radii.
@@ -259,7 +295,7 @@ impl CentralGravity {
         }
         Ok(inverse_radius_potential_increment(
             [self.center_world_m, before],
-            [self.center_world_m, after],
+            [source_after.center_world_m, after],
             [radius_before, radius_after],
             -potential_before,
         ))

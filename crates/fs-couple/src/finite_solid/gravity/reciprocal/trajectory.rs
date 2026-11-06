@@ -41,6 +41,9 @@ pub struct ReciprocalGravityStep {
     /// Conservative largest-axis-gap bound, minimized over original tetrahedra.
     pub path_separation_lower_bound_m: f64,
     pub kinetic_change_j: f64,
+    /// Direct endpoint potential increment at the original material-mass
+    /// quadrature, including source COM recoil and selected source rotation.
+    /// Small work can survive even when both kick potential totals are equal.
     pub interaction_potential_change_j: f64,
     pub gravitational_splitting_defect_j: f64,
     /// Actual kinetic + strain + pair-potential change minus external work.
@@ -262,7 +265,15 @@ impl<'a> FiniteSolidBody<'a> {
         )?;
         let (candidate, final_source, last_kick) =
             moved.gravity_source_kick_candidate(moved_source, properties, extent, half, cx)?;
-        let potential = dd(last_kick.potential_energy_j) - dd(first_kick.potential_energy_j);
+        let potential = dd(self.gravity_source_potential_change(
+            &moved,
+            source,
+            moved_source,
+            properties,
+            extent,
+            controls.gravity,
+            cx,
+        )?);
         let split = dd(first_kick.impulse_work_j) + dd(last_kick.impulse_work_j) + potential;
         let kinetic = dd(first_kick.kinetic_energy_change_j)
             + dd(middle.kinetic_change_j)

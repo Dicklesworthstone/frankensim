@@ -334,3 +334,28 @@ fn point_field_admission_rejects_nonfinite_and_nonconservative_derivatives() {
     sample.acceleration_world_m_s2.x = f64::NAN;
     assert!(sample.validate().is_err());
 }
+
+#[test]
+fn moving_central_snapshots_retain_both_endpoint_motions_and_the_original_source() {
+    let expected = 0.5e-12 * 0.625_f64.powi(2);
+    for shift in [Vec3::ZERO, Vec3::new(2e9, 1024.0, -512.0)] {
+        let before = CentralGravity::new(FRAME, Vec3::new(-5e7, 0.0, 0.0).add(shift), 1e12).unwrap();
+        let after = CentralGravity::new(FRAME, Vec3::new(-5e7, -0.375, 0.0).add(shift), 1e12).unwrap();
+        let a = Vec3::new(5e7, 0.0, 0.0).add(shift);
+        let b = Vec3::new(5e7, 0.25, 0.0).add(shift);
+        assert_eq!(before.sample(FRAME, a).unwrap().1, after.sample(FRAME, b).unwrap().1);
+        // phi = -mu / sqrt(r^2 + dy^2); the next binomial term is < 6e-30.
+        close(before.specific_potential_increment_to(&after, FRAME, a, b).unwrap(), expected, 3e-28);
+        close(after.specific_potential_increment_to(&before, FRAME, b, a).unwrap(), -expected, 3e-28);
+    }
+    let before = CentralGravity::new(FRAME, Vec3::ZERO, 1e20).unwrap();
+    let after = CentralGravity::new(FRAME, Vec3::new(1.0, 0.0, 0.0), 1e20).unwrap();
+    let point = Vec3::new(1e20, 0.0, 0.0);
+    close(before.specific_potential_increment_to(&after, FRAME, point, point).unwrap(), -1e-20, 3e-36);
+    assert_eq!(before.specific_potential_increment_to(&after, FRAME + 1, point, point), Err(GravityError::FrameMismatch));
+    let other_frame = CentralGravity::new(FRAME + 1, Vec3::ZERO, 1e20).unwrap();
+    assert_eq!(before.specific_potential_increment_to(&other_frame, FRAME, point, point), Err(GravityError::FrameMismatch));
+    let other_mass = CentralGravity::new(FRAME, Vec3::ZERO, 2e20).unwrap();
+    assert!(before.specific_potential_increment_to(&other_mass, FRAME, point, point).is_err());
+    assert!(before.specific_potential_increment_to(&after, FRAME, point, Vec3::new(1.0, 0.0, 0.0)).is_err());
+}

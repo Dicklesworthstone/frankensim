@@ -45,8 +45,11 @@ pub type GravityField3<'a> = dyn Fn([f64; 3]) -> Result<GravitySample3, HyperTet
 /// Specific potential at the second point minus that at the first [J/kg].
 ///
 /// A field-owned analytic difference can cancel its arbitrary datum before
-/// rounding. It must describe the same stationary potential as `GravityField3`;
-/// substituting midpoint force work changes the law for nonlinear fields.
+/// rounding. It describes the original field at the two endpoint source
+/// snapshots: the same field for stationary gravity, or explicitly retained
+/// source poses for reciprocal motion. The field owner admits those snapshots
+/// and retains its original parameters; the quadrature retains reference mass.
+/// Substituting midpoint force work changes the law for nonlinear fields.
 pub type GravityPotentialIncrement3<'a> =
     dyn Fn([f64; 3], [f64; 3]) -> Result<f64, HyperTetError> + 'a;
 

@@ -10,13 +10,72 @@
 /// Moving solid/source trajectories through native symmetric subflows.
 pub mod trajectory;
 
-use super::{BoundGravity, StationaryGravity, checkpoint, dd};
+use super::{BoundGravity, ReferenceDensity, StationaryGravity, checkpoint, dd};
 use crate::finite_solid::impulse::{FiniteSolidImpulse, FiniteSolidImpulseControls};
-use crate::finite_solid::{Cx, FiniteSolidBody, FiniteSolidError, inflate};
+use crate::finite_solid::{Cx, FiniteSolidBody, FiniteSolidError, HyperTetError, inflate};
 use fs_math::dd::Dd;
 pub use fs_mbd::gravity::QuadrupoleSourceExtent;
-use fs_mbd::gravity::{CentralGravity, PointGravityField, QuadrupoleSourceGravity};
+use fs_mbd::gravity::{CentralGravity, GravityError, PointGravityField, QuadrupoleSourceGravity};
 use fs_mbd::{MassProperties, MomentumImpulseReceipt, RigidBodyState, Vec3};
+use fs_solid::hyper3::gravity::ReferenceGravityDensity;
+
+// The same native source preparation serves frozen kicks and moving-source
+// potential increments; source mass, inertia and field selection have one owner.
+enum SourceGravitySnapshot {
+    Central(CentralGravity),
+    Quadrupole(QuadrupoleSourceGravity),
+}
+
+impl SourceGravitySnapshot {
+    fn new(
+        source: RigidBodyState,
+        properties: MassProperties,
+        extent: Option<QuadrupoleSourceExtent>,
+        controls: ReciprocalGravityKickControls,
+    ) -> Result<Self, GravityError> {
+        match extent {
+            None => CentralGravity::new(
+                controls.frame,
+                source.pose().position_world(),
+                controls.gravitational_constant_m3_kg_s2 * properties.mass(),
+            )
+            .map(Self::Central),
+            Some(extent) => QuadrupoleSourceGravity::new(
+                controls.frame,
+                source.pose(),
+                properties,
+                controls.gravitational_constant_m3_kg_s2,
+                extent,
+            )
+            .map(Self::Quadrupole),
+        }
+    }
+
+    fn field(&self) -> &dyn PointGravityField {
+        match self {
+            Self::Central(field) => field,
+            Self::Quadrupole(field) => field,
+        }
+    }
+
+    fn potential_increment_to(
+        &self,
+        after: &Self,
+        frame: u64,
+        before_position: Vec3,
+        after_position: Vec3,
+    ) -> Result<f64, GravityError> {
+        match (self, after) {
+            (Self::Central(before), Self::Central(after)) => before
+                .specific_potential_increment_to(after, frame, before_position, after_position),
+            (Self::Quadrupole(before), Self::Quadrupole(after)) => before
+                .specific_potential_increment_to(after, frame, before_position, after_position),
+            _ => Err(GravityError::Invalid(
+                "moving gravity source must retain its original field model",
+            )),
+        }
+    }
+}
 
 /// Declared physical exposure and the original native impulse allowances.
 #[derive(Clone, Copy, Debug)]
@@ -104,6 +163,52 @@ impl<'a> FiniteSolidBody<'a> {
         self.gravity_source_kick_candidate(source, properties, Some(extent), controls, cx)
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn gravity_source_potential_change(
+        &self,
+        after: &Self,
+        source_before: RigidBodyState,
+        source_after: RigidBodyState,
+        properties: MassProperties,
+        extent: Option<QuadrupoleSourceExtent>,
+        controls: ReciprocalGravityKickControls,
+        cx: &Cx<'_>,
+    ) -> Result<f64, FiniteSolidError> {
+        checkpoint(cx)?;
+        let before_field = SourceGravitySnapshot::new(source_before, properties, extent, controls)
+            .map_err(|error| FiniteSolidError::Source(error.to_string()))?;
+        let after_field = SourceGravitySnapshot::new(source_after, properties, extent, controls)
+            .map_err(|error| FiniteSolidError::Source(error.to_string()))?;
+        let gravity = BoundGravity::new(
+            &self.problem,
+            self.reference_density_field.as_deref(),
+            StationaryGravity::new(before_field.field(), controls.frame),
+            cx,
+        )?;
+        let density = match &gravity.density {
+            ReferenceDensity::PerElement(values) => ReferenceGravityDensity::PerElement(values),
+            ReferenceDensity::Nodal(values) => ReferenceGravityDensity::Nodal(values),
+        };
+        let before_u = inflate(&self.state.q, &self.free, &self.fixed);
+        let after_u = inflate(&after.state.q, &after.free, &after.fixed);
+        let increment = |before: [f64; 3], after: [f64; 3]| {
+            before_field
+                .potential_increment_to(&after_field, controls.frame, vector(before), vector(after))
+                .map_err(|error| match error {
+                    GravityError::Cancelled => HyperTetError::Cancelled,
+                    error => HyperTetError::InvalidInput {
+                        what: error.to_string(),
+                    },
+                })
+        };
+        // Fixed reference mass weights and actual endpoint material points are
+        // identical to the force owner's; no midpoint-force work substitutes
+        // for storage. Source translation AND rotation enter the same potential.
+        self.prepared
+            .gravity_potential_energy_change(density, &before_u, &after_u, &increment, cx)
+            .map_err(FiniteSolidError::from)
+    }
+
     fn gravity_source_kick_candidate(
         &self,
         source: RigidBodyState,
@@ -130,35 +235,15 @@ impl<'a> FiniteSolidBody<'a> {
                 "finite positive gravity kick data and tolerances required",
             ));
         }
-        let field = CentralGravity::new(
-            controls.frame,
-            source.pose().position_world(),
-            controls.gravitational_constant_m3_kg_s2 * properties.mass(),
-        )
-        .map_err(|error| FiniteSolidError::Source(error.to_string()))?;
-        let extended = extent
-            .map(|extent| {
-                QuadrupoleSourceGravity::new(
-                    controls.frame,
-                    source.pose(),
-                    properties,
-                    controls.gravitational_constant_m3_kg_s2,
-                    extent,
-                )
-            })
-            .transpose()
+        let source_field = SourceGravitySnapshot::new(source, properties, extent, controls)
             .map_err(|error| FiniteSolidError::Source(error.to_string()))?;
-        let selected: &dyn PointGravityField = match &extended {
-            Some(extended) => extended,
-            None => &field,
-        };
         let principal = properties.principal_inertia_body();
         let spin_reaction =
-            extended.is_some() && !(principal.x == principal.y && principal.y == principal.z);
+            extent.is_some() && !(principal.x == principal.y && principal.y == principal.z);
         let gravity = BoundGravity::new(
             &self.problem,
             self.reference_density_field.as_deref(),
-            StationaryGravity::new(selected, controls.frame),
+            StationaryGravity::new(source_field.field(), controls.frame),
             cx,
         )?;
         let displacement = inflate(&self.state.q, &self.free, &self.fixed);

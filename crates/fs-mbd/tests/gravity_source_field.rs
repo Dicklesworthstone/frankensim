@@ -260,3 +260,46 @@ fn extended_source_refuses_wrong_frame_incompatible_extent_and_near_field() {
     }
     assert!(QuadrupoleSourceGravity::new(FRAME, pose, mass, 0.0, EXTENT).is_err());
 }
+
+#[test]
+fn moving_extended_source_retains_rotation_work_and_isotropic_reduction() {
+    let properties = MassProperties::new(2.5, Vec3::ZERO, Vec3::new(0.3, 0.4, 0.5)).unwrap();
+    let before_pose = Pose::new(Vec3::ZERO, UnitQuaternion::IDENTITY).unwrap();
+    let translation = Vec3::new(3.0, -2.0, 4.0);
+    let angle = 0.7_f64;
+    let after_pose = Pose::new(
+        translation,
+        UnitQuaternion::from_axis_angle(Vec3::new(0.0, 0.0, 1.0), angle).unwrap(),
+    ).unwrap();
+    let before = QuadrupoleSourceGravity::new(FRAME, before_pose, properties, 1e12, EXTENT).unwrap();
+    let after = QuadrupoleSourceGravity::new(FRAME, after_pose, properties, 1e12, EXTENT).unwrap();
+    let a = Vec3::new(1e12, 0.0, 0.0);
+    let b = a.add(translation);
+    assert_eq!(before.sample_point(FRAME, a).unwrap().specific_potential_j_kg, -2.5);
+    assert_eq!(after.sample_point(FRAME, b).unwrap().specific_potential_j_kg, -2.5);
+    // Common translation leaves radius and monopole unchanged. The actual
+    // source orientation changes n.I.n by (Iy-Ix) sin(theta)^2.
+    let expected = 1.5e-24 * (0.4 - 0.3) * angle.sin().powi(2);
+    close(before.specific_potential_increment_to(&after, FRAME, a, b).unwrap(), expected, 3e-39);
+    close(after.specific_potential_increment_to(&before, FRAME, b, a).unwrap(), -expected, 3e-39);
+    assert_eq!(before.specific_potential_increment_to(&after, FRAME + 1, a, b), Err(GravityError::FrameMismatch));
+    assert_eq!(before.specific_potential_increment_to(&after, FRAME, a, translation.add(Vec3::new(1.0, 0.0, 0.0))), Err(GravityError::OutsideExpansionDomain));
+
+    let spherical = MassProperties::new(2.5, Vec3::ZERO, Vec3::new(0.4, 0.4, 0.4)).unwrap();
+    let spherical_before = QuadrupoleSourceGravity::new(FRAME, before_pose, spherical, 1e12, EXTENT).unwrap();
+    let spherical_after = QuadrupoleSourceGravity::new(FRAME, after_pose, spherical, 1e12, EXTENT).unwrap();
+    let central_before = CentralGravity::new(FRAME, Vec3::ZERO, 2.5e12).unwrap();
+    let central_after = CentralGravity::new(FRAME, translation, 2.5e12).unwrap();
+    let moved_point = b.add(Vec3::new(0.0, 0.25, 0.0));
+    assert_eq!(
+        spherical_before.specific_potential_increment_to(&spherical_after, FRAME, a, moved_point).unwrap(),
+        central_before.specific_potential_increment_to(&central_after, FRAME, a, moved_point).unwrap(),
+    );
+    assert!(before.specific_potential_increment_to(&spherical_after, FRAME, a, b).is_err());
+    for changed in [
+        QuadrupoleSourceGravity::new(FRAME, after_pose, properties, 2e12, EXTENT).unwrap(),
+        QuadrupoleSourceGravity::new(FRAME, after_pose, properties, 1e12, QuadrupoleSourceExtent { radius_m: 2.0, ..EXTENT }).unwrap(),
+    ] {
+        assert!(before.specific_potential_increment_to(&changed, FRAME, a, b).is_err());
+    }
+}

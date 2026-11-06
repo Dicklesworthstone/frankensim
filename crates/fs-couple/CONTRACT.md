@@ -224,6 +224,17 @@ defect, never heat. The midpoint integrator is unchanged and nonlinear fields
 still require temporal and spatial refinement. Endpoint diagnostics no longer
 assemble unused Newton tangents.
 
+Reciprocal finite-solid trajectories retain explicit native source snapshots
+at both configurations and integrate their direct interaction-potential
+increments over the original cellwise or nodal P1 reference-mass quadrature.
+Both source recoil and quadrupole orientation participate before rounded
+absolute binding-energy totals are formed. Central snapshots retain G M;
+quadrupole snapshots retain the original mass, inertia, G, extent and frame.
+The native force, recoil, torque, kick/drift stages and domain/energy gates
+remain unchanged. The new reciprocal regression covers both mass inventories
+and source selections; complete coupled execution still requires the original
+constellation dependencies.
+
 The new public-adapter and native free-flight regressions compare zero and
 1e20 m uniform datums, including cellwise and graded mass inventories, one-joule
 lifting work and 0.125-joule kinetic/potential exchange. Whole-workspace and
