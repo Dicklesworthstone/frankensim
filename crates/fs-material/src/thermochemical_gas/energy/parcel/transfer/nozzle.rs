@@ -143,7 +143,7 @@ impl ClosedGasParcel {
                 .map_err(source_error)?.value()/r)
         };
         let sample = |t: f64| -> Result<Sample, GasEnergyError> {
-            let properties = thermodynamics.evaluate_properties(Temperature::new(t), Pressure::new(p0))
+            let properties = thermodynamics.evaluate_heat_capacities(Temperature::new(t))
                 .map_err(source_error)?;
             let cp = properties.mass_specific_cp().value();
             let cv = properties.mass_specific_cv().value();

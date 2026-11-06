@@ -396,9 +396,8 @@ impl KineticGasTransportV1 {
             require_positive(mu, "species viscosity")?;
             let source = &self.thermodynamics.models()[i];
             let cp = source
-                .evaluate_properties(temperature)
+                .evaluate_heat_capacity(temperature)
                 .map_err(|source| KineticTransportErrorV1::Thermochemistry { species: i, source })?
-                .cp()
                 .value();
             // Keep floating-point tolerance separate from an explicitly
             // declared source-fit deficit. The Eucken closure below always

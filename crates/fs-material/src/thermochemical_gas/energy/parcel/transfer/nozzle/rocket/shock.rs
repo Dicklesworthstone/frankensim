@@ -74,7 +74,7 @@ pub(super) fn calculate(
     let thermo = parcel.model().thermodynamics();
     let r = parcel.state().state().specific_gas_constant;
     let properties = thermo
-        .evaluate_properties(Temperature::new(t1), Pressure::new(p1))
+        .evaluate_heat_capacities(Temperature::new(t1))
         .map_err(source_error)?;
     let cp1 = properties.mass_specific_cp().value();
     let lower = r * t1 / u1;
@@ -131,7 +131,7 @@ pub(super) fn calculate(
     let temperature = t1 + (u2 - u1) * (lower - u2) / r;
     let pressure = p1 * (b - u2) / lower;
     let properties = thermo
-        .evaluate_properties(Temperature::new(temperature), Pressure::new(pressure))
+        .evaluate_heat_capacities(Temperature::new(temperature))
         .map_err(source_error)?;
     let gamma = properties.mass_specific_cp().value() / properties.mass_specific_cv().value();
     if !positive(temperature) || !positive(pressure) || !gamma.is_finite() || gamma <= 1.0 {

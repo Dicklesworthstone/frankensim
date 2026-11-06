@@ -29,7 +29,7 @@ impl Isentrope<'_> {
         let thermo = self.parcel.model().thermodynamics();
         let r = self.parcel.state().state().specific_gas_constant;
         let properties = thermo
-            .evaluate_properties(Temperature::new(t), Pressure::new(self.anchor_pressure))
+            .evaluate_heat_capacities(Temperature::new(t))
             .map_err(source_error)?;
         let (cp, cv) = (
             properties.mass_specific_cp().value(),

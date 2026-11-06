@@ -133,8 +133,7 @@ struct CaloricMean {
 }
 
 fn cv_at(model: &ThermochemicalGasModel, t: f64) -> Result<f64, GasEnergyError> {
-    let pressure = model.thermodynamics().components()[0].convention().reference_pressure();
-    let properties = model.thermodynamics().evaluate_properties(Temperature::new(t), pressure)
+    let properties = model.thermodynamics().evaluate_heat_capacities(Temperature::new(t))
         .map_err(|error| failure("discrete Gibbs capacity", error))?;
     let cv = properties.mass_specific_cv().value();
     if !positive(cv) { return Err(invalid("positive original gas Cv required")); }

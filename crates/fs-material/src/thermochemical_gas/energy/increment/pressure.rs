@@ -84,7 +84,7 @@ impl GasCaloricBranch<'_> {
             return Err(GasEntropyError::Invalid("positive outlet pressure/tolerance, finite entropy change and supported reference temperature required"));
         }
         let evaluate = |t| -> Result<root::Sample, GasEntropyError> {
-            let properties = self.model.thermodynamics().evaluate_properties(Temperature::new(t), outlet_pressure)
+            let properties = self.model.thermodynamics().evaluate_heat_capacities(Temperature::new(t))
                 .map_err(|error| failure("pressure entropy tangent", error))?;
             let entropy = self.model.thermodynamics().specific_entropy_change(t0, p0,
                 Temperature::new(t), outlet_pressure).map_err(|error| failure("pressure entropy increment", error))?.value();
