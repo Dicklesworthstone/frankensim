@@ -404,10 +404,10 @@ When configured, `wave_balance_defect_j` includes the line-storage change.
 The original thermal callbacks receive heat after line growth or decay has
 been accounted for, through the existing per-cell route.
 
-This is a frozen-reference, constant-effective-line-energy closure. It does
-not resolve line geometry, tension, reconnections, polarization, line transport,
-radial variations in vortex drag, or the core/spacing dependence of a vortex
-equation of state. Heat deposition does not relinearize helium properties or
+The local source is a frozen-reference, constant-effective-line-energy closure.
+It does not resolve line geometry, tension, reconnections, polarization, radial
+variations in vortex drag, or the core/spacing dependence of a vortex equation
+of state. Optional line transport is described below. Heat deposition does not relinearize helium properties or
 supply phase-transition feedback. The represented balance is not a theorem for
 the full nonlinear internal energy of helium.
 
@@ -438,20 +438,146 @@ Intermediate temperatures and extrapolation refuse. Selecting another
 equilibrium reference does not create a temperature-dependent EOS or
 conservatively reinitialize a running channel.
 
+## Authored counterflow onset
+
+The optional `VinenTangle::with_counterflow_onset_m_s(W0)` changes production
+to `a * max(|v_n-v_s|-W0,0) * L^(3/2)`. Decay and mutual friction remain
+active below the threshold. Zero preserves the original source arithmetic;
+an empty tangle stays empty at every speed. W0 is an authored or measured
+application parameter, not a geometry-derived critical velocity or a
+spontaneous nucleation law.
+
+At an externally maintained counterflow speed, the nonzero source equilibrium
+is `sqrt(L)=(a/b)*max(W-W0,0)`; the helper
+`imposed_counterflow_equilibrium_per_m2` evaluates it for calibration checks.
+The freely decaying velocity/tangle system does not maintain that speed.
+The offset form is motivated by equation (8) in
+[Baggaley and Laizet](https://arxiv.org/html/1310.5890v1); a steady fit does not
+uniquely determine a transient law, so the chosen transient closure is explicit.
+
+The active source freezes a reduced production coefficient at a predicted
+midpoint and uses the same positive, dissipative exponential map. Every frozen
+coefficient lies in [0,a], so the existing global heat condition remains
+sufficient. The smooth active regime is second order; onset crossing has a
+continuous vector field with a derivative kink and requires time refinement.
+Once the source is subcritical, its remaining decay and drag are integrated
+exactly. The one original substep budget still bounds the whole source call.
+
+## Conservative vortex-line transport
+
+A configured tangle can also carry an independently authored drift field:
+
+```rust
+use fs_duct::superfluid::{
+    VortexTransportBoundaries, VortexTransportControls,
+};
+
+let n = channel.cells();
+let mut drift_m_s = vec![0.02; n];
+drift_m_s[0] = 0.0;
+drift_m_s[n - 1] = 0.0;
+channel.configure_vortex_line_transport(
+    &drift_m_s,
+    VortexTransportBoundaries::CLOSED,
+    VortexTransportControls {
+        maximum_outgoing_courant: 0.4,
+        maximum_substeps: 256,
+    },
+    || false,
+)?;
+```
+
+There are N-1 interior dual cells and N transport interfaces. Their transport
+domain runs from dx/2 to length-dx/2; endpoint half-cell vortex inventories
+remain the boundary model's responsibility. Drift is NOT silently equated to
+normal, superfluid or barycentric velocity. It can be reconfigured atomically
+between accepted steps.
+
+The law `L_t + (u_L L)_x = 0` uses limited linear upwinding and SSPRK2.
+The explicit budget limits the sum of outgoing Courant numbers to at most
+one half per substep. Each internal interface transfers the same line length
+out of one cell and into its neighbour; positivity requires no clipping.
+Preparation allocates reusable buffers, and stepping uses O(N) work per
+bounded transport substep with no transport allocation.
+
+Reflecting ends require zero endpoint drift. A
+`VortexTransportBoundary::Reservoir { incoming_line_density_per_m2 }`
+uses that density only on inflow; outflow uses the channel's adjacent density.
+Reports expose signed inward `vortex_transport_boundary_line_m` and
+`vortex_transport_boundary_energy_j`, a line-conservation defect, and the
+transport substep count. Each energy port is the constant effective line energy
+times its line-length port. Transport itself generates no heat.
+
+The channel orders transport/2, local source/2, wave, source/2, transport/2.
+Its represented energy balance includes the external line-energy ports.
+Existing heat and piston compositions retain those ports in their ChannelStep
+and compose the corrected residual; a mechanically closed channel may still
+have an explicitly open vortex reservoir. Transport shares accepted/pending
+publication with the original owners. Queries, cancellation, work-budget
+refusals and failed caloric acceptance never publish transported density.
+
+This supplies unresolved line advection, including external seeds arriving
+through an authored reservoir. It does not supply filament stretching,
+orientation, tension, reconnections, or a dynamical equation for the drift.
+
+## Continuous calorics on an authored isobar
+
+`fs_material::superfluid::caloric::IsobaricSuperfluidLaw` supplies a continuous
+finite-temperature material family on ONE externally maintained pressure.
+Its knots author Cp, superfluid fraction, thermodynamic adiabatic sound speed,
+expansion and normal viscosity. Preparation integrates the piecewise linear
+inputs consistently:
+
+```text
+h(T)   = h0 + integral Cp(T) dT
+s(T)   = s0 + integral Cp(T)/T dT
+rho(T) = rho0 exp(-integral alpha(T) dT)
+```
+
+Entropy and density are therefore derived from the same capacity/expansion
+data used by the local response. The entropy datum is physical because it
+enters the two-fluid sound equations; the enthalpy datum is explicitly supplied.
+The law identity binds all constitutive data, pressure, domain and datums.
+
+`state_at_temperature_k` and `state_at_specific_enthalpy` return a compatible
+`TwoFluidState` and caloric storage. Enthalpy inversion starts with a scaled
+analytic quadratic estimate and has a 64-step bracketed fallback. Ordinary
+queries locate a segment in O(log knots), integrate analytically and allocate
+nothing. Entropy exchange integrates crossed intervals and retains the
+original exchanged enthalpy even below absolute-temperature resolution.
+
+The law directly implements `fs_thermal::enthalpy::ThermalLaw`, declaring
+enthalpy storage, its caloric identity, a global temperature-slope bound and
+entropy increments. It can be supplied directly to the original thermal
+timeline and existing superfluid heat/contact compositions. Native coupling
+regressions exercise temperature-dependent heating and cooling, combined
+vortex/thermal energy, and complete rollback at the finite caloric-domain limit.
+
+This is an integrable authored isobar, not a calibrated helium EOS. The four
+measured helium references above lie on different saturation pressures and
+must not be relabelled as one isobaric curve. The API does not infer arbitrary
+pressure response, extrapolate, cross the lambda transition, or admit a pure
+normal/superfluid endpoint. Thermal geometry is reference heat-exchange
+geometry under the declared pressure load, not a rigid-vessel constraint.
+A running wave channel retains its selected linearization; caloric queries do
+not silently remap its wave, kinetic or vortex-line storage.
+
 ## Focused regression targets
 
 ```bash
 cargo test -p fs-material --test superfluid
-cargo test -p fs-material --test superfluid_vinen
+cargo test -p fs-material --test superfluid_vinen --test superfluid_vinen_onset
+cargo test -p fs-material --lib superfluid::caloric::tests
 cargo test -p fs-material --test superfluid_viscosity
 cargo test -p fs-material --test superfluid_normal_spectrum
 cargo test -p fs-duct --features superfluid --test superfluid_channel --test superfluid_ports
-cargo test -p fs-duct --features superfluid --test superfluid_vinen
+cargo test -p fs-duct --features superfluid --test superfluid_vinen --test superfluid_vortex_transport
 cargo test -p fs-duct --features superfluid --test superfluid_viscosity
 cargo test -p fs-duct --features superfluid --test superfluid_normal_profile
 cargo test -p fs-couple --features superfluid --test superfluid_counterflow --test superfluid_heat
 cargo test -p fs-couple --features superfluid --test superfluid_counterflow_pair
 cargo test -p fs-couple --features superfluid --test superfluid_transport_dissipation
+cargo test -p fs-couple --features superfluid --test superfluid_caloric
 ```
 
 The contact tests include independent finite-capacity/two-cell equations,

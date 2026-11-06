@@ -184,3 +184,7 @@ required-features = ["superfluid"]
 [[test]]
 name = "superfluid_transport_dissipation"
 required-features = ["superfluid"]
+
+[[test]]
+name = "superfluid_caloric"
+required-features = ["superfluid"]

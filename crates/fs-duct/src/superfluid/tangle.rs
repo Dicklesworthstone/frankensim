@@ -1,14 +1,20 @@
-//! Local, unresolved vortex-tangle memory on the channel's interior dual cells.
+//! Unresolved vortex-tangle memory on the channel's interior dual cells.
 
 use super::*;
 use fs_material::superfluid::vinen::VinenTangle;
 use fs_material::superfluid::{MutualFrictionStep, TwoFluidVelocity};
+
+mod transport;
+pub(super) use transport::TransportChange;
+use transport::VortexTransportMemory;
+pub use transport::{VortexTransportBoundaries, VortexTransportBoundary, VortexTransportControls};
 
 #[derive(Debug)]
 pub(super) struct VinenTangleMemory {
     model: VinenTangle,
     accepted: Vec<f64>,
     pending: Vec<f64>,
+    transport: Option<VortexTransportMemory>,
 }
 
 impl VinenTangleMemory {
@@ -22,6 +28,7 @@ impl VinenTangleMemory {
             model,
             accepted: filled(initial.len())?,
             pending: filled(initial.len())?,
+            transport: None,
         };
         for (i, &density) in initial.iter().enumerate() {
             if i % 128 == 0 {
@@ -118,8 +125,9 @@ impl TwoFluidChannel {
     /// frozen memory. The source includes its authored effective line energy
     /// in the channel balance and exports only the remaining dissipative heat.
     ///
-    /// This local isotropic closure has no line transport, orientation, resolved
-    /// reconnections, nucleation from an empty tangle, or critical-velocity law.
+    /// Optional authored line transport is configured separately and retained
+    /// when reseeding before the first step. The isotropic closure has no
+    /// orientation, resolved reconnections, or nucleation from an empty tangle.
     /// Normal-profile deviations remain unchanged by its section-mean force.
     /// Allocation occurs here only; cancellation/refusal preserves all accepted
     /// fields, profile and previously configured tangle memory.
@@ -138,7 +146,7 @@ impl TwoFluidChannel {
                 "Vinen configuration needs N-1 interior densities and the same frozen material before stepping",
             ));
         }
-        let memory = VinenTangleMemory::new(
+        let mut memory = VinenTangleMemory::new(
             model,
             interior_line_density_per_m2,
             self.cell_volume,
@@ -151,7 +159,17 @@ impl TwoFluidChannel {
                 "initial wave and vortex storage is not representable",
             ));
         }
+        if let Some(transport) = self
+            .vinen_tangle
+            .as_ref()
+            .and_then(|old| old.transport.as_ref())
+        {
+            transport.validate_boundary_densities(&model)?;
+        }
         poll(&mut cancelled)?;
+        if let Some(old) = &mut self.vinen_tangle {
+            memory.transport = old.transport.take();
+        }
         self.vinen_tangle = Some(memory);
         Ok(())
     }
@@ -185,6 +203,26 @@ impl TwoFluidChannel {
         match &self.vinen_tangle {
             Some(memory) => memory.energy(pending, self.cell_volume, cancelled),
             None => Ok(0.0),
+        }
+    }
+
+    pub(super) fn transport_vortex_half_step(
+        &mut self,
+        dt: f64,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<TransportChange, ChannelError> {
+        match &mut self.vinen_tangle {
+            Some(memory) => match &mut memory.transport {
+                Some(transport) => transport.advance(
+                    &mut memory.pending,
+                    dt,
+                    self.dx,
+                    self.cell_volume,
+                    cancelled,
+                ),
+                None => Ok(TransportChange::default()),
+            },
+            None => Ok(TransportChange::default()),
         }
     }
 }

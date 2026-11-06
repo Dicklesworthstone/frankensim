@@ -24,12 +24,16 @@
 //! An optional local Vinen tangle evolves one vortex-line density per interior
 //! dual volume. Its authored line energy joins the represented storage, so
 //! tangle growth stores energy and tangle decay releases heat exactly once.
+//! Optional conservative vortex-line transport uses an independently authored
+//! drift field, reflecting or reservoir boundaries, and explicit line-energy
+//! ports. Positivity-preserving finite volumes retain the same native wave and
+//! coupling interfaces; transport allocates only during configuration.
 //! Wave storage is availability, not absolute internal energy.
 //! The boundary thermal wave work is `T' q/T0`, distinct from transported heat.
 //! The scalar permeability option is quasisteady; the spectral option resolves
 //! an authored number of transverse laminar modes with an explicit passive
 //! high-mode approximation. Neither includes local radial vortex friction,
-//! nonlinear heating/phase feedback, vortex geometry/transport, critical
+//! nonlinear heating/phase feedback, resolved vortex geometry, critical
 //! velocities, longitudinal/second viscosities, Kapitza resistance, entrance
 //! effects or arbitrary transverse geometry.
 
@@ -48,6 +52,7 @@ pub use boundary::{
 };
 use modes::Modes;
 pub use momentum::{BodyForce, ComponentForceDensity, ForcedChannelStep};
+pub use tangle::{VortexTransportBoundaries, VortexTransportBoundary, VortexTransportControls};
 
 /// Source admission, caller domain, cancellation or numerical refusal.
 #[derive(Debug, Clone, PartialEq)]
@@ -60,6 +65,7 @@ pub enum ChannelError {
     Solve(TridiagonalError),
     Balance { defect_j: f64, tolerance_j: f64 },
     MomentumBalance { defect_n_s: f64, tolerance_n_s: f64 },
+    VortexTransportBalance { defect_m: f64, tolerance_m: f64 },
 }
 impl core::fmt::Display for ChannelError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -196,6 +202,19 @@ pub struct ChannelStep {
     /// quadratic wave energy. Zero when no evolving tangle is configured.
     pub vortex_energy_before_j: f64,
     pub vortex_energy_after_j: f64,
+    /// Vortex length transferred INTO the interior dual domain [m] at its
+    /// left/right interfaces, x=dx/2 and length-dx/2. Outflow is negative.
+    /// Zero with no transport or with reflecting boundaries.
+    pub vortex_transport_boundary_line_m: [f64; 2],
+    /// Matching inward effective line-energy transfers [J], NOT caloric heat.
+    /// Each entry is the authored constant line energy times its length port.
+    pub vortex_transport_boundary_energy_j: [f64; 2],
+    /// Summed numerical line-balance defects of transport alone [m]. Local
+    /// Vinen production/decay is accounted separately through line storage/heat.
+    pub vortex_transport_line_balance_defect_m: f64,
+    /// SSPRK2 transport substeps across both half-steps; independent of source
+    /// substeps. Zero when transport is absent or its drift field is zero.
+    pub vortex_transport_substeps: usize,
     pub boundary_wave_work_j: f64,
     /// Signed work supplied by authored body forces; friction heat is separate.
     pub body_force_work_j: f64,
@@ -222,8 +241,9 @@ pub struct ChannelStep {
     /// Normal-fluid kinetic energy dissipated by the stationary viscous walls.
     /// Exported separately from mutual friction, with the same cell heat route.
     pub normal_viscous_heat_j: f64,
-    /// Change in wave plus vortex storage, minus boundary/body work, plus
-    /// exported dissipative heat. With no tangle this is the wave-only balance.
+    /// Change in wave plus vortex storage, minus boundary/body work and inward
+    /// transported line energy, plus exported dissipative heat. With no tangle
+    /// this is the wave-only balance.
     pub wave_balance_defect_j: f64,
     /// First-order mass imported through the two explicit ports.
     pub boundary_mass_kg: f64,

@@ -118,6 +118,7 @@ impl TwoFluidChannel {
         if let Some(tangle) = &mut self.vinen_tangle {
             tangle.copy_pending(cancelled)?;
         }
+        let mut vortex_transport = self.transport_vortex_half_step(dt / 2.0, cancelled)?;
         self.friction_half_step(friction, dt / 2.0, cancelled)?;
         let (source_work, residual, wall_impulse) = if self.uses_viscous_wave_operator() {
             // Normal drag, authored force and the midpoint wave gradient share
@@ -161,9 +162,17 @@ impl TwoFluidChannel {
             self.validate_pending_with_limits(physical_limits, cancelled)?;
         }
         self.friction_half_step(friction, dt / 2.0, cancelled)?;
+        vortex_transport.add(self.transport_vortex_half_step(dt / 2.0, cancelled)?)?;
         self.validate_pending_with_limits(physical_limits, cancelled)?;
         let after = self.energy_with_profile(true, cancelled)?;
         let vortex_after = self.vortex_energy_with(true, cancelled)?;
+        let line_energy = self
+            .vinen_tangle()
+            .map_or(0.0, |model| model.parameters().line_energy_j_m);
+        let vortex_transport_energy = vortex_transport
+            .boundary_line_m
+            .map(|line| line_energy * line);
+        let vortex_energy_in = vortex_transport_energy[0] + vortex_transport_energy[1];
         let mut heat = 0.0;
         let mut correction = 0.0;
         let mut viscous_heat = 0.0;
@@ -193,13 +202,19 @@ impl TwoFluidChannel {
         let total_dissipated = total_heat + total_viscous_heat;
         let (defect, scale) = if self.vinen_tangle.is_some() {
             (
-                (after - before) + (vortex_after - vortex_before) - work - source_work + dissipated,
+                (after - before) + (vortex_after - vortex_before)
+                    - work
+                    - source_work
+                    - vortex_energy_in
+                    + dissipated,
                 before
                     + after
                     + vortex_before
                     + vortex_after
                     + work.abs()
                     + source_work.abs()
+                    + vortex_transport_energy[0].abs()
+                    + vortex_transport_energy[1].abs()
                     + dissipated,
             )
         } else {
@@ -220,6 +235,9 @@ impl TwoFluidChannel {
             total_dissipated,
             work,
             source_work,
+            vortex_transport_energy[0],
+            vortex_transport_energy[1],
+            vortex_energy_in,
             defect,
             tolerance,
         ]
@@ -284,6 +302,10 @@ impl TwoFluidChannel {
             wave_energy_after_j: after,
             vortex_energy_before_j: vortex_before,
             vortex_energy_after_j: vortex_after,
+            vortex_transport_boundary_line_m: vortex_transport.boundary_line_m,
+            vortex_transport_boundary_energy_j: vortex_transport_energy,
+            vortex_transport_line_balance_defect_m: vortex_transport.balance_defect_m,
+            vortex_transport_substeps: vortex_transport.substeps,
             boundary_wave_work_j: work,
             body_force_work_j: source_work,
             boundary_pressure_impulse_n_s: pressure_impulse,

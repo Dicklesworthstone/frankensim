@@ -76,3 +76,7 @@ required-features = ["superfluid"]
 [[test]]
 name = "superfluid_vinen"
 required-features = ["superfluid"]
+
+[[test]]
+name = "superfluid_vortex_transport"
+required-features = ["superfluid"]
