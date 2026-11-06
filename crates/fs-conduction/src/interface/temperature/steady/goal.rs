@@ -13,6 +13,8 @@ use crate::{
 };
 use fs_exec::Cx;
 
+mod ambient;
+
 impl TemperatureContacts<'_, '_> {
     /// Compare two fields using the complete source-backed steady residual.
     ///

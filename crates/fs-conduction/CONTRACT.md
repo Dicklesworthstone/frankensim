@@ -1174,6 +1174,44 @@ remainder distinguish frozen approximate boundaries and omitted reference
 feedback. Stale-reference, malformed/budget and cancellation regressions retain
 the same refusal contract.
 
+`compare_steady_goal_with_ambient_radiation` composes the same live-contact
+comparison with the original area-mean gray-surface ambient law. It takes the
+original convection/zero-flux partition, actual convection values at both
+fields, reference convection slopes and additional reference feedback, and
+the retained emissivity patches. Each field gets its own physical radiative
+secant at its actual area-mean wall temperature. The reference's complete
+contact/bulk transpose receives the radiative coefficient and weighted-reference
+slopes; original convective reference feedback is scaled by
+`h_convection/(h_convection+h_radiation)` exactly once. Local convection-reference
+slopes and diagonal map terms are additive, with no duplicated derivative.
+
+Original uniform zero-flux traces may carry radiation without convection.
+Their convective coefficients, local slopes and feedback rows must remain
+zero; their wall means may still drive another region's declared reference
+through a feedback column. A positive placeholder convection reference cannot
+replace the patch's retained radiation bath or create an air heat contribution.
+All radiation patches must occur once in the selected regions. The existing
+64-region, contact-trace and four-factor feedback budgets apply, alongside the
+unchanged physical reference residual and whole-domain watt gates.
+
+Only the reference requires an emissivity/source tangent. The approximate
+field is evaluated physically and may land on a supported emissivity interval
+endpoint; unsupported temperatures still refuse, including for a zero goal.
+The mean observation uses the same face-sum and fused area accumulation as
+the primal owner. No replacement primal, frozen approximate radiation, relaxed
+reference gate or continuum accuracy claim is introduced. This composes the
+mean-temperature secant model; it does not substitute pointwise fourth-power
+quadrature or reflected enclosure exchange.
+
+An independent four-temperature circuit with two radiation baths, nonlinear
+convection, asymmetric reference coupling and two-sided live contact checks
+the complete transpose and residual on matching and nonmatching traces.
+The direct fourth-power oracle and quadratic finite remainder distinguish
+frozen approximate radiation, frozen convection and omitted cross feedback.
+A radiation-only slab checks physical emissivity-endpoint admission, source
+domain exits, retained bath ownership, dirty references, exhausted budgets,
+invalid zero-convection feedback and cancellation.
+
 ## Temperature-dependent source laws on nonmatching thermal interfaces
 
 `TemperatureContact::new_nonmatching` assigns an ordered source law to two

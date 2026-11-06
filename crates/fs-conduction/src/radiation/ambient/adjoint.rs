@@ -204,6 +204,29 @@ impl AmbientRadiationLinearization {
         reference_feedback: Option<&[f64]>, patches: &[AmbientRadiationPatch],
         max_feedback_entries: usize,
     ) -> Result<Self, ConductionError> {
+        Self::bind_impl(cx, problem, temperature, regions, convective_mean_slopes_w_m2_k2,
+            reference_feedback, patches, max_feedback_entries, true)
+    }
+
+    /// Evaluate only the physical secants at a comparison field. No tangent
+    /// or neighboring source-temperature query is needed at this endpoint.
+    /// Only the boundary escapes; zero derivative placeholders remain private.
+    pub(crate) fn physical_boundary_at(
+        cx: &Cx<'_>, problem: ConductionProblem<'_>, temperature: &[f64],
+        regions: &[&str], patches: &[AmbientRadiationPatch], max_feedback_entries: usize,
+    ) -> Result<ThermalBoundary, ConductionError> {
+        if regions.len() > 64 { return Err(invalid("ambient comparison exceeds 64 regions")); }
+        Self::bind_impl(cx, problem, temperature, regions, &[0.0; 64][..regions.len()],
+            None, patches, max_feedback_entries, false).map(|bound| bound.boundary)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn bind_impl(
+        cx: &Cx<'_>, problem: ConductionProblem<'_>, temperature: &[f64],
+        regions: &[&str], convective_mean_slopes_w_m2_k2: &[f64],
+        reference_feedback: Option<&[f64]>, patches: &[AmbientRadiationPatch],
+        max_feedback_entries: usize, differentiate: bool,
+    ) -> Result<Self, ConductionError> {
     poll(cx, 0)?;
     let n = problem.mesh.vertex_count();
     let factors = if reference_feedback.is_some() { 4 } else { 2 };
@@ -279,15 +302,19 @@ impl AmbientRadiationLinearization {
                 if slot % 512 == 0 { poll(cx, slot)?; }
                 if problem.boundary.region_for(slot) != Some(region) { continue; }
                 area = finite(area + face.area, "ambient-adjoint patch area")?;
-                for &v in &face.vertices {
-                    integral = finite(integral + (face.area/3.0)*temperature[v as usize],
-                        "ambient-adjoint wall integral")?;
-                }
+                // Match the original Robin heat account's observation and
+                // arithmetic order; a few ulps matter under a contact W gate.
+                let mut sum = 0.0;
+                for &v in &face.vertices { sum = finite(sum + temperature[v as usize], "ambient wall sum")?; }
+                let mean = finite(sum / 3.0, "ambient face mean")?;
+                integral = finite(face.area.mul_add(mean, integral), "ambient-adjoint wall integral")?;
             }
             if area <= 0.0 { return Err(invalid("radiating region has no positive trace area")); }
-            let mean = finite(integral/area, "ambient-adjoint wall mean")?;
+            let mean = finite(integral * (1.0 / area), "ambient-adjoint wall mean")?;
             let hr = patch.secant_coefficient_w_m2_k(mean)?;
-            let [hr_slope, hr_ambient] = patch.secant_partials_w_m2_k2(mean)?;
+            let [hr_slope, hr_ambient] = if differentiate {
+                patch.secant_partials_w_m2_k2(mean)?
+            } else { [0.0; 2] };
             let ambient = patch.ambient_temperature_k();
             let h = finite(hc + hr, "combined adjoint coefficient")?;
             if h <= 0.0 { return Err(invalid("combined adjoint coefficient is not positive")); }

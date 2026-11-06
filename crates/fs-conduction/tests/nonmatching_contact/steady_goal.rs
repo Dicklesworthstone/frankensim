@@ -31,6 +31,45 @@ fn slab_field(mesh: &ConductionMesh, split: usize, a: f64, b: f64, hot: f64) -> 
         .collect()
 }
 
+fn goal_radiation_patch(name: &str, epsilon: f64, bath: f64) -> AmbientRadiationPatch {
+    let mut claims = ClaimSet::new();
+    claims
+        .insert_claim(PropertyClaim {
+            key: PropertyKey::new(SURFACE_EMISSIVITY_PROPERTY, EMISSIVITY_DIMS),
+            value: PropertyValue::Scalar {
+                value: epsilon,
+                dims: EMISSIVITY_DIMS,
+            },
+            validity: ValidityDomain::unconstrained().with("T", 280.0, 350.0),
+            uncertainty: UncertaintyModel::Unstated,
+            interpolation: InterpolationPolicy::ConstantWithinValidity,
+            observations: vec![],
+            provenance: Provenance {
+                source: "synthetic four-state radiation oracle, not measurements".into(),
+                license: "internal-test-use".into(),
+                artifact: None,
+            },
+        })
+        .unwrap();
+    let card = fs_matdb::MaterialCard::assemble(
+        MaterialStateId {
+            chemistry: "synthetic surface".into(),
+            phase: "solid".into(),
+            process: "fixture".into(),
+            revision: 0,
+        },
+        claims,
+        vec![],
+    )
+    .unwrap();
+    AmbientRadiationPatch::new(
+        name,
+        SurfaceEmissivity::from_card(name, &card, 320.0, SelectionPolicy::SingleClaimOnly).unwrap(),
+        bath,
+    )
+    .unwrap()
+}
+
 fn card_with_value(
     value: PropertyValue,
     interpolation: InterpolationPolicy,
@@ -589,178 +628,541 @@ fn solve_four_transpose(matrix: [[f64; 4]; 4], mut rhs: [f64; 4]) -> [f64; 4] {
     solution
 }
 
+fn check_four_state_goal(cx: &fs_exec::Cx<'_>, radiative: bool) {
+    let resistance = |a, b| 0.5 + (a - 320.0) / 1024.0 + 3.0 * (b - 320.0) / 1024.0;
+    let (mut lo, mut hi) = (0.0_f64, 75.0);
+    for _ in 0..80 {
+        let heat = 0.5 * (lo + hi);
+        let r = resistance(300.0 + 0.2 * heat, 330.0 - 0.2 * heat);
+        if heat * (0.4 + r) > 30.0 {
+            hi = heat;
+        } else {
+            lo = heat;
+        }
+    }
+    let heat = 0.5 * (lo + hi);
+    let x = [
+        300.0 + 0.1 * heat,
+        300.0 + 0.2 * heat,
+        330.0 - 0.2 * heat,
+        330.0 - 0.1 * heat,
+    ];
+    let feedback = [0.07, 0.17, -0.09, -0.04];
+    let epsilon = if radiative { [0.4, 0.6] } else { [0.0, 0.0] };
+    let baths: [f64; 2] = [280.0, 350.0];
+    // Direct fourth powers, not the production secant or its derivative.
+    let radiation = |i: usize, wall: f64| {
+        epsilon[i] * STEFAN_BOLTZMANN_W_M2_K4 * (wall.powi(4) - baths[i].powi(4))
+    };
+    let radiation_slope =
+        |i: usize, wall: f64| 4.0 * epsilon[i] * STEFAN_BOLTZMANN_W_M2_K4 * wall.powi(3);
+    // Manufacture exact convection reservoirs so the same physical
+    // contact/bulk state balances with and without the radiative fluxes.
+    let rc = [
+        300.0 + radiation(0, x[0]) / 10.0,
+        330.0 + radiation(1, x[3]) / 10.0,
+    ];
+    let points = [[10.0, rc[0], 0.25, 0.11], [10.0, rc[1], -0.35, 0.23]];
+    let patches = if radiative {
+        vec![
+            goal_radiation_patch("cold reservoir", epsilon[0], baths[0]),
+            goal_radiation_patch("hot reservoir", epsilon[1], baths[1]),
+        ]
+    } else {
+        vec![]
+    };
+    let values = |state: [f64; 4]| {
+        let u = state[0] - x[0];
+        let v = state[3] - x[3];
+        [
+            [
+                10.0 + 0.25 * u + 0.03 * u * u,
+                rc[0] + (0.11 + feedback[0]) * u + feedback[1] * v,
+            ],
+            [
+                10.0 - 0.35 * v + 0.02 * v * v,
+                rc[1] + (0.23 + feedback[3]) * v + feedback[2] * u,
+            ],
+        ]
+    };
+    let residual = |state: [f64; 4], rows: [[f64; 2]; 2]| {
+        let [c, a, b, d] = state;
+        let q = (a - b) / resistance(a, b);
+        [
+            10.0 * (c - a) + rows[0][0] * (c - rows[0][1]) + radiation(0, c),
+            10.0 * (a - c) + q,
+            10.0 * (b - d) - q,
+            10.0 * (d - b) + rows[1][0] * (d - rows[1][1]) + radiation(1, d),
+        ]
+    };
+    let r = resistance(x[1], x[2]);
+    let qa = 1.0 / r - (x[1] - x[2]) / (1024.0 * r * r);
+    let qb = -1.0 / r - 3.0 * (x[1] - x[2]) / (1024.0 * r * r);
+    let jacobian = [
+        [
+            20.0 + 0.25 * (x[0] - rc[0]) - 10.0 * (0.11 + feedback[0]) + radiation_slope(0, x[0]),
+            -10.0,
+            0.0,
+            -10.0 * feedback[1],
+        ],
+        [-10.0, 10.0 + qa, qb, 0.0],
+        [0.0, -qa, 10.0 - qb, -10.0],
+        [
+            -10.0 * feedback[2],
+            0.0,
+            -10.0,
+            20.0 - 0.35 * (x[3] - rc[1]) - 10.0 * (0.23 + feedback[3]) + radiation_slope(1, x[3]),
+        ],
+    ];
+    let lambda = solve_four_transpose(jacobian, [0.0, 1.0, 0.0, 0.0]);
+    let reference_residual = residual(x, values(x));
+    for matching in [true, false] {
+        let (mesh, split) = mesh(if matching { [1, 1, 1] } else { [1, 2, 3] }, 0.0);
+        // Deliberately stale original values: both physical evaluations
+        // must be bound from the supplied actual law, including the reference.
+        let bc = ThermalBoundaryBuilder::new(&mesh)
+            .region(
+                "cold reservoir",
+                |f| on_box_face(f.centroid[0], 0.0),
+                ThermalBc::robin(7.0, 285.0).unwrap(),
+            )
+            .unwrap()
+            .region(
+                "hot reservoir",
+                |f| on_box_face(f.centroid[0], 2.0),
+                ThermalBc::robin(14.0, 345.0).unwrap(),
+            )
+            .unwrap()
+            .adiabatic_remainder()
+            .finish()
+            .unwrap();
+        let boundary_before = bc.clone();
+        let card = source_card(1.0, false);
+        let set = contacts(cx, &mesh, &bc, &card, split, matching);
+        let material = ConductivityModel::isotropic_declared(10.0).unwrap();
+        let source = ScalarField::Uniform(0.0);
+        let problem = ConductionProblem {
+            mesh: &mesh,
+            boundary: &bc,
+            material: &material,
+            element_materials: None,
+            source: &source,
+        };
+        let field = |state: [f64; 4]| {
+            mesh.positions()
+                .iter()
+                .enumerate()
+                .map(|(i, p)| {
+                    if i < split {
+                        state[0] + (state[1] - state[0]) * p[0]
+                    } else {
+                        state[3] + (state[2] - state[3]) * (2.0 - p[0])
+                    }
+                })
+                .collect::<Vec<_>>()
+        };
+        let reference = field(x);
+        let weights = contact_mean(&mesh, split);
+        let regions = ["cold reservoir", "hot reservoir"];
+        let entries = 8 * mesh.vertex_count();
+        let mut remainders = Vec::new();
+        for fraction in [1.0, 0.5, 0.25] {
+            let y = std::array::from_fn(|i| x[i] + fraction * [1.7, 3.0, -2.0, -1.1][i]);
+            let approximate = field(y);
+            let approximate_before = approximate.clone();
+            let compare = |actual_values: &[[f64; 2]], map: &[f64]| {
+                if radiative {
+                    return set
+                        .compare_steady_goal_with_ambient_radiation(
+                            cx,
+                            problem,
+                            &reference,
+                            &approximate,
+                            solver_config().linear,
+                            1e-8,
+                            1e-8,
+                            &regions,
+                            &points,
+                            actual_values,
+                            map,
+                            &patches,
+                            &weights,
+                            entries,
+                            10_000,
+                        )
+                        .unwrap();
+                }
+                set.compare_steady_goal_with_robin_feedback(
+                    cx,
+                    problem,
+                    &reference,
+                    &approximate,
+                    solver_config().linear,
+                    1e-8,
+                    1e-8,
+                    &regions,
+                    &points,
+                    actual_values,
+                    map,
+                    &weights,
+                    entries,
+                    10_000,
+                )
+                .unwrap()
+            };
+            let report = compare(&values(y), &feedback);
+            let other = residual(y, values(y));
+            let expected: f64 = (0..4)
+                .map(|i| lambda[i] * (reference_residual[i] - other[i]))
+                .sum();
+            near(report.signed_residual_change, expected, 3e-10);
+            near(report.signed_goal_change, -3.0 * fraction, 3e-12);
+            near(report.nodal_contributions.iter().sum(), expected, 3e-10);
+            near(
+                report.signed_residual_change + report.linearization_remainder,
+                report.signed_goal_change,
+                3e-14,
+            );
+            assert!(report.uses_nonlinear_jacobian);
+            assert!(report.primal_relative_residual < 1e-12);
+            assert!(report.dual_relative_residual < solver_config().linear.tolerance);
+            remainders.push(report.linearization_remainder.abs());
+            if fraction == 1.0 {
+                let frozen_boundary = compare(&values(x), &feedback);
+                assert!((frozen_boundary.signed_residual_change - expected).abs() > 0.1);
+                let missing_map = compare(&values(y), &[0.0; 4]);
+                assert!((missing_map.signed_residual_change - expected).abs() > 1e-3);
+                if radiative {
+                    // Retain the exact reference tangent/contact, but freeze
+                    // only the approximate radiative secants. A plausible
+                    // combined-Robin surrogate must fail this same oracle.
+                    let mut combined_points = [[0.0; 4]; 2];
+                    let mut frozen_values = [[0.0; 2]; 2];
+                    let mut combined_map = [0.0; 4];
+                    for i in 0..2 {
+                        let wall = x[3 * i];
+                        let scale = epsilon[i] * STEFAN_BOLTZMANN_W_M2_K4;
+                        let hr = scale * (wall + baths[i]) * (wall * wall + baths[i] * baths[i]);
+                        let dhr = scale
+                            * (3.0 * wall * wall + 2.0 * wall * baths[i] + baths[i] * baths[i]);
+                        let [hc, tc, dhc, dtc] = points[i];
+                        let h = hc + hr;
+                        let t = (hc / h) * tc + (hr / h) * baths[i];
+                        combined_points[i] = [
+                            h,
+                            t,
+                            dhc + dhr,
+                            (dhc / h) * (tc - t) + (dhr / h) * (baths[i] - t) + (hc / h) * dtc,
+                        ];
+                        for j in 0..2 {
+                            combined_map[2 * i + j] = (hc / h) * feedback[2 * i + j];
+                        }
+                        let [ha, ta] = values(y)[i];
+                        frozen_values[i] =
+                            [ha + hr, (ha / (ha + hr)) * ta + (hr / (ha + hr)) * baths[i]];
+                    }
+                    let wrong = set
+                        .compare_steady_goal_with_robin_feedback(
+                            cx,
+                            problem,
+                            &reference,
+                            &approximate,
+                            solver_config().linear,
+                            1e-8,
+                            1e-8,
+                            &regions,
+                            &combined_points,
+                            &frozen_values,
+                            &combined_map,
+                            &weights,
+                            entries,
+                            10_000,
+                        )
+                        .unwrap();
+                    assert!((wrong.signed_residual_change - expected).abs() > 1e-3);
+                }
+            }
+            assert_eq!(approximate, approximate_before);
+        }
+        assert!(remainders[2] > 1e-4);
+        for pair in remainders.windows(2) {
+            assert!((3.6..4.5).contains(&(pair[0] / pair[1])), "{remainders:?}");
+        }
+        assert_eq!(bc, boundary_before);
+    }
+}
+
 #[test]
 fn g3_live_contact_robin_goal_matches_complete_four_state_transpose_and_both_law_values() {
-    with_cx(|cx| {
-        let resistance = |a, b| 0.5 + (a - 320.0) / 1024.0 + 3.0 * (b - 320.0) / 1024.0;
-        let (mut lo, mut hi) = (0.0_f64, 75.0);
+    with_cx(|cx| check_four_state_goal(cx, false));
+}
+
+#[test]
+fn g3_live_contact_ambient_goal_matches_four_state_transpose_and_live_radiative_residual() {
+    with_cx(|cx| check_four_state_goal(cx, true));
+}
+
+#[test]
+fn g3_live_contact_radiation_only_goal_accepts_physical_source_endpoint_but_retains_gates() {
+    support::with_gate(|gate, cx| {
+        let (mesh, split) = mesh([1, 1, 1], 0.0);
+        let bc = ThermalBoundaryBuilder::new(&mesh)
+            .region(
+                "cold",
+                |f| on_box_face(f.centroid[0], 0.0),
+                ThermalBc::dirichlet(300.0).unwrap(),
+            )
+            .unwrap()
+            .region(
+                "exterior",
+                |f| on_box_face(f.centroid[0], 2.0),
+                ThermalBc::neumann(0.0).unwrap(),
+            )
+            .unwrap()
+            .adiabatic_remainder()
+            .finish()
+            .unwrap();
+        let card = source_card(1.0, false);
+        let set = contacts(cx, &mesh, &bc, &card, split, true);
+        let material = ConductivityModel::isotropic_declared(10.0).unwrap();
+        let source = ScalarField::Uniform(0.0);
+        let problem = ConductionProblem {
+            mesh: &mesh,
+            boundary: &bc,
+            material: &material,
+            element_materials: None,
+            source: &source,
+        };
+        let patch = goal_radiation_patch("exterior", 0.6, 330.0);
+        // Independent series balance: H crosses both bulk slabs and the
+        // original two-sided source, then equals the direct fourth-power heat.
+        let states = |heat: f64| {
+            let a = 300.0 + 0.1 * heat;
+            let b = (a * (1.0 + heat / 1024.0) - 0.75 * heat) / (1.0 - 3.0 * heat / 1024.0);
+            [a, b, b + 0.1 * heat]
+        };
+        let (mut lo, mut hi) = (0.0_f64, 50.0);
         for _ in 0..80 {
             let heat = 0.5 * (lo + hi);
-            let r = resistance(300.0 + 0.2 * heat, 330.0 - 0.2 * heat);
-            if heat * (0.4 + r) > 30.0 {
+            let [_, _, wall] = states(heat);
+            if heat > 0.6 * STEFAN_BOLTZMANN_W_M2_K4 * (330.0_f64.powi(4) - wall.powi(4)) {
                 hi = heat;
             } else {
                 lo = heat;
             }
         }
-        let heat = 0.5 * (lo + hi);
-        let x = [
-            300.0 + 0.1 * heat,
-            300.0 + 0.2 * heat,
-            330.0 - 0.2 * heat,
-            330.0 - 0.1 * heat,
-        ];
-        let feedback = [0.07, 0.17, -0.09, -0.04];
-        let points = [[10.0, 300.0, 0.25, 0.11], [10.0, 330.0, -0.35, 0.23]];
-        let values = |state: [f64; 4]| {
-            let u = state[0] - x[0];
-            let v = state[3] - x[3];
-            [
-                [
-                    10.0 + 0.25 * u + 0.03 * u * u,
-                    300.0 + (0.11 + feedback[0]) * u + feedback[1] * v,
-                ],
-                [
-                    10.0 - 0.35 * v + 0.02 * v * v,
-                    330.0 + (0.23 + feedback[3]) * v + feedback[2] * u,
-                ],
-            ]
+        let [a, b, wall] = states(0.5 * (lo + hi));
+        let reference = slab_field(&mesh, split, a, b, wall);
+        let approximate = slab_field(&mesh, split, a, b, 350.0);
+        assert!(patch.secant_coefficient_w_m2_k(350.0).is_ok());
+        assert!(patch.secant_partials_w_m2_k2(350.0).is_err());
+        let weights = contact_mean(&mesh, split);
+        let point = [0.0, 330.0, 0.0, 0.0];
+        let value = [0.0, 330.0];
+        let entries = 4 * mesh.vertex_count();
+        let compare = |reference: &[f64],
+                       approximate: &[f64],
+                       points: &[[f64; 4]],
+                       values: &[[f64; 2]],
+                       map: &[f64],
+                       patches: &[AmbientRadiationPatch],
+                       weights: &[f64],
+                       cap| {
+            set.compare_steady_goal_with_ambient_radiation(
+                cx,
+                problem,
+                reference,
+                approximate,
+                solver_config().linear,
+                1e-8,
+                1e-8,
+                &["exterior"],
+                points,
+                values,
+                map,
+                patches,
+                weights,
+                cap,
+                10_000,
+            )
         };
-        let residual = |state: [f64; 4], rows: [[f64; 2]; 2]| {
-            let [c, a, b, d] = state;
-            let q = (a - b) / resistance(a, b);
-            [
-                10.0 * (c - a) + rows[0][0] * (c - rows[0][1]),
-                10.0 * (a - c) + q,
-                10.0 * (b - d) - q,
-                10.0 * (d - b) + rows[1][0] * (d - rows[1][1]),
-            ]
-        };
-        let r = resistance(x[1], x[2]);
-        let qa = 1.0 / r - (x[1] - x[2]) / (1024.0 * r * r);
-        let qb = -1.0 / r - 3.0 * (x[1] - x[2]) / (1024.0 * r * r);
-        let jacobian = [
-            [
-                20.0 + 0.25 * (x[0] - 300.0) - 10.0 * (0.11 + feedback[0]),
-                -10.0,
-                0.0,
-                -10.0 * feedback[1],
-            ],
-            [-10.0, 10.0 + qa, qb, 0.0],
-            [0.0, -qa, 10.0 - qb, -10.0],
-            [
-                -10.0 * feedback[2],
-                0.0,
-                -10.0,
-                20.0 - 0.35 * (x[3] - 330.0) - 10.0 * (0.23 + feedback[3]),
-            ],
-        ];
-        let lambda = solve_four_transpose(jacobian, [0.0, 1.0, 0.0, 0.0]);
-        let reference_residual = residual(x, values(x));
-        for matching in [true, false] {
-            let (mesh, split) = mesh(if matching { [1, 1, 1] } else { [1, 2, 3] }, 0.0);
-            // Deliberately stale original values: both physical evaluations
-            // must be bound from the supplied actual law, including the reference.
-            let bc = ThermalBoundaryBuilder::new(&mesh)
-                .region(
-                    "cold reservoir",
-                    |f| on_box_face(f.centroid[0], 0.0),
-                    ThermalBc::robin(7.0, 285.0).unwrap(),
+        let patches = [patch.clone()];
+        let report = compare(
+            &reference,
+            &approximate,
+            &[point],
+            &[value],
+            &[0.0],
+            &patches,
+            &weights,
+            entries,
+        )
+        .unwrap();
+        near(report.signed_goal_change, 0.0, 1e-14);
+        assert!(report.signed_residual_change.abs() > 0.1);
+        near(
+            report.signed_residual_change + report.linearization_remainder,
+            0.0,
+            1e-14,
+        );
+        assert!(report.uses_nonlinear_jacobian);
+        assert!(report.primal_relative_residual < 1e-12);
+        assert!(report.dual_relative_residual < solver_config().linear.tolerance);
+        // This trace has no convection. Arbitrary finite positive placeholders
+        // cannot overwrite the retained radiative reservoir or create air heat.
+        let placeholder = compare(
+            &reference,
+            &approximate,
+            &[[0.0, 290.0, 0.0, 0.0]],
+            &[[0.0, 345.0]],
+            &[0.0],
+            &patches,
+            &weights,
+            entries,
+        )
+        .unwrap();
+        assert_eq!(report, placeholder);
+        for bad in [
+            [1.0, 330.0, 0.0, 0.0],
+            [0.0, 330.0, 1.0, 0.0],
+            [0.0, 330.0, 0.0, 1.0],
+            [0.0, f64::NAN, 0.0, 0.0],
+        ] {
+            assert!(
+                compare(
+                    &reference,
+                    &approximate,
+                    &[bad],
+                    &[value],
+                    &[0.0],
+                    &patches,
+                    &weights,
+                    entries
                 )
-                .unwrap()
-                .region(
-                    "hot reservoir",
-                    |f| on_box_face(f.centroid[0], 2.0),
-                    ThermalBc::robin(14.0, 345.0).unwrap(),
-                )
-                .unwrap()
-                .adiabatic_remainder()
-                .finish()
-                .unwrap();
-            let boundary_before = bc.clone();
-            let card = source_card(1.0, false);
-            let set = contacts(cx, &mesh, &bc, &card, split, matching);
-            let material = ConductivityModel::isotropic_declared(10.0).unwrap();
-            let source = ScalarField::Uniform(0.0);
-            let problem = ConductionProblem {
-                mesh: &mesh,
-                boundary: &bc,
-                material: &material,
-                element_materials: None,
-                source: &source,
-            };
-            let field = |state: [f64; 4]| {
-                mesh.positions()
-                    .iter()
-                    .enumerate()
-                    .map(|(i, p)| {
-                        if i < split {
-                            state[0] + (state[1] - state[0]) * p[0]
-                        } else {
-                            state[3] + (state[2] - state[3]) * (2.0 - p[0])
-                        }
-                    })
-                    .collect::<Vec<_>>()
-            };
-            let reference = field(x);
-            let weights = contact_mean(&mesh, split);
-            let regions = ["cold reservoir", "hot reservoir"];
-            let entries = 8 * mesh.vertex_count();
-            let mut remainders = Vec::new();
-            for fraction in [1.0, 0.5, 0.25] {
-                let y = std::array::from_fn(|i| x[i] + fraction * [1.7, 3.0, -2.0, -1.1][i]);
-                let approximate = field(y);
-                let approximate_before = approximate.clone();
-                let compare = |actual_values: &[[f64; 2]], map: &[f64]| {
-                    set.compare_steady_goal_with_robin_feedback(
-                        cx,
-                        problem,
-                        &reference,
-                        &approximate,
-                        solver_config().linear,
-                        1e-8,
-                        1e-8,
-                        &regions,
-                        &points,
-                        actual_values,
-                        map,
-                        &weights,
-                        entries,
-                        10_000,
-                    )
-                    .unwrap()
-                };
-                let report = compare(&values(y), &feedback);
-                let other = residual(y, values(y));
-                let expected: f64 = (0..4)
-                    .map(|i| lambda[i] * (reference_residual[i] - other[i]))
-                    .sum();
-                near(report.signed_residual_change, expected, 3e-10);
-                near(report.signed_goal_change, -3.0 * fraction, 3e-12);
-                near(report.nodal_contributions.iter().sum(), expected, 3e-10);
-                near(
-                    report.signed_residual_change + report.linearization_remainder,
-                    report.signed_goal_change,
-                    3e-14,
-                );
-                assert!(report.uses_nonlinear_jacobian);
-                assert!(report.primal_relative_residual < 1e-12);
-                assert!(report.dual_relative_residual < solver_config().linear.tolerance);
-                remainders.push(report.linearization_remainder.abs());
-                if fraction == 1.0 {
-                    let frozen_boundary = compare(&values(x), &feedback);
-                    assert!((frozen_boundary.signed_residual_change - expected).abs() > 0.1);
-                    let missing_map = compare(&values(y), &[0.0; 4]);
-                    assert!((missing_map.signed_residual_change - expected).abs() > 1e-3);
-                }
-                assert_eq!(approximate, approximate_before);
-            }
-            assert!(remainders[2] > 1e-4);
-            for pair in remainders.windows(2) {
-                assert!((3.6..4.5).contains(&(pair[0] / pair[1])), "{remainders:?}");
-            }
-            assert_eq!(bc, boundary_before);
+                .is_err()
+            );
         }
+        assert!(
+            compare(
+                &reference,
+                &approximate,
+                &[point],
+                &[[1.0, 330.0]],
+                &[0.0],
+                &patches,
+                &weights,
+                entries
+            )
+            .is_err()
+        );
+        assert!(
+            compare(
+                &reference,
+                &approximate,
+                &[point],
+                &[value],
+                &[1.0],
+                &patches,
+                &weights,
+                entries
+            )
+            .is_err()
+        );
+        assert!(
+            compare(
+                &reference,
+                &approximate,
+                &[point],
+                &[value],
+                &[0.0],
+                &[],
+                &weights,
+                entries
+            )
+            .is_err()
+        );
+        assert!(
+            compare(
+                &reference,
+                &approximate,
+                &[point],
+                &[value],
+                &[0.0],
+                &[patch.clone(), patch],
+                &weights,
+                entries
+            )
+            .is_err()
+        );
+        assert!(
+            compare(
+                &reference,
+                &approximate,
+                &[point],
+                &[value],
+                &[0.0],
+                &patches,
+                &weights,
+                entries - 1
+            )
+            .is_err()
+        );
+        assert!(
+            compare(
+                &reference,
+                &slab_field(&mesh, split, a, b, 351.0),
+                &[point],
+                &[value],
+                &[0.0],
+                &patches,
+                &weights,
+                entries
+            )
+            .is_err()
+        );
+        let zero = vec![0.0; mesh.vertex_count()];
+        // Zero objectives do not launder an unbalanced reference or permit
+        // an unsupported physical approximate source query.
+        assert!(
+            compare(
+                &slab_field(&mesh, split, a, b, wall + 1.0),
+                &reference,
+                &[point],
+                &[value],
+                &[0.0],
+                &patches,
+                &zero,
+                entries
+            )
+            .is_err()
+        );
+        assert!(
+            compare(
+                &reference,
+                &slab_field(&mesh, split, a, b, 351.0),
+                &[point],
+                &[value],
+                &[0.0],
+                &patches,
+                &zero,
+                entries
+            )
+            .is_err()
+        );
+        gate.request();
+        assert!(matches!(
+            compare(
+                &reference,
+                &approximate,
+                &[point],
+                &[value],
+                &[0.0],
+                &patches,
+                &weights,
+                entries
+            ),
+            Err(ConductionError::Cancelled { .. })
+        ));
     });
 }
 
