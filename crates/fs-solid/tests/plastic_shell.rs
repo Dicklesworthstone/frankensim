@@ -466,3 +466,6 @@ fn g0_checkpoint_resume_late_refusal_and_cancellation_keep_original_state() {
         assert_eq!(loaded, saved);
     });
 }
+
+#[path = "plastic_shell/energy.rs"]
+mod energy;

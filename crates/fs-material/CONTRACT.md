@@ -17369,3 +17369,43 @@ normal differences and Mandel scaling, preserving representable answers even
 when those intermediate operations would otherwise overflow. It still refuses
 nonfinite inputs or an unrepresentable effective stress. Independent numerical
 oracles and exact path-parity cases live in `tests/plastic_hill_robustness.rs`.
+
+
+## Retained layered plane-stress plastic sections
+
+`plastic::section::LayeredPlaneStressSection` integrates the original native
+plane-stress reduction through an ordered stack in one declared material frame.
+Every thickness point retains the complete three-dimensional material history
+and transverse strains. Generalized engineering strains
+`[ex,ey,gamma_xy,kx,ky,kxy]` produce work-conjugate membrane forces and bending
+moments with the full consistent 6-by-6 tangent. Asymmetric layers, a shifted
+reference surface, partial yielding and native nonsymmetric tangents retain
+their coupling; the original constitutive owner performs every return map.
+
+Geometry and two- or three-point Gauss rules are prepared once, with explicit
+layer subdivisions and allocation bounds. Evaluations can reuse the original
+plane-stress factorization workspace. Each trial borrows the accepted history,
+and timed laws advance their physical interval only in the returned accepted
+candidate. In-plane face strains are bounded in addition to sampled full
+tensor strains. Elastic A/B/D integration is exact; moving yield fronts require
+thickness refinement and no quadrature-error bound is inferred.
+
+`plastic::section::energy` audits one exact accepted native increment for J2,
+Voce, linear/power/Voce overstress and Chaboche laws. It integrates the original
+`advance_with_energy` account, retaining elastic, isotropic-hardening and
+kinematic storage separately from physical dissipation and numerical loss.
+Chaboche recovery is counted once. Valid kinetic overstress is preserved;
+rate-independent incoming histories must satisfy their native yield allowance.
+Complete returned-history correspondence is required. Signed transverse
+constraint-residual work closes generalized membrane/bending work without
+being converted into another heat source.
+
+This remains small-strain plane stress in fixed material axes. It supplies no
+transverse-shear law, finite-rotation forming, layer separation, heat transport,
+temperature evolution or measured-material calibration. Constitutive energy
+interpretations and coefficients must remain unchanged over an audited step.
+Six section regressions and three energy regressions define elastic/resultant
+work identities, reference shifts, partial yielding and springback,
+nonproportional Chaboche tangents, timed holds, domain/history refusals, native
+heat and numerical-loss separation. These are added test definitions; native
+compilation and execution remain outstanding in the resource-exhausted runner.

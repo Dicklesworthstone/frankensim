@@ -9222,3 +9222,28 @@ in flat/oblique frames, eccentric physical layer signs and virtual work,
 free-DOF cantilever yielding and permanent shape after unloading, numerical
 coordinate-length invariance, complete restart and transactional refusal/
 cancellation. They are test definitions; execution requires the native build.
+
+
+### Native plastic-shell work and separate physical dissipation
+
+`plastic_shell::SmallStrainShellProblem::solve_with_energy` solves exactly one
+physical load entry from virgin state or a retained checkpoint and publishes only after the native material,
+section and whole-shell work gates pass. It uses the same prepared facet
+operators as the mechanical solve, original area/thickness weights, and the
+exact accepted native histories. Applied forces and moments plus prescribed
+coordinate reactions supply the external endpoint work.
+
+The account reports recoverable elastic/hardening storage, native physical
+plastic/overstress/recovery dissipation, material numerical loss, and signed
+transverse residual work separately. Virgin drilling stiffness supplies only
+numerical elastic storage and its explicit backward-Euler endpoint loss; both
+remain outside the physical material heat. Neither an equilibrium-work deficit
+nor a stabilization term becomes an inferred heat source.
+
+The same reference geometry, section assignments, coefficients and energetic
+interpretation must own both endpoints. This mechanical account performs no
+thermal transport or temperature evolution. Two added energy regressions define
+yielded cantilever load/unload work against independent yield-increment heat
+and pure-drilling storage/loss with zero material heat. Source/API review and
+rustfmt checks are complete; native compilation and regression execution remain
+unverified because the runner exhausted its available disk and memory.

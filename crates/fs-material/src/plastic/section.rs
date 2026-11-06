@@ -16,7 +16,7 @@
 //! Layer bounds share one caller-chosen reference surface and one material
 //! frame. Layers must be contiguous; voids and independent layer rotations are
 //! not inferred. This is a small-strain plane-stress section, with no transverse
-//! shear, finite-rotation kinematics, delamination or thermal-energy claim.
+//! shear, finite-rotation kinematics, delamination or thermal transport.
 //! Gauss integration is exact for elastic `A/B/D`, but a moving yield front
 //! requires thickness refinement; finite sampling does not certify its error.
 
@@ -25,6 +25,9 @@ use super::reduction::{
 };
 use crate::{SmallStrainLaw, tensor};
 use core::fmt;
+
+/// Native mechanical storage and physical/numerical loss of accepted sections.
+pub mod energy;
 
 /// One ordered physical layer and its original native material law.
 #[derive(Clone, Debug, PartialEq)]

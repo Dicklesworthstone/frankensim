@@ -28,6 +28,9 @@ use fs_plate::shell::{FacetGeometry, ShellMesh};
 use fs_sparse::{Coo, Csr};
 use std::cell::RefCell;
 
+/// Native physical/numerical energy and drilling work for a single accepted step.
+pub mod energy;
+
 /// Original immutable section assignments; no material averaging across facets.
 #[derive(Debug, Clone, Copy)]
 pub enum PlasticShellSections<'a, L: SmallStrainLaw> {
@@ -333,6 +336,15 @@ impl<L: SmallStrainLaw> SmallStrainShellProblem<'_, L> {
         cx: &Cx<'_>,
     ) -> Result<SmallStrainShellSolution<L::State>, SmallStrainTetError> {
         let elements = self.prepare(cx)?;
+        self.solve_prepared(&elements, initial, cx)
+    }
+
+    fn solve_prepared(
+        &self,
+        elements: &[Element],
+        initial: Option<(&[[f64; 6]], &[LayeredPlaneStressState<L::State>])>,
+        cx: &Cx<'_>,
+    ) -> Result<SmallStrainShellSolution<L::State>, SmallStrainTetError> {
         let length = self.coordinate_length_m;
         let prescribed: Vec<_> = self
             .prescribed
@@ -368,7 +380,7 @@ impl<L: SmallStrainLaw> SmallStrainShellProblem<'_, L> {
         }
         let operator = Operator {
             problem: self,
-            elements: &elements,
+            elements,
             workspace: RefCell::new(
                 PlaneStressWorkspace::new().map_err(|e| invalid(e.to_string()))?,
             ),

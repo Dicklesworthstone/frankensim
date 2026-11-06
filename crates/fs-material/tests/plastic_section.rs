@@ -389,3 +389,6 @@ fn g0_invalid_geometry_budget_and_stale_history_refuse_atomically() {
     truncated.points.pop();
     assert!(section.evaluate([0.0; 6], &truncated).is_err());
 }
+
+#[path = "plastic_section/energy.rs"]
+mod energy;
