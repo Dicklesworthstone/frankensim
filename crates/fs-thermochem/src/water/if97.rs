@@ -285,6 +285,15 @@ impl If97SaturationPair {
     pub const fn temperature(self) -> Temperature {
         self.liquid.temperature()
     }
+    /// Original R1-76(2014) liquid/pure-vapor surface coefficient and tangent
+    /// at this pair's temperature; no Gibbs or caloric datum is changed.
+    /// IF97's 273.15--273.16 K extension is outside this interfacial source.
+    pub fn surface_tension(
+        self,
+    ) -> Result<super::surface::WaterSurfaceTensionState, super::surface::WaterSurfaceTensionError>
+    {
+        super::surface::WaterSurfaceTensionState::at_temperature(self.temperature())
+    }
     /// Raw vapor-minus-liquid enthalpy [J/kg], not replaced by T delta_s.
     pub fn latent_enthalpy(self) -> MassSpecificEnergyQuantityV1 {
         MassSpecificEnergyQuantityV1::new(self.vapor.enthalpy_j_kg - self.liquid.enthalpy_j_kg)

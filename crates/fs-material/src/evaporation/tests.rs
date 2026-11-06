@@ -81,6 +81,25 @@ fn g1_water_rate_uses_original_if97_liquid_and_vapor_calorics() {
 }
 
 #[test]
+fn g1_water_reference_surface_tension_retains_original_source_and_admitted_temperature() {
+    let water = water();
+    // Literal IAPWS R1-76(2014) Table 1 calculated values at 25 and 50 C.
+    for (t, sigma_n_m) in [(298.15, 0.07197), (323.15, 0.06794)] {
+        let surface = water.pure_water_vapor_surface_tension(t).unwrap();
+        assert_eq!(surface.temperature(), Temperature::new(t));
+        assert_eq!(surface, water.saturation(t).unwrap().surface_tension().unwrap());
+        near(surface.surface_tension().value(), sigma_n_m, 5.0001e-6);
+        assert!(surface.temperature_derivative().value() < 0.0);
+    }
+    for t in [279.0, 351.0, f64::NAN] {
+        assert!(matches!(
+            water.pure_water_vapor_surface_tension(t),
+            Err(EvaporationError::TemperatureOutOfRange { .. })
+        ));
+    }
+}
+
+#[test]
 fn g1_actual_subboiling_water_cools_and_condenses_on_its_original_thermal_chart() {
     let water = water();
     let initial = LiquidSurfaceState {

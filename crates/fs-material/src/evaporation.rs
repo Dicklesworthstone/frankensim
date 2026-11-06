@@ -28,6 +28,7 @@ use fs_qty::Temperature;
 use fs_thermal::enthalpy::{DepositionError, ThermalLaw};
 use fs_thermal::evaporation::{EvaporationError, EvaporationLaw, EvaporationProperties};
 use fs_thermochem::water::if97::{If97SaturationPair, saturation_pressure_derivative};
+use fs_thermochem::water::surface::WaterSurfaceTensionState;
 
 /// Low-pressure pure-water interface on an ORIGINAL immutable caloric chart.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -122,6 +123,20 @@ impl WaterEvaporation {
         self.admit_temperature(temperature_k)?;
         If97SaturationPair::at_temperature(Temperature::new(temperature_k))
             .map_err(|_| EvaporationError::Invalid("original IF97 saturation source refused"))
+    }
+
+    /// Original IAPWS R1-76(2014) coefficient and temperature tangent for the
+    /// liquid/PURE-water-vapor reference interface at this admitted temperature.
+    /// This query does not qualify an arbitrary carrier gas, impurity or
+    /// pressure environment. It changes no gas-film rate, vapor pressure,
+    /// enthalpy or heat account, and supplies no Kelvin correction.
+    pub fn pure_water_vapor_surface_tension(
+        &self,
+        temperature_k: f64,
+    ) -> Result<WaterSurfaceTensionState, EvaporationError> {
+        self.admit_temperature(temperature_k)?;
+        WaterSurfaceTensionState::at_temperature(Temperature::new(temperature_k))
+            .map_err(|_| EvaporationError::Invalid("original IAPWS water surface source refused"))
     }
 
     /// Original saturated vapor-stream enthalpy in the SAME IF97 datum [J/kg].

@@ -22,6 +22,8 @@ pub mod if97;
 pub mod ice;
 /// Explicit near-ambient liquid and empirical freshwater-ice transport sources.
 pub mod conductivity;
+/// Original liquid/pure-vapor surface tension and its saturation-path tangent.
+pub mod surface;
 /// Industrial viscosity and conductivity from the original admitted IF97 state.
 pub mod transport;
 use core::fmt;
@@ -337,6 +339,14 @@ impl SaturatedWaterState {
     /// Saturation temperature on the ITS-90 scale [K].
     pub const fn temperature(self) -> Temperature {
         Temperature::new(self.temperature_k)
+    }
+    /// Original R1-76(2014) surface tension and tangent at this saturation
+    /// temperature. The independent interfacial source changes no caloric data;
+    /// zero at criticality does not create a distinguishable interface.
+    pub fn surface_tension(
+        self,
+    ) -> Result<surface::WaterSurfaceTensionState, surface::WaterSurfaceTensionError> {
+        surface::WaterSurfaceTensionState::at_temperature(self.temperature())
     }
     /// Evaluated equilibrium vapor pressure [Pa].
     pub const fn pressure(self) -> Pressure {
