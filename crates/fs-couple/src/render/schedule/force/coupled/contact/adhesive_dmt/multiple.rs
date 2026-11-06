@@ -12,8 +12,10 @@
 //! histories, contact occupancies and observations publish together. Adapter
 //! scratch and report storage are allocated at construction and reused.
 //!
-//! Sources, axes and work columns stay fixed. Straight coordinate paths and
-//! the original static/kinetic branch policy retain their limitations: this is
+//! Sources stay fixed during mechanical steps; [`temperature`] applies atomic
+//! original-source changes at held coordinates. Axes and work columns stay fixed.
+//! Straight coordinate paths and the original static/kinetic branch policy
+//! retain their limitations: this is
 //! not impact/event resolution, a uniqueness or global convergence theorem,
 //! contact discovery, heat deposition, torsion or an implicit temperature solve.
 //! Redundant columns BETWEEN contacts are allowed; every local three-axis
@@ -31,6 +33,8 @@ use super::{
 use fs_exec::CancelGate;
 use fs_matdb::MaterialStateId;
 use fs_math::{dd::Dd, det};
+
+pub mod temperature;
 
 /// Hard bound in addition to the caller's quadratic setup and evaluation caps.
 pub const MAX_ADHESIVE_DMT_CONTACTS: usize = 128;
@@ -279,7 +283,13 @@ impl<'a> MultipleAdhesiveDmtModalSystem<'a> {
                 state,
             });
         }
-        coupled_stability(&points, &compliance, gate)?;
+        coupled_stability(
+            points
+                .iter()
+                .map(|p| (p.load_line.normal(), p.load_line.shear())),
+            &compliance,
+            gate,
+        )?;
         let frame = MultipleAdhesiveDmtModalFrame {
             sample: 0,
             observer_pressure_pa: 0.0,
@@ -813,16 +823,15 @@ fn check_native(residual_j: f64, tolerance_j: f64) -> Result<(), MultipleAdhesiv
     Ok(())
 }
 
-fn coupled_stability(
-    points: &[Point<'_>],
+fn coupled_stability<'a>(
+    sources: impl ExactSizeIterator<Item = (&'a SourceDmtSphereContact, &'a SourceAdhesiveShear)>,
     compliance: &[f64],
     gate: &CancelGate,
 ) -> Result<(), MultipleAdhesiveDmtModalError> {
-    let rows = 3 * points.len();
-    let mut roots = Vec::with_capacity(points.len());
-    for (i, point) in points.iter().enumerate() {
+    let rows = 3 * sources.len();
+    let mut roots = Vec::with_capacity(sources.len());
+    for (i, (normal, shear)) in sources.enumerate() {
         poll(Some(gate))?;
-        let normal = point.load_line.normal();
         let tail = -normal
             .evaluate(0.0)
             .map_err(|e| source_error(i, e.into()))?
@@ -836,7 +845,7 @@ fn coupled_stability(
         let c = finite(
             0.25 * core::f64::consts::PI
                 * normal.effective_radius_m()
-                * point.load_line.shear().law().kinetic_shear_strength_pa(),
+                * shear.law().kinetic_shear_strength_pa(),
         )?;
         let eta = finite(0.5 * a + 0.5 * a.hypot(2.0 * c))?;
         roots.push(det::sqrt(eta));
