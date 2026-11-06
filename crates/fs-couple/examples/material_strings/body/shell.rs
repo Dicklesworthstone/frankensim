@@ -26,19 +26,24 @@ use bridge::Bridge;
 #[path = "shell/assembly.rs"]
 pub(super) mod assembly;
 
-// Per-component ceilings of one shell profile. The largest component on file is the il Cannone rib set at
-// 6 mm (data/instruments/geometry/violin-cannone-guarneri-1743-esrf2026/shell-assembly-h6.tsv): 2904
-// nodes and 5082 triangles.
-pub(super) const MAX_NODES: usize = 3072;
-pub(super) const MAX_TRIANGLES: usize = 6144;
+// Per-component ceilings of one shell profile (admission only: no allocation is sized from them). The largest
+// component on file is the il Cannone rib set at 6 mm
+// (data/instruments/geometry/violin-cannone-guarneri-1743-esrf2026/shell-assembly-h6.tsv): 2904 nodes and 5082
+// triangles. The double bass rib at 23 layers over its 190 mm (the rib-convergence table of the bass body, 12 layers
+// 4693 nodes and 8664 triangles, 23 layers 8664 and 16606) is the largest asked for; its whole table is 17495 nodes
+// and 30051 triangles, inside the 4x totals of the assembly.
+pub(super) const MAX_NODES: usize = 9216;
+pub(super) const MAX_TRIANGLES: usize = 18432;
 pub(super) const MAX_MODES: usize = input::MAX_BODY_MODES;
 const _: () = assert!(MAX_MODES <= fs_couple::shear_shell::MAX_SHELL_MODES);
 // Interface bindings keep their own allowance.
 const MAX_PROJECTION_WORK: usize = 268_435_456;
 // The shell projection work is `triangles * (10^6 + 324 modes + 18 modes^2) + 6 nodes modes` plus force and pressure
 // projections. An assembly adds the owner's conservative dense mortar bound `(6 total nodes)^2 (modes + bridges)`:
-// the 11216-node cello at 12.5 mm needs 1.06e13 at 1024 modes and about 1.3e13 at the v4 caps (12288 nodes, 24576
-// triangles, 1024 modes, 8 bridges). At 256 modes it was about 2.0e12; at 128 modes and four bridges it is 7.6e11 for
+// the 11216-node cello at 12.5 mm needs 1.06e13 at 1024 modes and about 1.3e13 at the former v4 caps (12288
+// nodes, 24576 triangles, 1024 modes, 8 bridges). The totals are now 4 x 9216 nodes, so this ceiling, not the
+// node cap, bounds a large assembly: the 17495-node bass at 23 rib layers passed 2^42 at 256 modes and refused
+// 2^41. At 256 modes it was about 2.0e12; at 128 modes and four bridges it is 7.6e11 for
 // the 11699-node il Cannone at 6 mm and 2.3e11 for the 5805-node Esteso guitar. 2^44 on 64-bit hosts.
 pub(super) const MAX_SHELL_PROJECTION_WORK: usize = if (1u64 << 44) > usize::MAX as u64 { usize::MAX } else { (1u64 << 44) as usize };
 

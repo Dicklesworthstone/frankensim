@@ -16,8 +16,9 @@ use fs_couple::bowed_string::runtime::reciprocal::bank::radiation::bem::SkinLoad
 pub const MAX_BYTES: usize = 65_536;
 /// Shell (v3) and assembled (v4) profiles carry node and triangle rows, so they take a larger byte
 /// ceiling; flat plate profiles keep [`MAX_BYTES`]. An assembly at its own record caps (8192 nodes, 16384
-/// triangles, both pressure roles on every triangle) writes about 2.1 MB at full float precision.
-pub const MAX_SHELL_BYTES: usize = 4 * 1_048_576;
+/// triangles, both pressure roles on every triangle) writes about 2.1 MB at full float precision. 8 MiB, raised from
+/// 4 MiB for the double bass body at 23 rib layers (17495 nodes, 30051 triangles). A read limit: nothing is sized from it.
+pub const MAX_SHELL_BYTES: usize = 8 * 1_048_576;
 const MAX_GRID: usize = 12;
 
 #[path = "body/shell.rs"]
@@ -95,7 +96,7 @@ impl Profile {
     }
 
     pub fn parse(bytes: &[u8]) -> Result<Self> {
-        if bytes.len() > MAX_SHELL_BYTES { return Err("body profile exceeds 4 MiB".into()); }
+        if bytes.len() > MAX_SHELL_BYTES { return Err("body profile exceeds 8 MiB".into()); }
         let text = std::str::from_utf8(bytes)?;
         let (body_text, interior) = cavity::split(text)?;
         let (body_text, skin) = skin::split(body_text)?;

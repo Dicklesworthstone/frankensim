@@ -20,7 +20,7 @@ conditions, loss model and listener. A table without the required cavity row
 refuses; `cavity none` remains an explicit cavity-free comparison.
 
 Supply both source flags, or `--body-profile`, exclusively. Original tables
-use the existing 4 MiB shell limit and options use the 64 KiB profile limit.
+use the existing 8 MiB shell limit and options use the 64 KiB profile limit.
 In `--self-contained` mode both paths must be explicit attachments, just like
 their material packs. This route also supports the existing body-response and
 coating-strain selections. The standalone `assemble-shell` command remains
@@ -722,8 +722,8 @@ be declared explicitly in the resulting body profile.
 
 ### Shell resource bounds
 
-The file admits at most 3072 nodes and 6144 triangles per component, 16 regions, eight string
-attachments and 1024 retained shell modes (the complete instrument's strings and cavity share the 1024 modal coordinates of the prepared network, so a card retains what remains), within 4 MiB (flat plate profiles keep 64 KiB and 16 modes). `mass` explicitly selects
+The file admits at most 9216 nodes and 18432 triangles per component, 16 regions, eight string
+attachments and 1024 retained shell modes (the complete instrument's strings and cavity share the 1024 modal coordinates of the prepared network, so a card retains what remains), within 8 MiB (flat plate profiles keep 64 KiB and 16 modes). `mass` explicitly selects
 `consistent` or `lumped` inertia. `drilling` supplies positive numerical
 drilling stabilization; `director-min-dot` declares the incident-facet alignment
 floor in `(0,1]`. The spectral window contains squared angular frequencies.
@@ -1476,8 +1476,8 @@ components; they retain the same physical chord and perpendicular-lever rule
 as v3. The other string controls, material bow interfaces, afterlength, torsion,
 preloads and shared gas continue through the original performer.
 
-Profiles take the 4 MiB shell limit and admit at most 64 components, 12288 total
-nodes, 24576 total triangles, 157 ties and 1024 shared body modes. Per-component v3
+Profiles take the 8 MiB shell limit and admit at most 64 components, 36864 total
+nodes, 73728 total triangles, 157 ties and 1024 shared body modes. Per-component v3
 mesh limits still apply. Material/interface source bytes and every damping
 channel remain under the existing complete-performance budgets. At least one
 region across the assembly must retain `@body`; other regions can select
