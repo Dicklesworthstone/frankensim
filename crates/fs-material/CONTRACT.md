@@ -1,5 +1,24 @@
 # fs-material — CONTRACT
 
+## Prescribed membrane strain-reference changes with retained memory
+
+`ViscoHyperelastic::change_membrane_reference_from` preserves the installed
+in-plane Green strain and original material-frame Maxwell metrics while the
+native plane-stress reference transaction changes the prescribed natural
+configuration. Both finite compliance and exact volume reuse the accepted
+transverse endpoint for consistent tangent condensation, without a second
+transverse Newton solve. No time passes and no relaxation heat is generated.
+
+Original-area storage, fixed-full-deformation reference work, pressure-volume
+constraint input, native transverse loading and physical endpoint transverse
+work remain separate. Their signed finite-event integration defect must be
+gated by the spatial owner. Ordered branch energies, equilibrium law and
+elastic domain retain the native compatibility rules; changing a material
+reference does not rename coordinates or supply a thermal evolution law.
+`tests/visco_membrane_reference.rs` checks retained nonproportional history,
+work closure, all tangent columns, kinetic-only changes, unused-bulk
+independence, continued relaxation and refusal atomicity.
+
 ## Finite-strain membrane relaxation with original material history
 
 `visco_hyper::membrane::FrozenViscoMembrane` reduces the original finite-strain

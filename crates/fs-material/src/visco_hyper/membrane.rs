@@ -15,6 +15,10 @@
 //! No source qualification, bending, wrinkling, damage or thermal evolution is
 //! inferred from the supplied explicit law and reference thickness.
 
+/// Prescribed natural-strain events with retained memory and transverse balance.
+pub mod reference_change;
+pub use reference_change::ViscoMembraneReferenceChange;
+
 use super::{
     FrozenViscoHyperelastic, FrozenViscoRemainder, ViscoHyperelastic, ViscoRemainderState,
     ViscoState,

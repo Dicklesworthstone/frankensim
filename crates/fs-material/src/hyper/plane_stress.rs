@@ -493,7 +493,7 @@ fn plane_stress_state_with(
     ))
 }
 
-fn plane_stress_response_from(
+pub(crate) fn plane_stress_response_from(
     state: PlaneStressState,
     a: [[f64; 9]; 9],
 ) -> Result<PlaneStressResponse, MaterialError> {

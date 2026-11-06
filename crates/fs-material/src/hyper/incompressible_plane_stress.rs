@@ -273,7 +273,7 @@ pub fn incompressible_plane_stress_with_seed<L: IncompressiblePlaneStressPotenti
     generic_response(state, remainder, in_plane)
 }
 
-fn generic_response(
+pub(crate) fn generic_response(
     state: IncompressiblePlaneStressState,
     remainder: Option<RemainderResponse>,
     in_plane: &[f64; 4],
