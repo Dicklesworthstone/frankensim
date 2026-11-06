@@ -6,6 +6,9 @@
 //! transport, storage and acoustics; the reacting equilibrium response remains
 //! separately available. No reaction rate, ignition or flame model is implied.
 
+/// Entropy-constrained volume changes with original-source frozen products.
+pub mod entropy;
+
 use super::{GasEquilibriumChamberError, ThermochemicalGasModel, equilibrium_feed_mass, poll};
 use crate::thermochemical_gas::energy::{
     IsochoricGasParcel, parcel::ClosedGasParcel, updated_point,
@@ -20,6 +23,14 @@ use fs_thermochem::equilibrium::composition::{
         EquilibriumInternalEnergySolveV1, EquilibriumVolumeErrorV1, IdealGasIsochoricEquilibriumV1,
     },
 };
+
+/// Internal tolerances for the common source-preserving product boundary.
+#[derive(Clone, Copy)]
+struct FreezeVolumeControls {
+    mass_tolerance_kg: f64,
+    energy_tolerance_j: f64,
+    relative_volume_tolerance: f64,
+}
 
 /// Absolute conservation limits for a source-resolved sealed chamber.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -199,6 +210,38 @@ impl ThermochemicalGasModel {
             controls.equilibrium,
             &mut cancelled,
         )?;
+        self.freeze_volume_equilibrium(
+            chemistry,
+            context,
+            feed,
+            equilibrium,
+            conserved_mass,
+            FreezeVolumeControls {
+                mass_tolerance_kg: controls.mass_tolerance_kg,
+                energy_tolerance_j: controls.equilibrium.energy_tolerance_j,
+                relative_volume_tolerance: controls.equilibrium.volume.relative_volume_tolerance,
+            },
+            &mut cancelled,
+        )
+    }
+
+    // UV and SV retain the same original source, trace, mass and caloric checks.
+    // The native equilibrium endpoint is consumed directly, never solved again.
+    #[allow(clippy::too_many_arguments)]
+    fn freeze_volume_equilibrium(
+        &self,
+        chemistry: &IdealGasEquilibriumV1,
+        context: &QueryPoint,
+        feed: &[(SpeciesId, Amount)],
+        equilibrium: IdealGasIsochoricEquilibriumV1,
+        conserved_mass: Option<f64>,
+        controls: FreezeVolumeControls,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<GasIsochoricEquilibriumChamber, GasIsochoricEquilibriumError> {
+        let target = equilibrium
+            .target_internal_energy()
+            .unwrap_or(equilibrium.internal_energy());
+        let volume = equilibrium.volume();
         let chemical = equilibrium.equilibrium();
         let feed_mass = equilibrium_feed_mass(chemistry, feed)?;
         let mass = conserved_mass.unwrap_or(feed_mass);
@@ -213,7 +256,9 @@ impl ThermochemicalGasModel {
         let properties = model
             .thermodynamics()
             .evaluate_properties(chemical.temperature(), chemical.pressure())
-            .map_err(|error| GasEquilibriumChamberError::from(failure("UV products", error)))?;
+            .map_err(|error| {
+                GasEquilibriumChamberError::from(failure("fixed-volume equilibrium products", error))
+            })?;
         let pressure = (mass / volume.value())
             * properties.mass_specific_gas_constant().value()
             * chemical.temperature().value();
@@ -235,9 +280,8 @@ impl ThermochemicalGasModel {
             relative_pressure_correction: pressure / chemical.pressure().value() - 1.0,
             maximum_mole_fraction_correction: correction,
         };
-        let pressure_tolerance = 2.0
-            * (controls.equilibrium.volume.relative_volume_tolerance
-                + controls.mass_tolerance_kg / mass);
+        let pressure_tolerance =
+            2.0 * (controls.relative_volume_tolerance + controls.mass_tolerance_kg / mass);
         if !internal_energy.is_finite()
             || !balance.energy_residual_j.is_finite()
             || !balance.freeze_energy_residual_j.is_finite()
@@ -245,8 +289,8 @@ impl ThermochemicalGasModel {
             || balance.mass_residual_kg.abs() > controls.mass_tolerance_kg
             || balance.chemical_mass_residual_kg.abs() > controls.mass_tolerance_kg
             || balance.density_mass_residual_kg.abs() > controls.mass_tolerance_kg
-            || balance.energy_residual_j.abs() > controls.equilibrium.energy_tolerance_j
-            || balance.freeze_energy_residual_j.abs() > controls.equilibrium.energy_tolerance_j
+            || balance.energy_residual_j.abs() > controls.energy_tolerance_j
+            || balance.freeze_energy_residual_j.abs() > controls.energy_tolerance_j
             || balance.relative_pressure_correction.abs() > pressure_tolerance
         {
             return Err(GasIsochoricEquilibriumError::Balance(balance));
