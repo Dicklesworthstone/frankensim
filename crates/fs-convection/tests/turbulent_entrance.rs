@@ -171,6 +171,12 @@ fn section_heat_telescopes_without_restarting_the_entrance_and_lowers_to_robin()
     );
     let middle = evaluate_turbulent_circular_duct_section(100_000.0, 1.0, 27.0, 64.0).unwrap();
     close(middle.nusselt(), 220.0 * 38.0 / 37.0, 3e-13);
+    let (start, end, upstream, downstream, nu) = middle.into_parts();
+    assert_eq!((start, end), (27.0, 64.0));
+    assert_eq!(upstream.unwrap().groups()["L_over_Dh"], start);
+    assert_eq!(downstream.groups()["L_over_Dh"], end);
+    close(nu, 220.0 * 38.0 / 37.0, 3e-13);
+    assert_ne!(nu, downstream.evidence().value);
 }
 
 #[test]
@@ -244,4 +250,84 @@ fn source_admission_and_positive_section_history_are_not_silently_extended() {
             )
             .is_err()
     );
+}
+
+#[test]
+fn section_partials_use_the_integrated_coefficient_including_adjacent_endpoints() {
+    let k = ThermalConductivity::new(0.04);
+    let diameter = Length::new(0.01);
+    let epsilon = 1e-5;
+    for (re, pr, start, end) in [
+        (20_000.0, 0.7, 0.0, 20.0),
+        (100_000.0, 7.0, 27.0, 64.0),
+        (300_000.0, 80.0, 1000.0, 1000.0_f64.next_up()),
+    ] {
+        let section = evaluate_turbulent_circular_duct_section(re, pr, start, end).unwrap();
+        let primal = section.heat_transfer_coefficient(k, diameter).unwrap();
+        let tangent = section.heat_transfer_coefficient_with_sensitivities(k, diameter).unwrap();
+        assert_eq!(tangent.value, primal.value);
+        assert_eq!(tangent.model, primal.model);
+        assert_eq!(tangent.numerical, primal.numerical);
+        assert!(tangent.adjoint_ref.is_none());
+        let h = |re, pr| evaluate_turbulent_circular_duct_section(re, pr, start, end).unwrap()
+            .heat_transfer_coefficient(k, diameter).unwrap().value.value();
+        for (axis, input, plus, minus) in [
+            ("Re", re, h(re * (1.0 + epsilon), pr), h(re * (1.0 - epsilon), pr)),
+            ("Pr", pr, h(re, pr * (1.0 + epsilon)), h(re, pr * (1.0 - epsilon))),
+        ] {
+            close(tangent.sensitivity.d_qoi[axis], (plus - minus) / (2.0 * epsilon * input), 3e-8);
+        }
+        close(tangent.sensitivity.d_qoi["k"], section.nusselt() / diameter.value(), 3e-13);
+        close(tangent.sensitivity.d_qoi["L"], -primal.value.value() / diameter.value(), 3e-13);
+        let downstream = CorrelationInputs::forced(re, pr).with_length_ratio(end)
+            .evaluate_with_sensitivities(CARD).unwrap()
+            .heat_transfer_coefficient_with_sensitivities(k, diameter).unwrap();
+        for axis in ["Re", "Pr"] {
+            close(tangent.sensitivity.d_qoi[axis] / primal.value.value(),
+                downstream.sensitivity.d_qoi[axis] / downstream.value.value(), 3e-13);
+            if start > 0.0 {
+                assert!(tangent.sensitivity.d_qoi[axis] < downstream.sensitivity.d_qoi[axis]);
+            }
+        }
+        if start > 0.0 {
+            assert_eq!(tangent.model.discrepancy_rel, f64::INFINITY);
+        }
+    }
+}
+
+#[test]
+fn section_partials_add_over_a_shared_inlet_and_preserve_boundary_omissions() {
+    let k = ThermalConductivity::new(0.04);
+    let diameter = Length::new(0.01);
+    let positions = [0.0, 27.0, 64.0, 125.0, 1000.0];
+    let mut d_re = 0.0;
+    let mut d_pr = 0.0;
+    for pair in positions.windows(2) {
+        let [a, b] = [pair[0], pair[1]];
+        let h = evaluate_turbulent_circular_duct_section(100_000.0, 7.0, a, b).unwrap()
+            .heat_transfer_coefficient_with_sensitivities(k, diameter).unwrap();
+        d_re += h.sensitivity.d_qoi["Re"] * (b - a) * diameter.value();
+        d_pr += h.sensitivity.d_qoi["Pr"] * (b - a) * diameter.value();
+    }
+    let whole = evaluate_turbulent_circular_duct_section(100_000.0, 7.0, 0.0, 1000.0).unwrap()
+        .heat_transfer_coefficient_with_sensitivities(k, diameter).unwrap();
+    close(d_re, whole.sensitivity.d_qoi["Re"] * 1000.0 * diameter.value(), 3e-13);
+    close(d_pr, whole.sensitivity.d_qoi["Pr"] * 1000.0 * diameter.value(), 3e-13);
+    // Holding either source length boundary fixed does not move Re or Pr.
+    let length_bounds = evaluate_turbulent_circular_duct_section(100_000.0, 7.0, 10.0, 1.0e6)
+        .unwrap().heat_transfer_coefficient_with_sensitivities(k, diameter).unwrap();
+    assert!(length_bounds.sensitivity.d_qoi["Re"] > 0.0);
+    assert!(length_bounds.sensitivity.d_qoi["Pr"] > 0.0);
+    for re in [10_000.0, 1.0e6] {
+        let h = evaluate_turbulent_circular_duct_section(re, 7.0, 27.0, 64.0).unwrap()
+            .heat_transfer_coefficient_with_sensitivities(k, diameter).unwrap();
+        assert!(!h.sensitivity.d_qoi.contains_key("Re"));
+        assert!(h.sensitivity.d_qoi["Pr"] > 0.0);
+    }
+    for pr in [0.5, 200.0] {
+        let h = evaluate_turbulent_circular_duct_section(100_000.0, pr, 27.0, 64.0).unwrap()
+            .heat_transfer_coefficient_with_sensitivities(k, diameter).unwrap();
+        assert!(!h.sensitivity.d_qoi.contains_key("Pr"));
+        assert!(h.sensitivity.d_qoi["Re"] > 0.0);
+    }
 }

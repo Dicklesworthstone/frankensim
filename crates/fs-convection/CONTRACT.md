@@ -643,3 +643,24 @@ scalar regressions passed for unequal subdivisions, cross-knot integration and
 thin-section limits using the installed August 31 toolchain. Public API and
 material integration regressions require the full constellation dependency
 closure and have not been executed in this environment.
+
+## Analytic finite-section heat-transfer tangents
+
+Flat-plate and developing turbulent circular-tube sections expose
+`heat_transfer_coefficient_with_sensitivities` for their actual section
+coefficient. Absolute Re, Pr, conductivity (`k`) and dimensional conversion
+(`L`) partials use the existing evidence convention. Plate Re is the
+downstream Reynolds number at fixed start/end fraction; tube Re uses diameter
+at fixed entrance-distance/diameter ratios. The direct L partial holds these
+dimensionless inputs fixed, so callers must supply any total geometry or
+material chain rule separately.
+
+Both original cumulative endpoints must admit a two-sided perturbation of the
+differentiated source axis. A missing derivative remains absent, while a
+boundary of an unrelated fixed axis does not suppress an available partial.
+Positive-start turbulent plate strips use the exact cancellation of the shared
+leading-edge correction and therefore have Reynolds elasticity 0.8; the first
+strip retains the original corrected-mean derivative. Analytic derivatives
+preserve the section's existing numerical estimate and unbounded positive-start
+model discrepancy. They do not establish local experimental accuracy or a
+whole-solver adjoint.

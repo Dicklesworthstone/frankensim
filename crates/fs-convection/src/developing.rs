@@ -23,6 +23,55 @@ pub(super) use turbulent::{
     mean_nusselt as turbulent_mean_nusselt,
 };
 
+// Re and Pr are independent source-domain axes for these two smooth section
+// models. Both retained endpoints must admit a two-sided input perturbation;
+// a boundary in another, held-fixed axis does not suppress this derivative.
+fn section_input_is_interior(evaluation: &NusseltEvaluation, axis: &str) -> bool {
+    evaluation.evidence().model.in_domain
+        && evaluation.card().model.validity.bounds().get(axis).is_some_and(|&(low, high)| {
+            evaluation.groups().get(axis).is_some_and(|&value| value > low && value < high)
+        })
+}
+
+fn attach_section_sensitivities(
+    coefficient: &mut Evidence<HeatTransferCoefficient>,
+    nusselt: f64,
+    conductivity: ThermalConductivity,
+    characteristic_length: Length,
+    means: (Option<&NusseltEvaluation>, &NusseltEvaluation),
+    elasticities: [f64; 2],
+) -> Result<(), CorrelationError> {
+    let (upstream, downstream) = means;
+    let mut sensitivity = SensitivitySummary::default();
+    let mut insert = |axis: &str, value: f64| -> Result<(), CorrelationError> {
+        if !value.is_finite() {
+            return Err(CorrelationError::NonFiniteResult {
+                stage: "section coefficient input derivative", value_bits: value.to_bits(),
+            });
+        }
+        sensitivity.d_qoi.insert(axis.to_string(), value);
+        Ok(())
+    };
+    for (axis, elasticity) in ["Re", "Pr"].into_iter().zip(elasticities) {
+        if section_input_is_interior(downstream, axis)
+            && upstream.is_none_or(|mean| section_input_is_interior(mean, axis))
+        {
+            insert(axis, coefficient.value.value() * (elasticity / downstream.groups()[axis]))?;
+        }
+    }
+    insert("k", nusselt / characteristic_length.value())?;
+    insert("L", -coefficient.value.value() / characteristic_length.value())?;
+    let mut parameters = [0_u8; 16];
+    parameters[..8].copy_from_slice(&conductivity.value().to_bits().to_le_bytes());
+    parameters[8..].copy_from_slice(&characteristic_length.value().to_bits().to_le_bytes());
+    coefficient.provenance = ProvenanceHash::chain(
+        "convection-section-dimensional-sensitivities-v1",
+        &[coefficient.provenance, ProvenanceHash::of_bytes(&parameters)],
+    );
+    coefficient.sensitivity = sensitivity;
+    Ok(())
+}
+
 /// Mean transfer over one finite section of the original rectangular CWT
 /// table slice at aspect ratio 0.5 and Pr=0.72. Lengths use hydraulic diameter.
 #[derive(Debug)]
@@ -224,7 +273,8 @@ impl FlatPlateSection {
     /// For positive starts, original source cards remain attached but their
     /// mean discrepancy cannot bound a difference of cumulative predictions:
     /// the derived strip therefore reports an explicit unbounded model band.
-    /// Formula arithmetic remains an estimate, with no local sensitivity claim.
+    /// Formula arithmetic remains an estimate; this primal-only conversion
+    /// does not attach input sensitivities.
     pub fn heat_transfer_coefficient(
         &self,
         conductivity: ThermalConductivity,
@@ -261,6 +311,41 @@ impl FlatPlateSection {
             ProvenanceHash::of_bytes(&values),
         ]);
         Ok(evidence)
+    }
+
+    /// Convert this strip's actual coefficient with analytic `Re`, `Pr`, `k`
+    /// and `L` partials in `sensitivity.d_qoi`, in the same absolute SI/input
+    /// convention as [`NusseltEvaluation::heat_transfer_coefficient_with_sensitivities`].
+    /// `Re` means the downstream Reynolds number and `L` the downstream
+    /// distance, holding `a/b` and the other independent inputs fixed.
+    ///
+    /// For a positive turbulent start the shared entrance correction cancels:
+    /// its Reynolds elasticity is exactly 0.8, unlike the original cumulative
+    /// mean. The leading-edge strip retains that mean's corrected derivative.
+    /// A partial is absent if it would cross a source bound at either endpoint;
+    /// absent never means zero, and no derivative crosses a transition or
+    /// changes the selected card. No geometry-fraction partial is supplied.
+    ///
+    /// These are derivatives of the held-property formula, not local model
+    /// validation or a total material/temperature derivative. The original
+    /// section evidence, including its unbounded positive-start discrepancy,
+    /// is retained. Invalid dimensions or nonfinite partials are refused.
+    pub fn heat_transfer_coefficient_with_sensitivities(
+        &self,
+        conductivity: ThermalConductivity,
+        downstream_distance: Length,
+    ) -> Result<Evidence<HeatTransferCoefficient>, CorrelationError> {
+        let mut coefficient = self.heat_transfer_coefficient(conductivity, downstream_distance)?;
+        let elasticities = flat_plate::section_elasticities(
+            self.downstream.evidence().value, self.downstream.groups()["Pr"],
+            self.start_fraction,
+            self.downstream.card().id == CorrelationId::FlatPlateTurbulentAverage,
+        );
+        attach_section_sensitivities(
+            &mut coefficient, self.nusselt, conductivity, downstream_distance,
+            (self.upstream.as_ref(), &self.downstream), elasticities,
+        )?;
+        Ok(coefficient)
     }
 
     /// Lower exactly this strip coefficient into the existing conduction owner,

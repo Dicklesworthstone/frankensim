@@ -34,6 +34,27 @@ pub(crate) fn turbulent_section(downstream_mean: f64, prandtl: f64, start_fracti
     uncorrected * quotient
 }
 
+/// Re and Pr logarithmic partials at fixed physical start/end fraction.
+/// The parent admits both source endpoints before exposing a derivative.
+pub(crate) fn section_elasticities(
+    downstream_mean: f64,
+    prandtl: f64,
+    start_fraction: f64,
+    turbulent: bool,
+) -> [f64; 2] {
+    let reynolds = if !turbulent {
+        0.5
+    } else if start_fraction == 0.0 {
+        // Only the first strip retains the laminar leading-edge correction.
+        let uncorrected = downstream_mean + LEADING_EDGE * det::pow(prandtl, 1.0 / 3.0);
+        TURBULENT_POWER * (uncorrected / downstream_mean)
+    } else {
+        // The constant entrance terms cancel before forming a positive strip.
+        TURBULENT_POWER
+    };
+    [reynolds, 1.0 / 3.0]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

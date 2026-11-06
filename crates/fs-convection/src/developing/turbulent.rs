@@ -8,7 +8,7 @@
 use super::{
     CorrelationError, CorrelationId, CorrelationInputs, CorrelationRobinBoundary, Evidence,
     HeatTransferCoefficient, Length, NumericalCertificate, NusseltEvaluation, ProvenanceHash,
-    SensitivitySummary, Temperature, ThermalConductivity, det, evaluate,
+    SensitivitySummary, Temperature, ThermalConductivity, attach_section_sensitivities, det, evaluate,
 };
 use crate::{
     Ambition, CorrelationCard, DiscrepancyBasis, ModelCard, SourceProvenance, ValidityDomain,
@@ -31,6 +31,21 @@ pub(crate) fn mean_nusselt(reynolds: f64, prandtl: f64, length_over_diameter: f6
     developed_nusselt(reynolds, prandtl) * (1.0 + det::pow(length_over_diameter, -2.0 / 3.0))
 }
 
+// The geometry multiplier is independent of Re and Pr, for both inlet means
+// and finite sections. Compute these two transport partials together.
+fn transport_elasticities(reynolds: f64, prandtl: f64) -> [f64; 2] {
+    let z = friction_root_inverse(reynolds);
+    let coefficient = 12.7 / (det::sqrt(8.0) * z);
+    let pr_power = det::pow(prandtl, 2.0 / 3.0);
+    let correction = coefficient * (pr_power - 1.0);
+    [
+        reynolds / (reynolds - 1_000.0)
+            - (3.6 / core::f64::consts::LN_10) / z
+                * (1.0 - 0.5 * correction / (1.0 + correction)),
+        1.0 - (2.0 / 3.0) * coefficient * pr_power / (1.0 + correction),
+    ]
+}
+
 /// Logarithmic partials of the same mean formula at admitted interior points.
 pub(crate) fn elasticity(
     reynolds: f64,
@@ -38,17 +53,9 @@ pub(crate) fn elasticity(
     length_over_diameter: f64,
     axis: &str,
 ) -> f64 {
-    let z = friction_root_inverse(reynolds);
-    let coefficient = 12.7 / (det::sqrt(8.0) * z);
-    let pr_power = det::pow(prandtl, 2.0 / 3.0);
-    let correction = coefficient * (pr_power - 1.0);
     match axis {
-        "Re" => {
-            reynolds / (reynolds - 1_000.0)
-                - (3.6 / core::f64::consts::LN_10) / z
-                    * (1.0 - 0.5 * correction / (1.0 + correction))
-        }
-        "Pr" => 1.0 - (2.0 / 3.0) * coefficient * pr_power / (1.0 + correction),
+        "Re" => transport_elasticities(reynolds, prandtl)[0],
+        "Pr" => transport_elasticities(reynolds, prandtl)[1],
         "L_over_Dh" => {
             let entrance = det::pow(length_over_diameter, -2.0 / 3.0);
             -(2.0 / 3.0) * entrance / (1.0 + entrance)
@@ -131,12 +138,28 @@ impl TurbulentCircularDuctSection {
         self.nusselt
     }
 
+    /// Move out both physical endpoint ratios, original cumulative evaluations
+    /// and the derived section value, in that order. The downstream evaluation
+    /// remains an original mean; it is never relabeled as the section value.
+    /// Compute the coefficient first to retain the section's complete evidence.
+    #[must_use]
+    pub fn into_parts(self) -> (f64, f64, Option<NusseltEvaluation>, NusseltEvaluation, f64) {
+        (
+            self.start_over_diameter,
+            self.end_over_diameter,
+            self.upstream,
+            self.downstream,
+            self.nusselt,
+        )
+    }
+
     /// Convert using the same bulk-fluid conductivity and tube diameter.
     ///
     /// A section beginning at zero retains the original mean evidence exactly.
     /// A positive-start section retains both mean evaluations, but its model
     /// discrepancy is unbounded: the original mean allowance does not validate
-    /// a derived local heat-transfer profile. Partials are not advertised here.
+    /// a derived local heat-transfer profile. This primal-only conversion
+    /// does not attach input sensitivities.
     pub fn heat_transfer_coefficient(
         &self,
         conductivity: ThermalConductivity,
@@ -183,6 +206,40 @@ impl TurbulentCircularDuctSection {
             ],
         );
         Ok(evidence)
+    }
+
+    /// Convert this section's actual coefficient with analytic `Re`, `Pr`, `k`
+    /// and `L` partials in `sensitivity.d_qoi`, using the same absolute
+    /// convention as [`NusseltEvaluation::heat_transfer_coefficient_with_sensitivities`].
+    /// `L` is the diameter. The two inlet-distance/diameter ratios and other
+    /// independent inputs stay fixed; no endpoint or total geometry derivative
+    /// is implied. Re/Pr partials scale the actual section coefficient, whose
+    /// geometry factor differs from the downstream cumulative mean.
+    ///
+    /// A partial is absent at its source-domain endpoint; an unrelated fixed
+    /// length boundary does not remove it. Derivatives describe the admitted
+    /// held-property formula and do not validate a local heat-transfer profile
+    /// or promote its unbounded positive-start model discrepancy. Invalid
+    /// dimensions and nonfinite derivative arithmetic are refused.
+    pub fn heat_transfer_coefficient_with_sensitivities(
+        &self,
+        conductivity: ThermalConductivity,
+        diameter: Length,
+    ) -> Result<Evidence<HeatTransferCoefficient>, CorrelationError> {
+        let mut coefficient = self.heat_transfer_coefficient(conductivity, diameter)?;
+        let elasticities = transport_elasticities(
+            self.downstream.groups()["Re"],
+            self.downstream.groups()["Pr"],
+        );
+        attach_section_sensitivities(
+            &mut coefficient,
+            self.nusselt,
+            conductivity,
+            diameter,
+            (self.upstream.as_ref(), &self.downstream),
+            elasticities,
+        )?;
+        Ok(coefficient)
     }
 
     /// Lower this section coefficient into the existing conduction Robin seam.
