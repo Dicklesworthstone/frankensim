@@ -21,6 +21,12 @@
 //! excited states and radiative recombination are absent. Other reaction and
 //! thermal owners can consume the returned common gas state. No radiation
 //! entropy model is supplied, so no closed-parcel entropy inequality is claimed.
+//!
+//! [`column`] composes these cells along a fixed-area beam, passing the exact
+//! integrated transmitted fluence through evolving upstream opacity. Each
+//! cell remains uniformly mixed; different cells need not share a gas state.
+
+pub mod column;
 
 use fs_math::det::{exp, expm1, ln};
 use fs_qty::{Amount, Area, Energy, Temperature, Time};
@@ -114,7 +120,8 @@ impl PhotoionizationResult {
     pub const fn initial_state(&self) -> &FrozenIonizedGasStateV1 { &self.initial }
     /// Original cross section, species bank and level-energy source.
     pub const fn source(&self) -> &AtomicPhotoionizationV1 { &self.source }
-    /// Applied constant illumination.
+    /// Applied illumination; serial transport uses the fluence-equivalent mean
+    /// flux, not a claim that the downstream instantaneous flux is constant.
     pub const fn exposure(&self) -> PhotoionizationExposure { self.exposure }
     /// Numerical publication allowances.
     pub const fn controls(&self) -> PhotoionizationControls { self.controls }
@@ -147,13 +154,7 @@ pub fn advance_monochromatic_photoionization(
     let time = exposure.duration.value();
     let flux = exposure.beam.number_flux_per_m2_s;
     let photon_energy = exposure.beam.photon_energy.value();
-    if !positive(area) || !nonnegative(time) || !nonnegative(flux)
-        || !positive(photon_energy) || !positive(controls.energy_tolerance_j)
-        || !positive(controls.relative_charge_tolerance)
-        || controls.relative_charge_tolerance >= 1.0
-    {
-        return Err(PhotoionizationError::Invalid("finite exposure and numerical controls"));
-    }
+    let (fluence, photons) = validate_exposure(exposure, controls)?;
     if initial.thermodynamics() != channel.thermodynamics()
         || initial.electron_index() != Some(channel.electron_index())
         || initial.relative_charge_residual() > controls.relative_charge_tolerance
@@ -165,8 +166,6 @@ pub fn advance_monochromatic_photoionization(
     let [a, i, e] = [channel.neutral_index(), channel.ion_index(), channel.electron_index()];
     let neutral = initial.amounts()[a].value();
     let electrons = initial.amounts()[e].value();
-    let fluence = flux * time;
-    let photons = fluence * area;
     let tau = ((sigma * NA) * neutral) / area;
     let dose = sigma * fluence;
     if [fluence, photons, tau, dose].iter().any(|x| !nonnegative(*x)) {
@@ -195,7 +194,13 @@ pub fn advance_monochromatic_photoionization(
     if !nonnegative(absorbed) || absorbed > photons + photon_allowance {
         return Err(PhotoionizationError::Arithmetic("absorbed photon budget"));
     }
-    let transmitted = if absorbed > photons { 0.0 } else { photons - absorbed };
+    // Subtraction loses small but representable escaping photon populations,
+    // giving downstream cells a false perfectly opaque shield. Integrate the
+    // changing opacity analytically instead.
+    let transmitted = transmitted_photons(photons, tau, dose);
+    if !nonnegative(transmitted) || transmitted > photons + photon_allowance {
+        return Err(PhotoionizationError::Arithmetic("transmitted photon budget"));
+    }
     let mut amounts = initial.amounts().to_vec();
     amounts[a] = Amount::new(remaining);
     amounts[i] = Amount::new(initial.amounts()[i].value() + extent);
@@ -249,6 +254,55 @@ pub fn advance_monochromatic_photoionization(
             absorbed_energy_j: absorbed_energy, energy_residual_j: residual,
         },
     })
+}
+
+fn validate_exposure(
+    exposure: PhotoionizationExposure,
+    controls: PhotoionizationControls,
+) -> Result<(f64, f64), PhotoionizationError> {
+    if !positive(exposure.illuminated_area.value())
+        || !nonnegative(exposure.duration.value())
+        || !nonnegative(exposure.beam.number_flux_per_m2_s)
+        || !positive(exposure.beam.photon_energy.value())
+        || !positive(controls.energy_tolerance_j)
+        || !positive(controls.relative_charge_tolerance)
+        || controls.relative_charge_tolerance >= 1.0
+    {
+        return Err(PhotoionizationError::Invalid("finite exposure and numerical controls"));
+    }
+    let fluence = exposure.beam.number_flux_per_m2_s * exposure.duration.value();
+    let photons = fluence * exposure.illuminated_area.value();
+    if !nonnegative(fluence) || !nonnegative(photons) {
+        return Err(PhotoionizationError::Arithmetic("photon exposure"));
+    }
+    Ok((fluence, photons))
+}
+
+// The transmitted dimensionless dose is
+// log1p(exp(-tau) * expm1(dose)). Evaluate without overflow or subtracting
+// nearly equal photon inventories. Factor out the exponential in the small
+// tail so a large photon count can keep it representable even at tau > 745.
+fn transmitted_photons(photons: f64, tau: f64, dose: f64) -> f64 {
+    if tau == 0.0 || dose == 0.0 {
+        return photons;
+    }
+    if dose <= tau {
+        let gap = tau - dose;
+        let exposed = -expm1(-dose);
+        let attenuation = exp(-gap);
+        let small = attenuation * exposed;
+        let correction = if small == 0.0 { 1.0 } else { log1p(small) / small };
+        let scale = photons * (exposed / dose);
+        let tail = if gap <= 700.0 || scale == 0.0 {
+            scale * attenuation
+        } else {
+            exp(ln(scale) - gap)
+        };
+        tail * correction
+    } else {
+        let gap = dose - tau;
+        photons * ((gap + log1p(exp(-gap) * (-expm1(-tau)))) / dose)
+    }
 }
 
 // ln(1+x) for this module's bounded arguments, preserving the rounding of 1+x.

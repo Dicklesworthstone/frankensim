@@ -12,16 +12,21 @@ use fs_thermochem::kinetics::atomic_ionization::photoionization::{
 
 const SIGMA: f64 = 1e-22;
 
+mod column;
+
 fn photon_source(channel: AtomicIonizationV1) -> AtomicPhotoionizationV1 {
+    photon_source_with_cross_section(channel, SIGMA)
+}
+fn photon_source_with_cross_section(channel: AtomicIonizationV1, sigma: f64) -> AtomicPhotoionizationV1 {
     AtomicPhotoionizationV1::new(channel, Provenance {
         source: "constant cross-section analytic photon-budget fixture".into(),
         license: "analytic test fixture".into(), artifact: None,
     }, vec![
         PhotoionizationCrossSectionPointV1 {
-            photon_energy: Energy::new(14.0 * EV), cross_section: Area::new(SIGMA),
+            photon_energy: Energy::new(14.0 * EV), cross_section: Area::new(sigma),
         },
         PhotoionizationCrossSectionPointV1 {
-            photon_energy: Energy::new(24.0 * EV), cross_section: Area::new(SIGMA),
+            photon_energy: Energy::new(24.0 * EV), cross_section: Area::new(sigma),
         },
     ]).unwrap()
 }
@@ -106,6 +111,24 @@ fn exact_depletion_preserves_small_events_and_small_surviving_populations() {
     relative(depleted.state().amounts()[0].value(), surviving, 5e-14);
     assert!(depleted.state().amounts()[0].value() > 0.0);
     assert!(depleted.balance().absorbed_photons <= depleted.balance().incident_photons);
+}
+
+#[test]
+fn transmitted_photons_preserve_thick_column_tails_without_inventory_subtraction() {
+    let (initial, atomic) = initial(0.0, 12000.0, 4000.0, 0.0, 0.0);
+    let source = photon_source(atomic);
+    for tau in [40.0, 750.0] {
+        let result = advance_monochromatic_photoionization(
+            &initial, &source, exposure(1.0, tau, 1.0), photo_controls(), || false,
+        ).unwrap();
+        // For dose=1, Pout = Pin*ln(1+exp(-tau)*(e-1)). At these depths
+        // ln(1+x)=x to f64 relative accuracy. Evaluate the independently
+        // combined logarithm to avoid an underflowing exp(-750).
+        let expected = (result.balance().incident_photons.ln()
+            + 1.0_f64.exp_m1().ln() - tau).exp();
+        assert!((result.balance().transmitted_photons / expected - 1.0).abs() < 2e-13);
+        assert!(result.balance().transmitted_photons > 0.0);
+    }
 }
 
 #[test]

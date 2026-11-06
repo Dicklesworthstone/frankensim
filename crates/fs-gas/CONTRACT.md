@@ -6157,6 +6157,40 @@ tiny surviving populations, exact interval composition, conserved-reference
 invariance, source refusal and cancellation. The scalar kernel includes
 independent high-precision optical-depth reference values.
 
+## Layered photoionization and evolving opacity
+
+`chemistry::photoionization::column::advance_monochromatic_column` transports
+one fixed-area monochromatic beam through ordered, individually mixed gas
+cells. Each cell retains its own initial state and original atomic source.
+The upstream analytic solution supplies escaped integrated photon fluence to
+the next cell. Since the admitted photoionization endpoint depends only on
+cumulative incident fluence, one analytic solve per cell accounts for evolving
+upstream opacity without freezing it or introducing chemical time substeps.
+Reported downstream fluxes are fluence-equivalent means, not instantaneous
+illumination histories.
+
+The single-cell owner evaluates outgoing photons directly with stable
+thin/thick expressions. It retains representable transmitted populations that
+would disappear in incident-minus-absorbed subtraction, including scaled tails
+for which unit transmittance underflows. Those photons can create downstream
+electrons and sensible energy through the original atomic source.
+
+An explicit maximum cell count bounds admission and allocation. Compensated
+incident-to-exit reductions check the whole-column photon account and a single
+unchanged absolute energy allowance. Indexed source failures, arithmetic
+refusals and late cancellation publish no partial endpoints; caller states
+remain immutable. Positive unrepresentable downstream mean flux refuses.
+
+The exact serial endpoint statement requires fixed geometry, fixed source
+cross sections, quasi-static propagation and the parent owner's immediate
+photoelectron thermalization. Recombination, cooling, collisional chemistry,
+scattering, other absorbers, motion and light-travel delays are absent during
+the interval; structure within each cell remains unresolved. This is not a
+general radiation-hydrodynamics or multi-frequency ionization-front solver.
+Controls include independent homogeneous-prefix and heterogeneous-column
+references, exposure composition, downstream heating, very thick transmission,
+whole-call budgets, late source mismatch and cancellation.
+
 ## Prescribed exterior states with inviscid entropy admission
 
 `MixtureEuler1d::step_entropy_consistent_with_exterior_states` extends the
