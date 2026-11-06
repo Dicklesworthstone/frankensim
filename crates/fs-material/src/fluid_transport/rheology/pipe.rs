@@ -12,6 +12,9 @@ use super::{MaterialError, TemperatureShiftState, ThermalCarreauYasuda, Viscosit
 use super::{parameters, positive, state_error};
 use fs_math::det;
 
+/// Radially resolved nonlinear viscous startup, relaxation and reversal.
+pub mod transient;
+
 #[cfg(test)]
 mod tests;
 
@@ -412,6 +415,31 @@ impl LaminarCarreauPipe {
             .prepared
             .inverse(target, self.prepared.ceiling, controls)?;
         self.profile_from_wall(wall, pressure_drop_pa, iterations, controls)
+    }
+
+    /// Resolve a steady profile at an authored signed wall shear rate.
+    ///
+    /// The rate is admitted directly against the original prepared source.
+    /// In particular, the exact declared ceiling can be queried without an
+    /// external pressure reconstruction rounding beyond its supported stress.
+    /// The original positive radial quadrature still owns flow and heat.
+    pub fn profile_at_wall_rate(
+        &self,
+        signed_wall_rate_per_s: f64,
+        controls: CarreauPipeControls,
+    ) -> Result<CarreauPipeProfile, MaterialError> {
+        controls.admit()?;
+        if !signed_wall_rate_per_s.is_finite() {
+            return Err(parameters("Carreau pipe wall rate must be finite"));
+        }
+        let wall = self.prepared.sample_rate(signed_wall_rate_per_s.abs())?;
+        let pressure = if wall.rate == 0.0 {
+            0.0
+        } else {
+            product_ratio(&[2.0, self.length_m, wall.stress()], &[self.radius_m])?
+                .copysign(signed_wall_rate_per_s)
+        };
+        self.profile_from_wall(wall, pressure, 0, controls)
     }
 
     /// Resolve the pressure required by a prescribed signed volume flow.

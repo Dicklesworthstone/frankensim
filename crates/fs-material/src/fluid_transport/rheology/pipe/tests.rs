@@ -49,6 +49,49 @@ fn nonlinear() -> LaminarCarreauPipe {
 }
 
 #[test]
+fn g0_direct_wall_rate_retains_exact_ceiling_and_signed_original_profile() {
+    let pipe = nonlinear();
+    let ceiling = pipe.maximum_laminar_wall_rate_per_s();
+    let controls = CarreauPipeControls::default();
+    let positive = pipe.profile_at_wall_rate(ceiling, controls).unwrap();
+    let negative = pipe.profile_at_wall_rate(-ceiling, controls).unwrap();
+    assert_eq!(positive.flow().wall_shear_rate_per_s, ceiling);
+    assert_eq!(negative.flow().wall_shear_rate_per_s, -ceiling);
+    assert_eq!(
+        positive.flow().volumetric_flow_m3_s,
+        -negative.flow().volumetric_flow_m3_s
+    );
+    assert_eq!(
+        positive.flow().dissipated_power_w,
+        negative.flow().dissipated_power_w
+    );
+    assert_eq!(positive.flow().pressure_residual_pa, 0.0);
+    assert_eq!(positive.flow().constitutive_iterations, 0);
+    assert!(
+        pipe.profile_at_wall_rate(ceiling.next_up(), controls)
+            .is_err()
+    );
+    assert!(pipe.profile_at_wall_rate(f64::NAN, controls).is_err());
+    let rest = pipe.profile_at_wall_rate(0.0, controls).unwrap();
+    assert_eq!(rest.flow().volumetric_flow_m3_s, 0.0);
+    assert_eq!(rest.flow().dissipated_power_w, 0.0);
+    let longer = pipe
+        .with_length(3.0 * pipe.length_m())
+        .unwrap()
+        .profile_at_wall_rate(ceiling, controls)
+        .unwrap();
+    assert_eq!(
+        longer.flow().volumetric_flow_m3_s,
+        positive.flow().volumetric_flow_m3_s
+    );
+    close(
+        longer.flow().pressure_drop_pa,
+        3.0 * positive.flow().pressure_drop_pa,
+        1e-14,
+    );
+}
+
+#[test]
 fn g1_prescribed_flow_recovers_poiseuille_pressure_heat_and_rest_conductance() {
     let source = law(
         [3.0, 3.0, 0.6, 0.4, 0.6],

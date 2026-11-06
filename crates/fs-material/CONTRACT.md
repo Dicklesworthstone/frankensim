@@ -15593,6 +15593,55 @@ material accuracy. Focused G0/G1 controls cover analytic Newtonian pressure
 and heat, an independently inverted nonlinear stress law, pressure-derivative
 finite differences, signed flow, source ceilings and bounded-work refusal.
 
+`LaminarCarreauPipe::profile_at_wall_rate` admits an authored signed wall rate
+directly through the original prepared source. The exact declared ceiling can
+therefore supply an operating-envelope profile without an external pressure
+round trip rounding beyond its supported stress. Original radial quadrature,
+temperature, flow, pressure and positive heat remain unchanged.
+
+`fluid_transport::rheology::pipe::transient::RadialCarreauPipe` resolves actual
+nonlinear radial viscous startup, relaxation and reversal. It evolves the
+axially developed equation `rho*u_t = delta_p/L + (r*tau)_r/r`, with
+`tau=mu(|u_r|)*u_r` evaluated by the same immutable original Carreau preparation.
+Uniform radial finite volumes retain every cell's axial velocity and exact
+annular mass. No frozen apparent viscosity, constant mean-flow inertance or
+fitted Newtonian memory spectrum replaces the changing radial stress field.
+
+Implicit midpoint and shared signed face stresses give a discrete pressure-work
+balance against full profile kinetic-energy change and nonnegative viscous heat.
+The reported time-average flow is midpoint quadrature, not an exact continuous
+trajectory integral. Nonlinear momentum residual work and the observed balance
+defect remain separate from physical heat. Both endpoint shear fields must stay
+inside the original source/rate support; their linear time interpolation cannot
+have a larger face-rate magnitude. Temperature, density and geometry stay fixed.
+Density is an explicit physical input, not new material calibration authority.
+
+Analytic original stress tangents form a tridiagonal Newton system, solved by
+the existing native `fs-la::tridiagonal::TridiagonalWorkspace`. The accepted
+same tangent system also returns the positive derivative of midpoint flow with
+respect to pressure at fixed initial history and duration. Bounded backtracking
+does not relax source ceilings. Cold construction allocates O(radial cells)
+state and scratch; warm steps reuse them without allocation. Local material
+queries and fixed-size radial tiles have bounded cancellation checks, and the
+native structured solve retains its own checks. A final checked swap publishes
+history and time together; source refusal, exhausted work or late cancellation
+leaves the accepted state unchanged and the workspace exactly retryable.
+
+This is a spatially and temporally convergent discretization, not an exact
+propagator. Midpoint is second order but under-resolved stiff modes can oscillate;
+energy balance alone does not establish time accuracy or monotonicity. The
+explicit radial mesh, diffusion timescale, nonlinear tolerances and iteration,
+backtracking and material-evaluation budgets remain visible. Spatial and time
+refinement must resolve the actual forcing. The model assumes incompressible,
+laminar, axially developed flow with stationary no-slip walls. It adds no axial
+entrance/convection, compressibility, cavitation, thermal evolution, transition
+prediction or network/junction dynamics, and does not deposit its heat. Focused
+regressions independently compare Newtonian Bessel startup/decay across three
+radial resolutions, measure temporal order on an exact discrete eigenmode,
+recover the original nonlinear steady profile, differentiate the transient
+pressure response, retain unequal radial histories at equal mean flow, and
+check thermal shifts, signed reversal, work and atomic refusal/retry.
+
 `fluid_transport::rheology::slit::LaminarCarreauSlit` resolves fully developed,
 no-slip planar Couette--Poiseuille flow using the original thermal Carreau-Yasuda
 source law. The circular-pipe and slit reductions share one immutable prepared
