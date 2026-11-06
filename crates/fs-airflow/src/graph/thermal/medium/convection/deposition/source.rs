@@ -30,6 +30,8 @@ pub enum SourceCellConvectionLaw {
     /// Original forced relation. Sieder-Tate additionally resolves this same
     /// fluid at the wall for viscosity; it requires Reservoir bulk properties
     /// and an explicit circular tube heated length/diameter in `settings`.
+    /// GnielinskiDeveloping also requires bulk properties and physical heated
+    /// L/D, with its explicitly constant-property K=1 approximation.
     Forced {
         correlation: CorrelationId,
         speed_m_s: f64,
@@ -85,13 +87,16 @@ impl SourceCellConvectionLaw {
             CellConvectionLaw::ForcedPlateSection { correlation, speed_m_s, start }
                 .admit_area(0.0, length)?;
         }
-        if let Self::Forced { correlation: CorrelationId::SiederTateTurbulent, settings, .. } = self {
+        if let Self::Forced {
+            correlation: CorrelationId::SiederTateTurbulent | CorrelationId::GnielinskiDeveloping,
+            settings, ..
+        } = self {
             if settings.aspect_ratio.is_some()
                 || settings.length_over_hydraulic_diameter
                     .is_none_or(|ratio| !ratio.is_finite() || ratio <= 0.0)
             {
                 return Err(ConvectionSourceError::Invalid(
-                    "Sieder-Tate requires a circular tube and explicit positive heated length/diameter",
+                    "turbulent tube convection requires a circular tube and explicit positive heated length/diameter",
                 ));
             }
         }
@@ -107,6 +112,13 @@ impl SourceCellConvectionLaw {
         {
             return Err(ConvectionSourceError::Invalid(
                 "viscosity-corrected convection requires bulk properties plus separately resolved wall viscosity",
+            ));
+        }
+        if matches!(self, Self::Forced { correlation: CorrelationId::GnielinskiDeveloping, .. })
+            && convention != ConvectionPropertyTemperature::Reservoir
+        {
+            return Err(ConvectionSourceError::Invalid(
+                "developing turbulent tube convection requires bulk properties with its explicit K=1 approximation",
             ));
         }
         if matches!(

@@ -4330,3 +4330,27 @@ interval; apply the returned gas/bath exchanges once when accepting their
 owners. Rebuild sourced optics when physical conditions require new
 coefficients. The adapter does not advance gas or certify timestep, spatial
 resolution, scattering or refractive-interface accuracy.
+
+## Developing turbulent tube material coupling
+
+`evaluate_turbulent_tube_section_from_material` carries the original material
+owner, one bulk transport snapshot, the actual circular diameter and both
+distances from the physical heated entrance into the shared Gnielinski
+developing-section evaluator. The same density, viscosity, heat capacity and
+conductivity determine Re, Pr and the dimensional coefficient. Native Robin
+lowering retains the section coefficient and its evidence without another
+material query. Finite section transfer is additive under fixed properties
+and thermal driving; a new mesh cell does not restart the entrance. Reversed
+flow requires rebinding the physical distances.
+
+Source-backed `Forced` cell and link bindings also admit the
+`GnielinskiDeveloping` mean with explicit heated L/D and circular geometry.
+They require `Reservoir` bulk properties, exactly matching the correlation's
+constant-property K=1 specialization. Film substitution and rectangular
+geometry are refused before resolving material states. Wall viscosity is not
+queried or silently used as a correction. Bulk state changes can be coupled to
+the existing conservative finite-cell thermal step, while strong spatial or
+cross-section property variation remains outside this held-property model.
+The tube tests include independent corrected-formula references, physical
+entrance subdivision, material query counts, native Robin lowering and closed
+finite-body heat exchange in both link orientations.

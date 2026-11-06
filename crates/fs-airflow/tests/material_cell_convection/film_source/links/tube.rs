@@ -26,6 +26,116 @@ fn coefficient(viscosity_scale: f64, wall: f64, bulk: f64) -> f64 {
     0.027 * re.powf(0.8) * pr.cbrt() * (mu / wall_mu).powf(0.14) * k / 0.1
 }
 
+fn developing_link(length_over_diameter: f64) -> SourceConvectiveLink {
+    SourceConvectiveLink {
+        law: SourceCellConvectionLaw::Forced {
+            correlation: CorrelationId::GnielinskiDeveloping,
+            speed_m_s: 1.0,
+            settings: ForcedConvectionSettings {
+                length_over_hydraulic_diameter: Some(length_over_diameter),
+                ..Default::default()
+            },
+        },
+        ..tube_link()
+    }
+}
+
+// Independent Gnielinski (2013) Eq. (2) with corrected Eq. (6), K=1.
+fn developing_coefficient(bulk: f64, length_over_diameter: f64) -> f64 {
+    let mu = 0.001 * (1.0 - 0.01 * (bulk - 300.0));
+    let k = 0.5 + 0.002 * (bulk - 300.0);
+    let re = 100.0 / mu;
+    let pr = mu * FLUID_CP / k;
+    let f = (1.8 * re.log10() - 1.5).powi(-2);
+    let nu = (f / 8.0) * (re - 1000.0) * pr
+        / (1.0 + 12.7 * (f / 8.0).sqrt() * (pr.powf(2.0 / 3.0) - 1.0));
+    nu * (1.0 + length_over_diameter.powf(-2.0 / 3.0)) * k / 0.1
+}
+
+#[test]
+fn g1_g3_developing_tube_entrance_changes_closed_pair_cooling_without_creating_heat() {
+    let chart = curve();
+    let (card, caloric) = fluid_source(1.0);
+    let law = liquid_law(&card);
+    let dt = 0.2;
+    let mut endpoints = Vec::new();
+    for length_ratio in [10.0, 1e6] {
+        let (mut lo, mut hi) = (294.0, 310.0);
+        for _ in 0..80 {
+            let wall = 0.5 * lo + 0.5 * hi;
+            let bulk = 290.0 + CP / FLUID_CP * (310.0 - wall);
+            let power = LINK_AREA * developing_coefficient(bulk, length_ratio) * (wall - bulk);
+            if MASS * CP * (wall - 310.0) + dt * power > 0.0 { hi = wall; }
+            else { lo = wall; }
+        }
+        let wall = 0.5 * lo + 0.5 * hi;
+        let expected = [wall, 290.0 + CP / FLUID_CP * (310.0 - wall)];
+        for reversed in [false, true] {
+            let thermal = pair(&chart, &caloric, reversed, 0.0);
+            let step = BackwardEulerStep::new(&thermal, dt, || Ok(())).unwrap();
+            let mut temperatures = Vec::new();
+            let trial = step.evaluate(&increments(&step, expected), |state| {
+                let source = evaluate_source_link_convection(
+                    state, &[developing_link(length_ratio)], 1,
+                    |_, _, temperature| {
+                        temperatures.push(temperature.value());
+                        law.at_temperature(temperature)
+                    }, || false,
+                )?;
+                Ok::<_, SourceCellConvectionError<MaterialStatePointError>>(StepCoefficients {
+                    sources_w: BTreeMap::new(),
+                    conductances_w_k: source.conductances_w_k().clone(), payload: source,
+                })
+            }, || Ok(())).unwrap();
+            let (next, source, audit) = trial.accept(1e-8, 1e-8, || Ok(())).unwrap();
+            assert_eq!(temperatures.len(), 1, "only actual bulk properties enter K=1");
+            near(temperatures[0], expected[1], 1e-12);
+            let sample = &source.samples()[0];
+            assert!(sample.surface.is_none());
+            near(sample.conductance_w_k,
+                LINK_AREA * developing_coefficient(expected[1], length_ratio), 1e-9);
+            near(next.temperature_k(IDS[0]).unwrap(), expected[0], 1e-9);
+            near(next.temperature_k(IDS[1]).unwrap(), expected[1], 1e-9);
+            near(next.energy_j(), thermal.energy_j(), 1e-8);
+            near(audit.external_heat_j, 0.0, 1e-12);
+            near(MASS * CP * (expected[0] - 310.0) + dt * sample.heat_into_fluid_w,
+                0.0, 1e-8);
+            assert_eq!(thermal.time_s(), 0.0);
+        }
+        endpoints.push(wall);
+    }
+    assert!(endpoints[0] < endpoints[1] - 0.1,
+        "the actual short-tube entrance enhancement must cool the finite wall more");
+}
+
+#[test]
+fn g0_developing_tube_rejects_film_substitution_and_non_circular_geometry_before_queries() {
+    let chart = curve();
+    let (card, caloric) = fluid_source(1.0);
+    let law = liquid_law(&card);
+    let thermal = pair(&chart, &caloric, false, 0.0);
+    let mut no_length = developing_link(10.0);
+    let mut rectangular = no_length;
+    if let SourceCellConvectionLaw::Forced { settings, .. } = &mut no_length.law {
+        settings.length_over_hydraulic_diameter = None;
+    }
+    if let SourceCellConvectionLaw::Forced { settings, .. } = &mut rectangular.law {
+        settings.aspect_ratio = Some(0.5);
+    }
+    for binding in [SourceConvectiveLink {
+        property_temperature: ConvectionPropertyTemperature::FilmMean,
+        ..developing_link(10.0)
+    }, no_length, rectangular] {
+        let mut calls = 0;
+        let result = evaluate_source_link_convection(&thermal, &[binding], 1, |_, _, t| {
+            calls += 1;
+            law.at_temperature(t)
+        }, || false);
+        assert!(result.is_err());
+        assert_eq!(calls, 0);
+    }
+}
+
 fn increments(step: &BackwardEulerStep<'_, '_>, temperatures: [f64; 2]) -> Vec<f64> {
     step.cell_ids()
         .iter()
