@@ -4848,3 +4848,35 @@ zero-volume/lossless cases and depth/index restrictions. Pinned Rust
 formatting/parser checks and bounded source/API/math review passed. The
 native Rust regressions were authored but not executed in the shared editing
 environment.
+
+### Differential winding inductance at a nonlinear 3D bias
+
+`spatial::vector_potential::nonlinear::winding::SpatialIncrementalWindingBasis`
+extracts local self/mutual inductance from the original source-bound Whitney
+magnetic problem. It solves the physical operating currents, permanent
+remanence and prescribed tangential traces, then reuses one sparse constitutive
+Hessian and one coexact perturbation topology across at most sixteen windings.
+Perturbation traces vanish on the same prescribed edges. The reciprocal block
+`L_ij = delta_A_i^T K_t delta_A_j` must agree with every ordered original
+Whitney current pairing. Both longitudinal and transverse differential
+reluctivity participate; secant permeability, `lambda/i` and `2W/i^2` cannot
+substitute for this derivative.
+
+Profiles retain turns, polarity and complete current closure, including
+prescribed exterior faces. Explicit omitted end self-inductance is added
+without invented leakage. Operating linkage remains separate from local flux
+increments and voltages. Source corners and range endpoints refuse a unique
+two-sided response. Recoil laws require an interior physical bias; derivative
+fields are infinitesimal responses, not finite one-ampere magnet states.
+Allocation bounds, original field/gauge allowances, complete-kernel
+compatibility, post-gauge residuals, div-curl checks and cancellation remain
+active. Dependent observation coordinates are allowed without claiming an
+invertible terminal matrix.
+
+`spatial_incremental_winding` defines regressions for the linear limit,
+nonlinear flux finite differences, reciprocal tensor energy, polarity/gauge
+invariance, fixed bias, source-domain refusal, dependent modes, bounded work
+and cancellation. This is a fixed-geometry, fixed-material-state local
+derivative. It does not supply finite-amplitude circuit evolution,
+frequency-dependent impedance, hysteresis, propagated source uncertainty or
+a spatial-discretization certificate.

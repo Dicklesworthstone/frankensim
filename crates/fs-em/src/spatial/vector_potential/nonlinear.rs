@@ -6,6 +6,9 @@
 //! gauge come from the original vector owner. Source ranges are never extended.
 //! This is reversible static magnetism, not hysteresis or transient induction.
 
+/// Differential self/mutual winding inductance at a solved nonlinear bias.
+pub mod winding;
+
 use super::super::{
     SpatialGeometry, SpatialMagneticError, cross, dot, finite, invalid,
     nonlinear::SpatialNonlinearMaterial, norm, poll, prepare_geometry, sub,
