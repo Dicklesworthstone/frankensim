@@ -163,3 +163,27 @@ collision, force correction and reservoir transport. G0/G3 tests in
 `tests/scenario_pressure.rs` exercise both native quadratures, actual boundary
 density after steps, gauge/absolute equivalence, histories, profile precedence,
 transactional refusal and cancellation. No new dependency or solver is added.
+
+## Changing contact area with physical conduction and exposed cooling
+
+`FrictionHeatStep::evaluate_with_area` and its entropy variant stage mechanical
+area first, then use the native contact-only implicit endpoint ingress before
+resolving material transport. The callback sees actual covered/exposed surface
+areas and a suppressed direct link. Half-cell fluxes use original conductivity
+times the new area divided by the original distance; conductivity itself is
+never rescaled to imitate geometry. The fixed and changing-area APIs share
+their physical transfer, energy and entropy assembly.
+
+The accepted thermal state and `FrictionHeatAreaTrial` successor route retain
+the same new coverage and source-derived series conductance. Actual ambient
+cooling follows native coverage without a compensating source. Areas must be
+positive and fit both original prismatic faces and aggregate surface coverage.
+Complete separation refuses because a vanished massless interface has no
+unique temperature. Cells, masses, caloric objects and geometry remain fixed.
+
+This is a uniform-face endpoint discretization requiring time/spatial
+refinement, not lateral heat spreading or a swept-contact model. Discrete
+active-cell changes may prevent a nonlinear root from converging. Three
+focused regressions specify independent shrink/growth energy and entropy
+balances, callback-visible coverage and source-k rebinding, exact-target event
+order, and transactional late failure including a caught contact-update error.

@@ -2383,3 +2383,22 @@ radiation, participating media or photon entropy. Focused regressions exercise
 independent two-surface balances, reversal, sensible/latent tangents, near-equal
 temperatures, insulating limits and original unequal-mass chain/graph BE/SDIRK
 energy and thermal-entropy quadrature.
+
+## Implicit endpoint contact coverage on the original heat owner
+
+`BackwardEulerStep::evaluate_with_contact_patches` and its entropy variant
+expose a narrow `ContactPatchEndpoint`: the resolver can inspect the current
+caloric trial and replace complete expected contact patches, but cannot edit
+cell storage, material objects, geometry, boundaries, clocks or schedule state.
+The existing batch contact-update checks are shared with the explicit public
+replacement operation. A rejected batch poisons the private trial even when
+the callback catches the returned error.
+
+Actual endpoint coverage is installed before the original heat-rate and
+entropy routines run. Consequently ambient exposed area, reservoir exclusion
+and link exchange use one consistent topology. Accepted patch changes persist;
+temporary rate/source overrides still restore exactly as before. Events at
+the exact target remain pending in the accepted left-limit state. Ordinary
+public patch replacement continues to require due events to have been
+processed. No extra thermal solver, swept-contact residence law, event-location
+algorithm or unconditional nonlinear-convergence claim is introduced.

@@ -152,6 +152,22 @@ impl DepositionSimulation<'_> {
         if self.schedule.get(self.cursor).is_some_and(|e| e.time_s <= self.time_s) {
             return Err(DepositionError::InvalidInput("process due scheduled events before contact updates"));
         }
+        let mut next = self.clone();
+        next.apply_contact_patch_updates(updates, &mut checkpoint)?;
+        Ok(next)
+    }
+
+    // Only private candidates may use this in-place operation. The explicit
+    // wrapper above owns schedule admission and cloning; an implicit endpoint
+    // already owns both and keeps exact-target events pending at its left limit.
+    // A failure may leave this scratch candidate changed, so its owner must
+    // discard it and must never let a caught callback error publish the trial.
+    pub(super) fn apply_contact_patch_updates(&mut self, updates: &[ContactPatchUpdate],
+        mut checkpoint: impl FnMut() -> Result<(), DepositionError>) -> Result<(), DepositionError> {
+        checkpoint()?;
+        if updates.len() > self.budget.max_events {
+            return Err(DepositionError::Budget("contact updates"));
+        }
         let mut ids = std::collections::BTreeSet::new();
         let mut touched = std::collections::BTreeSet::new();
         for update in updates {
@@ -171,26 +187,25 @@ impl DepositionSimulation<'_> {
                 }
             }
         }
-        let mut next = self.clone();
         let mut audit = EnergyAudit { incoming_mass_kg: 0.0, incoming_energy_j: 0.0,
             external_heat_j: 0.0, stored_energy_change_j: 0.0, residual_j: 0.0,
             substeps: 0, events: 0 };
         for update in updates {
             checkpoint()?;
             if update.expected != update.replacement && update.expected.is_some() {
-                next.apply(Event::Separation(update.id), &mut audit)?;
+                self.apply(Event::Separation(update.id), &mut audit)?;
             }
         }
         for update in updates {
             checkpoint()?;
             if update.expected != update.replacement {
-                if let Some(patch) = update.replacement { next.insert_contact_patch_structure(patch)?; }
+                if let Some(patch) = update.replacement { self.insert_contact_patch_structure(patch)?; }
             }
         }
         let selected: Vec<_> = touched.into_iter().collect();
-        next.exposed_areas_m2(&selected, &mut checkpoint)?;
+        self.exposed_areas_m2(&selected, &mut checkpoint)?;
         checkpoint()?;
-        Ok(next)
+        Ok(())
     }
 }
 

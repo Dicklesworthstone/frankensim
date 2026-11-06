@@ -7,8 +7,9 @@
 //! a nonlinear solver; this module neither guesses derivatives nor accepts a
 //! small iteration update in place of an actual local energy residual.
 //!
-//! Fixed topology/geometry, immutable caloric laws, endpoint-evaluated sources
-//! and conductances. Optional entropy accounting uses the original caloric laws.
+//! Fixed cell geometry/inventory, immutable caloric laws, endpoint-evaluated
+//! sources and conductances. The contact-patch ingress can change only exchange
+//! topology and surface coverage. Optional entropy uses the original caloric laws.
 //! Stateful physical owners may supply their original endpoint calorics through
 //! the internal ingress; no kinetics or entropy chart is inferred here. No
 //! moving mass or unconditional nonlinear-convergence claim. Refine time steps
@@ -27,6 +28,10 @@ pub use transport::TransportStepCoefficients;
 #[path = "backward_euler/exchanges.rs"]
 mod exchanges;
 pub use exchanges::{BoundaryExchangeStepCoefficients, BoundaryExchanges, PrescribedBathHeat};
+
+#[path = "backward_euler/contacts.rs"]
+mod contacts;
+pub use contacts::ContactPatchEndpoint;
 
 // Native Runge--Kutta stages retain the original storage/rate owner. Earlier
 // stage heat is distinct from authored sources and from physical old enthalpy.
@@ -403,7 +408,7 @@ impl<'s, 'm> BackwardEulerStep<'s, 'm> {
         &self,
         energy_increments_j: &[f64],
         resolve: impl FnOnce(
-            &DepositionSimulation<'m>,
+            &mut DepositionSimulation<'m>,
         ) -> Result<
             (
                 TransportStepCoefficients<T>,
@@ -477,7 +482,7 @@ impl<'s, 'm> BackwardEulerStep<'s, 'm> {
             },
             calorics,
             exchanges,
-        ) = resolve(&next)?;
+        ) = resolve(&mut next)?;
         checkpoint()?;
         let links = next.set_step_conductances(&conductances_w_k, &mut checkpoint)?;
         let sources = next.add_step_sources(&sources_w, &mut checkpoint)?;

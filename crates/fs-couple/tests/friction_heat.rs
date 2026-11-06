@@ -8,6 +8,9 @@ use fs_thermal::enthalpy::*;
 use fs_tribo::{FrictionLaw, TangentialLaw, TangentialSolveConfig, TangentialStepInput};
 use std::collections::BTreeMap;
 
+#[path = "friction_heat/area.rs"]
+mod area;
+
 #[path = "friction_heat/entropy.rs"]
 mod entropy;
 

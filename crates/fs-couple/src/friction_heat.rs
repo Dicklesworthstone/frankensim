@@ -29,6 +29,9 @@ use std::cell::RefCell;
 mod entropy;
 pub use entropy::FrictionHeatEntropy;
 
+mod area;
+pub use area::FrictionHeatAreaTrial;
+
 /// Physical finite-layer storage and source-derived conduction into both bodies.
 pub mod third_body;
 
@@ -360,78 +363,76 @@ impl<'s, 'm> FrictionHeatStep<'s, 'm> {
         }
         let checkpoint = RefCell::new(checkpoint);
         let check = || (*checkpoint.borrow_mut())();
-        let dt = self.duration_s();
         let coefficients =
             |state: &DepositionSimulation<'m>| -> Result<StepCoefficients<TrialPayload<P>>, E> {
-                let FrictionHeatInput {
-                    dissipated_j,
-                    conductivity_w_m_k,
-                    transport,
-                } = resolve(state, interface_temperature_k)?;
-                if !dissipated_j.is_finite() || dissipated_j < 0.0 {
-                    return Err(invalid(
-                        "only finite nonnegative exported friction work may heat bodies",
-                    )
-                    .into());
-                }
-                let StepCoefficients {
-                    mut sources_w,
-                    mut conductances_w_k,
-                    payload,
-                } = transport;
-                if conductances_w_k
-                    .insert(self.route.patch.link.id, 0.0)
-                    .is_some()
-                {
-                    return Err(
-                        invalid("friction interface conduction has two competing owners").into(),
-                    );
-                }
-                let external_heat_j = finite(
-                    dt * state.external_step_power_w(&sources_w, &conductances_w_k, &check)?,
-                )?;
-                let conductances = self.route.conductances(conductivity_w_m_k)?;
-                let mut body_heat_j = [0.0; 2];
-                let mut interface_entropy = if with_entropy {
-                    Some(entropy::InterfaceEntropy::new(state, &sources_w, dt, &check)?)
-                } else { None };
-                for (i, id) in self.route.cells().into_iter().enumerate() {
-                    let body_temperature_k = state.temperature_k(id)?;
-                    let power = finite(
-                        conductances[i] * (interface_temperature_k - body_temperature_k),
-                    )?;
-                    body_heat_j[i] = finite(dt * power)?;
-                    if power != 0.0 && body_heat_j[i] == 0.0 {
-                        return Err(DepositionError::Arithmetic.into());
-                    }
-                    if let Some(entropy) = &mut interface_entropy {
-                        entropy.add_transfer(body_heat_j[i], body_temperature_k,
-                            interface_temperature_k)?;
-                    }
-                    let source = sources_w.entry(id).or_insert(0.0);
-                    *source = finite(*source + power)?;
-                }
-                let interface_residual_j =
-                    finite(finite(body_heat_j[0] + body_heat_j[1])? - dissipated_j)?;
-                Ok(StepCoefficients {
-                    sources_w,
-                    conductances_w_k,
-                    payload: (
-                        payload,
-                        conductances,
-                        body_heat_j,
-                        dissipated_j,
-                        interface_residual_j,
-                        external_heat_j,
-                        interface_entropy,
-                    ),
-                })
+                let input = resolve(state, interface_temperature_k)?;
+                self.coefficients_for_input(self.route, state, interface_temperature_k,
+                    input, with_entropy, &check)
             };
         let trial = if with_entropy {
             self.thermal.evaluate_with_entropy(energy_increments_j, coefficients, &check)?
         } else {
             self.thermal.evaluate(energy_increments_j, coefficients, &check)?
         };
+        self.finish_trial(trial, interface_temperature_k).map_err(E::from)
+    }
+
+    // Fixed and changing-area routes use this same physical transfer, source
+    // classification and entropy assembly. Only endpoint geometry differs.
+    #[allow(clippy::too_many_arguments)]
+    fn coefficients_for_input<P, E: From<DepositionError>>(
+        &self,
+        route: &FrictionHeatRoute,
+        state: &DepositionSimulation<'m>,
+        interface_temperature_k: f64,
+        input: FrictionHeatInput<P>,
+        with_entropy: bool,
+        mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<StepCoefficients<TrialPayload<P>>, E> {
+        let dt = self.duration_s();
+        let FrictionHeatInput { dissipated_j, conductivity_w_m_k, transport } = input;
+        if !dissipated_j.is_finite() || dissipated_j < 0.0 {
+            return Err(invalid("only finite nonnegative exported friction work may heat bodies").into());
+        }
+        let StepCoefficients { mut sources_w, mut conductances_w_k, payload } = transport;
+        if conductances_w_k.insert(route.patch.link.id, 0.0).is_some() {
+            return Err(invalid("friction interface conduction has two competing owners").into());
+        }
+        let external_heat_j = finite(
+            dt * state.external_step_power_w(&sources_w, &conductances_w_k, &mut checkpoint)?,
+        )?;
+        let conductances = route.conductances(conductivity_w_m_k)?;
+        let mut body_heat_j = [0.0; 2];
+        let mut interface_entropy = if with_entropy {
+            Some(entropy::InterfaceEntropy::new(state, &sources_w, dt, &mut checkpoint)?)
+        } else { None };
+        for (i, id) in route.cells().into_iter().enumerate() {
+            let body_temperature_k = state.temperature_k(id)?;
+            let power = finite(conductances[i] * (interface_temperature_k - body_temperature_k))?;
+            body_heat_j[i] = finite(dt * power)?;
+            if power != 0.0 && body_heat_j[i] == 0.0 {
+                return Err(DepositionError::Arithmetic.into());
+            }
+            if let Some(entropy) = &mut interface_entropy {
+                entropy.add_transfer(body_heat_j[i], body_temperature_k, interface_temperature_k)?;
+            }
+            let source = sources_w.entry(id).or_insert(0.0);
+            *source = finite(*source + power)?;
+        }
+        let interface_residual_j = finite(finite(body_heat_j[0] + body_heat_j[1])? - dissipated_j)?;
+        Ok(StepCoefficients {
+            sources_w,
+            conductances_w_k,
+            payload: (payload, conductances, body_heat_j, dissipated_j,
+                interface_residual_j, external_heat_j, interface_entropy),
+        })
+    }
+
+    fn finish_trial<P>(
+        &self,
+        trial: BackwardEulerTrial<'m, TrialPayload<P>>,
+        interface_temperature_k: f64,
+    ) -> Result<FrictionHeatTrial<'m, P>, DepositionError> {
         let (_, conductances_w_k, body_heat_j, dissipated_j, interface_residual_j, external_heat_j,
             interface_entropy) =
             *trial.payload();
