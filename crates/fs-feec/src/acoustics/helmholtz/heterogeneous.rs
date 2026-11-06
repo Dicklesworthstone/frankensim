@@ -26,9 +26,10 @@
 //!
 //! Scope: linear, isotropic, lossless bulk fluids at a prescribed frozen
 //! equilibrium without mean flow; original affine or quadratic tetrahedra. Passive local
-//! boundary admittances may dissipate energy. This does not evolve the source
-//! temperature/composition, add thermoviscous or molecular bulk losses, or
-//! turn a homogeneous wall model into a heterogeneous one.
+//! boundary admittances may dissipate energy; [`SpatialBoundaryAdmittance`]
+//! retains their explicitly supplied spatial variation on the original traces.
+//! This does not evolve the source temperature/composition, add thermoviscous
+//! or molecular bulk losses, or infer wall properties from bulk fluid data.
 
 use super::{AcousticFeError, HelmholtzFe, MAX_MODES, Medium};
 use crate::highorder::simplex::duffy_quadrature;
@@ -54,6 +55,9 @@ pub use source::{MAX_VOLUME_SOURCES, VolumeVelocitySource};
 
 mod boundary_source;
 pub use boundary_source::{BoundaryVelocitySource, MAX_BOUNDARY_SOURCES};
+
+mod boundary_admittance;
+pub use boundary_admittance::SpatialBoundaryAdmittance;
 
 /// Broadband evolution in the original pressure-potential coordinates.
 pub mod time;

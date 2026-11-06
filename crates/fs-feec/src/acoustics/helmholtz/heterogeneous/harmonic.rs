@@ -3,8 +3,8 @@
 use super::super::pressure_release::PressureReleaseConstraints;
 use super::super::tri_quadrature;
 use super::{
-    BoundaryVelocitySource, HeterogeneousError, HeterogeneousHelmholtzFe, VolumeVelocitySource,
-    finite, invalid, poll,
+    BoundaryVelocitySource, HeterogeneousError, HeterogeneousHelmholtzFe, SpatialBoundaryAdmittance,
+    VolumeVelocitySource, finite, invalid, poll,
 };
 use fs_la::eigen_complex::{LuComplex, LuComplexError, lu_complex_with_cancel};
 use fs_math::{c64::C64, dd::Dd, det};
@@ -145,6 +145,37 @@ impl<'f, 'c> HeterogeneousHelmholtzFe<'f, 'c> {
         limits: HarmonicLimits,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<PreparedHeterogeneous<'m, 'f, 'c>, HeterogeneousError> {
+        self.prepare_with_spatial_admittances(
+            frequency_hz,
+            admittances,
+            &[],
+            pressure_release_faces,
+            limits,
+            cancelled,
+        )
+    }
+
+    /// Prepare the SAME full-space operator with pointwise sampled wall laws.
+    ///
+    /// Uniform groups and spatial fields may coexist on disjoint faces. Each
+    /// spatial field must belong to this exact material/geometry owner and
+    /// have been sampled at this exact frequency. All admittance faces must
+    /// be unique and disjoint from pressure-release faces; imposed velocity
+    /// sources may share admittance faces as before.
+    ///
+    /// The original physical forms receive +i omega C_Y. Boundary heat remains
+    /// p^H Re(C_Y) p / 2, retaining spatial wall/pressure correlation. No
+    /// material callback runs during factorization or subsequent solves.
+    /// Empty spatial fields preserve the existing uniform-law arithmetic.
+    pub fn prepare_with_spatial_admittances<'m>(
+        &'m self,
+        frequency_hz: f64,
+        admittances: &[BoundaryAdmittance],
+        spatial_admittances: &[&SpatialBoundaryAdmittance<'_, '_, '_>],
+        pressure_release_faces: &[[u32; 3]],
+        limits: HarmonicLimits,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<PreparedHeterogeneous<'m, 'f, 'c>, HeterogeneousError> {
         poll(cancelled)?;
         let omega = core::f64::consts::TAU * frequency_hz;
         if !omega.is_finite()
@@ -195,11 +226,23 @@ impl<'f, 'c> HeterogeneousHelmholtzFe<'f, 'c> {
                 maximum: limits.max_dense_bytes,
             });
         }
-        for boundary in admittances {
-            for &face in &boundary.faces {
+        for field in spatial_admittances {
+            poll(cancelled)?;
+            field.validate(self, frequency_hz)?;
+        }
+        let mut seen = BTreeSet::new();
+        for faces in admittances
+            .iter()
+            .map(|boundary| boundary.faces.as_slice())
+            .chain(spatial_admittances.iter().map(|field| field.faces.as_slice()))
+        {
+            for &face in faces {
                 poll(cancelled)?;
                 let mut key = face;
                 key.sort_unstable();
+                if !seen.insert(key) {
+                    return Err(invalid("admittance boundary faces must not overlap").into());
+                }
                 if pressure_release.faces.contains(&key) {
                     return Err(
                         invalid("pressure-release and admittance faces must not overlap").into(),
@@ -207,7 +250,41 @@ impl<'f, 'c> HeterogeneousHelmholtzFe<'f, 'c> {
                 }
             }
         }
-        let (conductance, susceptance) = self.admittance_matrices(admittances, cancelled)?;
+        let (mut conductance, mut susceptance) =
+            self.admittance_matrices(admittances, cancelled)?;
+        if !spatial_admittances.is_empty() {
+            let mut real = Coo::new(self.ndof(), self.ndof());
+            let mut imaginary = Coo::new(self.ndof(), self.ndof());
+            for (re, im) in core::iter::once((&conductance, &susceptance)).chain(
+                spatial_admittances
+                    .iter()
+                    .map(|field| (&field.conductance, &field.susceptance)),
+            ) {
+                for row in 0..self.ndof() {
+                    poll(cancelled)?;
+                    for (coo, matrix) in [(&mut real, re), (&mut imaginary, im)] {
+                        let (cols, values) = matrix.row(row);
+                        for (&col, &value) in cols.iter().zip(values) {
+                            coo.push(row, col, value);
+                        }
+                    }
+                }
+            }
+            conductance = real.assemble();
+            susceptance = imaginary.assemble();
+            for row in 0..self.ndof() {
+                poll(cancelled)?;
+                if conductance
+                    .row(row)
+                    .1
+                    .iter()
+                    .chain(susceptance.row(row).1)
+                    .any(|value| !value.is_finite())
+                {
+                    return Err(invalid("boundary admittance assembly overflow").into());
+                }
+            }
+        }
         let mut a = vec![C64::ZERO; entries];
         let mut scales = vec![0.0; n];
         for (row, &original_row) in pressure_release.free_dofs.iter().enumerate() {
