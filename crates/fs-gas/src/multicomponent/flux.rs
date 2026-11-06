@@ -3,6 +3,9 @@ use super::{
     SpatialCell, poll, positive, sum,
 };
 
+mod entropy;
+pub use entropy::EntropyFaceReport;
+
 /// Wave-speed receipt accompanying an allocation-free species/energy face flux.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct FaceFlux {

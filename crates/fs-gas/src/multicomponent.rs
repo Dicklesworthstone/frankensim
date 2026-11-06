@@ -55,7 +55,7 @@ pub use crate::dynamics::{
 };
 pub use eos::MixtureGas;
 pub use evolve::{MixtureEuler1d, StepReport, Totals};
-pub use flux::FaceFlux;
+pub use flux::{EntropyFaceReport, FaceFlux};
 pub use normal::{NormalCell, NormalPrimitive, SpatialCell, SpatialPrimitive};
 pub use piston::{
     SharedPistonGasReport, SharedPistonHeatReport, SharedPistonThermal,

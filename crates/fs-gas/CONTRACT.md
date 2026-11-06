@@ -5738,3 +5738,69 @@ have negative body entropy change but positive state-minus-bath generation.
 The binary fixture has near-zero net species transfer across the complete
 boundary while retaining nonzero absolute contributions from both stages
 and both ends.
+
+
+### Source-derived inviscid entropy-conjugate mixture faces
+
+`MixtureGas::entropy_conservative_flux` and `entropy_stable_flux` add original-
+source axial faces for the existing conserved species, momentum and referenced
+total energy. Every species retains its own molar mass and temperature-dependent,
+possibly piecewise NASA-9 calorics. The original EOS supplies both endpoint
+acoustic speeds. Reattaching the original energy datum to each species flux
+recovers physical total-energy transport, including the dissipative correction.
+
+For mathematical entropy eta=-S, beta=1/T and r_i=R/M_i, the entropy variables
+are v_i=(h_i,ref/T-s_i,partial)/M_i-beta*u^2/2, v_m=beta*u and v_E=-beta.
+The entropy potential is psi=u*sum_i(r_i*rho_i). The original molar function
+phi_i=beta*u_i,ref-s_i^0+R*ln(T) satisfies d(phi_i)/d(beta)=u_i,ref.
+Its divided energy e_i#=Delta(phi_i)/(M_i*Delta beta), logarithmic species
+densities and arithmetic velocity produce the conservative face:
+F_i=rho_i^log*ubar; p#=sum_i(r_i*rhobar_i)/betabar;
+F_m=ubar*sum_i(F_i)+p#; and
+F_E=sum_i(e_i#*F_i)+u_left*u_right*sum_i(F_i)/2+ubar*p#.
+Product jump identities give Delta(v).F_ec=Delta(psi) in exact arithmetic.
+
+The divided energy is evaluated through original internal-energy and entropy
+intervals around one sampled temperature. Formation-energy terms cancel inside
+those source intervals before rounding; caloric seams retain the source owner's
+continuity contract. Equal temperatures use the original referenced internal
+energy directly and skip three interval queries. Stable logarithmic ratios,
+temperature differences before inverse-temperature subtraction and double-double
+reductions retain weak jumps. Exactly identical admitted traces return the
+native physical flux of the original rounded conservative state.
+
+The dissipative choice subtracts alpha*Delta(q)/2 in every conserved component,
+with alpha=max(|u_left|+c_left, |u_right|+c_right). Convexity of -S on the admitted
+common-positive caloric/species domain gives the semidiscrete numerical entropy
+contribution alpha*Delta(v).Delta(q)/2 >= 0. This is numerical dissipation, not
+a second molecular heat source. `EntropyFaceReport` separately returns this
+contribution, the signed conservative identity defect, and the contraction
+against the actual final rounded flux. No residual or negative sign is clamped,
+and no flux repair is applied to force an entropy receipt.
+
+The successful face path allocates nothing and polls cancellation while walking
+the bounded original species axis. The native private interface reuses decoded
+endpoint states and compile-time removal of diagnostic contractions; it adds no
+EOS inversion. Every species must be positive on both traces or absent on both.
+Common absence carries exactly zero flux; one-sided absence has a named refusal,
+without mass floors or a switch to another face.
+
+These are source-conjugate semidiscrete faces, not a finite-step invariant-domain
+theorem, reconstruction certificate, or guarantee of pressure equilibrium at
+moving material contacts. Accepted native time evolution needs its own actual
+state/inventory/entropy admission. Viscous stress, molecular heat/species
+transport, reactions, moving boundaries and spatial/network geometry remain
+with their distinct original owners. The calorically perfect mixture construction
+and its positivity/contact limitations are described by Gouasmi, Duraisamy and
+Murman, https://arxiv.org/abs/1904.00972; the variable-caloric source-interval
+divided energy above is derived for this owner's original EOS.
+
+Four focused regression definitions use independent polynomial entropy
+derivatives and source integrals, unequal molar masses, a piecewise caloric seam,
+formation gauges of 1e18, physical-energy reattachment, exact consistency,
+zero velocity, adjacent temperatures/densities, common absence and cancellation.
+For the declared two-species variable-Cp fixture the conservative flux is
+[0.22939772576023482, 0.1796030100332838, 2.5951614422181946, 4.539804789164915]
+and numerical entropy production is 11.711975129142397 W/(m^2 K).
+Source regression definitions and isolated arithmetic are not a claim that the
+native Rust tests ran or that this model has experimental qualification.
