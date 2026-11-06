@@ -12,12 +12,14 @@ enum CaloricStorage<'s> {
     Tabulated(&'s TabulatedHeatStorage),
 }
 
-/// Nonlinear sensible storage of a uniform, perfectly bonded boundary film.
+/// Nonlinear sensible storage of a perfectly bonded boundary film.
 ///
 /// The original law describes the TOTAL inventory of this one triangle, in
-/// J/K, not an areal capacity. Its fixed amounts are distributed by the three
-/// equal P1 row moments, each one third of that inventory. At nonuniform host
-/// temperatures this is nodal lumping, not exact nonlinear surface quadrature.
+/// J/K, not an areal capacity. By default its fixed amounts are distributed by
+/// three equal P1 row moments. An explicit relative areal-inventory profile
+/// distributes that SAME total amount by its exact P1 row moments instead.
+/// At nonuniform host temperatures this is nodal lumping, not exact nonlinear
+/// surface quadrature.
 ///
 /// Each face retains its original borrowed caloric object. Reusing that object
 /// on a second face explicitly declares a second equal inventory. No material,
@@ -28,6 +30,8 @@ enum CaloricStorage<'s> {
 pub struct SurfaceHeatStorage<'s> {
     boundary_face: usize,
     law: CaloricStorage<'s>,
+    // None retains the original uniform /3 arithmetic, including DD storage.
+    fractions: Option<[f64; 3]>,
 }
 
 impl<'s> SurfaceHeatStorage<'s> {
@@ -37,6 +41,7 @@ impl<'s> SurfaceHeatStorage<'s> {
         Self {
             boundary_face,
             law: CaloricStorage::Prepared(storage),
+            fractions: None,
         }
     }
 
@@ -46,6 +51,53 @@ impl<'s> SurfaceHeatStorage<'s> {
         Self {
             boundary_face,
             law: CaloricStorage::Tabulated(storage),
+            fractions: None,
+        }
+    }
+
+    /// Distribute the original TOTAL inventory by a declared P1 areal profile.
+    ///
+    /// Values follow this boundary face's original vertex order. They are
+    /// relative nonnegative amounts (for example, relative fixed thickness),
+    /// not new masses or capacities. A common positive scale changes nothing;
+    /// every component of the borrowed total caloric law shares this profile.
+    /// At least one value must be positive, and all values must be finite.
+    ///
+    /// The exact row fraction is `(2*a_i+a_j+a_k)/(4*sum(a))`. Preparation
+    /// scales before summation, so finite large or subnormal profiles are
+    /// admitted without overflowing their total. Even a zero corner receives
+    /// a positive row moment from an active neighboring P1 basis function.
+    /// Uniform profiles retain the original division-by-three arithmetic.
+    pub fn with_inventory_profile(mut self, profile: [f64; 3]) -> Result<Self, EnthalpyError> {
+        let fractions = inventory_row_fractions(profile).ok_or(EnthalpyError::InvalidInput(
+            "surface inventory profile needs finite nonnegative values and a positive total",
+        ))?;
+        self.fractions = if profile[0] == profile[1] && profile[1] == profile[2] {
+            None
+        } else {
+            Some(fractions)
+        };
+        Ok(self)
+    }
+
+    /// Fractions of the original total inventory in boundary-face vertex order.
+    /// These are exact P1 row moments, not the normalized corner coefficients.
+    #[must_use]
+    pub const fn nodal_inventory_fractions(self) -> [f64; 3] {
+        match self.fractions {
+            Some(fractions) => fractions,
+            None => [1.0 / 3.0; 3],
+        }
+    }
+
+    pub(super) fn row_fraction(self, corner: usize) -> Option<f64> {
+        self.fractions.map(|fractions| fractions[corner])
+    }
+
+    pub(super) fn row_share(self, corner: usize, value: f64) -> f64 {
+        match self.row_fraction(corner) {
+            Some(fraction) => fraction * value,
+            None => value / 3.0,
         }
     }
 
@@ -107,6 +159,24 @@ impl<'s> SurfaceHeatStorage<'s> {
     }
 }
 
+// Pure normalized P1 row-moment owner; the original total inventory is never
+// recomputed from area, density, thickness, or a sampled heat capacity here.
+fn inventory_row_fractions(profile: [f64; 3]) -> Option<[f64; 3]> {
+    if profile
+        .iter()
+        .any(|&value| !value.is_finite() || value < 0.0)
+    {
+        return None;
+    }
+    let scale = profile.into_iter().fold(0.0_f64, f64::max);
+    if scale == 0.0 {
+        return None;
+    }
+    let normalized = profile.map(|value| value / scale);
+    let total: f64 = normalized.into_iter().sum();
+    Some(normalized.map(|value| (total + value) / (4.0 * total)))
+}
+
 #[derive(Debug, Default)]
 pub(super) struct NonlinearSurfaceStorage<'s> {
     faces: Vec<SurfaceHeatStorage<'s>>,
@@ -117,10 +187,13 @@ pub(super) struct NonlinearSurfaceStorage<'s> {
 }
 
 impl<'s> NonlinearSurfaceStorage<'s> {
-    pub(super) fn at_vertex(&self, vertex: usize) -> impl Iterator<Item = &SurfaceHeatStorage<'s>> {
+    pub(super) fn at_vertex(
+        &self,
+        vertex: usize,
+    ) -> impl Iterator<Item = (&SurfaceHeatStorage<'s>, usize)> {
         self.indices[self.offsets[vertex]..self.offsets[vertex + 1]]
             .iter()
-            .map(|&index| &self.faces[index])
+            .map(|&index| (&self.faces[index / 3], index % 3))
     }
 
     fn rebuild(&mut self, cx: &Cx<'_>, mesh: &ConductionMesh) -> Result<(), EnthalpyError> {
@@ -153,9 +226,15 @@ impl<'s> NonlinearSurfaceStorage<'s> {
             if index % ASSEMBLY_TILE == 0 {
                 poll(cx, index)?;
             }
-            for vertex in mesh.boundary()[face.boundary_face].vertices {
+            for (corner, vertex) in mesh.boundary()[face.boundary_face]
+                .vertices
+                .into_iter()
+                .enumerate()
+            {
                 let slot = &mut cursor[vertex as usize];
-                self.indices[*slot] = index;
+                // count = 3*faces.len() was bounded before allocation. Encode
+                // the original local corner without another incidence array.
+                self.indices[*slot] = 3 * index + corner;
                 *slot += 1;
             }
         }
@@ -167,10 +246,12 @@ impl<'m, 'c> EnthalpyBackwardEuler<'m, 'c> {
     /// Add nonlinear sensible films to the original host's primary enthalpy.
     ///
     /// Each supplied law owns one face's TOTAL inventory. A receiving row adds
-    /// one third of its original integral C(T)dT between old/new temperatures;
-    /// its tangent adds C(T)/3 times the host's dT/dh. Thus old, stage and endpoint
-    /// slopes are evaluated at their own temperatures, and a host latent plateau
-    /// stores no sensible film heat. Tables are borrowed, never sampled/frozen.
+    /// its exact P1 inventory fraction of the original integral C(T)dT between
+    /// old/new temperatures; its tangent adds that fraction of C(T) times the
+    /// host's dT/dh. Uniform inventories retain their original one-third share.
+    /// Old, stage and endpoint slopes use their own temperatures, and a host
+    /// latent plateau stores no sensible film heat. Tables are borrowed, never
+    /// sampled/frozen.
     ///
     /// BE, SDIRK2, adaptivity, contact/radiation, bath reactions and adjoints use
     /// the same storage helpers. Only the immutable data path is prepared here;

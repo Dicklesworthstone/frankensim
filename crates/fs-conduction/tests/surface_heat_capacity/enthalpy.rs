@@ -742,3 +742,242 @@ fn nonlinear_film_admission_and_two_sided_storage_derivatives_refuse_at_support_
         assert_eq!(old, [70.0; 4]);
     });
 }
+
+#[test]
+fn nonlinear_inventory_profiles_retain_exact_p1_moments_and_original_amounts() {
+    let law = prepared_film();
+    let original = SurfaceHeatStorage::prepared(2, &law);
+    // Integral(N_i*N_j) on a triangle is A/6 on the diagonal and A/12
+    // elsewhere; total P1 inventory is A*sum(a)/3. These are the resulting
+    // row fractions for a=[0,1,3], independently evaluated as rational values.
+    let expected = [1.0 / 4.0, 5.0 / 16.0, 7.0 / 16.0];
+    let tiny = f64::from_bits(1);
+    for profile in [
+        [0.0, 1.0, 3.0],
+        [0.0, tiny, 3.0 * tiny],
+        [0.0, 2.0_f64.powi(1020), 3.0 * 2.0_f64.powi(1020)],
+    ] {
+        let face = original.with_inventory_profile(profile).unwrap();
+        assert_eq!(face.boundary_face(), 2);
+        assert!(std::ptr::eq(face.prepared_storage().unwrap(), &law));
+        for (actual, expected) in face.nodal_inventory_fractions().into_iter().zip(expected) {
+            close(actual, expected, 2e-16);
+        }
+        close(face.nodal_inventory_fractions().iter().sum(), 1.0, 2e-16);
+    }
+    let reversed = original.with_inventory_profile([3.0, 0.0, 1.0]).unwrap();
+    for (actual, expected) in reversed.nodal_inventory_fractions().into_iter().zip([
+        expected[2],
+        expected[0],
+        expected[1],
+    ]) {
+        close(actual, expected, 2e-16);
+    }
+    for value in [tiny, 1.0, f64::MAX] {
+        assert_eq!(
+            original
+                .with_inventory_profile([value; 3])
+                .unwrap()
+                .nodal_inventory_fractions(),
+            original.nodal_inventory_fractions()
+        );
+    }
+    for profile in [
+        [0.0; 3],
+        [-1.0, 1.0, 1.0],
+        [f64::INFINITY, 1.0, 1.0],
+        [f64::NAN, 1.0, 1.0],
+    ] {
+        assert!(original.with_inventory_profile(profile).is_err());
+    }
+    assert_eq!(law.components()[0].amount(), HeatStorageAmount::MassKg(0.5));
+}
+
+#[test]
+fn profiled_original_films_charge_nonuniform_baths_and_entropy_in_both_integrators() {
+    with_cx(|cx| {
+        let mesh = regular_tetrahedron();
+        let chart = chart();
+        let law = prepared_film(); // Total C(T)=0.02*T-5 J/K, original mass=0.5 kg.
+        let face = SurfaceHeatStorage::prepared(0, &law)
+            .with_inventory_profile([0.0, 1.0, 3.0])
+            .unwrap();
+        let engine = bare_engine(cx, &mesh, &chart)
+            .with_surface_heat_storage(cx, &[face])
+            .unwrap();
+        let mut shares = [0.0; 4];
+        for (vertex, fraction) in
+            mesh.boundary()[0]
+                .vertices
+                .into_iter()
+                .zip([1.0 / 4.0, 5.0 / 16.0, 7.0 / 16.0])
+        {
+            shares[vertex as usize] = fraction;
+        }
+        let old_t = [289.0, 290.0, 291.0, 292.0];
+        let new_t = [294.0, 296.0, 295.0, 297.0];
+        let old_h = old_t.map(|t| 2.0 * (t - 280.0));
+        let new_h = new_t.map(|t| 2.0 * (t - 280.0));
+        let middle = std::array::from_fn(|i| 0.5 * (old_t[i] + new_t[i]));
+        let baths = [middle, new_t].map(|temperatures: [f64; 4]| {
+            ThermalBoundaryBuilder::new(&mesh)
+                .region(
+                    "bath",
+                    |_| true,
+                    ThermalBc::Dirichlet {
+                        temperature: ScalarField::Nodal(temperatures.to_vec()),
+                    },
+                )
+                .unwrap()
+                .finish()
+                .unwrap()
+        });
+        let expected_energy: f64 = (0..4)
+            .map(|i| {
+                let delta = new_t[i] - old_t[i];
+                0.5 * delta + shares[i] * delta * (0.01 * (new_t[i] + old_t[i]) - 5.0)
+            })
+            .sum();
+        let expected_entropy: f64 = (0..4)
+            .map(|i| {
+                let logarithm = (new_t[i] / old_t[i]).ln();
+                0.5 * logarithm + shares[i] * (0.02 * (new_t[i] - old_t[i]) - 5.0 * logarithm)
+            })
+            .sum();
+        close(
+            engine
+                .thermal_entropy_change_j_k(cx, &old_h, &new_h)
+                .unwrap(),
+            expected_entropy,
+            2e-14,
+        );
+        let material = ConductivityModel::isotropic_declared(2.0).unwrap();
+        let source = ScalarField::Uniform(0.0);
+        let dt = 0.4;
+        let be = engine
+            .advance(
+                cx,
+                problem(&mesh, &baths[1], &material, &source),
+                None,
+                &old_h,
+                dt,
+                controls(),
+            )
+            .unwrap();
+        close(be.stored_energy_change_j, expected_energy, 2e-10);
+        close(dt * be.dirichlet_in_w, expected_energy, 2e-10);
+        let stages = [0, 1].map(|i| input(problem(&mesh, &baths[i], &material, &source)));
+        let sdirk = engine
+            .advance_sdirk2(cx, stages, &old_h, dt, controls())
+            .unwrap();
+        close(sdirk.stored_energy_change_j, expected_energy, 2e-10);
+        close(sdirk.dirichlet_in_j, expected_energy, 2e-10);
+        close(sdirk.energy_residual_j, 0.0, 2e-10);
+        for i in 0..4 {
+            close(be.temperature[i], new_t[i], 2e-12);
+            close(sdirk.second_stage.temperature[i], new_t[i], 2e-12);
+        }
+        assert!(std::ptr::eq(
+            engine.surface_heat_storage()[0].prepared_storage().unwrap(),
+            &law
+        ));
+    });
+}
+
+#[test]
+fn profiled_nonlinear_storage_drives_the_original_transient_and_history_adjoint() {
+    with_cx(|cx| {
+        let mesh = regular_tetrahedron();
+        let chart = chart();
+        let law = nonlinear_table();
+        let uniform = SurfaceHeatStorage::tabulated(0, &law);
+        let film = uniform.with_inventory_profile([0.0, 1.0, 3.0]).unwrap();
+        let engine = bare_engine(cx, &mesh, &chart)
+            .with_surface_heat_storage(cx, &[film])
+            .unwrap();
+        let mut shares = [0.0; 4];
+        for (vertex, fraction) in
+            mesh.boundary()[0]
+                .vertices
+                .into_iter()
+                .zip([1.0 / 4.0, 5.0 / 16.0, 7.0 / 16.0])
+        {
+            shares[vertex as usize] = fraction;
+        }
+        let boundary = ThermalBoundaryBuilder::new(&mesh)
+            .adiabatic_remainder()
+            .finish()
+            .unwrap();
+        let material = ConductivityModel::isotropic_declared(2.0).unwrap();
+        let source = ScalarField::Uniform(0.0);
+        let p = problem(&mesh, &boundary, &material, &source);
+        let (target, dt) = ([292.0, 293.0, 294.0, 295.0], 0.1);
+        // Independent regular-tet K*T = (4/3)*(T-mean(T)). Each host row has
+        // mass=1/4 and Cp=2. Invert its quadratic film-plus-host energy to
+        // manufacture the OLD state for this explicitly specified endpoint.
+        let old = std::array::from_fn::<_, 4, _>(|i| {
+            let energy = dt * (4.0 / 3.0) * (target[i] - 293.5);
+            let linear = 0.5 + shares[i] * (0.02 * target[i] - 5.0);
+            let quadratic = 0.01 * shares[i];
+            let delta =
+                2.0 * energy / (linear + (linear * linear + 4.0 * quadratic * energy).sqrt());
+            2.0 * (target[i] + delta - 280.0)
+        });
+        let step = engine.advance(cx, p, None, &old, dt, controls()).unwrap();
+        for i in 0..4 {
+            close(step.temperature[i], target[i], 2e-8);
+        }
+        close(step.stored_energy_change_j, 0.0, 2e-9);
+        close(step.energy_residual_j, 0.0, 2e-9);
+        let response = engine
+            .linearize_accepted(cx, p, None, &old, dt, controls(), step)
+            .unwrap();
+        let seed = response
+            .temperature_pullback(cx, &[1.0, 0.0, 0.0, 0.0])
+            .unwrap();
+        let gradient = response
+            .pullback(
+                cx,
+                &seed,
+                LinearConfig {
+                    tolerance: 1e-11,
+                    max_iterations: 64,
+                    restart: 4,
+                },
+            )
+            .unwrap();
+        for i in 0..4 {
+            let mut lower = old;
+            let mut upper = old;
+            lower[i] -= 1e-3;
+            upper[i] += 1e-3;
+            let a = engine.advance(cx, p, None, &lower, dt, controls()).unwrap();
+            let b = engine.advance(cx, p, None, &upper, dt, controls()).unwrap();
+            close(
+                gradient.previous_specific_enthalpy[i],
+                (b.temperature[0] - a.temperature[0]) / 2e-3,
+                3e-7,
+            );
+        }
+        // Explicit uniform profiles must keep the old native arithmetic too.
+        let results = [
+            uniform,
+            uniform.with_inventory_profile([f64::MAX; 3]).unwrap(),
+        ]
+        .map(|face| {
+            bare_engine(cx, &mesh, &chart)
+                .with_surface_heat_storage(cx, &[face])
+                .unwrap()
+                .advance(cx, p, None, &old, dt, controls())
+                .unwrap()
+        });
+        assert_eq!(
+            results[0].specific_enthalpy_j_kg,
+            results[1].specific_enthalpy_j_kg
+        );
+        assert_eq!(
+            results[0].stored_energy_change_j,
+            results[1].stored_energy_change_j
+        );
+    });
+}

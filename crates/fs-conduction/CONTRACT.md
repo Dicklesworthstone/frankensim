@@ -28,13 +28,40 @@ accounts. They also retain source receipts, exact chart ownership, failed-step
 history, repeatability and cancelled-work checks. These native regressions
 require execution on a build host with the complete physics dependencies.
 
+## Nonuniform original nonlinear film inventory
+
+`SurfaceHeatStorage::with_inventory_profile` represents tapered or unevenly
+distributed inventory while borrowing the original face-total C(T) law and
+retaining its exact amounts, work constraint and source identity. The exact
+P1 row moments differ from normalized corner amounts: profile `[0,1,3]` gives
+fractions `[1/4,5/16,7/16]`. A zero corner still receives the positive moment
+from neighboring basis functions. Scaling before summation admits finite large
+and subnormal profiles without overflowing their total. Original uniform
+bindings and explicit uniform profiles retain their prior arithmetic.
+
+The same fraction multiplies original capacity, relative energy, entropy and
+double-double stage storage. Existing BE/SDIRK2, adaptive, boundary-reaction,
+heterogeneous and history-adjoint owners therefore consume one consistent
+spatial inventory. The prepared sparse incidence encodes the original local
+corner in its existing index array; no extra incidence array, table clone,
+per-query allocation or source re-resolution is introduced. Nonlinear nodal
+lumping, perfect bonding and the original sensible-storage limits remain.
+
+Two native tests of the unchanged production coefficient helper passed against
+independent degree-two triangle quadrature, extreme scales and invalid input.
+Three integration regressions were added to the existing surface-capacity
+enthalpy seam for original-source identity, nonuniform BE/SDIRK2 energy and
+entropy, and manufactured transient/history-adjoint responses. Those three
+integration tests remain unexecuted because the required external constellation
+dependencies are absent; helper execution does not establish whole-solver proof.
+
 ## Sensible bonded-film storage in primary enthalpy
 
 `EnthalpyBackwardEuler::with_surface_heat_capacity` and its heterogeneous counterpart bind the existing `SurfaceHeatCapacity` laws to the original host enthalpy. The shared P1 rule gives `C_i = integral(C_s N_i dA)` in J/K, including nonuniform thickness/capacity and its original material source. The native row storage is `E_i(h_i) = m_i h_i + C_i T_i(h_i)` up to a fixed datum, with increment `m_i Delta_h_i + C_i Delta_T_i`. Reference mass, host caloric charts and phase fractions keep their original owners. A sharp host latent plateau has zero sensible film increment at fixed temperature; no latent energy or apparent heat-capacity regularization is added.
 
-`with_surface_heat_storage` adds nonlinear sensible films on the same uniform or heterogeneous host. Each `SurfaceHeatStorage::prepared` or `::tabulated` binds the original borrowed `PreparedHeatStorage` or `TabulatedHeatStorage` to one boundary triangle. Its law describes that face's **total fixed inventory** in J/K, never an areal capacity. Each of the three P1 rows receives one third of that inventory; at nonuniform temperatures this is nodal lumping, not exact nonlinear surface quadrature. Reusing one law on another face declares another equal inventory. The original law integrates `C(T)` across every crossed breakpoint; it is never sampled into a constant capacity or a new independent enthalpy chart. Source-qualified amounts, constraints and evidence remain inspectable through that exact object. Declared tables acquire no material-source authority.
+`with_surface_heat_storage` adds nonlinear sensible films on the same uniform or heterogeneous host. Each `SurfaceHeatStorage::prepared` or `::tabulated` binds the original borrowed `PreparedHeatStorage` or `TabulatedHeatStorage` to one boundary triangle. Its law describes that face's **total fixed inventory** in J/K, never an areal capacity. By default each P1 row receives one third of that inventory. `with_inventory_profile([a0,a1,a2])` instead distributes the same total by the exact P1 row fractions `w_i = (2*a_i+a_j+a_k)/(4*sum(a))`, in the original boundary-face vertex order. The finite nonnegative values describe relative areal inventory, with at least one positive value; they infer no new total amount. Uniform profiles retain the original division-by-three arithmetic. At nonuniform temperatures this remains nodal lumping, not exact nonlinear surface quadrature. Reusing one law on another face declares another equal inventory. The original law integrates `C(T)` across every crossed breakpoint; it is never sampled into a constant capacity or a new independent enthalpy chart. Source-qualified amounts, constraints and evidence remain inspectable through that exact object. Declared tables acquire no material-source authority.
 
-Backward Euler, both SDIRK2 stages, adaptive whole-window audits, retained endpoint evaluations, spectral heating, and native contact/radiation paths use this same storage. Prescribed-temperature reactions include the film's actual heat once, while prescribed constraint rows retain their original reference-mass scaling. Native endpoint/history adjoints use the independent storage slopes `m_i + [C_i + sum(C_face(T_i)/3)] T_i'(h_i)` at the new and old states; the eliminated SDIRK2 carry uses the first-stage slope. Active-film history temperature kinks, host-chart endpoints and active film temperature-support edges refuse classical two-sided derivatives. Interior host latent plateaus remain admissible even at a film temperature-support edge because their temperature stays fixed. Continuous capacity-table knots require no artificial corner refusal: the integrated storage derivative is the continuous original capacity. Film parameter, geometry and source-selection derivatives are not inferred.
+Backward Euler, both SDIRK2 stages, adaptive whole-window audits, retained endpoint evaluations, spectral heating, and native contact/radiation paths use this same storage. Prescribed-temperature reactions include the film's actual heat once, while prescribed constraint rows retain their original reference-mass scaling. Native endpoint/history adjoints use the independent storage slopes `m_i + [C_i + sum(w_face,i C_face(T_i))] T_i'(h_i)` at the new and old states; the eliminated SDIRK2 carry uses the first-stage slope. Active-film history temperature kinks, host-chart endpoints and active film temperature-support edges refuse classical two-sided derivatives. Interior host latent plateaus remain admissible even at a film temperature-support edge because their temperature stays fixed. Continuous capacity-table knots require no artificial corner refusal: the integrated storage derivative is the continuous original capacity. Film parameter, geometry and source-selection derivatives are not inferred.
 
 Material-bound constant films retain their original density/Cp bundles; nonlinear films retain their original prepared or declared caloric laws. Both history and candidate temperatures must stay inside all participating source supports. Empty and zero constant additions retain no film storage or inactive sources. A face may occur once per addition; further additions explicitly represent further layers. Nonlinear face incidence is compiled once into contiguous sparse rows; caloric queries allocate nothing and touch only incident films, without copying tables or resolving claims during the solve. A separately meshed coating must not be counted again. The film is thermally thin, perfectly bonded, and purely sensible; its original capacity work constraint must be applicable to the supplied physical inventory. Independent film phase change requires another state model. Tangential film conductivity remains a separate boundary law.
 

@@ -173,13 +173,17 @@ impl EnthalpyBackwardEuler<'_, '_> {
         // source temperature is still checked, but no capacity can add latent heat.
         if temperature_derivative == 0.0 { return Ok(self.masses[vertex]); }
         let film = self.surface_capacity.as_ref().expect("active film storage");
-        let mut derivative = finite(self.masses[vertex]
-            + finite(film.nodal_j_per_k[vertex] * temperature_derivative)?)?;
+        let mut derivative = finite(
+            self.masses[vertex] + finite(film.nodal_j_per_k[vertex] * temperature_derivative)?,
+        )?;
         if let Some(laws) = &film.nonlinear {
-            for law in laws.at_vertex(vertex) {
-                let capacity = law.heat_capacity_j_k(temperature)
+            for (law, corner) in laws.at_vertex(vertex) {
+                let capacity = law
+                    .heat_capacity_j_k(temperature)
                     .map_err(|source| EnthalpyError::FilmStorage { vertex, source })?;
-                derivative = finite(derivative + finite((capacity / 3.0) * temperature_derivative)?)?;
+                derivative = finite(
+                    derivative + finite(law.row_share(corner, capacity) * temperature_derivative)?,
+                )?;
             }
         }
         Ok(derivative)
@@ -203,7 +207,7 @@ impl EnthalpyBackwardEuler<'_, '_> {
 
     /// Exact sensible entropy of the same bonded film inventories used by
     /// storage_change_j. Each nonlinear face retains its original caloric
-    /// integral and the same one-third nodal inventory; no C(T) is frozen.
+    /// integral and the same P1 nodal inventory fraction; no C(T) is frozen.
     pub(super) fn film_entropy_change_j_k(
         &self,
         vertex: usize,
@@ -228,10 +232,11 @@ impl EnthalpyBackwardEuler<'_, '_> {
             change = finite(capacity * logarithm)?;
         }
         if let Some(laws) = &film.nonlinear {
-            for law in laws.at_vertex(vertex) {
-                let entropy = law.sensible_entropy_change_j_k(old_temperature, temperature)
+            for (law, corner) in laws.at_vertex(vertex) {
+                let entropy = law
+                    .sensible_entropy_change_j_k(old_temperature, temperature)
                     .map_err(|source| EnthalpyError::FilmStorage { vertex, source })?;
-                change = finite(change + entropy / 3.0)?;
+                change = finite(change + law.row_share(corner, entropy))?;
             }
         }
         Ok(change)
@@ -251,13 +256,14 @@ impl EnthalpyBackwardEuler<'_, '_> {
         let (old_temperature, temperature) =
             self.film_temperature_change(vertex, old_h, temperature)?;
         let film = self.surface_capacity.as_ref().expect("active film storage");
-        let mut change = finite(bulk + finite(film.nodal_j_per_k[vertex]
-            * (temperature - old_temperature))?)?;
+        let mut change =
+            finite(bulk + finite(film.nodal_j_per_k[vertex] * (temperature - old_temperature))?)?;
         if let Some(laws) = &film.nonlinear {
-            for law in laws.at_vertex(vertex) {
-                let energy = law.energy_change_j(old_temperature, temperature)
+            for (law, corner) in laws.at_vertex(vertex) {
+                let energy = law
+                    .energy_change_j(old_temperature, temperature)
                     .map_err(|source| EnthalpyError::FilmStorage { vertex, source })?;
-                change = finite(change + energy / 3.0)?;
+                change = finite(change + law.row_share(corner, energy))?;
             }
         }
         Ok(change)
@@ -288,12 +294,17 @@ impl EnthalpyBackwardEuler<'_, '_> {
             checked_dd(Dd::from_f64(temperature) - Dd::from_f64(old_temperature))?,
         )?)?;
         if let Some(laws) = &film.nonlinear {
-            for law in laws.at_vertex(vertex) {
+            for (law, corner) in laws.at_vertex(vertex) {
                 // The native relative integral avoids subtracting large stored
                 // primitives; retain its result in the existing stage accumulator.
-                let energy = law.energy_change_j(old_temperature, temperature)
+                let energy = law
+                    .energy_change_j(old_temperature, temperature)
                     .map_err(|source| EnthalpyError::FilmStorage { vertex, source })?;
-                change = checked_dd(change + Dd::from_f64(energy) / Dd::from_f64(3.0))?;
+                let share = match law.row_fraction(corner) {
+                    Some(fraction) => Dd::from_f64(energy) * Dd::from_f64(fraction),
+                    None => Dd::from_f64(energy) / Dd::from_f64(3.0),
+                };
+                change = checked_dd(change + share)?;
             }
         }
         Ok(change)
