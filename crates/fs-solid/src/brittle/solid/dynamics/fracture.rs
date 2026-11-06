@@ -6,6 +6,9 @@
 //! topology owner and reconstructs consistent inertia on the new nodal stars.
 //! No impulse, elapsed time, artificial velocity or mass deletion is involved.
 
+/// Simultaneous native normal impacts on the same released material faces.
+pub mod contact;
+
 use std::sync::Arc;
 
 use fs_exec::Cx;

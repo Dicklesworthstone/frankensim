@@ -1,5 +1,27 @@
 # fs-solid CONTRACT
 
+## Simultaneous impacts on released brittle faces
+
+`BrittleTetMotion::impact_released_faces` binds the retained matching-face
+kinematics to the original simultaneous normal-impact owner in fs-contact.
+Every active non-tied vertex pair participates in one complete J M^-1 J^T
+solve using the original supported consistent mass. At most 64 active rows are
+admitted; one native sparse response is retained at a time. Redundant rows keep
+the original PSD velocity/work witness without inventing unique local pressure.
+
+The resulting signed nodal impulses are applied together through the original
+mass impulse owner. Actual endpoint restitution/complementarity, linear/angular
+impulse, individual contact couples, retained kinetic storage, signed support
+work and total contact loss must pass before publication. All position, source,
+damage, elastic storage, fracture-loss history, density, time and step budgets
+remain unchanged. Impact loss is explicit and is not inferred thermal heat.
+
+Contact requires nonnegative gaps and matching tangential witness positions;
+penetration and finite-sliding geometry refuse rather than being repaired.
+Restitution is an explicit model input. The caller locates the instantaneous
+event; this supplies no global collision search, persistent contact force or
+friction. Native motion retains its released-face opening guard afterward.
+
 ## Completed brittle fracture and native fragment continuation
 
 `BrittleTetSolid::split_fracture` releases explicitly selected conforming faces
