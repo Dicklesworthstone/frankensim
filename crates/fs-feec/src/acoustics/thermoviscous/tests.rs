@@ -5,6 +5,7 @@ mod curved;
 mod curved_thermal;
 mod fluid;
 mod heat_source;
+mod body_force;
 mod moving_wall;
 mod time;
 

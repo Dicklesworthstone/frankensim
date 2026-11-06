@@ -6,6 +6,7 @@
 //! `div(v) + i omega (beta_T p - alpha_p T0 theta) = 0`, and
 //! `i omega (rho cp T0 theta - alpha_p T0 p) - kappa T0 laplacian(theta) = q'`.
 //! [`heat_source`] supplies optional volumetric heating `q'` [W/m^3].
+//! [`body_force`] supplies original vector momentum forcing `f` [N/m^3].
 //! The signed isobaric expansion `alpha_p` and isothermal compressibility
 //! `beta_T` are material coefficients. The original ideal-gas constructor uses
 //! `alpha_p=1/T0, beta_T=1/p0`; [`ThermoviscousFe::new_with_thermodynamics`]
@@ -53,6 +54,7 @@ pub mod moving_wall;
 use moving_wall::{MovingWall, MovingWallField};
 /// Distributed heat-release excitation on the original resolved temperature basis.
 pub mod heat_source;
+pub mod body_force;
 /// Complete causal motion and thermal storage through the original pHS owner.
 pub mod time;
 
@@ -345,8 +347,11 @@ pub struct PreparedThermoviscousScattering<'a, 'c> {
 /// Cycle-averaged work [W]; no clipping of loss or residual is performed.
 #[derive(Debug, Clone, Copy)]
 pub struct ThermoviscousPower {
-    /// Total work entering through traction, structural forces and heat sources.
+    /// Total work entering through traction, structural forces and volume sources.
     pub input_w: f64,
+    /// Mechanical work Re(integral(conj(v) . f dV))/2 [W] from original
+    /// distributed fluid forces. Included in input_w, with no density scaling.
+    pub body_force_work_w: f64,
     /// Acoustic thermal work `Re(integral(conj(T'/T0) q'))/2` [W].
     /// Included in `input_w`; this is not the first-order heat-release phasor.
     pub heat_source_work_w: f64,
@@ -1532,6 +1537,7 @@ impl PreparedThermoviscous<'_, '_> {
                 .zip(&inward_flow_m3_s)
                 .map(|(&p, &q)| 0.5 * (p.conj() * q).re)
                 .sum(),
+            body_force_work_w: 0.0,
             heat_source_work_w: 0.0,
             viscous_w: 0.0,
             bulk_w: 0.0,

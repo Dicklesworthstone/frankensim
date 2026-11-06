@@ -9,6 +9,7 @@
 //! remain fixed; heat deposition and chemistry are inputs, not inferred models.
 
 use super::super::helmholtz::heterogeneous::MAX_QUADRATURE_ORDER;
+use super::body_force::ThermoviscousBodyForceSource;
 use super::*;
 
 /// An original-volume spatial heat distribution, evaluated once during setup.
@@ -111,6 +112,7 @@ fn add_sources(
     model: &ThermoviscousFe<'_>,
     rhs: &mut [C64],
     wall_forces: &[C64],
+    force_sources: &[(&ThermoviscousBodyForceSource<'_, '_>, C64)],
     heat_sources: &[(&ThermoviscousHeatSource<'_, '_>, C64)],
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(), ThermoviscousError> {
@@ -130,6 +132,9 @@ fn add_sources(
         let row = 3 * model.velocity_count + i;
         rhs[row] = rhs[row] + force;
     }
+    if !force_sources.is_empty() {
+        super::body_force::add_sources(model, rhs, force_sources, cancelled)?;
+    }
     for &(source, amplitude) in heat_sources {
         poll(cancelled)?;
         for (entry, &coefficient) in rhs[model.temperature_start..].iter_mut().zip(&source.load) {
@@ -146,11 +151,19 @@ fn field_with_source_work(
     prepared: &PreparedThermoviscous<'_, '_>,
     drive: &[C64],
     wall_forces: &[C64],
+    force_sources: &[(&ThermoviscousBodyForceSource<'_, '_>, C64)],
     x: &[C64],
     rhs: &[C64],
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<ThermoviscousField, ThermoviscousError> {
     let mut field = prepared.field(drive, wall_forces, x, cancelled)?;
+    super::body_force::add_work_and_reaction(
+        prepared.model,
+        x,
+        force_sources,
+        &mut field,
+        cancelled,
+    )?;
     let start = prepared.model.temperature_start;
     let mut work = Dd::from_f64(0.0);
     for (&theta, &heat) in x[start..].iter().zip(&rhs[start..]) {
@@ -182,6 +195,24 @@ impl PreparedThermoviscous<'_, '_> {
         heat_sources: &[(&ThermoviscousHeatSource<'_, '_>, C64)],
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<ThermoviscousField, ThermoviscousError> {
+        self.response_with_volume_sources(drive, wall_forces, &[], heat_sources, cancelled)
+    }
+
+    /// Simultaneous original traction, structural force, volume force and heat.
+    ///
+    /// Force amplitudes [N] multiply the original vector densities [m^-3].
+    /// All physical fields and losses come from the same mixed LU. The source
+    /// work pairs with the full Cartesian velocity, including moving-wall
+    /// coordinates; fluid traction includes the original constrained source
+    /// load. Sources are sampled once and never normalized or rescaled here.
+    pub fn response_with_volume_sources(
+        &self,
+        drive: &[C64],
+        wall_forces: &[C64],
+        force_sources: &[(&ThermoviscousBodyForceSource<'_, '_>, C64)],
+        heat_sources: &[(&ThermoviscousHeatSource<'_, '_>, C64)],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<ThermoviscousField, ThermoviscousError> {
         poll(cancelled)?;
         let model = self.model;
         if drive.len() != model.loads.len() || drive.iter().any(|z| !finite(*z)) {
@@ -193,7 +224,14 @@ impl PreparedThermoviscous<'_, '_> {
                 *entry = *entry + pressure.scale(coefficient);
             }
         }
-        add_sources(model, &mut rhs, wall_forces, heat_sources, cancelled)?;
+        add_sources(
+            model,
+            &mut rhs,
+            wall_forces,
+            force_sources,
+            heat_sources,
+            cancelled,
+        )?;
         let x = model.solve_system(
             &self.factor,
             &self.rows,
@@ -205,7 +243,7 @@ impl PreparedThermoviscous<'_, '_> {
             &rhs,
             cancelled,
         )?;
-        field_with_source_work(self, drive, wall_forces, &x, &rhs, cancelled)
+        field_with_source_work(self, drive, wall_forces, force_sources, &x, &rhs, cancelled)
     }
 }
 
@@ -214,6 +252,7 @@ impl PreparedThermoviscousScattering<'_, '_> {
         &self,
         incident: &[C64],
         wall_forces: &[C64],
+        force_sources: &[(&ThermoviscousBodyForceSource<'_, '_>, C64)],
         heat_sources: &[(&ThermoviscousHeatSource<'_, '_>, C64)],
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<(Vec<C64>, Vec<C64>), ThermoviscousError> {
@@ -231,7 +270,14 @@ impl PreparedThermoviscousScattering<'_, '_> {
                 *entry = *entry + pressure.scale(load);
             }
         }
-        add_sources(model, &mut rhs, wall_forces, heat_sources, cancelled)?;
+        add_sources(
+            model,
+            &mut rhs,
+            wall_forces,
+            force_sources,
+            heat_sources,
+            cancelled,
+        )?;
         let x = model.solve_system(
             &prepared.factor,
             &prepared.rows,
@@ -260,7 +306,28 @@ impl PreparedThermoviscousScattering<'_, '_> {
         heat_sources: &[(&ThermoviscousHeatSource<'_, '_>, C64)],
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<ThermoviscousField, ThermoviscousError> {
-        let (x, rhs) = self.solve_with_sources(incident, wall_forces, heat_sources, cancelled)?;
+        self.response_with_volume_sources(incident, wall_forces, &[], heat_sources, cancelled)
+    }
+
+    /// Resolve incident waves, original body forces and heat in one loaded solve.
+    /// Force [N] and heat [W] coordinates retain their original signed profiles.
+    /// Actual port traction and moving-wall reaction are reconstructed from
+    /// this same solution; source power is included exactly once.
+    pub fn response_with_volume_sources(
+        &self,
+        incident: &[C64],
+        wall_forces: &[C64],
+        force_sources: &[(&ThermoviscousBodyForceSource<'_, '_>, C64)],
+        heat_sources: &[(&ThermoviscousHeatSource<'_, '_>, C64)],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<ThermoviscousField, ThermoviscousError> {
+        let (x, rhs) = self.solve_with_sources(
+            incident,
+            wall_forces,
+            force_sources,
+            heat_sources,
+            cancelled,
+        )?;
         let drive = incident
             .iter()
             .enumerate()
@@ -271,7 +338,15 @@ impl PreparedThermoviscousScattering<'_, '_> {
         if drive.iter().any(|&p| !finite(p)) {
             return Err(ThermoviscousError::NonFinite);
         }
-        field_with_source_work(&self.inner, &drive, wall_forces, &x, &rhs, cancelled)
+        field_with_source_work(
+            &self.inner,
+            &drive,
+            wall_forces,
+            force_sources,
+            &x,
+            &rhs,
+            cancelled,
+        )
     }
 
     /// Outgoing power waves produced by internal sources at zero incident drive.
@@ -285,8 +360,26 @@ impl PreparedThermoviscousScattering<'_, '_> {
         heat_sources: &[(&ThermoviscousHeatSource<'_, '_>, C64)],
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Vec<C64>, ThermoviscousError> {
+        self.source_outgoing_with_volume_sources(wall_forces, &[], heat_sources, cancelled)
+    }
+
+    /// Affine outgoing-wave contribution of body forces and heat at zero
+    /// incident drive, reusing the original loaded LU and port references.
+    pub fn source_outgoing_with_volume_sources(
+        &self,
+        wall_forces: &[C64],
+        force_sources: &[(&ThermoviscousBodyForceSource<'_, '_>, C64)],
+        heat_sources: &[(&ThermoviscousHeatSource<'_, '_>, C64)],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Vec<C64>, ThermoviscousError> {
         let incident = vec![C64::ZERO; self.reference.len()];
-        let (x, _) = self.solve_with_sources(&incident, wall_forces, heat_sources, cancelled)?;
+        let (x, _) = self.solve_with_sources(
+            &incident,
+            wall_forces,
+            force_sources,
+            heat_sources,
+            cancelled,
+        )?;
         let outgoing = self
             .roots
             .iter()
