@@ -20,6 +20,8 @@ use fs_material::state_point::MaterialPropertySelection;
 use fs_qty::{Dims, QuantitySpec, Temperature};
 use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
 
+mod network;
+
 fn card(hot_viscosity: f64) -> MaterialCard {
     let mut claims = ClaimSet::new();
     for (name, value, dims, quantity) in [

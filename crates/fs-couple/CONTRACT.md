@@ -187,3 +187,29 @@ active-cell changes may prevent a nonlinear root from converging. Three
 focused regressions specify independent shrink/growth energy and entropy
 balances, callback-visible coverage and source-k rebinding, exact-target event
 order, and transactional late failure including a caught contact-update error.
+
+## Spatial thermal networks in impact pressure playback
+
+`render::plate::impact::audio::network::ThermalNetworkSource` retains an original
+heated or liquid-film impact source, its `DepositionSimulation`, thermal observer,
+reservoir/cell bindings, step controls and contact-material resolver. Its
+`ImpactSource` implementation calls the original `step_with_thermal_network`
+once per mechanical sample. It does not first take an adiabatic step, reconstruct
+caloric properties, or deposit mechanical dissipation a second time.
+
+`ImpactPressureRenderer` therefore observes the accepted network-coupled
+trajectory through its existing radiation and propagation histories. The same
+source can pass through causal decimation, pressure mixing and WAV streaming.
+`last_mechanical_frame` retains the original `NetworkImpactFrame`, including
+thermal substeps, external heat and the combined mechanical/thermal account.
+Source, thermal cells and observer are available read-only between callbacks.
+
+The original coupled owner admits complete bindings, matching physical clocks,
+caloric identity, source domains, thermal and mechanical budgets, and cancellation.
+A rejected physical sample publishes none of those states; the pressure host
+retains its existing failed-callback poisoning contract. External effects in a
+captured resolver are not rolled back. Thermal splitting, fixed geometry,
+unloaded-only contact refresh and one-way acoustic observation keep their
+original limitations. Construction retains inputs without advancing or admitting
+a physical step. The focused regressions compare direct/network-observed states
+and audits, conduction-driven viscosity and pressure, and late-observer refusal.

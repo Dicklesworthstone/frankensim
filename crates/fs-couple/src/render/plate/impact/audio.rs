@@ -35,6 +35,9 @@ use crate::render::RenderError;
 use fs_exec::CancelGate;
 use fs_math::{c64::C64, det};
 
+/// Retained spatial heat transport and material feedback during pressure playback.
+pub mod network;
+
 /// A velocity-response sample bank converted to causal acceleration response.
 /// Kept immutable so a caller cannot remove the source-time shift after fitting.
 pub struct ImpactRadiation {
@@ -217,7 +220,9 @@ impl ImpactSource for LiquidFilmImpactSystem<'_> {
 /// advances its adiabatic stores, and `LiquidFilmImpactSystem` also refreshes
 /// the original film viscosity from their accepted temperature. Their complete
 /// thermal diagnostics remain available through `last_mechanical_frame`.
-/// This does not add a spatial heat network or acoustic back-reaction.
+/// [`network::ThermalNetworkSource`] retains the original spatial heat network,
+/// its observer and material refresh on the same mechanical timeline. None of
+/// these observation adapters adds acoustic back-reaction.
 /// A failed callback poisons this host because a physical prefix may have run.
 /// Callers must discard the failed callback's output, as PressureRenderer requires.
 pub struct ImpactPressureRenderer<'a, M: ImpactSource = ImpactSystem> {
