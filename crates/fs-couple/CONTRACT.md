@@ -11,3 +11,61 @@ Cumulative work accounts distinguish original wrench work, axial drive work, con
 The thermal routes remain explicitly reduced, fixed-geometry bearing/rail receivers; no moving footprint, material remap, surface recession or flash-temperature law is inferred. Backward-Euler heat makes this a first-order thermal composition despite symmetric mechanical splitting. Caller time refinement remains required: exact static balance belongs in joint drive ports, while separately split body wrenches can introduce artificial axial slip/heat at finite step size. A small energy residual is not a trajectory/heating accuracy certificate.
 
 Four direct regressions cover event-aligned stopping/reversal poses with 1/2 J and 7/18 J loss, eight-step temperature-dependent friction against an independent quadratic recurrence, an authored drive switch with gravity/wrench/outside-heat and nonthermal-export accounts, and late source/cancellation or malformed-grid atomic refusal.
+
+## Hardness-limited sliding, wear and finite caloric feedback
+
+`friction_heat::plastic_wear::PlasticSlidingHeatContact` binds an accepted
+`SourcePlasticSlidingWear` checkpoint to its original ordered material cards,
+source-resolved Cp/density charts and an existing `FrictionHeatRoute`.
+`step_candidate` solves original cell-energy increments and the massless
+interface temperature using the existing `FrictionHeatStep`,
+`FallibleFiniteDifference` and Newton--Krylov owners. No parallel thermal
+balance or nonlinear solver is introduced.
+
+Each residual evaluation, directional probe and final replay starts from the
+same accepted source and complete indentation, shear and wear history. The
+original caloric objects give separate body temperatures; the normal/wear
+temperature factory refreshes original elasticity and each body's pressure
+hardness at those temperatures, while original friction and Archard coefficients
+follow the solved interface temperature. The selected normal boundary is held
+approach, maintained force or a held finite-stiffness device. Native Coulomb
+motion uses the resulting actual cell pressures, and only its solved slip
+length drives each body's original Archard removal and subsequent normal
+re-equilibration. Thermal coefficients are endpoint values; wear remains the
+native beginning-pressure split, requiring physical time/motion refinement.
+
+The original finite-cell geometry and endpoint conductivities determine signed
+heat into both bodies and a solved common interface temperature. No prescribed
+heat fraction or arithmetic temperature mean is inserted. The source callback
+owns original conductivity claims and other transport, retaining its query and
+selection evidence in the returned payload. The route excludes its old direct
+link to avoid duplicate conduction. Only actual native Coulomb dissipation
+enters this heat source. Normal plastic work and signed temperature/recession
+parameter work remain separate; their explicit external-work budget is the sum
+of absolute parameter contributions. Native contact identities and the thermal
+cell, interface and aggregate balances have independent acceptance tolerances.
+
+Admission retains the original receiving body IDs, cell geometry, material IDs,
+masses, caloric objects and clock. Original caloric and normal sources must share
+ordered card identities, complete fixed conditions and quantity axes, and the
+selected density claim. Accepted bulk source temperatures must equal the
+thermal checkpoint; melted material refuses. The original active grid-cell
+mask must have the thermal face's area and remain unchanged after both
+temperature refresh and wear. Pressure may redistribute within that mask.
+
+This is an explicit fixed-footprint, fixed-thermal-inventory approximation.
+Cumulative removed volume is bounded against each ORIGINAL receiving cell
+volume, never a renewed per-step denominator; zero permitted removal is valid.
+The fraction bounds an omitted effect, not its thermal error or experimental
+validity. Removed material has no modeled mass, enthalpy or debris export.
+Reciprocal thermoelastic free energy, conversion of normal plastic work to heat,
+moving contact coverage and storage in caller-supplied tangential body response
+are not closed by this owner. Its local contact identities and fixed-inventory
+heat balance imply no complete body-energy, entropy or passivity theorem.
+
+The candidate seals successor source, contact history and thermal state for
+joint adoption. Bounded trials, Newton iterations and thermal inventory,
+source-domain or footprint refusal, excessive cumulative removal or parameter
+work, nonconvergence and cancellation publish no partial physical history.
+The report retains both native mechanical operations, source callback evidence,
+friction heat, normal/plastic/parameter accounts and cumulative removed volumes.

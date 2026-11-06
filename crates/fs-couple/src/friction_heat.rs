@@ -71,6 +71,9 @@ pub mod joints;
 /// Retained source Mindlin histories, shared native bodies and finite heat.
 pub mod mindlin;
 
+/// Original hardness-limited sliding and wear with finite-body thermal feedback.
+pub mod plastic_wear;
+
 fn invalid(message: &'static str) -> DepositionError {
     DepositionError::InvalidInput(message)
 }
