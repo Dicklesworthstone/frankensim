@@ -24,15 +24,21 @@
 //! free-surface Nusselt/long-wave owner and refuse unsupported modes. The
 //! historical two-wall growth proxy remains an explicitly separate smoke path.
 //!
+//! [`FreeJetStudy`] adds the cylindrical capillary instability and the actual
+//! free-flight amplification for an explicit radius, flux and disturbance band.
+//! It shares the original material-capable jet owner in `fs-lbm`.
+//!
 //! Recorded successors (named, not pretended): level-set lip topology
 //! change (fs-topols wiring), cumulant collision, recorded-fluid
 //! calibration, the full Appendix C study-program runner.
 
+pub mod jet;
 pub mod pour;
 pub mod race;
 pub mod robust;
 pub mod stability;
 
+pub use jet::{FreeJetReport, FreeJetStudy};
 pub use pour::{PourError, PourOutcome, PourRig, render_pour};
 pub use race::{
     LipScreenReport, SCREEN_JITTER_WIDTH, SCREEN_SCALE, ScreenError, declared_span,

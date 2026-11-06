@@ -1,4 +1,4 @@
-//! G0/G1 source-to-film coupling with synthetic constitutive inputs.
+//! G0/G1 source-to-film and source-to-jet coupling with synthetic constitutive inputs.
 //! The independent dimensional dispersion check establishes numerical wiring,
 //! not empirical film accuracy or source calibration.
 
@@ -334,5 +334,77 @@ fn apparent_viscosity_requiring_shear_or_pressure_evolution_is_never_frozen() {
             MaterialFilmLiquid::try_new(source),
             Err(FilmError::InvalidInput(_))
         ));
+        assert!(matches!(
+            fs_lbm::jet::material::MaterialCapillaryJet::inviscid(source, 0.001, 0.1),
+            Err(fs_lbm::jet::JetError::InvalidInput(_))
+        ));
     }
+}
+
+#[test]
+fn cylindrical_jet_reuses_both_source_viscosity_bases_and_original_receipts() {
+    use fs_lbm::jet::material::MaterialCapillaryJet;
+
+    for basis in [LiquidViscosityBasis::Dynamic, LiquidViscosityBasis::Kinematic] {
+        let card = card(basis, true, false);
+        let source = resolve(&card, basis, LiquidCapillarity::Sourced);
+        let bound = MaterialCapillaryJet::inviscid(&source, 0.001, 0.01).unwrap();
+        assert!(core::ptr::eq(bound.material(), &source));
+        assert_eq!(bound.material().material().card_identity(), card.content_hash());
+        assert_eq!(bound.material().viscosity_basis(), basis);
+        assert_eq!(bound.material().material().properties().len(), 3);
+        near(bound.ohnesorge(), 0.002 / (1000.0_f64 * 0.08 * 0.001).sqrt());
+        assert_eq!(bound.maximum_ohnesorge(), 0.01);
+        let maximum = bound.jet().fastest_mode([0.0, 1000.0]).unwrap();
+        near(maximum.mode.kr, 0.697_018_898_306_3);
+        // Classical dimensionless inviscid maximum, independent of the material adapter.
+        let rate_scale = (0.08_f64 / (1000.0 * 0.001_f64.powi(3))).sqrt();
+        assert!((maximum.mode.growth_per_s / rate_scale - 0.343_338_701_861_3).abs() < 2e-12);
+    }
+}
+
+#[test]
+fn cylindrical_jet_source_temperature_changes_growth_and_viscosity_admission() {
+    use fs_lbm::jet::material::MaterialCapillaryJet;
+
+    let card = card(LiquidViscosityBasis::Dynamic, true, false);
+    let cold = resolve(&card, LiquidViscosityBasis::Dynamic, LiquidCapillarity::Sourced);
+    let hot = ResolvedLiquidSurfaceState::try_from_material(
+        cold.material().at_query_point(&card, &point(400.0)).unwrap(),
+        cold.viscosity_basis(),
+        cold.capillarity(),
+    ).unwrap();
+    let first = MaterialCapillaryJet::inviscid(&cold, 0.001, 0.01).unwrap();
+    // The SAME original source at 400 K has more viscosity and less tension:
+    // the old inviscid allowance no longer admits it.
+    assert!(MaterialCapillaryJet::inviscid(&hot, 0.001, 0.01).is_err());
+    let second = MaterialCapillaryJet::inviscid(&hot, 0.001, 0.03).unwrap();
+    let a = first.jet().mode(500.0).unwrap();
+    let b = second.jet().mode(500.0).unwrap();
+    near(b.growth_per_s / a.growth_per_s, (0.04_f64 / 800.0 / (0.08 / 1000.0)).sqrt());
+    near(second.ohnesorge(), 0.004 / (800.0_f64 * 0.04 * 0.001).sqrt());
+    assert!(core::ptr::eq(second.material(), &hot));
+    for previous in cold.material().properties() {
+        let refreshed = second.material().material().property(previous.requirement().name()).unwrap();
+        assert_eq!(refreshed.answer().receipt.selected, previous.answer().receipt.selected);
+        assert_eq!(refreshed.answer().receipt.axis_quantities, *point(400.0).axis_quantities());
+    }
+}
+
+#[test]
+fn cylindrical_material_jet_requires_active_tension_and_explicit_valid_budget() {
+    use fs_lbm::jet::material::MaterialCapillaryJet;
+
+    let without_surface = card(LiquidViscosityBasis::Dynamic, false, false);
+    let neglected = resolve(&without_surface, LiquidViscosityBasis::Dynamic, LiquidCapillarity::Neglected);
+    assert!(MaterialCapillaryJet::inviscid(&neglected, 0.001, 0.1).is_err());
+    let with_surface = card(LiquidViscosityBasis::Dynamic, true, false);
+    let source = resolve(&with_surface, LiquidViscosityBasis::Dynamic, LiquidCapillarity::Sourced);
+    for budget in [-1.0, f64::NAN, f64::INFINITY, 0.0, 0.001] {
+        assert!(MaterialCapillaryJet::inviscid(&source, 0.001, budget).is_err());
+    }
+    let bound = MaterialCapillaryJet::inviscid(&source, 0.001, 0.01).unwrap();
+    assert!(MaterialCapillaryJet::inviscid(&source, 0.001, bound.ohnesorge()).is_ok());
+    // Shrinking the same sourced jet raises Oh; units are physical radius.
+    assert!(MaterialCapillaryJet::inviscid(&source, 0.0001, 0.01).is_err());
 }

@@ -14,6 +14,9 @@
 //! These are deterministic floating-point model evaluations, not error
 //! enclosures or experimental calibration. All queries are allocation-free.
 
+/// Bind the original liquid source and explicit viscosity applicability.
+pub mod material;
+
 /// Most amplified inviscid eigenbranch, measured in the jet's rest frame.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct JetMode {

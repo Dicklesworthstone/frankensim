@@ -347,3 +347,32 @@ free-surface geometry, area coverage, wall occlusion, refraction, scattering,
 or a liquid's measured spectrum. The coefficient must be supplied at the
 declared wavelength and material state. The older render_pour visualization
 retains its explicitly authored lattice-opacity convention.
+
+## Cylindrical free-jet capillary screen
+
+`jet::FreeJetStudy` composes the original `fs_lbm::jet::CapillaryJet`
+owner with an authored cylindrical radius, volume flow, flight length,
+continuous physical wavenumber band and disturbance amplitude/threshold.
+Continuity fixes U=Q/(pi R²). Native temporal growth is observed over L/U;
+the result retains the fastest native mode, natural-log amplification,
+log amplitude/radius, and the linear time and advected distance to the
+declared threshold. Neutral or oscillatory bands below threshold return
+no threshold time. Large scores remain logarithmic, avoiding exponential
+overflow. Evaluation is allocation-free and independent of wavelength
+sampling density.
+
+The inviscid owner includes azimuthal curvature and its stable capillary-wave
+branch. This screen is a translating uniform cylinder with an authored
+normal-mode amplitude; it does not infer a jet radius or noise spectrum from
+the 2-D pour, replace its mass field, solve inlet-forced spatial instability,
+or resolve gravity stretching, liquid/gas viscosity, gas inertia, surfactants
+or nonlinear pinch-off. A threshold crossing is a linear extrapolation, not
+a simulated breakup or measured droplet size. The caller must justify the
+inviscid and small-disturbance approximations. Material-source consumers can
+supply the same native owner through its source-bound adapter.
+
+The module's G0/G1/G3 tests cover the independently evaluated cylindrical
+dispersion reaching the final score, conserved volume flux, flow/length
+sensitivity, stable and neutral bands, zero transit, logarithmic large scores
+and structured refusal. The existing pour connectivity result keeps its
+original 2-D meaning.
