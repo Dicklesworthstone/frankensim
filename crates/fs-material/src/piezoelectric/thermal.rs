@@ -190,7 +190,10 @@ impl ThermalLongitudinalPiezoelectric {
             .map_err(|_| PiezoelectricError::Invalid("piezoelectric thermal query is unrepresentable"))?;
         let resolved = self.original.material().at_query_point(&self.card,&point)?;
         let (material, derivatives) = match &self.tensor_reduction {
-            Some(reduction) if resolved.identity() == self.original.material().identity() => {
+            // A refresh pins the same claims but may change their selection-policy
+            // receipt. Reuse the exact original tensor projection only AFTER the
+            // complete source query succeeds at the identical physical point.
+            Some(reduction) if resolved.query() == self.original.material().query() => {
                 let derivatives = reduction.stress_charge.as_ref().map(|source| {
                     TensorThermalDerivatives {
                         slopes: self.slopes,
@@ -241,10 +244,35 @@ impl ThermalLongitudinalPiezoelectric {
             .find_map(|(name,value)| (name == &self.temperature_axis).then_some(*value))
             .ok_or(PiezoelectricError::Invalid("piezoelectric temperature coordinate is missing"))?;
         let at = self.at_temperature(temperature)?;
-        if at.material.tensor_reduction() != material.tensor_reduction()
-            || at.material.material().properties().iter().zip(material.material().properties())
-            .any(|(a,b)| a.value_si().to_bits() != b.value_si().to_bits()) {
+        if at.material.material().properties().iter().zip(material.material().properties())
+            .any(|(a,b)| a.value_si().to_bits() != b.value_si().to_bits())
+            || coefficients(&at.material).into_iter().zip(coefficients(material))
+                .any(|(a,b)| a.to_bits() != b.to_bits())
+            || at.material.density_kg_m3().to_bits() != material.density_kg_m3().to_bits() {
             return Err(PiezoelectricError::Invalid("piezoelectric dynamics and caloric law selected different source values"));
+        }
+        let same_projection = match (at.material.tensor_reduction(), material.tensor_reduction()) {
+            (None, None) => true,
+            (Some(expected), Some(actual)) if expected == actual => true,
+            (Some(expected), Some(actual))
+                if expected.frame_identity == actual.frame_identity
+                    && expected.direction == actual.direction => {
+                // Tensor identity includes the material's claim-selection receipt.
+                // Reconstruct under the caller's receipt policy. The full tensor
+                // identity then retains the source frame and rotation, even when
+                // different tensors have equal longitudinal coefficients.
+                let reduction = self.tensor_reduction.as_ref().ok_or(
+                    PiezoelectricError::Invalid("piezoelectric thermal tensor projection is missing"),
+                )?;
+                let (same_policy, _) = reduction.material(material.material().clone())?;
+                same_policy.tensor_reduction().is_some_and(|receipt| {
+                    receipt.tensor_identity == actual.tensor_identity
+                })
+            }
+            _ => false,
+        };
+        if !same_projection {
+            return Err(PiezoelectricError::Invalid("piezoelectric dynamics and caloric law selected different tensor projections"));
         }
         Ok(at)
     }

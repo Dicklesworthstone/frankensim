@@ -66,6 +66,95 @@ fn tensor(card: &MaterialCard) -> TensorPiezoelectric {
     .unwrap()
 }
 
+
+#[test]
+fn g0_tensor_thermal_refresh_admits_identical_sources_with_different_selection_receipts() {
+    let card = thermal_source(|_| {});
+    let original = tensor(&card);
+    let direction = [0.0, 0.0, 1.0];
+    let law = ThermalLongitudinalPiezoelectric::from_tensor(
+        &card, &original, direction, "T", [280.0, 340.0],
+    )
+    .unwrap();
+
+    // Re-querying pins the selected claims. At the reference point, preserve
+    // the exact original projection and its independently recorded receipt.
+    let reference = law.at_temperature(300.0).unwrap();
+    assert_eq!(reference.material(), law.original());
+    assert_eq!(law.at_material(law.original()).unwrap(), reference);
+
+    for temperature_k in [300.0, 320.0] {
+        let point = thermal_point(temperature_k);
+        let pinned = original.material().at_query_point(&card, &point).unwrap();
+        let pinned_tensor =
+            TensorPiezoelectric::from_strain_charge_material_state(pinned, FRAME).unwrap();
+        let single_tensor = TensorPiezoelectric::resolve_strain_charge(
+            &card, &point, MaterialPropertySelection::SingleClaimOnly, FRAME,
+        )
+        .unwrap();
+        assert_ne!(pinned_tensor.material().identity(), single_tensor.material().identity());
+        assert_ne!(pinned_tensor.identity(), single_tensor.identity());
+        let expected = law.at_temperature(temperature_k).unwrap();
+        for candidate in [
+            pinned_tensor.longitudinal(direction).unwrap(),
+            single_tensor.longitudinal(direction).unwrap(),
+        ] {
+            // Both snapshots retain every selected source claim and all source
+            // values; provenance policy alone cannot change their caloric law.
+            assert_eq!(law.at_material(&candidate).unwrap(), expected);
+        }
+    }
+}
+
+#[test]
+fn g0_tensor_thermal_receipt_refresh_retains_the_complete_source_frame() {
+    let card = thermal_source(|_| {});
+    let original = tensor(&card);
+    let direction = [0.0, 0.0, 1.0];
+    let law = ThermalLongitudinalPiezoelectric::from_tensor(
+        &card, &original, direction, "T", [280.0, 340.0],
+    )
+    .unwrap();
+    let pinned = original
+        .material()
+        .at_query_point(&card, &thermal_point(320.0))
+        .unwrap();
+    let correct =
+        TensorPiezoelectric::from_strain_charge_material_state(pinned.clone(), FRAME).unwrap();
+    let valid = correct.longitudinal(direction).unwrap();
+    law.at_material(&valid).unwrap();
+
+    // Identical scalar coefficients, selected claims, current frame and
+    // electrode direction do not authorize changing the original tensor frame.
+    let identity = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+    let foreign_frame =
+        TensorPiezoelectric::from_strain_charge_material_state(pinned, ContentHash([41; 32]))
+            .unwrap()
+            .rotated(FRAME, identity)
+            .unwrap()
+            .longitudinal(direction)
+            .unwrap();
+    assert_eq!(
+        [
+            valid.compliance_at_fixed_field_pa_inv(),
+            valid.strain_charge_coefficient_m_v(),
+            valid.permittivity_at_fixed_stress_f_m(),
+        ],
+        [
+            foreign_frame.compliance_at_fixed_field_pa_inv(),
+            foreign_frame.strain_charge_coefficient_m_v(),
+            foreign_frame.permittivity_at_fixed_stress_f_m(),
+        ],
+    );
+    let valid_receipt = valid.tensor_reduction().unwrap();
+    let foreign_receipt = foreign_frame.tensor_reduction().unwrap();
+    assert_eq!(valid_receipt.frame_identity, foreign_receipt.frame_identity);
+    assert_eq!(valid_receipt.direction, foreign_receipt.direction);
+    assert_ne!(valid_receipt.tensor_identity, foreign_receipt.tensor_identity);
+    assert!(law.at_material(&foreign_frame).is_err());
+    assert!(law.at_material(&correct.longitudinal([0.0, 0.0, -1.0]).unwrap()).is_err());
+}
+
 #[test]
 fn g1_full_tensor_temperature_reduction_preserves_cross_derivatives_and_potentials() {
     let card = thermal_source(|_| {});

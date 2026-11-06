@@ -30,6 +30,7 @@ use fs_solid::linear3::{
 };
 use fs_solver::{CsrOp, LinearOp, MinresState};
 use fs_sparse::{Coo, Csr};
+use std::borrow::Cow;
 
 mod boundary;
 use boundary::{BoundaryMap, prepare_boundary};
@@ -155,7 +156,7 @@ fn validate_controls(controls: TetPiezoelectricControls) -> Result<()> {
 pub struct TetPiezoelectricModel<'a> {
     nodes_m: &'a [[f64; 3]],
     tetrahedra: &'a [[usize; 4]],
-    materials: &'a [TensorPiezoelectric],
+    materials: Cow<'a, [TensorPiezoelectric]>,
     elastic_materials: Vec<TetElasticMaterial>,
     mesh_frame: ContentHash,
     budget: TetAssemblyBudget,
@@ -226,6 +227,32 @@ impl<'a> TetPiezoelectricModel<'a> {
         nodes_m: &'a [[f64; 3]],
         tetrahedra: &'a [[usize; 4]],
         materials: &'a [TensorPiezoelectric],
+        mesh_frame: ContentHash,
+        budget: TetAssemblyBudget,
+        cx: &Cx<'_>,
+    ) -> Result<Self> {
+        Self::assemble_materials(nodes_m, tetrahedra, Cow::Borrowed(materials), mesh_frame, budget, cx)
+    }
+
+    /// Prepare the SAME native operators while owning refreshed material tensors.
+    /// Geometry stays borrowed; source-dependent consumers can retain an accepted
+    /// operator/material snapshot without self-referential storage or a second
+    /// assembly implementation. All ordinary source/mesh/budget checks apply.
+    pub fn assemble_owned_materials(
+        nodes_m: &'a [[f64; 3]],
+        tetrahedra: &'a [[usize; 4]],
+        materials: Vec<TensorPiezoelectric>,
+        mesh_frame: ContentHash,
+        budget: TetAssemblyBudget,
+        cx: &Cx<'_>,
+    ) -> Result<Self> {
+        Self::assemble_materials(nodes_m, tetrahedra, Cow::Owned(materials), mesh_frame, budget, cx)
+    }
+
+    fn assemble_materials(
+        nodes_m: &'a [[f64; 3]],
+        tetrahedra: &'a [[usize; 4]],
+        materials: Cow<'a, [TensorPiezoelectric]>,
         mesh_frame: ContentHash,
         budget: TetAssemblyBudget,
         cx: &Cx<'_>,
@@ -337,8 +364,8 @@ impl<'a> TetPiezoelectricModel<'a> {
         self.mesh_frame
     }
     /// Original source tensor, uniform or in connectivity order.
-    pub const fn materials(&self) -> &[TensorPiezoelectric] {
-        self.materials
+    pub fn materials(&self) -> &[TensorPiezoelectric] {
+        &self.materials
     }
     /// Native full mechanical stiffness and consistent mass; no electrode clamp
     /// has yet condensed the coupling into this short-circuit stiffness.

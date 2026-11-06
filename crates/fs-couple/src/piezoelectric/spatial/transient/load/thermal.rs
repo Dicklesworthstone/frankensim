@@ -9,6 +9,8 @@
 
 mod ceramic;
 pub use ceramic::ThermalCeramicCell;
+/// Full tensor temperature feedback and reversible heat on a finite ceramic body.
+pub mod tensor;
 
 use super::{ElectrodeDrive, LoadedPiezoelectricStep, ResistiveElectrodeLoad};
 use crate::circuit_enthalpy::{

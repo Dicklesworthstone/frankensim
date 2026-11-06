@@ -2,6 +2,8 @@
 //! material data exercise the numerical model, not empirical qualification.
 #[path = "thermal/relaxation.rs"]
 mod relaxation;
+#[path = "thermal/tensor.rs"]
+mod tensor;
 
 use super::*;
 use fs_couple::circuit_enthalpy::material::{
