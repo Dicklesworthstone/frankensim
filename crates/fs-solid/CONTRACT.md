@@ -1180,8 +1180,12 @@ Engineering Green-strain rate gives objective resisting force and independently
 integrated power over reference area times thickness. Rigid motions and
 directional loss nullspaces are preserved. Flat prestressed transverse motion
 has zero first-order material strain-rate loss despite positive geometric
-stiffness. Shifted natural/thermal references refuse pending their constitutive
-pullback; no unmeasured damping floor is supplied.
+stiffness. Explicit nonthermal natural references use the original hyperelastic
+convention Fe=F G^-1: rates transform by D=diag(g1^-2,g2^-2,(g1*g2)^-1),
+conjugate stress by det(G) D, and heat by det(G). The original mesh volume and
+inertia remain unchanged, and source Gram factors receive the same pullback.
+Identity references preserve the original arithmetic. Thermal references still
+require an endpoint viscosity source and refuse; no unmeasured loss is supplied.
 
 `MembraneModes` retains the exact accepted linearization displacement.
 Projection keeps the complete modal resistance and source Gram rows, with

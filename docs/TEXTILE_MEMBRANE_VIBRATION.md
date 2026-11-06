@@ -71,9 +71,13 @@ stiffness is used to invent a loss coefficient.
 irreversible power. It uses engineering Green-strain rate and integrates
 against reference area times reference thickness. This is an explicit
 reference-configuration constitutive choice; it does not establish that
-small-strain source data are calibrated at finite strain. Shifted natural
-and thermal hyperelastic references currently refuse because their viscosity
-needs an additional constitutive pullback and an updated source state.
+small-strain source data are calibrated at finite strain. Explicit nonthermal
+natural references use the hyperelastic owner's same transformation:
+for G=diag(g1,g2,g3), D=diag(g1^-2,g2^-2,(g1*g2)^-1), the installed
+viscosity is det(G) D V D. Original mesh area, thickness and mass remain
+unchanged; the normal reference length contributes through det(G). An identity
+reference preserves the original arithmetic. Thermal references still refuse
+until viscosity is bound to the corresponding endpoint material state.
 
 `project_modes` uses the exact geometry retained by `MembraneModes` and
 preserves the complete matrix `C = Phi^T C_spatial Phi`, including

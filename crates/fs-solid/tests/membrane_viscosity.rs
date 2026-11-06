@@ -289,3 +289,6 @@ fn source_axes_band_budget_foreign_geometry_and_cancelled_trials_refuse() {
 
 #[path = "membrane_viscosity/modal.rs"]
 mod modal;
+
+#[path = "membrane_viscosity/natural_reference.rs"]
+mod natural_reference;

@@ -7,8 +7,10 @@
 //! into a calibrated finite-strain law. Source validity and the membrane's
 //! original geometric/strain envelope both remain necessary.
 //!
-//! Reference area times reference thickness integrates power. Neither current
-//! area, inertia, geometric prestress nor an invented decay rate is damped.
+//! Reference area times reference thickness integrates power, with the original
+//! elastic owner's natural-volume pullback for shifted nonthermal references.
+//! Neither current area, inertia, geometric prestress nor an invented decay rate
+//! is damped.
 //! In particular, a flat prestretched sheet has ZERO linear transverse loss
 //! from this mechanism; curved geometry or in-plane strain rate enables loss.
 
@@ -82,7 +84,51 @@ pub struct MembraneViscosity<'a> {
     laws: Vec<PlaneStressViscosity>,
     volumes_m3: Vec<f64>,
     factors: Vec<[[f64; 6]; 3]>,
+    natural_references: Vec<Option<NaturalReferencePullback>>,
     resolved_band_rad_s: (f64, f64),
+}
+
+// The elastic owner uses Fe = F G^-1 and W_mesh = det(G) W_natural.
+// Engineering Green rates therefore transform by D = diag(g1^-2,
+// g2^-2, (g1*g2)^-1), and their conjugate stresses by det(G) D.
+// None preserves the original arithmetic for an unchanged reference.
+#[derive(Clone, Copy, Debug)]
+struct NaturalReferencePullback {
+    rate: [f64; 3],
+    stress: [f64; 3],
+    volume_ratio: f64,
+}
+
+impl NaturalReferencePullback {
+    fn from_stretches(stretches: [f64; 3]) -> Result<Option<Self>> {
+        if stretches == [1.0; 3] {
+            return Ok(None);
+        }
+        let inverse = stretches.map(f64::recip);
+        let rate = [
+            inverse[0] * inverse[0],
+            inverse[1] * inverse[1],
+            inverse[0] * inverse[1],
+        ];
+        let volume_ratio = stretches[0] * stretches[1] * stretches[2];
+        let stress = rate.map(|scale| volume_ratio * scale);
+        if rate.iter().chain(&stress).chain([&volume_ratio])
+            .any(|value| !value.is_finite() || *value <= 0.0)
+        {
+            return Err(invalid("unrepresentable natural-reference viscosity pullback"));
+        }
+        Ok(Some(Self { rate, stress, volume_ratio }))
+    }
+}
+
+// A resolved nonzero direction must not silently disappear during a change
+// of material reference. Exact source/geometric null directions stay zero.
+fn pullback_scale(value: f64, scale: f64) -> Result<f64> {
+    let transformed = value * scale;
+    if !transformed.is_finite() || (value != 0.0 && transformed == 0.0) {
+        return Err(invalid("unrepresentable natural-reference viscous value"));
+    }
+    Ok(transformed)
 }
 
 /// Complete modal material resistance, with source rows proving its PSD form.
@@ -147,8 +193,11 @@ impl<'a> MembraneViscosity<'a> {
     /// its gradients into this frame, so viscosity is not rotated a second time.
     ///
     /// This constructor explicitly selects reference Green-rate Kelvin--Voigt
-    /// damping. Shifted natural/thermal hyperelastic references refuse because
-    /// they require a constitutive pullback and endpoint source refresh.
+    /// damping. A shifted nonthermal hyperelastic reference uses Fe = F G^-1
+    /// and det(G) times natural-volume power, exactly as the selected elastic
+    /// energy. The original source stress and passive factors are pulled back
+    /// to mesh coordinates without changing the source tensor or its nulls.
+    /// Thermal references still require a separately bound endpoint viscosity.
     /// Reference thickness comes from the original sheet, independently of mass.
     ///
     /// The finite ordered resolved band must lie inside EVERY source band.
@@ -170,6 +219,7 @@ impl<'a> MembraneViscosity<'a> {
         }
         let mut volumes_m3 = Vec::with_capacity(laws.len());
         let mut factors = Vec::with_capacity(laws.len());
+        let mut natural_references = Vec::with_capacity(laws.len());
         for (index, ((element, sheet), law)) in
             patch.elements.iter().zip(&patch.sheets).zip(&laws).enumerate()
         {
@@ -177,13 +227,14 @@ impl<'a> MembraneViscosity<'a> {
             if law.source() != sheet.material() || law.plane() != MaterialPlane::Axes12 {
                 return Err(invalid("viscosity needs the identical sheet source and warp/weft axes"));
             }
-            if let MembraneLaw::Hyperelastic(elastic) = &element.law {
-                if elastic.reference_stretches() != [1.0; 3]
-                    || elastic.mean_thermal_expansion().is_some()
-                {
-                    return Err(invalid("shifted membrane material references need a viscosity pullback"));
+            let natural_reference = if let MembraneLaw::Hyperelastic(elastic) = &element.law {
+                if elastic.mean_thermal_expansion().is_some() {
+                    return Err(invalid("thermal membrane references need endpoint viscosity sources"));
                 }
-            }
+                NaturalReferencePullback::from_stretches(elastic.reference_stretches())?
+            } else {
+                None
+            };
             for omega in [lo, hi] {
                 law.validate_frequency(omega)
                     .map_err(|source| MembraneViscosityError::Material { element: index, source })?;
@@ -192,13 +243,23 @@ impl<'a> MembraneViscosity<'a> {
             if !volume.is_finite() || volume <= 0.0 {
                 return Err(invalid("unrepresentable reference membrane volume"));
             }
-            let factor = factor_passive_resultant(law.matrix_pa_s())
+            let mut factor = factor_passive_resultant(law.matrix_pa_s())
                 .map_err(|source| MembraneViscosityError::Material { element: index, source })?;
+            if let Some(reference) = natural_reference {
+                let root_volume = reference.volume_ratio.sqrt();
+                for (row, scale) in factor.iter_mut().zip(reference.rate) {
+                    let scale = root_volume * scale;
+                    for value in row {
+                        *value = pullback_scale(*value, scale)?;
+                    }
+                }
+            }
             volumes_m3.push(volume);
             factors.push(factor);
+            natural_references.push(natural_reference);
         }
         poll(&mut cancelled)?;
-        Ok(Self { patch, laws, volumes_m3, factors, resolved_band_rad_s })
+        Ok(Self { patch, laws, volumes_m3, factors, natural_references, resolved_band_rad_s })
     }
 
     /// Exact original geometry, material and reference-inertia owner.
@@ -259,9 +320,21 @@ impl<'a> MembraneViscosity<'a> {
             let f = self.patch.deformation(element, displacement_m);
             self.patch.response(index, f)?;
             let local_velocity = element.nodes.map(|node| velocity_m_s[node]);
-            let strain_rate = rate(element, f, local_velocity);
-            let ([s11, s22, s12], power) = self.laws[index].stress_and_power(strain_rate)
+            let mut strain_rate = rate(element, f, local_velocity);
+            if let Some(reference) = self.natural_references[index] {
+                for (value, scale) in strain_rate.iter_mut().zip(reference.rate) {
+                    *value = pullback_scale(*value, scale)?;
+                }
+            }
+            let (mut stress, mut power) = self.laws[index].stress_and_power(strain_rate)
                 .map_err(|source| MembraneViscosityError::Material { element: index, source })?;
+            if let Some(reference) = self.natural_references[index] {
+                for (value, scale) in stress.iter_mut().zip(reference.stress) {
+                    *value = pullback_scale(*value, scale)?;
+                }
+                power = pullback_scale(power, reference.volume_ratio)?;
+            }
+            let [s11, s22, s12] = stress;
             let volume = self.volumes_m3[index];
             let heat = volume * power;
             if !heat.is_finite() || (power != 0.0 && heat == 0.0) {
