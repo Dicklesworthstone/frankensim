@@ -3382,3 +3382,35 @@ state or the already validated volume candidate. Three G0/G1/G3 regression group
 cover the sticking disk and sliding annulus, independent A/B hardness scaling,
 convergent spatial integrals through reversal and gross sliding, the frictionless
 Hertz limit, and local-radius/depth refusals.
+
+## Local hardness-limited equilibrium sensitivities
+
+`FiniteGapPlasticModel::linearize_advance` prepares a borrowed active set from
+one original native advance and its exact accepted predecessor. It checks the
+opaque candidate against the original equilibrium and retained plastic history,
+then requires explicit positive pressure/gap margins above the primal
+displacement tolerance. Opening, first yield and a previously yielded cell's
+loading/unloading corner refuse a classical tangent. The returned margins are
+measured slacks, not a certified finite-step radius.
+
+`FiniteGapPlasticLinearization::apply` computes a Jacobian-vector product for
+signed approach, reduced-modulus, per-cell pressure-hardness and recession
+directions. Accepted plastic history, original grid and datum remain fixed.
+Capped pressures follow their own hardness direction; free pressures reuse the
+original dense, matrix-free or FFT principal solve and its work limits. The
+shared compliance application retains negative pressure directions. Each result
+reports pressure, opening, new plastic depth, resultant force, elastic storage
+and incremental plastic-work derivatives, plus the directly recomputed
+directional equation residual. No perturbed contact solves or dense Jacobian
+are needed; no measured speedup is claimed.
+
+Material/source selection, equality of the two body hardnesses in a minimum,
+load/drive control, finite changes and active-set switches require their own
+chain rules or event treatment. The derivative residual is an absolute
+displacement-per-parameter budget, not a forward-error enclosure. Plastic-work
+derivatives can have either sign and are not heat or negative dissipation.
+G0/G1/G3 tests specify independent one-cell elastic/plastic slopes, preserved
+unloading memory, all three solver lanes against actual perturbed native
+equilibria, signed hardness/modulus/recession effects, work derivatives, source
+ownership, switch refusals and cancellation. These are numerical-model checks;
+the pressure-saturation law is not promoted to full bulk plasticity.

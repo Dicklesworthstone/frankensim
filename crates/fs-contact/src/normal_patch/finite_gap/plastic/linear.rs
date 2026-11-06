@@ -85,6 +85,29 @@ impl FiniteGapPlasticModel {
         rank_one: f64,
         cx: &Cx<'_>,
     ) -> Result<Vec<f64>, FiniteGapPlasticError> {
+        self.solve_free_with_tolerance(
+            free,
+            upper,
+            pressure,
+            target,
+            rank_one,
+            0.25 * self.config.complementarity_tolerance_m,
+            cx,
+        )
+    }
+
+    // Sensitivity equations use the same principal operator and numerical
+    // budgets, with their own explicit displacement-per-parameter tolerance.
+    pub(super) fn solve_free_with_tolerance(
+        &self,
+        free: &[usize],
+        upper: &[usize],
+        pressure: &[f64],
+        target: &[f64],
+        rank_one: f64,
+        allowance: f64,
+        cx: &Cx<'_>,
+    ) -> Result<Vec<f64>, FiniteGapPlasticError> {
         if self.linear_solver == FiniteGapPlasticLinearSolver::Dense
             && free.len() > MAX_FINITE_GAP_PLASTIC_FREE_CELLS
         {
@@ -162,6 +185,7 @@ impl FiniteGapPlasticModel {
                 rank_one,
                 maximum_iterations,
                 maximum_corrections,
+                allowance,
                 cx,
             ),
         }
@@ -174,13 +198,12 @@ impl FiniteGapPlasticModel {
         rank_one: f64,
         maximum_iterations: usize,
         maximum_corrections: usize,
+        allowance: f64,
         cx: &Cx<'_>,
     ) -> Result<Vec<f64>, FiniteGapPlasticError> {
-        // Reserve displacement tolerance for rescaling, full-gradient work,
-        // and the final physical/history check. Do not substitute a generic
-        // relative Krylov tolerance for the caller's absolute contact budget.
-        let allowance = 0.25 * self.config.complementarity_tolerance_m;
-        if allowance <= 0.0 {
+        // The caller supplies an absolute displacement allowance. Do not
+        // substitute a generic relative Krylov tolerance for this budget.
+        if !allowance.is_finite() || allowance <= 0.0 {
             return Err(invalid("representable matrix-free displacement allowance"));
         }
         let rhs_scale = rhs.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);

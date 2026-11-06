@@ -23,6 +23,8 @@ pub use load::*;
 mod linear;
 pub use linear::FiniteGapPlasticLinearSolver;
 mod fft;
+mod sensitivity;
+pub use sensitivity::*;
 
 use core::fmt;
 use std::sync::Arc;
@@ -924,10 +926,12 @@ impl FiniteGapPlasticModel {
         pressure: &[f64],
         cx: &Cx<'_>,
     ) -> Result<Vec<f64>, FiniteGapPlasticError> {
+        // Constitutive sensitivities can carry signed pressure directions.
+        // Ordinary equilibrium still supplies only nonnegative pressures.
         let active: Vec<usize> = pressure
             .iter()
             .enumerate()
-            .filter_map(|(i, p)| (*p > 0.0).then_some(i))
+            .filter_map(|(i, p)| (*p != 0.0).then_some(i))
             .collect();
         let mut opening = vec![0.0; pressure.len()];
         for (row_tile, rows) in opening.chunks_mut(64).enumerate() {
