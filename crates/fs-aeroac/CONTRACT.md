@@ -2573,3 +2573,33 @@ of force sources, trace and axis shear, receiving momentum/divergence, full
 tensor rotation, density scaling, normalized errors, admission/cancellation and
 third derivatives after raw-decay underflow. A shared-tail test independently
 checks the cubic envelope by integration by parts.
+
+## Refracted volume-cell arrays and original recorded stress spectra
+
+`full_wave::quadrupole::array::PreparedFullWaveQuadrupoleObserver` prepares
+the native transmitted 4-by-6 stress transfer at every original cell position.
+One source-count and aggregate quadrature budget bounds the complete array;
+per-source tensor diagnostics remain in their physical units. Coherent fields,
+explicitly independent cells and low-rank coherence factors preserve all six
+physical stress entries and the caller's correlation assumptions. Pressure and
+vector velocity are reduced before signed intensity or second moments.
+
+`RecordedQuadrupoleSpectrum::prepare_refracted_observer` binds the existing
+record's geometry and frequency to these transfers.
+`evaluate_refracted_bin` refuses reordered or relocated cells before applying
+their original joint Welch factors. The existing peak-bin owner applies the
+one-sided sqrt(2 df) normalization exactly once. No extra density, cell volume,
+phase origin, ray delay or independent-cell approximation is introduced.
+
+Warm observation uses fixed-order double-double reductions without allocation,
+FFT, quadrature or dense source covariance. Work is linear in cells times
+recorded factors. Cancellation and invalid source/frequency/work admission
+publish no partial field or statistics. These outputs are bin-integrated
+moments, not a reconstructed waveform or a physical-validation claim for the
+underlying flow/source model. Source-window/leakage/spatial-quadrature and
+single-interface propagation limits remain explicit.
+
+Four G1/G3/G4 tests compare native tensor sums and flux, coherent cancellation
+against independent/partial-coherence statistics, recorded Reynolds-stress
+transmission against the independent equal-speed pressure/velocity factors,
+and geometry/frequency/aggregate-budget/cancellation refusals.

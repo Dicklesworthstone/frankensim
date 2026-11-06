@@ -33,6 +33,9 @@ use crate::observation::HarmonicFieldLine;
 use core::f64::consts::{FRAC_1_SQRT_2, SQRT_2, TAU};
 use fs_math::{c64::C64, det};
 
+/// Coherent original volume cells and geometry-bound recorded stress spectra.
+pub mod array;
+
 /// Physical scope of the transmitted stress field, including its original clock.
 pub const FULL_WAVE_QUADRUPOLE_SCOPE: &str = "Prescribed stationary symmetric 3D \
 Lighthill stress moment [N m] in the original incident fluid; outgoing spherical \
