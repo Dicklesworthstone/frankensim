@@ -7,7 +7,10 @@
 
 use core::fmt;
 
+use fs_ivl::Interval;
 use fs_mbd::{Pose, RigidBodyState, UnitQuaternion, Vec3};
+
+mod kinematics;
 
 use crate::render_trajectory::{
     MAX_RENDER_TRAJECTORY_SAMPLES, RenderBaseModeState, RenderContactBranch,
@@ -120,6 +123,18 @@ pub struct ResampledTimelineSample {
     pub interval_events: Vec<TimelineEvent>,
     /// Events exactly coincident with this query.
     pub events_at_query: Vec<TimelineEvent>,
+}
+
+/// Continuous upper speeds of the reconstructed pose, not its momentum channels.
+///
+/// These enclose the selected original interpolation span. They do not certify
+/// the mechanical trajectory or add physical resolution to its accepted samples.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TimelinePoseSpeedBounds {
+    /// Upper norm of the derivative of world center-of-mass position [m/s].
+    pub maximum_translation_speed_m_s: f64,
+    /// Upper angular speed of the normalized shortest-arc orientation [rad/s].
+    pub maximum_angular_speed_rad_s: f64,
 }
 
 /// Policy for an exposure interval containing one or more event boundaries.
@@ -264,6 +279,65 @@ impl<'trajectory> TimelineResampler<'trajectory> {
     ) -> Result<ResampledTimelineSample, TimelineResamplingError> {
         validate_queries(self.trajectory, core::slice::from_ref(&time_s))?;
         self.sample_at(time_s, event_side)
+    }
+
+    /// Bound pose speed throughout a closed part of one original sample span.
+    ///
+    /// The left sample index selects the same Hermite/SLERP interpolant as
+    /// sampling. The interval must lie inside that span; no extrapolation or
+    /// endpoint-momentum approximation is permitted. Work and storage are fixed.
+    pub fn pose_speed_bounds(
+        &self,
+        left_index: usize,
+        interval_s: [f64; 2],
+    ) -> Result<TimelinePoseSpeedBounds, TimelineResamplingError> {
+        let invalid = || TimelineResamplingError::InvalidReconstruction(
+            "pose-speed bound requires a representable interval inside one original span".into(),
+        );
+        let samples = self.trajectory.samples()
+            .get(left_index..)
+            .and_then(|samples| samples.get(..2))
+            .ok_or_else(invalid)?;
+        let first_s = samples[0].input().time_s;
+        let last_s = samples[1].input().time_s;
+        let duration_s = last_s - first_s;
+        if interval_s.iter().any(|time| !time.is_finite())
+            || interval_s[0] < first_s
+            || interval_s[1] > last_s
+            || interval_s[0] > interval_s[1]
+            || !(duration_s > 0.0 && duration_s.is_finite())
+        {
+            return Err(invalid());
+        }
+        let unit = Interval::new(0.0, 1.0);
+        let alpha = interval_s.map(|time_s| {
+            if same_time(time_s, first_s) {
+                Interval::point(0.0)
+            } else if same_time(time_s, last_s) {
+                Interval::point(1.0)
+            } else {
+                ((Interval::point(time_s) - Interval::point(first_s))
+                    / Interval::point(duration_s))
+                    .intersect(unit)
+                    .unwrap_or(unit)
+            }
+        });
+        let states = [samples[0].state(), samples[1].state()];
+        let inverse_mass = self.trajectory.metadata().mass_properties.properties.mass().recip();
+        let components = |value: Vec3| [value.x, value.y, value.z];
+        let position = states.map(|state| components(state.pose().position_world()));
+        // These are exactly the endpoint tangents used by interpolate_state.
+        let velocity = states.map(|state| {
+            components(state.linear_momentum_world().scale(inverse_mass))
+        });
+        let orientation = states.map(|state| state.pose().orientation().components());
+        let [maximum_translation_speed_m_s, maximum_angular_speed_rad_s] =
+            kinematics::pose_speed_bounds(position, velocity, orientation, duration_s, alpha)
+                .ok_or_else(invalid)?;
+        Ok(TimelinePoseSpeedBounds {
+            maximum_translation_speed_m_s,
+            maximum_angular_speed_rad_s,
+        })
     }
 
     /// Partition a shutter interval at every known event boundary.
@@ -587,20 +661,8 @@ fn slerp_shortest(
     alpha: f64,
 ) -> Result<UnitQuaternion, TimelineResamplingError> {
     let first = left.components();
-    let mut second = right.components();
-    let mut dot = first
-        .iter()
-        .zip(second)
-        .map(|(first, second)| first * second)
-        .sum::<f64>();
-    if dot < 0.0 {
-        for component in &mut second {
-            *component = -*component;
-        }
-        dot = -dot;
-    }
-    dot = dot.clamp(-1.0, 1.0);
-    let components: [f64; 4] = if dot > 1.0 - 1.0e-12 {
+    let (second, dot) = kinematics::shortest_rotation(first, right.components());
+    let components: [f64; 4] = if dot > kinematics::LINEAR_ROTATION_DOT {
         core::array::from_fn(|index| first[index] + alpha * (second[index] - first[index]))
     } else {
         let angle = dot.acos();

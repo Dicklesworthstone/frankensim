@@ -40,6 +40,7 @@ use fs_couple::modal_acoustic_time::{
     ModalAcousticTimeModel,
 };
 use fs_exec::Cx;
+use fs_ivl::Interval;
 use fs_material::gas::GasState;
 use fs_material::state_point::IsotropicElasticStatePoint;
 use fs_material::visco::{LoweredModel, RayleighDamping, ViscoError, loss_factor_to_zeta};
@@ -66,7 +67,9 @@ use crate::audio_resampling::{
 };
 use crate::render_trajectory::RenderTrajectory;
 use crate::specimen::{DiscProfileSpec, ResolvedElasticDiscProfile};
-use crate::timeline_resampling::{EventEvaluationSide, TimelineResampler, TimelineResamplingError};
+use crate::timeline_resampling::{
+    EventEvaluationSide, TimelinePoseSpeedBounds, TimelineResampler, TimelineResamplingError,
+};
 use crate::{
     AudioResamplingError, ChannelControl, EulerControlStream, GeneralizedForceMeasureInterval,
     GeneralizedForceReconstructionInput, ReconstructedGeneralizedForce,
@@ -5466,11 +5469,8 @@ pub fn synthesize_retarded_far_field_world_observers(
 ) -> Result<Vec<PhysicalPressureSignal>, StructuralModalBasisError> {
     validate_retarded_observer_inputs(source, stem, basis, trajectory, observers, controls, cx)?;
     let source_rate_hz = f64::from(stem.sample_rate_hz);
-    let source_period_s = source_rate_hz.recip();
     let period = f64::from(controls.output_sample_rate_hz).recip();
-    let first_emission_s = stem.start_time_s + 8.0 * source_period_s;
-    let last_emission_s =
-        stem.start_time_s + (stem.frame_count() as f64 - 8.0) * source_period_s;
+    let [first_emission_s, last_emission_s] = retarded_emission_window(stem);
     let timeline = TimelineResampler::new(trajectory);
     let mut arrival_bounds = Vec::with_capacity(observers.len());
     for observer in observers {
@@ -5537,14 +5537,9 @@ pub fn synthesize_retarded_far_field_world_observers(
                 source.sound_speed_m_s,
                 controls,
             )?;
-            validate_retarded_state(
-                source,
-                trajectory,
-                &sample,
-                radius_m,
-                minimum_far_field_m,
-                controls.maximum_surface_mach,
-            )?;
+            // Continuous pose-speed admission already covers this root.
+            // Interpolated momenta are not derivatives of the sampled pose.
+            validate_retarded_radius(radius_m, minimum_far_field_m)?;
             interpolate_stem_lanczos8(stem, emission_s, &mut coefficient_scratch)?;
             let direction_body = sample
                 .state
@@ -5687,6 +5682,95 @@ fn validate_retarded_observer_inputs(
             )?;
         }
     }
+    validate_retarded_pose_motion(
+        &timeline,
+        trajectory,
+        retarded_emission_window(stem),
+        source,
+        controls.maximum_surface_mach,
+        cx,
+    )
+}
+
+fn retarded_emission_window(stem: &StructuralBroadbandSourceStem) -> [f64; 2] {
+    let period_s = f64::from(stem.sample_rate_hz).recip();
+    [
+        stem.start_time_s + 8.0 * period_s,
+        stem.start_time_s + (stem.frame_count() as f64 - 8.0) * period_s,
+    ]
+}
+
+fn validate_retarded_pose_motion(
+    timeline: &TimelineResampler<'_>,
+    trajectory: &RenderTrajectory,
+    emission_interval_s: [f64; 2],
+    source: &StructuralBroadbandRadiationArtifact,
+    maximum_surface_mach: f64,
+    cx: &Cx<'_>,
+) -> Result<(), StructuralModalBasisError> {
+    let samples = trajectory.samples();
+    let [first, last] = emission_interval_s;
+    if !(first.is_finite() && last.is_finite() && first <= last)
+        || first < samples[0].input().time_s
+        || last > samples[samples.len() - 1].input().time_s
+    {
+        return Err(StructuralModalBasisError::ControlTimeline {
+            what: "retarded emission bracket lies outside the original pose history",
+        });
+    }
+    let first_span = samples
+        .partition_point(|sample| sample.input().time_s < first)
+        .saturating_sub(1);
+    for left in first_span..samples.len().saturating_sub(1) {
+        if (left - first_span) % 64 == 0 {
+            cx.checkpoint()
+                .map_err(|_| StructuralModalBasisError::Cancelled)?;
+        }
+        let start = samples[left].input().time_s;
+        if start > last {
+            break;
+        }
+        let end = samples[left + 1].input().time_s;
+        let interval = [first.max(start), last.min(end)];
+        if interval[0] > interval[1] || (first < last && interval[0] == interval[1]) {
+            continue;
+        }
+        let bounds = timeline.pose_speed_bounds(left, interval)?;
+        validate_retarded_pose_speed(
+            bounds,
+            source.source_diameter_m,
+            source.sound_speed_m_s,
+            maximum_surface_mach,
+        )?;
+    }
+    Ok(())
+}
+
+fn validate_retarded_pose_speed(
+    bounds: TimelinePoseSpeedBounds,
+    source_diameter_m: f64,
+    sound_speed_m_s: f64,
+    maximum_surface_mach: f64,
+) -> Result<(), StructuralModalBasisError> {
+    // Radiation meshes are centered at the same COM as the trajectory pose.
+    // The declared diameter therefore bounds every rotated source point.
+    let upper_speed = if bounds.maximum_angular_speed_rad_s == 0.0 {
+        bounds.maximum_translation_speed_m_s
+    } else {
+        (Interval::point(bounds.maximum_translation_speed_m_s)
+            + Interval::point(0.5) * Interval::point(source_diameter_m)
+                * Interval::point(bounds.maximum_angular_speed_rad_s))
+        .hi()
+    };
+    let speed_limit =
+        (Interval::point(sound_speed_m_s) * Interval::point(maximum_surface_mach))
+            .lo()
+            .max(0.0);
+    if !upper_speed.is_finite() || upper_speed > speed_limit {
+        return Err(StructuralModalBasisError::InvalidRequest {
+            what: "retarded source pose interpolation exceeds the admitted surface Mach number",
+        });
+    }
     Ok(())
 }
 
@@ -5810,13 +5894,7 @@ fn validate_retarded_state(
     minimum_far_field_m: f64,
     maximum_surface_mach: f64,
 ) -> Result<(), StructuralModalBasisError> {
-    if !(radius_m >= minimum_far_field_m && radius_m.is_finite()) {
-        return Err(StructuralModalBasisError::ObserverOutsideFarField {
-            distance_m: radius_m,
-            minimum_m: minimum_far_field_m,
-            mode: 0,
-        });
-    }
+    validate_retarded_radius(radius_m, minimum_far_field_m)?;
     let properties = trajectory.metadata().mass_properties.properties;
     let kinematics_error = |_| StructuralModalBasisError::InvalidRequest {
         what: "retarded trajectory kinematics are invalid",
@@ -5833,6 +5911,20 @@ fn validate_retarded_state(
     if !speed.is_finite() || speed / source.sound_speed_m_s > maximum_surface_mach {
         return Err(StructuralModalBasisError::InvalidRequest {
             what: "retarded far-field source exceeds the admitted surface Mach number",
+        });
+    }
+    Ok(())
+}
+
+fn validate_retarded_radius(
+    radius_m: f64,
+    minimum_far_field_m: f64,
+) -> Result<(), StructuralModalBasisError> {
+    if !(radius_m >= minimum_far_field_m && radius_m.is_finite()) {
+        return Err(StructuralModalBasisError::ObserverOutsideFarField {
+            distance_m: radius_m,
+            minimum_m: minimum_far_field_m,
+            mode: 0,
         });
     }
     Ok(())
@@ -7898,6 +7990,39 @@ mod tests {
                 .is_err()
             );
         }
+    }
+
+    #[test]
+    fn retarded_pose_speed_gate_includes_translation_rotation_and_exact_rest() {
+        let resting = TimelinePoseSpeedBounds {
+            maximum_translation_speed_m_s: 0.0,
+            maximum_angular_speed_rad_s: 0.0,
+        };
+        validate_retarded_pose_speed(resting, 0.1, 300.0, 0.0).unwrap();
+        let translated = TimelinePoseSpeedBounds {
+            // The Hermite path from x=0 to x=2 over one second with zero
+            // endpoint momenta reaches 3 m/s between the original knots.
+            maximum_translation_speed_m_s: 3.0,
+            ..resting
+        };
+        assert!(validate_retarded_pose_speed(translated, 0.1, 300.0, 0.005).is_err());
+        validate_retarded_pose_speed(translated, 0.1, 300.0, 0.02).unwrap();
+        let rotating = TimelinePoseSpeedBounds {
+            maximum_angular_speed_rad_s: 40.0,
+            ..resting
+        };
+        // Surface radius is half the source diameter; the center can rest.
+        assert!(validate_retarded_pose_speed(rotating, 0.1, 300.0, 0.005).is_err());
+        validate_retarded_pose_speed(rotating, 0.1, 300.0, 0.01).unwrap();
+        assert!(
+            validate_retarded_pose_speed(
+                TimelinePoseSpeedBounds {
+                    maximum_angular_speed_rad_s: f64::INFINITY,
+                    ..resting
+                },
+                0.1, 300.0, 0.1,
+            ).is_err()
+        );
     }
 
     #[test]

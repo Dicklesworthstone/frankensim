@@ -48,6 +48,7 @@ fs-ga = { path = "../fs-ga" }
 fs-geom = { path = "../fs-geom" }
 fs-govern = { path = "../fs-govern" }
 fs-ir = { path = "../fs-ir", optional = true }
+fs-ivl = { path = "../fs-ivl" }
 fs-img = { path = "../fs-img" }
 fs-ledger = { path = "../fs-ledger", optional = true }
 fs-material = { path = "../fs-material" }

@@ -1741,7 +1741,17 @@ padded. Analytic two-tone regressions check 30 kHz foldover rejection and
 2 kHz phase on both possible incoming high-rate grid phases.
 
 Admission also enforces exact source/basis/gas identities, the conservative
-broadband far-field gate, and the existing caller-bounded surface Mach checks.
+broadband far-field gate, and the existing caller-bounded surface Mach checks
+on original mechanical knots. It additionally bounds the continuous derivative
+of the actual reconstructed pose throughout the complete emission-root bracket:
+cubic-Hermite translation and normalized shortest-arc SLERP, including its
+small-angle normalized-linear branch. The shared timeline owner clips each
+original span and uses outward bounds on its derivative. The source-radius
+rotational contribution is added to the translational speed before applying
+the low-Mach ceiling. Interpolated momenta remain mechanical channels; they are
+not treated as pose derivatives. A zero-momentum pair of knots with a rapidly
+changing pose therefore cannot bypass Doppler-bandwidth admission. This adds
+no mechanical resolution or stronger source-physics authority.
 This remains `EstimateOnly` under `RETARDED_FAR_FIELD_OBSERVER_NO_CLAIM`;
 in particular it is not a certified spectral enclosure, moving-boundary FW-H,
 exact Doppler amplitude, near-field, room/head, or calibrated SPL.

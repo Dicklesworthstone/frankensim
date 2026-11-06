@@ -610,3 +610,45 @@ fn declared_continuation_seams_partition_exposure_without_changing_pose() {
         Err(TimelineResamplingError::ExposureSpansEvent)
     );
 }
+
+
+#[test]
+fn pose_speed_bounds_follow_geometry_while_preserving_mechanical_channels() {
+    let mut first = input(
+        0.0, 0.2, RenderContactBranch::Open, RenderSampleDisposition::Continue,
+    );
+    let mut second = input(
+        1.0, 1.0, RenderContactBranch::Open, RenderSampleDisposition::HorizonCensored,
+    );
+    for sample in [&mut first, &mut second] {
+        let q = sample.orientation_body_to_world;
+        let orientation = UnitQuaternion::new(q[0], q[1], q[2], q[3]).unwrap();
+        sample.linear_momentum_world_kg_m_per_s = Vec3::ZERO;
+        sample.angular_momentum_body_kg_m2_per_s = Vec3::ZERO;
+        replace_orientation(sample, orientation);
+    }
+    let trajectory = RenderTrajectory::try_new(metadata(&first), vec![first, second]).unwrap();
+    let resampler = TimelineResampler::new(&trajectory);
+    let full = resampler.pose_speed_bounds(0, [0.0, 1.0]).unwrap();
+    let distance = 5.25_f64.sqrt();
+    assert_close(full.maximum_translation_speed_m_s, 1.5 * distance);
+    assert_close(full.maximum_angular_speed_rad_s, 0.8);
+
+    // The original accepted momenta are still zero, although the actual
+    // Hermite/SLERP pose moves continuously between these endpoints.
+    let sample = resampler.sample(0.5, EventEvaluationSide::RightLimit).unwrap();
+    assert_eq!(sample.state.linear_momentum_world(), Vec3::ZERO);
+    assert_eq!(sample.state.angular_momentum_body(), Vec3::ZERO);
+    assert_close(sample.state.pose().position_world().x, 1.0);
+
+    let clipped = resampler.pose_speed_bounds(0, [0.0, 0.125]).unwrap();
+    assert_close(clipped.maximum_translation_speed_m_s, 0.65625 * distance);
+    assert!(clipped.maximum_translation_speed_m_s < full.maximum_translation_speed_m_s);
+    assert_eq!(clipped.maximum_angular_speed_rad_s, full.maximum_angular_speed_rad_s);
+
+    for interval in [[-0.1, 0.5], [0.5, 1.1], [0.8, 0.2], [f64::NAN, 1.0]] {
+        assert!(resampler.pose_speed_bounds(0, interval).is_err());
+    }
+    assert!(resampler.pose_speed_bounds(1, [0.0, 1.0]).is_err());
+    assert!(resampler.pose_speed_bounds(usize::MAX, [0.0, 1.0]).is_err());
+}
