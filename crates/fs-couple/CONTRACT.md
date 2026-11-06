@@ -1279,3 +1279,34 @@ G0/G1/G3 regression definitions cover separate material inventories and
 enthalpy, an independent two-capacity heat oracle after export, unchanged
 mechanical history, no duplicate or retroactive removal, original cumulative
 bounds, and transactional patch/registration/cancellation refusals.
+
+### Spatial magnetic hysteresis and finite enthalpy
+
+The opt-in `hysteretic-eddy-heating` feature connects the original
+`PlanarHystereticEddy` vector-history owner to `MagneticThermalNetwork` and
+the existing finite-cell enthalpy Newton driver. Every thermal trial starts
+from the same accepted potential and vector polarizations. Native per-triangle
+pinning heat and spatial Joule heat enter their actual receiving cells exactly
+once. Insulating magnetic triangles can heat through pinning alone; any
+dissipating triangle without a finite receiver refuses. The endpoint field's
+numerical dissipation remains in the work account and never heats a cell.
+
+Actual endpoint temperature refreshes the original conductivity source.
+Every mapped magnetic fit must be source-constant over the complete original
+caloric temperature interval, with the same material card, selected claims,
+quantity schema and fixed external conditions. The report retains complete
+fitted magnetic receipts separately from the electrical bundles. Constant
+solid density and whole-cell volume correspondence remain mandatory. Stable
+magnetic storage change, physical heat, numerical loss, thermal storage and
+source work share one acceptance audit; failure/cancellation publishes neither
+history. The shared report's `deposited_joule_j` counter denotes total deposited
+physical heat in this driver; `deposited_heat_j()` names that sum explicitly,
+and its native field report separates Joule from pinning heat.
+
+This is fixed-geometry, fixed-fit, first-order magnetoquasistatic/thermal
+coupling. It supplies no changing-fit thermomagnetic entropy/parameter work,
+moving media, phase change, fitted core-loss overlay or experimental material
+validation. Focused synthetic regressions compare insulating minor-loop
+heating and conducting temperature feedback with independent scalar play and
+P1 balances, distinguish numerical loss from heat, and exercise missing
+receivers, source-temperature support, volume, cancellation and work budgets.
