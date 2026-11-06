@@ -6,7 +6,7 @@
 //! nodal mass lumping, or payload damping is introduced.
 
 use super::{MovingLoadError, MovingShellModel, ShellLoadPoint, cross, finite, invalid, poll};
-use crate::shell::ShellPlate;
+use crate::shell::{ShellMassFormulation, ShellPlate};
 
 /// One permanently attached rigid payload in the shell's reference SI frame.
 ///
@@ -130,6 +130,26 @@ impl MovingShellModel {
         plate: ShellPlate,
         max_load_points: usize,
         payloads: &[ShellRigidPayload],
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, MovingLoadError> {
+        Self::new_with_payloads_and_mass_formulation(
+            plate,
+            ShellMassFormulation::Lumped,
+            max_load_points,
+            payloads,
+            cancelled,
+        )
+    }
+
+    /// Attach the same physical payloads to a selected reference shell mass.
+    /// Payload inertia is added once to the full mass before support reduction;
+    /// Rayleigh damping still belongs only to the selected bare shell inertia.
+    /// The original [`Self::new_with_payloads`] entry selects lumped shell mass.
+    pub fn new_with_payloads_and_mass_formulation(
+        plate: ShellPlate,
+        mass_formulation: ShellMassFormulation,
+        max_load_points: usize,
+        payloads: &[ShellRigidPayload],
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<Self, MovingLoadError> {
         poll(&mut cancelled)?;
@@ -140,7 +160,12 @@ impl MovingShellModel {
             poll(&mut cancelled)?;
             payload.check()?;
         }
-        let mut model = Self::new(plate, max_load_points, &mut cancelled)?;
+        let mut model = Self::new_with_mass_formulation(
+            plate,
+            mass_formulation,
+            max_load_points,
+            &mut cancelled,
+        )?;
         if payloads.is_empty() {
             return Ok(model);
         }

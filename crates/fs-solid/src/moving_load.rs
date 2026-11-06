@@ -8,7 +8,7 @@
 //! rotation, estimate-only scope: angular momentum is about reference positions,
 //! not a finite-rotation shell or an inferred contact law.
 
-use crate::shell::{ShellAssembly, ShellError, ShellPlate};
+use crate::shell::{ShellAssembly, ShellError, ShellMassFormulation, ShellPlate};
 use crate::shell_time::{DynamicState, PreparedNewmark, ShellTimeConfig, ShellTimeError};
 use fs_la::LuWorkspace;
 
@@ -152,8 +152,26 @@ impl MovingShellModel {
     /// Assemble one fixed shell and bound each load sample to at most 4096
     /// explicit quadrature points. Cancellation brackets the original bounded
     /// spatial assembly and is polled between point loads and native solves.
+    /// This entry preserves the original lumped reference inertia.
     pub fn new(
         plate: ShellPlate,
+        max_load_points: usize,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, MovingLoadError> {
+        Self::new_with_mass_formulation(
+            plate,
+            ShellMassFormulation::Lumped,
+            max_load_points,
+            cancelled,
+        )
+    }
+
+    /// Assemble the selected native shell reference inertia for every force,
+    /// impulse and contact response. Support reduction, initial acceleration,
+    /// cached mass/Newmark solves and physical work use the same mass matrix.
+    pub fn new_with_mass_formulation(
+        plate: ShellPlate,
+        mass_formulation: ShellMassFormulation,
         max_load_points: usize,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<Self, MovingLoadError> {
@@ -161,7 +179,9 @@ impl MovingShellModel {
         if max_load_points == 0 || max_load_points > 4096 {
             return Err(invalid("moving shell load bound must be in 1..=4096"));
         }
-        let assembly = plate.assemble().map_err(MovingLoadError::Spatial)?;
+        let assembly = plate
+            .assemble_with_mass_formulation(mass_formulation)
+            .map_err(MovingLoadError::Spatial)?;
         let mut free_index = vec![None; assembly.full_mass.dimension()];
         for (free, &full) in assembly.free_dofs.iter().enumerate() {
             free_index[full] = Some(free);

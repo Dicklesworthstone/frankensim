@@ -9163,6 +9163,45 @@ moments with divided differences and checked discrete work/reversal. Native
 Cargo compilation and regression execution remain outstanding: DSR/RCH are
 unavailable and the shared filesystem is full.
 
+## Consistent reference inertia for the flat shell and moving loads
+
+`ShellPlate::assemble_with_mass_formulation` selects either the original
+`ShellMassFormulation::Lumped` inertia or `ConsistentReference`. The original
+`assemble`, `MovingShellModel::new` and `new_with_payloads` entries retain
+lumped inertia. Stiffness, geometry admission and deterministic element order
+are shared between the formulations.
+
+The consistent image integrates the existing P1 velocity fields exactly:
+`T = integral_A (rho*h*|v_h|^2/2 + rho*h^3*|omega_h|^2/24) dA`.
+Each triangle uses `integral_A N_i*N_j dA = A*(1 + delta_ij)/12`, retaining
+cross-node translational and rotary mass. This preserves the total mass and
+uniform-velocity inventory of the lumped image while resolving affine
+velocity and rigid-rotation kinetic energy without vertex-quadrature bias.
+The fixed local formula introduces no quadrature allocation or new mass solver.
+
+`MovingShellModel::new_with_mass_formulation` and
+`new_with_payloads_and_mass_formulation` carry that same native mass through
+support restriction, prescribed support coupling, initial acceleration,
+cached Newmark/mass solves, material-point inverse inertia and event impulses.
+Payload COM and full rotational inertia are added once to the selected full
+mass. Rayleigh damping uses the selected bare-shell mass; attached payloads
+retain the existing absence of inferred payload damping.
+
+Both formulations retain the shell's original isotropic rotary surrogate,
+including artificial drilling inertia about the plate normal. This changes
+the integration of that declared model, not its plate/shell constitutive
+scope: no Kirchhoff--Love continuum, finite-rotation shell or
+configuration-dependent inertia is introduced. Existing dense assembly
+budgets, complete-result publication and cancellation boundaries remain.
+
+Regressions in `tests/shell_operator.rs` compare kinetic energy with independent
+degree-two triangle quadrature, uniform inventories, rotated/refined rigid
+motion, support restriction and selected-mass damping. The existing moving-load
+payload and event tests exercise both formulations. An independent analytic
+triangle-inverse test verifies the complete post-impulse velocity field and
+its kinetic energy, then continues the same state through passive Newmark
+motion with the selected Rayleigh damping.
+
 ## Retained finite porous solids
 
 `hyper3::plastic::porous::FinitePorousTetSolid` retains original per-element

@@ -5,8 +5,8 @@
 //! plane-stress elasticity. Bending remains a surrogate with no continuum claim.
 
 use fs_solid::{
-    AssemblyBudget, DampingModel, OperatorDiagnostics, ShellError, ShellIdentity, ShellMaterial,
-    ShellNode, ShellPlate, ShellSupport,
+    AssemblyBudget, DampingModel, OperatorDiagnostics, ShellError, ShellIdentity,
+    ShellMassFormulation, ShellMaterial, ShellNode, ShellPlate, ShellSupport,
 };
 
 fn plate() -> ShellPlate {
@@ -213,6 +213,155 @@ fn shell_002_rayleigh_damping_and_three_point_pins_reduce_deterministically() {
     // Repeated assembly preserves both the declared element ordering and the
     // canonical node-major reduced DOF ordering.
     assert_eq!(assembly, model.assemble().expect("deterministic repeat"));
+}
+
+// Degree-two-exact three-point triangle quadrature. This evaluates velocity
+// fields directly, independently of the assembled mass coefficients.
+fn integrated_kinetic_energy(model: &ShellPlate, velocity: &[f64]) -> f64 {
+    let mut energy = 0.0;
+    for nodes in &model.triangles {
+        let [a, b, c] = nodes.map(|i| model.nodes[i].position_m);
+        let ab: [f64; 3] = core::array::from_fn(|i| b[i] - a[i]);
+        let ac: [f64; 3] = core::array::from_fn(|i| c[i] - a[i]);
+        let normal = [
+            ab[1] * ac[2] - ab[2] * ac[1],
+            ab[2] * ac[0] - ab[0] * ac[2],
+            ab[0] * ac[1] - ab[1] * ac[0],
+        ];
+        let area = 0.5 * normal.iter().map(|x| x * x).sum::<f64>().sqrt();
+        for vertex in 0..3 {
+            let motion: [f64; 6] = core::array::from_fn(|component| {
+                nodes
+                    .iter()
+                    .enumerate()
+                    .map(|(i, node)| {
+                        let weight = if i == vertex { 2.0 / 3.0 } else { 1.0 / 6.0 };
+                        weight * velocity[6 * node + component]
+                    })
+                    .sum()
+            });
+            let speed2: f64 = motion[..3].iter().map(|x| x * x).sum();
+            let spin2: f64 = motion[3..].iter().map(|x| x * x).sum();
+            energy += area / 3.0
+                * 0.5
+                * model.material.density_kg_m3
+                * (model.thickness_m * speed2 + model.thickness_m.powi(3) / 12.0 * spin2);
+        }
+    }
+    energy
+}
+
+#[test]
+fn consistent_reference_inertia_matches_independent_velocity_quadrature() {
+    for model in [plate(), rotated_plate()] {
+        let lumped = model.assemble().unwrap();
+        assert_eq!(
+            lumped,
+            model
+                .assemble_with_mass_formulation(ShellMassFormulation::Lumped)
+                .unwrap()
+        );
+        let consistent = model
+            .assemble_with_mass_formulation(ShellMassFormulation::ConsistentReference)
+            .unwrap();
+        assert_eq!(consistent.full_stiffness, lumped.full_stiffness);
+        for component in 0..6 {
+            let mut velocity = vec![0.0; 18];
+            for (node, speed) in [0.7, -1.2, 2.3].into_iter().enumerate() {
+                velocity[6 * node + component] = speed;
+            }
+            let expected = integrated_kinetic_energy(&model, &velocity);
+            let actual = consistent.full_mass.quadratic_energy(&velocity);
+            assert!((actual / expected - 1.0).abs() < 2e-14);
+            assert!(lumped.full_mass.quadratic_energy(&velocity) > actual);
+            let constant: Vec<_> = (0..18)
+                .map(|i| if i % 6 == component { 1.0 } else { 0.0 })
+                .collect();
+            let constant_energy = consistent.full_mass.quadratic_energy(&constant);
+            assert!(
+                (constant_energy / lumped.full_mass.quadratic_energy(&constant) - 1.0).abs()
+                    < 2e-14
+            );
+            assert!(consistent.full_mass.values()[component * 18 + 6 + component] > 0.0);
+        }
+    }
+}
+
+#[test]
+fn consistent_reference_rigid_rotation_energy_is_unchanged_by_refinement() {
+    let coarse = rotated_plate();
+    let mut refined = coarse.clone();
+    refined.budget.max_conditioning_dofs = 0;
+    for (a, b) in [(0, 1), (1, 2), (2, 0)] {
+        refined.nodes.push(ShellNode {
+            position_m: core::array::from_fn(|i| {
+                f64::midpoint(coarse.nodes[a].position_m[i], coarse.nodes[b].position_m[i])
+            }),
+        });
+    }
+    refined.triangles = vec![[0, 3, 5], [3, 1, 4], [5, 4, 2], [3, 4, 5]];
+    let translation = [0.3, -0.7, 0.2];
+    let rotation = [0.4, -0.2, 1.3];
+    let coarse_velocity = rigid_displacement(&coarse, translation, rotation);
+    let expected = integrated_kinetic_energy(&coarse, &coarse_velocity);
+    for model in [&coarse, &refined] {
+        let velocity = rigid_displacement(model, translation, rotation);
+        let assembly = model
+            .assemble_with_mass_formulation(ShellMassFormulation::ConsistentReference)
+            .unwrap();
+        let actual = assembly.full_mass.quadratic_energy(&velocity);
+        assert!((actual / expected - 1.0).abs() < 3e-14);
+    }
+    let lumped = coarse
+        .assemble()
+        .unwrap()
+        .full_mass
+        .quadratic_energy(&coarse_velocity);
+    assert!(
+        lumped > expected * 1.01,
+        "vertex lumping resolves a different rotational energy"
+    );
+}
+
+#[test]
+fn consistent_reference_support_restriction_and_damping_use_the_same_mass() {
+    let mut model = plate();
+    model.support = Some(ShellSupport {
+        node_indices: [2, 0, 1],
+        normal: [0.0, 0.0, 1.0],
+    });
+    model.damping = DampingModel::Rayleigh {
+        mass_proportional_per_s: 0.25,
+        stiffness_proportional_s: 0.002,
+    };
+    let assembly = model
+        .assemble_with_mass_formulation(ShellMassFormulation::ConsistentReference)
+        .unwrap();
+    for (i, &row) in assembly.free_dofs.iter().enumerate() {
+        for (j, &column) in assembly.free_dofs.iter().enumerate() {
+            let reduced = i * assembly.mass.dimension() + j;
+            let full = row * assembly.full_mass.dimension() + column;
+            assert_eq!(
+                assembly.mass.values()[reduced],
+                assembly.full_mass.values()[full]
+            );
+            assert_eq!(
+                assembly.damping.as_ref().unwrap().values()[reduced],
+                0.25 * assembly.full_mass.values()[full]
+                    + 0.002 * assembly.full_stiffness.values()[full]
+            );
+        }
+    }
+    assert!(
+        assembly.mass.values()[3] > 0.0,
+        "rotary cross-node inertia survives support restriction"
+    );
+    assert_eq!(
+        assembly,
+        model
+            .assemble_with_mass_formulation(ShellMassFormulation::ConsistentReference)
+            .unwrap()
+    );
 }
 
 #[test]

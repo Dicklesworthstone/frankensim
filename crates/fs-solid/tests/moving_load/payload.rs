@@ -15,14 +15,31 @@ fn payload() -> ShellRigidPayload {
 
 #[test]
 fn finite_payload_matches_com_energy_and_reference_angular_momentum() {
+    for formulation in [
+        ShellMassFormulation::Lumped,
+        ShellMassFormulation::ConsistentReference,
+    ] {
+        check_payload_inventory(formulation);
+    }
+}
+
+fn check_payload_inventory(formulation: ShellMassFormulation) {
     let mut p = plate();
     p.damping = DampingModel::Rayleigh {
         mass_proportional_per_s: 0.3,
         stiffness_proportional_s: 0.0001,
     };
-    let bare = MovingShellModel::new(p.clone(), 2, || false).unwrap();
+    let bare =
+        MovingShellModel::new_with_mass_formulation(p.clone(), formulation, 2, || false).unwrap();
     let body = payload();
-    let loaded = MovingShellModel::new_with_payloads(p, 2, &[body], || false).unwrap();
+    let loaded = MovingShellModel::new_with_payloads_and_mass_formulation(
+        p,
+        formulation,
+        2,
+        &[body],
+        || false,
+    )
+    .unwrap();
     assert_eq!(loaded.payloads(), &[body]);
     assert_eq!(loaded.assembly().full_stiffness, bare.assembly().full_stiffness);
     assert_eq!(loaded.assembly().full_damping, bare.assembly().full_damping);

@@ -115,7 +115,8 @@ pub use plastic3::{
 pub use rod::{Rod, RodSection, TipLoad};
 pub use shell::{
     AssemblyBudget, Damping, DampingModel, Mass, OperatorDiagnostics, ShellAssembly, ShellError,
-    ShellIdentity, ShellMaterial, ShellMatrix, ShellNode, ShellPlate, ShellSupport, Stiffness,
+    ShellIdentity, ShellMassFormulation, ShellMaterial, ShellMatrix, ShellNode, ShellPlate,
+    ShellSupport, Stiffness,
 };
 pub use stability::{
     BucklingResult, buckling_loads, eigenvalue_derivative, expand_mode, group_stiffness,

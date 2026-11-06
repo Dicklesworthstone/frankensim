@@ -1,8 +1,8 @@
 //! Deterministic, spatial-only flat-plate surrogate assembly.
 //!
-//! This fixture-scale operator assembles lumped inertia, constant-strain
-//! triangle (CST) plane-stress elasticity, and normal-slope/rotation bending
-//! penalties on one coplanar, consistently oriented triangular patch. The
+//! This fixture-scale operator assembles lumped or consistent reference inertia,
+//! constant-strain triangle (CST) plane-stress elasticity, and normal-slope/rotation
+//! bending penalties on one coplanar, consistently oriented triangular patch. The
 //! membrane reproduces affine isotropic plane stress, including Poisson
 //! coupling; the bending/rotation model remains an estimate-only surrogate,
 //! not a Kirchhoff--Love continuum. It is the Euler-disc ladder's spatial base; it
@@ -84,6 +84,19 @@ pub enum DampingModel {
         /// Stiffness-proportional coefficient in s.
         stiffness_proportional_s: f64,
     },
+}
+
+/// Reference inertia for the plate's P1 translational and rotational fields.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShellMassFormulation {
+    /// Split each triangle's mass and rotary inventory equally at its vertices.
+    /// This is the original [`ShellPlate::assemble`] behavior.
+    Lumped,
+    /// Integrate products of P1 shape functions exactly, retaining cross-node
+    /// inertia for nonuniform velocity fields. Both formulations keep the
+    /// original isotropic rotary surrogate, including drilling inertia about
+    /// the normal; neither supplies a Kirchhoff--Love shell or moving-frame mass.
+    ConsistentReference,
 }
 
 /// Three pointwise pinned supports on the plate's declared normal side.
@@ -303,13 +316,27 @@ impl core::fmt::Display for ShellError {
 impl std::error::Error for ShellError {}
 
 impl ShellPlate {
-    /// Assemble complete and optionally three-point-supported spatial operators.
+    /// Assemble complete and optionally three-point-supported spatial operators
+    /// with the original lumped reference inertia.
     ///
     /// The routine validates all input and budgets before allocation, then
     /// assembles private matrices and returns only a complete result. It is a
     /// synchronous spatial leaf: no time advancement or partial authority is
     /// exposed.
     pub fn assemble(&self) -> Result<ShellAssembly, ShellError> {
+        self.assemble_with_mass_formulation(ShellMassFormulation::Lumped)
+    }
+
+    /// Assemble one selected reference mass before support restriction and
+    /// Rayleigh damping. Consistent inertia exactly integrates
+    /// `rho*h*|v_h|^2/2 + rho*h^3*|omega_h|^2/24` over each triangle.
+    /// The existing isotropic rotary term remains an estimate-only surrogate,
+    /// including its drilling inertia. Geometry, stiffness, budgets and
+    /// deterministic element ordering are shared with [`Self::assemble`].
+    pub fn assemble_with_mass_formulation(
+        &self,
+        mass_formulation: ShellMassFormulation,
+    ) -> Result<ShellAssembly, ShellError> {
         self.validate()?;
         let dofs = self.nodes.len() * 6;
         let entries = dofs * dofs;
@@ -324,7 +351,8 @@ impl ShellPlate {
                     what: "curved, folded, or inconsistently oriented multi-patch triangles require the fs-iga shell frontend".into(),
                 });
             }
-            self.assemble_triangle(triangle, area, edges, normal, &mut mass, &mut stiffness);
+            self.assemble_triangle_mass(triangle, area, mass_formulation, &mut mass);
+            self.assemble_triangle(triangle, area, edges, normal, &mut stiffness);
         }
 
         let full_mass = matrix::<Mass>(dofs, mass);
@@ -573,39 +601,55 @@ impl ShellPlate {
         Ok(())
     }
 
+    fn assemble_triangle_mass(
+        &self,
+        triangle: [usize; 3],
+        area: f64,
+        formulation: ShellMassFormulation,
+        mass: &mut [f64],
+    ) {
+        let density = self.material.density_kg_m3;
+        let thickness = self.thickness_m;
+        let translational_mass = density * thickness * area / 3.0;
+        let rotary_mass = density * thickness.powi(3) * area / 36.0;
+        let n = self.nodes.len() * 6;
+        for row in triangle {
+            for column in triangle {
+                let weight = match formulation {
+                    ShellMassFormulation::Lumped if row == column => 1.0,
+                    ShellMassFormulation::Lumped => continue,
+                    // Integral N_i N_j dA = A*(1 + delta_ij)/12.
+                    // Relative to the lumped A/3, the weights are 1/2 and 1/4.
+                    ShellMassFormulation::ConsistentReference if row == column => 0.5,
+                    ShellMassFormulation::ConsistentReference => 0.25,
+                };
+                for component in 0..6 {
+                    let inventory = if component < 3 {
+                        translational_mass
+                    } else {
+                        rotary_mass
+                    };
+                    add(
+                        mass,
+                        n,
+                        dof(row, component),
+                        dof(column, component),
+                        weight * inventory,
+                    );
+                }
+            }
+        }
+    }
+
     fn assemble_triangle(
         &self,
         triangle: [usize; 3],
         area: f64,
         edges: [([f64; 3], f64); 3],
         normal: [f64; 3],
-        mass: &mut [f64],
         stiffness: &mut [f64],
     ) {
-        let density = self.material.density_kg_m3;
         let thickness = self.thickness_m;
-        let translational_mass = density * thickness * area / 3.0;
-        let rotary_mass = density * thickness.powi(3) * area / 36.0;
-        for node in triangle {
-            for component in 0..3 {
-                add(
-                    mass,
-                    self.nodes.len() * 6,
-                    dof(node, component),
-                    dof(node, component),
-                    translational_mass,
-                );
-            }
-            for component in 3..6 {
-                add(
-                    mass,
-                    self.nodes.len() * 6,
-                    dof(node, component),
-                    dof(node, component),
-                    rotary_mass,
-                );
-            }
-        }
         let positions = triangle.map(|node| self.nodes[node].position_m);
         let gradients = [
             scale(

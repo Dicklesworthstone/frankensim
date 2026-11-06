@@ -128,14 +128,31 @@ fn held_force_balance(
 
 #[test]
 fn off_center_payload_event_preserves_native_momentum_work_and_force_continuation() {
+    for formulation in [
+        ShellMassFormulation::Lumped,
+        ShellMassFormulation::ConsistentReference,
+    ] {
+        check_payload_impulse_and_continuation(formulation);
+    }
+}
+
+fn check_payload_impulse_and_continuation(formulation: ShellMassFormulation) {
     let mut p = plate();
     p.damping = DampingModel::Rayleigh {
         mass_proportional_per_s: 0.4,
         stiffness_proportional_s: 0.0002,
     };
     let body = body();
-    let bare = MovingShellModel::new(p.clone(), 2, || false).unwrap();
-    let model = MovingShellModel::new_with_payloads(p, 2, &[body], || false).unwrap();
+    let bare =
+        MovingShellModel::new_with_mass_formulation(p.clone(), formulation, 2, || false).unwrap();
+    let model = MovingShellModel::new_with_payloads_and_mass_formulation(
+        p,
+        formulation,
+        2,
+        &[body],
+        || false,
+    )
+    .unwrap();
     let n = model.assembly().mass.dimension();
     let q: Vec<_> = (0..n).map(|i| 1e-4 * (0.6 * i as f64).sin()).collect();
     let v: Vec<_> = (0..n).map(|i| 0.03 * (0.7 * i as f64).cos()).collect();
@@ -209,6 +226,71 @@ fn off_center_payload_event_preserves_native_momentum_work_and_force_continuatio
     assert_eq!(motion.state().step, accepted.step);
     assert_eq!(motion.state().displacement, accepted.displacement);
     held_force_balance(&model, &motion, &loads);
+}
+
+#[test]
+fn consistent_reference_impulse_excites_the_exact_triangle_mass_then_passive_newmark_motion() {
+    let mut p = plate();
+    p.nodes.truncate(3);
+    p.triangles.truncate(1);
+    p.damping = DampingModel::Rayleigh {
+        mass_proportional_per_s: 0.3,
+        stiffness_proportional_s: 1e-4,
+    };
+    let triangle_mass = p.material.density_kg_m3 * p.thickness_m * 0.5;
+    let model = MovingShellModel::new_with_mass_formulation(
+        p,
+        ShellMassFormulation::ConsistentReference,
+        1,
+        || false,
+    )
+    .unwrap();
+    let zero = vec![0.0; model.assembly().mass.dimension()];
+    let mut motion = model.start(&zero, &zero, &[], config(), || false).unwrap();
+    let kick = ShellPointImpulse {
+        point: ShellLoadPoint {
+            triangle: 0,
+            barycentric: [1.0, 0.0, 0.0],
+            offset_m: [0.0; 3],
+        },
+        linear_impulse_ns: [0.02, -0.01, 0.005],
+        angular_impulse_nms: [0.0; 3],
+    };
+    let event = motion.apply_impulses(&[kick], || false).unwrap();
+    // Analytic inverse of m*(I + 11^T)/12, independently of the native solve.
+    // An impulse at vertex 0 gives 9*j/m there and -3*j/m at both other vertices.
+    for node in 0..3 {
+        let coefficient = if node == 0 { 9.0 } else { -3.0 } / triangle_mass;
+        for axis in 0..3 {
+            near(
+                motion.state().velocity[6 * node + axis],
+                coefficient * kick.linear_impulse_ns[axis],
+                4e-16,
+            );
+            assert_eq!(motion.state().velocity[6 * node + 3 + axis], 0.0);
+        }
+    }
+    let initial_energy = 4.5 / triangle_mass * dot(kick.linear_impulse_ns, kick.linear_impulse_ns);
+    near(motion.state().kinetic_energy_j, initial_energy, 4e-18);
+    near(event.kinetic_energy_change_j, initial_energy, 4e-18);
+    near(event.applied_work_j, initial_energy, 4e-18);
+    near(event.energy_residual_j, 0.0, 4e-18);
+    let mut dissipated = 0.0;
+    for _ in 0..64 {
+        let old_energy = motion.state().total_energy_j;
+        let time = motion.state().time_s + config().dt_s;
+        let step = motion.advance(time, &[], || false).unwrap();
+        dissipated += step.damping_work_j;
+        assert!(step.damping_work_j >= 0.0);
+        assert!(motion.state().total_energy_j <= old_energy + 1e-16);
+        near(step.energy_residual_j, 0.0, 2e-16);
+        near(
+            motion.state().total_energy_j + dissipated,
+            initial_energy,
+            2e-15,
+        );
+    }
+    assert!(dissipated > 0.0);
 }
 
 #[test]
