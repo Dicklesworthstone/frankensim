@@ -65,7 +65,12 @@ impl ConformingThermoviscousTimePairStep {
     pub fn balance_residual_j(&self) -> f64 {
         self.regions
             .iter()
-            .map(|r| r.work.delta_energy_j + r.work.dissipated_j() - r.work.structural_work_j)
+            .map(|r| {
+                r.work.delta_energy_j + r.work.dissipated_j()
+                    - r.work.structural_work_j
+                    - r.work.body_force_work_j
+                    - r.work.heat_source_work_j
+            })
             .sum::<f64>()
             - self.external_pressure_work_j
     }
@@ -143,11 +148,25 @@ impl<'p, 'a, 'c> PreparedConformingThermoviscousTimePair<'p, 'a, 'c> {
         wall_forces_n_per_sqrt_kg: [&[f64]; 2],
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<ConformingThermoviscousTimePairStep, ThermoviscousTimeError> {
-        let frame = self.inner.evaluate(
-            initial,
-            external_traction_pa,
-            wall_forces_n_per_sqrt_kg,
-            cancelled,
+        self.step_with_volume_sources(
+            initial, external_traction_pa, wall_forces_n_per_sqrt_kg,
+            [&[]; 2], [&[]; 2], cancelled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::acoustics::thermoviscous::time) fn step_with_volume_sources(
+        &self,
+        initial: [&ThermoviscousTimeState; 2],
+        external_traction_pa: &[f64],
+        wall_forces_n_per_sqrt_kg: [&[f64]; 2],
+        force_drive_n: [&[f64]; 2],
+        heat_drive_w: [&[f64]; 2],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<ConformingThermoviscousTimePairStep, ThermoviscousTimeError> {
+        let frame = self.inner.evaluate_with_volume_sources(
+            initial, external_traction_pa, wall_forces_n_per_sqrt_kg,
+            force_drive_n, heat_drive_w, cancelled,
         )?;
         let nv = self.layout.traction_indices.len();
         let vectors = |reaction: &[f64]| {

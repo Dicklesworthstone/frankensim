@@ -16,10 +16,17 @@ use super::super::body_force::ThermoviscousBodyForceSource;
 use super::super::heat_source::ThermoviscousHeatSource;
 use super::*;
 
+mod interface;
+pub use interface::{
+    PreparedConformingThermoviscousVolumeTimePair, PreparedThermoviscousVolumeTimePair,
+    ThermoviscousTimeRegion,
+};
+
 /// Immutable fixed-clock evolution with original distributed volume inputs.
 ///
 /// The underlying field cache stays private: its extra force and heat ports
-/// cannot enter the legacy pressure-only interface APIs. Preparation changes
+/// cannot enter the legacy pressure-only interface APIs. Typed pair bindings
+/// carry those source ports through the original joint trajectory. Preparation changes
 /// input columns and their integral observations, not the physical state.
 pub struct PreparedThermoviscousVolumeTime<'a, 'c> {
     fields: PreparedThermoviscousTime<'a, 'c>,

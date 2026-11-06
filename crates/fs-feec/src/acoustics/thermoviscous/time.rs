@@ -35,7 +35,10 @@ pub use caloric::ThermoviscousCaloricReservoir;
 mod heat_source;
 pub use heat_source::{PreparedThermoviscousHeatTime, ThermoviscousHeatTimeStep};
 mod volume_source;
-pub use volume_source::{PreparedThermoviscousVolumeTime, ThermoviscousVolumeTimeStep};
+pub use volume_source::{
+    PreparedConformingThermoviscousVolumeTimePair, PreparedThermoviscousVolumeTime,
+    PreparedThermoviscousVolumeTimePair, ThermoviscousTimeRegion, ThermoviscousVolumeTimeStep,
+};
 mod wall;
 pub use wall::{ConductiveWallTimeLayout, TangentialWallConductivity, ThermoviscousWallDiscretization};
 mod interface;

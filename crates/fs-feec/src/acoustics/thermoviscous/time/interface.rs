@@ -10,6 +10,7 @@
 //! thermal trace to this SAME trajectory owner. Equilibrium geometry, pressure
 //! and temperature are fixed; composition is not advected or mixed.
 use super::*;
+use fs_math::dd::Dd;
 use fs_phs::linear_exact::CommonFlowProjection;
 use std::collections::BTreeMap;
 
@@ -55,7 +56,12 @@ impl ThermoviscousTimePairStep {
     pub fn balance_residual_j(&self) -> f64 {
         self.regions
             .iter()
-            .map(|r| r.work.delta_energy_j + r.work.dissipated_j() - r.work.structural_work_j)
+            .map(|r| {
+                r.work.delta_energy_j + r.work.dissipated_j()
+                    - r.work.structural_work_j
+                    - r.work.body_force_work_j
+                    - r.work.heat_source_work_j
+            })
             .sum::<f64>()
             - self.external_pressure_work_j
     }
@@ -350,7 +356,26 @@ impl<'p, 'a, 'c> PreparedThermoviscousTimePair<'p, 'a, 'c> {
         wall_forces_n_per_sqrt_kg: [&[f64]; 2],
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<ThermoviscousTimePairStep, ThermoviscousTimeError> {
-        let frame = self.evaluate(initial, external_traction_pa, wall_forces_n_per_sqrt_kg, cancelled)?;
+        self.step_with_volume_sources(
+            initial, external_traction_pa, wall_forces_n_per_sqrt_kg,
+            [&[]; 2], [&[]; 2], cancelled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn step_with_volume_sources(
+        &self,
+        initial: [&ThermoviscousTimeState; 2],
+        external_traction_pa: &[f64],
+        wall_forces_n_per_sqrt_kg: [&[f64]; 2],
+        force_drive_n: [&[f64]; 2],
+        heat_drive_w: [&[f64]; 2],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<ThermoviscousTimePairStep, ThermoviscousTimeError> {
+        let frame = self.evaluate_with_volume_sources(
+            initial, external_traction_pa, wall_forces_n_per_sqrt_kg,
+            force_drive_n, heat_drive_w, cancelled,
+        )?;
         Ok(ThermoviscousTimePairStep {
             regions: frame.regions,
             interface_work_j: frame.mechanical_work_j,
@@ -360,26 +385,38 @@ impl<'p, 'a, 'c> PreparedThermoviscousTimePair<'p, 'a, 'c> {
         })
     }
 
-    fn evaluate(
+    #[allow(clippy::too_many_arguments)]
+    fn evaluate_with_volume_sources(
         &self,
         initial: [&ThermoviscousTimeState; 2],
         external_traction_pa: &[f64],
         wall_forces_n_per_sqrt_kg: [&[f64]; 2],
+        force_drive_n: [&[f64]; 2],
+        heat_drive_w: [&[f64]; 2],
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<PairEvaluation, ThermoviscousTimeError> {
         poll(cancelled)?;
         if external_traction_pa.len() != self.external_pressure.len()
-            || (0..2)
-                .any(|s| wall_forces_n_per_sqrt_kg[s].len() != self.regions[s].wall_scale.len())
+            || (0..2).any(|s| {
+                let region = self.regions[s];
+                wall_forces_n_per_sqrt_kg[s].len() != region.wall_scale.len()
+                    || region.model.loads.len() + region.wall_scale.len()
+                        + force_drive_n[s].len() + heat_drive_w[s].len()
+                        != region.system.port_dim()
+            })
         {
             return Err(invalid(
-                "complete external pressure and original structural drives required",
+                "complete external pressure, structural, body-force and heat drives required",
             ));
         }
         let input: Vec<_> = external_traction_pa
             .iter()
             .chain(wall_forces_n_per_sqrt_kg[0])
+            .chain(force_drive_n[0])
+            .chain(heat_drive_w[0])
             .chain(wall_forces_n_per_sqrt_kg[1])
+            .chain(force_drive_n[1])
+            .chain(heat_drive_w[1])
             .copied()
             .collect();
         if input.iter().any(|v| !v.is_finite()) {
@@ -441,6 +478,8 @@ impl<'p, 'a, 'c> PreparedThermoviscousTimePair<'p, 'a, 'c> {
             let end = start + source.system.state_dim();
             let heat = &candidate.integrals[side * HEAT_CHANNELS..(side + 1) * HEAT_CHANNELS];
             let flows = &outputs[port_starts[side]..port_starts[side] + source.system.port_dim()];
+            let force_start = source.model.loads.len() + source.wall_scale.len();
+            let heat_start = force_start + force_drive_n[side].len();
             let work = ThermoviscousTimeWork {
                 initial_energy_j: source.system.hamiltonian(&x[start..end]),
                 final_energy_j: source.system.hamiltonian(&candidate.state[start..end]),
@@ -451,8 +490,12 @@ impl<'p, 'a, 'c> PreparedThermoviscousTimePair<'p, 'a, 'c> {
                 ),
                 pressure_work_j: external_work[side] + interface_work_j[side],
                 conductive_boundary_work_j: conductive_work_j[side],
-                body_force_work_j: 0.0,
-                heat_source_work_j: 0.0,
+                body_force_work_j: held_source_work(
+                    force_drive_n[side], &flows[force_start..heat_start],
+                ),
+                heat_source_work_j: held_source_work(
+                    heat_drive_w[side], &flows[heat_start..],
+                ),
                 structural_work_j: wall_forces_n_per_sqrt_kg[side]
                     .iter()
                     .enumerate()
@@ -473,7 +516,7 @@ impl<'p, 'a, 'c> PreparedThermoviscousTimePair<'p, 'a, 'c> {
                     .iter()
                     .map(|v| v / self.duration_s())
                     .collect(),
-                mean_wall_velocity_m_sqrt_kg_per_s: flows[source.model.loads.len()..]
+                mean_wall_velocity_m_sqrt_kg_per_s: flows[source.model.loads.len()..force_start]
                     .iter()
                     .map(|v| v / self.duration_s())
                     .collect(),
@@ -512,8 +555,12 @@ impl<'p, 'a, 'c> PreparedThermoviscousTimePair<'p, 'a, 'c> {
                 > self.maximum_relative_energy_residual * scale
             || result.conductive_work_j.iter().sum::<f64>().abs()
                 > self.maximum_relative_energy_residual * scale
-            || (result.regions.iter().map(|r| r.work.delta_energy_j + r.work.dissipated_j()
-                    - r.work.structural_work_j).sum::<f64>() - result.external_pressure_work_j).abs()
+            || (result.regions.iter().map(|r| {
+                    r.work.delta_energy_j + r.work.dissipated_j()
+                        - r.work.structural_work_j
+                        - r.work.body_force_work_j
+                        - r.work.heat_source_work_j
+                }).sum::<f64>() - result.external_pressure_work_j).abs()
                 > self.maximum_relative_energy_residual * scale
         {
             return Err(invalid(
@@ -523,6 +570,14 @@ impl<'p, 'a, 'c> PreparedThermoviscousTimePair<'p, 'a, 'c> {
         poll(cancelled)?;
         Ok(result)
     }
+}
+
+// Actual held source amplitudes times their integrated original dual fields.
+// This is acoustic work; heat amplitudes are not added as caloric energy.
+fn held_source_work(amplitudes: &[f64], integrated_flows: &[f64]) -> f64 {
+    amplitudes.iter().zip(integrated_flows).fold(Dd::ZERO, |sum, (&u, &y)| {
+        sum + Dd::from_f64(u) * Dd::from_f64(y)
+    }).to_f64()
 }
 
 type FaceKey = [[u64; 3]; 3];
