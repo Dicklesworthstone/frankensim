@@ -407,6 +407,46 @@ nucleation kinetics or a spatial phase-field evolution. Its free-energy form
 is the molar equivalent of the INL MOOSE regular-solution implementation:
 <https://mooseframework.inl.gov/docs/doxygen/modules/classRegularSolutionFreeEnergy.html>.
 
+### Multicomponent homogeneous liquid miscibility and diffusion
+
+`solution::multicomponent::MulticomponentRegularSolutionV1` extends the liquid
+constitutive path to 1..=128 explicitly identified components. Two complete,
+symmetric, zero-diagonal source matrices define `chi_ij(T)=A_ij+B_ij/T`.
+Canonicalization moves both matrices with their original species; missing
+interactions are refused, while explicit zero coefficients admit ideal pairs.
+The same molar free energy `RT sum(x_i ln x_i + sum_{j>i} chi_ij x_i x_j)`
+supplies log activities, chemical potentials relative to pure-liquid standards,
+mixing enthalpy/entropy and partial molar excess enthalpies. Exact absences
+have no finite chemical potential. Independent positive trace fractions are
+retained, including the carrier's small logarithm and activity correction.
+
+The source-owned state applies the FULL coupled thermodynamic-factor operator
+to a zero-sum composition gradient. Antisymmetric pair accumulation preserves
+Gibbs-Duhem balance to roundoff; a species can respond even when its own mole
+fraction gradient is zero. `mass_diffusion` and `molar_diffusion` pass these
+forces to the existing Maxwell-Stefan solve only after matching original
+species identities and canonical order. Liquid molar concentration and positive
+pair diffusivities remain independently supplied sources. Neither is inferred
+from an ideal-gas law or from a negative thermodynamic curvature.
+
+Directional simplex curvature reports local homogeneous demixing directions;
+positive curvature in one direction is not a global stability certificate.
+The response retains its immutable original owner and has no post-construction
+heap allocation beyond shared-owner reference counting. Energy/force evaluation
+is O(n²), with fixed-size bounded scratch and cancellation at pair-row boundaries.
+Tests cover extensive Gibbs/enthalpy derivatives, Gibbs-Duhem and Euler
+identities, binary reduction, ternary cross diffusion and cosolvent effects,
+both transport frames and friction entropy, pure/trace/maximum-size limits,
+canonical permutations, source refusals and atomic cancellation.
+
+This is a homogeneous symmetric-pair regular-solution closure. It does not
+perform an N-component phase flash, provide polymer/electrolyte entropy,
+infer measured interaction parameters, add pressure/Soret forces, or advance
+an N-component spatial phase field. Pure sensible enthalpies must accompany
+the partial excess enthalpies in a full diffusive-energy account. The model is
+the symmetric-pair specialization of the multicomponent Margules formulation:
+<https://cantera.org/stable/cxx/d7/dfe/classCantera_1_1MargulesVPSSTP.html>.
+
 ### Closed isobaric liquid calorics
 
 `solution::caloric` combines that SAME pair law with explicitly ordered

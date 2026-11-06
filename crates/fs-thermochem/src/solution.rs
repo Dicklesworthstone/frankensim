@@ -25,6 +25,9 @@ pub mod caloric;
 /// Homogeneous binary chemical potentials and explicit square-gradient energy.
 pub mod gradient;
 
+/// Source-owned multicomponent liquid activities and coupled diffusion forces.
+pub mod multicomponent;
+
 /// Finite solid/liquid partition for an explicitly declared neutral solute.
 pub mod solubility;
 
