@@ -2,6 +2,8 @@
 
 use super::*;
 
+mod absorption;
+
 fn selection(temperature_k: f64, reaction: NeutronReaction) -> EndfSelection {
     EndfSelection {
         material_number: 9237,
@@ -528,7 +530,12 @@ fn imported_fission_and_capture_tables_drive_competing_burnup_events() {
                 NeutronReaction::Fission => BurnupRate::TabulatedFission {
                     cross_sections: table,
                 },
-                NeutronReaction::Capture => BurnupRate::TabulatedCapture {
+                NeutronReaction::Capture
+                | NeutronReaction::ProtonProduction
+                | NeutronReaction::DeuteronProduction
+                | NeutronReaction::TritonProduction
+                | NeutronReaction::Helium3Production
+                | NeutronReaction::AlphaProduction => BurnupRate::TabulatedCapture {
                     cross_sections: table,
                 },
             },

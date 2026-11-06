@@ -21,8 +21,38 @@ use crate::{Accumulator, FissionError, finite, nonnegative, positive};
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum NeutronReaction {
     Fission,
-    /// Parent removal by capture, not elastic scattering.
+    /// Radiative neutron capture, ENDF MT102.
     Capture,
+    /// Nonfission (n,p) absorption without neutron-producing breakup, MT103.
+    ProtonProduction,
+    /// Nonfission (n,d) absorption without neutron-producing breakup, MT104.
+    DeuteronProduction,
+    /// Nonfission (n,t) absorption without neutron-producing breakup, MT105.
+    TritonProduction,
+    /// Nonfission (n,He-3) absorption without neutron-producing breakup, MT106.
+    Helium3Production,
+    /// Nonfission (n,alpha) absorption without neutron-producing breakup, MT107.
+    AlphaProduction,
+}
+
+impl NeutronReaction {
+    /// Channels that remove the incident neutron and parent without producing
+    /// another neutron in this model. Products and energy are supplied separately.
+    /// Charged-particle MTs are the absorption components in ENDF-102 §0.4.3.2;
+    /// neither a total particle-production tally nor a breakup model is inferred.
+    /// <https://www.nndc.bnl.gov/endfdocs/ENDF-102-2023.pdf>
+    #[must_use]
+    pub const fn is_nonfission_absorption(self) -> bool {
+        match self {
+            Self::Fission => false,
+            Self::Capture
+            | Self::ProtonProduction
+            | Self::DeuteronProduction
+            | Self::TritonProduction
+            | Self::Helium3Production
+            | Self::AlphaProduction => true,
+        }
+    }
 }
 
 /// Caller-supplied processed rows on one shared group grid. A source label does

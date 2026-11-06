@@ -164,6 +164,9 @@ pub struct IrradiationData {
 /// Both tables must cover the entire declared model temperature domain and
 /// carry identical nuclide and energy-group identities. Event energies retain
 /// their original owners; a table does not infer deposition or decay-heat data.
+/// The capture table may represent radiative capture or one explicit supported
+/// charged-particle absorption channel. Its reaction identity is retained;
+/// product inventories require the separate original burnup owner.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TabulatedIrradiationData {
     pub data_id: String,
@@ -214,7 +217,7 @@ impl IrradiationModel {
     /// the tables at the temperature passed to `rate_constants`.
     pub fn new_tabulated(data: TabulatedIrradiationData) -> Result<Self, FissionError> {
         if data.fission.reaction() != NeutronReaction::Fission
-            || data.capture.reaction() != NeutronReaction::Capture
+            || !data.capture.reaction().is_nonfission_absorption()
             || data.fission.nuclide() != data.capture.nuclide()
             || data.fission.groups() != data.capture.groups()
             || !positive(data.temperature_min_k)

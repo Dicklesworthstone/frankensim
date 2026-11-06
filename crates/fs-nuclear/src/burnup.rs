@@ -79,6 +79,10 @@ pub enum BurnupRate {
         cross_sections: Arc<CrossSectionTable>,
     },
     /// A processed nonfission-removal table with the same parent identity and grid.
+    /// Radiative capture and the explicit charged-particle absorption channels
+    /// retain their original table identity. Products and immediate event energy
+    /// are authored separately; no secondary neutrons or negative-Q exchange
+    /// are supplied by this parent-removal law. `captures` counts all such events.
     TabulatedCapture {
         cross_sections: Arc<CrossSectionTable>,
     },
@@ -339,7 +343,12 @@ impl BurnupModel {
         parent: usize,
         reaction: NeutronReaction,
     ) -> Result<(), BurnupError> {
-        if table.nuclide() != self.data.nuclides[parent].id || table.reaction() != reaction {
+        let same_kind = if reaction == NeutronReaction::Capture {
+            table.reaction().is_nonfission_absorption()
+        } else {
+            table.reaction() == reaction
+        };
+        if table.nuclide() != self.data.nuclides[parent].id || !same_kind {
             return Err(BurnupError::Invalid(
                 "tabulated reaction must match the parent nuclide and reaction kind",
             ));

@@ -29,7 +29,12 @@ fn temperature_table(reaction: NeutronReaction) -> Arc<CrossSectionTable> {
                 temperatures_k: vec![300.0, 400.0],
                 cross_sections_m2: match reaction {
                     NeutronReaction::Fission => vec![vec![0.2], vec![0.1]],
-                    NeutronReaction::Capture => vec![vec![0.0], vec![0.0]],
+                    NeutronReaction::Capture
+                    | NeutronReaction::ProtonProduction
+                    | NeutronReaction::DeuteronProduction
+                    | NeutronReaction::TritonProduction
+                    | NeutronReaction::Helium3Production
+                    | NeutronReaction::AlphaProduction => vec![vec![0.0], vec![0.0]],
                 },
             },
             CrossSectionLimits {

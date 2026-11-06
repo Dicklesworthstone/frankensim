@@ -46,10 +46,7 @@ fn curve(
     points_ev_barns: &[(f64, f64)],
     regions: &[(usize, EndfInterpolation)],
 ) -> PointwiseCrossSection {
-    let mt = match reaction {
-        NeutronReaction::Fission => 18,
-        NeutronReaction::Capture => 102,
-    };
+    let mt = crate::endf::reaction_mt(reaction);
     let mut lines = vec![
         control([92235.0, 233.0], [2, 1, 0, 7], 1, 451),
         control([0.0, 0.0], [0, 0, 0, 6], 1, 451),

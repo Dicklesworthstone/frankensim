@@ -1289,11 +1289,12 @@ invariant, and verify joint rollback on a final-temperature domain exit. The
 combined native nuclear lane passed 133 tests when this increment was prepared.
 These are manufactured verification problems, not evaluated-data validation.
 
-## Processed ENDF/PENDF fission and capture data
+## Processed ENDF/PENDF fission and absorption data
 
 `endf::PointwiseCrossSection::parse` reads caller-supplied text and selects an
-explicit MAT, isotope/isomer, total-fission (MT18) or radiative-capture (MT102)
-reaction and exact positive processed temperature. MF1/MT451 supplies ENDF-6
+explicit MAT, isotope/isomer, total-fission (MT18), radiative-capture (MT102),
+or charged-particle absorption (MT103–107) reaction and exact positive processed
+temperature. MF1/MT451 supplies ENDF-6
 incident-neutron identity, library/version/release/revision and temperature;
 selected MF3 identity must agree. LRP=0 or 2 is required. LRP=1 MF3 resonance
 backgrounds are refused rather than admitted as complete reaction curves.
@@ -1309,6 +1310,24 @@ rejects ambiguous selections, and converts eV to joules and barns to square
 metres. Source Q values remain observable metadata; neither QM nor QI is
 assigned to the prompt deposited-energy channel. Event energy and later
 radioactive-product release retain their existing explicit owners.
+
+The common `NeutronReaction` identity distinguishes (n,p), (n,d), (n,t),
+(n,He-3) and (n,alpha). The same original tables enter tabulated irradiation and
+`BurnupRate::TabulatedCapture`; `captures` counts nonfission parent-removal
+events. Products, yields and immediate energy remain explicitly authored.
+Original finite diffusion/burnup and fusion kinetic owners advance those
+inventories together; no alternative propagator or isotope dataset is introduced.
+The channel assignments follow the
+[NNDC ENDF reaction definitions](https://www.nndc.bnl.gov/endf/help.html)
+and ENDF-102 §0.4.3.2.
+
+All imported MF3 channels still require LR=0. Breakup, neutron multiplication,
+charged-particle stopping and signed endothermic energy exchange are outside
+this absorption model. MT105 identifies one triton-producing reaction; it does
+not imply a total breeding ratio. G1/G3 tests use manufactured processed tables
+for all five channels, independent analytic depletion, and Li-6(n,t)He-4 with
+explicit tritium/helium products, neutron/charge/baryon accounting, source-off
+capture, and separate incident-kinetic and nuclear-event energy accounts.
 
 `collapse_flat_in_energy` computes each group mean by integrating every
 intersected histogram or linear segment. Its declared weighting is flat flux
