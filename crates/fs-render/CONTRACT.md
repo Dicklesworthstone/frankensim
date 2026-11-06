@@ -8095,3 +8095,30 @@ Five G1/G3 regression groups cover both density bases, original P1 derivatives
 and optical Hessians, chromatic bending and group paths, concentration-jump
 bundle variations, constant-index/vacuum limits, and source/topology/work
 refusals. Native execution is reported separately from source/format checks.
+
+## Finite-source histories on refractive camera paths
+
+`polarization::dielectric::scene::curved::camera::transient` observes
+prescribed finite `SurfaceEmitter` radiance histories on the original camera
+paths. Each encountered source is evaluated at the observation time minus
+that encounter's accumulated group optical length divided by the exact vacuum
+light speed. Earlier source contributions never inherit the terminal path's
+delay. Phase index still owns bending, Fresnel response and radiance conversion.
+
+The observation clock is double-double seconds at the launched ray/pupil.
+Histories retain that clock until subtracting their own physical epoch. Missing
+group information, unresolved delays, invalid histories and cancellation refuse
+the complete sample. Histories multiply the original radiance spectrum, consume
+no random variates, and leave the original path, Beer attenuation and reciprocal
+polarization response intact. Exact unit histories preserve static arithmetic.
+
+This is frozen-geometry, frozen-medium, incoherent spectral envelope transport
+with a narrow-band group-delay approximation. It supplies no carrier phase,
+within-bin pulse reshaping, moving-medium frequency shift, fluorescence,
+unmodeled lens transit, interface/coating residence time, or temporal environment,
+volume or light-connection history. Unbound sources remain explicitly steady.
+
+Seven G1/G3/G4 tests cover native static/RNG parity, distinct per-source delays,
+chromatic pulse arrivals, an independent curved-path group integral, large-epoch
+invariance, source/domain refusals and late cancellation. Numerical execution
+remains separate from source and formatting checks.

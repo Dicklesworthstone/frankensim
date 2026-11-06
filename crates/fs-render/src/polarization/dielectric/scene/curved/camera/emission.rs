@@ -126,7 +126,22 @@ impl<'a, 's, 'm> SurfaceEmission<'a, 's, 'm> {
         // Area-source MIS applies only to the surface term. Thermal emission
         // has no competing source proposal and retains its full path weight.
         self.add_thermal(path, false)
-            .and_then(|()| self.add_surface(path, weight))
+            .and_then(|()| self.add_surface(path, weight, 1.0))
+            .map_err(|error| {
+                self.error = Some(error);
+                CurvedSceneError::NumericalRange
+            })
+    }
+
+    /// A finite source's prescribed radiance history changes only its own Le.
+    /// Steady LTE emission and the original reciprocal continuation are unchanged.
+    pub(super) fn observe_modulated(
+        &mut self,
+        path: &CurvedPathResult,
+        source_scale: f64,
+    ) -> Result<(), CurvedSceneError> {
+        self.add_thermal(path, false)
+            .and_then(|()| self.add_surface(path, 1.0, source_scale))
             .map_err(|error| {
                 self.error = Some(error);
                 CurvedSceneError::NumericalRange
@@ -137,8 +152,13 @@ impl<'a, 's, 'm> SurfaceEmission<'a, 's, 'm> {
         &mut self,
         path: &CurvedPathResult,
         mis_weight: f64,
+        source_scale: f64,
     ) -> Result<(), CameraRadianceError> {
-        if !mis_weight.is_finite() || !(0.0..=1.0).contains(&mis_weight) {
+        if !mis_weight.is_finite()
+            || !(0.0..=1.0).contains(&mis_weight)
+            || !source_scale.is_finite()
+            || source_scale < 0.0
+        {
             return Err(CameraRadianceError::NumericalRange);
         }
         let contact = path
@@ -185,7 +205,7 @@ impl<'a, 's, 'm> SurfaceEmission<'a, 's, 'm> {
             }
             _ => return Err(CameraRadianceError::NumericalRange),
         };
-        if emitted == 0.0 || mis_weight == 0.0 {
+        if emitted == 0.0 || mis_weight == 0.0 || source_scale == 0.0 {
             return Ok(());
         }
         if beam.power().i == 0.0 {
@@ -197,6 +217,13 @@ impl<'a, 's, 'm> SurfaceEmission<'a, 's, 'm> {
         let ratio = self.initial_index / local_index;
         let weight = beam.power().i * (ratio * ratio);
         let direct = (emitted * weight) * mis_weight;
+        // Keep the complete static arithmetic, including signed zero and the
+        // original overflow recovery, when the history is exactly steady.
+        let direct = if source_scale == 1.0 {
+            direct
+        } else {
+            direct * source_scale
+        };
         let contribution = if direct.is_finite() && direct > 0.0 {
             direct
         } else {
@@ -206,6 +233,11 @@ impl<'a, 's, 'm> SurfaceEmission<'a, 's, 'm> {
                 + fs_math::det::ln(beam.power().i)
                 + 2.0 * (fs_math::det::ln(self.initial_index) - fs_math::det::ln(local_index))
                 + fs_math::det::ln(mis_weight);
+            let logarithm = if source_scale == 1.0 {
+                logarithm
+            } else {
+                logarithm + fs_math::det::ln(source_scale)
+            };
             let value = fs_math::det::exp(logarithm);
             if !value.is_finite() || value <= 0.0 {
                 return Err(CameraRadianceError::NumericalRange);

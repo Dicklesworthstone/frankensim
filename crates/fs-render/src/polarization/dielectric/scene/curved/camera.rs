@@ -63,6 +63,8 @@ use fs_exec::Cx;
 use fs_geom::Vec3;
 
 mod emission;
+/// Finite-source emission histories on native group-delay paths.
+pub mod transient;
 use emission::SurfaceEmission;
 
 mod thermal;
