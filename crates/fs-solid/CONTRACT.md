@@ -9140,8 +9140,11 @@ unavailable and the shared filesystem is full.
 ## Retained finite porous solids
 
 `hyper3::plastic::porous::FinitePorousTetSolid` retains original per-element
-`FinitePorous` laws, non-isochoric plastic metrics, accumulated work-conjugate
-flow, configuration and Piola stress. Virgin reference preparation and every
+native or source-resolved `FinitePorousMaterial` owners, non-isochoric plastic
+metrics, accumulated work-conjugate flow, configuration and Piola stress.
+Complete source cards and their fixed physical contexts remain borrowed across
+load, unload and reload; constitutive trials never repeat source resolution.
+Virgin reference preparation and every
 absolute load/support endpoint reuse the existing tetrahedral geometry,
 Newton, line search and prepared-element storage. Both porous and J2 owners
 use the same mechanical endpoint/work implementation; neither infers plastic
@@ -9154,6 +9157,14 @@ preserves the complete old solid. Original reference volume integrates energy;
 physical `yield_stress * delta_alpha` loss remains separate from hardening
 storage and the signed numerical endpoint defect. Prestressed finite rotations
 can have negative endpoint-work defect without generating plastic heat.
+
+Accepted total volume `J` and permanent plastic volume `Jp` are retained from
+the native material response without conflation. The density query maps an
+explicit original reference inventory to `rho_ref/J`; it does not use Jp as the
+current volume or invent a source density calibration. The source-driven
+`hyper_porous` cases check the original material/context binding, conserved
+density, independent hydrostatic storage/dissipation/work, late work refusal
+and deterministic retry, and per-element source retention without averaging.
 
 The `hyper_porous_retained` regressions specify force-driven compression,
 permanent volume loss on unloading, elastic reload against independent

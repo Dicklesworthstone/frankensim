@@ -16,7 +16,8 @@ mod thermal_cross;
 pub use thermal_cross::{
     BinaryThermalDiffusionFactorMaterial, MaterialBinarySoretDufourTransport,
     MaterialSoretDufourTransport, ResolvedBinaryThermalDiffusionFactor,
-    ResolvedMaterialHeatsOfTransport, SpeciesHeatOfTransportMaterial, ThermalConductivityConvention,
+    ResolvedMaterialHeatsOfTransport, SpeciesHeatOfTransportMaterial,
+    ThermalConductivityConvention,
 };
 
 use crate::multicomponent::dissipation::{

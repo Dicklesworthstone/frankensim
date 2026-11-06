@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use fs_exec::Cx;
 use fs_material::plastic::finite::porous::{
-    FinitePorous, FinitePorousError, FinitePorousState, FrozenPorousTrial,
+    FinitePorous, FinitePorousError, FinitePorousMaterial, FinitePorousState, FrozenPorousTrial,
 };
 
 use super::{
@@ -38,15 +38,17 @@ use crate::linear3::TetAssemblyBudget;
 /// accepted plastic metric. Prepared reference elements are shared across
 /// candidates, while each original tetrahedron retains its own history.
 #[derive(Debug)]
-pub struct FinitePorousTetSolid<'a> {
-    material: FinitePlasticLawField<'a, FinitePorous>,
+pub struct FinitePorousTetSolid<'a, L: FinitePorousMaterial = FinitePorous> {
+    material: FinitePlasticLawField<'a, L>,
     state: FinitePlasticTetState<'a, FinitePorousState>,
+    jacobians: Vec<f64>,
+    plastic_jacobians: Vec<f64>,
 }
 
 /// Complete accepted endpoint plus its native equilibrium and physical work.
 #[derive(Debug)]
-pub struct FinitePorousTetStep<'a> {
-    pub solid: FinitePorousTetSolid<'a>,
+pub struct FinitePorousTetStep<'a, L: FinitePorousMaterial = FinitePorous> {
+    pub solid: FinitePorousTetSolid<'a, L>,
     /// `strain_energy_j` is the reduced incremental potential, not storage.
     pub equilibrium: HyperTetSolution,
     /// Physical yield heat, retained storage and numerical work remain distinct.
@@ -97,8 +99,10 @@ impl From<HyperTetError> for FinitePorousTetError {
     }
 }
 
-impl<'a> FinitePorousTetSolid<'a> {
+impl<'a, L: FinitePorousMaterial> FinitePorousTetSolid<'a, L> {
     /// Prepare an undeformed, stress-free solid with original per-element laws.
+    /// Native and source-resolved owners remain borrowed; complete source cards
+    /// and fixed physical contexts are retained without repeated source queries.
     ///
     /// # Errors
     /// Refuses invalid geometry, law cardinality, budget, or cancellation before
@@ -106,7 +110,7 @@ impl<'a> FinitePorousTetSolid<'a> {
     pub fn try_new(
         nodes_m: &'a [[f64; 3]],
         tetrahedra: &'a [[usize; 4]],
-        material: FinitePlasticLawField<'a, FinitePorous>,
+        material: FinitePlasticLawField<'a, L>,
         budget: TetAssemblyBudget,
         cx: &Cx<'_>,
     ) -> Result<Self, FinitePorousTetError> {
@@ -118,7 +122,7 @@ impl<'a> FinitePorousTetSolid<'a> {
             if index % 1024 == 0 {
                 checkpoint(cx)?;
             }
-            element_states.push(material.at(index).initial_state());
+            element_states.push(material.at(index).finite_porous().initial_state());
         }
         let frozen = Self::freeze(&material, &element_states, cx)?;
         let elements = FinitePlasticTetState::reference_elements(
@@ -141,11 +145,13 @@ impl<'a> FinitePorousTetSolid<'a> {
                 element_first_piola_pa: vec![[0.0; 9]; tetrahedra.len()],
                 stored_energy_j: 0.0,
             },
+            jacobians: vec![1.0; tetrahedra.len()],
+            plastic_jacobians: vec![1.0; tetrahedra.len()],
         })
     }
 
     fn freeze<'s>(
-        material: &'s FinitePlasticLawField<'_, FinitePorous>,
+        material: &'s FinitePlasticLawField<'_, L>,
         states: &'s [FinitePorousState],
         cx: &Cx<'_>,
     ) -> Result<Vec<FrozenPorousTrial<'s>>, FinitePorousTetError> {
@@ -157,6 +163,7 @@ impl<'a> FinitePorousTetSolid<'a> {
             frozen.push(
                 material
                     .at(element)
+                    .finite_porous()
                     .frozen(state)
                     .map_err(|source| FinitePorousTetError::Material { element, source })?,
             );
@@ -196,12 +203,61 @@ impl<'a> FinitePorousTetSolid<'a> {
         &self.state.element_first_piola_pa
     }
 
+    /// Total current/reference volume ratios, directly from the native response.
+    pub fn element_jacobians(&self) -> &[f64] {
+        &self.jacobians
+    }
+
+    /// Permanent plastic volume ratios det(Fp), independent of elastic volume.
+    pub fn element_plastic_jacobians(&self) -> &[f64] {
+        &self.plastic_jacobians
+    }
+
+    /// Transform an explicitly supplied original reference density field to
+    /// the accepted current configuration using mass conservation rho=rho_ref/J.
+    ///
+    /// One positive finite value is required per original tetrahedron. This is
+    /// a query, not a mass update or material-source calibration. The caller
+    /// must supply the same original inventory throughout its mechanical path.
+    /// Neither the relaxed plastic volume Jp nor current density replaces that
+    /// original reference inventory. No partial field is returned on refusal.
+    pub fn current_density_kg_m3(
+        &self,
+        reference_density_kg_m3: &[f64],
+        cx: &Cx<'_>,
+    ) -> Result<Vec<f64>, FinitePorousTetError> {
+        checkpoint(cx)?;
+        if reference_density_kg_m3.len() != self.jacobians.len() {
+            return Err(invalid("one original reference density per tetrahedron required").into());
+        }
+        let mut densities = Vec::with_capacity(self.jacobians.len());
+        for (index, (&reference, &j)) in reference_density_kg_m3
+            .iter()
+            .zip(&self.jacobians)
+            .enumerate()
+        {
+            if index % 1024 == 0 {
+                checkpoint(cx)?;
+            }
+            let density = reference / j;
+            if !reference.is_finite() || reference <= 0.0 || !density.is_finite() || density <= 0.0
+            {
+                return Err(
+                    invalid("reference and current densities must be finite and positive").into(),
+                );
+            }
+            densities.push(density);
+        }
+        checkpoint(cx)?;
+        Ok(densities)
+    }
+
     /// Elastic and energetic-hardening storage over the reference mesh, J.
     pub fn stored_energy_j(&self) -> f64 {
         self.state.stored_energy_j
     }
 
-    pub fn material(&self) -> FinitePlasticLawField<'a, FinitePorous> {
+    pub fn material(&self) -> FinitePlasticLawField<'a, L> {
         self.material
     }
 
@@ -225,7 +281,7 @@ impl<'a> FinitePorousTetSolid<'a> {
         settings: HyperTetSettings,
         controls: FinitePlasticStepControls,
         cx: &Cx<'_>,
-    ) -> Result<FinitePorousTetStep<'a>, FinitePorousTetError> {
+    ) -> Result<FinitePorousTetStep<'a, L>, FinitePorousTetError> {
         checkpoint(cx)?;
         validate_controls(settings, controls)?;
         for (element, state) in self.state.element_states.iter().enumerate() {
@@ -234,6 +290,7 @@ impl<'a> FinitePorousTetSolid<'a> {
             }
             self.material
                 .at(element)
+                .finite_porous()
                 .validate_committed(
                     &self.state.element_deformation[element],
                     state,
@@ -255,6 +312,8 @@ impl<'a> FinitePorousTetSolid<'a> {
         let mut element_states = Vec::with_capacity(self.state.elements.len());
         let mut element_deformation = Vec::with_capacity(self.state.elements.len());
         let mut element_first_piola_pa = Vec::with_capacity(self.state.elements.len());
+        let mut jacobians = Vec::with_capacity(self.state.elements.len());
+        let mut plastic_jacobians = Vec::with_capacity(self.state.elements.len());
         let mut energy = FinitePlasticTetEnergy {
             stored_before_j: self.state.stored_energy_j,
             stored_after_j: 0.0,
@@ -270,7 +329,7 @@ impl<'a> FinitePorousTetSolid<'a> {
             if index % 1024 == 0 {
                 checkpoint(cx)?;
             }
-            let law = self.material.at(index);
+            let law = self.material.at(index).finite_porous();
             let f = HyperTetProblem::<FrozenPorousTrial<'_>>::deformation_gradient(element, new_u);
             let refused = |source| FinitePorousTetError::Material {
                 element: index,
@@ -301,6 +360,8 @@ impl<'a> FinitePorousTetSolid<'a> {
             element_deformation.push(f);
             element_first_piola_pa.push(response.first_piola_pa);
             element_states.push(response.state);
+            jacobians.push(response.jacobian);
+            plastic_jacobians.push(response.plastic_jacobian);
         }
         let work = self.state.endpoint_work(
             &equilibrium,
@@ -362,6 +423,8 @@ impl<'a> FinitePorousTetSolid<'a> {
                     element_first_piola_pa,
                     stored_energy_j: energy.stored_after_j,
                 },
+                jacobians,
+                plastic_jacobians,
             },
             equilibrium,
             energy,
