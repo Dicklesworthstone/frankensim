@@ -118,11 +118,11 @@ pub(super) struct Workspace {
 /// scratch is allocated on first use and retained for later steps. All
 /// species share each face's wave speeds and one conservative energy flux.
 /// No species clipping, trace seeding or composition normalization is applied.
-/// Periodic, reflecting, transmissive and pressure-outlet boundaries are supported. The shared
+/// Periodic, reflecting, transmissive, pressure-outlet and acoustic
+/// characteristic-outlet boundaries are supported. Both outlets retain the
+/// current interior composition and refuse backflow. The shared
 /// frozen-gas `Boundary::Reservoir` variant refuses because it cannot specify
 /// the required species masses and their separate formation-energy references.
-/// `Boundary::CharacteristicOutlet` also refuses until its composition-aware
-/// acoustic closure is supported; it never falls back to a transmissive face.
 /// Prescribed species-bearing reservoirs use [`Self::step_with_reservoirs`].
 pub struct MixtureEuler1d {
     pub(super) gas: MixtureGas,
@@ -692,11 +692,20 @@ impl MixtureEuler1d {
 
 fn admit_boundaries(boundaries: Boundaries) -> Result<(), Error> {
     if let Boundaries::Ends { left, right } = boundaries {
-        for boundary in [left, right] {
-            if matches!(boundary, Boundary::CharacteristicOutlet { .. }) {
-                return Err(Error::Invalid(
-                    "characteristic outlet is not yet supported for evolving mixtures",
-                ));
+        for (boundary, normal) in [(left, -1.0), (right, 1.0)] {
+            if let Boundary::CharacteristicOutlet {
+                pressure_pa,
+                velocity_m_per_s,
+            } = boundary
+            {
+                if !positive(pressure_pa)
+                    || !velocity_m_per_s.is_finite()
+                    || normal * velocity_m_per_s < 0.0
+                {
+                    return Err(Error::Invalid(
+                        "characteristic outlet needs positive pressure and outward reference velocity",
+                    ));
+                }
             }
             if let Boundary::PressureOutlet { pressure_pa } = boundary {
                 if !positive(pressure_pa) {
@@ -1367,6 +1376,27 @@ fn operator_core_with_gravity<const ENTROPY_FLUX: bool>(
                         inner,
                         if face == 0 { -1.0 } else { 1.0 },
                         pressure_pa,
+                        &mut faces[face * m..(face + 1) * m],
+                        cancelled,
+                    )?;
+                    continue;
+                }
+                if let Boundary::CharacteristicOutlet {
+                    pressure_pa,
+                    velocity_m_per_s,
+                } = if face == 0 { lower } else { upper }
+                {
+                    let inner = reconstruct(
+                        if face == 0 { 0 } else { count - 1 },
+                        if face == 0 { -0.5 } else { 0.5 },
+                        &mut left[..m],
+                    )?;
+                    face_data[face] = gas.characteristic_outlet_admitted_flux(
+                        &left[..n],
+                        inner,
+                        if face == 0 { -1.0 } else { 1.0 },
+                        pressure_pa,
+                        velocity_m_per_s,
                         &mut faces[face * m..(face + 1) * m],
                         cancelled,
                     )?;

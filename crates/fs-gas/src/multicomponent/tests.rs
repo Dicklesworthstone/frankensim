@@ -1,5 +1,6 @@
 use super::*;
 
+mod characteristic_boundary;
 mod compatible_reconstruction;
 mod contact_equilibrium;
 mod pressure_boundary;
@@ -192,7 +193,7 @@ fn frozen_reservoir_cannot_silently_become_a_transmissive_mixture_boundary() {
 }
 
 #[test]
-fn characteristic_outlet_cannot_silently_become_a_transmissive_mixture_boundary() {
+fn characteristic_outlet_admission_and_reconfiguration_keep_oriented_reference_data() {
     let gas = standard(0.0);
     let q = gas.conserved(&[0.7, 0.3], 0.0, 1.0).unwrap();
     let original = Boundaries::Ends {
@@ -208,8 +209,6 @@ fn characteristic_outlet_cannot_silently_become_a_transmissive_mixture_boundary(
         || false,
     )
     .unwrap();
-    let expected =
-        Error::Invalid("characteristic outlet is not yet supported for evolving mixtures");
     for normal in [-1.0, 1.0] {
         let acoustic = Boundary::CharacteristicOutlet {
             pressure_pa: 1.0,
@@ -235,12 +234,34 @@ fn characteristic_outlet_cannot_silently_become_a_transmissive_mixture_boundary(
             boundaries,
             || false,
         );
-        assert_eq!(constructed.err(), Some(expected.clone()));
+        assert!(constructed.is_ok());
+        flow.set_boundaries(boundaries, || false).unwrap();
+        assert_eq!(flow.boundaries(), boundaries);
+        let invalid = Boundary::CharacteristicOutlet {
+            pressure_pa: 1.0,
+            velocity_m_per_s: -normal * 0.2,
+        };
+        let invalid = Boundaries::Ends {
+            left: if normal < 0.0 {
+                invalid
+            } else {
+                Boundary::Reflecting
+            },
+            right: if normal > 0.0 {
+                invalid
+            } else {
+                Boundary::Reflecting
+            },
+        };
+        assert!(matches!(
+            flow.set_boundaries(invalid, || false),
+            Err(Error::Invalid(_))
+        ));
         assert_eq!(
-            flow.set_boundaries(boundaries, || false),
-            Err(expected.clone())
+            flow.set_boundaries(original, || true),
+            Err(Error::Cancelled)
         );
-        assert_eq!(flow.boundaries(), original);
+        assert_eq!(flow.boundaries(), boundaries);
     }
 }
 

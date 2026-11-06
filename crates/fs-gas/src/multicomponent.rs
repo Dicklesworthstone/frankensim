@@ -10,9 +10,12 @@
 //! [`MixtureEuler1d::step_with_contact_equilibrium`] provides an explicit,
 //! caller-bounded numerical energy correction through the original calorics.
 //!
-//! Shared boundary types admit periodic, reflecting, transmissive and
-//! pressure-outlet ends here. Pressure outlets preserve the outgoing local
-//! composition and refuse backflow without an exterior thermodynamic state.
+//! Shared boundary types admit periodic, reflecting, transmissive,
+//! pressure-outlet and acoustic characteristic-outlet ends here. Both outlets
+//! preserve the outgoing local composition and refuse backflow without an
+//! exterior thermodynamic state. Characteristic outlets let pressure fluctuate
+//! by fixing only the incoming acoustic characteristic, with the current
+//! composition and original Cp(T) at each reconstructed stage trace.
 //! A frozen `Boundary::Reservoir` has no species-mass axis or species energy
 //! references and therefore refuses. Species-bearing compact-reservoir ports
 //! use [`MixtureGas::reservoir_flux`] with the original local compositions.

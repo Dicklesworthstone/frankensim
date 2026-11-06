@@ -1,5 +1,6 @@
-//! Species-bearing pressure outlets and compact-reservoir characteristic fluxes.
+//! Species-bearing acoustic/pressure outlets and compact-reservoir fluxes.
 
+mod acoustic;
 mod pressure;
 
 use super::wall::LocalCaloric;

@@ -4,7 +4,7 @@
 //! frozen and evolving mixtures. This adapter forms the original source-gauged
 //! flux and preserves the public frozen reservoir API.
 
-mod acoustic;
+pub(crate) mod acoustic;
 pub(crate) mod shared;
 mod wave;
 

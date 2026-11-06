@@ -9,7 +9,7 @@ use crate::dynamics::wall::shared::{CaloricLaw, WallError as Error, WallSolver};
 use crate::dynamics::{Primitive, positive};
 use fs_math::det;
 
-pub(super) fn outlet<L: CaloricLaw>(
+pub(crate) fn outlet<L: CaloricLaw>(
     gas: &L,
     inside: Primitive,
     reference_pressure: f64,

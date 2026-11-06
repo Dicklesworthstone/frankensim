@@ -196,7 +196,42 @@ impl MixtureGas {
             cancelled,
         )
         .map_err(characteristic_error)?;
-        let face = port.primitive;
+        self.outgoing_characteristic_flux(
+            &law,
+            port.primitive,
+            transverse_velocity,
+            outward_normal,
+            port.signal_speed,
+            out,
+            cancelled,
+        )
+    }
+
+    /// One conservative donor flux for pressure and acoustic outlet closures.
+    /// The borrowed local law retains the current species fractions and their
+    /// original energy references, including exact-zero absent species.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn outgoing_characteristic_flux<const TANGENTS: usize>(
+        &self,
+        law: &LocalCaloric<'_>,
+        face: Primitive,
+        transverse_velocity: [f64; TANGENTS],
+        outward_normal: f64,
+        signal_speed: f64,
+        out: &mut [f64],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<FaceFlux, Error> {
+        let n = self.species_count();
+        let energy_index = n + TANGENTS + 1;
+        if TANGENTS > 2
+            || out.len() != energy_index + 1
+            || !matches!(outward_normal, -1.0 | 1.0)
+            || !transverse_velocity.iter().all(|v| v.is_finite())
+        {
+            return Err(Error::Invalid(
+                "mixture pressure outlet axis, normal or shear",
+            ));
+        }
         let velocity = outward_normal * face.velocity;
         let mut candidate = [0.0; MAX_SPATIAL_COMPONENTS];
         let admitted = law.state_at(
@@ -244,7 +279,7 @@ impl MixtureGas {
         }
         candidate[n] += face.pressure;
         candidate[energy_index] = energy_flux;
-        let signal_speed = port.signal_speed.max(velocity.abs() + admitted.sound_speed);
+        let signal_speed = signal_speed.max(velocity.abs() + admitted.sound_speed);
         if !candidate[..=energy_index].iter().all(|v| v.is_finite())
             || !positive(candidate[n])
             || !positive(signal_speed)
