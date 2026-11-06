@@ -6,6 +6,7 @@ use crate::multicomponent::{MAX_NORMAL_COMPONENTS, MAX_SPECIES, NormalCell, Norm
 use fs_qty::{AmountConcentration, Pressure, Temperature};
 use fs_thermochem::UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K as R;
 
+pub(super) mod entropy;
 mod spatial;
 pub use spatial::SpatialTransport;
 
@@ -27,8 +28,10 @@ pub struct TransportFaceReport {
     pub maximum_gradient_residual_per_m: f64,
     /// Signed sum of all diffusive species mass fluxes [kg/(m² s)].
     pub mass_frame_residual_kg_m2_s: f64,
-    /// Temperature of the original partial enthalpies in the energy flux [K].
+    /// Temperature of the original partial enthalpies in the engineering flux [K].
     /// Reservoir effort may differ from the constitutive sampling temperature.
+    /// The entropy-conjugate axial path reports its constitutive sampling T here;
+    /// its divided source enthalpies need not share one effective temperature.
     pub enthalpy_temperature_k: f64,
     /// Fourier plus reciprocal Dufour heat, excluding species enthalpy and
     /// mechanical work [W/m²], positive in the oriented face direction.

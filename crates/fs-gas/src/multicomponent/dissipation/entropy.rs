@@ -117,6 +117,39 @@ pub struct ReservoirMolecularEntropyReport {
 
 impl<L: TransportLaw> DissipationOperator<L> {
 
+
+    /// Advance the closed molecular field with source-conjugate interior faces
+    /// and admit every actual SSP-RK2 candidate against the original entropy.
+    ///
+    /// Interior diffusion uses logarithmic chemical efforts and divided
+    /// enthalpies derived from each original caloric model. Fourier heat,
+    /// longitudinal stress and authored reciprocal Soret/Dufour terms share
+    /// one conservative energy flux. This corrects the spatial caloric/force
+    /// pairing; the native finite-step positivity and entropy gates remain
+    /// necessary. It does not establish a fully discrete stability theorem.
+    ///
+    /// Every active species must be positive at both sides of each interior
+    /// face; absence on both sides is admitted. One-sided zeros refuse without
+    /// flooring composition or selecting another flux. Periodic and stationary
+    /// zero-heat/species ends are supported. Reservoir, moving-wall, RKL2 and
+    /// advective/reactive integration are separate entry points.
+    pub fn advance_entropy_consistent_for(
+        &mut self,
+        flow: &mut MixtureEuler1d,
+        duration: Time,
+        controls: DissipationControl,
+        entropy: MolecularEntropyControl,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<(DissipationReport, MolecularEntropyReport), DissipationError> {
+        controls.validate()?;
+        entropy.validate()?;
+        let mut account = EntropyTracker::new(flow, entropy, &mut cancelled)?;
+        let report = super::evolve::advance_entropy_consistent(
+            self, flow, duration, controls, &mut account, &mut cancelled,
+        )?;
+        Ok((report, account.report))
+    }
+
     /// Admit the original SSP-RK2 interval with stationary molecular reservoirs.
     ///
     /// Entropy entering each end is q_reduced/T_b + sum_i(s_i,b * j_i/M_i),

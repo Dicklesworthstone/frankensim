@@ -6,6 +6,7 @@ use fs_thermochem::UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K as R;
 use fs_thermochem::transport::kinetic::ThermalConductivityQuantityV1;
 
 mod entropy;
+mod entropy_consistent;
 mod face;
 mod reservoir;
 mod reservoir_entropy;

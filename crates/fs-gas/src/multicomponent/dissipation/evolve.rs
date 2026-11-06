@@ -30,7 +30,7 @@ pub(super) fn advance<L: TransportLaw>(
     reservoirs: ReservoirEnds<'_>,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<DissipationReport, DissipationError> {
-    advance_inner(owner, flow, duration, controls, reservoirs, None, None, cancelled)
+    advance_inner::<false, L>(owner, flow, duration, controls, reservoirs, None, None, cancelled)
 }
 
 pub(super) fn advance_with_entropy<L: TransportLaw>(
@@ -41,9 +41,23 @@ pub(super) fn advance_with_entropy<L: TransportLaw>(
     entropy: &mut super::entropy::EntropyTracker,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<DissipationReport, DissipationError> {
-    advance_inner(owner, flow, duration, controls, [None; 2], None, Some(entropy), cancelled)
+    advance_inner::<false, L>(owner, flow, duration, controls, [None; 2], None, Some(entropy), cancelled)
 }
 
+
+
+pub(super) fn advance_entropy_consistent<L: TransportLaw>(
+    owner: &mut DissipationOperator<L>,
+    flow: &mut MixtureEuler1d,
+    duration: Time,
+    controls: DissipationControl,
+    entropy: &mut super::entropy::EntropyTracker,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<DissipationReport, DissipationError> {
+    advance_inner::<true, L>(
+        owner, flow, duration, controls, [None; 2], None, Some(entropy), cancelled,
+    )
+}
 
 pub(super) fn advance_with_reservoirs_and_entropy<L: TransportLaw>(
     owner: &mut DissipationOperator<L>,
@@ -54,7 +68,7 @@ pub(super) fn advance_with_reservoirs_and_entropy<L: TransportLaw>(
     entropy: &mut super::entropy::EntropyTracker,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<DissipationReport, DissipationError> {
-    advance_inner(owner, flow, duration, controls, reservoirs, None, Some(entropy), cancelled)
+    advance_inner::<false, L>(owner, flow, duration, controls, reservoirs, None, Some(entropy), cancelled)
 }
 
 pub(super) fn advance_moving<L: TransportLaw>(
@@ -76,7 +90,7 @@ pub(super) fn advance_moving<L: TransportLaw>(
             "molecular moving trial requires two finite impermeable wall speeds",
         ));
     }
-    advance_inner(
+    advance_inner::<false, L>(
         owner,
         flow,
         duration,
@@ -89,7 +103,7 @@ pub(super) fn advance_moving<L: TransportLaw>(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn advance_inner<L: TransportLaw>(
+fn advance_inner<const ENTROPY_FACES: bool, L: TransportLaw>(
     owner: &mut DissipationOperator<L>,
     flow: &mut MixtureEuler1d,
     duration: Time,
@@ -189,7 +203,7 @@ fn advance_inner<L: TransportLaw>(
                     rejected_steps,
                 });
             }
-            let a = spatial_with_wall_motion(
+            let a = spatial_with_wall_motion::<ENTROPY_FACES, _>(
                 gas,
                 mesh,
                 *boundaries,
@@ -235,7 +249,7 @@ fn advance_inner<L: TransportLaw>(
                     &mut work.stage,
                     cancelled,
                 )?;
-                let b = spatial_with_wall_motion(
+                let b = spatial_with_wall_motion::<ENTROPY_FACES, _>(
                     gas,
                     mesh,
                     *boundaries,
@@ -455,7 +469,7 @@ pub(in crate::multicomponent) fn spatial<L: TransportLaw>(
     controls: MaxwellStefanSolveV1,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<Stage, DissipationError> {
-    spatial_with_wall_motion(
+    spatial_with_wall_motion::<false, L>(
         gas,
         mesh,
         boundaries,
@@ -478,7 +492,7 @@ pub(in crate::multicomponent) fn spatial<L: TransportLaw>(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn spatial_with_wall_motion<L: TransportLaw>(
+fn spatial_with_wall_motion<const ENTROPY_FACES: bool, L: TransportLaw>(
     gas: &MixtureGas,
     mesh: &Mesh1d,
     boundaries: Boundaries,
@@ -518,7 +532,7 @@ fn spatial_with_wall_motion<L: TransportLaw>(
     };
     for face in 1..count {
         poll(cancelled)?;
-        let rate = interior_face(
+        let rate = interior_face_with_scheme::<ENTROPY_FACES, L>(
             gas,
             law,
             diffusion,
@@ -542,7 +556,7 @@ fn spatial_with_wall_motion<L: TransportLaw>(
     }
     match boundaries {
         Boundaries::Periodic => {
-            let rate = interior_face(
+            let rate = interior_face_with_scheme::<ENTROPY_FACES, L>(
                 gas,
                 law,
                 diffusion,
@@ -747,33 +761,51 @@ pub(in crate::multicomponent) fn interior_face<L: TransportLaw>(
     stage: &mut Stage,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<f64, DissipationError> {
+    interior_face_with_scheme::<false, L>(
+        gas, law, diffusion, workspace, left, right, pl, pr, cvl, cvr,
+        wl, wr, mass_ratio, binary, out, controls, stage, cancelled,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn interior_face_with_scheme<const ENTROPY_FACES: bool, L: TransportLaw>(
+    gas: &MixtureGas,
+    law: &mut L,
+    diffusion: &MaxwellStefanV1,
+    workspace: &mut MaxwellStefanWorkspaceV1,
+    left: &[f64],
+    right: &[f64],
+    pl: Primitive,
+    pr: Primitive,
+    cvl: f64,
+    cvr: f64,
+    wl: f64,
+    wr: f64,
+    mass_ratio: f64,
+    binary: &mut [f64],
+    out: &mut [f64],
+    controls: MaxwellStefanSolveV1,
+    stage: &mut Stage,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<f64, DissipationError> {
     let n = gas.species_count();
-    let evaluated = super::face::interior::<false, L>(
-        gas,
-        law,
-        diffusion,
-        workspace,
-        super::face::Trace {
-            densities: &left[..n],
-            primitive: pl,
-            transverse_velocity: 0.0,
-            cv_density: cvl,
-        },
-        super::face::Trace {
-            densities: &right[..n],
-            primitive: pr,
-            transverse_velocity: 0.0,
-            cv_density: cvr,
-        },
-        wl,
-        wr,
-        [0.0; 2],
-        mass_ratio,
-        binary,
-        out,
-        controls,
-        cancelled,
-    )?;
+    let left = super::face::Trace {
+        densities: &left[..n], primitive: pl, transverse_velocity: 0.0, cv_density: cvl,
+    };
+    let right = super::face::Trace {
+        densities: &right[..n], primitive: pr, transverse_velocity: 0.0, cv_density: cvr,
+    };
+    let evaluated = if ENTROPY_FACES {
+        super::face::entropy::interior(
+            gas, law, diffusion, workspace, left, right, wl, wr,
+            mass_ratio, binary, out, controls, cancelled,
+        )
+    } else {
+        super::face::interior::<false, L>(
+            gas, law, diffusion, workspace, left, right, wl, wr, [0.0; 2],
+            mass_ratio, binary, out, controls, cancelled,
+        )
+    }?;
     stage.gradient_residual = stage
         .gradient_residual
         .max(evaluated.maximum_gradient_residual_per_m);

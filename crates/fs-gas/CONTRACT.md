@@ -5462,3 +5462,60 @@ Fourier baths; composition baths that reduce body entropy while total generation
 is positive; original trajectory and formation-datum invariance; admission of
 initially absent incoming species; zero-activity refusal and heat-only admission;
 and cancellation before final publication followed by workspace reuse.
+
+### Entropy-conjugate axial molecular transport
+
+`DissipationOperator::advance_entropy_consistent_for` selects a source-conjugate
+interior face and retains the actual SSP-RK2 state-entropy admission. It uses
+the same original gas, Maxwell-Stefan solver, material/kinetic transport law,
+geometry and native publication transaction. Compile-time selection in the
+shared native loop retains the original faces for existing entry points;
+no parallel time integrator, altered public controls or extra owner state is
+introduced.
+
+Each species transports its original divided molar enthalpy
+h_i*=Delta(h_i/T-s_i^0)/Delta(1/T), with the existing reference-energy convention.
+The implementation forms this mean from source caloric/entropy intervals
+around the sampled temperature, before large formation references can cancel.
+Equal temperatures use the original referenced enthalpy directly. Variable
+heat capacities, piecewise caloric intervals and explicit source continuity
+remain those of the original thermochemical owner; no constant-Cp or
+constant-gamma surrogate is introduced.
+
+The conjugate chemical effort is Delta(mu_i/T)-h_i*Delta(1/T). Its actual
+finite-precision remainder is retained. Explicit barycentric balancing
+supplies the original Maxwell-Stefan driving-force solve. Authored Soret heats
+add their reciprocal-temperature force and the same coefficients multiply
+actual species flux in Dufour heat. Arithmetic velocity in viscous work closes
+the paired axial stress contribution, including unequal cell widths.
+
+The paired semidiscrete entropy rate consists of Maxwell-Stefan pair friction,
+Fourier heat production and axial viscous production. Original row/mass
+residuals and floating-point reductions remain limitations of that identity.
+The complete native finite-step entropy and species-inventory gates still
+apply before publication. This supplies neither an unconditional timestep
+bound nor a fully discrete entropy/invariant-domain theorem.
+
+Constitutive T, p and mole fractions retain the original width-weighted
+sampling, preserving exact equal traces. The coefficient law is evaluated
+once per face, with the original separate query for authored cross
+coefficients. Reusable Maxwell-Stefan storage and bounded stack arrays are
+retained. The engineering diffusivity estimate includes trace composition
+and temperature contrasts; it is not a nonlinear spectral or positivity
+certificate. Equal-temperature faces skip unnecessary caloric interval queries.
+
+The admitted interior domain has common species support: each species is
+positive at both traces or absent at both. One-sided zeros refuse before a
+transport-source query. There is no concentration floor, invented trace mass,
+post-solve flux clipping or fallback to the engineering face. Periodic and
+stationary zero-heat/species ends retain their native closures. Reservoir and
+moving-wall evolution, network/spatial faces, reactions and advective transport
+remain separate entry points.
+
+Focused regression definitions cover the original energy-conserving
+negative-entropy counterexample and its repaired face and full SSP-RK2 step;
+variable and piecewise source calorics; equal/adjacent temperatures; formation-
+reference shifts; reciprocal thermal diffusion and viscous work; common
+absence; and transactional domain/cancellation refusal. The independent
+two-cell initial entropy rate changes from -0.0397353103431 to
++0.0675891418055 W/K without reversing mixing or injecting energy.
