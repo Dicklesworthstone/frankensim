@@ -63,7 +63,7 @@ pub struct BoundarySgsReport3 {
 }
 
 #[derive(Clone, Copy)]
-enum Neighbour {
+pub(super) enum Neighbour {
     Fluid([f64; 3]),
     Wall([f64; 3]),
     Velocity,
@@ -183,6 +183,25 @@ impl BoundaryGrid3 {
         gate: &CancelGate,
         config: SgsConfig,
         workspace: &mut SgsWorkspace3<CollisionModel3>,
+        sample: impl FnMut([usize; 3], [[f64; 3]; 3]) -> Result<CollisionModel3, E>,
+    ) -> Result<SgsReport, E> {
+        self.prepare_sgs_with_gradient(
+            gate,
+            config,
+            workspace,
+            |p, velocity| self.sgs_gradient(p, velocity),
+            sample,
+        )
+    }
+
+    // Boundary owners may provide their actual intersection stencil while
+    // retaining the same force frame, closure gates and collision-family map.
+    pub(super) fn prepare_sgs_with_gradient<E: From<BoundarySgsError3>>(
+        &self,
+        gate: &CancelGate,
+        config: SgsConfig,
+        workspace: &mut SgsWorkspace3<CollisionModel3>,
+        mut gradient: impl FnMut([usize; 3], &[[f64; 3]]) -> [[f64; 3]; 3],
         mut sample: impl FnMut([usize; 3], [[f64; 3]; 3]) -> Result<CollisionModel3, E>,
     ) -> Result<SgsReport, E> {
         checkpoint(gate).map_err(BoundarySgsError3::from)?;
@@ -198,7 +217,7 @@ impl BoundaryGrid3 {
                     continue;
                 }
                 let coordinate = self.coords(tile, lane);
-                let gradient = self.sgs_gradient(coordinate, &workspace.velocity);
+                let gradient = gradient(coordinate, &workspace.velocity);
                 let eddy = eddy_viscosity(config.model, config.filter_width_lu, gradient)
                     .map_err(BoundarySgsError3::from)?;
                 let molecular = sample(coordinate, gradient)?;
@@ -357,6 +376,18 @@ impl BoundaryGrid3 {
         measure: impl FnOnce(&Self) -> Result<T, BoundaryStepError3>,
     ) -> Result<T, BoundarySgsError3> {
         self.topology_locked = true;
+        self.collide_sgs_prepared(gate, workspace)?;
+        let measured = measure(self)?;
+        self.stream_collided_serial(gate)?;
+        Ok(measured)
+    }
+
+    // Collision only: publication and topology admission stay with the caller.
+    pub(super) fn collide_sgs_prepared(
+        &mut self,
+        gate: &CancelGate,
+        workspace: &SgsWorkspace3<CollisionModel3>,
+    ) -> Result<(), BoundarySgsError3> {
         let collide = collision_kernel3();
         for tile in 0..self.f[0].len() {
             checkpoint(gate)?;
@@ -376,9 +407,7 @@ impl BoundaryGrid3 {
                 }
             }
         }
-        let measured = measure(self)?;
-        self.stream_collided_serial(gate)?;
-        Ok(measured)
+        Ok(())
     }
 
     /// Pooled SGS collision/streaming and optional wall loads through the
@@ -422,7 +451,7 @@ impl BoundaryGrid3 {
         })
     }
 
-    fn sgs_neighbour(
+    pub(super) fn sgs_neighbour(
         &self,
         p: [usize; 3],
         axis: usize,
@@ -464,7 +493,7 @@ impl BoundaryGrid3 {
         }
     }
 
-    fn sgs_gradient(&self, p: [usize; 3], velocity: &[[f64; 3]]) -> [[f64; 3]; 3] {
+    pub(super) fn sgs_gradient(&self, p: [usize; 3], velocity: &[[f64; 3]]) -> [[f64; 3]; 3] {
         let (tile, lane) = self.addr(p[0], p[1], p[2]);
         let center = velocity[tile * TILE_CELLS + lane];
         let mut gradient = [[0.0; 3]; 3];

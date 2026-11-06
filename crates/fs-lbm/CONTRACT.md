@@ -13839,3 +13839,21 @@ execution remain outstanding; these definitions are not an executed
 qualification. Existing Mach, source/material, boundary and timestep limits
 remain. No hydrostatic well-balancing, exact discrete fluid-plus-potential
 energy conservation, self-gravity or measured performance is claimed.
+
+## Curved-wall local SGS on native D3Q19
+
+`BoundaryGrid3::prepare_curved_sgs` and
+`step_with_curved_walls_and_sgs` admit explicit Smagorinsky, WALE or Vreman on
+frozen BFL geometry. Actual axial intersection distances and frozen per-link
+wall velocities supply nonuniform quadratic velocity gradients. The same
+velocities drive the native curved population and load transaction. Physical
+Guo-centered fluid velocity, original molecular collision, non-shear collision
+controls, wall mass/force/torque/work and external transport retain their
+existing owners. Sparse ordered traversal reuses the existing SGS workspace.
+
+Closure and load refusal precede population publication; zero coefficient
+retains native curved-step population and load bits. This supplies resolved
+gradients at the admitted fixed geometry, without a wall law, a nonlocal
+curved-domain dynamic filter or evolving geometry. The focused
+`tests/curved_sgs.rs` cases cover displaced linear/quadratic walls, rotation,
+force centering, five collision families, load accounting and refusal/retry.

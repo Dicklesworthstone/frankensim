@@ -14,6 +14,8 @@ use super::{
     TILE_CELLS, WallMomentumExchange3, cell_force, effective_wall_velocity, wall_population,
 };
 
+mod sgs;
+
 type Result<T> = core::result::Result<T, BoundaryStepError3>;
 
 /// An actual intersection on a native wall link. Pull direction points from
@@ -321,7 +323,7 @@ impl BoundaryGrid3 {
     fn step_curved_inner(
         &mut self,
         wall: &CurvedWall3,
-        mut velocity: impl FnMut(CurvedWallLink3) -> [f64; 3],
+        velocity: impl FnMut(CurvedWallLink3) -> [f64; 3],
         moment_origin: [f64; 3],
         relaxation: Option<&[f64]>,
         gate: &CancelGate,
@@ -331,6 +333,18 @@ impl BoundaryGrid3 {
             return Err(invalid("curved wall moment origin must be finite"));
         }
         self.try_collide_with_relaxation(Some(gate), relaxation)?;
+        self.stream_curved_collided(wall, velocity, moment_origin, gate)
+    }
+
+    // The same stream and complete load account accept molecular or explicit
+    // SGS post-collision populations. Only this owner publishes the candidate.
+    fn stream_curved_collided(
+        &mut self,
+        wall: &CurvedWall3,
+        mut velocity: impl FnMut(CurvedWallLink3) -> [f64; 3],
+        moment_origin: [f64; 3],
+        gate: &CancelGate,
+    ) -> Result<CurvedWallStep3> {
         let periodic = self.periodic_momentum_transport(gate).map_err(|_| {
             if gate.is_requested() {
                 BoundaryStepError3::Cancelled
