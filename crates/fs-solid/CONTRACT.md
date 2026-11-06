@@ -9745,6 +9745,18 @@ disk and memory exhaustion; these are regression definitions, not pass results.
 
 Physical yield dissipation, signed material endpoint-work defect and numerical kinetic loss retain independent work accounts and admission bounds; numerical loss is not heat. Prescribed support reactions include the full consistent-mass action, and free bodies require no artificial restraints. Refusal and cancellation leave the accepted state retryable. The current porous source schema has no density capability, so density is an explicitly supplied reference inventory, not a sourced calibration claim. Fixed-condition porous compression/release does not add evolving porosity, densification, thermal evolution, contact, mass transfer or pressure stabilization. Four native regressions cover independent hydrostatic and consistent-mass formulas, compacted elastic release, free motion and atomic refusal; their execution remains pending the shared dependency build resource blocker.
 
+Both cellwise inventories and positive original P1 nodal density fields are
+supported. The shared mass owner integrates `rho_ref * N_a * N_b` exactly;
+nodal values and the full consistent matrix survive compaction without being
+replaced by cell means. Density queries return current cell means through
+`rho_ref/J`. `reference_acceleration_load_n` projects `M*a` through that same
+matrix, including graded mass and support coupling.
+
+Three additional `hyper_porous_dynamics` regressions specify source/context
+retention, graded free-body acceleration, force-driven crush/unload/reload,
+independent material and kinetic work, consistent support reactions, density,
+late kinetic-budget refusal/retry, admission boundaries and cancellation.
+
 
 ## Primary and secondary creep in checked shell motion
 
