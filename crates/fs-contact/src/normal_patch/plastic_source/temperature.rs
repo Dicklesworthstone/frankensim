@@ -436,7 +436,7 @@ impl SourcePlasticContact {
             Ok(self.clone())
         } else {
             let config = self.model.config();
-            Ok(Self::new(
+            Ok(Self::new_with_linear_solver(
                 normal,
                 hardness,
                 config.grid,
@@ -447,6 +447,7 @@ impl SourcePlasticContact {
                     boundary_clearance_cells: config.boundary_clearance_cells,
                 },
                 self.envelope,
+                self.model.linear_solver(),
                 cx,
             )?)
         }

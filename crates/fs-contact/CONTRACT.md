@@ -3106,3 +3106,27 @@ known pressure and force, independent mixed capped/elastic cell solutions, direc
 series compliance under both solvers, physical storage/work, bounded failure and
 continuation ownership. These fixtures are model checks, not experimental
 qualification or evidence of an executed performance benchmark.
+
+
+## Original-source selection of the bounded pressure solver
+
+`SourcePlasticContact::new_with_linear_solver` exposes the native numerical
+selection through the same original-material factory. The dense constructor
+remains the default. Original body ordering, indentation-test context, exact
+claim selection, per-body pressure hardness and physical applicability bounds
+are unchanged. The selected algorithm and work budgets participate in the
+native model and complete source identities, so foreign numerical histories
+cannot be silently adopted.
+
+The shared temperature resolver preserves the selected algorithm when rebuilding
+contact at independently prescribed body and interface temperatures. Held
+approach, maintained force and held finite-stiffness loading all retain that
+selection. Existing wear continuations compose this same refreshed contact while
+retaining each body's original k/H claims, recession and removed-volume inventory;
+no duplicate constitutive or temperature solver is introduced.
+
+Focused source regressions specify dense/iterative physical equivalence through
+elastic loading, saturation, unloading and reloading; ownership by algorithm,
+budget and original test; retained depth/footprint limits; cancellation; and all
+three prescribed-temperature boundary modes. They do not alter the local
+pressure-saturation approximation or supply experimental qualification.

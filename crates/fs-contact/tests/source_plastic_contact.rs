@@ -9,6 +9,9 @@ mod load;
 #[path = "source_plastic_contact/drive.rs"]
 mod drive;
 
+#[path = "source_plastic_contact/linear.rs"]
+mod linear;
+
 #[path = "source_point/common.rs"]
 mod common;
 

@@ -26,8 +26,8 @@ use fs_material::hardness::IndentationHardnessStatePoint;
 use crate::interface_binding::BoundNormalInterfaceState;
 
 use super::{
-    FiniteGapGrid, FiniteGapPlasticConfig, FiniteGapPlasticError, FiniteGapPlasticModel,
-    FiniteGapPlasticReceipt, FiniteGapPlasticState,
+    FiniteGapGrid, FiniteGapPlasticConfig, FiniteGapPlasticError, FiniteGapPlasticLinearSolver,
+    FiniteGapPlasticModel, FiniteGapPlasticReceipt, FiniteGapPlasticState,
 };
 
 /// Numerical controls for the bounded half-space contact solve.
@@ -132,6 +132,33 @@ impl SourcePlasticContact {
         envelope: PlasticContactEnvelope,
         cx: &Cx<'_>,
     ) -> Result<Self, SourcePlasticContactError> {
+        Self::new_with_linear_solver(
+            normal,
+            hardness,
+            grid,
+            undeformed_gap_m,
+            controls,
+            envelope,
+            FiniteGapPlasticLinearSolver::Dense,
+            cx,
+        )
+    }
+
+    /// Bind original sources with an explicit pressure-solve algorithm and budget.
+    ///
+    /// Matrix-free iteration retains the same hardness cap and applicability
+    /// bounds. Its numerical controls belong to the immutable owner and remain
+    /// fixed through material-temperature and wear continuations.
+    pub fn new_with_linear_solver(
+        normal: BoundNormalInterfaceState,
+        hardness: [IndentationHardnessStatePoint; 2],
+        grid: FiniteGapGrid,
+        undeformed_gap_m: Vec<f64>,
+        controls: PlasticContactControls,
+        envelope: PlasticContactEnvelope,
+        linear_solver: FiniteGapPlasticLinearSolver,
+        cx: &Cx<'_>,
+    ) -> Result<Self, SourcePlasticContactError> {
         if normal.adhesion_energy_j_per_m2() != 0.0
             || normal
                 .elastic()
@@ -192,7 +219,7 @@ impl SourcePlasticContact {
         }
         let cap = hardness[0].hardness_pa().min(hardness[1].hardness_pa());
         let hardness_pa = vec![cap; undeformed_gap_m.len()];
-        let model = FiniteGapPlasticModel::new(
+        let model = FiniteGapPlasticModel::new_with_linear_solver(
             FiniteGapPlasticConfig {
                 grid,
                 undeformed_gap_m,
@@ -202,6 +229,7 @@ impl SourcePlasticContact {
                 complementarity_tolerance_m: controls.complementarity_tolerance_m,
                 boundary_clearance_cells: controls.boundary_clearance_cells,
             },
+            linear_solver,
             cx,
         )?;
         let mut hasher = DomainHasher::new("org.frankensim.fs-contact.source-plastic-gap.v1");
