@@ -379,14 +379,16 @@ impl SteadySlidingCurve {
 }
 
 /// A named steady-sliding calibration: the curve, the rig it was measured on,
-/// and the measured speed range.
+/// and its speed range.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RosinCalibration {
     /// Steady-sliding curve.
     pub curve: SteadySlidingCurve,
     /// The rig; its `reference_normal_n` is the rig load.
     pub rig: RosinContact,
-    /// Upper end [m/s] of the measured speed range.
+    /// Upper end [m/s] of the speed range: the measured range, or, from
+    /// [`Self::woodhouse_galluzzo_2025_eq13_authors_extended`], the range the
+    /// authors print the fit over, which is not measured above 0.3 m/s.
     pub speed_max_mps: f64,
 }
 
@@ -425,6 +427,38 @@ impl RosinCalibration {
                 moving: rig_solid,
             },
             speed_max_mps: MEASURED_SPEED_MAX_MPS,
+        })
+    }
+
+    /// [`Self::woodhouse_galluzzo_2025_eq13`] with its speed range widened
+    /// from the measured 0.3 m/s to 5 m/s, the range over which Woodhouse &
+    /// Galluzzo (2025) print the curve's contact temperature (their Fig. 7,
+    /// sliding speed 0 to 5 m/s). Their simulated contact temperatures go
+    /// above the measured range too (their Fig. 13 peaks near 71 C). An
+    /// opt-in only.
+    ///
+    /// Above 0.3 m/s the curve is the authors' extrapolated fit, not a
+    /// measurement: no friction or rosin shear strength is printed there.
+    /// Smith & Woodhouse (2000, p. 1666) keep their own runs below 40 K above
+    /// ambient, "probably low enough for plausibility of this model".
+    ///
+    /// The curve and the rig are unchanged, so below the measured limit
+    /// `k_y(T)` is the same function. On this rig Eq. (20) maps 5 m/s to
+    /// about 45.27 K. Here `T_ss` peaks near 6.5 m/s at about 45.33 K: with
+    /// `mu ~ w^-0.4`, it falls once the layer's advection reaches about a
+    /// quarter of the conduction term. So no speed range reaches the about
+    /// 53 K that the authors' Fig. 7 reads at 5 m/s; their eq. (5) contact
+    /// conducts into rosin, not into the rig's solid.
+    ///
+    /// # Errors
+    /// Non-positive `rig_solid` properties.
+    pub fn woodhouse_galluzzo_2025_eq13_authors_extended(
+        rig_solid: ThermalSolid,
+    ) -> Result<Self, TriboError> {
+        const FIG7_SPEED_MAX_MPS: f64 = 5.0;
+        Ok(Self {
+            speed_max_mps: FIG7_SPEED_MAX_MPS,
+            ..Self::woodhouse_galluzzo_2025_eq13(rig_solid)?
         })
     }
 }

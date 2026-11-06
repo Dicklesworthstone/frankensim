@@ -1151,15 +1151,19 @@ impl Spec {
             // Smith & Woodhouse (2000) thermal rosin, in place of the steady row
             // above: the whole contact (radius at the whole bow load, the layer),
             // the rosin, string-surface and hair packs, and a NAMED calibration.
-            // The calibration is selected first; no row takes its numbers.
+            // The calibration is selected first; no row takes its numbers. It runs
+            // over its measured range unless the row ends `applicability authors-extended`.
             "rosin-thermal-sw2000" => {
                 let rosin=row.pack_read()?; let radius_m=row.positive()?; let reference_normal_n=row.positive()?;
                 let layer_m=row.positive()?; let string=row.pack_read()?;
                 let hair=if row.next_is(rosin_thermal::ROSIN_HAIR) { rosin_thermal::Hair::RosinPerWg2025Eq5 }
                     else { rosin_thermal::Hair::Pack(row.pack_read()?) };
-                let calibration=row.label()?; let rig=row.pack_read()?; row.end()?;
+                let calibration=row.label()?; let rig=row.pack_read()?;
+                let applicability=if row.next_is(rosin_thermal::APPLICABILITY) { rosin_thermal::Applicability::parse(row.word()?)? }
+                    else { rosin_thermal::Applicability::Measured };
+                row.end()?;
                 bow_interfaces::Inputs::rosin_thermal(rosin_thermal::Row::new(rosin,radius_m,
-                    reference_normal_n,layer_m,string,hair,calibration,rig)?)?
+                    reference_normal_n,layer_m,string,hair,calibration,rig,applicability)?)?
             },
             kind @ ("layers" | "interfaces" | "contacts") => {
                 let count=row.count(16)?; row.end()?;

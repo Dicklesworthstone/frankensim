@@ -1,7 +1,12 @@
 //! `friction rosin-thermal-sw2000 ROSIN_PACK CONTEXT RADIUS_M REF_N LAYER_M STRING_SURFACE_PACK CONTEXT
-//! (HAIR_PACK CONTEXT | rosin-per-wg2025-eq5) CALIBRATION RIG_PACK CONTEXT`:
+//! (HAIR_PACK CONTEXT | rosin-per-wg2025-eq5) CALIBRATION RIG_PACK CONTEXT [applicability authors-extended]`:
 //! Smith & Woodhouse (2000) thermal rosin on the bow's contact, in place of the
 //! steady `rosin-wg2025-eq13` row (README "Thermal rosin").
+//!
+//! The calibration is used over its measured range unless the row ends with
+//! `applicability authors-extended`, which widens it to the range its authors
+//! print the curve over. Above the measured range that is their extrapolated fit,
+//! not a measurement, and the setup receipt says so.
 //!
 //! `RADIUS_M` is the WHOLE contact's radius at the whole bow load `REF_N`, and
 //! `LAYER_M` the actively deforming rosin layer. The rosin pack gives density
@@ -41,10 +46,38 @@ fn on_file(name: &str) -> Result<()> {
     Err(format!("rosin-thermal-sw2000: no calibration on file named {name:?}; on file: {}", CALIBRATIONS.join(", ")).into())
 }
 
-/// The named curve and rig, with the rig's solid read from `RIG_PACK`.
-fn calibration(name: &str, rig_solid: ThermalSolid) -> Result<RosinCalibration> {
-    match name {
-        "wg2025-eq13" => Ok(RosinCalibration::woodhouse_galluzzo_2025_eq13(rig_solid)?),
+/// The word after which the row names its opt-in applicability.
+pub const APPLICABILITY: &str = "applicability";
+/// The one opt-in: the range the calibration's authors print the curve over.
+pub const AUTHORS_EXTENDED: &str = "authors-extended";
+
+/// The speed range the row's calibration is used over.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Applicability {
+    /// The measured range: the default, with no keyword on the row.
+    Measured,
+    /// `applicability authors-extended`: the range the calibration's authors
+    /// print the curve over (`wg2025-eq13`: their Fig. 7, to 5 m/s). Above the
+    /// measured range it is their extrapolated fit, not a measurement.
+    AuthorsExtended,
+}
+
+impl Applicability {
+    /// # Errors
+    /// Any word but `authors-extended`.
+    pub fn parse(word: &str) -> Result<Self> {
+        if word == AUTHORS_EXTENDED { return Ok(Self::AuthorsExtended); }
+        Err(format!("rosin-thermal-sw2000: no applicability named {word:?}; the measured range is the default, and the one opt-in is {AUTHORS_EXTENDED}").into())
+    }
+}
+
+/// The named curve and rig, with the rig's solid read from `RIG_PACK`, over the
+/// row's applicability.
+fn calibration(name: &str, rig_solid: ThermalSolid, applicability: Applicability) -> Result<RosinCalibration> {
+    match (name, applicability) {
+        ("wg2025-eq13", Applicability::Measured) => Ok(RosinCalibration::woodhouse_galluzzo_2025_eq13(rig_solid)?),
+        ("wg2025-eq13", Applicability::AuthorsExtended) =>
+            Ok(RosinCalibration::woodhouse_galluzzo_2025_eq13_authors_extended(rig_solid)?),
         _ => { on_file(name)?; Err("rosin-thermal-sw2000: a calibration on file has no constructor".into()) }
     }
 }
@@ -119,15 +152,17 @@ pub struct Row {
     pub hair: Hair,
     pub calibration_name: String,
     pub rig: PackRead,
+    pub applicability: Applicability,
 }
 
 impl Row {
     /// Check the calibration name first: an unknown name refuses before any pack is read.
     #[allow(clippy::too_many_arguments)]
     pub fn new(rosin: PackRead, radius_m: f64, reference_normal_n: f64, layer_m: f64,
-        string: PackRead, hair: Hair, calibration_name: String, rig: PackRead) -> Result<Self> {
+        string: PackRead, hair: Hair, calibration_name: String, rig: PackRead,
+        applicability: Applicability) -> Result<Self> {
         on_file(&calibration_name)?;
-        Ok(Self { rosin, radius_m, reference_normal_n, layer_m, string, hair, calibration_name, rig })
+        Ok(Self { rosin, radius_m, reference_normal_n, layer_m, string, hair, calibration_name, rig, applicability })
     }
 
     /// Read the packs into the assembly's budgeted catalog, each at its own
@@ -154,7 +189,7 @@ impl Row {
         let rig_solid = solid(&self.rig)?;
         Ok(Resolved {
             row: self.clone(),
-            calibration: calibration(&self.calibration_name, rig_solid)?,
+            calibration: calibration(&self.calibration_name, rig_solid, self.applicability)?,
             rosin_density_kg_per_m3: value(&rosin, &self.rosin.path, "density")?,
             rosin_specific_heat_j_per_kg_k: value(&rosin, &self.rosin.path, SPECIFIC_HEAT_CAPACITY_PROPERTY)?,
             contact: RosinContact { radius_m: self.radius_m, reference_normal_n: self.reference_normal_n,
@@ -199,7 +234,18 @@ impl Resolved {
             Hair::RosinPerWg2025Eq5 => format!("hair={ROSIN_HAIR}: the rosin pack's constants on the hair side (moving), \
                 Woodhouse & Galluzzo (2025) eq. (5)'s own assumption; no printed keratin value is on file"),
         };
-        eprintln!("rosin_thermal=smith-woodhouse-2000; calibration={:?}; curve={:?}; rig={:?}; rig_pack={}; calibration_speed_max_m_s={}; rosin_pack={}; string_surface_pack={} (stationary); {hair}; whole_radius_m={}; whole_reference_N={}; layer_m={}; cells={cells}; rosin_density_kg_m3={}; rosin_specific_heat_J_kg_K={}; string_surface_solid={:?}; hair_solid={:?}; temperature_limit_K={}; step_s={:e}; history_steps={}; initial_mu={initial_mu}; each cell takes the step-start Coulomb mu_i = pi a^2 k_y(T_i)/N_ref; its heat advances on accepted loaded steps only; each cell's history starts at its first loaded step (its t = 0), and after its lift its force is mu x 0 = 0 and its history is frozen; a second landing refuses, since off-string cooling is unsourced",
+        // Printed only when opted in, so a row without the keyword prints as before.
+        let applicability = match self.row.applicability {
+            Applicability::Measured => String::new(),
+            Applicability::AuthorsExtended => {
+                let measured = calibration(&self.row.calibration_name, params.calibration.stationary, Applicability::Measured)?;
+                let limit = SmithWoodhouse::new(SmithWoodhouseParams { calibration_speed_max_mps: measured.speed_max_mps, ..*params })?
+                    .temperature_limit_k();
+                format!("applicability={AUTHORS_EXTENDED}: the calibration runs to the {} m/s its authors print the curve over; above the measured {} m/s ({limit} K on this rig) the curve is the authors' extrapolated fit, not a measurement, and no friction or rosin shear strength is printed there; Smith & Woodhouse (2000, p. 1666) keep their own runs below 40 K above ambient, \"probably low enough for plausibility of this model\"; ",
+                    params.calibration_speed_max_mps, measured.speed_max_mps)
+            },
+        };
+        eprintln!("rosin_thermal=smith-woodhouse-2000; calibration={:?}; curve={:?}; rig={:?}; rig_pack={}; calibration_speed_max_m_s={}; {applicability}rosin_pack={}; string_surface_pack={} (stationary); {hair}; whole_radius_m={}; whole_reference_N={}; layer_m={}; cells={cells}; rosin_density_kg_m3={}; rosin_specific_heat_J_kg_K={}; string_surface_solid={:?}; hair_solid={:?}; temperature_limit_K={}; step_s={:e}; history_steps={}; initial_mu={initial_mu}; each cell takes the step-start Coulomb mu_i = pi a^2 k_y(T_i)/N_ref; its heat advances on accepted loaded steps only; each cell's history starts at its first loaded step (its t = 0), and after its lift its force is mu x 0 = 0 and its history is frozen; a second landing refuses, since off-string cooling is unsourced",
             self.row.calibration_name, params.steady_fit, params.calibration, self.row.rig.describe(), params.calibration_speed_max_mps,
             self.row.rosin.describe(), self.row.string.describe(),
             c.radius_m, c.reference_normal_n, c.layer_thickness_m,

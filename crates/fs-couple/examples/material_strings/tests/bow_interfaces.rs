@@ -921,6 +921,38 @@ mod rosin_thermal_sw2000 {
         assert!(error.contains("names its source context on the row"), "{error}");
     }
 
+    /// Without the keyword the row keeps the measured 0.3 m/s and refuses k_y
+    /// just above its limit, as before. `applicability authors-extended` widens
+    /// the same curve and rig to the 5 m/s that Woodhouse & Galluzzo (2025)
+    /// print it over (their Fig. 7) and admits that temperature, refusing above
+    /// its own limit. Any other word refuses by name.
+    #[test]
+    fn the_authors_extended_range_is_opt_in() {
+        use fs_tribo::{TriboError, rosin_thermal::SmithWoodhouse};
+        let extended_row = format!("{} applicability authors-extended", on_file());
+        let applicability = |text: &str| input::Spec::parse(with(text).as_bytes()).unwrap().friction.rosin().unwrap().applicability;
+        assert_eq!(applicability(on_file().as_str()), rosin_thermal::Applicability::Measured);
+        assert_eq!(applicability(extended_row.as_str()), rosin_thermal::Applicability::AuthorsExtended);
+        let measured = resolve(&with(&on_file())).unwrap().params(1.0 / 48000.0, 16).unwrap();
+        let extended = resolve(&with(&extended_row)).unwrap().params(1.0 / 48000.0, 16).unwrap();
+        assert_eq!((measured.calibration_speed_max_mps, extended.calibration_speed_max_mps), (0.3, 5.0));
+        assert_eq!((measured.steady_fit, measured.calibration, measured.contact),
+            (extended.steady_fit, extended.calibration, extended.contact), "the same curve, rig and contact");
+        let (base, wide) = (SmithWoodhouse::new(measured).unwrap(), SmithWoodhouse::new(extended).unwrap());
+        let outside = |law: &SmithWoodhouse, t: f64| matches!(law.yield_stress_pa(t), Err(TriboError::OutsideApplicability { .. }));
+        assert!(outside(&base, 39.1) && !outside(&wide, 39.1), "39.1 K: limits {} and {}", base.temperature_limit_k(), wide.temperature_limit_k());
+        assert!(outside(&wide, wide.temperature_limit_k() + 1e-9));
+        for (record, text) in [
+            (format!("{} applicability", on_file()), "missing field"),
+            (format!("{} applicability measured", on_file()), "no applicability named \"measured\""),
+            (format!("{} applicability authors-extended 5", on_file()), "extra field"),
+            (format!("{} authors-extended", on_file()), "extra field"),
+        ] {
+            let error = refusal(&record);
+            assert!(error.contains(text), "{record}: {error}");
+        }
+    }
+
     /// A name that is not on file refuses by name, before any pack is read,
     /// and the refusal lists the names on file.
     #[test]

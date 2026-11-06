@@ -1546,7 +1546,7 @@ curve: no thermal or rosin-temperature memory.
 #### Thermal rosin
 
 ```text
-friction rosin-thermal-sw2000 ROSIN_PACK CONTEXT RADIUS_M REF_N LAYER_M STRING_SURFACE_PACK CONTEXT (HAIR_PACK CONTEXT | rosin-per-wg2025-eq5) CALIBRATION RIG_PACK CONTEXT
+friction rosin-thermal-sw2000 ROSIN_PACK CONTEXT RADIUS_M REF_N LAYER_M STRING_SURFACE_PACK CONTEXT (HAIR_PACK CONTEXT | rosin-per-wg2025-eq5) CALIBRATION RIG_PACK CONTEXT [applicability authors-extended]
 ```
 
 This row replaces `rosin-wg2025-eq13` with the plastic thermal model of Smith & Woodhouse
@@ -1594,6 +1594,27 @@ are read like the string's. The calibration on file is:
   `data/matdb/seed-v1/perspex-smith-woodhouse-jmps2000`, not the rosin.
 
 Any other name refuses with "no calibration on file named ...", before any pack is read.
+
+The calibration is used over its measured range: for `wg2025-eq13`, sliding speeds up to
+0.3 m/s, which Eq. (20) maps to 39.06 K above ambient on the rig. Above the limit, the row
+refuses. `applicability authors-extended`, at the end of the row, opts in to the range the
+calibration's authors print the curve over. For `wg2025-eq13` that is the 5 m/s of
+Woodhouse & Galluzzo's (2025) Fig. 7, and the limit becomes 45.27 K on the rig.
+
+- **What the opt-in rests on.** Above 0.3 m/s the curve is the authors' extrapolated fit,
+  not a measurement: no friction or rosin shear strength is printed there. Smith & Woodhouse
+  (2000, p. 1666) keep their own runs below 40 K above ambient, "probably low enough for
+  plausibility of this model".
+- **Why 45.27 K and not about 53 K.** The authors' Fig. 7 reads about 53 K at 5 m/s,
+  because their eq. (5) contact conducts into rosin, not into the rig's perspex. On the rig,
+  the temperature cannot go much past 45.27 K at any speed: it peaks at about 45.33 K near
+  6.5 m/s, then falls.
+- **What stays as it was.** The curve, the rig and `k_y(T)` below 39.06 K. Without the
+  keyword the row prints and refuses exactly as before.
+- **What the receipt says.** With the keyword, the setup receipt states it, with the
+  measured limit.
+- **Other words.** Any word after `applicability` other than `authors-extended` refuses by
+  name.
 
 With the seed packs (built with `xtask matdb-pack --manifest data/matdb/seed-v1/DIR/manifest.tsv`)
 and the rig's own geometry, a = 0.5 mm at 3 N with a 10 um layer:

@@ -155,6 +155,106 @@ fn g1_eq13_calibration_reproduces_eq13_through_eq20() {
 }
 
 #[test]
+fn g1_eq13_authors_extended_range_is_opt_in() {
+    // The default keeps the measured 0.3 m/s: its limit is the one the row
+    // printed before this constructor existed (39.06036861910653 K), and k_y
+    // just above it refuses. The authors-extended range (Woodhouse & Galluzzo
+    // 2025 Fig. 7, to 5 m/s) has the same curve and rig, admits that
+    // temperature, follows an independent Eq. (20) and eq. (13) out to 5 m/s,
+    // and refuses above its own limit.
+    let measured = RosinCalibration::woodhouse_galluzzo_2025_eq13(PERSPEX).unwrap();
+    let extended =
+        RosinCalibration::woodhouse_galluzzo_2025_eq13_authors_extended(PERSPEX).unwrap();
+    assert_eq!(measured.speed_max_mps.to_bits(), 0.3_f64.to_bits());
+    assert_eq!(extended.speed_max_mps.to_bits(), 5.0_f64.to_bits());
+    assert_eq!(
+        (extended.curve, extended.rig),
+        (measured.curve, measured.rig)
+    );
+    let base = SmithWoodhouse::new(params(measured, 1e-4, 1)).unwrap();
+    let wide = SmithWoodhouse::new(params(extended, 1e-4, 1)).unwrap();
+    assert_eq!(
+        base.temperature_limit_k().to_bits(),
+        39.060_368_619_106_53_f64.to_bits()
+    );
+    let refused = |law: &SmithWoodhouse, t: f64| {
+        matches!(
+            law.yield_stress_pa(t),
+            Err(TriboError::OutsideApplicability {
+                field: "smith_woodhouse_temperature_rise",
+                maximum,
+                ..
+            }) if maximum.to_bits() == law.temperature_limit_k().to_bits()
+        )
+    };
+    let just_above = 39.1;
+    assert!(refused(&base, just_above), "the default refuses 39.1 K");
+    let admitted = wide.yield_stress_pa(just_above).unwrap();
+    // Below the measured limit both give the same k_y(T); their bisections
+    // start from different brackets, so to rounding.
+    let mut worst_same = 0.0_f64;
+    for t in [0.0, 1.0, 10.0, 30.0, 39.0] {
+        let (a, b) = (
+            base.yield_stress_pa(t).unwrap(),
+            wide.yield_stress_pa(t).unwrap(),
+        );
+        worst_same = worst_same.max((a - b).abs() / a);
+    }
+    let (radius, layer, load) = (500e-6, 10e-6, 3.0);
+    let area = core::f64::consts::PI * radius * radius;
+    let k_rig = PERSPEX.conductivity_w_per_m_k;
+    let d = k_rig / (PERSPEX.density_kg_per_m3 * PERSPEX.specific_heat_j_per_kg_k);
+    let oracle = |v: f64| {
+        eq13(v) * load * v
+            / (v * radius * layer * ROSIN_DENSITY * ROSIN_SPECIFIC_HEAT
+                + area * k_rig * det::sqrt(3.0 * v / (8.0 * radius * d)))
+    };
+    let (mut worst_t, mut worst_mu, mut last_t) = (0.0_f64, 0.0_f64, 0.0_f64);
+    for v in speeds(60, 0.3, 5.0) {
+        let t = wide.calibration_steady_temperature_k(v).unwrap();
+        assert!(
+            t > last_t,
+            "T_ss increases with speed: {t} after {last_t} at {v}"
+        );
+        last_t = t;
+        let mu = area * wide.yield_stress_pa(t).unwrap() / load;
+        worst_t = worst_t.max((t - oracle(v)).abs() / oracle(v));
+        worst_mu = worst_mu.max((mu - eq13(v)).abs() / eq13(v));
+    }
+    let limit = wide.temperature_limit_k();
+    assert!(
+        refused(&wide, limit + 1e-9),
+        "the extended range refuses above its limit"
+    );
+    assert!(base.calibration_steady_temperature_k(0.31).is_err());
+    // No speed range on this rig reaches the about 53 K of the authors' Fig. 7:
+    // the oracle's T_ss peaks near 6.5 m/s, a few hundredths of a kelvin above
+    // the 5 m/s limit.
+    let (mut ceiling, mut at) = (0.0_f64, 0.0_f64);
+    for v in speeds(4000, 0.3, 100.0) {
+        if oracle(v) > ceiling {
+            (ceiling, at) = (oracle(v), v);
+        }
+    }
+    println!(
+        "{{\"law\":\"rosin-thermal\",\"test\":\"eq13_authors_extended\",\"oracle\":\"eq20,eq13\",\"measured_limit_k\":{},\"extended_limit_k\":{limit},\"k_y_at_39_1_k_pa\":{admitted},\"same_below_rel_err\":{worst_same:e},\"t_rel_err\":{worst_t:e},\"mu_rel_err\":{worst_mu:e},\"tol\":1e-12,\"oracle_ceiling_k\":{ceiling},\"ceiling_speed_mps\":{at}}}",
+        base.temperature_limit_k()
+    );
+    assert!(
+        worst_same < 1e-12,
+        "k_y(T) below the measured limit {worst_same:e}"
+    );
+    assert!(worst_t < 1e-12, "Eq. (20) temperature {worst_t:e}");
+    assert!(worst_mu < 1e-12, "eq. (13) through k_y(T) {worst_mu:e}");
+    assert!((limit - oracle(5.0)).abs() < 1e-12 * limit, "limit {limit}");
+    assert!(limit > 45.2 && limit < 45.3, "limit {limit}");
+    assert!(
+        ceiling >= limit && ceiling < 45.4 && at > 5.0 && at < 8.0,
+        "ceiling {ceiling} at {at}"
+    );
+}
+
+#[test]
 fn g1_eq13_steady_sliding_approaches_eq13() {
     // A port held at constant speed on the calibration rig returns eq. (13)
     // in the limit. The stationary half-space keeps drawing K T/sqrt(pi D t),
