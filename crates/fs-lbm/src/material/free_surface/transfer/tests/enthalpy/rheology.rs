@@ -223,6 +223,90 @@ fn original_p1_shear_law_drives_receiving_motion_and_molecular_heat() {
 }
 
 #[test]
+fn p1_transfer_retains_independent_bulk_work_without_changing_the_shear_law() {
+    let card = source_card(0.02, 100.0);
+    let law = LiquidTemperatureLaw::try_new(
+        &card, &shear_point(1.5), "T", LiquidViscosityBasis::Dynamic,
+        MaterialPropertySelection::SingleClaimOnly,
+    ).unwrap();
+    let surface = ResolvedLiquidSurfaceState::try_for_shear_rate_evolution(
+        law.reference_state().material().clone(), LiquidViscosityBasis::Dynamic, "T", "rate",
+    ).unwrap();
+    let caloric = chart(&card, 1000.0);
+    let (points, tets, _) = cube([0.0; 3]);
+    let h = vec![200000.0; points.len()];
+    let volume = 0.004_f64.powi(3);
+    let timestep = 0.0005;
+    let gate = CancelGate::new_clock_free();
+    with_cx(&gate, |cx| {
+        for shear_rate in [0.0, 20.0] {
+            // The full P1 field contains both spin and isotropic expansion.
+            // Neither changes the original generalized-Newtonian shear query.
+            let velocities: Vec<_> = points.iter().map(|point| {
+                let r = sub(*point, [0.004; 3]);
+                [0.01 + shear_rate * r[1] + 5.0 * r[0],
+                    -0.004 + 5.0 * r[1], 0.002 + 5.0 * r[2]]
+            }).collect();
+            for bulk_viscosity in [0.02, 0.24] {
+                let scaling = plan_free_surface_from_material(
+                    &surface, 0.001, timestep, 0.1,
+                ).unwrap().with_bulk_viscosity(bulk_viscosity, 1.2).unwrap();
+                let mut receiving = domain();
+                receiving.gravity_m_s2 = [0.5, -0.75, 0.25];
+                let (mut thermal, report) = scaling
+                    .free_surface3_from_tetrahedra_with_enthalpy_and_rheology(
+                        receiving, [0.0; 3], source(&points, &tets, &velocities, &h),
+                        &law, &caloric, bounds(), Default::default(), solve(), cx, &gate,
+                    ).unwrap();
+                assert_eq!(thermal.flow().scaling().bulk_viscosity_pa_s(), Some(bulk_viscosity));
+                for &actual in &report.source_shear_rates_per_s {
+                    close(actual, shear_rate, 1e-11);
+                }
+                close(report.mechanical.source.mass_kg, 1000.0 * volume, 1e-17);
+                close(report.mechanical.target.mass_kg, 1000.0 * volume, 1e-17);
+                close(report.source_enthalpy_j, 200000.0 * 1000.0 * volume, 1e-11);
+                close(report.target_enthalpy_j, report.source_enthalpy_j, 1e-11);
+                for axis in 0..3 {
+                    close(report.mechanical.target.momentum_kg_m_s[axis],
+                        report.mechanical.source.momentum_kg_m_s[axis], 1e-16);
+                    close(report.mechanical.target.angular_momentum_kg_m2_s[axis],
+                        report.mechanical.source.angular_momentum_kg_m2_s[axis], 1e-18);
+                }
+                let expected_mu = viscosity_at(400.0, shear_rate, 0.02);
+                for component in &report.mechanical.components {
+                    for &cell in &component.target_cells {
+                        close(thermal.rheology_at(cell).unwrap().shear_rate_per_s,
+                            shear_rate, 1e-8);
+                        close(thermal.material_at(cell).unwrap().dynamic_viscosity_pa_s(),
+                            expected_mu, 1e-9);
+                    }
+                }
+                let collision = thermal.flow().lattice().collision_model();
+                let step = thermal.step_with_viscous_heating(&[], &gate).unwrap();
+                for sample in &step.applied {
+                    close(sample.shear_rate_per_s, shear_rate, 1e-8);
+                    close(sample.divergence_magnitude_per_s, 15.0, 1e-8);
+                    close(sample.shear_power_w_m3,
+                        expected_mu * shear_rate * shear_rate, 1e-7);
+                    close(sample.bulk_power_w_m3, bulk_viscosity * 225.0, 1e-7);
+                }
+                // Independent work integral over the original affine field.
+                // The heat owner must retain div(u)=15/s when tau_bulk differs
+                // from both reference and locally resolved molecular tau.
+                let expected_heat = (expected_mu * shear_rate * shear_rate
+                    + bulk_viscosity * 15.0_f64.powi(2)) * volume * timestep;
+                close(step.flow.viscous_heat_j, expected_heat, expected_heat * 1e-7);
+                close(step.flow.external_heat_j, 0.0, 0.0);
+                close(step.flow.balance_defect_j, 0.0, 2e-11);
+                close(thermal.total_enthalpy_j().unwrap(),
+                    report.target_enthalpy_j + expected_heat, 2e-11);
+                assert_eq!(thermal.flow().lattice().collision_model(), collision);
+            }
+        }
+    });
+}
+
+#[test]
 fn g4_known_initial_tau_keeps_a_valid_strain_inside_its_tight_source_domain() {
     use crate::material::free_surface::enthalpy::rheology::RheologyBinding;
 

@@ -390,6 +390,22 @@ pub(crate) fn plan_momentum_scaling(
     Ok((ScalingPlan { tau, viscosity, u_lattice, mach, tau_margin: tau - 0.5, stable: true }, velocity_scale))
 }
 
+/// Shared physical bulk conversion for dense and free-surface D3Q19 owners.
+/// `zeta` multiplies `(div u) I`, so tau_bulk = 1/2 + (9/2) zeta dt/(rho dx²).
+pub(crate) fn physical_bulk_tau(
+    density_kg_m3: f64,
+    velocity_scale: f64,
+    cell_size_m: f64,
+    bulk_viscosity_pa_s: f64,
+) -> Result<f64, &'static str> {
+    let bulk_lattice = ((bulk_viscosity_pa_s / density_kg_m3) / velocity_scale) / cell_size_m;
+    let tau = 0.5 + 4.5 * bulk_lattice;
+    if !bulk_viscosity_pa_s.is_finite() || bulk_viscosity_pa_s <= 0.0 || !tau.is_finite() || tau <= 0.5 {
+        return Err("physical bulk viscosity or relaxation is unrepresentable");
+    }
+    Ok(tau)
+}
+
 fn relaxation(diffusivity: f64) -> Result<f64, MaterialLbmError> {
     let tau = 0.5 + diffusivity / CS2;
     if !tau.is_finite() || tau <= 0.5 {

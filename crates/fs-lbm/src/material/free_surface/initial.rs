@@ -171,6 +171,7 @@ impl<'a> MaterialFreeSurfaceScaling<'a> {
             &native,
             cx,
         )?;
+        self.apply_collision(&mut lattice)?;
         if self.density_dependent_gravity {
             lattice.rebind_body_acceleration_checked(gravity, || {
                 cx.checkpoint().map_err(|_| {

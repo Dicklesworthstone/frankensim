@@ -13690,7 +13690,10 @@ pressure-dependent rheology is selected. The original `RheologyModel::sample`
 then closes `gamma*tau(T,gamma)=A/dt` at each actual caloric state. Newtonian
 sources use the same numerator with their newly resolved molecular tau. Thus
 `mu(T,gamma)*gamma^2` uses one consistent material/strain response; it never
-combines an old physical strain rate with a new viscosity.
+combines an old physical strain rate with a new viscosity. The source coordinate
+is `sqrt(2 dev(D):dev(D))`. The orthogonal volumetric contribution is retained
+separately, with the same local tau for tied collision or its independent bulk
+rate when explicitly selected.
 
 Within one private thermal candidate, an identical enthalpy bit pattern can
 reuse its complete resolved sample for the same original source, held stress,
@@ -13714,7 +13717,7 @@ This opt-in is explicit thermal subcycling with the original first-order
 thermal/flow split. It holds the kinetic stress numerator, not physical strain
 or physical Cauchy stress, during thermal evolution. Nonlinear thermal time
 refinement is still required; no unconditional stability, simultaneous momentum
-feedback, kinetic-plus-thermal conservation, bulk-viscosity heat, phase heat,
+feedback, kinetic-plus-thermal conservation, phase heat,
 pressure work or numerical-loss heating is asserted. Existing frozen-source
 viscous-heating APIs retain their original arithmetic and meaning.
 
@@ -13724,6 +13727,32 @@ substep refinement and original source identity, exercise Newtonian conduction a
 constant-viscosity native-population parity, and verify complete rollback and
 exact retry after source and late thermal-budget refusals. These are synthetic
 constitutive coupling checks, not experimental validation of a liquid.
+
+### Independent physical bulk viscosity on the sparse free surface
+
+`FreeSurface3::set_central_moment_bulk` selects the existing D3Q19 central-moment
+operator, retaining the molecular shear rate and authored independent trace and
+higher rates. Prepared analytic and source-resolved rheology replace only shear
+relaxation. Material plans select `with_bulk_viscosity(zeta_pa_s, higher_rate)`;
+the shared dense/free-surface conversion is
+`tau_bulk = 1/2 + (9/2) zeta dt/(rho0 dx^2)`. This is an explicitly authored
+uniform physical scalar, not a temperature/pressure/composition source law or a
+coefficient inferred from numerical damping. Zero/unrepresentable viscosity or
+rates outside `(0,2)` refuse without a floor. D2Q9 and sparse SGS consumers
+explicitly refuse this selection.
+
+Native/P1 initialization uses `tau_s dev(D) + tau_bulk tr(D) I/3` for the retained
+nonequilibrium second moment. Frozen and thermally refreshed viscous heating use
+`mu gamma^2 + zeta (div u)^2`, with separate diagnostic powers and absolute
+divergence; neither carry nor zero-mass ghosts receive heat. Thermal feedback
+holds the independent trace rate while local temperature/shear changes the
+source viscosity. The default still retains the original `zeta=2mu/3` arithmetic.
+Runtime coefficient setters preserve populations and therefore change the
+inferred trace strain; selecting the plan before initialization preserves an
+authored initial gradient. This supplies no reversible pressure work, surface
+energy, compressible EOS, physical acoustic speed or discrete kinetic-energy
+thermalization claim. Focused regressions cover forced moments, source shear
+independence, actual collision, transfer heat and thermal bulk/shear separation.
 
 ## Implicit conduction inside phase-resistance heat/volume coupling
 

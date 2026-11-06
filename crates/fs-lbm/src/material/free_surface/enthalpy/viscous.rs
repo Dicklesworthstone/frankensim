@@ -12,10 +12,16 @@ pub struct FreeSurfaceViscousCell {
     pub material: ResolvedLiquidState,
     /// Force-corrected sqrt(2 dev(D):dev(D)) [1/s], using this source's tau.
     pub shear_rate_per_s: f64,
+    /// Absolute divergence [1/s], reconstructed with the actual bulk relaxation.
+    pub divergence_magnitude_per_s: f64,
+    /// Applied deviatoric molecular stress power [W/m3].
+    pub shear_power_w_m3: f64,
+    /// Applied volumetric molecular stress power [W/m3].
+    pub bulk_power_w_m3: f64,
     /// Located carrier mass divided by retained reference density [m3].
     /// Zero-mass interface ghosts and numerical carry get no cell heat.
     pub liquid_volume_m3: f64,
-    /// Shear plus tied bulk power, `2 mu D:D` [W/m3], held over one interval.
+    /// Total `2 mu dev(D):dev(D) + zeta (div u)^2` [W/m3], held over one interval.
     pub power_w_m3: f64,
     /// The same power times liquid volume and physical timestep [J].
     pub heat_j: f64,
@@ -45,6 +51,21 @@ pub struct FreeSurfaceViscousConductionReport {
     /// external and molecular energy.
     pub conduction: conduction::FreeSurfaceConductionReport,
     pub applied: Vec<FreeSurfaceViscousCell>,
+}
+
+// Both thermal integration paths use the same accepted source coefficients.
+// `dilation` is sqrt(2/3)|div u|; preserve tied-model arithmetic exactly.
+pub(super) fn molecular_power(
+    shear: f64,
+    dilation: f64,
+    mu: f64,
+    independent_bulk: Option<f64>,
+) -> [f64; 2] {
+    let bulk = match independent_bulk {
+        None => (mu * dilation) * dilation,
+        Some(zeta) => ((zeta * dilation) * dilation) * 1.5,
+    };
+    [(mu * shear) * shear, bulk]
 }
 
 impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
@@ -78,14 +99,17 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
             let mass = native_mass * mass_unit;
             let volume = mass / rho0;
             let mu = material.dynamic_viscosity_pa_s();
-            let shear_power = (mu * rate) * rate;
-            let bulk_power = (mu * dilation) * dilation;
+            let [shear_power, bulk_power] = molecular_power(
+                rate, dilation, mu, self.flow.scaling.bulk_viscosity_pa_s(),
+            );
+            let divergence = dilation * 1.5_f64.sqrt();
             let power = shear_power + bulk_power;
             let heat = (power * volume) * dt;
             if !rate.is_finite()
                 || rate < 0.0
                 || (lattice_rate != 0.0 && rate == 0.0)
                 || !dilation.is_finite()
+                || !divergence.is_finite()
                 || (lattice_dilation != 0.0 && dilation == 0.0)
                 || !mass.is_finite()
                 || mass <= 0.0
@@ -107,6 +131,9 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
                 coordinates: FreeSurface3::transport_coordinates(location).expect("cell"),
                 material,
                 shear_rate_per_s: rate,
+                divergence_magnitude_per_s: divergence,
+                shear_power_w_m3: shear_power,
+                bulk_power_w_m3: bulk_power,
                 liquid_volume_m3: volume,
                 power_w_m3: power,
                 heat_j: heat,
@@ -118,15 +145,17 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
     /// Convert molecular stress work into the actual moving liquid's enthalpy.
     ///
     /// Native force-corrected non-equilibrium stress supplies the accepted
-    /// initial strain rate. Its initial source viscosity gives 2 mu D:D.
+    /// initial deviatoric and volumetric strain rates. Its initial source shear
+    /// viscosity and selected physical bulk viscosity determine stress power.
     /// This source is held over one interval, applied with authored heat, then
     /// the original owner refreshes viscosity/buoyancy and advances momentum
     /// and VOF enthalpy transport once. Heating can change collision viscosity;
     /// these are different epochs of a first-order source split. Strong
     /// thermal feedback requires refinement.
     ///
-    /// Authored heat excludes molecular work owned here. The collision's tied
-    /// `zeta=2mu/3` retains bulk heat; no independent bulk coefficient is added.
+    /// Authored heat excludes molecular work owned here. The default collision's
+    /// `zeta=2mu/3` retains bulk heat; an explicitly bound independent coefficient
+    /// uses its own collision rate and `zeta (div u)^2` exactly once.
     /// Pressure work, surface energy and numerical damping are not thermalized.
     /// This closes constitutive heat and extensive enthalpy, without asserting
     /// exact discrete kinetic-plus-thermal balance. Non-Newtonian memory and

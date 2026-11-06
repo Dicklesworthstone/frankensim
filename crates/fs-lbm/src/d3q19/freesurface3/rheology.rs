@@ -2,7 +2,7 @@
 //!
 //! The native owner still performs collision, forcing, gas reconstruction,
 //! conservative mass exchange and phase conversion. This adapter supplies its
-//! existing per-wet-cell BGK/TRT relaxation hook, using the same constitutive
+//! existing per-wet-cell shear relaxation hook, using the same constitutive
 //! stress inversion as the plain 2-D/3-D grids. No material card is synthesized.
 
 use std::collections::BTreeMap;
@@ -347,9 +347,10 @@ fn resolve_into(
     check_cancel(gate)?;
     let initial_tau = match lattice.collision_model() {
         CollisionModel3::Bgk { tau } | CollisionModel3::Trt { tau, .. } => tau,
+        CollisionModel3::CentralMomentBulk { shear_rate, .. } => 1.0 / shear_rate,
         _ => {
             return Err(FreeSurfaceRheologyError3::Invalid(
-                "analytic free-surface rheology requires native BGK or TRT collision",
+                "analytic free-surface rheology requires native BGK, TRT or independent-bulk collision",
             ));
         }
     };
@@ -403,7 +404,7 @@ fn solve_cells<'a>(
     }
     check_cancel(gate)?;
     let collision = lattice.collision_model();
-    let is_trt = matches!(collision, CollisionModel3::Trt { .. });
+    let check_local_model = !matches!(collision, CollisionModel3::Bgk { .. });
     let mut stats = RheologyStats {
         floored: 0,
         capped: 0,
@@ -426,10 +427,10 @@ fn solve_cells<'a>(
                     coordinates: coordinates(key, lane),
                     reason,
                 })?;
-            if is_trt {
-                // The even stress uses the same constitutive inversion as BGK.
-                // Admit the actual derived odd rate before this source epoch
-                // can publish; a finite even tau alone is not sufficient.
+            if check_local_model {
+                // Admit the derived odd/central shear rate before this source
+                // epoch publishes. Independent trace and higher rates remain
+                // exactly those of the authored molecular collision model.
                 D3q19::with_shear_relaxation(collision, local.tau).map_err(|source| {
                     FreeSurfaceError3::Collision {
                         tile_key: key,
@@ -659,7 +660,9 @@ mod tests {
                         [-0.001, -0.003, 0.001],
                         [0.002, 0.001, 0.002],
                     ];
-                    let rate = (2.0 * strain.iter().flatten().map(|v| v * v).sum::<f64>()).sqrt();
+                    let trace = strain[0][0] + strain[1][1] + strain[2][2];
+                    let rate = (2.0 * strain.iter().flatten().map(|v| v * v).sum::<f64>()
+                        - (2.0 / 3.0) * trace * trace).sqrt();
                     max_rate = max_rate.max(rate);
                     let tau = 0.5 + field[index].viscosity(rate) / crate::CS2;
                     expected[index] = tau;
@@ -734,6 +737,67 @@ mod tests {
             assert!((actual[q] - streamed[q]).abs() < 3e-14);
         }
         assert!((run.lattice.ledger_mass() - mass).abs() < 2e-11);
+    }
+
+    #[test]
+    fn independent_bulk_rheology_preserves_trace_and_reaches_actual_collision() {
+        let gate = CancelGate::new_clock_free();
+        let force = [0.0002, -0.0001, 0.0003];
+        let law = Rheology::Carreau { nu0: 0.2, nu_inf: 0.01, lambda: 100.0, n: 0.5 };
+        let shear = 0.006;
+        let divergence = 0.009;
+        let tau = 0.5 + law.viscosity(shear) / crate::CS2;
+        for bulk_rate in [0.7, 1.3] {
+            let mut lattice = FreeSurface3::new(
+                4, 4, 4, 1.7, force, 0.0, ContactModel3::Neutral, |_, _, _| true,
+            ).unwrap();
+            let original = lattice.clone();
+            assert!(lattice.set_central_moment_bulk(2.0, 1.2).is_err());
+            assert_eq!(lattice.collision_model(), original.collision_model());
+            assert_same_state(&lattice, &original);
+            lattice.set_central_moment_bulk(bulk_rate, 1.2).unwrap();
+            assert_same_state(&lattice, &original);
+            for z in 0..4 {
+                for y in 0..4 {
+                    for x in 0..4 {
+                        lattice.initialize_strain_at(
+                            [x, y, z],
+                            [divergence / 3.0, divergence / 3.0, divergence / 3.0,
+                                shear / 2.0, 0.0, 0.0],
+                            tau,
+                        ).unwrap();
+                    }
+                }
+            }
+            let mut flow = FreeSurfaceRheology3::uniform(lattice, law, &gate).unwrap();
+            assert!((flow.stats().max_shear - shear).abs() < 2e-13);
+            let location = FreeSurface3::transport_location([2; 3]).unwrap();
+            let rates = flow.lattice.transport_strain_rates(location, tau).unwrap();
+            assert!((rates[0] - shear).abs() < 2e-13);
+            assert!((rates[1] - (2.0_f64 / 3.0).sqrt() * divergence).abs() < 2e-13);
+            let mut expected = [0.0; Q3];
+            for (q, e) in E3.iter().enumerate() {
+                let p = [2 - e.0, 2 - e.1, 2 - e.2];
+                let local_tau = flow.relaxation_at(p.map(|v| v as usize)).unwrap();
+                assert!((local_tau - tau).abs() < 3e-12);
+                let (slot, lane) = flow.lattice.grid.resolve_source(
+                    i64::from(p[0]), i64::from(p[1]), i64::from(p[2]),
+                ).unwrap();
+                let model = CollisionModel3::CentralMomentBulk {
+                    shear_rate: 1.0 / local_tau, bulk_rate, higher_order_rate: 1.2,
+                };
+                expected[q] = crate::d3q19::collide_cell3(
+                    flow.lattice.grid.populations(slot, lane), model, force,
+                ).unwrap()[q];
+            }
+            let model = flow.lattice.collision_model();
+            flow.step_with_gate(&gate).unwrap();
+            assert_eq!(flow.lattice.collision_model(), model);
+            let (slot, lane) = flow.lattice.grid.resolve_source(2, 2, 2).unwrap();
+            for (actual, expected) in flow.lattice.grid.populations(slot, lane).iter().zip(expected) {
+                assert!((actual - expected).abs() < 3e-14);
+            }
+        }
     }
 
     #[test]

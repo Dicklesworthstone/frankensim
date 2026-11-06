@@ -380,6 +380,19 @@ impl<'s> MaterialFreeSurface3<'s> {
 }
 
 impl<'s, 'm> MaterialFreeSurfaceEnthalpy3<'s, 'm> {
+    /// Bind uniform physical bulk viscosity independently of the evolving
+    /// molecular shear source. Both viscous-heating paths retain this same
+    /// coefficient. No time or energy is advanced by the constitutive rebind;
+    /// see [`MaterialFreeSurface3::set_bulk_viscosity`] for trace semantics.
+    pub fn set_bulk_viscosity(
+        &mut self,
+        bulk_viscosity_pa_s: f64,
+        higher_order_rate: f64,
+    ) -> Result<(), Error> {
+        self.flow.set_bulk_viscosity(bulk_viscosity_pa_s, higher_order_rate)?;
+        Ok(())
+    }
+
     /// Current rate, physical collision coefficient and local convergence check.
     #[must_use]
     pub fn rheology_at(&self, coordinates: [usize; 3]) -> Option<&FreeSurfaceRheologySample> {

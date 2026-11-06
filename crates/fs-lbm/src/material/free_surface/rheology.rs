@@ -320,7 +320,7 @@ struct CellMaterial {
 /// The immutable law, original physical units, native mass ledger and accepted
 /// source samples travel together. Source, speed, convergence or cancellation
 /// refusals preserve populations, fill, conversions, mass carry and receipts.
-/// This is explicit generalized-Newtonian BGK evolution. It does not evolve
+/// This is explicit generalized-Newtonian native evolution. It does not evolve
 /// heat, viscoelastic memory, yield history, phase change or surface energy.
 #[derive(Clone)]
 pub struct MaterialFreeSurfaceRheology3<'s, 'm> {
@@ -465,6 +465,24 @@ impl<'s, 'm> MaterialFreeSurfaceRheology3<'s, 'm> {
     #[must_use]
     pub const fn lattice(&self) -> &FreeSurface3 {
         &self.flow.lattice
+    }
+
+    /// Bind uniform physical bulk viscosity independently of the source shear
+    /// law. No time, mass, population or source coordinate changes. The trace
+    /// response changes as described by [`MaterialFreeSurface3::set_bulk_viscosity`].
+    pub fn set_bulk_viscosity(
+        &mut self,
+        bulk_viscosity_pa_s: f64,
+        higher_order_rate: f64,
+    ) -> Result<(), Error> {
+        self.flow.set_bulk_viscosity(bulk_viscosity_pa_s, higher_order_rate)?;
+        Ok(())
+    }
+
+    /// Authored uniform bulk viscosity [Pa s]; None retains the local shear tie.
+    #[must_use]
+    pub const fn bulk_viscosity_pa_s(&self) -> Option<f64> {
+        self.flow.scaling.bulk_viscosity_pa_s()
     }
 
     /// Source assignment, declared evolving coordinates and original claim receipts.

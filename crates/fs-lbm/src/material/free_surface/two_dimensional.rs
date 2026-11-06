@@ -153,6 +153,11 @@ impl<'a> MaterialFreeSurfaceScaling<'a> {
     ) -> Result<MaterialFreeSurface2<'a>, MaterialLbmError> {
         check_initialization_cancel(gate)?;
         self.require_frozen_source()?;
+        if self.bulk_viscosity_pa_s().is_some() {
+            return Err(MaterialLbmError::Invalid(
+                "independent physical bulk viscosity requires the 3-D free-surface owner",
+            ));
+        }
         let planar = match self.planar_wetting {
             None => None,
             Some((wall, wetting)) => {

@@ -218,9 +218,10 @@ impl FreeSurface3 {
         Ok(self.transport_strain_rates(location, tau)?[0])
     }
 
-    /// Deviatoric shear and sqrt(2/3)|div(u)| in lattice units. The BGK/TRT
-    /// liquid collision ties bulk to shear relaxation; retain both rates so
-    /// molecular heating does not lose dilation when material queries use shear.
+    /// Deviatoric shear and sqrt(2/3)|div(u)| in lattice units. Tied models
+    /// use the supplied local shear tau for both modes; independent bulk
+    /// collision retains its own trace relaxation. The material shear query
+    /// never includes dilation, while molecular heating retains both modes.
     pub(crate) fn transport_strain_rates(
         &self,
         location: MassLocation3,
@@ -241,14 +242,21 @@ impl FreeSurface3 {
         }
         let force = self.force_at_lane(key, lane);
         let u = core::array::from_fn(|d| raw[d] + 0.5 * force[d] / rho);
+        let model = self.collision_model();
         let components = crate::d3q19::rheology_stress_components3(
             &self.grid.populations(slot, lane),
             rho,
             u,
             force,
-            crate::d3q19::CollisionModel3::Bgk { tau },
+            model,
         );
-        let rates = components.map(|numerator| numerator / tau);
+        let bulk_tau = if matches!(model, crate::d3q19::CollisionModel3::CentralMomentBulk { .. }) {
+            // The canonical helper has already applied the independent rate.
+            1.0
+        } else {
+            tau
+        };
+        let rates = [components[0] / tau, components[1] / bulk_tau];
         if rates.iter().any(|rate| !rate.is_finite() || *rate < 0.0) {
             return Err(FreeSurfaceError3::Transport(
                 "unrepresentable liquid strain rate",

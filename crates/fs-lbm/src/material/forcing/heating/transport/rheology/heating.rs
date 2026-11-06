@@ -28,13 +28,10 @@ pub use bulk::BulkViscousMaterial;
 
 fn physical_bulk_tau(mapping: &MaterialSlab<ThermalLbm3>, bulk_viscosity_pa_s: f64) -> Result<f64, &'static str> {
     let units = mapping.force_units;
-    let bulk_lattice = ((bulk_viscosity_pa_s / units.transport.density_kg_m3())
-        / units.velocity_scale) / units.cell_size_m;
-    let tau = 0.5 + 4.5 * bulk_lattice;
-    if !bulk_viscosity_pa_s.is_finite() || bulk_viscosity_pa_s <= 0.0 || !tau.is_finite() || tau <= 0.5 {
-        return Err("physical bulk viscosity or relaxation is unrepresentable");
-    }
-    Ok(tau)
+    crate::material::physical_bulk_tau(
+        units.transport.density_kg_m3(), units.velocity_scale, units.cell_size_m,
+        bulk_viscosity_pa_s,
+    )
 }
 
 /// Explicit source partition for an accepted physical viscous-heating step.

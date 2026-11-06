@@ -31,6 +31,7 @@ pub use impulse::{
 
 mod initial;
 pub use initial::MaterialFreeSurfaceInitialCell3;
+mod bulk;
 mod forcing;
 pub use forcing::{MaterialAffineAcceleration3, MaterialCoriolis3, MaterialRigidFrame3};
 mod two_dimensional;
@@ -82,6 +83,7 @@ pub struct MaterialFreeSurfaceScaling<'a> {
     surface_tension_lattice: f64,
     planar_wetting: Option<(PlanarWall3, &'a ResolvedLiquidWettingState)>,
     density_dependent_gravity: bool,
+    bulk_viscosity: Option<bulk::BulkViscosity>,
 }
 
 /// Stationary voxel domain and explicitly chosen numerical wall model.
@@ -210,6 +212,7 @@ pub fn plan_free_surface_from_material(
         surface_tension_lattice,
         planar_wetting: None,
         density_dependent_gravity: false,
+        bulk_viscosity: None,
     })
 }
 
@@ -403,6 +406,7 @@ impl<'a> MaterialFreeSurfaceScaling<'a> {
             nx, ny, nz, self.flow.tau, reference_force, self.surface_tension_lattice,
             domain.contact, domain.solid_tiles, fluid,
         )?;
+        self.apply_collision(&mut lattice)?;
         if self.density_dependent_gravity {
             lattice.rebind_body_acceleration(gravity, &CancelGate::new_clock_free())?;
         }

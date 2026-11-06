@@ -171,6 +171,9 @@ impl<'s> MaterialFreeSurfaceScaling<'s> {
     /// before the constitutive attachment. This preserves affine strain and
     /// does not reset it to zero. Nonlinear viscosity is evaluated at the
     /// receiving T/rate; an average of nonlinear source stresses is not implied.
+    /// A bulk viscosity selected on the scaling retains its own trace relaxation
+    /// through ingress and subsequent physical heating, without changing the
+    /// shear query or the transferred extensive enthalpy.
     /// Generalized-Newtonian viscosity has no stored elastic memory to erase.
     /// Subcell strain variation and later lattice reconstruction require refinement.
     ///

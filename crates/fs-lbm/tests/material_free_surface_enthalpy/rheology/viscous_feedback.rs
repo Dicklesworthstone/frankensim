@@ -39,12 +39,22 @@ fn heat_ode(
     temperature_slope: f64,
     shear_slope: f64,
     authored_w_m3: f64,
+    independent_bulk: Option<(f64, f64)>,
 ) -> (f64, f64) {
     let rhs = |t| {
         let gamma = independent_rate(numerator, t, temperature_slope, shear_slope);
         let mu = 0.1 + temperature_slope * (t - 400.0) + shear_slope * gamma;
-        let dilation = dilation_numerator / ((0.5 + 3.0 * mu) * DT);
-        let q = mu * (gamma * gamma + dilation * dilation);
+        let bulk_power = match independent_bulk {
+            Some((zeta, bulk_tau)) => {
+                let divergence = 1.5_f64.sqrt() * dilation_numerator / (bulk_tau * DT);
+                zeta * divergence * divergence
+            }
+            None => {
+                let dilation = dilation_numerator / ((0.5 + 3.0 * mu) * DT);
+                mu * dilation * dilation
+            }
+        };
+        let q = mu * gamma * gamma + bulk_power;
         [(authored_w_m3 + q) / (RHO * CP), q]
     };
     let dt = DT / 1024.0;
@@ -92,6 +102,7 @@ fn g1_nonlinear_temperature_and_shear_feedback_converges_to_independent_heat_ode
                     temperature_slope,
                     shear_slope,
                     RHO * CP * 60.0 / DT,
+                    None,
                 );
                 exact_heat += q_integral * mass / RHO;
                 authored.push(FreeSurfaceCellHeat {
@@ -179,6 +190,84 @@ fn g1_nonlinear_temperature_and_shear_feedback_converges_to_independent_heat_ode
             );
         },
     );
+}
+
+#[test]
+fn independent_bulk_feedback_keeps_volume_relaxation_when_shear_viscosity_changes() {
+    let temperature_slope = -0.0008;
+    let shear_slope = 0.003;
+    let source = rheological_card(temperature_slope, shear_slope, 0.0, 1000.0);
+    let gravity = [0.03, -0.02, 0.01];
+    for zeta in [0.02, 0.24] {
+        with_liquid(
+            &source, true, true, gravity, solve(), |_| 200000.0,
+            |liquid, gate| {
+                liquid.set_bulk_viscosity(zeta, 1.2).unwrap();
+                let model = liquid.flow().lattice().collision_model();
+                let original_bits = liquid.flow().lattice().grid().state_bits();
+                for invalid in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+                    assert!(liquid.set_bulk_viscosity(invalid, 1.2).is_err());
+                    assert_eq!(liquid.flow().lattice().collision_model(), model);
+                    assert_eq!(liquid.flow().lattice().grid().state_bits(), original_bits);
+                    assert_eq!(liquid.flow().scaling().bulk_viscosity_pa_s(), Some(zeta));
+                }
+                liquid.step(gate).unwrap();
+                let before = liquid.clone();
+                let bulk_tau = 0.5 + 4.5 * zeta;
+                let mut authored = Vec::new();
+                let mut expected_heat = 0.0;
+                let mut initial_bulk_heat = 0.0;
+                for p in cells() {
+                    let mass = cell_mass(&before, p);
+                    let [n, spherical] = stress_numerators(&before, p, gravity);
+                    let (_, integral) = heat_ode(
+                        n, spherical, coordinate(before.material_at(p).unwrap(), "T"),
+                        temperature_slope, shear_slope, RHO * CP * 60.0 / DT,
+                        Some((zeta, bulk_tau)),
+                    );
+                    expected_heat += integral * mass / RHO;
+                    let divergence = 1.5_f64.sqrt() * spherical / (bulk_tau * DT);
+                    initial_bulk_heat += zeta * divergence * divergence * mass / RHO * DT;
+                    authored.push(FreeSurfaceCellHeat { coordinates: p, energy_j: mass * CP * 60.0 });
+                }
+                assert!(initial_bulk_heat > 1e-12);
+                let report = liquid.step_with_conduction_and_viscous_feedback(
+                    &[], &authored, controls(32), gate,
+                ).unwrap();
+                let feedback = report.viscous_feedback.as_ref().unwrap();
+                assert!((feedback.heat_j / expected_heat - 1.0).abs() < 0.01);
+                let mut endpoint_bulk_heat = 0.0;
+                for sample in &feedback.thermal_endpoint {
+                    let [n, spherical] = stress_numerators(&before, sample.coordinates, gravity);
+                    let temperature = coordinate(&sample.material, "T");
+                    let shear = independent_rate(n, temperature, temperature_slope, shear_slope);
+                    let divergence = 1.5_f64.sqrt() * spherical / (bulk_tau * DT);
+                    let mu = sample.material.dynamic_viscosity_pa_s();
+                    near(sample.shear_rate_per_s, shear, 2e-10);
+                    near(sample.divergence_magnitude_per_s, divergence, 2e-10);
+                    near(sample.shear_power_w_m3, mu * shear * shear, 2e-9);
+                    near(sample.bulk_power_w_m3, zeta * divergence * divergence, 2e-9);
+                    near(sample.power_w_m3, sample.shear_power_w_m3 + sample.bulk_power_w_m3, 2e-14);
+                    endpoint_bulk_heat += sample.bulk_power_w_m3 * sample.liquid_volume_m3 * DT;
+                }
+                near(endpoint_bulk_heat, initial_bulk_heat, 2e-12);
+                assert!(coordinate(&feedback.thermal_endpoint[0].material, "T") > 450.0);
+                assert_eq!(liquid.flow().lattice().collision_model(), model);
+                assert_eq!(liquid.flow().scaling().bulk_viscosity_pa_s(), Some(zeta));
+                assert_eq!(report.flow.viscous_heat_j, feedback.heat_j);
+                assert!(report.flow.balance_defect_j.abs() < 2e-8);
+                let accepted = liquid.clone();
+                let cancelled = CancelGate::new_clock_free();
+                cancelled.request();
+                assert!(liquid.step_with_conduction_and_viscous_feedback(
+                    &[], &[], controls(1), &cancelled,
+                ).is_err());
+                assert_eq!(liquid.flow().lattice().grid().state_bits(), accepted.flow().lattice().grid().state_bits());
+                assert_eq!(liquid.total_enthalpy_j().unwrap(), accepted.total_enthalpy_j().unwrap());
+                assert_eq!(liquid.flow().lattice().collision_model(), model);
+            },
+        );
+    }
 }
 
 #[test]

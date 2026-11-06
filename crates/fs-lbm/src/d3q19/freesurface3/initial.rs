@@ -38,6 +38,8 @@ impl FreeSurface3 {
     /// Seed one cell of an unpublished transfer candidate with its admitted
     /// symmetric strain, packed xx, yy, zz, xy, xz, yz, in lattice time units.
     /// The supplied molecular tau belongs to that SAME strain/source query.
+    /// Independent-bulk collision uses its own trace relaxation while this
+    /// local molecular tau controls only the deviatoric part of the strain.
     /// This changes no represented mass, velocity, heat or elapsed time. It
     /// supplies Newtonian/generalized-Newtonian stress, never elastic memory.
     /// Callers own cancellation between these fixed-size cell operations and
@@ -69,9 +71,26 @@ impl FreeSurface3 {
         let rho = sample.density;
         let velocity = sample.velocity;
         let force = self.force_at_lane(key, lane);
-        // Pi_neq = -2 rho cs^2 tau D. The physical viscous Cauchy stress is
-        // -(1 - 1/(2 tau))*Pi_neq; using tau-1/2 here would seed the wrong rate.
-        let expected = strain.map(|rate| -2.0 * CS2_3 * rho * tau * rate);
+        // Pi_neq = -2 rho cs^2 [tau_s dev(D) + tau_b tr(D) I/3].
+        // Each physical stress mode restores its OWN half-collision factor;
+        // using tau-1/2 here would seed the wrong physical deformation rate.
+        let expected = match self.collision_model() {
+            super::super::CollisionModel3::CentralMomentBulk { bulk_rate, .. } => {
+                let [xx, yy, zz, xy, xz, yz] = strain;
+                let rate = fs_material::fluid_transport::viscous::DeformationRate::from_tensor(
+                    [xx, yy, zz, xy, yz, xz],
+                ).map_err(|_| fail("initial viscous deformation rate is unrepresentable"))?;
+                let [xx, yy, zz, xy, yz, xz] = *rate.deviator_per_s();
+                let spherical = (rate.dilatation_per_s() / 3.0) / bulk_rate;
+                let mut relaxed = [xx, yy, zz, xy, xz, yz].map(|value| tau * value);
+                for diagonal in &mut relaxed[..3] {
+                    *diagonal += spherical;
+                }
+                relaxed.map(|value| -2.0 * CS2_3 * rho * value)
+            }
+            // Preserve the established tied-relaxation initialization exactly.
+            _ => strain.map(|rate| -2.0 * CS2_3 * rho * tau * rate),
+        };
         if expected.iter().any(|v| !v.is_finite()) {
             return Err(fail("initial viscous stress overflows lattice units"));
         }

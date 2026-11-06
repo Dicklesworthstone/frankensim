@@ -864,6 +864,31 @@ impl FreeSurface3 {
             .set_collision_model(super::CollisionModel3::Trt { tau, magic })
     }
 
+    /// Select independent volumetric relaxation while retaining the current
+    /// molecular shear relaxation, populations, force frame and liquid mass.
+    /// The bulk coefficient is `zeta/rho = (2/9)(1/bulk_rate - 1/2)` in lattice
+    /// units. Local material shear updates preserve both authored rates.
+    /// This changes the trace constitutive response without advancing time;
+    /// it does not initialize a different velocity gradient or pressure field.
+    /// Invalid rates refuse before changing the accepted collision law.
+    pub fn set_central_moment_bulk(
+        &mut self,
+        bulk_rate: f64,
+        higher_order_rate: f64,
+    ) -> Result<(), CollisionError3> {
+        let shear_rate = match self.collision_model() {
+            super::CollisionModel3::Bgk { tau } | super::CollisionModel3::Trt { tau, .. } => 1.0 / tau,
+            super::CollisionModel3::CentralMoment { second_order_rate, .. }
+            | super::CollisionModel3::ReducedCumulant { second_order_rate, .. } => second_order_rate,
+            super::CollisionModel3::CentralMomentBulk { shear_rate, .. } => shear_rate,
+        };
+        self.grid.set_collision_model(super::CollisionModel3::CentralMomentBulk {
+            shear_rate,
+            bulk_rate,
+            higher_order_rate,
+        })
+    }
+
     /// Impose a homogeneous equilibrium angle through the liquid at one planar
     /// domain face. Other walls use the neutral closure. The angle is not a
     /// dynamic contact-line law or a claim of calibrated sessile-drop accuracy.

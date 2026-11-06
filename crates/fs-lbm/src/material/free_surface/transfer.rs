@@ -230,7 +230,9 @@ impl<'a> MaterialFreeSurfaceScaling<'a> {
     /// Source tets must already be liquid without stored elastic stress/history;
     /// this API does not authorize deleting a solid's internal energy. Its
     /// overlap-averaged symmetric P1 gradient initializes the SAME source's
-    /// viscous stress through the native Guo population owner. No subcell
+    /// viscous stress through the native Guo population owner. An explicitly
+    /// selected bulk viscosity retains its independent trace relaxation;
+    /// the source shear viscosity controls only the deviatoric strain. No subcell
     /// dissipation or elastic energy is deposited as heat. Surface tension
     /// must be explicitly neglected because a conservative surface-energy
     /// projection is not represented here. Initial numerical pressure is zero
