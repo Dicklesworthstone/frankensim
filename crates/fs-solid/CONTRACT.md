@@ -34,48 +34,45 @@ and retry.
 
 ## Brittle time continuation through impact, sustained contact and release
 
-`advance_released_face_time_with_sustained` extends the original released-face
-time driver with its native nonlinear sustained-force owner. The impact-only
-entry retains its behavior through the same shared core. Approaching active
-pairs go through the existing simultaneous impact response first; normally
-resting active pairs use the original held-force complementarity solve. Unloaded
-separation returns to the free-flight path. A successful sustained endpoint is
-also scanned for a newly approaching pair, so an endpoint event is processed
-before accepting the requested final physical time.
+`advance_released_face_time_with_sustained` extends the shared native time
+driver with constrained approach, simultaneous impact, loaded dwell and unloaded
+release. Active approaching pairs receive the original impact response first.
+Initially resting matched pairs retain their native nonlinear sustained forces
+while every released pair is checked for arrival. A new arrival shortens the
+constrained interval; the subsequent simultaneous impact includes all active
+pairs, and the remainder recomputes the physical contact subset. An old contact
+may release when the shared consistent-mass response requires it.
 
-Every force interval uses the original global affine force mean and prescribed
-support path. Previous normal forces seed subsequent numerical solves in the
-stable retained row order, and seeds are cleared after impact. They are not
-material history or prescribed physical forces. All original force responses,
-including finite-difference probes and final replay, spend the same complete
-native-solve budget as contact localization. Only accepted motion intervals
-consume physical steps; impacts remain instantaneous. All original native source,
-material, mass, geometry, force-mode and work admission stays in force.
+Every trial samples forces and prescribed supports from the original global
+affine path. Previous accepted force receipts seed later solves by full paired-row
+identity, and seeds are cleared after impact. They are numerical iterates, never
+material history or prescribed forces. Every mechanical response, including
+discarded constrained endpoints, Newton probes and final replay, spends the
+complete native-solve budget. Only accepted intervals consume physical steps.
+All original source, material, mass, geometry, mode and work gates remain active.
 
-The result retains compact force/contact records and the original total-load
-midpoint receipt beside each external-only interval account. Whole-duration
-compensated kinetic, elastic, fracture, external/support and impact-loss accounts
-remain shared with impact-only time. Signed and absolute sustained normal work
-have an additional whole-duration gate; this numerical constraint-work account
-is never added as external work, contact dissipation, fracture energy or heat.
-The final motion is published only after all intervals and global work checks
-succeed. Any late source, contact, geometry, budget or cancellation refusal
-leaves the original predecessor available for retry.
+Each force interval retains its original total-load receipt beside external-only
+physical work. The shared driver preserves native energy types and separate
+parameter/eigenstrain accounts for its thermal caller. Compensated kinetic,
+elastic, fracture, applied/support and impact-loss accounts retain their physical
+roles. Signed and absolute sustained normal work have their own whole-duration
+gate; this numerical account is never added as external work, dissipation or
+heat. A late refusal returns no partial successor and leaves the original motion
+available for retry.
 
-Force/approach activation and normal-velocity tolerances must agree. The chosen
+Force/approach activation and normal-speed tolerances must agree. The chosen
 maximum interval remains temporal resolution, not an adaptive error certificate.
-Fixed matching traces and native small-strain domains still bound the model.
-An unresolved new arrival while other pairs remain loaded may refuse and require
-interval refinement; arbitrary mixed-mode event trajectories, global CCD,
-finite sliding, friction and new-pair discovery are not claimed.
+Fixed paired faces, small strain and frictionless normal response bound this
+entry. Sampled endpoint brackets do not establish globally earliest continuous
+collision detection; finite sliding and new-pair discovery remain outside it.
 
-G1/G3 cases in `tests/brittle_tet_fragment_contact/sustained/time.rs` check four
-loaded intervals without impulses or numerical damping; independently calculated
-accelerated approach, inelastic consistent-mass impact and sustained remainder;
-and affine load reversal through release into free flight. Original global-time
-force means, non-rigid fragment velocity, distinct impact loss, exact final clock
-and complete work are checked. All 18 tests in the existing fragment-contact
-target pass together in the focused native-source integration lane.
+G1/G3 cases in `tests/brittle_tet_fragment_contact/sustained/time.rs` retain
+loaded intervals, accelerated impact/dwell and affine load reversal. Additional
+`sustained/mixed_time.rs` cases independently reconstruct a shared-mass arrival,
+the unilateral impact that releases a different corner, the changed sustained
+force subset, affine global-time loads, physical work and final motion. Late
+interval/response refusal and deterministic full retry retain the predecessor.
+Existing mechanical and thermal contact tests exercise the same shared kernels.
 
 ## Sustained contact between native brittle fragments
 

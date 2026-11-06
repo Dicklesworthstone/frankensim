@@ -10,6 +10,8 @@ use fs_solver::NewtonKrylovConfig;
 
 #[path = "sustained/approach.rs"]
 mod approach;
+#[path = "sustained/mixed_time.rs"]
+mod mixed_time;
 #[path = "sustained/time.rs"]
 mod time;
 
