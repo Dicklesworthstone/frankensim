@@ -152,6 +152,7 @@ impl NuclearHeatSource for DiffusionCellSource {
             .map(|schedule| schedule.sources_at(time_s))
             .transpose()?;
         if self.cell_index == 0 {
+            self.state.admit_transport(budget.burnup, &mut || Ok(()))?;
             if let Some(rates) = rates {
                 self.state.neutrons().trial_with_sources(
                     0.0,

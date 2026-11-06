@@ -1600,3 +1600,37 @@ Reported uncertainties remain source metadata; covariance propagation,
 temperature-dependent yield synthesis and evaluated-data accuracy are not
 claimed. Format and analytical fission/decay/shutdown tests cover these paths.
 The format follows ENDF-102 (2023), section 8.3.
+
+## Moving fuel and products with spatial neutron feedback
+
+`DiffusionBurnupState::new_with_transport` binds the original
+`BurnupTransportState` to exactly matching spatial volumes and compartment
+order, retaining complete neutron/reaction bindings. One private inventory
+owner holds the populations and accepted history. Every Picard iterate
+restarts the original neutron and material histories, then invokes the existing
+joint reaction/transfer/outflow/production operator once. Fuel or products
+arriving in a compartment can react there during the same interval.
+
+The coupling obtains mean parent populations from actual integrated residence,
+including continuously populated zero-removal receivers. Movement counts,
+nuclear reaction counts and external supply remain separate. Event heat stays
+in its event compartment; previously emitted energy does not move with later
+product transfer. Optional movement, residence and cohort-balance accounts are
+returned by `DiffusionBurnupStep`, and the accepted transport state retains
+its original preparation and lifetime movement accounts.
+
+The independent-cell API and existing coupling budget remain available. Bound
+transport path/coefficient ceilings stay fixed; the current burnup propagation,
+work and accounting allowances apply to the entire joint inventory graph.
+Native thermal binding and idle admission check that graph. Adaptive comparisons
+include individual material-transfer and outflow counts once per shared cohort.
+Analytical same-interval fission, return-product heat, zero-flow equivalence,
+continuous supply/outflow, nonlinear ODE refinement and transactional refusal
+regressions accompany native thermal and adaptive integration checks.
+
+The joint inventory remains limited to 64 nuclide nodes across compartments,
+with a separate existing neutron/precursor limit. Transport rates and geometry
+are explicitly fixed. Mean-flux/mean-inventory time correlation still requires
+timestep refinement. This addition does not solve carrier-fluid dynamics or
+bulk material/enthalpy advection, and does not establish a certified global
+error bound or evaluated-reactor qualification.

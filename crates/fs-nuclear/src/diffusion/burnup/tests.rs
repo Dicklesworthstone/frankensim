@@ -11,13 +11,13 @@ use crate::irradiation::{NeutronGroups, NuclideId};
 use fs_qty::Frequency;
 use fs_thermochem::decay::DecayLawV1;
 
-fn close(a: f64, b: f64, tolerance: f64) {
+pub(super) fn close(a: f64, b: f64, tolerance: f64) {
     assert!(
         (a - b).abs() <= tolerance,
         "{a:.17e} != {b:.17e}, tolerance {tolerance}"
     );
 }
-fn budget() -> DiffusionBurnupBudget {
+pub(super) fn budget() -> DiffusionBurnupBudget {
     DiffusionBurnupBudget {
         diffusion: DiffusionBudget {
             limits: DiffusionLimits::default(),
@@ -40,7 +40,11 @@ fn stable(index: u16) -> BurnupNuclide {
     }
 }
 
-fn fixture(cells: usize, fission: bool, temperature_table: bool) -> DiffusionBurnupState {
+pub(super) fn fixture(
+    cells: usize,
+    fission: bool,
+    temperature_table: bool,
+) -> DiffusionBurnupState {
     let groups =
         Arc::new(NeutronGroups::new("manufactured-spatial-group".into(), vec![0.0, 1.0]).unwrap());
     let sigma = if temperature_table {
@@ -266,7 +270,7 @@ fn g4_unconverged_cancelled_or_out_of_domain_steps_publish_nothing() {
 fn g0_missing_duplicate_and_wrong_kind_bindings_are_refused() {
     let state = fixture(1, true, false);
     assert!(
-        DiffusionBurnupState::new(state.neutrons.clone(), state.inventories.clone(), vec![])
+        DiffusionBurnupState::new(state.neutrons.clone(), state.inventories().to_vec(), vec![])
             .is_err()
     );
     let repeated = vec![
@@ -277,14 +281,18 @@ fn g0_missing_duplicate_and_wrong_kind_bindings_are_refused() {
         2
     ];
     assert!(
-        DiffusionBurnupState::new(state.neutrons.clone(), state.inventories.clone(), repeated)
-            .is_err()
+        DiffusionBurnupState::new(
+            state.neutrons.clone(),
+            state.inventories().to_vec(),
+            repeated
+        )
+        .is_err()
     );
     let capture = fixture(1, false, false);
     assert!(
         DiffusionBurnupState::new(
             capture.neutrons,
-            state.inventories,
+            state.inventories().to_vec(),
             vec![ReactionBinding {
                 diffusion_reaction: 0,
                 burnup_reaction: 0

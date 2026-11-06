@@ -256,6 +256,10 @@ impl PartialEq for BurnupTransportState {
 pub struct BurnupTransportStep {
     pub duration_s: f64,
     pub burnup: Vec<BurnupStep>,
+    /// Integral of each compartment's original nuclide population over this
+    /// interval [nuclei s]. Includes same-interval ingrowth, supply and movement,
+    /// also for nuclei with zero local nuclear or transport removal rate.
+    pub integrated_populations_s: Vec<Vec<f64>>,
     pub produced_nuclei: Vec<Vec<f64>>,
     pub produced_nuclei_by_compartment: Vec<f64>,
     /// Path-major then original nuclide order; repeated circulation counts.
@@ -449,7 +453,7 @@ impl BurnupTransportState {
         Ok(step)
     }
 
-    fn admit(
+    pub(crate) fn admit(
         &self,
         transport: &NuclideTransport,
         limits: BurnupTransportLimits,
@@ -775,6 +779,7 @@ impl BurnupTransportState {
             BurnupTransportStep {
                 duration_s,
                 burnup,
+                integrated_populations_s: residence.chunks_exact(n).map(<[f64]>::to_vec).collect(),
                 produced_nuclei,
                 produced_nuclei_by_compartment,
                 transfer_counts,

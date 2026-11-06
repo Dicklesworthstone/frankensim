@@ -22,6 +22,19 @@ impl AdaptiveNuclearHeatSource for DiffusionCellSource {
         let model = initial.model();
         let groups = model.groups().len();
         let delayed = model.delayed_groups().len();
+        for candidate in [coarse, fine] {
+            match (self.state().transport(), candidate.state().transport()) {
+                (None, None) => {}
+                (Some(initial), Some(candidate))
+                    if initial.volumes_m3() == candidate.volumes_m3()
+                        && initial.transport() == candidate.transport() => {}
+                _ => {
+                    return Err(FissionThermalError::Invalid(
+                        "refinement changed spatial material transport",
+                    ));
+                }
+            }
+        }
         for state in [a, b] {
             let candidate = state.model();
             // Burnup deliberately rebinds macroscopic reaction coefficients.
@@ -91,6 +104,35 @@ impl AdaptiveNuclearHeatSource for DiffusionCellSource {
             &second.spatial().produced_nuclei[cell],
         )?;
         if coarse.cell_index() == 0 {
+            match (
+                &coarse.spatial().transport,
+                &first.spatial().transport,
+                &second.spatial().transport,
+            ) {
+                (None, None, None) => {}
+                (Some(a), Some(b), Some(c)) => {
+                    // Nuclide movement is a separate extensive account from
+                    // neutron/precursor movement and nuclear reaction counts.
+                    for (a, b, c) in [
+                        (&a.transfer_counts, &b.transfer_counts, &c.transfer_counts),
+                        (&a.outflow_counts, &b.outflow_counts, &c.outflow_counts),
+                    ] {
+                        if a.len() != b.len() || a.len() != c.len() {
+                            return Err(FissionThermalError::Invalid(
+                                "refinement changed spatial material path ordering",
+                            ));
+                        }
+                        for ((a, b), c) in a.iter().zip(b).zip(c) {
+                            metric.reaction_counts(a, b, c)?;
+                        }
+                    }
+                }
+                _ => {
+                    return Err(FissionThermalError::Invalid(
+                        "refinement changed spatial material transport reports",
+                    ));
+                }
+            }
             // Shared transport is solved once and its full edge/group accounts
             // are compared once, not once for every thermal cell handle.
             let a = &coarse.spatial().neutrons;

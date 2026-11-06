@@ -19,6 +19,9 @@ use fs_thermochem::decay::DecayLawV1;
 #[path = "forcing_tests.rs"]
 mod forcing_tests;
 
+#[path = "transport_tests.rs"]
+mod transport_tests;
+
 fn spatial_budget() -> DiffusionBurnupBudget {
     DiffusionBurnupBudget {
         diffusion: DiffusionBudget {
