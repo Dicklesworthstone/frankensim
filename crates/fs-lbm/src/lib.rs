@@ -30,6 +30,8 @@ pub mod film;
 pub mod freesurface;
 /// Instantaneous momentum changes on the original low-Mach fluid populations.
 pub mod impulse;
+/// Cylindrical capillary-jet dispersion and continuous-band growth screening.
+pub mod jet;
 pub mod kinematics;
 pub mod lattice3;
 pub mod material;
