@@ -2000,8 +2000,13 @@ interval; endpoint activity is not used as an interval rectangle.
 
 Absolute intensities use FD times RI for discrete records and FC times RP(E)
 for continua. Parent-wide branching is already included and is not applied
-again. Histogram and linear continua use positive analytical count and energy
-integrals over their intersections with the group grid. No midpoint energy or
+again. Histogram, linear and logarithmic continua (ENDF INT=1 through 5) use
+positive analytical count and energy integrals over their intersections with
+the group grid. Segment logarithms are reused across group intersections;
+small-contrast limits and separately scaled energy factors avoid cancellation
+and unnecessary intermediate overflow. Logarithmic domains require positive
+energy and/or density as specified by the supplied law. INT=6 remains outside
+this spectral-density interpretation. No midpoint energy or
 silent renormalization replaces the supplied distribution. Internal grid edges
 belong to the upper group; the last upper edge is inclusive. Positive spectral
 support outside the grid refuses instead of silently dropping radiation.
@@ -2031,6 +2036,10 @@ Unrepresentable positive per-decay coefficients refuse; amplification of a
 subnormal prepared coefficient by more than one decay also refuses because its
 lost preparation precision cannot be recovered by later multiplication. These
 are numerical admission limits, not nuclear-data uncertainty bounds.
+
+G1/G3 regressions cover analytical logarithmic moments, the inverse-energy and
+inverse-square limits, neighboring coordinates, flat spectra, mixed regions,
+discontinuities, group refinement and energy-unit rescaling by 1e-180 and 1e180.
 
 The `evaluated_decay_emissions` example imports the original cobalt-60/nickel-60
 records, evolves two physical half-lives and emits a two-group gamma history.

@@ -597,14 +597,14 @@ pub(super) struct IntegratedSpectrum {
 // integral representable; likewise tiny positive basis terms can sum to a
 // representable subnormal result. No signed slopes or cancellation are needed.
 #[derive(Clone, Copy)]
-pub(super) struct PositiveIntegral {
+pub(crate) struct PositiveIntegral {
     sum: Accumulator,
     exponent: i32,
     pub(super) nonzero: bool,
 }
 
 impl PositiveIntegral {
-    pub(super) const fn new() -> Self {
+    pub(crate) const fn new() -> Self {
         Self {
             sum: Accumulator::new(0.0),
             exponent: 0,
@@ -612,7 +612,7 @@ impl PositiveIntegral {
         }
     }
 
-    pub(super) fn add_product(
+    pub(crate) fn add_product(
         &mut self,
         width: f64,
         a: f64,
@@ -633,7 +633,7 @@ impl PositiveIntegral {
     /// Positive cubic basis term, with the same binary scaling as σφ. Keeping
     /// the yield factor separate avoids overflowing σ*φ*y before a small ΔE
     /// makes the physically required production integral representable.
-    pub(super) fn add_triple_product(
+    pub(crate) fn add_triple_product(
         &mut self,
         width: f64,
         a: f64,
@@ -650,6 +650,30 @@ impl PositiveIntegral {
         let (c, ce) = binary_parts(c);
         let (term, te) = binary_parts(w * a * b * c / divisor);
         self.add_scaled_term(term, we + ae + be + ce + te)
+    }
+
+    /// One additional independently scaled factor, used by the first-energy
+    /// moment of a log-log decay spectrum. E² must not overflow before the
+    /// density and normalization make its physical integral representable.
+    pub(crate) fn add_four_product(
+        &mut self,
+        width: f64,
+        a: f64,
+        b: f64,
+        c: f64,
+        d: f64,
+        divisor: f64,
+    ) -> Result<(), EndfError> {
+        if a == 0.0 || b == 0.0 || c == 0.0 || d == 0.0 {
+            return Ok(());
+        }
+        let (w, we) = binary_parts(width);
+        let (a, ae) = binary_parts(a);
+        let (b, be) = binary_parts(b);
+        let (c, ce) = binary_parts(c);
+        let (d, de) = binary_parts(d);
+        let (term, te) = binary_parts(w * a * b * c * d / divisor);
+        self.add_scaled_term(term, we + ae + be + ce + de + te)
     }
 
     fn add_scaled_term(&mut self, term: f64, exponent: i32) -> Result<(), EndfError> {
@@ -671,7 +695,7 @@ impl PositiveIntegral {
         Ok(())
     }
 
-    pub(super) fn value(self) -> Result<f64, EndfError> {
+    pub(crate) fn value(self) -> Result<f64, EndfError> {
         if !self.nonzero {
             return Ok(0.0);
         }
@@ -682,7 +706,7 @@ impl PositiveIntegral {
         Ok(value)
     }
 
-    pub(super) fn ratio(self, denominator: Self) -> Result<f64, EndfError> {
+    pub(crate) fn ratio(self, denominator: Self) -> Result<f64, EndfError> {
         if !self.nonzero {
             return Ok(0.0);
         }

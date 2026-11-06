@@ -761,7 +761,7 @@ fn unsupported_positive_continuum_is_not_silently_linearized() {
             .into(),
         interpolation: vec![DecayInterpolation {
             end_point: 2,
-            law: 5,
+            law: 6,
         }]
         .into(),
     });
@@ -775,5 +775,295 @@ fn unsupported_positive_continuum_is_not_silently_linearized() {
             || Ok(())
         ),
         Err(EndfError::Unsupported(_))
+    ));
+}
+
+fn continuum_spectrum(law: u8, points: &[(f64, f64)], normalization: f64) -> DecaySpectrum {
+    let mut spectrum = gamma(U);
+    spectrum.discrete = vec![].into();
+    spectrum.continuum_normalization = value(normalization);
+    spectrum.continuum = Some(DecayContinuum {
+        decay_mode: 1.0,
+        points: points
+            .iter()
+            .map(|&(energy_j, density_per_j)| DecaySpectrumPoint {
+                energy_j,
+                density_per_j,
+            })
+            .collect::<Vec<_>>()
+            .into(),
+        interpolation: vec![DecayInterpolation {
+            end_point: points.len(),
+            law,
+        }]
+        .into(),
+    });
+    spectrum
+}
+
+fn prepare_continuum(spectrum: DecaySpectrum, edges: Vec<f64>) -> PreparedDecayEmission {
+    prepare(
+        chain(vec![vec![spectrum], vec![]], false),
+        DecayRadiation::Gamma,
+        edges,
+    )
+}
+
+fn relative(actual: f64, expected: f64) {
+    near(actual, expected, 3e-12 * expected.abs());
+}
+
+// G1: manufactured functions use the exact INT definitions in ENDF-102 (2023)
+// §0.5.2.1. Native libm/closed antiderivatives form an independent oracle for
+// the strict-arithmetic production operation tree.
+#[test]
+fn logarithmic_laws_retain_analytic_particle_and_energy_integrals() {
+    let e2 = 2.0_f64.exp();
+    let logarithmic = prepare_continuum(
+        continuum_spectrum(3, &[(1.0, 1.0), (e2, 3.0)], 2.5),
+        vec![1.0, 1.0_f64.exp(), e2],
+    );
+    let edges = logarithmic.group_edges_j();
+    for (group, interval) in edges.windows(2).enumerate() {
+        let [a, b] = [interval[0], interval[1]];
+        let count = b * b.ln() - a * a.ln();
+        let moment = |x: f64| x * x * (0.5 * x.ln() + 0.25);
+        relative(
+            logarithmic.particles_per_decay(0).unwrap()[group],
+            2.5 * count,
+        );
+        relative(
+            logarithmic.energy_per_decay_j(0).unwrap()[group],
+            2.5 * (moment(b) - moment(a)),
+        );
+    }
+    for sign in [-1.0, 1.0] {
+        let exponential = prepare_continuum(
+            continuum_spectrum(4, &[(0.0, 1.0), (2.0, (2.0_f64 * sign).exp())], 1.0),
+            vec![0.0, 0.5, 1.25, 2.0],
+        );
+        for (group, interval) in exponential.group_edges_j().windows(2).enumerate() {
+            let [a, b] = [interval[0], interval[1]];
+            let count = ((sign * b).exp() - (sign * a).exp()) / sign;
+            let moment = |x: f64| (sign * x - 1.0) * (sign * x).exp();
+            relative(exponential.particles_per_decay(0).unwrap()[group], count);
+            relative(
+                exponential.energy_per_decay_j(0).unwrap()[group],
+                moment(b) - moment(a),
+            );
+        }
+    }
+    for power in [
+        -3.0,
+        -2.0 - 1e-12,
+        -2.0,
+        -2.0 + 1e-12,
+        -1.0 - 1e-12,
+        -1.0,
+        -1.0 + 1e-12,
+        0.0,
+        2.5,
+    ] {
+        let power_law = prepare_continuum(
+            continuum_spectrum(5, &[(1.0, 1.0), (4.0, 4.0_f64.powf(power))], 1.0),
+            vec![1.0, 1.125, 2.0, 3.5, 4.0],
+        );
+        for (group, interval) in power_law.group_edges_j().windows(2).enumerate() {
+            let [a, b] = [interval[0], interval[1]];
+            let moment = |order: f64| {
+                let k = power + order + 1.0;
+                if k == 0.0 {
+                    (b / a).ln()
+                } else {
+                    a.powf(k) * (k * (b / a).ln()).exp_m1() / k
+                }
+            };
+            relative(
+                power_law.particles_per_decay(0).unwrap()[group],
+                moment(0.0),
+            );
+            relative(power_law.energy_per_decay_j(0).unwrap()[group], moment(1.0));
+        }
+    }
+}
+
+#[test]
+fn logarithmic_spectra_preserve_group_refinement_discontinuities_and_unit_scaling() {
+    for law in 3..=5 {
+        let coarse = prepare_continuum(
+            continuum_spectrum(law, &[(1.0, 0.5), (4.0, 8.0)], 0.75),
+            vec![1.0, 4.0],
+        );
+        for scale in [1e-180, U, 1.0, 1e180] {
+            let refined = prepare_continuum(
+                continuum_spectrum(
+                    law,
+                    &[(scale, 0.5 / scale), (4.0 * scale, 8.0 / scale)],
+                    0.75,
+                ),
+                [1.0, 1.5, 2.25, 3.0, 4.0].map(|e| e * scale).to_vec(),
+            );
+            relative(
+                refined.particles_per_decay(0).unwrap().iter().sum(),
+                coarse.particles_per_decay(0).unwrap()[0],
+            );
+            relative(
+                refined.energy_per_decay_j(0).unwrap().iter().sum::<f64>() / scale,
+                coarse.energy_per_decay_j(0).unwrap()[0],
+            );
+        }
+    }
+    let mut mixed = continuum_spectrum(3, &[(1.0, 1.0), (2.0, 3.0), (2.0, 5.0), (4.0, 10.0)], 1.0);
+    mixed.continuum.as_mut().unwrap().interpolation = vec![
+        DecayInterpolation {
+            end_point: 2,
+            law: 3,
+        },
+        DecayInterpolation {
+            end_point: 4,
+            law: 5,
+        },
+    ]
+    .into();
+    let source = prepare_continuum(mixed, vec![1.0, 2.0, 3.0, 4.0]);
+    relative(
+        source.particles_per_decay(0).unwrap().iter().sum(),
+        20.0 - 2.0 / 2.0_f64.ln(),
+    );
+    relative(
+        source.energy_per_decay_j(0).unwrap().iter().sum(),
+        5.5 - 1.5 / 2.0_f64.ln() + 140.0 / 3.0,
+    );
+}
+
+#[test]
+fn logarithmic_moments_keep_flat_and_nearly_coincident_limits() {
+    for law in 3..=5 {
+        for right in [1.0_f64.next_up(), 1.0 + 1e-10] {
+            let source = prepare_continuum(
+                continuum_spectrum(law, &[(1.0, 2.0), (right, 2.0)], 1.0),
+                vec![1.0, right],
+            );
+            relative(
+                source.particles_per_decay(0).unwrap()[0] / (right - 1.0),
+                2.0,
+            );
+            relative(
+                source.energy_per_decay_j(0).unwrap()[0] / (right - 1.0),
+                1.0 + right,
+            );
+        }
+        let delta = (1.0 + 1e-12) - 1.0;
+        let source = prepare_continuum(
+            continuum_spectrum(law, &[(1.0, 1.0), (4.0, 1.0 + delta)], 1.0),
+            vec![1.0, 4.0],
+        );
+        let (count, energy) = if law == 4 {
+            (3.0 + 1.5 * delta, 7.5 + 4.5 * delta)
+        } else {
+            (
+                3.0 + delta * (4.0 - 3.0 / 4.0_f64.ln()),
+                7.5 + delta * (8.0 - 3.75 / 4.0_f64.ln()),
+            )
+        };
+        near(
+            source.particles_per_decay(0).unwrap()[0],
+            count,
+            4e-15 * count,
+        );
+        near(
+            source.energy_per_decay_j(0).unwrap()[0],
+            energy,
+            4e-15 * energy,
+        );
+    }
+}
+
+#[test]
+fn logarithmic_moments_preserve_representable_extreme_scale_products() {
+    // Neither E² nor the full endpoint density ratio is representable, but
+    // the physical zeroth and first moments both are. No saturation is needed.
+    let source = prepare_continuum(
+        continuum_spectrum(5, &[(1e-200, 1e200), (1e200, 1e-200)], 1.0),
+        vec![1e-200, 1.0, 1e200],
+    );
+    for &count in source.particles_per_decay(0).unwrap() {
+        relative(count, 200.0 * 10.0_f64.ln());
+    }
+    relative(source.energy_per_decay_j(0).unwrap()[0], 1.0);
+    relative(source.energy_per_decay_j(0).unwrap()[1], 1e200);
+    let source = prepare_continuum(
+        continuum_spectrum(4, &[(0.0, 1e300), (1.0, 1e-300)], 1e-300),
+        vec![0.0, 0.5, 1.0],
+    );
+    let contrast = 600.0 * 10.0_f64.ln();
+    relative(source.particles_per_decay(0).unwrap()[0], 1.0 / contrast);
+    relative(
+        source.energy_per_decay_j(0).unwrap()[0],
+        1.0 / (contrast * contrast),
+    );
+    relative(source.particles_per_decay(0).unwrap()[1], 1e-300 / contrast);
+    relative(
+        source.energy_per_decay_j(0).unwrap()[1],
+        1e-300 * (0.5 + 1.0 / contrast) / contrast,
+    );
+}
+
+#[test]
+fn logarithmic_domain_rules_reject_zero_logarithms_without_guessing() {
+    for (law, points) in [
+        (3, [(0.0, 1.0), (1.0, 2.0)]),
+        (3, [(0.0, 0.0), (1.0, 0.0)]),
+        (4, [(0.0, 0.0), (1.0, 1.0)]),
+        (4, [(0.0, 0.0), (1.0, 0.0)]),
+        (5, [(0.0, 1.0), (1.0, 2.0)]),
+        (5, [(1.0, 1.0), (2.0, 0.0)]),
+    ] {
+        let assembly = chain(
+            vec![vec![continuum_spectrum(law, &points, 1.0)], vec![]],
+            false,
+        );
+        assert!(matches!(
+            PreparedDecayEmission::new(
+                assembly,
+                DecayRadiation::Gamma,
+                vec![0.0, 3.0],
+                DecayEmissionLimits::default(),
+                || Ok(())
+            ),
+            Err(EndfError::Physics(FissionError::InvalidInput(_)))
+        ));
+    }
+    // INT=3 logs energy only: a true zero density endpoint remains valid.
+    let permitted = prepare_continuum(
+        continuum_spectrum(3, &[(1.0, 0.0), (2.0, 1.0)], 1.0),
+        vec![1.0, 2.0],
+    );
+    relative(
+        permitted.particles_per_decay(0).unwrap()[0],
+        2.0 - 1.0 / 2.0_f64.ln(),
+    );
+    // A derived subnormal density would be rounded before a large supplied
+    // normalization could restore its scale; refuse instead of amplifying it.
+    let assembly = chain(
+        vec![
+            vec![continuum_spectrum(
+                5,
+                &[(1.0, 1e-320), (4.0, 2e-320)],
+                1e300,
+            )],
+            vec![],
+        ],
+        false,
+    );
+    assert!(matches!(
+        PreparedDecayEmission::new(
+            assembly,
+            DecayRadiation::Gamma,
+            vec![1.0, 2.0, 4.0],
+            DecayEmissionLimits::default(),
+            || Ok(())
+        ),
+        Err(EndfError::Physics(FissionError::Arithmetic))
     ));
 }

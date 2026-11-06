@@ -4,8 +4,9 @@
 //! `FC * RP(E) + FD * sum(RI * delta(E-ER))`. Mode branching is already included
 //! in those normalizations and is never applied again here. Prepared group
 //! integrals are reusable across inventory histories and interval durations.
-//! Histogram and linear continua are integrated analytically, including their
-//! first energy moment; an energy-group midpoint is never substituted for it.
+//! Histogram, linear and logarithmic ENDF continua are integrated analytically,
+//! including their first energy moment; an energy-group midpoint is never
+//! substituted for it. Logarithmic laws retain their original positive domain.
 //!
 //! Discrete beta records describe endpoints, not monoenergetic particles. They
 //! require a separate beta-shape model and refuse here; a supplied beta-minus
@@ -37,6 +38,8 @@ use crate::endf::spectrum::PositiveIntegral;
 use crate::endf::{EndfError, budget, convex};
 use crate::irradiation::NuclideId;
 use crate::{Accumulator, FissionError, nonnegative};
+
+mod continuum;
 
 /// Explicit allocation and work bounds for preparation and source evaluation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -543,6 +546,15 @@ fn integrate_spectrum(
             region += 1;
         }
         let law = continuum.interpolation[region].law;
+        let logarithmic = match law {
+            1 | 2 => None,
+            3..=5 => Some(self::continuum::LogSegment::new(a, b, law)?),
+            _ => {
+                return Err(EndfError::Unsupported(
+                    "decay emission grouping supports ENDF interpolation laws 1 through 5",
+                ));
+            }
+        };
         if spectrum.radiation == DecayRadiation::ElectronCapturePositron
             && (a.density_per_j > 0.0 || (law != 1 && b.density_per_j > 0.0))
         {
@@ -561,11 +573,6 @@ fn integrate_spectrum(
                 "unresolved fragment or unidentified radiation spectrum",
             ));
         }
-        if !matches!(law, 1 | 2) {
-            return Err(EndfError::Unsupported(
-                "decay emission grouping supports histogram and linear spectra",
-            ));
-        }
         check_domain(edges, a.energy_j, b.energy_j)?;
         while group + 1 < counts.len() && edges[group + 1] <= a.energy_j {
             group += 1;
@@ -574,17 +581,21 @@ fn integrate_spectrum(
         while left < b.energy_j {
             visit(work, limits, checkpoint)?;
             let right = b.energy_j.min(edges[group + 1]);
-            let p = density_at(a, b, law, left)?;
-            let q = density_at(a, b, law, right)?;
-            let width = right - left;
-            counts[group].add_product(width, fc, p, 2.0)?;
-            counts[group].add_product(width, fc, q, 2.0)?;
-            // Integral of the product of two linear Bernstein polynomials,
-            // E and RP(E). Every term is positive; no slope cancellation.
-            energies[group].add_triple_product(width, fc, p, left, 3.0)?;
-            energies[group].add_triple_product(width, fc, q, right, 3.0)?;
-            energies[group].add_triple_product(width, fc, p, right, 6.0)?;
-            energies[group].add_triple_product(width, fc, q, left, 6.0)?;
+            if let Some(segment) = &logarithmic {
+                segment.add_moments(left, right, fc, &mut counts[group], &mut energies[group])?;
+            } else {
+                let p = density_at(a, b, law, left)?;
+                let q = density_at(a, b, law, right)?;
+                let width = right - left;
+                counts[group].add_product(width, fc, p, 2.0)?;
+                counts[group].add_product(width, fc, q, 2.0)?;
+                // Integral of the product of two linear Bernstein polynomials,
+                // E and RP(E). Every term is positive; no slope cancellation.
+                energies[group].add_triple_product(width, fc, p, left, 3.0)?;
+                energies[group].add_triple_product(width, fc, q, right, 3.0)?;
+                energies[group].add_triple_product(width, fc, p, right, 6.0)?;
+                energies[group].add_triple_product(width, fc, q, left, 6.0)?;
+            }
             left = right;
             if left < b.energy_j {
                 group += 1;
