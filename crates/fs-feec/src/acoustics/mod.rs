@@ -1,4 +1,4 @@
-//! Interior acoustics on tetrahedral complexes (music bead M2.4, home chosen by M2.4-W0): see [`helmholtz`].
+//! Interior acoustics on original spatial complexes (music bead M2.4): see [`helmholtz`] and [`axisymmetric`].
 
 pub mod helmholtz;
 
@@ -7,3 +7,6 @@ pub mod thermoviscous;
 
 /// Source-trace Galerkin coupling between pressure and resolved thermoviscous FE.
 pub mod hybrid;
+
+/// Full m=0 meridional pressure fields with exact swept volume and surface forms.
+pub mod axisymmetric;
