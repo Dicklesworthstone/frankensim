@@ -8,6 +8,8 @@ use fs_couple::moisture::{
 
 #[path = "shared/sdirk.rs"]
 mod sdirk;
+#[path = "shared/solution_sdirk.rs"]
+mod solution_sdirk;
 
 fn participant<'a>(
     id: u64,

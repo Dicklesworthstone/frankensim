@@ -984,3 +984,20 @@ native event clipping and donor admission do not estimate temporal accuracy.
 The three focused groups compare manual event-cut composition, isolate a
 large independent birth datum from actual conductive/latent heat, and exercise
 late physical/source/work/cancellation refusals.
+
+## Adaptive second-order diffusion with shared finite solutions
+
+`FiniteMoistureSolution::advance_shared_cartesian_sdirk2_adaptive_to` completes
+a requested duration through the existing shared temporal controller. Every
+original specimen, solution activity and solvent inventory receives separate
+local error control; opposing transfers cannot cancel specimen error estimates.
+Complete-window accounts include only accepted RK-weighted transfers, preserve
+the native nonvolatile stocks, and charge both implicit stages of every proposal.
+All fields and the one finite reservoir are admitted together after water
+conservation checks. Native kinetic-phase refusal remains; temporal estimates
+assume smooth source and algebraic phase branches and certify neither global
+error nor phase-crossing order.
+
+G1/G4 regression definitions cover opposing fields with a stationary pure bath,
+finite concentration/activity feedback against an independent continuous
+reference, accepted signed transfers and late stage-work exhaustion.

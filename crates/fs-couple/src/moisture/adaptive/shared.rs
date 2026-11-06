@@ -66,13 +66,14 @@ pub type SharedSolutionMoistureAdvanceCandidate = SharedMoistureAdvanceCandidate
     SharedSolutionMoistureStep,
     2,
 >;
-pub type SharedCartesianSolutionMoistureAdvanceCandidate = SharedMoistureAdvanceCandidate<
-    FiniteMoistureSolution,
-    MoistureCartesian,
-    MoistureCartesianReport,
-    SharedSolutionMoistureStep,
-    6,
->;
+pub type SharedCartesianSolutionMoistureAdvanceCandidate<Transport = MoistureCartesianReport> =
+    SharedMoistureAdvanceCandidate<
+        FiniteMoistureSolution,
+        MoistureCartesian,
+        Transport,
+        SharedSolutionMoistureStep,
+        6,
+    >;
 
 struct SharedStep<Step, Transport> {
     reservoir: Step,
@@ -517,6 +518,66 @@ impl FiniteMoistureSolution {
             |bath, fields, dt| {
                 bath.advance_fields(fields, dt, maximum_total_cells, physical, cx)
                     .map(|c| c.into_parts())
+            },
+            cx,
+        )
+    }
+
+    /// Complete second-order diffusion of independent Cartesian specimens
+    /// sharing one finite solution and its actual evolving water activity.
+    ///
+    /// Every field, solvent mass and activity receives separate local error
+    /// control. Opposing local transfers retain their own face accounts even
+    /// when the net solvent change vanishes. Only accepted RK-weighted half
+    /// intervals enter the complete-duration water balance; both implicit
+    /// stages count for every coupled probe, including rejected proposals.
+    ///
+    /// Native nonvolatile stocks and algebraic phase partitioning remain owned
+    /// by the solution. Kinetic phase evolution retains the physical SDIRK
+    /// owner's explicit refusal. Smooth-branch local error estimates do not
+    /// certify phase-crossing order or a global temporal bound. All original
+    /// fields and the finite reservoir publish together after final admission.
+    pub fn advance_shared_cartesian_sdirk2_adaptive_to(
+        &self,
+        participants: &[CartesianMoistureParticipant<'_>],
+        target_s: f64,
+        maximum_total_cells: usize,
+        physical: SolutionMoistureSolve,
+        time: MoistureTimeControls,
+        cx: &Cx<'_>,
+    ) -> Result<
+        SharedCartesianSolutionMoistureAdvanceCandidate<MoistureCartesianSdirk2Report>,
+        MoistureAdvanceError<SolutionMoistureError>,
+    > {
+        let fields = cartesians(participants, maximum_total_cells, cx)?;
+        evolve_shared(
+            self,
+            fields,
+            target_s,
+            maximum_total_cells,
+            self.solution().temperature_k(),
+            time,
+            TimeMethod::Sdirk2,
+            observe_solution,
+            |bath, fields, dt| {
+                let participants: Vec<_> = fields
+                    .iter()
+                    .map(|field| CartesianMoistureParticipant {
+                        id: field.id,
+                        moisture: field.field,
+                        faces: field.faces,
+                        transport: field.transport.0,
+                        nonlinear: field.transport.1,
+                    })
+                    .collect();
+                bath.advance_shared_cartesian_sdirk2(
+                    &participants,
+                    dt,
+                    maximum_total_cells,
+                    physical,
+                    cx,
+                )
+                .map(|c| c.into_parts())
             },
             cx,
         )
