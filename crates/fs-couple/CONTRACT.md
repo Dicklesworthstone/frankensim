@@ -726,3 +726,46 @@ source-to-native circuit tests remain unexecuted in the dependency environment.
 ### Prepared fixed-voltage piezoelectric motion
 
 `piezoelectric::prepared::PreparedPiezoelectricVoltage` owns the original rod and complete accepted extension, momentum and free charge under the terminal voltage inherited at preparation. Native exact quadratic propagation eliminates only the algebraic voltage constraint, retaining the short-circuit stiffness, consistent inertia and reciprocal force theta*V. Each candidate reconstructs charge from the original preparation anchor and independently checks the original full stored energy, force work, voltage-source work, induced charge and constitutive voltage before publication. Native whole-window mechanical norm admission bounds strain, and the fixed voltage with its explicit tolerance bounds electric field. Warm stepping uses fixed arrays and performs no owner allocation, factorization, exponential or Newton solve. Refusal and cancellation preserve the complete accepted body. This is the held-input linear model up to floating-point error with conservative numerical domain admission; changing to an incompatible ideal voltage requires another physical boundary model and cannot silently reset charge.
+
+## Regional coexistence in the conserved finite water cell
+
+`EquilibriumWaterCell::from_isochoric_state` admits an original prepared
+`IsochoricWaterState` directly. Its mass, fixed specific volume, raw internal
+energy, source mode and dense-root controls remain the source of the initial
+M,U,V inventory. Initialization requires the exact bounded source controls
+after applying the cell's absolute budgets per unit mass.
+
+The original stream, finite-wall heat and sealed moving-volume paths now
+preserve that source mode when rebinding V/M. Regional coexistence can therefore
+evolve liquid/vapor masses, pressure and density above 623.15 K through the
+same conservative ledgers and reciprocal pressure-work solve. Phase volumes
+use the retained original regional endpoints; mass quality is never substituted
+for vapor volume fraction. The constructor does not create a second EOS or
+replace conserved energy with an approximate recovered source image.
+
+Both native water-cell acoustic observers support the regional pair and use
+exactly the retained thermal source density, with the selected original bulk
+modulus. They expose the signed arithmetic density difference separately.
+The equilibrium observer preserves the original Gibbs accessor and adds a
+regional tangent accessor retaining its actual root/pressure defects. These
+are explicit asymptotic acoustic closures; the observer does not add phase
+kinetics or advance the thermal inventory.
+
+Regional operation remains a bounded coexistence window below the critical
+temperature, on one side of the 623.15 K source-fit seam. Losing either phase,
+crossing that seam, or exceeding the original source/residual budgets refuses
+the proposed interval. No noncondensable gas, slip, nucleation, moving interface
+or thermal-gradient model is inferred. Stream transfer keeps its existing
+held-donor approximation; moving-volume work keeps its existing trapezoidal
+time accuracy. Coupled material and source errors remain distinct from
+conserved mass/energy residuals.
+
+Five added native integration tests cover 640 K heat/phase/acoustic updates,
+two-cell source-retaining transfer, reciprocal isothermal phase expansion and
+return using raw Delta U plus p Delta V, source-window/late-cancellation
+rollback, and finite conducting-wall exchange on the same regional inventory.
+
+All 23 exact native water-cell tests passed, including the five additions and
+18 existing regressions. The source closure uses original feedback helpers and
+genuine native material, duct and thermal dependencies; no whole-workspace
+Cargo/DSR pass is implied.

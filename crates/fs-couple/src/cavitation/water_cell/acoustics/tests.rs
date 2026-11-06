@@ -214,7 +214,19 @@ fn accepted_phase_change_updates_propagation_without_mutating_an_earlier_observe
         after.source_state().vapor_mass_fraction(),
     )
     .unwrap();
-    assert_eq!(updated.state(), expected.state());
+    assert_eq!(
+        updated.state().density_kg_m3().to_bits(),
+        after.source_state().bulk_density_kg_m3().to_bits()
+    );
+    near(
+        updated.state().adiabatic_bulk_modulus_pa(),
+        expected.state().adiabatic_bulk_modulus_pa(),
+        5e-15,
+    );
+    assert_eq!(
+        updated.density_representation_difference_kg_m3(),
+        after.source_state().bulk_density_kg_m3() - expected.state().density_kg_m3()
+    );
     assert_eq!(old.source().time_s(), 0.0);
     assert_eq!(updated.source().time_s(), 0.25);
     near(after.mass_kg(), before.mass_kg(), 1e-14);

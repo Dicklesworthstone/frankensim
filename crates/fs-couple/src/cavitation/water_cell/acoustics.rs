@@ -16,6 +16,7 @@ use super::WaterCellState;
 use fs_material::MaterialError;
 use fs_material::fluid_acoustics::{FluidAcousticState, FluidAcoustics, FrozenHomogeneousMixture};
 use fs_material::phase::water::acoustics::HomogeneousEquilibriumWater;
+use fs_thermochem::water::if97::regions::If97FluidSaturationPair;
 
 /// Explicit frozen-phase acoustic view of one accepted water-cell snapshot.
 ///
@@ -27,6 +28,7 @@ pub struct FrozenWaterCellAcoustics<'a> {
     source: &'a WaterCellState,
     acoustic: FluidAcousticState,
     mixture: Option<FrozenHomogeneousMixture>,
+    density_representation_difference_kg_m3: f64,
 }
 
 impl<'a> FrozenWaterCellAcoustics<'a> {
@@ -36,7 +38,7 @@ impl<'a> FrozenWaterCellAcoustics<'a> {
         let thermodynamic = source.source_state();
         let (acoustic, mixture) = if let Some(single) = thermodynamic.single_phase_source() {
             (single.acoustic_state()?, None)
-        } else if let Some(pair) = thermodynamic.saturation_pair() {
+        } else if let Some(pair) = thermodynamic.regional_saturation_pair() {
             let mixture = FrozenHomogeneousMixture::from_mass_fraction(
                 pair.liquid().acoustic_state()?,
                 pair.vapor().acoustic_state()?,
@@ -48,10 +50,13 @@ impl<'a> FrozenWaterCellAcoustics<'a> {
                 what: "water acoustic observation requires the retained IF97 phase source".into(),
             });
         };
+        let (acoustic, density_representation_difference_kg_m3) =
+            retain_source_density(source, acoustic)?;
         Ok(Self {
             source,
             acoustic,
             mixture,
+            density_representation_difference_kg_m3,
         })
     }
 
@@ -66,9 +71,16 @@ impl<'a> FrozenWaterCellAcoustics<'a> {
         self.mixture
     }
 
-    /// Frozen-phase material response; this read does not advance the cell.
+    /// Frozen-phase response with exactly the retained thermal source density;
+    /// this read does not advance the cell or conceal its volume residual.
     pub const fn state(&self) -> FluidAcousticState {
         self.acoustic
+    }
+
+    /// Thermal 1/v minus the independently summed acoustic mixture density.
+    /// This is representation roundoff, not a change to conserved water mass.
+    pub const fn density_representation_difference_kg_m3(&self) -> f64 {
+        self.density_representation_difference_kg_m3
     }
 }
 
@@ -91,27 +103,41 @@ pub struct EquilibriumWaterCellAcoustics<'a> {
     source: &'a WaterCellState,
     acoustic: FluidAcousticState,
     equilibrium: Option<HomogeneousEquilibriumWater>,
+    regional_equilibrium: Option<HomogeneousEquilibriumWater<If97FluidSaturationPair>>,
+    density_representation_difference_kg_m3: f64,
 }
 
 impl<'a> EquilibriumWaterCellAcoustics<'a> {
     pub fn new(source: &'a WaterCellState) -> Result<Self, MaterialError> {
         let thermodynamic = source.source_state();
-        let (acoustic, equilibrium) = if let Some(single) = thermodynamic.single_phase_source() {
-            (single.acoustic_state()?, None)
+        let (acoustic, equilibrium, regional_equilibrium) = if let Some(single) =
+            thermodynamic.single_phase_source()
+        {
+            (single.acoustic_state()?, None, None)
         } else if let Some(pair) = thermodynamic.saturation_pair() {
             let equilibrium =
                 HomogeneousEquilibriumWater::try_new(pair, thermodynamic.vapor_mass_fraction())?;
-            (equilibrium.state(), Some(equilibrium))
+            (equilibrium.state(), Some(equilibrium), None)
+        } else if let Some(pair) = thermodynamic.regional_saturation_pair() {
+            let equilibrium = HomogeneousEquilibriumWater::try_from_regional(
+                pair,
+                thermodynamic.vapor_mass_fraction(),
+            )?;
+            (equilibrium.state(), None, Some(equilibrium))
         } else {
             return Err(MaterialError::State {
                 what: "equilibrium acoustic observation requires the retained IF97 phase source"
                     .into(),
             });
         };
+        let (acoustic, density_representation_difference_kg_m3) =
+            retain_source_density(source, acoustic)?;
         Ok(Self {
             source,
             acoustic,
             equilibrium,
+            regional_equilibrium,
+            density_representation_difference_kg_m3,
         })
     }
 
@@ -121,9 +147,21 @@ impl<'a> EquilibriumWaterCellAcoustics<'a> {
     pub const fn state(&self) -> FluidAcousticState {
         self.acoustic
     }
-    /// Original equilibrium source, analytic tangent and source-fit defects.
+    /// Original Gibbs-only equilibrium source, tangent and source-fit defects.
+    /// Regional coexistence charts expose their original pair separately.
     pub const fn equilibrium(&self) -> Option<HomogeneousEquilibriumWater> {
         self.equilibrium
+    }
+    /// Original regional coexistence source, including retained Region 3 roots
+    /// and the actual pressure/latent-energy residuals used by its tangent.
+    pub const fn regional_equilibrium(
+        &self,
+    ) -> Option<HomogeneousEquilibriumWater<If97FluidSaturationPair>> {
+        self.regional_equilibrium
+    }
+    /// Thermal 1/v minus the selected tangent's independently summed density.
+    pub const fn density_representation_difference_kg_m3(&self) -> f64 {
+        self.density_representation_difference_kg_m3
     }
 }
 
@@ -131,6 +169,25 @@ impl FluidAcoustics for EquilibriumWaterCellAcoustics<'_> {
     fn acoustic_state(&self) -> Result<FluidAcousticState, MaterialError> {
         Ok(self.acoustic)
     }
+}
+
+// Preserve thermal storage density and the selected physical bulk modulus.
+// The original mixture/tangent remains accessible for independent diagnostics.
+fn retain_source_density(
+    source: &WaterCellState,
+    selected: FluidAcousticState,
+) -> Result<(FluidAcousticState, f64), MaterialError> {
+    let density = source.source_state().bulk_density_kg_m3();
+    let difference = density - selected.density_kg_m3();
+    let acoustic = if density.to_bits() == selected.density_kg_m3().to_bits() {
+        selected
+    } else {
+        FluidAcousticState::from_adiabatic_bulk_modulus(
+            density,
+            selected.adiabatic_bulk_modulus_pa(),
+        )?
+    };
+    Ok((acoustic, difference))
 }
 
 #[cfg(test)]

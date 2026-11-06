@@ -24,7 +24,6 @@ use super::{
     EquilibriumWaterCell, WaterCellError, WaterCellStep, budget, finite, image, poll, positive,
 };
 use crate::cavity_phs::piston::thermal::feedback;
-use fs_material::phase::water::isochoric::IsochoricWater;
 use fs_qty::Temperature;
 use fs_thermochem::water::MassSpecificVolume;
 use fs_thermochem::water::if97::saturation_pressure_derivative;
@@ -190,12 +189,15 @@ impl EquilibriumWaterCell {
                 "specific volume is unrepresentable",
             ));
         }
-        let law = IsochoricWater::new(
-            MassSpecificVolume::new(specific_volume),
-            self.controls.source_controls(mass),
-            &mut cancelled,
-        )
-        .map_err(WaterCellError::from)?;
+        let law = initial
+            .source_state()
+            .law()
+            .rebind_specific_volume(
+                MassSpecificVolume::new(specific_volume),
+                self.controls.source_controls(mass),
+                &mut cancelled,
+            )
+            .map_err(WaterCellError::from)?;
         let t0 = initial.source_state().temperature_k();
         let u0 = initial.source_state().specific_internal_energy_j_kg();
         let p0 = initial.source_state().pressure_pa();

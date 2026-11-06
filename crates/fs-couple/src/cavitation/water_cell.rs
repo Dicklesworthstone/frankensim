@@ -1,8 +1,10 @@
 //! Finite rigid-volume water storage with conservative mass and energy transport.
 //!
 //! The accepted coordinates are total water mass M and internal energy U.
-//! Original `IsochoricWater` resolves v=V/M and u=U/M with IF97 Regions 1, 2
-//! and 4. Its actual source state, finite phase masses/volumes and inversion
+//! Original `IsochoricWater` resolves v=V/M and u=U/M. Its default chart uses
+//! IF97 Regions 1, 2 and 4; an explicitly prepared regional coexistence chart
+//! also admits Region 3 endpoints below the critical temperature. Its actual
+//! source state, finite phase masses/volumes and inversion
 //! residuals remain visible; an approximate root never overwrites conserved U.
 //! The original source supplies all sensible and latent calorics.
 //!
@@ -20,8 +22,9 @@
 //! only after source recovery, conservation checks and the final cancellation
 //! poll. Total water, including vapor, is retained. The equilibrium approximation
 //! excludes finite-rate nucleation, metastability, noncondensable gas, interface
-//! energy and thermal gradients. The source domain is 273.16..=623.15 K; its
-//! explicit temperature/pressure window may refuse an unsupported inventory.
+//! energy and thermal gradients. The default source domain is 273.16..=623.15 K.
+//! A retained regional coexistence chart requires both phases to remain within
+//! its explicit temperature/pressure window; it refuses an unsupported inventory.
 //! Entropy receipts retain the raw IF97 values. Supplied heat has no authored
 //! boundary temperature here, so an unaccounted entropy change is not certified
 //! entropy production.
@@ -364,6 +367,52 @@ impl EquilibriumWaterCell {
         Ok(Self { controls, state })
     }
 
+    /// Retain an already prepared original fixed-volume source, including an
+    /// explicitly bounded regional liquid-vapor coexistence chart.
+    ///
+    /// Initial V=M*v_fixed and U=M*u_source are formed once. Subsequent stream,
+    /// heat and volume-work updates reuse this chart's source family and dense
+    /// pressure controls. No source density or phase inventory is re-evaluated
+    /// during initialization. Source residuals remain independently checked.
+    ///
+    /// The supplied cell controls must match the original chart after applying
+    /// this cell's absolute volume/energy budgets per unit mass. This prevents
+    /// initialization under one source window and recovery under another.
+    pub fn from_isochoric_state(
+        mass_kg: f64,
+        source: IsochoricWaterState,
+        time_s: f64,
+        controls: WaterCellControls,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, WaterCellError> {
+        poll(&mut cancelled)?;
+        controls.validate()?;
+        if !positive(mass_kg) || !time_s.is_finite() {
+            return Err(WaterCellError::Invalid(
+                "positive finite mass and finite time required",
+            ));
+        }
+        if *source.law().controls() != controls.source_controls(mass_kg) {
+            return Err(WaterCellError::Invalid(
+                "initial water source must retain the cell's exact bounded source controls",
+            ));
+        }
+        let volume = finite(
+            mass_kg * source.fixed_specific_volume_m3_kg(),
+            "initial fixed volume",
+        )?;
+        let energy = finite(
+            mass_kg * source.specific_internal_energy_j_kg(),
+            "initial source energy",
+        )?;
+        if !positive(volume) || (source.specific_internal_energy_j_kg() != 0.0 && energy == 0.0) {
+            return Err(WaterCellError::Unrepresentable("initial source inventory"));
+        }
+        let state = image(volume, mass_kg, energy, time_s, source, controls)?;
+        poll(&mut cancelled)?;
+        Ok(Self { controls, state })
+    }
+
     pub const fn state(&self) -> WaterCellState {
         self.state
     }
@@ -635,6 +684,12 @@ fn recover(
         law.fixed_specific_volume_m3_kg() == specific_volume && *law.controls() == source_controls
     }) {
         *law
+    } else if let Some(law) = previous {
+        law.rebind_specific_volume(
+            MassSpecificVolume::new(specific_volume),
+            source_controls,
+            &mut *cancelled,
+        )?
     } else {
         IsochoricWater::new(
             MassSpecificVolume::new(specific_volume),
@@ -679,7 +734,7 @@ fn image(
     let vapor_mass = finite(mass * source.vapor_mass_fraction(), "vapor mass")?;
     let liquid_mass = mass - vapor_mass;
     let phase_masses = [liquid_mass, vapor_mass];
-    let volumes = if let Some(pair) = source.saturation_pair() {
+    let volumes = if let Some(pair) = source.regional_saturation_pair() {
         [
             liquid_mass * pair.liquid().specific_volume().value(),
             vapor_mass * pair.vapor().specific_volume().value(),
@@ -729,3 +784,7 @@ fn image(
 #[cfg(test)]
 #[path = "water_cell/tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "water_cell/regional_tests.rs"]
+mod regional_tests;
