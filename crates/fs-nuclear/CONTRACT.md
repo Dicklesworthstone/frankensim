@@ -1236,17 +1236,28 @@ physical assembly must still admit complete branch closure and daughter data.
 The caller's source label and MF8 identity are retained declarations, with no
 claim of independently verified MF1 library provenance or an isotope catalogue.
 
-Discrete, continuum and covariance records are traversed by their LIST/TAB1
-counts through SEND without allocating spectral arrays or interpreting their
-radiation transport. Input bytes, all scanned records and retained modes have
-explicit ceilings checked before data-dependent allocation. Energy storage is
-bounded by seventeen pairs; checkpoints preserve the caller's original error.
+Discrete and continuum radiation records retain their declared FD/FC
+normalizations, relative intensities, energy uncertainties, transition types,
+conversion coefficients and interpolation laws. Continuum densities convert
+from probability/eV to probability/J together with their energy coordinates.
+Beta endpoint records remain distinct from monoenergetic particle lines;
+relative intensities are not normalized to one and already include branching.
+Unknown spectrum mean energies remain unknown. Covariance payloads are
+structurally traversed through SEND and their presence is retained, without
+uncertainty propagation. No radiation transport or deposition is inferred.
 
-Seven regressions cover the pinned published ENDF/B-VIII.0 tritium/helium-3
-files, unknown NC17 components, spectral/covariance traversal, malformed
+Input bytes, all scanned records, retained modes, spectra, discrete records,
+continuum points and interpolation regions have explicit ceilings checked before
+data-dependent allocation. The latter three storage bounds are cumulative across
+radiation types. Aggregate-energy storage remains bounded by seventeen pairs;
+checkpoints preserve the caller's original error.
+
+The reader regressions cover the pinned published ENDF/B-VIII.0 tritium,
+helium-3 and cobalt-60 files, unknown energy components, spectral SI integrals,
+photon multiplicity and conversion coefficients, malformed data and
 identity/count/padding/SEND, exact resource and cancellation limits, and
 unrepresentable input. The default-feature actual-root native nuclear gate
-passed all 126 tests. The fixture source and exact original Git blobs are
+passed all 183 tests after spectrum retention. The fixture source and exact original Git blobs are
 recorded in `tests/data/endf_b_viii_0/README.md`. These checks establish
 import interoperability and numerical behavior, not empirical nuclear-data
 validation.

@@ -118,6 +118,16 @@ fn pinned_endf_b_viii_tritium_and_stable_helium_preserve_evaluated_values() {
     assert_eq!(h3.modes()[0].q_j, 18590.0 * EV_J);
     assert_eq!(h3.modes()[0].probability, 1.0);
     assert_eq!(h3.metadata().spectrum_count, 1);
+    let beta = &h3.spectra()[0];
+    assert_eq!(beta.radiation, spectra::DecayRadiation::BetaMinus);
+    assert_eq!(beta.discrete_normalization.value, 1.0);
+    assert_eq!(beta.discrete.len(), 1);
+    assert_eq!(beta.discrete[0].energy_j.value, 18590.0 * EV_J);
+    assert_eq!(beta.discrete[0].energy_j.uncertainty, 2.0 * EV_J);
+    assert_eq!(beta.discrete[0].intensity.value, 1.0);
+    assert_eq!(beta.discrete[0].transition_type, 1.0);
+    assert_eq!(beta.average_energy_j.value_j, Some(5690.0 * EV_J));
+    assert!(beta.continuum.is_none());
     assert_eq!(h3.metadata().spin, Some(0.5));
     assert_eq!(h3.metadata().parity, Some(1));
     // Neither the Q remainder nor the descriptive MF1 text becomes a guessed
@@ -139,6 +149,7 @@ fn pinned_endf_b_viii_tritium_and_stable_helium_preserve_evaluated_values() {
     assert!(he3.modes().is_empty());
     assert_eq!(he3.branch_fraction_sum(), 0.0);
     assert_eq!(he3.metadata().spectrum_count, 0);
+    assert!(he3.spectra().is_empty());
     assert!(
         he3.average_energies()
             .iter()
@@ -176,6 +187,71 @@ fn seventeen_components_unknown_values_and_mode_probabilities_remain_explicit() 
     assert_ne!(data.branch_fraction_sum(), 1.0);
 }
 
+#[test]
+fn published_cobalt_gamma_lines_keep_multiplicity_and_conversion_coefficients() {
+    let data = DecayEvaluation::parse(
+        "ENDF/B-VIII.0/Co-60".into(),
+        EndfDecaySelection {
+            material_number: 558,
+            nuclide: NuclideId::new(27, 60, 0).unwrap(),
+        },
+        include_str!("../../../tests/data/endf_b_viii_0/dec-027_Co_060.endf"),
+        EndfDecayReadLimits::default(),
+        || Ok(()),
+    )
+    .unwrap();
+    let gamma = &data.spectra()[0];
+    assert_eq!(gamma.radiation, spectra::DecayRadiation::Gamma);
+    assert_eq!(gamma.discrete.len(), 6);
+    assert_eq!(gamma.discrete[2].energy_j.value, 1.173228e6 * EV_J);
+    assert_eq!(gamma.discrete[2].intensity.value, 0.9985);
+    assert_eq!(gamma.discrete[3].energy_j.value, 1.332492e6 * EV_J);
+    assert_eq!(gamma.discrete[3].intensity.value, 0.999826);
+    assert_eq!(
+        gamma.discrete[2].conversion_total.unwrap().value,
+        1.667988e-4
+    );
+    assert_eq!(gamma.discrete[2].conversion_k.unwrap().value, 1.5e-4);
+    assert_eq!(gamma.discrete[2].conversion_l.unwrap().value, 1.465e-5);
+    let photons: f64 = gamma.discrete.iter().map(|line| line.intensity.value).sum();
+    assert!(photons > 1.99 && photons < 2.0);
+    let emitted_j: f64 = gamma
+        .discrete
+        .iter()
+        .map(|line| line.energy_j.value * line.intensity.value)
+        .sum();
+    // Agreement at the precision of the published rounded mean; conversion
+    // coefficients and the separate electron spectrum are not extra photons.
+    assert!((emitted_j / EV_J - gamma.average_energy_j.value_j.unwrap() / EV_J).abs() < 1.0);
+    assert_eq!(
+        data.spectra()[2].radiation,
+        spectra::DecayRadiation::Electron
+    );
+    assert_eq!(data.spectra()[2].discrete.len(), 20);
+    assert_eq!(data.spectra()[3].radiation, spectra::DecayRadiation::XRay);
+}
+
+#[test]
+fn spectral_values_reject_negative_data_and_preserve_unknown_means() {
+    let original = spectral_fixture();
+    for (row, column, value) in [(6, 0, "-1"), (8, 2, "-1"), (13, 3, "-0.1"), (7, 4, "10")] {
+        let mut broken = original.clone();
+        field(&mut broken[row], column, value);
+        assert!(
+            parse(&broken).is_err(),
+            "invalid spectral field {row}:{column}"
+        );
+    }
+    let mut unknown = original;
+    field(&mut unknown[6], 2, "-1");
+    assert_eq!(
+        parse(&unknown).unwrap().spectra()[0]
+            .average_energy_j
+            .value_j,
+        None
+    );
+}
+
 fn spectral_fixture() -> Vec<String> {
     let mut lines = simple();
     field(&mut lines[0], 5, "3");
@@ -204,11 +280,38 @@ fn spectral_fixture() -> Vec<String> {
 }
 
 #[test]
-fn ignored_discrete_continuous_and_covariance_records_remain_bounded_and_structural() {
+fn retained_discrete_and_continuous_spectra_preserve_units_and_covariance_presence() {
     let lines = spectral_fixture();
     let data = parse(&lines).unwrap();
     let simple = parse(&simple()).unwrap();
     assert_eq!(data.metadata().spectrum_count, 3);
+    assert_eq!(data.spectra().len(), 3);
+    let gamma = &data.spectra()[0];
+    assert_eq!(gamma.radiation, spectra::DecayRadiation::Gamma);
+    assert_eq!(gamma.discrete[0].energy_j.value, 9.0 * EV_J);
+    assert_eq!(gamma.discrete[0].intensity.value, 1.0);
+    assert_eq!(gamma.discrete[0].decay_mode, 1.0);
+    assert_eq!(gamma.covariance_flag, 0);
+    assert!(gamma.continuum.is_none());
+    let beta = &data.spectra()[1];
+    assert_eq!(beta.covariance_flag, 1);
+    let continuous = beta.continuum.as_ref().unwrap();
+    assert_eq!(continuous.decay_mode, 1.0);
+    assert_eq!(
+        continuous.interpolation[0],
+        spectra::DecayInterpolation {
+            end_point: 2,
+            law: 2
+        }
+    );
+    assert_eq!(continuous.points[1].energy_j, 20.0 * EV_J);
+    assert_eq!(continuous.points[1].density_per_j, 0.1 * EV_J.recip());
+    // The triangular probability integral is invariant under eV -> J conversion.
+    assert!(
+        (continuous.points[1].energy_j * continuous.points[1].density_per_j * 0.5 - 1.0).abs()
+            < 3e-16
+    );
+    assert_eq!(data.spectra()[2].covariance_flag, 3);
     assert_eq!(data.average_energies(), simple.average_energies());
     assert_eq!(data.modes(), simple.modes());
     assert!(parse(&lines[..lines.len() - 3]).is_err());
@@ -278,6 +381,10 @@ fn limits_and_original_checkpoint_errors_apply_to_entire_scanned_input() {
         max_bytes: text.len(),
         max_records: text.lines().count(),
         max_decay_modes: 1,
+        max_spectra: 3,
+        max_discrete_lines: 2,
+        max_continuum_points: 4,
+        max_interpolation_regions: 2,
     };
     assert!(
         DecayEvaluation::parse("exact limits".into(), selection(), &text, admitted, || {
@@ -296,6 +403,22 @@ fn limits_and_original_checkpoint_errors_apply_to_entire_scanned_input() {
         },
         EndfDecayReadLimits {
             max_decay_modes: 0,
+            ..admitted
+        },
+        EndfDecayReadLimits {
+            max_spectra: 2,
+            ..admitted
+        },
+        EndfDecayReadLimits {
+            max_discrete_lines: 1,
+            ..admitted
+        },
+        EndfDecayReadLimits {
+            max_continuum_points: 3,
+            ..admitted
+        },
+        EndfDecayReadLimits {
+            max_interpolation_regions: 1,
             ..admitted
         },
     ] {

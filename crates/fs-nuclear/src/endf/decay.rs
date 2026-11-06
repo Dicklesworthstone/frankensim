@@ -12,8 +12,10 @@
 //! These are averages over ALL modes of the parent, not conditional branch
 //! energies. Neither Q values nor emitted energies imply local deposition.
 //!
-//! Radiation spectra and their covariances are structurally traversed under the
-//! same record budget, but are not interpreted, integrated or retained. Only
+//! Discrete radiation records and continuous spectra retain their normalization,
+//! transition metadata and SI units under explicit storage and record budgets.
+//! Beta endpoints are not interpreted as monoenergetic particles. Covariances
+//! are structurally traversed, but are not propagated. Only
 //! caller-supplied source identity and MF8 identity are claimed; this reader
 //! neither requires nor certifies an MF1 library declaration. No isotope catalog,
 //! branch normalization, daughter inference or radiation transport is supplied.
@@ -33,6 +35,9 @@ use crate::{Accumulator, FissionError, nonnegative, positive};
 /// original decay and burnup data owners.
 pub mod model;
 
+/// Evaluated radiation records and continuous emitted-particle distributions.
+pub mod spectra;
+
 /// Both source identities must agree; no ground-state/isomer substitution occurs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct EndfDecaySelection {
@@ -47,6 +52,12 @@ pub struct EndfDecayReadLimits {
     pub max_bytes: usize,
     pub max_records: usize,
     pub max_decay_modes: usize,
+    pub max_spectra: usize,
+    /// Total retained discrete records across all radiation types.
+    pub max_discrete_lines: usize,
+    /// Total retained continuum points across all radiation types.
+    pub max_continuum_points: usize,
+    pub max_interpolation_regions: usize,
 }
 
 impl Default for EndfDecayReadLimits {
@@ -55,6 +66,10 @@ impl Default for EndfDecayReadLimits {
             max_bytes: 128 * 1024 * 1024,
             max_records: 1_600_000,
             max_decay_modes: 256,
+            max_spectra: 32,
+            max_discrete_lines: 100_000,
+            max_continuum_points: 1_000_000,
+            max_interpolation_regions: 4096,
         }
     }
 }
@@ -67,7 +82,7 @@ pub struct DecayMetadata {
     pub atomic_weight_ratio: f64,
     /// LIS, distinct from the nuclide's isomer number LISO.
     pub excited_state: u16,
-    /// Number of structurally traversed, unretained radiation spectra.
+    /// Number of retained radiation spectra.
     pub spectrum_count: usize,
     /// Source spin in units of hbar; `None` preserves ENDF's unknown sentinel.
     pub spin: Option<f64>,
@@ -108,12 +123,13 @@ pub struct DecayEvaluation {
     average_energies: Arc<[DecayEnergy]>,
     modes: Arc<[DecayMode]>,
     branch_fraction_sum: f64,
+    spectra: Arc<[spectra::DecaySpectrum]>,
 }
 
 impl DecayEvaluation {
     /// Read caller-supplied text, accepting stable or radioactive MF8/MT457.
-    /// Spectral/covariance payloads are skipped by their declared record counts,
-    /// so truncation cannot silently become a complete decay evaluation.
+    /// Spectral payloads are retained and covariance payloads are traversed by
+    /// their declared counts; truncation cannot become a complete evaluation.
     pub fn parse(
         data_id: String,
         selection: EndfDecaySelection,
@@ -201,6 +217,14 @@ impl DecayEvaluation {
         &self.modes
     }
 
+    /// Original parent-wide emitted spectra, with their declared normalization.
+    /// These intensities already include branching; they are not additional heat
+    /// on top of `average_energies` and are not conditional daughter spectra.
+    #[must_use]
+    pub fn spectra(&self) -> &[spectra::DecaySpectrum] {
+        &self.spectra
+    }
+
     /// Compensated reduction of the supplied BR values; no normalization.
     #[must_use]
     pub const fn branch_fraction_sum(&self) -> f64 {
@@ -238,6 +262,9 @@ fn read_evaluation(
         _ => return Err(head.error("NST must be zero or one")),
     };
     let spectrum_count = head.count(5)?;
+    if spectrum_count > limits.max_spectra {
+        return Err(budget("ENDF decay spectra"));
+    }
     if stable && spectrum_count != 0 {
         return Err(head.error("stable nuclei have no decay spectra"));
     }
@@ -361,7 +388,7 @@ fn read_evaluation(
         }
     }
 
-    skip_spectra(reader, head.mat, spectrum_count, checkpoint)?;
+    let spectra = spectra::read_spectra(reader, head.mat, spectrum_count, limits, checkpoint)?;
     reader.send(head.mat, 8, checkpoint)?;
     Ok(DecayEvaluation {
         data_id: Arc::from(""),
@@ -379,6 +406,7 @@ fn read_evaluation(
         average_energies: energies.into(),
         modes: modes.into(),
         branch_fraction_sum: probability_sum.value(),
+        spectra: spectra.into(),
     })
 }
 
@@ -445,103 +473,6 @@ fn skip_list(
     head.integer(3)?;
     head.count(5)?;
     skip_values(reader, mat, head.count(4)?, checkpoint)
-}
-
-fn skip_spectra(
-    reader: &mut Reader<'_>,
-    mat: i32,
-    count: usize,
-    checkpoint: &mut impl FnMut() -> Result<(), FissionError>,
-) -> Result<(), EndfError> {
-    let mut previous_type = -1.0;
-    for _ in 0..count {
-        let head = reader.section(mat, 8, 457, checkpoint)?;
-        let styp = head.number(1)?;
-        let lcon = head.integer(2)?;
-        let lcov = head.integer(3)?;
-        let discrete = head.count(5)?;
-        if head.number(0)? != 0.0
-            || styp.fract() != 0.0
-            || styp <= previous_type
-            || !(0..=2).contains(&lcon)
-            || !(0..=3).contains(&lcov)
-            || head.count(4)? != 6
-            || (lcon == 1 && discrete != 0)
-        {
-            return Err(head.error("invalid radiation-spectrum header"));
-        }
-        previous_type = styp;
-        skip_values(reader, mat, 6, checkpoint)?;
-        if lcon != 1 {
-            // Each discrete line has at least one LIST header. Remaining work
-            // is checked again before consuming its actual value payload.
-            require_records(reader, discrete)?;
-            for _ in 0..discrete {
-                skip_list(reader, mat, checkpoint)?;
-            }
-        }
-        if lcon != 0 {
-            skip_tab1(reader, mat, checkpoint)?;
-            if lcov == 1 || lcov == 3 {
-                skip_list(reader, mat, checkpoint)?;
-            }
-        }
-        if lcov == 2 || lcov == 3 {
-            skip_list(reader, mat, checkpoint)?;
-        }
-    }
-    Ok(())
-}
-
-fn skip_tab1(
-    reader: &mut Reader<'_>,
-    mat: i32,
-    checkpoint: &mut impl FnMut() -> Result<(), FissionError>,
-) -> Result<(), EndfError> {
-    let head = reader.section(mat, 8, 457, checkpoint)?;
-    head.number(0)?;
-    if head.number(1)? != 0.0 {
-        return Err(head.error("nonzero reserved spectral TAB1 field"));
-    }
-    head.zero_integer(2)?;
-    head.zero_integer(3)?;
-    let regions = head.count(4)?;
-    let points = head.count(5)?;
-    if regions == 0 || points < 2 || regions >= points {
-        return Err(head.error("spectral TAB1 needs points and interpolation ranges"));
-    }
-    let point_values = points
-        .checked_mul(2)
-        .ok_or_else(|| budget("ENDF spectral TAB1 values"))?;
-    require_records(
-        reader,
-        regions
-            .div_ceil(3)
-            .checked_add(point_values.div_ceil(6))
-            .ok_or_else(|| budget("ENDF spectral TAB1 records"))?,
-    )?;
-    let mut remaining = regions;
-    let mut previous = 1;
-    while remaining != 0 {
-        let record = reader.section(mat, 8, 457, checkpoint)?;
-        for pair in 0..3 {
-            let endpoint = record.count(2 * pair)?;
-            let law = record.integer(2 * pair + 1)?;
-            if pair < remaining {
-                if endpoint <= previous || endpoint > points || !(1..=6).contains(&law) {
-                    return Err(record.error("invalid spectral interpolation range"));
-                }
-                previous = endpoint;
-            } else if endpoint != 0 || law != 0 {
-                return Err(record.error("nonzero spectral interpolation padding"));
-            }
-        }
-        remaining = remaining.saturating_sub(3);
-    }
-    if previous != points {
-        return Err(head.error("spectral interpolation endpoint disagrees with NP"));
-    }
-    skip_values(reader, mat, point_values, checkpoint)
 }
 
 #[cfg(test)]
