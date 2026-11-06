@@ -83,7 +83,9 @@ pub struct ArticulatedGravityStep {
     pub potential_energy_before_j: f64,
     /// Field potential of the accepted physical link COM poses, in joules.
     pub potential_energy_after_j: f64,
-    /// Sum of per-link endpoint changes before rounding the total, in joules.
+    /// Sum of field-owned per-link endpoint changes, in joules. Direct field
+    /// increments retain small work hidden by absolute-potential rounding;
+    /// fields without that capability use their retained endpoint samples.
     pub potential_energy_change_j: f64,
     /// Signed midpoint field work, already included in `motion.external_work`.
     pub gravity_work_j: f64,
@@ -262,7 +264,7 @@ impl<'a> PreparedArticulatedGravity<'a> {
                         );
                         accumulated.add_storage(load.potential);
                         if record_start {
-                            potential_before.push(load.potential);
+                            potential_before.push((load.com_pose, load.potential));
                         }
                     }
                     accumulated.body_wrench_power = accumulated.body_wrench_power + gravity_power;
@@ -294,7 +296,7 @@ impl<'a> PreparedArticulatedGravity<'a> {
         })?;
         let mut potential_after = Dd::ZERO;
         let mut potential_change = Dd::ZERO;
-        for (i, (pose, before)) in evaluated
+        for (i, (pose, (before_pose, before))) in evaluated
             .kinematics_after
             .world_from_link
             .iter()
@@ -304,9 +306,19 @@ impl<'a> PreparedArticulatedGravity<'a> {
             if i % 64 == 0 {
                 poll(&mut cancelled)?;
             }
-            let after = Dd::from_f64(self.sample_link(field, frame, i, *pose)?.potential);
-            potential_after = potential_after + after;
-            potential_change = potential_change + (after - Dd::from_f64(before));
+            let after = self.sample_link(field, frame, i, *pose)?;
+            potential_after = potential_after + Dd::from_f64(after.potential);
+            let increment = field.potential_energy_increment(
+                frame,
+                before_pose,
+                after.com_pose,
+                self.properties[i],
+            )?;
+            potential_change = potential_change
+                + match increment {
+                    Some(value) => Dd::from_f64(value),
+                    None => Dd::from_f64(after.potential) - Dd::from_f64(before),
+                };
         }
         let dt = Dd::from_f64(duration);
         let gravity_work = dt * gravity_power;
@@ -369,6 +381,7 @@ impl<'a> PreparedArticulatedGravity<'a> {
         let at_origin = Wrench::new(torque_com_body + center.cross(force), force);
         super::super::validate_wrench(at_origin, "articulated_gravity.link_wrench")?;
         Ok(LinkGravity {
+            com_pose,
             at_origin,
             force_world,
             torque_com_body,
@@ -378,6 +391,7 @@ impl<'a> PreparedArticulatedGravity<'a> {
 }
 
 struct LinkGravity {
+    com_pose: Pose,
     at_origin: Wrench,
     force_world: Vec3,
     torque_com_body: Vec3,

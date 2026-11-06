@@ -6,6 +6,7 @@
 //! mass, quadrature, force assembly, Newton stiffness and support reactions.
 //! There is no second gravity law, mass inventory or equilibrium solver here.
 
+use fs_math::dd::Dd;
 use fs_mbd::Vec3;
 use fs_mbd::gravity::{GravityError, PointGravityField};
 use fs_solid::HyperTetError;
@@ -46,5 +47,45 @@ pub fn bind_field<F: PointGravityField + ?Sized>(
                 std::array::from_fn(|column| sample.acceleration_gradient_s2.m[3 * row + column])
             }),
         })
+    }
+}
+
+/// Bind the same stationary source's specific potential increment [J/kg].
+///
+/// Native uniform and central fields evaluate their original potential
+/// difference without subtracting its datum or two large absolute energies.
+/// Custom sources without this capability retain a sampled endpoint difference;
+/// no force-work approximation or gauge-invariance guarantee is inferred for
+/// that fallback. Frame and source-domain refusals remain authoritative.
+pub fn bind_potential_increment<F: PointGravityField + ?Sized>(
+    field: &F,
+    frame: u64,
+) -> impl Fn([f64; 3], [f64; 3]) -> Result<f64, HyperTetError> + '_ {
+    move |before, after| {
+        let before = Vec3::new(before[0], before[1], before[2]);
+        let after = Vec3::new(after[0], after[1], after[2]);
+        let result = (|| {
+            if let Some(change) = field.specific_potential_increment(frame, before, after)? {
+                return Ok(change);
+            }
+            let first = field.sample_point(frame, before)?.validate()?;
+            let last = field.sample_point(frame, after)?.validate()?;
+            Ok((Dd::from_f64(last.specific_potential_j_kg)
+                - Dd::from_f64(first.specific_potential_j_kg))
+            .to_f64())
+        })();
+        let change = result.map_err(|error| match error {
+            GravityError::Cancelled => HyperTetError::Cancelled,
+            error => HyperTetError::InvalidInput {
+                what: error.to_string(),
+            },
+        })?;
+        if change.is_finite() {
+            Ok(change)
+        } else {
+            Err(HyperTetError::InvalidInput {
+                what: "gravity potential increment is not representable".into(),
+            })
+        }
     }
 }

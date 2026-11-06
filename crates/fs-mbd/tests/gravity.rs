@@ -1,6 +1,7 @@
 //! G1/G2/G3: analytic gravity, Kepler refinement and conservative tidal loads.
 use fs_mbd::gravity::{
     CentralGravity, GravityError, RigidGravityField, UniformGravity, step_in_field,
+    step_in_field_with_loads,
 };
 use fs_mbd::{
     Gravity, MassProperties, Pose, RigidBodyIntegrator, RigidBodyState, UnitQuaternion, Vec3,
@@ -108,6 +109,85 @@ fn uniform_field_reproduces_native_ballistics_and_datum_shift() {
         properties.mass() * acceleration.dot(datum),
         2e-14,
     );
+}
+
+#[test]
+fn retained_native_gravity_work_is_independent_of_a_large_potential_datum() {
+    let gravity = Gravity::new(Vec3::new(0.0, 0.0, -8.0)).unwrap();
+    let initial = state(Vec3::ZERO, UnitQuaternion::IDENTITY, Vec3::ZERO, Vec3::ZERO);
+    let properties = body(3.0);
+    let run = |datum| {
+        let field = UniformGravity::new(FRAME, gravity, datum).unwrap();
+        step_in_field_with_loads(
+            &field,
+            FRAME,
+            initial,
+            properties,
+            Wrench::ZERO,
+            0.125,
+            || false,
+        )
+        .unwrap()
+    };
+    let reference = run(Vec3::ZERO);
+    let shifted = run(Vec3::new(0.0, 0.0, -1e30));
+    assert_eq!(shifted.step.state_after, reference.step.state_after);
+    assert_eq!(
+        shifted.load_before.potential_energy_j,
+        shifted.load_after.potential_energy_j
+    );
+    assert_eq!(reference.potential_energy_change_j, -1.5);
+    assert_eq!(
+        shifted.potential_energy_change_j,
+        reference.potential_energy_change_j
+    );
+    close(
+        shifted.step.diagnostics_after.translational_kinetic_energy
+            - shifted.step.diagnostics_before.translational_kinetic_energy
+            + shifted.potential_energy_change_j,
+        0.0,
+        2e-15,
+    );
+}
+
+#[test]
+fn custom_rigid_field_increment_fallback_reuses_exactly_two_load_samples() {
+    struct Counted {
+        field: UniformGravity,
+        calls: std::cell::Cell<usize>,
+    }
+    impl RigidGravityField for Counted {
+        fn load(
+            &self,
+            frame: u64,
+            pose: Pose,
+            properties: MassProperties,
+        ) -> Result<fs_mbd::gravity::GravityLoad, GravityError> {
+            self.calls.set(self.calls.get() + 1);
+            self.field.load(frame, pose, properties)
+        }
+    }
+    let field = Counted {
+        field: UniformGravity::new(
+            FRAME,
+            Gravity::new(Vec3::new(0.0, 0.0, -8.0)).unwrap(),
+            Vec3::ZERO,
+        )
+        .unwrap(),
+        calls: std::cell::Cell::new(0),
+    };
+    let step = step_in_field_with_loads(
+        &field,
+        FRAME,
+        state(Vec3::ZERO, UnitQuaternion::IDENTITY, Vec3::ZERO, Vec3::ZERO),
+        body(3.0),
+        Wrench::ZERO,
+        0.125,
+        || false,
+    )
+    .unwrap();
+    assert_eq!(field.calls.get(), 2);
+    assert_eq!(step.potential_energy_change_j, -1.5);
 }
 
 fn kepler(steps: usize, periods: usize) -> (f64, f64, f64) {

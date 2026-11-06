@@ -607,7 +607,7 @@ fn rigid_free_flight_with_source(
                 native.state_after_drift,
                 native.load_before.wrench,
                 native.load_after.wrench,
-                native.load_before.potential_energy_j - native.load_after.potential_energy_j,
+                -native.potential_energy_change_j,
             )
         }
     };

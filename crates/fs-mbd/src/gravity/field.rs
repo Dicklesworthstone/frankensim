@@ -72,6 +72,23 @@ pub trait PointGravityField {
         frame: u64,
         position_world_m: Vec3,
     ) -> Result<PointGravitySample, GravityError>;
+
+    /// Specific potential at `after` minus that at `before`, in J/kg.
+    ///
+    /// Fields may evaluate the difference directly to retain work smaller than
+    /// the rounding of either absolute potential, including a large arbitrary
+    /// reference datum. `None` leaves the caller's already retained endpoint
+    /// samples as the fallback; it does not trigger another field evaluation.
+    /// A supplied value must describe the same stationary potential as
+    /// [`Self::sample_point`] and admit both endpoints in the declared frame.
+    fn specific_potential_increment(
+        &self,
+        _frame: u64,
+        _before_world_m: Vec3,
+        _after_world_m: Vec3,
+    ) -> Result<Option<f64>, GravityError> {
+        Ok(None)
+    }
 }
 
 impl PointGravityField for UniformGravity {
@@ -90,6 +107,18 @@ impl PointGravityField for UniformGravity {
         }
         .validate()
     }
+
+    fn specific_potential_increment(
+        &self,
+        frame: u64,
+        before_world_m: Vec3,
+        after_world_m: Vec3,
+    ) -> Result<Option<f64>, GravityError> {
+        Ok(Some(finite(
+            self.specific_potential_change(frame, before_world_m, after_world_m)?
+                .to_f64(),
+        )?))
+    }
 }
 
 impl PointGravityField for CentralGravity {
@@ -103,6 +132,18 @@ impl PointGravityField for CentralGravity {
         // when every requested physical value is representable.
         let (direction, radius, potential) = self.radial(frame, position_world_m)?;
         central_sample(direction, radius, potential)
+    }
+
+    fn specific_potential_increment(
+        &self,
+        frame: u64,
+        before_world_m: Vec3,
+        after_world_m: Vec3,
+    ) -> Result<Option<f64>, GravityError> {
+        Ok(Some(finite(
+            self.specific_potential_change(frame, before_world_m, after_world_m)?
+                .to_f64(),
+        )?))
     }
 }
 

@@ -17,6 +17,7 @@
 
 use fs_exec::Cx;
 use fs_material::hyper::cards::HyperelasticMaterial;
+use fs_math::dd::Dd;
 use fs_sparse::{Coo, Csr};
 
 use super::{Element, HyperTetError, HyperTetProblem, checkpoint};
@@ -40,6 +41,14 @@ pub struct GravitySample3 {
 /// extrapolate source data. Derivative consistency is the field owner's
 /// obligation, not a property established by the Rust callback type.
 pub type GravityField3<'a> = dyn Fn([f64; 3]) -> Result<GravitySample3, HyperTetError> + 'a;
+
+/// Specific potential at the second point minus that at the first [J/kg].
+///
+/// A field-owned analytic difference can cancel its arbitrary datum before
+/// rounding. It must describe the same stationary potential as `GravityField3`;
+/// substituting midpoint force work changes the law for nonlinear fields.
+pub type GravityPotentialIncrement3<'a> =
+    dyn Fn([f64; 3], [f64; 3]) -> Result<f64, HyperTetError> + 'a;
 
 /// Gravity integrated with the original tetrahedral reference mass inventory.
 #[derive(Debug)]
@@ -221,6 +230,92 @@ const CUBIC_SHAPES: [[f64; 4]; 8] = [
     [1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0, 0.0],
 ];
 
+impl ReferenceGravityWeights {
+    fn quadrature_size(&self) -> (usize, usize) {
+        match self {
+            Self::PerElement(weights) => (weights.len(), 4),
+            Self::Nodal(weights) => (weights.len(), 8),
+        }
+    }
+
+    fn point(&self, element: usize, point: usize) -> ([f64; 4], f64) {
+        match self {
+            Self::PerElement(weights) => (
+                std::array::from_fn(|a| if a == point { LARGE } else { SMALL }),
+                weights[element],
+            ),
+            Self::Nodal(weights) => (CUBIC_SHAPES[point], weights[element][point]),
+        }
+    }
+}
+
+#[allow(clippy::needless_range_loop)]
+fn position_at(
+    nodes_m: &[[f64; 3]],
+    element: &Element,
+    displacement_m: &[f64],
+    shape: [f64; 4],
+) -> Result<[f64; 3], HyperTetError> {
+    // Relative interpolation preserves common translation in the geometry
+    // instead of adding four large absolute coordinates. Energy increments
+    // and force evaluations must sample exactly the same material points.
+    let origin = element.nodes[0];
+    let mut position = [0.0; 3];
+    for i in 0..3 {
+        position[i] = finite(nodes_m[origin][i] + displacement_m[3 * origin + i])?;
+        for a in 1..4 {
+            let node = element.nodes[a];
+            let relative = finite(
+                (nodes_m[node][i] - nodes_m[origin][i])
+                    + (displacement_m[3 * node + i] - displacement_m[3 * origin + i]),
+            )?;
+            position[i] = finite(shape[a].mul_add(relative, position[i]))?;
+        }
+    }
+    Ok(position)
+}
+
+/// Integrate field-owned differences before rounding or summing absolute
+/// potentials. Fixed material weights retain exactly the original inventory.
+pub(super) fn potential_increment(
+    nodes_m: &[[f64; 3]],
+    elements: &[Element],
+    mass_weights: &ReferenceGravityWeights,
+    before_m: &[f64],
+    after_m: &[f64],
+    field_increment: &GravityPotentialIncrement3<'_>,
+    cx: &Cx<'_>,
+) -> Result<f64, HyperTetError> {
+    checkpoint(cx)?;
+    let dofs = 3 * nodes_m.len();
+    for displacement in [before_m, after_m] {
+        if displacement.len() != dofs || displacement.iter().any(|v| !v.is_finite()) {
+            return Err(invalid(
+                "gravity needs one finite xyz displacement per reference node",
+            ));
+        }
+    }
+    let (element_count, point_count) = mass_weights.quadrature_size();
+    if element_count != elements.len() {
+        return Err(invalid(
+            "gravity reference weights do not cover the original mesh",
+        ));
+    }
+    let mut change = Dd::from_f64(0.0);
+    for (element_index, element) in elements.iter().enumerate() {
+        checkpoint(cx)?;
+        for point in 0..point_count {
+            let (shape, weight) = mass_weights.point(element_index, point);
+            let before = position_at(nodes_m, element, before_m, shape)?;
+            let after = position_at(nodes_m, element, after_m, shape)?;
+            let specific_change = finite(field_increment(before, after)?)?;
+            change = change + Dd::from_f64(weight) * Dd::from_f64(specific_change);
+        }
+    }
+    checkpoint(cx)?;
+    finite(change.to_f64())
+}
+
 #[allow(clippy::too_many_arguments, clippy::needless_range_loop)]
 pub(super) fn evaluate(
     nodes_m: &[[f64; 3]],
@@ -238,10 +333,7 @@ pub(super) fn evaluate(
             "gravity needs one finite xyz displacement per reference node",
         ));
     }
-    let (element_count, point_count) = match mass_weights {
-        ReferenceGravityWeights::PerElement(weights) => (weights.len(), 4),
-        ReferenceGravityWeights::Nodal(weights) => (weights.len(), 8),
-    };
+    let (element_count, point_count) = mass_weights.quadrature_size();
     if element_count != elements.len() {
         return Err(invalid(
             "gravity reference weights do not cover the original mesh",
@@ -253,31 +345,9 @@ pub(super) fn evaluate(
     for (element_index, element) in elements.iter().enumerate() {
         checkpoint(cx)?;
         let mut local = [[0.0; 12]; 12];
-        let origin = element.nodes[0];
         for point in 0..point_count {
-            let (shape, weight) = match mass_weights {
-                ReferenceGravityWeights::PerElement(weights) => (
-                    std::array::from_fn::<_, 4, _>(|a| if a == point { LARGE } else { SMALL }),
-                    weights[element_index],
-                ),
-                ReferenceGravityWeights::Nodal(weights) => {
-                    (CUBIC_SHAPES[point], weights[element_index][point])
-                }
-            };
-            // Relative interpolation preserves common translation in the
-            // geometry instead of adding four large absolute coordinates.
-            let mut position = [0.0; 3];
-            for i in 0..3 {
-                position[i] = finite(nodes_m[origin][i] + displacement_m[3 * origin + i])?;
-                for a in 1..4 {
-                    let node = element.nodes[a];
-                    let relative = finite(
-                        (nodes_m[node][i] - nodes_m[origin][i])
-                            + (displacement_m[3 * node + i] - displacement_m[3 * origin + i]),
-                    )?;
-                    position[i] = finite(shape[a].mul_add(relative, position[i]))?;
-                }
-            }
+            let (shape, weight) = mass_weights.point(element_index, point);
+            let position = position_at(nodes_m, element, displacement_m, shape)?;
             let sample = field(position)?.validate()?;
             potential_energy_j = finite(weight.mul_add(sample.potential_j_kg, potential_energy_j))?;
             for a in 0..4 {
@@ -663,6 +733,131 @@ mod nodal_density_tests {
             let cancelled = |_| Err(HyperTetError::Cancelled);
             assert!(matches!(
                 evaluate(&NODES, &[ELEMENT], &nodal, &u, &cancelled, true, cx),
+                Err(HyperTetError::Cancelled)
+            ));
+        });
+    }
+
+    #[test]
+    fn potential_increments_preserve_small_work_and_graded_mass_moments() {
+        with_cx(|cx| {
+            let before = [0.0; 12];
+            let after = displacement();
+            let field = |x: [f64; 3]| {
+                Ok(GravitySample3 {
+                    potential_j_kg: 1e20 + 8.0 * x[1],
+                    acceleration_m_s2: [0.0, -8.0, 0.0],
+                    acceleration_gradient_s2: [[0.0; 3]; 3],
+                })
+            };
+            for (density, shares) in [
+                (ReferenceGravityDensity::PerElement(&[6.0]), [0.25; 4]),
+                (ReferenceGravityDensity::Nodal(&DENSITY), SHARES),
+            ] {
+                let weights = bind_reference_weights(&[ELEMENT], 4, density, cx).unwrap();
+                let a = evaluate(&NODES, &[ELEMENT], &weights, &before, &field, false, cx).unwrap();
+                let b = evaluate(&NODES, &[ELEMENT], &weights, &after, &field, false, cx).unwrap();
+                // The datum has erased the motion from the rounded diagnostics.
+                assert_eq!(a.potential_energy_j, b.potential_energy_j);
+                let increment = |a: [f64; 3], b: [f64; 3]| Ok(8.0 * (b[1] - a[1]));
+                let change = potential_increment(
+                    &NODES,
+                    &[ELEMENT],
+                    &weights,
+                    &before,
+                    &after,
+                    &increment,
+                    cx,
+                )
+                .unwrap();
+                // Independent exact P1 rho*N moments, not a quadrature oracle.
+                let expected = 8.0 * (0..4).map(|a| shares[a] * after[3 * a + 1]).sum::<f64>();
+                close(change, expected);
+                let reverse = potential_increment(
+                    &NODES,
+                    &[ELEMENT],
+                    &weights,
+                    &after,
+                    &before,
+                    &increment,
+                    cx,
+                )
+                .unwrap();
+                close(reverse, -expected);
+                assert!(change.abs() > 0.1);
+            }
+        });
+    }
+
+    #[test]
+    fn potential_increment_retains_nonlinear_storage_and_source_refusals() {
+        with_cx(|cx| {
+            let weights =
+                bind_reference_weights(&[ELEMENT], 4, ReferenceGravityDensity::Nodal(&DENSITY), cx)
+                    .unwrap();
+            let before = [0.0; 12];
+            let after = displacement();
+            let field = |x: [f64; 3]| {
+                Ok(GravitySample3 {
+                    potential_j_kg: x.into_iter().map(|v| 0.25 * v.powi(4)).sum(),
+                    acceleration_m_s2: x.map(|v| -v.powi(3)),
+                    acceleration_gradient_s2: std::array::from_fn(|i| {
+                        std::array::from_fn(|j| if i == j { -3.0 * x[i] * x[i] } else { 0.0 })
+                    }),
+                })
+            };
+            let increment = |a: [f64; 3], b: [f64; 3]| {
+                Ok((0..3)
+                    .map(|i| 0.25 * (b[i] - a[i]) * (b[i] + a[i]) * (b[i] * b[i] + a[i] * a[i]))
+                    .sum())
+            };
+            let change = potential_increment(
+                &NODES,
+                &[ELEMENT],
+                &weights,
+                &before,
+                &after,
+                &increment,
+                cx,
+            )
+            .unwrap();
+            let first = evaluate(&NODES, &[ELEMENT], &weights, &before, &field, false, cx).unwrap();
+            let last = evaluate(&NODES, &[ELEMENT], &weights, &after, &field, false, cx).unwrap();
+            close(change, last.potential_energy_j - first.potential_energy_j);
+            assert!(
+                potential_increment(
+                    &NODES,
+                    &[ELEMENT],
+                    &weights,
+                    &before[..11],
+                    &after,
+                    &increment,
+                    cx,
+                )
+                .is_err()
+            );
+            assert!(
+                potential_increment(
+                    &NODES,
+                    &[ELEMENT],
+                    &weights,
+                    &before,
+                    &after,
+                    &|_, _| Ok(f64::NAN),
+                    cx,
+                )
+                .is_err()
+            );
+            assert!(matches!(
+                potential_increment(
+                    &NODES,
+                    &[ELEMENT],
+                    &weights,
+                    &before,
+                    &after,
+                    &|_, _| Err(HyperTetError::Cancelled),
+                    cx,
+                ),
                 Err(HyperTetError::Cancelled)
             ));
         });

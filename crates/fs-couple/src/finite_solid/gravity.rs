@@ -14,7 +14,7 @@ use std::sync::Arc;
 use fs_math::dd::Dd;
 use fs_mbd::gravity::PointGravityField;
 use fs_mbd_material::density_field::TetrahedralDensityBody;
-use fs_solid::hyper3::gravity::TetGravityLoad3;
+use fs_solid::hyper3::gravity::{ReferenceGravityDensity, TetGravityLoad3};
 use fs_solid::hyper3::pressure::{ClosedTetPressureSurface, TetPressure};
 use fs_sparse::{Coo, Csr};
 
@@ -135,6 +135,22 @@ impl<'a> BoundGravity<'a> {
                 problem.gravity_load_with_nodal_density(values, displacement, &field, cx)
             }
         }
+    }
+
+    pub(super) fn potential_increment(
+        &self,
+        problem: &PreparedHyperTetProblem<'a, FiniteSolidMaterial>,
+        before: &[f64],
+        after: &[f64],
+        cx: &Cx<'_>,
+    ) -> Result<f64, HyperTetError> {
+        let field =
+            crate::solid_gravity::bind_potential_increment(self.source.field, self.source.frame);
+        let density = match &self.density {
+            ReferenceDensity::PerElement(values) => ReferenceGravityDensity::PerElement(values),
+            ReferenceDensity::Nodal(values) => ReferenceGravityDensity::Nodal(values),
+        };
+        problem.gravity_potential_energy_change(density, before, after, &field, cx)
     }
 
     fn force_and_potential(
@@ -364,9 +380,12 @@ impl DynamicOperator<'_, '_, '_> {
                 ));
             }
         }
-        let first = gravity.evaluate(self.problem, before, self.cx)?;
-        let last = gravity.evaluate(self.problem, after, self.cx)?;
-        let work = dd(first.potential_energy_j) - dd(last.potential_energy_j);
+        // Endpoint diagnostics need no Newton tangent. Physical work comes
+        // from source-owned increments at the original material points, before
+        // a large arbitrary datum can be rounded into two total energies.
+        let (_, first_potential) = gravity.force_and_potential(self.problem, before, self.cx)?;
+        let (_, last_potential) = gravity.force_and_potential(self.problem, after, self.cx)?;
+        let work = dd(-gravity.potential_increment(self.problem, before, after, self.cx)?);
         let mut midpoint_work = dd(0.0);
         for (dof, ((&old, &new), &force)) in before.iter().zip(after).zip(force_n).enumerate() {
             if dof % 4096 == 0 {
@@ -383,8 +402,8 @@ impl DynamicOperator<'_, '_, '_> {
         }
         Ok(Some(GravityStep {
             frame: gravity.source.frame,
-            potential_before_j: first.potential_energy_j,
-            potential_after_j: last.potential_energy_j,
+            potential_before_j: first_potential,
+            potential_after_j: last_potential,
             work_j: work.to_f64(),
             midpoint_force_n: force_n.clone(),
             midpoint_work_j: midpoint_work.to_f64(),

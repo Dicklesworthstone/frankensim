@@ -488,6 +488,38 @@ impl<L: FiniteStrainPotential> PreparedHyperTetProblem<'_, L> {
         Ok((result.force_n, result.potential_energy_j))
     }
 
+    /// Change in the original reference-mass gravitational potential [J].
+    ///
+    /// The callback supplies `phi(after)-phi(before)` at the same material
+    /// quadrature points as the force owner. Analytic field differences cancel
+    /// arbitrary potential datums before rounding; subtracting two independently
+    /// rounded total energies cannot recover small physical work. Both cellwise
+    /// and positive nodal P1 inventories retain their original quadrature.
+    /// This evaluates storage, not a midpoint-force approximation to work, and
+    /// allocates neither a nodal force vector nor a Newton tangent.
+    ///
+    /// # Errors
+    /// Invalid density/displacement, field-domain refusal, overflow or cancellation.
+    pub fn gravity_potential_energy_change(
+        &self,
+        density: super::gravity::ReferenceGravityDensity<'_>,
+        before_displacement_m: &[f64],
+        after_displacement_m: &[f64],
+        field_increment: &super::gravity::GravityPotentialIncrement3<'_>,
+        cx: &Cx<'_>,
+    ) -> Result<f64, HyperTetError> {
+        let weights = self.bind_gravity_weights(density, cx)?;
+        super::gravity::potential_increment(
+            self.problem.nodes_m,
+            &self.elements,
+            &weights,
+            before_displacement_m,
+            after_displacement_m,
+            field_increment,
+            cx,
+        )
+    }
+
     fn gravity_evaluate_with_density(
         &self,
         density: super::gravity::ReferenceGravityDensity<'_>,

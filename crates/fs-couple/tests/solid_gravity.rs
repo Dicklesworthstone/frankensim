@@ -1,10 +1,11 @@
 //! Native shared gravity on finite-deformation solid quadrature and supports.
 use fs_alloc::{ArenaConfig, ArenaPool};
-use fs_couple::solid_gravity::bind_field;
+use fs_couple::solid_gravity::{bind_field, bind_potential_increment};
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_material::hyper::{Hyperelastic, HyperelasticModel};
 use fs_mbd::gravity::{CentralGravity, UniformGravity};
 use fs_mbd::{Gravity, Vec3};
+use fs_solid::hyper3::gravity::ReferenceGravityDensity;
 use fs_solid::{HyperTetError, HyperTetProblem, HyperTetSettings, HyperelasticLawField};
 
 const FRAME: u64 = 17;
@@ -150,5 +151,37 @@ fn shared_uniform_field_keeps_reference_weight_and_complete_support_reactions() 
             );
         }
         assert!((0..12).all(|row| load.force_tangent_n_m.row(row).1.iter().all(|&v| v == 0.0)));
+    });
+}
+
+#[test]
+fn source_owned_potential_increment_survives_a_large_uniform_datum() {
+    let law = material();
+    let p = problem(&law, &[]);
+    with_cx(|cx| {
+        let prepared = p.prepare(cx).unwrap();
+        let before = [0.0; 12];
+        let after = std::array::from_fn::<_, 12, _>(|dof| if dof % 3 == 1 { 0.125 } else { 0.0 });
+        for datum in [Vec3::ZERO, Vec3::new(0.0, 1e20, 0.0)] {
+            let source = UniformGravity::new(
+                FRAME,
+                Gravity::new(Vec3::new(0.0, -8.0, 0.0)).unwrap(),
+                datum,
+            )
+            .unwrap();
+            let increment = bind_potential_increment(&source, FRAME);
+            for density in [
+                ReferenceGravityDensity::PerElement(&[6.0]),
+                ReferenceGravityDensity::Nodal(&[3.0, 15.0, 3.0, 3.0]),
+            ] {
+                // Both inventories have mass one kilogram. Lifting by 1/8 m
+                // in acceleration -8 m/s^2 stores exactly one joule.
+                let change = prepared
+                    .gravity_potential_energy_change(density, &before, &after, &increment, cx)
+                    .unwrap();
+                near(change, 1.0, 2e-14);
+            }
+            assert!(bind_potential_increment(&source, FRAME + 1)(NODES[0], NODES[1]).is_err());
+        }
     });
 }

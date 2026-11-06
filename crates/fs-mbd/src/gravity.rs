@@ -16,6 +16,7 @@ use crate::{
     DynamicsDiagnostics, DynamicsError, Gravity, MassProperties, Pose, RigidBodyIntegrator,
     RigidBodyState, StepReceipt, Vec3, Wrench,
 };
+use fs_math::dd::Dd;
 
 /// Closed, recoiling systems with explicitly bounded direct Newtonian interactions.
 pub mod mutual;
@@ -78,6 +79,22 @@ pub trait RigidGravityField {
         pose: Pose,
         properties: MassProperties,
     ) -> Result<GravityLoad, GravityError>;
+
+    /// Potential at `after` minus that at `before`, in joules.
+    ///
+    /// A direct difference can retain work smaller than the rounding of either
+    /// absolute endpoint energy. It must use the same conservative potential,
+    /// mass and frame as [`Self::load`]. The default leaves callers' retained
+    /// endpoint loads as their fallback without sampling the field again.
+    fn potential_energy_increment(
+        &self,
+        _frame: u64,
+        _before: Pose,
+        _after: Pose,
+        _properties: MassProperties,
+    ) -> Result<Option<f64>, GravityError> {
+        Ok(None)
+    }
 }
 
 /// The existing uniform gravity value bound to a frame and potential datum.
@@ -107,6 +124,30 @@ impl UniformGravity {
             zero_potential_at_world_m,
         })
     }
+
+    fn specific_potential_change(
+        &self,
+        frame: u64,
+        before: Vec3,
+        after: Vec3,
+    ) -> Result<Dd, GravityError> {
+        same_frame(frame, self.frame)?;
+        if !before.is_finite() || !after.is_finite() {
+            return Err(GravityError::Invalid("nonfinite gravity endpoint"));
+        }
+        let acceleration = self.gravity.acceleration_world();
+        let mut change = Dd::ZERO;
+        for (g, a, b) in [
+            (acceleration.x, after.x, before.x),
+            (acceleration.y, after.y, before.y),
+            (acceleration.z, after.z, before.z),
+        ] {
+            // Cancel the datum symbolically, before either absolute potential
+            // or the endpoint subtraction can round away the physical work.
+            change = change - Dd::from_f64(g) * (Dd::from_f64(a) - Dd::from_f64(b));
+        }
+        Ok(change)
+    }
 }
 
 impl RigidGravityField for UniformGravity {
@@ -128,6 +169,21 @@ impl RigidGravityField for UniformGravity {
             potential_energy_j: -properties.mass() * acceleration.dot(displacement),
         }
         .validate()
+    }
+
+    fn potential_energy_increment(
+        &self,
+        frame: u64,
+        before: Pose,
+        after: Pose,
+        properties: MassProperties,
+    ) -> Result<Option<f64>, GravityError> {
+        properties.validate()?;
+        let change =
+            self.specific_potential_change(frame, before.position_world(), after.position_world())?;
+        Ok(Some(finite(
+            (Dd::from_f64(properties.mass()) * change).to_f64(),
+        )?))
     }
 }
 
@@ -188,6 +244,54 @@ impl CentralGravity {
         Ok((direction, radius, potential))
     }
 
+    fn specific_potential_change(
+        &self,
+        frame: u64,
+        before: Vec3,
+        after: Vec3,
+    ) -> Result<Dd, GravityError> {
+        let (_, radius_before, potential_before) = self.radial(frame, before)?;
+        let (_, radius_after, potential_after) = self.radial(frame, after)?;
+        if radius_before < 0.5 * radius_after || radius_after < 0.5 * radius_before {
+            // Well-separated radii have no cancellation. This branch also
+            // avoids an unrepresentable ratio between two admitted radii.
+            return Ok(Dd::from_f64(potential_after) - Dd::from_f64(potential_before));
+        }
+        let scale = radius_before.max(radius_after);
+        let divisor = Dd::from_f64(scale);
+        let mut radius_squared_change = Dd::ZERO;
+        for (a, b, center) in [
+            (after.x, before.x, self.center_world_m.x),
+            (after.y, before.y, self.center_world_m.y),
+            (after.z, before.z, self.center_world_m.z),
+        ] {
+            let a = Dd::from_f64(a);
+            let b = Dd::from_f64(b);
+            let center = Dd::from_f64(center);
+            let a_scaled = (a - center) / divisor;
+            let b_scaled = (b - center) / divisor;
+            let difference = a - b;
+            let difference = if difference.hi.is_finite() {
+                difference / divisor
+            } else {
+                // Opposite finite endpoints can overflow their unscaled
+                // separation even though each source radius is admitted.
+                a_scaled - b_scaled
+            };
+            let sum = a_scaled + b_scaled;
+            radius_squared_change = radius_squared_change + difference * sum;
+        }
+        // Rationalize 1/r_before - 1/r_after using the coordinate difference,
+        // not two rounded radii. This retains even a tiny transverse motion
+        // whose squared contribution cannot change either rounded radius.
+        // Scaling keeps radius squares, products and sums representable.
+        let before_scaled = Dd::from_f64(radius_before / scale);
+        let after_scaled = Dd::from_f64(radius_after / scale);
+        let relative_change =
+            radius_squared_change / ((before_scaled + after_scaled) * after_scaled);
+        Ok(Dd::from_f64(-potential_before) * relative_change)
+    }
+
     /// Select a finite-body quadrupole model with a caller-supplied COM bounding
     /// radius and maximum size/distance ratio, strictly between zero and one.
     /// This explicit domain is not a certified multipole truncation-error bound.
@@ -231,6 +335,21 @@ impl RigidGravityField for CentralGravity {
             potential_energy_j: properties.mass() * potential,
         }
         .validate()
+    }
+
+    fn potential_energy_increment(
+        &self,
+        frame: u64,
+        before: Pose,
+        after: Pose,
+        properties: MassProperties,
+    ) -> Result<Option<f64>, GravityError> {
+        properties.validate()?;
+        let change =
+            self.specific_potential_change(frame, before.position_world(), after.position_world())?;
+        Ok(Some(finite(
+            (Dd::from_f64(properties.mass()) * change).to_f64(),
+        )?))
     }
 }
 
@@ -374,6 +493,10 @@ pub struct GravityStepReceipt {
     pub load_before: GravityLoad,
     /// Field load at the actual drift endpoint, before the final half-kick.
     pub load_after: GravityLoad,
+    /// Field-owned endpoint potential change, in joules. Built-in uniform and
+    /// central fields retain small changes hidden by absolute-energy rounding;
+    /// custom fields without a direct increment use the retained load values.
+    pub potential_energy_change_j: f64,
     /// Native state after free drift and before the endpoint half-kick.
     pub state_after_drift: RigidBodyState,
 }
@@ -417,11 +540,20 @@ pub fn step_in_field_with_loads(
         with_potential(receipt.diagnostics_before, before.potential_energy_j)?;
     receipt.diagnostics_after =
         with_potential(receipt.diagnostics_after, after.potential_energy_j)?;
+    let potential_energy_change_j = finite(
+        field
+            .potential_energy_increment(frame, state.pose(), state_after_drift.pose(), properties)?
+            .unwrap_or_else(|| {
+                (Dd::from_f64(after.potential_energy_j) - Dd::from_f64(before.potential_energy_j))
+                    .to_f64()
+            }),
+    )?;
     poll(&mut cancelled)?;
     Ok(GravityStepReceipt {
         step: receipt,
         load_before: before,
         load_after: after,
+        potential_energy_change_j,
         state_after_drift,
     })
 }

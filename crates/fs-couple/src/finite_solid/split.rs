@@ -609,9 +609,11 @@ impl<'a> FiniteSolidBody<'a> {
             binding.gravity_potential_before_j,
             gravity_potential_after_j,
         ) {
-            (Some(before), Some(after)) => {
-                (fs_math::dd::Dd::from_f64(before) - fs_math::dd::Dd::from_f64(after)).to_f64()
-            }
+            (Some(_), Some(_)) => -self
+                .gravity
+                .as_ref()
+                .ok_or_else(|| invalid("contact drift requires its original gravity binding"))?
+                .potential_increment(&self.prepared, &before_u, &after_u, cx)?,
             (None, None) => 0.0,
             _ => {
                 return Err(invalid(

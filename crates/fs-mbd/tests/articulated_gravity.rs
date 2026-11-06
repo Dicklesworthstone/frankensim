@@ -113,6 +113,39 @@ fn articulated_model() -> ArticulatedModel {
 }
 
 #[test]
+fn articulated_gravity_work_retains_motion_below_the_absolute_potential_ulp() {
+    let model = one_body(sphere(3.0, Vec3::default(), 1.0));
+    let prepared = PreparedArticulatedGravity::new(&model, || false).unwrap();
+    let initial = state(Se3::identity(), Twist::zero());
+    let wrenches = [Wrench::new(Vec3::default(), Vec3::default())];
+    let gravity = Gravity::new(fs_mbd::Vec3::new(0.0, 0.0, -8.0)).unwrap();
+    let run = |datum| {
+        let field = UniformGravity::new(FRAME, gravity, datum).unwrap();
+        prepared
+            .step(&field, FRAME, &initial, unforced(&wrenches), 0.125, || {
+                false
+            })
+            .unwrap()
+    };
+    let reference = run(fs_mbd::Vec3::ZERO);
+    let shifted = run(fs_mbd::Vec3::new(0.0, 0.0, -1e30));
+    assert_eq!(shifted.motion.state_after, reference.motion.state_after);
+    assert_eq!(
+        shifted.potential_energy_before_j,
+        shifted.potential_energy_after_j
+    );
+    close(reference.potential_energy_change_j, -1.5, 2e-15);
+    close(
+        shifted.potential_energy_change_j,
+        reference.potential_energy_change_j,
+        2e-15,
+    );
+    close(shifted.gravity_work_j, 1.5, 2e-15);
+    close(shifted.gravity_work_residual_j, 0.0, 2e-15);
+    close(shifted.mechanical_work_residual_j, 0.0, 2e-15);
+}
+
+#[test]
 fn uniform_field_matches_original_gravity_and_translating_inertial_frames() {
     let model = articulated_model();
     let prepared = PreparedArticulatedGravity::new(&model, || false).unwrap();

@@ -59,6 +59,30 @@ strictly monotone terminal laws with independent quadratic midpoint solutions;
 the coupled regression deposits their original Joule heat once in a finite
 body with source-dependent heat capacity and checks the original enthalpy.
 
+## Stationary gravitational potential work
+
+`solid_gravity::bind_potential_increment` transports the original native point
+field's optional analytic potential difference into the existing tetrahedral
+reference-mass quadrature. Uniform and central sources retain small work that
+independently rounded absolute potentials would erase. Custom fields without
+this capability retain sampled endpoint differences; no additional precision
+or gauge-invariance guarantee is inferred for that fallback.
+
+Finite-solid midpoint accounting and force-kick/contact drift now obtain
+gravity work from this shared increment. Mixed rigid/solid free flight consumes
+the native rigid receipt's potential increment. Endpoint absolute potentials
+remain diagnostics. Gravity is still counted once as conservative source work;
+the measured difference from the integrator's force work remains a numerical
+defect, never heat. The midpoint integrator is unchanged and nonlinear fields
+still require temporal and spatial refinement. Endpoint diagnostics no longer
+assemble unused Newton tangents.
+
+The new public-adapter and native free-flight regressions compare zero and
+1e20 m uniform datums, including cellwise and graded mass inventories, one-joule
+lifting work and 0.125-joule kinetic/potential exchange. Whole-workspace and
+full solid/coupling execution remain unavailable with missing constellation
+dependencies; these integration regressions are retained for that lane.
+
 ## Nonlinear membrane damping and source-bound finite heat storage
 
 `membrane_thermal::advance_candidate` composes the existing nonlinear

@@ -163,6 +163,58 @@ fn bound_native_uniform_field_drives_free_fall_and_mixed_free_flight_account() {
     });
 }
 
+#[test]
+fn uniform_potential_datum_does_not_change_native_motion_or_small_work() {
+    with_cx(|_, cx| {
+        let material = bind(&source_card(6.0, 1.0, false, false));
+        for datum in [Vec3::ZERO, Vec3::new(0.0, 1e20, 0.0)] {
+            let source = UniformGravity::new(
+                FRAME,
+                Gravity::new(Vec3::new(0.0, -8.0, 0.0)).unwrap(),
+                datum,
+            )
+            .unwrap();
+            let body = FiniteSolidBody::new_with_gravity(
+                problem(&material, &[], &[]),
+                field(&source),
+                &[[0.0; 3]; 4],
+                &[[0.0, 0.5, 0.0]; 4],
+                0.0,
+                Default::default(),
+                cx,
+            )
+            .unwrap();
+            let (next, _, report) = body
+                .rigid_free_flight_candidate(
+                    &[],
+                    &[],
+                    &[],
+                    [0.0; 3],
+                    &[],
+                    Gravity::ZERO,
+                    0.0625,
+                    [0.0; 3],
+                    FreeFlightControls {
+                        solid: controls(1e-9),
+                        energy_tolerance_j: 1e-9,
+                        ..Default::default()
+                    },
+                    cx,
+                )
+                .unwrap();
+            for node in 0..4 {
+                near(next.displacement_m()[node][1], 0.015625, 2e-10);
+                near(next.velocity_m_s()[node][1], 0.0, 2e-10);
+            }
+            let gravity = report.solid.gravity.as_ref().unwrap();
+            near(gravity.work_j, -0.125, 2e-10);
+            near(gravity.quadrature_defect_j, 0.0, 2e-10);
+            near(report.solid.integration_defect_j, 0.0, 2e-10);
+            near(report.source_work_j, -0.125, 2e-10);
+        }
+    });
+}
+
 /// Exact P1 reference integrals for the original nodal density, independent of
 /// sparse mass, native quadrature, force assembly and the production Newton solve.
 fn moments(rho: [f64; 4]) -> (f64, [f64; 4], [f64; 4]) {

@@ -740,6 +740,19 @@ trace, rotations, the native rigid mass owner, frame/domain refusals and extreme
 radius arithmetic. The derivative API refuses unrepresentable gradients without
 changing the legacy acceleration-only admission domain.
 
+The optional `PointGravityField::specific_potential_increment` and
+`RigidGravityField::potential_energy_increment` evaluate the same stationary
+potential's endpoint change directly. Uniform fields cancel the reference
+datum before compensated force/displacement arithmetic. Central fields use a
+scaled rationalized inverse-radius difference, including transverse motion
+too small to change a rounded radius. Custom fields default to `None`; owners
+then subtract their already retained endpoint samples without another callback.
+These scalar differences do not replace endpoint force/domain admission.
+Native and articulated gravity receipts retain the direct potential change for
+work accounting while keeping the original absolute diagnostic energies.
+The field, force stages and integrator are unchanged, and finite-step work
+residuals remain measured numerical defects rather than dissipation.
+
 `gravity::CentralGravity` owns frame-checked Newtonian acceleration and specific
 potential, with caller-supplied source position and G M. Rocket environments
 reuse this owner. `UniformGravity` binds the existing acceleration to an explicit

@@ -1614,6 +1614,18 @@ reference mass weights, preserving graded center of mass and inertia moments.
 Under admitted positive-J deformation this represents rho_current = rho0/det F: changed current
 volume does not change inventory or replace the retained field by cell means.
 Globally uniform nodal input retains the original four-point arithmetic.
+`PreparedHyperTetProblem::gravity_potential_energy_change` integrates
+field-owned endpoint differences with those same material points and fixed
+weights. It sums differences in compensated precision before rounding, rather
+than subtracting two independently rounded total potentials. The callback must
+supply the original stationary potential difference, not midpoint force work.
+This retains small gravitational work beside a large arbitrary datum when the
+source supplies an analytic difference. It allocates neither nodal forces nor a
+Newton tangent. Both cellwise and graded P1 density are supported; nonlinear
+fields retain the same spatial-quadrature and source-domain boundaries.
+G0/G3 unit regressions check exact P1 mass moments beside a 1e20 J/kg datum,
+endpoint reversal, quartic potential differences and source refusal.
+
 `solve_with_nodal_density_gravity` and its combined pressure entry use the same
 native Newton, line search and reaction owner; the bound mass weights are
 prepared once. Current vertices and face centroids must lie in the field domain.
