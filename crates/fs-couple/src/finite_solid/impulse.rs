@@ -17,6 +17,7 @@ use super::{
     Csr, Cx, FiniteSolidBody, FiniteSolidError, FiniteSolidInitialization, MassDiagonal,
     SecondOrderProblem, SolveReport, checkpoint, inflate, second_order_acceleration,
 };
+use fs_math::dd::Dd;
 
 /// A material point inside one of the original P1 tetrahedra.
 /// Zero weights select faces, edges or vertices without a separate load map.
@@ -459,6 +460,35 @@ impl<'a> FiniteSolidBody<'a> {
         Ok((response.value, response.report))
     }
 
+    /// Independent supplied-port work on the actual endpoint mean velocity.
+    /// The load accessor retains the original full-coordinate impulse layout.
+    pub(super) fn mean_velocity_work_to(
+        &self,
+        velocity: &[f64],
+        mut load: impl FnMut(usize) -> f64,
+        cx: &Cx<'_>,
+    ) -> Result<Dd, FiniteSolidError> {
+        if velocity.len() != self.free.len() {
+            return Err(invalid("impulse work requires every free velocity coordinate"));
+        }
+        let mut leading = Dd::ZERO;
+        let mut trailing = Dd::ZERO;
+        for (row, ((&dof, &old), &new)) in
+            self.free.iter().zip(&self.state.v).zip(velocity).enumerate()
+        {
+            if row % 256 == 0 {
+                checkpoint(cx)?;
+            }
+            let mean = Dd::from_f64(0.5 * old) + Dd::from_f64(0.5 * new);
+            let port = Dd::from_f64(load(dof));
+            leading = leading + Dd::from_f64(mean.hi) * port;
+            trailing = trailing + Dd::from_f64(mean.lo) * port;
+        }
+        let work = leading + trailing;
+        finite(&[work.hi, work.lo])?;
+        Ok(work)
+    }
+
     fn apply_impulse(
         &self,
         impulse: &[f64],
@@ -482,7 +512,6 @@ impl<'a> FiniteSolidBody<'a> {
         let (change, solve) = self.impulse_response(impulse, controls.mass_solve, cx)?;
         let mut candidate = self.clone();
         let mut dv = vec![0.0; impulse.len()];
-        let mut average_v = vec![0.0; impulse.len()];
         for (row, (&dof, change)) in self.free.iter().zip(change).enumerate() {
             if row % 256 == 0 {
                 checkpoint(cx)?;
@@ -492,7 +521,6 @@ impl<'a> FiniteSolidBody<'a> {
             candidate.state.v[row] = new;
             // Account for the actual representable change, not the ideal solve.
             dv[dof] = new - old;
-            average_v[dof] = 0.5 * old + 0.5 * new;
         }
         finite(&candidate.state.v)?;
         let mut delta_p = vec![0.0; impulse.len()];
@@ -515,9 +543,11 @@ impl<'a> FiniteSolidBody<'a> {
             .map(|((&actual, &applied), &support)| actual - applied - support)
             .collect();
         let defect = moments(&positions, &residual, origin, cx)?;
-        let kinetic_change_j = super::dot(&average_v, &delta_p);
-        let impulse_work_j = super::dot(&average_v, impulse);
-        let work_residual_j = kinetic_change_j - impulse_work_j;
+        let kinetic = self.kinetic_increment_to(&candidate.state.v, cx)?;
+        let work = self.mean_velocity_work_to(&candidate.state.v, |dof| impulse[dof], cx)?;
+        let kinetic_change_j = kinetic.change.to_f64();
+        let impulse_work_j = work.to_f64();
+        let work_residual_j = (kinetic.change - work).to_f64();
         finite(&[kinetic_change_j, impulse_work_j, work_residual_j])?;
         if magnitude(defect.linear_kg_m_s) > controls.linear_tolerance_kg_m_s
             || magnitude(defect.angular_kg_m2_s) > controls.angular_tolerance_kg_m2_s

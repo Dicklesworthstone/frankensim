@@ -17,6 +17,7 @@ use super::{
     SolidThermalReport, balance, number,
 };
 use fs_exec::Cx;
+use fs_math::dd::Dd;
 use fs_solid::linear3::visco::{ViscoDynamicState, ViscoDynamicStep, ViscoElementError};
 use fs_solid::linear3::{QuadraticThermalStrainField, TetElasticError};
 use fs_thermal::enthalpy::{
@@ -217,15 +218,9 @@ pub fn step_thermal_candidate<'p, 'a, 't, O: DepositionObserver>(
         return Err(SolidThermalError::Invalid("negative total material heat"));
     }
     balance(total - heat, config.energy_tolerance_j)?;
-    let change = number(
-        (fs_math::dd::Dd::from_f64(step.kinetic_energy_change_j)
-            + fs_math::dd::Dd::from_f64(step.material_stored_energy_change_j))
-        .to_f64(),
-    )?;
-    let work = number(
-        step.external_work_j + step.support_work_j + step.constitutive.step_eigenstrain_work_j,
-    )?;
-    let mechanical = number(change + heat - work)?;
+    let change = step.retained_energy_change_j();
+    let work = step.retained_work_j();
+    let mechanical = number((change + Dd::from_f64(heat) - work).to_f64())?;
     balance(mechanical, config.energy_tolerance_j)?;
 
     let heating = NativeHeat {
@@ -251,10 +246,15 @@ pub fn step_thermal_candidate<'p, 'a, 't, O: DepositionObserver>(
             "spatial and caloric candidates ended at different times",
         ));
     }
-    let handoff = number(heating.deposited_j - heat)?;
-    let external = number(audit.external_heat_j - heating.deposited_j)?;
-    let combined =
-        number(change + audit.stored_energy_change_j - audit.incoming_energy_j - external - work)?;
+    let handoff = number(
+        (Dd::from_f64(heating.deposited_j) - Dd::from_f64(heat)).to_f64(),
+    )?;
+    let external = Dd::from_f64(audit.external_heat_j) - Dd::from_f64(heating.deposited_j);
+    let combined = number(
+        (change + Dd::from_f64(audit.stored_energy_change_j)
+            - Dd::from_f64(audit.incoming_energy_j) - external - work)
+            .to_f64(),
+    )?;
     balance(handoff, config.energy_tolerance_j)?;
     balance(combined, config.energy_tolerance_j)?;
     poll(cx)?;
@@ -269,9 +269,9 @@ pub fn step_thermal_candidate<'p, 'a, 't, O: DepositionObserver>(
                 element_heat_j,
                 material_heat_j: heat,
                 deposited_heat_j: heating.deposited_j,
-                external_thermal_heat_j: external,
-                mechanical_work_j: work,
-                mechanical_energy_change_j: change,
+                external_thermal_heat_j: number(external.to_f64())?,
+                mechanical_work_j: number(work.to_f64())?,
+                mechanical_energy_change_j: number(change.to_f64())?,
                 mechanical_residual_j: mechanical,
                 heat_handoff_residual_j: handoff,
                 combined_residual_j: combined,

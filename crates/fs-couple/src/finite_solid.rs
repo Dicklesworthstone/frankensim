@@ -65,6 +65,8 @@ use fs_material::state_point::{
     DENSITY_PROPERTY, MaterialPropertySelection, ResolvedMaterialStatePoint, ScalarAdmissibility,
     ScalarPropertyRequirement, resolve_material_state_point,
 };
+use fs_math::dd::Dd;
+use fs_math::quadratic::{QuadraticError, QuadraticIncrement};
 use fs_mbd_material::density_field::TetrahedralDensityBody;
 use fs_qty::Density;
 use fs_solid::hyper3::prepared::PreparedHyperTetProblem;
@@ -321,6 +323,9 @@ pub struct FiniteSolidStep {
     pub time: ImplicitStepTelemetry,
     pub kinetic_before_j: f64,
     pub kinetic_after_j: f64,
+    /// Actual velocity increment on the unchanged original consistent mass.
+    /// Retains exchanges below the resolution of the absolute kinetic totals.
+    pub kinetic_change_j: f64,
     pub strain_before_j: f64,
     pub strain_after_j: f64,
     /// Direct original material-potential change, before rounded mesh totals.
@@ -768,6 +773,39 @@ impl<'a> FiniteSolidBody<'a> {
         Ok(energy)
     }
 
+    /// The same free-coordinate mass used by native momentum, with exact
+    /// endpoint differences retained until after the original operator action.
+    fn kinetic_increment_to(
+        &self,
+        velocity: &[f64],
+        cx: &Cx<'_>,
+    ) -> Result<QuadraticIncrement, FiniteSolidError> {
+        if velocity.len() != self.free.len() {
+            return Err(FiniteSolidError::Invalid(
+                "kinetic exchange requires every original free coordinate",
+            ));
+        }
+        fs_math::quadratic::increment(
+            &self.state.v,
+            velocity,
+            |x, output, _| {
+                self.free_mass.spmv(x, output);
+                Ok::<_, std::convert::Infallible>(())
+            },
+            &mut || cx.checkpoint().is_err(),
+        )
+        .map_err(|error| match error {
+            QuadraticError::Dimension => {
+                FiniteSolidError::Invalid("kinetic exchange requires complete endpoints")
+            }
+            QuadraticError::Cancelled => HyperTetError::Cancelled.into(),
+            QuadraticError::NonFinite => {
+                FiniteSolidError::Invalid("kinetic exchange is not representable")
+            }
+            QuadraticError::Operator(never) => match never {},
+        })
+    }
+
     /// Advance a candidate using held dead loads over a positive interval.
     ///
     /// The original body remains unchanged on every refusal, including a
@@ -983,18 +1021,23 @@ impl<'a> FiniteSolidBody<'a> {
             .prepared
             .stored_energy_interval_j(&before_u, &after_u, cx)?;
         let kinetic_after_j = candidate.kinetic_energy_j()?;
-        let mut source_work_j = 0.0;
+        let mut source_work = Dd::ZERO;
+        let mut source_tail = Dd::ZERO;
         for (dof, ((before, after), load)) in before_u.iter().zip(&after_u).zip(&force).enumerate()
         {
             if dof % 4096 == 0 {
                 checkpoint(cx)?;
             }
-            source_work_j = load.mul_add(after - before, source_work_j);
+            let displacement = Dd::from_f64(*after) - Dd::from_f64(*before);
+            let load = Dd::from_f64(*load);
+            source_work = source_work + Dd::from_f64(displacement.hi) * load;
+            source_tail = source_tail + Dd::from_f64(displacement.lo) * load;
         }
+        source_work = source_work + source_tail;
         let pressure_work_j = match pressure {
             Some((surface, pressure_pa)) => {
                 let work = surface.work_j(&before_u, &after_u, pressure_pa, cx)?;
-                source_work_j += work;
+                source_work = source_work + Dd::from_f64(work);
                 work
             }
             None => 0.0,
@@ -1006,36 +1049,13 @@ impl<'a> FiniteSolidBody<'a> {
             .collect();
         let gravity = operator.gravity_balance(&before_u, &after_u)?;
         if let Some(gravity) = &gravity {
-            source_work_j = (fs_math::dd::Dd::from_f64(source_work_j)
-                + fs_math::dd::Dd::from_f64(gravity.work_j))
-            .to_f64();
+            source_work = source_work + Dd::from_f64(gravity.work_j);
         }
-        let kinetic_change_j = if energy_momentum || gravity.is_some() {
-            let dv: Vec<f64> = candidate
-                .state
-                .v
-                .iter()
-                .zip(&self.state.v)
-                .map(|(a, b)| a - b)
-                .collect();
-            let mut dp = vec![0.0; dv.len()];
-            self.free_mass.spmv(&dv, &mut dp);
-            candidate
-                .state
-                .v
-                .iter()
-                .zip(&self.state.v)
-                .zip(dp)
-                .fold(0.0, |sum, ((a, b), p)| (0.5 * a + 0.5 * b).mul_add(p, sum))
-        } else {
-            kinetic_after_j - kinetic_before_j
-        };
-        let integration_defect_j = {
-            use fs_math::dd::Dd;
-            (Dd::from_f64(kinetic_change_j) + Dd::from_f64(strain.change_j)
-                - Dd::from_f64(source_work_j))
-            .to_f64()
-        };
+        let kinetic = self.kinetic_increment_to(&candidate.state.v, cx)?;
+        let kinetic_change_j = kinetic.change.to_f64();
+        let source_work_j = source_work.to_f64();
+        let integration_defect_j =
+            (kinetic.change + Dd::from_f64(strain.change_j) - source_work).to_f64();
         if !source_work_j.is_finite() || !integration_defect_j.is_finite() {
             return Err(FiniteSolidError::Invalid(
                 "mechanical work is not representable",
@@ -1096,6 +1116,7 @@ impl<'a> FiniteSolidBody<'a> {
                 time,
                 kinetic_before_j,
                 kinetic_after_j,
+                kinetic_change_j,
                 strain_before_j: strain.before_j,
                 strain_after_j: strain.after_j,
                 strain_change_j: strain.change_j,

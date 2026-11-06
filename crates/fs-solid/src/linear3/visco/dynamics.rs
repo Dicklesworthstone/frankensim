@@ -115,6 +115,23 @@ pub struct ViscoDynamicStep {
     pub balance_residual_j: f64,
     /// Endpoint and exact mean internal forces; original storage/work/heat.
     pub constitutive: ViscoForceStep,
+    energy_change: Dd,
+    total_work: Dd,
+}
+
+impl ViscoDynamicStep {
+    /// Combined kinetic and material storage change before diagnostic rounding.
+    /// Coupled first-law checks must retain these words when small heat exchanges
+    /// accompany large opposing kinetic and constitutive transfers.
+    pub const fn retained_energy_change_j(&self) -> Dd {
+        self.energy_change
+    }
+
+    /// Independently integrated applied, support and imposed-eigenstrain work.
+    /// These retained words are separate from stored energy and physical heat.
+    pub const fn retained_work_j(&self) -> Dd {
+        self.total_work
+    }
 }
 
 fn invalid(what: &'static str) -> ViscoElementError {
@@ -682,9 +699,11 @@ impl<'p, 'a> ViscoDynamicState<'p, 'a> {
                 + Dd::from_f64(element.stored_energy_change_j);
         }
         let material_stored_energy_change_j = finite(material_change.to_f64())?;
+        let energy_change = kinetic_change + material_change;
+        let total_work =
+            load_work + support_work + Dd::from_f64(constitutive.step_eigenstrain_work_j);
         let defect = finite(
-            (load_work + support_work + Dd::from_f64(constitutive.step_eigenstrain_work_j)
-                - kinetic_change - material_change
+            (total_work - energy_change
                 - Dd::from_f64(constitutive.step_dissipated_j))
                 .to_f64(),
         )?;
@@ -744,6 +763,8 @@ impl<'p, 'a> ViscoDynamicState<'p, 'a> {
                 mean_reaction_force_n,
                 balance_residual_j: defect,
                 constitutive,
+                energy_change,
+                total_work,
             },
             port_result.map(|(_, response)| response),
         ))

@@ -35,6 +35,90 @@ fn mbd(v: [f64; 3]) -> Vec3 {
 }
 
 #[test]
+fn equal_opposite_impulses_retain_small_work_beside_common_motion() {
+    with_cx(|_, cx| {
+        // Total mass 20 makes the original P1 block M = I + 11^T exactly.
+        let material = bind(&source_card(120.0, 1.0, false, false));
+        let common = 2.0_f64.powi(54);
+        let body = FiniteSolidBody::new(
+            problem(&material, &[], &[]),
+            &[[0.0; 3]; 4],
+            &[[common, 0.0, 0.0]; 4],
+            0.0,
+            Default::default(),
+            cx,
+        )
+        .unwrap();
+        let initial = body.native_state().clone();
+        let (next, report) = body
+            .nodal_impulse_candidate(
+                &[(0, [4.0, 0.0, 0.0]), (1, [-4.0, 0.0, 0.0])],
+                [0.0; 3],
+                Default::default(),
+                cx,
+            )
+            .unwrap();
+        assert_eq!(next.velocity_m_s()[0][0], common + 4.0);
+        assert_eq!(next.velocity_m_s()[1][0], common - 4.0);
+        assert_eq!(report.kinetic_before_j, report.kinetic_after_j);
+        // The common mode does no net work. The counter-mode gains (4²+4²)/2.
+        assert_eq!(report.kinetic_change_j, 16.0);
+        assert_eq!(report.impulse_work_j, 16.0);
+        assert_eq!(report.work_residual_j, 0.0);
+        assert_eq!(report.linear_residual_kg_m_s, [0.0; 3]);
+        assert_eq!(report.angular_residual_kg_m2_s, [0.0; 3]);
+        assert_eq!(body.native_state(), &initial);
+        assert_eq!(next.native_state().q, initial.q);
+        assert_eq!(next.native_state().t, initial.t);
+    });
+}
+
+#[test]
+fn common_motion_force_kick_and_drift_keep_work_and_splitting_defect_distinct() {
+    with_cx(|_, cx| {
+        let material = bind(&source_card(120.0, 1.0, false, false));
+        let common = 2.0_f64.powi(54);
+        let duration = common.recip();
+        let force = [(0, 4.0 * common), (3, -4.0 * common)];
+        let body = FiniteSolidBody::new(
+            problem(&material, &[], &force),
+            &[[0.0; 3]; 4],
+            &[[common, 0.0, 0.0]; 4],
+            0.0,
+            Default::default(),
+            cx,
+        )
+        .unwrap();
+        let (kicked, kick) = body
+            .force_kick_candidate(
+                duration,
+                &force,
+                [0.0; 3],
+                [0.0; 3],
+                Default::default(),
+                cx,
+            )
+            .unwrap();
+        assert_eq!(kick.impulse.kinetic_change_j, 16.0);
+        assert_eq!(kick.source_impulse_work_j, 16.0);
+        assert_eq!(kick.internal_impulse_work_j, 0.0);
+        assert_eq!(kick.work_decomposition_residual_j, 0.0);
+        // This deliberately first-order split supplies 32 J along the drift
+        // after a 16 J kick. Its -16 J numerical defect must stay visible.
+        let (next, drift) = kicked
+            .contact_drift_candidate(&kick, controls(17.0), cx)
+            .unwrap();
+        assert_eq!(drift.kinetic_change_j, 0.0);
+        near(drift.source_displacement_work_j, 32.0, 1e-12);
+        near(drift.source_splitting_work_j, -16.0, 1e-12);
+        near(drift.integration_defect_j, -16.0, 1e-12);
+        near(drift.absolute_integration_defect_j, 16.0, 1e-12);
+        assert_eq!(next.velocity_m_s(), kicked.velocity_m_s());
+        assert_eq!(next.native_state().steps, 1);
+    });
+}
+
+#[test]
 fn off_center_impulse_uses_consistent_mass_current_geometry_and_conjugate_work() {
     with_cx(|_, cx| {
         let material = bind(&source_card(6.0, 1.0, false, false)); // total mass 1 kg

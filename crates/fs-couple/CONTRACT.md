@@ -197,6 +197,12 @@ integrated Kelvin/Maxwell loss enters the original finite caloric cells.
 Unchanged background translation cannot hide a small physical heat transfer
 or enlarge the native interval energy allowance.
 
+The native step's read-only `retained_energy_change_j` and `retained_work_j`
+carry the combined storage and independently supplied work in double-double
+form through the thermal consumer's complete balance. Opposing large kinetic
+and material increments are reduced before diagnostic rounding; wrapping their
+already-rounded public scalar fields in compensated arithmetic is insufficient.
+
 The reciprocal dynamic laminate owner consumes the original enriched MITC
 midpoint's retained kinetic increment directly. Its original director mass,
 nodal/director cross terms, material stress work, finite heat cells and launch
@@ -206,6 +212,15 @@ These remain fixed-reference, fixed-mass models with the existing material and
 time-resolution obligations. Focused regression definitions cover supported
 spatial strain heat and independent director motion beside dominant unchanged
 kinetic storage; isolated arithmetic checks do not execute those integrations.
+
+Finite-solid time steps, impulses, force kicks and kinetic drift retain actual
+kinetic increments through the unchanged original consistent mass. Endpoint
+difference and mean-velocity tails remain compensated through independent
+storage and supplied-work checks, including pressure and gravity ports.
+Background kinetic storage cannot erase a resolved local exchange. Numerical
+integration, impulse-work and force-splitting defects retain their original
+gates and never supply physical heat. `FiniteSolidStep::kinetic_change_j`
+exposes the same increment used by the original acceptance calculation.
 
 ## Original specific heat in coupled capacity admission
 

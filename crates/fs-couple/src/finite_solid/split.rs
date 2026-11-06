@@ -22,6 +22,7 @@
 
 use std::sync::Arc;
 
+use fs_math::dd::Dd;
 use fs_solid::hyper3::pressure::{ClosedTetPressureSurface, TetPressure};
 
 use super::impulse::{
@@ -30,7 +31,7 @@ use super::impulse::{
 use super::{
     Cx, DynamicOperator, FiniteSolidBody, FiniteSolidControls, FiniteSolidError,
     FiniteSolidMaterial, ImplicitStepTelemetry, MassDiagonal, OperatorGeneralizedAlpha,
-    PreparedHyperTetProblem, SolveReport, checkpoint, dot, inflate, second_order_acceleration,
+    PreparedHyperTetProblem, SolveReport, checkpoint, inflate, second_order_acceleration,
 };
 
 /// Native force kick and immutable binding to its original configuration/load.
@@ -319,29 +320,37 @@ impl<'a> FiniteSolidBody<'a> {
                 work_residual_j: 0.0,
             });
         }
-        let mut average_v = vec![0.0; external.len()];
-        for ((&dof, &before), &after) in self.free.iter().zip(&self.state.v).zip(&candidate.state.v)
-        {
-            average_v[dof] = 0.5 * before + 0.5 * after;
-        }
-        let dead_load_impulse_work_j = dot(&source, &average_v);
-        let pressure_impulse_work_j = pressure_impulse
+        let dead_load_work =
+            self.mean_velocity_work_to(&candidate.state.v, |dof| source[dof], cx)?;
+        let pressure_work = pressure_impulse
             .as_ref()
-            .map_or(0.0, |pressure| dot(pressure, &average_v));
-        let gravity_impulse_work_j = gravity_impulse
+            .map(|pressure| {
+                self.mean_velocity_work_to(&candidate.state.v, |dof| pressure[dof], cx)
+            })
+            .transpose()?
+            .unwrap_or(Dd::ZERO);
+        let gravity_work = gravity_impulse
             .as_ref()
-            .map_or(0.0, |gravity| dot(gravity, &average_v));
-        let mut source_impulse_work_j = if pressure_impulse.is_some() {
-            dead_load_impulse_work_j + pressure_impulse_work_j
-        } else {
-            dead_load_impulse_work_j
-        };
-        if gravity_impulse.is_some() {
-            source_impulse_work_j += gravity_impulse_work_j;
-        }
-        let internal_impulse_work_j = dot(&elastic, &average_v);
+            .map(|gravity| {
+                self.mean_velocity_work_to(&candidate.state.v, |dof| gravity[dof], cx)
+            })
+            .transpose()?
+            .unwrap_or(Dd::ZERO);
+        let source_work = dead_load_work + pressure_work + gravity_work;
+        let internal_work =
+            self.mean_velocity_work_to(&candidate.state.v, |dof| elastic[dof], cx)?;
+        let supplied_work = self.mean_velocity_work_to(
+            &candidate.state.v,
+            |dof| nodal_impulses[dof / 3].1[dof % 3],
+            cx,
+        )?;
+        let dead_load_impulse_work_j = dead_load_work.to_f64();
+        let pressure_impulse_work_j = pressure_work.to_f64();
+        let gravity_impulse_work_j = gravity_work.to_f64();
+        let source_impulse_work_j = source_work.to_f64();
+        let internal_impulse_work_j = internal_work.to_f64();
         let work_decomposition_residual_j =
-            impulse.impulse_work_j - (source_impulse_work_j + internal_impulse_work_j);
+            (supplied_work - source_work - internal_work).to_f64();
         let linear_decomposition_residual_kg_m_s = std::array::from_fn(|axis| {
             impulse.applied.linear_kg_m_s[axis]
                 - (source_impulse.linear_kg_m_s[axis] + internal_impulse.linear_kg_m_s[axis])
@@ -533,11 +542,9 @@ impl<'a> FiniteSolidBody<'a> {
         let after_positions = candidate.current_positions(cx)?;
         let mut before_v = vec![0.0; self.mass.nrows()];
         let mut delta_v = vec![0.0; self.mass.nrows()];
-        let mut average_v = vec![0.0; self.mass.nrows()];
         for ((&dof, &old), &new) in self.free.iter().zip(&self.state.v).zip(&candidate.state.v) {
             before_v[dof] = old;
             delta_v[dof] = new - old;
-            average_v[dof] = 0.5 * old + 0.5 * new;
         }
         let mut before_p = vec![0.0; self.mass.nrows()];
         let mut delta_p = vec![0.0; self.mass.nrows()];
@@ -563,7 +570,8 @@ impl<'a> FiniteSolidBody<'a> {
         let angular_residual_kg_m2_s: [f64; 3] = std::array::from_fn(|axis| {
             momentum_change.angular_kg_m2_s[axis] + position_change.angular_kg_m2_s[axis]
         });
-        let kinetic_change_j = dot(&average_v, &delta_p);
+        let kinetic = self.kinetic_increment_to(&candidate.state.v, cx)?;
+        let kinetic_change_j = kinetic.change.to_f64();
         if magnitude(momentum_change.linear_kg_m_s) > kick.controls.linear_tolerance_kg_m_s
             || magnitude(angular_residual_kg_m2_s) > kick.controls.angular_tolerance_kg_m2_s
             || kinetic_change_j.abs() > kick.controls.work_tolerance_j
@@ -630,14 +638,15 @@ impl<'a> FiniteSolidBody<'a> {
             source_displacement_work_j += gravity_work_j;
             source_splitting_work_j += gravity_splitting_work_j;
         }
-        let elastic_splitting_work_j = (fs_math::dd::Dd::from_f64(strain.change_j)
-            + fs_math::dd::Dd::from_f64(binding.internal_work_j))
-        .to_f64();
-        let integration_defect_j = source_splitting_work_j
-            + elastic_splitting_work_j
-            + binding.kick_work_residual_j
-            + binding.decomposition_residual_j
-            + kinetic_change_j;
+        let elastic_splitting_work =
+            Dd::from_f64(strain.change_j) + Dd::from_f64(binding.internal_work_j);
+        let elastic_splitting_work_j = elastic_splitting_work.to_f64();
+        let integration_defect_j = (Dd::from_f64(source_splitting_work_j)
+            + elastic_splitting_work
+            + Dd::from_f64(binding.kick_work_residual_j)
+            + Dd::from_f64(binding.decomposition_residual_j)
+            + kinetic.change)
+            .to_f64();
         let absolute_integration_defect_j = dead_load_splitting_work_j.abs()
             + pressure_splitting_work_j.abs()
             + gravity_splitting_work_j.abs()

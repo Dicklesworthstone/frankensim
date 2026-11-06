@@ -6,6 +6,87 @@ mod spatial_pressure;
 
 use super::*;
 
+#[test]
+fn small_finite_solid_exchange_survives_large_uncoupled_kinetic_inventory() {
+    fn advance<'a>(
+        body: &FiniteSolidBody<'a>,
+        compatible: bool,
+        cx: &Cx<'_>,
+    ) -> Result<(FiniteSolidBody<'a>, FiniteSolidStep), FiniteSolidError> {
+        if compatible {
+            body.step_energy_momentum_candidate(
+                1.0 / 128.0,
+                &[],
+                [0.0; 3],
+                controls(1e-9),
+                cx,
+            )
+        } else {
+            body.step_candidate(1.0 / 128.0, &[], [0.0; 3], controls(1e-6), cx)
+        }
+    }
+    with_cx(|_, cx| {
+        let materials = [
+            bind(&source_card(6.0, 1.0, false, false)),
+            bind(&source_card(6.0 * 2.0_f64.powi(80), 1.0, false, false)),
+        ];
+        let nodes: Vec<_> = NODES
+            .into_iter()
+            .chain(NODES.map(|[x, y, z]| [x + 3.0, y, z]))
+            .collect();
+        let tetrahedra = [[0, 1, 2, 3], [4, 5, 6, 7]];
+        // The first body has one deforming coordinate; the disconnected second
+        // tetrahedron translates rigidly. Its motion cannot supply strain work.
+        let fixed: Vec<_> = (0..24)
+            .filter(|&dof| dof != 3 && !(dof >= 12 && dof % 3 == 0))
+            .map(|dof| (dof, 0.0))
+            .collect();
+        let problem = HyperTetProblem {
+            nodes_m: &nodes,
+            tetrahedra: &tetrahedra,
+            material: HyperelasticLawField::PerElement(&materials),
+            prescribed_m: &fixed,
+            nodal_forces_n: &[],
+            body_force_n_m3: [0.0; 3],
+            budget: TetAssemblyBudget::standard(),
+            settings: HyperTetSettings::default(),
+        };
+        let mut u = [[0.0; 3]; 8];
+        u[1][0] = 0.25;
+        let initial = |background: f64| {
+            let mut v = [[0.0; 3]; 8];
+            v[1][0] = 0.125;
+            for velocity in &mut v[4..] {
+                velocity[0] = background;
+            }
+            FiniteSolidBody::new(problem, &u, &v, 0.0, Default::default(), cx).unwrap()
+        };
+        for compatible in [false, true] {
+            let mut baseline = initial(0.0);
+            let mut translating = initial(0.125);
+            for _ in 0..4 {
+                let (next_baseline, expected) = advance(&baseline, compatible, cx).unwrap();
+                let (next_translating, report) = advance(&translating, compatible, cx).unwrap();
+                assert_eq!(report.kinetic_before_j, report.kinetic_after_j);
+                assert!(report.kinetic_change_j.abs() > 1e-6);
+                near(report.kinetic_change_j, expected.kinetic_change_j, 2e-11);
+                near(report.strain_change_j, expected.strain_change_j, 2e-11);
+                near(report.integration_defect_j, expected.integration_defect_j, 2e-11);
+                near(
+                    next_translating.velocity_m_s()[1][0],
+                    next_baseline.velocity_m_s()[1][0],
+                    2e-11,
+                );
+                for velocity in &next_translating.velocity_m_s()[4..] {
+                    assert_eq!(velocity[0], 0.125);
+                }
+                baseline = next_baseline;
+                translating = next_translating;
+            }
+        }
+    });
+}
+
 fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
     [
         a[1] * b[2] - a[2] * b[1],
