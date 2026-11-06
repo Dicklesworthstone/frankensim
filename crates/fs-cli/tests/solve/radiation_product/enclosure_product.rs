@@ -203,6 +203,68 @@ fn g3_g5_native_enclosure_rebinds_refined_traces_and_replays_exact_fields() {
 }
 
 #[test]
+fn g1_native_enclosure_adaptive_preserves_reflection_and_measures_discretization() {
+    let epsilon = 0.7;
+    let (cards, card) = emissivity_cards(&fixture_cards(), epsilon);
+    let mut spec = enclosure_project(&card);
+    spec.solver.as_mut().unwrap().fidelity = "adaptive".into();
+    spec.solver.as_mut().unwrap().tolerance_rel = 1e-8;
+    spec.budgets.as_mut().unwrap().accuracy_rel = 0.2;
+    let declaration = spec.cooling.as_mut().unwrap().conduction.as_mut().unwrap()
+        .enclosure_radiation.as_mut().unwrap();
+    declaration.temperature_tolerance.value = 1e-11;
+    declaration.heat_tolerance.value = 1e-10;
+    let decoded = fs_project::parse_sexpr(&print_sexpr(&spec).unwrap()).unwrap();
+    assert!(decoded.findings().is_empty(), "{:?}", decoded.findings());
+    let ledger = Ledger::open(":memory:").unwrap();
+    import_fixture(&ledger, &spec, tetra_stl());
+    let (_, qoi, receipt, field) = run_conjugate_to_completion(&ledger, &decoded, &cards);
+    let (qoi, receipt, field) = (J::parse(&qoi).unwrap(), J::parse(&receipt).unwrap(), J::parse(&field).unwrap());
+    check_enclosure(&receipt, epsilon);
+    assert!(receipt.get("temperature_contact").is_none());
+    assert_eq!(receipt.get("conjugate"), Some(&J::Null));
+    assert_eq!(receipt.get("solver_control"), Some(&J::Null));
+    let adaptive = receipt.get("adaptive").unwrap();
+    assert_eq!(adaptive.str_field("status"), Some("observed-tolerance-met"));
+    assert!(n(adaptive, "solved_meshes") > 1.0);
+    assert_eq!(adaptive.get("continuum_error_bound"), Some(&J::Bool(false)));
+    let history = adaptive.get("history").unwrap().as_array().unwrap();
+    assert!(!history.is_empty());
+    for row in history {
+        let balance = row.get("algebraic_balance").unwrap();
+        assert_eq!(balance.str_field("comparison_model"), Some("enclosure-full-transpose"));
+        for key in ["radiation_feedback", "enclosure_feedback"] {
+            assert_eq!(balance.get(key), Some(&J::Bool(true)));
+        }
+        for key in ["open_enclosure", "air_reference_feedback"] {
+            assert_eq!(balance.get(key), Some(&J::Bool(false)));
+        }
+        assert_eq!(row.get("coupled_adjoint"), Some(&J::Null));
+        assert_eq!(n(row, "probe_tets"), 8.0 * n(row, "tets"));
+        assert_eq!(n(row, "interface_pairs"), 0.0);
+        assert!(n(row, "absolute_contribution_sum_k") > 0.0);
+        let measured = n(row, "measured_change_k");
+        near(n(row, "signed_linear_change_k") + n(row, "linearization_remainder_k")
+            + n(row, "maximum_remainder_k"), measured, 1e-9);
+        assert!(n(row, "estimated_change_k") + 1e-12 >= measured.abs());
+        assert!(n(row, "dual_residual") <= 1e-9);
+    }
+    let last = history.last().unwrap();
+    let goal = &qoi.get("qoi").unwrap().as_array().unwrap()[0];
+    let selected = n(goal, "witness_vertex") as usize;
+    assert_eq!(n(goal, "value"), field.get("temperature").unwrap().as_array().unwrap()[selected].as_f64().unwrap());
+    near(n(goal, "value"), n(last, "t_max_k"), 1e-9);
+    assert_eq!(goal.str_field("color"), Some("estimated"));
+    let term = qoi.get("budget").unwrap().as_array().unwrap()[0].get("terms").unwrap()
+        .as_array().unwrap().iter().find(|term| term.str_field("kind") == Some("discretization")).unwrap();
+    assert_eq!(qoi.str_field("authority"), Some("estimated-candidate"));
+    assert_eq!(term.str_field("state"), Some("interval"));
+    assert_eq!(term.get("derivation").unwrap().str_field("method"), Some("adaptive-enrichment-order-one"));
+    let half_width = 2.0 * n(last, "estimated_change_k").abs().max(n(last, "measured_change_k").abs());
+    assert_eq!(n(term, "upper_kelvin").to_bits(), half_width.to_bits());
+}
+
+#[test]
 fn g1_native_open_enclosure_adjoint_differentiates_each_original_emissivity_card() {
     let (cards, card) = emissivity_cards(&fixture_cards(), 0.7);
     let mut spec = enclosure_project(&card);
@@ -246,7 +308,7 @@ fn g1_native_open_enclosure_adjoint_differentiates_each_original_emissivity_card
 #[test]
 fn g0_native_enclosure_refuses_unsupported_bounds_and_bad_mesh_reciprocity() {
     let (cards, card) = emissivity_cards(&fixture_cards(), 0.85);
-    for kind in ["mean-bound", "adaptive", "unequal-area"] {
+    for kind in ["mean-bound", "pointwise-adaptive", "unequal-area"] {
         let mut spec = enclosure_project(&card);
         match kind {
             "mean-bound" => spec.outputs.as_mut().unwrap().push(OutputRequest {
@@ -254,7 +316,12 @@ fn g0_native_enclosure_refuses_unsupported_bounds_and_bad_mesh_reciprocity() {
                 kind: "report".into(),
                 region: None,
             }),
-            "adaptive" => spec.solver.as_mut().unwrap().fidelity = "adaptive".into(),
+            "pointwise-adaptive" => {
+                spec.solver.as_mut().unwrap().fidelity = "adaptive".into();
+                spec.cooling.as_mut().unwrap().conduction.as_mut().unwrap()
+                    .enclosure_radiation.as_mut().unwrap().spatial_model =
+                    Some(fs_project::RadiationSpatialModel::Pointwise);
+            }
             _ => {
                 // The sloping tetrahedral face has area sqrt(3)/2, so an
                 // equal-area F12=F21=1 declaration must fail at mesh binding.

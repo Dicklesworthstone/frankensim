@@ -1,5 +1,38 @@
 # CONTRACT: fs-cli
 
+## Adaptive reflected-enclosure cooling — driver 133
+
+Steady adaptive projects now admit closed and open area-mean gray enclosures
+with source-backed temperature-dependent contacts, fixed contacts or continuous
+solids. The retained enclosure belongs to the exact enriched mesh and original
+emissivity sources. Each comparison independently solves reflected exchange at
+both fields; original convection, conductivity and contact are also evaluated
+at each field. The full patch-flux Jacobian enters the same transpose as the
+bulk/contact tangent and natural or transported-air reference feedback.
+
+Physical residuals add radiative nodal loads directly to original convection
+and prescribed fluxes. They do not reconstruct heat through a shifted Robin
+reference, where `q/h` may round away. Genuine prescribed-flux and radiation-only
+patches retain their original heat, including cases with no Robin controls.
+Only physical enclosure surfaces contribute to the solid's radiation account;
+an open black reservoir has no solid node. Only original convection heats air.
+
+Live-contact comparisons retain their original independent watt residual and
+energy gates. Fixed-contact/continuous comparisons retain the accepted physical
+L2 residual target; their aggregate energy allowance is its Cauchy–Schwarz sum
+bound plus the independently declared radiosity heat allowance. Source domains,
+reference smoothness, exact trace ownership, patch/factor budgets and cancellation
+remain active. An approximate field needs physical radiosity, not a derivative.
+
+Receipts identify `source-contact-enclosure-full-transpose` or
+`enclosure-full-transpose`, including closed/open and air-feedback flags. Open
+bath temperatures participate in the declared temperature-rise accuracy scale.
+The existing measured enrichment, nonlinear remainder, maximum relocation and
+mark/refine loop supply an Estimated discretization term. Driver 133 invalidates
+older cached results. Transient or pointwise enclosure adaptation and continuum
+mean bounds remain unsupported. Native regression cases use independent closed,
+open and self-reflecting patch heat formulas plus bounded uniform comparisons.
+
 ## Adaptive live contact with ambient radiation — driver 132
 
 Steady adaptive projects now compose source-backed temperature-dependent contact
@@ -28,9 +61,9 @@ The algebraic receipt identifies `source-contact-radiation-full-transpose` and
 records both contact-temperature and radiation feedback. Signed residual terms,
 observed nonlinear remainder and maximum relocation remain in the existing
 Estimated discretization comparison and marking path. Driver 132 invalidates
-cached results from earlier producers. Reflected-enclosure and transient
-contact adaptation, steady pointwise radiation and continuum error certificates
-remain outside this increment. Focused native regressions cover radiation-only,
+cached results from earlier producers. Driver 133 adds reflected-enclosure
+adaptation; transient contact adaptation, steady pointwise radiation and continuum
+error certificates remain unsupported. Focused native regressions cover radiation-only,
 prescribed, natural and transported-air cases through the existing project path.
 
 ## Original material-source adjoints through reflected enclosures — driver 130
@@ -1252,8 +1285,8 @@ Explicit claim pins disambiguate sources without bypassing validity checks.
 The later driver sections above extend enclosure radiation and complete
 derivatives. Driver 131 additionally admits adaptive goals with prescribed,
 natural-convection and transported-air boundaries; driver 132 includes
-area-mean ambient radiation and radiation-only traces. Reflected-enclosure
-and transient adaptive compositions still refuse with
+area-mean ambient radiation and radiation-only traces. Driver 133 adds
+closed/open reflected-enclosure goals. Transient adaptive compositions still refuse with
 `cli-solve-conduction-contact-composition`.
 No frozen-contact inverse or roundoff certificate is published. Constant-contact projects retain their
 existing solver and derivative paths. Tests in
@@ -3480,8 +3513,9 @@ Future interval controls have zero influence on an earlier selected peak. A true
 all-prescribed capacity endpoint retains its exact zero residual target without
 inflating the allowance. Requesting derivatives leaves the forward field unchanged.
 
-Temperature-dependent emissivity, adaptive enclosure goals and continuum mean
-bounds retain explicit refusals. The driver never performs a
+Driver 133 adds complete steady area-mean enclosure adaptive goals.
+Temperature-dependent emissivity, transient and pointwise enclosure adaptation,
+and continuum mean bounds retain explicit refusals. The driver never performs a
 frozen-enclosure algebraic goal correction or presents its fixed-load linear
 roundoff calculation as an enclosure bound. Results remain Estimated.
 

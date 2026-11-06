@@ -335,7 +335,9 @@ pub const SOLVE_RUN_IDENTITY_DOMAIN: &str = "org.frankensim.fs-cli.solve-run.v1"
 /// Version 132 includes ambient radiation in those live-contact adaptive goals,
 /// admitting radiation-only traces for fixed and live contact and measuring
 /// adaptive rise tolerances from declared radiative reservoirs as well.
-pub const SOLVE_DRIVER_VERSION: u32 = 132;
+/// Version 133 admits closed/open reflected-enclosure adaptive goals through
+/// original contact and convection plus complete physical radiative fluxes.
+pub const SOLVE_DRIVER_VERSION: u32 = 133;
 
 const SOLVE_STAGE_SCHEMA: &str = "frankensim.cli.solve-stage.v1";
 const SOLVE_RUN_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-run-receipt.v1";
@@ -1576,6 +1578,8 @@ struct RungAdjointData {
     enclosure: Option<fs_conduction::radiation::GrayDiffuseEnclosure>,
     /// The physical open model and the exact independently prescribed bath.
     open_enclosure: Option<(fs_conduction::radiation::OpenDiffuseEnclosure, f64)>,
+    /// Original declared radiosity/heat allowance, retained across mesh rungs.
+    enclosure_heat_tolerance_w: Option<f64>,
     /// Original natural laws, pressure and feedback budget on this mesh.
     natural_goal: Option<natural::adaptive::NaturalGoal>,
 }
@@ -2107,7 +2111,7 @@ fn adaptive_study(
         achieved.as_deref().unwrap_or("null"),
         history.join(","),
         json_string(
-            "same-model nodal-maximum comparison against a globally enriched mesh; the actual residual/Jacobian retains fixed or admitted source-backed temperature contact, nonlinear conductivity, complete admitted natural-convection coefficient feedback, independent-branch air feedback at fixed mass flows and coefficients, and admitted area-mean ambient-radiation feedback, with explicit linearization and maximum remainders; source-backed contact currently excludes reflected-enclosure and transient adaptive compositions; incidence-distributed absolute contributions only mark cells; no continuum error, asymptotic order, equal-accuracy efficiency, physical validation, or complete uncertainty claim; output mesh counts do not certify allocator peak memory"
+            "same-model nodal-maximum comparison against a globally enriched mesh; the actual residual/Jacobian retains fixed or admitted source-backed temperature contact, nonlinear conductivity, complete admitted natural-convection coefficient feedback, independent-branch air feedback at fixed mass flows and coefficients, and admitted area-mean ambient or closed/open reflected-enclosure radiation, with explicit linearization and maximum remainders; enclosure comparisons retain original convection and fresh physical radiative nodal loads, including prescribed-flux patches; transient adaptive compositions remain unsupported; incidence-distributed absolute contributions only mark cells; no continuum error, asymptotic order, equal-accuracy efficiency, physical validation, or complete uncertainty claim; output mesh counts do not certify allocator peak memory"
         ),
     );
     // The published mesh was just compared with its uniform ratio-2
@@ -2124,7 +2128,7 @@ fn adaptive_study(
 }
 
 /// The coolest declared boundary temperature (fluid reference, airflow inlet,
-/// Dirichlet value or ambient-radiation reservoir): the base the tolerance's
+/// Dirichlet value or declared radiative reservoir): the base the tolerance's
 /// rise is measured from. `None` when no boundary temperature is declared.
 fn coolest_declared_temperature(setup: &ConductionSetup) -> Option<f64> {
     setup
@@ -2139,6 +2143,8 @@ fn coolest_declared_temperature(setup: &ConductionSetup) -> Option<f64> {
         })
         .chain(setup.radiation.iter().flat_map(|radiation| radiation.surfaces.iter())
             .map(|surface| surface.reservoir_temperature.value))
+        .chain(setup.enclosure_radiation.iter().filter_map(|enclosure| enclosure.ambient_temperature)
+            .map(|bath| bath.value))
         .filter(|value| value.is_finite())
         .reduce(f64::min)
 }
@@ -7326,6 +7332,8 @@ fn conduction_solve_receipt(
                 source,
                 materials: element_materials, fallback, linear, air_paths,
                 radiating_boundary, radiation_patches, enclosure, open_enclosure,
+                enclosure_heat_tolerance_w: setup.enclosure_radiation.as_ref()
+                    .map(|declaration| declaration.heat_tolerance.value),
                 natural_goal: if adaptive_requested && !natural_laws.is_empty() {
                     Some(natural::adaptive::NaturalGoal::new(natural_laws,
                         spec.envelope.as_ref().map_or(101_325.0, |e| e.pressure.value),

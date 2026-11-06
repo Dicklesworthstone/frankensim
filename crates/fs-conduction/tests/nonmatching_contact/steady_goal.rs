@@ -4,6 +4,7 @@ use super::temperature::source_card;
 use super::*;
 use fs_conduction::adjoint::compare_discrete_goal;
 use fs_conduction::interface::temperature::{TemperatureContact, TemperatureContacts};
+use fs_conduction::radiation::{EnclosureRadiationGradient, OpenDiffuseEnclosure};
 
 fn contact_mean(mesh: &ConductionMesh, split: usize) -> Vec<f64> {
     let (faces, _) = sides(mesh, split, 0.0);
@@ -1291,6 +1292,626 @@ fn g0_live_contact_robin_goal_rejects_malformed_stale_and_cancelled_feedback() {
         gate.request();
         assert!(matches!(
             compare(&region, &[point], &[value], &[0.0], &weights, entries),
+            Err(ConductionError::Cancelled { .. })
+        ));
+    });
+}
+
+// Independent closed exchange and explicit two-by-two open radiosity. The
+// open model includes both self reflection and exchange through a black bath.
+fn enclosure_oracle(open: bool, walls: [f64; 2], bath: f64) -> ([f64; 2], [[f64; 2]; 2]) {
+    let sigma = STEFAN_BOLTZMANN_W_M2_K4;
+    let epsilon = [0.4, 0.6];
+    if !open {
+        let scale = sigma / (1.0 / epsilon[0] + 1.0 / epsilon[1] - 1.0);
+        let heat = scale * (walls[0].powi(4) - walls[1].powi(4));
+        let slope = [
+            4.0 * scale * walls[0].powi(3),
+            -4.0 * scale * walls[1].powi(3),
+        ];
+        return ([heat, -heat], [slope, [-slope[0], -slope[1]]]);
+    }
+    let factors = [[0.1, 0.25], [0.25, 0.15]];
+    let escape = [0.65, 0.60];
+    let matrix: [[f64; 2]; 2] = std::array::from_fn(|i| {
+        std::array::from_fn(|j| {
+            (if i == j { 1.0 } else { 0.0 }) - (1.0 - epsilon[i]) * factors[i][j]
+        })
+    });
+    let determinant = matrix[0][0] * matrix[1][1] - matrix[0][1] * matrix[1][0];
+    let inverse = [
+        [matrix[1][1] / determinant, -matrix[0][1] / determinant],
+        [-matrix[1][0] / determinant, matrix[0][0] / determinant],
+    ];
+    let rhs: [f64; 2] = std::array::from_fn(|i| {
+        epsilon[i] * sigma * walls[i].powi(4)
+            + (1.0 - epsilon[i]) * escape[i] * sigma * bath.powi(4)
+    });
+    let radiosity: [f64; 2] =
+        std::array::from_fn(|i| inverse[i][0] * rhs[0] + inverse[i][1] * rhs[1]);
+    let heat = std::array::from_fn(|i| {
+        radiosity[i]
+            - factors[i][0] * radiosity[0]
+            - factors[i][1] * radiosity[1]
+            - escape[i] * sigma * bath.powi(4)
+    });
+    let derivative = std::array::from_fn(|i| {
+        std::array::from_fn(|j| {
+            (inverse[i][j] - factors[i][0] * inverse[0][j] - factors[i][1] * inverse[1][j])
+                * epsilon[j]
+                * 4.0
+                * sigma
+                * walls[j].powi(3)
+        })
+    });
+    (heat, derivative)
+}
+
+fn check_four_state_enclosure_goal(cx: &fs_exec::Cx<'_>, open: bool, live: bool, matching: bool) {
+    let resistance = |a, b| 0.5 + (a - 320.0) / 1024.0 + 3.0 * (b - 320.0) / 1024.0;
+    let (mut lo, mut hi) = (0.0_f64, 75.0);
+    for _ in 0..80 {
+        let heat = 0.5 * (lo + hi);
+        if heat * (0.4 + resistance(300.0 + 0.2 * heat, 330.0 - 0.2 * heat)) > 30.0 {
+            hi = heat;
+        } else {
+            lo = heat;
+        }
+    }
+    let heat = 0.5 * (lo + hi);
+    let x = [
+        300.0 + 0.1 * heat,
+        300.0 + 0.2 * heat,
+        330.0 - 0.2 * heat,
+        330.0 - 0.1 * heat,
+    ];
+    let bath = 310.0;
+    let (radiation, radiation_jacobian) = enclosure_oracle(open, [x[0], x[3]], bath);
+    let rc = [300.0 + radiation[0] / 10.0, 330.0 + radiation[1] / 10.0];
+    let feedback = [0.07, 0.17, -0.09, -0.04];
+    let points = [[10.0, rc[0], 0.25, 0.11], [10.0, rc[1], -0.35, 0.23]];
+    let values = |state: [f64; 4]| {
+        let u = state[0] - x[0];
+        let v = state[3] - x[3];
+        [
+            [
+                10.0 + 0.25 * u + 0.03 * u * u,
+                rc[0] + (0.11 + feedback[0]) * u + feedback[1] * v,
+            ],
+            [
+                10.0 - 0.35 * v + 0.02 * v * v,
+                rc[1] + (0.23 + feedback[3]) * v + feedback[2] * u,
+            ],
+        ]
+    };
+    let r = resistance(x[1], x[2]);
+    let residual = |state: [f64; 4], rows: [[f64; 2]; 2]| {
+        let [c, a, b, d] = state;
+        let q = (a - b) / if live { resistance(a, b) } else { r };
+        let (radiation, _) = enclosure_oracle(open, [c, d], bath);
+        [
+            10.0 * (c - a) + rows[0][0] * (c - rows[0][1]) + radiation[0],
+            10.0 * (a - c) + q,
+            10.0 * (b - d) - q,
+            10.0 * (d - b) + rows[1][0] * (d - rows[1][1]) + radiation[1],
+        ]
+    };
+    let qa = 1.0 / r
+        - if live {
+            (x[1] - x[2]) / (1024.0 * r * r)
+        } else {
+            0.0
+        };
+    let qb = -1.0 / r
+        - if live {
+            3.0 * (x[1] - x[2]) / (1024.0 * r * r)
+        } else {
+            0.0
+        };
+    let jacobian = [
+        [
+            20.0 + 0.25 * (x[0] - rc[0]) - 10.0 * (0.11 + feedback[0]) + radiation_jacobian[0][0],
+            -10.0,
+            0.0,
+            -10.0 * feedback[1] + radiation_jacobian[0][1],
+        ],
+        [-10.0, 10.0 + qa, qb, 0.0],
+        [0.0, -qa, 10.0 - qb, -10.0],
+        [
+            -10.0 * feedback[2] + radiation_jacobian[1][0],
+            0.0,
+            -10.0,
+            20.0 - 0.35 * (x[3] - rc[1]) - 10.0 * (0.23 + feedback[3]) + radiation_jacobian[1][1],
+        ],
+    ];
+    let lambda = solve_four_transpose(jacobian, [0.0, 1.0, 0.0, 0.0]);
+    let reference_residual = residual(x, values(x));
+    let (mesh, split) = mesh(if matching { [1, 1, 1] } else { [1, 2, 3] }, 0.0);
+    let bc = ThermalBoundaryBuilder::new(&mesh)
+        .region(
+            "cold reservoir",
+            |f| on_box_face(f.centroid[0], 0.0),
+            ThermalBc::robin(7.0, 285.0).unwrap(),
+        )
+        .unwrap()
+        .region(
+            "hot reservoir",
+            |f| on_box_face(f.centroid[0], 2.0),
+            ThermalBc::robin(14.0, 345.0).unwrap(),
+        )
+        .unwrap()
+        .adiabatic_remainder()
+        .finish()
+        .unwrap();
+    let boundary_before = bc.clone();
+    let card = source_card(1.0, false);
+    let set = contacts(cx, &mesh, &bc, &card, split, matching);
+    let material = ConductivityModel::isotropic_declared(10.0).unwrap();
+    let source = ScalarField::Uniform(0.0);
+    let problem = ConductionProblem {
+        mesh: &mesh,
+        boundary: &bc,
+        material: &material,
+        element_materials: None,
+        source: &source,
+    };
+    let surfaces = [0.0, 2.0]
+        .into_iter()
+        .enumerate()
+        .map(|(i, coordinate)| {
+            let name = ["cold reservoir", "hot reservoir"][i];
+            RadiationSurface::new(
+                &mesh,
+                name,
+                |f| on_box_face(f.centroid[0], coordinate),
+                goal_radiation_patch(name, [0.4, 0.6][i], bath)
+                    .emissivity()
+                    .clone(),
+            )
+            .unwrap()
+        })
+        .collect::<Vec<_>>();
+    let closed = GrayDiffuseEnclosure::new(
+        surfaces.clone(),
+        ViewFactorMatrix::infinite_parallel_plates(1.0).unwrap(),
+    )
+    .unwrap();
+    let opened = OpenDiffuseEnclosure::new(
+        cx,
+        surfaces,
+        vec![vec![0.1, 0.25], vec![0.25, 0.15]],
+        ViewFactorEvidence::Analytic {
+            geometry: "synthetic reciprocal two-patch goal oracle".into(),
+        },
+        ViewFactorTolerance::default(),
+    )
+    .unwrap();
+    let field = |state: [f64; 4]| {
+        mesh.positions()
+            .iter()
+            .enumerate()
+            .map(|(i, p)| {
+                if i < split {
+                    state[0] + (state[1] - state[0]) * p[0]
+                } else {
+                    state[3] + (state[2] - state[3]) * (2.0 - p[0])
+                }
+            })
+            .collect::<Vec<_>>()
+    };
+    let reference = field(x);
+    // This baseline deliberately represents a constant physical resistance.
+    // The live cases must differ: they query the two-sided source at both fields.
+    let frozen = set.evaluate(cx, &bc, &reference).unwrap();
+    let weights = contact_mean(&mesh, split);
+    let regions = ["cold reservoir", "hot reservoir"];
+    let entries = 12 * mesh.vertex_count(); // 4*n*2 Robin + 2*n*2 radiation.
+    let mut remainders = Vec::new();
+    for fraction in [1.0, 0.5, 0.25] {
+        let y = std::array::from_fn(|i| x[i] + fraction * [1.7, 3.0, -2.0, -1.1][i]);
+        let approximate = field(y);
+        let approximate_before = approximate.clone();
+        let compare = |rows: &[[f64; 2]], map: &[f64], live_contacts| {
+            match (open, live_contacts) {
+                (false, true) => set.compare_steady_goal_with_gray_diffuse_enclosure(
+                    cx,
+                    problem,
+                    &reference,
+                    &approximate,
+                    solver_config().linear,
+                    1e-8,
+                    1e-8,
+                    &regions,
+                    &points,
+                    rows,
+                    map,
+                    &closed,
+                    1e-9,
+                    &weights,
+                    entries,
+                    10_000,
+                ),
+                (true, true) => set.compare_steady_goal_with_open_gray_diffuse_enclosure(
+                    cx,
+                    problem,
+                    &reference,
+                    &approximate,
+                    solver_config().linear,
+                    1e-8,
+                    1e-8,
+                    &regions,
+                    &points,
+                    rows,
+                    map,
+                    &opened,
+                    bath,
+                    1e-9,
+                    &weights,
+                    entries,
+                    10_000,
+                ),
+                (false, false) => EnclosureRadiationGradient::compare_goal_at(
+                    cx,
+                    problem,
+                    Some(frozen.frozen_interfaces()),
+                    solver_config().linear,
+                    &reference,
+                    &approximate,
+                    1e-8,
+                    1e-8,
+                    &regions,
+                    &points,
+                    rows,
+                    map,
+                    &closed,
+                    1e-9,
+                    &weights,
+                    entries,
+                ),
+                (true, false) => EnclosureRadiationGradient::compare_open_goal_at(
+                    cx,
+                    problem,
+                    Some(frozen.frozen_interfaces()),
+                    solver_config().linear,
+                    &reference,
+                    &approximate,
+                    1e-8,
+                    1e-8,
+                    &regions,
+                    &points,
+                    rows,
+                    map,
+                    &opened,
+                    bath,
+                    1e-9,
+                    &weights,
+                    entries,
+                ),
+            }
+            .unwrap()
+        };
+        let report = compare(&values(y), &feedback, live);
+        let other = residual(y, values(y));
+        let difference: [f64; 4] = std::array::from_fn(|i| reference_residual[i] - other[i]);
+        let expected: f64 = (0..4).map(|i| lambda[i] * difference[i]).sum();
+        near(report.signed_residual_change, expected, 3e-10);
+        near(report.nodal_contributions.iter().sum(), expected, 3e-10);
+        near(report.signed_goal_change, -3.0 * fraction, 3e-12);
+        near(
+            report.signed_residual_change + report.linearization_remainder,
+            report.signed_goal_change,
+            3e-14,
+        );
+        assert!(report.primal_relative_residual < 1e-12);
+        assert!(report.dual_relative_residual < solver_config().linear.tolerance);
+        if live {
+            assert!(report.uses_nonlinear_jacobian);
+        }
+        remainders.push(report.linearization_remainder.abs());
+        if fraction == 1.0 {
+            assert!(
+                (compare(&values(x), &feedback, live).signed_residual_change - expected).abs()
+                    > 0.05
+            );
+            assert!(
+                (compare(&values(y), &[0.0; 4], live).signed_residual_change - expected).abs()
+                    > 1e-3
+            );
+            if live {
+                assert!(
+                    (compare(&values(y), &feedback, false).signed_residual_change - expected).abs()
+                        > 1e-4
+                );
+            }
+            // A local-only radiation tangent misses reflected cross-patch heat.
+            let mut local_only = jacobian;
+            local_only[0][3] -= radiation_jacobian[0][1];
+            local_only[3][0] -= radiation_jacobian[1][0];
+            let wrong_dual = solve_four_transpose(local_only, [0.0, 1.0, 0.0, 0.0]);
+            let wrong: f64 = (0..4).map(|i| wrong_dual[i] * difference[i]).sum();
+            assert!((wrong - expected).abs() > 1e-3);
+        }
+        assert_eq!(approximate, approximate_before);
+    }
+    assert!(remainders[2] > 1e-5);
+    for pair in remainders.windows(2) {
+        assert!((3.5..4.6).contains(&(pair[0] / pair[1])), "{remainders:?}");
+    }
+    assert_eq!(reference, field(x));
+    assert_eq!(bc, boundary_before);
+    if open && live && matching {
+        // A shifted Robin reservoir rounds to 300 K despite a real outward
+        // load. Zero goal weights cannot bypass the physical watt admission.
+        let isothermal = vec![300.0; mesh.vertex_count()];
+        let radiation = enclosure_oracle(true, [300.0; 2], 290.0).0;
+        for q in radiation {
+            assert!(q > 1.0);
+            assert_eq!(300.0 - q / 1e20, 300.0);
+        }
+        assert!(
+            set.compare_steady_goal_with_open_gray_diffuse_enclosure(
+                cx,
+                problem,
+                &isothermal,
+                &isothermal,
+                solver_config().linear,
+                1e-8,
+                1e-8,
+                &regions,
+                &[[1e20, 300.0, 0.0, 0.0]; 2],
+                &[[1e20, 300.0]; 2],
+                &[0.0; 4],
+                &opened,
+                290.0,
+                1e-9,
+                &vec![0.0; mesh.vertex_count()],
+                entries,
+                10_000
+            )
+            .is_err()
+        );
+    }
+}
+
+#[test]
+fn g3_live_contact_enclosure_goals_match_reflected_four_state_oracles() {
+    with_cx(|cx| {
+        for open in [false, true] {
+            for matching in [true, false] {
+                check_four_state_enclosure_goal(cx, open, true, matching);
+            }
+        }
+    });
+}
+
+#[test]
+fn g3_fixed_contact_enclosure_goals_retain_both_physical_fields_and_reflection() {
+    with_cx(|cx| {
+        for open in [false, true] {
+            check_four_state_enclosure_goal(cx, open, false, true);
+        }
+    });
+}
+
+#[test]
+fn g3_open_enclosure_goal_keeps_prescribed_flux_without_robin_and_physical_source_endpoints() {
+    support::with_gate(|gate, cx| {
+        let (mesh, split) = mesh([1, 1, 1], 0.0);
+        let bc = ThermalBoundaryBuilder::new(&mesh)
+            .region(
+                "cold",
+                |f| on_box_face(f.centroid[0], 0.0),
+                ThermalBc::dirichlet(300.0).unwrap(),
+            )
+            .unwrap()
+            .region(
+                "exterior",
+                |f| on_box_face(f.centroid[0], 2.0),
+                ThermalBc::neumann(2.0).unwrap(),
+            )
+            .unwrap()
+            .adiabatic_remainder()
+            .finish()
+            .unwrap();
+        let boundary_before = bc.clone();
+        let card = source_card(1.0, false);
+        let set = contacts(cx, &mesh, &bc, &card, split, true);
+        let material = ConductivityModel::isotropic_declared(10.0).unwrap();
+        let source = ScalarField::Uniform(0.0);
+        let problem = ConductionProblem {
+            mesh: &mesh,
+            boundary: &bc,
+            material: &material,
+            element_materials: None,
+            source: &source,
+        };
+        let patch = goal_radiation_patch("exterior", 0.6, 330.0);
+        let enclosure = |mesh: &ConductionMesh| {
+            let surface = RadiationSurface::new(
+                mesh,
+                "exterior",
+                |f| on_box_face(f.centroid[0], 2.0),
+                patch.emissivity().clone(),
+            )
+            .unwrap();
+            OpenDiffuseEnclosure::new(
+                cx,
+                vec![surface],
+                vec![vec![0.3]],
+                ViewFactorEvidence::Analytic {
+                    geometry: "synthetic self-reflecting aperture".into(),
+                },
+                ViewFactorTolerance::default(),
+            )
+            .unwrap()
+        };
+        let model = enclosure(&mesh);
+        // Eliminate the one-patch radiosity including repeated self reflection.
+        // The authored 2 W outward flux remains in the original heat balance.
+        let effective = 0.6 * 0.7 / (1.0 - 0.4 * 0.3);
+        let radiation =
+            |wall: f64| effective * STEFAN_BOLTZMANN_W_M2_K4 * (wall.powi(4) - 330.0_f64.powi(4));
+        let states = |heat: f64| {
+            let a = 300.0 + 0.1 * heat;
+            let b = (a * (1.0 + heat / 1024.0) - 0.75 * heat) / (1.0 - 3.0 * heat / 1024.0);
+            [a, b, b + 0.1 * heat]
+        };
+        let (mut lo, mut hi) = (0.0_f64, 50.0);
+        for _ in 0..80 {
+            let heat = 0.5 * (lo + hi);
+            if heat + 2.0 + radiation(states(heat)[2]) > 0.0 {
+                hi = heat;
+            } else {
+                lo = heat;
+            }
+        }
+        let heat = 0.5 * (lo + hi);
+        let [a, b, wall] = states(heat);
+        near(heat + 2.0 + radiation(wall), 0.0, 1e-11);
+        let reference = slab_field(&mesh, split, a, b, wall);
+        let approximate = slab_field(&mesh, split, a, b, 350.0);
+        assert!(patch.secant_coefficient_w_m2_k(350.0).is_ok());
+        assert!(patch.secant_partials_w_m2_k2(350.0).is_err());
+        let weights = contact_mean(&mesh, split);
+        let zero = vec![0.0; mesh.vertex_count()];
+        let entries = 2 * mesh.vertex_count(); // No Robin controls, one radiation patch.
+        let compare = |reference: &[f64],
+                       approximate: &[f64],
+                       model: &OpenDiffuseEnclosure,
+                       weights: &[f64],
+                       cap,
+                       pairs| {
+            set.compare_steady_goal_with_open_gray_diffuse_enclosure(
+                cx,
+                problem,
+                reference,
+                approximate,
+                solver_config().linear,
+                1e-8,
+                1e-8,
+                &[],
+                &[],
+                &[],
+                &[],
+                model,
+                330.0,
+                1e-9,
+                weights,
+                cap,
+                pairs,
+            )
+        };
+        let report = compare(&reference, &approximate, &model, &weights, entries, 10_000).unwrap();
+        near(report.signed_goal_change, 0.0, 1e-14);
+        assert!(report.signed_residual_change.abs() > 0.1);
+        near(
+            report.signed_residual_change + report.linearization_remainder,
+            0.0,
+            1e-14,
+        );
+        assert!(report.uses_nonlinear_jacobian);
+        assert!(report.primal_relative_residual < 1e-12);
+        assert!(report.dual_relative_residual < solver_config().linear.tolerance);
+        let same = compare(&reference, &reference, &model, &zero, entries, 10_000).unwrap();
+        assert_eq!(same.signed_goal_change, 0.0);
+        assert_eq!(same.signed_residual_change, 0.0);
+        assert!(
+            compare(
+                &reference,
+                &approximate,
+                &model,
+                &weights,
+                entries - 1,
+                10_000
+            )
+            .is_err()
+        );
+        assert!(compare(&reference, &approximate, &model, &weights, entries, 0).is_err());
+        let unsupported = slab_field(&mesh, split, a, b, 351.0);
+        assert!(compare(&reference, &unsupported, &model, &zero, entries, 10_000).is_err());
+        let unbalanced = slab_field(&mesh, split, a, b, wall + 1.0);
+        assert!(compare(&unbalanced, &reference, &model, &zero, entries, 10_000).is_err());
+        // Names only select original Robin convection. A radiating Neumann
+        // trace must not be promoted to an invented zero-coefficient film.
+        for name in ["exterior", "absent"] {
+            assert!(
+                set.compare_steady_goal_with_open_gray_diffuse_enclosure(
+                    cx,
+                    problem,
+                    &reference,
+                    &approximate,
+                    solver_config().linear,
+                    1e-8,
+                    1e-8,
+                    &[name],
+                    &[[10.0, 330.0, 0.0, 0.0]],
+                    &[[10.0, 330.0]],
+                    &[0.0],
+                    &model,
+                    330.0,
+                    1e-9,
+                    &weights,
+                    6 * mesh.vertex_count(),
+                    10_000
+                )
+                .is_err()
+            );
+        }
+        let (other_mesh, _) = super::mesh([1, 2, 3], 0.0);
+        let stale = enclosure(&other_mesh);
+        assert!(compare(&reference, &approximate, &stale, &zero, entries, 10_000).is_err());
+        // A perfectly balanced reference at the emissivity support endpoint
+        // still lacks the required tangent, even when the objective vanishes.
+        let edge_bc = ThermalBoundaryBuilder::new(&mesh)
+            .region(
+                "cold",
+                |f| on_box_face(f.centroid[0], 0.0),
+                ThermalBc::dirichlet(350.0).unwrap(),
+            )
+            .unwrap()
+            .region(
+                "exterior",
+                |f| on_box_face(f.centroid[0], 2.0),
+                ThermalBc::neumann(0.0).unwrap(),
+            )
+            .unwrap()
+            .adiabatic_remainder()
+            .finish()
+            .unwrap();
+        let edge_contacts = contacts(cx, &mesh, &edge_bc, &card, split, true);
+        let edge = vec![350.0; mesh.vertex_count()];
+        assert!(
+            edge_contacts
+                .compare_steady_goal_with_open_gray_diffuse_enclosure(
+                    cx,
+                    ConductionProblem {
+                        boundary: &edge_bc,
+                        ..problem
+                    },
+                    &edge,
+                    &edge,
+                    solver_config().linear,
+                    1e-8,
+                    1e-8,
+                    &[],
+                    &[],
+                    &[],
+                    &[],
+                    &model,
+                    350.0,
+                    1e-9,
+                    &zero,
+                    entries,
+                    10_000
+                )
+                .is_err()
+        );
+        assert_eq!(reference, slab_field(&mesh, split, a, b, wall));
+        assert_eq!(approximate, slab_field(&mesh, split, a, b, 350.0));
+        assert_eq!(bc, boundary_before);
+        gate.request();
+        assert!(matches!(
+            compare(&reference, &approximate, &model, &weights, entries, 10_000),
             Err(ConductionError::Cancelled { .. })
         ));
     });

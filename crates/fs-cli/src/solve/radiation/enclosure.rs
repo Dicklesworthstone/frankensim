@@ -99,16 +99,21 @@ pub(super) fn lower(
             return Err(bad("open total-enthalpy histories require spatial-model pointwise; regional-capacity histories use the shared area-mean enclosure owner"));
         }
     }
-    if spec
-        .solver
-        .as_ref()
-        .is_some_and(|solver| solver.fidelity == "adaptive")
-        || spec.outputs.iter().flatten().any(|output| {
-            output.name == "temperature-volume-mean-bound"
-        })
+    let adaptive = spec.solver.as_ref()
+        .is_some_and(|solver| solver.fidelity == "adaptive");
+    if adaptive && (setup.transient.is_some()
+        || declaration.spatial_model == Some(fs_project::RadiationSpatialModel::Pointwise))
     {
         return Err(bad(
-            "enclosure adaptive goals and continuum mean bounds require their own complete enclosure error estimator; a frozen radiative load is not that model",
+            "enclosure adaptive goals admit steady area-mean reflected exchange; transient and pointwise radiation require their own complete two-field comparison",
+        ));
+    }
+    if spec.outputs.iter().flatten().any(|output| {
+        output.name == "temperature-volume-mean-bound"
+    })
+    {
+        return Err(bad(
+            "enclosure continuum mean bounds require their own complete enclosure error bound; a discrete adaptive comparison is not that certificate",
         ));
     }
     if setup.transient.is_some() {

@@ -86,7 +86,8 @@ pub(super) fn probe_pair(
         adaptive_deadline(deadline)?;
         let approximate = adaptive_prolongation(cx, complex, coarse, split, fine)?;
         let radiating = fine.adjoint_data.as_ref().is_some_and(|data|
-            data.radiating_boundary.is_some() || !data.radiation_patches.is_empty());
+            data.radiating_boundary.is_some() || !data.radiation_patches.is_empty()
+                || data.enclosure.is_some() || data.open_enclosure.is_some());
         let mixed = fine.adjoint_data.as_ref().is_some_and(|data|
             data.natural_goal.is_some() && !data.air_paths.is_empty());
         let contact_feedback = fine.adjoint_data.as_ref().is_some_and(|data|
@@ -202,6 +203,12 @@ pub(super) fn probe_pair(
     // This method is a full core FGMRES transpose, not the legacy IQN-ILS
     // interface iteration. Preserve that distinction in retained evidence.
     let comparison = match fine.adjoint_data.as_ref() {
+        Some(data) if data.enclosure.is_some() || data.open_enclosure.is_some() => format!(
+            ",\"comparison_model\":{},\"radiation_feedback\":true,\"enclosure_feedback\":true,\"open_enclosure\":{},\"air_reference_feedback\":{}{}",
+            json_string(if data.temperature_contact.is_some() { "source-contact-enclosure-full-transpose" }
+                else { "enclosure-full-transpose" }),
+            data.open_enclosure.is_some(), !data.air_paths.is_empty(),
+            if data.temperature_contact.is_some() { ",\"contact_temperature_feedback\":true" } else { "" }),
         Some(data) if data.temperature_contact.is_some() && data.radiating_boundary.is_some() => format!(
             ",\"comparison_model\":\"source-contact-radiation-full-transpose\",\"contact_temperature_feedback\":true,\"radiation_feedback\":true,\"air_reference_feedback\":{}",
             !data.air_paths.is_empty()),

@@ -5,7 +5,7 @@
 
 use fs_airflow::conjugate::goal::{CoupledGoalError, maximum::affine_reference_law};
 use fs_conduction::adjoint::RobinResponse;
-use fs_conduction::radiation::AmbientRadiationGradient;
+use fs_conduction::radiation::{AmbientRadiationGradient, EnclosureRadiationGradient};
 use fs_conduction::{ConductionError, ConductionProblem, ScalarField, ThermalBc};
 use fs_exec::Cx;
 
@@ -32,6 +32,16 @@ fn poll(cx: &Cx<'_>, index: usize) -> Result<(), SolveRefusal> {
 
 fn finite(value: f64) -> Result<f64, SolveRefusal> {
     if value.is_finite() { Ok(value) } else { Err(bad("nonfinite coupled boundary adaptive arithmetic")) }
+}
+
+fn enclosure_energy_allowance(fine: &RungSolved, heat_w: f64) -> Result<f64, SolveRefusal> {
+    // The fixed-contact primal gates the physical L2 residual, without a
+    // separate global-energy stop. Its summed free residual is bounded by
+    // sqrt(n_free)*residual_w; add the declared radiosity heat allowance.
+    // Live contacts instead retain their original independent energy gate.
+    let root = fs_math::next_up((fine.solution.report.free_dofs as f64).sqrt());
+    let residual = finite(fs_math::next_up(fine.solution.report.residual_threshold * root))?;
+    finite(fs_math::next_up(residual + heat_w))
 }
 
 fn zeros<T: Default + Clone>(n: usize) -> Result<Vec<T>, SolveRefusal> {
@@ -68,14 +78,18 @@ pub(in crate::solve) fn probe(
     poll(cx, 0)?;
     let data = fine.adjoint_data.as_ref().ok_or_else(|| bad("missing coupled boundary goal operator"))?;
     let combined = data.radiating_boundary.as_ref();
-    if combined.is_some() == data.radiation_patches.is_empty() {
-        return Err(bad("radiation patches and their accepted combined boundary must be retained together"));
+    let ambient = !data.radiation_patches.is_empty();
+    let enclosed = data.enclosure.is_some() || data.open_enclosure.is_some();
+    if combined.is_some() != (ambient || enclosed)
+        || (ambient && enclosed)
+        || (data.enclosure.is_some() && data.open_enclosure.is_some())
+        || enclosed != data.enclosure_heat_tolerance_w.is_some()
+    {
+        return Err(bad("retain exactly one original radiation model, its accepted boundary, and its declared enclosure heat allowance when applicable"));
     }
     let live_contact = data.temperature_contact.is_some();
-    if live_contact && (data.interfaces.is_some()
-        || data.enclosure.is_some() || data.open_enclosure.is_some())
-    {
-        return Err(bad("adaptive live contact requires its original source and admitted convection/ambient-radiation laws; frozen contact or reflected-enclosure feedback cannot substitute"));
+    if live_contact && data.interfaces.is_some() {
+        return Err(bad("adaptive live contact requires its original source; a separate frozen contact cannot substitute for its coupled tangent"));
     }
     if combined.is_none()
         && !(data.natural_goal.is_some() && !data.air_paths.is_empty())
@@ -132,7 +146,9 @@ pub(in crate::solve) fn probe(
     }
     let m = names.len();
     let entries = usize::try_from(memory_bytes / 32).unwrap_or(usize::MAX);
-    if m == 0 || m*m > entries
+    // Enclosure patch means and flux factors belong to the radiation owner,
+    // independently of convection. A genuine vacuum may have no Robin rows.
+    if (m == 0 && !enclosed) || m*m > entries
         || n.checked_mul(4).and_then(|v| v.checked_mul(m)).is_none_or(|v| v > entries)
     { return Err(bad("coupled adaptive goal exceeds the declared feedback-entry budget")); }
     let mut areas = zeros::<f64>(m)?;
@@ -228,7 +244,33 @@ pub(in crate::solve) fn probe(
     weights[peak] = 1.0;
     let problem = ConductionProblem { mesh: &fine.mesh, boundary: &data.boundary,
         material: &data.fallback, element_materials: Some(&data.materials), source: &data.source };
-    let dual = if let Some(contact) = &data.temperature_contact {
+    let dual = if let Some(enclosure) = &data.enclosure {
+        let heat_w = data.enclosure_heat_tolerance_w
+            .ok_or_else(|| bad("closed enclosure lost its declared heat allowance"))?;
+        if let Some(contact) = &data.temperature_contact {
+            contact.compare_goal_with_enclosure(cx, problem,
+                &fine.solution.temperature, approximate, data.linear, &names,
+                &points, &other, &feedback, enclosure, heat_w, &weights, entries)?
+        } else {
+            EnclosureRadiationGradient::compare_goal_at(cx, problem, data.interfaces.as_ref(),
+                data.linear, &fine.solution.temperature, approximate,
+                fine.solution.report.residual_threshold, enclosure_energy_allowance(fine, heat_w)?, &names, &points,
+                &other, &feedback, enclosure, heat_w, &weights, entries).map_err(solid_error)?
+        }
+    } else if let Some((enclosure, bath)) = &data.open_enclosure {
+        let heat_w = data.enclosure_heat_tolerance_w
+            .ok_or_else(|| bad("open enclosure lost its declared heat allowance"))?;
+        if let Some(contact) = &data.temperature_contact {
+            contact.compare_goal_with_open_enclosure(cx, problem,
+                &fine.solution.temperature, approximate, data.linear, &names,
+                &points, &other, &feedback, enclosure, *bath, heat_w, &weights, entries)?
+        } else {
+            EnclosureRadiationGradient::compare_open_goal_at(cx, problem, data.interfaces.as_ref(),
+                data.linear, &fine.solution.temperature, approximate,
+                fine.solution.report.residual_threshold, enclosure_energy_allowance(fine, heat_w)?, &names, &points,
+                &other, &feedback, enclosure, *bath, heat_w, &weights, entries).map_err(solid_error)?
+        }
+    } else if let Some(contact) = &data.temperature_contact {
         if combined.is_some() {
             contact.compare_goal_with_ambient_radiation(cx, problem,
                 &fine.solution.temperature, approximate, data.linear, &names,
