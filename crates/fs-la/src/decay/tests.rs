@@ -143,6 +143,49 @@ fn long_chain_matches_the_independent_erlang_population_law() {
 }
 
 #[test]
+fn broad_shallow_network_uses_graph_depth_for_its_series_budget() {
+    // Sixty-three independent nuclides feed one stable product. No trajectory
+    // visits more than two physical nodes, irrespective of inventory breadth.
+    let n = MAX_DECAY_NODES;
+    let mut rates: Vec<_> = (0..n).map(|i| 0.25 + i as f64 / n as f64).collect();
+    rates[n - 1] = 0.0;
+    let edges: Vec<_> = (0..n - 1).map(|i| edge(i, n - 1, 1.0)).collect();
+    let time = 0.4;
+    let limits = DecayLimits { maximum_series_terms: 32, ..DecayLimits::default() };
+    let plan = DecayPlan::prepare(&rates, &edges, time, limits, || false).unwrap();
+    assert!(plan.series_terms() < 32);
+    let initial = vec![1.0; n];
+    let answer = plan.apply(&initial).unwrap();
+    let mut expected_stable = 1.0;
+    for i in 0..n - 1 {
+        let survived = (-rates[i] * time).exp();
+        let transformed = -(-rates[i] * time).exp_m1();
+        relative(answer.populations[i], survived, 2e-14);
+        relative(answer.decays[i], transformed, 2e-14);
+        expected_stable += transformed;
+    }
+    relative(answer.populations[n - 1], expected_stable, 2e-14);
+
+    // Uniform production adds a real augmented edge, but unrelated nuclides
+    // still must not raise the series budget. Each fresh parent's mean age is
+    // integrated by Fbar=(1-exp(-lambda*t))/(lambda*t).
+    let source = source::DecaySourcePlan::prepare(&rates, &edges, time, limits, || false).unwrap();
+    assert!(source.homogeneous_plan().series_terms() < 32);
+    let supplied = vec![2.0; n];
+    let fed = source.apply(&initial, &supplied).unwrap();
+    let mut expected_stable = 3.0;
+    for i in 0..n - 1 {
+        let x = rates[i] * time;
+        let retained = -(-x).exp_m1() / x;
+        let expected_count = -(-x).exp_m1() + 2.0 * (1.0 - retained);
+        relative(fed.populations[i], (-x).exp() + 2.0 * retained, 3e-14);
+        relative(fed.decays[i], expected_count, 3e-14);
+        expected_stable += expected_count;
+    }
+    relative(fed.populations[n - 1], expected_stable, 3e-14);
+}
+
+#[test]
 fn independent_intervals_compose_both_populations_and_counts() {
     let rates = [0.3, 0.7, 4.0, 0.0];
     let edges = [edge(0, 1, 0.6), edge(0, 2, 0.4), edge(1, 2, 0.2),

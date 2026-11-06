@@ -20,10 +20,11 @@
 //! case or Bateman divided difference. Work grows with the logarithm of the
 //! fastest dimensionless rate, not with the number of fastest lifetimes.
 //!
-//! The positive series has a componentwise tail test: after term k >= n, a
-//! path has at most n non-self transitions in the augmented population/count
-//! system, so subsequent term ratios are bounded by mu/(k+1-n). This bounds
-//! truncation in exact arithmetic, not floating-point error. Final stochastic,
+//! The positive series has a componentwise tail test: with at most d non-self
+//! transitions along any augmented population/count path, after term k >= d
+//! subsequent term ratios are bounded by mu/(k+1-d). The graph's longest path
+//! supplies d, so unrelated nuclides do not increase the minimum series length.
+//! This bounds truncation in exact arithmetic, not floating-point error. Final stochastic,
 //! per-node balance and visit-count checks are numerical admission tests; no
 //! interval enclosure, adjoint, branching-data accuracy or physical validation
 //! is claimed. Unrepresentable direct base transfers refuse instead of silently
@@ -375,12 +376,17 @@ impl DecayPlan {
             charge(&mut work, 6 * n * n, limits.maximum_work)?;
             Some(source::SourceTerms::new(n))
         } else { None };
-        // Constant injection adds one genuine transition to each augmented path.
-        // At most this many transitions multiply any individual path. Reserve
-        // most of the tolerance for floating arithmetic and semigroup staging.
-        let path_transitions = n + usize::from(with_source);
+        // The retained graph bound counts transfer edges, independently of
+        // how many unrelated nodes happen to share this prepared map. A count
+        // accumulator adds at most one transition, as does constant injection.
+        // Using n here needlessly forces shallow inventories to sum n terms
+        // and can reject them under a perfectly adequate series budget.
+        let path_transitions = tails.iter().map(|tail| tail.maximum_steps).max().unwrap_or(0)
+            + 1 + usize::from(with_source);
+        // Preserve the original width-based allowance for floating arithmetic
+        // and semigroup staging; only the exact-arithmetic path bound changes.
         let series_tolerance = limits.relative_tolerance.min(1.0e-15)
-            / (8.0 * path_transitions as f64 * (squarings + 1) as f64);
+            / (8.0 * (n + usize::from(with_source)) as f64 * (squarings + 1) as f64);
         let mut series_terms = 0;
         for k in 1..=limits.maximum_series_terms {
             poll(&mut cancelled)?;

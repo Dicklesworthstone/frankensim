@@ -905,6 +905,10 @@ outgoing stable-node branches refuse. No physical rate data is inferred.
 maps. Positive uniformization and triangular semigroup composition avoid
 equal-rate Bateman cancellation. Deterministic exp/expm1 diagonals are refreshed
 at every scale so an unrelated stiff component cannot erase slow parent counts.
+The componentwise positive-series tail bound uses the longest actual transfer
+path plus the count/source accumulator edges, not the total inventory width.
+Shallow branching inventories therefore do not require one series term per
+unrelated nuclide; the original width-based truncation allowance is preserved.
 Application returns populations, integrated counts and the uncorrected population
 balance residual without mutating caller data. Plans are reusable across cells.
 
