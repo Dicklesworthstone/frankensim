@@ -348,7 +348,7 @@ fn complete_recession_can_unload_both_contact_and_the_finite_loading_spring() {
 }
 
 #[test]
-fn cold_pressure_trials_resolve_drive_changes_smaller_than_closure_tolerance() {
+fn direct_pressure_solve_resolves_drive_changes_smaller_than_closure_tolerance() {
     with_cx(|cx, _| {
         let mut config = config();
         config.complementarity_tolerance_m = 1e-8;
@@ -369,6 +369,7 @@ fn cold_pressure_trials_resolve_drive_changes_smaller_than_closure_tolerance() {
                 < 1e-8
         );
         assert_eq!(next.contact.receipt.plastic_work_j, 0.0);
+        assert_eq!(next.drive.equilibrium_evaluations, 1);
     });
 }
 
@@ -397,10 +398,10 @@ fn drive_failures_are_transactional_and_tensile_equilibria_are_refused() {
             Err(FiniteGapPlasticDriveError::InvalidInput { .. })
         ));
         let mut exhausted = controls();
-        exhausted.maximum_equilibrium_evaluations = 1;
+        exhausted.maximum_equilibrium_evaluations = 0;
         assert!(matches!(
             model.advance_with_drive(&before, drive(4e-6), exhausted, cx),
-            Err(FiniteGapPlasticDriveError::DidNotConverge { .. })
+            Err(FiniteGapPlasticDriveError::InvalidInput { .. })
         ));
         let mut outside = controls();
         outside.minimum_approach_m = 1e-5;

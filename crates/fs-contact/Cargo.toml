@@ -24,6 +24,7 @@ fs-motion = { path = "../fs-motion" }
 fs-qty = { path = "../fs-qty" }
 fs-query = { path = "../fs-query" }
 fs-solver = { path = "../fs-solver" }
+fs-sparse = { path = "../fs-sparse" }
 fs-tribo = { path = "../fs-tribo" }
 
 [dev-dependencies]

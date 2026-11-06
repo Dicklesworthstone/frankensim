@@ -20,12 +20,14 @@ mod drive;
 pub use drive::*;
 mod load;
 pub use load::*;
+mod linear;
+pub use linear::FiniteGapPlasticLinearSolver;
 
 use core::fmt;
 
 use fs_blake3::{ContentHash, hash_domain};
 use fs_exec::Cx;
-use fs_la::factor::{FactorError, FactorRunError, cholesky_cancellable};
+use fs_la::factor::{FactorError, FactorRunError};
 
 use super::{
     ComplianceKernel, FiniteGapContactError, FiniteGapContactReceipt, FiniteGapContactRequest,
@@ -76,6 +78,7 @@ pub struct FiniteGapPlasticConfig {
 #[derive(Clone, PartialEq)]
 pub struct FiniteGapPlasticModel {
     config: FiniteGapPlasticConfig,
+    linear_solver: FiniteGapPlasticLinearSolver,
     identity: ContentHash,
     gap_datum_m: f64,
     gap_m: Vec<f64>,
@@ -86,6 +89,7 @@ impl fmt::Debug for FiniteGapPlasticModel {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("FiniteGapPlasticModel")
             .field("config", &self.config)
+            .field("linear_solver", &self.linear_solver)
             .field("identity", &self.identity)
             .field("gap_datum_m", &self.gap_datum_m)
             .finish_non_exhaustive()
@@ -196,6 +200,15 @@ pub enum FiniteGapPlasticError {
         /// Maximum supported dense dimension.
         maximum: usize,
     },
+    /// The bounded iterative free solve did not meet its measured displacement tolerance.
+    LinearSolveDidNotConverge {
+        /// Number of simultaneous free pressure unknowns.
+        free_cells: usize,
+        /// Krylov iterations consumed across all defect corrections.
+        iterations: usize,
+        /// Recomputed maximum free-equation residual in physical displacement units [m].
+        residual_m: f64,
+    },
 }
 
 impl From<FiniteGapContactError> for FiniteGapPlasticError {
@@ -217,6 +230,14 @@ impl fmt::Display for FiniteGapPlasticError {
             } => write!(
                 f,
                 "finite-gap plastic free set has {free_cells} cells; dense work limit is {maximum}"
+            ),
+            Self::LinearSolveDidNotConverge {
+                free_cells,
+                iterations,
+                residual_m,
+            } => write!(
+                f,
+                "finite-gap plastic linear solve for {free_cells} free cells did not converge after {iterations} iterations; displacement residual is {residual_m} m"
             ),
         }
     }
@@ -240,10 +261,31 @@ struct PlasticStepMetrics {
     yielded_cells: usize,
 }
 
+struct PlasticBoxSolution {
+    pressure: Vec<f64>,
+    opening: Vec<f64>,
+    iterations: usize,
+    kkt_residual_m: f64,
+}
+
 impl FiniteGapPlasticModel {
     /// Validate physical inputs and compile the shared Boussinesq compliance.
     pub fn new(config: FiniteGapPlasticConfig, cx: &Cx<'_>) -> Result<Self, FiniteGapPlasticError> {
+        Self::new_with_linear_solver(config, FiniteGapPlasticLinearSolver::Dense, cx)
+    }
+
+    /// Compile with an explicit free-set linear solver and bounded numerical work.
+    ///
+    /// The default dense choice preserves the reference model identity. An
+    /// iterative choice and its budgets become part of the model identity;
+    /// neither choice changes the hardness law or displacement acceptance gate.
+    pub fn new_with_linear_solver(
+        config: FiniteGapPlasticConfig,
+        linear_solver: FiniteGapPlasticLinearSolver,
+        cx: &Cx<'_>,
+    ) -> Result<Self, FiniteGapPlasticError> {
         checkpoint(cx)?;
+        linear_solver.validate()?;
         let count = config.grid.cell_count()?;
         if config.undeformed_gap_m.len() != count
             || config.undeformed_gap_m.iter().any(|g| !g.is_finite())
@@ -300,9 +342,10 @@ impl FiniteGapPlasticModel {
             return Err(invalid("finite positive half-space compliance"));
         }
         checkpoint(cx)?;
-        let identity = config_identity(&config);
+        let identity = config_identity(&config, linear_solver);
         Ok(Self {
             config,
+            linear_solver,
             identity,
             gap_datum_m,
             gap_m,
@@ -318,6 +361,11 @@ impl FiniteGapPlasticModel {
     /// Validated physical inputs and numerical controls.
     pub fn config(&self) -> &FiniteGapPlasticConfig {
         &self.config
+    }
+
+    /// Selected free-set solver, including explicit iterative work budgets.
+    pub fn linear_solver(&self) -> FiniteGapPlasticLinearSolver {
+        self.linear_solver
     }
 
     /// Original constant height datum subtracted once during construction [m].
@@ -380,8 +428,87 @@ impl FiniteGapPlasticModel {
         cx: &Cx<'_>,
     ) -> Result<FiniteGapPlasticAdvance, FiniteGapPlasticError> {
         checkpoint(cx)?;
+        let target = self.trial_closure(state, approach_m, recession_m)?;
+        let solved = self.solve_box(&target, pressure_guess, 0.0, cx)?;
+        self.finish_advance(state, approach_m, recession_m, &target, solved, cx)
+    }
+
+    // Callers own predecessor/refresh admission. The rank-one spring term
+    // belongs to the equilibrium operator, never to half-space stored energy.
+    pub(super) fn advance_with_series_spring(
+        &self,
+        state: &FiniteGapPlasticState,
+        drive_position_m: f64,
+        stiffness_n_per_m: f64,
+        recession_m: &[f64],
+        cx: &Cx<'_>,
+    ) -> Result<FiniteGapPlasticAdvance, FiniteGapPlasticError> {
+        checkpoint(cx)?;
+        if !stiffness_n_per_m.is_finite() || stiffness_n_per_m <= 0.0 {
+            return Err(invalid("finite positive series-spring stiffness"));
+        }
+        let area = self.config.grid.cell_width_m * self.config.grid.cell_depth_m;
+        let rank_one = area / stiffness_n_per_m;
+        if !rank_one.is_finite()
+            || rank_one <= 0.0
+            || !(self.compliance.compliance(0, 0) + rank_one).is_finite()
+        {
+            return Err(invalid("representable series-spring compliance"));
+        }
+        let augmented_target = self.trial_closure(state, drive_position_m, recession_m)?;
+        // A cold feasible start avoids retaining a warm pressure plateau when
+        // the imposed drive change is smaller than a free-equation tolerance.
+        let mut solved = self.solve_box(
+            &augmented_target,
+            &vec![0.0; self.gap_m.len()],
+            rank_one,
+            cx,
+        )?;
+        // Match the force integral used by build_receipt exactly.
+        let pressure_sum = solved.pressure.iter().sum::<f64>();
+        let force = pressure_sum * area;
+        let spring_extension = force / stiffness_n_per_m;
+        let approach_m = drive_position_m - spring_extension;
+        if !force.is_finite()
+            || !spring_extension.is_finite()
+            || !approach_m.is_finite()
+            || (pressure_sum > 0.0 && force == 0.0)
+            || (force > 0.0 && spring_extension == 0.0)
+            || (spring_extension > 0.0 && approach_m == drive_position_m)
+        {
+            return Err(invalid("representable series-spring equilibrium"));
+        }
+        let target = self.trial_closure(state, approach_m, recession_m)?;
+        // Reapply the base kernel instead of subtracting a potentially large
+        // uniform spring displacement from the augmented opening.
+        solved.opening = self.apply_compliance(&solved.pressure, cx)?;
+        solved.kkt_residual_m = box_residual(
+            &solved.pressure,
+            &solved.opening,
+            &target,
+            &self.config.hardness_pa,
+        );
+        if solved.kkt_residual_m > self.config.complementarity_tolerance_m {
+            return Err(FiniteGapContactError::ActiveSetDidNotConverge {
+                iterations: solved.iterations,
+                residual_m: solved.kkt_residual_m,
+            }
+            .into());
+        }
+        self.finish_advance(state, approach_m, recession_m, &target, solved, cx)
+    }
+
+    fn trial_closure(
+        &self,
+        state: &FiniteGapPlasticState,
+        approach_m: f64,
+        recession_m: &[f64],
+    ) -> Result<Vec<f64>, FiniteGapPlasticError> {
         if !approach_m.is_finite() {
             return Err(invalid("finite approach"));
+        }
+        if recession_m.len() != self.gap_m.len() {
+            return Err(invalid("surface recession shape"));
         }
         let target: Vec<f64> = self
             .gap_m
@@ -393,8 +520,24 @@ impl FiniteGapPlasticModel {
         if target.iter().any(|b| !b.is_finite()) {
             return Err(invalid("finite trial closure"));
         }
-        let (pressure, opening, iterations, kkt_residual_m) =
-            self.solve_box(&target, pressure_guess, cx)?;
+        Ok(target)
+    }
+
+    fn finish_advance(
+        &self,
+        state: &FiniteGapPlasticState,
+        approach_m: f64,
+        recession_m: &[f64],
+        target: &[f64],
+        solved: PlasticBoxSolution,
+        cx: &Cx<'_>,
+    ) -> Result<FiniteGapPlasticAdvance, FiniteGapPlasticError> {
+        let PlasticBoxSolution {
+            pressure,
+            opening,
+            iterations,
+            kkt_residual_m,
+        } = solved;
         let active: Vec<usize> = pressure
             .iter()
             .enumerate()
@@ -569,10 +712,11 @@ impl FiniteGapPlasticModel {
         &self,
         target: &[f64],
         previous_pressure: &[f64],
+        rank_one: f64,
         cx: &Cx<'_>,
-    ) -> Result<(Vec<f64>, Vec<f64>, usize, f64), FiniteGapPlasticError> {
+    ) -> Result<PlasticBoxSolution, FiniteGapPlasticError> {
         let mut pressure = previous_pressure.to_vec();
-        let mut opening = self.apply_compliance(&pressure, cx)?;
+        let mut opening = self.apply_box_compliance(&pressure, rank_one, cx)?;
         let tolerance = self.config.complementarity_tolerance_m;
         let mut bound: Vec<Bound> = pressure
             .iter()
@@ -600,7 +744,12 @@ impl FiniteGapPlasticModel {
         }
         let initial_residual = box_residual(&pressure, &opening, target, &self.config.hardness_pa);
         if initial_residual <= tolerance {
-            return Ok((pressure, opening, 0, initial_residual));
+            return Ok(PlasticBoxSolution {
+                pressure,
+                opening,
+                iterations: 0,
+                kkt_residual_m: initial_residual,
+            });
         }
         for iteration in 1..=self.config.maximum_active_set_iterations {
             checkpoint(cx)?;
@@ -609,45 +758,13 @@ impl FiniteGapPlasticModel {
                 .enumerate()
                 .filter_map(|(i, b)| (*b == Bound::Free).then_some(i))
                 .collect();
-            if free.len() > MAX_FINITE_GAP_PLASTIC_FREE_CELLS {
-                return Err(FiniteGapPlasticError::FreeSetTooLarge {
-                    free_cells: free.len(),
-                    maximum: MAX_FINITE_GAP_PLASTIC_FREE_CELLS,
-                });
-            }
             if !free.is_empty() {
-                let n = free.len();
                 let upper: Vec<usize> = bound
                     .iter()
                     .enumerate()
                     .filter_map(|(i, b)| (*b == Bound::Upper).then_some(i))
                     .collect();
-                let mut matrix = vec![0.0; n * n];
-                let mut solution = Vec::with_capacity(n);
-                for (row, &i) in free.iter().enumerate() {
-                    checkpoint(cx)?;
-                    for (col, &j) in free.iter().enumerate().take(row + 1) {
-                        let c = self.compliance.compliance(i, j);
-                        matrix[row * n + col] = c;
-                        matrix[col * n + row] = c;
-                    }
-                    let mut rhs = target[i];
-                    for &j in &upper {
-                        rhs = (-self.compliance.compliance(i, j)).mul_add(pressure[j], rhs);
-                    }
-                    solution.push(rhs);
-                }
-                if solution.iter().any(|p| !p.is_finite()) {
-                    return Err(invalid("finite constrained pressure right-hand side"));
-                }
-                let factor = cholesky_cancellable(&matrix, n, || cx.checkpoint().is_err())
-                    .map_err(factor_error)?;
-                factor
-                    .solve_cancellable(&mut solution, || cx.checkpoint().is_err())
-                    .map_err(factor_error)?;
-                if solution.iter().any(|p| !p.is_finite()) {
-                    return Err(invalid("finite pressure solution"));
-                }
+                let solution = self.solve_free(&free, &upper, &pressure, target, rank_one, cx)?;
                 let mut fraction = 1.0_f64;
                 let mut blocker = None;
                 for (slot, &i) in free.iter().enumerate() {
@@ -712,10 +829,15 @@ impl FiniteGapPlasticModel {
                     continue;
                 }
             }
-            opening = self.apply_compliance(&pressure, cx)?;
+            opening = self.apply_box_compliance(&pressure, rank_one, cx)?;
             let residual = box_residual(&pressure, &opening, target, &self.config.hardness_pa);
             if residual <= tolerance {
-                return Ok((pressure, opening, iteration, residual));
+                return Ok(PlasticBoxSolution {
+                    pressure,
+                    opening,
+                    iterations: iteration,
+                    kkt_residual_m: residual,
+                });
             }
             let mut release = None;
             let mut worst = tolerance;
@@ -745,7 +867,7 @@ impl FiniteGapPlasticModel {
         }
         // Last feasible line search may have changed pressure without a full
         // gradient evaluation. Report the residual of that actual iterate.
-        opening = self.apply_compliance(&pressure, cx)?;
+        opening = self.apply_box_compliance(&pressure, rank_one, cx)?;
         let residual = box_residual(&pressure, &opening, target, &self.config.hardness_pa);
         Err(FiniteGapContactError::ActiveSetDidNotConverge {
             iterations: self.config.maximum_active_set_iterations,
@@ -765,16 +887,47 @@ impl FiniteGapPlasticModel {
             .filter_map(|(i, p)| (*p > 0.0).then_some(i))
             .collect();
         let mut opening = vec![0.0; pressure.len()];
-        for (i, displacement) in opening.iter_mut().enumerate() {
+        for (row_tile, rows) in opening.chunks_mut(64).enumerate() {
             checkpoint(cx)?;
-            for &j in &active {
-                *displacement = self
-                    .compliance
-                    .compliance(i, j)
-                    .mul_add(pressure[j], *displacement);
+            for sources in active.chunks(64) {
+                checkpoint(cx)?;
+                for (row_offset, displacement) in rows.iter_mut().enumerate() {
+                    let i = row_tile * 64 + row_offset;
+                    for &j in sources {
+                        *displacement = self
+                            .compliance
+                            .compliance(i, j)
+                            .mul_add(pressure[j], *displacement);
+                    }
+                }
             }
-            if !displacement.is_finite() {
+            if rows.iter().any(|displacement| !displacement.is_finite()) {
                 return Err(invalid("finite elastic opening"));
+            }
+        }
+        Ok(opening)
+    }
+
+    fn apply_box_compliance(
+        &self,
+        pressure: &[f64],
+        rank_one: f64,
+        cx: &Cx<'_>,
+    ) -> Result<Vec<f64>, FiniteGapPlasticError> {
+        let mut opening = self.apply_compliance(pressure, cx)?;
+        if rank_one != 0.0 {
+            let common = rank_one * pressure.iter().sum::<f64>();
+            if !common.is_finite() {
+                return Err(invalid("finite series-spring opening"));
+            }
+            for chunk in opening.chunks_mut(64) {
+                checkpoint(cx)?;
+                for displacement in chunk {
+                    *displacement += common;
+                    if !displacement.is_finite() {
+                        return Err(invalid("finite augmented opening"));
+                    }
+                }
             }
         }
         Ok(opening)
@@ -796,7 +949,10 @@ fn box_residual(pressure: &[f64], opening: &[f64], target: &[f64], hardness: &[f
     residual
 }
 
-fn config_identity(config: &FiniteGapPlasticConfig) -> ContentHash {
+fn config_identity(
+    config: &FiniteGapPlasticConfig,
+    linear_solver: FiniteGapPlasticLinearSolver,
+) -> ContentHash {
     let mut bytes = Vec::with_capacity(80 + 16 * config.undeformed_gap_m.len());
     bytes.extend_from_slice(&(config.grid.cells_x as u64).to_le_bytes());
     bytes.extend_from_slice(&(config.grid.cells_y as u64).to_le_bytes());
@@ -813,7 +969,23 @@ fn config_identity(config: &FiniteGapPlasticConfig) -> ContentHash {
     for value in config.undeformed_gap_m.iter().chain(&config.hardness_pa) {
         bytes.extend_from_slice(&value.to_bits().to_le_bytes());
     }
-    hash_domain(FINITE_GAP_PLASTIC_MODEL_ID, &bytes)
+    let reference_identity = hash_domain(FINITE_GAP_PLASTIC_MODEL_ID, &bytes);
+    match linear_solver {
+        FiniteGapPlasticLinearSolver::Dense => reference_identity,
+        FiniteGapPlasticLinearSolver::MatrixFree {
+            maximum_iterations,
+            maximum_corrections,
+        } => {
+            let mut solver_bytes = Vec::with_capacity(48);
+            solver_bytes.extend_from_slice(&reference_identity.0);
+            solver_bytes.extend_from_slice(&(maximum_iterations as u64).to_le_bytes());
+            solver_bytes.extend_from_slice(&(maximum_corrections as u64).to_le_bytes());
+            hash_domain(
+                "org.frankensim.fs-contact.finite-gap-plastic-matrix-free-model.v1",
+                &solver_bytes,
+            )
+        }
+    }
 }
 
 fn factor_error(error: FactorRunError) -> FiniteGapPlasticError {

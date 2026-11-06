@@ -2960,10 +2960,11 @@ unloaded device position u in the original approach chart. Its equilibrium is
 F_contact(delta) = K*(u-delta). Positive K determines displacement on a fully
 plastic contact-force plateau; it does not change material hardness or introduce
 strain hardening. A separated equilibrium has zero spring compression at delta=u.
-The bounded solver shares the original native contact law, reuses one feasible
-pressure guess, and starts every trial from accepted irreversible history. Force
-balance, finite approach bounds, explicit evaluation budgets and cancellation
-remain required. The reported residual is not a rigorous position enclosure.
+The direct solver shares the original native pressure box law and eliminates
+spring displacement with its rank-one compliance. It starts from accepted
+irreversible history and needs one native equilibrium solve. Actual force balance,
+finite approach admission bounds, explicit work budgets and cancellation remain
+required. The reported residual is not a rigorous position enclosure.
 
 At maintained force, normal work is F*delta(approach). At a held device position,
 recession transfers minus the change in spring storage to contact; the stationary
@@ -3056,3 +3057,52 @@ Native and source analytical regressions cover series compliance, cap-softening
 indentation, retained dents on cooling, absence of fictitious intermediate flow,
 changed future wear, and immutable refusal. They do not supply a thermal evolution
 law, caloric closure, strain hardening, or experimental validation.
+
+
+## Bounded matrix-free pressure and direct series-spring equilibrium
+
+`FiniteGapPlasticModel::new_with_linear_solver` selects the existing dense
+reference or an opt-in matrix-free free-set solve. Existing `new` calls retain
+the dense default and its model identity. The iterative choice and its explicit
+iteration/correction budgets are part of state ownership; material refresh must
+retain that choice along with the original geometry and numerical controls.
+
+The matrix-free lane delegates Krylov recurrence and bounded defect correction
+to `fs_solver::checked_cg`. It applies the same symmetric free principal matrix
+as dense assembly using the precomputed rectangular half-space kernel, normalized
+by positive diagonal compliance. The inner target reserves part of the declared
+absolute displacement tolerance. Both an explicitly recomputed Euclidean residual
+and an independent residual in metres must pass before the free solution is used;
+the full physical pressure box and final separation checks still govern acceptance.
+Operator work checks cancellation within bounded tiles, and exhaustion returns a
+typed refusal with free-set size, consumed iterations and measured residual.
+
+This lane removes the dense 2,048-free-cell ceiling without allocating a dense
+free matrix or factor. Kernel and vector storage scale with sampled grid size;
+the existing 16,384-total-cell bound remains. Operator applications still perform
+quadratic pair interactions. No FFT acceleration, runtime benchmark speedup,
+forward-error certificate or material-validation claim is made.
+
+Finite spring stiffness K is incorporated as the rank-one compliance
+`C + (cell_area / K) 1 1^T`, with right-hand side
+`u - original_gap - accepted_plastic_depth - recession`. The common active-set
+box solve retains all pressure hardness bounds and returns approach
+`u - F / K`. Original base compliance is then applied again for physical
+separation, contact elastic energy and permanent indentation. Spring energy is
+separate, so the rank-one term cannot be charged as contact storage. Positive
+forces and extensions must remain representable, and actual reconstructed spring
+force must pass the supplied force tolerance.
+
+New drive equilibria consume one equilibrium evaluation; an exactly retained
+accepted state consumes none. Approach controls admit the selected physical point
+and are no longer evaluated as artificial search endpoints. Receipt endpoints are
+that actual point and its actual residual. Native active-set and Krylov budgets,
+boundary checks, original history ownership and immutable refusal remain active.
+Recession and temperature continuations use this same equilibrium and preserve
+the existing distinction between spring transfer, plastic work and parameter work.
+
+Synthetic regression fixtures specify a manufactured 2,209-free-cell patch with
+known pressure and force, independent mixed capped/elastic cell solutions, direct
+series compliance under both solvers, physical storage/work, bounded failure and
+continuation ownership. These fixtures are model checks, not experimental
+qualification or evidence of an executed performance benchmark.

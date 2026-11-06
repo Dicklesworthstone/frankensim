@@ -1290,6 +1290,7 @@ dependencies = [
  "fs-qty",
  "fs-query",
  "fs-solver",
+ "fs-sparse",
  "fs-tribo",
 ]
 

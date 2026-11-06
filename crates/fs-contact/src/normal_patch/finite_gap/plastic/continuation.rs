@@ -233,7 +233,8 @@ impl FiniteGapPlasticModel {
     ) -> Result<(), FiniteGapPlasticError> {
         let a = &self.config;
         let b = &previous.config;
-        if a.grid != b.grid
+        if self.linear_solver() != previous.linear_solver()
+            || a.grid != b.grid
             || a.maximum_active_set_iterations != b.maximum_active_set_iterations
             || a.complementarity_tolerance_m.to_bits() != b.complementarity_tolerance_m.to_bits()
             || a.boundary_clearance_cells != b.boundary_clearance_cells
@@ -245,7 +246,7 @@ impl FiniteGapPlasticModel {
             || self.gap_datum_m.to_bits() != previous.gap_datum_m.to_bits()
         {
             return Err(invalid(
-                "material refresh must retain original grid, gap, datum and controls",
+                "material refresh must retain original grid, gap, datum and solver controls",
             ));
         }
         Ok(())

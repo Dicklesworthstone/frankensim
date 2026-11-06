@@ -359,11 +359,22 @@ fn maintained_drive_material_refresh_retains_noops_and_refuses_foreign_or_change
                 FiniteGapPlasticError::Contact(FiniteGapContactError::InvalidInput { .. })
             ))
         ));
-        let mut exhausted = controls();
-        exhausted.maximum_equilibrium_evaluations = 1;
+        let mut single_equilibrium = controls();
+        single_equilibrium.maximum_equilibrium_evaluations = 1;
+        let refreshed = successor
+            .refresh_from_with_drive(&previous, &before, boundary, single_equilibrium, cx)
+            .unwrap();
+        assert_eq!(refreshed.drive.equilibrium_evaluations, 1);
+        assert_eq!(
+            refreshed.continuation.receipt.response.predecessor_identity,
+            before.identity()
+        );
+        assert!(refreshed.drive.force_residual_n.abs() <= refreshed.drive.force_tolerance_n);
+        let mut exhausted = single_equilibrium;
+        exhausted.maximum_equilibrium_evaluations = 0;
         assert!(matches!(
             successor.refresh_from_with_drive(&previous, &before, boundary, exhausted, cx),
-            Err(FiniteGapPlasticDriveError::DidNotConverge { .. })
+            Err(FiniteGapPlasticDriveError::InvalidInput { .. })
         ));
         assert_eq!(before, saved);
         gate.request();

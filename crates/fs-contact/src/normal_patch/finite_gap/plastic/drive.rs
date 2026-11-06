@@ -7,7 +7,11 @@
 //! exactly at the prescribed drive position. Coordinates retain the original
 //! gap datum; the loading spring does not change the indentation law.
 //!
-//! Every pressure trial starts from the original accepted irreversible history.
+//! Eliminating the approach adds the rank-one compliance `A / K * 11^T` to
+//! the pressure box problem. One native equilibrium determines both pressure
+//! and approach, including fully plastic plateaus. Only the selected physical
+//! contact must satisfy the admitted approach bounds and boundary clearance.
+//! Plastic depth and work start from the original accepted irreversible history.
 //! Recession at a fixed drive position exchanges work with the spring; its
 //! normal work is minus the spring-storage change, separate from geometry work.
 //! Material refresh solves the new modulus/hardness on the same drive boundary,
@@ -39,7 +43,7 @@ pub struct FiniteGapPlasticDrive {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum FiniteGapPlasticDriveDisposition {
-    /// Contact and spring force balance within the reported tolerance.
+    /// One augmented pressure solve balances contact and spring within tolerance.
     ForceBalanced = 0,
     /// The unchanged accepted contact already satisfies this drive boundary.
     RetainedExistingEquilibrium = 1,
@@ -77,9 +81,9 @@ pub struct FiniteGapPlasticDriveRefreshAdvance {
 pub struct FiniteGapPlasticDriveReceipt {
     /// Content identity of the boundary, controls, and original native response.
     pub identity: ContentHash,
-    /// Immutable contact model used by every trial.
+    /// Immutable contact model used by the equilibrium.
     pub model_identity: ContentHash,
-    /// Original accepted history used by every trial.
+    /// Original accepted history used by the equilibrium.
     pub predecessor_state_identity: ContentHash,
     /// Selected physical candidate.
     pub candidate_state_identity: ContentHash,
@@ -100,16 +104,18 @@ pub struct FiniteGapPlasticDriveReceipt {
     pub force_tolerance_n: f64,
     /// Reversible storage in the loading spring only [J].
     pub spring_energy_j: f64,
-    /// Final tested approach interval; an exact retained state reports a point.
-    /// The upper bound is limited to the unloaded drive position. These are
-    /// numerical search bounds, not a rigorous physical position enclosure.
+    /// Selected approach repeated at both endpoints. The direct pressure solve
+    /// does not evaluate the caller's bounds or claim a position enclosure.
     pub approach_bracket_m: [f64; 2],
-    /// Signed contact-minus-spring residuals at the reported tested bounds [N].
+    /// Actual selected contact-minus-spring residual repeated at both ends [N].
     pub balance_residual_bracket_n: [f64; 2],
-    /// Number of native pressure equilibria attempted, including rejected trials.
+    /// One native pressure equilibrium, or zero for exact retained history.
     pub equilibrium_evaluations: usize,
     /// Original numerical controls. The relative force tolerance uses the
     /// larger contact/spring force rather than a prescribed constant load.
+    /// Approach bounds admit the selected result; a budget of one suffices.
+    /// `approach_tolerance_m` is retained for API compatibility and does not
+    /// relax the force criterion or authorize snapping to an approach bound.
     pub controls: FiniteGapPlasticLoadControls,
     /// Actual position-selection convention.
     pub disposition: FiniteGapPlasticDriveDisposition,
@@ -122,7 +128,9 @@ pub enum FiniteGapPlasticDriveError {
     InvalidInput { field: &'static str },
     /// Original contact ownership, geometry, convergence, or cancellation refusal.
     Contact(FiniteGapPlasticError),
-    /// The admitted approach bounds do not contain a spring/contact balance.
+    /// The selected spring/contact balance is outside the admitted approach
+    /// bounds. Both fields report the actual selected point and residual, not
+    /// unevaluated endpoint forces.
     TargetOutsideApproachBounds {
         approach_bracket_m: [f64; 2],
         balance_residual_bracket_n: [f64; 2],
@@ -157,7 +165,7 @@ impl fmt::Display for FiniteGapPlasticDriveError {
                 balance_residual_bracket_n,
             } => write!(
                 f,
-                "normal drive has no admitted balance in {approach_bracket_m:?} m; contact-minus-spring residuals {balance_residual_bracket_n:?} N"
+                "normal drive selected approach {approach_bracket_m:?} m is outside admitted controls; selected contact-minus-spring residuals {balance_residual_bracket_n:?} N"
             ),
             Self::DidNotConverge {
                 equilibrium_evaluations,
@@ -209,7 +217,6 @@ struct DriveProgress {
     evaluations: usize,
     bracket_m: [f64; 2],
     best_residual_n: Option<f64>,
-    zero_pressure: Vec<f64>,
 }
 
 impl DriveProgress {
@@ -233,7 +240,8 @@ impl FiniteGapPlasticModel {
     /// Equilibrate contact against a finite-stiffness normal loading device.
     ///
     /// The contact-force plateau is allowed: positive loading stiffness makes
-    /// the combined residual strictly increasing. Each trial uses original
+    /// the combined residual strictly increasing. One pressure solve augments
+    /// contact compliance by the spring's rank-one compliance and uses original
     /// plastic depth, recession, and accumulated work. No actuator-work path
     /// is inferred when the prescribed loading-device position changes.
     pub fn advance_with_drive(
@@ -249,7 +257,7 @@ impl FiniteGapPlasticModel {
     /// Change modulus and/or hardness at a fixed finite-stiffness drive position.
     ///
     /// The original model must own `before`, and the original grid, gap, datum,
-    /// and numerical controls remain exact. Every trial applies the successor's
+    /// and numerical controls remain exact. The solve applies the successor's
     /// compliance and caps to the ORIGINAL plastic depth, recession, and work.
     /// A held-approach intermediate could create a dent that the actual loading
     /// spring never produces; this method does not adopt such an intermediate.
@@ -365,20 +373,12 @@ impl FiniteGapPlasticModel {
             self.check_refresh_geometry(previous_model)?;
         }
         validate_drive(drive, controls)?;
-        // Nonadhesive equilibrium cannot stretch the spring into tension. If
-        // the entire admitted interval is above its unloaded position, test
-        // the lower endpoint and report that one-sided refusal.
-        let upper_approach = controls
-            .maximum_approach_m
-            .min(drive.position_m)
-            .max(controls.minimum_approach_m);
         let mut progress = DriveProgress {
             boundary: drive,
             controls,
             evaluations: 0,
-            bracket_m: [controls.minimum_approach_m, upper_approach],
+            bracket_m: [controls.minimum_approach_m, controls.maximum_approach_m],
             best_residual_n: None,
-            zero_pressure: vec![0.0; self.gap_m.len()],
         };
         if self.identity == previous_model.identity
             && recession_m == before.recession_m.as_slice()
@@ -408,105 +408,30 @@ impl FiniteGapPlasticModel {
                 );
             }
         }
-        let mut lower = self.drive_trial(
+        let selected = self.solve_drive_equilibrium(before, recession_m, &mut progress, cx)?;
+        if !selected.balanced() {
+            return Err(progress.unresolved());
+        }
+        let residuals = [selected.residual_n; 2];
+        if selected.approach_m() < controls.minimum_approach_m
+            || selected.approach_m() > controls.maximum_approach_m
+        {
+            return Err(progress.outside(residuals));
+        }
+        self.finish_drive(
             before,
-            recession_m,
-            progress.bracket_m[0],
-            &mut progress,
+            selected,
+            &progress,
+            residuals,
+            FiniteGapPlasticDriveDisposition::ForceBalanced,
             cx,
-        )?;
-        if lower.balanced() {
-            progress.bracket_m = [lower.approach_m(); 2];
-            let residuals = [lower.residual_n; 2];
-            return self.finish_drive(
-                before,
-                lower,
-                &progress,
-                residuals,
-                FiniteGapPlasticDriveDisposition::ForceBalanced,
-                cx,
-            );
-        }
-        if lower.residual_n >= 0.0 || upper_approach == controls.minimum_approach_m {
-            progress.bracket_m = [lower.approach_m(); 2];
-            return Err(progress.outside([lower.residual_n; 2]));
-        }
-        let mut upper = self.drive_trial(before, recession_m, upper_approach, &mut progress, cx)?;
-        if upper.balanced() {
-            let residuals = [lower.residual_n, upper.residual_n];
-            return self.finish_drive(
-                before,
-                upper,
-                &progress,
-                residuals,
-                FiniteGapPlasticDriveDisposition::ForceBalanced,
-                cx,
-            );
-        }
-        if upper.residual_n < 0.0 {
-            return Err(progress.outside([lower.residual_n, upper.residual_n]));
-        }
-        let mut bisect_next = false;
-        loop {
-            checkpoint(cx)?;
-            let width = upper.approach_m() - lower.approach_m();
-            if width <= controls.approach_tolerance_m {
-                return Err(progress.unresolved());
-            }
-            // Scale opposite-sign residuals before forming a secant fraction;
-            // their unscaled difference could overflow despite finite endpoints.
-            let scale = (-lower.residual_n).max(upper.residual_n);
-            let left = -lower.residual_n / scale;
-            let right = upper.residual_n / scale;
-            let fraction = left / (left + right);
-            let secant = fraction.mul_add(width, lower.approach_m());
-            let approach = if !bisect_next
-                && secant.is_finite()
-                && secant > lower.approach_m()
-                && secant < upper.approach_m()
-            {
-                secant
-            } else {
-                f64::midpoint(lower.approach_m(), upper.approach_m())
-            };
-            if approach <= lower.approach_m() || approach >= upper.approach_m() {
-                return Err(progress.unresolved());
-            }
-            let trial = self.drive_trial(before, recession_m, approach, &mut progress, cx)?;
-            if (trial.residual_n < lower.residual_n
-                && lower.residual_n - trial.residual_n > lower.tolerance_n.max(trial.tolerance_n))
-                || (trial.residual_n > upper.residual_n
-                    && trial.residual_n - upper.residual_n
-                        > upper.tolerance_n.max(trial.tolerance_n))
-            {
-                return Err(progress.unresolved());
-            }
-            if trial.balanced() {
-                let residuals = [lower.residual_n, upper.residual_n];
-                return self.finish_drive(
-                    before,
-                    trial,
-                    &progress,
-                    residuals,
-                    FiniteGapPlasticDriveDisposition::ForceBalanced,
-                    cx,
-                );
-            }
-            if trial.residual_n < 0.0 {
-                lower = trial;
-            } else {
-                upper = trial;
-            }
-            progress.bracket_m = [lower.approach_m(), upper.approach_m()];
-            bisect_next = upper.approach_m() - lower.approach_m() > 0.75 * width;
-        }
+        )
     }
 
-    fn drive_trial(
+    fn solve_drive_equilibrium(
         &self,
         before: &FiniteGapPlasticState,
         recession_m: &[f64],
-        approach_m: f64,
         progress: &mut DriveProgress,
         cx: &Cx<'_>,
     ) -> Result<DriveTrial, FiniteGapPlasticDriveError> {
@@ -514,15 +439,15 @@ impl FiniteGapPlasticModel {
             return Err(progress.unresolved());
         }
         progress.evaluations += 1;
-        // Reuse a cold feasible pressure vector: a warm guess within closure
-        // tolerance can otherwise freeze force across a small approach change.
-        let contact = self.advance_with_history(
+        let contact = self.advance_with_series_spring(
             before,
-            approach_m,
+            progress.boundary.position_m,
+            progress.boundary.stiffness_n_per_m,
             recession_m,
-            &progress.zero_pressure,
             cx,
         )?;
+        let approach_m = contact.candidate.approach_m;
+        progress.bracket_m = [approach_m; 2];
         let force = contact.receipt.normal.normal_force_n;
         let drive_force_n = spring_force(progress.boundary, approach_m)?;
         let residual_n = force - drive_force_n;
@@ -530,11 +455,7 @@ impl FiniteGapPlasticModel {
             return Err(invalid_drive("finite contact-minus-spring residual"));
         }
         let tolerance_n = force_tolerance(force, drive_force_n, progress.controls)?;
-        progress.best_residual_n = Some(
-            progress
-                .best_residual_n
-                .map_or(residual_n.abs(), |old| old.min(residual_n.abs())),
-        );
+        progress.best_residual_n = Some(residual_n.abs());
         Ok(DriveTrial {
             contact,
             drive_force_n,
@@ -602,8 +523,13 @@ impl FiniteGapPlasticModel {
         let force = trial.contact.receipt.normal.normal_force_n;
         let spring_energy_j =
             (0.5 * trial.drive_force_n) * (progress.boundary.position_m - approach_m);
-        if !spring_energy_j.is_finite() || spring_energy_j < 0.0 {
-            return Err(invalid_drive("finite nonnegative loading-spring energy"));
+        if !spring_energy_j.is_finite()
+            || spring_energy_j < 0.0
+            || (trial.drive_force_n > 0.0 && spring_energy_j == 0.0)
+        {
+            return Err(invalid_drive(
+                "representable nonnegative loading-spring energy",
+            ));
         }
         let mut bytes = Vec::with_capacity(320);
         for identity in [
