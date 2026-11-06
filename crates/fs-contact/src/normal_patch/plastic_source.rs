@@ -159,6 +159,34 @@ impl SourcePlasticContact {
         linear_solver: FiniteGapPlasticLinearSolver,
         cx: &Cx<'_>,
     ) -> Result<Self, SourcePlasticContactError> {
+        Self::validate_sources(&normal, &hardness, envelope)?;
+        let cap = hardness[0].hardness_pa().min(hardness[1].hardness_pa());
+        let hardness_pa = vec![cap; undeformed_gap_m.len()];
+        let model = FiniteGapPlasticModel::new_with_linear_solver(
+            FiniteGapPlasticConfig {
+                grid,
+                undeformed_gap_m,
+                reduced_modulus_pa: normal.elastic().reduced_modulus_pa(),
+                hardness_pa,
+                maximum_active_set_iterations: controls.maximum_active_set_iterations,
+                complementarity_tolerance_m: controls.complementarity_tolerance_m,
+                boundary_clearance_cells: controls.boundary_clearance_cells,
+            },
+            linear_solver,
+            cx,
+        )?;
+        Ok(Self::from_validated_sources(
+            normal, hardness, model, envelope,
+        ))
+    }
+
+    // Constructors and temperature successors apply exactly the same original-
+    // source admission before compiling or reusing their native material model.
+    fn validate_sources(
+        normal: &BoundNormalInterfaceState,
+        hardness: &[IndentationHardnessStatePoint; 2],
+        envelope: PlasticContactEnvelope,
+    ) -> Result<(), SourcePlasticContactError> {
         if normal.adhesion_energy_j_per_m2() != 0.0
             || normal
                 .elastic()
@@ -217,21 +245,18 @@ impl SourcePlasticContact {
                 "finite positive approach, depths, and ratios; nonnegative permanent depth bound",
             ));
         }
-        let cap = hardness[0].hardness_pa().min(hardness[1].hardness_pa());
-        let hardness_pa = vec![cap; undeformed_gap_m.len()];
-        let model = FiniteGapPlasticModel::new_with_linear_solver(
-            FiniteGapPlasticConfig {
-                grid,
-                undeformed_gap_m,
-                reduced_modulus_pa: normal.elastic().reduced_modulus_pa(),
-                hardness_pa,
-                maximum_active_set_iterations: controls.maximum_active_set_iterations,
-                complementarity_tolerance_m: controls.complementarity_tolerance_m,
-                boundary_clearance_cells: controls.boundary_clearance_cells,
-            },
-            linear_solver,
-            cx,
-        )?;
+        Ok(())
+    }
+
+    // The private callers have already admitted the sources and compiled the
+    // matching modulus and softer-surface pressure cap. Storage sharing is not
+    // part of either physical identity.
+    fn from_validated_sources(
+        normal: BoundNormalInterfaceState,
+        hardness: [IndentationHardnessStatePoint; 2],
+        model: FiniteGapPlasticModel,
+        envelope: PlasticContactEnvelope,
+    ) -> Self {
         let mut hasher = DomainHasher::new("org.frankensim.fs-contact.source-plastic-gap.v1");
         hasher.update(normal.identity().as_bytes());
         for source in &hardness {
@@ -249,13 +274,13 @@ impl SourcePlasticContact {
             hasher.update(&value.to_bits().to_le_bytes());
         }
         let identity = hasher.finalize();
-        Ok(Self {
+        Self {
             normal,
             hardness,
             model,
             envelope,
             identity,
-        })
+        }
     }
 
     /// Complete ordered normal material/interface source.

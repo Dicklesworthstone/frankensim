@@ -253,12 +253,47 @@ fn rectangular_off_axis_mixed_caps_preserve_physics_through_contact_history() {
             );
             let saved_worn = worn.candidate.clone();
             let mut changed = fixture.config.clone();
-            changed.reduced_modulus_pa *= 0.8;
             changed.hardness_pa[18] = 0.3e6;
             changed.hardness_pa[9] *= 0.6;
-            let successor =
+            let softened = model
+                .with_material_properties(
+                    changed.reduced_modulus_pa,
+                    changed.hardness_pa.clone(),
+                    cx,
+                )
+                .unwrap();
+            let fresh =
+                FiniteGapPlasticModel::new_with_linear_solver(changed.clone(), selection, cx)
+                    .unwrap();
+            assert_eq!(softened, fresh);
+            let softened_state = softened.refresh_from(&model, &worn.candidate, cx).unwrap();
+            assert_eq!(
+                softened_state,
+                fresh.refresh_from(&model, &worn.candidate, cx).unwrap()
+            );
+            assert_eq!(softened_state.candidate.recession_m(), recession);
+            assert!(softened_state.receipt.response.plastic_work_j > 0.0);
+            assert!(matches!(
+                softened.advance(&worn.candidate, fixture.approach_m, cx),
+                Err(FiniteGapPlasticError::ForeignState)
+            ));
+
+            changed.reduced_modulus_pa *= 0.8;
+            let successor = model
+                .with_material_properties(
+                    changed.reduced_modulus_pa,
+                    changed.hardness_pa.clone(),
+                    cx,
+                )
+                .unwrap();
+            let fresh =
                 FiniteGapPlasticModel::new_with_linear_solver(changed, selection, cx).unwrap();
+            assert_eq!(successor, fresh);
             let refreshed = successor.refresh_from(&model, &worn.candidate, cx).unwrap();
+            assert_eq!(
+                refreshed,
+                fresh.refresh_from(&model, &worn.candidate, cx).unwrap()
+            );
             assert_eq!(successor.linear_solver(), selection);
             assert_eq!(refreshed.candidate.owner_identity(), successor.identity());
             assert_eq!(refreshed.candidate.recession_m(), recession);
@@ -281,6 +316,7 @@ fn rectangular_off_axis_mixed_caps_preserve_physics_through_contact_history() {
                 (unloaded.candidate, unloaded.receipt),
                 (reloaded.candidate, reloaded.receipt),
                 (worn.candidate, worn.receipt.response),
+                (softened_state.candidate, softened_state.receipt.response),
                 (refreshed.candidate, refreshed.receipt.response),
             ];
             if let Some(reference) = &reference {
@@ -442,7 +478,39 @@ fn fft_iteration_limits_owner_selection_and_cancellation_remain_binding() {
         let before = model.initial_state();
         let saved = before.clone();
         assert!(model.advance(&before, fixture.approach_m, cx).is_ok());
+        for modulus in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            assert!(matches!(
+                model.with_material_properties(modulus, config.hardness_pa.clone(), cx),
+                Err(FiniteGapPlasticError::Contact(
+                    FiniteGapContactError::InvalidInput { .. }
+                ))
+            ));
+        }
+        for hardness in [
+            vec![],
+            vec![0.0; 35],
+            vec![f64::NAN; 35],
+            vec![f64::INFINITY; 35],
+        ] {
+            assert!(matches!(
+                model.with_material_properties(config.reduced_modulus_pa, hardness, cx),
+                Err(FiniteGapPlasticError::Contact(
+                    FiniteGapContactError::InvalidInput { .. }
+                ))
+            ));
+        }
+        assert_eq!(model.config(), &config);
         gate.request();
+        assert!(matches!(
+            model.with_material_properties(
+                config.reduced_modulus_pa,
+                config.hardness_pa.clone(),
+                cx,
+            ),
+            Err(FiniteGapPlasticError::Contact(
+                FiniteGapContactError::Cancelled
+            ))
+        ));
         assert_eq!(
             model.advance(&before, fixture.approach_m, cx),
             Err(FiniteGapPlasticError::Contact(

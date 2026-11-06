@@ -262,6 +262,9 @@ mod tests {
     use fs_exec::{Budget, CancelGate, ExecMode, StreamKey};
 
     use super::super::super::{FiniteGapContactError, FiniteGapGrid};
+    use super::super::{
+        FiniteGapPlasticConfig, FiniteGapPlasticLinearSolver, FiniteGapPlasticModel,
+    };
 
     fn with_cx(f: impl FnOnce(&Cx<'_>, &CancelGate)) {
         let gate = CancelGate::new_clock_free();
@@ -312,6 +315,66 @@ mod tests {
                 "cell {i}: {a:.16e} versus {b:.16e}"
             );
         }
+    }
+
+    #[test]
+    fn hardness_successors_share_prepared_operators_but_modulus_changes_rebuild() {
+        with_cx(|cx, _| {
+            let config = FiniteGapPlasticConfig {
+                grid: FiniteGapGrid {
+                    cells_x: 5,
+                    cells_y: 3,
+                    cell_width_m: 7.0e-4,
+                    cell_depth_m: 1.1e-3,
+                },
+                undeformed_gap_m: vec![0.0; 15],
+                reduced_modulus_pa: 1.3e9,
+                hardness_pa: vec![1.0e6; 15],
+                maximum_active_set_iterations: 64,
+                complementarity_tolerance_m: 1.0e-12,
+                boundary_clearance_cells: 1,
+            };
+            for solver in [
+                FiniteGapPlasticLinearSolver::Dense,
+                FiniteGapPlasticLinearSolver::MatrixFree {
+                    maximum_iterations: 128,
+                    maximum_corrections: 2,
+                },
+                FiniteGapPlasticLinearSolver::Fft {
+                    maximum_iterations: 128,
+                    maximum_corrections: 2,
+                },
+            ] {
+                let original =
+                    FiniteGapPlasticModel::new_with_linear_solver(config.clone(), solver, cx)
+                        .unwrap();
+                for modulus in [config.reduced_modulus_pa, 0.8 * config.reduced_modulus_pa] {
+                    let successor = original
+                        .with_material_properties(modulus, vec![0.5e6; 15], cx)
+                        .unwrap();
+                    let reference = FiniteGapPlasticModel::new_with_linear_solver(
+                        successor.config().clone(),
+                        solver,
+                        cx,
+                    )
+                    .unwrap();
+                    assert_eq!(successor, reference);
+                    assert_eq!(successor.identity(), reference.identity());
+                    let shared = modulus == config.reduced_modulus_pa;
+                    assert_eq!(
+                        Arc::ptr_eq(&successor.compliance, &original.compliance),
+                        shared
+                    );
+                    if let (Some(next), Some(before)) =
+                        (&successor.fft_compliance, &original.fft_compliance)
+                    {
+                        assert_eq!(Arc::ptr_eq(&next.plan, &before.plan), shared);
+                        assert_eq!(Arc::ptr_eq(&next.spectrum, &before.spectrum), shared);
+                    }
+                }
+                assert_eq!(original.config(), &config);
+            }
+        });
     }
 
     #[test]

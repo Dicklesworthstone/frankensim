@@ -5,6 +5,9 @@
 //! independently for the two bodies. The pressure field re-equilibrates and a
 //! reduced hardness may produce additional permanent indentation. Cooling does
 //! not heal an existing dent or replace removed material.
+//! When the combined modulus is unchanged, hardness refreshes share the original
+//! prepared compliance and FFT payload. Identities and rounding match a fresh
+//! construction at the same material state.
 //!
 //! At held approach the signed parameter supply is the elastic-energy change
 //! plus incremental plastic work. At maintained force it additionally subtracts
@@ -25,10 +28,7 @@ use crate::normal_patch::{
     FiniteGapPlasticLoadControls, FiniteGapPlasticLoadError, FiniteGapPlasticLoadReceipt,
 };
 
-use super::{
-    PlasticContactControls, SourcePlasticContact, SourcePlasticContactError,
-    SourcePlasticContactState,
-};
+use super::{SourcePlasticContact, SourcePlasticContactError, SourcePlasticContactState};
 
 /// Exact material, interface, contact, or applicability refusal.
 #[derive(Clone, Debug, PartialEq)]
@@ -435,21 +435,19 @@ impl SourcePlasticContact {
         if unchanged {
             Ok(self.clone())
         } else {
-            let config = self.model.config();
-            Ok(Self::new_with_linear_solver(
+            Self::validate_sources(&normal, &hardness, self.envelope)?;
+            let cap = hardness[0].hardness_pa().min(hardness[1].hardness_pa());
+            let model = self.model.with_material_properties(
+                normal.elastic().reduced_modulus_pa(),
+                vec![cap; self.model.config().hardness_pa.len()],
+                cx,
+            )?;
+            Ok(Self::from_validated_sources(
                 normal,
                 hardness,
-                config.grid,
-                config.undeformed_gap_m.clone(),
-                PlasticContactControls {
-                    maximum_active_set_iterations: config.maximum_active_set_iterations,
-                    complementarity_tolerance_m: config.complementarity_tolerance_m,
-                    boundary_clearance_cells: config.boundary_clearance_cells,
-                },
+                model,
                 self.envelope,
-                self.model.linear_solver(),
-                cx,
-            )?)
+            ))
         }
     }
 }

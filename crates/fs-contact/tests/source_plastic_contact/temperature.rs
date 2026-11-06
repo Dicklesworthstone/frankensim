@@ -3,8 +3,8 @@
 use super::*;
 use fs_contact::normal_patch::plastic_source::temperature::SourcePlasticTemperatureError;
 use fs_contact::normal_patch::{
-    FiniteGapPlasticContinuationKind, FiniteGapPlasticDrive, FiniteGapPlasticLoadControls,
-    FiniteGapPlasticLoadError,
+    FiniteGapPlasticContinuationKind, FiniteGapPlasticDrive, FiniteGapPlasticLinearSolver,
+    FiniteGapPlasticLoadControls, FiniteGapPlasticLoadError,
 };
 use fs_matdb::ClaimSet;
 use fs_qty::Temperature;
@@ -94,6 +94,62 @@ fn thermal_load_controls() -> FiniteGapPlasticLoadControls {
         approach_tolerance_m: 1.0e-18,
         maximum_equilibrium_evaluations: 128,
     }
+}
+
+#[test]
+fn thermal_material_successors_match_fresh_compilation_for_every_pressure_solver() {
+    with_cx(|cx, _| {
+        let compile = |source: &SourcePlasticContact, solver| {
+            let config = source.model().config();
+            SourcePlasticContact::new_with_linear_solver(
+                source.normal_source().clone(),
+                source.hardness_sources().clone(),
+                config.grid,
+                config.undeformed_gap_m.clone(),
+                PlasticContactControls {
+                    maximum_active_set_iterations: config.maximum_active_set_iterations,
+                    complementarity_tolerance_m: config.complementarity_tolerance_m,
+                    boundary_clearance_cells: config.boundary_clearance_cells,
+                },
+                envelope(),
+                solver,
+                cx,
+            )
+            .unwrap()
+        };
+        for hot_young in [[2.0e7; 2], [1.0e7, 2.0e7]] {
+            let (cards, initial) =
+                thermal_source([1.0e6, 2.0e6], [0.5e6, 2.0e6], hot_young, envelope(), cx);
+            for solver in [
+                FiniteGapPlasticLinearSolver::Dense,
+                FiniteGapPlasticLinearSolver::MatrixFree {
+                    maximum_iterations: 128,
+                    maximum_corrections: 2,
+                },
+                FiniteGapPlasticLinearSolver::Fft {
+                    maximum_iterations: 128,
+                    maximum_corrections: 2,
+                },
+            ] {
+                let law = compile(&initial, solver);
+                let loaded = law.advance(&law.initial_state(), 5.0e-5, cx).unwrap();
+                let before = loaded.candidate.clone();
+                let hot = law
+                    .refresh_at_temperatures(&before, cards.each_ref(), [HOT, COLD], COLD, cx)
+                    .unwrap();
+                let reference = compile(hot.source(), solver);
+                assert_eq!(hot.source(), &reference);
+                let expected = reference
+                    .model()
+                    .refresh_from(law.model(), before.contact_state(), cx)
+                    .unwrap();
+                assert_eq!(hot.candidate().contact_state(), &expected.candidate);
+                assert_eq!(hot.receipt(), &expected.receipt);
+                assert!(hot.receipt().response.plastic_work_j > 0.0);
+                assert_eq!(before, loaded.candidate);
+            }
+        }
+    });
 }
 
 #[test]

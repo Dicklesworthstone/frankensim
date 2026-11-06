@@ -25,6 +25,7 @@ pub use linear::FiniteGapPlasticLinearSolver;
 mod fft;
 
 use core::fmt;
+use std::sync::Arc;
 
 use fs_blake3::{ContentHash, hash_domain};
 use fs_exec::Cx;
@@ -83,7 +84,7 @@ pub struct FiniteGapPlasticModel {
     identity: ContentHash,
     gap_datum_m: f64,
     gap_m: Vec<f64>,
-    compliance: ComplianceKernel,
+    compliance: Arc<ComplianceKernel>,
     fft_compliance: Option<fft::FftCompliance>,
 }
 
@@ -294,17 +295,7 @@ impl FiniteGapPlasticModel {
         {
             return Err(invalid("undeformed gap shape or values"));
         }
-        if config.hardness_pa.len() != count
-            || config
-                .hardness_pa
-                .iter()
-                .any(|h| !h.is_finite() || *h <= 0.0)
-        {
-            return Err(invalid("indentation hardness field"));
-        }
-        if !config.reduced_modulus_pa.is_finite() || config.reduced_modulus_pa <= 0.0 {
-            return Err(invalid("reduced modulus"));
-        }
+        validate_material_properties(count, config.reduced_modulus_pa, &config.hardness_pa)?;
         if config.maximum_active_set_iterations == 0
             || !config.complementarity_tolerance_m.is_finite()
             || config.complementarity_tolerance_m <= 0.0
@@ -356,8 +347,52 @@ impl FiniteGapPlasticModel {
             identity,
             gap_datum_m,
             gap_m,
-            compliance,
+            compliance: Arc::new(compliance),
             fft_compliance,
+        })
+    }
+
+    /// Construct a material successor on the exact original geometry and controls.
+    ///
+    /// Only the reduced modulus and pressure-hardness field may change. With a
+    /// bit-identical modulus, the immutable rectangular compliance and prepared
+    /// FFT payload are shared; hardness updates do not rebuild either operator.
+    /// A changed modulus uses the original constructor, without rescaling the
+    /// old kernel, so both paths retain its exact rounding and model identity.
+    ///
+    /// This does not transfer or modify accepted history. Use [`Self::refresh_from`]
+    /// or its load/drive counterpart to admit the predecessor and re-equilibrate
+    /// pressure, irreversible indentation, recession, and work under the new law.
+    pub fn with_material_properties(
+        &self,
+        reduced_modulus_pa: f64,
+        hardness_pa: Vec<f64>,
+        cx: &Cx<'_>,
+    ) -> Result<Self, FiniteGapPlasticError> {
+        checkpoint(cx)?;
+        validate_material_properties(self.gap_m.len(), reduced_modulus_pa, &hardness_pa)?;
+        let config = FiniteGapPlasticConfig {
+            grid: self.config.grid,
+            undeformed_gap_m: self.config.undeformed_gap_m.clone(),
+            reduced_modulus_pa,
+            hardness_pa,
+            maximum_active_set_iterations: self.config.maximum_active_set_iterations,
+            complementarity_tolerance_m: self.config.complementarity_tolerance_m,
+            boundary_clearance_cells: self.config.boundary_clearance_cells,
+        };
+        if reduced_modulus_pa.to_bits() != self.config.reduced_modulus_pa.to_bits() {
+            return Self::new_with_linear_solver(config, self.linear_solver, cx);
+        }
+        let identity = config_identity(&config, self.linear_solver);
+        checkpoint(cx)?;
+        Ok(Self {
+            config,
+            linear_solver: self.linear_solver,
+            identity,
+            gap_datum_m: self.gap_datum_m,
+            gap_m: self.gap_m.clone(),
+            compliance: Arc::clone(&self.compliance),
+            fft_compliance: self.fft_compliance.clone(),
         })
     }
 
@@ -955,6 +990,20 @@ fn box_residual(pressure: &[f64], opening: &[f64], target: &[f64], hardness: &[f
         });
     }
     residual
+}
+
+fn validate_material_properties(
+    count: usize,
+    reduced_modulus_pa: f64,
+    hardness_pa: &[f64],
+) -> Result<(), FiniteGapPlasticError> {
+    if hardness_pa.len() != count || hardness_pa.iter().any(|h| !h.is_finite() || *h <= 0.0) {
+        return Err(invalid("indentation hardness field"));
+    }
+    if !reduced_modulus_pa.is_finite() || reduced_modulus_pa <= 0.0 {
+        return Err(invalid("reduced modulus"));
+    }
+    Ok(())
 }
 
 fn config_identity(

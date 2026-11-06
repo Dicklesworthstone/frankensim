@@ -209,7 +209,7 @@ impl FiniteGapPlasticModel {
                 }),
             }
         } else {
-            let mut normalized = self.compliance.clone();
+            let mut normalized = (*self.compliance).clone();
             for chunk in normalized.values.chunks_mut(TILE) {
                 checkpoint(cx)?;
                 for value in chunk {
