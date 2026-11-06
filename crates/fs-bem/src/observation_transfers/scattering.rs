@@ -14,7 +14,10 @@
 use super::*;
 use crate::helmholtz::bc::{
     Admittance, PreparedBoundary,
-    incident::{self, ForceDipole, IncidentField, IncidentSource, IncidentTraces, Monopole},
+    incident::{
+        self, ForceDipole, IncidentField, IncidentSource, IncidentTraces, Monopole,
+        StressQuadrupole,
+    },
 };
 use crate::near_field::{MAX_RECEIVERS, Options};
 use std::cell::RefCell;
@@ -42,13 +45,34 @@ pub struct ForceDipoleSpec {
     pub direction: [f64; 3],
 }
 
+/// One scalar stress-moment coordinate [N m] multiplying a fixed real
+/// symmetric tensor. Its entries are xx, yy, zz, xy, xz, yz; shear entries are
+/// physical tensor components, without an engineering factor of two.
+///
+/// The shape is dimensionless and is never normalized. Six independently
+/// driven, co-located component shapes retain an arbitrary complex stress
+/// tensor's original component phases. Each point represents an explicitly
+/// compact source or one cell of a spatially refined volume-source quadrature;
+/// admission does not establish source-size or spatial-convergence accuracy.
+/// Do not add passive-body surface forces already represented by diffraction.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StressQuadrupoleSpec {
+    /// Caller-owned identity, distinct within the complete input basis.
+    pub id: String,
+    /// Stress integration point [m] in the obstacle/receiver frame.
+    pub position_m: [f64; 3],
+    /// Nonzero finite xx, yy, zz, xy, xz, yz shape; no trace removal.
+    pub tensor_shape: [f64; 6],
+}
+
 /// Physical input coordinates to one coherent diffraction operator.
-/// A volume coordinate is [m³/s]; a force coordinate is [N]. Their numerical
-/// signals are never converted into one another or normalized by source power.
+/// A volume coordinate is [m³/s], force [N], and stress moment [N m].
+/// Signals are never converted into one another or normalized by source power.
 #[derive(Clone, Debug, PartialEq)]
 pub enum CompactSourceSpec {
     VolumeFlow(PointSourceSpec),
     ForceDipole(ForceDipoleSpec),
+    StressQuadrupole(StressQuadrupoleSpec),
 }
 
 impl CompactSourceSpec {
@@ -56,18 +80,21 @@ impl CompactSourceSpec {
         match self {
             Self::VolumeFlow(source) => &source.id,
             Self::ForceDipole(source) => &source.id,
+            Self::StressQuadrupole(source) => &source.id,
         }
     }
     fn position_m(&self) -> [f64; 3] {
         match self {
             Self::VolumeFlow(source) => source.position_m,
             Self::ForceDipole(source) => source.position_m,
+            Self::StressQuadrupole(source) => source.position_m,
         }
     }
     fn source_id(&self) -> SourceId {
         match self {
             Self::VolumeFlow(source) => SourceId::PointVolumeFlow(source.id.clone()),
             Self::ForceDipole(source) => SourceId::PointForce(source.id.clone()),
+            Self::StressQuadrupole(source) => SourceId::PointStressQuadrupole(source.id.clone()),
         }
     }
     pub(super) fn unit_incident(&self) -> IncidentSource {
@@ -80,6 +107,12 @@ impl CompactSourceSpec {
                 position_m: source.position_m,
                 force_on_fluid_n: source.direction.map(C64::from_re),
             }),
+            Self::StressQuadrupole(source) => {
+                IncidentSource::StressQuadrupole(StressQuadrupole {
+                    position_m: source.position_m,
+                    stress_moment_n_m: source.tensor_shape.map(C64::from_re),
+                })
+            }
         }
     }
 }
@@ -136,12 +169,12 @@ impl<'a> ScatteringObservation<'a> {
         )
     }
 
-    /// Bind a coherent mixture of physical volume-flow and force coordinates.
-    /// Every force direction must be unit length; it is not silently normalized.
-    /// Positive-frequency harmonic observation uses the physical field. Force
-    /// FIR realization requires the existing explicit [`LowerBandWindow`] on
-    /// [`LocalBoundaryObservation`], because this wave solver has no DC force
-    /// solution and a force's static pressure must not be manufactured as zero.
+    /// Bind coherent volume-flow, force and stress-moment coordinates.
+    /// Force directions must be unit length; stress shapes need not be. Neither
+    /// is silently normalized. Positive-frequency harmonic observation uses the
+    /// physical field. Force and stress FIR realization require the explicit
+    /// [`LowerBandWindow`] on [`LocalBoundaryObservation`], because this wave
+    /// solver has no static force/stress solution and must not invent zero DC.
     #[allow(clippy::too_many_arguments)]
     pub fn new_mixed(
         surface: &'a SpherePanels,
@@ -200,10 +233,16 @@ impl<'a> ScatteringObservation<'a> {
             || sources
                 .iter()
                 .any(|s| s.name().is_empty() || s.name().len() > 1024)
-            || sources.iter().any(|s| {
-                matches!(s, CompactSourceSpec::ForceDipole(f)
-                if f.direction.iter().any(|v| !v.is_finite())
-                    || (f.direction.iter().map(|v| v * v).sum::<f64>() - 1.0).abs() > 1e-10)
+            || sources.iter().any(|s| match s {
+                CompactSourceSpec::VolumeFlow(_) => false,
+                CompactSourceSpec::ForceDipole(f) => {
+                    f.direction.iter().any(|v| !v.is_finite())
+                        || (f.direction.iter().map(|v| v * v).sum::<f64>() - 1.0).abs() > 1e-10
+                }
+                CompactSourceSpec::StressQuadrupole(q) => {
+                    q.tensor_shape.iter().any(|v| !v.is_finite())
+                        || q.tensor_shape.iter().all(|&v| v == 0.0)
+                }
             })
             || receivers
                 .iter()
@@ -282,15 +321,15 @@ impl<'a> ScatteringObservation<'a> {
         })
     }
 
-    /// Complete input basis: volume-flow signals are [m³/s], forces are [N].
+    /// Complete input basis: volume flow [m³/s], force [N], stress moment [N m].
     pub fn sources(&self) -> &[SourceId] {
         &self.sources
     }
 
-    pub(super) fn has_force_sources(&self) -> bool {
+    pub(super) fn has_static_pressure_sources(&self) -> bool {
         self.sources
             .iter()
-            .any(|s| matches!(s, SourceId::PointForce(_)))
+            .any(SourceId::requires_lower_band_window)
     }
 
     /// Source-major, receiver-minor conservative earliest arrivals [s].
@@ -346,13 +385,19 @@ impl<'a> ScatteringObservation<'a> {
                         h.update(&component.to_bits().to_le_bytes());
                     }
                 }
+                CompactSourceSpec::StressQuadrupole(source) => {
+                    h.update(&[2]);
+                    for component in source.tensor_shape {
+                        h.update(&component.to_bits().to_le_bytes());
+                    }
+                }
             }
         }
         h.finalize()
     }
 
     /// Source-major, receiver-major `(p, dp/dx, dp/dy, dp/dz)` in the original
-    /// exp(-iωt) convention, per declared SI source coordinate [m³/s] or [N].
+    /// exp(-iωt) convention, per SI source coordinate [m³/s], [N] or [N m].
     ///
     /// One boundary assembly/LU serves the entire source basis, and one set of
     /// adaptive Green rows serves every receiver/source pair. Cancellation is
@@ -400,9 +445,9 @@ impl<'a> ScatteringObservation<'a> {
         }
         let channels = 4 * self.compact_sources.len() * self.receivers.len();
         if omega == 0.0 {
-            if self.has_force_sources() {
+            if self.has_static_pressure_sources() {
                 return Err(HelmholtzError::BadParameter {
-                    what: "force-dipole observation has no admitted DC solution; declare a lower reconstruction window",
+                    what: "force or stress observation has no admitted DC solution; declare a lower reconstruction window",
                 });
             }
             return Ok(vec![C64::ZERO; channels]);
@@ -476,7 +521,7 @@ impl<'a> ScatteringObservation<'a> {
         Ok(output)
     }
 
-    /// Realize actual source-flow histories through the existing converged
+    /// Realize actual SI source histories through the existing converged
     /// observation FIR owner. Producer/BEM uncertainty is retained separately
     /// from temporal convergence; an exact-analytic producer claim is refused.
     pub fn bake(
@@ -485,10 +530,10 @@ impl<'a> ScatteringObservation<'a> {
         cancelled: impl FnMut() -> bool,
     ) -> Result<ObservationTransferBake, TransferError> {
         // The common FIR owner fixes bin zero without querying the producer.
-        // Refuse here too; raw DC refusal alone cannot protect a force bake.
-        if self.has_force_sources() {
+        // Raw DC refusal alone cannot protect a force or stress bake.
+        if self.has_static_pressure_sources() {
             return Err(TransferError::Invalid(
-                "force-dipole FIR requires LocalBoundaryObservation with an explicit lower band window",
+                "force or stress FIR requires LocalBoundaryObservation with an explicit lower band window",
             ));
         }
         if declaration.sources != self.sources

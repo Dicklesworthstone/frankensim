@@ -32,7 +32,9 @@ pub use molecular::{
     MolecularResponsePower, PreparedMolecularResponse,
 };
 mod scattering;
-pub use scattering::{CompactSourceSpec, ForceDipoleSpec, PointSourceSpec, ScatteringObservation};
+pub use scattering::{
+    CompactSourceSpec, ForceDipoleSpec, PointSourceSpec, ScatteringObservation, StressQuadrupoleSpec,
+};
 mod harmonic;
 pub use harmonic::{
     HarmonicAveragedField, HarmonicControlLimits, HarmonicEnergyGradient,
@@ -76,7 +78,7 @@ pub const MAX_OBSERVATION_RUNGS: usize = 8;
 /// Physical source coordinate. Velocity traces are supplied separately, in
 /// m/s per unit coordinate rate. Aperture traces integrate to exactly one m³/s
 /// per unit flow, checked against the physical panel areas.
-/// Point-volume-flow and point-force coordinates instead belong to
+/// Point flow, force and stress-moment coordinates instead belong to
 /// [`ScatteringObservation`] and are never admitted as panel traces.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SourceId {
@@ -95,6 +97,9 @@ pub enum SourceId {
     /// convention. A retained source map carries it to physical exterior
     /// sources; it is not automatically an outward aperture flow.
     PrescribedVolumeFlow(String),
+    /// Prescribed symmetric stress moment [N m] along its declared tensor shape.
+    /// This coordinate is neither a force nor a time derivative of stress.
+    PointStressQuadrupole(String),
 }
 impl SourceId {
     fn name(&self) -> &str {
@@ -104,7 +109,8 @@ impl SourceId {
             | Self::PointVolumeFlow(s)
             | Self::PointForce(s)
             | Self::OpenCircuitPressure(s)
-            | Self::PrescribedVolumeFlow(s) => s,
+            | Self::PrescribedVolumeFlow(s)
+            | Self::PointStressQuadrupole(s) => s,
         }
     }
 
@@ -117,7 +123,14 @@ impl SourceId {
             Self::PointForce(_) => 3,
             Self::OpenCircuitPressure(_) => 4,
             Self::PrescribedVolumeFlow(_) => 5,
+            Self::PointStressQuadrupole(_) => 6,
         }
+    }
+
+    // The positive-frequency exterior wave owner does not solve the static
+    // force/stress pressure field. Its generic FIR must not invent a zero DC.
+    fn requires_lower_band_window(&self) -> bool {
+        matches!(self, Self::PointForce(_) | Self::PointStressQuadrupole(_))
     }
 }
 /// All four components are retained, in order p, dp/dx, dp/dy, dp/dz.
@@ -847,10 +860,10 @@ fn bake_observation_transfers_with_errors<E: From<TransferError>>(
         && decl
             .sources
             .iter()
-            .any(|s| matches!(s, SourceId::PointForce(_)))
+            .any(SourceId::requires_lower_band_window)
     {
         return Err(TransferError::Invalid(
-            "force-source FIR requires the declared lower-window observation owner",
+            "force or stress FIR requires the declared lower-window observation owner",
         )
         .into());
     }

@@ -905,7 +905,10 @@ impl NameText for SourceId {
             SourceId::StructuralMode(s)
             | SourceId::ApertureVolumeFlow(s)
             | SourceId::PointVolumeFlow(s)
-            | SourceId::PointForce(s) => s.split(':').next().unwrap_or("").to_string(),
+            | SourceId::PointForce(s)
+            | SourceId::PointStressQuadrupole(s)
+            | SourceId::OpenCircuitPressure(s)
+            | SourceId::PrescribedVolumeFlow(s) => s.split(':').next().unwrap_or("").to_string(),
         }
     }
 }

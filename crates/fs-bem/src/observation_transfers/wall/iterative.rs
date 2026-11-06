@@ -167,9 +167,9 @@ impl<'a> IterativeBoundaryObservation<'a> {
         Self::for_mixed_scattering(surface, medium, &mixed, receivers, boundary, options, gate)
     }
 
-    /// Prescribed volume-flow [m³/s] and force [N] coordinates through the
-    /// same FMM boundary and adaptive receiver. Force FIR realization needs
-    /// an explicit lower window; harmonic sampling remains unwindowed.
+    /// Prescribed volume flow [m³/s], force [N] and stress moment [N m] through
+    /// the same FMM boundary and adaptive receiver. Force/stress FIR realization
+    /// needs an explicit lower window; harmonic sampling remains unwindowed.
     pub fn for_mixed_scattering(
         surface: &'a SpherePanels,
         medium: Medium,
@@ -431,9 +431,9 @@ impl<'a> IterativeBoundaryObservation<'a> {
         poll(gate)?;
         self.observation.admit_frequency(omega)?;
         if omega == 0.0 {
-            if self.observation.has_force_sources() {
+            if self.observation.has_static_pressure_sources() {
                 return Err(TransferError::Invalid(
-                    "force-dipole observation has no admitted DC solution",
+                    "force or stress observation has no admitted DC solution",
                 )
                 .into());
             }

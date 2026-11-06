@@ -328,10 +328,10 @@ impl<'a> LocalBoundaryObservation<'a> {
             Excitation::Combined { sources, .. } => sources,
         }
     }
-    fn has_force_sources(&self) -> bool {
+    fn has_static_pressure_sources(&self) -> bool {
         self.sources()
             .iter()
-            .any(|source| matches!(source, SourceId::PointForce(_)))
+            .any(SourceId::requires_lower_band_window)
     }
     pub fn receivers(&self) -> &[ReceiverSpec] {
         match &self.excitation {
@@ -445,9 +445,9 @@ impl<'a> LocalBoundaryObservation<'a> {
         }
         self.admit_frequency(omega)?;
         if omega == 0.0 {
-            if self.has_force_sources() {
+            if self.has_static_pressure_sources() {
                 return Err(TransferError::Invalid(
-                    "force-dipole observation has no admitted DC solution",
+                    "force or stress observation has no admitted DC solution",
                 ));
             }
             if self.boundary.supported_band_hz().0 > 0.0 {
@@ -603,10 +603,10 @@ impl<'a> LocalBoundaryObservation<'a> {
         producer_hash: ContentHash,
     ) -> Result<(), TransferError> {
         // The common FIR owner sets bin zero without querying this producer.
-        // Only a caller-declared lower window can remove force-source DC.
-        if self.has_force_sources() && self.lower_window.is_none() {
+        // Only a caller-declared lower window can remove force/stress DC.
+        if self.has_static_pressure_sources() && self.lower_window.is_none() {
             return Err(TransferError::Invalid(
-                "force-dipole FIR requires an explicit lower band window",
+                "force or stress FIR requires an explicit lower band window",
             ));
         }
         declaration.admit_work()?;

@@ -153,6 +153,7 @@ impl PreparedHarmonicObservation {
                 SourceId::ApertureVolumeFlow(_) => SourceId::ApertureVolumeFlow(name),
                 SourceId::PointVolumeFlow(_) => SourceId::PointVolumeFlow(name),
                 SourceId::PointForce(_) => SourceId::PointForce(name),
+                SourceId::PointStressQuadrupole(_) => SourceId::PointStressQuadrupole(name),
                 SourceId::OpenCircuitPressure(_) => SourceId::OpenCircuitPressure(name),
                 SourceId::PrescribedVolumeFlow(_) => SourceId::PrescribedVolumeFlow(name),
             });
