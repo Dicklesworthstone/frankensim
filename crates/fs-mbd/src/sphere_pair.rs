@@ -7,12 +7,15 @@
 //! geometry, the two-body effective masses and physical momentum application.
 //!
 //! Impulses act equally and oppositely at the real facing surface points.
-//! Translation and torque-free attitude are analytic, up to floating arithmetic.
-//! Global linear/angular momentum and force-work/energy balances must close
-//! before a complete result is returned. No position or momentum is repaired.
+//! Translation, spin and applied-force/couple work are analytic, up to floating
+//! arithmetic. The optional held-world-torque entry uses exact commuting
+//! rotations and bounded exponential midpoint steps for changing spin axes.
+//! Global linear/angular momentum and work/energy balances must close before a
+//! complete result is returned. No position or momentum is repaired.
 //! This is a floating analytic sphere query, not interval-certified general CCD.
-//! It does not model unequal accelerations, external torques, anisotropic inertia,
-//! deformation, adhesion, rolling resistance, or a many-body contact network.
+//! It does not model unequal accelerations, state-dependent or body-held torque,
+//! anisotropic inertia, deformation, adhesion, rolling resistance, or a many-body
+//! contact network.
 
 use crate::{DynamicsError, MassProperties, Pose, RigidBodyState, Vec3};
 use fs_contact::impact::{NormalImpactError, NormalImpactInput, solve_normal_impact};
@@ -41,6 +44,30 @@ pub struct SpherePairScene {
     pub restitution: f64,
     /// Nonnegative ideal Coulomb coefficient, equal for static and kinetic slip.
     pub friction_coefficient: f64,
+}
+
+/// Explicit attitude resolution for the optional held-world-torque path.
+///
+/// Translation, spin and impact timing do not use these substeps. An isotropic
+/// body's changing-axis attitude uses the native quaternion exponential at
+/// each angular-velocity midpoint, with second-order convergence. A small
+/// conservation residual does not certify angular phase accuracy; refine the
+/// time bound for the rotation being resolved.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SpherePairTorqueConfig {
+    /// Positive finite upper duration of each noncommuting attitude step [s].
+    pub max_attitude_step_s: f64,
+    /// Total noncommuting attitude steps across both bodies and flight phases.
+    /// Must be in 1..=1_000_000. Commuting exact rotations need no substeps.
+    pub max_attitude_substeps: usize,
+}
+impl Default for SpherePairTorqueConfig {
+    fn default() -> Self {
+        Self {
+            max_attitude_step_s: 0.01,
+            max_attitude_substeps: 65_536,
+        }
+    }
 }
 
 /// The single detected contact, including zero-impulse interior grazing.
@@ -74,11 +101,20 @@ pub struct SpherePairAdvance {
     pub impact: Option<SpherePairImpact>,
     /// Work of both common-acceleration forces along the actual trajectories.
     pub external_force_work: f64,
+    /// Signed work of the prescribed central world couples, separately from
+    /// centre-force work [J]. Negative work represents braking.
+    pub external_torque_work: f64,
+    /// Integrated prescribed free couples about the COMs, in world axes [N m s].
+    /// Orbital moments from the centre forces remain a separate contribution.
+    pub external_torque_impulse_world: Vec3,
+    /// Noncommuting attitude substeps actually used across both bodies/phases.
+    pub attitude_substeps: usize,
     /// Mechanical energy lost to normal restitution and ideal Coulomb friction.
     ///
     /// This is not an automatic heat assignment to either sphere.
     pub dissipated_energy: f64,
-    /// Final kinetic energy minus initial energy minus force work plus loss.
+    /// Final kinetic energy minus initial energy minus force AND torque work,
+    /// plus the original impact loss.
     pub energy_balance_residual: f64,
     /// Total final minus initial linear momentum minus applied force impulses.
     pub linear_momentum_residual: Vec3,
@@ -110,6 +146,8 @@ pub enum SpherePairError {
     Detection(SweptSphereError),
     /// Cancellation was observed before complete publication.
     Cancelled,
+    /// The declared total noncommuting attitude-step budget was exhausted.
+    AttitudeBudget,
     /// Event geometry, endpoint response or a conservation balance did not close.
     Unresolved(&'static str),
 }
@@ -146,12 +184,28 @@ struct Mechanics {
     shapes: [SpherePairBody; 2],
     acceleration: Vec3,
     forces: [Vec3; 2],
+    torques_world: [Vec3; 2],
+    attitude: SpherePairTorqueConfig,
     radii_sum: f64,
     inverse_normal_mass: f64,
     inverse_tangent_mass: f64,
 }
 impl Mechanics {
-    fn new(scene: &SpherePairScene) -> Result<Self, SpherePairError> {
+    fn new(
+        scene: &SpherePairScene,
+        torques_world: [Vec3; 2],
+        attitude: SpherePairTorqueConfig,
+    ) -> Result<Self, SpherePairError> {
+        for torque in torques_world {
+            vector(torque)?;
+        }
+        if !attitude.max_attitude_step_s.is_finite()
+            || attitude.max_attitude_step_s <= 0.0
+            || attitude.max_attitude_substeps == 0
+            || attitude.max_attitude_substeps > 1_000_000
+        {
+            return Err(SpherePairError::Invalid("invalid torque attitude controls"));
+        }
         if !(scene.restitution.is_finite() && (0.0..=1.0).contains(&scene.restitution))
             || !(scene.friction_coefficient.is_finite() && scene.friction_coefficient >= 0.0)
         {
@@ -195,6 +249,8 @@ impl Mechanics {
             shapes: scene.bodies,
             acceleration: scene.acceleration_world,
             forces,
+            torques_world,
+            attitude,
             radii_sum: finite(scene.bodies[0].radius + scene.bodies[1].radius)?,
             inverse_normal_mass,
             inverse_tangent_mass,
@@ -253,15 +309,66 @@ impl Mechanics {
             let displacement = velocity.add(self.acceleration.scale(0.5 * h)).scale(h);
             let spin = world_spin(body);
             let inertia = self.shapes[i].properties.principal_inertia_body().x;
-            let orientation = body
-                .pose()
-                .orientation()
-                .right_exp(body.angular_momentum_body().scale(h / inertia))?;
+            let torque = self.torques_world[i];
+            let torque_impulse = torque.scale(h);
+            vector(torque_impulse)?;
+            let next_spin = if torque == Vec3::ZERO {
+                spin
+            } else {
+                spin.add(torque_impulse)
+            };
+            vector(next_spin)?;
+            let mut orientation = body.pose().orientation();
+            if torque == Vec3::ZERO {
+                // Preserve the established unforced flight arithmetic.
+                orientation =
+                    orientation.right_exp(body.angular_momentum_body().scale(h / inertia))?;
+            } else if commuting_directions(spin, torque) {
+                // This integral remains exact through braking and reversal.
+                let rotation = spin.scale(0.5).add(next_spin.scale(0.5)).scale(h / inertia);
+                orientation = orientation.right_exp(orientation.rotate_world_to_body(rotation))?;
+            } else {
+                let steps_float = (h / self.attitude.max_attitude_step_s).ceil().max(1.0);
+                let remaining = self.attitude.max_attitude_substeps - ledger.attitude_steps;
+                if !steps_float.is_finite() || steps_float > remaining as f64 {
+                    return Err(SpherePairError::AttitudeBudget);
+                }
+                let steps = steps_float as usize;
+                ledger.attitude_steps += steps;
+                let substep = h / steps as f64;
+                if substep == 0.0 {
+                    return Err(SpherePairError::Unresolved(
+                        "unrepresentable attitude substep",
+                    ));
+                }
+                for step in 0..steps {
+                    poll(cancelled)?;
+                    let midpoint = (step as f64 + 0.5) * substep;
+                    let rotation = spin.add(torque.scale(midpoint)).scale(substep / inertia);
+                    orientation =
+                        orientation.right_exp(orientation.rotate_world_to_body(rotation))?;
+                }
+            }
             result[i] = RigidBodyState::new(
                 Pose::new(position.add(displacement), orientation)?,
                 body.linear_momentum_world().add(self.forces[i].scale(h)),
-                orientation.rotate_world_to_body(spin),
+                orientation.rotate_world_to_body(next_spin),
             )?;
+            if torque != Vec3::ZERO {
+                // The isotropic world angular velocity is affine in time.
+                // Reuse native compensated midpoint impulse work, retaining
+                // the signed couple work on each side of the original impact.
+                let omega0 = divide_vector(spin, inertia);
+                let omega1 = divide_vector(next_spin, inertia);
+                vector(omega0)?;
+                vector(omega1)?;
+                let work = finite(
+                    crate::midpoint_impulse_pairing(omega0, omega1, torque_impulse).to_f64(),
+                )?;
+                ledger.torque_work = finite(ledger.torque_work + work)?;
+                ledger.torque_angular = ledger.torque_angular.add(torque_impulse);
+                ledger.angular_scale = finite(ledger.angular_scale + norm(torque_impulse)?)?;
+            }
             // The h³ term vanishes: each applied force is parallel to acceleration.
             let angular = position
                 .cross(self.forces[i])
@@ -273,6 +380,7 @@ impl Mechanics {
             ledger.angular_scale = finite(ledger.angular_scale + norm(angular)?)?;
         }
         vector(ledger.force_angular)?;
+        vector(ledger.torque_angular)?;
         Ok(result)
     }
 }
@@ -280,6 +388,9 @@ impl Mechanics {
 struct Ledger {
     force_work: f64,
     force_angular: Vec3,
+    torque_work: f64,
+    torque_angular: Vec3,
+    attitude_steps: usize,
     angular_scale: f64,
     loss: f64,
     impulse_scale: f64,
@@ -301,6 +412,42 @@ pub fn advance_sphere_pair(
     scene: &SpherePairScene,
     states: [RigidBodyState; 2],
     duration_s: f64,
+    cancelled: impl FnMut() -> bool,
+) -> Result<SpherePairAdvance, SpherePairError> {
+    advance_sphere_pair_with_torques(
+        scene,
+        states,
+        [Vec3::ZERO; 2],
+        duration_s,
+        SpherePairTorqueConfig::default(),
+        cancelled,
+    )
+}
+
+/// Advance the same sphere-pair impact owner with held central world couples.
+///
+/// Each torque is constant in WORLD axes, about its body's COM, in N m.
+/// Isotropic spin evolves as L(t) = L(0) + torque*t between original impacts;
+/// the applied work uses the corresponding mean angular velocity. Pre-impact
+/// spin enters the original Coulomb law, and post-impact spin starts the next
+/// torque interval. Spherical geometry leaves the original contact time intact.
+///
+/// A couple is not a body-following drive or a force at an attachment. A
+/// state-dependent motor, spring or drag law needs its own coupled sampling.
+/// Commuting attitude is exact; changing-axis attitude is a bounded second-order
+/// exponential midpoint approximation, independently of the momentum/work
+/// checks. Exactly zero torques retain the ordinary flight arithmetic.
+///
+/// # Errors
+/// The original detection, impulse, geometry and conservation refusals, invalid
+/// torque/attitude controls, or an exhausted attitude budget. Cancellation is
+/// polled at every noncommuting substep; no partial endpoint is published.
+pub fn advance_sphere_pair_with_torques(
+    scene: &SpherePairScene,
+    states: [RigidBodyState; 2],
+    torques_world_nm: [Vec3; 2],
+    duration_s: f64,
+    config: SpherePairTorqueConfig,
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<SpherePairAdvance, SpherePairError> {
     poll(&mut cancelled)?;
@@ -309,7 +456,7 @@ pub fn advance_sphere_pair(
             "positive finite duration required",
         ));
     }
-    let mechanics = Mechanics::new(scene)?;
+    let mechanics = Mechanics::new(scene, torques_world_nm, config)?;
     for state in states {
         state.validate()?;
     }
@@ -504,8 +651,9 @@ pub fn advance_sphere_pair(
         return Err(SpherePairError::Unresolved("penetrating final geometry"));
     }
     let final_energy = mechanics.kinetic(states_after)?;
-    let energy_balance_residual =
-        finite((final_energy - initial_energy) - ledger.force_work + ledger.loss)?;
+    let energy_balance_residual = finite(
+        (final_energy - initial_energy) - ledger.force_work - ledger.torque_work + ledger.loss,
+    )?;
     let external_impulse = mechanics.forces[0]
         .scale(duration_s)
         .add(mechanics.forces[1].scale(duration_s));
@@ -514,11 +662,17 @@ pub fn advance_sphere_pair(
         .sub(external_impulse);
     let angular_momentum_residual = total_angular(states_after)
         .sub(total_angular(states))
-        .sub(ledger.force_angular);
+        .sub(ledger.force_angular)
+        .sub(ledger.torque_angular);
     vector(linear_momentum_residual)?;
     vector(angular_momentum_residual)?;
-    let energy_scale =
-        finite(initial_energy.abs() + final_energy.abs() + ledger.force_work.abs() + ledger.loss)?;
+    let energy_scale = finite(
+        initial_energy.abs()
+            + final_energy.abs()
+            + ledger.force_work.abs()
+            + ledger.torque_work.abs()
+            + ledger.loss,
+    )?;
     let mut linear_scale = norm(external_impulse)? + 2.0 * ledger.impulse_scale;
     let mut angular_scale = ledger.angular_scale;
     for i in 0..2 {
@@ -539,6 +693,9 @@ pub fn advance_sphere_pair(
         states_after,
         impact,
         external_force_work: ledger.force_work,
+        external_torque_work: ledger.torque_work,
+        external_torque_impulse_world: ledger.torque_angular,
+        attitude_substeps: ledger.attitude_steps,
         dissipated_energy: ledger.loss,
         energy_balance_residual,
         linear_momentum_residual,
@@ -547,6 +704,19 @@ pub fn advance_sphere_pair(
     })
 }
 
+// Scale directions independently so changing SI units cannot underflow the
+// cross product into an erroneous claim of commuting angular motion.
+fn commuting_directions(spin: Vec3, torque: Vec3) -> bool {
+    if spin == Vec3::ZERO || torque == Vec3::ZERO {
+        return true;
+    }
+    let a = divide_vector(spin, spin.x.abs().max(spin.y.abs()).max(spin.z.abs()));
+    let b = divide_vector(torque, torque.x.abs().max(torque.y.abs()).max(torque.z.abs()));
+    a.cross(b) == Vec3::ZERO
+}
+fn divide_vector(value: Vec3, divisor: f64) -> Vec3 {
+    Vec3::new(value.x / divisor, value.y / divisor, value.z / divisor)
+}
 fn world_spin(body: RigidBodyState) -> Vec3 {
     body.pose()
         .orientation()

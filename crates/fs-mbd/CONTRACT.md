@@ -3176,6 +3176,35 @@ unequal-acceleration detector, compliant/adhesive model, anisotropic solver,
 rolling-resistance model or automatic heat allocation.
 
 
+### Applied torque through two-sphere flight and impact
+
+`sphere_pair::advance_sphere_pair_with_torques` adds a prescribed constant
+world couple about each sphere's centre of mass. Isotropic spin angular
+momentum advances analytically on each free-flight segment. The resulting
+pre-impact spin enters the original normal/Coulomb response, and the
+post-impact spin starts the remaining torque interval. Signed applied-torque
+work (including braking) and the direct couple impulse are reported separately
+from centre-force work and orbital moments. Complete kinetic/work and
+orbital-plus-spin angular-momentum balances include both flight segments and
+the original impact loss; no state or residual is projected.
+
+Commuting angular velocities use the exact integrated rotation. Changing spin
+axes use native quaternion exponentials at angular-velocity midpoints, with
+second-order attitude accuracy and explicit `SpherePairTorqueConfig` controls.
+The total noncommuting substep budget covers both bodies and both flight
+segments. Conservation does not certify phase accuracy: callers must resolve
+attitude with the declared time bound. Budget exhaustion, invalid input and
+late cancellation return no partial state. The original zero-torque entry
+retains its existing flight arithmetic.
+
+Focused regressions cover analytic spin-up, braking and reversal; torque-driven
+pre-impact slip and frictional recoil with simultaneous force work; frame
+covariance; changing-axis attitude convergence against an independent RK4
+reference; and budget/cancellation rollback with deterministic retry. This
+extension retains isotropic enclosed inertia and common constant acceleration.
+State-dependent or body-held couples, anisotropic inertia, sustained contact
+and many-body torque-driven trajectories remain outside this entry.
+
 ### Native redundant support and prescribed-support work
 
 `frictional_impact::apply_rigid_frictional_impacts` consumes the contact core's explicit impulse/velocity determinacy receipt. Its original shared-body Gram mobility makes a unique contact velocity image sufficient for unique native body momenta, even when individual contact impulses are indeterminate. Such impulses remain an admissible representative; the report does not promote them to unique local pressure or heat.
