@@ -1439,8 +1439,12 @@ pub(crate) fn open_hole_flows(
     Ok(flows)
 }
 
-/// Most open holes whose orifices can be coupled as ports of one network.
-pub const MAX_ORIFICE_PORTS: usize = 3;
+/// Most open holes whose orifices can be coupled as ports of one network. The solver and the passivity
+/// bisection are general in the port count; the cap bounds the fixed solver arrays and the cost, which grows
+/// as `N^2 + 2N` realized kernels (15 at three ports, 143 at eleven). The texts that say `1..=12` in
+/// `fs-couple` are tied to this value by compile-time asserts.
+pub const MAX_ORIFICE_PORTS: usize = 12;
+const _: () = assert!(MAX_ORIFICE_PORTS == 12, "the refusal text below says twelve: update it with the cap");
 
 /// One block of the nodal ladder behind [`open_hole_port_admittance`].
 enum LadderBlock {
@@ -1490,7 +1494,7 @@ pub(crate) fn open_hole_port_admittance(
     options: ComposeOptions,
 ) -> Result<Vec<C64>, DuctError> {
     if ports > MAX_ORIFICE_PORTS {
-        return Err(bad("at most three open holes can carry a coupled orifice"));
+        return Err(bad("at most twelve open holes can carry a coupled orifice"));
     }
     let m = ports.min(open_holes.len());
     if m == 0 {

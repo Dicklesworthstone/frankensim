@@ -74,10 +74,14 @@ fn two_and_three_coupled_holes_change_the_sound_and_differ_from_each_other() {
 }
 
 #[test]
-fn counts_outside_one_to_three_refuse() {
-    for row in ["open_hole_orifice 0\n", "open_hole_orifice 4\n", "open_hole_orifice\n", "open_hole_orifice 2 3\n"] {
+fn counts_outside_one_to_the_cap_refuse() {
+    // The cap is 12 (`fs_duct::exterior::MAX_ORIFICE_PORTS`); a count above the open holes is clamped, not refused.
+    for row in ["open_hole_orifice 0\n", "open_hole_orifice 13\n", "open_hole_orifice\n", "open_hole_orifice 2 3\n"] {
         assert!(render(&card(3, row)).is_err(), "{row:?} must refuse");
     }
+    let clamped = render(&card(3, "open_hole_orifice 12\n")).unwrap();
+    let three = render(&card(3, "open_hole_orifice 3\n")).unwrap();
+    assert_eq!(bits(&clamped.0), bits(&three.0), "12 on a three-hole bore is the three-port render");
 }
 
 // ---- N above 1 on a `gas_field continuous` binding: each orifice reads its own local gas ----

@@ -37,6 +37,7 @@ use fs_math::{c64::C64, det};
 use fs_vfit::scattering::FirScatteringPort;
 
 const NP: usize = MAX_ORIFICE_PORTS;
+const _: () = assert!(NP == 12, "the `1..=12` refusal text in `realize_orifice_ports_with` names the cap: update it with the cap");
 type Mat = [[f64; NP]; NP];
 type CMat = [[C64; NP]; NP];
 
@@ -45,7 +46,7 @@ type CMat = [[C64; NP]; NP];
 pub enum RegisterHoleShunt {
     /// The first open hole alone (`N = 1`, the default).
     Single(RegisterHoleShuntLine),
-    /// The first `2..=3` open holes together.
+    /// The first `2..=MAX_ORIFICE_PORTS` open holes together.
     Ports(RegisterHoleOrificePorts),
 }
 
@@ -557,7 +558,7 @@ impl RegionalDuct {
         Ok(Some(RegisterHoleShunt::Ports(line)))
     }
 
-    /// Frequency sweep, realization and passivity treatment of the `ports`-hole network (any `1..=3`).
+    /// Frequency sweep, realization and passivity treatment of the `ports`-hole network (any `1..=MAX_ORIFICE_PORTS`).
     pub(crate) fn realize_orifice_ports(
         &self,
         sample_rate_hz: u32,
@@ -583,7 +584,7 @@ impl RegionalDuct {
         if m == 0 || m > NP || m > sites.len() || sample_rate_hz == 0 || !(256..=super::MAX_OUTLET_FFT_SAMPLES).contains(&n)
             || !n.is_power_of_two()
         {
-            return Err(invalid("orifice ports need 1..=3 open holes and a power-of-two grid in 256..=65536").into());
+            return Err(invalid("orifice ports need 1..=12 open holes and a power-of-two grid in 256..=65536").into());
         }
         let zc = self.inlet_impedance();
         if !zc.is_finite() || zc <= 0.0 {

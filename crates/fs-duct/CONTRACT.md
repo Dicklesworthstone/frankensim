@@ -304,7 +304,8 @@ Identical media retain the original arithmetic. Different hole media cannot
 fall back to the old single-medium ABCD path.
 
 `exterior::input_impedance_holes_and_ports` returns `input_impedance_and_holes` plus, for the first `ports`
-(`MAX_ORIFICE_PORTS` = 3) open holes, the row-major `ports x ports` admittance `Y` of the LINEAR network seen at their
+(`MAX_ORIFICE_PORTS` = 12, the cap that bounds the solver's fixed arrays and the `N^2 + 2N` kernel cost; it was 3 until the
+oboe D5 page, which has 11 open holes) open holes, the row-major `ports x ports` admittance `Y` of the LINEAR network seen at their
 orifice terminals: `U_i = - sum_j Y_ij dp_j`, `U_i` the flow leaving the bore through hole `i`'s open chimney fraction
 and `dp_j` the pressure drop across hole `j`'s orifice, in series with that chimney. Every other hole stays linear, the
 inlet is the chain's matched reference and the load is the termination's own. It is built as a nodal ladder of the

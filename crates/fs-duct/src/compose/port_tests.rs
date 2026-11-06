@@ -125,6 +125,54 @@ fn the_leading_block_does_not_change_with_the_port_count() {
     }
 }
 
+/// Eight open holes of graded size and spacing on the same 7.45 mm bore (a fuller fingering than the three-hole duct).
+fn eight_hole_duct() -> Duct {
+    let mut segments = vec![cylinder(0.08)];
+    for k in 0..8 {
+        segments.push(hole(0.0013 + 0.0002 * k as f64, 0.004 + 0.001 * k as f64, HoleState::Open));
+        segments.push(cylinder(0.015 + 0.002 * k as f64));
+    }
+    segments.push(cylinder(0.2));
+    Duct { segments }
+}
+
+#[test]
+fn eight_ports_are_reciprocal_passive_and_leave_the_leading_block_alone() {
+    // The ladder is general in the port count (the cap is 12): the same laws as for three ports hold for eight.
+    assert!(crate::compose::MAX_ORIFICE_PORTS >= 8);
+    let duct = eight_hole_duct();
+    for f in [200.0, 700.0, 1500.0, 3000.0] {
+        let (flows, y8) = run(&duct, f, 8);
+        assert_eq!((flows.len(), y8.len()), (8, 64));
+        let scale = y8.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
+        for i in 0..8 {
+            for j in 0..8 {
+                let d = (y8[i * 8 + j] - y8[j * 8 + i]).abs();
+                assert!(d <= 1.0e-9 * scale, "{f} Hz: Y[{i}][{j}] != Y[{j}][{i}] by {d:e}");
+            }
+        }
+        for k in 0..64 {
+            let x: Vec<C64> = (0..8)
+                .map(|i| C64::new(((k * 7 + i * 3) as f64).sin(), ((k * 5 + i * 11) as f64).cos()))
+                .collect();
+            let mut q = C64::ZERO;
+            for i in 0..8 {
+                for j in 0..8 {
+                    q = q + C64::new(x[i].re, -x[i].im) * y8[i * 8 + j] * x[j];
+                }
+            }
+            assert!(q.re >= -1.0e-9 * scale, "{f} Hz, probe {k}: Re(x^H Y x) = {:e}", q.re);
+        }
+        let (_, y4) = run(&duct, f, 4);
+        for i in 0..4 {
+            for j in 0..4 {
+                let (a, b) = (y4[i * 4 + j], y8[i * 8 + j]);
+                assert!((a - b).abs() <= 1.0e-9 * scale, "{f} Hz: block ({i},{j}) differs between 4 and 8 ports");
+            }
+        }
+    }
+}
+
 fn pair_duct(before: f64, after: f64) -> Duct {
     Duct {
         segments: vec![

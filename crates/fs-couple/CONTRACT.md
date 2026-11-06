@@ -1086,7 +1086,7 @@ vapor with opposing transfers, ID permutations and late stage-budget failure.
 
 ## Coupled orifice law on the first N open tone holes (`open_hole_orifice N`)
 
-The optional reed-card record `open_hole_orifice N` (N = 1..=3; after `constriction_noise`, before `compile_limits`; once
+The optional reed-card record `open_hole_orifice N` (N = 1..=12, `fs_duct::exterior::MAX_ORIFICE_PORTS`; after `constriction_noise`, before `compile_limits`; once
 only) solves the quasi-steady sharp-edged orifice law `delta_p_i = K_i |U_i| U_i` (`K = rho / (2 C_vc^2 A_h^2)`, the
 first-hole shunt's own law and coefficient) of the first N open tone holes TOGETHER instead of the first alone
 (`RegionalDuct::with_open_hole_orifice_ports`; `RegisterHoleOrificePorts` in `regional/outlet/orifice_ports.rs`). The
@@ -1111,12 +1111,20 @@ binding (`GasFieldDuct::response_with_wall_holes_and_ports`: each orifice reads 
 reference included). A molecular bore, a midpoint `gas_field` (N > 1) and a segment-gas duct with several regions
 refuse by name. On a continuous field with `open_hole_interaction` there is ONE approximation, stated on the page too:
 each orifice sees its own UNCOUPLED radiation load (`Y` is the uncoupled chain's) while the radiated sound uses the
-coupled flows; the fully coupled orifice network is not built. Cost: `N^2 + 2N` kernels of the grid length instead of 3,
-and one more frequency sweep at build.
+coupled flows; the fully coupled orifice network is not built. Cost: `N^2 + 2N` kernels of the grid length instead of 3
+(15 at N = 3, 143 at N = 11), and one more frequency sweep at build; the passivity step holds one `NP x NP` complex matrix
+per frequency bin (2.3 KB at the cap of 12, about 38 MB on a 8192-point grid, about 300 MB on the largest 65536 grid).
+The cap was 3 until the oboe D5 page, which has 11 open holes; the solver residual test now runs n up to the cap
+(1200 random passive systems) and `compose::port_tests` checks an eight-hole ladder (reciprocal, passive, leading block
+independent of the port count). Measured on the oboe D5 card (11 open holes, `gas_field continuous`, tmmi 2, 96 kHz, 2.65 s):
+`open_hole_orifice 3` renders the posted wav byte for byte on the build with the cap at 12, and `open_hole_orifice 11` (all
+open holes) changes the steady tone by +0.8 c, the level by 0.00 dB and the harmonic levels by none to the digit, with the
+grader count unchanged (6 of 14); user CPU 591 s at N = 3 and 1118 s at N = 11, so the cost is far below proportional to the
+`N^2 + 2N` kernel count (15 to 143). Not measured: an N above 3 on any other page.
 
 Evidence (G0/G1): `fs-duct` `compose::port_tests` (the ladder's admittance is the inverse of the one-port network
 impedance to 1e-9, reciprocal, passive, independent of the port count, and the sign of its off-diagonal term fixed by a
-coincident-pair test); `orifice_ports::tests` (the solver's residual over 600 random passive systems and a stiff drive;
+coincident-pair test); `orifice_ports::tests` (the solver's residual over 1200 random passive systems, n = 1 up to the cap, and a stiff drive;
 the realized matrix is passive and is the admittance scattering, not its transpose; the time-domain steady state with
 linear drops equals the network built from the realized kernels to 1e-14 and the TMM chain to a few percent at a 4096
 grid; the general solver run as one port follows the first-hole line through a strongly nonlinear drive to 1e-6);

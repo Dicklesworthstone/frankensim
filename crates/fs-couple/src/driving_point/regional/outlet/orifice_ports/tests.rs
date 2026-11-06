@@ -64,14 +64,21 @@ fn the_card_count_is_bounded() {
     assert_eq!(duct.open_hole_orifice_ports(), 1);
     assert!(duct.clone().with_open_hole_orifice_ports(0).is_err());
     assert!(duct.clone().with_open_hole_orifice_ports(MAX_ORIFICE_PORTS + 1).is_err());
-    assert_eq!(duct.with_open_hole_orifice_ports(3).unwrap().open_hole_orifice_ports(), 3);
+    assert_eq!(duct.clone().with_open_hole_orifice_ports(3).unwrap().open_hole_orifice_ports(), 3);
+    assert_eq!(
+        duct.with_open_hole_orifice_ports(MAX_ORIFICE_PORTS).unwrap().open_hole_orifice_ports(),
+        MAX_ORIFICE_PORTS,
+    );
 }
 
 #[test]
 fn the_coupled_orifice_solve_converges_to_a_small_residual() {
     let mut seed = 0x9E37_79B9_7F4A_7C15_u64;
-    for trial in 0..600 {
-        let n = 1 + trial % 3;
+    for trial in 0..1200 {
+        // n runs over 1..=NP (the cap, 12); the coupling amplitude is 0.3 up to three ports, as before, and
+        // 0.9 / n beyond, so every row sum of |D| stays under 0.45 and the system stays passive.
+        let n = 1 + trial % NP;
+        let amp = 0.3 * 3.0 / n.max(3) as f64;
         let mut d = [[0.0_f64; NP]; NP];
         let mut r = [1.0_f64; NP];
         let mut k = [0.0_f64; NP];
@@ -81,7 +88,7 @@ fn the_coupled_orifice_solve_converges_to_a_small_residual() {
             k[i] = 10.0_f64.powf(8.0 + 3.0 * lcg(&mut seed));
             u_th[i] = 2.0 * (lcg(&mut seed) - 0.5) * 10.0_f64.powf(-5.0 + 3.0 * lcg(&mut seed));
             for j in 0..n {
-                d[i][j] = 0.3 * (lcg(&mut seed) - 0.5);
+                d[i][j] = amp * (lcg(&mut seed) - 0.5);
             }
         }
         let mut i_plus_d = d;
@@ -109,8 +116,14 @@ fn the_coupled_orifice_solve_converges_to_a_small_residual() {
 
 #[test]
 fn zero_loss_leaves_the_linear_flow_untouched() {
-    let a = [[1.0e-5, 2.0e-6, 0.0], [2.0e-6, 1.5e-5, 0.0], [0.0, 0.0, 1.0e-5]];
-    let u_th = [1.0e-4, -3.0e-4, 2.0e-4];
+    // The solver arrays are NP (the cap, 12) wide; the three active ports sit in the leading block.
+    let block = [[1.0e-5, 2.0e-6, 0.0], [2.0e-6, 1.5e-5, 0.0], [0.0, 0.0, 1.0e-5]];
+    let mut a = [[0.0_f64; NP]; NP];
+    for i in 0..3 {
+        a[i][..3].copy_from_slice(&block[i]);
+    }
+    let mut u_th = [0.0_f64; NP];
+    u_th[..3].copy_from_slice(&[1.0e-4, -3.0e-4, 2.0e-4]);
     assert_eq!(solve_orifices(&a, &[0.0; NP], &u_th, 3).unwrap(), u_th);
 }
 
