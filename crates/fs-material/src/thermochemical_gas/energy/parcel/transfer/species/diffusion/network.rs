@@ -1,7 +1,9 @@
-//! One source snapshot for all diffusion faces, one update per finite volume.
-//! Reuse the original Maxwell-Stefan face solver and selective inventory owner.
+//! Finite molecular networks on the original material and inventory owners.
+//! Default steps sample one unchanged source snapshot for all diffusion faces.
 /// Error-controlled complete windows over the original conservative snapshots.
 pub mod adaptive;
+/// Source-refreshed exponential pair splitting on finite binary gas networks.
+pub mod binary;
 
 use super::super::super::snapshot::{MAX_SNAPSHOT_PARCELS, MAX_SNAPSHOT_TRANSFERS};
 use super::super::network::{

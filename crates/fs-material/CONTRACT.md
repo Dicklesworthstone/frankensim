@@ -16872,3 +16872,42 @@ exact-ramp subdivision, periodic loss versus the harmonic response, atomic
 refusals and retained sub-ulp density increments. Rustfmt passed. Combined
 with the source response and prior water/molecular regressions, 21 focused
 material tests passed. This is not a whole-workspace Cargo/DSR pass.
+
+### Exponential diffusion on finite binary gas networks
+
+`species::diffusion::network::binary::advance_candidate` advances a closed,
+fixed-volume binary gas network through a complete requested duration. Each
+symmetric sweep applies the original `diffuse_binary_exponential_with` owner
+in canonical physical-edge order: forward half updates, one central full
+update, then reverse half updates. Every invocation refreshes actual face
+T/p, source-selected diffusivity, upstream species enthalpies and both original
+caloric endpoints. Source, withdrawal, local T/p, mass, energy and pair-entropy
+checks remain authoritative. Input order, reporting IDs and edge orientation
+do not change the endpoint arithmetic.
+
+Branches, cycles, disconnected components and unequal finite volumes are
+supported. Each open edge must join exactly two original species and supply
+their binary material. At most one edge connects an unordered endpoint pair;
+distinct parallel source laws are not combined. Closed faces retain the
+original source-free identity.
+
+Caller controls select symmetric substeps and bound actual pair evaluations.
+For E>0 links, each sweep costs 2*E-1 pair calls, including closed faces.
+Integrated species and partial-enthalpy transfers and pair energy residuals
+use compensated accumulation; detailed receipts retain only the last sweep.
+Independent original-to-final species, total-mass, source-relative energy and
+entropy audits and the energy-residual sum must fit fixed whole-window
+budgets, without multiplying tolerances by the step count. Late failure or
+cancellation returns no partial network.
+
+A single isothermal/isobaric constant-D edge retains its analytic exponential
+endpoint without an explicit diffusion CFL restriction. Symmetric composition
+of exact constant-state pair flows is second order under refinement.
+State-dependent or nonisothermal frozen-coefficient pair updates remain first
+order; symmetry alone does not raise their order. Large stiff sweeps can retain
+substantial network splitting error. This API requires substep refinement and
+supplies no adaptive time-error estimate or unconditional nonlinear stability
+claim. Bulk flow, pressure diffusion, reactions and moving volumes retain
+their separate owners. G1/G3/G4 fixtures cover analytic stiff relaxation,
+chain refinement and conservation, variable-source cycles, canonical ordering,
+closed faces and transactional work/source/cancellation refusal.
