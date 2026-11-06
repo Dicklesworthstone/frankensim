@@ -6274,3 +6274,59 @@ exact depletion limits, cancellation and bounded-work refusal. The model
 assumes immediate electron thermalization and escaping recombination photons;
 it supplies no trapped-radiation transport, stimulated capture, complete
 multilevel recombination or closed-gas entropy inequality.
+
+## Conservative isothermal gravity with evolving mixture density
+
+`multicomponent::IsothermalMixtureGravity` prepares an original-species
+isothermal atmosphere on a stationary constant-area mesh.
+`MixtureEuler1d::step_with_isothermal_gravity` advances the existing species,
+momentum and energy coordinates with reflecting ends and explicit first-order
+spatial reconstruction. The reference retains its original species/caloric
+bank, canonical mass fractions, physical mesh, temperature, pressure datum and
+signed acceleration. Species densities remain dynamic; density is their
+compensated sum, including when local composition changes.
+
+Preparation caches original source-admitted reference face states and
+tractions, and analytic exponential cell averages evaluated stably to floating
+precision. The native Riemann and wall kernels remain the flux owners.
+Subtracting the same reference tractions before differencing preserves
+reference rest, while the density perturbation supplies the actual buoyancy
+force. The report separates physical gravity impulse from the represented
+reference-traction balance defect.
+
+Gravitational work uses the same species mass fluxes as each native SSP-RK2
+stage. The potential convention is phi=-g*(x-x0), with the explicit discrete
+cell-center sum phi_i*M_i. Internal face transfers cancel in the combined gas
+and gravitational energy account. This is a discrete potential quadrature,
+not the exact within-cell integral of the continuous atmosphere. Per-cell
+potential changes and source exchanges use compensated reductions; represented
+source-energy loss remains a diagnostic, not an invented heat source.
+
+Original source identity, formation-energy references, EOS/caloric admission,
+CFL checks, retries and final cancellation remain authoritative. Energy and
+potential accounts are evaluated before the physical state/time swap. Failed
+stages remain private scratch. Zero gravity delegates the original unforced
+entry, preserving its bits. Preparation owns the added buffers; successful
+steps add no scratch allocation.
+
+The scope excludes tapered/moving meshes, open reservoirs, higher-order
+reconstruction, self-gravity, species diffusion and a jointly advanced chemistry
+model. Uniform reference composition is a common-velocity Euler atmosphere,
+not a claim of molecular diffusive equilibrium. The broad conservative gas
+control-volume bead remains open.
+
+Four new integration tests cover analytical reference rest, composition-driven
+buoyancy, species and combined-energy conservation, formation-gauge invariance,
+native caloric/CFL retries, late cancellation, source/geometry admission and
+zero-gravity parity. The new production file and corrected integration tests
+passed native rustfmt. Root and an independent reviewer checked the discrete
+force/work and atomic-publication scheme.
+
+Validation is incomplete: the first full native gas source check stopped on
+three APIs missing from the old cached thermochemical dependency. A genuine
+current-source dependency rebuild was started, but the executor disconnected
+before it returned. The final native gas build, these four new tests, and three
+selected unchanged-path regressions therefore have no completed result. No
+native test pass, whole-workspace Cargo pass or DSR pass is claimed for this
+increment. The focused integration target is
+`cargo test -p fs-gas --features experimental-euler --test mixture_gravity`.

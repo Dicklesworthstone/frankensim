@@ -54,7 +54,7 @@ pub use crate::dynamics::{
     Boundaries, Boundary, CaloricDomain, Mesh1d, Primitive, Reconstruction, StepControl,
 };
 pub use eos::MixtureGas;
-pub use evolve::{MixtureEuler1d, StepReport, Totals};
+pub use evolve::{IsothermalMixtureGravity, MixtureEuler1d, MixtureGravityStep, StepReport, Totals};
 pub use flux::{EntropyFaceReport, FaceFlux};
 /// Actual source entropy and boundary supply of prescribed exterior gas states.
 pub use dissipation::entropy::ExteriorMixtureEntropyReport;

@@ -12,6 +12,8 @@ use fs_qty::{Length, Time};
 
 pub(super) mod forcing;
 mod entropy;
+mod gravity;
+pub use gravity::{IsothermalMixtureGravity, MixtureGravityStep};
 
 /// Extensive conserved integrals in the canonical source-species order.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -93,7 +95,7 @@ pub struct StepReport {
     pub right_boundary_change: Totals,
     /// Stationary area-wall pressure impulse [kg m/s].
     pub area_momentum_impulse: f64,
-    /// Held distributed mechanical source, without changing the species amounts.
+    /// Distributed mechanical source, without changing the species amounts.
     pub source_change: ForceChange,
     /// `after - before - boundary_change - area momentum impulse - body source`.
     pub conservation_residual: Totals,
@@ -475,8 +477,25 @@ impl MixtureEuler1d {
         controls: StepControl,
         reservoirs: ReservoirEnds<'_>,
         forcing: Option<(BodyForce<'_>, ForceControl)>,
+        equilibrium: Option<(ContactEquilibriumControl, &mut ContactWorkspace)>,
+        entropy: Option<&mut EntropyTracker>,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<StepReport, Error> {
+        self.advance_inner_with_gravity::<ENTROPY_FLUX>(
+            maximum_duration, controls, reservoirs, forcing, equilibrium, entropy, None, cancelled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn advance_inner_with_gravity<const ENTROPY_FLUX: bool>(
+        &mut self,
+        maximum_duration: Time,
+        controls: StepControl,
+        reservoirs: ReservoirEnds<'_>,
+        forcing: Option<(BodyForce<'_>, ForceControl)>,
         mut equilibrium: Option<(ContactEquilibriumControl, &mut ContactWorkspace)>,
         mut entropy: Option<&mut EntropyTracker>,
+        mut gravity: Option<(&IsothermalMixtureGravity, &mut gravity::Balance)>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<StepReport, Error> {
         poll(&mut cancelled)?;
@@ -529,7 +548,19 @@ impl MixtureEuler1d {
             if let Some((control, workspace)) = equilibrium.as_mut() {
                 workspace.begin_attempt(*control)?;
             }
-            let result = if let Some((force, force_controls)) = forcing {
+            let result = if let Some((reference, balance)) = gravity.as_mut() {
+                attempt_with_gravity::<ENTROPY_FLUX>(
+                    &self.gas, &self.states, &self.mesh, self.boundaries, dt,
+                    controls.cfl, order, reservoirs, &mut self.work,
+                    equilibrium.as_mut().map(|(_, workspace)| &mut **workspace),
+                    entropy.as_deref_mut(), Some(*reference), &mut cancelled,
+                )
+                .map(|(a, b, exchange)| {
+                    balance.physical_impulse = exchange.physical_impulse();
+                    balance.reference_impulse_defect = exchange.reference_impulse_defect();
+                    (a, b, exchange.finish(), 0.0)
+                })
+            } else if let Some((force, force_controls)) = forcing {
                 forcing::attempt(
                     &self.gas,
                     &self.states,
@@ -609,6 +640,12 @@ impl MixtureEuler1d {
                         && !(residual[n + 1] - workspace.receipt().signed_energy_j).is_finite()
                     {
                         return Err(Error::Invalid("non-finite contact energy balance"));
+                    }
+                    if let Some((reference, balance)) = gravity.as_mut() {
+                        **balance = reference.balance(
+                            &self.states, &self.work.candidate, residual[n + 1],
+                            source_change, **balance, &mut cancelled,
+                        )?;
                     }
                     poll(&mut cancelled)?;
                     core::mem::swap(&mut self.states, &mut self.work.candidate);
@@ -828,12 +865,36 @@ fn attempt_with_scheme<const ENTROPY_FLUX: bool>(
     reconstruction: Reconstruction,
     reservoirs: ReservoirEnds<'_>,
     work: &mut Workspace,
-    mut contact: Option<&mut ContactWorkspace>,
-    mut entropy: Option<&mut EntropyTracker>,
+    contact: Option<&mut ContactWorkspace>,
+    entropy: Option<&mut EntropyTracker>,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(Stage, Stage), Error> {
+    attempt_with_gravity::<ENTROPY_FLUX>(
+        gas, states, mesh, boundaries, dt, cfl, reconstruction, reservoirs,
+        work, contact, entropy, None, cancelled,
+    )
+    .map(|(a, b, _)| (a, b))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn attempt_with_gravity<const ENTROPY_FLUX: bool>(
+    gas: &MixtureGas,
+    states: &[f64],
+    mesh: &Mesh1d,
+    boundaries: Boundaries,
+    dt: f64,
+    cfl: f64,
+    reconstruction: Reconstruction,
+    reservoirs: ReservoirEnds<'_>,
+    work: &mut Workspace,
+    mut contact: Option<&mut ContactWorkspace>,
+    mut entropy: Option<&mut EntropyTracker>,
+    gravity: Option<&IsothermalMixtureGravity>,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(Stage, Stage, gravity::Exchange), Error> {
     let n = gas.species_count();
     let m = n + 2;
+    let mut gravity_exchange = gravity::Exchange::default();
     let mut endpoint_storage = [[0.0; MAX_COMPONENTS]; 2];
     let ends = reservoir_fluxes_with_scheme::<ENTROPY_FLUX>(
         gas,
@@ -843,7 +904,7 @@ fn attempt_with_scheme<const ENTROPY_FLUX: bool>(
         &mut endpoint_storage,
         cancelled,
     )?;
-    let a = operator_core_with_scheme::<ENTROPY_FLUX>(
+    let a = operator_core_with_gravity::<ENTROPY_FLUX>(
         gas,
         states,
         mesh,
@@ -856,6 +917,7 @@ fn attempt_with_scheme<const ENTROPY_FLUX: bool>(
         ends,
         None,
         contact.as_deref_mut().map(|workspace| (workspace, true)),
+        gravity,
         cancelled,
     )?;
     check_cfl(a.signal_rate * dt, cfl)?;
@@ -875,6 +937,9 @@ fn attempt_with_scheme<const ENTROPY_FLUX: bool>(
             n,
         );
         let stage = &mut work.stage[i * m..(i + 1) * m];
+        if let Some(reference) = gravity {
+            reference.correct_forward(i, q, dt, &work.faces, stage, &mut gravity_exchange)?;
+        }
         if let Some(workspace) = contact.as_deref_mut() {
             stage[n + 1] = workspace.project_energy(
                 gas,
@@ -901,7 +966,7 @@ fn attempt_with_scheme<const ENTROPY_FLUX: bool>(
         &mut endpoint_storage,
         cancelled,
     )?;
-    let b = operator_core_with_scheme::<ENTROPY_FLUX>(
+    let b = operator_core_with_gravity::<ENTROPY_FLUX>(
         gas,
         &work.stage,
         mesh,
@@ -914,6 +979,7 @@ fn attempt_with_scheme<const ENTROPY_FLUX: bool>(
         ends,
         None,
         contact.as_deref_mut().map(|workspace| (workspace, false)),
+        gravity,
         cancelled,
     )?;
     check_cfl(b.signal_rate * dt, cfl)?;
@@ -930,6 +996,11 @@ fn attempt_with_scheme<const ENTROPY_FLUX: bool>(
             &mut second[..m],
             n,
         );
+        if let Some(reference) = gravity {
+            reference.correct_forward(
+                i, q, dt, &work.faces, &mut second[..m], &mut gravity_exchange,
+            )?;
+        }
         if let Some(workspace) = contact.as_deref_mut() {
             second[n + 1] = workspace.project_energy(
                 gas,
@@ -978,7 +1049,7 @@ fn attempt_with_scheme<const ENTROPY_FLUX: bool>(
             cancelled,
         )?;
     }
-    Ok((a, b))
+    Ok((a, b, gravity_exchange))
 }
 fn check_cfl(observed: f64, maximum: f64) -> Result<(), Error> {
     if !observed.is_finite() || observed > maximum * (1.0 + 64.0 * f64::EPSILON) {
@@ -1089,7 +1160,30 @@ fn operator_core_with_scheme<const ENTROPY_FLUX: bool>(
     face_data: &mut [Face],
     endpoint_fluxes: [Option<EndpointFlux<'_>>; 2],
     face_velocity: Option<&[f64]>,
+    contact: Option<(&mut ContactWorkspace, bool)>,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<Stage, Error> {
+    operator_core_with_gravity::<ENTROPY_FLUX>(
+        gas, states, mesh, boundaries, reconstruction, primitive, slopes,
+        faces, face_data, endpoint_fluxes, face_velocity, contact, None, cancelled,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn operator_core_with_gravity<const ENTROPY_FLUX: bool>(
+    gas: &MixtureGas,
+    states: &[f64],
+    mesh: &Mesh1d,
+    boundaries: Boundaries,
+    reconstruction: Reconstruction,
+    primitive: &mut [Primitive],
+    slopes: &mut [f64],
+    faces: &mut [f64],
+    face_data: &mut [Face],
+    endpoint_fluxes: [Option<EndpointFlux<'_>>; 2],
+    face_velocity: Option<&[f64]>,
     mut contact: Option<(&mut ContactWorkspace, bool)>,
+    gravity: Option<&IsothermalMixtureGravity>,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<Stage, Error> {
     let n = gas.species_count();
@@ -1097,7 +1191,11 @@ fn operator_core_with_scheme<const ENTROPY_FLUX: bool>(
     let primitive_width = n + 3;
     let count = mesh.cell_count();
     for (i, q) in states.chunks_exact(m).enumerate() {
-        primitive[i] = gas.decode(q, Some(primitive[i].temperature), cancelled)?;
+        primitive[i] = if let Some(reference) = gravity {
+            reference.primitive(i, q, primitive[i].temperature, cancelled)?
+        } else {
+            gas.decode(q, Some(primitive[i].temperature), cancelled)?
+        };
     }
     if let Some((workspace, first_stage)) = contact.as_mut() {
         for (i, p) in primitive.iter().enumerate() {
@@ -1199,6 +1297,12 @@ fn operator_core_with_scheme<const ENTROPY_FLUX: bool>(
         }
     }
     let reconstruct = |i: usize, sign: f64, target: &mut [f64]| -> Result<Primitive, Error> {
+        if let Some(reference) = gravity {
+            return reference.reconstruct(
+                i, if sign < 0.0 { i } else { i + 1 },
+                &states[i * m..(i + 1) * m], primitive[i], target,
+            );
+        }
         let row = &slopes[i * primitive_width..(i + 1) * primitive_width];
         if row.iter().all(|x| *x == 0.0) {
             target.copy_from_slice(&states[i * m..(i + 1) * m]);
