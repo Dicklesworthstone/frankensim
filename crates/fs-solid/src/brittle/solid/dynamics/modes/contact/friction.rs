@@ -12,6 +12,9 @@
 //! original contact owner. No finite oscillation amplitude, future stick/slip
 //! transition, heat, finite sliding or material-source authority is inferred.
 
+/// Original material-interface sources on the held static-friction branch.
+pub mod source;
+
 use super::{
     BrittleModeConstraint, FrozenBrittleContactControls, FrozenBrittleContactError,
     FrozenBrittleContactModes, admit_counts, assemble_frozen_pencil, dot, normal_constraints,
@@ -20,7 +23,7 @@ use super::{
 use crate::brittle::solid::checkpoint;
 use crate::brittle::solid::dynamics::BrittleTetMotion;
 use crate::brittle::solid::dynamics::fracture::contact::friction::{
-    BrittleFaceFriction, BrittleFaceFrictionFrame,
+    BrittleFaceFriction, BrittleFaceFrictionFrame, EllipticFriction,
 };
 use crate::brittle::solid::fracture::ReleasedBrittleFace;
 use crate::inertia::P1ReferenceMass;
@@ -105,8 +108,57 @@ pub(crate) fn assemble_sticking_contact_modes<'m>(
     controls: FrozenBrittleStickingControls,
     cx: &Cx<'_>,
 ) -> Result<FrozenBrittleContactModes, FrozenBrittleContactError> {
+    assemble_sticking_contact_modes_with(
+        geometry,
+        budget,
+        materials,
+        states,
+        displacement_m,
+        velocity_mps,
+        released_faces,
+        mass,
+        friction.len(),
+        preload_n,
+        fixed_dofs,
+        controls,
+        cx,
+        |face, normal, _velocity| {
+            Ok((
+                friction[face].vertices[normal.row.vertex],
+                friction[face].tangent_direction,
+            ))
+        },
+    )
+}
+
+/// Only a loaded original vertex requests coefficients. Source callers keep
+/// their candidates private until the entire pencil and spectrum are accepted.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn assemble_sticking_contact_modes_with<'m, E>(
+    geometry: &TetLoadGeometry3<'_>,
+    budget: TetAssemblyBudget,
+    materials: impl ExactSizeIterator<Item = &'m BrittleCrackBand>,
+    states: &[BrittleState<'_>],
+    displacement_m: &[[f64; 3]],
+    velocity_mps: &[[f64; 3]],
+    released_faces: &[ReleasedBrittleFace],
+    mass: &P1ReferenceMass,
+    friction_faces: usize,
+    preload_n: &[[[f64; 3]; 3]],
+    fixed_dofs: &[usize],
+    controls: FrozenBrittleStickingControls,
+    cx: &Cx<'_>,
+    mut friction_at: impl FnMut(
+        usize,
+        BrittleModeConstraint,
+        [f64; 3],
+    ) -> Result<(EllipticFriction, [f64; 3]), E>,
+) -> Result<FrozenBrittleContactModes, E>
+where
+    E: From<FrozenBrittleContactError>,
+{
     use FrozenBrittleContactError as Error;
-    checkpoint(cx)?;
+    checkpoint(cx).map_err(Error::from)?;
     let full = geometry
         .nodes_m()
         .len()
@@ -121,13 +173,13 @@ pub(crate) fn assemble_sticking_contact_modes<'m>(
         || displacement_m.len() != geometry.nodes_m().len()
         || velocity_mps.len() != geometry.nodes_m().len()
         || preload_n.len() != released_faces.len()
-        || friction.len() != released_faces.len()
+        || friction_faces != released_faces.len()
     {
-        return Err(Error::Invalid("sticking modal source dimensions or margin"));
+        return Err(Error::Invalid("sticking modal source dimensions or margin").into());
     }
     let mut constraints = Vec::new();
     for (face_index, face) in released_faces.iter().enumerate() {
-        checkpoint(cx)?;
+        checkpoint(cx).map_err(Error::from)?;
         let preload = preload_n[face_index];
         // A stack-sized native normal admission avoids copying all inactive
         // faces into a new preload buffer. The cumulative scalar cap below
@@ -148,12 +200,13 @@ pub(crate) fn assemble_sticking_contact_modes<'m>(
                     face: face.id,
                     vertex,
                     reason: "open or tied contact cannot carry any preload",
-                });
+                }
+                .into());
             }
         }
         let mut frame = None;
         for normal in normals {
-            checkpoint(cx)?;
+            checkpoint(cx).map_err(Error::from)?;
             let vertex = normal.row.vertex;
             let fail = |reason| Error::Contact {
                 face: face.id,
@@ -161,9 +214,15 @@ pub(crate) fn assemble_sticking_contact_modes<'m>(
                 reason,
             };
             let force = preload[vertex];
-            let coordinates =
-                EllipticForceCoordinates::prepare(friction[face_index].vertices[vertex])
-                    .map_err(|_| fail("native sustained friction ellipse refused"))?;
+            let [a, b] = normal.row.nodes;
+            let relative =
+                core::array::from_fn(|axis| velocity_mps[b][axis] - velocity_mps[a][axis]);
+            // Even a frictionless active point needs one scalar row. Check
+            // that minimum before a source callback allocates its snapshot.
+            admit_counts(full, free, constraints.len() + 1, controls.contact)?;
+            let (friction, tangent_direction) = friction_at(face_index, normal, relative)?;
+            let coordinates = EllipticForceCoordinates::prepare(friction)
+                .map_err(|_| fail("native sustained friction ellipse refused"))?;
             let q = coordinates
                 .force_to_solver(force)
                 .map_err(|_| fail("native preload force coordinates refused"))?;
@@ -176,7 +235,7 @@ pub(crate) fn assemble_sticking_contact_modes<'m>(
             admit_counts(full, free, total, controls.contact)?;
             if !sticking {
                 if force[1] != 0.0 || force[2] != 0.0 {
-                    return Err(fail("zero friction cannot carry tangent preload"));
+                    return Err(fail("zero friction cannot carry tangent preload").into());
                 }
                 constraints.push(normal);
                 continue;
@@ -192,30 +251,26 @@ pub(crate) fn assemble_sticking_contact_modes<'m>(
             {
                 return Err(fail(
                     "preload is not representably inside the static friction ellipse",
-                ));
+                )
+                .into());
             }
             let local_frame = match frame {
                 Some(frame) => frame,
                 None => {
-                    let built = BrittleFaceFrictionFrame::from_unit_normal(
-                        face.normal,
-                        friction[face_index].tangent_direction,
-                    )
-                    .map_err(|_| fail("native friction frame refused"))?;
+                    let built =
+                        BrittleFaceFrictionFrame::from_unit_normal(face.normal, tangent_direction)
+                            .map_err(|_| fail("native friction frame refused"))?;
                     frame = Some(built);
                     built
                 }
             };
-            let [a, b] = normal.row.nodes;
-            let relative =
-                core::array::from_fn(|axis| velocity_mps[b][axis] - velocity_mps[a][axis]);
             let speed1 = dot(local_frame.tangent1, relative);
             let speed2 = dot(local_frame.tangent2, relative);
             if !speed1.is_finite()
                 || !speed2.is_finite()
                 || speed1.hypot(speed2) > controls.contact.velocity_tolerance_mps
             {
-                return Err(fail("sticking contact must be tangentially resting"));
+                return Err(fail("sticking contact must be tangentially resting").into());
             }
             constraints.push(normal);
             constraints.push(BrittleModeConstraint {
@@ -238,6 +293,7 @@ pub(crate) fn assemble_sticking_contact_modes<'m>(
         fixed_dofs,
         controls.contact.assembly,
         cx,
-    )?;
-    project_contact_pencil(pencil, constraints, controls.contact, cx)
+    )
+    .map_err(Error::from)?;
+    project_contact_pencil(pencil, constraints, controls.contact, cx).map_err(E::from)
 }

@@ -1,5 +1,7 @@
 //! Actual incoming slip, original interface identity and atomic source history.
 
+#[path = "source/modes.rs"]
+mod modes;
 #[path = "source/sustained.rs"]
 mod sustained;
 #[path = "source/time.rs"]

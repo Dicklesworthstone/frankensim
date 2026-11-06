@@ -13,9 +13,14 @@ use fs_exec::Cx;
 
 use super::ThermalBrittleTetMotion;
 use crate::brittle::solid::dynamics::fracture::contact::friction::BrittleFaceFriction;
+use crate::brittle::solid::dynamics::fracture::contact::friction::source::BrittleFaceFrictionSource;
 use crate::brittle::solid::dynamics::modes::contact::assemble_contact_modes;
 pub use crate::brittle::solid::dynamics::modes::contact::friction::FrozenBrittleStickingControls;
 use crate::brittle::solid::dynamics::modes::contact::friction::assemble_sticking_contact_modes;
+use crate::brittle::solid::dynamics::modes::contact::friction::source::assemble_sourced_sticking_contact_modes;
+pub use crate::brittle::solid::dynamics::modes::contact::friction::source::{
+    FrozenBrittleSourcedStickingError, FrozenBrittleSourcedStickingModes,
+};
 pub use crate::brittle::solid::dynamics::modes::contact::{
     FrozenBrittleContactControls, FrozenBrittleContactError, FrozenBrittleContactModes,
 };
@@ -24,6 +29,52 @@ use crate::brittle::solid::dynamics::modes::{assemble_frozen_pencil, require_ope
 use crate::brittle::solid::{BrittleTetError, checkpoint};
 
 impl ThermalBrittleTetMotion<'_> {
+    /// Observe sourced static crack-contact modes at the accepted thermal state.
+    ///
+    /// Original ordered surface materials and Static claims govern loaded
+    /// vertices. Sources query actual relative speed and preserve accepted
+    /// distance, slip, texture and thermal history. Open and tied pairs are not
+    /// sampled. Bulk coefficients and mechanical strain come from this thermal
+    /// motion; inertia remains its original cached reference mass.
+    ///
+    /// The supplied preload and source conditions are held model inputs, not
+    /// an equilibrium solve, pressure reconstruction or finite-amplitude proof.
+    /// All source snapshots and modes return together after complete admission;
+    /// success and refusal both leave temperature, body and histories unchanged.
+    pub fn frozen_sourced_sticking_contact_modes(
+        &self,
+        sources: &[BrittleFaceFrictionSource<'_>],
+        preload_n: &[[[f64; 3]; 3]],
+        fixed_dofs: &[usize],
+        controls: FrozenBrittleStickingControls,
+        cx: &Cx<'_>,
+    ) -> Result<FrozenBrittleSourcedStickingModes, FrozenBrittleSourcedStickingError> {
+        assemble_sourced_sticking_contact_modes(
+            self.solid.geometry,
+            self.solid.budget,
+            self.solid
+                .materials
+                .iter()
+                .map(|source| source.band().law()),
+            |element| {
+                self.solid
+                    .materials
+                    .get(element)
+                    .map(|source| source.band().material().material())
+            },
+            &self.solid.solution.element_states,
+            &self.solid.solution.displacement_m,
+            &self.velocity_mps,
+            &self.solid.released_faces,
+            &self.mass,
+            sources,
+            preload_n,
+            fixed_dofs,
+            controls,
+            cx,
+        )
+    }
+
     /// Observe a held static-friction branch using the native directional ellipse.
     ///
     /// Each face has three preload vectors in its declared normal/tangent frame.

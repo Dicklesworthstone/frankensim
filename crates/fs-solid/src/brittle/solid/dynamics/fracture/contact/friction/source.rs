@@ -176,6 +176,20 @@ pub(super) fn source_directions<'m>(
     sources: &[BrittleFaceFrictionSource<'_>],
     cx: &Cx<'_>,
 ) -> Result<Vec<[f64; 3]>, BrittleFaceSourcedFrictionError> {
+    validate_source_bindings(faces, material, sources, cx)?;
+    Ok(sources
+        .iter()
+        .map(|source| source.tangent_direction)
+        .collect())
+}
+
+/// The same original face/material ownership also governs frozen observations.
+pub(in crate::brittle::solid) fn validate_source_bindings<'m>(
+    faces: &[crate::brittle::solid::fracture::ReleasedBrittleFace],
+    material: impl Fn(usize) -> Option<&'m MaterialStateId>,
+    sources: &[BrittleFaceFrictionSource<'_>],
+    cx: &Cx<'_>,
+) -> Result<(), BrittleFaceSourcedFrictionError> {
     let poll = || {
         cx.checkpoint()
             .map_err(|_| BrittleFaceSourcedFrictionError::Cancelled)
@@ -206,14 +220,11 @@ pub(super) fn source_directions<'m>(
             }
         }
     }
-    Ok(sources
-        .iter()
-        .map(|source| source.tangent_direction)
-        .collect())
+    Ok(())
 }
 
 /// Prepare coefficients only; publication belongs to the complete body event.
-pub(super) fn sample_source(
+pub(in crate::brittle::solid) fn sample_source(
     binding: BrittleVertexFrictionSource<'_>,
     row: BrittleFaceImpactRow,
     velocity: [f64; 3],

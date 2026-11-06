@@ -1,5 +1,33 @@
 # fs-solid CONTRACT
 
+## Original interface sources in brittle sticking modes
+
+`frozen_sourced_sticking_contact_modes` on mechanical and thermal brittle
+motion uses the existing original material-interface friction sampler and
+the same exact contact-mode reduction as explicit-law sticking. Bindings
+retain ordered incident material identities and an explicit Static coefficient
+role. Every loaded original face/vertex samples its own actual tangent speed
+in the declared frame, even when subsequent constraint reduction identifies
+duplicate covectors. Open and tied vertices do not query coefficients or
+construct inactive tangent frames.
+
+The original source owner refreshes temperature/pressure-dependent claims,
+accepted distance, texture and slip consistently. Source temperature and
+pressure remain explicit external conditions; nodal preload does not invent
+pressure. Returned samples are observations: finite-step temperature, slip,
+distance, physical time, body state and fracture history do not advance.
+All samples return with the fully admitted spectrum, so a late source, mode,
+budget or cancellation refusal publishes neither output.
+
+Source coefficients determine whether the held preload fits strictly inside
+the native static ellipse; they add no tangent spring or damping. The thermal
+route retains accepted mechanical strain and its original reference mass.
+Equilibrium and finite-amplitude sticking remain outside this observation.
+Focused regressions specify source-temperature loss of sticking, exact
+explicit-law recovery, measured speed rather than query placeholders,
+wrong-role/material refusal, late-query atomicity and inactive-source omission.
+
+
 ## Static-friction modes of closed brittle cracks
 
 `frozen_sticking_contact_modes` on mechanical and thermal brittle motion
