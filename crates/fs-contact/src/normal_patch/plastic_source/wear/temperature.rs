@@ -7,6 +7,7 @@
 
 use fs_exec::Cx;
 use fs_matdb::MaterialCard;
+use fs_qty::Temperature;
 
 use crate::normal_patch::{
     FiniteGapPlasticContinuationReceipt, FiniteGapPlasticDrive, FiniteGapPlasticDriveReceipt,
@@ -206,34 +207,59 @@ impl SourcePlasticArchardWear {
     ) -> Result<(SourcePlasticWearThermalRefresh, T), SourcePlasticWearError> {
         self.admit(before)?;
         checkpoint(cx)?;
-        if self
-            .coefficients
-            .properties()
-            .iter()
-            .any(|property| !property.has_only_fixed_external_conditions(Some("T"), false))
-            || self.hardness.iter().any(|source| {
-                source
-                    .resolved()
-                    .properties()
+        let owned = self
+            .local_axes
+            .as_ref()
+            .map_or_else(Vec::new, |axes| axes.owned());
+        if self.coefficients.properties().iter().any(|property| {
+            if self.local_axes.is_none() {
+                return !property.has_only_fixed_external_conditions(Some("T"), false);
+            }
+            !property.has_only_owned_coordinates_and_fixed_external_conditions(&owned)
+                || property
+                    .source_axes()
                     .iter()
-                    .any(|property| !property.has_only_fixed_external_conditions(Some("T"), false))
-            })
-        {
+                    .any(|(axis, dims)| axis != "T" && *dims == Temperature::DIMS)
+                || property
+                    .answer()
+                    .evidence
+                    .model
+                    .validity
+                    .bounds()
+                    .keys()
+                    .any(|axis| {
+                        axis != "T"
+                            && self
+                                .coefficients
+                                .axis_quantities()
+                                .get(axis)
+                                .is_some_and(|quantity| quantity.dims() == Temperature::DIMS)
+                    })
+        }) || self.hardness.iter().any(|source| {
+            source
+                .resolved()
+                .properties()
+                .iter()
+                .any(|property| !property.has_only_fixed_external_conditions(Some("T"), false))
+        }) {
             return Err(invalid(
-                "wear refresh requires one owned temperature and otherwise fixed conditions",
+                "wear refresh requires owned local coordinates/temperature and otherwise fixed conditions",
             ));
         }
         let (contact, contact_state, receipt, boundary) = refresh_contact()?;
         let normal = contact.normal_source();
-        let coefficients =
-            if self.coefficients.query_point() == normal.interface_state().query_point() {
-                self.coefficients.clone()
-            } else {
-                self.coefficients.at_query_point(
-                    normal.elastic().interface().card(),
-                    &normal.interface_state().query(),
-                )?
-            };
+        let mut coefficient_query = self.coefficients.query();
+        for (name, value) in normal.interface_state().query_point() {
+            coefficient_query = coefficient_query
+                .with(name, *value)
+                .map_err(|_| invalid("finite original wear temperature query"))?;
+        }
+        let coefficients = if self.coefficients.query() == coefficient_query {
+            self.coefficients.clone()
+        } else {
+            self.coefficients
+                .at_query_point(normal.elastic().interface().card(), &coefficient_query)?
+        };
         let points = [
             normal.elastic().surface_a_state().resolved().query(),
             normal.elastic().surface_b_state().resolved().query(),
@@ -247,12 +273,13 @@ impl SourcePlasticArchardWear {
                     self.hardness[side].at_query_point(material_cards[side], &points[side])?;
             }
         }
-        let source = Self::new(
+        let source = Self::build(
             contact,
             coefficients,
             self.coefficient_keys.clone(),
             hardness,
             self.maximum_recession_m,
+            self.local_axes.clone(),
         )?;
         source.admit_receded_profile(&contact_state, &before.recession_m, cx)?;
         let candidate = SourcePlasticWearState {

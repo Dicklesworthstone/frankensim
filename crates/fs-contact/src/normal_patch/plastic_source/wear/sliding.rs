@@ -36,6 +36,7 @@ use crate::normal_patch::{
     FiniteGapPlasticLoadControls, FiniteGapPlasticLoadReceipt, FiniteGapPlasticReceipt,
 };
 
+use super::coefficients::LocalWearCoefficientSamples;
 use super::{
     SourcePlasticArchardWear, SourcePlasticWearAdvance, SourcePlasticWearError,
     SourcePlasticWearState, add_compensated, checkpoint,
@@ -144,6 +145,9 @@ pub struct SourcePlasticSlidingWearAdvance<B = ()> {
     pub recession_increment_m: [Vec<f64>; 2],
     /// Beginning-pressure-weighted actual unsigned sliding [N m].
     pub pressure_weighted_sliding_j: f64,
+    /// Original wear claims at actual local pressure/irreversible mean speed.
+    /// Present only when the wear owner evolves local coefficient coordinates.
+    pub coefficient_samples: Option<LocalWearCoefficientSamples>,
     /// Contact storage, irreversible indentation, normal and parameter work.
     pub normal: FiniteGapPlasticContinuationReceipt,
     /// Unit at held approach, or the native load/drive receipt for that boundary.
@@ -167,9 +171,9 @@ impl SourcePlasticSlidingWear {
     /// Bind exact original ordered sources at one held interface temperature.
     ///
     /// Friction may additionally own a pressure coordinate absent from the
-    /// fixed normal/wear query. All other coordinates and quantities must match
-    /// exactly. Speed/path-dependent coefficients need an implicit physical
-    /// source closure and are not silently frozen by this adapter.
+    /// fixed normal query. All other friction coordinates and quantities must
+    /// match exactly. Local wear coefficients may follow the actual native
+    /// irreversible sliding speed after friction resolves its physical closure.
     pub fn new(
         wear: SourcePlasticArchardWear,
         friction: SourceThermalCoulomb,
@@ -404,7 +408,7 @@ impl SourcePlasticSlidingWear {
     ) -> Result<SourcePlasticSlidingWearAdvance, SourcePlasticSlidingError> {
         self.advance_with(before, motion, duration_s, controls, cx, |slip| {
             self.wear
-                .advance_wear(&before.wear, slip, cx)
+                .advance_wear_during(&before.wear, slip, duration_s, cx)
                 .map(|wear| (wear, ()))
         })
     }
@@ -425,7 +429,14 @@ impl SourcePlasticSlidingWear {
     > {
         self.advance_with(before, motion, duration_s, controls, cx, |slip| {
             self.wear
-                .advance_wear_at_load(&before.wear, slip, target_force_n, normal_controls, cx)
+                .advance_wear_at_load_during(
+                    &before.wear,
+                    slip,
+                    duration_s,
+                    target_force_n,
+                    normal_controls,
+                    cx,
+                )
                 .map(|next| (next.wear, next.load))
         })
     }
@@ -446,7 +457,14 @@ impl SourcePlasticSlidingWear {
     > {
         self.advance_with(before, motion, duration_s, controls, cx, |slip| {
             self.wear
-                .advance_wear_with_drive(&before.wear, slip, drive, normal_controls, cx)
+                .advance_wear_with_drive_during(
+                    &before.wear,
+                    slip,
+                    duration_s,
+                    drive,
+                    normal_controls,
+                    cx,
+                )
                 .map(|next| (next.wear, next.drive))
         })
     }
@@ -574,6 +592,7 @@ impl SourcePlasticSlidingWear {
             wear: removed.wear,
             recession_increment_m: removed.recession_increment_m,
             pressure_weighted_sliding_j: removed.pressure_weighted_sliding_j,
+            coefficient_samples: removed.coefficient_samples,
             normal: removed.receipt,
             boundary,
         })

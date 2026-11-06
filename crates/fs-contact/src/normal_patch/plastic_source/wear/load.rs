@@ -88,11 +88,55 @@ impl SourcePlasticArchardWear {
         controls: FiniteGapPlasticLoadControls,
         cx: &Cx<'_>,
     ) -> Result<SourcePlasticWearLoadAdvance, SourcePlasticWearError> {
+        self.advance_wear_at_load_over_interval(
+            before,
+            local_unsigned_slip_m,
+            None,
+            target_force_n,
+            controls,
+            cx,
+        )
+    }
+
+    /// Maintain normal force while sampling wear at actual local mean speed.
+    /// The duration belongs to the supplied irreversible sliding increment.
+    pub fn advance_wear_at_load_during(
+        &self,
+        before: &SourcePlasticWearState,
+        local_unsigned_slip_m: &[f64],
+        duration_s: f64,
+        target_force_n: f64,
+        controls: FiniteGapPlasticLoadControls,
+        cx: &Cx<'_>,
+    ) -> Result<SourcePlasticWearLoadAdvance, SourcePlasticWearError> {
+        self.advance_wear_at_load_over_interval(
+            before,
+            local_unsigned_slip_m,
+            Some(duration_s),
+            target_force_n,
+            controls,
+            cx,
+        )
+    }
+
+    fn advance_wear_at_load_over_interval(
+        &self,
+        before: &SourcePlasticWearState,
+        local_unsigned_slip_m: &[f64],
+        duration_s: Option<f64>,
+        target_force_n: f64,
+        controls: FiniteGapPlasticLoadControls,
+        cx: &Cx<'_>,
+    ) -> Result<SourcePlasticWearLoadAdvance, SourcePlasticWearError> {
         self.admit(before)?;
         checkpoint(cx)?;
         self.contact.admit_load_controls(controls)?;
-        let (wear, load) =
-            self.advance_wear_with_recession(before, local_unsigned_slip_m, cx, |increment| {
+        let (wear, load) = self.advance_wear_during_with_recession(
+            before,
+            local_unsigned_slip_m,
+            duration_s,
+            cx,
+            |increment| {
                 let response = self
                     .contact
                     .model()
@@ -105,7 +149,8 @@ impl SourcePlasticArchardWear {
                     )
                     .map_err(SourcePlasticLoadError::from)?;
                 Ok((response.continuation, response.load))
-            })?;
+            },
+        )?;
         Ok(SourcePlasticWearLoadAdvance { wear, load })
     }
 }

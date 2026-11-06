@@ -1981,6 +1981,16 @@ pub struct ArchardLaw {
     /// Dimensionless Archard coefficient; strictly non-negative.
     pub wear_coefficient: f64,
 }
+/// One spatial or temporal quadrature contribution to a heterogeneous Archard law.
+/// The physical caller resolves the local coefficient at the actual conditions;
+/// this sample carries neither a calibration claim nor a heat interpretation.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LocalArchardSample {
+    /// Dimensionless local Archard coefficient, nonnegative.
+    pub wear_coefficient: f64,
+    /// Local `p * |ds| * dA` contribution [N m], nonnegative.
+    pub pressure_weighted_sliding_j: f64,
+}
 /// Caller-owned wear volume in cubic metres.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct WearState {
@@ -2015,6 +2025,53 @@ impl WearAdvance {
     }
 }
 impl ArchardLaw {
+    /// Integrate local `k(x) * p(x) * |ds(x)| / H` contributions atomically.
+    ///
+    /// The original body's positive indentation hardness is held over the
+    /// quadrature. Coefficients may differ between samples; no average k is
+    /// inferred. Compensated summation retains small contributions, and the
+    /// caller-owned volume changes only after every sample has been admitted.
+    /// An empty quadrature removes nothing. Actual conditions and support of
+    /// the local coefficients remain the physical/source caller's responsibility.
+    pub fn advance_local_pressure_weighted_sliding(
+        interface: &InterfaceSystemRef,
+        state: &mut WearState,
+        samples: impl IntoIterator<Item = LocalArchardSample>,
+        hardness_pa: f64,
+    ) -> Result<WearAdvance, TriboError> {
+        interface.validate()?;
+        positive_finite(hardness_pa, "hardness_pa")?;
+        nonnegative_finite(state.volume_m3, "wear_volume_m3")?;
+        let mut increment_m3 = 0.0;
+        let mut compensation = 0.0;
+        for sample in samples {
+            nonnegative_finite(sample.wear_coefficient, "wear_coefficient")?;
+            nonnegative_finite(
+                sample.pressure_weighted_sliding_j,
+                "pressure_weighted_sliding_j",
+            )?;
+            let contribution = checked_mul(
+                sample.wear_coefficient,
+                sample.pressure_weighted_sliding_j,
+                "wear_increment",
+            )? / hardness_pa;
+            nonnegative_finite(contribution, "wear_increment")?;
+            let corrected = contribution - compensation;
+            let next = checked_add(increment_m3, corrected, "wear_increment")?;
+            compensation = (next - increment_m3) - corrected;
+            increment_m3 = next;
+        }
+        nonnegative_finite(increment_m3, "wear_increment")?;
+        let total_volume_m3 = checked_add(state.volume_m3, increment_m3, "wear_volume_m3")?;
+        nonnegative_finite(total_volume_m3, "wear_volume_m3")?;
+        state.volume_m3 = total_volume_m3;
+        Ok(WearAdvance {
+            increment_m3,
+            total_volume_m3,
+            provenance: interface.provenance.clone(),
+        })
+    }
+
     /// Computes and validates `k * F * ds / H` before atomically committing the state candidate.
     pub fn advance(
         self,

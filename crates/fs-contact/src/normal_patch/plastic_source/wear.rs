@@ -1,12 +1,16 @@
 //! Local Archard recession of a retained hardness-limited contact patch.
 //!
 //! One update integrates the *initial* equilibrated cell pressure against the
-//! supplied unsigned local sliding distance, holding k/H fixed over the step.
+//! supplied unsigned local sliding distance, holding each sampled local k/H
+//! fixed over the step. Original k claims may follow actual cell pressure and
+//! irreversible mean sliding speed; separate body hardness stays independent.
 //! It removes volume from each original body and re-equilibrates the increased
 //! relative gap at held approach. Refine sliding increments when wear changes
 //! pressure appreciably. This bounded surface law does not transport debris or
 //! infer local sliding from macroscopic displacement, and it assigns no heat.
 
+/// Original local pressure/speed-dependent wear coefficients and query receipts.
+pub mod coefficients;
 /// Wear under an explicitly finite loading-device stiffness.
 pub mod drive;
 /// Adaptive integration of pressure-dependent local surface recession.
@@ -24,7 +28,9 @@ use fs_matdb::{MaterialCard, PropertyKey};
 use fs_material::hardness::IndentationHardnessStatePoint;
 use fs_material::state_point::{MaterialStatePointError, ResolvedInterfaceStatePoint};
 use fs_qty::{Dims, QuantitySpec};
-use fs_tribo::{ArchardLaw, TriboError, WearAdvance, WearState};
+use fs_tribo::{ArchardLaw, LocalArchardSample, TriboError, WearAdvance, WearState};
+
+use coefficients::{LocalWearAxes, LocalWearCoefficientSamples};
 
 use super::drive::SourcePlasticDriveError;
 use super::load::SourcePlasticLoadError;
@@ -90,12 +96,13 @@ impl core::fmt::Display for SourcePlasticWearError {
 }
 impl std::error::Error for SourcePlasticWearError {}
 
-/// Exact fixed-condition interface coefficients and separate body hardness.
+/// Exact original interface coefficients and separate body hardness.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SourcePlasticArchardWear {
     contact: SourcePlasticContact,
     coefficients: ResolvedInterfaceStatePoint,
     coefficient_keys: [PropertyKey; 2],
+    local_axes: Option<LocalWearAxes>,
     hardness: [IndentationHardnessStatePoint; 2],
     laws: [ArchardLaw; 2],
     maximum_recession_m: [f64; 2],
@@ -148,6 +155,9 @@ pub struct SourcePlasticWearAdvance {
     /// Initial-pressure quadrature `sum(p_old * unsigned_local_slip * area)` [N m].
     /// This is a sliding measure and has no automatic heat interpretation.
     pub pressure_weighted_sliding_j: f64,
+    /// Actual local wear-claim queries, present for a pressure/speed-dependent
+    /// source. Static-coefficient steps reuse their original source directly.
+    pub coefficient_samples: Option<LocalWearCoefficientSamples>,
     /// Native normal response and old/new storage plus signed parameter work.
     /// Material removal at held approach may release stored elastic energy;
     /// the caller must retain this account in its coupled energy balance.
@@ -200,16 +210,68 @@ impl SourcePlasticArchardWear {
         hardness: [IndentationHardnessStatePoint; 2],
         maximum_recession_m: [f64; 2],
     ) -> Result<Self, SourcePlasticWearError> {
+        Self::build(
+            contact,
+            coefficients,
+            coefficient_keys,
+            hardness,
+            maximum_recession_m,
+            None,
+        )
+    }
+
+    /// Bind original wear coefficients to actual local pressure and/or speed.
+    ///
+    /// Additional typed coordinates belong to this contact/sliding owner. The
+    /// same exact claims and original fixed conditions are retained on every
+    /// query; unsupported actual conditions refuse the whole candidate. Local
+    /// speed requires an actual duration and unsigned irreversible sliding, not
+    /// released body motion. No coefficient or hardness calibration is inferred.
+    pub fn new_with_local_coefficients(
+        contact: SourcePlasticContact,
+        coefficients: ResolvedInterfaceStatePoint,
+        coefficient_keys: [PropertyKey; 2],
+        hardness: [IndentationHardnessStatePoint; 2],
+        maximum_recession_m: [f64; 2],
+        axes: LocalWearAxes,
+    ) -> Result<Self, SourcePlasticWearError> {
+        Self::build(
+            contact,
+            coefficients,
+            coefficient_keys,
+            hardness,
+            maximum_recession_m,
+            Some(axes),
+        )
+    }
+
+    fn build(
+        contact: SourcePlasticContact,
+        coefficients: ResolvedInterfaceStatePoint,
+        coefficient_keys: [PropertyKey; 2],
+        hardness: [IndentationHardnessStatePoint; 2],
+        maximum_recession_m: [f64; 2],
+        local_axes: Option<LocalWearAxes>,
+    ) -> Result<Self, SourcePlasticWearError> {
         let original = contact.normal_source().interface_state();
         if coefficients.card_identity() != original.card_identity()
             || coefficients.surface_materials() != original.surface_materials()
-            || coefficients.query_point() != original.query_point()
-            || coefficients.axis_quantities() != original.axis_quantities()
         {
             return Err(invalid(
                 "wear requires the original ordered interface and fixed query",
             ));
         }
+        let owned = if let Some(axes) = &local_axes {
+            axes.admit(&coefficients, original)?;
+            axes.owned()
+        } else {
+            if coefficients.query_point() != original.query_point()
+                || coefficients.axis_quantities() != original.axis_quantities()
+            {
+                return Err(invalid("wear requires the original fixed interface query"));
+            }
+            Vec::new()
+        };
         let elastic = contact.normal_source().elastic();
         let bulk = [
             elastic.surface_a_state().resolved(),
@@ -227,7 +289,7 @@ impl SourcePlasticArchardWear {
             if coefficient_keys[side].quantity() != QuantitySpec::dimensional(Dims::NONE)
                 || !k.value_si().is_finite()
                 || k.value_si() < 0.0
-                || !k.is_static_at_fixed_external_conditions()
+                || !k.has_only_owned_coordinates_and_fixed_external_conditions(&owned)
                 || !hardness[side]
                     .property()
                     .is_static_at_fixed_external_conditions()
@@ -237,7 +299,7 @@ impl SourcePlasticArchardWear {
                 || h.axis_quantities() != bulk[side].axis_quantities()
             {
                 return Err(invalid(
-                    "wear requires static original k and ordered typed indentation hardness",
+                    "wear requires original k with only owned coordinates and ordered typed indentation hardness",
                 ));
             }
             if !maximum_recession_m[side].is_finite() || maximum_recession_m[side] < 0.0 {
@@ -260,10 +322,20 @@ impl SourcePlasticArchardWear {
             hash.update(hardness[side].identity().as_bytes());
             hash.update(&maximum_recession_m[side].to_bits().to_le_bytes());
         }
+        if let Some(axes) = &local_axes {
+            hash.update(b"local-pressure-speed-coefficients-v1");
+            for axis in [&axes.pressure, &axes.sliding_speed] {
+                hash.update(&[u8::from(axis.is_some())]);
+                let name = axis.as_deref().unwrap_or("");
+                hash.update(&(name.len() as u64).to_le_bytes());
+                hash.update(name.as_bytes());
+            }
+        }
         Ok(Self {
             contact,
             coefficients,
             coefficient_keys,
+            local_axes,
             hardness,
             laws,
             maximum_recession_m,
@@ -274,6 +346,10 @@ impl SourcePlasticArchardWear {
     /// Original hardness-limited normal owner.
     pub const fn contact(&self) -> &SourcePlasticContact {
         &self.contact
+    }
+    /// Exact local coordinates this owner evolves when querying wear claims.
+    pub const fn local_coefficient_axes(&self) -> Option<&LocalWearAxes> {
+        self.local_axes.as_ref()
     }
     /// Complete original coefficient receipt.
     pub const fn coefficient_source(&self) -> &ResolvedInterfaceStatePoint {
@@ -354,24 +430,57 @@ impl SourcePlasticArchardWear {
         local_unsigned_slip_m: &[f64],
         cx: &Cx<'_>,
     ) -> Result<SourcePlasticWearAdvance, SourcePlasticWearError> {
-        self.advance_wear_with_recession(before, local_unsigned_slip_m, cx, |increment| {
-            let geometry = self
-                .contact
-                .model()
-                .recede(&before.contact.contact, increment, cx)
-                .map_err(SourcePlasticContactError::from)?;
-            Ok((geometry, ()))
-        })
+        self.advance_wear_over_interval(before, local_unsigned_slip_m, None, cx)
+    }
+
+    /// Remove material over a supplied positive physical interval.
+    ///
+    /// Speed-dependent claims use `unsigned actual slip / duration` separately
+    /// at every loaded sliding cell. This held mean-speed quadrature requires
+    /// refinement when local pressure, speed, or temperature changes within a
+    /// step. Detached and sticking cells remove nothing without a source query.
+    pub fn advance_wear_during(
+        &self,
+        before: &SourcePlasticWearState,
+        local_unsigned_slip_m: &[f64],
+        duration_s: f64,
+        cx: &Cx<'_>,
+    ) -> Result<SourcePlasticWearAdvance, SourcePlasticWearError> {
+        self.advance_wear_over_interval(before, local_unsigned_slip_m, Some(duration_s), cx)
+    }
+
+    fn advance_wear_over_interval(
+        &self,
+        before: &SourcePlasticWearState,
+        local_unsigned_slip_m: &[f64],
+        duration_s: Option<f64>,
+        cx: &Cx<'_>,
+    ) -> Result<SourcePlasticWearAdvance, SourcePlasticWearError> {
+        self.advance_wear_during_with_recession(
+            before,
+            local_unsigned_slip_m,
+            duration_s,
+            cx,
+            |increment| {
+                let geometry = self
+                    .contact
+                    .model()
+                    .recede(&before.contact.contact, increment, cx)
+                    .map_err(SourcePlasticContactError::from)?;
+                Ok((geometry, ()))
+            },
+        )
         .map(|(advance, ())| advance)
     }
 
     // The native boundary condition changes the equilibrium solve, not the
     // Archard law, source ownership, volume/profile accounting, or admissibility.
     // A trial geometry is accepted only with the complete per-body inventory.
-    fn advance_wear_with_recession<T>(
+    fn advance_wear_during_with_recession<T>(
         &self,
         before: &SourcePlasticWearState,
         local_unsigned_slip_m: &[f64],
+        duration_s: Option<f64>,
         cx: &Cx<'_>,
         equilibrate: impl FnOnce(
             &[f64],
@@ -390,6 +499,8 @@ impl SourcePlasticArchardWear {
                 "finite nonnegative local slip at every original cell",
             ));
         }
+        let sampled =
+            self.sample_local_coefficients(pressure, local_unsigned_slip_m, duration_s, cx)?;
         let grid = self.contact.model().config().grid;
         let area = grid.cell_width_m * grid.cell_depth_m;
         let mut increment = [vec![0.0; pressure.len()], vec![0.0; pressure.len()]];
@@ -409,12 +520,15 @@ impl SourcePlasticArchardWear {
                 return Err(invalid("finite pressure-weighted local sliding"));
             }
             // Compensated summation protects heterogeneous pressure/sliding
-            // fields without querying source cards or allocating provenance per cell.
+            // fields. Equal local source queries share their original receipts.
             add_compensated(&mut measure, &mut compensation, cell_measure);
             for side in 0..2 {
-                let depth = (self.laws[side].wear_coefficient
-                    * (p / self.hardness[side].hardness_pa()))
-                    * slip;
+                let coefficient = sampled
+                    .as_ref()
+                    .map_or(self.laws[side].wear_coefficient, |local| {
+                        local.coefficient(side, index)
+                    });
+                let depth = (coefficient * (p / self.hardness[side].hardness_pa())) * slip;
                 let old = recession[side][index];
                 let total = old + depth;
                 let retained_increment = total - old;
@@ -468,19 +582,53 @@ impl SourcePlasticArchardWear {
             .interface()
             .interface();
         let mut volumes = before.volumes;
-        let wear_a = self.laws[0].advance_pressure_weighted_sliding(
-            interface,
-            &mut volumes[0],
-            measure,
-            self.hardness[0].hardness_pa(),
-        )?;
-        let wear_b = self.laws[1].advance_pressure_weighted_sliding(
-            interface,
-            &mut volumes[1],
-            measure,
-            self.hardness[1].hardness_pa(),
-        )?;
-        let wear = [wear_a, wear_b];
+        let mut advance_volume = |side: usize| -> Result<WearAdvance, SourcePlasticWearError> {
+            if let Some(local) = &sampled {
+                let mut refusal = None;
+                let samples = pressure
+                    .iter()
+                    .zip(local_unsigned_slip_m)
+                    .enumerate()
+                    .scan((), |_, (cell, (&p, &slip))| {
+                        if cell % 64 == 0 {
+                            if let Err(error) = checkpoint(cx) {
+                                refusal = Some(error);
+                                return None;
+                            }
+                        }
+                        Some(local.receipt.cell_source_indices[cell].map(|slot| {
+                            LocalArchardSample {
+                                wear_coefficient: local.laws[slot][side].wear_coefficient,
+                                pressure_weighted_sliding_j: (p * area) * slip,
+                            }
+                        }))
+                    })
+                    .flatten();
+                let result = ArchardLaw::advance_local_pressure_weighted_sliding(
+                    interface,
+                    &mut volumes[side],
+                    samples,
+                    self.hardness[side].hardness_pa(),
+                );
+                // The inventory is still private. A cancelled iterator may
+                // not publish its partial native quadrature as an accepted step.
+                if let Some(error) = refusal {
+                    Err(error)
+                } else {
+                    result.map_err(Into::into)
+                }
+            } else {
+                self.laws[side]
+                    .advance_pressure_weighted_sliding(
+                        interface,
+                        &mut volumes[side],
+                        measure,
+                        self.hardness[side].hardness_pa(),
+                    )
+                    .map_err(Into::into)
+            }
+        };
+        let wear = [advance_volume(0)?, advance_volume(1)?];
         for side in 0..2 {
             let scalar = wear[side].increment_m3;
             let retained_volume = volumes[side].volume_m3() - before.volumes[side].volume_m3();
@@ -527,6 +675,7 @@ impl SourcePlasticArchardWear {
             wear,
             recession_increment_m: increment,
             pressure_weighted_sliding_j: measure,
+            coefficient_samples: sampled.map(|local| local.receipt),
             receipt: geometry.receipt,
         };
         Ok((advance, boundary_response))

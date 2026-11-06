@@ -7,7 +7,7 @@ use fs_tribo::{
     ApplicabilityRange, ArchardLaw, ContactFrame, DryFrictionApplicability, DryFrictionState,
     DryInterfaceSystemCard, FlashTemperatureEstimate, FlashTemperatureInput,
     FlashTemperatureUnknown, FrictionLaw, FrictionRegime, HeatPartition, HertzCylinderPlane,
-    HertzSpherePlane, InputAuthority, InterfaceMedium, InterfaceSystemRef,
+    HertzSpherePlane, InputAuthority, InterfaceMedium, InterfaceSystemRef, LocalArchardSample,
     SurfaceThermalProperties, TangentialSlip, TriboError, WearState, WorkLedger,
     flash_temperature_candidate,
 };
@@ -142,6 +142,59 @@ fn g3_reversal_scaling_and_replay_are_deterministic() {
             .unwrap();
     }
     assert_eq!(first, second);
+}
+
+#[test]
+fn local_archard_coefficients_integrate_one_original_inventory_atomically() {
+    let samples = [
+        LocalArchardSample {
+            wear_coefficient: 2.0e-6,
+            pressure_weighted_sliding_j: 20.0,
+        },
+        LocalArchardSample {
+            wear_coefficient: 6.0e-6,
+            pressure_weighted_sliding_j: 5.0,
+        },
+    ];
+    let mut state = WearState::new(4.0e-12).unwrap();
+    let original = state;
+    let result = ArchardLaw::advance_local_pressure_weighted_sliding(
+        &interface(),
+        &mut state,
+        samples,
+        2.0e9,
+    )
+    .unwrap();
+    let expected = (2.0e-6 * 20.0 + 6.0e-6 * 5.0) / 2.0e9;
+    assert!((result.increment_m3 / expected - 1.0).abs() < 1.0e-14);
+    assert!((state.volume_m3() - original.volume_m3() - expected).abs() < 1.0e-27);
+    assert_eq!(
+        result.provenance().authority(),
+        InputAuthority::SyntheticFixture
+    );
+    let accepted = state;
+    let invalid = [
+        samples[0],
+        LocalArchardSample {
+            wear_coefficient: -1.0,
+            ..samples[1]
+        },
+    ];
+    assert!(
+        ArchardLaw::advance_local_pressure_weighted_sliding(
+            &interface(),
+            &mut state,
+            invalid,
+            2.0e9
+        )
+        .is_err()
+    );
+    assert_eq!(state, accepted);
+    let empty =
+        ArchardLaw::advance_local_pressure_weighted_sliding(&interface(), &mut state, [], 2.0e9)
+            .unwrap();
+    assert_eq!(empty.increment_m3, 0.0);
+    assert_eq!(state, accepted);
 }
 
 #[test]

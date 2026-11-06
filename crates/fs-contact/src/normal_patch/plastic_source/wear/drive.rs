@@ -82,18 +82,63 @@ impl SourcePlasticArchardWear {
         controls: FiniteGapPlasticLoadControls,
         cx: &Cx<'_>,
     ) -> Result<SourcePlasticWearDriveAdvance, SourcePlasticWearError> {
+        self.advance_wear_with_drive_over_interval(
+            before,
+            local_unsigned_slip_m,
+            None,
+            drive,
+            controls,
+            cx,
+        )
+    }
+
+    /// Retain the loading spring while sampling wear at actual local mean speed.
+    /// The positive duration belongs to the supplied irreversible sliding path.
+    pub fn advance_wear_with_drive_during(
+        &self,
+        before: &SourcePlasticWearState,
+        local_unsigned_slip_m: &[f64],
+        duration_s: f64,
+        drive: FiniteGapPlasticDrive,
+        controls: FiniteGapPlasticLoadControls,
+        cx: &Cx<'_>,
+    ) -> Result<SourcePlasticWearDriveAdvance, SourcePlasticWearError> {
+        self.advance_wear_with_drive_over_interval(
+            before,
+            local_unsigned_slip_m,
+            Some(duration_s),
+            drive,
+            controls,
+            cx,
+        )
+    }
+
+    fn advance_wear_with_drive_over_interval(
+        &self,
+        before: &SourcePlasticWearState,
+        local_unsigned_slip_m: &[f64],
+        duration_s: Option<f64>,
+        drive: FiniteGapPlasticDrive,
+        controls: FiniteGapPlasticLoadControls,
+        cx: &Cx<'_>,
+    ) -> Result<SourcePlasticWearDriveAdvance, SourcePlasticWearError> {
         self.admit(before)?;
         checkpoint(cx)?;
         self.contact.admit_load_controls(controls)?;
-        let (wear, drive) =
-            self.advance_wear_with_recession(before, local_unsigned_slip_m, cx, |increment| {
+        let (wear, drive) = self.advance_wear_during_with_recession(
+            before,
+            local_unsigned_slip_m,
+            duration_s,
+            cx,
+            |increment| {
                 let response = self
                     .contact
                     .model()
                     .recede_with_drive(&before.contact.contact, increment, drive, controls, cx)
                     .map_err(SourcePlasticDriveError::from)?;
                 Ok((response.continuation, response.drive))
-            })?;
+            },
+        )?;
         Ok(SourcePlasticWearDriveAdvance { wear, drive })
     }
 

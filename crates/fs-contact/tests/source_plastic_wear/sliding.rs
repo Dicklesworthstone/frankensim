@@ -3,6 +3,9 @@
 #[path = "sliding/temperature.rs"]
 mod temperature;
 
+#[path = "sliding/coefficients.rs"]
+mod coefficients;
+
 use super::*;
 use fs_contact::interface_binding::thermal_friction::{
     SourceThermalCoulomb, SourceThermalCoulombError, ThermalFrictionAxes,

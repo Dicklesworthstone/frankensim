@@ -3441,3 +3441,24 @@ step. Independent one-cell force/spring balances, preserved unloading history,
 mixed elastic/plastic finite differences in all three native solver lanes,
 opening/unloading refusals, receipt mismatch and cancellation specify the
 G0/G1/G3 numerical-model coverage.
+
+### Local wear coefficients at actual pressure and sliding speed
+
+`SourcePlasticArchardWear::new_with_local_coefficients` retains separate original
+A/B wear claims and indentation-hardness tests while owning explicitly typed
+local pressure and irreversible mean-speed coordinates. The native Coulomb
+solve supplies actual slip divided by the physical interval. Released motion
+cannot replace that speed. Timed wear steps support held approach, maintained
+force and finite loading springs; the coupled thermal path supplies its own
+actual duration and original interface temperature. Existing source curves and
+supported surfaces select k; no trivariate interpolation or wear calibration is
+invented. Every body retains its own measured H in the denominator.
+
+Equal local queries share original receipts within a step. Detached/sticking
+cells remove nothing without asserting coefficient coverage at zero speed.
+Unsupported loaded sliding conditions refuse transactionally. Native compensated
+heterogeneous Archard quadrature and geometric recession must close to the same
+original per-body inventory. Static coefficients retain their existing fast
+path. Temperature continuation keeps the original selected claims, coordinate
+ownership and mechanical histories. This is held-condition quadrature requiring
+physical refinement, not an inferred wear-regime transition or debris model.
