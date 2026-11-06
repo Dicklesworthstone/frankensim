@@ -33,6 +33,8 @@ use fs_solver::CheckedCgConfig;
 
 #[path = "brittle_tet_fragment_contact/approach.rs"]
 mod approach;
+#[path = "brittle_tet_fragment_contact/sustained.rs"]
+mod sustained;
 #[path = "brittle_tet_fragment_contact/time.rs"]
 mod time;
 

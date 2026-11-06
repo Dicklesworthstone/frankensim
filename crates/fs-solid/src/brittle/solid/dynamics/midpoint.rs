@@ -119,6 +119,34 @@ impl<'a> BrittleTetMotion<'a> {
         controls: BrittleTetMidpointControls,
         cx: &Cx<'_>,
     ) -> Result<BrittleTetMidpointStep<'a>, BrittleTetDynamicError> {
+        let step = self.midpoint_candidate(
+            dt_s,
+            prescribed_m,
+            mean_nodal_forces_n,
+            settings,
+            controls,
+            cx,
+        )?;
+        self.solid
+            .require_released_faces(&step.motion.solid.solution.displacement_m, cx)?;
+        checkpoint(cx)?;
+        Ok(step)
+    }
+
+    /// Unpublished response for the native sustained-contact force solve.
+    /// Only released-face opening admission is deferred: signed force probes
+    /// may overlap before complementarity is solved. Every material, source,
+    /// history, inertia and work gate remains identical to public midpoint.
+    /// The receiving contact owner must admit all openings before publication.
+    pub(in crate::brittle::solid::dynamics) fn midpoint_candidate(
+        &self,
+        dt_s: f64,
+        prescribed_m: &[(usize, f64)],
+        mean_nodal_forces_n: &[(usize, f64)],
+        settings: IncrementSettings,
+        controls: BrittleTetMidpointControls,
+        cx: &Cx<'_>,
+    ) -> Result<BrittleTetMidpointStep<'a>, BrittleTetDynamicError> {
         checkpoint(cx)?;
         if self.accepted_steps >= self.maximum_steps {
             return Err(BrittleTetDynamicError::StepBudget {
@@ -289,8 +317,6 @@ impl<'a> BrittleTetMotion<'a> {
                 "midpoint must retain physical nonnegative energy without numerical kinetic loss",
             ));
         }
-        self.solid
-            .require_released_faces(&solution.displacement_m, cx)?;
         let solid = BrittleTetSolid {
             geometry: self.solid.geometry,
             materials: self.solid.materials,

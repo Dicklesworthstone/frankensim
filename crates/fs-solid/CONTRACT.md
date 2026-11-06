@@ -1,5 +1,50 @@
 # fs-solid CONTRACT
 
+## Sustained contact between native brittle fragments
+
+`BrittleTetMotion::advance_released_face_sustained` solves simultaneous
+frictionless normal forces through the original nonlinear brittle midpoint,
+using `fs_contact::sustained::solve`. Every force response starts from the same
+accepted material history, frozen consistent mass and physical clock. The
+shared contact owner retains its Newton–Krylov/FGMRES, native force-response
+differentiation, final replay and force-space feasibility admission. All
+non-tied released pairs participate within its explicit 21-contact hard cap.
+The numerical normal-map scale supplies conditioning only, with no physical
+spring, compliance, stored energy or impulse-to-force conversion.
+
+A private midpoint candidate seam defers only released-face opening admission
+during unpublished signed-force probes. Every original material/source,
+constitutive history, inertia, Newton and work gate still runs. Public midpoint
+retains its original opening guard. Only the final freshly replayed contact
+candidate, independently checked for strict nonnegative actual gaps and normal
+forces, can publish one physical motion step. The zero-friction embedding uses
+only normal loads and requires exactly zero final algebraic tangent forces.
+
+Loaded pairs must remain active, normally at rest and tangentially matched at
+both ends of the native affine displacement trace. Approaching impacts,
+open-to-loaded arrivals and unresolved modes refuse instead of receiving
+fictitious contact damping. Unloaded pairs may separate. Independent gates
+check normal force-gap complementarity at both endpoints, signed and absolute
+per-pair normal work, nodal/paired work agreement, the native applied-load work
+split, internal resultant force and the sum of absolute pair force couples.
+Normal contact work remains bounded numerical work, not fracture loss or heat.
+
+The result retains both the original total-load midpoint receipt and an
+external-load-only receipt including native support reaction work. Original
+compressive material response, source ownership, cumulative fracture loss and
+reference matter remain present. An optional private normal-force seed supports
+subsequent numerical solves without becoming physical history. Trial response,
+contact-space and native solid budgets stay explicit; refusal/cancellation
+leaves the predecessor unchanged. This is fixed-pair, small-strain normal dwell
+and release, not finite sliding, friction, new-pair discovery, global continuous
+collision detection or a continuous-trajectory accuracy certificate.
+
+G1/G3 regressions in `tests/brittle_tet_fragment_contact/sustained.rs` use
+independent consistent-P1 mass and compressive stiffness calculations for closed
+loaded motion, retained elastic storage after fracture, outward release, moving
+support work and bounded atomic refusal/retry. Their compression branch prevents
+a mass-only or rigid-fragment replacement from satisfying the mechanics checks.
+
 ## Complete brittle-fragment time intervals through impact
 
 `BrittleTetMotion::advance_released_face_time` composes the original native

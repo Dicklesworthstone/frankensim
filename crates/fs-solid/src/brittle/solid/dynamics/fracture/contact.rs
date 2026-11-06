@@ -11,6 +11,9 @@
 /// Bounded native midpoint prefixes locating approaching released-face events.
 pub mod approach;
 
+/// Native nonlinear midpoint motion with sustained unilateral normal forces.
+pub mod sustained;
+
 /// Complete native physical intervals through simultaneous released-face impacts.
 pub mod time;
 
