@@ -4,6 +4,14 @@ use super::*;
 
 #[test]
 fn bdf2_material_rheology_preserves_endpoint_sources_pressure_and_instantaneous_heat() {
+    // The legacy equal-step entry and explicit equal/growing/shrinking
+    // intervals must all retain the same physical endpoint and source owners.
+    for previous_timestep_s in [None, Some(0.1), Some(0.05), Some(0.2)] {
+        check_bdf2_material_sources(previous_timestep_s);
+    }
+}
+
+fn check_bdf2_material_sources(previous_timestep_s: Option<f64>) {
     let mesh = TriMesh::from_mesh2(&Mesh2::triangles(1.0, 1.0, 2, 2));
     let system = FluxSystem::new(&mesh);
     let dt = 0.1;
@@ -35,7 +43,7 @@ fn bdf2_material_rheology_preserves_endpoint_sources_pressure_and_instantaneous_
         .collect();
     let older: Vec<_> = base_moments
         .iter()
-        .map(|u| amplitude(time - 2.0 * dt) * u)
+        .map(|u| amplitude(time - dt - previous_timestep_s.unwrap_or(dt)) * u)
         .collect();
     let snapshots = [previous.clone(), older.clone()];
     let target = |p| base(p).map(|u| scale * u);
@@ -90,30 +98,43 @@ fn bdf2_material_rheology_preserves_endpoint_sources_pressure_and_instantaneous_
         let reads = Rc::new(Cell::new(0));
         let mut first_rates = vec![None; mesh.tris.len()];
         let mut queries = 0;
-        let result = owner
-            .bdf2_navier_stokes_mixed_rheology_step(
+        let controls = NavierStokesControls {
+            relative_tolerance: 1e-10,
+            ..NavierStokesControls::default()
+        };
+        let resolve = |point: MaterialFluxRheologyPoint, retained: &FluidTransportState| {
+            assert_eq!(retained, &reference);
+            first_rates[point.cell].get_or_insert(point.shear_rate_per_s);
+            queries += 1;
+            Ok(RheologyResponse {
+                transport: transport(density, viscosity(point.shear_rate_per_s)),
+                point,
+                temperature_k: 310.0,
+                reads: Rc::clone(&reads),
+            })
+        };
+        let result = if let Some(previous_dt) = previous_timestep_s {
+            owner.bdf2_navier_stokes_mixed_rheology_variable_step(
+                &force,
+                &boundaries,
+                &previous,
+                Some((&older, previous_dt)),
+                dt,
+                controls,
+                resolve,
+            )
+        } else {
+            owner.bdf2_navier_stokes_mixed_rheology_step(
                 &force,
                 &boundaries,
                 &previous,
                 Some(&older),
                 dt,
-                NavierStokesControls {
-                    relative_tolerance: 1e-10,
-                    ..NavierStokesControls::default()
-                },
-                |point, retained| {
-                    assert_eq!(retained, &reference);
-                    first_rates[point.cell].get_or_insert(point.shear_rate_per_s);
-                    queries += 1;
-                    Ok(RheologyResponse {
-                        transport: transport(density, viscosity(point.shear_rate_per_s)),
-                        point,
-                        temperature_k: 310.0,
-                        reads: Rc::clone(&reads),
-                    })
-                },
+                controls,
+                resolve,
             )
-            .unwrap();
+        }
+        .unwrap();
         let solution = &result.step.solution;
         let (error, divergence) = system.velocity_error(&solution.discrete().x, &target);
         assert!(error < 3e-9 && divergence < 3e-9, "{error}, {divergence}");
@@ -449,6 +470,44 @@ fn mixed_material_rheology_preserves_endpoint_source_errors_and_history() {
     );
     assert!(matches!(result, Err(MaterialFluxError::Material(error)) if error == refusal));
     assert!(queries > mesh.tris.len() && queries <= 2 * mesh.tris.len());
+    queries = 0;
+    let result = owner.bdf2_navier_stokes_mixed_rheology_variable_step(
+        &zero_force,
+        &boundaries,
+        &previous,
+        Some((&older, 0.2)),
+        0.1,
+        controls,
+        |point, _| {
+            queries += 1;
+            if point.shear_rate_per_s > 1e-6 {
+                Err(refusal.clone())
+            } else {
+                Ok(reference)
+            }
+        },
+    );
+    assert!(matches!(result, Err(MaterialFluxError::Material(error)) if error == refusal));
+    assert!(queries > mesh.tris.len() && queries <= 2 * mesh.tris.len());
+    for previous_dt in [0.0, 0.04] {
+        let result = owner.bdf2_navier_stokes_mixed_rheology_variable_step(
+            &zero_force,
+            &boundaries,
+            &previous,
+            Some((&older, previous_dt)),
+            0.1,
+            controls,
+            |_, _| -> Result<FluidTransportState, MaterialError> {
+                panic!("inadmissible variable timestep queried the material source")
+            },
+        );
+        assert!(matches!(
+            result,
+            Err(MaterialFluxError::Boundary(
+                StokesBoundaryError::InvalidInput(_)
+            ))
+        ));
+    }
     let invalid_older = vec![f64::NAN; system.n_u];
     let result = owner.bdf2_navier_stokes_mixed_rheology_step(
         &zero_force,

@@ -1743,6 +1743,16 @@ the nonlinear loop; the frozen-viscosity entries perform no strain queries.
 The original mixed traction/slip/reservoir policies, endpoint residual checks
 and immutable-history refusal semantics remain authoritative.
 
+The material `bdf2_navier_stokes_mixed_variable_step` and
+`bdf2_navier_stokes_mixed_rheology_variable_step` bind those same unequal
+intervals to the original physical density, dynamic viscosity, force density
+and traction units. Accepted source responses remain attached to the endpoint;
+reporting preserves physical pressure, kinetic energy and instantaneous
+viscous dissipation without requerying material. Changed density or an original
+source failure refuses the complete step. The focused material regressions use
+quadratic-time affine flow with increasing and decreasing intervals, distinct
+densities, exact pressure/heat, original-history strain and final-source refusal.
+
 The focused `navier_stokes_rheology.rs` regressions under `tests/stokes_boundary`
 and `tests/material_flow` add an independently derived affine unsteady flow
 with nonzero history, live convection and shear-dependent spatial viscosity;

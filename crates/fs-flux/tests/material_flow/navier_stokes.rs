@@ -184,3 +184,110 @@ fn steady_material_flow_has_live_convection_and_no_initial_history_load() {
         }
     }
 }
+
+#[test]
+fn variable_step_material_flow_retains_physical_pressure_inertia_and_heat() {
+    let mesh = TriMesh::from_mesh2(&Mesh2::triangles(1.0, 1.0, 2, 2));
+    let system = FluxSystem::new(&mesh);
+    let dt = 0.1;
+    let time = 0.3;
+    let amplitude = |t: f64| 1.0 + 0.2 * t + 0.3 * t * t;
+    let scale = amplitude(time);
+    let base = |point: [f64; 2]| [0.4 + 0.3 * point[1], 0.1];
+    let target = |point| base(point).map(|u| scale * u);
+    let base_moments: Vec<_> = mesh
+        .edges
+        .iter()
+        .flat_map(|edge| {
+            let u = base(edge.mid);
+            let dy = mesh.verts[edge.verts.1][1] - mesh.verts[edge.verts.0][1];
+            [
+                u[0] * edge.normal[0] + u[1] * edge.normal[1],
+                0.3 * dy * edge.normal[0] / 12.0,
+            ]
+        })
+        .collect();
+    let previous: Vec<_> = base_moments
+        .iter()
+        .map(|u| amplitude(time - dt) * u)
+        .collect();
+    for previous_dt in [0.05, 0.2] {
+        let older: Vec<_> = base_moments
+            .iter()
+            .map(|u| amplitude(time - dt - previous_dt) * u)
+            .collect();
+        let snapshots = [previous.clone(), older.clone()];
+        for density in [2.0, 7.0] {
+            let mu = 0.4;
+            let source = transport(density, mu);
+            let owner =
+                MaterialFluxSystem::new(&system, &source, MaterialFluxNumerics::default()).unwrap();
+            let force = |point| {
+                let v = base(point);
+                [
+                    density * ((0.2 + 0.6 * time) * v[0] + 0.03 * scale * scale) + 2.0,
+                    density * (0.2 + 0.6 * time) * v[1] - 3.0,
+                ]
+            };
+            let traction = |point: [f64; 2], normal: [f64; 2]| {
+                let pressure = 7.0 + 2.0 * point[0] - 3.0 * point[1];
+                [
+                    -pressure * normal[0] + 0.3 * scale * mu * normal[1],
+                    0.3 * scale * mu * normal[0] - pressure * normal[1],
+                ]
+            };
+            let boundaries: Vec<_> = mesh
+                .edges
+                .iter()
+                .enumerate()
+                .filter(|(edge, _)| mesh.is_boundary(*edge))
+                .map(|(edge, geometry)| {
+                    if geometry.normal[0].abs() > 0.5 {
+                        MaterialNavierStokesBoundary::Open {
+                            edge,
+                            traction: &traction,
+                            backflow: OpenBoundaryPolicy::NaturalTraction,
+                        }
+                    } else {
+                        MaterialNavierStokesBoundary::Velocity {
+                            edge,
+                            value: &target,
+                        }
+                    }
+                })
+                .collect();
+            let result = owner
+                .bdf2_navier_stokes_mixed_variable_step(
+                    &force,
+                    &boundaries,
+                    &previous,
+                    Some((&older, previous_dt)),
+                    dt,
+                    NavierStokesControls {
+                        relative_tolerance: 1e-10,
+                        ..NavierStokesControls::default()
+                    },
+                )
+                .unwrap();
+            let solution = &result.solution;
+            let (error, divergence) = system.velocity_error(&solution.discrete().x, &target);
+            assert!(error < 3e-9 && divergence < 3e-9, "{error}, {divergence}");
+            for (pressure, point) in solution.pressure_pa().iter().zip(&mesh.centroids) {
+                near(*pressure, 7.0 + 2.0 * point[0] - 3.0 * point[1], 4e-8);
+            }
+            near(
+                solution.kinetic_energy_j_per_m(),
+                0.16 * density * scale * scale,
+                4e-8,
+            );
+            near(
+                solution.viscous_dissipation().total_power_w_per_m(),
+                mu * 0.09 * scale * scale,
+                4e-8,
+            );
+            assert_eq!(solution.transport(), &source);
+            assert_eq!(previous, snapshots[0]);
+            assert_eq!(older, snapshots[1]);
+        }
+    }
+}
