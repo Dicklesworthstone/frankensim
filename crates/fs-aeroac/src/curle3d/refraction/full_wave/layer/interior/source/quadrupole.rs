@@ -31,6 +31,9 @@ use crate::observation::HarmonicFieldLine;
 use core::f64::consts::{PI, SQRT_2, TAU};
 use fs_math::{c64::C64, det};
 
+/// Coherent, statistically specified and recorded original inside-layer stress arrays.
+pub mod array;
+
 /// Applicability of the original physical layer stress and exterior field.
 pub const FULL_WAVE_INTERIOR_SOURCE_QUADRUPOLE_SCOPE: &str = "Prescribed stationary \
 symmetric 3D Lighthill stress moment [N m] strictly inside the original finite \
