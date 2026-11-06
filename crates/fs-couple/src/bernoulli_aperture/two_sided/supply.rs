@@ -129,7 +129,7 @@ impl TwoSidedAperture {
     /// the channel time step must exactly match the valve clock.
     ///
     /// The supplied channel must have fixed walls and StaticPressure terminals.
-    /// Its declared planar or circular, incompressible, fully developed scope remains; this
+    /// Its declared planar, circular or annular fully developed scope remains; this
     /// does not attach the fixed mesh to a closing or spatially varying reed gap.
     #[allow(clippy::too_many_arguments)]
     pub fn with_supply_channel(

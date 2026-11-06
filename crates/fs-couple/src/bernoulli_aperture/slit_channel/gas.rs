@@ -90,8 +90,8 @@ impl SlitChannel {
 
 impl FixedChannel {
     /// Native momentum-preserving gas transfer on the actual section geometry.
-    /// Uses the same atomic source/work semantics as `SlitChannel` and
-    /// `CircularChannel`; no hydraulic-diameter or lumped-inertance replacement.
+    /// Uses the same atomic source/work semantics for planar, circular and
+    /// annular fields; no hydraulic-diameter or lumped-inertance replacement.
     pub fn rebind_gas_controlled(
         &mut self,
         gas: &GasState,
@@ -103,6 +103,9 @@ impl FixedChannel {
                 channel.rebind_gas_controlled(gas, maximum_absolute_parameter_work_j, cancelled)
             }
             Self::Circular(channel) => {
+                channel.rebind_gas_controlled(gas, maximum_absolute_parameter_work_j, cancelled)
+            }
+            Self::Annular(channel) => {
                 channel.rebind_gas_controlled(gas, maximum_absolute_parameter_work_j, cancelled)
             }
         }

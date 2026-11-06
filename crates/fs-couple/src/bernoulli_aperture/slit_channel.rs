@@ -132,15 +132,17 @@ pub struct SlitChannel {
     profile: MomentumProfile,
 }
 
-/// Explicit cross-section of one fixed material-gas passage. Both variants
-/// share the same finite-volume momentum, pressure condensation and energy
-/// owner; their actual geometry is retained instead of a hydraulic-diameter fit.
+/// Explicit cross-section of one fixed material-gas passage. Every variant
+/// retains its actual finite-volume areas and no-slip faces in the shared
+/// momentum, pressure condensation and energy owner.
 #[derive(Debug, Clone)]
 pub enum FixedChannel {
     /// Parallel, planar, no-slip walls.
     Slit(SlitChannel),
     /// Axisymmetric circular no-slip wall, with symmetry at the axis.
     Circular(circular::CircularChannel),
+    /// Concentric annulus with independent inner and outer no-slip walls.
+    Annular(annular::AnnularChannel),
 }
 impl From<SlitChannel> for FixedChannel {
     fn from(value: SlitChannel) -> Self { Self::Slit(value) }
@@ -148,11 +150,17 @@ impl From<SlitChannel> for FixedChannel {
 impl From<circular::CircularChannel> for FixedChannel {
     fn from(value: circular::CircularChannel) -> Self { Self::Circular(value) }
 }
+impl From<annular::AnnularChannel> for FixedChannel {
+    fn from(value: annular::AnnularChannel) -> Self { Self::Annular(value) }
+}
 impl From<&SlitChannel> for FixedChannel {
     fn from(value: &SlitChannel) -> Self { Self::Slit(value.clone()) }
 }
 impl From<&circular::CircularChannel> for FixedChannel {
     fn from(value: &circular::CircularChannel) -> Self { Self::Circular(value.clone()) }
+}
+impl From<&annular::AnnularChannel> for FixedChannel {
+    fn from(value: &annular::AnnularChannel) -> Self { Self::Annular(value.clone()) }
 }
 impl From<&FixedChannel> for FixedChannel {
     fn from(value: &FixedChannel) -> Self { value.clone() }
@@ -165,39 +173,77 @@ impl FixedChannel {
         match self {
             Self::Slit(value) => value.continuous_operator(),
             Self::Circular(value) => value.continuous_operator(),
+            Self::Annular(value) => value.continuous_operator(),
         }
     }
     /// Original planar field when the supplied geometry is a slit.
     pub const fn slit(&self) -> Option<&SlitChannel> {
-        match self { Self::Slit(v) => Some(v), Self::Circular(_) => None }
+        match self {
+            Self::Slit(v) => Some(v),
+            Self::Circular(_) | Self::Annular(_) => None,
+        }
     }
-    /// Original annular field when the supplied geometry is circular.
+    /// Original circular field when the supplied geometry has a symmetry axis.
     pub const fn circular(&self) -> Option<&circular::CircularChannel> {
-        match self { Self::Circular(v) => Some(v), Self::Slit(_) => None }
+        match self {
+            Self::Circular(v) => Some(v),
+            Self::Slit(_) | Self::Annular(_) => None,
+        }
+    }
+    /// Original annular field, including both actual radii and material walls.
+    pub const fn annular(&self) -> Option<&annular::AnnularChannel> {
+        match self {
+            Self::Annular(v) => Some(v),
+            Self::Slit(_) | Self::Circular(_) => None,
+        }
     }
     /// Original complete material state; no caller-owned density override.
     pub const fn gas(&self) -> &GasState {
-        match self { Self::Slit(v) => v.gas(), Self::Circular(v) => v.gas() }
+        match self {
+            Self::Slit(v) => v.gas(),
+            Self::Circular(v) => v.gas(),
+            Self::Annular(v) => v.gas(),
+        }
     }
     /// One unchanged physical integration period [s].
     pub const fn sample_period_s(&self) -> f64 {
-        match self { Self::Slit(v) => v.spec.sample_period_s, Self::Circular(v) => v.spec().sample_period_s }
+        match self {
+            Self::Slit(v) => v.spec.sample_period_s,
+            Self::Circular(v) => v.spec().sample_period_s,
+            Self::Annular(v) => v.spec().sample_period_s,
+        }
     }
     /// Original accepted transverse velocity field.
     pub fn velocities_m_s(&self) -> &[f64] {
-        match self { Self::Slit(v) => v.velocities_m_s(), Self::Circular(v) => v.velocities_m_s() }
+        match self {
+            Self::Slit(v) => v.velocities_m_s(),
+            Self::Circular(v) => v.velocities_m_s(),
+            Self::Annular(v) => v.velocities_m_s(),
+        }
     }
     /// Original accepted fluid work and storage account.
     pub const fn last_step(&self) -> SlitChannelStep {
-        match self { Self::Slit(v) => v.last_step(), Self::Circular(v) => v.last_step() }
+        match self {
+            Self::Slit(v) => v.last_step(),
+            Self::Circular(v) => v.last_step(),
+            Self::Annular(v) => v.last_step(),
+        }
     }
     /// Current kinetic storage, including any zero-duration material transfer.
     pub const fn stored_energy_j(&self) -> f64 {
-        match self { Self::Slit(v) => v.stored_energy_j(), Self::Circular(v) => v.stored_energy_j() }
+        match self {
+            Self::Slit(v) => v.stored_energy_j(),
+            Self::Circular(v) => v.stored_energy_j(),
+            Self::Annular(v) => v.stored_energy_j(),
+        }
     }
     /// Exact next-step affine pressure boundary of the actual geometry.
     pub fn pressure_load(&self) -> Result<SlitChannelLoad, AcousticRealizeError> {
-        match self { Self::Slit(v) => v.pressure_load(), Self::Circular(v) => v.pressure_load() }
+        match self {
+            Self::Slit(v) => v.pressure_load(),
+            Self::Circular(v) => v.pressure_load(),
+            Self::Annular(v) => v.pressure_load(),
+        }
     }
     /// Added-mass part of [`Self::pressure_load`]'s impedance, rho L / (A dt) [Pa s/m^3].
     #[must_use]
@@ -205,6 +251,7 @@ impl FixedChannel {
         match self {
             Self::Slit(v) => v.inertial_impedance_pa_s_m3(),
             Self::Circular(v) => v.inertial_impedance_pa_s_m3(),
+            Self::Annular(v) => v.inertial_impedance_pa_s_m3(),
         }
     }
     /// Candidate original field at the common through-flow; no state publishes.
@@ -212,22 +259,28 @@ impl FixedChannel {
         match self {
             Self::Slit(v) => v.preview_at_flow(flow).map(Self::Slit),
             Self::Circular(v) => v.preview_at_flow(flow).map(Self::Circular),
+            Self::Annular(v) => v.preview_at_flow(flow).map(Self::Annular),
         }
     }
     /// Advance with the shared implicit field and work acceptance.
     pub fn step(&mut self, pressure: f64) -> Result<SlitChannelStep, AcousticRealizeError> {
-        match self { Self::Slit(v) => v.step(pressure), Self::Circular(v) => v.step(pressure) }
+        match self {
+            Self::Slit(v) => v.step(pressure),
+            Self::Circular(v) => v.step(pressure),
+            Self::Annular(v) => v.step(pressure),
+        }
     }
 
-    /// Common axial wall drive in lower/upper order for a slit, or axis/outer
-    /// order for a circle. The circular axis must have zero prescribed speed.
-    /// Geometry stays fixed; this is tangential motion, never a swept-volume law.
+    /// Axial wall drive in lower/upper order for a slit, inner/outer order for
+    /// an annulus, or axis/outer order for a circle. The circular axis must have
+    /// zero speed. Geometry stays fixed; no swept-volume law is inferred.
     pub fn step_with_wall_velocities(&mut self, pressure: f64, walls: [f64; 2])
         -> Result<SlitChannelStep, AcousticRealizeError>
     {
         match self {
             Self::Slit(v) => v.step_with_wall_velocities(pressure, walls),
             Self::Circular(v) => v.step_with_wall_velocities(pressure, walls),
+            Self::Annular(v) => v.step_with_wall_velocities(pressure, walls),
         }
     }
 
@@ -239,6 +292,7 @@ impl FixedChannel {
         match self {
             Self::Slit(v) => v.pressure_load_with_wall_velocities(walls),
             Self::Circular(v) => v.pressure_load_with_wall_velocities(walls),
+            Self::Annular(v) => v.pressure_load_with_wall_velocities(walls),
         }
     }
 

@@ -808,6 +808,12 @@ fn fixed_channel_provenance(
                 spec.length_m, spec.radius_m, spec.radial_cells,
                 channel.gas().density, channel.gas().dynamic_viscosity)
         }
+        fs_couple::bernoulli_aperture::slit_channel::FixedChannel::Annular(channel) => {
+            let spec = channel.spec();
+            format!("{{\"kind\":\"annular\",\"length_m\":{:e},\"inner_radius_m\":{:e},\"outer_radius_m\":{:e},\"radial_cells\":{},\"density_kg_m3\":{:e},\"viscosity_pa_s\":{:e}}}",
+                spec.length_m, spec.inner_radius_m, spec.outer_radius_m, spec.radial_cells,
+                channel.gas().density, channel.gas().dynamic_viscosity)
+        }
     })
 }
 

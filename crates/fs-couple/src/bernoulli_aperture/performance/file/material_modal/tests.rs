@@ -240,7 +240,10 @@ fn g3_a_heavy_circular_supply_is_refused_by_name_with_its_added_mass_ratio_and_r
 #[test]
 fn g0_circular_supply_malformed_geometry_refuses_before_material_loading() {
     for supply in ["circular 0.02 -0.0005 32", "circular 0.02 0.0005 1",
-        "circular 0.02 0.0005 4097", "circular 0.02 0.0005", "circular NaN 0.0005 32"] {
+        "circular 0.02 0.0005 4097", "circular 0.02 0.0005", "circular NaN 0.0005 32",
+        "annular 0.012 0 0.0006 32", "annular 0.012 0.0006 0.0002 32",
+        "annular 0.012 0.0002 0.0002 32", "annular 0.012 0.0002 0.0006 1",
+        "annular 0.012 0.0002 0.0006 4097", "annular 0.012 NaN 0.0006 32"] {
         let text = input().replace("supply none", &format!("supply {supply}"));
         assert!(MaterialModalValvePerformance::from_bytes_with_sources(text.as_bytes(), 37,
             &CancelGate::new_clock_free(), None,

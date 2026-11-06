@@ -380,3 +380,24 @@ G1/G4 definitions in spatial_transient/support_motion.rs cover analytic rigid
 inertia/reactions, independently condensed base-excited sensing, resistor and
 capacitor harvesting, and transactional refusals. Small-strain assumptions,
 source validity and temporal/spatial refinement obligations remain.
+
+## Annular no-slip supply passages
+
+`FixedChannel::Annular` carries the original `AnnularChannel` into the shared
+two-sided and DG-backed aperture supply connection. Both physical radii, all
+radial velocities, the inner and outer no-slip conductances, and the actual
+gas source survive the connection. Pressure condensation, stored fluid energy,
+physical viscous heat, numerical loss and gas-intervention work use the same
+native momentum owner as the standalone annulus. No equivalent circular
+radius or hydraulic-diameter resistance replaces the annular solution.
+
+The common channel API also retains independent axial inner/outer wall drive;
+coupled supply constructors retain their existing stationary-wall semantics.
+Geometry is fixed and concentric, the fluid is incompressible and Newtonian,
+and axial flow is fully developed. Rotating cylinders, normal wall motion,
+eccentricity, entrance effects and transition are outside this model.
+
+The existing DG supply startup/reversal/passive-release battery includes the
+annular geometry. `tests/annular_channel.rs` exercises momentum-preserving
+gas changes through the common channel API alongside the original analytic
+Poiseuille, logarithmic Couette and narrow-gap checks.

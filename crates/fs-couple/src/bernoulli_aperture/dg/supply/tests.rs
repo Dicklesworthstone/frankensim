@@ -3,6 +3,7 @@ use super::*;
 use crate::bernoulli_aperture::BernoulliAperture;
 use crate::bernoulli_aperture::dg::LoadedApertureDg;
 use crate::bernoulli_aperture::dynamic::{ApertureState, DynamicAperture, DynamicApertureSpec};
+use crate::bernoulli_aperture::slit_channel::annular::{AnnularChannel, AnnularChannelSpec};
 use crate::bernoulli_aperture::slit_channel::circular::{CircularChannel, CircularChannelSpec};
 use crate::bernoulli_aperture::slit_channel::{SlitChannel, SlitChannelSpec, SlitExit};
 use crate::bernoulli_aperture::tube::TubeDrive;
@@ -105,7 +106,7 @@ fn single(model: &LoadedApertureDg) -> &DynamicAperture {
 }
 
 #[test]
-fn both_channel_geometries_share_current_flow_and_work_and_release_passively() {
+fn all_channel_geometries_share_current_flow_and_work_and_release_passively() {
     let gas = gas(101325.0);
     let dt = 1.0 / 96000.0;
     let circular: FixedChannel = CircularChannel::from_gas(
@@ -120,7 +121,20 @@ fn both_channel_geometries_share_current_flow_and_work_and_release_passively() {
     )
     .unwrap()
     .into();
-    for channel in [slit(&gas, dt, 16).into(), circular] {
+    let annular: FixedChannel = AnnularChannel::from_gas(
+        &gas,
+        AnnularChannelSpec {
+            length_m: 0.004,
+            inner_radius_m: 0.0001,
+            outer_radius_m: 0.00025,
+            radial_cells: 16,
+            sample_period_s: dt,
+            exit: SlitExit::StaticPressure,
+        },
+    )
+    .unwrap()
+    .into();
+    for channel in [slit(&gas, dt, 16).into(), circular, annular] {
         for tract in [false, true] {
             let mut model = system(channel.clone(), tract);
             let mut reversed = false;

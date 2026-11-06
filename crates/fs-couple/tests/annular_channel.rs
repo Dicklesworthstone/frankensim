@@ -3,7 +3,7 @@
 //! Axial wall motion only; these tests do not qualify rotating-cylinder flow.
 
 use fs_couple::bernoulli_aperture::slit_channel::{
-    SlitChannel, SlitChannelSpec, SlitChannelStep, SlitExit,
+    FixedChannel, SlitChannel, SlitChannelSpec, SlitChannelStep, SlitExit,
     annular::{AnnularChannel, AnnularChannelSpec},
 };
 use fs_material::gas::{GasSpec, GasState};
@@ -279,7 +279,10 @@ fn annular_source_changes_preserve_momentum_and_refuse_atomically() {
     let ordinary = gas(1.0, 101_325.0);
     let dense = gas(1.0, 202_650.0);
     let viscous_dense = gas(2.0, 202_650.0);
-    let mut channel = AnnularChannel::from_gas(&ordinary, spec(ordinary, 32)).unwrap();
+    let mut channel: FixedChannel =
+        AnnularChannel::from_gas(&ordinary, spec(ordinary, 32)).unwrap().into();
+    assert_eq!(*channel.annular().unwrap().spec(), spec(ordinary, 32));
+    assert!(channel.slit().is_none() && channel.circular().is_none());
     for _ in 0..40 {
         channel.step(4.0).unwrap();
     }

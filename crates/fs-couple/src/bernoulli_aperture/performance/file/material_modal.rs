@@ -41,7 +41,9 @@
 //!
 //! `supply circular LENGTH_M RADIUS_M RADIAL_CELLS` selects a fixed cylindrical
 //! no-slip passage instead of `supply slit LENGTH_M WIDTH_M HEIGHT_M CELLS`.
-//! Both retain the same material-gas finite-volume momentum and work owner,
+//! `supply annular LENGTH_M INNER_RADIUS_M OUTER_RADIUS_M RADIAL_CELLS`
+//! retains a concentric inner cylinder and both physical no-slip walls.
+//! All three retain the same material-gas finite-volume momentum and work owner,
 //! with their actual section measures. The channel's flow inertia and shear
 //! feed back into both reeds and both ducts in the original accepted step.
 //! The fully developed laminar incompressible passage is additional geometry;
@@ -77,6 +79,7 @@ use crate::bernoulli_aperture::radiation::environment::BaffledOutletBinding;
 use crate::bernoulli_aperture::radiation::environment::multiport::input::MimoRadiationRecord;
 use crate::bernoulli_aperture::radiation::environment::multiport::source::ComputedBaffledRecord;
 use crate::bernoulli_aperture::slit_channel::{FixedChannel, SlitChannel, SlitChannelSpec, SlitExit};
+use crate::bernoulli_aperture::slit_channel::annular::{AnnularChannel, AnnularChannelSpec};
 use crate::bernoulli_aperture::slit_channel::circular::{CircularChannel, CircularChannelSpec};
 use crate::bernoulli_aperture::two_sided::{TwoSidedLimits, ValveSide, combined_inlet_state};
 use crate::bernoulli_aperture::two_sided::supply::combined_inlet_state_with_supply;
@@ -105,6 +108,7 @@ enum SupplyInput {
     None,
     Slit { length: f64, width: f64, height: f64, cells: usize },
     Circular { length: f64, radius: f64, cells: usize },
+    Annular { length: f64, inner_radius: f64, outer_radius: f64, cells: usize },
 }
 
 impl SupplyInput {
@@ -119,8 +123,12 @@ impl SupplyInput {
             "circular" => Self::Circular {
                 length: row.scalar()?, radius: row.scalar()?, cells: row.count(4096)?,
             },
+            "annular" => Self::Annular {
+                length: row.scalar()?, inner_radius: row.scalar()?,
+                outer_radius: row.scalar()?, cells: row.count(4096)?,
+            },
             _ => return Err(bad(row.line,
-                "supply must be none, slit LENGTH WIDTH HEIGHT CELLS or circular LENGTH RADIUS CELLS")),
+                "supply must be none, slit LENGTH WIDTH HEIGHT CELLS, circular LENGTH RADIUS CELLS or annular LENGTH INNER_RADIUS OUTER_RADIUS CELLS")),
         };
         row.finish()?;
         Ok(input)
@@ -137,6 +145,11 @@ impl SupplyInput {
                 length_m: length, radius_m: radius, radial_cells: cells,
                 sample_period_s: dt, exit: SlitExit::StaticPressure,
             }).map_err(PlateValveInputError::Physics)?.into()),
+            Self::Annular { length, inner_radius, outer_radius, cells } =>
+                Some(AnnularChannel::from_gas(inlet, AnnularChannelSpec {
+                    length_m: length, inner_radius_m: inner_radius, outer_radius_m: outer_radius,
+                    radial_cells: cells, sample_period_s: dt, exit: SlitExit::StaticPressure,
+                }).map_err(PlateValveInputError::Physics)?.into()),
         })
     }
 }

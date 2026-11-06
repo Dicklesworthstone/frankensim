@@ -9,6 +9,7 @@ const SLIT: &str = "supply slit 0.004 0.002 0.0002 16\n";
 /// root 0.9679 against 0.9570), see `heavy_circular_supply_is_refused_by_name_through_the_file_path`. The radius and the
 /// cell count are unchanged.
 const CIRCULAR: &str = "supply circular 0.0023 0.0002 16\n";
+const ANNULAR: &str = "supply annular 0.0023 0.0001 0.00025 16\n";
 /// The previous fixture geometry, kept to show that the check refuses it.
 const HEAVY_CIRCULAR: &str = "supply circular 0.004 0.0002 16\n";
 const TRACT: &str = "upstream_tract\ndg_tube 0.04 0.001 closed 1 2 8 50 2000 0.01 1e-11 256\n";
@@ -30,9 +31,9 @@ fn optional_supply_none_preserves_existing_native_samples_and_histories() {
 }
 
 #[test]
-fn both_native_geometries_reach_original_material_modes_and_are_block_invariant() {
+fn all_native_geometries_reach_original_material_modes_and_are_block_invariant() {
     let plain = render(build(&input(), 37));
-    for declaration in [SLIT, CIRCULAR] {
+    for declaration in [SLIT, CIRCULAR, ANNULAR] {
         let text = input().replace("slit_length", &format!("{declaration}slit_length"));
         let source = build(&text, 37);
         let system = source.renderer().system();
@@ -187,6 +188,11 @@ fn malformed_supply_records_refuse_without_a_substitute_passage() {
         "supply circular 0.004 0.0002 4097\n",
         "supply slit 0 0.002 0.0002 16\n",
         "supply circular 0.004 -0.0002 16\n",
+        "supply annular 0.0023 0 0.00025 16\n",
+        "supply annular 0.0023 0.00025 0.0001 16\n",
+        "supply annular 0.0023 0.0001 0.0001 16\n",
+        "supply annular 0.0023 0.0001 0.00025 4097\n",
+        "supply annular 0.0023 0.0001 16\n",
         "supply none extra\n",
     ] {
         let text = input().replace("slit_length", &format!("{declaration}slit_length"));
