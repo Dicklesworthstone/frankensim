@@ -357,6 +357,7 @@ pub(super) fn solve_mixed_steady(
     pressure_pa: f64,
     path: &super::conjugate::ConjugatePath,
     adaptive_goal_tolerance: Option<f64>,
+    contact_tolerance_w: Option<f64>,
     mut solve: impl FnMut(
         &BTreeMap<String, (f64, f64)>,
     ) -> Result<super::radiation::SolidSolution, SolveRefusal>,
@@ -392,6 +393,17 @@ pub(super) fn solve_mixed_steady(
             "partition the exterior into separate natural-reservoir and airflow targets",
         ));
     }
+    let contact_heat_tolerance_w = if let Some(watts) = contact_tolerance_w {
+        let per_law_w = watts / (4.0 * laws.len() as f64);
+        if !(watts.is_finite() && watts > 0.0 && per_law_w.is_finite() && per_law_w > 0.0) {
+            return Err(conduction_error(
+                "cli-solve-conduction-mixed-contact-tolerance",
+                "the original contact watt target must yield a finite positive heat allowance for every natural reservoir",
+                "retain a positive physical target; an unrepresentable per-reservoir allowance cannot be widened",
+            ));
+        }
+        Some(per_law_w)
+    } else { None };
     let adaptive = adaptive_goal_tolerance.is_some();
     let config = super::conjugate::exchange_config(adaptive);
     // The comparison independently rebuilds the complete physical residual.
@@ -406,7 +418,7 @@ pub(super) fn solve_mixed_steady(
         let natural_rows: BTreeMap<String, (f64, f64)> = laws.iter()
             .map(|law| (law.target.clone(), (htc[&law.target], law.ambient_k)))
             .collect();
-        let mut exchange = super::conjugate::solve_steady_exchange(cx, path, adaptive, |air_rows| {
+        let mut exchange = super::conjugate::solve_steady_exchange(cx, path, adaptive, contact_tolerance_w, |air_rows| {
             let mut derived = natural_rows.clone();
             derived.extend(air_rows.iter().map(|(target, values)| (target.clone(), *values)));
             solve(&derived)
@@ -439,6 +451,10 @@ pub(super) fn solve_mixed_steady(
             let tolerance_w = config.balance_tolerance_w.max(
                 config.balance_relative_tolerance * physical_heat_w.abs().max(flux.heat_rate_w.abs()),
             );
+            // Distinct reservoir temperatures cannot cancel each other's
+            // constitutive defects in the complete contact residual.
+            let tolerance_w = contact_heat_tolerance_w.map_or(tolerance_w,
+                |physical| tolerance_w.min(physical));
             worst_heat_w = worst_heat_w.max(mismatch_w);
             worst_heat_ratio = worst_heat_ratio.max(finite(mismatch_w / tolerance_w)?);
             next.insert(law.target.clone(), point.htc_w_m2_k);

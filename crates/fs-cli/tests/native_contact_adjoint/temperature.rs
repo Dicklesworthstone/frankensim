@@ -11,6 +11,8 @@ mod enthalpy;
 mod adjoint;
 #[path = "temperature/surface_band.rs"]
 mod surface_band;
+#[path = "temperature/adaptive.rs"]
+mod adaptive;
 
 fn temperature_pack() -> (Vec<u8>, String, String) {
     temperature_pack_from_knots(vec![(200.0, 0.2), (450.0, 0.45)])

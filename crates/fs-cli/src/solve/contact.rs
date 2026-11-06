@@ -29,7 +29,8 @@ pub(super) const NO_CLAIM: &str = concat!(
     "Ambient derivatives add the original mean-temperature secant and weighted-reference feedback, including radiation-only traces with zero convection controls. ",
     "Inlet, fan, contact-law, emissivity and radiative-bath controls retain their original physical owners. ",
     "Boundary-extended reports reuse the same complete dual for prescribed-temperature controls, retaining both contact-temperature columns, all fixed-node wall-mean weights and the direct objective term. ",
-    "Steady pointwise radiation, adaptive-goal refinement and inverse/roundoff certificates for this nonlinear contact path are not supplied. ",
+    "Adaptive refinement re-queries the original contact law at both fields and uses the complete contact/bulk transpose, including the actual natural-convection coefficients and transported-air reference feedback when declared. The observed nonlinear and maximum-relocation remainders remain part of the Estimated comparison. ",
+    "Adaptive contact with radiative feedback or transient storage, steady pointwise radiation and inverse/roundoff certificates for this nonlinear contact path are not supplied. ",
     "Uniform spatial ladder differences retain their existing Estimated meaning. No evolving pressure, geometry or new material authority is inferred.",
 );
 
@@ -82,6 +83,59 @@ impl Retained {
         contacts.linearize_steady_endpoint(
             cx, problem, temperature, linear, self.tolerance_w, self.tolerance_w,
             regions, max_pairs,
+        ).map_err(lower)
+    }
+
+    /// Compare an enriched field with the prolonged coarse field under the
+    /// same original source law. Both fields must retain the prescribed
+    /// temperatures, while their contact resistances are queried independently.
+    pub(super) fn compare_goal(
+        &self,
+        cx: &Cx<'_>,
+        problem: ConductionProblem<'_>,
+        reference: &[f64],
+        approximate: &[f64],
+        linear: fs_conduction::LinearConfig,
+        weights: &[f64],
+    ) -> Result<fs_conduction::adjoint::DiscreteGoalComparison, SolveRefusal> {
+        // These pairs were already admitted against the original import and
+        // refined-interface budgets. The comparison may not add another pair.
+        let max_pairs = self.resolution.pairs.len();
+        let contacts = self.prepared.bind(
+            cx, problem.mesh, problem.boundary, &self.resolution, max_pairs,
+        )?;
+        contacts.compare_steady_goal(
+            cx, problem, reference, approximate, linear, self.tolerance_w,
+            self.tolerance_w, weights, max_pairs,
+        ).map_err(lower)
+    }
+
+    /// The original boundary owners evaluate both physical fields and supply
+    /// their complete wall derivatives in one shared Robin ordering. Contact
+    /// remains live in both residuals and in that same coupled transpose.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn compare_goal_with_robin_feedback(
+        &self,
+        cx: &Cx<'_>,
+        problem: ConductionProblem<'_>,
+        reference: &[f64],
+        approximate: &[f64],
+        linear: fs_conduction::LinearConfig,
+        regions: &[&str],
+        reference_points: &[[f64; 4]],
+        approximate_values: &[[f64; 2]],
+        reference_feedback: &[f64],
+        weights: &[f64],
+        max_feedback_entries: usize,
+    ) -> Result<fs_conduction::adjoint::DiscreteGoalComparison, SolveRefusal> {
+        let max_pairs = self.resolution.pairs.len();
+        let contacts = self.prepared.bind(
+            cx, problem.mesh, problem.boundary, &self.resolution, max_pairs,
+        )?;
+        contacts.compare_steady_goal_with_robin_feedback(
+            cx, problem, reference, approximate, linear, self.tolerance_w,
+            self.tolerance_w, regions, reference_points, approximate_values,
+            reference_feedback, weights, max_feedback_entries, max_pairs,
         ).map_err(lower)
     }
 }
@@ -437,14 +491,21 @@ pub(super) fn admit(
             || (!pointwise && (transient.is_none() || capacity_contact)))
     });
     let unsupported_adjoint = adjoint && transient.is_some() && !trajectory_adjoint;
+    let adaptive = spec.solver.as_ref()
+        .is_some_and(|solver| solver.fidelity == super::SOLVER_FIDELITY_ADAPTIVE);
+    let unsupported_adaptive = adaptive && (transient.is_some()
+        || setup.radiation.is_some() || setup.enclosure_radiation.is_some());
+    if unsupported_adaptive {
+        return Err(conduction_error(
+            "cli-solve-conduction-contact-composition",
+            "adaptive source-backed contact admits steady prescribed, natural-convection and transported-air boundaries; radiation and transient storage require their own complete two-field goal comparison",
+            "use base or uniform-ladder fidelity for radiation or transient storage; do not freeze the contact or boundary laws",
+        ));
+    }
     if unsupported_transient
         || unsupported_radiation
         || unsupported_adjoint
         || mean_bound
-        || spec
-            .solver
-            .as_ref()
-            .is_some_and(|solver| solver.fidelity == super::SOLVER_FIDELITY_ADAPTIVE)
     {
         return Err(conduction_error(
             "cli-solve-conduction-contact-composition",
@@ -545,22 +606,7 @@ impl Prepared {
         // Use the spatial owner's actual initial-field and material-span policy.
         // This prepares state only; it executes no uncounted thermal response.
         let initial = ConductionSolver::initial_temperature(problem, &config).map_err(lower)?;
-        let mut power_scale = 0.0;
-        for (element, tet) in problem.mesh.complex().tets.iter().enumerate() {
-            if element % 256 == 0 {
-                poll(cx)?;
-            }
-            let nodal = tet
-                .iter()
-                .map(|&vertex| problem.source.at(vertex as usize).abs())
-                .sum::<f64>();
-            power_scale += problem.mesh.element_volume(element) * nodal / 4.0;
-        }
-        let tolerance =
-            (config.stop.residual_rtol * power_scale.max(1.0)).max(config.stop.residual_atol);
-        if !tolerance.is_finite() || tolerance <= 0.0 {
-            return Err(bad("contact watt allowance is not positive and finite"));
-        }
+        let tolerance = watt_tolerance(cx, problem.mesh, problem.source, &config)?;
         if let Some(radiation) = radiation {
             return radiation::solve(
                 cx, self, problem, &contacts, &initial, &config,
@@ -587,6 +633,27 @@ impl Prepared {
             .map_err(lower)?;
         finish_picard(cx, accepted, tolerance, work, NO_CLAIM, "")
     }
+}
+
+/// The original physical watt allowance, shared with derived-boundary stops.
+/// This performs the same bounded source integration as the primal and does
+/// not execute a thermal response or replace the final physical residual gate.
+pub(super) fn watt_tolerance(
+    cx: &Cx<'_>, mesh: &ConductionMesh, source: &fs_conduction::ScalarField,
+    config: &SolveConfig,
+) -> Result<f64, SolveRefusal> {
+    let mut power_scale = 0.0;
+    for (element, tet) in mesh.complex().tets.iter().enumerate() {
+        if element % 256 == 0 { poll(cx)?; }
+        let nodal = tet.iter().map(|&vertex| source.at(vertex as usize).abs()).sum::<f64>();
+        power_scale += mesh.element_volume(element) * nodal / 4.0;
+    }
+    let tolerance = (config.stop.residual_rtol * power_scale.max(1.0))
+        .max(config.stop.residual_atol);
+    if !tolerance.is_finite() || tolerance <= 0.0 {
+        return Err(bad("contact watt allowance is not positive and finite"));
+    }
+    Ok(tolerance)
 }
 
 /// The same original inner tolerances apply with and without radiation.

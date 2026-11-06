@@ -330,7 +330,9 @@ pub const SOLVE_RUN_IDENTITY_DOMAIN: &str = "org.frankensim.fs-cli.solve-run.v1"
 /// closed/open pointwise enthalpy enclosures, including source-backed contact.
 /// Version 130 differentiates original material-emissivity sources through
 /// closed/open enclosure histories, including one shared black-bath control.
-pub const SOLVE_DRIVER_VERSION: u32 = 130;
+/// Version 131 admits adaptive spatial refinement through original temperature-
+/// dependent contacts, including complete natural and transported-air feedback.
+pub const SOLVE_DRIVER_VERSION: u32 = 131;
 
 const SOLVE_STAGE_SCHEMA: &str = "frankensim.cli.solve-stage.v1";
 const SOLVE_RUN_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-run-receipt.v1";
@@ -1704,7 +1706,21 @@ fn adaptive_probe(
         element_materials: Some(&data.materials),
         source: &data.source,
     };
-    let (dual, coupled_adjoint) = if let Some(natural) = &data.natural_goal {
+    let (dual, coupled_adjoint) = if let Some(contact) = &data.temperature_contact {
+        if data.interfaces.is_some() || data.natural_goal.is_some()
+            || !data.air_paths.is_empty() || data.radiating_boundary.is_some()
+            || !data.radiation_patches.is_empty() || data.enclosure.is_some()
+            || data.open_enclosure.is_some()
+        {
+            return Err(conduction_error(
+                "cli-solve-conduction-contact-composition",
+                "adaptive source-backed contact requires its original law and prescribed thermal boundaries; frozen contact or boundary feedback cannot substitute",
+                "use prescribed temperature, flux or Robin boundaries, or base/uniform-ladder fidelity for coupled boundary laws",
+            ));
+        }
+        (contact.compare_goal(cx, problem, &fine.solution.temperature, approximate,
+            data.linear, &weights)?, None)
+    } else if let Some(natural) = &data.natural_goal {
         if !data.air_paths.is_empty() || data.radiating_boundary.is_some() {
             return Err(conduction_error(
                 "cli-solve-conduction-natural-adaptive",
@@ -2088,7 +2104,7 @@ fn adaptive_study(
         achieved.as_deref().unwrap_or("null"),
         history.join(","),
         json_string(
-            "same-model nodal-maximum comparison against a globally enriched mesh; the actual residual/Jacobian retains fixed contact, nonlinear conductivity, complete admitted natural-convection coefficient feedback, and independent-branch air feedback at fixed mass flows and coefficients, with explicit linearization and maximum remainders; incidence-distributed absolute contributions only mark cells; no continuum error, asymptotic order, equal-accuracy efficiency, physical validation, or complete uncertainty claim; output mesh counts do not certify allocator peak memory"
+            "same-model nodal-maximum comparison against a globally enriched mesh; the actual residual/Jacobian retains fixed or admitted source-backed temperature contact, nonlinear conductivity, complete admitted natural-convection coefficient feedback, and independent-branch air feedback at fixed mass flows and coefficients, with explicit linearization and maximum remainders; source-backed contact currently excludes radiative and transient adaptive compositions; incidence-distributed absolute contributions only mark cells; no continuum error, asymptotic order, equal-accuracy efficiency, physical validation, or complete uncertainty claim; output mesh counts do not certify allocator peak memory"
         ),
     );
     // The published mesh was just compared with its uniform ratio-2
@@ -6928,6 +6944,30 @@ fn conduction_solve_receipt(
         // actual air references before enforcing the unchanged physical gate.
         let strict_boundary_feedback = adaptive_requested
             || (adjoint_requested && temperature_contact.is_some());
+        let mut solid_config = fs_conduction::SolveConfig::default();
+        if let Some(solver) = &spec.solver {
+            solid_config.stop.residual_rtol = solver.tolerance_rel;
+            // Keep recomputed Krylov error below the declared nonlinear stop.
+            solid_config.linear.tolerance = (solver.tolerance_rel * 1e-2).max(1e-13);
+        }
+        if adaptive_requested {
+            // Leave room below the enriched comparison's physical gate.
+            solid_config.stop.residual_rtol = solid_config.linear.tolerance * 0.5;
+            solid_config.stop.residual_atol = 0.0;
+            solid_config.stop.step_atol = 0.0;
+            solid_config.linear.tolerance *= 0.1;
+        }
+        if let Some(envelope) = &spec.envelope {
+            solid_config.initial = fs_conduction::InitialGuess::Uniform(
+                (envelope.ambient_lo.value + envelope.ambient_hi.value) / 2.0,
+            );
+        }
+        // A kelvin-only outer stop can exceed the original contact watt gate
+        // on high-conductance walls. Share the primal's exact allowance with
+        // the physical boundary iterations, without relaxing the comparison.
+        let contact_boundary_tolerance = if adaptive_requested && temperature_contact.is_some() {
+            Some(contact::watt_tolerance(&cx, solve_mesh, &source, &solid_config)?)
+        } else { None };
         let solve_once = |derived: &BTreeMap<String, (f64, f64)>| -> Result<
             radiation::SolidSolution,
             SolveRefusal,
@@ -6947,33 +6987,7 @@ fn conduction_solve_receipt(
             let interfaces = if temperature_contact.is_none() {
                 lower_thermal_interfaces(spec, cards, &mesh, &boundary, &interface_resolution)?
             } else { None };
-            let mut config = fs_conduction::SolveConfig::default();
-            if let Some(solver) = &spec.solver {
-                config.stop.residual_rtol = solver.tolerance_rel;
-                // The linear solve is gated on its RECOMPUTED residual; the
-                // crate default (1e-12) sits below what conjugate gradients
-                // attain in double precision once the h-ladder reaches tens of
-                // thousands of unknowns (MEASURED 2026-09-02: rung refused at
-                // 1.37e-12 after 1256 iterations). Two decades under the
-                // declared stop keeps the linear residual out of the nonlinear
-                // clause; the floor keeps a tiny declared tolerance sane.
-                config.linear.tolerance = (solver.tolerance_rel * 1e-2).max(1e-13);
-            }
-            if adaptive_requested {
-                // The enriched comparison independently checks this same
-                // nonlinear residual against the adjoint's linear tolerance.
-                // Leave room below that gate and solve each inner system more
-                // tightly so the nonlinear stop cannot stall at its CG floor.
-                config.stop.residual_rtol = config.linear.tolerance * 0.5;
-                config.stop.residual_atol = 0.0;
-                config.stop.step_atol = 0.0;
-                config.linear.tolerance *= 0.1;
-            }
-            if let Some(envelope) = &spec.envelope {
-                config.initial = fs_conduction::InitialGuess::Uniform(
-                    (envelope.ambient_lo.value + envelope.ambient_hi.value) / 2.0,
-                );
-            }
+            let config = solid_config.clone();
             let problem = fs_conduction::ConductionProblem {
                 mesh: solve_mesh,
                 boundary: &boundary,
@@ -7133,6 +7147,7 @@ fn conduction_solve_receipt(
                     fs_conduction::LinearConfig::default().tolerance,
                     |solver| (solver.tolerance_rel * 1e-2).max(1e-13),
                 )),
+                contact_boundary_tolerance,
                 solve_once,
             )?;
             natural_fragment = Some(mixed.natural_receipt);
@@ -7166,6 +7181,7 @@ fn conduction_solve_receipt(
                 let mut next = BTreeMap::new();
                 let mut converged = Vec::with_capacity(natural_laws.len());
                 let mut worst = 0.0f64;
+                let mut boundary_heat_change_w = 0.0f64;
                 for law in &natural_laws {
                     let flux = solution
                         .convective_robin_fluxes()
@@ -7185,6 +7201,8 @@ fn conduction_solve_receipt(
                     )?;
                     let current = htc[&law.target];
                     worst = worst.max((coefficient.htc_w_m2_k - current).abs() / current);
+                    boundary_heat_change_w += (coefficient.htc_w_m2_k - current).abs()
+                        * flux.area_m2 * (flux.mean_wall_temperature_k - law.ambient_k).abs();
                     next.insert(law.target.clone(), coefficient.htc_w_m2_k);
                     converged.push(natural::Converged {
                         law: law.clone(),
@@ -7193,7 +7211,10 @@ fn conduction_solve_receipt(
                         heat_rate_w: flux.heat_rate_w,
                     });
                 }
-                if worst <= natural_tolerance {
+                if worst <= natural_tolerance && contact_boundary_tolerance.is_none_or(
+                    |tolerance| boundary_heat_change_w.is_finite()
+                        && boundary_heat_change_w <= tolerance * 0.25,
+                ) {
                     natural_fragment = Some(natural::receipt_fragment(&converged, iterations)?);
                     break (solution, None, derived, Vec::new());
                 }
@@ -7213,7 +7234,7 @@ fn conduction_solve_receipt(
         } else {
             let path = airflow_path.as_ref().expect("declared airflow was lowered");
             let exchange = conjugate::solve_steady_exchange(
-                &cx, path, strict_boundary_feedback, solve_once,
+                &cx, path, strict_boundary_feedback, contact_boundary_tolerance, solve_once,
             )?;
             let fragment = conjugate::receipt_fragment(path, &exchange.outcome)?;
             (exchange.solid, Some(fragment), exchange.derived, path.air_paths())

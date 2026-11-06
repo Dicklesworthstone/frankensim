@@ -568,6 +568,7 @@
     "crates/fs-cli/tests/import.rs",
     "crates/fs-cli/tests/multi_region_mutations.rs",
     "crates/fs-cli/tests/multi_region_pipeline.rs",
+    "crates/fs-cli/tests/native_contact_adjoint/temperature/adaptive.rs",
     "crates/fs-cli/tests/native_uncertainty.rs",
     "crates/fs-cli/tests/native_uncertainty/compliance.rs",
     "crates/fs-cli/tests/native_uncertainty/copula.rs",

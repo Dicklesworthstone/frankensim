@@ -282,6 +282,39 @@ cooling, final and selected-prefix goals, and fixed-temperature lifting. Rust
 syntax and source checks do not establish native execution; numerical runtime
 verification remains required on a host with adequate build resources.
 
+## Adaptive refinement with live contact — driver 131
+
+Steady `solver.fidelity = "adaptive"` now admits original temperature-dependent
+matching contacts with prescribed temperature, flux and Robin boundaries,
+natural convection, transported air and mixed natural/forced boundaries. Each
+spatial rung rebinds the original interface faces and pinned source claims. The
+uniform enrichment inherits the coarse region-owned P1 field, preserving the
+two independent temperatures across a contact instead of averaging them away.
+
+The numerical comparison re-queries each original resistance law at both the
+accepted enriched field and the prolonged coarse field. Its complete transpose
+includes heterogeneous conductivity and both contact-temperature derivatives.
+Natural coefficients and physical air marches are evaluated at both fields;
+the actual wall/film derivatives and ordered cross-wall air-reference map enter
+the same transpose. Frozen convection or inlet rows cannot substitute for them.
+The reference must pass the same physical watt-residual and heat-balance gates
+as the primal. Contact-specific air-reference and natural heat stops share
+that original watt allowance, so a kelvin-only stop on a high-conductance
+wall cannot substitute for physical closure. Rebinding uses the primal's
+wall-mean arithmetic. Nodal dual-weighted residual differences drive the existing
+mark/refine/re-solve loop; the measured nonlinear remainder and actual maximum
+relocation remain in the stopping criterion. Source corners and invalid
+comparison states refuse rather than receiving a frozen-contact derivative.
+
+The existing rise-relative accuracy and mesh/work limits apply. Only a study
+that meets its measured criterion supplies the Estimated discretization term.
+Unresolved budgets retain an unresolved terminal and no such term. The
+`source-contact-full-transpose` comparison identifier distinguishes this path
+from fixed-contact and derived-boundary comparisons. No continuum error bound,
+contact-model validation or inverse/roundoff certificate follows from it.
+Adaptive live-contact compositions with ambient/enclosure radiation or
+transient storage remain explicitly refused.
+
 ## Prescribed temperatures and volume means with live contact — driver 121
 
 Steady `temperature-max-boundary-adjoint`,
@@ -1183,10 +1216,11 @@ refer to that unchanged field, while `temperature_contact` retains the outer
 thermal/Krylov work, both local temperatures, actual resistance and usage
 receipt identities. Equal curve endpoints cannot hide interior variation.
 Explicit claim pins disambiguate sources without bypassing validity checks.
-Steady enclosure radiation, adaptive-goal refinement and derivative/bound
-requests on this varying-contact path refuse with
-`cli-solve-conduction-contact-composition`; no frozen-contact inverse or
-roundoff certificate is published. Constant-contact projects retain their
+The later driver sections above extend enclosure radiation and complete
+derivatives. Driver 131 additionally admits adaptive goals with prescribed,
+natural-convection and transported-air boundaries; radiative and transient
+adaptive compositions still refuse with `cli-solve-conduction-contact-composition`.
+No frozen-contact inverse or roundoff certificate is published. Constant-contact projects retain their
 existing solver and derivative paths. Tests in
 `native_contact_adjoint/temperature.rs` exercise real imported projects,
 nonlinear bulk conductivity, transported air, independent constant-resistance

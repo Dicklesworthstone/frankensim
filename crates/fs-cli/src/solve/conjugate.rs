@@ -497,15 +497,42 @@ pub(super) fn solve_steady_exchange(
     cx: &Cx<'_>,
     path: &ConjugatePath,
     adaptive: bool,
+    contact_tolerance_w: Option<f64>,
     mut solve: impl FnMut(
         &BTreeMap<String, (f64, f64)>,
     ) -> Result<super::radiation::SolidSolution, SolveRefusal>,
 ) -> Result<SteadyExchange, SolveRefusal> {
+    let mut config = exchange_config(adaptive);
+    if let Some(watts) = contact_tolerance_w {
+        let invalid = || conduction_error(
+            "cli-solve-conduction-airflow-contact-tolerance",
+            "the contact watt target and airflow wall conductances must yield a finite positive reference-temperature tolerance",
+            "retain a positive physical contact target and finite positive coefficients and wetted areas",
+        );
+        if !(watts.is_finite() && watts > 0.0) { return Err(invalid()); }
+        let conductance = path.segments.iter().try_fold(0.0_f64, |total, segment| {
+            let h = segment.htc_w_m2_k;
+            let area = segment.wetted_area_m2;
+            let local = h * area;
+            let next = total + local;
+            if [h, area, local, next].iter().all(|value| value.is_finite() && *value > 0.0) {
+                Ok(next)
+            } else { Err(invalid()) }
+        })?;
+        // A reference change contributes at most sum(h*A)*delta_T to the
+        // original solid load. Reserve one quarter of the physical watt gate
+        // without changing the IQN policy or flooring an unattainable target.
+        let temperature_tolerance_k = (watts / conductance) * 0.25;
+        if !(temperature_tolerance_k.is_finite() && temperature_tolerance_k > 0.0) {
+            return Err(invalid());
+        }
+        config.temperature_tolerance_k = config.temperature_tolerance_k.min(temperature_tolerance_k);
+    }
     let coefficients = derived_coefficients(path);
     let path_targets: BTreeSet<&str> = path.segments.iter()
         .map(|segment| segment.target.as_str()).collect();
     let mut solid_solves = 0usize;
-    let outcome = run_exchange(cx, path, adaptive, |_, references| {
+    let outcome = run_exchange_with_config(cx, path, config, |_, references| {
         let derived = references.iter().map(|(target, reference)| {
             (target.clone(), (coefficients.get(target).copied().unwrap_or(f64::NAN), *reference))
         }).collect();

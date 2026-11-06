@@ -71,8 +71,17 @@ pub(in crate::solve) fn probe(
     if combined.is_some() == data.radiation_patches.is_empty() {
         return Err(bad("radiation patches and their accepted combined boundary must be retained together"));
     }
-    if combined.is_none() && (data.natural_goal.is_none() || data.air_paths.is_empty()) {
-        return Err(bad("a nonradiating coupled boundary comparison needs both natural and forced convection"));
+    let live_contact = data.temperature_contact.is_some();
+    if live_contact && (combined.is_some() || data.interfaces.is_some()
+        || data.enclosure.is_some() || data.open_enclosure.is_some())
+    {
+        return Err(bad("adaptive live contact requires its original source with nonradiating convection; frozen contact or radiation feedback cannot substitute"));
+    }
+    if combined.is_none()
+        && !(data.natural_goal.is_some() && !data.air_paths.is_empty())
+        && !(live_contact && (data.natural_goal.is_some() || !data.air_paths.is_empty()))
+    {
+        return Err(bad("a nonradiating coupled boundary comparison needs natural/air feedback, or live contact with either physical convection law"));
     }
     let n = fine.mesh.vertex_count();
     if approximate.len() != n || fine.solution.temperature.len() != n
@@ -122,15 +131,21 @@ pub(in crate::solve) fn probe(
         }
         let Some(i) = region.and_then(|r| regions.iter().position(|&v| v == r)) else { continue; };
         areas[i] = finite(areas[i] + face.area)?;
-        for &v in &face.vertices {
-            means[i][0] = finite(means[i][0] + face.area/3.0 * fine.solution.temperature[v as usize])?;
-            means[i][1] = finite(means[i][1] + face.area/3.0 * approximate[v as usize])?;
-        }
+        // Match energy_balance's original wall observation, including its
+        // arithmetic order. A few temperature ulps matter for the contact
+        // watt gate on a high-conductance wall.
+        let reference_mean = face.vertices.iter()
+            .map(|&v| fine.solution.temperature[v as usize]).sum::<f64>() / 3.0;
+        let approximate_mean = face.vertices.iter()
+            .map(|&v| approximate[v as usize]).sum::<f64>() / 3.0;
+        means[i][0] = finite(face.area.mul_add(reference_mean, means[i][0]))?;
+        means[i][1] = finite(face.area.mul_add(approximate_mean, means[i][1]))?;
     }
     for i in 0..m {
         if areas[i] <= 0.0 { return Err(bad("coupled adaptive Robin trace has no positive area")); }
-        means[i][0] = finite(means[i][0] / areas[i])?;
-        means[i][1] = finite(means[i][1] / areas[i])?;
+        let inverse_area = 1.0 / areas[i];
+        means[i][0] = finite(means[i][0] * inverse_area)?;
+        means[i][1] = finite(means[i][1] * inverse_area)?;
     }
     if let Some(natural) = &data.natural_goal {
         // h_c, its wall derivative, and the comparison field's h_c all come
@@ -199,15 +214,19 @@ pub(in crate::solve) fn probe(
     weights[peak] = 1.0;
     let problem = ConductionProblem { mesh: &fine.mesh, boundary: &data.boundary,
         material: &data.fallback, element_materials: Some(&data.materials), source: &data.source };
-    let dual = if combined.is_some() {
+    let dual = if let Some(contact) = &data.temperature_contact {
+        contact.compare_goal_with_robin_feedback(cx, problem,
+            &fine.solution.temperature, approximate, data.linear, &names,
+            &points, &other, &feedback, &weights, entries)?
+    } else if combined.is_some() {
         AmbientRadiationGradient::compare_goal_at(cx, problem, data.interfaces.as_ref(),
             data.linear, &fine.solution.temperature, approximate, &names, &points, &other,
-            &feedback, &data.radiation_patches, &weights, entries)
+            &feedback, &data.radiation_patches, &weights, entries).map_err(solid_error)?
     } else {
         RobinResponse::compare_mean_robin_goal_with_reference_feedback_at(
             cx, problem, data.interfaces.as_ref(), data.linear, &fine.solution.temperature,
-            approximate, &names, &points, &other, &feedback, &weights, entries)
-    }.map_err(solid_error)?;
+            approximate, &names, &points, &other, &feedback, &weights, entries).map_err(solid_error)?
+    };
     let coarse_max = ladder_functional(&coarse.labels, &coarse.mesh.complex().tets,
         &coarse.solution.temperature, Some(region));
     let remainder = finite(approximate[peak] - coarse_max)?;
