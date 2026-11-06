@@ -13,9 +13,10 @@
 //! curvature and pressure-reconstruction operator.
 //!
 //! Sparse specifics owned by this layer:
-//! - Inactive tiles and out-of-domain space are WALL (exactly the sparse
-//!   sweep's convention); interface cells are inserted only between fluid
-//!   and gas.
+//! - Streaming treats inactive tiles and out-of-domain space as WALL (exactly
+//!   the sparse sweep's convention); interface cells are inserted only between
+//!   fluid and gas. Height geometry treats unallocated interior nonsolid tiles
+//!   as empty gas, so storage maintenance does not move a resolved surface.
 //! - Tile activation as fluid advances: when the conversion cascade must
 //!   promote a gas cell that lives in an inactive in-domain tile, that tile
 //!   is activated first (equilibrium-initialized, all lanes gas, zero
@@ -100,7 +101,10 @@ use transport::{MassLocation3, MassTransport3};
 /// Version 7 extends imposed planar-angle ghosts through raw-fill smoothing,
 /// preventing artificial curvature at an affine contact interface. Neutral
 /// and unassigned walls retain their original averaging arithmetic.
-pub const FREE_SURFACE3_BIT_SEMANTICS_VERSION: u32 = 7;
+/// Version 8 shares raw-volume height-graph selection between Laplace pressure
+/// and local surface traction, independent of empty interior gas allocation.
+/// Wall/contact-angle fallback arithmetic is unchanged.
+pub const FREE_SURFACE3_BIT_SEMANTICS_VERSION: u32 = 8;
 
 /// Conversion semantics for new simulations versus historical trajectory replay.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -1151,39 +1155,18 @@ impl FreeSurface3 {
             [-2, 2].into_iter().all(|distance| {
                 let mut p = [cx, cy, cz];
                 p[axis] += distance;
-                !self.planar_piston_contains(p)
-                    && self.grid.resolve_source(p[0], p[1], p[2]).is_some()
+                self.local_geometric_fill(p).is_some()
             })
         });
         if wall_free {
-            let normal = [
-                phi(-1, 0, 0) - phi(1, 0, 0),
-                phi(0, -1, 0) - phi(0, 1, 0),
-                phi(0, 0, -1) - phi(0, 0, 1),
-            ];
-            // Share the bounded complete-height family used by local surface
-            // traction. The original 7-cell column remains first; wider
-            // deterministic columns are attempted only when needed before
-            // falling back to the smoothed wall/contact-angle reconstruction.
-            for half_depth in [3, 5, 7] {
-                if let Some(geometry) = curvature::height_geometry_with_depth(
-                    normal,
-                    half_depth,
-                    |offset| {
-                        let position = [cx + offset[0], cy + offset[1], cz + offset[2]];
-                        if self.planar_piston_contains(position) {
-                            return None;
-                        }
-                        let (slot, sample_lane) =
-                            self.grid
-                                .resolve_source(position[0], position[1], position[2])?;
-                        Some(self.fill(self.grid.active_keys()[slot], sample_lane))
-                    },
-                ) {
-                    return geometry
-                        .curvature
-                        .clamp(-Self::CURVATURE_LIMIT, Self::CURVATURE_LIMIT);
-                }
+            // Pressure and tangential traction must select the same raw-volume
+            // graph, including alternate axes and sparse interior gas support.
+            // Otherwise a force-frame rebind can change the pressure geometry
+            // even though the tracked interface has not moved.
+            if let Some(geometry) = self.local_height_geometry([cx, cy, cz]) {
+                return geometry
+                    .curvature
+                    .clamp(-Self::CURVATURE_LIMIT, Self::CURVATURE_LIMIT);
             }
         }
         let nhat = |dx: i64, dy: i64, dz: i64| -> [f64; 3] {

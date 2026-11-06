@@ -9033,7 +9033,7 @@ The named `Local` policy explicitly retains its former mass-only arithmetic.
 version-1 trajectories, including their nonlocal pooling. The frozen pour
 sentinel selects this replay mode and retains its original four-quadrant hash;
 new locality and thermal regressions exercise the corrected default. The
-independent `FREE_SURFACE3_BIT_SEMANTICS_VERSION` is 6 for the current default;
+independent `FREE_SURFACE3_BIT_SEMANTICS_VERSION` is 8 for the current default;
 version 2 introduced local redistribution, and version 3 corrects the density
 and force handling of fresh-cell initialization described below. Version 4
 uses the physical Guo frame in gas-pressure reconstruction as described above.
@@ -9454,10 +9454,17 @@ wetting validation.
 material, enthalpy, native pressure and Guo-force owners while removing the
 global tank-column restriction. `LocalThermocapillarity` bounds the smallest
 positive cut-cell fill and the conditioning of the local source reconstruction.
-Complete monotone raw-VOF height stencils share their derivatives with native
-curvature; local traction may try bounded axial depths of 7, 11 and 15 cells.
+Complete monotone raw-VOF height stencils share their graph selection and
+derivatives with native curvature. Both try bounded axial depths of 7, 11 and
+15 cells in descending raw-fill direction order, including alternate axes
+when a preferred graph is incomplete. Unallocated in-domain nonsolid gas is
+zero fill, so gas-tile activation alone cannot switch resolved height geometry.
 The selected graph must have a normal-axis magnitude of at least one half.
-Native pressure keeps its existing seven-cell curvature stencil and fallback.
+Native pressure retains its smoothed-fill contact-angle fallback at walls and
+where no complete bounded height graph is available.
+This changes the native free-surface bit semantics to version 8. Direct
+regressions require spherical Young-Laplace pressure convergence and bitwise
+pressure invariance when empty gas tiles are retired without moving liquid.
 Cartesian direction magnitudes that differ only within unit-fill arithmetic
 uncertainty use a deterministic coordinate tie rule. This prevents a force-frame
 rebind from switching equivalent height columns and rotating the local normal;

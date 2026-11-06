@@ -267,10 +267,13 @@ fn wet_component(fill: &[f64; 27], seed: usize) -> [bool; 27] {
 }
 
 impl FreeSurface3 {
-    fn local_geometric_fill(&self, p: [i64; 3]) -> Option<(f64, (u64, usize))> {
+    pub(in crate::d3q19::freesurface3) fn local_geometric_fill(
+        &self,
+        p: [i64; 3],
+    ) -> Option<(f64, (u64, usize))> {
         let (nx, ny, nz) = self.grid.tile_dims();
         let size = [nx * TILE, ny * TILE, nz * TILE];
-        if (0..3).any(|d| p[d] < 0 || p[d] as usize >= size[d]) {
+        if (0..3).any(|d| p[d] < 0 || p[d] as usize >= size[d]) || self.planar_piston_contains(p) {
             return None;
         }
         let Some((slot, lane)) = self.grid.resolve_source(p[0], p[1], p[2]) else {
@@ -309,6 +312,15 @@ impl FreeSurface3 {
     }
 
     fn local_height_normal(&self, center: [i64; 3]) -> Option<[f64; 3]> {
+        self.local_height_geometry(center)
+            .map(|geometry| geometry.normal)
+    }
+
+    /// One bounded raw-VOF graph for both Laplace pressure and surface traction.
+    pub(in crate::d3q19::freesurface3) fn local_height_geometry(
+        &self,
+        center: [i64; 3],
+    ) -> Option<curvature::HeightGeometry3> {
         let mut direction = [0.0; 3];
         for axis in 0..3 {
             let mut p = center;
@@ -356,7 +368,7 @@ impl FreeSurface3 {
                     // exactly largest normal component can reject every axis.
                     // Bound the graph metric by four instead (|n_axis| >= 1/2).
                     if geometry.normal[axis].abs() >= 0.5 {
-                        return Some(geometry.normal);
+                        return Some(geometry);
                     }
                 }
             }
@@ -740,6 +752,92 @@ mod tests {
             sphere_fill(p.map(|x| x as f64 - center as f64), radius as f64)
         });
         (surface, [center as f64 + 0.5; 3])
+    }
+
+    #[test]
+    fn g1_local_native_spherical_laplace_pressure_refines() {
+        let gate = CancelGate::new_clock_free();
+        let mut previous_error = f64::INFINITY;
+        for radius in [16, 32] {
+            let (mut surface, _) = drop_surface(radius);
+            surface.refresh_fill(&gate).unwrap();
+            // The independently integrated spherical VOF above represents
+            // both principal curvatures: Delta p = 2 sigma / R. Exercise
+            // native pressure over the whole drop, including oblique cuts.
+            let expected = 2.0 * surface.sigma / radius as f64;
+            let mut error_square = 0.0;
+            let mut patches = 0;
+            for (&key, tile) in &surface.tiles {
+                for (lane, &cell) in tile.cells.iter().enumerate() {
+                    let fill = surface.fill(key, lane);
+                    if cell != Cell3::Interface || fill <= 0.0 || fill >= 1.0 {
+                        continue;
+                    }
+                    let pressure = (surface.reference_density(key, lane) - 1.0) * CS2_3;
+                    assert!(
+                        pressure > 0.0,
+                        "inward capillary pressure lost at {key}/{lane}"
+                    );
+                    error_square += (pressure / expected - 1.0).powi(2);
+                    patches += 1;
+                }
+            }
+            assert!(patches > 4 * radius * radius);
+            let error = (error_square / patches as f64).sqrt();
+            eprintln!("native spherical pressure R={radius}: relative RMS error={error:e}");
+            assert!(error < 0.04, "spherical pressure error={error}");
+            assert!(error < 0.6 * previous_error, "{error} >= {previous_error}");
+            previous_error = error;
+        }
+    }
+
+    #[test]
+    fn g1_local_native_capillary_pressure_is_invariant_under_gas_tile_retirement() {
+        let gate = CancelGate::new_clock_free();
+        // R=17 resolves even diagonal corner cuts within fifteen cells while
+        // putting an axial cap at the last lane of a tile; its complete height
+        // column reaches into an all-gas neighbor tile.
+        let (mut surface, _) = drop_surface(17);
+        surface.refresh_fill(&gate).unwrap();
+        let mass = surface.ledger_mass();
+        let mut before = BTreeMap::new();
+        for (&key, tile) in &surface.tiles {
+            for (lane, &cell) in tile.cells.iter().enumerate() {
+                let fill = surface.fill(key, lane);
+                if cell != Cell3::Interface || fill <= 0.0 || fill >= 1.0 {
+                    continue;
+                }
+                let (x, y, z) = FreeSurface3::global_of(key, lane);
+                assert!(surface.local_height_geometry([x, y, z]).is_some());
+                before.insert((key, lane), surface.reference_density(key, lane));
+            }
+        }
+        assert!(!before.is_empty());
+        assert!(surface.retire_gas_tiles().unwrap() > 0);
+        assert_eq!(mass.to_bits(), surface.ledger_mass().to_bits());
+        surface.refresh_fill(&gate).unwrap();
+        let mut sparse_support = 0;
+        for ((key, lane), density) in before {
+            let (x, y, z) = FreeSurface3::global_of(key, lane);
+            if (0..3).any(|axis| {
+                [-2, 2].into_iter().any(|distance| {
+                    let mut p = [x, y, z];
+                    p[axis] += distance;
+                    surface.grid.resolve_source(p[0], p[1], p[2]).is_none()
+                })
+            }) {
+                sparse_support += 1;
+            }
+            assert_eq!(
+                density.to_bits(),
+                surface.reference_density(key, lane).to_bits(),
+                "gas allocation changed capillary pressure at [{x}, {y}, {z}]"
+            );
+        }
+        assert!(
+            sparse_support > 0,
+            "fixture did not expose sparse gas support"
+        );
     }
 
     #[test]

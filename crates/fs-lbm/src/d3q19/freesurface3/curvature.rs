@@ -54,8 +54,8 @@ pub(super) fn height_geometry(
     height_geometry_with_depth(normal, 3, sample)
 }
 
-/// The wider bounded local-traction stencil uses the same volume integration
-/// and derivatives. Native pressure retains its original three-cell half-depth.
+/// Native pressure and local traction share this bounded volume integration
+/// and its derivatives; the shared selector tries increasing depths per axis.
 pub(super) fn height_geometry_with_depth(
     normal: [f64; 3],
     half_depth: i64,
