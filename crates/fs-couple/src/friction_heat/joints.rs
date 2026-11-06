@@ -6,6 +6,10 @@
 //! heat. Conductivity and friction effort are resolved at the same candidate
 //! temperatures. Shared cells store energy once and retain ordinary conduction.
 
+/// Actual native pose evolution and thermal feedback on an authored time grid.
+#[path = "joints/trajectory.rs"]
+pub mod trajectory;
+
 use super::network::{
     FrictionHeatNetworkInput, FrictionHeatNetworkReport, FrictionHeatNetworkStep,
     InterfaceHeatInput,
