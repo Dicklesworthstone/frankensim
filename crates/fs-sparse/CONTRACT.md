@@ -70,6 +70,15 @@ results are machine-specific, not a universal throughput guarantee.
   V-cycle with Chebyshev smoothing and ILU-PCG coarsest solve;
   `operator_complexity()` and `level_sizes` are the memory-honesty
   evidence. `pcg` is a REFERENCE driver (solver stack supersedes it).
+  Its report recomputes `b - A*x` for the returned iterate; recursive residual
+  drift restarts the search without resetting the iteration budget. Norm and
+  positive-curvature ratios use exact power-of-two scaling when ordinary
+  accumulation would overflow, underflow, or become subnormal. A zero RHS
+  converges only with a zero residual, and zero tolerance requires exact
+  recomputed zeros. Nonpositive/nonfinite curvature or an unrepresentable
+  update stops at the last finite iterate. Matrix and preconditioner SPD
+  remain caller obligations; this does not make unrepresentable matrix
+  products or solution values representable.
 - `direct::{amd_order, DirectOrdering, SymbolicLdlt, LdltFactor, LdltOptions,
   LdltError, Inertia, FactorStats}` (bead frankensim-fsim-sparse-direct-4a38j)
   — sparse symmetric direct factorization P·A·Pᵀ = L·D·Lᵀ. `amd_order` is a

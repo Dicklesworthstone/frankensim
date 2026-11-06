@@ -151,6 +151,153 @@ fn ilu_breakdown_is_typed() {
 }
 
 #[test]
+fn pcg_preserves_rhs_scale_instead_of_squaring_it_away() {
+    let a = Csr::identity(2);
+    for amplitude in [f64::from_bits(1), 1e-200, 1.0, 1e200, f64::MAX] {
+        let b = [amplitude, -amplitude];
+        let mut x = [0.0; 2];
+        let report = pcg(&a, &b, &mut x, &IdentityPrecond, 1e-12, 2);
+        assert!(report.converged, "amplitude {amplitude:e}: {report:?}");
+        assert_eq!(x.map(f64::to_bits), b.map(f64::to_bits));
+        assert_eq!(report.iters, 1);
+        assert_eq!(report.rel_residual, 0.0);
+    }
+}
+
+#[test]
+fn pcg_scaled_curvature_preserves_multistep_solves() {
+    let a = Csr::from_parts(3, 3, vec![0, 1, 2, 3], vec![0, 1, 2], vec![2.0, 7.0, 13.0]);
+    for amplitude in [1e-200, 1.0, 1e200] {
+        let exact = [amplitude, -amplitude, 0.5 * amplitude];
+        let mut b = [0.0; 3];
+        a.spmv(&exact, &mut b);
+        let mut x = [0.0; 3];
+        let report = pcg(&a, &b, &mut x, &IdentityPrecond, 1e-12, 8);
+        assert!(report.converged, "amplitude {amplitude:e}: {report:?}");
+        assert!(
+            report.iters > 1,
+            "the fixture must exercise the CG recurrence"
+        );
+        for (&actual, &expected) in x.iter().zip(&exact) {
+            assert!((actual / amplitude - expected / amplitude).abs() < 1e-12);
+        }
+    }
+}
+
+#[test]
+fn pcg_report_measures_the_returned_iterate() {
+    // The recursive FMA residual of this one-step solve is nonzero, whereas
+    // independently multiplying the returned x gives exactly the stored RHS.
+    let a = Csr::from_parts(1, 1, vec![0, 1], vec![0], vec![3.0]);
+    let mut x = [0.0];
+    let report = pcg(&a, &[1.0], &mut x, &IdentityPrecond, 0.0, 1);
+    let mut ax = [0.0];
+    a.spmv(&x, &mut ax);
+    assert_eq!(ax, [1.0]);
+    assert_eq!(report.rel_residual, (1.0 - ax[0]).abs());
+    assert!(report.converged, "{report:?}");
+}
+
+#[test]
+fn pcg_restarts_when_a_zero_recursive_residual_is_optimistic() {
+    // The first step has an exactly zero recursive residual, but rounding
+    // 0.1 * 3.0 makes the returned iterate fail the actual equation.
+    let a = Csr::from_parts(1, 1, vec![0, 1], vec![0], vec![0.1]);
+    let mut capped = [0.0];
+    let report = pcg(&a, &[0.3], &mut capped, &IdentityPrecond, 0.0, 1);
+    assert!(!report.converged, "{report:?}");
+    assert_eq!(report.iters, 1);
+    assert!(report.rel_residual > 0.0);
+    let mut corrected = [0.0];
+    let report = pcg(&a, &[0.3], &mut corrected, &IdentityPrecond, 0.0, 2);
+    assert!(report.converged, "{report:?}");
+    assert_eq!(report.iters, 2);
+    let mut ax = [0.0];
+    a.spmv(&corrected, &mut ax);
+    assert_eq!(ax, [0.3]);
+    assert_eq!(report.rel_residual, 0.0);
+}
+
+#[test]
+fn pcg_checks_entry_and_iteration_cap_before_preconditioning() {
+    struct MustNotApply;
+    impl Precond for MustNotApply {
+        fn apply(&self, _: &[f64], _: &mut [f64]) {
+            panic!("a completed or zero-budget solve must not apply a preconditioner");
+        }
+    }
+    let a = Csr::identity(2);
+    let mut exact = [2.0, -3.0];
+    let report = pcg(&a, &[2.0, -3.0], &mut exact, &MustNotApply, 1e-12, 10);
+    assert!(report.converged);
+    assert_eq!(report.iters, 0);
+    let mut unchanged = [0.0; 2];
+    let report = pcg(&a, &[2.0, -3.0], &mut unchanged, &MustNotApply, 1e-12, 0);
+    assert!(!report.converged);
+    assert_eq!(report.iters, 0);
+    assert_eq!(report.rel_residual, 1.0);
+    assert_eq!(unchanged, [0.0; 2]);
+}
+
+#[test]
+fn pcg_breakdown_keeps_the_last_finite_iterate() {
+    for diagonal in [0.0, -1.0] {
+        let a = Csr::from_parts(1, 1, vec![0, 1], vec![0], vec![diagonal]);
+        let mut x = [0.0];
+        let report = pcg(&a, &[1.0], &mut x, &IdentityPrecond, 1e-12, 4);
+        assert!(!report.converged, "nonpositive curvature: {report:?}");
+        assert_eq!(report.iters, 0);
+        assert_eq!(report.rel_residual, 1.0);
+        assert_eq!(x, [0.0]);
+    }
+    struct InvalidPreconditioner;
+    impl Precond for InvalidPreconditioner {
+        fn apply(&self, _: &[f64], z: &mut [f64]) {
+            z.fill(f64::NAN);
+        }
+    }
+    let mut x = [0.0];
+    let report = pcg(
+        &Csr::identity(1),
+        &[1.0],
+        &mut x,
+        &InvalidPreconditioner,
+        1e-12,
+        4,
+    );
+    assert!(!report.converged);
+    assert_eq!(report.iters, 0);
+    assert_eq!(report.rel_residual, 1.0);
+    assert_eq!(x, [0.0]);
+}
+
+#[test]
+fn pcg_zero_rhs_requires_a_zero_recomputed_residual() {
+    let a = Csr::identity(1);
+    let mut x = [f64::from_bits(1)];
+    let report = pcg(&a, &[0.0], &mut x, &IdentityPrecond, 1e-12, 2);
+    assert!(report.converged, "{report:?}");
+    assert_eq!(report.iters, 1);
+    assert_eq!(report.rel_residual, 0.0);
+    assert_eq!(x, [0.0]);
+}
+
+#[test]
+fn pcg_zero_tolerance_does_not_round_a_nonzero_relative_residual_to_success() {
+    let b = [1e300, f64::from_bits(1)];
+    let mut x = [1e300, 0.0];
+    let report = pcg(&Csr::identity(2), &b, &mut x, &IdentityPrecond, 0.0, 0);
+    assert!(
+        !report.converged,
+        "a finite nonzero residual is not exact convergence"
+    );
+    assert!(report.rel_residual > 0.0);
+    let report = pcg(&Csr::identity(2), &b, &mut x, &IdentityPrecond, 0.0, 1);
+    assert!(report.converged, "{report:?}");
+    assert_eq!(x.map(f64::to_bits), b.map(f64::to_bits));
+}
+
+#[test]
 fn amg_grid_independence_and_complexity() {
     let tol = 1e-10;
     let mut iter_counts = Vec::new();

@@ -327,16 +327,186 @@ impl Precond for Ilu0 {
 /// Result of a PCG solve: the evidence object.
 #[derive(Debug, Clone)]
 pub struct PcgReport {
-    /// Iterations performed.
+    /// Finite iterate updates completed before convergence, cap, or breakdown.
     pub iters: usize,
-    /// Final relative residual ‖r‖₂/‖b‖₂.
+    /// Recomputed ‖b − A·x‖₂/‖b‖₂ for the returned iterate, never the
+    /// recursive CG residual. For a zero RHS this is zero only for a zero
+    /// residual, and infinity otherwise. Non-finite residuals give infinity.
     pub rel_residual: f64,
-    /// Whether the tolerance was met within the cap.
+    /// Whether the recomputed residual met the tolerance within the cap.
     pub converged: bool,
+}
+
+/// A nonnegative scalar times an exact power of two. Dot products and norms
+/// need not themselves fit f64 when their ratios (the CG coefficients) do.
+#[derive(Clone, Copy)]
+struct PcgMagnitude {
+    value: f64,
+    exponent: i32,
+}
+
+fn pcg_scale(maximum: f64) -> (f64, i32) {
+    let bits = (maximum.to_bits() >> 52).max(1);
+    (f64::from_bits(bits << 52), bits as i32 - 1023)
+}
+
+fn pcg_norm(values: &[f64]) -> Option<PcgMagnitude> {
+    let mut squared = 0.0;
+    let mut maximum = 0.0_f64;
+    for &value in values {
+        if !value.is_finite() {
+            return None;
+        }
+        squared += value * value;
+        maximum = maximum.max(value.abs());
+    }
+    if maximum == 0.0 || squared.is_normal() {
+        return Some(PcgMagnitude {
+            value: squared.sqrt(),
+            exponent: 0,
+        });
+    }
+    let (scale, exponent) = pcg_scale(maximum);
+    let inverse = scale.recip();
+    let squared: f64 = values.iter().map(|v| (v * inverse).powi(2)).sum();
+    Some(PcgMagnitude {
+        value: squared.sqrt(),
+        exponent,
+    })
+}
+
+fn pcg_positive_dot(a: &[f64], b: &[f64]) -> Option<PcgMagnitude> {
+    let mut sum = 0.0;
+    let (mut max_a, mut max_b) = (0.0_f64, 0.0_f64);
+    for (&a, &b) in a.iter().zip(b) {
+        if !a.is_finite() || !b.is_finite() {
+            return None;
+        }
+        sum += a * b;
+        max_a = max_a.max(a.abs());
+        max_b = max_b.max(b.abs());
+    }
+    // Preserve the established accumulation and ratio bits at ordinary
+    // scales. Subnormal dot products also need scaling: their quantization
+    // can otherwise turn a perfectly conditioned solve into a wrong step.
+    if sum.is_normal() && sum > 0.0 {
+        return Some(PcgMagnitude {
+            value: sum,
+            exponent: 0,
+        });
+    }
+    if max_a == 0.0 || max_b == 0.0 {
+        return None;
+    }
+    let (scale_a, exponent_a) = pcg_scale(max_a);
+    let (scale_b, exponent_b) = pcg_scale(max_b);
+    let (inverse_a, inverse_b) = (scale_a.recip(), scale_b.recip());
+    let sum: f64 = a
+        .iter()
+        .zip(b)
+        .map(|(&a, &b)| (a * inverse_a) * (b * inverse_b))
+        .sum();
+    (sum.is_finite() && sum > 0.0).then_some(PcgMagnitude {
+        value: sum,
+        exponent: exponent_a + exponent_b,
+    })
+}
+
+fn pcg_normalize(value: f64) -> (f64, i32) {
+    let (value, correction) = if value < f64::MIN_POSITIVE {
+        (value * f64::MIN_POSITIVE.recip(), -1022)
+    } else {
+        (value, 0)
+    };
+    let exponent = ((value.to_bits() >> 52) as i32) - 1023 + correction;
+    let mantissa = f64::from_bits((value.to_bits() & ((1_u64 << 52) - 1)) | (1023_u64 << 52));
+    (mantissa, exponent)
+}
+
+fn pcg_ratio(numerator: PcgMagnitude, denominator: PcgMagnitude) -> f64 {
+    if numerator.value == 0.0 {
+        return 0.0;
+    }
+    if denominator.value == 0.0 {
+        return f64::INFINITY;
+    }
+    if numerator.exponent == denominator.exponent {
+        return numerator.value / denominator.value;
+    }
+    let (numerator_value, numerator_exponent) = pcg_normalize(numerator.value);
+    let (denominator_value, denominator_exponent) = pcg_normalize(denominator.value);
+    let mut value = numerator_value / denominator_value;
+    let mut exponent =
+        numerator.exponent - denominator.exponent + numerator_exponent - denominator_exponent;
+    if value < 1.0 {
+        value *= 2.0;
+        exponent -= 1;
+    }
+    // Exact normal power-of-two factors defer subnormal rounding until the
+    // final scale. An overflowing/underflowing final ratio stays explicit.
+    while exponent > 1023 {
+        value *= f64::from_bits(2046_u64 << 52);
+        exponent -= 1023;
+    }
+    while exponent < -1022 {
+        value *= f64::MIN_POSITIVE;
+        exponent += 1022;
+    }
+    value * f64::from_bits(((exponent + 1023) as u64) << 52)
+}
+
+fn pcg_relative_residual(r: &[f64], bnorm: PcgMagnitude) -> f64 {
+    pcg_norm(r).map_or(f64::INFINITY, |norm| {
+        let ratio = pcg_ratio(norm, bnorm);
+        if ratio == 0.0 && norm.value != 0.0 {
+            f64::from_bits(1)
+        } else {
+            ratio
+        }
+    })
+}
+
+fn pcg_report(
+    a: &Csr,
+    b: &[f64],
+    x: &[f64],
+    residual: &mut [f64],
+    bnorm: PcgMagnitude,
+    iters: usize,
+    tol: f64,
+) -> PcgReport {
+    a.spmv(x, residual);
+    for (r, &b) in residual.iter_mut().zip(b) {
+        *r = b - *r;
+    }
+    let rel_residual = pcg_relative_residual(residual, bnorm);
+    let converged = if tol == 0.0 {
+        residual.iter().all(|&value| value == 0.0)
+    } else {
+        rel_residual <= tol
+    };
+    PcgReport {
+        iters,
+        rel_residual,
+        converged,
+    }
 }
 
 /// Preconditioned conjugate gradients (reference driver — the solver
 /// stack supersedes this; kept minimal and deterministic).
+///
+/// Positive, finite preconditioned curvature is required. Numerical breakdown
+/// returns `converged: false` with the last finite iterate and its recomputed
+/// residual. Iterate updates are staged before publication. A recursive
+/// convergence candidate is checked against `b - A*x`; residual drift restarts
+/// the search from that actual residual without resetting the iteration cap.
+/// Norms and dot-product ratios use power-of-two scaling when ordinary
+/// accumulation would overflow, underflow, or become subnormal. This does not
+/// make unrepresentable matrix products or solution values representable.
+///
+/// # Panics
+/// Non-square/mismatched shapes, non-finite RHS/initial iterate, or a negative
+/// or non-finite tolerance. Matrix and preconditioner SPD are caller obligations.
 pub fn pcg<P: Precond>(
     a: &Csr,
     b: &[f64],
@@ -346,52 +516,83 @@ pub fn pcg<P: Precond>(
     max_iters: usize,
 ) -> PcgReport {
     let n = b.len();
-    let bnorm = b
-        .iter()
-        .map(|v| v * v)
-        .sum::<f64>()
-        .sqrt()
-        .max(f64::MIN_POSITIVE);
+    assert_eq!(a.nrows(), n, "pcg: rows must match RHS");
+    assert_eq!(a.ncols(), n, "pcg requires a square matrix");
+    assert_eq!(x.len(), n, "pcg: iterate must match RHS");
+    assert!(
+        tol.is_finite() && tol >= 0.0,
+        "pcg: tolerance must be finite and nonnegative"
+    );
+    assert!(
+        x.iter().all(|v| v.is_finite()),
+        "pcg: initial iterate must be finite"
+    );
+    let bnorm = pcg_norm(b).expect("pcg: RHS must be finite");
     let mut r = vec![0.0f64; n];
-    a.spmv(x, &mut r);
-    for i in 0..n {
-        r[i] = b[i] - r[i];
+    let entry = pcg_report(a, b, x, &mut r, bnorm, 0, tol);
+    if entry.converged || max_iters == 0 || !r.iter().all(|v| v.is_finite()) {
+        return entry;
     }
     let mut z = vec![0.0f64; n];
     m.apply(&r, &mut z);
     let mut p = z.clone();
-    let mut rz: f64 = r.iter().zip(&z).map(|(a, b)| a * b).sum();
+    let mut rz = pcg_positive_dot(&r, &z);
     let mut ap = vec![0.0f64; n];
-    for it in 0..max_iters {
-        let rel = r.iter().map(|v| v * v).sum::<f64>().sqrt() / bnorm;
-        if rel <= tol {
-            return PcgReport {
-                iters: it,
-                rel_residual: rel,
-                converged: true,
-            };
-        }
+    let mut next_x = vec![0.0f64; n];
+    let mut completed = 0;
+    for _ in 0..max_iters {
+        let Some(current_rz) = rz else {
+            break;
+        };
         a.spmv(&p, &mut ap);
-        let pap: f64 = p.iter().zip(&ap).map(|(a, b)| a * b).sum();
-        let alpha = rz / pap;
+        let Some(pap) = pcg_positive_dot(&p, &ap) else {
+            break;
+        };
+        let alpha = pcg_ratio(current_rz, pap);
+        if !alpha.is_finite() || alpha <= 0.0 {
+            break;
+        }
         for i in 0..n {
-            x[i] = alpha.mul_add(p[i], x[i]);
-            r[i] = (-alpha).mul_add(ap[i], r[i]);
+            next_x[i] = alpha.mul_add(p[i], x[i]);
+            ap[i] = (-alpha).mul_add(ap[i], r[i]);
+        }
+        if !next_x.iter().chain(&ap).all(|v| v.is_finite()) {
+            break;
+        }
+        x.copy_from_slice(&next_x);
+        std::mem::swap(&mut r, &mut ap);
+        completed += 1;
+        if pcg_relative_residual(&r, bnorm) <= tol || completed == max_iters {
+            let report = pcg_report(a, b, x, &mut ap, bnorm, completed, tol);
+            if report.converged || completed == max_iters {
+                return report;
+            }
+            // The recurrence lost the true residual. Restart from the
+            // recomputed vector while retaining both x and the spent budget.
+            std::mem::swap(&mut r, &mut ap);
+            m.apply(&r, &mut z);
+            rz = pcg_positive_dot(&r, &z);
+            p.copy_from_slice(&z);
+            continue;
         }
         m.apply(&r, &mut z);
-        let rz_new: f64 = r.iter().zip(&z).map(|(a, b)| a * b).sum();
-        let beta = rz_new / rz;
-        rz = rz_new;
-        for i in 0..n {
-            p[i] = beta.mul_add(p[i], z[i]);
+        let Some(rz_new) = pcg_positive_dot(&r, &z) else {
+            break;
+        };
+        let beta = pcg_ratio(rz_new, current_rz);
+        if !beta.is_finite() || beta < 0.0 {
+            break;
         }
+        for i in 0..n {
+            ap[i] = beta.mul_add(p[i], z[i]);
+        }
+        if !ap.iter().all(|v| v.is_finite()) {
+            break;
+        }
+        std::mem::swap(&mut p, &mut ap);
+        rz = Some(rz_new);
     }
-    let rel = r.iter().map(|v| v * v).sum::<f64>().sqrt() / bnorm;
-    PcgReport {
-        iters: max_iters,
-        rel_residual: rel,
-        converged: rel <= tol,
-    }
+    pcg_report(a, b, x, &mut r, bnorm, completed, tol)
 }
 
 // ---------------------------------------------------------------------------
