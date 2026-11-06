@@ -244,6 +244,18 @@ fn g0_zero_force_retains_original_bits_and_admission_respects_shape_and_byte_lim
         BodyForce3d::Acceleration(&short),
         BodyForce3d::ForceDensity(&nonfinite),
         BodyForce3d::UniformAcceleration([f64::NAN, 0.0, 0.0]),
+        BodyForce3d::Coriolis {
+            angular_velocity: [0.0, f64::INFINITY, 0.0],
+            acceleration: [0.0; 3],
+        },
+        BodyForce3d::CoriolisField {
+            angular_velocity: [0.1, 0.2, 0.3],
+            acceleration: &short,
+        },
+        BodyForce3d::CoriolisField {
+            angular_velocity: [0.1, 0.2, 0.3],
+            acceleration: &nonfinite,
+        },
     ] {
         assert!(matches!(
             flow.step_with_forcing(
@@ -455,4 +467,113 @@ fn g4_g5_cancelled_force_trials_keep_accepted_history_and_retry_without_duplicat
         assert_eq!(candidate.states(), reference.states());
         assert_eq!(impulses(&candidate), impulses(&reference));
     }
+}
+
+#[test]
+fn g1_arbitrary_axis_coriolis_rotates_without_heating_the_periodic_gas() {
+    let velocity = [0.23, -0.17, 0.11];
+    let mut flow = field([3; 3], [0.3; 3], 0.3, |_| {
+        [1.7, velocity[0], velocity[1], velocity[2], 3.4]
+    });
+    let initial = flow.states()[0].primitive(flow.gas(), || false).unwrap();
+    let energy = flow.states()[0].energy;
+    let mut workspace = flow.forcing_workspace(usize::MAX).unwrap();
+    let pointer = workspace.original.as_ptr();
+    let mut angle = 0.0_f64;
+    for _ in 0..256 {
+        let report = flow
+            .step_with_forcing(
+                Time::new(0.002),
+                StepControl::default(),
+                BodyForce3d::Coriolis {
+                    angular_velocity: [1.0, 2.0, 2.0],
+                    acceleration: [0.0; 3],
+                },
+                cap(),
+                &mut workspace,
+                || false,
+            )
+            .unwrap();
+        // Two midpoint source half steps each turn by -2 atan(|Omega|*dt/2).
+        angle -= 4.0 * (1.5 * report.elapsed.value()).atan();
+        assert_eq!(report.source_change.work, 0.0);
+        balance(&report);
+    }
+    assert_eq!(workspace.original.as_ptr(), pointer);
+    // Independent Rodrigues rotation about the unit vector (1,2,2)/3.
+    let axis = [1.0 / 3.0, 2.0 / 3.0, 2.0 / 3.0];
+    let projection: f64 = (0..3).map(|i| axis[i] * velocity[i]).sum();
+    let cross = [
+        axis[1] * velocity[2] - axis[2] * velocity[1],
+        axis[2] * velocity[0] - axis[0] * velocity[2],
+        axis[0] * velocity[1] - axis[1] * velocity[0],
+    ];
+    let (sine, cosine) = angle.sin_cos();
+    for q in flow.states() {
+        let p = q.primitive(flow.gas(), || false).unwrap();
+        assert_eq!(q.energy.to_bits(), energy.to_bits());
+        close(p.temperature, initial.temperature, 5e-11);
+        close(p.pressure, initial.pressure, 5e-11);
+        for i in 0..3 {
+            let expected =
+                cosine * velocity[i] + sine * cross[i] + (1.0 - cosine) * projection * axis[i];
+            close(p.velocity[i], expected, 2e-12);
+        }
+    }
+}
+
+#[test]
+fn g1_coriolis_field_uses_current_density_and_only_mechanical_work() {
+    let flow = field([2; 3], [0.2, 0.3, 0.4], 0.2, |i| {
+        let rho = 1.0 + 0.1 * i as f64;
+        [rho, 0.03 * (i as f64 - 3.0), 0.02, -0.04, 2.0 * rho]
+    });
+    let acceleration: Vec<_> = (0..8)
+        .map(|i| [0.2 + 0.01 * i as f64, -0.1, 0.3])
+        .collect();
+    let omega = [0.7, -0.3, 0.2];
+    let force = BodyForce3d::CoriolisField {
+        angular_velocity: omega,
+        acceleration: &acceleration,
+    };
+    assert!(force.admit::<Error>(flow.states().len(), &mut || false).unwrap());
+    let mut candidate = flow.states().to_vec();
+    let (source, _) = kick_field(
+        flow.gas(),
+        flow.grid(),
+        &mut candidate,
+        force,
+        cap(),
+        0.07,
+        true,
+        &mut || false,
+    )
+    .unwrap();
+    let mut expected_work = 0.0;
+    for (i, (before, after)) in flow.states().iter().zip(&candidate).enumerate() {
+        let p0 = before.primitive(flow.gas(), || false).unwrap();
+        let p1 = after.primitive(flow.gas(), || false).unwrap();
+        let midpoint: [f64; 3] =
+            core::array::from_fn(|axis| 0.5 * (p0.velocity[axis] + p1.velocity[axis]));
+        let spin = [
+            omega[1] * midpoint[2] - omega[2] * midpoint[1],
+            omega[2] * midpoint[0] - omega[0] * midpoint[2],
+            omega[0] * midpoint[1] - omega[1] * midpoint[0],
+        ];
+        let work: f64 = (0..3)
+            .map(|axis| 0.07 * before.density * acceleration[i][axis] * midpoint[axis])
+            .sum();
+        expected_work += work * flow.grid().cell_volume();
+        assert_eq!(after.density, before.density);
+        close(p1.temperature, p0.temperature, 5e-11);
+        close(after.energy - before.energy, work, 3e-13);
+        for axis in 0..3 {
+            close(
+                p1.velocity[axis] - p0.velocity[axis],
+                0.07 * (acceleration[i][axis] - 2.0 * spin[axis]),
+                3e-13,
+            );
+        }
+    }
+    close(source.work, expected_work, 3e-13);
 }

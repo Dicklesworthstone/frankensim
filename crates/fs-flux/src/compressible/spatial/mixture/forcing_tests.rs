@@ -528,3 +528,40 @@ fn g3_forced_reacting_channel_keeps_molecular_sgs_and_chemical_energy_owners() {
         report.dissipation.as_ref().map(|d| &d.second)
     );
 }
+
+#[test]
+fn g3_coriolis_keeps_species_and_caloric_reference_energy_unchanged() {
+    for reference in [0.0, 1e12] {
+        let mut flow = field(reference, false);
+        let mut workspace = work(&flow);
+        let initial = flow.cell(0).unwrap().primitive(flow.gas(), || false).unwrap();
+        let species = flow.cell(0).unwrap().partial_densities.to_vec();
+        let report = flow
+            .step_with_forcing(
+                Time::new(0.002),
+                StepControl::default(),
+                BodyForce3d::Coriolis {
+                    angular_velocity: [1.0, -2.0, 0.5],
+                    acceleration: [0.0; 3],
+                },
+                control(),
+                &mut workspace,
+                || false,
+            )
+            .unwrap();
+        assert_eq!(report.source_change.work, 0.0);
+        balance(&report);
+        for i in 0..flow.cell_count() {
+            let q = flow.cell(i).unwrap();
+            let p = q.primitive(flow.gas(), || false).unwrap();
+            assert_eq!(q.partial_densities, species.as_slice());
+            close(p.temperature, initial.temperature, 3e-11);
+            close(p.pressure, initial.pressure, 3e-11);
+            close(
+                p.velocity.iter().map(|u| u * u).sum::<f64>(),
+                initial.velocity.iter().map(|u| u * u).sum::<f64>(),
+                3e-13,
+            );
+        }
+    }
+}

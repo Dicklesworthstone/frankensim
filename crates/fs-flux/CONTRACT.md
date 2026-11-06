@@ -2488,6 +2488,38 @@ and two new coupled tests pass in the native debug build, including variable-Cp
 source work, force-driven stability retries, active dynamic channel SGS,
 physical wall energy and final-checkpoint rollback.
 
+### Local Coriolis sources on the shared compressible momentum operator
+
+`BodyForce2d` and `BodyForce3d` also admit `Coriolis` (uniform effective
+acceleration) and `CoriolisField` (borrowed cellwise effective acceleration).
+Both carry explicit angular velocity [rad/s] in the velocity axes. The planar
+owner refuses in-plane spin; spatial owners admit arbitrary axes. These are
+local rotating-flow sources. Centrifugal, Euler and origin acceleration must
+be supplied explicitly in the non-Coriolis field when applicable; the existing
+pressure flux remains the sole owner of pressure gradients.
+
+The common source kick integrates `dm/dt = rho*a - 2*omega cross m` with an
+analytic skew midpoint inverse. It solves for the impulse directly, avoids
+per-cell allocation/trigonometry/iteration, and uses each source stage's actual
+density. Pure Coriolis changes momentum direction with exactly zero reported
+source work and bit-preserved conservative energy. The speed/axial-velocity
+identity holds to floating-point roundoff. With effective acceleration, the
+represented kinetic change supplies signed mechanical work using the original
+source convention. Neither case adds a sensible-heat or chemical source.
+
+The existing planar/spatial gas, mixture, reactive and molecular forcing
+consumers inherit this shared source. Native retries, cancellation, workspace,
+Mach and advective CFL admission still govern the complete interval. Zero spin
+uses the original acceleration arithmetic. The local midpoint phase is second
+order rather than exact; resolve the inertial period. This is not global
+spherical geometry or a well-balanced pressure/Coriolis discretization.
+
+Focused regression cases accompany planar geostrophic balance and zero-spin
+identity, a repeated arbitrary-axis periodic gas rotation with an independent
+Rodrigues phase oracle, spatial drive/work and density coupling, mixture
+species/caloric-reference preservation, and invalid source admission. Native
+Rust execution of these added cases was unavailable in the authoring session.
+
 ### Three-dimensional Newtonian stress, Fourier heat and the coupled field
 
 `spatial::molecular::MolecularTransport3d` binds the original gas's exact species

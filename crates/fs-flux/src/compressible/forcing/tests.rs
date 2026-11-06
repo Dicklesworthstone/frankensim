@@ -261,6 +261,18 @@ fn g4_invalid_sources_and_late_cancellation_preserve_complete_accepted_state() {
         BodyForce2d::UniformAcceleration([f64::NAN, 0.0]),
         BodyForce2d::Acceleration(&[]),
         BodyForce2d::UniformForceDensity([f64::INFINITY, 0.0]),
+        BodyForce2d::Coriolis {
+            angular_velocity: [1.0, 0.0, 0.0],
+            acceleration: [0.0; 2],
+        },
+        BodyForce2d::Coriolis {
+            angular_velocity: [0.0, 0.0, f64::NAN],
+            acceleration: [0.0; 2],
+        },
+        BodyForce2d::CoriolisField {
+            angular_velocity: [0.0, 0.0, 1.0],
+            acceleration: &[],
+        },
     ] {
         assert!(
             flow.step_with_forcing(
@@ -348,4 +360,66 @@ fn g4_invalid_sources_and_late_cancellation_preserve_complete_accepted_state() {
         .unwrap();
     assert_eq!(retry, expected);
     assert_eq!(flow.states(), probe.states());
+}
+
+#[test]
+fn g1_coriolis_and_prescribed_acceleration_preserve_uniform_geostrophic_balance() {
+    let mut flow = uniform(2.0, [0.5, -0.25]);
+    let original = flow.states().to_vec();
+    let mut scratch = workspace(&flow);
+    // a = 2*Omega cross u: the held pressure-drive acceleration exactly
+    // balances the Coriolis acceleration. No centrifugal field is implied.
+    let force = BodyForce2d::Coriolis {
+        angular_velocity: [0.0, 0.0, 2.0],
+        acceleration: [1.0, 2.0],
+    };
+    for _ in 0..8 {
+        let report = flow
+            .step_with_forcing(
+                Time::new(0.015625),
+                StepControl::default(),
+                force,
+                FORCE_CONTROL,
+                &mut scratch,
+                || false,
+            )
+            .unwrap();
+        assert_eq!(flow.states(), original);
+        assert_eq!(report.source_change, ForceChange2d::default());
+        balance(&report);
+    }
+}
+
+#[test]
+fn g3_zero_spin_retains_the_prescribed_acceleration_arithmetic() {
+    let acceleration = [0.4, -0.2];
+    let mut original = uniform(1.3, [0.2, -0.1]);
+    let mut rotating = uniform(1.3, [0.2, -0.1]);
+    let mut original_work = workspace(&original);
+    let mut rotating_work = workspace(&rotating);
+    let expected = original
+        .step_with_forcing(
+            Time::new(0.01),
+            StepControl::default(),
+            BodyForce2d::UniformAcceleration(acceleration),
+            FORCE_CONTROL,
+            &mut original_work,
+            || false,
+        )
+        .unwrap();
+    let actual = rotating
+        .step_with_forcing(
+            Time::new(0.01),
+            StepControl::default(),
+            BodyForce2d::Coriolis {
+                angular_velocity: [0.0; 3],
+                acceleration,
+            },
+            FORCE_CONTROL,
+            &mut rotating_work,
+            || false,
+        )
+        .unwrap();
+    assert_eq!(actual, expected);
+    assert_eq!(rotating.states(), original.states());
 }
