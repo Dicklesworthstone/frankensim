@@ -220,6 +220,46 @@ impl TimeSignal {
         self.eval_prevalidated(t)
     }
 
+    /// Validate and evaluate through the same signal owner, with cancellation.
+    ///
+    /// The outer result retains the caller's checkpoint error; the inner result
+    /// retains the ordinary signal diagnostic. Validation polls while scanning
+    /// table entries or spectral coefficients, and Chebyshev evaluation polls
+    /// each recurrence. Table lookup remains logarithmic after validation.
+    /// Polls before admission and before returning a value also cover constant,
+    /// ramp and table samples. A refusal never publishes a partial sample.
+    ///
+    /// Public signal variants can be constructed or changed directly, so each
+    /// call validates the complete current history. No stale validation cache,
+    /// cloned history, second interpolation law or new clock is introduced.
+    /// Clamped tails and exact-knot behavior are identical to [Self::eval].
+    /// The ordinary evaluator retains its optimized spectral dispatch; this
+    /// cancellable lane uses the original bit-identical portable recurrence.
+    pub fn eval_with_checkpoint<E>(
+        &self,
+        t: f64,
+        checkpoint: &mut impl FnMut(&'static str) -> Result<(), E>,
+    ) -> Result<Result<QtyAny, ScenarioError>, E> {
+        checkpoint("signal evaluation admission")?;
+        if !t.is_finite() {
+            return Ok(Err(ScenarioError::Evaluate {
+                what: format!("non-finite evaluation time {t}"),
+            }));
+        }
+        let mut violations = Vec::new();
+        self.check_with_checkpoint("signal evaluation", &mut violations, checkpoint)?;
+        if let Some(first) = violations.first() {
+            return Ok(Err(ScenarioError::Evaluate {
+                what: first.what.clone(),
+            }));
+        }
+        let result = self.eval_prevalidated_with_checkpoint(t, &mut || {
+            checkpoint("signal Chebyshev evaluation")
+        })?;
+        checkpoint("signal evaluation publication")?;
+        Ok(result)
+    }
+
     /// Evaluate after the caller has already run semantic validation.
     ///
     /// This retains the local shape, bounds, and finite-result guards needed
@@ -496,6 +536,134 @@ mod validation_internal_tests {
                 .eval_prevalidated(f64::NAN)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn public_checkpointed_sampling_retains_units_knots_and_clamped_tails() {
+        let dims = Dims([-1, 1, -2, 0, 0, 0]);
+        let signals = [
+            TimeSignal::Constant(QtyAny::new(3.0, dims)),
+            TimeSignal::Ramp {
+                t_start: -1.0,
+                t_end: 1.0,
+                from: QtyAny::new(-2.0, dims),
+                to: QtyAny::new(6.0, dims),
+            },
+            TimeSignal::Table {
+                times: vec![-1.0, 0.0, 1.0],
+                values: vec![-2.0, 7.0, 6.0],
+                dims,
+                interp: Interp::Hold,
+            },
+            TimeSignal::Table {
+                times: vec![-1.0, 0.0, 1.0],
+                values: vec![-2.0, 7.0, 6.0],
+                dims,
+                interp: Interp::Linear,
+            },
+            TimeSignal::Chebfun(ChebProfile {
+                cheb: Cheb1::from_coeffs(-1.0, 1.0, vec![6.0, 2.0]),
+                dims,
+            }),
+        ];
+        // G0: independently prescribed pressure values, not a second sampler.
+        let expected = [
+            [3.0, 3.0, 3.0, 3.0, 3.0],
+            [-2.0, 0.0, 2.0, 4.0, 6.0],
+            [-2.0, -2.0, 7.0, 7.0, 6.0],
+            [-2.0, 2.5, 7.0, 6.5, 6.0],
+            [1.0, 2.0, 3.0, 4.0, 5.0],
+        ];
+        for (signal, expected) in signals.iter().zip(expected) {
+            for (time, value) in [-2.0, -0.5, 0.0, 0.5, 2.0].into_iter().zip(expected) {
+                let sampled = signal
+                    .eval_with_checkpoint(time, &mut |_| Ok::<(), ()>(()))
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(sampled, QtyAny::new(value, dims));
+                assert_eq!(signal.eval(time).unwrap(), sampled);
+            }
+        }
+    }
+
+    #[test]
+    fn public_sampling_cancels_validation_recurrence_and_publication() {
+        // G4: interruption within the original owners returns no scalar.
+        let signal = TimeSignal::Table {
+            times: (0..128).map(f64::from).collect(),
+            values: vec![2.0; 128],
+            dims: Dims::NONE,
+            interp: Interp::Linear,
+        };
+        let mut visited = 0;
+        let cancelled = signal.eval_with_checkpoint(0.5, &mut |phase| {
+            if phase == "signal table times" {
+                visited += 1;
+                if visited == 3 {
+                    return Err("stop table scan");
+                }
+            }
+            Ok(())
+        });
+        assert_eq!(visited, 3);
+        assert!(matches!(cancelled, Err("stop table scan")));
+
+        let spectral = TimeSignal::Chebfun(ChebProfile {
+            cheb: Cheb1::from_coeffs(-1.0, 1.0, vec![2.0, 0.5, 0.25, 0.125]),
+            dims: Dims::NONE,
+        });
+        let mut recurrence_steps = 0;
+        let cancelled = spectral.eval_with_checkpoint(0.25, &mut |phase| {
+            if phase == "signal Chebyshev evaluation" {
+                recurrence_steps += 1;
+                if recurrence_steps == 2 {
+                    return Err("stop recurrence");
+                }
+            }
+            Ok(())
+        });
+        assert_eq!(recurrence_steps, 2);
+        assert!(matches!(cancelled, Err("stop recurrence")));
+
+        let constant = TimeSignal::Constant(QtyAny::new(2.0, Dims::NONE));
+        assert!(matches!(
+            constant.eval_with_checkpoint(0.0, &mut |phase| {
+                if phase == "signal evaluation publication" {
+                    Err("stop publication")
+                } else {
+                    Ok(())
+                }
+            }),
+            Err("stop publication")
+        ));
+    }
+
+    #[test]
+    fn public_sampling_validates_unsampled_history_and_retains_signal_errors() {
+        // G0: a valid sample cannot launder malformed data elsewhere in a history.
+        let malformed = TimeSignal::Table {
+            times: vec![0.0, 1.0, 0.5],
+            values: vec![2.0, 3.0, 4.0],
+            dims: Dims::NONE,
+            interp: Interp::Hold,
+        };
+        let mut checkpoint = |_: &'static str| Ok::<(), ()>(());
+        let error = malformed
+            .eval_with_checkpoint(-1.0, &mut checkpoint)
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            malformed.eval(-1.0).unwrap_err().to_string()
+        );
+        assert!(matches!(
+            malformed.eval_with_checkpoint(f64::NAN, &mut checkpoint),
+            Ok(Err(_))
+        ));
+        assert!(matches!(
+            malformed.eval_with_checkpoint(0.0, &mut |_| Err("pre-cancelled")),
+            Err("pre-cancelled")
+        ));
     }
 
     #[test]

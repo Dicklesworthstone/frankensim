@@ -1394,3 +1394,21 @@ Ordinary absolute vector payloads still rotate components only and acquire no
 implicit carrier velocity. `tests/translating_frames.rs` covers parent-axis
 composition, canonical round trips, velocity-reference semantics, malformed
 coordinates/units and retained-history budgets.
+
+
+### Cancellable public time-history evaluation
+
+`TimeSignal::eval_with_checkpoint` validates and samples the existing signal
+representation under a caller-supplied checkpoint. Table validation and
+Chebyshev validation/evaluation poll their original loops; admission and final
+publication are also cancellable. The outer result preserves the checkpoint
+error and the inner result preserves the ordinary scenario diagnostic. No
+partial scalar is returned. Every call revalidates public mutable histories.
+
+The existing `eval` keeps its optimized spectral dispatch. The cancellable
+lane uses the original bit-identical portable recurrence and retains units,
+exact-knot behavior, interpolation and clamped tails. G0/G4 regressions in
+`signal::validation_internal_tests` cover independently specified sample
+values, malformed unsampled data, and cancellation during validation,
+recurrence and publication. These are source-level tests, not a measured
+cancellation-latency guarantee.
