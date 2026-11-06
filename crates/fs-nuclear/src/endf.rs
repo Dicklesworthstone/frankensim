@@ -20,6 +20,9 @@ use std::sync::Arc;
 /// Explicit incident spectra and reaction-rate-preserving group collapse.
 pub mod spectrum;
 
+/// Evaluated prompt, delayed and total fission-neutron multiplicities.
+pub mod neutron_yield;
+
 /// Evaluated half-lives, decay modes and aggregate emitted energies.
 pub mod decay;
 
@@ -195,7 +198,7 @@ impl PointwiseCrossSection {
                 continue;
             }
             if record.mf == 1 && record.mt == 451 {
-                metadata = read_metadata(&mut reader, record, selection, &mut checkpoint)?;
+                metadata = read_metadata(&mut reader, record, selection, true, &mut checkpoint)?;
             } else if record.mf == 3 && record.mt == mt {
                 if let Some(identity) = &metadata {
                     if candidate.is_some() {
@@ -626,6 +629,7 @@ fn read_metadata(
     reader: &mut Reader<'_>,
     head: Record<'_>,
     selection: EndfSelection,
+    require_reconstructed: bool,
     checkpoint: &mut impl FnMut() -> Result<(), FissionError>,
 ) -> Result<Option<EndfMetadata>, EndfError> {
     let second = reader.section(head.mat, 1, 451, checkpoint)?;
@@ -661,7 +665,10 @@ fn read_metadata(
         ));
     }
     let resonance_flag = head.integer(2)?;
-    if resonance_flag != 0 && resonance_flag != 2 {
+    if !(0..=2).contains(&resonance_flag) {
+        return Err(head.error("invalid resonance flag"));
+    }
+    if require_reconstructed && resonance_flag != 0 && resonance_flag != 2 {
         return Err(EndfError::Unsupported(
             "MF3 must contain complete reconstructed cross sections (LRP=0 or 2)",
         ));
@@ -740,6 +747,34 @@ fn read_curve(
     if tab.integer(3)? != 0 {
         return Err(EndfError::Unsupported("MF3 breakup flag LR must be zero"));
     }
+    let curve = read_nonnegative_tab1(reader, tab, BARN_M2, checkpoint)?;
+    reader.send(head.mat, 3, checkpoint)?;
+    Ok(PointwiseCrossSection {
+        data_id: Arc::from(""),
+        metadata,
+        reaction,
+        energies_j: curve.energies_j.into(),
+        cross_sections_m2: curve.values.into(),
+        interpolation_regions: curve.interpolation_regions.into(),
+        mass_difference_q_j: convert_si(tab.number(0)?, EV_J)?,
+        reaction_q_j: convert_si(tab.number(1)?, EV_J)?,
+    })
+}
+
+/// The same bounded TAB1 grammar serves cross sections and dimensionless
+/// yields. Callers own the header's physical meaning and consume its SEND.
+struct NonnegativeTabulation {
+    energies_j: Vec<f64>,
+    values: Vec<f64>,
+    interpolation_regions: Vec<EndfInterpolationRegion>,
+}
+
+fn read_nonnegative_tab1(
+    reader: &mut Reader<'_>,
+    tab: Record<'_>,
+    value_scale: f64,
+    checkpoint: &mut impl FnMut() -> Result<(), FissionError>,
+) -> Result<NonnegativeTabulation, EndfError> {
     let regions_count = tab.count(4)?;
     let points_count = tab.count(5)?;
     if regions_count == 0 || points_count < 2 || regions_count >= points_count {
@@ -764,7 +799,7 @@ fn read_curve(
         .try_reserve_exact(regions_count)
         .map_err(|_| budget("ENDF interpolation memory"))?;
     for _ in 0..regions_count.div_ceil(3) {
-        let row = reader.section(head.mat, 3, head.mt, checkpoint)?;
+        let row = reader.section(tab.mat, tab.mf, tab.mt, checkpoint)?;
         for pair in 0..3 {
             if regions.len() == regions_count {
                 row.zero_integer(pair * 2)?;
@@ -797,30 +832,30 @@ fn read_curve(
         return Err(tab.error("last interpolation endpoint must equal NP"));
     }
     let mut energies = Vec::new();
-    let mut cross_sections = Vec::new();
+    let mut values = Vec::new();
     energies
         .try_reserve_exact(points_count)
         .map_err(|_| budget("ENDF point memory"))?;
-    cross_sections
+    values
         .try_reserve_exact(points_count)
         .map_err(|_| budget("ENDF point memory"))?;
     let mut previous_ev = None;
     for _ in 0..points_count.div_ceil(3) {
-        let row = reader.section(head.mat, 3, head.mt, checkpoint)?;
+        let row = reader.section(tab.mat, tab.mf, tab.mt, checkpoint)?;
         for pair in 0..3 {
             let energy_ev = row.number(pair * 2)?;
-            let cross_section_barns = row.number(pair * 2 + 1)?;
+            let source_value = row.number(pair * 2 + 1)?;
             if energies.len() == points_count {
-                if energy_ev != 0.0 || cross_section_barns != 0.0 {
+                if energy_ev != 0.0 || source_value != 0.0 {
                     return Err(row.error("nonzero TAB1 padding"));
                 }
                 continue;
             }
-            if !nonnegative(energy_ev) || !nonnegative(cross_section_barns) {
-                return Err(row.error("nonnegative energy and cross section required"));
+            if !nonnegative(energy_ev) || !nonnegative(source_value) {
+                return Err(row.error("nonnegative energy and tabulated value required"));
             }
             let energy_j = convert_si(energy_ev, EV_J)?;
-            let sigma_m2 = convert_si(cross_section_barns, BARN_M2)?;
+            let value = convert_si(source_value, value_scale)?;
             if let Some(previous) = previous_ev {
                 let last = energies[energies.len() - 1];
                 if energy_ev < previous || (energy_ev > previous && energy_j <= last) {
@@ -837,22 +872,16 @@ fn read_curve(
             }
             previous_ev = Some(energy_ev);
             energies.push(energy_j);
-            cross_sections.push(sigma_m2);
+            values.push(value);
         }
     }
     if energies[0] >= energies[energies.len() - 1] {
         return Err(tab.error("nonempty energy domain required"));
     }
-    reader.send(head.mat, 3, checkpoint)?;
-    Ok(PointwiseCrossSection {
-        data_id: Arc::from(""),
-        metadata,
-        reaction,
-        energies_j: energies.into(),
-        cross_sections_m2: cross_sections.into(),
-        interpolation_regions: regions.into(),
-        mass_difference_q_j: convert_si(tab.number(0)?, EV_J)?,
-        reaction_q_j: convert_si(tab.number(1)?, EV_J)?,
+    Ok(NonnegativeTabulation {
+        energies_j: energies,
+        values,
+        interpolation_regions: regions,
     })
 }
 

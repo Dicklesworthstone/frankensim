@@ -1538,3 +1538,32 @@ volume length before allocating its retained volume array.
 
 The combined native integration gate passed all 242 nuclear and thermal tests,
 including the six new coupled transport regressions and the constructor guard.
+
+## Evaluated fission-neutron multiplicities
+
+`endf::neutron_yield::FissionNeutronYield` imports the distinct MF1/MT452 total,
+MT456 prompt and MT455 delayed neutron yields from supplied ENDF-6 text. Exact
+MAT, nuclide/isomer and metadata temperature select one section. The original
+bounded reader admits histogram/linear TAB1 laws, preserves multiplicities
+above one, converts incident energies to joules and rejects duplicate matching
+sections, truncation, unsupported interpolation and excess work or storage.
+MT455 with LDG=0 retains the ordered positive precursor decay constants in
+inverse seconds. Family abundances and outgoing neutron spectra are separate
+data; the importer does not infer either from these constants. Polynomial
+LNU=1 and energy-dependent delayed constants LDG=1 explicitly refuse.
+
+MF1 yield data can come from an unreconstructed zero-temperature evaluation.
+The existing MF3 cross-section importer still requires reconstructed processed
+data at its declared positive temperature. `collapse` admits their common
+isotope, target mass and library/revision identity, retaining both metadata
+records. It reuses the original reaction-weighted integration to preserve
+`integral(sigma_f * phi * nu)`, with no representative-energy sampling or yield
+normalization. A zero-reaction group has an undefined yield (`None`), not an
+invented neutron multiplicity. The output retains prompt/delayed/total meaning.
+
+Synthetic regressions exercise raw evaluation import, isomers, native spatial
+prompt growth and delayed release against analytical solutions, weighted
+production, incompatible data, malformed/unsupported records and late
+cancellation. They establish format and equation behavior, not validation of
+an evaluated isotope. The format follows ENDF-102 (2023), sections 1.2–1.4,
+<https://www.nndc.bnl.gov/endfdocs/ENDF-102-2023.pdf>.
