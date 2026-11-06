@@ -8,6 +8,8 @@
 //! + R I. Native power ports cancel this transfer against the original Kirchhoff
 //! graph. Reversible saturation, eddy diffusion and prescribed motion in separate
 //! conducting regions therefore affect terminal voltage and current directly.
+//! Explicit end-region self/mutual storage uses passive shared-flux modes; it
+//! adds only caller-declared flux outside the resolved three-dimensional field.
 //!
 //! Stranded profiles include their physical turns and complete return paths.
 //! Their source-bound scalar resistivity and explicit conductor filling give
@@ -30,6 +32,7 @@ use super::{
 use crate::{
     spatial::{SpatialMagneticError, nonlinear::SpatialNonlinearMaterial},
     winding::{
+        end::{EndWindingError, EndWindingInductance, EndWindingMode, EndWindingStep},
         nonlinear::{
             NonlinearWindingControls, NonlinearWindingError, NonlinearWindingInitial,
             NonlinearWindingPort, native_seed, resistors::GraphResistorMaterial,
@@ -61,7 +64,8 @@ pub struct SpatialNonlinearWindings {
     /// Signed complete distributed current divided by terminal current [1/m2].
     /// The values are averages over the represented cells, including filling.
     pub profiles_per_m2: Vec<Vec<[f64; 3]>>,
-    /// Explicit omitted series self-inductance; zero is admitted [H].
+    /// Independent omitted series self-inductance; zero is admitted [H].
+    /// Shared end-flux modes are supplied separately to new_with_end_modes.
     pub end_inductance_h: Vec<f64>,
 }
 
@@ -106,6 +110,7 @@ pub enum SpatialNonlinearWindingError {
     Circuit(CircuitError),
     Interface(NonlinearWindingError),
     Conductor(OhmicWindingError),
+    End(EndWindingError),
     Newton(NewtonError),
     TrialBudget,
     Interrupted(SolverRunProgress),
@@ -166,6 +171,11 @@ impl From<NewtonError> for SpatialNonlinearWindingError {
         Self::Newton(value)
     }
 }
+impl From<EndWindingError> for SpatialNonlinearWindingError {
+    fn from(value: EndWindingError) -> Self {
+        Self::End(value)
+    }
+}
 type Result<T> = core::result::Result<T, SpatialNonlinearWindingError>;
 fn finite(value: f64) -> Result<f64> {
     Ok(super::finite(value)?)
@@ -215,12 +225,6 @@ fn impressed(
     }
     Ok(values)
 }
-fn end_energy(inductances: &[f64], currents: &[f64]) -> Result<f64> {
-    inductances
-        .iter()
-        .zip(currents)
-        .try_fold(0.0, |sum, (&l, &i)| finite((0.5 * l * i).mul_add(i, sum)))
-}
 struct Layout {
     graph: CircuitGraph,
     dae: CircuitDae,
@@ -236,6 +240,7 @@ struct Layout {
 pub struct SpatialNonlinearWindingCircuit<'m, C: SpatialConductorMaterial = ResolvedConductorState>
 {
     layout: Rc<Layout>,
+    end: Rc<EndWindingInductance>,
     graph_materials: Vec<GraphResistorMaterial>,
     field: SpatialNonlinearInduction<'m, C>,
     conductors: Vec<SpatialWindingConductor>,
@@ -460,6 +465,36 @@ impl<'m, C: SpatialConductorMaterial> SpatialNonlinearWindingCircuit<'m, C> {
         config: SpatialNonlinearWindingConfig,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Self> {
+        Self::new_with_end_modes(
+            field,
+            graph,
+            windings,
+            terminal_ports,
+            Vec::new(),
+            sources,
+            initial,
+            config,
+            cancelled,
+        )
+    }
+
+    /// Couple the original field/circuit history with explicit end-flux modes.
+    /// Each mode adds ell*n*n^T to the independent end self-inductances.
+    /// Signed participation carries winding polarity. Shared or dependent
+    /// modes are admitted without inventing leakage or inverting end storage.
+    /// These modes must describe flux omitted from the resolved field domain.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_end_modes(
+        field: SpatialNonlinearInduction<'m, C>,
+        graph: CircuitGraph,
+        windings: SpatialNonlinearWindings,
+        terminal_ports: Vec<NonlinearWindingPort>,
+        end_modes: Vec<EndWindingMode>,
+        sources: Vec<SpatialWindingConductor>,
+        initial: NonlinearWindingInitial,
+        config: SpatialNonlinearWindingConfig,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self> {
         poll(cancelled)?;
         let nc = field.problem().mesh().tets.len();
         let ne = field.potential_wb().len();
@@ -481,6 +516,10 @@ impl<'m, C: SpatialConductorMaterial> SpatialNonlinearWindingCircuit<'m, C> {
                 if !initial_voltage_v.is_finite() || !positive(*residual_scale_ohm) || !positive(*current_tolerance_a))) {
             return Err(invalid("invalid spatial winding geometry, limits, native graph or terminal causality"));
         }
+        let end = Rc::new(EndWindingInductance::new(
+            windings.end_inductance_h.clone(),
+            end_modes,
+        )?);
         let mut loads_per_a = Vec::with_capacity(count);
         for profile in &windings.profiles_per_m2 {
             // Closed physical currents cannot disappear at a prescribed A trace.
@@ -573,14 +612,12 @@ impl<'m, C: SpatialConductorMaterial> SpatialNonlinearWindingCircuit<'m, C> {
             None,
             cancelled,
         )?;
+        let end_linkage = end.flux_linkages_wb(&initial.currents_a)?;
         let flux_linkages_wb = loads_per_a
             .iter()
             .enumerate()
             .map(|(w, load)| {
-                finite(
-                    pairing(load, field.potential_wb(), cancelled)?
-                        + windings.end_inductance_h[w] * initial.currents_a[w],
-                )
+                finite(pairing(load, field.potential_wb(), cancelled)? + end_linkage[w])
             })
             .collect::<Result<Vec<_>>>()?;
         let layout = Rc::new(Layout {
@@ -642,11 +679,12 @@ impl<'m, C: SpatialConductorMaterial> SpatialNonlinearWindingCircuit<'m, C> {
         finite(
             field.field(cancelled)?.stored_energy_j()
                 + layout.dae.system.hamiltonian(&state)
-                + end_energy(&layout.windings.end_inductance_h, &initial.currents_a)?,
+                + end.stored_energy_j(&initial.currents_a)?,
         )?;
         poll(cancelled)?;
         Ok(Self {
             layout,
+            end,
             graph_materials: Vec::new(),
             field,
             conductors,
@@ -676,8 +714,18 @@ impl<'m, C: SpatialConductorMaterial> SpatialNonlinearWindingCircuit<'m, C> {
     pub fn profiles_per_m2(&self) -> &[Vec<[f64; 3]>] {
         &self.layout.windings.profiles_per_m2
     }
+    /// Independent diagonal end contribution; shared modes add their own self
+    /// and mutual terms. Use end_inductance_matrix_h for the complete block.
     pub fn end_inductance_h(&self) -> &[f64] {
         &self.layout.windings.end_inductance_h
+    }
+    /// The admitted original end model, retained across material/thermal refresh.
+    pub fn end_inductance(&self) -> &EndWindingInductance {
+        &self.end
+    }
+    /// Full row-major end self/mutual matrix in original winding order [H].
+    pub fn end_inductance_matrix_h(&self) -> &[f64] {
+        self.end.matrix_h()
     }
     pub fn terminal_ports(&self) -> &[NonlinearWindingPort] {
         &self.layout.ports
@@ -894,10 +942,9 @@ impl<'m, C: SpatialConductorMaterial> SpatialNonlinearWindingCircuit<'m, C> {
             let mut linkage = Vec::with_capacity(currents.len());
             let mut inductive_voltage = Vec::with_capacity(currents.len());
             let mut required_voltage = Vec::with_capacity(currents.len());
+            let end = self.end.step(&self.currents_a, currents)?;
             for (w, &i) in currents.iter().enumerate() {
-                let increment = finite(
-                    field_increments[w] + self.end_inductance_h()[w] * (i - self.currents_a[w]),
-                )?;
+                let increment = finite(field_increments[w] + end.flux_increment_wb[w])?;
                 linkage.push(finite(self.flux_linkages_wb[w] + increment)?);
                 let induced = finite(increment / dt)?;
                 inductive_voltage.push(induced);
@@ -950,6 +997,7 @@ impl<'m, C: SpatialConductorMaterial> SpatialNonlinearWindingCircuit<'m, C> {
             }
             Ok(Trial {
                 field,
+                end,
                 native,
                 x0,
                 linkage,
@@ -1076,29 +1124,11 @@ impl<'m, C: SpatialConductorMaterial> SpatialNonlinearWindingCircuit<'m, C> {
                 .sum::<f64>(),
         )?;
         let field_work = pairing(&solver.x, &trial.field_increments, &mut check)?;
-        let delta_i = solver
-            .x
-            .iter()
-            .zip(&self.currents_a)
-            .map(|(&a, &b)| finite(a - b))
-            .collect::<Result<Vec<_>>>()?;
-        let end_before = end_energy(self.end_inductance_h(), &self.currents_a)?;
-        let end_after = end_energy(self.end_inductance_h(), &solver.x)?;
-        let end_numerical = end_energy(self.end_inductance_h(), &delta_i)?;
-        let end_work = self
-            .end_inductance_h()
-            .iter()
-            .zip(&delta_i)
-            .zip(&solver.x)
-            .try_fold(0.0, |sum, ((&l, &di), &i)| finite((l * di).mul_add(i, sum)))?;
-        let end_change = self
-            .end_inductance_h()
-            .iter()
-            .zip(&delta_i)
-            .zip(self.currents_a.iter().zip(&solver.x))
-            .try_fold(0.0, |sum, ((&l, &di), (&old, &new))| {
-                finite((l * di).mul_add(f64::midpoint(old, new), sum))
-            })?;
+        let end_before = trial.end.stored_before_j;
+        let end_after = trial.end.stored_after_j;
+        let end_numerical = trial.end.numerical_dissipation_j;
+        let end_work = trial.end.endpoint_work_j;
+        let end_change = trial.end.stored_change_j;
         let field_step = trial.field.step();
         let circuit_before = finite(self.dae().system.hamiltonian(&trial.x0))?;
         let circuit_after = finite(self.dae().system.hamiltonian(&trial.native.x))?;
@@ -1122,7 +1152,6 @@ impl<'m, C: SpatialConductorMaterial> SpatialNonlinearWindingCircuit<'m, C> {
             trial.native.balance_residual(),
             field_work - field_step.impressed_work_j,
             end_change + end_numerical - end_work,
-            end_after - end_before - end_change,
             terminal_work - field_work - end_work - winding_heat,
             energy_residual_j,
         ];
@@ -1171,6 +1200,7 @@ impl<'m, C: SpatialConductorMaterial> SpatialNonlinearWindingCircuit<'m, C> {
         };
         let circuit = Self {
             layout: Rc::clone(&self.layout),
+            end: Rc::clone(&self.end),
             graph_materials: self.graph_materials.clone(),
             field,
             conductors,
@@ -1187,6 +1217,7 @@ impl<'m, C: SpatialConductorMaterial> SpatialNonlinearWindingCircuit<'m, C> {
 
 struct Trial<'m, C: SpatialConductorMaterial> {
     field: SpatialNonlinearInductionCandidate<'m, C>,
+    end: EndWindingStep,
     native: StepRecord,
     x0: Vec<f64>,
     linkage: Vec<f64>,

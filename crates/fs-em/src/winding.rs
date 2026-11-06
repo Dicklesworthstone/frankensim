@@ -19,6 +19,8 @@
 //! from the same spatial material/profile data and retains explicit graph losses.
 
 pub mod circuit;
+/// Passive self/mutual storage for explicitly unresolved end-winding flux.
+pub mod end;
 /// Differential self/mutual inductance at a solved nonlinear operating point.
 pub mod incremental;
 /// Circuit-driven reversible nonlinear fields with spatial conductor losses.

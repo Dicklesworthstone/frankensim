@@ -4896,3 +4896,33 @@ the original gas energy account.
 These are sequentially declared illumination, field evaluation and collision
 intervals. The regression does not assert a simultaneous radiation/field/
 chemistry integrator or attach an arbitrary conductivity to illumination.
+
+## Coupled unresolved end-winding magnetic storage
+
+`winding::end::EndWindingInductance` admits at most 16 windings and 16
+caller-authored shared end-flux modes:
+L_end = diag(L_self) + sum(ell*n*n^T). Finite nonnegative coefficients
+and signed participation define passive storage directly. Dependent and zero
+modes remain valid; no inverse, leakage floor or regularization is invented.
+These terms describe only magnetic flux outside the resolved field domain.
+
+The complete symmetric matrix is inspectable. Linkage, storage, finite
+increments and work use compensated projections of the original modes,
+retaining cancellation between opposing currents. Stable energy changes pair
+modal midpoint current with its increment instead of subtracting large endpoint
+energies. Explicit current/mode bounds keep this terminal work independent of
+mesh size. Unrepresentable arithmetic refuses.
+
+`SpatialNonlinearWindingCircuit::new_with_end_modes` retains this same model
+for initial linkage, terminal voltage, accepted storage and backward-Euler
+numerical dissipation. Source/conductor/material refresh and graph-resistor
+reassembly preserve the model. Existing constructors retain independent
+diagonal end inductances. End numerical dissipation is never conductor heat,
+and the resolved field and graph retain their original work/heat owners.
+
+Focused integration regressions cover independent coupled-loop evolution,
+saturated open-secondary EMF, reversed winding polarity, source refresh,
+resistor reassembly and late cancellation. Six native kernel regressions
+plus five independent actual-source tests passed, including 1,000 expanded
+matrix/work comparisons. The enclosing field/circuit integration regressions
+are authored but could not be executed in the available dependency environment.
