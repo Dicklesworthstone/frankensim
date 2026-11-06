@@ -100,9 +100,9 @@ use super::turbulence::{TURBULENT_PRANDTL, law_of_the_wall_ratios, wall_distance
 use super::{ChtError, finite, finite_positive, poll};
 use crate::d3q19::Face3;
 
+mod momentum_reconstruction;
 pub mod sgs;
 pub mod viscous_heat;
-mod momentum_reconstruction;
 pub use momentum_reconstruction::MomentumReconstruction;
 mod darcy;
 use darcy::DarcyCross;
@@ -481,17 +481,25 @@ impl SimpleConfig {
                 .enumerate()
                 .find_map(|(side, face)| {
                     face.prescribed_pressure().and_then(|uniform| {
-                        self.pressure_profiles_pa[side].as_ref().map_or(Some(uniform), |profile| {
-                            let n = domain.dims();
-                            let axis = side / 2;
-                            // Shape admission follows this datum selection.
-                            // Never interpret excess malformed entries as cells.
-                            profile.iter().take(n[(axis + 1) % 3] * n[(axis + 2) % 3])
-                                .enumerate().find_map(|(index, &pressure)| {
-                                    domain.is_fluid(Self::pressure_profile_cell(domain, side, index))
-                                        .then_some(pressure)
-                                })
-                        })
+                        self.pressure_profiles_pa[side]
+                            .as_ref()
+                            .map_or(Some(uniform), |profile| {
+                                let n = domain.dims();
+                                let axis = side / 2;
+                                // Shape admission follows this datum selection.
+                                // Never interpret excess malformed entries as cells.
+                                profile
+                                    .iter()
+                                    .take(n[(axis + 1) % 3] * n[(axis + 2) % 3])
+                                    .enumerate()
+                                    .find_map(|(index, &pressure)| {
+                                        domain
+                                            .is_fluid(Self::pressure_profile_cell(
+                                                domain, side, index,
+                                            ))
+                                            .then_some(pressure)
+                                    })
+                            })
                     })
                 })
                 .unwrap_or(0.0)
@@ -933,7 +941,7 @@ fn cell_of(n: [usize; 3], c: [usize; 3]) -> usize {
 }
 
 impl<'a> Solver<'a> {
-    #[allow(clippy::too_many_lines)]// one constructor of the solver state
+    #[allow(clippy::too_many_lines)] // one constructor of the solver state
     pub(super) fn new(
         domain: &'a VoxelDomain,
         fluid: &FluidProperties,
@@ -1152,7 +1160,9 @@ impl<'a> Solver<'a> {
                     .collect(),
             },
             planar_loss,
-            porous_nonlinear: porous.iter().any(|cell| cell.iter().any(|(_, c)| *c != 0.0)),
+            porous_nonlinear: porous
+                .iter()
+                .any(|cell| cell.iter().any(|(_, c)| *c != 0.0)),
             porous,
             porous_cross: Vec::new(),
             porous_framed: Vec::new(),
@@ -1263,18 +1273,30 @@ impl<'a> Solver<'a> {
         if self.symmetric_stress() {
             // One positive coefficient at the MAC shear edge, shared by
             // tau_ad and tau_da. Material jumps use harmonic transmission;
-            // with SGS the transmitted coefficient is the TOTAL viscosity.
+            // SGS uses the SAME edge-gradient eddy viscosity in each of the
+            // adjacent total material viscosities before harmonic transmission.
             // Without a molecular field, smooth eddy coefficients retain
             // their native arithmetic interpolation.
             // The same area weights also handle graded cells.
             let a = (0..3).find(|&a| minus[a] != plus[a]).unwrap_or((d + 1) % 3);
+            let edge_eddy = self.sgs_edge_eddy(minus, plus, d, up);
+            let viscosity = |c: [usize; 3]| match edge_eddy {
+                Some(eddy) => self.rho.mul_add(
+                    eddy,
+                    self.molecular_viscosity
+                        .get(cell_of(self.n, c))
+                        .copied()
+                        .unwrap_or(self.mu),
+                ),
+                None => self.mu_eff(c),
+            };
             let mut weights = [(0usize, 0.0, 1.0); 4];
             let mut count = 0;
             for c in [minus, plus] {
                 weights[count] = (
                     cell_of(self.n, c),
                     self.domain.width(a, c[a]) * self.domain.width(d, c[d]),
-                    self.mu_eff(c),
+                    viscosity(c),
                 );
                 count += 1;
                 let mut g = c;
@@ -1285,7 +1307,7 @@ impl<'a> Solver<'a> {
                         weights[count] = (
                             cell_of(self.n, g),
                             self.domain.width(a, g[a]) * self.domain.width(d, g[d]),
-                            self.mu_eff(g),
+                            viscosity(g),
                         );
                         count += 1;
                     }
@@ -1498,8 +1520,9 @@ impl<'a> Solver<'a> {
         {
             return Err(ChtError::InvalidInput {
                 field: "simple.dynamic_viscosity_pa_s",
-                reason: "one molecular viscosity per voxel is required; equilibrium LVEL is unsupported"
-                    .into(),
+                reason:
+                    "one molecular viscosity per voxel is required; equilibrium LVEL is unsupported"
+                        .into(),
             });
         }
         for (c, &mu) in dynamic_viscosity_pa_s.iter().enumerate() {
@@ -1596,8 +1619,11 @@ impl<'a> Solver<'a> {
         let mass = imbalance / (self.rho * largest_flux);
         // Only a prospective convergence result needs the additional frozen
         // coupled residual. Ordinary diagonal paths keep their exact arithmetic.
-        if (!self.porous_cross.is_empty() || self.porous_nonlinear || self.pressure_work_axis.is_some())
-            && mass <= self.config.tolerance && steady <= self.config.tolerance
+        if (!self.porous_cross.is_empty()
+            || self.porous_nonlinear
+            || self.pressure_work_axis.is_some())
+            && mass <= self.config.tolerance
+            && steady <= self.config.tolerance
         {
             steady = self.coupled_darcy_residual(gate)?;
         }
@@ -1804,8 +1830,7 @@ impl<'a> Solver<'a> {
         self.rho
             * self.comp_face_area(axis, index)
             * (0.5
-                * (self.domain.width(axis, plus[axis] - 1)
-                    + self.domain.width(axis, plus[axis])))
+                * (self.domain.width(axis, plus[axis] - 1) + self.domain.width(axis, plus[axis])))
     }
 
     /// Face of component `d` on side `s` of cell `c` (`s = 1`: plus side).
@@ -1840,8 +1865,8 @@ impl<'a> Solver<'a> {
         let comp = &self.comps[a];
         let alpha = self.config.velocity_relaxation;
         let advective_density = if self.creeping { 0.0 } else { self.rho };
-        let reconstruct = !self.creeping
-            && self.config.momentum_reconstruction == MomentumReconstruction::Minmod;
+        let reconstruct =
+            !self.creeping && self.config.momentum_reconstruction == MomentumReconstruction::Minmod;
         let width = |axis: usize, i: usize| self.domain.width(axis, i);
         let mut coo = Coo::new(rows, rows);
         let mut b = vec![0.0f64; rows];
@@ -1853,8 +1878,8 @@ impl<'a> Solver<'a> {
                 poll(gate)?;
             }
             let f = comp.coords(index);
-            let pressure_mouth_row = self.pressure_work_axis == Some(a)
-                && matches!(comp.kind[index], Kind::Outlet(_));
+            let pressure_mouth_row =
+                self.pressure_work_axis == Some(a) && matches!(comp.kind[index], Kind::Outlet(_));
             // The two cells the face separates; an outlet face has one
             // inside, and its outside twin mirrors it (zero normal gradient).
             let minus_cell = (f[a] > 0).then(|| {
@@ -1921,7 +1946,9 @@ impl<'a> Solver<'a> {
                         // derivative of mu*(du_n/dn)^2*V as the interior row.
                         // The unchanged doubled pressure drop then prescribes
                         // normal traction -p_res*n at the actual mouth.
-                        if pressure_mouth_row { diff *= 2.0; }
+                        if pressure_mouth_row {
+                            diff *= 2.0;
+                        }
                         let coef = self.config.scheme.face_coefficients(diff, flux).1;
                         match comp.kind[nf] {
                             Kind::Unknown(col) | Kind::Outlet(col) => {
@@ -1943,8 +1970,8 @@ impl<'a> Solver<'a> {
                     let side_area = length * w3;
                     let vm = self.vel[d][self.cell_face(d, minus_cell, plus)];
                     let vp = self.vel[d][self.cell_face(d, plus_cell, plus)];
-                    let edge_flux = s * advective_density * w3
-                        * (0.5 * w_minus).mul_add(vm, 0.5 * w_plus * vp);
+                    let edge_flux =
+                        s * advective_density * w3 * (0.5 * w_minus).mul_add(vm, 0.5 * w_plus * vp);
                     let outside = if plus {
                         f[d] + 1 >= self.n[d]
                     } else {
@@ -1963,9 +1990,17 @@ impl<'a> Solver<'a> {
                         self.pressure_mouth_mu(a, minus_cell, plus_cell)
                     } else if pressure_mouth_row && !outside {
                         let mut next = plus_cell;
-                        if plus { next[d] += 1; } else { next[d] -= 1; }
+                        if plus {
+                            next[d] += 1;
+                        } else {
+                            next[d] -= 1;
+                        }
                         if self.domain.is_fluid(cell_of(self.n, next)) {
-                            let (m, p) = if plus { (plus_cell, next) } else { (next, plus_cell) };
+                            let (m, p) = if plus {
+                                (plus_cell, next)
+                            } else {
+                                (next, plus_cell)
+                            };
                             self.pressure_mouth_mu(d, m, p)
                         } else {
                             self.edge_mu(minus_cell, plus_cell, d, plus)
@@ -1988,7 +2023,9 @@ impl<'a> Solver<'a> {
                         // complementary tangential row share one shear edge.
                         let difference = if pressure_mouth_row {
                             if f[a] == 0 { 2.0 * vp } else { -2.0 * vm }
-                        } else { vp - vm };
+                        } else {
+                            vp - vm
+                        };
                         s * edge_mu * w3 * difference
                     } else {
                         0.0
@@ -2023,9 +2060,7 @@ impl<'a> Solver<'a> {
                                 // momentum even when its net mass flux is zero.
                                 // Retain the original arithmetic when both
                                 // portions flow in the same direction.
-                                let incoming = if (vm < 0.0 && vp > 0.0)
-                                    || (vm > 0.0 && vp < 0.0)
-                                {
+                                let incoming = if (vm < 0.0 && vp > 0.0) || (vm > 0.0 && vp < 0.0) {
                                     let scale = s * advective_density * w3;
                                     (-(scale * (0.5 * w_minus * vm))).max(0.0)
                                         + (-(scale * (0.5 * w_plus * vp))).max(0.0)
@@ -2034,7 +2069,8 @@ impl<'a> Solver<'a> {
                                 };
                                 if incoming > 0.0 {
                                     a_p += incoming;
-                                    if let Some(velocity) = self.config
+                                    if let Some(velocity) = self
+                                        .config
                                         .backflow_tangential_velocity_m_s[2 * d + usize::from(plus)]
                                     {
                                         rhs = incoming.mul_add(velocity[a], rhs);
@@ -2060,9 +2096,8 @@ impl<'a> Solver<'a> {
                             sum_nb += coef;
                             a_p += coef;
                             if reconstruct {
-                                rhs -= self.momentum_reconstruction_flux(
-                                    a, d, index, nf, plus, edge_flux,
-                                );
+                                rhs -= self
+                                    .momentum_reconstruction_flux(a, d, index, nf, plus, edge_flux);
                             }
                         }
                         // A blocked transverse neighbour touches a solid:
@@ -2207,7 +2242,11 @@ impl<'a> Solver<'a> {
         if !steady.is_finite() {
             return Err(ChtError::FlowDiverged { step: self.sweeps });
         }
-        let absolute_force_n = if self.time.as_ref().is_some_and(|time| time.face_mass_kg.is_some()) {
+        let absolute_force_n = if self
+            .time
+            .as_ref()
+            .is_some_and(|time| time.face_mass_kg.is_some())
+        {
             r.iter()
                 .zip(&b)
                 .zip(&a_p_relaxed)
@@ -2221,7 +2260,9 @@ impl<'a> Solver<'a> {
             rms: residual / rows_root,
             absolute_force_n,
         };
-        if !solve { return Ok(residual); }
+        if !solve {
+            return Ok(residual);
+        }
         if steady > 1e-15 {
             let outcome = bicgstab_ilu0("momentum", &matrix, &b, &mut x, inner, 20_000, gate)
                 .map_err(|error| match error {
@@ -2605,7 +2646,11 @@ impl Solver<'_> {
         self.update_sgs(gate)?;
         self.guard_finite()?;
         let coupled = self.admit_projected_darcy(gate)?;
-        Ok(self.finish_projected(fluid, iterations, (mass_residual, momentum_residual.max(coupled))))
+        Ok(self.finish_projected(
+            fluid,
+            iterations,
+            (mass_residual, momentum_residual.max(coupled)),
+        ))
     }
 
     /// Report an already projected field, keeping a checkpoint and its receipt
@@ -2847,8 +2892,15 @@ pub(super) fn material_solver<'a>(
     gate: &CancelGate,
 ) -> Result<Solver<'a>, ChtError> {
     material_solver_with_darcy_tensor(
-        domain, fluid, dynamic_viscosity_pa_s, force_density_n_m3,
-        drag_pa_s_m2, None, None, config, gate,
+        domain,
+        fluid,
+        dynamic_viscosity_pa_s,
+        force_density_n_m3,
+        drag_pa_s_m2,
+        None,
+        None,
+        config,
+        gate,
     )
 }
 
@@ -2866,8 +2918,15 @@ pub(in crate::conjugate) fn simple_flow_with_darcy_tensor(
     gate: &CancelGate,
 ) -> Result<FvFlow, ChtError> {
     let solver = material_solver_with_darcy_tensor(
-        domain, fluid, dynamic_viscosity_pa_s, force_density_n_m3,
-        None, Some(drag_pa_s_m2), forchheimer_resistance, config, gate,
+        domain,
+        fluid,
+        dynamic_viscosity_pa_s,
+        force_density_n_m3,
+        None,
+        Some(drag_pa_s_m2),
+        forchheimer_resistance,
+        config,
+        gate,
     )?;
     solve_steady(solver, fluid, config, gate)
 }
@@ -2926,7 +2985,9 @@ pub(super) fn material_solver_with_darcy_tensor<'a>(
             solver.porous = vec![[(0.0, 0.0); 3]; domain.cell_count()];
         }
         for (c, matrix) in drag.iter().enumerate() {
-            if c % 256 == 0 { poll(gate)?; }
+            if c % 256 == 0 {
+                poll(gate)?;
+            }
             let cross = DarcyCross::from_tensor(matrix)?;
             if !domain.is_fluid(c) && matrix != &[[0.0; 3]; 3] {
                 return Err(ChtError::InvalidInput {
@@ -2958,9 +3019,15 @@ pub(super) fn material_solver_with_darcy_tensor<'a>(
             solver.porous = vec![[(0.0, 0.0); 3]; domain.cell_count()];
         }
         for (c, law) in drag.iter().enumerate() {
-            if c % 256 == 0 { poll(gate)?; }
-            let Some(law) = law else { continue; };
-            if law.is_zero() { continue; }
+            if c % 256 == 0 {
+                poll(gate)?;
+            }
+            let Some(law) = law else {
+                continue;
+            };
+            if law.is_zero() {
+                continue;
+            }
             if !domain.is_fluid(c) {
                 return Err(ChtError::InvalidInput {
                     field: "simple.forchheimer_resistance",

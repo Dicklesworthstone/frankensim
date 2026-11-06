@@ -107,7 +107,9 @@ fn source_molecular_and_sgs_viscosity_compose_once_with_molecular_wall_traction(
     faces[0] = FvBoundary::Outlet;
     faces[1] = FvBoundary::Outlet;
     faces[2] = FvBoundary::wall();
-    faces[3] = FvBoundary::Wall { velocity: [1.0, 0.0, 0.0] };
+    faces[3] = FvBoundary::Wall {
+        velocity: [1.0, 0.0, 0.0],
+    };
     let controls = SimpleConfig::new(faces);
     let fluid = fluid();
     let gate = CancelGate::new();
@@ -120,23 +122,30 @@ fn source_molecular_and_sgs_viscosity_compose_once_with_molecular_wall_traction(
         fill_faces(&mut solver, |p| [p[1], 0.0, 0.0]);
         solver.start_time(0.01, TimeScheme::BackwardEuler);
         if material_first {
-            solver.set_material_transport(&molecular, None, &gate).unwrap();
+            solver
+                .set_material_transport(&molecular, None, &gate)
+                .unwrap();
         }
         solver.enable_sgs(sgs, &gate).unwrap();
         let expected_eddy = (0.2_f64 * 0.25).powi(2);
         for scale in [1.0, 1.0, 2.0] {
             let updated: Vec<_> = molecular.iter().map(|mu| scale * mu).collect();
-            solver.set_material_transport(&updated, None, &gate).unwrap();
+            solver
+                .set_material_transport(&updated, None, &gate)
+                .unwrap();
             solver.update_sgs(&gate).unwrap();
             for (c, &mu) in updated.iter().enumerate() {
                 assert!((solver.eddy_viscosity[c] - expected_eddy).abs() < 2e-15);
                 assert!((solver.mu_eff(domain.coords(c)) - (mu + expected_eddy)).abs() < 2e-15);
             }
-            assert_eq!(solver.molecular_viscosity, updated, "source is never eddy-enriched");
+            assert_eq!(
+                solver.molecular_viscosity, updated,
+                "source is never eddy-enriched"
+            );
             // Lower/upper source layers transmit one reciprocal edge stress.
             let edge = solver.edge_mu([0, 0, 0], [1, 0, 0], 1, true);
-            let expected_edge = 2.0 / (1.0 / (scale * 0.01 + expected_eddy)
-                + 1.0 / (scale * 0.02 + expected_eddy));
+            let expected_edge =
+                2.0 / (1.0 / (scale * 0.01 + expected_eddy) + 1.0 / (scale * 0.02 + expected_eddy));
             assert!((edge - expected_edge).abs() < 2e-15);
             assert_eq!(edge, solver.edge_mu([0, 0, 0], [0, 1, 0], 0, true));
             assert!((solver.wall_mu([0, 0, 0], [1, 0, 0]) - scale * 0.01).abs() < 2e-15);
@@ -152,7 +161,9 @@ fn sgs_cap_follows_a_refreshed_local_molecular_viscosity() {
     faces[0] = FvBoundary::Outlet;
     faces[1] = FvBoundary::Outlet;
     faces[2] = FvBoundary::wall();
-    faces[3] = FvBoundary::Wall { velocity: [1.0, 0.0, 0.0] };
+    faces[3] = FvBoundary::Wall {
+        velocity: [1.0, 0.0, 0.0],
+    };
     let controls = SimpleConfig::new(faces);
     let fluid = fluid();
     let gate = CancelGate::new();
@@ -162,13 +173,19 @@ fn sgs_cap_follows_a_refreshed_local_molecular_viscosity() {
     let mut sgs = config(SgsModel::Smagorinsky { cs: 0.2 });
     sgs.maximum_eddy_to_molecular = 1.0;
     solver.enable_sgs(sgs, &gate).unwrap();
-    let mut source = vec![fluid.density_kg_m3 * fluid.kinematic_viscosity_m2_s; domain.cell_count()];
+    let mut source =
+        vec![fluid.density_kg_m3 * fluid.kinematic_viscosity_m2_s; domain.cell_count()];
     solver.set_material_transport(&source, None, &gate).unwrap();
     solver.update_sgs(&gate).unwrap();
     source[0] = 0.0001; // local nu_t/nu=25 although the reference ratio is 0.25
     solver.set_material_transport(&source, None, &gate).unwrap();
-    assert!(matches!(solver.update_sgs(&gate),
-        Err(ChtError::InvalidInput { field: "simple.sgs", .. })));
+    assert!(matches!(
+        solver.update_sgs(&gate),
+        Err(ChtError::InvalidInput {
+            field: "simple.sgs",
+            ..
+        })
+    ));
 }
 
 #[test]
@@ -476,12 +493,27 @@ fn transient_sgs_drives_heat_and_zero_coefficient_recovers_the_existing_march() 
     .unwrap();
     explicit.eddy_wall_treatment = crate::conjugate::EddyWallTreatment::EffectiveConductivity;
     let augmented_walls = march_energy(
-        &domain, &fluid, &[], &coupled.flow.flow.field, &explicit, &initial,
-        |_| 1.0, &thermal, None, &gate,
-    ).unwrap();
-    let wall_error = coupled.temperature.iter().zip(&augmented_walls.temperature)
+        &domain,
+        &fluid,
+        &[],
+        &coupled.flow.flow.field,
+        &explicit,
+        &initial,
+        |_| 1.0,
+        &thermal,
+        None,
+        &gate,
+    )
+    .unwrap();
+    let wall_error = coupled
+        .temperature
+        .iter()
+        .zip(&augmented_walls.temperature)
         .fold(0.0_f64, |max, (a, b)| max.max((a - b).abs()));
-    assert!(wall_error > 1e-5, "SGS must not augment the molecular wall heat law");
+    assert!(
+        wall_error > 1e-5,
+        "SGS must not augment the molecular wall heat law"
+    );
     let error = coupled
         .temperature
         .iter()
@@ -521,4 +553,191 @@ fn transient_sgs_drives_heat_and_zero_coefficient_recovers_the_existing_march() 
         .is_err(),
         "a second turbulent thermal closure must refuse"
     );
+}
+
+#[test]
+fn native_shear_edges_resolve_centered_nulls_and_drive_momentum() {
+    // G0: u_x alternates between native rows. Every interior centred
+    // derivative cancels, but each actual MAC shear edge resolves du_x/dy.
+    let domain = VoxelDomain::new(5, 6, 3, 0.25).unwrap();
+    let controls = SimpleConfig::new([FvBoundary::Outlet; 6]);
+    let fluid = fluid();
+    let gate = CancelGate::new_clock_free();
+    let mut solver = Solver::new(&domain, &fluid, &controls);
+    for f in 0..solver.vel[0].len() {
+        let row = solver.comps[0].coords(f)[1];
+        solver.vel[0][f] = if row % 2 == 0 { 0.1 } else { -0.1 };
+    }
+    // Isolate the original viscous momentum operator from advective effects.
+    solver.creeping = true;
+    solver.start_time(0.01, TimeScheme::BackwardEuler);
+    solver
+        .enable_sgs(config(SgsModel::Smagorinsky { cs: 0.2 }), &gate)
+        .unwrap();
+    solver.update_sgs(&gate).unwrap();
+    for at in [[1, 1, 1], [2, 1, 1], [1, 2, 1], [2, 2, 1]] {
+        let cell = super::super::cell_of(solver.n, at);
+        assert_eq!(solver.eddy_viscosity[cell], 0.0);
+    }
+    let expected = (0.2_f64 * 0.25).powi(2) * (0.2 / 0.25);
+    let actual = solver.sgs_edge_eddy([1, 1, 1], [2, 1, 1], 1, true).unwrap();
+    assert!((actual - expected).abs() < 1e-15);
+    assert_eq!(
+        Some(actual),
+        solver.sgs_edge_eddy([1, 1, 1], [1, 2, 1], 0, true)
+    );
+    let stress = solver.edge_mu([1, 1, 1], [2, 1, 1], 1, true);
+    assert!((stress - (0.01 + expected)).abs() < 1e-15);
+    assert_eq!(stress, solver.edge_mu([1, 1, 1], [1, 2, 1], 0, true));
+    let dissipated = (stress - 0.01) * (0.2_f64 / 0.25).powi(2);
+    assert!(dissipated > 0.0);
+
+    // Exercise the production momentum assembly. Keep cell coefficients,
+    // face velocities, pressure and time history identical; remove ONLY the
+    // edge SGS coefficient for the comparison.
+    let coupled = solver.momentum(0, false, &gate).unwrap().rms;
+    for values in &mut solver.sgs.as_mut().unwrap().shear_eddy {
+        for value in values.iter_mut().filter(|v| **v >= 0.0) {
+            *value = 0.0;
+        }
+    }
+    let molecular_edges = solver.momentum(0, false, &gate).unwrap().rms;
+    assert!(
+        coupled > 1.01 * molecular_edges,
+        "{coupled} <= {molecular_edges}"
+    );
+}
+
+#[test]
+fn graded_edge_filters_and_full_gradient_are_shared_by_reciprocal_stresses() {
+    // G0: the full affine tensor is independent of every stencil. This also
+    // distinguishes WALE's matrix square from a strain-only approximation.
+    let domain = VoxelDomain::graded([
+        vec![0.1, 0.2, 0.3, 0.4],
+        vec![0.12, 0.2, 0.4, 0.5],
+        vec![0.11, 0.2, 0.3, 0.4],
+    ])
+    .unwrap();
+    let controls = SimpleConfig::new([FvBoundary::Outlet; 6]);
+    let fluid = fluid();
+    let gate = CancelGate::new_clock_free();
+    let g = [[0.2, 0.7, -0.1], [0.3, -0.4, 0.5], [0.6, -0.2, 0.2]];
+    for model in [
+        SgsModel::Smagorinsky { cs: 0.2 },
+        SgsModel::Wale { cw: 0.5 },
+        SgsModel::Vreman { cv: 0.07 },
+    ] {
+        let mut solver = Solver::new(&domain, &fluid, &controls);
+        fill_faces(&mut solver, |p| {
+            core::array::from_fn(|i| 0.17 + g[i][0] * p[0] + g[i][1] * p[1] + g[i][2] * p[2])
+        });
+        solver.start_time(0.01, TimeScheme::Bdf2);
+        solver.enable_sgs(config(model), &gate).unwrap();
+        solver.update_sgs(&gate).unwrap();
+        for (a, d) in [(0, 1), (0, 2), (1, 2)] {
+            let upper = [2, 2, 2];
+            let mut minus_a = upper;
+            minus_a[a] -= 1;
+            let mut minus_d = upper;
+            minus_d[d] -= 1;
+            let mut scalar_width = 0.0;
+            let mut widths = [0.0; 3];
+            for low_a in [true, false] {
+                for low_d in [true, false] {
+                    let mut at = upper;
+                    at[a] -= usize::from(low_a);
+                    at[d] -= usize::from(low_d);
+                    let fraction = |axis, low| {
+                        let left = domain.width(axis, 1);
+                        let right = domain.width(axis, 2);
+                        if low {
+                            right / (left + right)
+                        } else {
+                            left / (left + right)
+                        }
+                    };
+                    let weight = fraction(a, low_a) * fraction(d, low_d);
+                    let local = [0, 1, 2].map(|axis| domain.width(axis, at[axis]));
+                    scalar_width += weight * (local[0] * local[1] * local[2]).cbrt();
+                    for axis in 0..3 {
+                        widths[axis] += weight * local[axis];
+                    }
+                }
+            }
+            let expected = match model {
+                SgsModel::Vreman { cv } => vreman_eddy_viscosity(cv, widths, g),
+                _ => eddy_viscosity(model, scalar_width, g),
+            }
+            .unwrap();
+            let edge = solver.sgs_edge_eddy(minus_a, upper, d, false).unwrap();
+            assert!(
+                (edge - expected).abs() < 2e-13 * expected.max(1e-6),
+                "model={model:?}, axes={a}/{d}, {edge} != {expected}"
+            );
+            assert_eq!(Some(edge), solver.sgs_edge_eddy(minus_d, upper, a, false));
+            assert_eq!(
+                solver.edge_mu(minus_a, upper, d, false),
+                solver.edge_mu(minus_d, upper, a, false)
+            );
+        }
+    }
+}
+
+#[test]
+fn native_edge_caps_follow_material_endpoints_and_refresh_without_allocation() {
+    let domain = VoxelDomain::new(5, 6, 3, 0.25).unwrap();
+    let controls = SimpleConfig::new([FvBoundary::Outlet; 6]);
+    let fluid = fluid();
+    let gate = CancelGate::new_clock_free();
+    let mut solver = Solver::new(&domain, &fluid, &controls);
+    for f in 0..solver.vel[0].len() {
+        solver.vel[0][f] = if solver.comps[0].coords(f)[1] % 2 == 0 {
+            0.1
+        } else {
+            -0.1
+        };
+    }
+    solver.start_time(0.01, TimeScheme::BackwardEuler);
+    let sgs = FvSgsConfig {
+        maximum_eddy_to_molecular: 1.0,
+        ..config(SgsModel::Smagorinsky { cs: 0.2 })
+    };
+    solver.enable_sgs(sgs, &gate).unwrap();
+    let source = vec![0.01; domain.cell_count()];
+    solver.set_material_transport(&source, None, &gate).unwrap();
+    solver.update_sgs(&gate).unwrap();
+    let cache = solver.sgs.as_ref().unwrap();
+    let allocations = cache.shear_eddy.each_ref().map(|values| values.as_ptr());
+    let gradients = cache.gradients.as_ptr();
+    let edge = solver.sgs_edge_eddy([1, 1, 1], [2, 1, 1], 1, true);
+    let mut endpoint = source.clone();
+    for at in [[1, 1, 1], [2, 1, 1], [1, 2, 1], [2, 2, 1]] {
+        let cell = super::super::cell_of(solver.n, at);
+        assert_eq!(solver.eddy_viscosity[cell], 0.0);
+        endpoint[cell] = 0.001; // only native edge viscosity exceeds the cap
+    }
+    assert!(
+        solver
+            .admit_sgs_material_endpoint(&endpoint, &gate)
+            .is_err()
+    );
+    assert_eq!(solver.molecular_viscosity, source);
+    assert_eq!(solver.sgs_edge_eddy([1, 1, 1], [2, 1, 1], 1, true), edge);
+    solver
+        .set_material_transport(&endpoint, None, &gate)
+        .unwrap();
+    assert!(solver.update_sgs(&gate).is_err());
+    solver.set_material_transport(&source, None, &gate).unwrap();
+    for values in &mut solver.vel {
+        values.fill(0.0);
+    }
+    solver.update_sgs(&gate).unwrap();
+    let cache = solver.sgs.as_ref().unwrap();
+    assert_eq!(
+        cache.shear_eddy.each_ref().map(|values| values.as_ptr()),
+        allocations
+    );
+    assert_eq!(cache.gradients.as_ptr(), gradients);
+    assert!(cache.shear_eddy.iter().flatten().all(|&nu| nu == 0.0));
+    assert!(solver.eddy_viscosity.iter().all(|&nu| nu == 0.0));
 }

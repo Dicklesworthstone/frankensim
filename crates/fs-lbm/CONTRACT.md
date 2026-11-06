@@ -13857,3 +13857,24 @@ gradients at the admitted fixed geometry, without a wall law, a nonlocal
 curved-domain dynamic filter or evolving geometry. The focused
 `tests/curved_sgs.rs` cases cover displaced linear/quadratic walls, rotation,
 force centering, five collision families, load accounting and refusal/retry.
+
+## Native staggered-edge SGS stress
+
+The transient finite-volume SGS owner evaluates reciprocal shear-edge
+viscosity from the actual two staggered velocity differences at that edge.
+Other full-gradient entries and the authored scalar or directional filter
+width fields are interpolated using physical graded-grid distances. A single
+cached kinematic viscosity supplies both reciprocal stresses; material jumps
+retain the original sorted harmonic transmission of each adjacent TOTAL
+viscosity. Smagorinsky, WALE and Vreman keep their shared constitutive kernels.
+
+Prepared full-gradient and edge arrays are reused on every nonlinear sweep.
+Normal stress and scalar heat retain their cell-interior closure values.
+Four-fluid-cell interior edges use the new stencil; walls and incomplete
+stencils retain the original boundary treatment. Each adjacent material
+independently constrains the edge eddy/molecular ratio during both refresh
+and endpoint admission. Zero coefficient keeps the original disabled path.
+The SGS unit regressions cover a centered-strain null with nonzero native
+momentum stress, full affine tensors on graded grids, reciprocal coefficients,
+material endpoint refusal and cache reuse. These are discretization checks,
+without a developed turbulent-spectrum or wall-resolution claim.

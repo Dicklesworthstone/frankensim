@@ -2,7 +2,9 @@
 //!
 //! This is a resolved-velocity closure, separate from equilibrium LVEL.
 //! Momentum consumes the existing complete symmetric effective-viscosity
-//! stress. Heat uses gradient diffusion with the independently declared
+//! stress. Reciprocal shear edges evaluate the full closure on their native
+//! staggered differences, avoiding centred-strain nulls. Cell normal stress
+//! and heat retain cell-interior closure values. Heat uses gradient diffusion with the independently declared
 //! `SimpleConfig::turbulent_prandtl` (default 0.9); neither dissipation
 //! heating nor a turbulent-DNS or thermal-wall-resolution claim is inferred.
 
@@ -10,6 +12,8 @@ use super::{FvBoundary, Solver, Turbulence};
 use crate::conjugate::{ChtError, poll};
 use crate::sgs3::{SgsConfig, SgsModel, SgsUse, eddy_viscosity, vreman_eddy_viscosity};
 use fs_exec::CancelGate;
+
+mod edges;
 
 /// Explicit exploration controls for transient finite-volume flow.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -19,7 +23,8 @@ pub struct FvSgsConfig {
     /// Positive dimensionless filter factor. Smagorinsky/WALE multiply the
     /// cube root of volume; Vreman multiplies EACH directional cell width.
     pub filter_width_factor: f64,
-    /// Refuse, rather than clip, a cell exceeding this nu_t/nu ratio.
+    /// Refuse, rather than clip, this nu_t/nu ratio at a cell or shear edge.
+    /// Each adjacent source material independently constrains an edge.
     pub maximum_eddy_to_molecular: f64,
     /// Acceptance renders refuse; no existing transient enables this model.
     pub usage: SgsUse,
@@ -49,6 +54,10 @@ impl FvSgsConfig {
 pub(super) struct State {
     config: FvSgsConfig,
     velocity: Vec<[f64; 3]>,
+    /// Reused full gradients for interpolation to reciprocal shear edges.
+    gradients: Vec<[[f64; 3]; 3]>,
+    /// One viscosity per interior edge; indexed by its remaining axis.
+    shear_eddy: [Vec<f64>; 3],
     /// Scalar-filter cache for Smagorinsky/WALE. Vreman borrows directional
     /// geometry instead, avoiding a redundant three-vector per cell.
     filter_width: Vec<f64>,
@@ -187,6 +196,8 @@ impl Solver<'_> {
             config,
             filter_width,
             velocity: vec![[0.0; 3]; self.domain.cell_count()],
+            gradients: vec![[[0.0; 3]; 3]; self.domain.cell_count()],
+            shear_eddy: edges::storage(self.n),
         });
         Ok(())
     }
@@ -226,6 +237,7 @@ impl Solver<'_> {
                 )?;
             }
         }
+        self.admit_sgs_edge_material(state, molecular, gate)?;
         Ok(())
     }
 
@@ -248,6 +260,7 @@ impl Solver<'_> {
                 }
                 if !self.domain.is_fluid(cell) {
                     self.eddy_viscosity[cell] = 0.0;
+                    state.gradients[cell] = [[0.0; 3]; 3];
                     continue;
                 }
                 // Source refresh changes molecular transport, never the SGS
@@ -259,6 +272,7 @@ impl Solver<'_> {
                     .copied()
                     .unwrap_or(self.mu);
                 let gradient = self.sgs_gradient(cell, &state.velocity);
+                state.gradients[cell] = gradient;
                 let eddy = match state.config.model {
                     SgsModel::Vreman { cv } => vreman_eddy_viscosity(
                         cv,
@@ -279,6 +293,7 @@ impl Solver<'_> {
                 )?;
                 self.eddy_viscosity[cell] = eddy;
             }
+            self.update_sgs_edges(&mut state, gate)?;
             Ok(())
         })();
         self.sgs = Some(state);
