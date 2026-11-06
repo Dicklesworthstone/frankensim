@@ -22,6 +22,8 @@ mod implicit_window;
 mod implicit_adaptive;
 #[path = "wall_film_thermal/deposition.rs"]
 mod deposition;
+#[path = "wall_film_thermal/deposition_timeline.rs"]
+mod deposition_timeline;
 
 #[test]
 fn dry_condensation_warms_finite_wall_and_retains_actual_film_capacity() {

@@ -945,3 +945,42 @@ moving contact line, boiling or liquid-mixture activity model. Focused tests
 cover analytic conductive supply on a wall fusion plateau, dry condensation,
 the uniform-wall limit, manufactured partial-area/source feedback and atomic
 physical/source/event/work refusal.
+
+## Native thermal events with a continuing condensate film
+
+`deposition::timeline::advance_deposition_with_wall_film_timeline` advances
+the spatial wall-film endpoint through the original thermal schedule. Births,
+contacts, separations and boundary changes apply in authored equal-time order,
+including events at the initial and requested final time. Every heat/phase
+interval stops before a native event; the event pass permits zero thermal
+substeps, so it cannot insert an independent sensible-only heat advance.
+
+The initially active wall keeps the same physical wetting patch and separate
+film inventory. New contacts must leave enough native exposed area for that
+patch; incompatible coverage refuses the whole candidate instead of hiding,
+draining or discarding condensate. Unselected cells may be born during the
+window and subsequently exchange heat through original contacts. Birth mass
+and energy retain each new cell's original material datum. Final wall storage
+subtracts each cell's initial or birth enthalpy before multiplication and
+summation, so incoming formation energy cannot masquerade as latent heat.
+
+External gas heat is a full-window uniform source, apportioned by cumulative
+physical endpoints. Wall sources retain their native watts and boundary events.
+Only original phase step-limit refusals shorten a trial; other source, nonlinear
+and conservation failures propagate. All proposals share the original implicit
+work meter, the complete-call attempt limit and the native thermal substep
+allowance. Accepted intervals alone contribute physical accounts. A final
+source, coverage, conservation or cancellation failure returns no partial graph,
+gas, film or event history.
+
+Compensated totals retain accepted phase, sensible, storage and external-source
+accounts. Final admission checks actual native wall storage against interval
+sums, exact total gas-source allocation, film/volatile/whole-gas mass, carrier
+preservation, and cumulative absolute mass/energy defects. The final payload
+belongs to the last accepted heat endpoint before any final-time events.
+
+This bounded continuation remains first-order with a fixed maximum interval;
+native event clipping and donor admission do not estimate temporal accuracy.
+The three focused groups compare manual event-cut composition, isolate a
+large independent birth datum from actual conductive/latent heat, and exercise
+late physical/source/work/cancellation refusals.

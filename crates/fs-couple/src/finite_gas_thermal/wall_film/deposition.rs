@@ -32,6 +32,9 @@ mod solve;
 pub use solve::advance_deposition_with_wall_film;
 pub(super) use solve::advance_deposition_with_wall_film_metered;
 
+/// Original thermal events around the same coupled heat/film/gas endpoint.
+pub mod timeline;
+
 /// One fixed native wall and an independent original liquid inventory.
 #[derive(Clone, Copy)]
 pub struct DepositionWallFilmBinding<'a> {
