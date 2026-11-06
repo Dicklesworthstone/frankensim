@@ -13,6 +13,10 @@
 //! fixed oriented projection and transverse relaxation. The common interval
 //! capacity admission is reused by rod/circuit consumers.
 //!
+//! The full three-dimensional `ThermalTensorPiezoelectric` owner evaluates the
+//! same original stress-charge source at fixed complete Mandel strain and
+//! Cartesian displacement, with its own whole-interval capacity bound.
+//!
 //! This adds no pyroelectric offset, thermal expansion, depoling, hysteresis,
 //! phase transition or mechanical integrator.
 use super::*;
@@ -20,6 +24,10 @@ use crate::field_storage::{
     FieldStorageError, admit_source_temperature_refresh,
     thermal::{FieldThermalState, affine_source_path, capacity_bound},
 };
+
+/// Full three-dimensional fixed-strain/displacement thermal material.
+pub mod spatial;
+pub use spatial::{ResolvedThermalTensorPiezoelectric, ThermalTensorPiezoelectric};
 
 mod tensor;
 

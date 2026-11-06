@@ -496,13 +496,19 @@ impl TensorPiezoelectric {
         self.density
     }
 
-    // Thermal source differentiation reuses the already admitted native
-    // elastic factor; no inverse matrix or separate factorization owner.
+    // Thermal source differentiation reuses the admitted native constitutive
+    // factors; responses need no matrix inverse or separate factorization owner.
     pub(super) fn solve_elastic(&self, rhs: [f64; 6]) -> Result<[f64; 6]> {
         self.elastic_factor.solve(rhs)
     }
     pub(super) fn elastic_inverse_factor_action(&self, rhs: [f64; 6]) -> Result<[f64; 6]> {
         self.elastic_factor.inverse_factor_action(rhs)
+    }
+    pub(super) fn solve_dielectric(&self, rhs: [f64; 3]) -> Result<[f64; 3]> {
+        self.dielectric_factor.solve(rhs)
+    }
+    pub(super) fn dielectric_inverse_factor_action(&self, rhs: [f64; 3]) -> Result<[f64; 3]> {
+        self.dielectric_factor.inverse_factor_action(rhs)
     }
 
     /// Reduce the SAME tensor to a homogeneous longitudinal sensor/actuator law.

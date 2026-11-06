@@ -3,6 +3,8 @@
 mod relaxation;
 #[path = "piezoelectric_tensor/thermal.rs"]
 mod thermal;
+#[path = "piezoelectric_tensor/thermal_spatial.rs"]
+mod thermal_spatial;
 
 use fs_blake3::ContentHash;
 use fs_evidence::ValidityDomain;
