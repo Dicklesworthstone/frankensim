@@ -3,8 +3,10 @@ use super::*;
 /// Source-owning, prepared reactor for repeated independent fixed-volume solves.
 ///
 /// Construction admits the source interval once and reserves all concentration,
-/// reaction-extent, Newton, stage and endpoint storage. Successful advances use
-/// this storage without allocating. Inputs use the immutable mechanism's
+/// reaction-extent, Newton, stage and endpoint storage. The iterative methods
+/// reuse this storage without allocating. `ExactFirstOrder` additionally caches
+/// one interval propagator and uses its bounded checked-application allocations.
+/// Inputs use the immutable mechanism's
 /// canonical species order. The owner can be reused after every refusal;
 /// unsuccessful scratch state is never returned as an accepted endpoint.
 pub struct IsochoricReactor {
@@ -17,6 +19,7 @@ pub struct IsochoricReactor {
     pub(super) current_concentrations: Vec<f64>,
     pub(super) full_concentrations: Vec<f64>,
     pub(super) amounts: Vec<Amount>,
+    pub(super) first_order: Option<linear::PreparedFirstOrder>,
 }
 
 impl IsochoricReactor {
@@ -40,6 +43,12 @@ impl IsochoricReactor {
             .try_reserve_exact(ns)
             .map_err(|_| IsochoricKineticsError::AllocationRefused)?;
         amounts.resize(ns, Amount::new(0.0));
+        let first_order = match controls.method {
+            IsochoricKineticsMethod::ExactFirstOrder { limits } => Some(
+                linear::PreparedFirstOrder::new(&mechanism, limits, &mut cancelled)?,
+            ),
+            _ => None,
+        };
         let prepared = Self {
             reactor: solve::Reactor::new(mechanism, controls)?,
             current: zeros(nr)?,
@@ -54,6 +63,7 @@ impl IsochoricReactor {
             current_concentrations: zeros(ns)?,
             full_concentrations: zeros(ns)?,
             amounts,
+            first_order,
         };
         poll(&mut cancelled)?;
         Ok(prepared)
@@ -72,6 +82,8 @@ impl IsochoricReactor {
     /// Allocated numerical heap capacity, including original kinetics,
     /// constrained Newton, stages and endpoint amounts. Immutable mechanism
     /// storage, fixed-size owner values and bounded stack scratch are excluded.
+    /// For `ExactFirstOrder`, this reports the local binding vectors but excludes
+    /// the shared propagator's cache and temporary checked-application arrays.
     pub fn workspace_bytes(&self) -> usize {
         let scalars = [
             &self.current,
@@ -88,6 +100,10 @@ impl IsochoricReactor {
         self.reactor.workspace_bytes()
             + scalars * core::mem::size_of::<f64>()
             + self.amounts.capacity() * core::mem::size_of::<Amount>()
+            + self
+                .first_order
+                .as_ref()
+                .map_or(0, linear::PreparedFirstOrder::binding_bytes)
     }
 
     /// Advance dense canonical amounts from their original source energy at T.
@@ -192,7 +208,8 @@ impl IsochoricReactor {
     }
 }
 
-/// Accepted endpoint borrowed from a prepared reactor, with no per-call allocation.
+/// Accepted endpoint borrowed from a prepared reactor. Iterative methods require
+/// no per-call allocation; the explicit exponential lane uses bounded arrays.
 ///
 /// Original thermodynamic identity is retained by `mechanism()`, and
 /// `temperature()` identifies the accepted source evaluation. Call `to_owned`

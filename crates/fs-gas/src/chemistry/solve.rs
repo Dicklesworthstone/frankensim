@@ -496,6 +496,40 @@ impl Reactor {
     pub fn composition_reference_roundoff_j(&self) -> f64 {
         self.caloric_reference.composition_roundoff_density.value() * self.volume
     }
+    /// One ULP of every independently represented reaction counter, converted
+    /// with the original reaction ΔU or ΔH and immutable reference volume.
+    /// These source-combined energies cancel conserved formation references.
+    /// This quantization account is separate from the population discrepancy
+    /// recorded by rebase; that discrepancy must not waive caloric precision.
+    pub fn reaction_counter_roundoff_j(
+        &self,
+        extents: &[f64],
+    ) -> Result<f64, IsochoricKineticsError> {
+        let mut allowance = Sum::default();
+        for (&extent, &energy) in extents
+            .iter()
+            .zip(&self.caloric_reference.reaction_energies)
+        {
+            if extent == 0.0 || energy == 0.0 {
+                continue;
+            }
+            let magnitude = extent.abs();
+            let spacing = magnitude.next_up() - magnitude;
+            let contribution = ((spacing * energy.abs()).next_up() * self.volume).next_up();
+            allowance.add(contribution);
+        }
+        let value = if allowance.value() > 0.0 {
+            allowance.value().next_up()
+        } else {
+            allowance.value()
+        };
+        if !value.is_finite() || value < 0.0 {
+            return Err(IsochoricKineticsError::Invalid(
+                "unrepresentable first-order counter energy allowance",
+            ));
+        }
+        Ok(value)
+    }
     pub fn absolute_energy_roundoff_allowance_j(&self) -> f64 {
         let mut bound = Sum::default();
         for (i, &initial) in self.initial.iter().enumerate() {
@@ -515,9 +549,32 @@ impl Reactor {
         heat: Sum,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<ReactorState, IsochoricKineticsError> {
+        self.resolve_with_energy_allowance(
+            extents,
+            hint,
+            heat,
+            self.controls.energy_tolerance_j,
+            cancelled,
+        )
+    }
+    pub fn resolve_with_energy_allowance(
+        &mut self,
+        extents: &[f64],
+        hint: f64,
+        heat: Sum,
+        energy_allowance_j: f64,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<ReactorState, IsochoricKineticsError> {
+        if !positive(energy_allowance_j) || !positive(energy_allowance_j / self.volume) {
+            return Err(IsochoricKineticsError::Invalid(
+                "invalid caloric energy allowance",
+            ));
+        }
+        let mut controls = self.controls;
+        controls.energy_tolerance_j = energy_allowance_j;
         resolve(
             &self.mechanism,
-            self.controls,
+            controls,
             self.volume,
             &self.caloric_reference,
             &self.origin,

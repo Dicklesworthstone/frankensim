@@ -1,7 +1,8 @@
 //! Sealed chemistry at one prescribed pressure with enthalpy as the energy.
 //!
-//! The original extent integrator, prepared Newton solve, step doubling and
-//! physical admission gates remain the only evolution owner. Actual volume is
+//! The original reactor's selected integrator and physical admission gates
+//! remain the evolution owner, including its optional constant-first-order
+//! exponential lane for adiabatic calls. Actual volume is
 //! V=nRT/p at every trial; concentration dilution and volume-scaled rates enter
 //! its analytic Jacobian. Formation energy occurs once in H. Boundary work is
 //! p(Vfinal-Vinitial), positive outward. Adiabatic evolution conserves H;
@@ -20,7 +21,8 @@ pub use super::{
 };
 
 /// Prepared constant-pressure adapter over the original constrained reactor.
-/// Successful advances allocate no storage and never mutate caller histories.
+/// Iterative advances allocate no storage; the explicit exponential method uses
+/// the shared propagator's bounded arrays. Caller histories are never mutated.
 pub struct IsobaricReactor {
     inner: IsochoricReactor,
 }

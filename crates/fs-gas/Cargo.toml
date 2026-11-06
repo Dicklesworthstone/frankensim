@@ -16,6 +16,7 @@ experimental-euler = ["dep:fs-thermal"]
 material = ["dep:fs-material", "dep:fs-matdb"]
 
 [dependencies]
+fs-la = { path = "../fs-la" }
 fs-math = { path = "../fs-math" }
 fs-qty = { path = "../fs-qty" }
 fs-thermochem = { path = "../fs-thermochem" }

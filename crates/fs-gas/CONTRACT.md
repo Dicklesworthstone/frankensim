@@ -3604,6 +3604,75 @@ fixture uses 322 accepted SDIRK2 steps and 3714 Newton iterations versus
 0.01556 K and 0.04168 K respectively. These are fixture-specific work counts,
 not a universal speed or accuracy guarantee.
 
+## Constant first-order half-life evolution
+
+`IsochoricKineticsMethod::ExactFirstOrder { limits }` explicitly selects the
+shared positive `fs_la::decay::reaction::ReactionPlan` for a constant chemical
+generator. Every source channel must be irreversible, have exactly one
+order-one reactant, and use an Arrhenius law with zero activation energy and
+temperature exponent and independent pressure law. Original mechanism admission
+continues to own identities, elemental/charge and molecular-mass conservation,
+and all species calorics. Ineligible mechanisms refuse at construction;
+temperature-dependent or thermodynamic reverse rates are never frozen by this
+selection. `ElementaryReactionV1::from_half_life` supplies eligible authored
+half-lives without a second chemical rate convention.
+
+Competing channels contribute their original hazards to each parent's total
+removal rate. Original product stoichiometries determine yields without changing
+multiplicity. The same positive owner prepares endpoint populations and
+population-time integrals; channel events are `k_j * integral(N_parent dt)`.
+This includes daughter ingrowth and preserves a small channel even when its
+hazard no longer changes the rounded total hazard. An unrepresented positive
+branch or event refuses. Counts are never inferred from a net inventory change.
+An independent original-stoichiometry check uses the represented population
+scale plus explicit counterproduct ULP allowances, rather than a relative
+tolerance on large opposing event counts. This admits late daughter tails even
+when both macroscopic counters round to the same value; the original caloric
+and composition-reference-roundoff checks remain in force.
+Separately, each interval charges one ULP of every channel counter, weighted
+by the original source-combined reference reaction ΔU (or ΔH at fixed pressure)
+and reference volume. The accumulated `first_order_counter_roundoff_j` reduces
+the caloric root allowance, and that account plus the actual energy residual
+must fit the original `energy_tolerance_j`. Large opposing cycle counts cannot
+hide energetically significant quantization inside the reference-roundoff
+diagnostic. This account is independent of arbitrary elemental formation
+offsets; it is not a bound on all propagator arithmetic or source uncertainty.
+
+The original reactor rebases directly onto the propagated populations and
+independent channel extents, then performs its existing source-relative caloric
+solve. Trace survivors are not reconstructed by subtracting nearly equal
+amounts. Both adiabatic U,V and H,p entry points use this path, including explicit
+energy initialization and restart. At fixed pressure, `V=nRT/p` and pressure
+work remain the existing owner; the amount generator is independent of volume
+because `V*k*(N/V)=kN`. Formation energy is included once. Final mass, element,
+charge, energy and entropy gates are unchanged.
+
+`maximum_step_s` bounds the interval between actual caloric and entropy checks;
+`maximum_steps` bounds complete exponential intervals. Each interval has no
+species time-discretization error for the declared constant generator. The
+shared positive series, floating-point maps and source data still have their
+own numerical/model limits; the method is not exact arithmetic or an accuracy
+certificate. Initial/minimum steps and adaptive local-error controls belong to
+the iterative methods. The balance reports zero Newton iterations and no local
+time-error estimate. Thermal bath/finite-body exchange explicitly refuses this
+method, and no continuous-interior source-support or entropy theorem is implied
+by the checked states.
+
+One immutable map is cached by exact interval duration and reused across
+independent initial inventories. Shared node, edge, series, squaring and work
+limits are explicit in `linear::FirstOrderLimits`; original cancellation and
+no-partial-publication semantics remain. Checked map application allocates
+bounded temporary arrays, unlike the unchanged allocation-free implicit
+stages. The prepared `workspace_bytes()` report includes local binding vectors
+but excludes the exponential owner's cached and temporary arrays.
+
+Focused G1/G3/G4 regressions cover a half-life in one exponential interval,
+equal-rate daughter ingrowth and calorimetry, rare competing channels, cyclic
+events, trace survivors and sub-ULP parent losses, U,V restart and H,p work,
+late daughter tails, excessive counter-energy quantization, ineligible laws,
+numerical budgets, cancellation, zero time and deterministic
+replay. They reuse the original source-backed NASA-9 reactor fixtures.
+
 ## Shared chemical sources for axial and planar conserved cells
 
 `multicomponent::reactive::CellChemistry` binds the identical original

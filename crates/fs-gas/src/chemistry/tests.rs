@@ -22,6 +22,8 @@ mod hydrogen;
 mod ionization;
 #[path = "tests/isobaric.rs"]
 mod isobaric;
+#[path = "tests/linear.rs"]
+mod linear;
 #[path = "tests/methane.rs"]
 mod methane;
 #[path = "tests/prepared.rs"]

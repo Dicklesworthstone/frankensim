@@ -3,6 +3,8 @@
 //! The immutable L1 mechanism owns reaction laws and thermodynamics. This L3
 //! owner advances reaction extents with damped backward Euler or the optional
 //! two-stage, second-order L-stable SDIRK method, both with step doubling.
+//! An explicitly selected constant-first-order lane uses the shared positive
+//! matrix exponential and independently integrated reaction events instead.
 //! The adiabatic entry points fix U,V; `isobaric` fixes H,p using the same
 //! integrator and actual variable volume. A declared `HeatBath` exchanges heat
 //! simultaneously with reaction evolution. Each trial includes formation energy
@@ -28,20 +30,22 @@ pub mod energy;
 pub mod heat;
 /// Source-bound two-temperature atomic ionization and three-body recombination.
 pub mod ionization;
-/// Photon-conserving ionization of a rigid uniformly mixed column.
-pub mod photoionization;
-/// Reciprocal atomic capture with escaping photon and electron-energy accounting.
-pub mod radiative_recombination;
 /// Constant-pressure evolution through the shared extent integrator.
 pub mod isobaric;
+/// Exponential evolution of admitted constant first-order chemical mechanisms.
+pub mod linear;
+/// Photon-conserving ionization of a rigid uniformly mixed column.
+pub mod photoionization;
 mod prepared;
+/// Reciprocal atomic capture with escaping photon and electron-energy accounting.
+pub mod radiative_recombination;
 mod solve;
 
 pub use heat::{HeatBath, ThermalConductance};
 pub use prepared::{IsochoricKineticsView, IsochoricReactor};
 
 /// Time method for the homogeneous constrained reactor, not its outer coupling.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub enum IsochoricKineticsMethod {
     /// First-order backward Euler; retained as the default.
     #[default]
@@ -56,19 +60,31 @@ pub enum IsochoricKineticsMethod {
     /// coupling. Positivity and entropy remain actual trial acceptance gates,
     /// not unconditional properties of this Runge–Kutta formula.
     Sdirk2,
+    /// Constant first-order species evolution through the shared positive
+    /// reaction exponential. Every channel must be irreversible, have one
+    /// order-one reactant, and have an Arrhenius coefficient independent of
+    /// temperature and pressure. Ineligible mechanisms refuse at construction.
+    ///
+    /// Adiabatic fixed-volume and fixed-pressure calls retain their original
+    /// caloric, conservation and entropy gates. Heat exchange is not admitted.
+    /// Steps use `maximum_step_s` and `maximum_steps`; initial/minimum step and
+    /// local error controls belong to the iterative methods. There is no time
+    /// discretization of the constant species generator, but its floating-point
+    /// maps retain explicit numerical limits and are not exact arithmetic.
+    ExactFirstOrder { limits: linear::FirstOrderLimits },
 }
 
 impl IsochoricKineticsMethod {
     fn error_divisor(self) -> f64 {
         match self {
-            Self::BackwardEuler => 1.0,
+            Self::BackwardEuler | Self::ExactFirstOrder { .. } => 1.0,
             Self::Sdirk2 => 3.0,
         }
     }
 
     fn error_root(self, error: f64) -> f64 {
         match self {
-            Self::BackwardEuler => fs_math::det::sqrt(error),
+            Self::BackwardEuler | Self::ExactFirstOrder { .. } => fs_math::det::sqrt(error),
             Self::Sdirk2 => fs_math::det::pow(error, 1.0 / 3.0),
         }
     }
@@ -185,6 +201,11 @@ pub struct IsochoricKineticsBalance {
     /// Original-reference energy equivalent of represented species-update
     /// roundoff [J]. This is not a physical heat input or a reaction source.
     pub composition_reference_roundoff_j: f64,
+    /// Accumulated reaction-counter quantization energy allowance for
+    /// `ExactFirstOrder`, using original reference reaction energies. Charged
+    /// alongside the caloric residual to `energy_tolerance_j`; zero for the
+    /// iterative methods. This excludes propagator and source-data errors.
+    pub first_order_counter_roundoff_j: f64,
     /// Actual final-minus-initial ideal-mixture entropy, J/K.
     pub entropy_change_j_k: f64,
     /// Smallest accepted step entropy increment, J/K; zero for zero duration.
@@ -201,8 +222,10 @@ pub struct IsochoricKineticsBalance {
     /// Smallest accepted parcel-plus-reservoir entropy increment [J/K].
     pub minimum_step_entropy_production_j_k: f64,
     /// Maximum admitted dimensionless local species/temperature error estimate.
+    /// Zero for `ExactFirstOrder`, which uses the propagator's numerical limits
+    /// and does not estimate a species time-discretization error.
     pub maximum_estimated_local_error: f64,
-    /// Accepted complete steps (each publishes the two-half-step result).
+    /// Accepted complete steps; iterative methods retain the two-half result.
     pub accepted_steps: usize,
     /// Rejected proposed steps.
     pub rejected_steps: usize,
@@ -306,6 +329,8 @@ pub enum IsochoricKineticsError {
     Invalid(&'static str),
     /// Original source or constitutive kinetics refusal.
     Chemistry(KineticsErrorV1),
+    /// The shared first-order propagator refused its resources or arithmetic.
+    FirstOrder(fs_la::decay::DecayError),
     /// Original finite-body caloric source or pressure-work refusal.
     #[cfg(feature = "material")]
     FiniteBody(fs_material::phase::PhaseStateError),
@@ -346,6 +371,14 @@ impl From<KineticsErrorV1> for IsochoricKineticsError {
         match error {
             KineticsErrorV1::Cancelled => Self::Cancelled,
             other => Self::Chemistry(other),
+        }
+    }
+}
+impl From<fs_la::decay::DecayError> for IsochoricKineticsError {
+    fn from(error: fs_la::decay::DecayError) -> Self {
+        match error {
+            fs_la::decay::DecayError::Cancelled => Self::Cancelled,
+            other => Self::FirstOrder(other),
         }
     }
 }
@@ -469,6 +502,11 @@ fn advance_prepared_constraint<'a>(
 ) -> Result<IsochoricKineticsView<'a>, IsochoricKineticsError> {
     poll(&mut cancelled)?;
     let controls = prepared.controls();
+    if prepared.first_order.is_some() && heat_exchange.is_some() {
+        return Err(IsochoricKineticsError::Invalid(
+            "exact first-order chemistry requires an adiabatic parcel",
+        ));
+    }
     if !positive(volume.value())
         || pressure.is_some_and(|pressure| !positive(pressure.value()))
         || !duration.value().is_finite()
@@ -492,6 +530,7 @@ fn advance_prepared_constraint<'a>(
         current_concentrations,
         full_concentrations,
         amounts,
+        first_order,
     } = prepared;
     let explicit_target = target.is_some();
     let target = reactor.initialize(
@@ -531,8 +570,13 @@ fn advance_prepared_constraint<'a>(
     }
     let mut accepted = initial;
     let mut elapsed = 0.0;
-    let mut step = controls.initial_step_s.min(duration.value());
+    let mut step = if first_order.is_some() {
+        controls.maximum_step_s.min(duration.value())
+    } else {
+        controls.initial_step_s.min(duration.value())
+    };
     let mut balance = IsochoricKineticsBalance::default();
+    let mut counter_roundoff = Sum::default();
     while elapsed < duration.value() {
         poll(&mut cancelled)?;
         if balance.accepted_steps + balance.rejected_steps >= controls.maximum_steps {
@@ -550,6 +594,86 @@ fn advance_prepared_constraint<'a>(
                 step_s: step,
                 reason: "time increment is not representable",
             });
+        }
+        if let Some(linear) = first_order {
+            let endpoint = linear.advance(
+                &reactor.mechanism,
+                current_concentrations,
+                step,
+                fine,
+                &mut cancelled,
+            )?;
+            let mut candidate_roundoff = counter_roundoff;
+            candidate_roundoff.add(reactor.reaction_counter_roundoff_j(fine)?);
+            let accumulated_roundoff = candidate_roundoff.value();
+            if !accumulated_roundoff.is_finite() || accumulated_roundoff < 0.0 {
+                return Err(IsochoricKineticsError::Invalid(
+                    "unrepresentable accumulated first-order counter energy allowance",
+                ));
+            }
+            let energy_roundoff = if accumulated_roundoff > 0.0 {
+                accumulated_roundoff.next_up()
+            } else {
+                0.0
+            };
+            let energy_allowance = controls.energy_tolerance_j - energy_roundoff;
+            if !positive(energy_allowance) {
+                return Err(IsochoricKineticsError::StepFailure {
+                    elapsed_time_s: elapsed,
+                    step_s: step,
+                    reason: "first-order counter energy precision exhausts the energy allowance",
+                });
+            }
+            audit_charge(
+                &reactor.mechanism,
+                |i| reactor.initial[i],
+                |i| endpoint[i],
+                controls.relative_conservation_tolerance,
+                &mut balance,
+            )?;
+            // The exponential supplies populations and independent channel
+            // events. Reuse the original caloric rebase so trace survivors are
+            // never reconstructed as the difference of macroscopic extents.
+            reactor.rebase(&endpoint, fine)?;
+            let state = reactor.resolve_with_energy_allowance(
+                current,
+                accepted.temperature.value(),
+                Sum::default(),
+                energy_allowance,
+                &mut cancelled,
+            )?;
+            let entropy_change = state
+                .entropy_increment_density_j_m3_k
+                .difference(accepted.entropy_increment_density_j_m3_k)
+                * volume.value();
+            if !entropy_change.is_finite() || entropy_change < -controls.entropy_tolerance_j_k {
+                return Err(IsochoricKineticsError::StepFailure {
+                    elapsed_time_s: elapsed,
+                    step_s: step,
+                    reason: "exact first-order trial decreases entropy",
+                });
+            }
+            current_concentrations.copy_from_slice(reactor.concentrations());
+            counter_roundoff = candidate_roundoff;
+            balance.first_order_counter_roundoff_j = energy_roundoff;
+            accepted = state;
+            elapsed = if step == remaining {
+                duration.value()
+            } else {
+                elapsed + step
+            };
+            if balance.accepted_steps == 0 {
+                balance.minimum_step_entropy_change_j_k = entropy_change;
+                balance.minimum_step_entropy_production_j_k = entropy_change;
+            } else {
+                balance.minimum_step_entropy_change_j_k =
+                    balance.minimum_step_entropy_change_j_k.min(entropy_change);
+                balance.minimum_step_entropy_production_j_k = balance
+                    .minimum_step_entropy_production_j_k
+                    .min(entropy_change);
+            }
+            balance.accepted_steps += 1;
+            continue;
         }
         let attempt = (|| {
             let full_state = reactor.implicit_step(
@@ -768,6 +892,7 @@ fn advance_prepared_constraint<'a>(
         || !balance.energy_residual_j.is_finite()
         || !balance.absolute_energy_residual_j.is_finite()
         || !balance.composition_reference_roundoff_j.is_finite()
+        || !balance.first_order_counter_roundoff_j.is_finite()
         || !absolute_roundoff.is_finite()
         || !unexplained_absolute_residual.is_finite()
         || !balance.entropy_change_j_k.is_finite()
@@ -780,7 +905,8 @@ fn advance_prepared_constraint<'a>(
         || balance.maximum_relative_element_residual > controls.relative_conservation_tolerance
         || balance.mass_residual_kg.abs()
             > controls.relative_conservation_tolerance * initial.mass_density_kg_m3 * volume.value()
-        || balance.energy_residual_j.abs() > controls.energy_tolerance_j
+        || balance.energy_residual_j.abs() + balance.first_order_counter_roundoff_j
+            > controls.energy_tolerance_j
         || unexplained_absolute_residual.abs() > controls.energy_tolerance_j + absolute_roundoff
         || balance.entropy_production_j_k < -controls.entropy_tolerance_j_k
         || amounts
