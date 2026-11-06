@@ -62,6 +62,10 @@ pub use symplectic::{
     verlet_momentum_adjoint, verlet_momentum_parameter_adjoint, verlet_momentum_step,
     verlet_momentum_step_with_displacement, verlet_step,
 };
+pub use validated::events::{
+    CrossingDirection, GuardBounds, GuardError, GuardOptions, GuardScan, GuardWindow,
+    GuardWindowKind, scan_guard,
+};
 pub use validated::trajectory::{
     TrajectoryFailure, TrajectoryOptions, TrajectoryStats, TrajectoryStop, TrajectoryTube,
     validated_trajectory,

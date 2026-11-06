@@ -25,6 +25,7 @@
 use fs_exec::{AdmittedBudget, BudgetRefusal, Cx};
 use fs_ivl::Interval;
 
+pub mod events;
 pub mod trajectory;
 
 #[cfg(test)]

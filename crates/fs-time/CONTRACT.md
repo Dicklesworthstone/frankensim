@@ -699,6 +699,25 @@ where claimed below.
   must keep the same deterministic RHS and its interval-extension assumptions
   throughout. G0/G1/G3/G4/G5 tests use analytic flows, subdivision, exact budget
   edges, callback/cancellation refusal and deterministic repeated execution.
+- `validated::events::scan_guard` encloses a caller-supplied scalar guard on
+  every closed time cell of a `TrajectoryTube`. A strict interval sign excludes
+  the entire cell; it is never inferred from a finite set of samples. Cells
+  whose guard contains zero are subdivided deterministically until the requested
+  width or floating-point time resolution is reached. Exact `[0, 0]` ranges
+  remain one unresolved cell without futile subdivision. Uncertain cells are
+  retained as `Unresolved`, including tangencies, clustered roots and shared
+  step boundaries. A zero-duration tube checks its initial point explicitly.
+  An optional strictly signed enclosure of the total derivative
+  `g_t + g_x f`, together with strict opposite endpoint signs, proves a unique
+  crossing in that cell for each admitted trajectory, conditional on the
+  caller's continuous differentiability and interval-extension obligations.
+  Monotonicity and matching strict endpoint signs can instead exclude a cell.
+  `no_events_proved()` is true only after the complete covered interval was
+  excluded. Refusal, cancellation or exhausted cell, callback, frontier, output
+  or work budgets returns no partial successful scan. One ambient accountant
+  covers every range query and scan operation. Windows may share endpoints;
+  their number is not a root count. G0/G1/G3/G4/G5 regressions cover analytic
+  crossings, missed-by-sampling roots, uncertainty, budget edges and repetition.
 - `se3` module (bead 3ol0): canonical `fs-ga::Twist` uses
   `[angular, linear]` ordering. `se3_exp_step(T, twist_body, h)` performs the
   right/body update `T Exp(h twist_body)` and
@@ -1042,9 +1061,10 @@ per-relation and aggregate reset-target caps.
 - RK45 dense output and event brackets describe the numerical interpolant.
   The separate validated explicit-ODE owner encloses the true flow under its
   callback assumptions; it does not upgrade RK45 brackets into true-flow
-  certificates. No complete event/root accounting, grazing/simultaneous reset
-  proof, constrained DAE tube, stiffness detection or Zeno certificate is
-  provided by that owner.
+  certificates. Its guard scanner provides conditional whole-interval exclusion
+  and isolated monotone crossings, retaining unresolved windows explicitly.
+  No complete root count, grazing/simultaneous reset proof, constrained DAE
+  tube, stiffness detection or Zeno certificate is provided by that owner.
 - Adjoint support is specific to each admitted map: Verlet, free-body DEP,
   frozen-step/recorded RK45, autonomous operator IMEX ARS(2,2,2), and
   operator-backed first-order and structural second-order generalized-alpha.
