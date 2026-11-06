@@ -621,6 +621,8 @@ fn menegotto_pinto_mirrored_cycles_retain_true_reversal_memory() {
                 (positive.sig_0, negative.sig_0),
                 (positive.eps_prev, negative.eps_prev),
                 (positive.sig_prev, negative.sig_prev),
+                (positive.eps_min, negative.eps_max),
+                (positive.eps_max, negative.eps_min),
                 (positive.dir, negative.dir),
             ] {
                 assert!((a + b).abs() <= 1e-13 * a.abs().max(1.0));
@@ -638,6 +640,111 @@ fn menegotto_pinto_mirrored_cycles_retain_true_reversal_memory() {
             );
             assert!(positive.xi_max > 0.0);
         }
+    }
+}
+
+#[test]
+fn menegotto_pinto_subyield_reversal_does_not_invent_bauschinger_softening() {
+    let law = MenegottoPintoSteel::new(200e9, 400e6, 0.02).unwrap();
+    let ey = law.fy / law.e0;
+    for sign in [-1.0, 1.0] {
+        let loaded = law.update_state(sign * 0.5 * ey, &law.initial_state());
+        let unloaded = law.update_state(0.0, &loaded);
+        // A half-yield excursion is essentially elastic. The old-history
+        // formula reduced R from 20 to 5.769 and left about 60 kPa here.
+        assert!((unloaded.r - law.r0).abs() < 4e-6);
+        assert!(unloaded.xi_max < 3e-8);
+        assert!(unloaded.sig_prev.abs() < 20.0);
+        assert!((law.tangent(0.0, &unloaded) / law.e0 - 1.0).abs() < 1e-8);
+        assert_eq!(unloaded.eps_min, -ey);
+        assert_eq!(unloaded.eps_max, ey);
+    }
+}
+
+#[test]
+fn menegotto_pinto_nested_reversals_match_directional_reference() {
+    let law = MenegottoPintoSteel::new(200e9, 400e6, 0.02).unwrap();
+    let ey = law.fy / law.e0;
+    // Independent 40-digit decimal evaluation of the no-isotropic-shift
+    // OpenSees Steel02 recurrence: cR1 = a1/R0 = 0.925, cR2 = a2 = 0.15.
+    // Each row is (strain/ey, stress/fy, tangent/E0, current branch R).
+    // A small reversal after yielding must sharpen again while xi_max retains
+    // the previous large excursion. A single global R cannot reproduce this.
+    // Reference: OpenSees/OpenSees, SRC/material/uniaxial/Steel02.cpp,
+    // Steel02::setTrialStrain; these are model checks, not coupon calibration.
+    let reference = [
+        (0.1, 0.1, 1.0, 20.0),
+        (0.0, 0.0, 1.0, 20.0),
+        (3.0, 1.0399999999859469, 0.020000000093687085, 20.0),
+        (
+            2.0,
+            0.08627305856946775,
+            0.835826815891151,
+            2.790697674409996,
+        ),
+        (
+            -2.0,
+            -0.9682512169517064,
+            0.047460340588417065,
+            2.790697674409996,
+        ),
+        (
+            -1.0,
+            -0.043021068943941145,
+            0.7702312957476694,
+            2.3664280539708797,
+        ),
+        (
+            0.5,
+            0.66585290600874,
+            0.24577922911710283,
+            2.3664280539708797,
+        ),
+        (
+            0.25,
+            0.41586813630853953,
+            0.9996753683213945,
+            4.329431641630422,
+        ),
+        (
+            1.5,
+            0.9853969527113433,
+            0.06893618440282649,
+            2.696505840597006,
+        ),
+        (
+            4.0,
+            1.0586253876366107,
+            0.020984033652422377,
+            2.696505840597006,
+        ),
+        (
+            -3.0,
+            -0.9831120544933418,
+            0.03682093761426735,
+            2.168448768639866,
+        ),
+    ];
+    let mut state = law.initial_state();
+    for (strain_ratio, stress_ratio, tangent_ratio, curvature) in reference {
+        let strain = strain_ratio * ey;
+        let before = state.clone();
+        let stress = law.stress(strain, &state);
+        let tangent = law.tangent(strain, &state);
+        assert!((stress / law.fy - stress_ratio).abs() < 3e-12);
+        assert!((tangent / law.e0 - tangent_ratio).abs() < 3e-12);
+        let h = 1e-6 * ey;
+        let fd = (law.stress(strain + h, &state) - law.stress(strain - h, &state)) / (2.0 * h);
+        assert!((tangent - fd).abs() < 2e-7 * law.e0);
+        assert_eq!(state, before, "trials cannot advance reversal history");
+        state = law.update_state(strain, &state);
+        assert!((state.r - curvature).abs() < 1e-10);
+        assert!(state.xi_max >= before.xi_max);
+        assert_eq!(
+            law.update_state(strain, &state),
+            state,
+            "a hold keeps history"
+        );
     }
 }
 

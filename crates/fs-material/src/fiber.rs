@@ -70,7 +70,12 @@ pub struct MpState {
     pub eps_prev: f64,
     /// Last committed stress.
     pub sig_prev: f64,
-    /// Maximum normalized excursion ξ (drives R degradation).
+    /// Compression-side extremum recorded at reversals, seeded at −f_y/E₀.
+    pub eps_min: f64,
+    /// Tension-side extremum recorded at reversals, seeded at f_y/E₀.
+    pub eps_max: f64,
+    /// Maximum normalized excursion ξ seen so far (diagnostic only).
+    /// The current branch curvature uses its own directional excursion.
     pub xi_max: f64,
 }
 
@@ -137,9 +142,15 @@ impl MenegottoPintoSteel {
         let eps_0 =
             (dir * self.fy * (1.0 - self.b) - sig_r + self.e0 * eps_r) / (self.e0 * (1.0 - self.b));
         let sig_0 = sig_r + self.e0 * (eps_0 - eps_r);
-        let xi = ((eps_r - s.eps_0) / self.yield_strain())
-            .abs()
-            .max(s.xi_max);
+        let eps_min = s.eps_min.min(eps_r);
+        let eps_max = s.eps_max.max(eps_r);
+        // Menegotto–Pinto's plastic excursion is measured from the previous
+        // extremum in the NEW loading direction to the NEW asymptote
+        // intersection (the no-isotropic-shift Steel02 recurrence). Using
+        // the old intersection instead spuriously softens subyield reversals;
+        // reusing the largest excursion erases nested-loop directional memory.
+        let eps_target = if dir > 0.0 { eps_max } else { eps_min };
+        let xi = ((eps_target - eps_0) / self.yield_strain()).abs();
         let r = self.r0 - self.a1 * xi / (self.a2 + xi);
         Some(MpState {
             eps_r,
@@ -150,7 +161,9 @@ impl MenegottoPintoSteel {
             dir,
             eps_prev: s.eps_prev,
             sig_prev: s.sig_prev,
-            xi_max: xi,
+            eps_min,
+            eps_max,
+            xi_max: xi.max(s.xi_max),
         })
     }
 
@@ -175,6 +188,8 @@ impl Uniaxial for MenegottoPintoSteel {
             dir: 0.0,
             eps_prev: 0.0,
             sig_prev: 0.0,
+            eps_min: -self.yield_strain(),
+            eps_max: self.yield_strain(),
             xi_max: 0.0,
         }
     }

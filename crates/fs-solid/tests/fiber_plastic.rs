@@ -255,6 +255,55 @@ fn menegotto_pinto_symmetric_section_has_no_artificial_axial_force_under_bending
 }
 
 #[test]
+fn steel_section_retains_directional_extrema_through_nested_bending_loops() {
+    let law = MenegottoPintoSteel::new(E, 400e6, 0.02).unwrap();
+    let mut section = Section::new(
+        [-ARM, ARM]
+            .map(|y| Fiber {
+                y,
+                area: AREA,
+                law: FiberLaw::Steel(law.clone()),
+            })
+            .to_vec(),
+    );
+    let yield_curvature = law.fy / (E * ARM);
+    // Independent normalized Steel02/no-isotropic-shift reference, propagated
+    // through the actual section's opposing tension/compression fiber histories.
+    // Rows are curvature/yield_curvature, moment/(2 A y fy), tangent/(2 A y² E).
+    for (curvature, moment, stiffness) in [
+        (0.1, 0.1, 1.0),
+        (0.0, 0.0, 1.0),
+        (3.0, 1.0399999999859469, 0.020000000093687085),
+        (2.0, 0.08627305856946775, 0.835826815891151),
+        (-2.0, -0.9682512169517064, 0.047460340588417065),
+        (-1.0, -0.043021068943941145, 0.7702312957476694),
+        (0.5, 0.66585290600874, 0.24577922911710283),
+        (0.25, 0.41586813630853953, 0.9996753683213945),
+    ] {
+        let kappa = curvature * yield_curvature;
+        let response = section.try_respond(0.0, kappa).unwrap();
+        close(response.n, 0.0, 1e-7);
+        close(response.m / (2.0 * AREA * ARM * law.fy), moment, 3e-12);
+        close(
+            response.tangent[1][1] / (2.0 * AREA * ARM * ARM * E),
+            stiffness,
+            3e-12,
+        );
+        section.try_commit(0.0, kappa).unwrap();
+    }
+    for state in &section.states {
+        let FiberState::Steel(state) = state else {
+            panic!("steel history required")
+        };
+        assert!(
+            state.xi_max > 3.0,
+            "the large excursion is still remembered"
+        );
+        close(state.r, 4.329431641630422, 1e-11);
+    }
+}
+
+#[test]
 fn metal_section_has_exact_bilinear_bending_and_residual_curvature() {
     let mut section = section();
     let curvature = 0.025;
