@@ -46,6 +46,29 @@ pub enum BodyForce<'a, const D: usize> {
         /// Non-Coriolis acceleration [m/s²], one vector per original cell.
         acceleration: &'a [[f64; D]],
     },
+    /// Spatially varying local Coriolis coefficients and effective acceleration.
+    ///
+    /// Each borrowed slice contains either ONE uniform vector or one vector
+    /// per original cell in x-fast order. The two shapes are independent, so
+    /// uniform gravity does not require another cell-sized allocation. Fields
+    /// remain fixed throughout the attempted interval, including retries.
+    ///
+    /// A traditional beta plane uses `angular_velocity = [0, 0, f(y)/2]`
+    /// with `f(y) = f0 + beta*y`; the factor two belongs to the Coriolis
+    /// equation. Both signs and a zero equatorial value are admitted. Spatial
+    /// states also admit a varying local axis. These are coefficients of a
+    /// Cartesian source law, not a deforming reference frame or a spherical
+    /// geometry model. Authored fields must respect the domain's boundaries.
+    ///
+    /// Each cell retains the same work-free midpoint Coriolis update and its
+    /// current stage density. No coefficient arrays are copied or allocated
+    /// during source admission, stepping or retry.
+    CoriolisSpatial {
+        /// Local angular velocity coefficients [rad/s], uniform or cellwise.
+        angular_velocity: &'a [[f64; 3]],
+        /// Non-Coriolis acceleration [m/s²], uniform or cellwise.
+        acceleration: &'a [[f64; D]],
+    },
 }
 
 impl<const D: usize> BodyForce<'_, D> {
@@ -63,10 +86,13 @@ impl<const D: usize> BodyForce<'_, D> {
                 acceleration: field,
                 ..
             } => field[cell],
+            Self::CoriolisSpatial { acceleration, .. } => {
+                acceleration[if acceleration.len() == 1 { 0 } else { cell }]
+            }
         }
     }
 
-    fn angular_velocity(self) -> Option<[f64; 3]> {
+    fn angular_velocity(self, cell: usize) -> Option<[f64; 3]> {
         match self {
             Self::Coriolis {
                 angular_velocity, ..
@@ -74,6 +100,9 @@ impl<const D: usize> BodyForce<'_, D> {
             | Self::CoriolisField {
                 angular_velocity, ..
             } => Some(angular_velocity),
+            Self::CoriolisSpatial {
+                angular_velocity, ..
+            } => Some(angular_velocity[if angular_velocity.len() == 1 { 0 } else { cell }]),
             _ => None,
         }
     }
@@ -84,7 +113,40 @@ impl<const D: usize> BodyForce<'_, D> {
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<bool, E> {
         poll::<E>(cancelled)?;
-        let rotating = if let Some(omega) = self.angular_velocity() {
+        if let Self::CoriolisSpatial {
+            angular_velocity,
+            acceleration,
+        } = self
+        {
+            // Validate both shapes before indexing either field. Inspect each
+            // authored vector once; broadcast values do not cost a cell loop.
+            if (angular_velocity.len() != 1 && angular_velocity.len() != cells)
+                || (acceleration.len() != 1 && acceleration.len() != cells)
+            {
+                return Err(E::invalid(
+                    "spatial Coriolis fields require one vector or one per original cell",
+                ));
+            }
+            let mut active = false;
+            for (cell, &omega) in angular_velocity.iter().enumerate() {
+                if cell % 64 == 0 {
+                    poll::<E>(cancelled)?;
+                }
+                admit_rotation::<E, D>(omega)?;
+                active |= omega.into_iter().any(|x| x != 0.0);
+            }
+            for (cell, value) in acceleration.iter().enumerate() {
+                if cell % 64 == 0 {
+                    poll::<E>(cancelled)?;
+                }
+                if !value.iter().all(|x| x.is_finite()) {
+                    return Err(E::invalid("body force must be finite"));
+                }
+                active |= value.iter().any(|&x| x != 0.0);
+            }
+            return Ok(active);
+        }
+        let rotating = if let Some(omega) = self.angular_velocity(0) {
             admit_rotation::<E, D>(omega)?;
             omega.into_iter().any(|x| x != 0.0)
         } else {
@@ -108,6 +170,7 @@ impl<const D: usize> BodyForce<'_, D> {
                 acceleration: field,
                 ..
             } => field,
+            Self::CoriolisSpatial { .. } => unreachable!("spatial fields admitted above"),
         };
         if field.len() != cells {
             return Err(E::invalid(
@@ -214,7 +277,7 @@ pub(super) fn kick<E: Failure, const D: usize>(
         return Err(E::invalid("invalid conservative body-force source state"));
     }
     let value = force.value(cell);
-    if let Some(omega) = force.angular_velocity() {
+    if let Some(omega) = force.angular_velocity(cell) {
         admit_rotation::<E, D>(omega)?;
         if omega.into_iter().any(|x| x != 0.0) {
             return coriolis_kick::<E, D>(
@@ -228,6 +291,7 @@ pub(super) fn kick<E: Failure, const D: usize>(
             | BodyForce::Acceleration(_)
             | BodyForce::Coriolis { .. }
             | BodyForce::CoriolisField { .. }
+            | BodyForce::CoriolisSpatial { .. }
     );
     let mut result = Kick {
         momentum,

@@ -2530,6 +2530,33 @@ Rodrigues phase oracle, spatial drive/work and density coupling, mixture
 species/caloric-reference preservation, and invalid source admission. Native
 Rust execution of these added cases was unavailable in the authoring session.
 
+### Spatial Coriolis coefficients and latitude-dependent local flow
+
+`BodyForce::CoriolisSpatial` borrows angular-velocity and effective-acceleration
+slices. Each independently contains one uniform value or one value per original
+x-fast cell. Uniform gravity therefore requires no duplicate cell-sized array.
+Both shapes and every coefficient are admitted before a candidate is advanced;
+cancellation is polled while inspecting fields. The same source descriptor is
+held across both half steps and every retry, with no coefficient allocation.
+
+Each cell uses its own rotation vector and current stage density in the original
+analytic midpoint source. In two dimensions only the normal component is legal.
+For a traditional beta-plane source, callers sample
+`Omega_z(y) = (f0 + beta*y)/2`, where f0 has units s^-1 and beta has units
+m^-1 s^-1. Signed and zero local coefficients are supported. Three-dimensional
+owners also admit changing local axes. This describes a Cartesian local source;
+it neither supplies spherical metric terms nor infers a deforming frame.
+Authored coefficient fields must respect the physical domain and its boundaries.
+
+Pure rotation still supplies zero source work and preserves conservative energy
+in the source substep. The inherited pressure/transport discretization, timestep
+phase accuracy and Mach/CFL controls are unchanged. Uniform broadcast and
+cellwise representations produce identical uniform-source arithmetic; the
+zero-spin field uses the original acceleration path. Regression definitions
+cover hemispheric sign/equatorial rest, heterogeneous density/axis/drive,
+periodic conservative transport, allocation reuse, full-field admission and
+atomic cancellation/retry.
+
 ### Three-dimensional Newtonian stress, Fourier heat and the coupled field
 
 `spatial::molecular::MolecularTransport3d` binds the original gas's exact species

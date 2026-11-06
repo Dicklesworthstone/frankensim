@@ -576,4 +576,98 @@ fn g1_coriolis_field_uses_current_density_and_only_mechanical_work() {
         }
     }
     close(source.work, expected_work, 3e-13);
+
+    // Vary both the axis and the drive. Density is an independent cell field;
+    // the midpoint momentum equation must use all three at the SAME index.
+    let rotations: Vec<_> = (0..8)
+        .map(|i| [0.1 * i as f64 - 0.3, 0.2, 0.4 - 0.05 * i as f64])
+        .collect();
+    let force = BodyForce3d::CoriolisSpatial {
+        angular_velocity: &rotations,
+        acceleration: &acceleration,
+    };
+    assert!(force.admit::<Error>(8, &mut || false).unwrap());
+    candidate.copy_from_slice(flow.states());
+    let (source, _) = kick_field(
+        flow.gas(),
+        flow.grid(),
+        &mut candidate,
+        force,
+        cap(),
+        0.07,
+        true,
+        &mut || false,
+    )
+    .unwrap();
+    let mut expected_work = 0.0;
+    for (i, (before, after)) in flow.states().iter().zip(&candidate).enumerate() {
+        let p0 = before.primitive(flow.gas(), || false).unwrap();
+        let p1 = after.primitive(flow.gas(), || false).unwrap();
+        let midpoint: [f64; 3] =
+            core::array::from_fn(|axis| 0.5 * (p0.velocity[axis] + p1.velocity[axis]));
+        let omega = rotations[i];
+        let spin = [
+            omega[1] * midpoint[2] - omega[2] * midpoint[1],
+            omega[2] * midpoint[0] - omega[0] * midpoint[2],
+            omega[0] * midpoint[1] - omega[1] * midpoint[0],
+        ];
+        let work: f64 = (0..3)
+            .map(|axis| 0.07 * before.density * acceleration[i][axis] * midpoint[axis])
+            .sum();
+        expected_work += work * flow.grid().cell_volume();
+        for axis in 0..3 {
+            close(
+                p1.velocity[axis] - p0.velocity[axis],
+                0.07 * (acceleration[i][axis] - 2.0 * spin[axis]),
+                3e-13,
+            );
+        }
+        assert_eq!(after.density, before.density);
+        close(after.energy - before.energy, work, 3e-13);
+        close(p1.temperature, p0.temperature, 5e-11);
+    }
+    close(source.work, expected_work, 3e-13);
+}
+
+#[test]
+fn g1_spatial_coriolis_axes_drive_one_conservative_periodic_trajectory() {
+    let mut flow = field([3; 3], [1.0; 3], 0.2, |_| [1.3, 0.23, -0.17, 0.11, 2.0]);
+    let rotations: Vec<_> = (0..flow.states().len())
+        .map(|cell| match cell % 3 {
+            0 => [0.7, -0.3, 0.2],
+            1 => [-0.1, 0.4, 0.6],
+            _ => [0.0; 3],
+        })
+        .collect();
+    let before = flow.totals();
+    let original = flow.states().to_vec();
+    let force = BodyForce3d::CoriolisSpatial {
+        angular_velocity: &rotations,
+        acceleration: &[[0.0; 3]],
+    };
+    let mut workspace = flow.forcing_workspace(usize::MAX).unwrap();
+    let pointer = workspace.original.as_ptr();
+    for _ in 0..8 {
+        let report = flow
+            .step_with_forcing(
+                Time::new(0.002),
+                StepControl::default(),
+                force,
+                cap(),
+                &mut workspace,
+                || false,
+            )
+            .unwrap();
+        assert_eq!(report.source_change.work, 0.0);
+        close(report.after.mass, before.mass, 2e-12);
+        close(report.after.energy, before.energy, 2e-12);
+        balance(&report);
+    }
+    assert!(flow.states().iter().zip(&original).any(|(a, b)| {
+        a.momentum
+            .iter()
+            .zip(b.momentum)
+            .any(|(x, y)| (x - y).abs() > 1e-5)
+    }));
+    assert_eq!(workspace.original.as_ptr(), pointer);
 }
