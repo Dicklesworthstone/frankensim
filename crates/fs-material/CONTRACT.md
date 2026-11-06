@@ -1,5 +1,30 @@
 # fs-material — CONTRACT
 
+## Frozen brittle and cohesive stiffness
+
+`CohesivePoint::frozen_tangent_pa_m` differentiates the original recoverable
+storage while holding irreversible damage and its onset mode mix fixed.
+`BrittleCrackBand::frozen_tangent` projects that same stiffness through the
+original crack-band modes and parallel elastic remainder. Native remaining
+integrity is retained directly, including values lost by subtracting rounded
+damage from one. Neither operation advances history, dissipated work or time.
+
+Opening and shear lose transfer exactly at complete failure; normal compression
+and in-plane bulk elasticity remain. The bulk tensor is positive semidefinite
+under tensor-shear work weights, with physical null directions preserved and
+no residual stiffness. Unequal opening/compression stiffness at zero normal
+jump returns `CohesiveError::NormalClosureSwitch`; an arbitrary active branch
+is never presented as a unique derivative. Owner and strain admission remain
+the original brittle checks. Both fixed-size observations allocate nothing.
+
+This is a conditional frozen-history stiffness for vibration/wave consumers,
+not the tangent of ongoing fracture loading. Finite oscillations must avoid
+further damage and opening/closure switches. It supplies neither geometric
+prestress stiffness, crack-face contact, damping nor experimental authority.
+Focused G0/G1/G3 regressions check unloading/storage, mixed-mode anisotropy,
+exact failed null directions, compression, closure refusal, retained history,
+rotation and work symmetry.
+
 ## Completed brittle-plane release admission
 
 `BrittleCrackBand::release_failed_plane` admits an explicitly selected physical

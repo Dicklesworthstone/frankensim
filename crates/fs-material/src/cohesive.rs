@@ -40,6 +40,9 @@ pub mod temperature;
 /// Shared rigid damaged-area friction projection used by native body owners.
 pub mod friction;
 
+/// Recoverable stiffness with the original irreversible history held fixed.
+pub mod frozen;
+
 // Work-conjugate vector averages for native dynamic interface owners.
 mod path;
 
@@ -52,6 +55,12 @@ pub enum CohesiveError {
     SeparationLimit,
     /// Actual work/storage/fracture mismatch exceeds the supplied J/m2 gate.
     EnergyDefect(f64),
+    /// Opening and compression have different stiffness at zero normal jump.
+    /// A unique two-sided frozen tangent does not exist at this contact switch.
+    NormalClosureSwitch {
+        opening_stiffness_pa_m: f64,
+        compression_stiffness_pa_m: f64,
+    },
 }
 impl core::fmt::Display for CohesiveError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
