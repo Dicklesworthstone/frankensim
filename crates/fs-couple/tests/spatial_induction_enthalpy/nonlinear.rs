@@ -2,6 +2,8 @@
 //! retained 3D field, native Joule heat and finite caloric cells together.
 #[path = "nonlinear/heat.rs"]
 mod heat;
+#[path = "nonlinear/terminals.rs"]
+mod terminals;
 #[path = "nonlinear/thermal.rs"]
 mod thermal;
 

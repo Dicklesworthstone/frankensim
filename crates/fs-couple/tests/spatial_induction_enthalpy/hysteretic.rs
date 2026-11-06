@@ -1,6 +1,8 @@
 //! Native three-dimensional memory and physical loss reach finite thermal cells.
 #[path = "../../../fs-em/tests/spatial_induction/hysteretic/common.rs"]
 mod data;
+#[path = "hysteretic/terminals.rs"]
+mod terminals;
 
 use super::{near, regions, thermal_controls};
 use data::{
@@ -57,6 +59,13 @@ fn caloric(card: &MaterialCard) -> ResolvedHeatCapacityCurve {
     .unwrap()
 }
 fn thermal(curve: &ResolvedHeatCapacityCurve, volume: f64) -> DepositionSimulation<'_> {
+    thermal_with_capacity(curve, volume, CP)
+}
+fn thermal_with_capacity(
+    curve: &ResolvedHeatCapacityCurve,
+    volume: f64,
+    heat_capacity: f64,
+) -> DepositionSimulation<'_> {
     DepositionSimulation::new(
         vec![TimedEvent {
             time_s: 0.0,
@@ -66,7 +75,7 @@ fn thermal(curve: &ResolvedHeatCapacityCurve, volume: f64) -> DepositionSimulati
                 body_id: 0,
                 material_id: MaterialId(9),
                 mass_kg: volume,
-                specific_h_j_kg: CP * (300.0 - 200.0),
+                specific_h_j_kg: heat_capacity * (300.0 - 200.0),
                 geometry: CellGeometry {
                     start_m: [0.0; 3],
                     end_m: [1.0, 0.0, 0.0],

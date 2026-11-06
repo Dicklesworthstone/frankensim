@@ -44,9 +44,9 @@ impl<E: core::fmt::Debug> core::fmt::Display for SpatialInductionHeatError<E> {
     }
 }
 impl<E: core::fmt::Debug> std::error::Error for SpatialInductionHeatError<E> {}
-type HeatError<E> = CircuitEnthalpyError<SpatialInductionHeatError<E>>;
+pub(super) type HeatError<E> = CircuitEnthalpyError<SpatialInductionHeatError<E>>;
 
-fn heat_error<E: From<HeatNetworkError>>(error: HeatNetworkError) -> HeatError<E> {
+pub(super) fn heat_error<E: From<HeatNetworkError>>(error: HeatNetworkError) -> HeatError<E> {
     match error {
         HeatNetworkError::Cancelled => CircuitEnthalpyError::Cancelled,
         other => CircuitEnthalpyError::Source(SpatialInductionHeatError::Heat(other.into())),
@@ -62,7 +62,7 @@ fn concrete_error(error: SpatialInductionHeatError<HeatNetworkError>) -> Magneti
     }
 }
 
-fn close_heat_balance<D, S: AsRef<HeatNetworkSample>, E: From<HeatNetworkError>>(
+pub(super) fn close_heat_balance<D, S: AsRef<HeatNetworkSample>, E: From<HeatNetworkError>>(
     report: &mut SpatialInductionThermalReport<D, S>,
     dt: f64,
     tolerance: f64,

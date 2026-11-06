@@ -1,3 +1,40 @@
+## Physical nonlinear and hysteretic electrodes with finite heat
+
+`SpatialMagneticThermalNetwork` supplies `step_nonlinear_voltage_candidate` and
+`step_nonlinear_current_candidate`. With `magnetic-hysteresis`, the corresponding
+`step_hysteretic_voltage_candidate` and `step_hysteretic_current_candidate`
+advance actual solid-conductor electrodes, the original 3D A–phi field and
+finite caloric inventory together. The shared `SpatialTerminalThermalCandidate`
+retains the typed native electrode owner, finite thermal state and full coupled
+receipt. Candidate failure or cancellation publishes neither history.
+
+Private read-only history traits let the existing finite-enthalpy drivers read
+accepted electrode geometry and sources without exposing isolated field
+stepping. Every thermal trial starts from the same accepted magnetic history,
+retains electrode charge topology, and resolves scalar/tensor conductivity at
+the actual endpoint temperature. Nonlinear electrodes preserve the existing
+optional source-separable magnetic entropy law and effective-capacity checks.
+Hysteretic electrodes retain vector polarization and require fixed fitted
+coefficients over the full admitted caloric interval.
+
+Actual terminal V*I work joins impressed supply once. Native local Joule heat,
+and irreversible pinning heat where present, enter their original whole-volume
+solid receivers once; numerical magnetic dissipation remains outside deposited
+heat. The joint work balance closes magnetic/caloric storage and numerical loss
+against electrode work, impressed work and external heat. The nonlinear path
+also retains the original reversible magnetic entropy/parameter-work account.
+Thermal clocks, complete magnetic source identity, receiver volume, field and
+finite-enthalpy budgets all retain their original admission.
+
+The `nonlinear::terminals` and `hysteretic::terminals` modules additionally expose
+`voltage_heat_assembly_candidate` and `current_heat_assembly_candidate` for the
+complete original contact, layer, radiation and finite-coolant heat provider.
+Provider source payloads, typed errors and closed-radiation accounting are
+preserved. Electrical graph/contact work without an electrical owner refuses.
+These thermal adapters describe stationary, fixed-geometry, fully solid bodies;
+material transport, phase transitions and transported magnetic memory remain
+outside this scope.
+
 ## Native 3D hysteretic winding circuits and finite enthalpy
 
 With `magnetic-hysteresis`, the existing `SpatialWindingThermalNetwork` supplies

@@ -11,6 +11,8 @@
 
 /// Source-pinned saturation/recoil and local conductivity-temperature feedback.
 pub mod nonlinear;
+/// Joint finite thermal candidates for physical conducting electrodes.
+pub mod terminals;
 /// Vector magnetic memory, local pinning heat and finite enthalpy.
 #[cfg(feature = "magnetic-hysteresis")]
 pub mod hysteretic;

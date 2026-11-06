@@ -8,6 +8,8 @@
 //! over its complete admitted caloric interval. Geometry and material occupancy
 //! are stationary; this adapter supplies no transport of magnetic memory.
 
+/// Physical electrodes on the original vector-memory finite heat solve.
+pub mod terminals;
 /// Native winding circuits on the same retained vector-memory thermal solve.
 pub mod winding;
 
@@ -25,7 +27,7 @@ use fs_em::spatial::{
     vector_potential::induction::hysteretic::{
         SpatialHystereticInduction, SpatialHystereticInductionCandidate,
         SpatialHystereticInductionControls, SpatialHystereticInductionError,
-        SpatialHystereticInductionStep,
+        SpatialHystereticInductionStep, SpatialHystereticProblem,
     },
 };
 use fs_material::{
@@ -87,6 +89,28 @@ impl<'m, C: SpatialConductorMaterial> ThermalDriver for SpatialHystereticInducti
     }
 }
 
+// Electrode-owned charge topology exposes accepted physical sources without
+// allowing an isolated field step to reinterpret its grouped charge rows.
+trait HystereticInductionHistory<C: SpatialConductorMaterial> {
+    fn time_s(&self) -> f64;
+    fn problem(&self) -> &SpatialHystereticProblem;
+    fn conductors(&self) -> &[Option<C>];
+}
+
+impl<C: SpatialConductorMaterial> HystereticInductionHistory<C>
+    for SpatialHystereticInduction<'_, C>
+{
+    fn time_s(&self) -> f64 {
+        SpatialHystereticInduction::time_s(self)
+    }
+    fn problem(&self) -> &SpatialHystereticProblem {
+        SpatialHystereticInduction::problem(self)
+    }
+    fn conductors(&self) -> &[Option<C>] {
+        SpatialHystereticInduction::conductors(self)
+    }
+}
+
 // Current excitation and native circuit terminals share the original magnetic
 // source admission, finite-enthalpy residual and per-tetrahedron heat accounts.
 trait HystereticInductionDriver: ThermalDriver {
@@ -108,7 +132,7 @@ impl<C: SpatialConductorMaterial> HystereticInductionDriver
             heat_j: step.heat_j,
             numerical_dissipation_j: step.numerical_dissipation_j,
             stored_change_j: step.stored_change_j,
-            supplied_j: step.impressed_work_j,
+            supplied_j: step.impressed_work_j + step.terminal_work_j,
         }
     }
     fn field_trials(&self) -> usize {
@@ -295,7 +319,6 @@ impl SpatialMagneticThermalNetwork<'_> {
     #[allow(clippy::too_many_arguments)]
     fn step_hysteretic_driver_candidate<
         't,
-        'm,
         S,
         E: From<MagneticThermalError>,
         C: SpatialConductorMaterial,
@@ -304,7 +327,7 @@ impl SpatialMagneticThermalNetwork<'_> {
         &self,
         thermal: &DepositionSimulation<'t>,
         target_s: f64,
-        field: &SpatialHystereticInduction<'m, C>,
+        field: &impl HystereticInductionHistory<C>,
         controls: CircuitEnthalpySolve,
         initial_energy_increments_j: &[f64],
         resolve: impl Fn(

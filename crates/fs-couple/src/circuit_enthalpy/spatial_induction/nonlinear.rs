@@ -6,6 +6,8 @@
 //! Joule heat and reversible entropy exchange enter their finite receivers;
 //! backward-Euler magnetic loss stays a separate numerical energy export.
 
+/// Physical electrodes on the original charge-conserving finite heat solve.
+pub mod terminals;
 /// Source-separable nonlinear magnetism in the original spatial heat solve.
 pub mod thermal;
 /// Native distributed winding circuits on the same finite thermal residual.
@@ -27,12 +29,15 @@ use fs_em::spatial::{
     SpatialMagneticError,
     nonlinear::SpatialNonlinearMaterial,
     vector_potential::{
-        induction::nonlinear::{
-            SpatialNonlinearInduction, SpatialNonlinearInductionCandidate,
-            SpatialNonlinearInductionControls, SpatialNonlinearInductionError,
-            SpatialNonlinearInductionStep,
+        induction::{
+            SpatialInductionField,
+            nonlinear::{
+                SpatialNonlinearInduction, SpatialNonlinearInductionCandidate,
+                SpatialNonlinearInductionControls, SpatialNonlinearInductionError,
+                SpatialNonlinearInductionStep,
+            },
         },
-        nonlinear::NonlinearVectorError,
+        nonlinear::{NonlinearVectorError, SpatialNonlinearVectorMagnetostatics},
     },
 };
 use fs_material::conductor::{ResolvedConductorState, spatial::SpatialConductorMaterial};
@@ -88,6 +93,38 @@ impl<'m, C: SpatialConductorMaterial> ThermalDriver for SpatialNonlinearInductio
     }
 }
 
+// Thermal preparation reads accepted geometry and sources without gaining an
+// isolated stepping path for a field whose charge rows belong to electrodes.
+trait NonlinearInductionHistory<C: SpatialConductorMaterial> {
+    fn time_s(&self) -> f64;
+    fn problem(&self) -> &SpatialNonlinearVectorMagnetostatics;
+    fn conductors(&self) -> &[Option<C>];
+    fn field(
+        &self,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<SpatialInductionField, SpatialNonlinearInductionError>;
+}
+
+impl<C: SpatialConductorMaterial> NonlinearInductionHistory<C>
+    for SpatialNonlinearInduction<'_, C>
+{
+    fn time_s(&self) -> f64 {
+        SpatialNonlinearInduction::time_s(self)
+    }
+    fn problem(&self) -> &SpatialNonlinearVectorMagnetostatics {
+        SpatialNonlinearInduction::problem(self)
+    }
+    fn conductors(&self) -> &[Option<C>] {
+        SpatialNonlinearInduction::conductors(self)
+    }
+    fn field(
+        &self,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<SpatialInductionField, SpatialNonlinearInductionError> {
+        SpatialNonlinearInduction::field(self, cancelled)
+    }
+}
+
 // A native terminal circuit changes the external driver, not the material
 // query, entropy law, finite thermal residual or local field heat integral.
 trait InductionThermalDriver: ThermalDriver {
@@ -113,7 +150,7 @@ impl<C: SpatialConductorMaterial> InductionThermalDriver
             heat_j: s.heat_j,
             numerical_dissipation_j: s.numerical_dissipation_j,
             stored_change_j: s.stored_change_j - s.parameter_work_j,
-            supplied_j: s.impressed_work_j - s.mechanical_work_j,
+            supplied_j: s.impressed_work_j + s.terminal_work_j - s.mechanical_work_j,
         }
     }
     fn field_trials(&self) -> usize {
@@ -307,13 +344,13 @@ impl SpatialMagneticThermalNetwork<'_> {
     // solve. Only the candidate driver and its additional native heat differ.
     #[allow(clippy::too_many_arguments)]
     fn step_constitutive_driver_candidate<
-        't, 'm, S, E: From<MagneticThermalError>,
+        't, S, E: From<MagneticThermalError>,
         C: SpatialConductorMaterial, D: InductionThermalDriver,
     >(
         &self,
         thermal: &DepositionSimulation<'t>,
         target_s: f64,
-        field: &SpatialNonlinearInduction<'m, C>,
+        field: &impl NonlinearInductionHistory<C>,
         bindings: Option<&[SpatialMagneticThermalLaw<MagneticConstitutiveThermalLaw>]>,
         controls: CircuitEnthalpySolve,
         initial_energy_increments_j: &[f64],
