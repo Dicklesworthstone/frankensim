@@ -4202,3 +4202,52 @@ not advanced here. Native thermal clock/event admission remains in force:
 interior events refuse and accepted endpoint events remain pending until
 joint-owner acceptance. These are algebraic and energy checks, not a temporal
 accuracy or through-thickness isothermal certificate.
+
+## Non-isothermal absorbing material in participating enclosures
+
+`radiation::slabs::SlabPair` binds two equal-area exterior ports to one
+original prepared `AbsorbingSlab`. The gray and spectral slab entry points
+accept one actual temperature per original material layer; each port matches
+its adjacent first/last layer. Front and back temperatures may differ.
+The original gas paths, view factors and factored boundary equations continue
+to own enclosure exchange. The opaque path retains its original arithmetic.
+
+Material heat is reported separately in stack-then-layer order. Exterior ports
+have exactly zero surface thermal power: their incoming-minus-outgoing flux
+must not be deposited alongside actual layer absorption minus emission.
+The full energy gate sums opaque boundaries, gas and every material layer.
+The same directed dependency admission rejects indeterminate lossless cycles.
+The prepared material response retains angular memory inside each stack;
+exterior coupling uses the enclosure's explicit diffuse approximation.
+
+`SpectralOptics::new_with_slab_bands` requires genuine band sources for
+non-port faces and each physical material layer. Every band retains identical
+ordered ports, layer count/order and physical thicknesses, while absorption
+and source support may vary. Every emitting layer contributes its own Planck
+spectrum and spectral-coverage gate, including layers hidden from both ports.
+Constant band optics need one factorization/solve per band and no wavelength
+samples; varying soot uses the existing adaptive wavelength integration.
+Reported layer heat errors cover wavelength quadrature. Each prepared slab
+separately retains its angular coefficient diagnostics; source and spatial
+errors are not inferred from either estimate.
+
+`radiation::slabs::thermal::candidate_slab_thermal` binds these ordered
+layers to active original `CellId` values. Each layer in one stack has a
+distinct cell; separate optical stacks may share a cell and their powers are
+summed without duplicating its mass. Both ports bind their adjacent layer
+cells. Other faces retain stored-cell or prescribed-bath ownership.
+
+The slab adapter shares the existing sheet adapter's bounded native
+backward-Euler/Newton driver. All original cells, conductive links, authored
+sources, material domains, latent storage and event/clock rules remain active.
+Each immutable-history trial evaluates actual endpoint layer temperatures.
+Gray callbacks query only non-port faces; genuine spectral inputs skip them.
+Only actual layer and opaque-face heat enters native storage. Local and total
+native joule residuals and the applied material/gas/bath balance gate acceptance.
+
+The returned candidate already contains its reported material heating.
+Gas temperatures, optical coefficients and geometry remain prescribed for the
+interval; apply the returned gas/bath exchanges once when accepting their
+owners. Rebuild sourced optics when physical conditions require new
+coefficients. The adapter does not advance gas or certify timestep, spatial
+resolution, scattering or refractive-interface accuracy.

@@ -160,6 +160,12 @@ pub struct SheetThermalCandidate<'m, 's> {
 
 /// Reusable numerical storage; contains no accepted physical state.
 pub struct SheetThermalWorkspace {
+    thermal: ThermalWorkspace,
+    optical: OpticalWorkspace,
+}
+
+/// Numerical buffers shared by the sheet and non-isothermal slab adapters.
+pub(crate) struct ThermalWorkspace {
     ids: Vec<CellId>,
     energy: Vec<f64>,
     probe: Vec<f64>,
@@ -168,7 +174,29 @@ pub struct SheetThermalWorkspace {
     rhs: Vec<f64>,
     delta: Vec<f64>,
     lu: LuWorkspace,
-    optical: OpticalWorkspace,
+}
+
+impl ThermalWorkspace {
+    pub(crate) fn new(
+        thermal: &DepositionSimulation<'_>,
+    ) -> Result<Self, SheetThermalError> {
+        let n = thermal.cells().len();
+        if !(1..=MAX_SHEET_THERMAL_CELLS).contains(&n) {
+            return Err(SheetThermalError::Invalid(
+                "sheet thermal storage needs 1..=256 cells",
+            ));
+        }
+        Ok(Self {
+            ids: thermal.cells().keys().copied().collect(),
+            energy: vec![0.0; n],
+            probe: vec![0.0; n],
+            residual: vec![0.0; n],
+            matrix: vec![0.0; n * n],
+            rhs: vec![0.0; n],
+            delta: vec![0.0; n],
+            lu: LuWorkspace::new(n)?,
+        })
+    }
 }
 
 struct OpticalWorkspace {
@@ -236,21 +264,8 @@ impl ParticipatingEnclosure {
         &self,
         thermal: &DepositionSimulation<'_>,
     ) -> Result<SheetThermalWorkspace, SheetThermalError> {
-        let n = thermal.cells().len();
-        if !(1..=MAX_SHEET_THERMAL_CELLS).contains(&n) {
-            return Err(SheetThermalError::Invalid(
-                "sheet thermal storage needs 1..=256 cells",
-            ));
-        }
         Ok(SheetThermalWorkspace {
-            ids: thermal.cells().keys().copied().collect(),
-            energy: vec![0.0; n],
-            probe: vec![0.0; n],
-            residual: vec![0.0; n],
-            matrix: vec![0.0; n * n],
-            rhs: vec![0.0; n],
-            delta: vec![0.0; n],
-            lu: LuWorkspace::new(n)?,
+            thermal: ThermalWorkspace::new(thermal)?,
             optical: OpticalWorkspace {
                 gray: self.workspace()?,
                 spectral: self.spectral_workspace()?,
@@ -292,182 +307,188 @@ impl ParticipatingEnclosure {
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<SheetThermalCandidate<'m, 's>, SheetThermalError> {
         checkpoint(&mut cancelled)?;
-        let n = thermal.cells().len();
-        if !(1..=MAX_SHEET_THERMAL_CELLS).contains(&n)
-            || work.ids.len() != n
-            || !work.ids.iter().copied().eq(thermal.cells().keys().copied())
-            || surfaces.len() != self.geometry().len()
-            || !positive(duration.value())
+        if surfaces.len() != self.geometry().len()
             || gas_temperatures.iter().any(|t| !positive(t.value()))
-            || !(1..=64).contains(&controls.maximum_iterations)
-            || !(1..=32).contains(&controls.maximum_backtracks)
-            || !(1..=65_536).contains(&controls.maximum_evaluations)
-            || !positive(controls.energy_difference_j)
-            || !nonnegative(controls.cell_energy_tolerance_j)
-            || !nonnegative(controls.total_energy_tolerance_j)
-            || !nonnegative(controls.combined_energy_tolerance_j)
         {
-            return Err(SheetThermalError::Invalid(
-                "sheet thermal axes, workspace or controls",
-            ));
+            return Err(SheetThermalError::Invalid("sheet thermal optical axes or gas temperature"));
         }
         let paired = admit_surfaces(thermal, surfaces, optics.sheets())?;
-        let step = BackwardEulerStep::new(
-            thermal,
-            finite(thermal.time_s() + duration.value())?,
-            || checkpoint(&mut cancelled),
+        let optical = &mut work.optical;
+        candidate_thermal(
+            thermal, duration, controls, &mut work.thermal,
+            |state, cancel| resolve_sheet(
+                self, state, surfaces, &paired, gas_temperatures, optics,
+                &mut emissivity, optical, cancel,
+            ),
+            cancelled,
+        )
+    }
+}
+
+/// One original-history thermal solve; only the endpoint optical resolver varies.
+pub(crate) fn candidate_thermal<'m, 's>(
+    thermal: &DepositionSimulation<'m>,
+    duration: Time,
+    controls: SheetThermalSolve,
+    work: &mut ThermalWorkspace,
+    mut resolve: impl FnMut(
+        &DepositionSimulation<'m>, &mut dyn FnMut() -> bool,
+    ) -> Result<Applied<'s>, SheetThermalError>,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<SheetThermalCandidate<'m, 's>, SheetThermalError> {
+    checkpoint(&mut cancelled)?;
+    let n = thermal.cells().len();
+    if !(1..=MAX_SHEET_THERMAL_CELLS).contains(&n)
+        || work.ids.len() != n
+        || !work.ids.iter().copied().eq(thermal.cells().keys().copied())
+        || !positive(duration.value())
+        || !(1..=64).contains(&controls.maximum_iterations)
+        || !(1..=32).contains(&controls.maximum_backtracks)
+        || !(1..=65_536).contains(&controls.maximum_evaluations)
+        || !positive(controls.energy_difference_j)
+        || !nonnegative(controls.cell_energy_tolerance_j)
+        || !nonnegative(controls.total_energy_tolerance_j)
+        || !nonnegative(controls.combined_energy_tolerance_j)
+    {
+        return Err(SheetThermalError::Invalid("sheet thermal axes, workspace or controls"));
+    }
+    let step = BackwardEulerStep::new(
+        thermal,
+        finite(thermal.time_s() + duration.value())?,
+        || checkpoint(&mut cancelled),
+    )?;
+    work.energy.fill(0.0);
+    let mut evaluations = 0;
+    for iteration in 0..controls.maximum_iterations {
+        checkpoint(&mut cancelled)?;
+        let trial = evaluate(
+            &step,
+            &work.energy,
+            controls,
+            &mut resolve,
+            &mut evaluations,
+            &mut cancelled,
         )?;
-        work.energy.fill(0.0);
-        let mut evaluations = 0;
-        for iteration in 0..controls.maximum_iterations {
-            checkpoint(&mut cancelled)?;
-            let trial = evaluate(
-                self,
-                &step,
-                &work.energy,
-                surfaces,
-                &paired,
-                gas_temperatures,
-                optics,
-                &mut emissivity,
+        let maximum_cell = trial.maximum_cell_residual_j();
+        if maximum_cell <= controls.cell_energy_tolerance_j
+            && trial.audit().residual_j.abs() <= controls.total_energy_tolerance_j
+        {
+            return finish(
+                trial,
+                step.duration_s(),
+                iteration + 1,
+                evaluations,
+                maximum_cell,
                 controls,
-                &mut work.optical,
-                &mut evaluations,
                 &mut cancelled,
-            )?;
-            let maximum_cell = trial.maximum_cell_residual_j();
-            if maximum_cell <= controls.cell_energy_tolerance_j
-                && trial.audit().residual_j.abs() <= controls.total_energy_tolerance_j
-            {
-                return finish(
-                    trial,
-                    step.duration_s(),
-                    iteration + 1,
-                    evaluations,
-                    maximum_cell,
-                    controls,
-                    &mut cancelled,
-                );
-            }
-            let norm = maximum_cell.max(trial.audit().residual_j.abs());
-            work.residual.copy_from_slice(trial.residual_j());
-            drop(trial);
-            for column in 0..n {
-                checkpoint(&mut cancelled)?;
-                let cell = &thermal.cells()[&work.ids[column]];
-                let scale = finite(cell.mass_kg * cell.specific_h_j_kg.abs())?;
-                let mut increment = controls
-                    .energy_difference_j
-                    .max(64.0 * f64::EPSILON * scale.max(work.energy[column].abs()));
-                let mut derivative = None;
-                for _ in 0..controls.maximum_backtracks {
-                    let mut representable = false;
-                    for sign in [1.0, -1.0] {
-                        work.probe.copy_from_slice(&work.energy);
-                        let value = work.energy[column] + sign * increment;
-                        if !value.is_finite() {
-                            continue;
-                        }
-                        work.probe[column] =
-                            resolvable_increment_j(cell.specific_h_j_kg, value, cell.mass_kg);
-                        let difference = finite(work.probe[column] - work.energy[column])?;
-                        if difference == 0.0 {
-                            continue;
-                        }
-                        representable = true;
-                        match evaluate(
-                            self,
-                            &step,
-                            &work.probe,
-                            surfaces,
-                            &paired,
-                            gas_temperatures,
-                            optics,
-                            &mut emissivity,
-                            controls,
-                            &mut work.optical,
-                            &mut evaluations,
-                            &mut cancelled,
-                        ) {
-                            Ok(probe) => {
-                                derivative = Some((probe, difference));
-                                break;
-                            }
-                            Err(error) if trial_domain_error(&error) => {}
-                            Err(error) => return Err(error),
-                        }
-                    }
-                    if derivative.is_some() || !representable {
-                        break;
-                    }
-                    increment *= 0.5;
-                }
-                let (probe, difference) = derivative.ok_or(SheetThermalError::Iterations)?;
-                for row in 0..n {
-                    work.matrix[row * n + column] =
-                        finite((probe.residual_j()[row] - work.residual[row]) / difference)?;
-                }
-            }
-            for row in 0..n {
-                work.rhs[row] = -work.residual[row];
-            }
+            );
+        }
+        let norm = maximum_cell.max(trial.audit().residual_j.abs());
+        work.residual.copy_from_slice(trial.residual_j());
+        drop(trial);
+        for column in 0..n {
             checkpoint(&mut cancelled)?;
-            work.lu
-                .solve_into(&work.matrix, &work.rhs, &mut work.delta)?;
-            let mut scale = 1.0;
-            let mut improved = false;
+            let cell = &thermal.cells()[&work.ids[column]];
+            let scale = finite(cell.mass_kg * cell.specific_h_j_kg.abs())?;
+            let mut increment = controls
+                .energy_difference_j
+                .max(64.0 * f64::EPSILON * scale.max(work.energy[column].abs()));
+            let mut derivative = None;
             for _ in 0..controls.maximum_backtracks {
-                checkpoint(&mut cancelled)?;
-                let mut representable = true;
-                for (i, id) in work.ids.iter().enumerate() {
-                    let cell = &thermal.cells()[id];
-                    let value = work.energy[i] + scale * work.delta[i];
+                let mut representable = false;
+                for sign in [1.0, -1.0] {
+                    work.probe.copy_from_slice(&work.energy);
+                    let value = work.energy[column] + sign * increment;
                     if !value.is_finite() {
-                        representable = false;
-                        break;
+                        continue;
                     }
-                    work.probe[i] =
+                    work.probe[column] =
                         resolvable_increment_j(cell.specific_h_j_kg, value, cell.mass_kg);
-                }
-                if !representable {
-                    scale *= 0.5;
-                    continue;
-                }
-                match evaluate(
-                    self,
-                    &step,
-                    &work.probe,
-                    surfaces,
-                    &paired,
-                    gas_temperatures,
-                    optics,
-                    &mut emissivity,
-                    controls,
-                    &mut work.optical,
-                    &mut evaluations,
-                    &mut cancelled,
-                ) {
-                    Ok(probe) => {
-                        let candidate_norm = probe
-                            .maximum_cell_residual_j()
-                            .max(probe.audit().residual_j.abs());
-                        if candidate_norm < norm {
-                            improved = true;
+                    let difference = finite(work.probe[column] - work.energy[column])?;
+                    if difference == 0.0 {
+                        continue;
+                    }
+                    representable = true;
+                    match evaluate(
+                        &step,
+                        &work.probe,
+                        controls,
+                        &mut resolve,
+                        &mut evaluations,
+                        &mut cancelled,
+                    ) {
+                        Ok(probe) => {
+                            derivative = Some((probe, difference));
                             break;
                         }
+                        Err(error) if trial_domain_error(&error) => {}
+                        Err(error) => return Err(error),
                     }
-                    Err(error) if trial_domain_error(&error) => {}
-                    Err(error) => return Err(error),
                 }
-                scale *= 0.5;
+                if derivative.is_some() || !representable {
+                    break;
+                }
+                increment *= 0.5;
             }
-            if !improved {
-                return Err(SheetThermalError::Iterations);
+            let (probe, difference) = derivative.ok_or(SheetThermalError::Iterations)?;
+            for row in 0..n {
+                work.matrix[row * n + column] =
+                    finite((probe.residual_j()[row] - work.residual[row]) / difference)?;
             }
-            work.energy.copy_from_slice(&work.probe);
         }
-        Err(SheetThermalError::Iterations)
+        for row in 0..n {
+            work.rhs[row] = -work.residual[row];
+        }
+        checkpoint(&mut cancelled)?;
+        work.lu
+            .solve_into(&work.matrix, &work.rhs, &mut work.delta)?;
+        let mut scale = 1.0;
+        let mut improved = false;
+        for _ in 0..controls.maximum_backtracks {
+            checkpoint(&mut cancelled)?;
+            let mut representable = true;
+            for (i, id) in work.ids.iter().enumerate() {
+                let cell = &thermal.cells()[id];
+                let value = work.energy[i] + scale * work.delta[i];
+                if !value.is_finite() {
+                    representable = false;
+                    break;
+                }
+                work.probe[i] =
+                    resolvable_increment_j(cell.specific_h_j_kg, value, cell.mass_kg);
+            }
+            if !representable {
+                scale *= 0.5;
+                continue;
+            }
+            match evaluate(
+                &step,
+                &work.probe,
+                controls,
+                &mut resolve,
+                &mut evaluations,
+                &mut cancelled,
+            ) {
+                Ok(probe) => {
+                    let candidate_norm = probe
+                        .maximum_cell_residual_j()
+                        .max(probe.audit().residual_j.abs());
+                    if candidate_norm < norm {
+                        improved = true;
+                        break;
+                    }
+                }
+                Err(error) if trial_domain_error(&error) => {}
+                Err(error) => return Err(error),
+            }
+            scale *= 0.5;
+        }
+        if !improved {
+            return Err(SheetThermalError::Iterations);
+        }
+        work.energy.copy_from_slice(&work.probe);
     }
+    Err(SheetThermalError::Iterations)
 }
 
 fn admit_surfaces(
@@ -509,7 +530,7 @@ fn admit_surfaces(
     Ok(paired)
 }
 
-struct Applied<'s> {
+pub(crate) struct Applied<'s> {
     radiation: WallRadiation<'s>,
     temperatures: Vec<Temperature>,
     cell_power: BTreeMap<CellId, Power>,
@@ -517,18 +538,13 @@ struct Applied<'s> {
     power_residual_w: f64,
 }
 
-#[allow(clippy::too_many_arguments)]
 fn evaluate<'m, 's>(
-    enclosure: &ParticipatingEnclosure,
     step: &BackwardEulerStep<'_, 'm>,
     energy: &[f64],
-    surfaces: &[SheetThermalSurface],
-    paired: &[bool],
-    gas_temperatures: [Temperature; 2],
-    optics: SheetThermalOptics<'_, 's>,
-    emissivity: &mut impl FnMut(usize, Temperature) -> Result<SurfaceEmissivity, ConductionError>,
     controls: SheetThermalSolve,
-    work: &mut OpticalWorkspace,
+    resolve: &mut impl FnMut(
+        &DepositionSimulation<'m>, &mut dyn FnMut() -> bool,
+    ) -> Result<Applied<'s>, SheetThermalError>,
     evaluations: &mut usize,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<BackwardEulerTrial<'m, Applied<'s>>, SheetThermalError> {
@@ -540,115 +556,130 @@ fn evaluate<'m, 's>(
         });
     }
     *evaluations += 1;
-    // The original owner invokes its thermal and optical callbacks serially.
-    // RefCell allows both to share cancellation without disabling either gate.
+    // The original thermal and optical callbacks execute serially.
     let cancellation = RefCell::new(cancelled);
     step.evaluate(
         energy,
         |state| {
-            let mut cancelled = || (*cancellation.borrow_mut())();
-            let mut temperatures = Vec::with_capacity(surfaces.len());
-            for surface in surfaces {
-                checkpoint(&mut cancelled)?;
-                temperatures.push(match *surface {
-                    SheetThermalSurface::Stored(id) => Temperature::new(state.temperature_k(id)?),
-                    SheetThermalSurface::Prescribed(t) => t,
-                });
-            }
-            let spectral_sources = matches!(
-                optics, SheetThermalOptics::Spectral { optics, .. }
-                    if optics.surface_emissivity_bands().is_some()
-            );
-            let mut cards = Vec::new();
-            if !spectral_sources {
-                for (surface, &temperature) in temperatures.iter().enumerate() {
-                    if paired[surface] {
-                        continue;
-                    }
-                    checkpoint(&mut cancelled)?;
-                    let card = emissivity(surface, temperature)
-                        .map_err(|error| SheetThermalError::Emissivity { surface, error })?;
-                    if card.temperature_k() != temperature.value() {
-                        return Err(SheetThermalError::Invalid(
-                            "emissivity must query the actual endpoint temperature",
-                        ));
-                    }
-                    cards.push(card);
-                }
-            }
-            let radiation = match optics {
-                SheetThermalOptics::Gray {
-                    absorption,
-                    sheets,
-                    solve,
-                } => WallRadiation::Gray(enclosure.evaluate_with_sheets(
-                    &temperatures,
-                    &cards,
-                    sheets,
-                    gas_temperatures,
-                    absorption,
-                    solve,
-                    &mut work.gray,
-                    &mut cancelled,
-                )?),
-                SheetThermalOptics::Spectral { optics, solve } => {
-                    WallRadiation::Spectral(enclosure.evaluate_spectral(
-                        &temperatures,
-                        &cards,
-                        gas_temperatures,
-                        optics,
-                        solve,
-                        &mut work.spectral,
-                        &mut cancelled,
-                    )?)
-                }
-            };
-            let mut sums = BTreeMap::new();
-            let mut bath_power = vec![Power::new(0.0); surfaces.len()];
-            for (i, (&surface, &power)) in surfaces
-                .iter()
-                .zip(radiation.surface_heat_power())
-                .enumerate()
-            {
-                checkpoint(&mut cancelled)?;
-                match surface {
-                    SheetThermalSurface::Stored(id) => {
-                        let entry = sums.entry(id).or_insert(Dd::from_f64(0.0));
-                        *entry = *entry + Dd::from_f64(power.value());
-                    }
-                    SheetThermalSurface::Prescribed(_) => bath_power[i] = power,
-                }
-            }
-            let sources_w: BTreeMap<CellId, f64> = sums
-                .into_iter()
-                .map(|(id, sum)| Ok((id, finite(sum.to_f64())?)))
-                .collect::<Result<_, DepositionError>>()?;
-            let cell_power = sources_w
-                .iter()
-                .map(|(&id, &q)| (id, Power::new(q)))
-                .collect();
-            let mut balance = Dd::from_f64(0.0);
-            for &power in sources_w.values() {
-                balance = balance + Dd::from_f64(power);
-            }
-            for power in bath_power.iter().chain(radiation.gas_heat_power().iter()) {
-                balance = balance + Dd::from_f64(power.value());
-            }
-            let power_residual_w = finite(balance.to_f64())?;
+            let applied = resolve(state, &mut || (*cancellation.borrow_mut())())?;
             Ok(StepCoefficients {
-                sources_w,
+                sources_w: applied.cell_power.iter()
+                    .map(|(&id, &power)| (id, power.value())).collect(),
                 conductances_w_k: BTreeMap::new(),
-                payload: Applied {
-                    radiation,
-                    temperatures,
-                    cell_power,
-                    bath_power,
-                    power_residual_w,
-                },
+                payload: applied,
             })
         },
         || checkpoint(&mut || (*cancellation.borrow_mut())()),
     )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn resolve_sheet<'s>(
+    enclosure: &ParticipatingEnclosure,
+    state: &DepositionSimulation<'_>,
+    surfaces: &[SheetThermalSurface],
+    paired: &[bool],
+    gas_temperatures: [Temperature; 2],
+    optics: SheetThermalOptics<'_, 's>,
+    emissivity: &mut impl FnMut(usize, Temperature) -> Result<SurfaceEmissivity, ConductionError>,
+    work: &mut OpticalWorkspace,
+    cancelled: &mut dyn FnMut() -> bool,
+) -> Result<Applied<'s>, SheetThermalError> {
+    let mut temperatures = Vec::with_capacity(surfaces.len());
+    for surface in surfaces {
+        checkpoint(cancelled)?;
+        temperatures.push(match *surface {
+            SheetThermalSurface::Stored(id) => Temperature::new(state.temperature_k(id)?),
+            SheetThermalSurface::Prescribed(t) => t,
+        });
+    }
+    let spectral_sources = matches!(
+        optics, SheetThermalOptics::Spectral { optics, .. }
+            if optics.surface_emissivity_bands().is_some()
+    );
+    let mut cards = Vec::new();
+    if !spectral_sources {
+        for (surface, &temperature) in temperatures.iter().enumerate() {
+            if paired[surface] {
+                continue;
+            }
+            checkpoint(cancelled)?;
+            let card = emissivity(surface, temperature)
+                .map_err(|error| SheetThermalError::Emissivity { surface, error })?;
+            if card.temperature_k() != temperature.value() {
+                return Err(SheetThermalError::Invalid(
+                    "emissivity must query the actual endpoint temperature",
+                ));
+            }
+            cards.push(card);
+        }
+    }
+    let radiation = match optics {
+        SheetThermalOptics::Gray {
+            absorption,
+            sheets,
+            solve,
+        } => WallRadiation::Gray(enclosure.evaluate_with_sheets(
+            &temperatures,
+            &cards,
+            sheets,
+            gas_temperatures,
+            absorption,
+            solve,
+            &mut work.gray,
+            &mut *cancelled,
+        )?),
+        SheetThermalOptics::Spectral { optics, solve } => {
+            WallRadiation::Spectral(enclosure.evaluate_spectral(
+                &temperatures,
+                &cards,
+                gas_temperatures,
+                optics,
+                solve,
+                &mut work.spectral,
+                &mut *cancelled,
+            )?)
+        }
+    };
+    let mut sums = BTreeMap::new();
+    let mut bath_power = vec![Power::new(0.0); surfaces.len()];
+    for (i, (&surface, &power)) in surfaces
+        .iter()
+        .zip(radiation.surface_heat_power())
+        .enumerate()
+    {
+        checkpoint(cancelled)?;
+        match surface {
+            SheetThermalSurface::Stored(id) => {
+                let entry = sums.entry(id).or_insert(Dd::from_f64(0.0));
+                *entry = *entry + Dd::from_f64(power.value());
+            }
+            SheetThermalSurface::Prescribed(_) => bath_power[i] = power,
+        }
+    }
+    pack_applied(radiation, temperatures, sums, bath_power)
+}
+
+/// Finalize the exact sources consumed by the native thermal residual once.
+pub(crate) fn pack_applied<'s>(
+    radiation: WallRadiation<'s>,
+    temperatures: Vec<Temperature>,
+    sums: BTreeMap<CellId, Dd>,
+    bath_power: Vec<Power>,
+) -> Result<Applied<'s>, SheetThermalError> {
+    let cell_power: BTreeMap<CellId, Power> = sums
+        .into_iter()
+        .map(|(id, sum)| Ok((id, Power::new(finite(sum.to_f64())?))))
+        .collect::<Result<_, DepositionError>>()?;
+    let mut balance = Dd::from_f64(0.0);
+    for power in cell_power.values() {
+        balance = balance + Dd::from_f64(power.value());
+    }
+    for power in bath_power.iter().chain(radiation.gas_heat_power().iter()) {
+        balance = balance + Dd::from_f64(power.value());
+    }
+    let power_residual_w = finite(balance.to_f64())?;
+    Ok(Applied { radiation, temperatures, cell_power, bath_power, power_residual_w })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -704,20 +735,20 @@ fn trial_domain_error(error: &SheetThermalError) -> bool {
             | SheetThermalError::Emissivity { .. }
     )
 }
-fn positive(value: f64) -> bool {
+pub(crate) fn positive(value: f64) -> bool {
     value.is_finite() && value > 0.0
 }
 fn nonnegative(value: f64) -> bool {
     value.is_finite() && value >= 0.0
 }
-fn finite(value: f64) -> Result<f64, DepositionError> {
+pub(crate) fn finite(value: f64) -> Result<f64, DepositionError> {
     if value.is_finite() {
         Ok(value)
     } else {
         Err(DepositionError::Arithmetic)
     }
 }
-fn checkpoint(cancelled: &mut impl FnMut() -> bool) -> Result<(), DepositionError> {
+pub(crate) fn checkpoint(cancelled: &mut (impl FnMut() -> bool + ?Sized)) -> Result<(), DepositionError> {
     if cancelled() {
         Err(DepositionError::Cancelled)
     } else {

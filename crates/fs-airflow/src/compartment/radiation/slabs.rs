@@ -275,5 +275,8 @@ fn slab_coefficients(emissivities: &[f64], slabs: &[SlabPair]) -> BoundaryCoeffi
     result
 }
 
+/// Implicit layer-resolved radiation heating of original thermal cells.
+pub mod thermal;
+
 #[cfg(test)]
 mod tests;

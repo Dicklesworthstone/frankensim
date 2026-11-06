@@ -4903,3 +4903,42 @@ partitions and temperatures outside the declared source interval refuse.
 These scalar laws describe diffuse, isothermal sheets; coherent films,
 specular/refraction geometry and through-thickness temperature gradients
 remain separate models.
+
+## Layer-resolved absorbing and emitting material
+
+`radiation::slab::AbsorbingSlab` prepares the hemispherical response of a
+front-to-back stack of sourced `AbsorbingLayer` inputs. Each layer retains
+its physical thickness, absorption coefficient in inverse metres, optical
+depth, positive temperature support and original source. A layer has uniform
+temperature and absorption; different layers may have different temperatures.
+The caller chooses a spatial partition adequate for its material gradients.
+
+Preparation retains one direction cosine through the entire stack before
+angular integration. The exact ray factors use exponential transmission and
+expm1 absorption. Positive adaptive GL8/GL16 integration prepares transmission,
+reciprocal face escape/absorption and symmetric interlayer exchange once.
+Splitting an isothermal layer preserves the full path instead of introducing
+artificial angular redistribution. The homogeneous diffuse transmittance is
+2 E_3(kappa d); thin diffuse absorptance tends to 2 kappa d.
+
+Warm emission and layer-heat applications reuse immutable shared coefficients
+without angular quadrature. Each layer receives its own external absorption
+minus emission plus reciprocal heat exchange with all other layers.
+Interlayer exchange is retained even when no light traverses the full stack.
+The stable common-background form accepts signed emission deviations, provided
+every input uses the same background and gray/band/per-wavelength scope.
+Only complete finite results reach caller-owned heat output.
+
+At most 64 layers and bounded angular work are admitted; cancellation and
+exhausted accuracy/work controls refuse preparation. The retained embedded
+coefficient discrepancy and incident-energy partition residual are numerical
+diagnostics, not certified material or continuum error bounds. A finite
+positive thickness/absorption product that overflows takes the opaque limit.
+
+All material layers and exterior fields use refractive index one. There is no
+scattering, Fresnel reflection, refraction or coherent interference. Incident
+radiance is diffuse; emergent hemispherical power is generally not Lambertian.
+A scalar view-factor consumer explicitly owns its exterior diffuse-port
+approximation. Gray inputs do not become spectral measurements. Consumers
+admit actual layer temperatures against every source, supply their own Planck
+scope, and separately assess angular, spectral and spatial model errors.
