@@ -1567,3 +1567,25 @@ production, incompatible data, malformed/unsupported records and late
 cancellation. They establish format and equation behavior, not validation of
 an evaluated isotope. The format follows ENDF-102 (2023), sections 1.2–1.4,
 <https://www.nndc.bnl.gov/endfdocs/ENDF-102-2023.pdf>.
+
+## Evaluated independent fission products in burnup
+
+`endf::fission_yields` imports identified ENDF-6 neutron-induced independent
+fission yields from MF8/MT454, with MF1/MT451 establishing the parent isomer and
+NSUB=11 source family. Product multiplicities, uncertainties and incident
+energies are retained without normalization; cumulative MT459 yields cannot
+enter the birth-to-decay bridge. Histogram/linear energy laws require an
+unchanged explicit product set. Single-row LE=0 sources are energy independent;
+multirow laws do not extrapolate.
+
+`FissionYieldEvaluation::collapse` reuses the existing reaction-rate-weighted
+owner to preserve product production integrals. Its `FissionYieldCollapse`
+appends disjoint neutron-group fission channels to original `BurnupData`, with
+explicit per-group prompt energy and represented or explicitly exported
+positive products. It refuses duplicate fission sources and binds the fixed
+processed cross sections to their exact temperature. Subsequent daughter
+evolution, heat release and thermal coupling retain their original owners.
+Reported uncertainties remain source metadata; covariance propagation,
+temperature-dependent yield synthesis and evaluated-data accuracy are not
+claimed. Format and analytical fission/decay/shutdown tests cover these paths.
+The format follows ENDF-102 (2023), section 8.3.

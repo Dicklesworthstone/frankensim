@@ -23,6 +23,9 @@ pub mod spectrum;
 /// Evaluated prompt, delayed and total fission-neutron multiplicities.
 pub mod neutron_yield;
 
+/// Independent fission products connected to the original burnup inventory.
+pub mod fission_yields;
+
 /// Evaluated half-lives, decay modes and aggregate emitted energies.
 pub mod decay;
 
