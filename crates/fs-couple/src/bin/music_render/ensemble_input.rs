@@ -229,7 +229,11 @@ fn load_with_gas_sources(
             let p = description.build()?;
             let i = p.info();
             let listener = Listener::Gas(ListenerMedium::of(description.ambient_gas()));
-            let exterior_json = format!("{},\"observation_scope\":\"lip-driven bore mouth flow through its original baffled exterior receiver\",\"control_item_kind\":\"source pressure/tension initial values and events\",\"mode_count_kind\":\"retained transverse bore order plus one lip coordinate\"",
+            let observer_gas = i.observer_gas.as_ref().map_or_else(String::new, |report| {
+                format!(",\"observer_gas\":{}",
+                    super::duct_metadata::observer_gas_provenance(Some(report)))
+            });
+            let exterior_json = format!("{}{observer_gas},\"observation_scope\":\"lip-driven bore mouth flow through its original baffled exterior receiver\",\"control_item_kind\":\"source pressure/tension initial values and events\",\"mode_count_kind\":\"retained transverse bore order plus one lip coordinate\"",
                 super::thermochemical::provenance(std::slice::from_ref(description.gas_record())));
             let info = SourceInfo {
                 kind: input.kind, schema: LIP_PERFORMANCE_SCHEMA, hash: i.input_hash,
@@ -295,8 +299,9 @@ fn load_with_gas_sources(
             let p = PlatePerformance::from_bytes_with_all_sources(&bytes, block, sources,
                 super::plate_input::section_pack_loader(parent)).map_err(|e| e.to_string())?;
             let i = p.info();
-            let gas_json=format!("{}{}{}", super::thermochemical::provenance(std::slice::from_ref(p.gas_record())),
+            let gas_json=format!("{}{}{}{}", super::thermochemical::provenance(std::slice::from_ref(p.gas_record())),
                 super::plate_input::section_sources_json(p.section_provenance()),
+                super::plate_input::atmosphere_json(&p),
                 super::plate_input::spatial_observer_json(i));
             // Align only the receiver's numerical reconstruction latency. The
             // Rayleigh trace keeps every surface point's physical travel time.

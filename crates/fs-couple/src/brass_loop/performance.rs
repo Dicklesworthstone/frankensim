@@ -39,9 +39,21 @@
 //! bore_source <free text to end of line>     required provenance sentence
 //! bore nonlinear <max_cell_m> <mechanics_per_output> <gas_steps_per_mechanics> <wall_poles> <wall_band_lo_hz> <wall_band_hi_hz> <wall_tolerance>
 //! microphone <x_m> <y_m> <z_m> <radial_rings> <angular_points> <max_frequency_hz>
+//! observer_gas <stokes-kirchhoff|lossless> <max_paths> <max_filter_taps> <max_kernel_terms>  optional
+//! observer_gas molecular <max_paths> <max_filter_taps> <max_kernel_terms> <shared relaxation law>  optional
 //! schedule
 //! <canonical GestureSchedule bytes: blowing-pressure, optional pre-stress>
 //! ```
+//!
+//! `observer_gas` applies the shared material propagation law to every original
+//! bell-surface-to-microphone path, using the complete `ambient` gas and the
+//! caller's work limits. Molecular laws bind that original gas record, including
+//! its composition and source packs; species properties are never inferred from
+//! a name. Both the linear and nonlinear total-flow receivers carry this law,
+//! retaining every mechanics substep and the common causal filter latency.
+//! It changes observation only, not lip motion, bore feedback or bell loading.
+//! It currently refuses `modal_baffle`, whose signed multimode receiver has no
+//! material-propagation path. Without the row, observation is unchanged.
 //!
 //! `mouth_reservoir` attaches a rigid adiabatic upstream gas volume to
 //! `bore nonlinear`. Its pressure and temperature evolve with the bore's
@@ -149,7 +161,9 @@ use crate::brass_sequence::mouth::{MAX_MOUTH_FLOW_TAPS, MouthFlowConfig, modal_f
 use crate::driving_point::LineLadder;
 use crate::mm_line::{MmComboReceipt, MmLineConfig, MmLoad};
 use crate::pcm_wav::baffled::{BaffledPressure, CircularOutletReceiver, RayleighMedium};
+use crate::pcm_wav::baffled::gas::{GasPropagation, GasPropagationReport};
 use crate::pcm_wav::baffled::modal::{MAX_MODAL_KERNEL_TERMS, ModalOutletOptions, ModalOutletReport};
+use crate::pcm_wav::baffled::openings::CircularOpening;
 use crate::pcm_wav::observation::PressureRenderer;
 use crate::render::RenderError;
 use crate::turbulence_noise::{ConstrictionNoiseCard, JetNoiseCard};
@@ -232,6 +246,7 @@ pub struct LipDescription {
     extra_slices: usize,
     duct: Duct,
     microphone: CircularOutletReceiver,
+    observer_gas: Option<GasPropagation>,
     mouth_flow_tail_tol: f64,
     mouth_flow_max_taps: usize,
     modal_baffle: Option<ModalOutletOptions>,
@@ -452,6 +467,7 @@ impl LipDescription {
         let mut termination: Option<Termination> = None;
         let mut modes: Option<(usize, usize)> = None;
         let mut microphone: Option<CircularOutletReceiver> = None;
+        let mut observer_gas_record = None;
         let mut mouth_flow_tail_tol: Option<f64> = None;
         let mut mouth_flow_max_taps: Option<usize> = None;
         let mut modal_baffle: Option<ModalOutletOptions> = None;
@@ -724,6 +740,11 @@ impl LipDescription {
                     once(&mut microphone, receiver, &f)?;
                     f.finish()?;
                 }
+                "observer_gas" => {
+                    // Bind after all records so molecular laws use the actual
+                    // ambient composition regardless of declaration order.
+                    once(&mut observer_gas_record, (line, rest), &f)?;
+                }
                 _ => return Err(format!("line {line}: unknown key {key:?}")),
             }
             if segments.len() > MAX_SEGMENTS {
@@ -779,6 +800,14 @@ impl LipDescription {
         {
             return Err("modal_baffle requires a linear bore and termination flanged; no foreign exterior load is substituted".into());
         }
+        if observer_gas_record.is_some() && modal_baffle.is_some() {
+            return Err("observer_gas is not supported with modal_baffle; the modal receiver has no material propagation path".into());
+        }
+        let gas = gas.ok_or_else(|| missing("ambient"))?;
+        let observer_gas = observer_gas_record.map(|(line, record)| {
+            GasPropagation::read_record_for_gas(&mut record.split_ascii_whitespace(), &gas)
+                .map_err(|error| format!("line {line}: observer_gas refused: {error}"))
+        }).transpose()?;
         let lip_mode2 = match lip_mode2_raw {
             None => None,
             Some(_) if !lip_from_response => {
@@ -851,7 +880,7 @@ impl LipDescription {
             rate_hz,
             samples,
             full_scale_pa: full_scale.ok_or_else(|| missing("full_scale_pa"))?,
-            gas: gas.ok_or_else(|| missing("ambient"))?,
+            gas,
             lip,
             lip_source,
             bore_source,
@@ -861,6 +890,7 @@ impl LipDescription {
             extra_slices,
             duct: Duct { segments },
             microphone: microphone.ok_or_else(|| missing("microphone"))?,
+            observer_gas,
             mouth_flow_tail_tol: mouth_flow_tail_tol.unwrap_or(LineLadder::default().tail_tol),
             mouth_flow_max_taps: mouth_flow_max_taps.unwrap_or(MouthFlowConfig::default().max_taps),
             modal_baffle,
@@ -923,6 +953,12 @@ impl LipDescription {
     #[must_use]
     pub const fn gas_record(&self) -> &GasRecord {
         &self.gas
+    }
+
+    /// Explicit exterior propagation on the original bell surface paths.
+    #[must_use]
+    pub const fn observer_gas(&self) -> Option<&GasPropagation> {
+        self.observer_gas.as_ref()
     }
 
     /// Retained transverse modes in each section of the bore's acoustic image.
@@ -1006,15 +1042,11 @@ impl LipDescription {
     /// receiver's resolved-band admission.
     pub fn build(&self) -> Result<LipPerformance, String> {
         let gas = self.ambient_gas();
-        let medium = RayleighMedium {
-            density: gas.density,
-            sound_speed: gas.sound_speed,
-        };
         #[cfg(feature = "nonlinear-brass")]
         if let Some((record, model)) = &self.nonlinear {
             let mouth_radius_m = self.duct.segments.last().map(Segment::outlet_radius)
                 .ok_or_else(|| "empty bore".to_string())?;
-            return self.build_nonlinear(*record, model, mouth_radius_m, medium);
+            return self.build_nonlinear(*record, model, mouth_radius_m);
         }
         let config = MmLineConfig {
             sample_rate_hz: self.rate_hz,
@@ -1088,14 +1120,14 @@ impl LipDescription {
         }
         .map_err(|e| format!("mouth-flow line refused: {e}"))?;
         let mouth_radius_m = mouth_receipt.mouth_radius_m;
-        let (receiver, modal_radiation) = if let Some((radius, receiver, report)) = modal_receiver {
+        let (receiver, modal_radiation, observer_gas) = if let Some((radius, receiver, report)) = modal_receiver {
             if radius != mouth_radius_m {
                 return Err("modal load and receiver must retain the same actual mouth radius".into());
             }
-            (receiver, Some(report))
+            (receiver, Some(report), None)
         } else {
-            (BaffledPressure::circular_outlet_multirate_differentiating(mouth_radius_m,
-                self.rate_hz, self.rate_hz, self.microphone, medium)?, None)
+            let (receiver, observer_gas) = self.scalar_receiver(mouth_radius_m, self.rate_hz)?;
+            (receiver, None, observer_gas)
         };
         let bore = LipBoreInfo::Linear(LinearBoreInfo {
             line,
@@ -1116,6 +1148,7 @@ impl LipDescription {
             bore,
             Engine::Linear { voice, mouth },
             receiver,
+            observer_gas,
             1,
         ))
     }
@@ -1126,7 +1159,6 @@ impl LipDescription {
         record: NonlinearBoreRecord,
         model: &ThermochemicalGasModel,
         mouth_radius_m: f64,
-        medium: RayleighMedium,
     ) -> Result<LipPerformance, String> {
         use super::nonlinear::{FiniteMouthSpec, NonlinearClock, NonlinearLip};
         use fs_duct::nonlinear::bore::{WallGas, WallMemory};
@@ -1194,13 +1226,8 @@ impl LipDescription {
                 .map_err(|e| format!("constriction_noise refused: {e}"))?,
             None => lip,
         };
-        let receiver = BaffledPressure::circular_outlet_multirate_differentiating(
-            mouth_radius_m,
-            clock.mechanics_rate_hz(),
-            self.rate_hz,
-            self.microphone,
-            medium,
-        )?;
+        let (receiver, observer_gas) =
+            self.scalar_receiver(mouth_radius_m, clock.mechanics_rate_hz())?;
         let wall = lip
             .wall_receipt()
             .ok_or_else(|| "the nonlinear bore bound no wall memory".to_string())?;
@@ -1220,8 +1247,33 @@ impl LipDescription {
             bore,
             Engine::Nonlinear(Box::new(lip)),
             receiver,
+            observer_gas,
             record.mechanics_per_output as usize,
         ))
+    }
+
+    // Both bore engines deliver actual bell volume flow to the same aperture
+    // owner; only their mechanics/output clock ratio differs.
+    fn scalar_receiver(
+        &self,
+        mouth_radius_m: f64,
+        mechanics_rate_hz: u32,
+    ) -> Result<(BaffledPressure, Option<GasPropagationReport>), String> {
+        let gas = self.ambient_gas();
+        if let Some(propagation) = &self.observer_gas {
+            let opening = CircularOpening { center_m: [0.0; 2], radius_m: mouth_radius_m };
+            let (receiver, report) = BaffledPressure::circular_openings_multirate_gas_differentiating(
+                &[opening], mechanics_rate_hz, self.rate_hz, self.microphone,
+                gas, propagation, &mut || false,
+            ).map_err(|error| format!("observer_gas refused: {error}"))?;
+            Ok((receiver, Some(report)))
+        } else {
+            let receiver = BaffledPressure::circular_outlet_multirate_differentiating(
+                mouth_radius_m, mechanics_rate_hz, self.rate_hz, self.microphone,
+                RayleighMedium::from(gas),
+            )?;
+            Ok((receiver, None))
+        }
     }
 
     fn performance(
@@ -1230,6 +1282,7 @@ impl LipDescription {
         bore: LipBoreInfo,
         engine: Engine,
         receiver: BaffledPressure,
+        observer_gas: Option<GasPropagationReport>,
         ratio: usize,
     ) -> LipPerformance {
         let gas = self.ambient_gas();
@@ -1250,6 +1303,7 @@ impl LipDescription {
             gas_temperature_k: gas.temperature,
             sound_speed_m_s: gas.sound_speed,
             microphone: self.microphone,
+            observer_gas,
             bore,
             control_rate_hz: self.schedule.control_rate_hz,
             has_lip_tension_track: self.tension_track.is_some(),
@@ -1361,6 +1415,9 @@ pub struct LipInfo {
     pub sound_speed_m_s: f64,
     /// The declared microphone.
     pub microphone: CircularOutletReceiver,
+    /// Original per-path gas propagation, absent for the legacy lossless receiver.
+    /// Its extra causal padding is included once in the receiver's filter delay.
+    pub observer_gas: Option<GasPropagationReport>,
     /// How the bore was realized, with its receipts.
     pub bore: LipBoreInfo,
     /// Control clock of the pressure phrase [Hz].
@@ -1839,6 +1896,10 @@ impl PressureRenderer for LipPerformance {
 #[cfg(test)]
 #[path = "performance_bank_limit.rs"]
 mod bank_limit;
+
+#[cfg(test)]
+#[path = "performance_observer_gas.rs"]
+mod observer_gas_tests;
 
 #[cfg(test)]
 #[path = "../render/schedule/reed/field_input/tests/support.rs"]

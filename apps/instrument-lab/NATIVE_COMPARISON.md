@@ -34,6 +34,26 @@ These are the existing lip and glottal physics models: the lip island and vocal
 fold remain lumped, and neither gains measured tissue geometry from this wiring.
 Original source provenance and limitations remain in the performance files.
 
+For material propagation between a brass bell and its microphone, add this
+optional native record before `schedule`:
+
+```text
+observer_gas stokes-kirchhoff 4096 1000000 50000000
+```
+
+The three positive budgets bound distinct surface paths, total material-filter
+taps and kernel construction terms. The existing shared gas owner applies the
+complete `ambient` material to each original bell-surface path. Use `lossless`
+in place of `stokes-kirchhoff` for an explicit comparison, or
+`observer_gas molecular 4096 1000000 50000000 LAW` with the shared material
+relaxation declaration and an explicit `ambient mixture` or `thermochemical`
+source. Classical transport does not invent molecular relaxation coefficients.
+Both linear and nonlinear brass retain their original lip/bore dynamics and
+every mechanics sample. The sidecar reports the applied gas and causal filter
+latency; that latency stays in the WAV. `modal_baffle` currently refuses this
+record because its multimode receiver has no material propagation path.
+Files without `observer_gas` keep their existing lossless observation.
+
 ## Compare a change
 
 Render the baseline with the existing local native service. Give it a label and

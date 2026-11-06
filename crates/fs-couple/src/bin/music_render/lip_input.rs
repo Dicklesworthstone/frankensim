@@ -273,11 +273,15 @@ fn input_json(i: &LipInfo) -> String {
     let mic = &i.microphone;
     let second = lip_mode2_json(i);
     let exponent = lip_area_exponent_json(i);
+    let observer_gas = i.observer_gas.as_ref().map_or_else(String::new, |report| {
+        format!("\"observer_gas\":{},",
+            super::duct_metadata::observer_gas_provenance(Some(report)))
+    });
     format!(
         "\"lip_input\":{{\"schema\":\"{}\",\"blake3\":\"{}\",\"bore\":{{\"segments\":{},\"length_m\":{},\"mouth_radius_m\":{},\"gas_temperature_k\":{},\"sound_speed_m_s\":{},\"source\":{}}},\
          \"lip\":{{\"mass_kg\":{},\"stiffness_n_m\":{},\"damping_n_s_m\":{},\"width_m\":{},\"rest_gap_m\":{},\"face_area_m2\":{},\"source\":{}}},{}{}\
          \"cup_volume_m3\":{},\"control_rate_hz\":{},\"lip_tension_track\":{},\
-         \"microphone\":{{\"position_m\":[{},{},{}],\"radial_rings\":{},\"angular_points\":{},\"resolved_band_hz\":{}}},\
+         \"microphone\":{{\"position_m\":[{},{},{}],\"radial_rings\":{},\"angular_points\":{},\"resolved_band_hz\":{}}},{observer_gas}\
          {}}}",
         fs_couple::brass_loop::performance::LIP_PERFORMANCE_SCHEMA,
         i.input_hash.to_hex(),
@@ -430,6 +434,17 @@ pub(super) fn run_with_gas_sources(
         number(tension_work[0]),
         number(tension_work[1]),
     );
+    let (observation_filter, observation_delay) = if info.observer_gas.is_some() {
+        (
+            "shared differentiating Rayleigh receiver with material gas propagation on every surface path",
+            format!(",\"filter_delay_output_samples\":{}", number(performance.filter_delay_samples())),
+        )
+    } else {
+        (
+            "none: the baffled receiver differentiates and delays the mouth flow of every mechanical sample",
+            String::new(),
+        )
+    };
     let provenance = format!(
         "{{\"schema\":\"frankensim-music-render-provenance-v1\",\"fixture\":\"lip-input\",\
          \"sample_rate_hz\":{},\"samples\":{samples},\"block\":{block},\
@@ -438,8 +453,8 @@ pub(super) fn run_with_gas_sources(
          \"encoder\":\"fs_couple::pcm_wav (mono PCM16, never peak-normalized)\",{},\
          \"lip_windows_0p1s\":[{}],{tension_work_json},{jet_band}\
          \"observation\":{{\"mechanics_sample_rate_hz\":{mechanics_rate_hz},\"output_sample_rate_hz\":{},\"ratio\":{ratio},\
-         \"filter\":\"none: the baffled receiver differentiates and delays the mouth flow of every mechanical sample\",\
-         \"resampled\":false,\"declared_band_hz\":{}}}{fallbacks}{gas_sources}}}",
+         \"filter\":\"{observation_filter}\",\
+         \"resampled\":false,\"declared_band_hz\":{}{observation_delay}}}{fallbacks}{gas_sources}}}",
         info.sample_rate_hz,
         info.full_scale_pa,
         rendered.clipped,
