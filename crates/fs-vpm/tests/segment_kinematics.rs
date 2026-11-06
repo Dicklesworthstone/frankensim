@@ -216,5 +216,98 @@ fn thin_exterior_and_singular_axis_are_distinguished() {
         assert!(segment_kinematics_with_core(a, a, b, core2).is_none());
     }
     assert!(segment_kinematics_with_core(a, a, [1e200, 0.0, 0.0], 1.0).is_none());
-    assert!(segment_kinematics_with_core(a, a, [1e-200, 0.0, 0.0], 1.0).is_none());
+    // A finite short segment is not a degenerate source just because its
+    // squared length underflows. Its positive-core axis has a small rotation.
+    let tiny = segment_kinematics_with_core(a, a, [1e-200, 0.0, 0.0], 1.0).unwrap();
+    assert_eq!(tiny.velocity, [0.0; 3]);
+    let expected = 1e-200 / (4.0 * PI);
+    near(tiny.gradient[2][1] / expected, 1.0, 2e-15);
+    near(tiny.gradient[1][2] / expected, -1.0, 2e-15);
+}
+
+#[test]
+fn exceptional_length_scales_preserve_the_physical_core_and_full_gradient() {
+    let a = [-0.2, 0.1, -0.5];
+    let b = [0.7, -0.4, 1.5];
+    for p in [[0.3, 0.5, 0.2], [4.0, 2.0, 7.0], [-3.0, -2.0, -5.0], a, b] {
+        // Independent quadrature is performed at unit scale. Its dimensional
+        // transformation is known, even when dimensional cubes cannot fit.
+        let reference = quadrature(p, a, b, 0.07);
+        for scale in [1e-150, 1e-100, 1e-60, 1.0, 1e60, 1e100, 1e150] {
+            let probe = p.map(|value| value * scale);
+            let start = a.map(|value| value * scale);
+            let end = b.map(|value| value * scale);
+            let core2 = (0.07 * scale) * scale;
+            let actual = segment_kinematics_with_core(probe, start, end, core2).unwrap();
+            let velocity = segment_velocity_with_core(probe, start, end, core2);
+            for i in 0..3 {
+                near(actual.velocity[i] * scale, reference.velocity[i], 3e-12);
+                near(velocity[i] * scale, reference.velocity[i], 3e-12);
+                for j in 0..3 {
+                    near(
+                        (actual.gradient[i][j] * scale) * scale,
+                        reference.gradient[i][j],
+                        3e-12,
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn velocity_remains_finite_when_segment_and_distance_squares_do_not_fit() {
+    let a = [-0.2, 0.1, -0.5];
+    let b = [0.7, -0.4, 1.5];
+    let p = [0.3, 0.5, 0.2];
+    let reference = quadrature(p, a, b, 0.0).velocity;
+    for scale in [1e-300, 1e-200, 1e-170, 1e170, 1e200, 1e300] {
+        let actual = segment_velocity_with_core(
+            p.map(|value| value * scale),
+            a.map(|value| value * scale),
+            b.map(|value| value * scale),
+            0.0,
+        );
+        assert!(actual.iter().all(|value| value.is_finite()));
+        for i in 0..3 {
+            near(actual[i] * scale, reference[i], 3e-12);
+        }
+    }
+}
+
+#[test]
+fn large_zero_core_segment_retains_representable_subnormal_derivatives() {
+    let scale = 1e160;
+    let actual = segment_kinematics_with_core(
+        [0.0, scale, 0.0],
+        [0.0; 3],
+        [scale, 0.0, 0.0],
+        0.0,
+    )
+    .unwrap();
+    // Independent endpoint geometry: the probe is one length normal to the
+    // start of an x-directed segment. These are the analytic unit-scale
+    // Jacobian entries before their two inverse-length factors.
+    let root2 = 2.0_f64.sqrt();
+    let factor = 1.0 / (4.0 * PI);
+    let unit = [
+        [0.0; 3],
+        [0.0, 0.0, -factor / root2],
+        [
+            factor * (1.0 - 1.0 / (2.0 * root2)),
+            -3.0 * factor / (2.0 * root2),
+            0.0,
+        ],
+    ];
+    for i in 0..3 {
+        for j in 0..3 {
+            let expected = (unit[i][j] / scale) / scale;
+            near(actual.gradient[i][j], expected, 4.0 * f64::from_bits(1));
+            if unit[i][j] != 0.0 {
+                assert!(actual.gradient[i][j].is_subnormal());
+                assert_ne!(actual.gradient[i][j], 0.0);
+            }
+        }
+    }
+    near(actual.velocity[2] * scale, factor / root2, 2e-15);
 }

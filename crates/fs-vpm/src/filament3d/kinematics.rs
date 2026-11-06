@@ -2,6 +2,10 @@
 //! Biot–Savart integral used by the connected wake. Differentiating the
 //! rationalized exterior expression retains thin, distant filament fields.
 
+use super::{
+    SegmentGeometry, exceptional_segment_scale, scale_segment, scale_segment_value,
+};
+
 /// Velocity and its spatial Jacobian for unit circulation [m²/s].
 /// Multiply both fields by the signed circulation of the source segment.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -43,20 +47,54 @@ pub fn segment_kinematics_with_core(
     {
         return None;
     }
-    let ab = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
-    let length = (ab[0] * ab[0] + ab[1] * ab[1] + ab[2] * ab[2]).sqrt();
-    if !length.is_finite() {
+    let geometry = SegmentGeometry::new(a, b);
+    if !geometry.length.is_finite() {
         return None;
     }
-    if length == 0.0 {
-        return ab
-            .iter()
-            .all(|x| *x == 0.0)
-            .then_some(SegmentKinematics::default());
+    if geometry.length == 0.0 {
+        return Some(SegmentKinematics::default());
     }
-    let t = ab.map(|x| x / length);
     let r1 = [p[0] - a[0], p[1] - a[1], p[2] - a[2]];
     let r2 = [p[0] - b[0], p[1] - b[1], p[2] - b[2]];
+    if r1.iter().chain(r2.iter()).any(|value| !value.is_finite()) {
+        return None;
+    }
+    if exceptional_segment_scale(geometry.length, r1, r2, core2_m2) {
+        if let Some(scaled) = scale_segment(geometry.length, r1, r2, core2_m2) {
+            if let Some(mut sample) = kinematics_relative(
+                geometry.tangent,
+                scaled.length,
+                scaled.r1,
+                scaled.r2,
+                scaled.core2,
+            ) {
+                sample.velocity = sample
+                    .velocity
+                    .map(|value| scale_segment_value(value, -scaled.exponent));
+                sample.gradient = sample.gradient.map(|row| {
+                    row.map(|value| scale_segment_value(value, -2 * scaled.exponent))
+                });
+                return sample
+                    .velocity
+                    .iter()
+                    .chain(sample.gradient.iter().flatten())
+                    .all(|value| value.is_finite())
+                    .then_some(sample);
+            }
+        }
+    }
+    kinematics_relative(geometry.tangent, geometry.length, r1, r2, core2_m2)
+}
+
+// The original endpoint derivatives operate on either ordinary or normalized
+// relative geometry. Final dimensional scaling is applied once, to outputs.
+fn kinematics_relative(
+    t: [f64; 3],
+    length: f64,
+    r1: [f64; 3],
+    r2: [f64; 3],
+    core2_m2: f64,
+) -> Option<SegmentKinematics> {
     let c = cross(t, r1);
     let n = cross(c, t);
     let transverse2 = c[0] * c[0] + c[1] * c[1] + c[2] * c[2] + core2_m2;
@@ -64,6 +102,9 @@ pub fn segment_kinematics_with_core(
     let z2 = t[0] * r2[0] + t[1] * r2[1] + t[2] * r2[2];
     let l1 = (z1 * z1 + transverse2).sqrt();
     let l2 = (z2 * z2 + transverse2).sqrt();
+    if !l1.is_finite() || !l2.is_finite() {
+        return None;
+    }
     let exterior = (z1 > 0.0 && z2 > 0.0) || (z1 < 0.0 && z2 < 0.0);
     if transverse2 == 0.0 && !exterior {
         return None;
@@ -73,6 +114,9 @@ pub fn segment_kinematics_with_core(
     } else {
         (z1 / l1 - z2 / l2) / transverse2
     };
+    if !f.is_finite() || f == 0.0 {
+        return None;
+    }
     let mut df = [0.0; 3];
     if exterior {
         // Logarithmic differentiation avoids subtracting nearly equal
@@ -89,8 +133,13 @@ pub fn segment_kinematics_with_core(
                     - dl2 / l2);
         }
     } else {
-        let inv_l1_3 = 1.0 / (l1 * l1 * l1);
-        let inv_l2_3 = 1.0 / (l2 * l2 * l2);
+        let l1_3 = l1 * l1 * l1;
+        let l2_3 = l2 * l2 * l2;
+        if !l1_3.is_finite() || !l2_3.is_finite() || l1_3 == 0.0 || l2_3 == 0.0 {
+            return None;
+        }
+        let inv_l1_3 = 1.0 / l1_3;
+        let inv_l2_3 = 1.0 / l2_3;
         for j in 0..3 {
             df[j] = t[j] * (inv_l1_3 - inv_l2_3)
                 - n[j] / transverse2 * (z1 * inv_l1_3 - z2 * inv_l2_3 + 2.0 * f);

@@ -1756,3 +1756,30 @@ The three G0/G3 tests in `tests/material_prepared_diffusion.rs` cover real gas
 state changes, allocation/edge reuse, complete fixed/adaptive parity against
 fresh preparation, zero-viscosity recovery, native invalid-viscosity refusals
 and atomic rejection of changed kernels or one-ULP support changes.
+
+### Physical scaling of finite-segment velocity and derivatives
+
+The shared finite-segment geometry retains nonzero lengths whose squared
+norms underflow and finite lengths whose squared norms overflow. Ordinary
+endpoint arithmetic remains unchanged in its normal range. At exceptional
+absolute scales, velocity and analytic-Jacobian queries use the same relative
+geometry normalized by an exact power of two, then restore the physical
+inverse-length and inverse-length-squared dimensions with the existing binary
+scaling helpers. Both endpoint offsets are retained independently; no
+near-endpoint displacement is reconstructed by subtracting rounded offsets.
+No buffers, source visits, new core law or time integrator are introduced.
+
+This covers exceptional uniform physical scaling when the normalized
+relative geometry and positive core remain representable. It is not a
+universal arithmetic-range guarantee: extreme aspect ratios, unresolved
+transverse geometry, unrepresentable coordinate differences and final
+derivatives can still refuse. A finite unresolved line integral is not
+silently published as a zero field. A regularized short nonzero source remains
+distinct from an exactly degenerate segment.
+
+The additional G1/G3 regressions in `tests/segment_kinematics.rs` compare
+scaled positive-core velocity and full Jacobians against independently
+integrated unit geometry over length scales `1e-150..1e150`; zero-core
+velocities cover `1e-300..1e300`. Separate analytic cases retain a tiny
+short-segment axis rotation and the representable subnormal derivatives of
+a large zero-core segment.

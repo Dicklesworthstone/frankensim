@@ -719,7 +719,20 @@ impl SegmentGeometry {
     #[inline]
     fn new(a: [f64; 3], b: [f64; 3]) -> Self {
         let ab = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
-        let length = (ab[0] * ab[0] + ab[1] * ab[1] + ab[2] * ab[2]).sqrt();
+        let length2 = ab[0] * ab[0] + ab[1] * ab[1] + ab[2] * ab[2];
+        let length = if length2.is_normal() {
+            length2.sqrt()
+        } else {
+            // A nonzero segment must not disappear when its squared length
+            // underflows, or become infinite merely because that square does.
+            let scale = ab[0].abs().max(ab[1].abs()).max(ab[2].abs());
+            if scale == 0.0 {
+                0.0
+            } else {
+                let q = ab.map(|value| value / scale);
+                scale * (q[0] * q[0] + q[1] * q[1] + q[2] * q[2]).sqrt()
+            }
+        };
         let tangent = if length == 0.0 {
             [0.0; 3]
         } else {
@@ -735,42 +748,134 @@ impl SegmentGeometry {
 
     #[inline]
     fn velocity(&self, p: [f64; 3], core2_m2: f64) -> [f64; 3] {
-        let Self {
-            start: a,
-            end: b,
-            tangent: t,
-            length,
-        } = *self;
-        if length == 0.0 {
+        if self.length == 0.0 {
             return [0.0; 3];
         }
-        let r1 = [p[0] - a[0], p[1] - a[1], p[2] - a[2]];
-        let r2 = [p[0] - b[0], p[1] - b[1], p[2] - b[2]];
-        let c = [
-            t[1] * r1[2] - t[2] * r1[1],
-            t[2] * r1[0] - t[0] * r1[2],
-            t[0] * r1[1] - t[1] * r1[0],
-        ];
-        let h2 = c[0] * c[0] + c[1] * c[1] + c[2] * c[2];
-        if h2 == 0.0 {
-            return [0.0; 3];
+        let r1 = std::array::from_fn(|i| p[i] - self.start[i]);
+        let r2 = std::array::from_fn(|i| p[i] - self.end[i]);
+        if exceptional_segment_scale(self.length, r1, r2, core2_m2) {
+            if let Some(scaled) = scale_segment(self.length, r1, r2, core2_m2) {
+                let velocity = segment_velocity_relative(
+                    self.tangent,
+                    scaled.length,
+                    scaled.r1,
+                    scaled.r2,
+                    scaled.core2,
+                );
+                if velocity.iter().all(|value| value.is_finite()) {
+                    return velocity.map(|value| scale_segment_value(value, -scaled.exponent));
+                }
+            }
         }
-        let z1 = t[0] * r1[0] + t[1] * r1[1] + t[2] * r1[2];
-        let z2 = t[0] * r2[0] + t[1] * r2[1] + t[2] * r2[2];
-        let transverse2 = h2 + core2_m2;
-        let l1 = (z1 * z1 + transverse2).sqrt();
-        let l2 = (z2 * z2 + transverse2).sqrt();
-        // Work with a unit tangent: all squared lengths have units m²,
-        // avoiding the old dimensionally inconsistent cross-product cutoff.
-        let coefficient = if (z1 > 0.0 && z2 > 0.0) || (z1 < 0.0 && z2 < 0.0) {
-            // Rationalize the endpoint difference outside the segment. Directly
-            // subtracting z1/l1 - z2/l2 loses the small finite field near the axis
-            // or far beyond an endpoint, especially for a short segment.
-            length / (l1 * l2) * ((z1 + z2) / (z1 * l2 + z2 * l1))
-        } else {
-            (z1 / l1 - z2 / l2) / transverse2
-        };
-        let k = coefficient / (4.0 * core::f64::consts::PI);
-        [k * c[0], k * c[1], k * c[2]]
+        segment_velocity_relative(self.tangent, self.length, r1, r2, core2_m2)
     }
+}
+
+/// Original endpoint arithmetic on relative geometry, shared by the ordinary
+/// path and its exceptional-range normalization.
+#[inline]
+fn segment_velocity_relative(
+    t: [f64; 3],
+    length: f64,
+    r1: [f64; 3],
+    r2: [f64; 3],
+    core2_m2: f64,
+) -> [f64; 3] {
+    let c = [
+        t[1] * r1[2] - t[2] * r1[1],
+        t[2] * r1[0] - t[0] * r1[2],
+        t[0] * r1[1] - t[1] * r1[0],
+    ];
+    if c == [0.0; 3] {
+        return [0.0; 3];
+    }
+    let h2 = c[0] * c[0] + c[1] * c[1] + c[2] * c[2];
+    let z1 = t[0] * r1[0] + t[1] * r1[1] + t[2] * r1[2];
+    let z2 = t[0] * r2[0] + t[1] * r2[1] + t[2] * r2[2];
+    let transverse2 = h2 + core2_m2;
+    let l1 = (z1 * z1 + transverse2).sqrt();
+    let l2 = (z2 * z2 + transverse2).sqrt();
+    if !l1.is_finite() || !l2.is_finite() {
+        return [f64::NAN; 3];
+    }
+    // Rationalization retains the small endpoint difference outside the
+    // segment, including thin transverse offsets and distant short segments.
+    let coefficient = if (z1 > 0.0 && z2 > 0.0) || (z1 < 0.0 && z2 < 0.0) {
+        length / (l1 * l2) * ((z1 + z2) / (z1 * l2 + z2 * l1))
+    } else {
+        (z1 / l1 - z2 / l2) / transverse2
+    };
+    if coefficient == 0.0 {
+        // For a finite nondegenerate source this line integral is positive.
+        // The normalized path restores representable underflowed products;
+        // an unresolved integral is not a valid zero field.
+        return [f64::NAN; 3];
+    }
+    let k = coefficient / (4.0 * core::f64::consts::PI);
+    [k * c[0], k * c[1], k * c[2]]
+}
+
+// Keep the established arithmetic in ordinary physical ranges. The wide band
+// leaves headroom for cubic derivative denominators without another square
+// root in ordinary velocity queries.
+fn exceptional_segment_scale(length: f64, r1: [f64; 3], r2: [f64; 3], core2: f64) -> bool {
+    const LOW: f64 = f64::from_bits(895_u64 << 52); // 2^-128
+    const HIGH: f64 = f64::from_bits(1151_u64 << 52); // 2^128
+    let extent = r1
+        .iter()
+        .chain(r2.iter())
+        .fold(length, |scale, value| scale.max(value.abs()));
+    extent > HIGH || core2 > HIGH * HIGH || (extent < LOW && core2 < LOW * LOW)
+}
+
+struct ScaledSegment {
+    length: f64,
+    r1: [f64; 3],
+    r2: [f64; 3],
+    core2: f64,
+    exponent: i32,
+}
+
+/// Normalize relative lengths by one exact power of two, retaining the two
+/// endpoint offsets independently. Reconstructing r2 as r1-ab could erase a
+/// resolved near-endpoint displacement before the kernel sees it.
+fn scale_segment(length: f64, r1: [f64; 3], r2: [f64; 3], core2: f64) -> Option<ScaledSegment> {
+    if !length.is_finite()
+        || length <= 0.0
+        || !core2.is_finite()
+        || core2 < 0.0
+        || r1.iter().chain(r2.iter()).any(|value| !value.is_finite())
+    {
+        return None;
+    }
+    let extent = r1
+        .iter()
+        .chain(r2.iter())
+        .fold(length.max(core2.sqrt()), |scale, value| scale.max(value.abs()));
+    let (_, exponent) = crate::binary_parts(extent);
+    let scaled = ScaledSegment {
+        length: scale_segment_value(length, -exponent),
+        r1: r1.map(|value| scale_segment_value(value, -exponent)),
+        r2: r2.map(|value| scale_segment_value(value, -exponent)),
+        core2: scale_segment_value(core2, -2 * exponent),
+        exponent,
+    };
+    // Do not silently replace a retained positive core or relative offset by
+    // zero in a geometry whose aspect ratios exceed the normalized domain.
+    if scaled.length == 0.0
+        || (core2 != 0.0 && scaled.core2 == 0.0)
+        || r1.iter().zip(scaled.r1).any(|(&a, b)| a != 0.0 && b == 0.0)
+        || r2.iter().zip(scaled.r2).any(|(&a, b)| a != 0.0 && b == 0.0)
+    {
+        return None;
+    }
+    Some(scaled)
+}
+
+fn scale_segment_value(value: f64, shift: i32) -> f64 {
+    if value == 0.0 {
+        return value;
+    }
+    let (mantissa, exponent) = crate::binary_parts(value.abs());
+    crate::scale_binary(mantissa.copysign(value), exponent + shift)
 }
