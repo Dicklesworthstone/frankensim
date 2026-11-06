@@ -7,7 +7,7 @@
 //! heterogeneous members need not share one proportional damping ratio.
 //! Material work is exported as dissipation, not silently deposited into heat.
 
-use super::{Frame2d, Geometry, SectionModel, SolidError};
+use super::{Frame2d, FrameReferenceKinematics, Geometry, SectionModel, SolidError};
 use fs_material::section::{
     ConcentricElasticSection, ConcentricKelvinVoigtSection, axial::ConcentricAxialViscosity,
     transverse::ConcentricTransverseViscosity,
@@ -287,9 +287,18 @@ impl FrameViscousSection {
     /// Exact [axial, symmetric bending/shear, antisymmetric bending] native
     /// reference dashpots [N s/m], using the same Timoshenko interpolation as
     /// stiffness and consistent inertia. No allocation or source query occurs.
-    pub fn reference_damping_n_s_m(&self, length_m: f64) -> Result<[f64; 3], SolidError> {
-        let [axial, bending, shear, antisymmetric] = self.reference_damping_parts(length_m)?;
-        Ok([axial, bending + shear, antisymmetric])
+    pub fn reference_damping_n_s_m(&self, length_m: f64) -> Result<[f64; 3], SolidError>{
+        self.reference_kinematics(length_m)?.damping_n_s_m(self)
+    }
+
+    /// Capture the original strain interpolation independently of later E/G/eta.
+    /// A live thermal consumer retains this value with its original mass basis
+    /// and accounts for coefficient work through the same source potential.
+    pub fn reference_kinematics(
+        &self,
+        length_m: f64,
+    ) -> Result<FrameReferenceKinematics, SolidError> {
+        FrameReferenceKinematics::new(self, length_m)
     }
 
     /// Physical loss fractions for one original layer, without factoring a
@@ -299,90 +308,8 @@ impl FrameViscousSection {
         length_m: f64,
         layer: usize,
     ) -> Result<FrameViscousHeatFractions, SolidError> {
-        let [_, bending, shear, _] = self.reference_damping_parts(length_m)?;
-        let fraction = |part: f64, whole: f64| {
-            let value = if whole == 0.0 { 0.0 } else { part / whole };
-            if !value.is_finite() || !(0.0..=1.0).contains(&value) || (part > 0.0 && value == 0.0) {
-                return Err(invalid(
-                    "original frame-layer loss fraction is unrepresentable",
-                ));
-            }
-            Ok(value)
-        };
-        let axial = *self
-            .axial
-            .layer_viscous_rigidity_n_s()
-            .get(layer)
-            .ok_or_else(|| invalid("frame viscosity layer index out of range"))?;
-        let curvature = self.bending.layer_viscous_stiffness_n_m2_s()[layer];
-        let axial = fraction(axial, self.axial.viscous_rigidity_n_s())?;
-        let curvature = fraction(curvature, self.bending.viscous_stiffness_n_m2_s())?;
-        let transverse = match &self.transverse {
-            Some(source) => fraction(
-                source.layer_viscous_rigidity_n_s()[layer],
-                source.viscous_rigidity_n_s(),
-            )?,
-            None => 0.0,
-        };
-        let bending_share = fraction(bending, bending + shear)?;
-        let shear_share = fraction(shear, bending + shear)?;
-        let symmetric_bending = curvature * bending_share;
-        let symmetric_shear = transverse * shear_share;
-        if (curvature > 0.0 && bending_share > 0.0 && symmetric_bending == 0.0)
-            || (transverse > 0.0 && shear_share > 0.0 && symmetric_shear == 0.0)
-        {
-            return Err(invalid("original frame-layer loss fraction underflow"));
-        }
-        Ok(FrameViscousHeatFractions {
-            axial,
-            symmetric_bending,
-            symmetric_shear,
-            antisymmetric_bending: curvature,
-        })
-    }
-
-    fn reference_damping_parts(&self, length: f64) -> Result<[f64; 4], SolidError> {
-        if !length.is_finite() || length <= 0.0 {
-            return Err(invalid(
-                "finite positive frame viscosity reference length required",
-            ));
-        }
-        let axial = self.axial.viscous_rigidity_n_s() / length;
-        let curvature = self.bending.viscous_stiffness_n_m2_s() / length / length / length;
-        if (self.axial.viscous_rigidity_n_s() > 0.0 && axial == 0.0)
-            || (self.bending.viscous_stiffness_n_m2_s() > 0.0 && curvature == 0.0)
-            || !axial.is_finite()
-            || !curvature.is_finite()
-        {
-            return Err(invalid(
-                "material section viscosity is unrepresentable on the member geometry",
-            ));
-        }
-        let (bending, shear) = match &self.transverse {
-            Some(transverse) => {
-                let (_, beta, fraction) =
-                    super::shear::ShearElement::compliance_partition(transverse.shear(), length)?;
-                // Exact integral of the native curvature/shear-rate shapes:
-                // kappa_dot=-(3 beta(1-2x/L)x1_dot+x2_dot)/L²,
-                // gamma_dot=-fraction*x1_dot/(2L). Correction is already in C_s.
-                let bending = (curvature * beta) * (3.0 * beta);
-                let rigidity = transverse.viscous_rigidity_n_s();
-                let shear = (rigidity * fraction / length) * (0.25 * fraction);
-                if (curvature > 0.0 && bending == 0.0) || (rigidity > 0.0 && shear == 0.0) {
-                    return Err(invalid(
-                        "Timoshenko section viscosity is unrepresentable on the member geometry",
-                    ));
-                }
-                (bending, shear)
-            }
-            None => (3.0 * curvature, 0.0),
-        };
-        if !(bending + shear).is_finite() {
-            return Err(invalid(
-                "material section viscosity is unrepresentable on the member geometry",
-            ));
-        }
-        Ok([axial, bending, shear, curvature])
+        self.reference_kinematics(length_m)?
+            .layer_heat_fractions(self, layer)
     }
 }
 

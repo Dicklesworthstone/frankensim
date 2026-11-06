@@ -1856,11 +1856,29 @@ viscosities per interval; the fluid thermal owner resolves endpoint viscosity
 and the complete fluid-memory trajectory jointly. Their existing work, entropy,
 finite-cell, source-domain and atomic publication gates remain in force.
 
-Live E/G-dependent thermoelasticity still refuses transverse members because
-its elastic storage, interpolation, inertia and parameter work require a
-separate accounted extension. Focused synthetic regressions cover independent
-Timoshenko oscillator/strain-work references, distinct layer temperatures,
-shear-only dissipation, full exterior-fluid memory and late source refusal.
+Live thermoelasticity retains each original Timoshenko interpolation and
+consistent mass as a fixed reference Galerkin basis. The original
+`ConcentricRodThermoelasticLaw` supplies affine E(T)/G(T), integrated expansion,
+Helmholtz energy and entropy. Because each layer has uniform temperature and
+the potential is quadratic, its RMS-curvature evaluation integrates the whole
+member exactly; a separate endpoint-curvature and shear check enforces the
+actual strain envelope. Named and derived G roles remain source-owned.
+
+Each layer's symmetric spring combines bending and shear storage on the same
+native coordinate. Updated viscosity, heat partition and stiffness use the
+retained reference strains, while the existing complete coefficient update
+checks source parameter work, Psi+TS, finite-cell heat and atomic publication.
+The original complete structural basis and the same fluid/electrical/shared
+assembly owners remain in force. This is a fixed-shape beam approximation:
+member refinement is required when changed stiffness ratios alter the
+unresolved physical fields. It does not update geometry or inertia, infer
+nonlinear G derivatives, or claim exact continuum dynamics.
+
+Focused synthetic regressions cover independent Timoshenko oscillator and
+strain-work references, affine E/G thermoelastic energy/entropy exchange,
+distinct layer temperatures, shear-only dissipation, full exterior-fluid
+memory and warm-state refusal/retry. Native fixed-basis regressions separately
+compare layer energy, loss and parameter work with integrated physical strains.
 
 
 ## Source-bound creep and reciprocal heat in layered shells

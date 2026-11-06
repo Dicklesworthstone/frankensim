@@ -8,7 +8,7 @@ fn live_config() -> ModalCouplingConfig {
         ..config()
     }
 }
-fn live_specs() -> [Spec; 2] {
+fn live_specs() -> [Spec; 2]{
     let mut specs = specimens();
     specs[0].modulus_slope = -2.0;
     specs[1].modulus_slope = -3.0;
@@ -16,6 +16,281 @@ fn live_specs() -> [Spec; 2] {
         spec.cp *= 0.01;
     }
     specs
+}
+
+#[test]
+fn affine_shear_and_young_moduli_change_motion_on_one_accounted_reference_mass() {
+    let correction = 0.8;
+    let area = areas();
+    let moment = moments();
+    let g0 = YOUNG / 50.0;
+    let beta = 1.0
+        / (1.0
+            + 12.0 * YOUNG * moment.iter().sum::<f64>()
+                / (correction * g0 * area.iter().sum::<f64>() * LENGTH.powi(2)));
+    let shear = 1.0 - beta;
+    // Original static Timoshenko shape for a fixed-position member whose tip
+    // rotation is free. These analytic kinetic integrals remain fixed when E/G
+    // change; re-equilibrating the shapes would silently change the mass.
+    let (p1, p2, p3) = (-0.5 * shear, 0.5 - 1.5 * beta, beta);
+    let translation = p1 * p1 / 3.0
+        + p1 * p2 / 2.0
+        + (p2 * p2 + 2.0 * p1 * p3) / 5.0
+        + p2 * p3 / 3.0
+        + p3 * p3 / 7.0;
+    let rotation = 1.0 / 3.0 - beta / 2.0 + 3.0 * beta * beta / 10.0;
+    let mass = RHO
+        * (area.iter().sum::<f64>() * LENGTH.powi(3) * translation
+            + moment.iter().sum::<f64>() * LENGTH * rotation);
+    let bending_geometry = moment.map(|i| i * (1.0 + 3.0 * beta * beta) / LENGTH);
+    let shear_geometry = area.map(|a| correction * a * shear * shear * LENGTH / 4.0);
+    let mut endpoints = Vec::new();
+    for cached in [false, true] {
+        for variable_shear in [false, true] {
+            let specs = live_specs().map(|mut spec| {
+                spec.cp *= 0.001;
+                spec.curved_eta = true;
+                spec.curved_shear_modulus = variable_shear;
+                spec
+            });
+            fixture_with_shear(
+                specs,
+                true,
+                false,
+                0.0,
+                Some(correction),
+                |component, mut thermal, network| {
+                    let gate = CancelGate::new_clock_free();
+                    let mut owner = component
+                        .into_thermoelastic_system(
+                            &thermal,
+                            network,
+                            &DESTINATIONS,
+                            0.05,
+                            live_config(),
+                            cached.then(prepared),
+                            &gate,
+                        )
+                        .unwrap();
+                    let fixed = owner.members()[0].reference_kinematics;
+                    near(fixed.bending_fraction(), beta, 2e-15);
+                    let shape = owner.basis().modes()[0].displacement[5];
+                    let initial =
+                        owner.mechanical_internal_energy_j().unwrap() + thermal.energy_j();
+                    let (mut q, mut v, mut temperature) = (0.01, 0.03, [300.0; 2]);
+                    let g_slope = if variable_shear { 0.005 * g0 } else { 0.0 };
+                    let slopes: [f64; 2] = core::array::from_fn(|i| {
+                        specs[i].modulus_slope * bending_geometry[i] + g_slope * shear_geometry[i]
+                    });
+                    let reference: [f64; 2] = core::array::from_fn(|i| {
+                        YOUNG * bending_geometry[i] + g0 * shear_geometry[i]
+                    });
+                    let capacity: [f64; 2] =
+                        core::array::from_fn(|i| RHO * area[i] * LENGTH * specs[i].cp);
+                    for _ in 0..24 {
+                        let spring: [f64; 2] = core::array::from_fn(|i| {
+                            reference[i] + slopes[i] * (temperature[i] - 300.0)
+                        });
+                        let damping: [f64; 2] = core::array::from_fn(|i| {
+                            (0.005 * temperature[i] - 0.5)
+                                * (specs[i].bending * bending_geometry[i]
+                                    + specs[i].shear * shear_geometry[i])
+                        });
+                        let k: f64 = spring.iter().sum();
+                        let c: f64 = damping.iter().sum();
+                        let expected = oscillator_from(mass, k, c, 1.0 / f64::from(RATE), q, v);
+                        let loss = 0.5 * (mass * v * v + k * q * q) - expected.2;
+                        let report = owner
+                            .step(&mut thermal, &[0.0], solve(), &[0.0; 2], &gate)
+                            .unwrap();
+                        let mut parameter_work = 0.0;
+                        for i in 0..2 {
+                            let heat = loss * damping[i] / c;
+                            // For an affine modulus and zero expansion,
+                            // U=(k-T*k')q²/2 is independent of T at fixed q.
+                            // Its reversible heat follows from stress work,
+                            // not from an energy-residual correction.
+                            let reversible = 0.5
+                                * temperature[i]
+                                * slopes[i]
+                                * (expected.0 * expected.0 - q * q);
+                            let previous = temperature[i];
+                            temperature[i] += (heat + reversible) / capacity[i];
+                            let next_k = reference[i] + slopes[i] * (temperature[i] - 300.0);
+                            let psi = 0.5 * next_k * expected.0 * expected.0;
+                            let entropy = -0.5 * slopes[i] * expected.0 * expected.0;
+                            let state = report.layers[i].states[1];
+                            near(report.layers[i].material_heat_j, heat, 2e-11);
+                            near(report.layers[i].reversible_heat_j, reversible, 2e-11);
+                            near(state.free_energy_j, psi, 2e-11);
+                            near(state.entropy_j_k, entropy, 2e-13);
+                            near(
+                                state.internal_energy_j,
+                                psi + temperature[i] * entropy,
+                                2e-11,
+                            );
+                            near(
+                                thermal.temperature_k(CELLS[i]).unwrap(),
+                                temperature[i],
+                                2e-5,
+                            );
+                            parameter_work += 0.5
+                                * slopes[i]
+                                * (temperature[i] - previous)
+                                * expected.0
+                                * expected.0;
+                            let fresh = owner.members()[0].viscosity.transverse().unwrap().shear();
+                            near(
+                                fresh.layer_shear_modulus_pa(i).unwrap(),
+                                g0 + g_slope * (temperature[i] - 300.0),
+                                2e-6,
+                            );
+                        }
+                        near(report.parameter_work_j, parameter_work, 2e-11);
+                        let actual = owner.mechanical().components()[0].states()[0];
+                        near(shape * actual.displacement_m_sqrt_kg, expected.0, 2e-9);
+                        near(shape * actual.velocity_m_sqrt_kg_per_s, expected.1, 2e-8);
+                        near(
+                            owner.mechanical_internal_energy_j().unwrap() + thermal.energy_j(),
+                            initial,
+                            3e-9,
+                        );
+                        near(report.total_energy_residual_j, 0.0, 2e-10);
+                        assert_eq!(owner.members()[0].reference_kinematics, fixed);
+                        (q, v) = (expected.0, expected.1);
+                    }
+                    // A fresh static interpolation is different; accepted
+                    // mechanics has intentionally retained the original one.
+                    let instantaneous = owner.members()[0]
+                        .viscosity
+                        .reference_kinematics(LENGTH)
+                        .unwrap();
+                    assert!((instantaneous.bending_fraction() - beta).abs() > 1e-5);
+                    endpoints.push((q, temperature));
+                },
+            );
+        }
+    }
+    assert!((endpoints[0].0 - endpoints[1].0).abs() > 1e-8);
+    near(endpoints[0].0, endpoints[2].0, 2e-10);
+    near(endpoints[1].0, endpoints[3].0, 2e-10);
+}
+
+#[test]
+fn warm_shear_thermoelastic_refusal_preserves_complete_coefficients_and_retry() {
+    let specs = live_specs().map(|mut spec| {
+        spec.curved_shear_modulus = true;
+        spec.curved_eta = true;
+        spec
+    });
+    fixture_with_shear(
+        specs,
+        true,
+        false,
+        0.0,
+        Some(0.8),
+        |component, mut thermal, network| {
+            let gate = CancelGate::new_clock_free();
+            let mut other = component
+                .basis()
+                .coupled_component(
+                    RATE,
+                    &[0.0],
+                    ModalAcousticTimeBudget::audible_reference(),
+                    18,
+                    || false,
+                )
+                .unwrap();
+            other.restore_states(component.states()).unwrap();
+            let mut reference_thermal = thermal.clone();
+            let mut reference = other
+                .into_thermoelastic_system(
+                    &reference_thermal,
+                    network,
+                    &DESTINATIONS,
+                    0.05,
+                    live_config(),
+                    Some(prepared()),
+                    &gate,
+                )
+                .unwrap();
+            let mut owner = component
+                .into_thermoelastic_system(
+                    &thermal,
+                    network,
+                    &DESTINATIONS,
+                    0.05,
+                    live_config(),
+                    Some(prepared()),
+                    &gate,
+                )
+                .unwrap();
+            for _ in 0..4 {
+                owner
+                    .step(&mut thermal, &[0.0], solve(), &[0.0; 2], &gate)
+                    .unwrap();
+                reference
+                    .step(&mut reference_thermal, &[0.0], solve(), &[0.0; 2], &gate)
+                    .unwrap();
+            }
+            let motion = owner.mechanical().components()[0].states().to_vec();
+            let members = owner.members().to_vec();
+            let coefficients: Vec<_> = (0..9)
+                .map(|i| owner.mechanical().connection_coefficients(i).unwrap())
+                .collect();
+            let cells = thermal.cells().clone();
+            let clock = thermal.time_s();
+            let limited = FrameThermalSolve {
+                maximum_material_trials: 1,
+                ..solve()
+            };
+            assert!(
+                owner
+                    .step(&mut thermal, &[0.0], limited, &[0.0; 2], &gate)
+                    .is_err()
+            );
+            // The source shear/fibre strain envelope is a real late mechanical
+            // refusal; it cannot install part of the proposed thermoelastic state.
+            let torque = 10.0 * owner.basis().modes()[0].displacement[5];
+            assert!(matches!(
+                owner.step(&mut thermal, &[torque], solve(), &[0.0; 2], &gate),
+                Err(CircuitEnthalpyError::Source(
+                    fs_couple::frame_vibration::thermal::FrameThermalSourceError::Material(_)
+                ))
+            ));
+            assert_eq!(owner.mechanical().components()[0].states(), motion);
+            assert_eq!(thermal.cells(), &cells);
+            assert_eq!(thermal.time_s(), clock);
+            assert_eq!(
+                (0..9)
+                    .map(|i| owner.mechanical().connection_coefficients(i).unwrap())
+                    .collect::<Vec<_>>(),
+                coefficients
+            );
+            assert_eq!(owner.members()[0].source, members[0].source);
+            assert_eq!(
+                owner.members()[0].reference_kinematics,
+                members[0].reference_kinematics
+            );
+            assert_eq!(
+                owner.members()[0].viscosity.transverse(),
+                members[0].viscosity.transverse()
+            );
+            for _ in 0..4 {
+                owner
+                    .step(&mut thermal, &[0.0], solve(), &[0.0; 2], &gate)
+                    .unwrap();
+                reference
+                    .step(&mut reference_thermal, &[0.0], solve(), &[0.0; 2], &gate)
+                    .unwrap();
+            }
+            assert_eq!(
+                owner.mechanical().components()[0].states(),
+                reference.mechanical().components()[0].states()
+            );
+            assert_eq!(thermal.cells(), reference_thermal.cells());
+        },
+    );
 }
 
 #[test]

@@ -1,4 +1,4 @@
-//! Source E(T), expansion and finite heat on the original complete frame owner.
+//! Source E(T)/G(T), expansion and heat on the original complete frame owner.
 //!
 //! The fixed, complete mass basis is only a coordinate chart. Its kinetic
 //! coordinates use fs-modal's exact free-coordinate owner; each original layer
@@ -6,6 +6,9 @@
 //! Axial rest extension is that layer's integrated alpha dT times L. Separate
 //! bending factors retain the full off-diagonal stiffness and mismatch energy
 //! of layers at unequal temperatures. Original material dashpots stay separate.
+//! Shear-deformable members retain their original Timoshenko strain shapes and
+//! consistent mass as a fixed Galerkin basis. Updated moduli act on those SAME
+//! strains; temperature never silently changes interpolation or inertia.
 //!
 //! An interval first follows the exact accepted-temperature mechanics. Its
 //! original spring-port work W and dashpot losses D then enter the existing
@@ -16,7 +19,7 @@
 //! temporal-accuracy or reversible-entropy certificate.
 //!
 //! Geometry/reference density stay fixed. Scalar expansion and scalar or
-//! globally affine E(T) use the original ConcentricThermoelasticLaw. Every
+//! globally affine E(T)/G(T) use the original section/rod thermal potentials. Every
 //! layer has a whole solid caloric cell, positive combined capacity and an
 //! explicit small-strain envelope. Radial constraint, buckling/geometric
 //! stiffness, changing mass, topology and phase transitions require other
@@ -48,13 +51,21 @@ use crate::render::schedule::force::coupled::{
     ModalConnection, coefficients::ConnectionCoefficients,
 };
 use fs_material::section_temperature::thermoelastic::{
-    ConcentricThermoelasticLaw, ConcentricThermoelasticState,
+    ConcentricThermoelasticLaw, ConcentricThermoelasticState, rod::ConcentricRodThermoelasticLaw,
 };
 use fs_math::c64::C64;
+use fs_solid::frame2d::FrameReferenceKinematics;
+
+enum MemberThermoelasticLaw<'a> {
+    Longitudinal(ConcentricThermoelasticLaw<'a>),
+    Transverse(Box<ConcentricRodThermoelasticLaw<'a>>),
+}
 
 struct Member<'a> {
     region: Region<'a>,
-    law: ConcentricThermoelasticLaw<'a>,
+    law: MemberThermoelasticLaw<'a>,
+    reference_kinematics: FrameReferenceKinematics,
+    reference_viscosity: FrameViscousSection,
     columns: [Vec<f64>; 3],
     spring_start: usize,
     component: usize,
@@ -62,8 +73,6 @@ struct Member<'a> {
     linear_strain_limit: f64,
     /// Conservative caloric + elastic capacity floor per original layer.
     capacity_floor_j_k: Vec<f64>,
-    axial_property: String,
-    bending_property: String,
 }
 
 /// One physical layer's mechanical contribution, additional to its caloric U.
@@ -74,6 +83,7 @@ pub struct FrameThermoelasticLayerState {
     pub free_energy_j: f64,
     pub entropy_j_k: f64,
     pub internal_energy_j: f64,
+    /// Maximum extreme-fibre elastic strain or transverse shear strain.
     pub maximum_absolute_elastic_strain: f64,
 }
 
@@ -84,6 +94,9 @@ pub struct FrameThermoelasticMemberState {
     pub component: usize,
     pub element: usize,
     pub source: ConcentricThermoelasticState,
+    /// Immutable strain shapes corresponding to this member's original mass.
+    /// Use these with the live viscosity; do not rebuild shapes from fresh G/E.
+    pub reference_kinematics: FrameReferenceKinematics,
     pub viscosity: FrameViscousSection,
     pub layers: Vec<FrameThermoelasticLayerState>,
 }
@@ -94,7 +107,7 @@ pub struct FrameThermoelasticLayerExchange {
     pub states: [FrameThermoelasticLayerState; 2],
     /// Original spring-port work into elastic storage during frozen-T motion.
     pub stress_work_j: f64,
-    /// Original eta*A / eta*I partition of independent dashpot work.
+    /// Original axial/curvature/transverse-shear partition of dashpot work.
     pub material_heat_j: f64,
     /// Psi(T_new, q_end) - Psi(T_old, q_end), at unchanged physical coordinates.
     pub coefficient_free_energy_change_j: f64,
@@ -240,19 +253,39 @@ fn resolve_member(
             .map(|(b, q)| b * q.displacement_m_sqrt_kg))?;
     }
     let length = member.region.length_m;
-    let strain = finite(x[0] / length)?;
-    let source = member
-        .law
-        .at_temperatures_k(temperatures, strain, strain_limit)
-        .map_err(material)?;
-    let curvature =
-        finite((3.0 * x[1] + x[2]).abs().max((3.0 * x[1] - x[2]).abs()) / length / length)?;
-    let curvature_integral = finite((3.0 * x[1] * x[1] + x[2] * x[2]) / length / length / length)?;
+    let strains = member
+        .reference_kinematics
+        .strain_measures(x)
+        .map_err(solid)?;
+    let strain = strains.axial_strain;
+    let (source, transverse) = match &member.law {
+        MemberThermoelasticLaw::Longitudinal(law) => (
+            law.at_temperatures_k(temperatures, strain, strain_limit)
+                .map_err(material)?,
+            None,
+        ),
+        MemberThermoelasticLaw::Transverse(law) => {
+            // The original rod potential is quadratic in curvature and shear.
+            // Uniform T in each whole layer makes its RMS-curvature evaluation
+            // the exact integral along this member, without repeated sources or
+            // quadrature. Extreme-fibre admission uses endpoint curvature below.
+            let state = law
+                .at_strain(
+                    temperatures,
+                    [strain, strains.transverse_shear_strain, 0.0],
+                    [0.0, strains.rms_curvature_per_m, 0.0],
+                    strain_limit,
+                )
+                .map_err(material)?;
+            (state.axial, Some(state.layers))
+        }
+    };
+    let curvature = strains.maximum_absolute_curvature_per_m;
     let mut layers = Vec::with_capacity(source.layers.len());
     for (i, layer) in source.layers.iter().enumerate() {
         let radius = source.section.section().layers()[i].outer_radius_m;
-        let maximum_absolute_elastic_strain =
-            finite(layer.elastic_strain.abs() + radius * curvature)?;
+        let maximum_absolute_elastic_strain = finite(layer.elastic_strain.abs() + radius * curvature)?
+            .max(strains.transverse_shear_strain.abs());
         if maximum_absolute_elastic_strain > strain_limit
             || finite(strain.abs() + radius * curvature)? > strain_limit
         {
@@ -260,15 +293,19 @@ fn resolve_member(
                 "frame endpoint exceeds its total or elastic fibre-strain envelope",
             ));
         }
-        let bending_geometry = finite(layer.second_moment_m4 * curvature_integral)?;
-        let free_energy_j = finite(
-            length * layer.axial_free_energy_per_reference_length_j_m
-                + 0.5 * layer.young_modulus_pa * bending_geometry,
-        )?;
-        let entropy_j_k = finite(
-            length * layer.entropy_per_reference_length_j_m_k
-                - 0.5 * layer.young_modulus_derivative_pa_k * bending_geometry,
-        )?;
+        let (free_energy_j, entropy_j_k) = match &transverse {
+            Some(states) => (finite(length * states[i].free_energy_j_m)?,
+                finite(length * states[i].entropy_j_m_k)?),
+            None => {
+                let curvature_integral = finite((3.0 * x[1] * x[1] + x[2] * x[2])
+                    / length / length / length)?;
+                let bending_geometry = finite(layer.second_moment_m4 * curvature_integral)?;
+                (finite(length * layer.axial_free_energy_per_reference_length_j_m
+                    + 0.5 * layer.young_modulus_pa * bending_geometry)?,
+                 finite(length * layer.entropy_per_reference_length_j_m_k
+                    - 0.5 * layer.young_modulus_derivative_pa_k * bending_geometry)?)
+            }
+        };
         layers.push(FrameThermoelasticLayerState {
             destination: member.region.receivers[i].binding,
             temperature_k: layer.temperature_k,
@@ -278,12 +315,10 @@ fn resolve_member(
             maximum_absolute_elastic_strain,
         });
     }
-    let viscosity = FrameViscousSection::try_new(
-        source.section.section().clone(),
-        &member.axial_property,
-        &member.bending_property,
-    )
-    .map_err(solid)?;
+    let viscosity = member
+        .reference_viscosity
+        .with_material_section(source.section.section().clone())
+        .map_err(solid)?;
     let band = viscosity.omega_band_rad_s();
     if band.0 != 0.0 || band.1 < core::f64::consts::PI / dt {
         return Err(invalid(
@@ -294,28 +329,26 @@ fn resolve_member(
         component: member.component,
         element: member.region.element,
         source,
+        reference_kinematics: member.reference_kinematics,
         viscosity,
         layers,
     })
 }
-fn layer_springs(
-    state: &FrameThermoelasticMemberState,
-    layer: usize,
-    length: f64,
-) -> Result<[(f64, f64); 3]> {
-    let value = &state.source.layers[layer];
-    let axial = positive(value.young_modulus_pa * value.area_m2 / length)?;
-    let bending =
-        positive(value.young_modulus_pa * value.second_moment_m4 / length / length / length)?;
+fn layer_springs(state: &FrameThermoelasticMemberState, layer: usize) -> Result<[(f64, f64); 3]> {
+    let length = state.reference_kinematics.length_m();
+    let stiffness = state
+        .reference_kinematics
+        .layer_stiffness_n_m(&state.viscosity, layer)
+        .map_err(solid)?;
     let free_strain = state.source.section.expansion_paths()[layer].free_linear_strain();
     let rest = finite(length * free_strain)?;
     if free_strain != 0.0 && rest == 0.0 {
         return Err(invalid("thermal layer rest extension underflow"));
     }
     Ok([
-        (axial, rest),
-        (positive(3.0 * bending)?, 0.0),
-        (bending, 0.0),
+        (stiffness[0], rest),
+        (stiffness[1], 0.0),
+        (stiffness[2], 0.0),
     ])
 }
 fn admit_capacity(
@@ -343,6 +376,8 @@ fn admit_capacity(
         let (lo, hi) = (knots[0].temperature_k, knots[knots.len() - 1].temperature_k);
         // The original support thermal owner uses this same conservative bound.
         // Affine arithmetic bounds Psi_TT; actual source queries never extrapolate.
+        // Fixed-reference bending/shear add terms affine in T at fixed q, so
+        // the admitted E/G laws add no further heat-capacity curvature.
         let modulus = |t: f64| {
             finite(
                 layer
@@ -374,8 +409,10 @@ impl FrameVibrationComponent {
     /// E(T) may couple arbitrary modes without a truncation/reprojection claim.
     /// Frozen preload and additional authored modal damping currently refuse.
     /// Each layer requires explicit scalar alpha, fixed scalar rho, scalar or
-    /// globally affine E(T), a solid caloric chart and positive combined capacity.
-    /// `linear_strain_limit` bounds total, thermal and extreme fibre strains.
+    /// globally affine E(T)/G(T), a solid caloric chart and positive combined capacity.
+    /// Original Timoshenko interpolation stays fixed with the reference inertia;
+    /// this Galerkin approximation needs member refinement as stiffness ratios
+    /// change. `linear_strain_limit` bounds total, thermal, fibre and shear strains.
     #[allow(clippy::too_many_arguments)]
     pub fn into_thermoelastic_system<'n, 'a>(
         self,
@@ -581,16 +618,30 @@ impl FrameVibrationComponent {
         let mut projected = vec![0.0; count * count];
         for (index, (region, (_, eta))) in regions.into_iter().zip(viscosity).enumerate() {
             check(gate)?;
+            let law = match eta.transverse() {
+                Some(transverse) => {
+                    let shear = transverse.shear();
+                    let law = match shear.shear_property() {
+                        Some(property) => ConcentricRodThermoelasticLaw::try_new(
+                            region.law.clone(), property, shear.shear_correction()),
+                        None => ConcentricRodThermoelasticLaw::try_new_with_isotropic_shear(
+                            region.law.clone(), shear.shear_correction()),
+                    }.map_err(material)?;
+                    MemberThermoelasticLaw::Transverse(Box::new(law))
+                }
+                None => MemberThermoelasticLaw::Longitudinal(
+                    ConcentricThermoelasticLaw::try_new(region.law.clone()).map_err(material)?),
+            };
             let mut member = Member {
-                law: ConcentricThermoelasticLaw::try_new(region.law.clone()).map_err(material)?,
+                law,
+                reference_kinematics: eta.reference_kinematics(region.length_m).map_err(solid)?,
+                reference_viscosity: eta,
                 columns: core::array::from_fn(|k| connections[3 * index + k].left.shapes.clone()),
                 spring_start: connections.len(),
                 component,
                 damping_start: connection_start + 3 * index,
                 linear_strain_limit,
                 capacity_floor_j_k: Vec::new(),
-                axial_property: eta.axial().viscosity_property().into(),
-                bending_property: eta.bending().viscosity_property().into(),
                 region,
             };
             let state = resolve_member(
@@ -601,7 +652,7 @@ impl FrameVibrationComponent {
             )?;
             member.capacity_floor_j_k = admit_capacity(&member, &state, source, linear_strain_limit)?;
             for layer in 0..state.layers.len() {
-                for (k, (stiffness, rest)) in layer_springs(&state, layer, member.region.length_m)?
+                for (k, (stiffness, rest)) in layer_springs(&state, layer)?
                     .into_iter()
                     .enumerate()
                 {
@@ -797,22 +848,12 @@ impl FrameThermoelasticSystem<'_, '_> {
                         if loss < 0.0 { return Err(invalid("frame dashpot supplied negative material heat")); }
                         Ok(loss)
                     };
-                    let axial_loss = port_loss(0)?;
-                    let bending_loss = finite(port_loss(1)?+port_loss(2)?)?;
-                    material_heat_j = finite(material_heat_j+axial_loss+bending_loss)?;
+                    let port_losses = [port_loss(0)?, port_loss(1)?, port_loss(2)?];
+                    material_heat_j = finite(material_heat_j+sum(port_losses)?)?;
                     for (layer, receiver) in member.region.receivers.iter().enumerate() {
-                        let eta = &old.viscosity;
-                        let partition = |fraction: f64, loss: f64| -> Result<f64> {
-                            let part = finite(fraction*loss)?;
-                            if fraction > 0.0 && loss > 0.0 && part == 0.0 {
-                                return Err(invalid("physical frame layer heat underflow"));
-                            }
-                            Ok(part)
-                        };
-                        let loss = finite(partition(share(eta.axial().layer_viscous_rigidity_n_s()[layer],
-                            eta.axial().viscous_rigidity_n_s())?, axial_loss)?
-                            + partition(share(eta.bending().layer_viscous_stiffness_n_m2_s()[layer],
-                                eta.bending().viscous_stiffness_n_m2_s())?, bending_loss)?)?;
+                        let fractions = member.reference_kinematics
+                            .layer_heat_fractions(&old.viscosity, layer).map_err(solid)?;
+                        let loss = sum(fractions.partition_energy_j(port_losses).map_err(solid)?)?;
                         let first = member.spring_start+3*layer;
                         let work = sum(transfers[first..first+3].iter().map(|p| -p.energy_into().value()))?;
                         let delta = frozen[index].layers[layer].free_energy_j-old.layers[layer].free_energy_j;
@@ -949,21 +990,15 @@ impl FrameThermoelasticSystem<'_, '_> {
                 let field_split = finite(field_entropy + field_reversible_entropy)?;
                 let mut updates = Vec::with_capacity(transfers.len());
                 for (member, state) in members.iter().zip(&next_states) {
-                    let l = member.region.length_m;
-                    let a = finite(state.viscosity.axial().viscous_rigidity_n_s()/l)?;
-                    let b = finite(state.viscosity.bending().viscous_stiffness_n_m2_s()/l/l/l)?;
-                    if (state.viscosity.axial().viscous_rigidity_n_s() > 0.0 && a == 0.0)
-                        || (state.viscosity.bending().viscous_stiffness_n_m2_s() > 0.0 && b == 0.0) {
-                        return Err(invalid("refreshed frame viscosity underflows its original geometry"));
-                    }
-                    for (k, damping_n_s_m) in [a, finite(3.0*b)?, b].into_iter().enumerate() {
+                    for (k, damping_n_s_m) in member.reference_kinematics
+                        .damping_n_s_m(&state.viscosity).map_err(solid)?.into_iter().enumerate() {
                         updates.push(ConnectionCoefficients { connection: member.damping_start+k,
                             stiffness_n_m: 0.0, damping_n_s_m, rest_extension_m: 0.0 });
                     }
                 }
                 for (member, state) in members.iter().zip(&next_states) {
                     for layer in 0..state.layers.len() {
-                        for (k, (stiffness_n_m, rest_extension_m)) in layer_springs(state, layer, member.region.length_m)?.into_iter().enumerate() {
+                        for (k, (stiffness_n_m, rest_extension_m)) in layer_springs(state, layer)?.into_iter().enumerate() {
                             updates.push(ConnectionCoefficients { connection: member.spring_start+3*layer+k,
                                 stiffness_n_m, damping_n_s_m: 0.0, rest_extension_m });
                         }

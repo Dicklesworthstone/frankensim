@@ -1,6 +1,8 @@
 //! Source viscosity reaches the real native frame history, not a modal fit.
 //! Data are manufactured; the references are the continuous mechanical ODEs.
 
+mod reference_kinematics;
+
 use fs_evidence::ValidityDomain;
 use fs_matdb::{
     ClaimSet, InterpolationPolicy, MaterialCard, MaterialStateId, PropertyClaim, PropertyKey,

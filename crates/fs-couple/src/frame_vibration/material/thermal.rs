@@ -153,17 +153,6 @@ fn same_positive(actual: f64, expected: f64) -> bool {
         && expected > 0.0
         && (actual - expected).abs() <= 1e-10 * expected
 }
-fn share(part: f64, whole: f64) -> Result<f64> {
-    if whole == 0.0 {
-        return Ok(0.0);
-    }
-    let fraction = finite(part / whole)?;
-    if part > 0.0 && fraction == 0.0 {
-        return Err(invalid("layer heat fraction underflow"));
-    }
-    Ok(fraction)
-}
-
 struct Receiver {
     binding: FrameLayerCell,
     original: DepositedCell,
@@ -352,16 +341,6 @@ fn bind_regions_with_links<'n, 'a>(
     let operator = basis
         .material_damping()
         .ok_or_else(|| invalid("frame heat requires its original material viscosity"))?;
-    if !frozen_elasticity
-        && operator
-            .sections()
-            .iter()
-            .any(|(_, section)| section.transverse().is_some())
-    {
-        return Err(invalid(
-            "live frame thermoelasticity requires an accounted transverse shear storage law",
-        ));
-    }
     let binding = match additional_links {
         Some(links) => source.prepare_with_link_conductances(
             thermal, &[], links, || gate.is_requested()),
@@ -443,8 +422,10 @@ fn bind_regions_with_links<'n, 'a>(
             } else {
                 vec![section.elastic().density_source_property(layer).map_err(material)?]
             };
-            if let Some(transverse) = section.transverse() {
-                coefficients.extend(transverse.shear().source_properties(layer).map_err(material)?);
+            if frozen_elasticity {
+                if let Some(transverse) = section.transverse() {
+                    coefficients.extend(transverse.shear().source_properties(layer).map_err(material)?);
+                }
             }
             for coefficient in coefficients {
                 if !coefficient.source_axes().is_empty()

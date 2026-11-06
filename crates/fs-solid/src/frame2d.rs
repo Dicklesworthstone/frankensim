@@ -89,6 +89,8 @@ mod viscosity;
 pub use viscosity::{
     FrameMaterialDamping, FrameViscousHeatFractions, FrameViscousPort, FrameViscousSection,
 };
+mod reference_kinematics;
+pub use reference_kinematics::{FrameReferenceKinematics, FrameReferenceStrainMeasures};
 
 /// A section constitutive model for frame elements.
 #[derive(Debug, Clone)]

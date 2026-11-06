@@ -6575,7 +6575,14 @@ shear share one physical port; antisymmetric curvature has no shear loss.
 `with_material_section` retains every viscosity selector, the original
 named/derived G role and the authored correction across source refreshes.
 The finite-cell thermal consumer admits temperature-dependent viscosity with
-fixed sourced elasticity; live thermoelastic shear storage remains separate.
+fixed sourced elasticity. Live thermoelastic consumers can retain a
+`FrameReferenceKinematics` value independently of later E/G/eta updates. It
+supplies layer spring coefficients, damping, heat fractions, RMS curvature for
+quadratic energy integration and distinct peak curvature for fibre bounds.
+The original beta/shear fractions, correction and consistent mass stay fixed:
+updated moduli act on one Galerkin basis, with source potential, entropy and
+coefficient work owned by the complete thermal consumer. A new instantaneous
+static interpolation is not substituted into an unchanged mass matrix.
 `material_damping_energy` and
 `rayleigh_damping_energy` are separate parts of the existing total damping work,
 not additional heat sources.
