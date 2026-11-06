@@ -34,6 +34,9 @@ pub mod energy;
 /// Retained reference inertia and native momentum evolution of plastic shells.
 pub mod dynamics;
 
+/// Source-bound critical-plane fatigue at accepted layer integration points.
+pub mod fatigue;
+
 /// Immutable numerical drilling stiffness across changing material coefficients.
 pub mod drilling;
 

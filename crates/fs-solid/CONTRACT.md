@@ -1569,6 +1569,39 @@ heat generation, crack topology, a sequence-dependent damage law or a qualified
 component service life. `examples/frame_fatigue.rs --demo` demonstrates the
 native plastic loading path with deliberately synthetic CMB parameters.
 
+## Critical-plane strain-life at original plastic shell material points
+
+`plastic_shell::fatigue::ShellFatiguePath` binds a native source-resolved J2
+CST/DKT shell to finite-plane variable-amplitude strain-life gauges. A gauge
+names an original element, one of its three surface quadrature points, and one
+original layer/thickness quadrature point. Plane normals are fixed in that
+facet's material frame. The complete accepted plane-stress strain, including
+transverse contraction and signed plastic strain, is retained. Stress recovery
+applies the original elastic map to accepted elastic strain; it performs no
+return mapping or extra constitutive update. Membrane force and bending moment
+resultants never replace the local tensor histories.
+
+The existing critical-plane Miner owner counts each declared plane throughout
+the complete observation and selects the greatest accumulated damage. It uses
+the declared uncorrected, Morrow or paired SWT policy and retains their existing
+phase/coincident-extrema refusals. Original material identity, typed absolute
+temperature, modulus and source-backed CMB receipts must match the assigned
+layer. Per-gauge storage/work limits and checked aggregate plane/residue/work
+budgets apply before admission. These are bounded empirical predictions, not
+new constitutive damage, stabilization or measured service-life claims.
+
+Prepared geometry is shared across continuation and clones. The virgin native
+zero-load state is observed once, followed by every absolute load-path target,
+including holds. Static preload may continue under the original backward-Euler
+inertia. Dynamic advancement retains that exact reference-mass owner, accepted
+velocity and representable elapsed time; returning to statics after motion
+begins refuses. Original physical kinetic and numerical-loss accounts pass
+through unchanged. Native solution, fatigue banks and motion publish together;
+source, solver, late-gauge and cancellation failures preserve the accepted step.
+`preview_finish` evaluates a prefix without consuming it, while `finish`
+requires completion of the declared path. Fixed source conditions, small
+strain/rotation and native shell/reduction limits remain authoritative.
+
 ## Fatigue at fixed material points in spatial rods
 
 `rod::material_field::fatigue::SpatialRodFatiguePath` observes chronological
