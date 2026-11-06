@@ -9,20 +9,25 @@
 //! The same storage also binds the existing implicit conduction adapter. This
 //! is prescribed mass-balanced bulk flow at common fixed pressure, not transient
 //! species storage, phase-selective flow, a momentum solve or an inferred fluid
-//! geometry. The existing flow owner keeps chemical-flow entropy unavailable.
+//! geometry. Original pure Cp/T integrals and accepted phase mixing entropy
+//! supply the native flow entropy account without inferred absolute species
+//! entropies or a complete pressure/chemical-work model.
 
 use super::{
     BinaryCaloricSolveV1, BinaryLiquidCaloricError, BinaryLiquidCaloricLaw,
     BinaryLiquidThermalStorage, SourceOwner, poll,
 };
 use fs_blake3::ContentHash;
-use fs_thermal::enthalpy::advection::species::CaloricComposition;
+use fs_thermal::enthalpy::advection::species::{CaloricComposition, CaloricEntropyAnchor};
 
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct StreamBinding {
     species: [String; 2],
     mass_fractions: [f64; 2],
     enthalpy_reference: String,
+    entropy_reference: String,
+    entropy_anchor_h_j_kg: f64,
+    reduced_entropy_anchor_j_kg_k: f64,
     caloric_identity: [u8; 32],
 }
 
@@ -37,6 +42,14 @@ impl StreamBinding {
 
     pub(super) const fn caloric_identity(&self) -> [u8; 32] {
         self.caloric_identity
+    }
+
+    pub(super) fn entropy_anchor(&self) -> CaloricEntropyAnchor<'_> {
+        CaloricEntropyAnchor {
+            specific_h_j_kg: self.entropy_anchor_h_j_kg,
+            reduced_specific_entropy_j_kg_k: self.reduced_entropy_anchor_j_kg_k,
+            entropy_reference: &self.entropy_reference,
+        }
     }
 }
 
@@ -60,8 +73,12 @@ impl BinaryLiquidCaloricLaw<'_, '_> {
     ///
     /// The existing implicit thermal graph admits these laws through
     /// `Advected::with_stationary_species` and `with_implicit_advection`.
-    /// Their optional flow-entropy closure still refuses chemical mixing;
-    /// original fixed-composition storage entropy remains available.
+    /// `with_implicit_advection_entropy` additionally retains original mixing
+    /// and Cp/T contributions on the same accepted flow stages. Its anchor
+    /// removes only shared linear pure-species entropy constants at the common
+    /// source datum. The entropy convention is independent of composition and
+    /// prepared temperature bracket; it does not infer absolute entropy or a
+    /// pressure/chemical-work closure from heat capacity.
     pub fn stream_storage_from_mass_fractions(
         &self,
         mass_fractions: [f64; 2],
@@ -97,6 +114,13 @@ impl BinaryLiquidCaloricLaw<'_, '_> {
                 "stream enthalpy domain is unrepresentable in the original common datum",
             ));
         }
+        let reduced_entropy_anchor_j_kg_k =
+            storage.endpoints[0].reduced_entropy_j_per_k()? / storage.mass_kg;
+        if !reduced_entropy_anchor_j_kg_k.is_finite() {
+            return Err(BinaryLiquidCaloricError::Invalid(
+                "source-relative stream entropy is not representable",
+            ));
+        }
         let reference = common_reference(&self.owner);
         let mut identity = Vec::with_capacity(64);
         identity.extend_from_slice(reference.as_bytes());
@@ -118,6 +142,12 @@ impl BinaryLiquidCaloricLaw<'_, '_> {
                 .map(|species| species.to_string()),
             mass_fractions,
             enthalpy_reference: format!("binary-liquid-isobaric-v1:{}", reference.to_hex()),
+            entropy_reference: format!(
+                "binary-liquid-species-reduced-entropy-v1:{}",
+                reference.to_hex()
+            ),
+            entropy_anchor_h_j_kg: lower,
+            reduced_entropy_anchor_j_kg_k,
             caloric_identity: *fs_blake3::hash_domain(
                 "org.frankensim.fs-material.binary-liquid-stream-storage.v1",
                 &identity,

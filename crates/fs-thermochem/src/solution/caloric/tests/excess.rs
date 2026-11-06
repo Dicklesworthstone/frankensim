@@ -38,6 +38,58 @@ fn equilibrium(model: &BinaryLiquidCaloricModelV1, t: f64) -> BinaryCaloricState
 }
 
 #[test]
+fn g1_source_reduced_entropy_retains_signed_excess_and_accepted_coexistence() {
+    for c in [-40.0, 40.0] {
+        let model = caloric(0.0, 100.0, c, 400.0);
+        let pure = model
+            .equilibrate(
+                Temperature::new(100.0),
+                [1.0, 0.0],
+                controls().coexistence,
+                || false,
+            )
+            .unwrap();
+        assert_eq!(pure.reduced_entropy_j_per_k().unwrap(), 0.0);
+        let ideal = -5.0 * R * (0.4_f64 * 0.4_f64.ln() + 0.6_f64 * 0.6_f64.ln());
+        for t in [350.0_f64, 450.0] {
+            let state = equilibrium(&model, t);
+            assert_eq!(state.equilibrium().unwrap().phases().len(), 1);
+            let excess = 5.0 * 0.4 * 0.6 * c * (t / 400.0).ln();
+            near(
+                state.reduced_entropy_j_per_k().unwrap(),
+                680.0 * (t / 100.0).ln() + ideal + excess,
+                2e-12,
+            );
+            assert_eq!(
+                excess.is_sign_positive(),
+                (c * (t - 400.0)).is_sign_positive()
+            );
+        }
+        let cold = equilibrium(&model, 350.0);
+        let hot = equilibrium(&model, 450.0);
+        near(
+            hot.reduced_entropy_j_per_k().unwrap() - cold.reduced_entropy_j_per_k().unwrap(),
+            model.entropy_change_j_per_k(&cold, &hot).unwrap(),
+            2e-12,
+        );
+
+        // At T=T0=400 K, chi=1200/400=3 independently of signed C.
+        // Use the independently solved dilute binodal, not the feed x_A=.4.
+        let separated = caloric(0.0, 1200.0, c, 400.0);
+        let state = equilibrium(&separated, 400.0);
+        assert_eq!(state.equilibrium().unwrap().phases().len(), 2);
+        let x = 0.070_720_181_679_944_8_f64;
+        let phase = -5.0 * R * (x * x.ln() + (1.0 - x) * (1.0 - x).ln());
+        near(
+            state.reduced_entropy_j_per_k().unwrap(),
+            680.0 * 4.0_f64.ln() + phase,
+            2e-11,
+        );
+        assert!((phase - ideal).abs() > 10.0);
+    }
+}
+
+#[test]
 fn g1_signed_homogeneous_mixing_cp_closes_exact_enthalpy_and_entropy() {
     for c in [-80.0, 80.0] {
         let model = caloric(0.0, 0.0, c, 400.0);

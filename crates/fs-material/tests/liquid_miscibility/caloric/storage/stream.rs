@@ -12,6 +12,9 @@ use fs_thermal::enthalpy::conduction::implicit::{
 };
 use fs_thermal::enthalpy::conduction::{ConductionObserver, ConductiveLink, ConductivityLaw};
 
+#[path = "stream/entropy.rs"]
+mod entropy;
+
 fn near(actual: f64, expected: f64, tolerance: f64) {
     assert!(
         (actual - expected).abs() <= tolerance,
@@ -266,7 +269,7 @@ fn native_open_mixer_preserves_heat_of_mixing_and_variable_signed_specific_heat(
             assert!(
                 system
                     .with_implicit_advection_entropy(&thermal, || Ok(()))
-                    .is_err()
+                    .is_ok()
             );
         }
     }
@@ -447,6 +450,60 @@ fn native_recirculation_couples_composition_specific_cp_with_conduction_conserva
     assert_eq!(thermal.time_s(), 0.0);
     assert!(report.entropy.advection.is_none());
     assert!(report.entropy.has_unclassified_sources);
+
+    let audited = system
+        .with_implicit_advection_entropy(&thermal, || Ok(()))
+        .unwrap();
+    let (classified, classified_report) = audited
+        .advance_to(
+            &thermal,
+            dt,
+            implicit_controls(dt),
+            &mut ImplicitConductionWorkspace::new(2).unwrap(),
+            || Ok(()),
+        )
+        .unwrap();
+    assert_eq!(classified.cells(), next.cells());
+    assert_eq!(classified_report.energy, report.energy);
+    let temperatures = [0, 1].map(|i| expected_t(fractions[i], excess_cp, expected[i]));
+    let s = [0, 1].map(|i| entropy::expected_s(fractions[i], excess_cp, temperatures[i]));
+    let inlet_s = [
+        entropy::expected_s([1.0, 0.0], excess_cp, 460.0),
+        entropy::expected_s([0.0, 1.0], excess_cp, 330.0),
+    ];
+    let expected_boundary = dt * (inlet_s[0] + inlet_s[1] - 2.0 * s[1]);
+    let expected_mixing = dt
+        * ((inlet[0] - expected[0]) / temperatures[0] - (inlet_s[0] - s[0])
+            + (inlet[1] - expected[1]) / temperatures[1]
+            - (inlet_s[1] - s[1])
+            + 2.0 * ((expected[0] - expected[1]) / temperatures[1] - (s[0] - s[1]))
+            + (expected[1] - expected[0]) / temperatures[0]
+            - (s[1] - s[0]));
+    let expected_storage: f64 = (0..2)
+        .map(|i| masses[i] * (s[i] - entropy::expected_s(fractions[i], excess_cp, initial_t[i])))
+        .sum();
+    let generation = dt
+        * 1000.0
+        * (temperatures[1] - temperatures[0])
+        * (1.0 / temperatures[0] - 1.0 / temperatures[1]);
+    let account = classified_report.entropy;
+    let transported = account.advection.unwrap();
+    near(
+        transported.boundary_entropy_input_j_k,
+        expected_boundary,
+        2e-7,
+    );
+    near(transported.upwind_mixing_j_k, expected_mixing, 2e-7);
+    near(transported.balance_residual_j_k, 0.0, 2e-10);
+    near(account.thermal_storage_change_j_k, expected_storage, 2e-7);
+    near(account.conduction_generation_j_k, generation, 2e-8);
+    near(
+        account.temporal_defect_j_k,
+        expected_storage - expected_boundary - expected_mixing - generation,
+        3e-7,
+    );
+    assert!(!account.has_unclassified_sources);
+    assert_eq!(account.unclassified_source_at_cell_j_k, 0.0);
 }
 
 #[test]
@@ -460,6 +517,16 @@ fn common_stream_reference_retains_sources_and_exact_fractions_without_changing_
         .stream_storage_from_mass_fractions(y, controls(), || false)
         .unwrap();
     let descriptor = storage.advected_composition().unwrap();
+    let entropy_anchor = storage.advected_entropy_anchor().unwrap();
+    near(
+        entropy_anchor.reduced_specific_entropy_j_kg_k,
+        entropy::expected_s(y, -40.0, 290.0),
+        2e-10,
+    );
+    assert_eq!(
+        entropy_anchor.specific_h_j_kg,
+        storage.specific_enthalpy_domain_j_kg()[0]
+    );
     assert_eq!(descriptor.species, ["A", "B"]);
     assert_eq!(descriptor.mass_fractions, y);
     assert_eq!(storage.sources(), caloric.sources());
@@ -471,6 +538,10 @@ fn common_stream_reference_retains_sources_and_exact_fractions_without_changing_
         pure.advected_composition().unwrap().enthalpy_reference
     );
     assert_ne!(storage.caloric_identity(), pure.caloric_identity());
+    assert_eq!(
+        entropy_anchor.entropy_reference,
+        pure.advected_entropy_anchor().unwrap().entropy_reference
+    );
     let mut varied = controls();
     varied.maximum_iterations += 1;
     varied.energy_tolerance_j *= 2.0;
@@ -487,6 +558,16 @@ fn common_stream_reference_retains_sources_and_exact_fractions_without_changing_
         narrow.advected_composition().unwrap().enthalpy_reference
     );
     assert_ne!(storage.caloric_identity(), narrow.caloric_identity());
+    let narrow_anchor = narrow.advected_entropy_anchor().unwrap();
+    assert_eq!(
+        entropy_anchor.entropy_reference,
+        narrow_anchor.entropy_reference
+    );
+    near(
+        narrow_anchor.reduced_specific_entropy_j_kg_k,
+        entropy::expected_s(y, -40.0, 300.0),
+        2e-10,
+    );
     for t in [290.0, 300.0, 350.0, 400.0, 500.0, 600.0] {
         let enthalpy = h(&storage, t);
         near(enthalpy, expected_h(y, -40.0, t), 2e-8);
@@ -505,6 +586,7 @@ fn common_stream_reference_retains_sources_and_exact_fractions_without_changing_
         .unwrap();
     assert_eq!(closed.specific_enthalpy_domain_j_kg()[0], 0.0);
     assert!(closed.advected_composition().is_none());
+    assert!(closed.advected_entropy_anchor().is_none());
     assert_eq!(closed.caloric_identity(), None);
     near(
         h(&storage, 500.0) - h(&storage, 350.0),
@@ -571,6 +653,18 @@ fn actual_flow_binding_refuses_changed_source_datum_or_composition_atomically() 
                 .unwrap(),
         ];
         let flow = mixer_flow([h(&storage[1], 400.0), h(&storage[2], 400.0)]);
+        if !wrong_composition {
+            assert_ne!(
+                storage[0]
+                    .advected_entropy_anchor()
+                    .unwrap()
+                    .entropy_reference,
+                storage[1]
+                    .advected_entropy_anchor()
+                    .unwrap()
+                    .entropy_reference
+            );
+        }
         let laws = conduction_laws(&storage);
         let (thermal, conduction) = prepare(&laws, &[400.0], &[2.0], false);
         let before = thermal.cells().clone();

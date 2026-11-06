@@ -15959,8 +15959,19 @@ own mass and energy transport, including inlet-fed recirculation and simultaneou
 conduction. This remains prescribed, stationary, mass-balanced bulk flow at
 one fixed pressure. It does not evolve species inventories, select individual
 liquid phases for transport, solve momentum or infer geometry. Original
-fixed-composition storage entropy remains available; chemical-flow entropy
-remains explicitly unclassified by the existing thermal owner.
+fixed-composition storage entropy remains available.
+
+Each stream also retains one `CaloricEntropyAnchor`, prepared from the original
+pure Cp/T integrals and its actual cold equilibrium's mixing entropy. The
+shared entropy-reference identity is independent of composition and prepared
+temperature bracket. It removes only common linear pure-species entropy
+constants, which cancel in the admitted stationary species balance.
+`with_implicit_advection_entropy` uses the existing implicit chain/graph owner
+to retain boundary entropy, signed composition/thermal mixing and numerical
+temporal defect separately on the same accepted BE or SDIRK stages. This is
+source-relative fixed-pressure bulk-flow accounting, without inferred absolute
+species entropy, selective-phase work or a complete pressure/chemical-work
+closure. Enabling the audit preserves the energy trajectory.
 
 Native integration tests run an open implicit mixer at ten cell residence
 times and an inlet-fed recirculating conduction graph against independent
@@ -15968,6 +15979,11 @@ coupled energy equations and analytic variable-Cp enthalpy inverses. They
 cover unequal component masses, both signs of excess Cp, equal-temperature
 heat of mixing, unequal-temperature feeds, conservative external energy,
 exact composition binding, source/datum rejection and unchanged closed storage.
+Additional native cases compare original entropy integrals with actual mixer
+stage quadrature and recirculation/conduction balances, including distinct
+cold brackets, signed excess Cp, equal-temperature mixing, source mismatch
+and cancellation. Audited and energy-only cell states and energy reports are
+bit-for-bit equal.
 
 
 ### Qualified molecular momentum moments

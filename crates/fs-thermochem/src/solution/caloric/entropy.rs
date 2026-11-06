@@ -73,6 +73,43 @@ impl PureLiquidHeatCapacityV1 {
     }
 }
 
+impl BinaryCaloricStateV1 {
+    /// Entropy [J/K] after removing the common linear pure-species constants
+    /// at this owner's caloric reference temperature and fixed pressure.
+    ///
+    /// Original pure Cp/T integrals and the accepted phase mixing entropy are
+    /// retained, including signed excess Cp and coexistence redistribution.
+    /// No absolute species entropy or pressure dependence is inferred. For
+    /// conserved species the omitted constants cancel before evaluation, so
+    /// this coordinate can anchor transport between different compositions.
+    /// Use the local `entropy_change_j_per_k` integral for small thermal
+    /// increments instead of subtracting two such reference-dependent values.
+    pub fn reduced_entropy_j_per_k(&self) -> Result<f64, BinaryCaloricErrorV1> {
+        let mut entropy = Sum::default();
+        for (&moles, source) in self.component_moles.iter().zip(&self.owner.heat_capacity) {
+            if moles != 0.0 {
+                entropy.add(scaled_entropy(
+                    moles,
+                    source.entropy_change_j_per_mol_k(
+                        source.reference_temperature(),
+                        self.temperature,
+                    )?,
+                    "source-relative sensible entropy",
+                )?)?;
+            }
+        }
+        // Symmetric coexistence phases have identical mixing entropy. Use
+        // the original accepted representative, as the enthalpy owner does,
+        // instead of evaluating the unequilibrated overall composition.
+        entropy.add(scaled_entropy(
+            self.total_moles,
+            self.mixing.mixing_entropy_j_per_mol_k(),
+            "source-relative phase mixing entropy",
+        )?)?;
+        entropy.value()
+    }
+}
+
 impl BinaryLiquidCaloricModelV1 {
     /// Entropy change [J/K] of the SAME conserved component inventory under
     /// this original caloric/source binding. Pure-component entropy datums

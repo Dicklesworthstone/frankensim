@@ -712,6 +712,16 @@ alone supplies no entropy account for an unspecified external reservoir.
 Focused tests cover affine Cp, tiny increments, subnormal arithmetic, source
 and inventory refusal, UCST/LCST Clausius bounds and adiabatic demixing.
 
+`BinaryCaloricStateV1::reduced_entropy_j_per_k` supplies a source-relative
+entropy coordinate for transport between compositions. It integrates each
+original pure Cp/T from the shared sensible datum and retains the actual
+accepted homogeneous or coexistence mixing entropy, including signed excess
+Cp. Only common linear pure-species entropy constants are removed; those
+cancel under conserved species. No absolute species entropy or pressure
+dependence is inferred. Small fixed-inventory changes still use the direct
+increment above. Native tests compare signed excess terms, pure-datum limits,
+local increments and a two-liquid binodal against independent formulas.
+
 G0/G1/G3 tests in `src/solution/caloric/tests.rs` check exact source integrals,
 ideal unequal-capacity temperature mixing, both heat-of-mixing signs, an
 independent high-precision two-phase thermal root, the additional equilibrium

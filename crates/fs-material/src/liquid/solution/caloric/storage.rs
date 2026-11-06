@@ -14,9 +14,10 @@
 //! Numeric thermal trials do not refresh mixture transport: publish resolved
 //! phases through the original source-bound law when those properties are used.
 //! Entropy uses the same pure Cp/T integrals and accepted mixing phases.
-//! Only the explicit stream constructor supplies an advection binding and
-//! caloric identity. Chemical entropy transported between different compositions
-//! remains outside the existing stationary-species flow entropy capability.
+//! Only the explicit stream constructor supplies composition, caloric identity
+//! and source-relative entropy anchors for stationary bulk flow. The native
+//! entropy owner retains mixing and thermal contributions separately from
+//! numerical time defects and other heat/work sources.
 
 use super::{
     BinaryCaloricSolveV1, BinaryCaloricStateV1, BinaryLiquidCaloricError, BinaryLiquidCaloricLaw,
@@ -270,6 +271,13 @@ impl ThermalLaw for BinaryLiquidThermalStorage {
         &self,
     ) -> Option<fs_thermal::enthalpy::advection::species::CaloricComposition<'_>> {
         self.stream.as_ref().map(stream::StreamBinding::composition)
+    }
+    fn advected_entropy_anchor(
+        &self,
+    ) -> Option<fs_thermal::enthalpy::advection::species::CaloricEntropyAnchor<'_>> {
+        self.stream
+            .as_ref()
+            .map(stream::StreamBinding::entropy_anchor)
     }
     fn temperature_k(&self, h: f64) -> Result<f64, DepositionError> {
         self.caloric_state_at_specific_enthalpy(h, || false)
