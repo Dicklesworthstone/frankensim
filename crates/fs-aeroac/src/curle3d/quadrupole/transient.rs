@@ -26,7 +26,7 @@ use fs_material::fluid_acoustics::FluidAcousticState;
 use fs_math::{dd::Dd, det};
 
 mod reflection;
-/// Doppler-correct pressure of uniformly translating physical stress moments.
+/// Doppler-correct pressure of uniform and accelerating physical stress moments.
 pub mod moving;
 
 /// One source's physical symmetric stress history at one retarded time.

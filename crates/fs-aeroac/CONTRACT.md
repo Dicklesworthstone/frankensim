@@ -2853,3 +2853,39 @@ particle velocity, acceleration, reflected paths and finite-cell quadrature
 are not inferred. `tests/moving_quadrupole.rs` specifies stationary radial
 orders, independent retarded Green-Hessian refinement, physical clock ratios,
 rotation covariance and domain refusal.
+
+## Accelerating transient quadrupole pressure
+
+`MovingCompactObserver::prepare_emission_quadrupole` and
+`PreparedSourceTrajectory::prepare_quadrupole_receiver` extend the same
+18-coefficient stress-pressure evaluator to accelerating subsonic motion.
+They differentiate the original retarded potential, rather than attaching a
+uniform-motion amplitude to a curved delay. With `D=R*kappa`,
+`C=1-|v/c|²+r.a/c²`, their symmetric spatial derivatives are
+`tau_ij=[C*n_i*n_j-kappa*(n_i*M_j+M_i*n_j)-kappa²*delta_ij]/(c*R*kappa³)`
+and `D_ij=-c*C*tau_ij+(n_i*a_j+a_i*n_j)/(c²*kappa)
+-(r.jerk-3*v.a)*n_i*n_j/(c³*kappa²)`. These retain acceleration and jerk in
+the Green amplitude as well as the original Q/Qdot/Qddot source-clock terms.
+Uniform translation preserves the existing analytic preparation arithmetic.
+
+The trajectory entry point reuses the original admitted quintic, safeguarded
+retarded inverse, residual tolerance and continuous Mach/clearance bounds.
+`kinematics_with_jerk_at` analytically differentiates its original acceleration
+controls in fixed medium-frame axes. It adds no stored trajectory arrays or
+new integration law. Original C2 knots need not have continuous jerk: internal
+knots use the left polynomial, matching the root owner's endpoint convention;
+the first knot uses the right polynomial. Pressure at such a knot uses this
+one-sided convention and does not assert a unique classical Hessian there.
+
+The represented polynomial, source history and their convergence remain
+caller-owned. A bound on retarded source-clock rate does not certify bandwidth
+of geometric modulation or of a jerk jump. This is still prescribed compact
+stress in a homogeneous quiescent lossless medium; moving quadrupole velocity
+fields, finite-cell quadrature, reflections, flow and source feedback are not
+supplied. Preparation and evaluation allocate nothing.
+
+G1/G3 `tests/accelerating_quadrupole.rs` checks stationary/uniform recovery,
+independent bisection and spatial-potential Hessian refinement with acceleration
+and jerk, exact polynomial jets and C2 knot sides, constant-stress jerk
+radiation, rotation covariance and domain/cancellation refusal. Test execution
+and full workspace validation are separate from these specified regressions.

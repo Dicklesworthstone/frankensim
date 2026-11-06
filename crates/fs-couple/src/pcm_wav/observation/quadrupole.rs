@@ -18,7 +18,7 @@ use fs_aeroac::observation::HarmonicSampleClock;
 use fs_bem::near_field::FirstOrder;
 use fs_math::dd::Dd;
 
-/// Doppler-correct pressure from uniformly translating volume-stress histories.
+/// Doppler-correct pressure from uniform and accelerating volume-stress histories.
 pub mod moving;
 
 /// Physical pressure, particle motion, intensity and ideal microphone output.

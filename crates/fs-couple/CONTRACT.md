@@ -1244,8 +1244,8 @@ a declaration does not establish source interpolation or spectral accuracy.
 Callbacks allocate nothing, preserve global integer sample clocks, use DD
 source summation and publish output/cursor only after complete success.
 Out-of-support queries, failed reads and cancellation preserve accepted state.
-Scope is uniform source translation, a fixed omnidirectional receiver and
-homogeneous quiescent lossless propagation on the original moving operator's
+Scope includes uniform and admitted quintic source translations, a fixed
+omnidirectional receiver and homogeneous quiescent lossless propagation on the original moving operator's
 f64 clock domain. No source evolution, interpolation, particle velocity or
 directional/reflected moving field is inferred.
 `tests/moving_quadrupole_pcm.rs` covers history/bandwidth/clearance refusal,
@@ -1393,3 +1393,34 @@ regressions cover linear RC/RLC limits, exact loop work, charging refinement,
 atomic refusal, detected LC turning points and small transfers beneath large
 unrelated energy biases. Both native and combined audits use the original
 solver's stable energy increment.
+
+## Accelerating stress histories through the original PCM renderer
+
+`MovingQuadrupoleSourceWindow<M>` and `MovingQuadrupoleRenderer<F,M>` now
+accept uniform motion, a borrowed `PreparedSourceTrajectory`, or the existing
+mixed `CompactSourceMotion` ensemble. `QuadrupoleMotion` extends the sealed
+original motion owners with complete stress-potential derivatives; the
+renderer retains one source-history, admission, coherent summation and atomic
+streaming loop. Its default remains `UniformSourceMotion`.
+
+Curved paths use their original quintic kinematics and analytic jerk at each
+retarded source event. Their continuous clearance and window-local Doppler
+bounds come from the existing `CompactMotion` implementation. Observer, medium,
+limits, source support and receiver coverage must match. Each original root
+keeps its finite refinement cap; `maximum_retarded_iterations()` reports the
+checked complete-window cap. Admission and constant-work endpoint/final checks
+are additional bounded work. Runtime trajectory lookup and the prepared
+18-coefficient pressure contraction allocate nothing in the renderer.
+
+The receiver remains fixed and omnidirectional in a homogeneous quiescent
+lossless medium. The declared receive bandwidth must account separately for
+geometric modulation: the Doppler clock-rate bound does not certify a curved
+source's full emitted spectrum, especially across C2 knots with jerk jumps.
+History reconstruction, trajectory convergence and antialias accuracy remain
+producer responsibilities. The existing decimator/WAV path consumes the actual
+coherent pressure without a second pitch transform or receiver multiplier.
+
+G3/G4 `tests/accelerating_quadrupole_pcm.rs` specifies mixed-owner retarded
+clocks and chunk invariance, observer/history/Doppler/work refusal, late failure
+and cancellation atomicity, and parity through the native decimator and WAV
+writer. Native execution remains a separate validation obligation.

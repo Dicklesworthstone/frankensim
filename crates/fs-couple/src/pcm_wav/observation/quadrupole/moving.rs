@@ -8,25 +8,31 @@
 //! must cover Doppler shift AND geometric amplitude modulation. Render at an
 //! adequate rate and use the existing `DecimatedRenderer` for downsampling.
 //!
-//! Scope: uniform subsonic source translations, a fixed omnidirectional pressure
-//! receiver, and homogeneous quiescent lossless propagation. This pressure-only
+//! Scope: uniform or original admitted quintic source translations, a fixed
+//! omnidirectional receiver, and homogeneous quiescent lossless propagation.
+//! Analytic trajectory jerk supplies the accelerating radiation coefficients.
+//! C2 knots can have jerk jumps: the original clock-rate bound does not certify
+//! the bandwidth of that geometric modulation. This pressure-only
 //! adapter does not infer particle velocity, directivity from p/Z, reflected
 //! moving paths, compactness, or the validity of a turbulence source model.
 
 use super::{QuadrupolePressureBudget, check_cancel, sizing};
 use crate::pcm_wav::observation::PressureRenderer;
-use crate::pcm_wav::observation::moving::{CompactMotion, MovingPressureConfig, clock_time};
+use crate::pcm_wav::observation::moving::{MovingPressureConfig, clock_time};
 use crate::render::RenderError;
 use fs_aeroac::AeroacError;
 use fs_aeroac::curle3d::moving::{MovingCompactObserver, UniformSourceMotion};
 use fs_aeroac::curle3d::quadrupole::transient::TransientQuadrupoleSource;
 use fs_math::dd::Dd;
 
-/// One original physical stress history and its independent uniform motion.
+mod motion;
+pub use motion::QuadrupoleMotion;
+
+/// One original physical stress history and its independent admitted motion.
 #[derive(Clone, Copy, Debug)]
-pub struct MovingQuadrupoleSourceWindow {
+pub struct MovingQuadrupoleSourceWindow<M = UniformSourceMotion> {
     /// Translation in the same medium rest frame as the receiver and tensor.
-    pub motion: UniformSourceMotion,
+    pub motion: M,
     /// Closed interval [s] available from the original source reader.
     pub source_time_interval_s: [f64; 2],
     /// Physical history bandwidth [Hz], before Doppler and amplitude modulation.
@@ -47,23 +53,24 @@ pub struct MovingQuadrupoleSourceWindow {
 /// once. Each block uses global integer indices and fixed-order DD source sums,
 /// allocates nothing, and publishes output/cursor only after the whole block
 /// succeeds. Failed reads or cancellation leave both unchanged.
-pub struct MovingQuadrupoleRenderer<'a, F> {
+pub struct MovingQuadrupoleRenderer<'a, F, M: QuadrupoleMotion = UniformSourceMotion> {
     observer: MovingCompactObserver,
-    sources: &'a [MovingQuadrupoleSourceWindow],
+    sources: &'a [MovingQuadrupoleSourceWindow<M>],
     source_at: F,
     config: MovingPressureConfig,
     scratch: Vec<f64>,
     completed: u64,
+    maximum_retarded_iterations: u64,
 }
 
-impl<'a, F> MovingQuadrupoleRenderer<'a, F>
+impl<'a, F, M: QuadrupoleMotion> MovingQuadrupoleRenderer<'a, F, M>
 where
     F: Fn(usize, f64) -> Result<TransientQuadrupoleSource, AeroacError>,
 {
     /// Admit all clocks/history/geometry/bandwidth and finite lifetime budgets.
     pub fn new(
         observer: MovingCompactObserver,
-        sources: &'a [MovingQuadrupoleSourceWindow],
+        sources: &'a [MovingQuadrupoleSourceWindow<M>],
         source_at: F,
         config: MovingPressureConfig,
         budget: QuadrupolePressureBudget,
@@ -109,8 +116,19 @@ where
                 "moving quadrupole receiver clock cannot resolve adjacent samples",
             ));
         }
+        let mut iterations_per_sample = 0_u64;
         for source in sources {
             check_cancel(cancelled)?;
+            source.motion.admit_observer(&observer)?;
+            source
+                .motion
+                .admit_clock(first_time, last_time, config.maximum_time_residual_s)?;
+            iterations_per_sample = iterations_per_sample
+                .checked_add(
+                    u64::try_from(source.motion.maximum_root_iterations())
+                        .map_err(|_| sizing("moving quadrupole root limit exceeds u64"))?,
+                )
+                .ok_or_else(|| sizing("moving quadrupole root work overflows"))?;
             let [start, end] = source.source_time_interval_s;
             if !start.is_finite()
                 || !end.is_finite()
@@ -122,20 +140,18 @@ where
                     "moving quadrupole needs finite ordered source support and bandwidth",
                 ));
             }
-            let first = observer
-                .prepare_uniform_quadrupole(
-                    first_time,
-                    &source.motion,
-                    config.maximum_time_residual_s,
-                )
-                .map_err(RenderError::Acoustic)?;
-            let last = observer
-                .prepare_uniform_quadrupole(
-                    last_time,
-                    &source.motion,
-                    config.maximum_time_residual_s,
-                )
-                .map_err(RenderError::Acoustic)?;
+            let first = source.motion.prepare_quadrupole_at(
+                &observer,
+                first_time,
+                config.maximum_time_residual_s,
+                cancelled,
+            )?;
+            let last = source.motion.prepare_quadrupole_at(
+                &observer,
+                last_time,
+                config.maximum_time_residual_s,
+                cancelled,
+            )?;
             if first.source_time_s() < start
                 || last.source_time_s() > end
                 || first.source_time_s() > last.source_time_s()
@@ -144,8 +160,8 @@ where
                     "moving quadrupole retarded clock exceeds declared source support",
                 ));
             }
-            // Uniform propagation is monotone. Its existing motion owner
-            // admits the continuous closest approach and bounds d tau/d t.
+            // Each original motion owner admits continuous clearance and
+            // bounds d tau/d t over this whole finite receiver window.
             let maximum_rate = source.motion.admit_window(
                 &observer,
                 first.propagation(),
@@ -160,6 +176,9 @@ where
                 ));
             }
         }
+        let maximum_retarded_iterations = iterations_per_sample
+            .checked_mul(config.samples)
+            .ok_or_else(|| sizing("moving quadrupole lifetime root work overflows"))?;
         check_cancel(cancelled)?;
         let mut scratch = Vec::new();
         scratch
@@ -173,6 +192,7 @@ where
             config,
             scratch,
             completed: 0,
+            maximum_retarded_iterations,
         })
     }
 
@@ -182,6 +202,12 @@ where
 
     pub const fn max_block_len(&self) -> usize {
         self.config.max_block
+    }
+
+    /// Complete-window cap on interior root refinements, excluding admission
+    /// and the constant-work endpoint/final evaluations. Uniform roots use 0.
+    pub const fn maximum_retarded_iterations(&self) -> u64 {
+        self.maximum_retarded_iterations
     }
 
     pub fn receiver_time_at(&self, index: u64) -> Result<f64, RenderError> {
@@ -234,14 +260,12 @@ where
             let mut sum = Dd::ZERO;
             for (index, source) in self.sources.iter().enumerate() {
                 check_cancel(cancelled)?;
-                let prepared = self
-                    .observer
-                    .prepare_uniform_quadrupole(
-                        time,
-                        &source.motion,
-                        self.config.maximum_time_residual_s,
-                    )
-                    .map_err(RenderError::Acoustic)?;
+                let prepared = source.motion.prepare_quadrupole_at(
+                    &self.observer,
+                    time,
+                    self.config.maximum_time_residual_s,
+                    cancelled,
+                )?;
                 let source_time = prepared.source_time_s();
                 // Keep source readers inside the original finite support even
                 // if rounded retarded roots sit just outside an endpoint.
@@ -274,7 +298,7 @@ where
     }
 }
 
-impl<F> PressureRenderer for MovingQuadrupoleRenderer<'_, F>
+impl<F, M: QuadrupoleMotion> PressureRenderer for MovingQuadrupoleRenderer<'_, F, M>
 where
     F: Fn(usize, f64) -> Result<TransientQuadrupoleSource, AeroacError>,
 {

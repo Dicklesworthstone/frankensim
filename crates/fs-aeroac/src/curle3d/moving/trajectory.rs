@@ -294,6 +294,47 @@ impl PreparedSourceTrajectory {
         self.segments[index].polynomial.evaluate(source_time, true)
     }
 
+    /// Read position, velocity, acceleration and jerk [m/s³] from one quintic.
+    ///
+    /// Jerk differentiates the original acceleration polynomial analytically;
+    /// it is not reconstructed by differencing source samples. C2 preparation
+    /// does not promise continuous jerk: internal knots use the left segment,
+    /// matching the original retarded-root convention, and the first knot uses
+    /// the right segment. These one-sided values do not establish C3 motion or
+    /// a finite bandwidth for geometric amplitude modulation.
+    pub fn kinematics_with_jerk_at(
+        &self,
+        source_time: f64,
+    ) -> Result<(SourceKinematics, [f64; 3]), AeroacError> {
+        let [first, last] = self.source_time_interval_s();
+        if !source_time.is_finite() || source_time < first || source_time > last {
+            return Err(invalid(
+                "kinematics/jerk query is outside retained trajectory",
+            ));
+        }
+        let index = self
+            .segments
+            .partition_point(|segment| segment.polynomial.last.source_time_s < source_time);
+        let segment = &self.segments[index].polynomial;
+        let state = segment.evaluate(source_time, true)?;
+        let u = (Dd::from_f64(source_time) - Dd::from_f64(segment.first.source_time_s))
+            / segment.duration;
+        let controls: [[Dd; 3]; 3] = core::array::from_fn(|i| {
+            core::array::from_fn(|axis| {
+                segment.acceleration[i + 1][axis] - segment.acceleration[i][axis]
+            })
+        });
+        // Differentiate the original degree-three Bernstein acceleration.
+        // Scaling after evaluation needs three DD divisions and no new
+        // retained controls in trajectories that never request jerk.
+        let jerk = evaluate_controls(controls, u)
+            .map(|value| ((value / segment.duration) * Dd::from_f64(3.0)).to_f64());
+        if jerk.iter().any(|v| !v.is_finite()) {
+            return Err(invalid("quintic source jerk is unrepresentable"));
+        }
+        Ok((state, jerk))
+    }
+
     /// Invert the monotone arrival map and prepare the original pressure law.
     ///
     /// The requested receiver timestamp is retained exactly. Admission measures
