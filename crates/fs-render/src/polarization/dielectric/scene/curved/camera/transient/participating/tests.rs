@@ -1,3 +1,5 @@
+mod exposure;
+
 use super::super::{
     LIGHT_M_S, SurfaceEmissionHistory, SurfaceEmissionHistoryBinding, SurfaceEmissionQuery,
     SurfaceHistoryError,

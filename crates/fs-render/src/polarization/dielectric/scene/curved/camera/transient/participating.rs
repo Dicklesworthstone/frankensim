@@ -23,6 +23,8 @@ use crate::polarization::dielectric::scene::curved::participating::{
 use fs_exec::Cx;
 use fs_math::dd::Dd;
 
+pub mod exposure;
+
 /// A completed retarded source observation and its original volume-work counts.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TransientRayleighCameraSample {

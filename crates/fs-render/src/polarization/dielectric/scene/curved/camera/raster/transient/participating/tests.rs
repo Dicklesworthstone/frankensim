@@ -1,3 +1,5 @@
+mod exposure;
+
 use super::super::super::tests::{bindings, camera, settings, with_cx};
 use super::*;
 use crate::charts::TriMesh;

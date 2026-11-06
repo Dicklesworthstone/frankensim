@@ -18,6 +18,8 @@ use crate::spectral::detector::QuantumEfficiencySensor;
 use fs_exec::Cx;
 use fs_math::dd::Dd;
 
+pub mod exposure;
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TransientRayleighPixelSample {
     sample: TransientPixelSample,

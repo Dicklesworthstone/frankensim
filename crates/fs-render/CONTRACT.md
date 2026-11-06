@@ -8350,3 +8350,31 @@ chromatic triangular-pulse area and Beer/QE/photon references at ordinary and
 large DD epochs, and transactional failure of a later spectral lane. Pinned Rust
 formatting/parser checks passed; the authored native tests were not executed in
 the shared editing environment.
+
+
+## Finite exposure through the original refracted molecular walk
+
+The transient molecular camera and raster now compose the same explicit shutter
+and source-owned interval means with their original participating-medium paths.
+Seeded, uniform custom-flight and heterogeneous tracking exposure entry points
+trace each spectral path once. Every actual surface source uses the accumulated
+group delay after all preceding refractive legs and molecular turns. Native
+volume/LTE emission, Beer attenuation, Mueller weights, collision proposals,
+null-candidate acceptance, path limits and cancellation remain unchanged.
+
+`sample_pixel_rayleigh_during_exposure` retains the original CIE mean observation;
+`sample_pixel_sensor_rayleigh_during_exposure` shares the original four paths
+across all QE channels and uses the common exposure conversion to J/(m² sr)
+and photoelectrons per m² sr. Both retain per-lane volume/free-flight counters,
+original random domains and complete-or-error output semantics. There are no
+new temporal samples, repeated paths or unsupported point-sampling fallbacks.
+The original frozen-medium, instantaneous molecular-event and finite-surface
+history boundaries continue to apply.
+
+Two focused regression groups specify a narrow triangular pulse after two
+molecular turns at a large DD epoch, one source mean and unchanged native path/
+flight work; and actual seeded scattering with steady CIE parity, independent
+chromatic integrated energy/photon references, one-versus-three-channel shared
+work and unsupported-history refusal. Pinned Rust formatting/parser checks
+passed for both module trees; native test execution was not performed in the
+shared editing environment.
