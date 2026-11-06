@@ -28,6 +28,7 @@ use crate::articulated::{
 };
 use core::fmt;
 use fs_ga::{GaError, Twist, Vec3, Wrench};
+use fs_math::dd::Dd;
 
 /// Physical momentum acceptance and an absolute parameter-work budget.
 #[derive(Debug, Clone, Copy)]
@@ -60,9 +61,10 @@ pub struct InertiaReconfiguration {
     /// The same mass action independently evaluated on the returned state.
     pub generalized_momentum_after: Vec<f64>,
     /// Signed mechanical kinetic change in joules; positive work enters the
-    /// moving tree. Evaluated in a common translating frame with the actual
-    /// linear-momentum residual correction, avoiding cancellation of unchanged
-    /// bulk kinetic energy. No internal deformation energy is inferred.
+    /// moving tree. Compensated COM-velocity and full-tensor differences retain
+    /// small work beside unchanged bulk translation or spin. All original link
+    /// contributions are reduced before rounding. No internal deformation
+    /// energy is inferred.
     pub parameter_work_j: f64,
     /// Largest componentwise residual across all 6+n generalized momenta and
     /// independently accumulated world angular/linear momenta. At most one.
@@ -182,7 +184,7 @@ pub fn transfer_inertia(
         });
     }
 
-    let (state_after, boost_world) =
+    let state_after =
         raw_momentum_candidate(previous, next, state, momentum_before, &mut cancelled)?;
     let after = state_kinematics(next, &state_after)?;
     poll(&mut cancelled)?;
@@ -197,8 +199,9 @@ pub fn transfer_inertia(
         momentum_after,
         controls,
     )?;
-    let parameter_work_j =
-        parameter_work(previous, next, &before, &after, boost_world, &mut cancelled)?;
+    let parameter_work_j = kinetic_change(previous, next, &before, &after, &mut cancelled)?
+        .total()
+        .to_f64();
     if parameter_work_j.abs() > controls.maximum_parameter_work_j {
         return Err(ReconfigurationError::ParameterWork {
             work_j: parameter_work_j,
@@ -225,7 +228,7 @@ fn raw_momentum_candidate(
     state: &FreeFloatingMotionState,
     momentum_before: ArticulatedMomentum,
     cancelled: &mut impl FnMut() -> bool,
-) -> Result<(FreeFloatingMotionState, Vec3), ReconfigurationError> {
+) -> Result<FreeFloatingMotionState, ReconfigurationError> {
     // A uniform translation has the same generalized momentum in both models:
     // only the centroidal tensors differ. Remove it before the native solve
     // so a large Galilean boost cannot swamp the changing rotational momentum.
@@ -277,17 +280,14 @@ fn raw_momentum_candidate(
     let solved =
         free_floating_impulse_delta(next, &state.joint_position, &zero_joint_rhs, &link_momenta)?;
     poll(cancelled)?;
-    Ok((
-        FreeFloatingMotionState {
-            base: FreeFloatingBaseState::new(
-                state.base.world_from_base,
-                Twist::new(solved.base.angular, solved.base.linear + boost_body),
-            ),
-            joint_position: state.joint_position.clone(),
-            joint_velocity: solved.joint,
-        },
-        boost_world,
-    ))
+    Ok(FreeFloatingMotionState {
+        base: FreeFloatingBaseState::new(
+            state.base.world_from_base,
+            Twist::new(solved.base.angular, solved.base.linear + boost_body),
+        ),
+        joint_position: state.joint_position.clone(),
+        joint_velocity: solved.joint,
+    })
 }
 
 fn validate_compatible_models(
@@ -461,45 +461,63 @@ fn normalized_residual(
     Ok((after - before).abs() / allowed)
 }
 
-fn parameter_work(
+// The mass and material-frame COM stay fixed, but the full centroidal tensor
+// and both endpoint poses/rates may change. No source or reaction work enters
+// this storage calculation.
+fn kinetic_change(
     previous: &ArticulatedModel,
     next: &ArticulatedModel,
     before: &Kinematics,
     after: &Kinematics,
-    boost_world: Vec3,
     cancelled: &mut impl FnMut() -> bool,
-) -> Result<f64, ReconfigurationError> {
-    let mut centered_work = 0.0;
-    let mut actual_linear_residual = Vec3::default();
+) -> Result<crate::MomentumWork, ReconfigurationError> {
+    let mut change = crate::MomentumWork::default();
     for (index, (old, new)) in previous.links().iter().zip(next.links()).enumerate() {
         if index % 64 == 0 {
             poll(cancelled)?;
         }
-        let rotation = before.world_from_link[index].rotation();
-        let local_boost = Twist::new(Vec3::default(), rotation.inverse().rotate(boost_world)?);
-        let old_velocity = before.body_twist[index];
-        let new_velocity = after.body_twist[index];
-        centered_work += new
-            .inertia()
-            .kinetic_energy(new_velocity.minus(local_boost))?
-            - old
-                .inertia()
-                .kinetic_energy(old_velocity.minus(local_boost))?;
-        // Linear momentum depends only on unchanged mass and COM. Evaluate its
-        // actual difference directly, before a large common boost is summed.
-        let delta = old
-            .inertia()
-            .momentum(new_velocity.minus(old_velocity))?
-            .force;
-        actual_linear_residual = actual_linear_residual + rotation.rotate(delta)?;
-        ensure_finite_scalar(centered_work, "reconfigure.centered_work", index)?;
-        validate_vec3(actual_linear_residual, "reconfigure.linear_residual")?;
+        let center = old.inertia().center_of_mass();
+        crate::kinetic_energy::accumulate_spatial_change(
+            &mut change,
+            old.inertia().mass(),
+            [center.x, center.y, center.z],
+            old.inertia().inertia_com().m,
+            before.body_twist[index].to_array(),
+            new.inertia().inertia_com().m,
+            after.body_twist[index].to_array(),
+        );
     }
-    // K_v = K - v.P + (m/2)|v|², hence ΔK = ΔK_v + v.ΔP for fixed mass.
-    // Retain the finite returned state's residual; do not declare it zero.
-    let work = centered_work + boost_world.dot(actual_linear_residual);
-    ensure_finite_scalar(work, "reconfigure.parameter_work", 0)?;
-    Ok(work)
+    let value = change.total().to_f64();
+    ensure_finite_scalar(value, "reconfigure.kinetic_change", 0)?;
+    Ok(change)
+}
+
+fn state_kinetic_change(
+    previous: &ArticulatedModel,
+    next: &ArticulatedModel,
+    before: &FreeFloatingMotionState,
+    after: &FreeFloatingMotionState,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<crate::MomentumWork, ReconfigurationError> {
+    poll(cancelled)?;
+    let before = state_kinematics(previous, before)?;
+    poll(cancelled)?;
+    let after = state_kinematics(next, after)?;
+    poll(cancelled)?;
+    kinetic_change(previous, next, &before, &after, cancelled)
+}
+
+// Compare storage with the original independent work channels BEFORE rounding
+// either their sum or the kinetic increment. No work is inferred from a balance.
+fn kinetic_work_residual(change: crate::MomentumWork, supplied: &[f64]) -> f64 {
+    let mut work = crate::MomentumWork::default();
+    for &value in supplied {
+        work.add_compensated(
+            [Dd::from_f64(value), Dd::ZERO, Dd::ZERO],
+            [Dd::from_f64(1.0), Dd::ZERO, Dd::ZERO],
+        );
+    }
+    change.difference(work).to_f64()
 }
 
 fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<(), ReconfigurationError> {

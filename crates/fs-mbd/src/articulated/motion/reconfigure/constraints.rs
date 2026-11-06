@@ -13,8 +13,8 @@ pub mod step;
 
 use super::{
     InertiaReconfiguration, ReconfigurationControls, ReconfigurationError, audit_momentum,
-    generalized_momentum, parameter_work, raw_momentum_candidate, state_kinematics,
-    transfer_inertia, validate_compatible_models,
+    generalized_momentum, kinetic_change, kinetic_work_residual, raw_momentum_candidate,
+    state_kinematics, transfer_inertia, validate_compatible_models,
 };
 use crate::articulated::motion::{FreeFloatingMotionState, MAX_FREE_FLOATING_STEP_LINKS};
 use crate::articulated::{
@@ -279,7 +279,7 @@ pub fn transfer_inertia_constrained(
     poll(&mut cancelled)?;
     let generalized_momentum_before = generalized_momentum(previous, state)?;
     poll(&mut cancelled)?;
-    let (mut state_after, boost) =
+    let mut state_after =
         raw_momentum_candidate(previous, next, state, momentum_before, &mut cancelled)?;
     let free_rates = apply_rows(constraints, &state_after.joint_velocity, &mut cancelled)?;
     let rhs: Vec<_> = free_rates.iter().map(|rate| -rate).collect();
@@ -323,8 +323,8 @@ pub fn transfer_inertia_constrained(
         momentum_after,
         controls.reconfiguration,
     )?;
-    let kinetic_energy_change_j =
-        parameter_work(previous, next, &before, &after, boost, &mut cancelled)?;
+    let kinetic_increment = kinetic_change(previous, next, &before, &after, &mut cancelled)?;
+    let kinetic_energy_change_j = kinetic_increment.total().to_f64();
     let mut reaction_work_j = 0.0;
     for ((&impulse, &old), &new) in response
         .multipliers
@@ -343,7 +343,10 @@ pub fn transfer_inertia_constrained(
             maximum_j: controls.maximum_reaction_work_j,
         });
     }
-    let parameter_work_j = finite(kinetic_energy_change_j - reaction_work_j, "parameter work")?;
+    let parameter_work_j = finite(
+        kinetic_work_residual(kinetic_increment, &[reaction_work_j]),
+        "parameter work",
+    )?;
     if parameter_work_j.abs() > controls.reconfiguration.maximum_parameter_work_j {
         return Err(ReconfigurationError::ParameterWork {
             work_j: parameter_work_j,

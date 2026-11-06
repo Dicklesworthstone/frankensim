@@ -233,6 +233,68 @@ fn wheel(limits: Option<JointLimits>) -> (ArticulatedModel, FreeFloatingMotionSt
 }
 
 #[test]
+fn full_tensor_parameter_work_survives_dominant_spin_and_enforces_its_budget() {
+    let model = |tensor: [f64; 9]| {
+        ArticulatedModel::new(vec![Link::new(
+            "body",
+            None,
+            Se3::identity(),
+            JointModel::FIXED,
+            SpatialInertia::new(2., Vec3::default(), Mat3 { m: tensor }).unwrap(),
+        )])
+        .unwrap()
+    };
+    let previous = model([2., 0., 0., 0., 3., 0., 0., 0., 4.]);
+    for (tensor, angular, expected) in [
+        (
+            [4., 0., 0., 0., 3., 0., 0., 0., 4.],
+            Vec3::new(1., 0., 1e12),
+            -0.5,
+        ),
+        (
+            [4., 1., 0., 1., 3., 0., 0., 0., 4.],
+            Vec3::new(1., -1., 1e12),
+            5. / 22.,
+        ),
+    ] {
+        let next = model(tensor);
+        let state = FreeFloatingMotionState {
+            base: FreeFloatingBaseState::new(
+                Se3::identity(),
+                Twist::new(angular, Vec3::new(0., 0., 1e12)),
+            ),
+            joint_position: vec![],
+            joint_velocity: vec![],
+        };
+        let result = transfer_inertia(&previous, &next, &state, controls(&[], 1.), || false)
+            .unwrap();
+        // Diagonal case: Lx=2, so Kx changes from 1 to 1/2 J.
+        // Coupled case: pxy=(2,-3), Ixy^-1=[[3,-1],[-1,4]]/11;
+        // final xy energy is 30/11 J, from the initial 5/2 J.
+        close(result.parameter_work_j, expected);
+        assert_eq!(
+            result.momentum_before.kinetic_energy,
+            result.momentum_after.kinetic_energy,
+            "rounded total energies cannot resolve either physical transfer"
+        );
+        assert!(result.maximum_normalized_momentum_residual <= 1.);
+        let reversed = transfer_inertia(
+            &next,
+            &previous,
+            &result.state_after,
+            controls(&[], 1.),
+            || false,
+        )
+        .unwrap();
+        close(reversed.parameter_work_j, -expected);
+        assert!(matches!(
+            transfer_inertia(&previous, &next, &state, controls(&[], 0.), || false),
+            Err(ReconfigurationError::ParameterWork { .. })
+        ));
+    }
+}
+
+#[test]
 fn coaxial_carrier_and_rotor_keep_both_momenta_and_continue_at_new_rates() {
     let (previous, state) = wheel(None);
     let next = with_inertias(&previous, &[sphere(2., 4.), sphere(1., 3.)]);

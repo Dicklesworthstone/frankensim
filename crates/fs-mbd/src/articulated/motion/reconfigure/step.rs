@@ -10,7 +10,7 @@ use super::super::{
 };
 use super::{
     InertiaReconfiguration, ReconfigurationControls, ReconfigurationError, transfer_inertia,
-    validate_compatible_models, validate_controls,
+    kinetic_work_residual, state_kinetic_change, validate_compatible_models, validate_controls,
 };
 use core::fmt;
 use fs_ga::Vec3;
@@ -32,10 +32,12 @@ pub struct InertiaMotionStep {
     /// Sum of ABSOLUTE parameter work, J. Opposite-signed transfers cannot hide
     /// work from the whole-window `maximum_parameter_work_j` budget.
     pub absolute_parameter_work_j: f64,
-    /// Actual final-minus-initial kinetic energy, less parameter work and all
-    /// original smooth work. This is numerical error, not physical dissipation.
-    /// Lab-frame endpoint subtraction can lose small signals under a large
-    /// common boost; the separate parameter-work receipts remain conditioned.
+    /// Actual initial-to-final kinetic increment, independently evaluated from
+    /// the accepted endpoint rates and full tensors before rounding [J].
+    pub kinetic_energy_change_j: f64,
+    /// Actual endpoint kinetic increment, less parameter work and all original
+    /// smooth work. This is numerical error, not physical dissipation. Large
+    /// unchanged translation or spin is not subtracted as absolute storage.
     pub kinetic_work_residual: f64,
     /// Actual world linear-momentum change less original external impulse, N s.
     pub linear_momentum_residual: Vec3,
@@ -281,12 +283,24 @@ fn advance_using<C: FnMut() -> bool>(
     }
     let before = &first_transfer.momentum_before;
     let after = &final_transfer.momentum_after;
-    let kinetic_work_residual = after.kinetic_energy
-        - before.kinetic_energy
-        - net_parameter_work_j
-        - motion.actuator_work
-        - motion.external_work
-        - motion.internal_body_work;
+    let kinetic_increment = state_kinetic_change(
+        previous,
+        next,
+        state,
+        &final_transfer.state_after,
+        &mut cancelled,
+    )?;
+    let kinetic_energy_change_j = kinetic_increment.total().to_f64();
+    let kinetic_work_residual = kinetic_work_residual(
+        kinetic_increment,
+        &[
+            first_transfer.parameter_work_j,
+            final_transfer.parameter_work_j,
+            motion.actuator_work,
+            motion.external_work,
+            motion.internal_body_work,
+        ],
+    );
     let linear_momentum_residual = after.linear_momentum_world
         - before.linear_momentum_world
         - motion.external_linear_impulse_world;
@@ -316,6 +330,7 @@ fn advance_using<C: FnMut() -> bool>(
         final_transfer,
         net_parameter_work_j,
         absolute_parameter_work_j,
+        kinetic_energy_change_j,
         kinetic_work_residual,
         linear_momentum_residual,
         angular_momentum_residual,

@@ -4,7 +4,8 @@
 //! joint reactions enforce `A qddot = 0`; both tensor transfers retain `A qdot = 0`.
 
 use super::super::{
-    ReconfigurationControls, ReconfigurationError, validate_compatible_models,
+    ReconfigurationControls, ReconfigurationError, kinetic_work_residual, state_kinetic_change,
+    validate_compatible_models,
     validate_controls as validate_reconfiguration_controls,
 };
 use super::{
@@ -60,9 +61,12 @@ pub struct ConstrainedInertiaMotionStep {
     pub net_reaction_work_j: f64,
     /// Sum of absolute work from both transfer reactions and smooth motion [J].
     pub absolute_reaction_work_j: f64,
+    /// Actual initial-to-final storage change from accepted rates and full
+    /// endpoint tensors, independently of parameter, reaction or source work [J].
+    pub kinetic_energy_change_j: f64,
     /// Actual endpoint kinetic change minus all supplied physical work [J].
-    /// Numerical error is not heat. Large common boosts can obscure small
-    /// changes in this lab-frame subtraction; transfer work remains conditioned.
+    /// Numerical error is not heat. Compensated differences retain small
+    /// changes beside unchanged bulk translation or spin.
     pub kinetic_work_residual: f64,
     pub linear_momentum_residual: Vec3,
     pub angular_momentum_residual: Vec3,
@@ -288,14 +292,28 @@ pub fn advance_with_effort(
     check_reaction_work(absolute_reaction_work_j, controls.maximum_reaction_work_j)?;
     let before = &first_transfer.momentum_before;
     let after = &final_transfer.momentum_after;
+    let kinetic_increment = state_kinetic_change(
+        previous,
+        next,
+        state,
+        &final_transfer.state_after,
+        &mut cancelled,
+    )?;
+    let kinetic_energy_change_j = kinetic_increment.total().to_f64();
     let kinetic_work_residual = finite(
-        after.kinetic_energy
-            - before.kinetic_energy
-            - net_parameter_work_j
-            - net_reaction_work_j
-            - caller_actuator_work_j
-            - motion.external_work
-            - motion.internal_body_work,
+        kinetic_work_residual(
+            kinetic_increment,
+            &[
+                first_transfer.parameter_work_j,
+                final_transfer.parameter_work_j,
+                first_transfer.reaction_work_j,
+                final_transfer.reaction_work_j,
+                smooth_reaction_work_j,
+                caller_actuator_work_j,
+                motion.external_work,
+                motion.internal_body_work,
+            ],
+        ),
         "endpoint kinetic work residual",
     )?;
     let linear_momentum_residual = after.linear_momentum_world
@@ -321,6 +339,7 @@ pub fn advance_with_effort(
         absolute_parameter_work_j,
         net_reaction_work_j,
         absolute_reaction_work_j,
+        kinetic_energy_change_j,
         kinetic_work_residual,
         linear_momentum_residual,
         angular_momentum_residual,

@@ -110,6 +110,60 @@ fn integral_square(p: f64, k: f64, j: f64, a: f64, t: f64) -> f64 {
 }
 
 #[test]
+fn complete_changing_inertia_storage_retains_small_work_under_common_translation() {
+    let previous = model(2., 1.);
+    let midpoint = model(2.25, 1.125);
+    let next = model(2.5, 1.25);
+    let initial = initial(0.4, 1.2);
+    let loads = FreeFloatingMotionLoads {
+        generalized_force: &[0.3],
+        external_body_wrench: &[Wrench::new(z(0.15), Vec3::default()), Wrench::default()],
+        gravity_world: Vec3::default(),
+    };
+    let reference = advance(
+        &previous,
+        &midpoint,
+        &next,
+        &initial,
+        loads,
+        0.01,
+        controls(10.),
+        || false,
+    )
+    .unwrap();
+    let mut translated = initial.clone();
+    translated.base.twist_body.linear = z(1e12);
+    let result = advance(
+        &previous,
+        &midpoint,
+        &next,
+        &translated,
+        loads,
+        0.01,
+        controls(10.),
+        || false,
+    )
+    .unwrap();
+    let expected = kinetic(result.state_after(), 2.5, 1.25) - kinetic(&translated, 2., 1.);
+    assert!(expected.abs() > 0.1);
+    assert_eq!(
+        result.first_transfer.momentum_before.kinetic_energy,
+        result.final_transfer.momentum_after.kinetic_energy,
+    );
+    close(result.kinetic_energy_change_j, expected);
+    close(result.kinetic_energy_change_j, reference.kinetic_energy_change_j);
+    close(result.net_parameter_work_j, reference.net_parameter_work_j);
+    close(result.motion.actuator_work, reference.motion.actuator_work);
+    close(result.motion.external_work, reference.motion.external_work);
+    close(result.kinetic_work_residual, reference.kinetic_work_residual);
+    close(
+        result.kinetic_work_residual,
+        expected - result.net_parameter_work_j - result.motion.actuator_work
+            - result.motion.external_work,
+    );
+}
+
+#[test]
 fn driven_changing_inertia_preserves_impulses_and_refines_angles_and_parameter_work() {
     let external_torque = 0.15;
     let joint_effort = 0.3;

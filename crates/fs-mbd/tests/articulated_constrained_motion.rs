@@ -134,6 +134,70 @@ fn second_order(errors: [f64; 3], label: &str) {
 }
 
 #[test]
+fn constrained_changing_inertia_keeps_storage_and_reaction_work_under_common_translation() {
+    let previous = model(2., 1., 3.);
+    let midpoint = model(2., 1.125, 3.375);
+    let next = model(2., 1.25, 3.75);
+    let original = state(0.4, 1.2);
+    let rows = [gear()];
+    let loads = FreeFloatingMotionLoads {
+        generalized_force: &[0.3, -0.2],
+        external_body_wrench: &[
+            Wrench::new(z(0.15), Vec3::default()),
+            Wrench::default(),
+            Wrench::default(),
+        ],
+        gravity_world: Vec3::default(),
+    };
+    let reference = advance(
+        &previous,
+        &midpoint,
+        &next,
+        &original,
+        loads,
+        0.01,
+        &rows,
+        controls(10.),
+        || false,
+    )
+    .unwrap();
+    let mut translated = original.clone();
+    translated.base.twist_body.linear = z(1e12);
+    let result = advance(
+        &previous,
+        &midpoint,
+        &next,
+        &translated,
+        loads,
+        0.01,
+        &rows,
+        controls(10.),
+        || false,
+    )
+    .unwrap();
+    let expected = kinetic(result.state_after(), 2., 1.25, 3.75)
+        - kinetic(&translated, 2., 1., 3.);
+    assert!(expected.abs() > 0.1);
+    assert_eq!(
+        result.first_transfer.momentum_before.kinetic_energy,
+        result.final_transfer.momentum_after.kinetic_energy,
+    );
+    close(result.kinetic_energy_change_j, expected);
+    close(result.kinetic_energy_change_j, reference.kinetic_energy_change_j);
+    close(result.net_parameter_work_j, reference.net_parameter_work_j);
+    close(result.net_reaction_work_j, reference.net_reaction_work_j);
+    close(result.caller_actuator_work_j, reference.caller_actuator_work_j);
+    close(result.motion.external_work, reference.motion.external_work);
+    close(result.kinetic_work_residual, reference.kinetic_work_residual);
+    close(
+        result.kinetic_work_residual,
+        expected - result.net_parameter_work_j - result.net_reaction_work_j
+            - result.caller_actuator_work_j - result.motion.external_work,
+    );
+    admit_gear(result.state_after());
+}
+
+#[test]
 fn driven_gear_reactions_and_nonuniform_inertia_refine_to_the_scalar_solution() {
     // Jb=2, J1=1+t, J2=3(1+t). The reduced mass is
     // [[2+4k,-5k],[-5k,13k]], k=1+t, in coordinates (base angle,q1).

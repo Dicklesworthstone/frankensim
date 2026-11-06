@@ -1,4 +1,4 @@
-//! Shared fixed-inertia storage arithmetic for native rigid-body owners.
+//! Shared kinetic-storage arithmetic for native rigid-body and articulated owners.
 //!
 //! Inputs are already admitted by the original state/mass boundaries. Keeping
 //! the quadratic form here lets single-body, pair and coupled consumers use
@@ -88,6 +88,72 @@ impl MomentumWork {
     }
 }
 
+/// Accumulate actual storage change for fixed mass/COM and changing full inertia.
+///
+/// Twists use `[angular, linear]` about the same material-frame origin. Their
+/// world poses may differ: each isotropic COM-translation norm and each
+/// material-frame rotational form can be evaluated in its own endpoint frame.
+/// Inputs are admitted by the original articulated model/state boundaries.
+/// This measures only storage; no source, parameter or reaction law enters it.
+pub(super) fn accumulate_spatial_change(
+    change: &mut MomentumWork,
+    mass: f64,
+    center: [f64; 3],
+    inertia_before: [f64; 9],
+    before: [f64; 6],
+    inertia_after: [f64; 9],
+    after: [f64; 6],
+) {
+    if inertia_before == inertia_after && before == after {
+        return;
+    }
+    let half = Dd::from_f64(0.5);
+    let center = center.map(Dd::from_f64);
+    let old_angular = [before[0], before[1], before[2]].map(Dd::from_f64);
+    let new_angular = [after[0], after[1], after[2]].map(Dd::from_f64);
+    let center_velocity = |twist: [f64; 6], angular: [Dd; 3]| -> [Dd; 3] {
+        let linear = [twist[3], twist[4], twist[5]].map(Dd::from_f64);
+        let offset = [
+            angular[1] * center[2] - angular[2] * center[1],
+            angular[2] * center[0] - angular[0] * center[2],
+            angular[0] * center[1] - angular[1] * center[0],
+        ];
+        core::array::from_fn(|i| linear[i] + offset[i])
+    };
+    let old_center = center_velocity(before, old_angular);
+    let new_center = center_velocity(after, new_angular);
+    let mass = Dd::from_f64(mass);
+    change.add_compensated(
+        core::array::from_fn(|i| half * old_center[i] + half * new_center[i]),
+        core::array::from_fn(|i| mass * (new_center[i] - old_center[i])),
+    );
+
+    let old_tensor = inertia_before.map(Dd::from_f64);
+    let tensor_action = |tensor: [Dd; 9], vector: [Dd; 3]| {
+        core::array::from_fn(|row| {
+            tensor[3 * row] * vector[0]
+                + tensor[3 * row + 1] * vector[1]
+                + tensor[3 * row + 2] * vector[2]
+        })
+    };
+    let mean_angular = core::array::from_fn(|i| half * old_angular[i] + half * new_angular[i]);
+    let delta_angular = core::array::from_fn(|i| new_angular[i] - old_angular[i]);
+    // Exact variable-metric polarization:
+    // ΔKrot = mean(ω)·I0·Δω + 1/2 ω1·(I1-I0)·ω1.
+    // Form Δω and ΔI BEFORE products with a dominant unchanged spin.
+    change.add_compensated(mean_angular, tensor_action(old_tensor, delta_angular));
+    if inertia_before != inertia_after {
+        let new_tensor = inertia_after.map(Dd::from_f64);
+        change.add_compensated(
+            new_angular.map(|value| half * value),
+            tensor_action(
+                core::array::from_fn(|i| new_tensor[i] - old_tensor[i]),
+                new_angular,
+            ),
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -167,5 +233,84 @@ mod tests {
             sum.add_fixed_inertia(2.0, [2.0, 3.0, 4.0], IDENTITY, old, new);
             assert_eq!(sum.total().to_f64(), expected);
         }
+    }
+    const OLD_TENSOR: [f64; 9] = [2.0, 0.0, 0.0, 0.0, 3.0, 0.0, 0.0, 0.0, 4.0];
+
+    #[test]
+    fn dominant_unchanged_spin_cannot_hide_signed_parameter_work() {
+        let next_tensor = [4.0, 0.0, 0.0, 0.0, 3.0, 0.0, 0.0, 0.0, 4.0];
+        let old = [1.0, 0.0, 1e12, 0.0, 0.0, 1e12];
+        let new = [0.5, 0.0, 1e12, 0.0, 0.0, 1e12];
+        for (i0, v0, i1, v1, expected) in [
+            (OLD_TENSOR, old, next_tensor, new, -0.5),
+            (next_tensor, new, OLD_TENSOR, old, 0.5),
+            (OLD_TENSOR, old, OLD_TENSOR, old, 0.0),
+        ] {
+            let mut change = MomentumWork::default();
+            accumulate_spatial_change(&mut change, 2.0, [0.0; 3], i0, v0, i1, v1);
+            assert_eq!(change.total().to_f64(), expected);
+        }
+    }
+
+    #[test]
+    fn changing_nondiagonal_tensor_keeps_the_original_cross_inertia() {
+        let next_tensor = [4.0, 1.0, 0.0, 1.0, 3.0, 0.0, 0.0, 0.0, 4.0];
+        let mut change = MomentumWork::default();
+        accumulate_spatial_change(
+            &mut change,
+            2.0,
+            [0.0; 3],
+            OLD_TENSOR,
+            [1.0, -1.0, 1e12, 0.0, 0.0, 1e12],
+            next_tensor,
+            [9.0 / 11.0, -14.0 / 11.0, 1e12, 0.0, 0.0, 1e12],
+        );
+        // pxy=(2,-3) and Ixy^-1=[[3,-1],[-1,4]]/11 give
+        // Kxy=30/11 J after, from 5/2 J before: gain 5/22 J.
+        assert!((change.total().to_f64() - 5.0 / 22.0).abs() < 2e-14);
+    }
+
+    #[test]
+    fn offset_com_uses_centroidal_motion_and_is_covariant_under_axis_relabeling() {
+        for (center, tensor, before, after) in [
+            (
+                [1.0, 0.0, 0.0],
+                OLD_TENSOR,
+                [1e12, 0.0, 2.0, 0.0, 3.0, 1e12],
+                [1e12, 0.0, 1.0, 0.0, 2.0, 1e12],
+            ),
+            (
+                [0.0, 1.0, 0.0],
+                [4.0, 0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 3.0],
+                [2.0, 1e12, 0.0, 1e12, 0.0, 3.0],
+                [1.0, 1e12, 0.0, 1e12, 0.0, 2.0],
+            ),
+        ] {
+            let mut change = MomentumWork::default();
+            accumulate_spatial_change(&mut change, 2.0, center, tensor, before, tensor, after);
+            // Transverse COM speed changes 5 -> 3 m/s, spin rate 2 -> 1:
+            // translation loses 16 J and I=4 rotation loses 6 J.
+            assert_eq!(change.total().to_f64(), -22.0);
+        }
+    }
+
+    #[test]
+    fn changing_link_transfers_reduce_before_rounding_absolute_storage() {
+        let p = 2.0_f64.powi(54);
+        let diagonal = |value| [value, 0.0, 0.0, 0.0, value, 0.0, 0.0, 0.0, value];
+        let mut change = MomentumWork::default();
+        for (next_inertia, delta_rate) in [(4.0, 4.0), (2.0, -8.0)] {
+            accumulate_spatial_change(
+                &mut change,
+                2.0,
+                [0.0; 3],
+                diagonal(3.0),
+                [p, 0.0, 0.0, 0.0, 0.0, 0.0],
+                diagonal(next_inertia),
+                [p + delta_rate, 0.0, 0.0, 0.0, 0.0, 0.0],
+            );
+        }
+        // 1/2[4(p+4)^2 + 2(p-8)^2 - 6p^2] = 96 J.
+        assert_eq!(change.total().to_f64(), 96.0);
     }
 }

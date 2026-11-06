@@ -1989,10 +1989,13 @@ The result independently reconstructs all 6+n momenta through a zero-velocity
 RNEA mass action and world linear/spin-plus-orbital momentum through native link
 kinematics. Caller-declared componentwise physical tolerances govern admission.
 The inverse-mass solve uses a common translating frame to avoid contamination
-by large bulk motion. Signed parameter work is evaluated in that same frame
-with the actual linear-momentum-residual correction; it remains available when
-rounded lab kinetic totals lose a small rotational-energy change. Positive
-and negative work both consume the absolute budget. No heat partition follows.
+by large bulk motion. Signed parameter work uses compensated COM-velocity
+differences and the full centroidal-tensor identity
+`delta Krot = mean(omega) dot I0 delta(omega) + omega1 dot (I1-I0) omega1 / 2`.
+Every original link enters the shared kinetic accumulator before rounding,
+retaining small work beside unchanged bulk translation or spin. The actual
+accepted endpoint governs the absolute work budget, for positive and negative
+work alike. No heat partition follows.
 
 Identical models preserve state bits after admission. Invalid resulting rates,
 changed inventory/geometry, work exhaustion, numerical failure or cancellation
@@ -2109,9 +2112,12 @@ Signed parameter work remains separate from actuator, external and internal
 body work. The complete-window budget caps the sum of absolute parameter work:
 the final transfer receives only the unused allowance, so opposite-signed
 changes cannot cancel out of admission. Actual endpoint energy and world
-momentum residuals independently audit the entire step. Lab-frame kinetic
-subtraction can lose small signals under a large common boost; the separate
-conditioned parameter-work receipts retain their own numerical meaning.
+momentum residuals independently audit the entire step. The public
+`kinetic_energy_change_j` is independently reconstructed from accepted endpoint
+rates and full tensors. Storage is compared with the original parameter,
+actuator and external/internal-body work channels before rounding, rather than
+subtracting absolute kinetic totals or defining a source by residual. The fixed
+per-link mass/COM and prescribed-inertia model restrictions remain unchanged.
 
 Stage-dependent effort callbacks retain the native elapsed times zero and
 half-duration. The first callback sees the virtual transferred state at the
@@ -2187,6 +2193,10 @@ The last transfer receives only each remaining allowance, including reaction
 work already supplied during smooth motion. Opposite signs cannot hide work.
 Both transfer receipts, both stage reactions and the native motion result are
 retained, with independently calculated final energy and world-momentum residuals.
+The same compensated endpoint-storage owner supplies `kinetic_energy_change_j`
+and the full-window residual. Parameter, transfer-reaction, smooth-reaction,
+caller-actuator and external/internal-body work remain distinct inputs to that
+comparison.
 A failed stage/helper/native step or cancellation returns no state; typed helper
 errors survive the callback adapter. Callback-owned side effects cannot roll back.
 
