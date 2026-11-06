@@ -2371,3 +2371,36 @@ counted once, bounded work and cancellation. Original applicable numerical
 implementations were used; unavailable constellation dependencies prevent a full
 workspace Cargo/DSR result. This increment does not establish thermal-feature,
 facade/example compilation or empirical evaluated-isotope accuracy.
+
+## Evaluated decay radiation energy partitions
+
+`radiation::decay::PreparedDecayRadiation` prepares composition-dependent group
+energies from an original `PreparedDecayEmission` and its original decay-energy
+routing. Every parent with outward energy must have the selected spectrum and
+no positive outward energy in another decay-heat category. The selected
+spectral energy must agree with the original outward mean energy within an
+explicit `DecayRadiationClosure` data-discrepancy allowance. Accepted group
+weights are reconciled to that original energy; the absolute adjustment is
+reported separately and never creates heat or enlarges a numerical tolerance.
+
+Preparation retains immutable per-parent coefficients and model identity.
+Application uses integrated original decay counts, including newborn daughters,
+or matched original burnup decay-channel counts. Capture and fission channels
+retain their independent energy accounts. Near-one branch sums are handled
+explicitly when converting branch counts to parent events. Scaled positive
+products, storage/work limits and cancellation reuse the original numerical
+owners; missing spectra, incompatible models and unrepresentable amplification
+are refused.
+
+Stochastic application uses the actual integer parent and branch counts,
+checking exact count consistency and the original 2^53 event ceiling before
+binary64 conversion. It preserves the trajectory and consumes no randomness.
+The returned spectrum is expected emission conditional on those decays; photon
+sampling, angular correlations and branch-resolved cascades are not supplied.
+Ordinary caller-provided step reports are not authenticated receipts.
+
+Seven regressions cover daughter ingrowth and subdivision, different per-parent
+routing, explicit spectral reconciliation, missing-energy refusal, reordered
+burnup with competing capture, bounded work and cancellation, and stochastic
+trajectory/replay/count consistency. Spectral reconciliation records data
+agreement; it does not propagate evaluated covariance or establish data accuracy.

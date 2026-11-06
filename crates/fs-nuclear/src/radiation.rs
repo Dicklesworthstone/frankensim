@@ -13,6 +13,9 @@ use std::sync::Arc;
 /// Energy-dependent deposition on an explicit emitted-radiation group grid.
 pub mod grouped;
 
+/// Evaluated decay spectra reconciled to the original outward energy account.
+pub mod decay;
+
 /// Fixed admission tolerance for the sum of a supplied response row.
 /// Coefficients are never renormalized; admitted defects are charged in joules.
 pub const ROW_CLOSURE_TOLERANCE: f64 = 16.0 * f64::EPSILON;
