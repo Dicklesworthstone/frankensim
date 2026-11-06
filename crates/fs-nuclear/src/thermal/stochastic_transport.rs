@@ -1,4 +1,4 @@
-//! Integer radioactive movement and event-local heat in a complete cell cohort.
+//! Integer radioactive supply, movement and heat in a complete cell cohort.
 //!
 //! Every cell handle shares one accepted physical history. The grouped source
 //! trial advances the cohort once, so a transferred nucleus can decay in its
@@ -12,49 +12,171 @@ use fs_thermal::enthalpy::{CellId, MaterialId};
 use super::source::{NuclearHeatSource, sealed};
 use super::{FissionThermalError, NuclearHeating};
 use crate::decay::DecayError;
-use crate::decay::stochastic::StochasticDecayStep;
+use crate::decay::stochastic::transport::production::{
+    StochasticDecayProductionTransportBudget, StochasticDecayProductionTransportState,
+    StochasticDecayProductionTransportStep,
+};
 use crate::decay::stochastic::transport::{
     StochasticDecayTransportBudget, StochasticDecayTransportState, StochasticDecayTransportStep,
 };
+use crate::decay::stochastic::{StochasticDecayInventory, StochasticDecayStep};
 use crate::{EnergyChannels, FissionError};
+
+mod cohort_sealed {
+    pub trait Sealed {}
+}
+
+/// Admitted stochastic compartment histories supported by one thermal adapter.
+///
+/// The implementations are sealed to the original transport owners. They retain
+/// fixed compartment identities and return one local decay account per cell.
+/// This lets supplied and unsupplied cohorts share binding, event clipping,
+/// material admission, report mapping and all-or-nothing thermal publication.
+pub trait StochasticDecayCohort: cohort_sealed::Sealed + Clone + std::fmt::Debug {
+    type Budget: Copy + std::fmt::Debug;
+    type Step: Clone + std::fmt::Debug;
+
+    fn time_s(&self) -> f64;
+    fn inventories(&self) -> &[StochasticDecayInventory];
+    fn next_transition_time_s(&self) -> Option<f64>;
+    fn energy_tolerance_j(budget: Self::Budget) -> f64;
+    fn trial_cohort_to(
+        &self,
+        end_s: f64,
+        budget: Self::Budget,
+        checkpoint: &mut dyn FnMut() -> Result<(), DecayError>,
+    ) -> Result<(Self, Self::Step), DecayError>;
+    fn transport_report(step: &Self::Step) -> &StochasticDecayTransportStep;
+    fn produced_nuclei(step: &Self::Step, compartment: usize) -> u64;
+}
+
+impl cohort_sealed::Sealed for StochasticDecayTransportState {}
+
+impl StochasticDecayCohort for StochasticDecayTransportState {
+    type Budget = StochasticDecayTransportBudget;
+    type Step = StochasticDecayTransportStep;
+
+    fn time_s(&self) -> f64 {
+        StochasticDecayTransportState::time_s(self)
+    }
+    fn inventories(&self) -> &[StochasticDecayInventory] {
+        StochasticDecayTransportState::inventories(self)
+    }
+    fn next_transition_time_s(&self) -> Option<f64> {
+        StochasticDecayTransportState::next_event_time_s(self)
+    }
+    fn energy_tolerance_j(budget: Self::Budget) -> f64 {
+        budget.decay.energy_tolerance_j
+    }
+    fn trial_cohort_to(
+        &self,
+        end_s: f64,
+        budget: Self::Budget,
+        checkpoint: &mut dyn FnMut() -> Result<(), DecayError>,
+    ) -> Result<(Self, Self::Step), DecayError> {
+        StochasticDecayTransportState::trial_to(self, end_s, budget, checkpoint)
+    }
+    fn transport_report(step: &Self::Step) -> &StochasticDecayTransportStep {
+        step
+    }
+    fn produced_nuclei(_: &Self::Step, _: usize) -> u64 {
+        0
+    }
+}
+
+impl cohort_sealed::Sealed for StochasticDecayProductionTransportState {}
+
+impl StochasticDecayCohort for StochasticDecayProductionTransportState {
+    type Budget = StochasticDecayProductionTransportBudget;
+    type Step = StochasticDecayProductionTransportStep;
+
+    fn time_s(&self) -> f64 {
+        StochasticDecayProductionTransportState::time_s(self)
+    }
+    fn inventories(&self) -> &[StochasticDecayInventory] {
+        StochasticDecayProductionTransportState::inventories(self)
+    }
+    fn next_transition_time_s(&self) -> Option<f64> {
+        StochasticDecayProductionTransportState::next_transition_time_s(self)
+    }
+    fn energy_tolerance_j(budget: Self::Budget) -> f64 {
+        budget.transport.decay.energy_tolerance_j
+    }
+    fn trial_cohort_to(
+        &self,
+        end_s: f64,
+        budget: Self::Budget,
+        checkpoint: &mut dyn FnMut() -> Result<(), DecayError>,
+    ) -> Result<(Self, Self::Step), DecayError> {
+        StochasticDecayProductionTransportState::trial_to(self, end_s, budget, checkpoint)
+    }
+    fn transport_report(step: &Self::Step) -> &StochasticDecayTransportStep {
+        &step.transport
+    }
+    fn produced_nuclei(step: &Self::Step, compartment: usize) -> u64 {
+        // The core admits the complete interval's birth count at or below 2^53.
+        step.produced_nuclei[compartment].iter().copied().sum()
+    }
+}
 
 /// One thermal cell's immutable view of the complete stochastic cohort.
 /// Construct all handles together with [`Self::bind`], then advance them together.
 #[derive(Clone, Debug)]
-pub struct StochasticDecayTransportCellSource {
+pub struct StochasticDecayCohortCellSource<C: StochasticDecayCohort> {
     cell_id: CellId,
     material_id: MaterialId,
     compartment_index: usize,
-    state: Arc<StochasticDecayTransportState>,
+    state: Arc<C>,
 }
+
+/// An original transport cohort bound to a thermal cell.
+pub type StochasticDecayTransportCellSource =
+    StochasticDecayCohortCellSource<StochasticDecayTransportState>;
+
+/// A supplied transport cohort bound to a thermal cell.
+pub type StochasticDecayProductionTransportCellSource =
+    StochasticDecayCohortCellSource<StochasticDecayProductionTransportState>;
 
 /// Sampled movement, radioactive transformation and original thermal storage.
 pub type StochasticDecayTransportHeating = NuclearHeating<StochasticDecayTransportCellSource>;
 
+/// Sampled supply, movement, decay and original thermal storage in one history.
+pub type StochasticDecayProductionTransportHeating =
+    NuclearHeating<StochasticDecayProductionTransportCellSource>;
+
 /// The original compartment emission account plus the shared movement report.
 #[derive(Clone, Debug)]
-pub struct StochasticDecayTransportCellStep {
+pub struct StochasticDecayCohortCellStep<C: StochasticDecayCohort> {
     compartment_index: usize,
-    transport: Arc<StochasticDecayTransportStep>,
+    report: Arc<C::Step>,
 }
 
-impl StochasticDecayTransportCellStep {
+pub type StochasticDecayTransportCellStep =
+    StochasticDecayCohortCellStep<StochasticDecayTransportState>;
+pub type StochasticDecayProductionTransportCellStep =
+    StochasticDecayCohortCellStep<StochasticDecayProductionTransportState>;
+
+impl<C: StochasticDecayCohort> StochasticDecayCohortCellStep<C> {
     pub fn decay(&self) -> &StochasticDecayStep {
-        &self.transport.decay[self.compartment_index]
+        &self.transport().decay[self.compartment_index]
     }
     pub fn transport(&self) -> &StochasticDecayTransportStep {
-        &self.transport
+        C::transport_report(&self.report)
+    }
+    /// The entire shared interval report, including supply for a produced cohort.
+    pub fn report(&self) -> &C::Step {
+        &self.report
     }
     pub fn compartment_index(&self) -> usize {
         self.compartment_index
     }
 }
 
-impl StochasticDecayTransportCellSource {
+impl<C: StochasticDecayCohort> StochasticDecayCohortCellSource<C> {
     /// Bind one distinct original thermal cell to every compartment. Rates are
     /// already authored per-nucleus hazards; binding does not infer carrier flow.
     pub fn bind(
-        state: Arc<StochasticDecayTransportState>,
+        state: Arc<C>,
         cells: Vec<(CellId, MaterialId)>,
     ) -> Result<Vec<Self>, FissionThermalError> {
         if cells.len() != state.inventories().len() {
@@ -80,7 +202,7 @@ impl StochasticDecayTransportCellSource {
         Ok(sources)
     }
 
-    pub fn state(&self) -> &Arc<StochasticDecayTransportState> {
+    pub fn state(&self) -> &Arc<C> {
         &self.state
     }
     pub fn compartment_index(&self) -> usize {
@@ -98,11 +220,11 @@ impl StochasticDecayTransportCellSource {
     }
 }
 
-impl sealed::Sealed for StochasticDecayTransportCellSource {}
+impl<C: StochasticDecayCohort> sealed::Sealed for StochasticDecayCohortCellSource<C> {}
 
-impl NuclearHeatSource for StochasticDecayTransportCellSource {
-    type Budget = StochasticDecayTransportBudget;
-    type Step = StochasticDecayTransportCellStep;
+impl<C: StochasticDecayCohort> NuclearHeatSource for StochasticDecayCohortCellSource<C> {
+    type Budget = C::Budget;
+    type Step = StochasticDecayCohortCellStep<C>;
 
     fn cell_id(&self) -> CellId {
         self.cell_id
@@ -111,14 +233,16 @@ impl NuclearHeatSource for StochasticDecayTransportCellSource {
         self.material_id
     }
     fn energy_tolerance_j(budget: Self::Budget) -> f64 {
-        budget.decay.energy_tolerance_j
+        C::energy_tolerance_j(budget)
     }
     fn next_transition(&self, time_s: f64) -> Option<f64> {
         // Complete-cohort validation guarantees this representative exists.
         // The thermal owner takes the union of source boundaries: advertising
         // the same shared event from every cell would rescan all clocks C times.
         if self.compartment_index == 0 {
-            self.state.next_event_time_s().filter(|&next| next > time_s)
+            self.state
+                .next_transition_time_s()
+                .filter(|&next| next > time_s)
         } else {
             None
         }
@@ -127,7 +251,7 @@ impl NuclearHeatSource for StochasticDecayTransportCellSource {
     fn admit(&self, time_s: f64, _: f64, budget: Self::Budget) -> Result<(), FissionThermalError> {
         self.check_clock(time_s)?;
         if self.compartment_index == 0 {
-            self.state.trial_to(time_s, budget, || Ok(()))?;
+            self.state.trial_cohort_to(time_s, budget, &mut || Ok(()))?;
         }
         Ok(())
     }
@@ -201,7 +325,7 @@ impl NuclearHeatSource for StochasticDecayTransportCellSource {
         let first = sources[0];
         first.check_clock(time_s)?;
         let mut checkpoint_error = None;
-        let trial = first.state.trial_to(end_s, budget, || {
+        let trial = first.state.trial_cohort_to(end_s, budget, &mut || {
             checkpoint().map_err(|error| {
                 checkpoint_error = Some(error);
                 DecayError::Cancelled
@@ -223,9 +347,9 @@ impl NuclearHeatSource for StochasticDecayTransportCellSource {
                     compartment_index: source.compartment_index,
                     state: Arc::clone(&state),
                 },
-                StochasticDecayTransportCellStep {
+                StochasticDecayCohortCellStep {
                     compartment_index: source.compartment_index,
-                    transport: Arc::clone(&report),
+                    report: Arc::clone(&report),
                 },
             ));
         }
@@ -241,6 +365,9 @@ impl NuclearHeatSource for StochasticDecayTransportCellSource {
     fn decays(step: &Self::Step) -> f64 {
         step.decay().events as f64
     }
+    fn produced_nuclei(step: &Self::Step) -> f64 {
+        C::produced_nuclei(step.report(), step.compartment_index) as f64
+    }
     fn fissions(_: &Self::Step) -> f64 {
         0.0
     }
@@ -254,3 +381,6 @@ impl NuclearHeatSource for StochasticDecayTransportCellSource {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod production_tests;

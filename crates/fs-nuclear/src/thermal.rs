@@ -83,8 +83,10 @@ pub use stochastic_production::{
 
 mod stochastic_transport;
 pub use stochastic_transport::{
-    StochasticDecayTransportCellSource, StochasticDecayTransportCellStep,
-    StochasticDecayTransportHeating,
+    StochasticDecayCohort, StochasticDecayCohortCellSource, StochasticDecayCohortCellStep,
+    StochasticDecayProductionTransportCellSource, StochasticDecayProductionTransportCellStep,
+    StochasticDecayProductionTransportHeating, StochasticDecayTransportCellSource,
+    StochasticDecayTransportCellStep, StochasticDecayTransportHeating,
 };
 
 mod kinetics;

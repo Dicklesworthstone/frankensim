@@ -550,6 +550,13 @@ original local emission channels remain distinct. Supply and movement infer no
 creation heat or carrier enthalpy. Event processing allocates nothing, and any
 refusal retains the entire original history.
 
+`thermal::StochasticDecayProductionTransportHeating` binds that same combined
+history to every original material cell. The existing transport adapter now
+uses one sealed `StochasticDecayCohort` interface for supplied and unsupplied
+cohorts, sharing complete-cohort admission, the single event-boundary scan,
+original endpoint handling, local heat mapping and atomic material publication.
+Each cell's interval report exposes the shared complete production/transport
+report through `report()` and its original local emission through `decay()`.
 The manufactured `stochastic_production_transport` example demonstrates a source
 pulse feeding a downstream compartment with daughter decay, outflow, integer
 balance and exact cloned restart.
