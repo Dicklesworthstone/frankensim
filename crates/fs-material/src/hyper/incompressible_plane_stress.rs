@@ -229,7 +229,23 @@ pub fn incompressible_plane_stress_state<L: IncompressiblePlaneStressPotential +
     in_plane: &[f64; 4],
     settings: PlaneStressSettings,
 ) -> Result<IncompressiblePlaneStressState, MaterialError> {
-    generic_state(material, in_plane, settings).map(|(state, _)| state)
+    generic_state(material, in_plane, None, settings).map(|(state, _)| state)
+}
+
+/// Exact-volume relaxation from a retained or caller-supplied transverse shear
+/// `[F02,F12]`. Thickness is always recomputed as `J_reference/det(a)`; a warm
+/// start never changes the incompressibility constraint or material history.
+/// Nonfinite seed entries refuse. A finite seed outside the material domain or
+/// stable shear branch falls back to zero shear once, before Newton begins.
+pub fn incompressible_plane_stress_state_with_seed<
+    L: IncompressiblePlaneStressPotential + ?Sized,
+>(
+    material: &L,
+    in_plane: &[f64; 4],
+    initial_shear: [f64; 2],
+    settings: PlaneStressSettings,
+) -> Result<IncompressiblePlaneStressState, MaterialError> {
+    generic_state(material, in_plane, Some(initial_shear), settings).map(|(state, _)| state)
 }
 
 /// Exact-volume plane stress with the consistent constrained-energy tangent.
@@ -241,7 +257,27 @@ pub fn incompressible_plane_stress<L: IncompressiblePlaneStressPotential + ?Size
     in_plane: &[f64; 4],
     settings: PlaneStressSettings,
 ) -> Result<IncompressiblePlaneStressResponse, MaterialError> {
-    let (state, remainder) = generic_state(material, in_plane, settings)?;
+    let (state, remainder) = generic_state(material, in_plane, None, settings)?;
+    generic_response(state, remainder, in_plane)
+}
+
+/// Seeded exact-volume equilibrium with the same consistent condensed tangent.
+/// See [`incompressible_plane_stress_state_with_seed`] for seed admission.
+pub fn incompressible_plane_stress_with_seed<L: IncompressiblePlaneStressPotential + ?Sized>(
+    material: &L,
+    in_plane: &[f64; 4],
+    initial_shear: [f64; 2],
+    settings: PlaneStressSettings,
+) -> Result<IncompressiblePlaneStressResponse, MaterialError> {
+    let (state, remainder) = generic_state(material, in_plane, Some(initial_shear), settings)?;
+    generic_response(state, remainder, in_plane)
+}
+
+fn generic_response(
+    state: IncompressiblePlaneStressState,
+    remainder: Option<RemainderResponse>,
+    in_plane: &[f64; 4],
+) -> Result<IncompressiblePlaneStressResponse, MaterialError> {
     let remainder = remainder.ok_or_else(|| state_error("missing accepted remainder tangent"))?;
     let determinant = in_plane[0] * in_plane[3] - in_plane[1] * in_plane[2];
     let thickness = state.deformation_gradient[8];
@@ -289,12 +325,14 @@ pub fn incompressible_plane_stress<L: IncompressiblePlaneStressPotential + ?Size
 fn generic_state<L: IncompressiblePlaneStressPotential + ?Sized>(
     material: &L,
     in_plane: &[f64; 4],
+    initial_shear: Option<[f64; 2]>,
     settings: PlaneStressSettings,
 ) -> Result<(IncompressiblePlaneStressState, Option<RemainderResponse>), MaterialError> {
     incompressible_state_with(
         in_plane,
         settings,
         material.incompressible_reference_volume_ratio(),
+        initial_shear,
         |f| {
             let response = material.incompressible_remainder_response(f)?;
             if !response.potential_pa.is_finite()
@@ -428,6 +466,7 @@ impl Hyperelastic {
             in_plane,
             settings,
             1.0,
+            None,
             |f| {
                 let (stress, block) = self.incompressible_shear_data(f)?;
                 Ok(ShearEvaluation {
@@ -446,6 +485,7 @@ fn incompressible_state_with(
     in_plane: &[f64; 4],
     settings: PlaneStressSettings,
     reference_volume: f64,
+    initial_shear: Option<[f64; 2]>,
     shear: impl Fn(&[f64; 9]) -> Result<ShearEvaluation, MaterialError>,
     point: impl Fn(&[f64; 9]) -> Result<([f64; 9], f64), MaterialError>,
 ) -> Result<(IncompressiblePlaneStressState, Option<RemainderResponse>), MaterialError> {
@@ -470,11 +510,30 @@ fn incompressible_state_with(
             "finite orientation-preserving in-plane gradient required",
         ));
     }
+    let seed = initial_shear.unwrap_or([0.0, 0.0]);
+    if seed.iter().any(|value| !value.is_finite()) {
+        return Err(state_error("finite transverse shear seed required"));
+    }
     let mut f = constrained_gradient(
-        &[in_plane[0], in_plane[1], in_plane[2], in_plane[3], 0.0, 0.0],
+        &[
+            in_plane[0],
+            in_plane[1],
+            in_plane[2],
+            in_plane[3],
+            seed[0],
+            seed[1],
+        ],
         reference_volume,
     );
-    let mut data = shear(&f)?;
+    let mut data = match shear(&f) {
+        Ok(data) => data,
+        Err(MaterialError::State { .. }) if initial_shear.is_some() && seed != [0.0, 0.0] => {
+            f[2] = 0.0;
+            f[5] = 0.0;
+            shear(&f)?
+        }
+        Err(error) => return Err(error),
+    };
     let gradient_norm = in_plane[0]
         .hypot(in_plane[1])
         .hypot(in_plane[2])

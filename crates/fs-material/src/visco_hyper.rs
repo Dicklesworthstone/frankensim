@@ -41,6 +41,9 @@
 /// Prescribed natural-strain changes with retained viscous history and energy.
 pub mod reference;
 pub use reference::{ViscoReferenceChange, ViscoRemainderReferenceChange};
+/// Accepted-history updates under finite or exact-incompressible plane stress.
+pub mod plane_stress;
+pub use plane_stress::{ViscoIncompressiblePlaneStressStepResponse, ViscoPlaneStressStepResponse};
 
 use crate::hyper::reference::ReferenceDeformation;
 use crate::hyper::{Hyperelastic, MAX_OGDEN_TERMS, OgdenTerm};
