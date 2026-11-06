@@ -41,6 +41,23 @@ impl core::fmt::Display for FrozenIonizedGasStateErrorV1 {
 }
 impl std::error::Error for FrozenIonizedGasStateErrorV1 {}
 
+/// Finite entropy changes of the original frozen heavy and electron populations.
+/// These are matter state-function differences, not boundary heat or a
+/// reservoir entropy balance. Units are J/K, including the original amounts.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FrozenIonizedGasEntropyChangeV1 {
+    /// Heavy-species entropy change at their common temperature, J/K.
+    pub heavy_j_k: f64,
+    /// Electron entropy change at the electron temperature, J/K.
+    pub electron_j_k: f64,
+}
+impl FrozenIonizedGasEntropyChangeV1 {
+    /// Total matter entropy change; construction checks its representability.
+    pub fn total_j_k(self) -> f64 {
+        self.heavy_j_k + self.electron_j_k
+    }
+}
+
 /// Immutable actual populations, original source bank and evaluated caloric state.
 ///
 /// Clones share both the original chemistry bank and the population array.
@@ -243,6 +260,91 @@ impl FrozenIonizedGasStateV1 {
             relative_charge_residual,
         })
     }
+    /// Entropy change to proposed temperatures and volume at the SAME amounts.
+    ///
+    /// Each populated source integrates its own Cv/T at its heavy/electron
+    /// temperature, then adds n R ln(V1/V0). Original entropy offsets and
+    /// fixed-composition mixing references cancel before rounding. Absent
+    /// species impose no source interval and contribute exactly zero.
+    ///
+    /// The endpoints must have finite positive Cv and number density. Raw
+    /// caloric jumps remain; endpoint support alone does not establish a
+    /// continuous thermodynamic path. Evolution owners must admit that path.
+    /// No reaction, Coulomb excess entropy, heat or reservoir entropy is inferred.
+    /// Successful evaluation allocates nothing and never changes this state.
+    pub fn entropy_change(
+        &self,
+        final_heavy_temperature: Temperature,
+        final_electron_temperature: Temperature,
+        final_volume: Volume,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<FrozenIonizedGasEntropyChangeV1, FrozenIonizedGasStateErrorV1> {
+        use FrozenIonizedGasStateErrorV1 as E;
+        if cancelled() {
+            return Err(E::Cancelled);
+        }
+        let final_temperatures = [final_heavy_temperature, final_electron_temperature];
+        if final_temperatures
+            .iter()
+            .map(|t| t.value())
+            .chain([final_volume.value()])
+            .any(|x| !x.is_finite() || x <= 0.0)
+        {
+            return Err(E::Invalid("positive finite entropy endpoint temperatures and volume"));
+        }
+        let initial_temperatures = [self.heavy_temperature, self.electron_temperature];
+        let expansion = R * crate::entropy::log_ratio(final_volume.value(), self.volume.value());
+        let mut change = [Sum::default(); 2];
+        for (i, (model, amount)) in self
+            .thermodynamics
+            .models()
+            .iter()
+            .zip(self.amounts())
+            .enumerate()
+        {
+            if cancelled() {
+                return Err(E::Cancelled);
+            }
+            let n = amount.value();
+            if n == 0.0 {
+                continue;
+            }
+            let pool = usize::from(Some(i) == self.electron_index);
+            let error = |source| E::SpeciesEvaluation {
+                species: model.species().clone(),
+                source,
+            };
+            let cv = model.evaluate_properties(final_temperatures[pool]).map_err(error)?
+                .cp().value() - R;
+            if !cv.is_finite() || cv <= 0.0 {
+                return Err(E::Invalid("populated entropy endpoints require positive frozen Cv"));
+            }
+            let density = (n / final_volume.value()) * AVOGADRO;
+            if !density.is_finite() || density <= 0.0 {
+                return Err(E::Arithmetic("entropy endpoint number density"));
+            }
+            let thermal = model.molar_isochoric_entropy_change(
+                initial_temperatures[pool], final_temperatures[pool],
+            ).map_err(error)?.value();
+            change[pool].add(n * thermal);
+            change[pool].add(n * expansion);
+        }
+        let result = FrozenIonizedGasEntropyChangeV1 {
+            heavy_j_k: change[0].value(),
+            electron_j_k: change[1].value(),
+        };
+        if !result.heavy_j_k.is_finite()
+            || !result.electron_j_k.is_finite()
+            || !result.total_j_k().is_finite()
+        {
+            return Err(E::Arithmetic("frozen matter entropy change"));
+        }
+        if cancelled() {
+            return Err(E::Cancelled);
+        }
+        Ok(result)
+    }
+
     /// Complete original source bank and canonical species axes.
     pub const fn thermodynamics(&self) -> &IdealGasEquilibriumV1 {
         &self.thermodynamics

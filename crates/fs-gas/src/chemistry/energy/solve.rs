@@ -60,6 +60,15 @@ pub(super) struct Point {
     pub capacities: [f64; 2],
 }
 
+/// One accepted backward-Euler entropy account. Numerical excess includes
+/// time discretization and the retained nonlinear solve residuals.
+pub(super) struct EntropyStep {
+    pub power: f64,
+    pub collision: f64,
+    pub numerical: f64,
+    pub tolerance: f64,
+}
+
 #[derive(Clone, Copy)]
 pub(super) struct Coupling {
     neutral: f64,
@@ -212,6 +221,80 @@ impl<'a> Problem<'a> {
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<(f64, f64), ElectronHeavyEnergyError> {
         source_pool_calorics(self.initial, pool == 1, temperature, cancelled)
+    }
+
+    /// Finite source entropy, with the SAME lagged conductance and endpoint
+    /// temperatures as the implicit energy step. For positive source Cv,
+    /// entropy is concave in each pool's internal energy:
+    /// Delta S >= sum(Delta U_pool / T_pool,end). With exact energy closure
+    /// this is the external power term plus dt G (Te-Th)^2/(Te Th).
+    /// The excess is numerical, never an additional material heat source.
+    pub fn entropy_step(
+        &self,
+        start: &Point,
+        end: &Point,
+        coupling: Coupling,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<EntropyStep, ElectronHeavyEnergyError> {
+        poll(cancelled)?;
+        let mut changes = [Sum::default(), Sum::default()];
+        for (i, (amount, model)) in self.initial.amounts().iter()
+            .zip(self.initial.thermodynamics().models()).enumerate()
+        {
+            if amount.value() == 0.0 {
+                continue;
+            }
+            poll(cancelled)?;
+            let pool = usize::from(Some(i) == self.initial.electron_index());
+            let change = model.molar_isochoric_entropy_change(
+                Temperature::new(start.temperatures[pool]),
+                Temperature::new(end.temperatures[pool]),
+            ).map_err(|source| ElectronHeavyEnergyError::Species {
+                species: model.species().clone(),
+                source,
+            })?.value();
+            changes[pool].add(amount.value() * change);
+        }
+        let dt = end.time - start.time;
+        let [th, te] = end.temperatures;
+        let power_terms = [dt * (self.powers[0] / th), dt * (self.powers[1] / te)];
+        let power = power_terms[0] + power_terms[1];
+        let alpha = dt * coupling.total();
+        let difference = te - th;
+        let collision = if alpha == 0.0 {
+            0.0
+        } else {
+            alpha * (difference / th) * (difference / te)
+        };
+        let entropy = changes[0].value + changes[1].value;
+        let mut numerical = Sum::default();
+        numerical.add(changes[0].value);
+        numerical.add(changes[1].value);
+        numerical.add(-power);
+        numerical.add(-collision);
+        // Each pool's start/end energy discrepancy and the exchange residual
+        // are bounded by the existing energy controls. Scale that allowance
+        // into entropy with the lowest admitted temperature, then add a
+        // rounding budget for the actual terms, without an arbitrary entropy
+        // floor. This is numerical admission, not an interval certificate.
+        let magnitude = changes[0].value.abs() + changes[1].value.abs()
+            + power_terms[0].abs() + power_terms[1].abs() + collision.abs();
+        let tolerance = 4.0 * (self.controls.energy_tolerance_j
+            / self.controls.minimum_temperature_k) + 128.0 * f64::EPSILON * magnitude;
+        if [entropy, power, collision, numerical.value, tolerance]
+            .into_iter().any(|x| !x.is_finite())
+        {
+            return Err(ElectronHeavyEnergyError::Arithmetic("discrete entropy balance"));
+        }
+        if collision < 0.0 || numerical.value < -tolerance
+            || (self.powers == [0.0; 2] && entropy < -tolerance)
+        {
+            return Err(ElectronHeavyEnergyError::Balance(
+                "source entropy violates the discrete second law",
+            ));
+        }
+        poll(cancelled)?;
+        Ok(EntropyStep { power, collision, numerical: numerical.value, tolerance })
     }
 
     fn invert(
@@ -395,12 +478,12 @@ impl<'a> Problem<'a> {
 }
 
 #[derive(Default)]
-struct Sum {
-    value: f64,
+pub(super) struct Sum {
+    pub(super) value: f64,
     correction: f64,
 }
 impl Sum {
-    fn add(&mut self, x: f64) {
+    pub(super) fn add(&mut self, x: f64) {
         let y = x - self.correction;
         let sum = self.value + y;
         self.correction = (sum - self.value) - y;

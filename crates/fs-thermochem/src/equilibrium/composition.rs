@@ -39,7 +39,9 @@ pub use solve::expansion::{
 };
 /// Fixed-volume composition and adiabatic internal-energy equilibrium.
 pub use solve::volume;
-pub use state::{FrozenIonizedGasStateErrorV1, FrozenIonizedGasStateV1};
+pub use state::{
+    FrozenIonizedGasEntropyChangeV1, FrozenIonizedGasStateErrorV1, FrozenIonizedGasStateV1,
+};
 /// Maximum retained gas species, including reactants and inerts.
 pub const MAX_EQUILIBRIUM_SPECIES_V1: usize = 128;
 /// Maximum elemental rows; dependent rows remain checked at publication.

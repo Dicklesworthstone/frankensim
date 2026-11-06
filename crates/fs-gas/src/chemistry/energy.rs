@@ -22,6 +22,15 @@
 //! Temperature/source limits, numerical work and the massive-target regime
 //! are explicit. There is no clipping, equilibrium projection, species change,
 //! two-temperature molecular reverse rate, or per-trial heap allocation.
+//!
+//! Accepted half steps also close the original-source matter entropy change.
+//! Their collision term uses the same lagged G and backward endpoint
+//! temperatures. Positive Cv makes entropy concave in internal energy, so
+//! backward Euler has a nonnegative entropy excess beyond that collision
+//! term and endpoint-weighted external power. This numerical excess remains
+//! separate from physical transfer. The power term is not a reservoir entropy
+//! flux: an electrical/work source and heat at a declared reservoir temperature
+//! have different external entropy accounts.
 
 use fs_qty::{Energy, Power, Temperature, Time};
 use fs_thermochem::coulomb::{CoulombErrorV1, CoulombModelV1};
@@ -40,7 +49,7 @@ pub use exchange::ElectronHeavyCollisionSources;
 pub(in crate::chemistry) use exchange::{ExchangeConductance, PreparedExchange};
 mod solve;
 pub(super) use solve::source_pool_calorics;
-use solve::{Point, Problem};
+use solve::{Point, Problem, Sum};
 
 /// Explicit physical domain and numerical error/work controls.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -171,7 +180,7 @@ pub enum ElectronHeavyEnergyError {
     StepBudget,
     /// A needed arithmetic result is not finite/representable.
     Arithmetic(&'static str),
-    /// A per-pool energy or exchange-sign audit exceeded its explicit tolerance.
+    /// Energy, exchange sign or discrete entropy exceeded its explicit tolerance.
     Balance(&'static str),
     /// Original frozen-state publication refused.
     State(FrozenIonizedGasStateErrorV1),
@@ -210,6 +219,38 @@ pub struct ElectronHeavyEnergyBalance {
     pub rejected_steps: usize,
 }
 
+/// Source-bound matter entropy and its accepted discrete evolution account.
+/// Values are finite signed J/K; small numerical residuals are retained, not
+/// clipped. This does not close the entropy of an unspecified power reservoir.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ElectronHeavyEntropyBalance {
+    /// Original heavy-source entropy difference at the accepted endpoint.
+    pub heavy_entropy_change_j_k: f64,
+    /// Original electron-source entropy difference at the accepted endpoint.
+    pub electron_entropy_change_j_k: f64,
+    /// Sum dt (Ph/Th_end + Pe/Te_end), evaluated on accepted half steps.
+    /// A matter deposition term; not an inferred boundary entropy flux.
+    pub external_power_contribution_j_k: f64,
+    /// Sum dt G_lag (Te_end-Th_end)^2/(Te_end Th_end), nonnegative.
+    /// The same neutral/Coulomb conductance drives the implicit energy steps.
+    pub collision_production_j_k: f64,
+    /// Sum of finite Delta S minus power and collision contributions.
+    /// Backward-Euler concavity excess plus nonlinear/rounding defects;
+    /// numerical, not additional material entropy or a physical heat source.
+    pub numerical_excess_j_k: f64,
+    /// Endpoint Delta S minus all three accumulated contributions.
+    pub residual_j_k: f64,
+    /// Accumulated energy-to-entropy and arithmetic admission budget.
+    /// This is a numerical tolerance, not an interval or trajectory certificate.
+    pub tolerance_j_k: f64,
+}
+impl ElectronHeavyEntropyBalance {
+    /// Total matter entropy change from the original source laws.
+    pub fn total_entropy_change_j_k(self) -> f64 {
+        self.heavy_entropy_change_j_k + self.electron_entropy_change_j_k
+    }
+}
+
 /// Final source-bound state with original collision sources and energy account.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ElectronHeavyEnergyResult {
@@ -220,6 +261,7 @@ pub struct ElectronHeavyEnergyResult {
     controls: ElectronHeavyEnergySolve,
     elapsed: Time,
     balance: ElectronHeavyEnergyBalance,
+    entropy_balance: ElectronHeavyEntropyBalance,
 }
 impl ElectronHeavyEnergyResult {
     /// Final actual populations, Th, Te, pressure and original species calorics.
@@ -249,6 +291,10 @@ impl ElectronHeavyEnergyResult {
     /// Per-pool source energy balance and step diagnostics.
     pub const fn balance(&self) -> ElectronHeavyEnergyBalance {
         self.balance
+    }
+    /// Matter entropy, internal collisional production and numerical excess.
+    pub const fn entropy_balance(&self) -> ElectronHeavyEntropyBalance {
+        self.entropy_balance
     }
     /// Signed cumulative elastic electron-to-heavy energy transfer [J].
     pub const fn exchanged_energy(&self) -> Energy {
@@ -361,6 +407,8 @@ fn advance(
     let mut accepted = 0;
     let mut rejected = 0;
     let mut maximum_error = 0.0_f64;
+    // Only accepted half steps contribute; rejected trials remain scratch.
+    let mut entropy_terms = [Sum::default(), Sum::default(), Sum::default(), Sum::default()];
     let mut step = controls.initial_step_s;
     while point.time < duration.value() {
         poll(&mut cancelled)?;
@@ -378,9 +426,9 @@ fn advance(
             let half = problem.step(&point, middle, coupling, &mut cancelled)?;
             let coupling_half = problem.coupling(&half, &mut cancelled)?;
             let two = problem.step(&half, end, coupling_half, &mut cancelled)?;
-            Ok::<_, ElectronHeavyEnergyError>((full, two))
+            Ok::<_, ElectronHeavyEnergyError>((full, half, two, coupling_half))
         })();
-        let (full, two) = match trial {
+        let (full, half, two, coupling_half) = match trial {
             Ok(result) => result,
             Err(
                 ElectronHeavyEnergyError::OutsideDomain | ElectronHeavyEnergyError::Nonconvergence,
@@ -429,6 +477,15 @@ fn advance(
             }
             continue;
         }
+        for entropy in [
+            problem.entropy_step(&point, &half, coupling, &mut cancelled)?,
+            problem.entropy_step(&half, &two, coupling_half, &mut cancelled)?,
+        ] {
+            entropy_terms[0].add(entropy.power);
+            entropy_terms[1].add(entropy.collision);
+            entropy_terms[2].add(entropy.numerical);
+            entropy_terms[3].add(entropy.tolerance);
+        }
         maximum_error = maximum_error.max(error);
         let accepted_step = end - point.time;
         point = two;
@@ -474,6 +531,42 @@ fn advance(
         FrozenIonizedGasStateErrorV1::Cancelled => ElectronHeavyEnergyError::Cancelled,
         error => ElectronHeavyEnergyError::State(error),
     })?;
+    let entropy_change = initial.entropy_change(
+        state.heavy_temperature(),
+        state.electron_temperature(),
+        state.volume(),
+        &mut cancelled,
+    ).map_err(|error| match error {
+        FrozenIonizedGasStateErrorV1::Cancelled => ElectronHeavyEnergyError::Cancelled,
+        error => ElectronHeavyEnergyError::State(error),
+    })?;
+    let [power, collision, numerical, step_tolerance] = entropy_terms.map(|term| term.value);
+    let mut entropy_residual = Sum::default();
+    entropy_residual.add(entropy_change.heavy_j_k);
+    entropy_residual.add(entropy_change.electron_j_k);
+    entropy_residual.add(-power);
+    entropy_residual.add(-collision);
+    entropy_residual.add(-numerical);
+    let entropy_tolerance = step_tolerance + 128.0 * f64::EPSILON
+        * (entropy_change.heavy_j_k.abs() + entropy_change.electron_j_k.abs()
+            + power.abs() + collision.abs() + numerical.abs());
+    if [power, collision, numerical, entropy_residual.value, entropy_tolerance]
+        .into_iter().any(|x| !x.is_finite())
+    {
+        return Err(ElectronHeavyEnergyError::Arithmetic("final entropy balance"));
+    }
+    if entropy_residual.value.abs() > entropy_tolerance {
+        return Err(ElectronHeavyEnergyError::Balance("final source entropy closure"));
+    }
+    let entropy_balance = ElectronHeavyEntropyBalance {
+        heavy_entropy_change_j_k: entropy_change.heavy_j_k,
+        electron_entropy_change_j_k: entropy_change.electron_j_k,
+        external_power_contribution_j_k: power,
+        collision_production_j_k: collision,
+        numerical_excess_j_k: numerical,
+        residual_j_k: entropy_residual.value,
+        tolerance_j_k: entropy_tolerance,
+    };
     poll(&mut cancelled)?;
     Ok(ElectronHeavyEnergyResult {
         initial: initial.clone(),
@@ -482,6 +575,7 @@ fn advance(
         coulomb: coulomb.cloned(),
         controls,
         elapsed: duration,
+        entropy_balance,
         balance: ElectronHeavyEnergyBalance {
             electron_deposited_energy_j: electron_power.value() * duration.value(),
             heavy_deposited_energy_j: heavy_power.value() * duration.value(),

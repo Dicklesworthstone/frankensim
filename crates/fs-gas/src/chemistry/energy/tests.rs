@@ -16,6 +16,14 @@ fn id(name: &str) -> SpeciesId {
     SpeciesId::new(name).unwrap()
 }
 fn species(name: &str, mass: f64, formation: f64) -> Nasa9StandardStateModelV1 {
+    species_with_entropy(name, mass, formation, 0.0)
+}
+fn species_with_entropy(
+    name: &str,
+    mass: f64,
+    formation: f64,
+    entropy_offset: f64,
+) -> Nasa9StandardStateModelV1 {
     let mut parameters = BTreeMap::new();
     for ((name, dims), value) in required_nasa9_parameter_dims().into_iter().take(9).zip([
         0.0,
@@ -26,7 +34,7 @@ fn species(name: &str, mass: f64, formation: f64) -> Nasa9StandardStateModelV1 {
         0.0,
         0.0,
         formation / R,
-        0.0,
+        entropy_offset,
     ]) {
         parameters.insert(name.into(), LawParameter { value, dims });
     }
@@ -67,6 +75,15 @@ fn species(name: &str, mass: f64, formation: f64) -> Nasa9StandardStateModelV1 {
     .unwrap()
 }
 fn state(te: f64, th: f64, fraction: f64, formation_shift: f64) -> FrozenIonizedGasStateV1 {
+    state_with_entropy(te, th, fraction, formation_shift, 0.0)
+}
+fn state_with_entropy(
+    te: f64,
+    th: f64,
+    fraction: f64,
+    formation_shift: f64,
+    entropy_offset: f64,
+) -> FrozenIonizedGasStateV1 {
     let proton = 1.672_621_925_95e-27;
     let ids = vec![id("H"), id("H+"), id("e")];
     let bank = IdealGasEquilibriumV1::new(
@@ -78,9 +95,9 @@ fn state(te: f64, th: f64, fraction: f64, formation_shift: f64) -> FrozenIonized
         .unwrap(),
         ChargeVector::new(ids, vec![0, 1, -1]).unwrap(),
         vec![
-            species("H", proton + ELECTRON_MASS_KG, formation_shift),
-            species("H+", proton, formation_shift + 1.3e6),
-            species("e", ELECTRON_MASS_KG, 0.0),
+            species_with_entropy("H", proton + ELECTRON_MASS_KG, formation_shift, entropy_offset),
+            species_with_entropy("H+", proton, formation_shift + 1.3e6, entropy_offset),
+            species_with_entropy("e", ELECTRON_MASS_KG, 0.0, entropy_offset),
         ],
     )
     .unwrap();
@@ -198,6 +215,15 @@ fn sourced_two_temperature_relaxation_converges_to_independent_nonlinear_solutio
         assert!(result.balance().electron_energy_residual_j.abs() <= c.energy_tolerance_j);
         assert!(result.balance().heavy_energy_residual_j.abs() <= c.energy_tolerance_j);
         assert!(result.balance().maximum_normalized_local_error <= 1.0);
+        let entropy = result.entropy_balance();
+        let expected_entropy = initial.heavy_heat_capacity_j_k() * (th / 4000.0).ln()
+            + initial.electron_heat_capacity_j_k() * (te / 12000.0).ln();
+        assert!((entropy.total_entropy_change_j_k() - expected_entropy).abs() < 2e-14);
+        assert!(entropy.total_entropy_change_j_k() > 0.0);
+        assert!(entropy.collision_production_j_k > 0.0);
+        assert!(entropy.numerical_excess_j_k >= -entropy.tolerance_j_k);
+        assert_eq!(entropy.external_power_contribution_j_k, 0.0);
+        assert!(entropy.residual_j_k.abs() <= entropy.tolerance_j_k);
     }
     assert!(
         errors[1] < errors[0] * 0.3 && errors[2] < errors[1] * 0.3,
@@ -437,4 +463,137 @@ fn slow_but_light_target_does_not_acquire_massive_target_physics() {
         ),
         Err(ElectronHeavyEnergyError::OutsideDomain)
     );
+}
+
+#[test]
+fn g1_frozen_entropy_retains_two_temperatures_and_volume_expansion() {
+    let initial = state(12000.0, 4000.0, 1e-4, 1e12);
+    let change = initial.entropy_change(
+        Temperature::new(5000.0), Temperature::new(8000.0), Volume::new(2.0), || false,
+    ).unwrap();
+    let heavy = initial.heavy_heat_capacity_j_k() * (5000.0_f64 / 4000.0).ln()
+        + R * 2.0_f64.ln();
+    let electron = initial.electron_heat_capacity_j_k() * (8000.0_f64 / 12000.0).ln()
+        + 1e-4 * R * 2.0_f64.ln();
+    assert!((change.heavy_j_k / heavy - 1.0).abs() < 5e-14);
+    assert!((change.electron_j_k / electron - 1.0).abs() < 5e-14);
+    let final_state = FrozenIonizedGasStateV1::new(
+        initial.thermodynamics(), initial.amounts(), Volume::new(2.0),
+        Temperature::new(5000.0), Temperature::new(8000.0), 1e-12, || false,
+    ).unwrap();
+    let reverse = final_state.entropy_change(
+        initial.heavy_temperature(), initial.electron_temperature(), initial.volume(), || false,
+    ).unwrap();
+    assert_eq!(reverse.heavy_j_k, -change.heavy_j_k);
+    assert_eq!(reverse.electron_j_k, -change.electron_j_k);
+
+    let neutral = state(4000.0, 4000.0, 0.0, 0.0);
+    // Absent electrons impose no source-temperature interval.
+    let absent = neutral.entropy_change(
+        Temperature::new(4500.0), Temperature::new(90000.0), Volume::new(1.0), || false,
+    ).unwrap();
+    assert_eq!(absent.electron_j_k, 0.0);
+    assert!(absent.heavy_j_k > 0.0);
+    let saved = initial.clone();
+    assert!(initial.entropy_change(
+        Temperature::new(5000.0), Temperature::new(8000.0), Volume::new(0.0), || false,
+    ).is_err());
+    let mut calls = 0;
+    assert_eq!(initial.entropy_change(
+        Temperature::new(5000.0), Temperature::new(8000.0), Volume::new(2.0), || {
+            calls += 1;
+            calls > 2
+        },
+    ), Err(FrozenIonizedGasStateErrorV1::Cancelled));
+    assert_eq!(initial, saved);
+}
+
+#[test]
+fn g3_passive_entropy_is_reference_invariant_with_colder_electrons() {
+    let mut observed = Vec::new();
+    for offset in [0.0, 1e24] {
+        let initial = state_with_entropy(4000.0, 12000.0, 1e-4, 1e12, offset);
+        let result = advance_frozen_energy(
+            &initial, &[collision(1e-24, 200.0)],
+            Power::new(0.0), Power::new(0.0), Time::new(0.002), controls(), || false,
+        ).unwrap();
+        let th = result.state().heavy_temperature().value();
+        let te = result.state().electron_temperature().value();
+        assert!(te > 4000.0 && th < 12000.0);
+        assert!(result.exchanged_energy().value() < 0.0);
+        let entropy = result.entropy_balance();
+        let expected = initial.heavy_heat_capacity_j_k() * (th / 12000.0).ln()
+            + initial.electron_heat_capacity_j_k() * (te / 4000.0).ln();
+        assert!((entropy.total_entropy_change_j_k() - expected).abs() < 2e-14);
+        assert!(entropy.total_entropy_change_j_k() > 0.0);
+        assert!(entropy.collision_production_j_k > 0.0);
+        assert!(entropy.numerical_excess_j_k >= -entropy.tolerance_j_k);
+        assert!(entropy.residual_j_k.abs() <= entropy.tolerance_j_k);
+        observed.push((th, te, entropy));
+    }
+    assert_eq!(observed[0], observed[1]);
+}
+
+#[test]
+fn g1_external_cooling_keeps_power_and_collision_entropy_separate() {
+    let initial = state(6000.0, 4000.0, 1e-4, 0.0);
+    let result = advance_frozen_energy(
+        &initial, &[collision(0.0, 200.0)],
+        Power::new(-2.0), Power::new(-4.0), Time::new(0.001), controls(), || false,
+    ).unwrap();
+    let entropy = result.entropy_balance();
+    assert!(entropy.total_entropy_change_j_k() < 0.0);
+    assert!(entropy.external_power_contribution_j_k < 0.0);
+    assert_eq!(entropy.collision_production_j_k, 0.0);
+    assert!(entropy.numerical_excess_j_k >= -entropy.tolerance_j_k);
+    assert!(entropy.residual_j_k.abs() <= entropy.tolerance_j_k);
+
+    for duration in [0.0, 0.001] {
+        let equilibrium = state(6000.0, 6000.0, 1e-4, 0.0);
+        let result = advance_frozen_energy(
+            &equilibrium, &[collision(1e-24, 200.0)],
+            Power::new(0.0), Power::new(0.0), Time::new(duration), controls(), || false,
+        ).unwrap();
+        let entropy = result.entropy_balance();
+        assert_eq!(entropy.total_entropy_change_j_k(), 0.0);
+        assert_eq!(entropy.external_power_contribution_j_k, 0.0);
+        assert_eq!(entropy.collision_production_j_k, 0.0);
+        assert_eq!(entropy.numerical_excess_j_k, 0.0);
+        assert_eq!(entropy.residual_j_k, 0.0);
+    }
+}
+
+#[test]
+fn g0_discrete_second_law_refuses_energy_conserving_cold_to_hot_transfer() {
+    let initial = state(12000.0, 4000.0, 1e-4, 0.0);
+    let c = controls();
+    let sources = [collision(1e-24, 200.0)];
+    let problem = Problem::new(
+        &initial, &sources, None, [0.0; 2], c, &mut || false,
+    ).unwrap();
+    let start = Point {
+        time: 0.0,
+        exchange: 0.0,
+        coulomb_exchange: 0.0,
+        temperatures: [4000.0, 12000.0],
+        capacities: [initial.heavy_heat_capacity_j_k(), initial.electron_heat_capacity_j_k()],
+    };
+    let coupling = problem.coupling(&start, &mut || false).unwrap();
+    // Independent forbidden trajectory: equal/opposite energy moves from the
+    // colder heavy pool into the hotter electrons. Energy alone would close.
+    let stolen_heat = 0.1;
+    let wrong = Point {
+        time: 0.001,
+        exchange: -stolen_heat,
+        coulomb_exchange: 0.0,
+        temperatures: [
+            4000.0 - stolen_heat / start.capacities[0],
+            12000.0 + stolen_heat / start.capacities[1],
+        ],
+        capacities: start.capacities,
+    };
+    assert!(matches!(
+        problem.entropy_step(&start, &wrong, coupling, &mut || false),
+        Err(ElectronHeavyEnergyError::Balance(_))
+    ));
 }

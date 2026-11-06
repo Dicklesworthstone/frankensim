@@ -92,7 +92,14 @@ fn coulomb_only_thermal_transient_converges_to_independent_landau_moment_integra
         );
         assert!(b.electron_to_heavy_coulomb_energy_j > 0.0);
         let cv = 1.5 * BOLTZMANN_J_PER_K * 1e20;
-        assert!(cv * ((te / 20000.0).ln() + (th / 10000.0).ln()) > 0.0);
+        let expected_entropy = cv * ((te / 20000.0).ln() + (th / 10000.0).ln());
+        assert!(expected_entropy > 0.0);
+        let entropy = result.entropy_balance();
+        assert!((entropy.total_entropy_change_j_k() - expected_entropy).abs() < 2e-17);
+        assert!(entropy.collision_production_j_k > 0.0);
+        assert_eq!(entropy.external_power_contribution_j_k, 0.0);
+        assert!(entropy.numerical_excess_j_k >= -entropy.tolerance_j_k);
+        assert!(entropy.residual_j_k.abs() <= entropy.tolerance_j_k);
         assert!(b.maximum_normalized_local_error <= 1.0);
     }
     eprintln!("Coulomb transient temperature errors [K]: {errors:?}");
