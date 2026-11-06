@@ -7533,6 +7533,21 @@ in force. These adapters enable shared thermal entropy audits without a second
 caloric law. Independent sensible/latent and variable-cp gas regressions cover
 storage, endpoint reversal, no-ops and refused source-domain exits.
 
+`GasEnthalpyLaw::advected_entropy_anchor` also supplies the existing stationary
+species transport owner with a source-bound entropy reference. At the common
+lower caloric temperature it retains original enthalpy, ideal mixing entropy,
+and the source pressure-entropy increment. Pure-species standard entropies at
+that temperature and standard pressure are cancelled analytically by stationary
+component conservation, before a large source datum can erase mixing. The
+reference binds the full source catalog, caloric policy and anchor temperature;
+different pressure states remain explicit entropy contributions. The same
+original Cp/T integrals extend each frozen composition away from the anchor.
+Native source/transport regressions cover equal- and unequal-temperature
+mixing, pressure changes, incompatible anchor temperatures and large positive
+and negative species entropy-reference shifts. This closure is for stationary
+nonreacting species; it does not supply reaction affinity or selective phase
+outlet entropy.
+
 
 ## Molecular sublimation with evolving gas energy
 
@@ -17773,6 +17788,38 @@ G3/G4 fixtures in `tests/liquid_multicomponent.rs` exercise authored ternary
 surfaces, independent component/mass/volume accounts, exact equal-diffusivity
 fluxes, unstable homogeneous compositions, source/species permutation, traces,
 typed-coordinate refusal and atomic source/cancellation failures.
+
+## Source-bound multicomponent liquid calorics
+
+`liquid::solution::multicomponent::caloric::MulticomponentLiquidCaloricLaw`
+binds the original homogeneous mixture law to one explicitly qualified
+pure-liquid `IsobaricHeatCapacityLaw` per species. Canonicalization keeps
+species, source receipts and original molar masses together. Every original
+Cp knot survives the mass-to-molar conversion. The original typed mixture
+pressure must match every pure source, and the numerical owner admits only
+their common datum and supported temperature interval.
+
+Preparation, unequal-temperature mixing and signed heating/cooling delegate
+all caloric work to `MulticomponentLiquidCaloricModelV1`. The same nonideal
+potential supplies mixing heat and entropy once; total-mixture transport Cp
+is never substituted for pure caloric sources. Only the accepted thermal
+endpoint refreshes actual density, viscosity, conductivity and transport Cp
+through the original mixture source binding. The returned state retains the
+complete caloric inventory, actual resolved liquid cell and pure source laws.
+Source-relative heat and entropy increments also require the same original
+component inventory and complete source owner.
+
+Source/domain refusal or cancellation returns no partially published endpoint.
+The mixture sources must support the accepted temperature/composition even
+when the pure Cp sources admit a larger interval. An isolated zero-heat mix
+inherits the numerical owner's entropy-decrease refusal; with external heat,
+system entropy needs a separate reservoir exchange before an entropy-production
+claim. The caller qualifies pure-liquid source roles and interaction data.
+No equilibrium phase split, pressure evolution or consistency certification
+between independently authored transport Cp and caloric Cp is introduced.
+Focused G1/G3 integration tests cover ternary nonideal mixing, original receipt
+retention, actual material refresh, variable source Cp heating/cooling, pressure
+and datum mismatch, foreign source provenance and atomic final-source refusal.
 
 ## Source-resolved multicomponent equilibrium phases
 

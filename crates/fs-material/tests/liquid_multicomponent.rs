@@ -1,6 +1,9 @@
 //! G0/G1/G3/G4 liquid-source integration, using authored nonideal surface data.
 //! These numerical fixtures are not measured solvent-pair fits.
 
+#[path = "liquid_multicomponent/caloric.rs"]
+mod caloric;
+
 use fs_evidence::ValidityDomain;
 use fs_matdb::{
     ClaimSet, InterpolationPolicy, MaterialCard, MaterialStateId, PropertyClaim, PropertyKey,

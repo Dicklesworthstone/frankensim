@@ -30,7 +30,8 @@ fn thermal_timeline<'a>(
             reservoir: None, source_w },
     };
     DepositionSimulation::new(vec![TimedEvent { time_s: 0.0, event: Event::Birth(cell) }],
-        materials, DepositionBudget { max_cells: 2, max_links: 0, max_events: 1, max_substeps: 8 })
+        materials, DepositionBudget { max_cells: materials.len().max(2), max_links: 0,
+            max_events: 1, max_substeps: 8 })
         .unwrap().advance_to(0.0, thermal_config(), || Ok(())).unwrap().0
 }
 
@@ -79,6 +80,96 @@ fn thermal_entropy_adapter_integrates_original_variable_cp_at_fixed_pressure() {
     assert_eq!(law.specific_entropy_change_j_kg_k(h1,h0).unwrap().unwrap(),-entropy);
     assert_eq!(law.specific_entropy_change_j_kg_k(h0,h0).unwrap(),Some(0.0));
     assert!(law.specific_entropy_change_j_kg_k(h0-1e9,h1).is_err());
+}
+
+fn entropy_shifted_source(offset: f64) -> ThermochemicalGasModel {
+    let source = model(vec![0.5, 0.5], 0.001);
+    let components = source.thermodynamics().components().iter().enumerate()
+        .map(|(index, original)| {
+            let mut card = original.regions()[0].card().clone();
+            card.parameters.get_mut("a8").unwrap().value = if index == 0 { offset } else { -offset };
+            Nasa9StandardStateModelV1::new(original.species().clone(), original.molar_mass(),
+                original.convention().clone(),
+                vec![fs_thermochem::Nasa9RegionV1::from_card(card).unwrap()]).unwrap()
+        }).collect();
+    ThermochemicalGasModel::new(
+        fs_thermochem::mixture::FrozenIdealGasMixtureModelV1::new(components,
+            mole(vec![0.5, 0.5])).unwrap(), source.transport_materials().to_vec(), None,
+    ).unwrap()
+}
+
+#[test]
+fn source_entropy_anchor_retains_ideal_mixing_pressure_and_compatible_reference() {
+    let source = model(vec![0.75, 0.25], 0.001);
+    let prepare = |pressure, controls| GasEnthalpyLaw::from_mole(&source,
+        mole(vec![0.75, 0.25]), point(320.0, pressure), controls).unwrap();
+    let standard = prepare(100000.0, controls());
+    let compressed = prepare(140000.0, controls());
+    let a = standard.advected_entropy_anchor().unwrap();
+    let b = compressed.advected_entropy_anchor().unwrap();
+    let r = UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K / (0.75 * 0.028 + 0.25 * 0.004);
+    let mixing = -r * (0.75 * 0.75_f64.ln() + 0.25 * 0.25_f64.ln());
+    assert!((a.reduced_specific_entropy_j_kg_k - mixing).abs() < 1e-11);
+    assert!((b.reduced_specific_entropy_j_kg_k - mixing + r * 1.4_f64.ln()).abs() < 1e-11);
+    assert_eq!(a.entropy_reference, b.entropy_reference);
+    assert_eq!(a.specific_h_j_kg, standard.enthalpy_at_temperature(280.0).unwrap());
+    let other_anchor = prepare(100000.0,
+        GasEnergySolve { minimum_temperature_k: 281.0, ..controls() });
+    assert_ne!(a.entropy_reference, other_anchor.advected_entropy_anchor().unwrap().entropy_reference);
+}
+
+#[test]
+fn native_stationary_mixture_entropy_uses_source_calorics_under_species_reference_shifts() {
+    use fs_thermal::enthalpy::advection::{Advected, MassBoundary, species::InletSpecies};
+    let r = UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K;
+    for offset in [0.0, 2.0_f64.powi(50), -2.0_f64.powi(50)] {
+        let source = entropy_shifted_source(offset);
+        let law = |fractions| GasEnthalpyLaw::new(&source,
+            Composition::new(CompositionBasis::MassFraction, fractions).unwrap(),
+            point(320.0, 100000.0), controls()).unwrap();
+        let mixed = law(vec![0.5, 0.5]);
+        let a = law(vec![1.0, 0.0]);
+        let b = law(vec![0.0, 1.0]);
+        for (ta, tb) in [(320.0, 320.0), (300.0, 340.0)] {
+            let ha = a.enthalpy_at_temperature(ta).unwrap();
+            let hb = b.enthalpy_at_temperature(tb).unwrap();
+            let h = 0.5 * ha + 0.5 * hb;
+            let temperature = mixed.temperature_k(h).unwrap();
+            let initial = thermal_timeline(&[
+                (MaterialId(1), &mixed), (MaterialId(2), &a), (MaterialId(3), &b),
+            ], h, 0.0);
+            let flow = Advected::new((), vec![], 0).unwrap().with_boundaries(vec![
+                MassBoundary::Inlet { id: 1, cell: CellId(1), kg_s: 0.1,
+                    material_id: MaterialId(2), specific_h_j_kg: ha },
+                MassBoundary::Inlet { id: 2, cell: CellId(1), kg_s: 0.1,
+                    material_id: MaterialId(3), specific_h_j_kg: hb },
+                MassBoundary::Outlet { id: 3, cell: CellId(1), kg_s: 0.2 },
+            ], 3).unwrap().with_stationary_species(vec!["A".into(), "B".into()], vec![
+                InletSpecies { boundary_id: 1, mass_fractions: vec![1.0, 0.0] },
+                InletSpecies { boundary_id: 2, mass_fractions: vec![0.0, 1.0] },
+            ], 1, 2).unwrap();
+            let (next, observed, energy, entropy) = initial.advance_advected_with_entropy(
+                &flow, 0.25, thermal_config(), || Ok(())).unwrap();
+            // Equal mass inflows give x_A=1/8, x_B=7/8. Exact NASA Cp/T
+            // integrals and ideal mixing independently determine the production.
+            let expected_rate = r * (0.1 / 0.028
+                * (3.5 * (temperature / ta).ln() + 0.001 * (temperature - ta) - 0.125_f64.ln())
+                + 0.1 / 0.004 * (2.5 * (temperature / tb).ln() - 0.875_f64.ln()));
+            let advection = entropy.advection.unwrap();
+            assert!(expected_rate > 0.0);
+            assert!((advection.upwind_mixing_j_k - 0.25 * expected_rate).abs() < 2e-9);
+            assert!((advection.boundary_entropy_input_j_k + 0.25 * expected_rate).abs() < 2e-9);
+            assert!(entropy.thermal_storage_change_j_k.abs() < 1e-10);
+            assert!(entropy.temporal_defect_j_k.abs() < 1e-10);
+            assert!(energy.external_heat_j.abs() < 1e-8);
+            assert!((next.temperature_k(CellId(1)).unwrap() - temperature).abs() < 1e-9);
+            assert!(observed.entropy_audit().is_some());
+            assert!(!entropy.has_unclassified_sources);
+            assert!(matches!(initial.advance_advected_with_entropy(&flow, 0.25,
+                thermal_config(), || Err(DepositionError::Cancelled)), Err(DepositionError::Cancelled)));
+            assert_eq!(initial.cells()[&CellId(1)].specific_h_j_kg, h);
+        }
+    }
 }
 
 #[test]

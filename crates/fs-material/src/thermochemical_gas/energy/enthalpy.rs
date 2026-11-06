@@ -9,7 +9,9 @@ use crate::thermochemical_gas::{ResolvedThermochemicalGasState, ThermochemicalGa
 use fs_matdb::QueryPoint;
 use fs_qty::Temperature;
 use fs_thermal::enthalpy::{DepositionError, ThermalLaw};
-use fs_thermal::enthalpy::advection::species::{CaloricComposition, close_generated_simplex};
+use fs_thermal::enthalpy::advection::species::{
+    CaloricComposition, CaloricEntropyAnchor, close_generated_simplex,
+};
 use fs_thermochem::{Composition, CompositionBasis, Nasa9StandardStateModelV1,
     ReferenceEquationOfStateV1, StandardStatePhaseV1, UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K};
 
@@ -110,6 +112,9 @@ pub struct GasEnthalpyLaw {
     mass_fractions: Vec<f64>,
     mole_composition: Composition,
     enthalpy_reference: String,
+    entropy_reference: String,
+    entropy_anchor_h_j_kg: f64,
+    reduced_entropy_anchor_j_kg_k: f64,
     maximum_slope: f64,
 }
 
@@ -331,7 +336,7 @@ impl GasEnthalpyLaw {
         mole_composition: Composition, context: QueryPoint, controls: GasEnergySolve,
     ) -> Result<Self, GasEnergyError> {
         controls.validate()?;
-        coordinates(&context)?;
+        let (_, pressure) = coordinates(&context)?;
         let model = source.with_composition(mole_composition.clone())?;
         let convention = source.thermodynamics().components()[0].convention();
         if convention.phase() != StandardStatePhaseV1::Gas
@@ -357,12 +362,36 @@ impl GasEnthalpyLaw {
         let enthalpy_reference = format!("NASA9:{:?}:{:?}:{:016x}:{}:caloric:{}",
             convention.phase(), convention.eos(), convention.reference_pressure().value().to_bits(),
             convention.elemental_reference().as_str(), caloric_reference_identity(source).to_hex());
+        // Stationary species conservation cancels each pure species' entropy
+        // at a common T* and standard pressure. Reduce those constants BEFORE
+        // evaluating a mixture: subtracting absolute source entropies would
+        // erase mixing when a conserved entropy reference is large.
+        let anchor_temperature = Temperature::new(controls.minimum_temperature_k);
+        let thermodynamics = model.thermodynamics();
+        let anchor = thermodynamics.evaluate_properties(anchor_temperature, pressure)
+            .map_err(conversion_error)?;
+        let entropy_anchor_h_j_kg = anchor.h().value() / anchor.molar_mass().value();
+        let x_log_x: f64 = thermodynamics.mole_composition().fractions().iter()
+            .map(|&x| x * fs_math::det::ln(x)).sum();
+        let pressure_entropy = thermodynamics.specific_entropy_change(
+            anchor_temperature, convention.reference_pressure(), anchor_temperature, pressure,
+        ).map_err(conversion_error)?.value();
+        let reduced_entropy_anchor_j_kg_k = pressure_entropy
+            - UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K * x_log_x / anchor.molar_mass().value();
+        if !entropy_anchor_h_j_kg.is_finite() || !reduced_entropy_anchor_j_kg_k.is_finite() {
+            return Err(GasEnergyError::Invalid("source reduced entropy anchor is not representable"));
+        }
+        // Actual pressure is a state contribution in the anchor, not a new
+        // entropy datum. Different T* values are deliberately incompatible.
+        let entropy_reference = format!("{enthalpy_reference}:stationary-entropy:T:{:016x}",
+            anchor_temperature.value().to_bits());
         Ok(Self {
             model, context, controls,
             species: source.thermodynamics().components().iter()
                 .map(|component| component.species().to_string()).collect(),
             mass_fractions: mass_composition.fractions().to_vec(),
-            mole_composition, enthalpy_reference, maximum_slope,
+            mole_composition, enthalpy_reference, entropy_reference,
+            entropy_anchor_h_j_kg, reduced_entropy_anchor_j_kg_k, maximum_slope,
         })
     }
 
@@ -441,6 +470,13 @@ impl ThermalLaw for GasEnthalpyLaw {
     fn advected_composition(&self) -> Option<CaloricComposition<'_>> {
         Some(CaloricComposition { species: &self.species, mass_fractions: &self.mass_fractions,
             enthalpy_reference: &self.enthalpy_reference })
+    }
+    fn advected_entropy_anchor(&self) -> Option<CaloricEntropyAnchor<'_>> {
+        Some(CaloricEntropyAnchor {
+            specific_h_j_kg: self.entropy_anchor_h_j_kg,
+            reduced_specific_entropy_j_kg_k: self.reduced_entropy_anchor_j_kg_k,
+            entropy_reference: &self.entropy_reference,
+        })
     }
 }
 
