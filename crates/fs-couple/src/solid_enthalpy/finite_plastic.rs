@@ -39,6 +39,7 @@ pub use material::{CaloricReference, FiniteThermoplasticMaterial, FiniteThermopl
 use std::collections::BTreeSet;
 use std::convert::Infallible;
 
+use crate::iqn_ils::{IqnIlsError, driver::CouplingMethod};
 use fs_exec::Cx;
 use fs_material::phase::PhaseStateError;
 use fs_solid::hyper2d::plastic::thermal::FiniteThermoplasticSheetError;
@@ -64,6 +65,8 @@ pub enum FiniteThermoplasticError<E = Infallible> {
     Solid(FiniteThermoplasticTetError),
     Sheet(FiniteThermoplasticSheetError),
     Thermal(DepositionError),
+    /// Original IQN-ILS policy or arithmetic refusal.
+    Accelerator(IqnIlsError),
     Observer(E),
     Cancelled,
     NotConverged {
@@ -104,7 +107,7 @@ pub struct FiniteThermoplasticConfig {
     pub maximum_iterations: usize,
     pub temperature_tolerance_k: f64,
     pub energy_tolerance_j: f64,
-    /// Relax the trial specific caloric energy in (0,1].
+    /// Picard or IQN-ILS startup relaxation of trial specific caloric energy in (0,1].
     pub enthalpy_relaxation: f64,
 }
 
@@ -263,7 +266,47 @@ impl<'a> FiniteThermoplasticSolid<'a> {
         config: FiniteThermoplasticConfig,
         cx: &Cx<'_>,
     ) -> Result<FiniteThermoplasticCandidate<'a, 't, O>, FiniteThermoplasticError<O::Error>> {
-        let next = feedback::advance(
+        self.advance_with_coupling(
+            thermal,
+            observer,
+            target_s,
+            prescribed_m,
+            nodal_forces_n,
+            body_force_n_m3,
+            settings,
+            mechanical_controls,
+            thermal_config,
+            config,
+            CouplingMethod::RelaxedPicard,
+            cx,
+        )
+    }
+
+    /// Advance the original owners with an explicit enthalpy coupling method.
+    ///
+    /// IQN-ILS changes only the next trial specific caloric energies [J/kg].
+    /// Its bounded secant history belongs to this physical interval and never
+    /// advances material, velocity, thermal or observer history. The original
+    /// temperature, per-cell heat and both energy gates still decide acceptance.
+    /// Source-domain and accelerator refusals propagate without clamping.
+    /// Neither numerical convergence nor acceleration certifies physical accuracy.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_with_coupling<'t, O: DepositionObserver>(
+        &self,
+        thermal: &DepositionSimulation<'t>,
+        observer: &O,
+        target_s: f64,
+        prescribed_m: &[(usize, f64)],
+        nodal_forces_n: &[(usize, f64)],
+        body_force_n_m3: [f64; 3],
+        settings: HyperTetSettings,
+        mechanical_controls: FiniteThermoplasticControls,
+        thermal_config: StepConfig,
+        config: FiniteThermoplasticConfig,
+        method: CouplingMethod,
+        cx: &Cx<'_>,
+    ) -> Result<FiniteThermoplasticCandidate<'a, 't, O>, FiniteThermoplasticError<O::Error>> {
+        let next = feedback::advance_with_coupling(
             self.binding(),
             self.time_s,
             thermal,
@@ -271,6 +314,7 @@ impl<'a> FiniteThermoplasticSolid<'a> {
             target_s,
             thermal_config,
             config,
+            method,
             cx,
             |temperatures, duration_s| {
                 let step = self

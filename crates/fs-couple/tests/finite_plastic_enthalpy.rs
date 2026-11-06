@@ -15,6 +15,7 @@ mod sheet;
 
 use std::collections::BTreeMap;
 
+use fs_couple::iqn_ils::{IqnIlsConfig, IqnIlsError, driver::CouplingMethod};
 use fs_couple::solid_enthalpy::finite_plastic::{
     CaloricReference, FiniteThermoplasticCell, FiniteThermoplasticConfig, FiniteThermoplasticError,
     FiniteThermoplasticMaterial, FiniteThermoplasticQuery, FiniteThermoplasticSolid,
@@ -671,6 +672,154 @@ fn source_bound_free_dof_recovers_heating_reyield_reversal_and_separates_numeric
                 solid = next_solid;
             }
         }
+    });
+}
+
+
+#[test]
+fn g1_iqn_and_picard_recover_native_thermoplastic_heat_motion_and_history() {
+    context(|cx| {
+        let fixture = Fixture::new(CP, 0);
+        for inertia in [false, true] {
+            let endpoints = path(&fixture, inertia);
+            let expected = &endpoints[0];
+            let thermal = initial(&fixture, &endpoints);
+            let solid = bind(&fixture, &thermal, inertia, cx);
+            let original_cells = thermal.cells().clone();
+            let original_history = solid.mechanics().element_states().to_vec();
+            let run = |method| {
+                solid
+                    .advance_with_coupling(
+                        &thermal,
+                        &(),
+                        expected.time_s,
+                        &expected.prescribed(),
+                        &[(3, expected.free_force_n)],
+                        [0.0; 3],
+                        settings(),
+                        controls(),
+                        thermal_config(),
+                        config(),
+                        method,
+                        cx,
+                    )
+                    .unwrap()
+            };
+            let picard = run(CouplingMethod::RelaxedPicard);
+            let accelerated = run(CouplingMethod::IqnIls(IqnIlsConfig::default()));
+            for candidate in [&picard, &accelerated] {
+                let actual = candidate.solid().mechanics();
+                let report = candidate.report();
+                // The point-law oracle fixes load and outside heat independently
+                // of the coupled solver, including the free displacement.
+                close(candidate.thermal().temperature_k(CELL).unwrap(),
+                    expected.temperature_k, 2e-7);
+                close(actual.temperatures_k()[0], expected.temperature_k, 2e-7);
+                for (u, expected_u) in actual.displacement_m().iter().flatten()
+                    .zip(expected.displacement.iter().flatten())
+                {
+                    close(*u, *expected_u, 2e-11);
+                }
+                close(actual.element_states()[0].alpha,
+                    expected.increment.mechanical.state.alpha, 3e-9);
+                close(report.material_energy.caloric_heat_j,
+                    V * expected.increment.caloric_heat_j_m3(), 2e-9);
+                close(report.external_heat_j, expected.boundary_heat_j, 2e-9);
+                assert!(report.temperature_defect_k <= config().temperature_tolerance_k);
+                assert!(report.heat_defect_j <= config().energy_tolerance_j);
+                close(report.thermal_residual_j, 0.0, config().energy_tolerance_j);
+                close(report.combined_residual_j, 0.0, config().energy_tolerance_j);
+                assert!(std::ptr::eq(actual.families()[0].caloric_source(), &fixture.caloric));
+                assert_eq!(actual.families()[0].query().card.content_hash(),
+                    fixture.card.content_hash());
+                assert_eq!(candidate.thermal().cells()[&CELL].mass_kg, RHO * V);
+                if inertia {
+                    let account = report.inertia.as_ref().unwrap();
+                    close(account.reference_mass_kg, RHO * V, 1e-18);
+                    assert!(account.numerical_loss_j > 1e-6);
+                    for (v, expected_v) in actual.velocity_mps().unwrap().iter().flatten()
+                        .zip(expected.velocity.iter().flatten())
+                    {
+                        close(*v, *expected_v, 2e-11);
+                    }
+                } else {
+                    assert!(report.inertia.is_none());
+                }
+                assert!(report.iterations > 1);
+            }
+            assert_eq!(thermal.cells(), &original_cells);
+            assert_eq!(solid.mechanics().element_states(), original_history);
+            assert_eq!(thermal.time_s(), 0.0);
+            assert_eq!(solid.time_s(), 0.0);
+        }
+    });
+}
+
+#[test]
+fn iqn_refusal_budget_and_retry_preserve_nonvirgin_thermoplastic_owners() {
+    context(|cx| {
+        let fixture = Fixture::new(CP, 0);
+        let endpoints = path(&fixture, true);
+        let thermal = initial(&fixture, &endpoints);
+        let solid = bind(&fixture, &thermal, true, cx);
+        let first = &endpoints[0];
+        let accepted = solid.advance(
+            &thermal, &(), first.time_s, &first.prescribed(), &[(3, first.free_force_n)],
+            [0.0; 3], settings(), controls(), thermal_config(), config(), cx,
+        ).unwrap();
+        let (thermal, solid, (), _) = accepted.into_parts();
+        let old_cells = thermal.cells().clone();
+        let old_history = solid.mechanics().element_states().to_vec();
+        let old_u = solid.mechanics().displacement_m().to_vec();
+        let old_v = solid.mechanics().velocity_mps().unwrap().to_vec();
+        let expected = &endpoints[1];
+        let method = CouplingMethod::IqnIls(IqnIlsConfig::default());
+        let propose = |feedback, method| {
+            solid.advance_with_coupling(
+                &thermal, &(), expected.time_s, &expected.prescribed(),
+                &[(3, expected.free_force_n)], [0.0; 3], settings(), controls(),
+                thermal_config(), feedback, method, cx,
+            )
+        };
+        assert!(matches!(
+            propose(config(), CouplingMethod::IqnIls(IqnIlsConfig {
+                max_history: 0,
+                ..IqnIlsConfig::default()
+            })),
+            Err(FiniteThermoplasticError::Accelerator(IqnIlsError::InvalidHistoryLimit(0)))
+        ));
+        let observer = LateRefusal { completed_substeps: 0 };
+        let late = solid.advance_with_coupling(
+            &thermal, &observer, expected.time_s, &expected.prescribed(),
+            &[(3, expected.free_force_n)], [0.0; 3], settings(), controls(),
+            thermal_config(), config(), method, cx,
+        );
+        assert!(matches!(
+            late,
+            Err(FiniteThermoplasticError::Observer(DepositionError::Cancelled))
+        ));
+        assert_eq!(observer.completed_substeps, 0);
+        assert!(matches!(
+            propose(FiniteThermoplasticConfig { maximum_iterations: 1, ..config() }, method),
+            Err(FiniteThermoplasticError::NotConverged { iterations: 1, .. })
+        ));
+        assert_eq!(thermal.cells(), &old_cells);
+        assert_eq!(solid.mechanics().element_states(), old_history);
+        assert_eq!(solid.mechanics().displacement_m(), old_u);
+        assert_eq!(solid.mechanics().velocity_mps().unwrap(), old_v);
+        assert_eq!(thermal.time_s(), 1.0);
+        assert_eq!(solid.time_s(), 1.0);
+
+        let retried = propose(config(), method).unwrap();
+        close(retried.thermal().temperature_k(CELL).unwrap(),
+            expected.temperature_k, 2e-7);
+        close(retried.solid().mechanics().element_states()[0].alpha,
+            expected.increment.mechanical.state.alpha, 3e-9);
+        assert!(retried.solid().mechanics().element_states()[0].alpha > old_history[0].alpha);
+        close(retried.report().combined_residual_j, 0.0, config().energy_tolerance_j);
+        // Even an accepted proposal has not adopted either predecessor's state.
+        assert_eq!(thermal.cells(), &old_cells);
+        assert_eq!(solid.mechanics().element_states(), old_history);
     });
 }
 

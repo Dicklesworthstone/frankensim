@@ -6,6 +6,7 @@
 
 use std::collections::BTreeMap;
 
+use crate::iqn_ils::{IqnIls, driver::CouplingMethod};
 use fs_exec::Cx;
 use fs_solid::hyper3::plastic::FinitePlasticLawField;
 use fs_solid::hyper3::plastic::thermal::FiniteThermoplasticTetEnergy;
@@ -147,6 +148,37 @@ pub(super) fn advance<'t, S, E, O: DepositionObserver>(
     thermal_config: StepConfig,
     config: FiniteThermoplasticConfig,
     cx: &Cx<'_>,
+    mechanics: impl FnMut(
+        &[f64],
+        f64,
+    )
+        -> Result<MechanicalProposal<S, E>, FiniteThermoplasticError<O::Error>>,
+) -> Result<FeedbackCandidate<'t, S, E, O>, FiniteThermoplasticError<O::Error>> {
+    advance_with_coupling(
+        binding,
+        time_s,
+        thermal,
+        observer,
+        target_s,
+        thermal_config,
+        config,
+        CouplingMethod::RelaxedPicard,
+        cx,
+        mechanics,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn advance_with_coupling<'t, S, E, O: DepositionObserver>(
+    binding: ThermalBinding<'_, '_, '_>,
+    time_s: f64,
+    thermal: &DepositionSimulation<'t>,
+    observer: &O,
+    target_s: f64,
+    thermal_config: StepConfig,
+    config: FiniteThermoplasticConfig,
+    method: CouplingMethod,
+    cx: &Cx<'_>,
     mut mechanics: impl FnMut(
         &[f64],
         f64,
@@ -173,10 +205,19 @@ pub(super) fn advance<'t, S, E, O: DepositionObserver>(
         ));
     }
     let mut enthalpies = binding.enthalpies(thermal, true, cx)?;
+    // The thermal/mechanical map changes between physical intervals; never
+    // carry its interface secants into the next accepted material history.
+    let mut accelerator = match method {
+        CouplingMethod::RelaxedPicard => None,
+        CouplingMethod::IqnIls(policy) => Some(
+            IqnIls::new(enthalpies.len(), policy)
+                .map_err(FiniteThermoplasticError::Accelerator)?,
+        ),
+    };
     let mut defects = [f64::INFINITY; 4];
     // Every proposal and cached endpoint starts from the SAME accepted owner.
-    // At relaxation=1 the actual-temperature proposal is the next trial, so
-    // another native equilibrium solve would repeat exactly the same work.
+    // Reuse an actual-temperature solve only at its exact evaluated enthalpies;
+    // an accelerated iterate normally needs its own native equilibrium solve.
     let mut next_trial = None;
     for iteration in 1..=config.maximum_iterations {
         poll(cx)?;
@@ -283,7 +324,25 @@ pub(super) fn advance<'t, S, E, O: DepositionObserver>(
                 report,
             });
         }
-        if config.enthalpy_relaxation == 1.0 {
+        if iteration == config.maximum_iterations {
+            break;
+        }
+        poll(cx)?;
+        if let Some(accelerator) = &mut accelerator {
+            let proposal = accelerator
+                .step(&enthalpies, &final_h, config.enthalpy_relaxation)
+                .map_err(FiniteThermoplasticError::Accelerator)?;
+            poll(cx)?;
+            if proposal
+                .values
+                .iter()
+                .zip(&final_h)
+                .all(|(proposed, evaluated)| proposed.to_bits() == evaluated.to_bits())
+            {
+                next_trial = Some(actual);
+            }
+            enthalpies = proposal.values;
+        } else if config.enthalpy_relaxation == 1.0 {
             enthalpies = final_h;
             next_trial = Some(actual);
         } else {
