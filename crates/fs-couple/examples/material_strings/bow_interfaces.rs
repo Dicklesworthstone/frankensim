@@ -55,12 +55,14 @@ struct Bound {
 }
 // Layer contacts use this only while their original mechanical ports are built.
 // Their source layer must bind before scheduling; it is never a fallback law.
+// Thermal rosin ports carry it too, until the rosin law sets every step's coefficient.
 const LAYER_TOPOLOGY_LAW: FrictionLaw = FrictionLaw::Coulomb { static_mu: 0.0, kinetic_mu: 0.0 };
 #[derive(Clone)]
 pub struct Inputs {
     research: Option<FrictionLaw>,
     layers: Option<shear_layers::Inputs>,
     mindlin: Option<bow_mindlin::Inputs>,
+    rosin: Option<rosin_thermal::Row>,
     declarations: Vec<Declaration>,
     packs: BTreeMap<String, NormalizedInterfacePack>,
     environment: BTreeMap<String, Vec<(String, f64)>>,
@@ -80,13 +82,14 @@ impl core::fmt::Debug for Inputs {
             .collect();
         let mut debug = f.debug_struct("BowFriction");
         debug
-            .field("research_override", &if self.layers.is_none() { self.research.as_ref() } else { None })
+            .field("research_override", &if self.layers.is_none() && self.rosin.is_none() { self.research.as_ref() } else { None })
             .field("material_shear_layers", &self.layers)
             .field("declarations", &self.declarations)
             .field("packs", &packs)
             .field("environment", &self.environment)
             .field("states", &states);
         if let Some(mindlin) = &self.mindlin { debug.field("material_mindlin_contacts", mindlin); }
+        if let Some(rosin) = &self.rosin { debug.field("rosin_thermal", rosin); }
         debug.finish()
     }
 }
@@ -97,6 +100,7 @@ impl Inputs {
             research: Some(law),
             layers: None,
             mindlin: None,
+            rosin: None,
             declarations: Vec::new(),
             packs: BTreeMap::new(),
             environment: BTreeMap::new(),
@@ -130,6 +134,16 @@ impl Inputs {
         if !mindlin.is_empty() { inputs.mindlin = Some(bow_mindlin::Inputs::new(mindlin)?); }
         Ok(inputs)
     }
+    /// Thermal rosin on the bow's own plain Coulomb ports. The zero dry law only
+    /// builds their topology: before every step the rosin law sets each port's
+    /// coefficient (rosin_thermal.rs), so no fallback renderer is exposed.
+    pub fn rosin_thermal(row: rosin_thermal::Row) -> Result<Self> {
+        let mut inputs = Self::interfaces(Vec::new())?;
+        inputs.research = Some(LAYER_TOPOLOGY_LAW);
+        inputs.rosin = Some(row);
+        Ok(inputs)
+    }
+    pub fn rosin(&self) -> Option<&rosin_thermal::Row> { self.rosin.as_ref() }
     pub fn shear_layers(&self) -> Option<&shear_layers::Inputs> {
         self.layers.as_ref()
     }
@@ -166,6 +180,7 @@ impl Inputs {
             research: None,
             layers: None,
             mindlin: None,
+            rosin: None,
             declarations,
             packs: BTreeMap::new(),
             environment: BTreeMap::new(),

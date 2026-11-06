@@ -57,6 +57,10 @@ pub mod layer;
 /// Original source-bound Hertz--Mindlin microslip at fixed normal preload.
 pub mod mindlin;
 
+/// Smith & Woodhouse (2000) thermal rosin: a per-port temperature history and
+/// a step-start Coulomb coefficient, advanced only on an accepted step.
+pub mod rosin_thermal;
+
 /// Bounded joint setup and nonlinear work, in addition to each port's limits.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MultiFrictionConfig {
@@ -1344,6 +1348,34 @@ impl MultiFrictionModalSystem {
             self.interfaces[index-1] = Some(binding);
         }
         Ok(self)
+    }
+    /// The law [`Self::set_port_coulomb_coefficient`] would bind at `index`,
+    /// or its refusal; changes nothing.
+    pub(crate) fn admit_port_coulomb_coefficient(&self, index: usize, mu: f64)
+        -> Result<FrictionLaw, ModalFrictionError>
+    {
+        let point = self.points.get(index).ok_or_else(|| invalid("coefficient names an unknown friction port"))?;
+        if self.interface(index).is_some() || self.shear_layers[index].is_some() || self.mindlin_contacts[index].is_some()
+            || !matches!(point.port.law, FrictionLaw::Coulomb { .. }) {
+            return Err(invalid("a step Coulomb coefficient binds only to a plain Coulomb port").into());
+        }
+        if index == 0 { self.core.admit_coulomb_coefficient(mu)?; }
+        let law = FrictionLaw::Coulomb { static_mu: mu, kinetic_mu: mu };
+        law.regularized_traction_1d(0.0, 0.0, 1.0)?;
+        Ok(law)
+    }
+    /// Set one plain Coulomb port's coefficient for the next step
+    /// ([`FrictionModalSystem::set_coulomb_coefficient`]). Port 0 is held by the
+    /// original single-port owner and by the joint points: both change, and
+    /// that port's cached held-force line is dropped. Source-bound ports refuse.
+    pub(crate) fn set_port_coulomb_coefficient(&mut self, index: usize, mu: f64)
+        -> Result<(), ModalFrictionError>
+    {
+        let law = self.admit_port_coulomb_coefficient(index, mu)?;
+        if index == 0 { self.core.set_coulomb_coefficient(mu)?; }
+        self.points[index].port.law = law;
+        self.load_lines[index] = None;
+        Ok(())
     }
     /// Source belonging to this physical contact, in original drive order.
     /// The first binding remains in the original scalar owner, including its

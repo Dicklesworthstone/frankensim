@@ -1543,6 +1543,110 @@ about 1.215) and takes the same set-valued branch continuation as `hyperbolic`. 
 points span about 0.3 m/s; above that the curve is the fit's own trend. It is a steady-sliding
 curve: no thermal or rosin-temperature memory.
 
+#### Thermal rosin
+
+```text
+friction rosin-thermal-sw2000 ROSIN_PACK CONTEXT RADIUS_M REF_N LAYER_M STRING_SURFACE_PACK CONTEXT (HAIR_PACK CONTEXT | rosin-per-wg2025-eq5) CALIBRATION RIG_PACK CONTEXT
+```
+
+This row replaces `rosin-wg2025-eq13` with the plastic thermal model of Smith & Woodhouse
+(2000), "The tribology of rosin", J. Mech. Phys. Solids 48, 1633-1681, as implemented in
+`fs_tribo::rosin_thermal`. Friction comes from the rosin's temperature instead of from the
+sliding speed. The fields are:
+
+- `RADIUS_M`: the radius of the WHOLE bow contact at the whole bow load `REF_N`. The radius
+  grows as the square root of the load.
+- `LAYER_M`: the thickness of the actively deforming rosin layer.
+- `ROSIN_PACK`: the rosin's density and specific heat.
+- `STRING_SURFACE_PACK`: the string surface, which is stationary relative to the contact.
+  This pack and the next give conductivity, density and specific heat.
+- `HAIR_PACK`: the hair, which moves through the contact.
+
+Each pack names its source context on the card, as a measured string section does (see
+"Explicit property and state selection" in MEASURED_STRINGS.md). `CONTEXT` is
+`COUNT AXIS VALUE ...`, with up to eight coordinates:
+
+- `0` reads the pack at the performance's `state` (T and omega), together with any
+  `material-state` coordinates the card gives that pack.
+- A nonzero count reads the pack at exactly the named source coordinates, without the
+  performance's T. `T` and `omega` cannot be named here, because they belong to the `state`
+  row. A pack named with a context cannot also take a `material-state`.
+
+`temperature_known 0` is the context for a source that states no test temperature. It is
+not zero kelvin, room temperature, or the performance's T. Smith & Woodhouse's (2000) Table 1
+states none for the rosin or the perspex, so the seed packs scope every claim to it, and a
+read without it refuses: no claim is in domain. Such a pack's values enter the law as the
+constants Smith & Woodhouse used. The setup receipt prints each pack's context.
+
+No printed keratin value is on file. `rosin-per-wg2025-eq5` in the hair's place puts the
+rosin pack's own constants, read at the rosin's context, on the hair side. That is
+Woodhouse & Galluzzo's (2025) own stated assumption in their eq. (5), and the setup receipt
+names it as theirs.
+
+`CALIBRATION` names the steady-sliding curve and the rig it was measured on. These convert a
+measured friction curve into the rosin's yield stress `k_y(T)`. Their numbers never ride on
+the row. `RIG_PACK` is the solid of that rig, whose conductivity, density and specific heat
+are read like the string's. The calibration on file is:
+
+- `wg2025-eq13`: the steady curve of Woodhouse & Galluzzo (2025) eq. (13), on Smith &
+  Woodhouse's (2000) steady-sliding rig (`fs_tribo::rosin_thermal::RosinCalibration`). That
+  rig's solid was perspex, so `RIG_PACK` is the perspex pack built from
+  `data/matdb/seed-v1/perspex-smith-woodhouse-jmps2000`, not the rosin.
+
+Any other name refuses with "no calibration on file named ...", before any pack is read.
+
+With the seed packs (built with `xtask matdb-pack --manifest data/matdb/seed-v1/DIR/manifest.tsv`)
+and the rig's own geometry, a = 0.5 mm at 3 N with a 10 um layer:
+
+```text
+friction rosin-thermal-sw2000 rosin.fsmatpk 1 temperature_known 0 5e-4 3 1e-5 steel.fsmatpk 0 rosin-per-wg2025-eq5 wg2025-eq13 perspex.fsmatpk 1 temperature_known 0
+```
+
+Here `rosin.fsmatpk` is built from `rosin-smith-woodhouse-jmps2000`, `steel.fsmatpk` from
+`steel-music-wire-string-heptonstall-ligo-p1400229` (bound at 293.15 K, so the card's `state`
+must be 293.15) and `perspex.fsmatpk` from `perspex-smith-woodhouse-jmps2000`. The geometry
+is the calibration rig's, not a measurement of a bow.
+
+Each bow contact cell is one cell of the same contact: a single point, or each cell of a
+ribbon. The row needs exactly one bow track.
+
+- **Friction.** Before each step, cell `i` takes the set-valued Coulomb coefficient
+  `mu_i = pi a^2 k_y(T_i)/N_ref`, using its temperature at the start of the step. Because
+  the area grows with load, `mu_i` does not depend on the cell's load.
+- **Heat.** Heat advances only on the step the solver accepts, with that cell's own load and
+  slip. Each cell keeps the whole contact's radius at `N_ref/cells`. Every hair point crosses
+  the whole contact, so the crossing time does not change with the cell count: one and
+  three cells under the same slip give the same temperature.
+- **Landing and lift: one stroke per cell.** A cell is loaded on a step when its normal load
+  is positive and it is not released.
+  - Before its first loaded step the cell is inert, since there is no contact. Its history
+    starts at that step from the law's own initial state, the rosin at ambient, as at t = 0
+    of Smith & Woodhouse (2000) and Woodhouse & Galluzzo (2025). Its t = 0 is its first
+    contact, not the first sample.
+  - After the lift the friction force is mu x 0 = 0, so the cell adds nothing. Its history
+    is frozen and reported.
+  - A second landing refuses by name, because neither source states what the rosin does
+    off the string. So a single note whose bow lands once and lifts once plays, and a
+    phrase of several strokes refuses at its second landing. A contact-loaded bow that
+    bounces on landing also refuses.
+
+The row refuses when:
+- a cell lands a second time after its lift;
+- an unloaded cell carries traction, or a normal load is negative or not finite;
+- a temperature goes above the calibration's limit;
+- the performance has more samples than the law's history capacity;
+- it is combined with `--contact-thermal` or `--bridge-force`.
+
+The heat is a convolution over the whole history, so its cost grows as the square of the
+sample count. The log prints the setup before the render. After the render, or after a
+refusal part way through, it prints a receipt with:
+- the accepted steps;
+- each cell's heat steps, which are its loaded steps;
+- each cell's phase, with its landing and lift steps (0-based samples);
+- each cell's temperature rise, frozen after a lift;
+- the next coefficients;
+- `heat_seconds`: the wall time spent on the heat, a receipt rather than physics.
+
 The material-layer form above selects bulk constitutive properties and layer geometry.
 A separate supported choice replaces the friction row with source-bound ordered interfaces:
 

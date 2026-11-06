@@ -1148,6 +1148,19 @@ impl Spec {
             "rosin-wg2025-eq13" => {
                 row.end()?; bow_interfaces::Inputs::research(FrictionLaw::rosin_woodhouse_galluzzo_2025_eq13())?
             },
+            // Smith & Woodhouse (2000) thermal rosin, in place of the steady row
+            // above: the whole contact (radius at the whole bow load, the layer),
+            // the rosin, string-surface and hair packs, and a NAMED calibration.
+            // The calibration is selected first; no row takes its numbers.
+            "rosin-thermal-sw2000" => {
+                let rosin=row.pack_read()?; let radius_m=row.positive()?; let reference_normal_n=row.positive()?;
+                let layer_m=row.positive()?; let string=row.pack_read()?;
+                let hair=if row.next_is(rosin_thermal::ROSIN_HAIR) { rosin_thermal::Hair::RosinPerWg2025Eq5 }
+                    else { rosin_thermal::Hair::Pack(row.pack_read()?) };
+                let calibration=row.label()?; let rig=row.pack_read()?; row.end()?;
+                bow_interfaces::Inputs::rosin_thermal(rosin_thermal::Row::new(rosin,radius_m,
+                    reference_normal_n,layer_m,string,hair,calibration,rig)?)?
+            },
             kind @ ("layers" | "interfaces" | "contacts") => {
                 let count=row.count(16)?; row.end()?;
                 if count == 0 { return Err("source-bound friction requires explicit contact declarations".into()); }
@@ -1814,5 +1827,17 @@ impl<'a> Row<'a> {
     }
     fn end(mut self) -> Result<()> {
         if self.words.next().is_some() { return Err(format!("extra field on line {}", self.line).into()); } Ok(())
+    }
+    /// The next word, consumed only if it is `literal`.
+    fn next_is(&mut self, literal: &str) -> bool {
+        if self.words.clone().next() == Some(literal) { self.words.next(); true } else { false }
+    }
+    /// `PACK COUNT AXIS VALUE ...`: a pack path and the source context it is read at.
+    fn pack_read(&mut self) -> Result<rosin_thermal::PackRead> {
+        let path = self.path()?;
+        let count = self.count(fs_couple::material_source::MAX_RECORD_AXES)?;
+        let mut context = Vec::with_capacity(count);
+        for _ in 0..count { context.push((self.label()?, self.scalar()?)); }
+        rosin_thermal::PackRead::new(path, context)
     }
 }

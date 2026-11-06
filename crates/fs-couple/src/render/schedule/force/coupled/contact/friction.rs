@@ -502,6 +502,27 @@ impl FrictionModalSystem {
     #[must_use]
     pub const fn port(&self) -> &ModalFrictionPort { &self.port }
 
+    /// The law [`Self::set_coulomb_coefficient`] would bind, or its refusal;
+    /// changes nothing.
+    pub(crate) fn admit_coulomb_coefficient(&self, mu: f64) -> Result<FrictionLaw, ModalFrictionError> {
+        if self.interface.is_some() || self.adhesive.is_some()
+            || !matches!(self.port.law, FrictionLaw::Coulomb { .. }) {
+            return Err(invalid("a step Coulomb coefficient binds only to a plain Coulomb port").into());
+        }
+        let law = FrictionLaw::Coulomb { static_mu: mu, kinetic_mu: mu };
+        law.regularized_traction_1d(0.0, 0.0, 1.0)?;
+        Ok(law)
+    }
+    /// Set this port's set-valued Coulomb coefficient for the NEXT step only,
+    /// with static and kinetic equal (`|F| <= mu N`). Only a plain Coulomb port
+    /// takes it: a bound interface source or adhesive junction keeps its own law.
+    /// The cached held-force line is dropped, so the step solves on `mu`.
+    pub(crate) fn set_coulomb_coefficient(&mut self, mu: f64) -> Result<(), ModalFrictionError> {
+        self.port.law = self.admit_coulomb_coefficient(mu)?;
+        self.load_line = None;
+        Ok(())
+    }
+
     /// Advance one held-input physical sample without a cancellation request.
     pub fn step(&mut self, external: &[f64], drive: FrictionDrive)
         -> Result<&FrictionModalFrame, ModalFrictionError> { self.step_inner(external, drive, None) }

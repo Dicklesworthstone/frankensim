@@ -26,6 +26,8 @@ mod shear_layers;
 mod bow_mindlin;
 #[path = "material_strings/contact_thermal.rs"]
 mod contact_thermal;
+#[path = "material_strings/rosin_thermal.rs"]
+mod rosin_thermal;
 #[path = "material_strings/bridge_interfaces.rs"]
 mod bridge_interfaces;
 #[path = "material_strings/axial_bearings.rs"]
@@ -272,13 +274,16 @@ impl core::fmt::Display for BodyRadiationReport {
 }
 struct Ready { spec: input::Spec, catalog: Catalog, performance: MultiBowPerformance,
     body_profile: Option<body::Profile>, rotational_bridge_baselines_m: Vec<Option<f64>>,
-    stop_profile: Option<stops::Profile>, body_radiation: Option<BodyRadiationReport> }
+    stop_profile: Option<stops::Profile>, body_radiation: Option<BodyRadiationReport>,
+    // The thermal rosin row and its law on this bank's step; bound by the writer.
+    rosin: Option<(rosin_thermal::Resolved, fs_tribo::rosin_thermal::SmithWoodhouseParams)>,
+    rosin_receipt: Option<fs_couple::render::schedule::force::coupled::contact::friction::multiple::rosin_thermal::RosinThermalPorts> }
 /// The complete physical bank before gesture scheduling and microphone setup.
 /// Both analysis and playback pass through this one source-binding sequence.
 struct ReadyBank { spec: input::Spec, catalog: Catalog, bank: MultiBowStringBank,
     body_profile: Option<body::Profile>, rotational_bridge_baselines_m: Vec<Option<f64>>,
     stop_profile: Option<stops::Profile>, body_radiation: Option<BodyRadiationReport>,
-    bow_station_program: Option<BowStationProgram> }
+    bow_station_program: Option<BowStationProgram>, rosin: Option<rosin_thermal::Resolved> }
 impl ReadyBank {
     fn into_performance(self, gate: &CancelGate) -> Result<Ready> {
         if matches!(self.bank.source().bank().preparation(), ModalPreparation::HarmonicOnly(_)) {
@@ -286,7 +291,7 @@ impl ReadyBank {
         }
         self.spec.schedule_bank(self.bank, self.catalog, self.body_profile,
             self.rotational_bridge_baselines_m, self.stop_profile, self.body_radiation,
-            self.bow_station_program, gate)
+            self.bow_station_program, self.rosin, gate)
     }
 }
 impl input::Spec {
@@ -318,6 +323,14 @@ impl input::Spec {
         self.bridge_interfaces.require_environment(&self.material_states)?;
         self.axial_bearings.require_environment(&self.material_states)?;
         self.friction.validate_thermal_mode(self.dry_contact_thermal)?;
+        if self.friction.rosin().is_some() {
+            if self.dry_contact_thermal {
+                return Err("rosin-thermal-sw2000 owns the bow contact's heat; it cannot run with contact-thermal heat".into());
+            }
+            if self.schedule.tracks().len() != 1 {
+                return Err("rosin-thermal-sw2000 is one bow contact: it needs exactly one bow track".into());
+            }
+        }
         let preparation = if harmonic_only {
             if !profile.as_ref().is_some_and(body::Profile::has_shell_material_basis) {
                 return Err("loaded body-response-only requires a curved or assembled shell profile".into());
@@ -482,6 +495,7 @@ impl input::Spec {
             load_pack(path, &mut catalog, &mut loader)?;
         }
         self.friction.validate_surfaces(&self, &catalog)?;
+        let rosin=self.friction.rosin().map(|row|row.resolve(&self,&mut catalog,&mut loader)).transpose()?;
         let bank=if let Some(body_profile)=&profile {
             body_profile.compile_with_preparation(&self,sources,&mut catalog,&mut loader,
                 settings.clone(),preparation,cx,gate)?
@@ -651,12 +665,13 @@ impl input::Spec {
             return Err("material-state names a source pack unused by this assembly".into());
         }
         Ok(ReadyBank { spec:self,catalog,bank,body_profile:profile,
-            rotational_bridge_baselines_m:baselines,stop_profile,body_radiation,bow_station_program })
+            rotational_bridge_baselines_m:baselines,stop_profile,body_radiation,bow_station_program,rosin })
     }
 
     fn schedule_bank(self, bank:MultiBowStringBank, catalog:Catalog, profile:Option<body::Profile>,
         baselines:Vec<Option<f64>>, stop_profile:Option<stops::Profile>, body_radiation:Option<BodyRadiationReport>,
-        bow_station_program:Option<BowStationProgram>, gate:&CancelGate) -> Result<Ready> {
+        bow_station_program:Option<BowStationProgram>, rosin:Option<rosin_thermal::Resolved>,
+        gate:&CancelGate) -> Result<Ready> {
         let performance_config=MultiBowPerformanceConfig { samples:self.samples,max_block:self.block,
             max_work:input::MAX_WORK,max_events:input::MAX_CONTROLS };
         let mut performance=if self.bow_ribbon.is_some() {
@@ -705,7 +720,10 @@ impl input::Spec {
             } else { performance.with_one_way_shell_observer(observer.clone(),&skin,store,gate)? };
         }
         performance.validate_sample_rate(self.rate)?;performance.validate_sample_count(self.samples)?;poll(gate)?;
-        Ok(Ready { spec:self,catalog,performance,body_profile:profile,rotational_bridge_baselines_m:baselines,stop_profile,body_radiation })
+        let rosin=rosin.map(|row|row.params(performance.bank().system().sample_period_s(),self.samples)
+            .map(|params|(row,params))).transpose()?;
+        Ok(Ready { spec:self,catalog,performance,body_profile:profile,rotational_bridge_baselines_m:baselines,stop_profile,body_radiation,
+            rosin,rosin_receipt:None })
     }
 }
 impl Ready {
@@ -720,6 +738,18 @@ impl Ready {
     }
     fn write_observed<W:Write+Seek>(&mut self,output:W,trace:Option<&mut dyn Write>,
         decimate:bool,gate:&CancelGate)->Result<(W,WavStreamSummary)> {
+        // Thermal rosin binds to this performance for the render only; the
+        // receipt is kept even when the render refuses part way through.
+        if let Some((_,params))=&self.rosin {
+            let mut rosin=self.performance.with_rosin_thermal(*params)?;
+            let result=match trace {
+                Some(trace)=>write_traced_pressure(&mut rosin,output,trace,&self.spec,
+                    decimate,gate,|rosin|rosin.performance().bank().system().last_frame()),
+                None=>write_pressure(&mut rosin,output,&self.spec,decimate,gate),
+            };
+            self.rosin_receipt=Some(rosin.into_rosin());
+            return result;
+        }
         match trace {
             Some(trace)=>write_traced_pressure(&mut self.performance,output,trace,&self.spec,
                 decimate,gate,|performance|performance.bank().system().last_frame()),
@@ -730,6 +760,7 @@ impl Ready {
     /// `write_bridge_force_pressure`). The WAV bytes are `write`'s, as for `write_traced`.
     fn write_bridge_forces<W:Write+Seek>(&mut self,output:W,forces:&mut dyn Write,decimate:bool,gate:&CancelGate)
         ->Result<(W,WavStreamSummary)> {
+        if self.rosin.is_some() { return Err("rosin-thermal-sw2000 renders through the plain or traced writer only".into()); }
         write_bridge_force_pressure(&mut self.performance,output,forces,&self.spec,decimate,gate,|performance|{
             let system=performance.bank().system();
             Some((system.last_frame()?.sample,system.coupled_frame()?.connection_forces_n.as_slice()))
@@ -990,6 +1021,9 @@ fn run(raw:&[std::ffi::OsString])->Result<()> {
     let mut spec=input::Spec::parse_with_gas_sources(
         &read_bounded(path,input::MAX_INPUT_BYTES)?,gas_registry.as_ref())?;
     if let Some(geometry)=geometry { geometry.bind(&mut spec)?; }
+    if spec.friction.rosin().is_some() && (thermal_profile.is_some() || force_path.is_some()) {
+        return Err("rosin-thermal-sw2000 owns the bow contact's heat and renders through the plain or traced writer; run it without --contact-thermal or --bridge-force".into());
+    }
     if response_options.as_ref().is_some_and(body_response::Options::loaded)
         && spec.plate_observer.is_some() {
         return Err("loaded shell response requires its shell or acoustic-skin receiver; a planar microphone is incompatible".into());
@@ -1096,6 +1130,7 @@ fn run(raw:&[std::ffi::OsString])->Result<()> {
     }
     measured::describe_torsion(&ready);
     eprintln!("bow_friction={:?}",ready.spec.friction);
+    if let Some((row,params))=&ready.rosin { row.describe(params,ready.spec.bow_contact_count())?; }
     if let Some(forces)=ready.performance.material_force_program() {
         eprintln!("physical_force_ports={:?}; initial_force_N={:?}; initialization={:?}; authored_events={}; preload_energy_J={:?}; shared mechanical clock and coupled solver",
             forces.ports,forces.initial_force_n,forces.initialization,forces.events.len(),
@@ -1292,6 +1327,7 @@ fn run(raw:&[std::ffi::OsString])->Result<()> {
     coating_strain::describe(&ready.performance,&mut std::io::stderr().lock())?;
     if let Some(trace)=trace.as_mut() { trace.flush()?; }
     if let Some(forces)=bridge_forces.as_mut() { forces.flush()?; }
+    if let Some(ports)=&ready.rosin_receipt { rosin_thermal::receipt(ports); }
     let (_,summary)=written.map_err(|e|format!("WAV not completed; keep/discard its partial prefix explicitly: {e}"))?;
     if let Some(frame)=ready.performance.fiber_support_frame() {
         eprintln!("bow_fiber_support_frame={frame:?}");

@@ -6,6 +6,7 @@ use super::MultiBowStringBank;
 use crate::pcm_wav::observation::PressureRenderer;
 use crate::render::{RenderError, schedule::GestureCompileError};
 use crate::render::schedule::force::coupled::contact::friction::FrictionDrive;
+use crate::render::schedule::force::coupled::contact::friction::multiple::MultiFrictionFrame;
 use crate::render::schedule::force::coupled::render::friction::{
     FrictionGestureConfig, compile_friction_track_admitted,
 };
@@ -274,19 +275,25 @@ impl PressureRenderer for MultiBowPerformance {
         Ok(())
     }
     fn block(&mut self, output: &mut [f64]) -> Result<(), RenderError> {
-        self.block_with_step(output, |bank, forces, drives, motion| {
-            let frame = if let Some(bows) = motion.bow_stations {
-                bank.step_with_bow_and_stop_stations_under_gate(forces, drives, bows,
-                    motion.stop_stations, motion.stop_offsets_m, &fs_exec::CancelGate::new_clock_free())
-            } else if let Some(stations) = motion.stop_stations {
-                bank.step_with_stop_stations(forces, drives, stations, motion.stop_offsets_m)
-            } else if let Some(offsets) = motion.stop_offsets_m {
-                bank.step_with_stop_offsets(forces, drives, offsets).map_err(RenderError::Friction)
-            } else {
-                bank.step(forces, drives).map_err(RenderError::Friction)
-            }?;
-            Ok(frame.observer_pressure_pa)
-        })
+        self.block_with_step(output, |bank, forces, drives, motion|
+            Ok(ordinary_step(bank, forces, drives, motion)?.observer_pressure_pa))
+    }
+}
+
+// The ordinary joint step for the motion this sample carries. The thermal
+// rosin performance takes this SAME dispatch, so its mechanics are these.
+fn ordinary_step<'b>(bank: &'b mut MultiBowStringBank, forces: &[f64], drives: &[FrictionDrive],
+    motion: StepMotion<'_>) -> Result<&'b MultiFrictionFrame, RenderError>
+{
+    if let Some(bows) = motion.bow_stations {
+        bank.step_with_bow_and_stop_stations_under_gate(forces, drives, bows,
+            motion.stop_stations, motion.stop_offsets_m, &fs_exec::CancelGate::new_clock_free())
+    } else if let Some(stations) = motion.stop_stations {
+        bank.step_with_stop_stations(forces, drives, stations, motion.stop_offsets_m)
+    } else if let Some(offsets) = motion.stop_offsets_m {
+        bank.step_with_stop_offsets(forces, drives, offsets).map_err(RenderError::Friction)
+    } else {
+        bank.step(forces, drives).map_err(RenderError::Friction)
     }
 }
 
@@ -419,3 +426,6 @@ pub mod coating;
 
 /// Source-bound contact heat on the original scheduled pressure/PCM route.
 pub mod thermal;
+
+/// Smith & Woodhouse thermal rosin on every bow contact of the same loop.
+pub mod rosin_thermal;

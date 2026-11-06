@@ -793,3 +793,169 @@ mod rosin_wg2025_eq13 {
         }
     }
 }
+
+mod rosin_thermal_sw2000 {
+    use super::*;
+    use fs_tribo::rosin_thermal::ThermalSolid;
+
+    const TK: &str = "1 temperature_known 0";
+
+    /// The row with each pack's context; `hair` is either `PACK CONTEXT` or the literal.
+    fn row(rosin: &str, string: &str, hair: &str, calibration: &str, rig: &str) -> String {
+        format!("friction rosin-thermal-sw2000 rosin.fsmatpk {rosin} 5e-4 3 1e-5 string.fsmatpk {string} {hair} {calibration} perspex.fsmatpk {rig}")
+    }
+    fn on_file() -> String { row(TK, "0", "rosin-per-wg2025-eq5", "wg2025-eq13", TK) }
+    fn row_with_hair_pack() -> String { row(TK, "0", &format!("hair.fsmatpk {TK}"), "wg2025-eq13", TK) }
+
+    fn with(record: &str) -> String {
+        String::from_utf8(spec().bytes).unwrap().replace("friction stribeck 0.8 0.4 0.1 0", record)
+    }
+
+    fn refusal(record: &str) -> String {
+        match input::Spec::parse(with(record).as_bytes()) {
+            Ok(_) => panic!("{record} must be refused"),
+            Err(error) => error.to_string(),
+        }
+    }
+
+    /// Smith & Woodhouse (2000) Table 1's rosin and perspex, and a steel at the
+    /// performance's T. The rosin and perspex claims are scoped to
+    /// `temperature_known 0` as the seed packs are, because the source states no
+    /// test temperature. Manufactured here, not the seed packs themselves.
+    fn table1(name: &str) -> NormalizedPack {
+        let (values, validity) = match name {
+            "rosin.fsmatpk" => ([1010.0, 250.0, 0.113], ValidityDomain::unconstrained().with("temperature_known", 0.0, 0.0)),
+            "perspex.fsmatpk" => ([1200.0, 1460.0, 0.2], ValidityDomain::unconstrained().with("temperature_known", 0.0, 0.0)),
+            _ => ([7800.0, 486.0, 49.0], ValidityDomain::unconstrained().with("T", 280.0, 320.0)),
+        };
+        let mut claims = ClaimSet::new();
+        let artifact = fs_blake3::ContentHash([47; 32]);
+        let provenance = Provenance {
+            source: "manufactured thermal-rosin row fixture".into(),
+            license: "CC0-1.0".into(),
+            artifact: Some(artifact),
+        };
+        let observation = claims
+            .register_observation(fs_matdb::ObservationDataset {
+                specimen: "manufactured thermal-rosin row fixture".into(),
+                method: "printed table values typed in".into(),
+                artifact,
+                caveats: "a test fixture, not a measurement".into(),
+                provenance: provenance.clone(),
+            })
+            .unwrap();
+        for ((property, dims), value) in [
+            ("density", Density::DIMS),
+            (SPECIFIC_HEAT_CAPACITY_PROPERTY, SPECIFIC_HEAT_CAPACITY_DIMS),
+            (THERMAL_CONDUCTIVITY_PROPERTY, THERMAL_CONDUCTIVITY_DIMS),
+        ].into_iter().zip(values) {
+            claims
+                .insert_claim(PropertyClaim {
+                    key: PropertyKey::new(property, dims),
+                    value: PropertyValue::Scalar { value, dims },
+                    validity: validity.clone(),
+                    uncertainty: UncertaintyModel::Unstated,
+                    interpolation: InterpolationPolicy::ConstantWithinValidity,
+                    observations: vec![observation.clone()],
+                    provenance: provenance.clone(),
+                })
+                .unwrap();
+        }
+        let pack = NormalizedPack::new(name, "synthetic-test-v1", artifact, "manufactured test fixture",
+            claims, vec![], vec![]).unwrap();
+        NormalizedPack::from_bytes(&pack.to_bytes()).unwrap()
+    }
+
+    fn resolve(text: &str) -> Result<rosin_thermal::Resolved> {
+        let spec = input::Spec::parse(text.as_bytes())?;
+        let row = spec.friction.rosin().expect("the rosin row");
+        let mut loader = |name: &str| -> Result<MaterialPack> { Ok(table1(name).into()) };
+        row.resolve(&spec, &mut Catalog::new(), &mut loader)
+    }
+
+    /// Every field reaches the row; a context-free pack reads at the state.
+    #[test]
+    fn the_row_on_file_parses_with_its_fields() {
+        let parsed = input::Spec::parse(with(&on_file()).as_bytes()).unwrap();
+        let row = parsed.friction.rosin().expect("the rosin row");
+        let tk = vec![("temperature_known".to_string(), 0.0)];
+        assert_eq!(row.rosin, rosin_thermal::PackRead { path: "rosin.fsmatpk".into(), context: tk.clone() });
+        assert_eq!(row.string, rosin_thermal::PackRead { path: "string.fsmatpk".into(), context: vec![] });
+        assert_eq!(row.hair, rosin_thermal::Hair::RosinPerWg2025Eq5);
+        assert_eq!(row.rig, rosin_thermal::PackRead { path: "perspex.fsmatpk".into(), context: tk.clone() });
+        assert_eq!((row.radius_m, row.reference_normal_n, row.layer_m), (5e-4, 3.0, 1e-5));
+        assert_eq!(row.calibration_name, "wg2025-eq13");
+        let hair = input::Spec::parse(with(&row_with_hair_pack()).as_bytes()).unwrap();
+        assert_eq!(hair.friction.rosin().unwrap().hair,
+            rosin_thermal::Hair::Pack(rosin_thermal::PackRead { path: "hair.fsmatpk".into(), context: tk }));
+    }
+
+    /// A temperature-unknown pack resolves only at the context its card names;
+    /// read at the performance's state it refuses, as the seed packs did. The
+    /// literal puts the rosin's own constants on the hair side.
+    #[test]
+    fn a_temperature_unknown_pack_resolves_only_at_the_context_named_on_the_card() {
+        let params = resolve(&with(&on_file())).unwrap().params(1.0 / 48000.0, 16).unwrap();
+        let solid = |density_kg_per_m3, specific_heat_j_per_kg_k, conductivity_w_per_m_k|
+            ThermalSolid { conductivity_w_per_m_k, density_kg_per_m3, specific_heat_j_per_kg_k };
+        assert_eq!((params.rosin_density_kg_per_m3, params.rosin_specific_heat_j_per_kg_k), (1010.0, 250.0));
+        assert_eq!(params.contact.stationary, solid(7800.0, 486.0, 49.0), "the steel, at the performance's T");
+        assert_eq!(params.contact.moving, solid(1010.0, 250.0, 0.113), "the rosin's constants on the hair side");
+        assert_eq!((params.calibration.stationary, params.calibration.moving),
+            (solid(1200.0, 1460.0, 0.2), solid(1200.0, 1460.0, 0.2)), "the rig's perspex");
+        for silent in [row("0", "0", "rosin-per-wg2025-eq5", "wg2025-eq13", TK), row(TK, "0", "rosin-per-wg2025-eq5", "wg2025-eq13", "0")] {
+            let error = format!("{:?}", resolve(&with(&silent)).unwrap_err());
+            assert!(error.contains("NoClaimInDomain"), "{silent}: {error}");
+        }
+        // The steel is bound at T: a context in place of the state refuses too.
+        let error = format!("{:?}", resolve(&with(&row(TK, TK, "rosin-per-wg2025-eq5", "wg2025-eq13", TK))).unwrap_err());
+        assert!(error.contains("NoClaimInDomain"), "{error}");
+    }
+
+    /// A pack with its context on the row cannot also take a material-state.
+    #[test]
+    fn a_second_context_for_one_pack_is_refused() {
+        let text = with(&on_file()).replacen("state 293.15 1000\n",
+            "state 293.15 1000\nmaterial-states 1\nmaterial-state rosin.fsmatpk 1 moisture_content 0.1\n", 1);
+        let error = resolve(&text).unwrap_err().to_string();
+        assert!(error.contains("names its source context on the row"), "{error}");
+    }
+
+    /// A name that is not on file refuses by name, before any pack is read,
+    /// and the refusal lists the names on file.
+    #[test]
+    fn a_calibration_not_on_file_is_refused_by_name() {
+        let error = refusal(&row(TK, "0", "rosin-per-wg2025-eq5", "galluzzo-2017", TK));
+        assert!(error.contains("no calibration on file named \"galluzzo-2017\"") && error.contains("on file: wg2025-eq13"), "{error}");
+    }
+
+    /// The row's own fields and contexts are checked before the calibration is
+    /// looked up, and the calibration's numbers can never ride on the row.
+    #[test]
+    fn a_malformed_row_is_refused_with_text() {
+        let nine = format!("9{}", (0..9).map(|i| format!(" a{i} 0")).collect::<String>());
+        let ok = on_file();
+        for (record, text) in [
+            (row(TK, "0", "rosin-per-wg2025-eq5", "wg2025-eq13", "").trim_end().to_string(), "missing field"),
+            ("friction rosin-thermal-sw2000 rosin.fsmatpk 5e-4 3 1e-5".to_string(), "invalid field"),
+            (row("1 temperature_known", "0", "rosin-per-wg2025-eq5", "wg2025-eq13", TK), "invalid field"),
+            (row(&nine, "0", "rosin-per-wg2025-eq5", "wg2025-eq13", TK), "count exceeds 8"),
+            (row("1 T 293.15", "0", "rosin-per-wg2025-eq5", "wg2025-eq13", TK), "T and omega belong to the state row"),
+            (row(TK, "1 omega 1000", "rosin-per-wg2025-eq5", "wg2025-eq13", TK), "T and omega belong to the state row"),
+            (row("2 temperature_known 0 temperature_known 0", "0", "rosin-per-wg2025-eq5", "wg2025-eq13", TK), "distinct finite coordinates"),
+            (row("1 temperature_known inf", "0", "rosin-per-wg2025-eq5", "wg2025-eq13", TK), "nonfinite scalar"),
+            (ok.replace(" 5e-4 ", " 0 "), "positive scalar required"),
+            (ok.replace(" 3 1e-5 ", " -1 1e-5 "), "positive scalar required"),
+            (ok.replace(" 1e-5 ", " 0 "), "positive scalar required"),
+            (ok.replace("rosin.fsmatpk", "/abs/rosin.fsmatpk"), "relative"),
+            (ok.replace("string.fsmatpk", "../string.fsmatpk"), "relative"),
+            (ok.replace("perspex.fsmatpk", "/abs/perspex.fsmatpk"), "relative"),
+            (format!("{ok} 0.4 0.45"), "extra field"),
+            (format!("{ok} eq13"), "extra field"),
+            (ok.replace("rosin-thermal-sw2000", "rosin-thermal"), "unsupported physical friction law"),
+        ] {
+            let error = refusal(&record);
+            assert!(error.contains(text), "{record}: {error}");
+        }
+    }
+}
