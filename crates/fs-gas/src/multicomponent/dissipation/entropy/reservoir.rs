@@ -2,7 +2,7 @@
 //! The state account uses the same fixed species reference as the bath account.
 //! Chemical/enthalpy terms are combined before source reference offsets return.
 
-use super::{Dd, DissipationError, MAX_SPECIES, MixtureGas, R, log_ratio, poll, scalar};
+use super::{Dd, FlowError, MAX_SPECIES, MixtureGas, R, log_ratio, poll, scalar};
 use super::super::evolve::Stage;
 use super::super::reservoir::ReservoirEnds;
 use fs_qty::Temperature;
@@ -49,12 +49,12 @@ impl ReservoirEntropyAccount {
         reference_entropy: &[f64; MAX_SPECIES],
         reservoirs: ReservoirEnds<'_>,
         cancelled: &mut impl FnMut() -> bool,
-    ) -> Result<Self, DissipationError> {
+    ) -> Result<Self, FlowError> {
         let mut molar_mass = [0.0; MAX_SPECIES];
         for (k, model) in gas.source().models().iter().enumerate() {
             molar_mass[k] = model.molar_mass().value();
             if !molar_mass[k].is_finite() {
-                return Err(DissipationError::Invalid("reservoir molar mass"));
+                return Err(FlowError::EntropyDomain("reservoir molar mass"));
             }
         }
         let mut baths: [Option<Bath>; 2] = [None, None];
@@ -109,7 +109,7 @@ impl ReservoirEntropyAccount {
         areas: [f64; 2],
         n: usize,
         cancelled: &mut impl FnMut() -> bool,
-    ) -> Result<(), DissipationError> {
+    ) -> Result<(), FlowError> {
         let mut trial = EntropyExchange::default();
         for end in 0..2 {
             poll(cancelled)?;
@@ -123,7 +123,7 @@ impl ReservoirEntropyAccount {
                 Some(bath) => Dd::from_f64(energy) / Dd::from_f64(bath.temperature),
                 None => {
                     if first[n + 1] != 0.0 || second[n + 1] != 0.0 {
-                        return Err(DissipationError::Invalid("unowned molecular boundary heat"));
+                        return Err(FlowError::EntropyDomain("unowned molecular boundary heat"));
                     }
                     Dd::ZERO
                 }
@@ -140,7 +140,7 @@ impl ReservoirEntropyAccount {
                 match &self.baths[end] {
                     Some(bath) => {
                         if !bath.positive_species[k] && (first[k] != 0.0 || second[k] != 0.0) {
-                            return Err(DissipationError::Invalid(
+                            return Err(FlowError::EntropyDomain(
                                 "nonzero molecular transfer at zero bath species activity",
                             ));
                         }
@@ -150,7 +150,7 @@ impl ReservoirEntropyAccount {
                             + moles * Dd::from_f64(self.reference_entropy[k]);
                     }
                     None if first[k] != 0.0 || second[k] != 0.0 => {
-                        return Err(DissipationError::Invalid("unowned molecular boundary species"));
+                        return Err(FlowError::EntropyDomain("unowned molecular boundary species"));
                     }
                     None => {}
                 }
@@ -182,9 +182,9 @@ impl ReservoirEntropyAccount {
         areas: [f64; 2],
         n: usize,
         cancelled: &mut impl FnMut() -> bool,
-    ) -> Result<(), DissipationError> {
+    ) -> Result<(), FlowError> {
         if !weighted_dt.is_finite() {
-            return Err(DissipationError::Invalid("non-finite molecular quadrature weight"));
+            return Err(FlowError::EntropyDomain("non-finite molecular quadrature weight"));
         }
         if weighted_dt == 0.0 {
             return Ok(());
@@ -193,18 +193,18 @@ impl ReservoirEntropyAccount {
             poll(cancelled)?;
             let flux = if end == 0 { &stage.left } else { &stage.right };
             if self.baths[end].is_none() && flux[n + 1] != 0.0 {
-                return Err(DissipationError::Invalid("unowned molecular boundary heat"));
+                return Err(FlowError::EntropyDomain("unowned molecular boundary heat"));
             }
             let measure = Dd::from_f64(weighted_dt.abs()) * Dd::from_f64(areas[end]);
             for k in 0..n {
                 match &self.baths[end] {
                     Some(bath) if !bath.positive_species[k] && flux[k] != 0.0 => {
-                        return Err(DissipationError::Invalid(
+                        return Err(FlowError::EntropyDomain(
                             "nonzero molecular transfer at zero bath species activity",
                         ));
                     }
                     None if flux[k] != 0.0 => {
-                        return Err(DissipationError::Invalid("unowned molecular boundary species"));
+                        return Err(FlowError::EntropyDomain("unowned molecular boundary species"));
                     }
                     _ => {}
                 }
@@ -224,7 +224,7 @@ impl ReservoirEntropyAccount {
         transfers: &[[f64; super::super::MAX_COMPONENTS]; 2],
         n: usize,
         cancelled: &mut impl FnMut() -> bool,
-    ) -> Result<(), DissipationError> {
+    ) -> Result<(), FlowError> {
         let mut trial = EntropyExchange {
             throughput: self.trial.throughput,
             ..EntropyExchange::default()
@@ -235,7 +235,7 @@ impl ReservoirEntropyAccount {
             let mut input = match &self.baths[end] {
                 Some(bath) => Dd::from_f64(energy) / Dd::from_f64(bath.temperature),
                 None if energy != 0.0 => {
-                    return Err(DissipationError::Invalid("unowned molecular boundary heat"));
+                    return Err(FlowError::EntropyDomain("unowned molecular boundary heat"));
                 }
                 None => Dd::ZERO,
             };
@@ -247,7 +247,7 @@ impl ReservoirEntropyAccount {
                 match &self.baths[end] {
                     Some(bath) => {
                         if !bath.positive_species[k] && transfer != 0.0 {
-                            return Err(DissipationError::Invalid(
+                            return Err(FlowError::EntropyDomain(
                                 "nonzero molecular transfer at zero bath species activity",
                             ));
                         }
@@ -256,7 +256,7 @@ impl ReservoirEntropyAccount {
                         reference = reference + moles * Dd::from_f64(self.reference_entropy[k]);
                     }
                     None if transfer != 0.0 => {
-                        return Err(DissipationError::Invalid("unowned molecular boundary species"));
+                        return Err(FlowError::EntropyDomain("unowned molecular boundary species"));
                     }
                     None => {}
                 }
@@ -271,7 +271,7 @@ impl ReservoirEntropyAccount {
         Ok(())
     }
 
-    pub fn accept(&mut self, n: usize) -> Result<(), DissipationError> {
+    pub fn accept(&mut self, n: usize) -> Result<(), FlowError> {
         let mut total = self.total;
         total.input = total.input + self.trial.input;
         scalar(total.input)?;

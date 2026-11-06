@@ -1,4 +1,7 @@
-//! Entropy admission of the existing axial molecular SSP-RK2 evolution.
+//! Original-source state entropy shared by axial gas transport owners.
+//!
+//! Molecular SSP-RK2/RKL2 and the inviscid step use the same source intervals,
+//! reference basis, species continuity checks and final report arithmetic.
 //!
 //! This measures the actual ideal-mixture state increment, including conversion
 //! of kinetic energy through the original total-energy inversion. It does not
@@ -15,10 +18,12 @@
 //! rounding, preserving weak mixing and cancellation of source reference data.
 
 use super::super::wall::log_ratio;
-use super::super::{MAX_SPECIES, MixtureEuler1d, MixtureGas, Primitive, allocated};
+use super::super::{
+    Error as FlowError, MAX_SPECIES, MixtureEuler1d, MixtureGas, Primitive, allocated, poll,
+};
 use super::{
     Boundaries, Boundary, DissipationControl, DissipationError, DissipationOperator,
-    DissipationReport, TransportLaw, poll, positive,
+    DissipationReport, TransportLaw, positive,
 };
 use fs_math::dd::Dd;
 use fs_qty::{Temperature, Time};
@@ -53,13 +58,13 @@ impl Default for MolecularEntropyControl {
 }
 
 impl MolecularEntropyControl {
-    fn validate(self) -> Result<(), DissipationError> {
+    fn validate(self) -> Result<(), FlowError> {
         if !self.absolute_tolerance_j_k.is_finite()
             || self.absolute_tolerance_j_k < 0.0
             || !self.relative_species_tolerance.is_finite()
             || !(0.0..=1e-3).contains(&self.relative_species_tolerance)
         {
-            return Err(DissipationError::Invalid(
+            return Err(FlowError::EntropyDomain(
                 "closed molecular entropy controls",
             ));
         }
@@ -293,7 +298,7 @@ impl<L: TransportLaw> DissipationOperator<L> {
 }
 
 /// The fixed basis is shared by every actual trial and the final direct check.
-pub(super) struct EntropyTracker {
+pub(in crate::multicomponent) struct EntropyTracker {
     controls: MolecularEntropyControl,
     reference_temperature: f64,
     reference_density: [f64; MAX_SPECIES],
@@ -311,11 +316,11 @@ pub(super) struct EntropyTracker {
 }
 
 impl EntropyTracker {
-    pub(super) fn new(
+    pub(in crate::multicomponent) fn new(
         flow: &MixtureEuler1d,
         controls: MolecularEntropyControl,
         cancelled: &mut impl FnMut() -> bool,
-    ) -> Result<Self, DissipationError> {
+    ) -> Result<Self, FlowError> {
         controls.validate()?;
         poll(cancelled)?;
         match flow.boundaries {
@@ -324,7 +329,7 @@ impl EntropyTracker {
                 if matches!(left, Boundary::Reflecting | Boundary::Transmissive)
                     && matches!(right, Boundary::Reflecting | Boundary::Transmissive) => {}
             _ => {
-                return Err(DissipationError::Invalid(
+                return Err(FlowError::EntropyDomain(
                     "closed molecular entropy requires periodic or stationary zero-heat/species ends",
                 ));
             }
@@ -350,7 +355,7 @@ impl EntropyTracker {
         }
         let volume = scalar(volume)?;
         if !positive(volume) {
-            return Err(DissipationError::Invalid("closed molecular entropy volume"));
+            return Err(FlowError::EntropyDomain("closed molecular entropy volume"));
         }
         let reference_temperature = temperature[0];
         let t_ref = Temperature::new(reference_temperature);
@@ -374,7 +379,7 @@ impl EntropyTracker {
                 .value()
                 - R * (log_partial_pressure + 1.0);
             if !reference_entropy[k].is_finite() {
-                return Err(DissipationError::Invalid(
+                return Err(FlowError::EntropyDomain(
                     "unrepresentable source entropy reference",
                 ));
             }
@@ -399,7 +404,7 @@ impl EntropyTracker {
         })
     }
 
-    pub(super) fn begin_attempt(&mut self, primitive: &[Primitive]) {
+    pub(in crate::multicomponent) fn begin_attempt(&mut self, primitive: &[Primitive]) {
         for (i, (temperature, state)) in self
             .current_temperature
             .iter_mut()
@@ -416,7 +421,7 @@ impl EntropyTracker {
         self.trial_relative = 0.0;
     }
 
-    pub(super) fn candidate_cell(
+    pub(in crate::multicomponent) fn candidate_cell(
         &mut self,
         gas: &MixtureGas,
         cell: usize,
@@ -425,7 +430,7 @@ impl EntropyTracker {
         temperature: f64,
         volume: f64,
         cancelled: &mut impl FnMut() -> bool,
-    ) -> Result<(), DissipationError> {
+    ) -> Result<(), FlowError> {
         let increment = cell_change(
             gas,
             &self.reference_density,
@@ -447,7 +452,7 @@ impl EntropyTracker {
         Ok(())
     }
 
-    fn inventory(&self, n: usize, whole: bool) -> Result<f64, DissipationError> {
+    fn inventory(&self, n: usize, whole: bool) -> Result<f64, FlowError> {
         let mut maximum = 0.0_f64;
         for k in 0..n {
             let transfer = self.boundary.as_ref().map_or(Dd::ZERO, |b| {
@@ -461,7 +466,7 @@ impl EntropyTracker {
             let scale = scalar(Dd::from_f64(self.original_mass[k]) + throughput)?;
             let tolerance = self.controls.relative_species_tolerance * scale;
             if !tolerance.is_finite() || residual.abs() > tolerance {
-                return Err(DissipationError::SpeciesInventoryDrift {
+                return Err(FlowError::SpeciesInventoryDrift {
                     species: k, residual_kg: residual, tolerance_kg: tolerance,
                 });
             }
@@ -480,7 +485,7 @@ impl EntropyTracker {
         dt: f64,
         areas: [f64; 2],
         cancelled: &mut impl FnMut() -> bool,
-    ) -> Result<(), DissipationError> {
+    ) -> Result<(), FlowError> {
         let check = (|| {
             if let Some(boundary) = &mut self.boundary {
                 boundary.stage_pair(a, b, dt, areas, n, cancelled)?;
@@ -489,7 +494,7 @@ impl EntropyTracker {
             let input = self.boundary.as_ref().map_or(Dd::ZERO, |b| b.trial.input);
             let change = scalar(self.trial_entropy - input)?;
             if change < -self.controls.absolute_tolerance_j_k {
-                return Err(DissipationError::EntropyDecrease {
+                return Err(FlowError::EntropyDecrease {
                     change_j_k: change,
                     tolerance_j_k: self.controls.absolute_tolerance_j_k,
                 });
@@ -502,7 +507,7 @@ impl EntropyTracker {
         check
     }
 
-    pub(super) fn accept_attempt(&mut self, n: usize) -> Result<(), DissipationError> {
+    pub(super) fn accept_attempt(&mut self, n: usize) -> Result<(), FlowError> {
         let input = self.boundary.as_ref().map_or(Dd::ZERO, |b| b.trial.input);
         let change = scalar(self.trial_entropy - input)?;
         if let Some(boundary) = &mut self.boundary { boundary.accept(n)?; }
@@ -518,24 +523,27 @@ impl EntropyTracker {
         Ok(())
     }
 
-    fn reservoir_report(&self) -> Result<ReservoirMolecularEntropyReport, DissipationError> {
-        let boundary = self.boundary.as_ref().ok_or(DissipationError::Invalid(
+    fn reservoir_report(
+        &self,
+        report: MolecularEntropyReport,
+    ) -> Result<ReservoirMolecularEntropyReport, FlowError> {
+        let boundary = self.boundary.as_ref().ok_or(FlowError::EntropyDomain(
             "missing molecular reservoir entropy account",
         ))?;
         let generation = self.trial_entropy - boundary.total.input;
         Ok(ReservoirMolecularEntropyReport {
-            source_entropy_change_j_k: self.report.source_entropy_change_j_k,
+            source_entropy_change_j_k: report.source_entropy_change_j_k,
             boundary_entropy_input_j_k: [
                 scalar(boundary.total.source_input[0])?,
                 scalar(boundary.total.source_input[1])?,
             ],
             entropy_generation_j_k: scalar(generation)?,
             source_entropy_generation_j_k: scalar(generation
-                + Dd::from_f64(self.report.reference_entropy_residual_j_k))?,
-            reference_entropy_residual_j_k: self.report.reference_entropy_residual_j_k,
-            minimum_step_entropy_generation_j_k: self.report.minimum_step_entropy_change_j_k,
-            maximum_relative_species_residual: self.report.maximum_relative_species_residual,
-            rejected_entropy_steps: self.report.rejected_entropy_steps,
+                + Dd::from_f64(report.reference_entropy_residual_j_k))?,
+            reference_entropy_residual_j_k: report.reference_entropy_residual_j_k,
+            minimum_step_entropy_generation_j_k: report.minimum_step_entropy_change_j_k,
+            maximum_relative_species_residual: report.maximum_relative_species_residual,
+            rejected_entropy_steps: report.rejected_entropy_steps,
         })
     }
 
@@ -548,7 +556,7 @@ impl EntropyTracker {
         original: &[f64],
         final_state: &[f64],
         cancelled: &mut impl FnMut() -> bool,
-    ) -> Result<(), DissipationError> {
+    ) -> Result<(), FlowError> {
         let n = gas.species_count();
         let m = n + 2;
         self.trial_entropy = Dd::ZERO;
@@ -577,11 +585,69 @@ impl EntropyTracker {
                     self.trial_mass[k] + volume * (Dd::from_f64(new[k]) - Dd::from_f64(old[k]));
             }
         }
-        let relative = self.inventory(n, true)?;
+        let report = self.complete_report(gas, cancelled)?;
+        let reservoir_report = if self.boundary.is_some() {
+            Some(self.reservoir_report(report)?)
+        } else {
+            None
+        };
+        // Every fallible report reduction precedes both account and field publication.
+        self.report = report;
+        self.completed_reservoir_report = reservoir_report;
+        Ok(())
+    }
+
+    /// Admit one closed native step using the original-to-candidate increments
+    /// already collected by candidate_cell. No second source interval or EOS
+    /// evaluation is performed. Failed report arithmetic cannot accept the trial.
+    pub(in crate::multicomponent) fn admit_single_step(
+        &mut self,
+        gas: &MixtureGas,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(), FlowError> {
+        if self.boundary.is_some() || self.accepted != 0 {
+            return Err(FlowError::EntropyDomain(
+                "single-step entropy admission requires a fresh closed account",
+            ));
+        }
+        let completion = self.complete_report(gas, cancelled);
+        match completion {
+            Ok(mut report) => {
+                report.minimum_step_entropy_change_j_k = report.entropy_change_j_k;
+                self.report = report;
+                self.accepted = 1;
+                Ok(())
+            }
+            Err(error) => {
+                if matches!(
+                    &error,
+                    FlowError::EntropyDecrease { .. } | FlowError::SpeciesInventoryDrift { .. }
+                ) {
+                    self.report.rejected_entropy_steps += 1;
+                }
+                Err(error)
+            }
+        }
+    }
+
+    /// The report is copied only after the native caller has admitted its step.
+    pub(in crate::multicomponent) fn report(&self) -> MolecularEntropyReport {
+        self.report
+    }
+
+    /// Shared original-to-final reduction for one native step and a complete
+    /// molecular interval. The input increments are already in the fixed basis;
+    /// all reference and continuity reductions complete before changing a report.
+    fn complete_report(
+        &self,
+        gas: &MixtureGas,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<MolecularEntropyReport, FlowError> {
+        let relative = self.inventory(gas.species_count(), true)?;
         let input = self.boundary.as_ref().map_or(Dd::ZERO, |b| b.total.input);
         let change = scalar(self.trial_entropy - input)?;
         if change < -self.controls.absolute_tolerance_j_k {
-            return Err(DissipationError::EntropyDecrease {
+            return Err(FlowError::EntropyDecrease {
                 change_j_k: change,
                 tolerance_j_k: self.controls.absolute_tolerance_j_k,
             });
@@ -598,25 +664,22 @@ impl EntropyTracker {
                 + (self.trial_mass[k] - transfer) / Dd::from_f64(model.molar_mass().value())
                     * Dd::from_f64(self.reference_entropy[k]);
         }
-        self.report.entropy_change_j_k = scalar(self.trial_entropy)?;
-        self.report.reference_entropy_residual_j_k = scalar(reference_residual)?;
-        self.report.source_entropy_change_j_k = scalar(self.trial_entropy + reference)?;
-        self.report.maximum_relative_species_residual =
-            self.report.maximum_relative_species_residual.max(relative);
-        // Every fallible report reduction precedes the native caller-state copy.
-        if self.boundary.is_some() {
-            self.completed_reservoir_report = Some(self.reservoir_report()?);
-        }
-        Ok(())
+        let mut report = self.report;
+        report.entropy_change_j_k = scalar(self.trial_entropy)?;
+        report.reference_entropy_residual_j_k = scalar(reference_residual)?;
+        report.source_entropy_change_j_k = scalar(self.trial_entropy + reference)?;
+        report.maximum_relative_species_residual =
+            report.maximum_relative_species_residual.max(relative);
+        Ok(report)
     }
 }
 
-fn scalar(value: Dd) -> Result<f64, DissipationError> {
+fn scalar(value: Dd) -> Result<f64, FlowError> {
     let result = value.to_f64();
     if value.hi.is_finite() && value.lo.is_finite() && result.is_finite() {
         Ok(result)
     } else {
-        Err(DissipationError::Invalid(
+        Err(FlowError::EntropyDomain(
             "non-finite closed molecular entropy",
         ))
     }
@@ -656,7 +719,7 @@ pub(super) fn cell_change(
     old_temperature: f64,
     new_temperature: f64,
     cancelled: &mut impl FnMut() -> bool,
-) -> Result<Dd, DissipationError> {
+) -> Result<Dd, FlowError> {
     let mut entropy = Dd::ZERO;
     let reference = Temperature::new(reference_temperature);
     let initial = Temperature::new(old_temperature);

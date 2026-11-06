@@ -10,7 +10,7 @@
 //! fixed varying areas while refusing shear and bulk viscosity at every state.
 
 pub(super) mod evolve;
-mod entropy;
+pub(in crate::multicomponent) mod entropy;
 mod face;
 mod law;
 pub(in crate::multicomponent) mod reservoir;
@@ -177,6 +177,13 @@ impl From<FlowError> for DissipationError {
     fn from(error: FlowError) -> Self {
         match error {
             FlowError::Cancelled => Self::Cancelled,
+            FlowError::EntropyDomain(reason) => Self::Invalid(reason),
+            FlowError::EntropyDecrease { change_j_k, tolerance_j_k } => {
+                Self::EntropyDecrease { change_j_k, tolerance_j_k }
+            }
+            FlowError::SpeciesInventoryDrift { species, residual_kg, tolerance_kg } => {
+                Self::SpeciesInventoryDrift { species, residual_kg, tolerance_kg }
+            }
             other => Self::Flow(other),
         }
     }

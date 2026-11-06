@@ -147,7 +147,9 @@ impl EntropyTracker {
         self.trial_entropy = Dd::ZERO;
         self.trial_mass.fill(Dd::ZERO);
         self.trial_relative = 0.0;
-        let check = (|| {
+        // Native RKL2 reports retain the molecular error surface; the common
+        // state/bath account now returns the original gas owner's errors.
+        let check: Result<(), DissipationError> = (|| {
             for (i, (previous, candidate)) in old
                 .chunks_exact(m)
                 .zip(new.chunks_exact(m))

@@ -5804,3 +5804,58 @@ For the declared two-species variable-Cp fixture the conservative flux is
 and numerical entropy production is 11.711975129142397 W/(m^2 K).
 Source regression definitions and isolated arithmetic are not a claim that the
 native Rust tests ran or that this model has experimental qualification.
+
+
+### Native inviscid entropy-admitted SSP-RK2 evolution
+
+`MixtureEuler1d::step_entropy_consistent` connects the original-source
+dissipative inviscid face to the existing axial SSP-RK2 owner. It advances one
+accepted native step, returning the original `StepReport` and the shared
+`MixtureEntropyReport`; `MixtureEntropyControl` aliases the original state
+entropy controls. The requested duration is a maximum: native CFL and bounded
+admissibility/entropy retries can shorten the actual returned duration.
+
+This entry point admits first-order space, fixed constant-area geometry, and
+periodic or two stationary reflecting boundaries. The native reflected-wave
+wall closure supplies wall momentum and no species, energy or external entropy.
+Every active species must have common positive support across each interior
+face, or be absent on both traces. Open advective ends, reconstruction, moving
+or varying-area geometry, forcing, reactions and coupled molecular composition
+require their own complete treatment and are not enabled by this entry point.
+
+The original integrator still owns both conservative stages, intermediate
+caloric/positivity admission, actual face-speed CFL checks, bounded retries,
+extensive balances and final state/clock publication. A compile-time interior
+face choice reuses that integrator and the already decoded original states.
+Existing engineering, forcing, moving and contact-correction paths retain their
+original dispatch. No second integrator or replacement caloric source is added.
+
+The final native candidate loop passes its already admitted temperature and
+actual conserved state into the same source-interval entropy account used by
+molecular SSP-RK2 and RKL2. The account checks every species' inventory and the
+original-to-final thermal/mixing entropy before native success. Entropy or
+inventory refusal enters the original halving loop without state clipping,
+mass seeding or an engineering-flux fallback. Each retry resets its anchor
+temperatures from the unchanged original field. No second candidate EOS solve
+or repeated final entropy-interval evaluation is introduced.
+
+A common pure report reducer completes all finite arithmetic before accepting
+the account. The original final balance checks and cancellation poll still
+precede the field swap and clock advance. Failed or cancelled work cannot
+publish a partial field. The entropy allowance applies to this complete
+accepted step; it is not a cumulative allowance across separate calls.
+Source-reference effects of numerical species residuals are reported separately
+and cannot replace the individual continuity checks. Molecular public errors
+keep their existing variants through explicit conversion from the shared native
+state-account errors.
+
+Four native regression definitions cover an independently computed two-cell
+SSP-RK2 pressure/density mode, variable-Cp unequal-mass reflected pressure waves,
+large formation gauges and common absence, exact uniform motion, and late
+cancellation/open-boundary refusal with successful reuse. The two-cell fixture
+has an independent entropy increment of 0.027299800511537853 J/K for its
+0.02-second accepted step. These are regression definitions and independent
+arithmetic evidence; native Rust execution and typechecking were unavailable.
+The semidiscrete face identity and these runtime gates do not establish a
+general finite-step invariant-domain theorem or moving-contact pressure
+equilibrium guarantee.

@@ -56,6 +56,11 @@ pub use crate::dynamics::{
 pub use eos::MixtureGas;
 pub use evolve::{MixtureEuler1d, StepReport, Totals};
 pub use flux::{EntropyFaceReport, FaceFlux};
+/// Original ideal-mixture state entropy controls shared by flow and molecular transport.
+pub use dissipation::{
+    MolecularEntropyControl as MixtureEntropyControl,
+    MolecularEntropyReport as MixtureEntropyReport,
+};
 pub use normal::{NormalCell, NormalPrimitive, SpatialCell, SpatialPrimitive};
 pub use piston::{
     SharedPistonGasReport, SharedPistonHeatReport, SharedPistonThermal,
@@ -136,6 +141,12 @@ pub enum Error {
         /// Caller-authorized absolute correction per accepted step [J].
         maximum_j: f64,
     },
+    /// Invalid state-entropy controls or unrepresentable entropy account.
+    EntropyDomain(&'static str),
+    /// Actual inventory-corrected state entropy fell beyond its absolute allowance.
+    EntropyDecrease { change_j_k: f64, tolerance_j_k: f64 },
+    /// A conservative step violated one species' individual inventory allowance.
+    SpeciesInventoryDrift { species: usize, residual_kg: f64, tolerance_kg: f64 },
     /// All atomic time-step retries failed.
     StepRetries { attempts: usize, last: Box<Error> },
     /// Bounded workspace reservation failed.

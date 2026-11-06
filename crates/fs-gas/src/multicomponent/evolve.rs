@@ -1,4 +1,5 @@
 use super::flux::Face;
+use super::dissipation::entropy::EntropyTracker;
 use super::pressure_equilibrium::{
     ContactEquilibriumControl, ContactEquilibriumStepReport, ContactWorkspace,
 };
@@ -10,6 +11,7 @@ use crate::body_force::{BodyForce, ForceChange, ForceControl};
 use fs_qty::{Length, Time};
 
 pub(super) mod forcing;
+mod entropy;
 
 /// Extensive conserved integrals in the canonical source-species order.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -458,7 +460,23 @@ impl MixtureEuler1d {
         controls: StepControl,
         reservoirs: ReservoirEnds<'_>,
         forcing: Option<(BodyForce<'_>, ForceControl)>,
+        equilibrium: Option<(ContactEquilibriumControl, &mut ContactWorkspace)>,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<StepReport, Error> {
+        self.advance_inner::<false>(
+            maximum_duration, controls, reservoirs, forcing, equilibrium, None, cancelled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn advance_inner<const ENTROPY_FLUX: bool>(
+        &mut self,
+        maximum_duration: Time,
+        controls: StepControl,
+        reservoirs: ReservoirEnds<'_>,
+        forcing: Option<(BodyForce<'_>, ForceControl)>,
         mut equilibrium: Option<(ContactEquilibriumControl, &mut ContactWorkspace)>,
+        mut entropy: Option<&mut EntropyTracker>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<StepReport, Error> {
         poll(&mut cancelled)?;
@@ -530,7 +548,7 @@ impl MixtureEuler1d {
                     &mut cancelled,
                 )
             } else {
-                attempt_with_contact(
+                attempt_with_scheme::<ENTROPY_FLUX>(
                     &self.gas,
                     &self.states,
                     &self.mesh,
@@ -541,6 +559,7 @@ impl MixtureEuler1d {
                     reservoirs,
                     &mut self.work,
                     equilibrium.as_mut().map(|(_, workspace)| &mut **workspace),
+                    entropy.as_deref_mut(),
                     &mut cancelled,
                 )
                 .map(|(a, b)| (a, b, ForceChange::default(), 0.0))
@@ -754,7 +773,28 @@ fn attempt_with_contact(
     reconstruction: Reconstruction,
     reservoirs: ReservoirEnds<'_>,
     work: &mut Workspace,
+    contact: Option<&mut ContactWorkspace>,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(Stage, Stage), Error> {
+    attempt_with_scheme::<false>(
+        gas, states, mesh, boundaries, dt, cfl, reconstruction, reservoirs,
+        work, contact, None, cancelled,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn attempt_with_scheme<const ENTROPY_FLUX: bool>(
+    gas: &MixtureGas,
+    states: &[f64],
+    mesh: &Mesh1d,
+    boundaries: Boundaries,
+    dt: f64,
+    cfl: f64,
+    reconstruction: Reconstruction,
+    reservoirs: ReservoirEnds<'_>,
+    work: &mut Workspace,
     mut contact: Option<&mut ContactWorkspace>,
+    mut entropy: Option<&mut EntropyTracker>,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(Stage, Stage), Error> {
     let n = gas.species_count();
@@ -768,7 +808,7 @@ fn attempt_with_contact(
         &mut endpoint_storage,
         cancelled,
     )?;
-    let a = operator_core(
+    let a = operator_core_with_scheme::<ENTROPY_FLUX>(
         gas,
         states,
         mesh,
@@ -784,6 +824,9 @@ fn attempt_with_contact(
         cancelled,
     )?;
     check_cfl(a.signal_rate * dt, cfl)?;
+    if let Some(account) = &mut entropy {
+        account.begin_attempt(&work.primitive);
+    }
     for (i, q) in states.chunks_exact(m).enumerate() {
         poll(cancelled)?;
         forward(
@@ -823,7 +866,7 @@ fn attempt_with_contact(
         &mut endpoint_storage,
         cancelled,
     )?;
-    let b = operator_core(
+    let b = operator_core_with_scheme::<ENTROPY_FLUX>(
         gas,
         &work.stage,
         mesh,
@@ -885,7 +928,16 @@ fn attempt_with_contact(
                 &mut *cancelled,
             )?;
         }
-        gas.decode(candidate, Some(work.primitive[i].temperature), cancelled)?;
+        let accepted = gas.decode(candidate, Some(work.primitive[i].temperature), cancelled)?;
+        if let Some(account) = &mut entropy {
+            account.candidate_cell(
+                gas, i, &states[i * m..(i + 1) * m], candidate,
+                accepted.temperature, mesh.volumes()[i], cancelled,
+            )?;
+        }
+    }
+    if let Some(account) = &mut entropy {
+        account.admit_single_step(gas, cancelled)?;
     }
     Ok((a, b))
 }
@@ -965,6 +1017,28 @@ pub(super) fn operator_with_face_motion(
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn operator_core(
+    gas: &MixtureGas,
+    states: &[f64],
+    mesh: &Mesh1d,
+    boundaries: Boundaries,
+    reconstruction: Reconstruction,
+    primitive: &mut [Primitive],
+    slopes: &mut [f64],
+    faces: &mut [f64],
+    face_data: &mut [Face],
+    endpoint_fluxes: [Option<EndpointFlux<'_>>; 2],
+    face_velocity: Option<&[f64]>,
+    contact: Option<(&mut ContactWorkspace, bool)>,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<Stage, Error> {
+    operator_core_with_scheme::<false>(
+        gas, states, mesh, boundaries, reconstruction, primitive, slopes,
+        faces, face_data, endpoint_fluxes, face_velocity, contact, cancelled,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn operator_core_with_scheme<const ENTROPY_FLUX: bool>(
     gas: &MixtureGas,
     states: &[f64],
     mesh: &Mesh1d,
@@ -1207,6 +1281,8 @@ pub(super) fn operator_core(
                 flux,
                 cancelled,
             )?
+        } else if ENTROPY_FLUX {
+            gas.interface_entropy(&left[..m], pl, &right[..m], pr, flux, cancelled)?
         } else {
             gas.interface(&left[..m], pl, &right[..m], pr, flux, cancelled)?
         };
