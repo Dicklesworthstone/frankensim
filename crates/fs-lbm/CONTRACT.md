@@ -11702,6 +11702,26 @@ isothermal entries add no thermal coupling or finite-inertia vessel dynamics.
 The native force/mass/moment, new-interface, SI conversion, constitutive and
 cancellation regression definitions accompany the implementations.
 
+### Local rotating thermal and Boussinesq liquid
+
+`MaterialFreeSurfaceEnthalpy3::step_with_coriolis_si` and
+`step_with_coriolis_and_viscous_heating_si` compose the local rotating source
+with the existing single thermal/VOF transaction. Material density departure
+weights authored effective gravity only; Coriolis uses reference inertia,
+retained nongravitational loads remain force densities, and Coriolis supplies
+no thermal source. SI conversion, midpoint momentum, heated source viscosity,
+native mass routes, extensive enthalpy transport and endpoint/clock acceptance
+share one sparse candidate. The accepted endpoint restores the original
+thermal force datum without another impulse; rotation and gravity are supplied
+on each interval.
+
+Full rigid-frame rotating-Boussinesq refusal remains, as do first-order thermal
+splitting and complete-boundary ownership limits. This adds neither
+density-dependent accelerating-vessel inertia nor a total mechanical-energy
+theorem. Independent dimensional midpoint, material feedback, no-heat,
+interface-transport and atomic-refusal regression definitions are in
+`tests/material_free_surface_enthalpy/frame.rs`.
+
 ### Acceleration of sparse free surfaces and material-owned vessels
 
 `RigidFrame3::prepare_free_surface_step` applies the SAME admitted rigid-frame

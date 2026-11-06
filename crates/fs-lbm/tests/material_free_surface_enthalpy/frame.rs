@@ -5,7 +5,7 @@ use fs_lbm::d3q19::freesurface3::{
     ConversionRedistribution3, ConversionStats3, FreeSurfaceSample3,
 };
 use fs_lbm::d3q19::{E3, Q3, W3};
-use fs_lbm::material::free_surface::MaterialRigidFrame3;
+use fs_lbm::material::free_surface::{MaterialCoriolis3, MaterialRigidFrame3};
 use fs_lbm::material::free_surface::enthalpy::MaterialFreeSurfaceEnthalpy3;
 use fs_lbm::material::transport::boussinesq::BoussinesqConfig;
 use fs_material::liquid::ResolvedLiquidState;
@@ -549,6 +549,252 @@ fn g4_frame_source_rotation_cancellation_and_late_transport_refusals_are_atomic(
                 format!("{error:?}").contains("route"),
                 "expected native route-budget refusal: {error:?}"
             );
+            assert_eq!(snapshot(liquid), before);
+        },
+    );
+}
+
+#[test]
+fn g1_local_coriolis_buoyancy_weights_gravity_without_weighting_rotation() {
+    let source = card(0.02, 980.0);
+    let gravity = [0.2, -0.1, -1.0];
+    with_liquid(
+        &source,
+        Case {
+            buoyant: true,
+            gravity,
+            velocity: [0.02, -0.015, 0.01],
+            ..Case::default()
+        },
+        |_| 200000.0,
+        |liquid, gate| {
+            let before = liquid
+                .flow()
+                .sample_at_si(CELL[0], CELL[1], CELL[2])
+                .unwrap()
+                .unwrap()
+                .velocity_m_s;
+            let rotation = MaterialCoriolis3 {
+                angular_velocity_rad_s: [3.0, -2.0, 1.5],
+            };
+            let effective_gravity = [0.08, -0.04, -0.7];
+            let heat = full_cell_heat(liquid, 100000.0);
+            // The independent dimensional elimination oracle has zero radius
+            // here, suppressing centrifugal/Euler terms while retaining Coriolis.
+            // Heating to 450 K gives rho(T)/rho0 = .985 and mu = .04 Pa s.
+            let expected = acceleration(
+                MaterialRigidFrame3 {
+                    origin_m: CELL.map(|p| (p as f64 + 0.5) * DX),
+                    angular_velocity_rad_s: rotation.angular_velocity_rad_s,
+                    ..Default::default()
+                },
+                effective_gravity.map(|g| 0.985 * g),
+                CELL,
+                before,
+            );
+            let report = liquid
+                .step_with_coriolis_si(rotation, effective_gravity, &heat, gate)
+                .unwrap();
+            let after = liquid
+                .flow()
+                .sample_at_si(CELL[0], CELL[1], CELL[2])
+                .unwrap()
+                .unwrap()
+                .velocity_m_s;
+            for d in 0..3 {
+                assert!((after[d] - before[d] - DT * expected[d]).abs() < 3e-13);
+            }
+            let material = liquid.material_at(CELL).unwrap();
+            near(material.density_kg_m3(), 985.0, 2e-11);
+            near(material.dynamic_viscosity_pa_s(), 0.04, 2e-11);
+            assert_eq!(material.material().card_identity(), source.content_hash());
+            near(report.mass_after_kg, report.mass_before_kg, 2e-11);
+            near(
+                report.enthalpy_after_j - report.enthalpy_before_j,
+                heat.iter().map(|cell| cell.energy_j).sum(),
+                2e-11,
+            );
+            assert_eq!(report.viscous_heat_j, 0.0);
+            // The accepted source representation returns to the original
+            // thermal gravity, not the temporary local Coriolis load.
+            let force = liquid.flow().lattice().force_density_at(3, 3, 3).unwrap();
+            for d in 0..3 {
+                near(force[d], gravity[d] * DT * DT / DX * 0.985, 2e-11);
+            }
+            assert_eq!(liquid.accepted_steps(), 1);
+            assert_eq!(liquid.physical_time_s(), DT);
+        },
+    );
+}
+
+#[test]
+fn g3_local_coriolis_does_not_heat_boussinesq_liquid_or_supply_viscous_strain() {
+    let source = card(0.02, 980.0);
+    with_liquid(
+        &source,
+        Case {
+            buoyant: true,
+            velocity: [0.02, -0.01, 0.015],
+            ..Case::default()
+        },
+        |_| 200000.0,
+        |liquid, gate| {
+            let before = liquid.flow().sample_at_si(3, 3, 3).unwrap().unwrap();
+            let rotation = MaterialCoriolis3 {
+                angular_velocity_rad_s: [4.0, -3.0, 2.0],
+            };
+            let report = liquid
+                .step_with_coriolis_and_viscous_heating_si(rotation, [0.0; 3], &[], gate)
+                .unwrap();
+            let after = liquid.flow().sample_at_si(3, 3, 3).unwrap().unwrap();
+            let speed2 = |u: [f64; 3]| u.into_iter().map(|v| v * v).sum::<f64>();
+            near(speed2(after.velocity_m_s), speed2(before.velocity_m_s), 2e-11);
+            assert!((after.velocity_m_s[1] - before.velocity_m_s[1]).abs() > 1e-6);
+            assert!(report.flow.viscous_heat_j.abs() < 1e-20);
+            assert!(
+                report
+                    .applied
+                    .iter()
+                    .all(|cell| cell.shear_rate_per_s.abs() < 1e-8)
+            );
+            near(report.flow.mass_after_kg, report.flow.mass_before_kg, 2e-11);
+            near(
+                report.flow.enthalpy_after_j,
+                report.flow.enthalpy_before_j,
+                2e-11,
+            );
+            assert_eq!(report.flow.external_heat_j, 0.0);
+            near(liquid.specific_enthalpy_at(CELL).unwrap(), 200000.0, 2e-11);
+        },
+    );
+}
+
+#[test]
+fn g1_local_coriolis_conversion_carries_the_original_enthalpy_routes_once() {
+    let source = card(0.02, 1000.0);
+    with_liquid(
+        &source,
+        Case {
+            full: false,
+            ..Case::default()
+        },
+        |p| 100000.0 + 50000.0 * p[0] as f64,
+        |liquid, gate| {
+            let heat = [FreeSurfaceCellHeat {
+                coordinates: [2, 3, 3],
+                energy_j: 0.02,
+            }];
+            let report = liquid
+                .step_with_coriolis_si(
+                    MaterialCoriolis3 {
+                        angular_velocity_rad_s: [1.0, -0.5, 2.0],
+                    },
+                    [0.0; 3],
+                    &heat,
+                    gate,
+                )
+                .unwrap();
+            let conversions = liquid.flow().lattice().conversions();
+            assert!(conversions.to_fluid > 0 && conversions.gas_to_interface > 0);
+            assert!(report.mass_routes > 0);
+            near(report.mass_after_kg, report.mass_before_kg, 2e-11);
+            near(
+                report.enthalpy_after_j,
+                report.enthalpy_before_j + 0.02,
+                2e-11,
+            );
+            assert_eq!(report.viscous_heat_j, 0.0);
+            let h = liquid.specific_enthalpy_at([4, 3, 3]).unwrap();
+            let material = liquid.material_at([4, 3, 3]).unwrap();
+            near(
+                material.dynamic_viscosity_pa_s(),
+                0.1 - 0.08 * h / 400000.0,
+                2e-11,
+            );
+            assert_eq!(material.material().card_identity(), source.content_hash());
+            assert_eq!(liquid.accepted_steps(), 1);
+        },
+    );
+}
+
+#[test]
+fn g4_local_coriolis_heat_motion_and_transport_refusals_publish_nothing() {
+    let source = card(0.02, 980.0);
+    with_liquid(
+        &source,
+        Case {
+            buoyant: true,
+            ..Case::default()
+        },
+        |_| 200000.0,
+        |liquid, gate| {
+            let before = snapshot(liquid);
+            for spin in [[f64::NAN, 0.0, 0.0], [f64::MAX, 0.0, 0.0]] {
+                assert!(
+                    liquid
+                        .step_with_coriolis_si(
+                            MaterialCoriolis3 {
+                                angular_velocity_rad_s: spin,
+                            },
+                            [0.0; 3],
+                            &[],
+                            gate,
+                        )
+                        .is_err()
+                );
+                assert_eq!(snapshot(liquid), before);
+            }
+            let rotation = MaterialCoriolis3 {
+                angular_velocity_rad_s: [1.0; 3],
+            };
+            assert!(
+                liquid
+                    .step_with_coriolis_si(rotation, [f64::NAN, 0.0, 0.0], &[], gate)
+                    .is_err()
+            );
+            let heat = [FreeSurfaceCellHeat {
+                coordinates: CELL,
+                energy_j: 0.3,
+            }];
+            assert!(matches!(
+                liquid.step_with_coriolis_si(rotation, [0.0; 3], &heat, gate),
+                Err(FreeSurfaceEnthalpyError::Material(_))
+            ));
+            let cancelled = CancelGate::new_clock_free();
+            cancelled.request();
+            assert!(
+                liquid
+                    .step_with_coriolis_si(rotation, [0.0; 3], &[], &cancelled)
+                    .is_err()
+            );
+            assert_eq!(snapshot(liquid), before);
+        },
+    );
+    let fixed = card(0.02, 1000.0);
+    with_liquid(
+        &fixed,
+        Case {
+            full: false,
+            controls: FreeSurfaceEnthalpyControls {
+                max_mass_routes: 1,
+                ..FreeSurfaceEnthalpyControls::default()
+            },
+            ..Case::default()
+        },
+        |_| 200000.0,
+        |liquid, gate| {
+            let before = snapshot(liquid);
+            let error = liquid
+                .step_with_coriolis_si(
+                    MaterialCoriolis3 {
+                        angular_velocity_rad_s: [0.0, 0.0, 2.0],
+                    },
+                    [0.1, 0.0, 0.0],
+                    &[],
+                    gate,
+                )
+                .unwrap_err();
+            assert!(format!("{error:?}").contains("route"));
             assert_eq!(snapshot(liquid), before);
         },
     );
