@@ -2966,6 +2966,49 @@ index-one observation component; it does not feed absorbed secondary light
 back to heat or solve fluorescence cascades, subcell pump structure, dipole
 anisotropy, surfaces or light-travel delay. Thermal emission remains separate.
 
+### Finite-lifetime luminescence on the native heat clock
+
+`volumes::heating::luminescence::{LuminescenceSource, LuminescentOpticalHeating}`
+extends the same admitted pump/transparent-escape model with a separate,
+initially unexcited energy store for each absorbing optical cell. An authored
+emitting-state wavelength fixes the stored energy per excitation; it must lie
+between the entire pump band and every emitted photon energy. Pump-to-state
+relaxation heats the mapped native cell immediately. The L3
+`fs_thermal::luminescence::ExcitationDecay` then integrates constant pumping and
+decay analytically over the final accepted interval. Radiative branching retains
+the original photon fractions and photon-energy ratios; nonradiative decay and
+the remaining radiative relaxation energy heat that same cell once.
+
+Excitation is not thermal enthalpy. Cumulative absorbed energy equals escaped
+light plus native heat plus the remaining excitation, within explicit joule
+roundoff allowances. Every candidate retains signed global and cumulative
+absolute local defects. Native explicit steps, implicit interval retries, event
+alignment and observer composition keep acceptance with the original thermal
+owner. Retrying an interval replaces tentative work from the unchanged accepted
+store. Cancellation and source-temperature refusal publish no partial history.
+
+The existing `SpectralPowerSchedule` supplies bounded rectangular pulses and
+dark gaps; its transitions split native steps exactly. Ramps refuse because a
+fluence-only mean would misrepresent excitation timing. Scheduled lanes remain
+within the prepared linear Beer-law envelope; unrepresentable small scaling
+refuses rather than losing transmitted or absorbed energy. Pump-off intervals
+continue to emit and heat from the retained excitation. Optional authored
+Arrhenius quenching adds a nonradiative rate and changes lifetime and yield
+together. Rates freeze at each native start temperature, so thermal feedback
+still requires independent timestep refinement.
+
+Accepted endpoint cell-emission watts and last-interval mean watts are separate
+observations. Both retain original optical cell indices and integrate discrete
+emission nodes, allowing `transport::luminescence::LuminescenceGrid` to observe
+the actual excitation history without an invented temperature or bin width.
+This remains one linear unsaturated emitting state with fixed pump optics,
+transparent escape and supplied material data. It does not infer a spin/trap
+phosphorescence mechanism, saturation, bleaching, self-absorption/cascades,
+temperature-dependent absorption or measured rate constants. Focused G0/G1/G3/G4
+regressions cover analytic pumping and afterglow, photon/heat/storage closure,
+prompt limits, quenching, temporal partition/restart, implicit retry replacement,
+shared thermal receivers, source-domain refusal and transactional cancellation.
+
 ### Temperature-dependent optical heating
 
 `volumes::heating::feedback::TemperatureOpticalHeating` retains source-bound

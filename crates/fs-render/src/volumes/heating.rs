@@ -43,6 +43,9 @@ pub mod exchange;
 /// Prompt Stokes fluorescence with verified transparent escape and native heat.
 pub mod fluorescence;
 
+/// Finite-lifetime excitation, pulsed luminescence and local heat on the native clock.
+pub mod luminescence;
+
 mod ensemble_statistics;
 
 /// Retained SI power accounting for the original wavelength packet.
