@@ -24,10 +24,18 @@ fs-thermal = { path = "../fs-thermal", optional = true }
 
 [dev-dependencies]
 fs-material = { path = "../fs-material" }
+fs-gas = { path = "../fs-gas" }
+fs-matdb = { path = "../fs-matdb" }
+fs-evidence = { path = "../fs-evidence" }
 
 [[example]]
 name = "prescribed_fission_water"
 path = "examples/prescribed_fission_water.rs"
+required-features = ["thermal"]
+
+[[example]]
+name = "fusion_neutron_water"
+path = "examples/fusion_neutron_water.rs"
 required-features = ["thermal"]
 
 [lints]

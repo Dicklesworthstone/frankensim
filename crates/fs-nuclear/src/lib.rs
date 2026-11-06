@@ -40,6 +40,9 @@ pub mod endf;
 /// Spatial multigroup neutron histories and composition-coupled depletion.
 pub mod diffusion;
 
+/// Fusion-neutron injection, kinetic-energy transport and disjoint heat/leakage.
+pub mod fusion_neutrons;
+
 /// Product-forming fission, capture and radioactive transmutation networks.
 pub mod burnup;
 

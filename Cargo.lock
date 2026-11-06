@@ -2250,12 +2250,15 @@ dependencies = [
 name = "fs-nuclear"
 version = "0.0.1"
 dependencies = [
+ "fs-evidence",
+ "fs-gas",
  "fs-la",
+ "fs-matdb",
  "fs-material",
  "fs-math",
  "fs-qty",
- "fs-thermal",
  "fs-rand",
+ "fs-thermal",
  "fs-thermochem",
 ]
 

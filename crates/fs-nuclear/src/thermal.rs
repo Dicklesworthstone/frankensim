@@ -50,6 +50,12 @@ pub use diffusion::{
     DiffusionSourceSchedule,
 };
 
+mod fusion_neutrons;
+pub use fusion_neutrons::{
+    FusionNeutronPulse, NeutronKineticCellSource, NeutronKineticCellStep,
+    NeutronKineticHeating,
+};
+
 mod transport;
 pub use transport::{
     BurnupTransportCellSource, BurnupTransportCellStep, BurnupTransportHeating,
@@ -218,6 +224,8 @@ pub enum FissionThermalError {
     Activation(CaptureActivationError),
     /// Spatial neutron, finite-fuel or shared reaction-account refusal.
     Diffusion(DiffusionBurnupError),
+    /// Original neutron kinetic-energy source, transport or accounting refusal.
+    NeutronKinetic(crate::fusion_neutrons::NeutronKineticError),
     /// Original radiation response, coverage, work or energy-account refusal.
     Radiation(RadiationError),
     /// Malformed schedule, duplicate owner or inconsistent hook sequence.
@@ -308,6 +316,14 @@ impl From<DiffusionBurnupError> for FissionThermalError {
         }
     }
 }
+impl From<crate::fusion_neutrons::NeutronKineticError> for FissionThermalError {
+    fn from(error: crate::fusion_neutrons::NeutronKineticError) -> Self {
+        match error {
+            crate::fusion_neutrons::NeutronKineticError::Source(error) => Self::Fission(error),
+            other => Self::NeutronKinetic(other),
+        }
+    }
+}
 impl std::fmt::Display for FissionThermalError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "fission/thermal coupling refused: {self:?}")
@@ -323,6 +339,7 @@ impl std::error::Error for FissionThermalError {
             Self::Decay(error) => Some(error),
             Self::Activation(error) => Some(error),
             Self::Diffusion(error) => Some(error),
+            Self::NeutronKinetic(error) => Some(error),
             Self::Radiation(error) => Some(error),
             _ => None,
         }

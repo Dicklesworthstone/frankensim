@@ -1,5 +1,62 @@
 # fs-nuclear contract
 
+## Fusion-neutron transport and material heat
+
+`fusion_neutrons` binds the original spatial multigroup `DiffusionModel` to
+explicit representative kinetic energies and per-reaction deposition fractions.
+`NeutronKineticState` reuses its positive continuous-source propagator, reaction
+histories and reciprocal face transfers. Capture removes incident kinetic
+energy; downscatter removes the incident/outgoing representative-energy
+difference. Each removal is split explicitly between local heat and outgoing
+radiation, while boundary leakage carries the remaining neutron energy.
+Every cell and the full interval audit neutron storage, incoming source energy,
+heat, radiation and leakage independently. Lifetime exports use the existing
+compensated accumulators. Source/model/domain/work/account failure publishes
+no candidate state.
+
+`FusionNeutronSource::project_interval_mean` retains the original immutable
+D-T and D-D-neutron emission. Each channel's count and energy are conservatively
+projected onto adjacent authored group energies, with unsupported coverage
+refused. The named approximation collapses a channel to its mean energy and
+holds its rate constant over the original interval. Native continuous injection
+preserves residence-time effects for that declared source; it does not resolve
+the original subinterval burn history or a thermal/Doppler spectrum. Users
+must split/refine emission intervals and the energy grid when those effects
+matter. No channel branching fraction or automatic source normalization is
+introduced.
+
+With `thermal`, `NeutronKineticHeating` uses the existing `NuclearHeating`
+transaction and original material caloric laws. One complete shared spatial
+cohort advances once per accepted thermal step. `FusionNeutronPulse` retains
+the original source and absolute start/end, clips native thermal steps at
+source transitions, and refuses unrepresentable pulse duration. Shutoff does
+not erase stored neutrons: their later scattering, absorption and leakage
+continue. Complete distinct cell binding, shared accepted clock, original
+reference volumes, cancellation and atomic material/source publication remain
+mandatory. Only the local deposited channel becomes material heat.
+
+This is a bounded nonmultiplying kinetic-energy model with fixed authored
+group data. It supplies no nuclear capture Q, activation/depletion, changes
+of material mass/composition, temperature feedback to cross sections,
+upscatter, fission, delayed-neutron production or photon transport. Effective
+speeds/cross sections and representative energies must have compatible physical
+averaging. The original diffusion approximation does not resolve angular or
+near-void streaming; see the primary
+[Moltres theory](https://arfc.github.io/moltres/getting_started/theory.html)
+and [OpenMC neutron-physics](https://docs.openmc.org/en/stable/methods/neutron_physics.html)
+descriptions of diffusion/scattering/capture assumptions.
+
+G1/G3 checks use independently solved constant-source absorption/leakage and
+two-group slowing/capture equations, reciprocal spatial transfer, restarts,
+projection count/energy, zero/source-off evolution and atomic refusal. Thermal
+checks compare original material heating with direct neutron evolution and
+analytic capture, including pulse boundaries and late deposited heat.
+`cargo run -p fs-nuclear --features thermal --example fusion_neutron_water`
+connects an actual D-T burn to the existing neutron owner and finite IF97
+water receiver, checking the combined plasma/neutron/material energy account.
+Its neutron coefficients are explicitly illustrative, not evaluated water or
+blanket data; IF97 supplies the receiver's original caloric response.
+
 ## Prescribed fission, finite inventory and delayed energy
 
 `fs-nuclear` is an L3 source owner. The source kernel uses the shared deterministic
