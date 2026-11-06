@@ -6,6 +6,18 @@ floating-point POLICY: FMA contraction, subnormals, NaN, ULP budgets
 (patch Rev O; plan §5.4/§6.4). Layer: L0.
 
 ## Public types and semantics
+- `quadratic::increment` evaluates the change of an unchanged symmetric
+  quadratic form through the caller's original fallible linear action. Endpoint
+  differences and means retain their low words before the action; separate
+  leading/cross/trailing reductions return double-double `change` and
+  `increment_quadratic = delta^T A delta / 2`. Two buffers are reused; a second
+  action is needed only for nonzero difference tails. The caller retains
+  symmetry, operator accuracy, positivity and all physical meaning. For mass
+  in backward Euler, the latter term is numerical kinetic loss, never heat;
+  centered integration does not consume it as loss. Five native leaf tests
+  cover coupled counter-motion, exchanged inventories, retained work residuals,
+  fallible/cancelled actions and incomplete outputs. This new path adds no
+  universal relative bound, interval enclosure or dual-ISA qualification.
 - `decay::{remaining_fraction, decayed_fraction, attenuate, relax_toward}` —
   allocation-free scalar exponential kernels for nonnegative integrated hazard,
   including its infinite limit. Separate survival/loss evaluation retains tiny
@@ -188,7 +200,10 @@ codegen flags recorded as explicit NOT-RUN cells rather than omitted. Run
 the matrix before and after any toolchain bump.
 
 ## Cancellation behavior
-Straight-line arithmetic; no poll points needed.
+Scalar arithmetic is straight-line and needs no poll points. The vector
+`quadratic::increment` path polls the caller's cancellation probe every 256
+coordinates and around each action; the action receives that same probe and
+retains its own bounded checkpoints and typed refusal.
 
 ## Unsafe boundary
 None.

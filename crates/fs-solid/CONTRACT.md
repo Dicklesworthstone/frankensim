@@ -7791,6 +7791,25 @@ cancellation. These manufactured source curves verify the integration; they
 are not physical validation of a temperature-dependent adhesive specimen or a
 coupled thermal-transport/heat-partition model.
 
+## Shared original consistent-mass kinetic increments
+
+Backward-Euler and centered reference inertia and the original cohesive
+dynamics owner use `fs-math::quadratic::increment` with their unchanged mass
+actions. Actual endpoint difference/mean tails and compensated reductions retain
+small kinetic transfers beside large common motion or cancelling coordinate
+transfers. The native reference-mass row accumulation order and force/velocity
+trajectories remain unchanged; no lumping or substitute mass is introduced.
+
+Backward Euler independently retains `delta-v^T M delta-v / 2` as numerical
+kinetic loss. Centered inertia reports zero numerical loss. Independent native
+force work uses actual displacement endpoints and remains double-double through
+the kinetic residual, so kinematic rounding or operator error is still visible.
+Neither numerical account supplies material heat. Absolute kinetic diagnostics
+and existing admission tolerances retain their original semantics. Focused
+owner fixtures cover coupled counter-motion and the separate BE/centered work
+identities; their full integration execution remains pending the native
+dependency/resource blocker. The shared arithmetic leaf has executed directly.
+
 ## Conservative finite-strain elastic motion
 
 `hyper3::mixed::conservative::{ConservativeTetDefinition, ConservativeTetSolid}`

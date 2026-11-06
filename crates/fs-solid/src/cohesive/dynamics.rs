@@ -53,6 +53,7 @@ pub mod impulse;
 mod tangent;
 use tangent::StepJacobian;
 
+#[cfg(test)]
 mod kinetic;
 
 /// Explicit numerical, trajectory and energy controls. These are not material
@@ -711,10 +712,22 @@ fn kinetic_change(
             "complete original kinetic coordinates required",
         ));
     }
-    kinetic::change(before, after, |x, y| mass.apply(x, y), cancelled).map_err(|error| match error {
-        kinetic::KineticError::Dimension => Error::Invalid("complete kinetic endpoints required"),
-        kinetic::KineticError::Cancelled => Error::Cancelled,
-        kinetic::KineticError::NonFinite => Error::Invalid("non-finite kinetic increment"),
+    use fs_math::quadratic::{QuadraticError, increment};
+    increment(
+        before,
+        after,
+        |x, y, _| {
+            mass.apply(x, y);
+            Ok::<_, std::convert::Infallible>(())
+        },
+        cancelled,
+    )
+    .map(|energy| energy.change.to_f64())
+    .map_err(|error| match error {
+        QuadraticError::Dimension => Error::Invalid("complete kinetic endpoints required"),
+        QuadraticError::Cancelled => Error::Cancelled,
+        QuadraticError::NonFinite => Error::Invalid("non-finite kinetic increment"),
+        QuadraticError::Operator(never) => match never {},
     })
 }
 

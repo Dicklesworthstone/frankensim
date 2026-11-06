@@ -1,9 +1,13 @@
 //! Fixed symmetric mass forms with independently known small energy changes.
 
-use super::change;
+use super::{LinearOp, kinetic_change};
 
 struct Mass([[f64; 2]; 2]);
-impl Mass {
+impl LinearOp for Mass {
+    fn n(&self) -> usize {
+        2
+    }
+
     fn apply(&self, x: &[f64], y: &mut [f64]) {
         for (row, value) in self.0.iter().zip(y) {
             *value = row[0] * x[0] + row[1] * x[1];
@@ -20,11 +24,11 @@ fn coupled_mass_retains_countermotion_beside_large_common_velocity() {
     // The initial vector is in the common mode; its mass-inner product with
     // [4,-4] vanishes. The counter-mode has eigenvalue one, so delta K=16 J.
     assert_eq!(
-        change(&before, &after, |x, y| mass.apply(x, y), &mut || false).unwrap(),
+        kinetic_change(&mass, &before, &after, &mut || false).unwrap(),
         16.0
     );
     assert_eq!(
-        change(&after, &before, |x, y| mass.apply(x, y), &mut || false).unwrap(),
+        kinetic_change(&mass, &after, &before, &mut || false).unwrap(),
         -16.0
     );
 }
@@ -39,11 +43,11 @@ fn exchanged_motion_retains_small_storage_after_large_transfers_cancel() {
     // independent small speeds differ: (2²-1²)/2 = 1.5 J. The second actual
     // difference large-1 needs its low word before the original mass action.
     assert_eq!(
-        change(&before, &after, |x, y| mass.apply(x, y), &mut || false).unwrap(),
+        kinetic_change(&mass, &before, &after, &mut || false).unwrap(),
         1.5
     );
     assert_eq!(
-        change(&after, &before, |x, y| mass.apply(x, y), &mut || false).unwrap(),
+        kinetic_change(&mass, &after, &before, &mut || false).unwrap(),
         -1.5
     );
 }

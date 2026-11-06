@@ -31,6 +31,7 @@ pub mod det;
 pub mod eft;
 pub mod payne;
 pub mod qd;
+pub mod quadratic;
 pub mod special;
 
 /// Crate version, re-exported for provenance stamping.

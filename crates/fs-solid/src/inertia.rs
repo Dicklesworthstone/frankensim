@@ -6,6 +6,8 @@
 //! mass is admitted once and may be retained across finite-deformation steps.
 
 use fs_exec::Cx;
+use fs_math::dd::Dd;
+use fs_math::quadratic::{QuadraticError, QuadraticIncrement};
 use fs_sparse::{Coo, Csr};
 
 mod impulse;
@@ -76,6 +78,34 @@ fn finite(value: f64) -> Result<f64, InertiaError> {
 
 fn dot(a: &[f64], b: &[f64]) -> f64 {
     a.iter().zip(b).fold(0.0, |s, (x, y)| x.mul_add(*y, s))
+}
+
+/// Independent native force work on the actual displacement endpoints. Keep
+/// displacement-rounding defects visible instead of defining work from storage.
+fn displacement_work(
+    before: &[f64],
+    after: &[f64],
+    force: &[f64],
+    cx: &Cx<'_>,
+) -> Result<Dd, InertiaError> {
+    if before.len() != after.len() || before.len() != force.len() {
+        return Err(invalid("inertial work requires complete endpoint coordinates"));
+    }
+    let mut leading = Dd::ZERO;
+    let mut trailing = Dd::ZERO;
+    for (i, ((&old, &new), &force)) in before.iter().zip(after).zip(force).enumerate() {
+        if i % 256 == 0 {
+            checkpoint(cx)?;
+        }
+        let displacement = Dd::from_f64(new) - Dd::from_f64(old);
+        let force = Dd::from_f64(force);
+        leading = leading + Dd::from_f64(displacement.hi) * force;
+        trailing = trailing + Dd::from_f64(displacement.lo) * force;
+    }
+    let work = leading + trailing;
+    finite(work.hi)?;
+    finite(work.lo)?;
+    Ok(work)
 }
 
 /// Immutable consistent mass on an already admitted reference mesh.
@@ -554,23 +584,53 @@ impl ReferenceMass {
 
     /// The same immutable mass action used by momentum and acceleration loads.
     pub(crate) fn action(&self, x: &[f64], cx: &Cx<'_>) -> Result<Vec<f64>, InertiaError> {
-        if x.len() != self.ndofs() {
+        let mut output = vec![0.0; self.ndofs()];
+        self.action_into(x, &mut output, cx)?;
+        Ok(output)
+    }
+
+    fn action_into(
+        &self,
+        x: &[f64],
+        output: &mut [f64],
+        cx: &Cx<'_>,
+    ) -> Result<(), InertiaError> {
+        if x.len() != self.ndofs() || output.len() != x.len() {
             return Err(invalid("inertia requires every nodal component"));
         }
-        let mut output = Vec::with_capacity(x.len());
-        for row in 0..x.len() {
+        for (row, output) in output.iter_mut().enumerate() {
             if row % 256 == 0 {
                 checkpoint(cx)?;
             }
             let (columns, values) = self.matrix.row(row);
-            output.push(finite(
+            *output = finite(
                 columns
                     .iter()
                     .zip(values)
                     .fold(0.0, |sum, (&column, &value)| value.mul_add(x[column], sum)),
-            )?);
+            )?;
         }
-        Ok(output)
+        Ok(())
+    }
+
+    fn kinetic_increment(
+        &self,
+        before: &[f64],
+        after: &[f64],
+        cx: &Cx<'_>,
+    ) -> Result<QuadraticIncrement, InertiaError> {
+        fs_math::quadratic::increment(
+            before,
+            after,
+            |x, output, _| self.action_into(x, output, cx),
+            &mut || cx.checkpoint().is_err(),
+        )
+        .map_err(|error| match error {
+            QuadraticError::Dimension => invalid("inertia requires complete kinetic endpoints"),
+            QuadraticError::Cancelled => InertiaError::Cancelled,
+            QuadraticError::NonFinite => invalid("non-finite consistent kinetic increment"),
+            QuadraticError::Operator(error) => error,
+        })
     }
 }
 
@@ -788,27 +848,19 @@ impl<'a> BackwardEulerInertia<'a> {
             .iter()
             .map(|du| finite(du * self.inverse_dt))
             .collect::<Result<_, _>>()?;
-        let delta: Vec<_> = velocity
-            .iter()
-            .zip(self.old_v)
-            .map(|(v, old)| finite(v - old))
-            .collect::<Result<_, _>>()?;
-        let mean: Vec<_> = velocity
-            .iter()
-            .zip(self.old_v)
-            .map(|(v, old)| finite(0.5 * v + 0.5 * old))
-            .collect::<Result<_, _>>()?;
         let old_momentum = self.action(self.old_v, cx)?;
         let next_momentum = self.action(&velocity, cx)?;
-        let impulse = self.action(&delta, cx)?;
         let kinetic_before_j = finite(0.5 * dot(self.old_v, &old_momentum))?;
         let kinetic_after_j = finite(0.5 * dot(&velocity, &next_momentum))?;
-        let kinetic_change_j = finite(dot(&mean, &impulse))?;
-        let numerical_loss_j = finite(0.5 * dot(&delta, &impulse))?;
+        let kinetic = self.mass.kinetic_increment(self.old_v, &velocity, cx)?;
+        let kinetic_change_j = kinetic.change.to_f64();
+        let numerical_loss_j = kinetic.increment_quadratic.to_f64();
         let mut inertia = vec![0.0; u.len()];
         self.add_force(u, &mut inertia, cx)?;
-        let inertial_work_j = finite(dot(&du, &inertia))?;
-        let balance_error_j = finite(inertial_work_j - kinetic_change_j - numerical_loss_j)?;
+        let work = displacement_work(self.old_u, u, &inertia, cx)?;
+        let inertial_work_j = work.to_f64();
+        let balance_error_j =
+            finite((work - kinetic.change - kinetic.increment_quadratic).to_f64())?;
         let scale = kinetic_before_j
             .max(kinetic_after_j)
             .max(inertial_work_j.abs())
@@ -936,10 +988,7 @@ impl<'a> MidpointInertia<'a> {
         cx: &Cx<'_>,
     ) -> Result<(Vec<[f64; 3]>, InertialEnergy), InertiaError> {
         self.original.check_length(u)?;
-        let mut du = Vec::with_capacity(u.len());
         let mut velocity = Vec::with_capacity(u.len());
-        let mut delta = Vec::with_capacity(u.len());
-        let mut mean = Vec::with_capacity(u.len());
         for (i, ((&u, &old_u), &old_v)) in u
             .iter()
             .zip(self.original.old_u)
@@ -951,21 +1000,22 @@ impl<'a> MidpointInertia<'a> {
             }
             let displacement = finite(u - old_u)?;
             let next_v = finite(2.0 * (displacement * self.original.inverse_dt) - old_v)?;
-            du.push(displacement);
             velocity.push(next_v);
-            delta.push(finite(next_v - old_v)?);
-            mean.push(finite(0.5 * next_v + 0.5 * old_v)?);
         }
         let old_momentum = self.action(self.original.old_v, cx)?;
         let next_momentum = self.action(&velocity, cx)?;
-        let impulse = self.action(&delta, cx)?;
         let kinetic_before_j = finite(0.5 * dot(self.original.old_v, &old_momentum))?;
         let kinetic_after_j = finite(0.5 * dot(&velocity, &next_momentum))?;
-        let kinetic_change_j = finite(dot(&mean, &impulse))?;
+        let kinetic = self
+            .original
+            .mass
+            .kinetic_increment(self.original.old_v, &velocity, cx)?;
+        let kinetic_change_j = kinetic.change.to_f64();
         let mut inertial = vec![0.0; u.len()];
         self.add_force(u, &mut inertial, cx)?;
-        let inertial_work_j = finite(dot(&du, &inertial))?;
-        let balance_error_j = finite(inertial_work_j - kinetic_change_j)?;
+        let work = displacement_work(self.original.old_u, u, &inertial, cx)?;
+        let inertial_work_j = work.to_f64();
+        let balance_error_j = finite((work - kinetic.change).to_f64())?;
         let scale = kinetic_before_j
             .max(kinetic_after_j)
             .max(kinetic_change_j.abs())
@@ -1033,6 +1083,42 @@ mod density_tests {
             "{actual:.17e} != {expected:.17e}"
         );
     }
+
+    #[test]
+    fn common_motion_preserves_small_storage_and_separate_integration_loss() {
+        with_cx(|cx| {
+            // Two coupled translational coordinates plus their unchanged
+            // orthogonal coordinates; this is the original, un-lumped mass.
+            let mut matrix = Coo::new(6, 6);
+            for i in 0..6 {
+                matrix.push(i, i, if i == 0 || i == 3 { 2.0 } else { 1.0 });
+            }
+            matrix.push(0, 3, 1.0);
+            matrix.push(3, 0, 1.0);
+            let mass = ReferenceMass::from_matrix(matrix.assemble(), 6.0, 6, cx).unwrap();
+            let common = 2.0_f64.powi(54);
+            let old_u = [0.0; 6];
+            let old_v = [common, 0.0, 0.0, common, 0.0, 0.0];
+            let u = [common + 4.0, 0.0, 0.0, common - 4.0, 0.0, 0.0];
+            let euler = BackwardEulerInertia::new(&mass, &old_u, &old_v, 1.0, cx).unwrap();
+            let (velocity, report) = euler.motion_flat(&u, cx).unwrap();
+            assert_eq!(velocity, u);
+            assert_eq!(report.kinetic_before_j, report.kinetic_after_j);
+            assert_eq!(report.kinetic_change_j, 16.0);
+            assert_eq!(report.numerical_loss_j, 16.0);
+            assert_eq!(report.inertial_work_j, 32.0);
+            assert_eq!(report.balance_error_j, 0.0);
+
+            let midpoint = MidpointInertia::new(&mass, &old_u, &old_v, 1.0, cx).unwrap();
+            let (_, centered) = midpoint.motion(&u, cx).unwrap();
+            assert_eq!(centered.kinetic_before_j, centered.kinetic_after_j);
+            assert_eq!(centered.kinetic_change_j, 64.0);
+            assert_eq!(centered.numerical_loss_j, 0.0);
+            assert_eq!(centered.inertial_work_j, 64.0);
+            assert_eq!(centered.balance_error_j, 0.0);
+        });
+    }
+
     // Independent simplex monomial integral: 6V*product(p_i!)/(sum(p_i)+3)!.
     fn exact_entry(a: usize, b: usize) -> f64 {
         let factorial = [1.0, 1.0, 2.0, 6.0];
