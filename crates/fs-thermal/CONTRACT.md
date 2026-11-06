@@ -803,6 +803,30 @@ join only at their scheduled birth, with the then-current chamber inventory.
 repeat it and must not be summed. Individual reservoir replacement refuses in
 this mode; `set_shared_reservoir` replaces the external bath atomically.
 
+`CoatingSimulation::advance_coupled_to` and
+`advance_coupled_chamber_to` consume each native substep's authored heat in
+the same supported phase endpoint. Ordinary cells retain their native thermal
+update. Coated substrates bypass the heat-only intermediate and receive their
+net source, bath and contact heat exactly once, together with substrate/deposit
+sensible storage and latent transfer. The shared variant couples all active
+coatings through the original common-pressure solver; unheated bare receivers
+remain active.
+
+These advances reuse the existing heat/event loop, start exposure, explicit
+CFL and whole-call budget. Future births join at the event endpoint and carry
+their original coating inventory; endpoint coverage cannot rewrite the
+preceding exchange. Accepted native endpoints pass their original substrate
+validators and finite-storage gates. One private candidate contains the entire
+timeline and gas inventory. `CoupledCoatingAudit` reports complete storage,
+external heat, carried vapor energy and actual mass/energy residuals without
+a fictitious heat-only intermediate account. Local compensated conservation
+checks and represented-inventory corrections retain their original owner.
+
+Three coupled-timeline regressions exercise strong heating and cooling whose
+split intermediate leaves the caloric domain, common vapor with native contact
+heat and an unheated bare receiver, and both modes' exact birth/coverage
+intervals, whole-call budgets and final cancellation.
+
 The material adapter `fs_material::thermal::PureSolidThermalLaw::
 specific_enthalpy_at_temperature` supplies original solid h(T) directly from
 its borrowed curve. It retains exact source knots, varying sensible slopes and
@@ -825,9 +849,11 @@ energy differences and compensated sums preserve caloric reference handling;
 actual mass-rounding corrections are charged to the energy residual, and
 opposing local defects cannot cancel out of its absolute admission.
 
-This remains first-order heat/phase splitting with fixed reference area and
-conductances and a shared substrate/coating temperature. It does not resolve
-thick-layer resistance, porosity, melting, moving geometry, dynamic
+The split APIs retain first-order heat/phase splitting; the coupled APIs use
+first-order explicit heat transport and implicit phase endpoints. Both retain
+fixed reference area and conductances and a shared substrate/coating
+temperature. They do not resolve thick-layer resistance, porosity, melting,
+moving geometry, dynamic
 observer-based sources, or evolving gas sensible heat. Finite baths supplied to
 the independent constructor remain independent. Seven native integration tests cover combined
 storage/conduction/source work, zero-inventory growth and regrowth, finite vapor

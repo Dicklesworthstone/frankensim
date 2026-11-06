@@ -1,5 +1,7 @@
 //! G0/G1: native heat storage, deposition inventories, events and rollback.
 
+#[path = "coupled/tests.rs"]
+mod coupled;
 #[path = "chamber/tests.rs"]
 mod shared_chamber;
 

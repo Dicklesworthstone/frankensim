@@ -335,10 +335,12 @@ impl<'a> CoatingSimulation<'a> {
         Ok((ids, step))
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn exchange_chamber(
         &mut self,
         areas: &BTreeMap<CellId, f64>,
         duration_s: f64,
+        supplied_heat_j: Option<&BTreeMap<CellId, f64>>,
         config: ChamberSolverConfig,
         sums: &mut Ledger,
         audit: &mut CoatingAudit,
@@ -351,10 +353,15 @@ impl<'a> CoatingSimulation<'a> {
         // active cells participate; a future birth cannot consume vapor early.
         let mut ids = Vec::with_capacity(self.coatings.len());
         let mut surfaces = Vec::with_capacity(self.coatings.len());
+        let mut heats =
+            supplied_heat_j.map_or_else(Vec::new, |_| Vec::with_capacity(self.coatings.len()));
         for (&id, coating) in &self.coatings {
             checkpoint()?;
             let model = &self.surfaces[&id];
             ids.push(id);
+            if let Some(supplied) = supplied_heat_j {
+                heats.push(*supplied.get(&id).ok_or(DepositionError::Arithmetic)?);
+            }
             surfaces.push(SupportedChamberSurface {
                 state: supported_state(&self.thermal.cells[&id], *coating, areas[&id]),
                 kinetics: model.kinetics,
@@ -363,28 +370,40 @@ impl<'a> CoatingSimulation<'a> {
             });
         }
         let mut refusal = None;
-        let result = advance_supported_chamber(
-            &surfaces,
-            reservoir,
-            duration_s,
-            config,
-            |index, h| {
-                let material = self.thermal.cells[&ids[index]].material_id;
-                self.thermal.materials[&material]
-                    .temperature_k(h)
-                    .map_err(|_| {
-                        SublimationError::Invalid(
-                            "original substrate calorics refused chamber trial",
-                        )
-                    })
-            },
-            || {
-                checkpoint().map_err(|error| {
-                    refusal = Some(error);
-                    SublimationError::Cancelled
+        let temperature = |index: usize, h: f64| {
+            let material = self.thermal.cells[&ids[index]].material_id;
+            self.thermal.materials[&material]
+                .temperature_k(h)
+                .map_err(|_| {
+                    SublimationError::Invalid("original substrate calorics refused chamber trial")
                 })
-            },
-        );
+        };
+        let mut poll = || {
+            checkpoint().map_err(|error| {
+                refusal = Some(error);
+                SublimationError::Cancelled
+            })
+        };
+        let result = if supplied_heat_j.is_some() {
+            advance_supported_chamber_with_heat(
+                &surfaces,
+                reservoir,
+                duration_s,
+                &heats,
+                config,
+                temperature,
+                &mut poll,
+            )
+        } else {
+            advance_supported_chamber(
+                &surfaces,
+                reservoir,
+                duration_s,
+                config,
+                temperature,
+                &mut poll,
+            )
+        };
         if let Some(error) = refusal {
             return Err(error.into());
         }
@@ -403,6 +422,16 @@ impl<'a> CoatingSimulation<'a> {
         )?;
         for (id, surface_step) in ids.into_iter().zip(step.surfaces) {
             checkpoint()?;
+            if supplied_heat_j.is_some() {
+                let mut candidate = self.thermal.cells[&id].clone();
+                candidate.specific_h_j_kg = surface_step.state.substrate_specific_enthalpy_j_kg;
+                self.thermal.materials[&candidate.material_id].validate_cell(&candidate)?;
+                finite(candidate.mass_kg * candidate.specific_h_j_kg)?;
+                finite(
+                    surface_step.state.deposit_mass_kg
+                        * surface_step.phase.solid.specific_enthalpy_j_kg,
+                )?;
+            }
             accept_phase_step(
                 self.thermal.cells.get_mut(&id).unwrap(),
                 self.coatings.get_mut(&id).unwrap(),

@@ -39,6 +39,9 @@ use std::collections::{BTreeMap, BTreeSet};
 #[path = "coating/chamber.rs"]
 mod chamber;
 pub use chamber::ChamberCoatingSurface;
+#[path = "coating/coupled.rs"]
+mod coupled;
+pub use coupled::CoupledCoatingAudit;
 
 /// Coating-aware heat transport and admission for an externally solved gas.
 #[path = "coating/external.rs"]
@@ -47,6 +50,7 @@ pub mod external;
 #[derive(Clone, Copy)]
 enum AdvanceMode {
     Reservoirs(Option<crate::sublimation::chamber::ChamberSolverConfig>),
+    Coupled(Option<crate::sublimation::chamber::ChamberSolverConfig>),
     External { maximum_substeps: usize },
 }
 
@@ -452,6 +456,26 @@ impl<'a> CoatingSimulation<'a> {
         mode: AdvanceMode,
         mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<(Self, CoatingAudit), ThermalSublimationError> {
+        self.advance_mode_with_checkpoint(
+            target_s,
+            thermal_config,
+            phase_config,
+            mode,
+            &mut checkpoint,
+        )
+    }
+
+    // Keep the large heat/event/phase pipeline in one codegen instance instead
+    // of duplicating every nonlinear solver for each caller's cancellation type.
+    // The borrowed callback requires no allocation and preserves poll ordering.
+    fn advance_mode_with_checkpoint(
+        &self,
+        target_s: f64,
+        thermal_config: StepConfig,
+        phase_config: SolverConfig,
+        mode: AdvanceMode,
+        mut checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(Self, CoatingAudit), ThermalSublimationError> {
         checkpoint()?;
         if !target_s.is_finite()
             || target_s < self.time_s()
@@ -465,7 +489,9 @@ impl<'a> CoatingSimulation<'a> {
         }
         validate_solver(phase_config)?;
         let maximum_substeps = match mode {
-            AdvanceMode::Reservoirs(_) => self.thermal.budget.max_substeps,
+            AdvanceMode::Reservoirs(_) | AdvanceMode::Coupled(_) => {
+                self.thermal.budget.max_substeps
+            }
             AdvanceMode::External { maximum_substeps } => {
                 maximum_substeps.min(self.thermal.budget.max_substeps)
             }
@@ -560,10 +586,15 @@ impl<'a> CoatingSimulation<'a> {
                 return Err(DepositionError::Arithmetic.into());
             }
             let mut applied_heat = Sum::default();
+            let mut coating_heat = BTreeMap::new();
             for (&id, cell) in &mut next.thermal.cells {
                 checkpoint()?;
                 let heat = finite(dt * rates.watts[&id])?;
                 applied_heat.add(heat)?;
+                if matches!(mode, AdvanceMode::Coupled(_)) && next.coatings.contains_key(&id) {
+                    coating_heat.insert(id, heat);
+                    continue;
+                }
                 let old_h = cell.specific_h_j_kg;
                 let stored_heat = if let Some(coating) = next.coatings.get_mut(&id) {
                     let model = &next.surfaces[&id];
@@ -622,8 +653,27 @@ impl<'a> CoatingSimulation<'a> {
             sums.heat_residual.add(internal_defect)?;
             sums.defects.add(internal_defect.abs())?;
             // START exposure: endpoint coverage/source events are still pending.
-            if let AdvanceMode::Reservoirs(Some(config)) = mode {
-                next.exchange_chamber(&areas, dt, config, &mut sums, &mut audit, &mut checkpoint)?;
+            if let AdvanceMode::Coupled(chamber_config) = mode {
+                next.exchange_coupled(
+                    &areas,
+                    dt,
+                    &coating_heat,
+                    phase_config,
+                    chamber_config,
+                    &mut sums,
+                    &mut audit,
+                    &mut checkpoint,
+                )?;
+            } else if let AdvanceMode::Reservoirs(Some(config)) = mode {
+                next.exchange_chamber(
+                    &areas,
+                    dt,
+                    None,
+                    config,
+                    &mut sums,
+                    &mut audit,
+                    &mut checkpoint,
+                )?;
             } else if let AdvanceMode::Reservoirs(None) = mode {
                 for (&id, coating) in &mut next.coatings {
                     checkpoint()?;
