@@ -6,6 +6,9 @@
 //! iteration, factorization and work-conjugate directional tangent; it neither
 //! fits a power law nor substitutes a frozen apparent viscosity.
 
+/// Coupled sensible heating of a uniformly mixed recirculating assembly.
+pub mod thermal;
+
 use fs_material::MaterialError;
 use fs_material::fluid_transport::rheology::slit::{CarreauSlitControls, LaminarCarreauSlit};
 

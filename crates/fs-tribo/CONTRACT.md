@@ -2175,6 +2175,53 @@ compliant recoil and transactional refusal. An independent pressure-times-plasti
 slip return map refines in space and time across simultaneous load and shear
 reversals, including contact entry/exit; it does not reuse native dissipated work.
 
+## Coupled Carreau self-heating and cooling
+
+`resistive_film::carreau::thermal::ThermalCarreauFilm` advances the actual
+temperature of an explicitly uniform, recirculating film assembly. The fixed
+thermal inventory includes the returning supply fluid; all pressure ports
+return at the same body temperature. Original `TabulatedHeatStorage` owns the
+authored total sensible C(T), its supported interval and exact piecewise-affine
+caloric integral. Density, mass, heat capacity, supply-loop losses and material
+provenance are not inferred from viscosity or film volume. This is not an open
+film with silently omitted advected enthalpy.
+
+The owner binds fixed graph coordinates. Tangential wall velocities, pressure
+supplies, prescribed heat and linear bath conductance/temperature are held over
+each interval; any velocity changing a cell or passage gap refuses. At every
+thermal trial the original Carreau slits are prepared at the mean endpoint
+temperature and the complete existing pressure/sliding graph is solved again.
+The original caloric change satisfies
+`E(T1)-E(T0) = dt*(D((T0+T1)/2) + Q - H*((T0+T1)/2-Tbath))`.
+Only actual profile dissipation enters stored heat. Mechanical/supply work,
+prescribed and bath heat, caloric residual and native constitutive/continuity
+work residual remain distinct. Reported force, pressure and channel responses
+are the accepted midpoint mechanics; the returned film is prepared and checked
+against the held loading at its endpoint temperature.
+
+A bounded local bracket/secant solve starts from the accepted temperature,
+obeys an explicit temperature-excursion cap and the shared original caloric and
+material support, and reserves work for endpoint admission. The endpoint
+net-power sign guard refuses detected equilibrium overshoots, including stiff
+midpoint cooling. It does not isolate every interior equilibrium of a
+nonmonotone pressure/sliding load, establish unconditional root uniqueness or
+diagnose physical thermal runaway. Unresolved intervals require caller step
+refinement. One candidate film is allocated per interval; root iterations reuse
+its original ordered passage and coefficient arrays with bounded stack scratch.
+All sources, outputs and the accepted thermal clock publish together after the
+final cancellation check. Failed work, support or energy admission changes none
+of the accepted state or caller output slices.
+
+This rung supplies midpoint temperature feedback at fixed geometry and fixed
+thermal inventory. Spatial temperature profiles, open-stream enthalpy,
+cavitation/latent heat, thermal expansion, moving-gap integration and cooling
+coefficient calibration remain outside its scope. Focused tests compare the
+linear cooling balance, nonlinear Carreau heating across caloric knots and both
+thermal shift conventions, independent pressure-fed viscous work, and temporal
+second-order refinement. Source/geometry/work limits, stiff cooling refusal and
+late cancellation retain exact retry. Existing full-film and cavitation
+regressions remain applicable to their unchanged mechanical/mass owners.
+
 ## Original thermal Carreau Reynolds films
 
 `resistive_film::carreau::CarreauFilm` couples original
