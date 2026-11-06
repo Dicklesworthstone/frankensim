@@ -211,6 +211,7 @@ fn g1_midpoint_remainder_closes_work_against_independent_gauss_integration() {
     let mid: [f64; 4] = core::array::from_fn(|i| f64::midpoint(a[i], b[i]));
     // Two-point Gauss quadrature integrates the cubic source effort exactly.
     let mut independently_integrated_work = 0.0;
+    let mut independently_integrated_effort = [0.0; 4];
     for t in [0.5 - 0.5 / 3.0_f64.sqrt(), 0.5 + 0.5 / 3.0_f64.sqrt()] {
         let mut absolute: [f64; 4] = core::array::from_fn(|i| a[i] + t * delta[i]);
         for i in 0..2 {
@@ -221,9 +222,19 @@ fn g1_midpoint_remainder_closes_work_against_independent_gauss_integration() {
         for i in 0..2 {
             effort[2 * i] -= storage.preload_forces()[i];
         }
+        for i in 0..4 {
+            independently_integrated_effort[i] += 0.5 * effort[i];
+        }
         independently_integrated_work += 0.5 * (0..4).map(|i| effort[i] * delta[i]).sum::<f64>();
     }
     let discrete = discrete_gradient(&storage, &a, &b);
+    assert!(storage.discrete_gradient_rule().is_some());
+    for i in 0..4 {
+        close(discrete[i], independently_integrated_effort[i], 3e-14);
+    }
+    for i in 0..2 {
+        assert_eq!(discrete[2 * i + 1], mid[2 * i + 1]);
+    }
     let work: f64 = discrete.iter().zip(delta).map(|(e, d)| e * d).sum();
     close(work, independently_integrated_work, 2e-14);
     close(
@@ -244,6 +255,157 @@ fn g1_midpoint_remainder_closes_work_against_independent_gauss_integration() {
         independently_integrated_work,
         2e-14,
     );
+}
+
+#[test]
+fn g3_channel_integral_keeps_tiny_motion_beside_large_preload_and_kinetic_storage() {
+    let (omega, beta, reference) = (2.0, 1e-16, 1e8);
+    let storage = scalar(omega, beta, reference);
+    let a = [-2e-12, 1e9];
+    let b = [3e-12, 1e9 + 4.0];
+    assert_eq!(reference + a[0], reference);
+    assert_eq!(reference + b[0], reference);
+    let effort = discrete_gradient(&storage, &a, &b);
+    // Independent scalar polynomial of the translated original potential.
+    let stiffness = omega * omega + 3.0 * beta * reference * reference;
+    let expected = 0.5 * stiffness * (a[0] + b[0])
+        + beta * reference * (a[0] * a[0] + a[0] * b[0] + b[0] * b[0])
+        + 0.25 * beta * (a[0] + b[0]) * (a[0] * a[0] + b[0] * b[0]);
+    close(effort[0], expected, 8e-16);
+    assert_eq!(effort[1], 1e9 + 2.0);
+    let potential =
+        |q: f64| 0.5 * stiffness * q * q + beta * reference * q.powi(3) + 0.25 * beta * q.powi(4);
+    close(
+        effort[0] * (b[0] - a[0]),
+        potential(b[0]) - potential(a[0]),
+        1e-15,
+    );
+    let direction = [0.2, -0.7];
+    let mut tangent = [0.0; 2];
+    assert!(
+        storage
+            .discrete_gradient_rule()
+            .unwrap()
+            .end_jacobian_action(&a, &b, &direction, &mut tangent)
+    );
+    let scalar_tangent = 0.5 * stiffness
+        + beta * reference * (a[0] + 2.0 * b[0])
+        + 0.25 * beta * (a[0] * a[0] + 2.0 * a[0] * b[0] + 3.0 * b[0] * b[0]);
+    close(tangent[0], scalar_tangent * direction[0], 8e-16);
+    assert_eq!(tangent[1], 0.5 * direction[1]);
+}
+
+#[test]
+fn g1_shifted_endpoint_tangent_matches_the_original_channel_integral() {
+    let storage = coupled(&[0.2, -0.13]);
+    let rule = storage.discrete_gradient_rule().unwrap();
+    let a = [-0.11, 0.23, 0.07, -0.19];
+    let direction = [0.7, -0.2, -0.9, 0.3];
+    for b in [[0.17, -0.08, -0.15, 0.13], a, a.map(|v| -v)] {
+        let mut tangent = [f64::NAN; 4];
+        assert!(rule.end_jacobian_action(&a, &b, &direction, &mut tangent));
+        let h = 0.001;
+        // Five-point differentiation is exact for the endpoint's cubic
+        // polynomial in exact arithmetic, independently of its Jacobian.
+        let probes: Vec<_> = [-2.0, -1.0, 1.0, 2.0]
+            .into_iter()
+            .map(|scale| {
+                let point = core::array::from_fn::<_, 4, _>(|i| b[i] + scale * h * direction[i]);
+                discrete_gradient(&storage, &a, &point)
+            })
+            .collect();
+        for i in 0..4 {
+            let expected = (probes[0][i] - 8.0 * probes[1][i] + 8.0 * probes[2][i] - probes[3][i])
+                / (12.0 * h);
+            close(tangent[i], expected, 3e-11);
+        }
+        if b == a {
+            let mut continuous = [0.0; 4];
+            storage
+                .hessian_action(&a, &direction, &mut continuous)
+                .unwrap();
+            for i in 0..4 {
+                close(tangent[i], 0.5 * continuous[i], 3e-15);
+            }
+        }
+    }
+    let mut out = [17.0; 4];
+    assert!(!rule.end_jacobian_action(&a[..3], &a, &direction, &mut out));
+    assert_eq!(out, [17.0; 4]);
+    assert!(!rule.end_jacobian_action(&a, &a, &[f64::INFINITY; 4], &mut out));
+    assert!(!rule.end_jacobian_action(&a, &[1e200; 4], &direction, &mut out));
+    rule.evaluate(&a[..3], &a, &a, &mut out);
+    assert!(out.iter().all(|v| v.is_nan()));
+}
+
+#[test]
+fn g1_preloaded_native_and_prepared_steps_match_independent_scalar_mechanics() {
+    // V=7q²/2+2q³+q⁴ follows directly from the original quartic law
+    // (omega=2, beta=4) translated under its required force at reference=1/2.
+    let storage = scalar(2.0, 4.0, 0.5);
+    let system =
+        fs_nlmodal::assemble_storage(1, &[2.0], &[0.1], 1, vec![0.0, 1.0], Box::new(storage))
+            .unwrap();
+    let mut workspace = fs_phs::StepWorkspace::new(&system).unwrap();
+    workspace.set_iteration_limit(8).unwrap();
+    let (dt, force, damping) = (0.04, 0.3, 0.4);
+    let potential = |q: f64| 3.5 * q * q + 2.0 * q.powi(3) + q.powi(4);
+    let mut state = [0.35, -0.2];
+    for _ in 0..30 {
+        let secant = |q: f64| {
+            3.5 * (state[0] + q)
+                + 2.0 * (state[0] * state[0] + state[0] * q + q * q)
+                + (state[0] + q) * (state[0] * state[0] + q * q)
+        };
+        let residual = |q: f64| {
+            (2.0 + damping * dt) * (q - state[0]) + dt * dt * secant(q)
+                - 2.0 * dt * state[1]
+                - dt * dt * force
+        };
+        let (mut lo, mut hi) = (-2.0, 2.0);
+        assert!(residual(lo) < 0.0 && residual(hi) > 0.0);
+        for _ in 0..80 {
+            let q = f64::midpoint(lo, hi);
+            if residual(q) < 0.0 {
+                lo = q;
+            } else {
+                hi = q;
+            }
+        }
+        let expected_q = f64::midpoint(lo, hi);
+        let expected_p =
+            state[1] + dt * (force - damping * (expected_q - state[0]) / dt - secant(expected_q));
+        let (mut next, mut output) = ([0.0; 2], [0.0]);
+        let prepared = workspace
+            .step_into_analytic(
+                &system,
+                &state,
+                &[force],
+                dt,
+                &mut next,
+                &mut output,
+                &|_, _, _| panic!("preloaded storage owns its exact endpoint tangent"),
+            )
+            .unwrap();
+        let native = fs_phs::step(&system, &state, &[force], dt).unwrap();
+        for (actual, expected) in next.iter().zip([expected_q, expected_p]) {
+            assert!((actual - expected).abs() < 2e-13);
+        }
+        for (actual, ordinary) in next.iter().zip(native.x) {
+            assert!((actual - ordinary).abs() < 2e-13);
+        }
+        let displacement = next[0] - state[0];
+        let work = force * displacement;
+        let heat = damping * displacement * displacement / dt;
+        let energy_change = potential(next[0]) - potential(state[0])
+            + 0.5 * (next[1] * next[1] - state[1] * state[1]);
+        assert!((displacement / dt - f64::midpoint(state[1], next[1])).abs() < 2e-12);
+        assert!((prepared.supplied - work).abs() < 2e-13);
+        assert!((prepared.dissipated - heat).abs() < 2e-13);
+        assert!((prepared.delta_h - energy_change).abs() < 2e-13);
+        assert!((prepared.delta_h + heat - work).abs() < 2e-13);
+        state = next;
+    }
 }
 
 #[test]
@@ -359,6 +521,14 @@ fn g3_centered_limit_is_the_original_law_and_exactness_is_not_inferred_from_bias
         }
     }
     assert!(!storage.quadratic_part().unwrap().exact);
+    let a = [0.2, -0.3, 0.11, 0.04];
+    let b = [-0.1, 0.0, -0.3, 0.23];
+    for (actual, expected) in discrete_gradient(&storage, &a, &b)
+        .into_iter()
+        .zip(discrete_gradient(storage.source(), &a, &b))
+    {
+        close(actual, expected, 3e-15);
+    }
     let linear = scalar(2.0, 0.0, 0.7);
     assert!(linear.quadratic_part().unwrap().exact);
     assert_eq!(linear.preload_forces(), &[2.8]);

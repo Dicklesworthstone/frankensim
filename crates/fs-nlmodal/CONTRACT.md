@@ -80,7 +80,22 @@ the crash cascade with structurally exact energy accounting.
   accounted in the translated potential; incremental applied drive excludes
   that held force. `Storage::quadratic_part` supplies this full local stiffness
   to existing exact-linear nonlinear stepping, and the continuous tangent
-  retains every nonlinear interaction. The stable midpoint remainder retains
+  retains every nonlinear interaction. The same source owns a complete shifted
+  average-vector-field discrete gradient and its analytic endpoint action.
+  With cached `r=E a`, `s=a^T E a`, incremental midpoint `m`, difference `d`,
+  `t=r^T m`, `u=m^T E m`, `D=d^T E d` and `Z=r^T d+m^T E d`, the original
+  channel's mean restoring force is
+  `c [(2t+u+D/12) r + (s+2t+u+D/12) E m + (Z/6) E d]`.
+  It includes the preload-induced quadratic/cubic interactions and cancels
+  the held dead load algebraically. It never reconstructs `a+q`, subtracts
+  large absolute forces, or transfers elastic work into momentum efforts.
+  The endpoint derivative differentiates this same complete polynomial;
+  coincidence gives half the full continuous Hessian. Both capabilities
+  propagate through the existing boxed/composed pHS interface and prepared
+  analytic Newton. The immutable source admission remains the owner of exact
+  stress symmetry and local-curvature refusal. Evaluations reuse diagonal
+  channel metadata, cost O(modes) per diagonal channel or O(modes²) per dense
+  channel, and allocate no temporary state or Hessian. The stable midpoint remainder retains
   the represented midpoint offset `o=(left-m)+(right-m)`, including quadratic
   kinetic and elastic terms. For each channel, with `z=a+m`, it evaluates
   `c [(z^T E d + d^T E o/2)(z^T E o + (d^T E d + o^T E o)/4)
@@ -94,7 +109,10 @@ the crash cascade with structurally exact energy accounting.
   stability certificate, or permission to ignore generated-harmonic bandwidth.
   `tests/preload.rs` checks the exact biased Duffing law and its DC/even/odd
   force harmonics, full coupled translation and tangent, tiny resolved motion
-  beside a large static reference, independent Gauss-integrated work, the
+  beside a large static reference and kinetic background, independent
+  Gauss-integrated force components/work, endpoint polynomial derivatives,
+  native/prepared mechanics against an independent scalar solve with separate
+  spring work, external work and physical viscous heat, the
   centered limit, represented-midpoint offsets, cubic instability in an
   admitted Hessian nullspace, and negative-curvature/asymmetric refusals.
 - `assemble(storage, zetas, strike_weights)` — the pHS: symplectic

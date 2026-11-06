@@ -13,7 +13,10 @@
 //! energy, effort, tangent and midpoint-remainder evaluations allocate nothing.
 
 use fs_math::dd::Dd;
-use fs_phs::{ContinuousStorageTangent, QuadraticStorage, Storage, linear_exact::QuadraticPart};
+use fs_phs::{
+    ConstitutiveDiscreteGradient, ContinuousStorageTangent, QuadraticStorage, Storage,
+    linear_exact::QuadraticPart,
+};
 
 use crate::{NlModalError, SosModalStorage};
 
@@ -192,12 +195,16 @@ impl PreloadedModalStorage {
     }
 
     fn row(&self, channel: usize, row: usize, state: &[f64]) -> f64 {
+        self.row_of(channel, row, |j| state[2 * j])
+    }
+
+    fn row_of(&self, channel: usize, row: usize, coordinate: impl Fn(usize) -> f64) -> f64 {
         let n = self.mode_count();
         let e = &self.source.channels[channel].coupling;
         if self.channels[channel].diagonal {
-            e[row * n + row] * state[2 * row]
+            e[row * n + row] * coordinate(row)
         } else {
-            (0..n).map(|j| e[row * n + j] * state[2 * j]).sum()
+            (0..n).map(|j| e[row * n + j] * coordinate(j)).sum()
         }
     }
 
@@ -268,6 +275,10 @@ impl ContinuousStorageTangent for PreloadedModalStorage {
 
 impl Storage for PreloadedModalStorage {
     fn continuous_tangent(&self) -> Option<&dyn ContinuousStorageTangent> {
+        Some(self)
+    }
+
+    fn discrete_gradient_rule(&self) -> Option<&dyn ConstitutiveDiscreteGradient> {
         Some(self)
     }
 
@@ -401,5 +412,127 @@ impl Storage for PreloadedModalStorage {
                 channel.coefficient == 0.0 || channel.coupling.iter().all(|entry| *entry == 0.0)
             }),
         })
+    }
+}
+
+/// Integrate the original translated cubic force through each stress channel.
+/// All contractions use the cached reference forms/products and incremental
+/// coordinates. Neither absolute displaced states nor differences of source
+/// forces are formed. Diagonal channels retain O(modes) work; dense channels
+/// use O(modes²), with constant temporary memory and no warm allocation.
+impl ConstitutiveDiscreteGradient for PreloadedModalStorage {
+    fn evaluate(&self, a: &[f64], b: &[f64], midpoint: &[f64], out: &mut [f64]) {
+        if !self.valid_state(a)
+            || !self.valid_state(b)
+            || !self.valid_state(midpoint)
+            || out.len() != a.len()
+        {
+            out.fill(f64::NAN);
+            return;
+        }
+        if a == b {
+            self.gradient(a, out);
+            return;
+        }
+        let n = self.mode_count();
+        for (i, omega) in self.source.omegas.iter().enumerate() {
+            out[2 * i] = omega * omega * midpoint[2 * i];
+            out[2 * i + 1] = midpoint[2 * i + 1];
+        }
+        for (channel, law) in self.source.channels.iter().enumerate() {
+            if law.coefficient == 0.0 {
+                continue;
+            }
+            let reference = &self.channels[channel];
+            let mut t = 0.0;
+            let mut u = 0.0;
+            let mut delta_form = 0.0;
+            let mut shifted_delta_form = 0.0;
+            for i in 0..n {
+                let em = self.row(channel, i, midpoint);
+                let ed = self.row_of(channel, i, |j| b[2 * j] - a[2 * j]);
+                let di = b[2 * i] - a[2 * i];
+                t += reference.product[i] * midpoint[2 * i];
+                u += midpoint[2 * i] * em;
+                delta_form += di * ed;
+                shifted_delta_form += reference.product[i] * di + midpoint[2 * i] * ed;
+            }
+            // r=E*reference, S=reference.E.reference, t=r.m, u=m.E.m,
+            // D=d.E.d, Z=r.d+m.E.d. The exact force integral is
+            // c*[(2t+u+D/12)r + (S+2t+u+D/12)E.m + (Z/6)E.d].
+            // The held preload has already canceled in these coefficients.
+            let changed_form = 2.0 * t + u + delta_form / 12.0;
+            for i in 0..n {
+                let em = self.row(channel, i, midpoint);
+                let ed = self.row_of(channel, i, |j| b[2 * j] - a[2 * j]);
+                out[2 * i] += law.coefficient
+                    * (changed_form * reference.product[i]
+                        + (reference.form + changed_form) * em
+                        + (shifted_delta_form / 6.0) * ed);
+            }
+        }
+    }
+
+    fn end_jacobian_action(
+        &self,
+        a: &[f64],
+        b: &[f64],
+        direction: &[f64],
+        out: &mut [f64],
+    ) -> bool {
+        if !self.valid_state(a)
+            || !self.valid_state(b)
+            || !self.valid_state(direction)
+            || out.len() != a.len()
+        {
+            return false;
+        }
+        let n = self.mode_count();
+        for (i, omega) in self.source.omegas.iter().enumerate() {
+            out[2 * i] = 0.5 * omega * omega * direction[2 * i];
+            out[2 * i + 1] = 0.5 * direction[2 * i + 1];
+        }
+        for (channel, law) in self.source.channels.iter().enumerate() {
+            if law.coefficient == 0.0 {
+                continue;
+            }
+            let reference = &self.channels[channel];
+            let mut t = 0.0;
+            let mut u = 0.0;
+            let mut delta_form = 0.0;
+            let mut shifted_delta_form = 0.0;
+            let mut shifted_direction_form = 0.0;
+            let mut delta_direction_form = 0.0;
+            for i in 0..n {
+                let em = self.row_of(channel, i, |j| f64::midpoint(a[2 * j], b[2 * j]));
+                let ed = self.row_of(channel, i, |j| b[2 * j] - a[2 * j]);
+                let ev = self.row(channel, i, direction);
+                let mi = f64::midpoint(a[2 * i], b[2 * i]);
+                let di = b[2 * i] - a[2 * i];
+                t += reference.product[i] * mi;
+                u += mi * em;
+                delta_form += di * ed;
+                shifted_delta_form += reference.product[i] * di + mi * ed;
+                shifted_direction_form += reference.product[i] * direction[2 * i] + mi * ev;
+                delta_direction_form += di * ev;
+            }
+            // Differentiate this same shifted force integral: D_b m[v]=v/2,
+            // D_b d[v]=v. At coincidence this is half the full source Hessian,
+            // including all preload-induced quadratic/cubic interactions.
+            let direction_factor =
+                0.5 * (reference.form + 2.0 * t + u + delta_form / 12.0) + shifted_delta_form / 6.0;
+            let mean_factor = shifted_direction_form + delta_direction_form / 6.0;
+            let delta_factor = shifted_direction_form / 6.0 + delta_direction_form / 12.0;
+            for i in 0..n {
+                let em = self.row_of(channel, i, |j| f64::midpoint(a[2 * j], b[2 * j]));
+                let ed = self.row_of(channel, i, |j| b[2 * j] - a[2 * j]);
+                let ev = self.row(channel, i, direction);
+                out[2 * i] += law.coefficient
+                    * (direction_factor * ev
+                        + mean_factor * (reference.product[i] + em)
+                        + delta_factor * ed);
+            }
+        }
+        out.iter().all(|value| value.is_finite())
     }
 }
