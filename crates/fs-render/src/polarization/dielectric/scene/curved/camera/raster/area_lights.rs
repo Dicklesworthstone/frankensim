@@ -7,7 +7,7 @@
 //! complete pixel. XYZ integration remains owned by the original raster.
 
 use super::super::area_lights::camera::{
-    AreaLightCameraError, AreaLightCameraSettings, AreaLightCameraWorkspace,
+    AreaLightCameraError, AreaLightCameraSample, AreaLightCameraSettings, AreaLightCameraWorkspace,
     CurvedAreaLightCameraScene, MAX_AREA_LIGHT_BINDINGS,
 };
 use super::sensor::CurvedSensorPixelSample;
@@ -26,20 +26,20 @@ pub mod participating;
 
 /// Keep the original physical-camera or source-transport failure with its lane.
 #[derive(Debug)]
-pub enum AreaLightRasterError {
+pub enum AreaLightRasterError<E = AreaLightCameraError> {
     Raster(CurvedRasterError),
     Transport {
         lane: usize,
-        error: AreaLightCameraError,
+        error: E,
     },
 }
 
-impl core::fmt::Display for AreaLightRasterError {
+impl<E: core::fmt::Debug> core::fmt::Display for AreaLightRasterError<E> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "native area-light pixel: {self:?}")
     }
 }
-impl core::error::Error for AreaLightRasterError {}
+impl<E: core::fmt::Debug> core::error::Error for AreaLightRasterError<E> {}
 
 /// A complete spectral pixel with per-lane NEE contributions and source work.
 /// Total radiance also contains the complementary emitter-hit contribution.
@@ -81,6 +81,46 @@ impl<P> AreaLightPixelSample<P> {
 
     pub const fn query_work(&self) -> &[u64; CAMERA_WAVELENGTHS] {
         &self.query_work
+    }
+
+    /// Change only the detector observation while retaining every original
+    /// lane's source radiance and work; used by finite-shutter unit conversion.
+    pub(super) fn try_map_pixel<Q, E>(
+        self,
+        map: impl FnOnce(P) -> Result<Q, E>,
+    ) -> Result<AreaLightPixelSample<Q>, E> {
+        Ok(AreaLightPixelSample {
+            pixel: map(self.pixel)?,
+            area_radiance_w_m2_sr_nm: self.area_radiance_w_m2_sr_nm,
+            area_samples: self.area_samples,
+            images: self.images,
+            trace_evaluations: self.trace_evaluations,
+            field_evaluations: self.field_evaluations,
+            query_work: self.query_work,
+        })
+    }
+}
+
+/// Typed counter address shared by steady and transient consumers. Keeping
+/// draws as methods permits the original inner-loop closures to inline.
+#[derive(Clone, Copy)]
+pub(super) struct AreaLaneSamples {
+    key: [u32; 2],
+    pixel: u32,
+    sample: u32,
+    lane: usize,
+}
+
+impl AreaLaneSamples {
+    pub(super) fn surface(self, event: u32) -> [f64; 3] {
+        let block = philox4x32_10(
+            [self.pixel, self.sample, event, 0x6372_7340 + self.lane as u32], self.key);
+        core::array::from_fn(|i| unit(block[i]))
+    }
+    pub(super) fn area(self, event: u32, binding: usize) -> [f64; 2] {
+        let domain = 0x6372_6100 + (self.lane * MAX_AREA_LIGHT_BINDINGS + binding) as u32;
+        let block = philox4x32_10([self.pixel, self.sample, event, domain], self.key);
+        [unit(block[0]), unit(block[1])]
     }
 }
 
@@ -165,6 +205,28 @@ impl CurvedCameraRaster<'_> {
             ) -> Result<CameraRadianceSample, CameraRadianceError>,
         ) -> Result<P, CurvedRasterError>,
     ) -> Result<AreaLightPixelSample<P>, AreaLightRasterError> {
+        self.sample_area_with_transport(seed, pixel, sample,
+            |cx, ray, wavelength, samples| {
+                scene.sample_ray_with_samples(cx, ray, wavelength, initial_medium, settings,
+                    workspace, |event| samples.surface(event), |event, binding| samples.area(event, binding))
+            }, integrate)
+    }
+
+    /// One owner for the native continuation/area counter domains and complete
+    /// per-lane work. A temporal adapter supplies only its source observation.
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    pub(super) fn sample_area_with_transport<P, E>(
+        &self,
+        seed: u64,
+        pixel: u32,
+        sample: u32,
+        mut trace: impl FnMut(&Cx<'_>, Ray, f64, AreaLaneSamples) -> Result<AreaLightCameraSample, E>,
+        integrate: impl FnOnce(
+            &mut dyn FnMut(
+                &Cx<'_>, Ray, f64, usize,
+            ) -> Result<CameraRadianceSample, CameraRadianceError>,
+        ) -> Result<P, CurvedRasterError>,
+    ) -> Result<AreaLightPixelSample<P>, AreaLightRasterError<E>> {
         let key = [seed as u32, (seed >> 32) as u32];
         let mut area_radiance_w_m2_sr_nm = [0.0; CAMERA_WAVELENGTHS];
         let mut area_samples = [0; CAMERA_WAVELENGTHS];
@@ -174,23 +236,11 @@ impl CurvedCameraRaster<'_> {
         let mut query_work = [0; CAMERA_WAVELENGTHS];
         let mut source_failure = None;
         let result = integrate(&mut |cx, ray, wavelength, lane| {
-            let traced = match scene.sample_ray_with_samples(
+            let traced = match trace(
                 cx,
                 ray,
                 wavelength,
-                initial_medium,
-                settings,
-                workspace,
-                |event| {
-                    let block =
-                        philox4x32_10([pixel, sample, event, 0x6372_7340 + lane as u32], key);
-                    core::array::from_fn(|i| unit(block[i]))
-                },
-                |event, binding| {
-                    let domain = 0x6372_6100 + (lane * MAX_AREA_LIGHT_BINDINGS + binding) as u32;
-                    let block = philox4x32_10([pixel, sample, event, domain], key);
-                    [unit(block[0]), unit(block[1])]
-                },
+                AreaLaneSamples { key, pixel, sample, lane },
             ) {
                 Ok(traced) => traced,
                 Err(error) => {

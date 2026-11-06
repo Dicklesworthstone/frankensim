@@ -30,6 +30,7 @@ use fs_geom::{Point3, Vec3};
 use fs_rand::philox::philox4x32_10;
 
 mod sensor;
+mod transient;
 
 fn material() -> DielectricGlass {
     DielectricGlass::new(
