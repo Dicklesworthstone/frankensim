@@ -17,6 +17,8 @@
 //! Gap attraction has no solid shear area. There is no inferred partial-slip
 //! stiffness, JKR mixed-mode law, evolving contact frame or heat destination.
 
+pub mod multiple;
+
 use super::{
     CoupledModalSystem, ModalCouplingError, dot, finite, invalid, limit, network_response, poll,
 };
