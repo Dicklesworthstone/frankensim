@@ -1,4 +1,4 @@
-//! Horizontal capillary filling and drainage with the original Carreau law.
+//! Capillary filling and drainage with the original Carreau law.
 //!
 //! At liquid length x, the fully developed circular-pipe owner resolves
 //! Q(x) from dp = p_in - p_out + 2 sigma cos(theta)/R. The moving front obeys
@@ -9,9 +9,13 @@
 //! The prescribed pressure and temperature are frozen throughout a step.
 //! A strictly positive minimum wet length bounds the declared developed-flow
 //! interval; there is no dry-entry singularity, entrance model, inertia,
-//! gravity, evolving contact angle, displaced-fluid resistance or thermal
-//! feedback. A step admits its load over that entire wet-length interval.
+//! evolving contact angle, displaced-fluid resistance or thermal feedback.
+//! The horizontal owner excludes gravity; [`inclined`] adds its resolved
+//! hydrostatic load and potential energy. A step admits its load over the
+//! entire declared wet-length interval.
 //! This numerical consumer adds no empirical authority to the supplied law.
+
+pub mod inclined;
 
 use core::f64::consts::PI;
 use fs_material::MaterialError;
@@ -125,9 +129,11 @@ pub struct CarreauMeniscusStep {
     pub reservoir_work_j: f64,
     /// Change in wall wetting energy, -2 pi R sigma cos(theta) delta_x.
     pub wall_energy_change_j: f64,
+    /// Change in gravitational potential energy; zero for horizontal travel.
+    pub gravitational_energy_change_j: f64,
     /// Integral of the ORIGINAL accepted pipe pressure times signed dV.
     pub viscous_dissipation_j: f64,
-    /// Reservoir work minus wall-energy change minus accepted viscous heat.
+    /// Reservoir work minus wall and gravitational energy changes minus heat.
     /// Constitutive pressure residuals and quadrature error are not extra heat.
     pub constitutive_work_defect_j: f64,
     /// Evaluated travel time minus elapsed_s, not a physical time correction.
@@ -146,6 +152,13 @@ struct Travel {
     heat_j: f64,
     relative_change: f64,
     endpoint: CarreauPipeProfile,
+}
+
+#[derive(Clone, Copy)]
+struct PathSample {
+    profile: CarreauPipeProfile,
+    /// Absolute physical length change per integration coordinate.
+    length_jacobian: f64,
 }
 
 impl CarreauCapillaryTube {
@@ -217,11 +230,15 @@ impl CarreauCapillaryTube {
             .profile_at_pressure(pressure, controls.pipe)?)
     }
 
-    fn integrands(&self, profile: &CarreauPipeProfile) -> Result<[f64; 2], CarreauMeniscusError> {
-        let flow = profile.flow();
+    fn integrands(&self, sample: &PathSample) -> Result<[f64; 2], CarreauMeniscusError> {
+        let flow = sample.profile.flow();
         let values = [
-            self.area_m2 / flow.volumetric_flow_m3_s.abs(),
-            self.area_m2 * flow.pressure_drop_pa.abs(),
+            if sample.length_jacobian == 1.0 {
+                self.area_m2 / flow.volumetric_flow_m3_s.abs()
+            } else {
+                self.area_m2 * (sample.length_jacobian / flow.volumetric_flow_m3_s.abs())
+            },
+            (self.area_m2 * flow.pressure_drop_pa.abs()) * sample.length_jacobian,
         ];
         if values.iter().any(|v| !v.is_finite() || *v <= 0.0) {
             return Err(CarreauMeniscusError::Unrepresentable);
@@ -240,11 +257,45 @@ impl CarreauCapillaryTube {
         let x0 = start.pipe().length_m();
         let x1 = endpoint.pipe().length_m();
         let signed_distance = x1 - x0;
-        let distance = signed_distance.abs();
-        if distance == 0.0 {
+        self.integrate_travel(
+            PathSample {
+                profile: *start,
+                length_jacobian: 1.0,
+            },
+            PathSample {
+                profile: endpoint,
+                length_jacobian: 1.0,
+            },
+            signed_distance.abs(),
+            controls,
+            |fraction| {
+                Ok(PathSample {
+                    profile: self.profile(
+                        x0 + signed_distance * fraction,
+                        pressure,
+                        controls,
+                        evaluations,
+                    )?,
+                    length_jacobian: 1.0,
+                })
+            },
+        )
+    }
+
+    /// Shared positive quadrature in physical distance or a regularizing
+    /// coordinate. The original profile owns the accepted work at each sample.
+    fn integrate_travel(
+        &self,
+        start: PathSample,
+        endpoint: PathSample,
+        span: f64,
+        controls: CarreauMeniscusControls,
+        mut sample: impl FnMut(f64) -> Result<PathSample, CarreauMeniscusError>,
+    ) -> Result<Travel, CarreauMeniscusError> {
+        if !span.is_finite() || span <= 0.0 {
             return Err(CarreauMeniscusError::Unrepresentable);
         }
-        let a = self.integrands(start)?;
+        let a = self.integrands(&start)?;
         let b = self.integrands(&endpoint)?;
         let mut trapezoid = core::array::from_fn::<_, 2, _>(|k| 0.5 * a[k] + 0.5 * b[k]);
         let mut previous: Option<[f64; 2]> = None;
@@ -255,9 +306,7 @@ impl CarreauCapillaryTube {
             let mut compensation = [0.0; 2];
             for i in 0..panels {
                 let fraction = (i as f64 + 0.5) / panels as f64;
-                let x = x0 + signed_distance * fraction;
-                let sample = self.profile(x, pressure, controls, evaluations)?;
-                let values = self.integrands(&sample)?;
+                let values = self.integrands(&sample(fraction)?)?;
                 for k in 0..2 {
                     // Average before accumulation to avoid a panel-count overflow.
                     let term = values[k] / panels as f64 - compensation[k];
@@ -268,7 +317,7 @@ impl CarreauCapillaryTube {
             }
             let refined = core::array::from_fn::<_, 2, _>(|k| 0.5 * trapezoid[k] + 0.5 * sums[k]);
             let integral = core::array::from_fn::<_, 2, _>(|k| {
-                distance * (refined[k] + (refined[k] - trapezoid[k]) / 3.0)
+                span * (refined[k] + (refined[k] - trapezoid[k]) / 3.0)
             });
             if integral.iter().any(|v| !v.is_finite() || *v <= 0.0) {
                 return Err(CarreauMeniscusError::Unrepresentable);
@@ -287,7 +336,7 @@ impl CarreauCapillaryTube {
                         time_s: integral[0],
                         heat_j: integral[1],
                         relative_change: change,
-                        endpoint,
+                        endpoint: endpoint.profile,
                     });
                 }
             }
@@ -495,6 +544,7 @@ impl CarreauCapillaryTube {
             transferred_volume_m3,
             reservoir_work_j,
             wall_energy_change_j,
+            gravitational_energy_change_j: 0.0,
             viscous_dissipation_j: travel.heat_j,
             constitutive_work_defect_j,
             travel_time_residual_s: travel.time_s - elapsed_s,

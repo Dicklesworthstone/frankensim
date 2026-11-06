@@ -3714,32 +3714,52 @@ two-fluid resistance follows Budaraju et al. (2016),
 
 ## Carreau capillary filling and drainage
 
-`capillary::rheology::CarreauCapillaryTube` advances a horizontal meniscus
-through the original `LaminarCarreauPipe` law, frozen temperature and explicit
-laminar shear-rate support. At each liquid length the actual radial viscosity
-profile supplies Q; bounded travel-time quadrature integrates A dx/Q, and
-safeguarded Newton uses the endpoint A/|Q| derivative. The prepared material
-pipe's `with_length` changes geometry without repeating its thermal admission.
-No apparent viscosity or timestep-lagged constitutive state replaces the law.
+`capillary::rheology::CarreauCapillaryTube` advances a meniscus through the
+original `LaminarCarreauPipe` law, frozen temperature and explicit laminar
+shear-rate support. At each liquid length the actual radial viscosity profile
+supplies Q; bounded travel-time quadrature integrates A dx/Q, and safeguarded
+Newton uses the actual endpoint derivative. The prepared material pipe's
+`with_length` changes geometry without repeating its thermal admission. No
+apparent viscosity or timestep-lagged constitutive state replaces the law.
 
-The same positive quadrature integrates accepted viscous pressure times signed
-volume. Reservoir pressure work, wall wetting-energy change, positive viscous
-dissipation, constitutive/quadrature work defect and travel-time residual remain
-separate. The endpoint profile retains the actual liquid length and original
-material law. Filling and drainage stop at the declared geometric endpoint,
-returning only its arrival time; no post-event throughflow is inferred.
+`step_horizontal` retains the fixed-pressure horizontal owner.
+`step_inclined` additionally consumes positive constant density and signed
+gravity projected against increasing wet length. It resolves the combined
+drive `p_applied + p_capillary - rho*g*x` through the original radial law at
+every spatial sample. Both endpoints admit the whole declared wet interval:
+the maximum magnitude of `p_total/x - rho*g` occurs at an endpoint. Signed
+gravity supports rising, downward filling and drainage. A stable hydrostatic
+equilibrium uses logarithmic remaining distance for the travel-time integral;
+finite steps remain on their original side, and unrepresentable remaining
+motion refuses rather than snapping to or crossing equilibrium. Accepted
+viscous pressure is integrated in physical distance, keeping heat quadrature
+well conditioned after many equilibrium relaxation times. Both integrations
+share one explicit profile-evaluation budget and retain positive weights.
+
+Reservoir pressure work, wall wetting-energy change, column gravitational
+energy change, positive viscous dissipation, constitutive/quadrature work
+defect and travel-time residual remain separate. Gravity energy uses the
+actual signed volume transfer and mean column height. The inclined result
+retains density, projected gravity, signed mass transfer and endpoint
+hydrostatic pressure. Its common meniscus result retains the actual liquid
+length and original material profile. Filling and drainage stop at the
+declared geometric endpoint, returning only its arrival time; no post-event
+throughflow is inferred. Zero projected gravity delegates to the horizontal
+owner.
 
 The caller supplies surface tension, equilibrium angle and a strictly positive
-minimum wet length. Each fixed pressure load must be source-supported over the
-whole declared wet-length interval. This is a fully developed, no-slip,
-quasisteady, vented-gas reduction with no dry-entry singularity model, inertia,
-gravity, displaced-fluid resistance, dynamic wetting or thermal evolution.
+minimum wet length. Density and gravity are explicit physical inputs, not new
+material-source authority. This is a fully developed, no-slip, quasisteady,
+vented-gas reduction with no dry-entry singularity model, inertia, displaced
+fluid resistance, variable density, dynamic wetting or thermal evolution.
 Success adds no experimental authority. Two consecutive Simpson refinements
 supply an error estimate, not a rigorous quadrature certificate. Numerical
 root, refinement and total profile-evaluation budgets are explicit; refusal
-publishes no partial state. Focused G1 numerical tests cover analytic Washburn
-limits, an independently inverted nonlinear constitutive/radial/travel solution,
-signed work, temporal subdivision, reversal, endpoint time and support refusal.
+publishes no partial state. Focused numerical tests cover analytic Washburn
+and gravity-dependent rise/drainage, independently inverted nonlinear radial
+and travel solutions, positive heat and signed mass/energy, temporal
+subdivision, reversal, equilibrium approach from both sides, exact geometric
+arrival times, zero-gravity delegation and support/work-budget refusal.
 
 ## Material-bound circular capillary transport
 
