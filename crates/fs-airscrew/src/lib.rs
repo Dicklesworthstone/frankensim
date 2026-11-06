@@ -207,19 +207,20 @@ pub struct BemtPower {
 
 /// Section closure: attached thin-airfoil + flat-plate blend (the same
 /// documented shape as the E4.1 datasets; prop tables refine later).
-fn section_cl_cd(alpha: f64, camber: f64) -> (f64, f64) {
-    let a = alpha.clamp(-1.3, 1.3);
-    let attached_cl = 2.0 * core::f64::consts::PI * (a + 2.0 * camber);
+/// Use the actual incidence throughout: clipping it before the wind-axis
+/// transform invents a chordwise force in the separated pressure-only law.
+fn section_cl_cd(alpha: f64, camber: f64) -> Result<(f64, f64), fs_airfoil::Refusal> {
+    let attached_cl = 2.0 * core::f64::consts::PI * (alpha + 2.0 * camber);
     // Statement-split (guzez.7.2.1): no fused mul-add.
-    let a2 = 0.8 * a * a;
+    let a2 = 0.8 * alpha * alpha;
     let cd0 = 0.012 + a2; // declared profile-drag model
-    let mag = a.abs();
-    if mag <= 0.25 {
+    let mag = alpha.abs();
+    Ok(if mag <= 0.25 {
         (attached_cl, cd0)
     } else {
         // Blend to the separated plate (V-03's honest post-stall shape).
-        let sep = flat_plate_separated(a, 6.0).expect("domain-clamped");
-        let (cl_s, cd_s) = fs_airfoil::body_to_wind(sep.cn, sep.ca, a);
+        let sep = flat_plate_separated(alpha, 6.0)?;
+        let (cl_s, cd_s) = fs_airfoil::body_to_wind(sep.cn, sep.ca, alpha);
         let t = ((mag - 0.25) / 0.2).min(1.0);
         let t2 = t * t;
         let s = t2 * (3.0 - 2.0 * t);
@@ -231,7 +232,7 @@ fn section_cl_cd(alpha: f64, camber: f64) -> (f64, f64) {
             },
             cd0 * (1.0 - s) + cd_s.abs() * s,
         )
-    }
+    })
 }
 
 /// Solve one rotor at (axial speed V, rotation Ω). Warm-started station
@@ -241,6 +242,7 @@ fn section_cl_cd(alpha: f64, camber: f64) -> (f64, f64) {
 /// Rotor admission; `operating-point-invalid`;
 /// `station-did-not-converge` naming the station (typed, never clamped);
 /// `station-wake-domain` for high induction or non-normal throughflow;
+/// `station-section-domain` for incidence outside the native section law;
 /// `station-numerical-invalid` for unrepresentable derived arithmetic.
 pub fn bemt_solve(
     rotor: &Rotor,
@@ -425,7 +427,13 @@ impl StationProblem<'_> {
         }
         let phi = det::atan2(u_ax, self.tangential);
         let alpha = self.station.beta_rad - phi;
-        let (cl, cd) = section_cl_cd(alpha, self.rotor.camber_ratio);
+        let (cl, cd) = section_cl_cd(alpha, self.rotor.camber_ratio).map_err(|source| {
+            self.refusal(
+                "station-section-domain",
+                &source.message,
+                "supply a normalized incidence within the native fs-airfoil section domain",
+            )
+        })?;
         let ua2 = u_ax * u_ax;
         let ut2 = self.tangential * self.tangential;
         let u2 = ua2 + ut2;

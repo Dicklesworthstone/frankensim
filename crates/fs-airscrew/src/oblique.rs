@@ -260,7 +260,7 @@ impl AzimuthQuadrature {
     /// # Errors
     /// Native rotor/section admission; `oblique-rotor-invalid` for invalid
     /// inputs/overflow; `oblique-rotor-section-domain` for reversed local flow
-    /// or angle outside the native unclipped section range `|alpha| <= 1.3`.
+    /// or incidence outside [`fs_airfoil::MAX_ABS_ALPHA_RAD`].
     #[allow(clippy::too_many_arguments)]
     pub fn evaluate(
         &self,
@@ -442,11 +442,14 @@ impl AzimuthQuadrature {
                 {
                     return Err(invalid("section velocity overflow"));
                 }
-                if tangential <= 0.0 || throughflow < 0.0 || alpha.abs() > 1.3 {
+                if tangential <= 0.0
+                    || throughflow < 0.0
+                    || alpha.abs() > fs_airfoil::MAX_ABS_ALPHA_RAD
+                {
                     return Err(refuse(
                         "oblique-rotor-section-domain",
                         format!(
-                            "station {index} leaves positive tangential/normal flow or |alpha| <= 1.3"
+                            "station {index} leaves positive tangential/normal flow or the native fs-airfoil incidence domain"
                         ),
                         "use a smaller crossflow/tilt rate or an applicable reversed-flow section model",
                     ));

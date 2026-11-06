@@ -78,6 +78,14 @@ CoupledPropAirframeStep (Aitken candidate A).
   braking limit receives a distinct wake-domain refusal. No reversed-flow,
   turbulent-wake, vortex-ring or universal turbine model is inferred.
 - Prandtl F ∈ (0, 1], falling toward the tip.
+- Every blade-load path uses the actual incidence `alpha = beta - phi`,
+  without angle clipping. Beyond the blend (`|alpha| >= 0.45`), the existing
+  `fs-airfoil::flat_plate_separated` baseline gives `Cn = 1.98 sin(alpha)`
+  and zero chordwise force. Hence `dT = q c B Cn cos(beta) dr` and
+  `dQ = q c B r Cn sin(beta) dr`, including deep-stall braking. Section
+  queries share fs-airfoil's inclusive `[-pi, pi]` domain; unsupported
+  incidence refuses. This is the declared analytic pressure model, not new
+  measured rotor calibration or admission of reversed-throughflow wakes.
 - The steady blade law closes `Omega Q = V T + sum(w dT) + sum(D |U|)`.
   Induced power uses each accepted annulus's own induction, including braking
   annuli; it is not `T` times a mean induction. Profile power comes from actual
@@ -101,6 +109,7 @@ CoupledPropAirframeStep (Aitken candidate A).
 `operating-point-invalid` (nonfinite/unrepresentable state, V < 0, ω ≤ 0),
 `station-did-not-converge` (names the station and unresolved numerical branch),
 `station-wake-domain` (high induction or non-normal throughflow),
+`station-section-domain` (incidence outside the native fs-airfoil domain),
 `station-numerical-invalid` (unrepresentable station arithmetic),
 `rotor-dynamics-invalid`.
 
@@ -219,17 +228,23 @@ section-power identities, not a complete fluid/wake passivity result.
 Quadrature has 8–512 points in multiples of four, with deterministic antipodal
 pairs and trigonometry prepared once. Evaluation allocates no storage and costs
 O(radial stations times azimuth points). Nonpositive local tangential speed,
-reversed section throughflow, and `|alpha| > 1.3` refuse instead of extrapolating
-the native angle clamp. Normal-branch induction admission remains explicit.
+reversed section throughflow, and incidence outside fs-airfoil's `[-pi, pi]`
+domain refuse. High-incidence sections within that domain use the actual
+angle in the existing separated pressure law. Normal-branch induction
+admission remains explicit.
 The maximum ignored spanwise speed is reported: a two-dimensional strip law
 does not model spanwise force. There is no blade phase, flapping, skew-induced
 wake distribution, compressibility, swirl, cyclic pitch or section memory.
 
-Five focused native tests in `tests/oblique.rs` cover the original axial limit,
+Six focused native tests in `tests/oblique.rs` cover the original axial limit,
 an independent attached-section midpoint quadrature and azimuth refinement,
 physical handedness parity, full frame rotation and shaft/carrier power, and
-bounded work/reversed-flow/angle/overflow refusals. This establishes numerical
-conformance of the declared Estimated section model, not propeller calibration.
+bounded work/reversed-flow/overflow refusals. The separated-section regression
+checks both signs beyond 1.3 radians against pressure projected directly along
+the blade normal, independently of the production lift/drag transform. Both
+uniform dynamic-inflow and oblique force evaluations must recover that thrust,
+shaft torque and profile dissipation. This establishes numerical conformance
+of the declared Estimated section model, not propeller calibration.
 
 ## Normal-flow first harmonic wake memory and distributed blade induction
 
@@ -409,11 +424,15 @@ without returning a partial rotor. Existing `bemt_solve` and its goldens retain
 their original no-swirl behavior; this separate API supersedes only the
 absence of a steady angular-momentum option.
 
-Six tests in `tests/swirl_momentum.rs` independently reconstruct blade forces,
+Seven tests in `tests/swirl_momentum.rs` independently reconstruct blade forces,
 Prandtl losses and both SI momentum balances, including manufactured hover
 and braking equilibria, torque-free windmilling, the weak-loading no-swirl
 limit, density/speed scaling, actual swirl-induced force changes, and bounded
-and inadmissible solves. They do not establish transient swirl, resolved
+and inadmissible solves. Deeply separated manufactured rotors additionally
+check both incidence signs beyond 1.3 radians: chord-normal pressure requires
+`Q/(r T) = tan(beta)`, so the original momentum laws require `u/w = tan(beta)`.
+Their actual loads and signed shaft/wake/profile powers are checked without
+the production coefficient transform. They do not establish transient swirl, resolved
 helical wake, radial pressure, contraction, skew-flow swirl, compressibility,
 historical rotor calibration, full-workspace or cross-platform validation.
 

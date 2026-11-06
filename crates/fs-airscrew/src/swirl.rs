@@ -244,7 +244,7 @@ impl Equation<'_> {
         loop {
             if current.converged(self.controls.relative_tolerance, self.radius) {
                 if current.state.axial_mps < -MAX_BRAKING_INDUCTION * self.axial
-                    || current.blade.alpha.abs() > 1.3
+                    || current.blade.alpha.abs() > fs_airfoil::MAX_ABS_ALPHA_RAD
                     || self.axial + current.state.axial_mps <= 0.0
                 {
                     return Err(error(

@@ -39,7 +39,7 @@ fn loads(rotor: &Rotor, i: usize, axial: f64, omega: f64, w: f64) -> [f64; 5] {
     let radius = station.r_over_r * rotor.radius_m;
     let tangent = omega * radius;
     let phi = det::atan2(axial + w, tangent);
-    let alpha = (station.beta_rad - phi).clamp(-1.3, 1.3);
+    let alpha = station.beta_rad - phi;
     let attached_cl = 2.0 * std::f64::consts::PI * (alpha + 2.0 * rotor.camber_ratio);
     let attached_cd = 0.012 + 0.8 * alpha * alpha;
     let (cl, cd) = if alpha.abs() <= 0.25 {

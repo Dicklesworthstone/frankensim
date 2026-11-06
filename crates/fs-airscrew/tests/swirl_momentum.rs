@@ -80,8 +80,8 @@ fn width(rotor: &Rotor, index: usize) -> f64 {
     rotor.radius_m * (high - low)
 }
 
-/// Public-state reconstruction uses only ordinary trigonometry and the
-/// declared attached section equations, independently of production helpers.
+/// Public-state reconstruction uses ordinary trigonometry and the declared
+/// attached or fully separated section equations, not production helpers.
 fn check(rotor: &Rotor, density: f64, axial: f64, omega: f64, solved: &swirl::Solution) {
     let mut thrust = 0.0;
     let mut torque = 0.0;
@@ -98,13 +98,27 @@ fn check(rotor: &Rotor, density: f64, axial: f64, omega: f64, solved: &swirl::So
         let vt = omega * r - u;
         let phi = va.atan2(vt);
         let alpha = blade.beta_rad - phi;
-        assert!(alpha.abs() < 0.25, "oracle fixture must remain attached");
-        let cl = std::f64::consts::TAU * (alpha + 2.0 * rotor.camber_ratio);
-        let cd = 0.012 + 0.8 * alpha * alpha;
         let pressure =
             0.5 * density * (va * va + vt * vt) * blade.chord_m * f64::from(rotor.n_blades) * dr;
-        let dt = pressure * (cl * phi.cos() - cd * phi.sin());
-        let dq = pressure * r * (cl * phi.sin() + cd * phi.cos());
+        let (dt, dq, dissipation) = if alpha.abs() < 0.25 {
+            let cl = std::f64::consts::TAU * (alpha + 2.0 * rotor.camber_ratio);
+            let cd = 0.012 + 0.8 * alpha * alpha;
+            (
+                pressure * (cl * phi.cos() - cd * phi.sin()),
+                pressure * r * (cl * phi.sin() + cd * phi.cos()),
+                pressure * cd * va.hypot(vt),
+            )
+        } else {
+            assert!(alpha.abs() >= 0.45, "oracle excludes the section blend");
+            let beta = blade.beta_rad;
+            let normal_speed = vt * beta.sin() - va * beta.cos();
+            let normal_force = pressure * 1.98 * normal_speed / va.hypot(vt);
+            (
+                normal_force * beta.cos(),
+                normal_force * r * beta.sin(),
+                normal_force * normal_speed,
+            )
+        };
         let geometric = 4.0 * std::f64::consts::PI * density * r * prandtl(r, phi) * dr;
         let momentum_t = geometric * va * w;
         let momentum_q = geometric * r * va * u;
@@ -139,11 +153,18 @@ fn check(rotor: &Rotor, density: f64, axial: f64, omega: f64, solved: &swirl::So
         torque += dq;
         axial_power += dt * w;
         swirl_power += dq * u / r;
-        drag_power += pressure * cd * va.hypot(vt);
+        drag_power += dissipation;
     }
     near(solved.thrust_n, thrust, 3e-12 * thrust.abs().max(1.0));
     near(solved.torque_nm, torque, 3e-12 * torque.abs().max(1.0));
-    let tolerance = 3e-12 * solved.power.shaft_w.abs().max(1.0);
+    let tolerance = 3e-12
+        * solved
+            .power
+            .shaft_w
+            .abs()
+            .max(drag_power)
+            .max((axial * thrust).abs())
+            .max(1.0);
     near(solved.power.axial_induced_w, axial_power, tolerance);
     near(solved.power.swirl_w, swirl_power, tolerance);
     near(solved.power.profile_drag_w, drag_power, tolerance);
@@ -153,6 +174,72 @@ fn check(rotor: &Rotor, density: f64, axial: f64, omega: f64, solved: &swirl::So
         tolerance,
     );
     near(solved.power.residual_w, 0.0, tolerance);
+}
+
+#[test]
+fn deeply_separated_rotors_satisfy_both_momentum_equations_without_angle_clipping() {
+    // G1: pressure normal to a blade at beta requires Q/(r T) = tan(beta).
+    // Annular momentum therefore requires u/w = tan(beta). Choose w, impose
+    // that relation, and obtain the positive chord from axial momentum.
+    // No production section coefficients are used to manufacture these roots.
+    for (beta, axial, omega) in [(1.45_f64, 0.0, 50.0), (0.01, 30.0, 2.0)] {
+        let radii = [0.3, 0.5, 0.7, 0.9];
+        let states = radii.map(|r| {
+            let w = if axial == 0.0 { 0.03 * omega * r } else { -3.0 };
+            Induction {
+                axial_mps: w,
+                tangential_mps: w * beta.tan(),
+            }
+        });
+        let stations = radii
+            .into_iter()
+            .zip(states)
+            .map(|(r, state)| {
+                let va = axial + state.axial_mps;
+                let vt = omega * r - state.tangential_mps;
+                let phi = va.atan2(vt);
+                assert!((beta - phi).abs() > 1.3);
+                let speed = va.hypot(vt);
+                let cn = 1.98 * (vt * beta.sin() - va * beta.cos()) / speed;
+                let thrust_per_chord = 1.5 * RHO * speed * speed * cn * beta.cos();
+                let momentum =
+                    4.0 * std::f64::consts::PI * RHO * r * prandtl(r, phi) * va * state.axial_mps;
+                BladeStation {
+                    r_over_r: r,
+                    chord_m: momentum / thrust_per_chord,
+                    beta_rad: beta,
+                }
+            })
+            .collect();
+        let rotor = Rotor {
+            radius_m: 1.0,
+            n_blades: 3,
+            camber_ratio: 0.0,
+            stations,
+        };
+        let result = swirl::bemt_solve(
+            &rotor,
+            RHO,
+            axial,
+            omega,
+            Controls::default(),
+            Some(&states),
+        )
+        .unwrap();
+        for (station, expected) in result.stations.iter().zip(states) {
+            assert!(station.alpha_rad.abs() > 1.3);
+            near(station.induction.axial_mps, expected.axial_mps, 1e-9);
+            near(
+                station.induction.tangential_mps,
+                expected.tangential_mps,
+                1e-9,
+            );
+        }
+        check(&rotor, RHO, axial, omega, &result);
+        assert!(result.power.profile_drag_w > 0.0);
+        assert!(result.power.swirl_w > 0.0);
+        assert_eq!(result.power.shaft_w.is_sign_positive(), axial == 0.0);
+    }
 }
 
 #[test]

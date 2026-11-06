@@ -100,6 +100,80 @@ fn axial_limit_matches_native_sections_and_ignores_already_counted_axial_carrier
     );
 }
 
+#[test]
+fn deeply_separated_sections_keep_chord_normal_force_at_actual_incidence() {
+    // G0/G3: the fs-airfoil separated baseline is Cn = 1.98 sin(alpha),
+    // Ca = 0. Project this pressure directly along the blade normal, without
+    // using production lift/drag coefficients or their wind-axis transform.
+    // Both signs exceed the former 1.3-radian clip; the last case is braking
+    // at low shaft speed, where the old clip greatly overstated shaft torque.
+    for (beta, axial, induced, omega) in [
+        (1.31, 0.0, 0.0, OMEGA),
+        (1.4, 0.0, 0.0, OMEGA),
+        (1.49, 0.0, 0.0, OMEGA),
+        (0.01, 25.0, 5.0, 2.0),
+        (0.01, 25.0, -5.0, 2.0),
+    ] {
+        let mut rotor = rotor();
+        for station in &mut rotor.stations {
+            station.beta_rad = beta;
+        }
+        let mut thrust = 0.0;
+        let mut torque = 0.0;
+        let mut dissipation = 0.0;
+        for (station, dr) in rotor.stations.iter().zip([0.15, 0.2, 0.2, 0.25]) {
+            let r = station.r_over_r;
+            let ua: f64 = axial + induced;
+            let ut = omega * r;
+            let speed = ua.hypot(ut);
+            assert!((beta - ua.atan2(ut)).abs() > 1.3);
+            let normal_speed = ut * beta.sin() - ua * beta.cos();
+            let pressure = 0.5 * RHO * speed * speed * station.chord_m * 3.0 * dr;
+            let normal_force = pressure * 1.98 * normal_speed / speed;
+            thrust += normal_force * beta.cos();
+            torque += normal_force * r * beta.sin();
+            dissipation += normal_force * normal_speed;
+        }
+        let uniform = UniformAxialInflow::new(1.0, RHO)
+            .unwrap()
+            .evaluate(&rotor, axial, induced, omega)
+            .unwrap();
+        let oblique = AzimuthQuadrature::new(32)
+            .unwrap()
+            .evaluate(
+                &rotor,
+                RHO,
+                DiskFrame::new(AXIS, RADIAL, SpinDirection::AlongThrust).unwrap(),
+                [axial, 0.0, 0.0],
+                ZERO,
+                induced,
+                omega,
+            )
+            .unwrap();
+        for actual in [uniform.thrust_n, oblique.thrust_n] {
+            near(actual, thrust, 3e-12 * thrust.abs().max(1.0));
+        }
+        for actual in [uniform.torque_nm, oblique.torque_nm] {
+            near(actual, torque, 3e-12 * torque.abs().max(1.0));
+        }
+        assert!(dissipation > 0.0);
+        let power_tolerance = 3e-12 * dissipation;
+        near(oblique.profile_dissipation_w, dissipation, power_tolerance);
+        near(
+            omega * uniform.torque_nm - (axial + induced) * uniform.thrust_n,
+            dissipation,
+            power_tolerance,
+        );
+        near(oblique.power_residual_w, 0.0, power_tolerance);
+        vector_near(
+            oblique.force_n,
+            [thrust, 0.0, 0.0],
+            3e-12 * thrust.abs().max(1.0),
+        );
+        vector_near(oblique.hub_moment_nm, ZERO, 3e-12);
+    }
+}
+
 // Independent attached-section integration. It resolves lift/drag from unit
 // velocity vectors (not sin/cos(phi)), uses midpoint azimuths and explicit
 // radial panel widths, and does not call the production blade-force owner.
@@ -245,16 +319,6 @@ fn bounded_quadrature_and_unmodeled_section_regimes_refuse_without_clipping() {
     let frame = DiskFrame::new(AXIS, RADIAL, SpinDirection::AlongThrust).unwrap();
     assert_eq!(
         rule.evaluate(&rotor(), RHO, frame, [7.0, 100.0, 0.0], ZERO, 2.0, OMEGA)
-            .unwrap_err()
-            .code,
-        "oblique-rotor-section-domain"
-    );
-    let mut high_pitch = rotor();
-    for station in &mut high_pitch.stations {
-        station.beta_rad = 1.4;
-    }
-    assert_eq!(
-        rule.evaluate(&high_pitch, RHO, frame, ZERO, ZERO, 0.0, OMEGA)
             .unwrap_err()
             .code,
         "oblique-rotor-section-domain"
