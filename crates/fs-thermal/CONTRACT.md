@@ -2173,6 +2173,26 @@ production thermal library compiled cleanly and all 29 selected native tests
 passed; this is numerical verification of the declared closure, not empirical
 qualification of a material source.
 
+### Source response at the actual exterior temperature
+
+`ImplicitGrayExteriorLaw` and `ImplicitGrayExteriorState` distinguish original
+bulk energy e, solved exterior temperature Ts and actual gas temperature Tgas.
+The original caloric object determines whether e is h/Cp or u/Cv. The embedded
+`ImplicitGraySurfaceState` energy derivatives are partials at fixed Ts/Tgas;
+the additional temperature derivatives hold e/Tgas fixed. Sources return both
+partials at the same physical query, retain their own gas/coupled-domain
+admission, and must not include the boundary's implicit surface response.
+
+These carriers support the source-integrated material boundary's
+`with_exterior_law` closure. They do not alter the existing bulk-only
+`GrayAmbientBoundary` or `GrayTwoBathBoundary` contracts. Exterior temperature
+bounds need not contain either bath or the bulk; the consuming boundary
+intersects them with its physical surface bracket. Nonnegative passive
+coefficients may have signed differential response, so consumers must admit
+their combined material/surface elimination rather than infer monotonicity.
+The original finite caloric storage, heat/entropy accounts and time solver
+remain owners; no new surface state, flow state or clock is introduced.
+
 ## Implicit upwind enthalpy with native conduction
 
 `ImplicitConductionChain::with_implicit_advection` and its graph counterpart

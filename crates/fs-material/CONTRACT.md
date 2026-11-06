@@ -8694,6 +8694,44 @@ asymmetric coverage, source-domain, disjoint-support, insulation and exact
 radiation-disabled contact limits. All 25 focused native original Cp/Cv and
 integrated exchange tests pass.
 
+## Exterior-temperature source feedback on original Cp/Cv storage
+
+`IntegratedCaloricGrayBoundary::with_exterior_law` binds one original
+`ImplicitGrayExteriorLaw` to the actual stored energy, solved exterior surface
+temperature and scheduled gas-bath temperature. Emissivity and convection can
+therefore change with the exterior surface while the body retains its original
+nonlinear h/Cp or u/Cv inventory. The original bulk-only source remains a
+separate declared closure; its coefficients are still queried once per energy
+trial. Fixed, bulk-source and exterior-source ownership are mutually exclusive.
+
+The existing supported conductivity integral, coating jump and bounded common
+surface solve remain the physical owners. Every exterior source query uses the
+actual trial Ts; the accepted response carries its partial derivatives without
+a second query after convergence. Source temperature support can exclude the
+bulk and baths, and a coating can place the exterior outside the material
+conductivity chart. The material path still requires its own support. The
+source must refuse unsupported gas temperatures or coupled source conditions;
+interval bounds do not authorize extrapolation or rectangular-domain inference.
+
+For total exterior power F(e,Ts), the complete tangent is
+`dQ/de = (F_Ts*Gc*dT/de + Gs*F_e)/(Gs+F_Ts)`, where Gc and Gs are the
+existing material endpoint slopes after eliminating any coating resistance.
+F_Ts includes both coefficient derivatives, and F_e holds Ts and Tgas fixed.
+The original 1/Cp or 1/Cv appears once; an additional bulk dk/de term would
+double-count the differentiated conductivity integral. Zero-emissivity/HTC
+onset retains its original partials. Signed differential response is admitted
+when the combined material/exterior slope is positive; a singular or locally
+unstable surface elimination refuses. This local condition does not establish
+global uniqueness for an arbitrary nonlinear source.
+
+Separate bath powers, actual bath entropy temperatures, the native chain/graph
+and transactional time integration remain authoritative. No extra surface
+inventory, evolving flow state, finite radiative enclosure or source authority
+is inferred. The adapter allocates no trial tables; the source retains its own
+evaluation costs. Focused native regressions cover independent nonlinear
+surface balances, full Cp/Cv tangents, distinct source support, coefficient
+onset, signed response and accepted-time energy/cancellation behavior.
+
 ## Coated Cp/Cv surfaces with separate material and exterior temperatures
 
 `IntegratedCaloricGrayBoundary` now admits the original boundary geometry's

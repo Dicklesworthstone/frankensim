@@ -2,6 +2,8 @@
 
 #[path = "gray_boundary/coating.rs"]
 mod coating;
+#[path = "gray_boundary/exterior.rs"]
+mod exterior;
 
 use super::*;
 use fs_thermal::enthalpy::Reservoir;

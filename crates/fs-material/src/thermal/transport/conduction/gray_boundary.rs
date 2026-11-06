@@ -12,7 +12,8 @@ use crate::thermal::conduction::{
 use fs_thermal::enthalpy::backward_euler::PrescribedBathHeat;
 use fs_thermal::enthalpy::conduction::implicit::boundary::{
     GrayTwoBathResponse, ImplicitBoundaryExchangeLaw, ImplicitBoundaryExchangeState,
-    ImplicitBoundaryGeometry, ImplicitGraySurfaceLaw, ImplicitGraySurfaceState,
+    ImplicitBoundaryGeometry, ImplicitGrayExteriorLaw, ImplicitGrayExteriorState,
+    ImplicitGraySurfaceLaw, ImplicitGraySurfaceState,
 };
 use fs_thermal::enthalpy::{DepositionError, ThermalLaw};
 
@@ -22,6 +23,12 @@ const SIGMA: f64 = 5.670_374_419e-8;
 struct BoundSurface<'a> {
     law: &'a dyn ImplicitGraySurfaceLaw,
     bounds_j_kg: [f64; 2],
+}
+
+struct BoundExterior<'a> {
+    law: &'a dyn ImplicitGrayExteriorLaw,
+    energy_bounds_j_kg: [f64; 2],
+    temperature_bounds_k: [f64; 2],
 }
 
 #[derive(Clone, Copy)]
@@ -60,6 +67,7 @@ pub struct IntegratedCaloricGrayBoundary<'l, 'a, 'm> {
     coating_resistance_k_w: f64,
     fixed: ImplicitGraySurfaceState,
     surface: Option<BoundSurface<'l>>,
+    exterior: Option<BoundExterior<'l>>,
     radiative_temperature_k: f64,
     config: LayerConductionConfig,
 }
@@ -116,6 +124,7 @@ impl<'l, 'a, 'm> IntegratedCaloricGrayBoundary<'l, 'a, 'm> {
             coating_resistance_k_w,
             fixed,
             surface: None,
+            exterior: None,
             radiative_temperature_k,
             config,
         })
@@ -128,9 +137,9 @@ impl<'l, 'a, 'm> IntegratedCaloricGrayBoundary<'l, 'a, 'm> {
     /// This preserves `ImplicitGraySurfaceLaw`'s BULK-state closure: the source
     /// is evaluated once per energy trial, then its coefficients are held fixed
     /// during the surface solve. Its complete original energy derivatives are
-    /// included afterward. Sources requiring the solved exterior temperature,
-    /// evolving surface phases or changing flow states need their own closure;
-    /// the adapter does not substitute those into the source's coordinates.
+    /// included afterward. A source requiring the solved exterior temperature
+    /// uses `with_exterior_law`; this method never substitutes that temperature
+    /// into a source declared on the bulk coordinate.
     pub fn with_surface_law(
         mut self,
         law: &'l dyn ImplicitGraySurfaceLaw,
@@ -138,6 +147,7 @@ impl<'l, 'a, 'm> IntegratedCaloricGrayBoundary<'l, 'a, 'm> {
         let [lo, hi] = law.enthalpy_bounds_j_kg();
         let [source_lo, source_hi] = self.layer.energy_bounds_j_kg();
         if self.surface.is_some()
+            || self.exterior.is_some()
             || self.fixed.emissivity != 0.0
             || self.fixed.convection_w_m2_k != 0.0
             || !lo.is_finite()
@@ -157,6 +167,56 @@ impl<'l, 'a, 'm> IntegratedCaloricGrayBoundary<'l, 'a, 'm> {
         self.surface = Some(BoundSurface {
             law,
             bounds_j_kg: [lo, hi],
+        });
+        Ok(self)
+    }
+
+    /// Uniquely replace zero fixed coefficients with an actual exterior law.
+    ///
+    /// Energy bounds lie inside the SAME original caloric/conductivity chart.
+    /// Exterior temperature support is independent of that chart, the bulk
+    /// temperature and either bath. Each surface trial queries its original
+    /// source using `(e_bulk, Ts, Tgas)`; no query uses a substituted bulk state.
+    ///
+    /// Both source partials enter the exact implicit tangent, including signed
+    /// exterior-temperature feedback and coefficient onset at zero. A final
+    /// branch needs positive combined material/exterior differential stiffness
+    /// to eliminate this zero-storage surface stably; a singular or locally
+    /// unstable branch refuses. This local check and the existing bracket do
+    /// not claim global uniqueness for an arbitrary nonlinear source.
+    pub fn with_exterior_law(
+        mut self,
+        law: &'l dyn ImplicitGrayExteriorLaw,
+    ) -> Result<Self, DepositionError> {
+        let [lo, hi] = law.energy_bounds_j_kg();
+        let [source_lo, source_hi] = self.layer.energy_bounds_j_kg();
+        let [surface_lo, surface_hi] = law.surface_temperature_bounds_k();
+        if self.surface.is_some()
+            || self.exterior.is_some()
+            || self.fixed.emissivity != 0.0
+            || self.fixed.convection_w_m2_k != 0.0
+            || !lo.is_finite()
+            || !hi.is_finite()
+            || lo >= hi
+            || lo < source_lo
+            || hi > source_hi
+            || !surface_lo.is_finite()
+            || surface_lo <= 0.0
+            || !surface_hi.is_finite()
+            || surface_lo >= surface_hi
+            || !core::ptr::addr_eq(
+                self.layer.caloric_law() as *const dyn ThermalLaw,
+                law.caloric_law() as *const dyn ThermalLaw,
+            )
+        {
+            return Err(DepositionError::InvalidInput(
+                "integrated exterior source needs sole ownership, its original supported caloric object and positive surface bounds",
+            ));
+        }
+        self.exterior = Some(BoundExterior {
+            law,
+            energy_bounds_j_kg: [lo, hi],
+            temperature_bounds_k: [surface_lo, surface_hi],
         });
         Ok(self)
     }
@@ -189,10 +249,16 @@ impl<'l, 'a, 'm> IntegratedCaloricGrayBoundary<'l, 'a, 'm> {
             self.fixed
         };
         let curve = self.layer.conductivity_curve();
-        // The bulk-owned gray coefficients require positive absolute surface
-        // temperature, not material-source coverage outside the coating.
-        // Keep the original support/arithmetic for the zero-resistance path.
-        let surface_span = if self.coating_resistance_k_w == 0.0 {
+        // An exterior source owns its actual Ts support independently of the
+        // bulk chart and bath states. Fixed/bulk coefficients retain the exact
+        // original support and arithmetic, including the zero-coating path.
+        let surface_span = if let Some(exterior) = &self.exterior {
+            let [lo, hi] = exterior.energy_bounds_j_kg;
+            if !(lo..=hi).contains(&specific_energy_j_kg) {
+                return Err(DepositionError::MaterialDomain);
+            }
+            exterior.temperature_bounds_k
+        } else if self.coating_resistance_k_w == 0.0 {
             curve.temperature_range_k()
         } else {
             [
@@ -215,7 +281,23 @@ impl<'l, 'a, 'm> IntegratedCaloricGrayBoundary<'l, 'a, 'm> {
                 surface_span,
                 self.coating_resistance_k_w,
                 self.config,
-                |surface| self.exterior_exchange(surface, gas_temperature_k, coefficients),
+                |surface| {
+                    if let Some(exterior) = &self.exterior {
+                        // The original kernel brackets Ts inside the source
+                        // interval and polls around every callback. Its saved
+                        // payload carries the final partials without a second
+                        // source query after convergence.
+                        let source = exterior.law.state_at_surface(
+                            specific_energy_j_kg,
+                            surface,
+                            gas_temperature_k,
+                        )?;
+                        source.admit()?;
+                        self.exterior_source_exchange(surface, gas_temperature_k, source)
+                    } else {
+                        self.exterior_exchange(surface, gas_temperature_k, coefficients)
+                    }
+                },
                 &mut *checkpoint,
             )
             .map_err(|error| match error {
@@ -258,12 +340,30 @@ impl<'l, 'a, 'm> IntegratedCaloricGrayBoundary<'l, 'a, 'm> {
         // include the entire k(T) response; adding a bulk dk/de term would
         // double count it. Source F_e is taken at fixed exterior Ts and may
         // be signed, including zero-coefficient onset.
-        let storage = (fraction(exterior_slope, surface_slope) * cell_slope)
-            * material.temperature_slope_kg_k_j;
-        let derivative = finite(
-            fraction(surface_slope, exterior_slope)
-                .mul_add(response.film.energy_derivative_w_kg_j, storage),
-        )?;
+        let derivative = if exterior_slope >= 0.0 {
+            // Preserve the original fixed/bulk coefficient arithmetic exactly.
+            let storage = (fraction(exterior_slope, surface_slope) * cell_slope)
+                * material.temperature_slope_kg_k_j;
+            finite(
+                fraction(surface_slope, exterior_slope)
+                    .mul_add(response.film.energy_derivative_w_kg_j, storage),
+            )?
+        } else {
+            let denominator = finite(surface_slope + exterior_slope)?;
+            if denominator <= 0.0 {
+                return Err(DepositionError::InvalidInput(
+                    "integrated exterior source has a singular or locally unstable surface balance",
+                ));
+            }
+            // A passive source can have negative differential feedback. Keep
+            // that signed response; normalized positive-only fractions would
+            // silently turn it into a different Newton/adjoint tangent.
+            let body = finite(cell_slope * material.temperature_slope_kg_k_j)?;
+            finite((exterior_slope / denominator).mul_add(
+                body,
+                (surface_slope / denominator) * response.film.energy_derivative_w_kg_j,
+            ))?
+        };
         let [convection, radiation] = response.powers_to_baths_w;
         let outward = finite(convection + radiation)?;
         let boundary = ImplicitBoundaryExchangeState {
@@ -340,6 +440,38 @@ impl<'l, 'a, 'm> IntegratedCaloricGrayBoundary<'l, 'a, 'm> {
                 energy_derivative_w_kg_j: finite(convection_energy + radiation_energy)?,
             },
         ))
+    }
+
+    fn exterior_source_exchange(
+        &self,
+        surface: f64,
+        gas: f64,
+        source: ImplicitGrayExteriorState,
+    ) -> Result<([f64; 2], [f64; 2], SurfaceTangent), DepositionError> {
+        let (powers, conductances, mut tangent) =
+            self.exterior_exchange(surface, gas, source.coefficients)?;
+        let area = self.geometry.area_m2;
+        if source.convection_temperature_derivative_w_m2_k2 != 0.0 {
+            tangent.temperature_derivative_w_k = finite(
+                finite(area * source.convection_temperature_derivative_w_m2_k2)?
+                    .mul_add(surface - gas, tangent.temperature_derivative_w_k),
+            )?;
+        }
+        if source.emissivity_temperature_derivative_per_k != 0.0 {
+            // Factored fourth-power difference also retains the source tangent
+            // at epsilon=0. No quotient by emissivity or radiative power occurs.
+            let scale = finite((area * SIGMA) * source.emissivity_temperature_derivative_per_k)?;
+            let sum = finite(surface + self.radiative_temperature_k)?;
+            let squares = finite(surface.mul_add(
+                surface,
+                self.radiative_temperature_k * self.radiative_temperature_k,
+            ))?;
+            tangent.temperature_derivative_w_k = finite(finite((scale * sum) * squares)?.mul_add(
+                surface - self.radiative_temperature_k,
+                tangent.temperature_derivative_w_k,
+            ))?;
+        }
+        Ok((powers, conductances, tangent))
     }
 }
 

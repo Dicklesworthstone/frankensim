@@ -22,6 +22,11 @@ pub use two_bath::{GrayTwoBathBoundary, GrayTwoBathResponse};
 mod surface;
 pub use surface::{ImplicitGraySurfaceLaw, ImplicitGraySurfaceState};
 
+/// Original energy and actual exterior-temperature gray source response.
+#[path = "boundary/exterior.rs"]
+mod exterior;
+pub use exterior::{ImplicitGrayExteriorLaw, ImplicitGrayExteriorState};
+
 /// Original centre-to-face geometry and the external film/contact resistance.
 /// Area is the actual reservoir coverage or exposed ambient area. Resistance
 /// is area-specific; a material owner converts it to total K/W exactly once.
