@@ -318,7 +318,11 @@ impl PreparedFullWaveQuadrupole {
 
 /// Rotate the normalized cylindrical tensor without choosing an arbitrary
 /// transverse axis. P=I-nn and S=P-tt retain the exact axis limit t=0.
-fn cartesian(a: [C64; 14], t: [f64; 3], n: [f64; 3]) -> Result<[[C64; 6]; 4], AeroacError> {
+pub(super) fn cartesian(
+    a: [C64; 14],
+    t: [f64; 3],
+    n: [f64; 3],
+) -> Result<[[C64; 6]; 4], AeroacError> {
     let [
         ptt,
         pss,
@@ -510,7 +514,7 @@ impl Spectrum<14> for QuadrupoleKernel {
     }
 }
 
-fn j2_over_argument(argument: f64, zero: f64, ratio: f64) -> f64 {
+pub(super) fn j2_over_argument(argument: f64, zero: f64, ratio: f64) -> f64 {
     if argument.abs() < 0.1 {
         // DLMF 10.2.2: the omitted x^11 term is <4.1e-21 in this branch.
         let square = argument * argument;

@@ -2603,3 +2603,52 @@ Four G1/G3/G4 tests compare native tensor sums and flux, coherent cancellation
 against independent/partial-coherence statistics, recorded Reynolds-stress
 transmission against the independent equal-speed pressure/velocity factors,
 and geometry/frequency/aggregate-budget/cancellation refusals.
+
+## Reflected and coherent total original quadrupole fields
+
+`PreparedReflectedFullWaveQuadrupole` extends the original stress source to
+incident-side observations at one infinite planar fluid interface. Source and
+receiver remain strictly in the original incident fluid. The source is the
+original six physical symmetric stress moments in N m on its existing
+`exp(-i omega t)` clock. Reflected-only and coherent direct-plus-reflected
+queries expose complex pressure, all three particle-velocity components,
+signed active/reactive intensity and the original harmonic-field line type.
+
+The original reflected Green kernel supplies critical-circle branch maps,
+grazing cancellation and logarithmically scaled spectral weights. Analytic
+source Hessians and receiving derivatives retain physical shear, tensor trace,
+near-field, reactive and evanescent contributions. The returning normal
+velocity has the opposite propagation sign to transmission. The published
+transmission owner's fourteen-channel tensor reconstruction and ten velocity
+diagnostic entries are shared without changing its public API or its coherent
+array/recorded-source consumers. Pressure and velocity retain their respective
+degree-two and degree-three analytic omitted-tail envelopes.
+
+Exactly equal original sound speeds use the existing homogeneous quadrupole
+observer with image stress `S M S`, where `S = I - 2 n n^T`, and reflection
+factor `(rho2-rho1)/(rho2+rho1)`. The image displacement is formed with the
+original double-double geometric separation. Matched original fluids have
+exactly zero reflected transfer. The direct native contribution and reflected
+transfer are cached separately; total pressure and velocity are added before
+intensity is formed, retaining their interference cross terms. Warm source
+application uses fixed 4-by-6 reductions without allocation, quadrature or
+transcendental evaluation.
+
+A coincident prescribed source and receiver can query the finite reflected
+field; a total-field query refuses its singular direct contribution. Native
+cancellation, material domains and bounded work remain explicit. Numerical
+relative tolerances control the reflected tensor transfer, not a coherent
+total-field cancellation; its absolute estimates carry to the total field.
+The owner does not add source loading, unresolved stress generation,
+absorption, mean flow, finite edges, multilayer reflection or an interval
+certificate.
+
+Focused regressions specify exact rotated image tensors and density limits,
+independent full-wave reference coefficients, native source/receiver
+derivative relations, interface pressure/normal-velocity continuity, coherent
+energy interference and self-field/domain/work refusals. Independent direct
+transverse-wavenumber integrations with J2/J3 angular moments were executed at
+35 and 50 decimal digits for both sound-speed orders; all fourteen complex
+coefficients agreed at all 30 printed significant digits. Pinned
+formatter/parser checks passed; the native Rust regressions were added but
+were not executed in the shared editing environment.

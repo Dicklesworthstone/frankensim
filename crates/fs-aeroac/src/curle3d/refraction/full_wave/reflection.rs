@@ -37,6 +37,12 @@ pub use force::{
 };
 pub(super) use force::{apply as apply_force, cartesian as force_cartesian, sample_force_spectrum};
 
+mod quadrupole;
+pub use quadrupole::{
+    FULL_WAVE_REFLECTED_QUADRUPOLE_SCOPE, FULL_WAVE_TOTAL_QUADRUPOLE_SCOPE,
+    PreparedReflectedFullWaveQuadrupole,
+};
+
 /// The returned field excludes the direct source contribution.
 pub const FULL_WAVE_REFLECTED_MONOPOLE_SCOPE: &str = "Prescribed stationary compact 3D volume \
 source; reflected spherical-wave field in the incident fluid at one infinite planar \
