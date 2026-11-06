@@ -22,6 +22,8 @@ use std::collections::BTreeMap;
 pub mod history;
 /// Spatially varying P1 pressure, traction and volume fields.
 pub mod fields;
+/// Original adhesive pressure and moments on exterior P1 faces and native motion.
+pub mod adhesive;
 /// Sparse inertial trajectories on the same reference mesh and load operators.
 pub mod transient;
 
