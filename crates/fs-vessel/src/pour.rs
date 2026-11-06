@@ -13,7 +13,10 @@ use fs_lbm::core2::frame::{FrameForcingError2, RigidFrame2};
 use fs_lbm::freesurface::{ContactModel, FreeSurface};
 use fs_lbm::rheology::{Rheology, TAU_CAP, TAU_FLOOR, update_tau};
 use fs_lbm::{Cell, Grid};
-use fs_render::volumes::{AbsorptionImageSettings, VolumeGrid, render_absorption_transmittance};
+use fs_render::volumes::{
+    AbsorptionImageSettings, DensityAbsorption, DvrError, VolumeGrid,
+    render_absorption_transmittance, render_density_transmittance,
+};
 
 /// The pour fixture: a tank with an interior weir (the lip) the fluid
 /// crosses as gravity tilts.
@@ -111,6 +114,128 @@ pub struct PourOutcome {
     /// The final mass field (nx × ny) — the SAME bytes the render
     /// binds (kept for the deliverable path).
     pub mass_field: Vec<f64>,
+}
+
+/// A monochromatic SI absorption view of an accepted two-dimensional pour.
+///
+/// The original field contains cell-averaged liquid mass per lattice cell:
+/// full-cell lattice density in liquid cells, volume-fraction-weighted density
+/// in interface cells, and zero in gas/wall cells. Multiplying it by
+/// `density_unit_kg_m3` supplies the liquid mass density for the optical slab.
+///
+/// The view explicitly extrudes this two-dimensional field through
+/// `slab_depth_m`. Interface cells use a homogeneous density along that ray;
+/// the mass map does not determine a sharp interface or pixel-area coverage.
+/// This computes liquid absorption only. It does not infer wall occlusion,
+/// surface reflection/refraction, scattering, thermal emission or a spectrum.
+/// The caller supplies the coefficient at the stated wavelength; changing only
+/// the wavelength label does not invent a new material coefficient.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PourOpticalView {
+    /// Positive vacuum wavelength at which the coefficient was supplied [nm].
+    pub wavelength_nm: f64,
+    /// Intensity mass absorption at `wavelength_nm` [m²/kg], nonnegative.
+    pub mass_absorption_m2_kg: f64,
+    /// Physical density represented by one unit of cell-average lattice mass
+    /// [kg/m³]. This is a density conversion, not kilograms per grid cell.
+    pub density_unit_kg_m3: f64,
+    /// Positive physical spacing of the square in-plane lattice cells [m].
+    pub lattice_spacing_m: f64,
+    /// Positive out-of-plane path length [m], independent of grid resolution.
+    pub slab_depth_m: f64,
+}
+
+/// A physical pour view that cannot produce an admitted transmittance image.
+#[derive(Debug)]
+pub enum PourOpticalError {
+    /// The declared vacuum wavelength is nonfinite or nonpositive.
+    InvalidWavelength,
+    /// The physical cell spacing or extruded path length is invalid.
+    InvalidGeometry,
+    /// The original bounded renderer refused the field, conversion or budget.
+    Transport(DvrError),
+}
+
+impl core::fmt::Display for PourOpticalError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::InvalidWavelength => {
+                f.write_str("pour absorption requires a positive finite vacuum wavelength")
+            }
+            Self::InvalidGeometry => {
+                f.write_str("pour absorption requires positive finite SI spacing and slab depth")
+            }
+            Self::Transport(error) => write!(f, "pour absorption transport refused: {error:?}"),
+        }
+    }
+}
+
+impl std::error::Error for PourOpticalError {}
+
+impl PourOpticalView {
+    /// Render a borrowed accepted mass field with explicit work/memory limits.
+    ///
+    /// Each pixel returns the direct intensity transmittance
+    /// `exp(-mass * density_unit_kg_m3 * mass_absorption_m2_kg * slab_depth_m)`.
+    /// The original mass buffer is borrowed without allocating a converted
+    /// density/extinction field. Pixel-centre sampling has no area filter.
+    ///
+    /// Invalid geometry, samples, conversion or budget returns no partial image.
+    pub fn render_mass_field(
+        self,
+        mass_field: &[f64],
+        dimensions: [usize; 2],
+        settings: AbsorptionImageSettings,
+    ) -> Result<Vec<f64>, PourOpticalError> {
+        if !self.wavelength_nm.is_finite() || self.wavelength_nm <= 0.0 {
+            return Err(PourOpticalError::InvalidWavelength);
+        }
+        if !self.lattice_spacing_m.is_finite()
+            || self.lattice_spacing_m <= 0.0
+            || !self.slab_depth_m.is_finite()
+            || self.slab_depth_m <= 0.0
+        {
+            return Err(PourOpticalError::InvalidGeometry);
+        }
+        // Struct construction lets the shared validator reject dimension
+        // overflow/mismatched storage without VolumeGrid::new's panic.
+        let grid = VolumeGrid {
+            dims: [dimensions[0], dimensions[1], 1],
+            data: mass_field,
+            origin: [0.0; 3],
+            cell: [
+                self.lattice_spacing_m,
+                self.lattice_spacing_m,
+                self.slab_depth_m,
+            ],
+        };
+        render_density_transmittance(
+            &grid,
+            settings,
+            DensityAbsorption {
+                density_unit_kg_m3: self.density_unit_kg_m3,
+                length_unit_m: 1.0,
+                mass_absorption_m2_kg: self.mass_absorption_m2_kg,
+            },
+        )
+        .map_err(PourOpticalError::Transport)
+    }
+}
+
+impl PourOutcome {
+    /// Render this accepted pour using explicit SI material/view parameters.
+    ///
+    /// `dimensions` must be the original simulation shape. This uses the same
+    /// borrowed mass buffer as the authored preview, with an independently
+    /// supplied physical slab thickness and absorption calibration.
+    pub fn render_transmittance(
+        &self,
+        dimensions: [usize; 2],
+        view: PourOpticalView,
+        settings: AbsorptionImageSettings,
+    ) -> Result<Vec<f64>, PourOpticalError> {
+        view.render_mass_field(&self.mass_field, dimensions, settings)
+    }
 }
 
 /// A pour that cannot report a trajectory for the supplied fluid and motion.
@@ -666,6 +791,8 @@ mod capillary_tests {
 /// The fixture maps lattice mass to absorption per lattice length and uses
 /// `ny` as the displayed slab thickness. This is an absorption visualization,
 /// not a calibrated liquid optical material or refracting 3-D free surface.
+/// Use [`PourOutcome::render_transmittance`] with [`PourOpticalView`] for a
+/// supplied SI absorption coefficient, density conversion and physical depth.
 ///
 /// # Panics
 /// Invalid dimensions, field values or an unrepresentable image allocation.
@@ -688,4 +815,125 @@ pub fn render_pour(outcome: &PourOutcome, nx: usize, ny: usize, res: usize) -> V
         },
     )
     .expect("valid finite pour absorption image")
+}
+
+#[cfg(test)]
+mod physical_opacity_tests {
+    use super::*;
+
+    fn view() -> PourOpticalView {
+        // Authored analytic fixture, not measured liquid spectroscopy.
+        PourOpticalView {
+            wavelength_nm: 550.0,
+            mass_absorption_m2_kg: 0.4,
+            density_unit_kg_m3: 1000.0,
+            lattice_spacing_m: 1e-3,
+            slab_depth_m: 2e-3,
+        }
+    }
+
+    fn settings(cells: usize) -> AbsorptionImageSettings {
+        AbsorptionImageSettings {
+            resolution: [2; 2],
+            max_pixels: 4,
+            max_grid_cells: cells,
+            max_cell_visits: 4,
+        }
+    }
+
+    fn close(actual: f64, expected: f64) {
+        assert!((actual - expected).abs() < 8e-15, "{actual} != {expected}");
+    }
+
+    /// G1: the accepted full/interface-cell masses use the supplied SI column.
+    #[test]
+    fn physical_pour_absorption_uses_density_coefficient_and_viewing_depth() {
+        let outcome = PourOutcome {
+            mass_drift: 0.0,
+            fragments: 1,
+            poured_mass: 0.0,
+            dribble_cells: 0,
+            mass_field: vec![0.0, 0.25, 0.5, 1.0],
+        };
+        let optics = view();
+        let image = outcome
+            .render_transmittance([2, 2], optics, settings(4))
+            .unwrap();
+        for (&transmittance, &mass) in image.iter().zip(&outcome.mass_field) {
+            close(transmittance, (-mass * 0.8).exp());
+        }
+        let deeper = PourOpticalView {
+            slab_depth_m: 2.0 * optics.slab_depth_m,
+            ..optics
+        }
+        .render_mass_field(&outcome.mass_field, [2, 2], settings(4))
+        .unwrap();
+        for (&twice, &once) in deeper.iter().zip(&image) {
+            close(twice, once * once);
+        }
+        let red = PourOpticalView {
+            wavelength_nm: 700.0,
+            mass_absorption_m2_kg: 0.1,
+            ..optics
+        }
+        .render_mass_field(&outcome.mass_field, [2, 2], settings(4))
+        .unwrap();
+        close(red[3], (-0.2_f64).exp());
+        assert!(red[3] > image[3]);
+
+        let vacuum = PourOpticalView {
+            mass_absorption_m2_kg: 0.0,
+            ..optics
+        }
+        .render_mass_field(&outcome.mass_field, [2, 2], settings(4))
+        .unwrap();
+        assert_eq!(vacuum, vec![1.0; 4]);
+    }
+
+    /// G3: lateral refinement and density-unit choices cannot change opacity.
+    #[test]
+    fn physical_pour_opacity_is_independent_of_lattice_resolution_and_mass_units() {
+        let coarse = [0.0, 0.25, 0.5, 1.0];
+        let optics = view();
+        let reference = optics.render_mass_field(&coarse, [2, 2], settings(4)).unwrap();
+        let fine: Vec<_> = (0..4)
+            .flat_map(|y| (0..4).map(move |x| coarse[x / 2 + 2 * (y / 2)]))
+            .collect();
+        let refined = PourOpticalView {
+            lattice_spacing_m: 0.5 * optics.lattice_spacing_m,
+            ..optics
+        }
+        .render_mass_field(&fine, [4, 4], settings(16))
+        .unwrap();
+        assert_eq!(refined, reference);
+        let rescaled = PourOpticalView {
+            density_unit_kg_m3: 0.5 * optics.density_unit_kg_m3,
+            ..optics
+        }
+        .render_mass_field(&coarse.map(|mass| 2.0 * mass), [2, 2], settings(4))
+        .unwrap();
+        assert_eq!(rescaled, reference);
+    }
+
+    /// G0: invalid source/view input and bounded work never return an image.
+    #[test]
+    fn physical_pour_refuses_invalid_calibration_shape_and_budget() {
+        let mass = [0.0, 0.25, 0.5, 1.0];
+        let optics = view();
+        for invalid in [
+            PourOpticalView { wavelength_nm: f64::NAN, ..optics },
+            PourOpticalView { wavelength_nm: 0.0, ..optics },
+            PourOpticalView { lattice_spacing_m: 0.0, ..optics },
+            PourOpticalView { slab_depth_m: f64::INFINITY, ..optics },
+            PourOpticalView { density_unit_kg_m3: -1.0, ..optics },
+            PourOpticalView { mass_absorption_m2_kg: -1.0, ..optics },
+        ] {
+            assert!(invalid.render_mass_field(&mass, [2, 2], settings(4)).is_err());
+        }
+        assert!(optics.render_mass_field(&mass, [3, 2], settings(4)).is_err());
+        assert!(optics.render_mass_field(&mass, [usize::MAX, 2], settings(4)).is_err());
+        assert!(optics.render_mass_field(&[-0.1, 0.0, 0.0, 0.0], [2, 2], settings(4)).is_err());
+        let limited = AbsorptionImageSettings { max_pixels: 3, ..settings(4) };
+        assert!(optics.render_mass_field(&mass, [2, 2], limited).is_err());
+    }
 }

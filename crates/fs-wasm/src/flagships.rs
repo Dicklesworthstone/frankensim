@@ -13,7 +13,7 @@
 //!   fiber hinge) → FRAGILITY (anytime CS + MLMC) → CVaR mass minimization.
 //!
 //! SAFETY CONTRACT (identical to the rest of the crate): `unsafe_code` is
-//! forbidden, every input is clamped, every fallible kernel result is folded to
+//! forbidden, every input is bounded or refused, every fallible kernel result is folded to
 //! `NaN` / an empty vector, and every documented panic precondition of the
 //! composed crates is respected. Nothing here can trap — a wasm trap would kill
 //! the whole page. In particular the LAYOUT stage of the frame flagship uses a
@@ -667,6 +667,9 @@ fn canonical_cvar_or_nan(losses: &[f64], beta: f64) -> f64 {
 ///   losses at the robust lip.
 /// - BLOCK 5 RENDER: `R·R` transmittance ∈ [0,1], row-major `py·R+px`.
 /// - TAIL: `[robust_lip, nominal_lip, beta]`.
+///
+/// The render block is an authored lattice preview. Pass any captured mass
+/// frame to [`render_vessel_transmittance`] for explicit SI absorption optics.
 pub fn run_vessel(lip_x1000: u32) -> Vec<f64> {
     let lip = (f64::from(lip_x1000) / 1000.0).clamp(0.5, 3.0);
     let beta = 0.8f64;
@@ -756,7 +759,7 @@ pub fn run_vessel(lip_x1000: u32) -> Vec<f64> {
     let cvar_robust_offband = offband(robust_lip);
     let robust_band_losses = band_losses(robust_lip);
 
-    // ---- STAGE 5: Woodcock volume render of the final pour mass field ----
+    // ---- STAGE 5: authored exact slab view of the final pour mass field ----
     let transmittance = render_thin_slab(&neutral.mass_field, nx, ny, render_res);
 
     /* ---- assemble the flat output --------------------------------------- */
@@ -966,6 +969,62 @@ fn render_thin_slab(mass: &[f64], nx: usize, ny: usize, res: usize) -> Vec<f64> 
         },
     )
     .unwrap_or_else(|_| vec![f64::NAN; pixels])
+}
+
+/// Re-render a captured pour mass frame with supplied SI absorption optics.
+///
+/// `mass_field` is the original row-major cell-average liquid mass, including
+/// interface-cell volume fractions. Output is `resolution²` row-major direct
+/// intensity transmittance at `wavelength_nm`. The caller supplies the mass
+/// absorption coefficient at that wavelength; no liquid spectrum is guessed.
+///
+/// Square lattice cells have physical width `lattice_spacing_m`; the
+/// independent `slab_depth_m` is the optical path length perpendicular to
+/// the simulated plane. Density is `mass_field[i] * density_unit_kg_m3`.
+/// Interface cells use the native view's homogeneous along-ray approximation.
+/// Surface reflection/refraction, wall occlusion and scattering are excluded.
+///
+/// Reuses captured frames without running the pour again or making an
+/// intermediate extinction buffer. Refuses images or fields larger than
+/// 1,048,576 samples and returns an empty vector for any invalid input/budget.
+/// Physical parameters are validated, never clamped into a different material.
+#[allow(clippy::too_many_arguments)]
+pub fn render_vessel_transmittance(
+    mass_field: &[f64],
+    nx: u32,
+    ny: u32,
+    resolution: u32,
+    wavelength_nm: f64,
+    mass_absorption_m2_kg: f64,
+    density_unit_kg_m3: f64,
+    lattice_spacing_m: f64,
+    slab_depth_m: f64,
+) -> Vec<f64> {
+    let (Ok(nx), Ok(ny), Ok(resolution)) = (
+        usize::try_from(nx),
+        usize::try_from(ny),
+        usize::try_from(resolution),
+    ) else {
+        return Vec::new();
+    };
+    fs_vessel::pour::PourOpticalView {
+        wavelength_nm,
+        mass_absorption_m2_kg,
+        density_unit_kg_m3,
+        lattice_spacing_m,
+        slab_depth_m,
+    }
+    .render_mass_field(
+        mass_field,
+        [nx, ny],
+        AbsorptionImageSettings {
+            resolution: [resolution; 2],
+            max_pixels: 1_048_576,
+            max_grid_cells: 1_048_576,
+            max_cell_visits: 1_048_576,
+        },
+    )
+    .unwrap_or_default()
 }
 
 /* ======================================================================= */
@@ -1764,6 +1823,34 @@ mod wasm {
         super::run_vessel(lip_x1000)
     }
 
+
+    /// Monochromatic SI absorption of an existing captured mass frame.
+    #[wasm_bindgen]
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_vessel_transmittance(
+        mass_field: &[f64],
+        nx: u32,
+        ny: u32,
+        resolution: u32,
+        wavelength_nm: f64,
+        mass_absorption_m2_kg: f64,
+        density_unit_kg_m3: f64,
+        lattice_spacing_m: f64,
+        slab_depth_m: f64,
+    ) -> Vec<f64> {
+        super::render_vessel_transmittance(
+            mass_field,
+            nx,
+            ny,
+            resolution,
+            wavelength_nm,
+            mass_absorption_m2_kg,
+            density_unit_kg_m3,
+            lattice_spacing_m,
+            slab_depth_m,
+        )
+    }
+
     #[wasm_bindgen]
     pub fn run_frame(seed: u32) -> Vec<f64> {
         super::run_frame(seed)
@@ -1788,6 +1875,60 @@ mod tests {
         assert!(image[1] < 1.0);
         assert!(render_thin_slab(&[-0.1], 1, 1, 1)[0].is_nan());
         assert!(render_thin_slab(&[f64::NAN], 1, 1, 1)[0].is_nan());
+    }
+
+    #[test]
+    fn browser_physical_pour_view_matches_native_optics_and_source_wavelength() {
+        let mass = [0.0, 0.25, 0.5, 1.0];
+        let optics = fs_vessel::pour::PourOpticalView {
+            wavelength_nm: 550.0,
+            mass_absorption_m2_kg: 0.4,
+            density_unit_kg_m3: 1000.0,
+            lattice_spacing_m: 1e-3,
+            slab_depth_m: 2e-3,
+        };
+        let native = optics
+            .render_mass_field(
+                &mass,
+                [2, 2],
+                AbsorptionImageSettings {
+                    resolution: [2; 2],
+                    max_pixels: 4,
+                    max_grid_cells: 4,
+                    max_cell_visits: 4,
+                },
+            )
+            .unwrap();
+        let browser = render_vessel_transmittance(
+            &mass, 2, 2, 2, 550.0, 0.4, 1000.0, 1e-3, 2e-3,
+        );
+        assert_eq!(browser, native);
+        for (&actual, &density) in browser.iter().zip(&mass) {
+            assert!((actual - (-density * 0.8).exp()).abs() < 8e-15);
+        }
+        let red = render_vessel_transmittance(
+            &mass, 2, 2, 2, 700.0, 0.1, 1000.0, 1e-3, 2e-3,
+        );
+        assert!((red[3] - (-0.2_f64).exp()).abs() < 8e-15);
+    }
+
+    #[test]
+    fn browser_physical_pour_view_refuses_invalid_or_oversized_input() {
+        let mass = [0.0, 0.25, 0.5, 1.0];
+        for (nx, ny, resolution, wavelength, coefficient, depth) in [
+            (3, 2, 2, 550.0, 0.4, 2e-3),
+            (2, 2, 1_000_000, 550.0, 0.4, 2e-3),
+            (2, 2, 2, f64::NAN, 0.4, 2e-3),
+            (2, 2, 2, 550.0, -0.4, 2e-3),
+            (2, 2, 2, 550.0, 0.4, 0.0),
+        ] {
+            assert!(
+                render_vessel_transmittance(
+                    &mass, nx, ny, resolution, wavelength, coefficient, 1000.0, 1e-3, depth,
+                )
+                .is_empty()
+            );
+        }
     }
 
     #[test]

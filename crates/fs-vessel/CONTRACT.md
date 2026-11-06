@@ -327,3 +327,23 @@ band CVaR and band maximum, so product consumers can plot actual objectives
 without repeating the candidate/fluid sweep. Existing sampled studies keep
 their previous semantics. Continuous-band maxima do not establish global,
 finite-length, nonlinear or turbulent stability.
+
+
+## Monochromatic physical pour opacity
+
+PourOpticalView renders an accepted mass field or PourOutcome through the
+shared fs-render density-opacity integrator. The view explicitly supplies
+vacuum wavelength, mass absorption in m²/kg, kg/m³ per lattice mass unit,
+in-plane lattice spacing and an independent viewing depth in metres. Field
+storage is borrowed; no converted extinction image or new simulation is
+needed. Doubling depth squares direct-beam transmittance, and changing the
+lateral resolution or density units without changing the physical column
+preserves opacity. The fs-wasm render_vessel_transmittance export exposes
+the same computation for captured browser frames with fixed work limits.
+
+An interface cell's liquid mass is treated as homogeneous along the viewing
+ray. This is a declared cell-average slab model: it does not reconstruct
+free-surface geometry, area coverage, wall occlusion, refraction, scattering,
+or a liquid's measured spectrum. The coefficient must be supplied at the
+declared wavelength and material state. The older render_pour visualization
+retains its explicitly authored lattice-opacity convention.
