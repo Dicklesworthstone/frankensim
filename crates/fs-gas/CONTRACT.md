@@ -3319,6 +3319,41 @@ They also check actual perimeter heat exchange, density/material substitution
 and kinetic-to-thermal conversion without a second heat source. G0/G4 checks
 cover source/geometry/regime refusal and cancellation with complete rollback.
 
+### Concentric annular gas-wall resistance
+
+`AnnularLaminarWall` and `with_annular_laminar_transport` extend the original
+gas-wall owner to concentric passages, including narrow cooling/seal gaps.
+`DevelopedWallModel::Annular` shares a transport source and one conservative
+transaction with circular and rectangular branches. Actual area is
+`pi (R-r)(R+r)`, hydraulic diameter is `2(R-r)`, and both wetted surfaces enter
+the cell conductance. Original source viscosity and density refresh drag;
+the explicitly authored Nu retains the annular radius-ratio and thermal-wall
+assumptions. Both cylinders share one contact temperature and axial velocity.
+
+The no-slip axial solution gives
+`Q = pi dp [R^4-r^4-(R²-r²)²/ln(R/r)]/(8 mu L)`.
+Preparing its exact mean-flow resistance once avoids a logarithm or series at
+source-step time. For r/R>=1/2, a fixed positive series in `(R-r)/(R+r)` avoids
+catastrophic cancellation and preserves `12 mu/[rho (R-r)²]` in the thin-gap
+limit. A nonzero vanishing core retains logarithmic drag even when r/R
+underflows; only exactly zero inner radius selects circular arithmetic.
+Reference: Huilgol and Georgiou (2020), Newtonian specialization of equations
+(18), (22), (23), <https://doi.org/10.1016/j.jnnfm.2020.104401>.
+
+The original interval-frozen source model, Reynolds ceiling 2300, wall-relative
+Mach ceiling 0.3, endpoint domain checks, heat/work ownership and rollback
+remain unchanged. Eccentricity, differential cylinder velocities, separate
+inner/outer wall temperatures, rotation, slip, turbulent annular flow and
+resolved unsteady transverse profiles are outside this closure.
+
+G1/G3 kernel tests check independent 100-digit integrated-velocity values,
+thin-gap resistance, circular-limit bit agreement, logarithmic small-core drag
+and material/length scaling. All six kernel tests were executed by compiling
+the actual source with the production `fs-math` library. Network regressions
+for both-wall heat transfer, mixed shapes, boosted wall motion, energy accounting
+and late regime refusal are authored but await native integration execution;
+the isolated kernel result is not evidence that those regressions passed.
+
 ### Current material state and roughness in turbulent pipe-wall friction
 
 `NetworkWallOperator::with_circular_transport` accepts one explicit

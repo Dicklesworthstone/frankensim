@@ -38,8 +38,8 @@ pub use shared::{
 mod transport;
 use transport::DevelopedWallTransport;
 pub use transport::{
-    CircularChurchillWall, CircularGnielinskiWall, CircularLaminarWall, CircularTurbulentWall,
-    CircularWallModel, DevelopedWallModel, RectangularLaminarWall,
+    AnnularLaminarWall, CircularChurchillWall, CircularGnielinskiWall, CircularLaminarWall,
+    CircularTurbulentWall, CircularWallModel, DevelopedWallModel, RectangularLaminarWall,
 };
 
 #[cfg(feature = "material")]
@@ -112,7 +112,8 @@ struct BranchShape {
 /// models through the same source, heat and momentum transaction.
 /// [`Self::with_rectangular_laminar_transport`] retains the actual rectangular
 /// Poiseuille shape factor through that same transaction.
-/// [`Self::with_developed_transport`] admits both geometries in one network.
+/// [`Self::with_annular_laminar_transport`] adds concentric annular resistance.
+/// [`Self::with_developed_transport`] admits these geometries in one network.
 /// [`Self::with_material_heat_storage`] supplies original source-dependent finite thermal
 /// storage, including exact latent plateaus, instead of a constant capacity.
 pub struct NetworkWallOperator<'law> {

@@ -6,9 +6,11 @@ use crate::multicomponent::dissipation::evolve::fractions;
 use crate::multicomponent::{Cell, MAX_SPECIES, Mesh1d, MixtureGas, allocated, positive};
 use fs_qty::{Length, Pressure, Temperature};
 
+mod annular;
 mod churchill;
 mod rectangular;
 mod turbulent;
+pub use annular::AnnularLaminarWall;
 pub use rectangular::RectangularLaminarWall;
 pub use turbulent::{CircularChurchillWall, CircularGnielinskiWall, CircularTurbulentWall};
 
@@ -152,14 +154,16 @@ fn admit_circular_mesh(diameter: Length, mesh: &Mesh1d) -> Result<(), WallExchan
 
 /// Explicit geometry and developed-flow law for one original gas branch.
 ///
-/// Circular and rectangular passages can share one source-owned transport
-/// binding. Each branch retains its own shape, heat relation and applicability.
+/// Circular, rectangular and concentric annular passages share one source-owned
+/// transport binding. Each branch retains its own shape, heat relation and applicability.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum DevelopedWallModel {
     /// Circular Poiseuille, Colebrook, Gnielinski or Churchill wall model.
     Circular(CircularWallModel),
     /// Full no-slip rectangular Poiseuille shape and an authored Nusselt number.
     Rectangular(RectangularLaminarWall),
+    /// Concentric no-slip annular Poiseuille flow and an authored Nusselt number.
+    Annular(AnnularLaminarWall),
 }
 
 impl DevelopedWallModel {
@@ -167,6 +171,7 @@ impl DevelopedWallModel {
         match self {
             Self::Circular(model) => model.admit_mesh(mesh),
             Self::Rectangular(model) => model.admit_mesh(mesh),
+            Self::Annular(model) => model.admit_mesh(mesh),
         }
     }
 
@@ -174,6 +179,11 @@ impl DevelopedWallModel {
         match self {
             Self::Circular(model) => model.parameters(),
             Self::Rectangular(model) => (
+                model.hydraulic_diameter(),
+                model.reynolds_number(),
+                model.maximum_mach_number(),
+            ),
+            Self::Annular(model) => (
                 model.hydraulic_diameter(),
                 model.reynolds_number(),
                 model.maximum_mach_number(),
@@ -189,6 +199,7 @@ pub(super) struct DevelopedWallTransport {
     // homogeneous bindings; mixed networks retain only their complete models.
     circular: Option<Vec<Option<CircularWallModel>>>,
     rectangular: Option<Vec<Option<RectangularLaminarWall>>>,
+    annular: Option<Vec<Option<AnnularLaminarWall>>>,
     binary: Vec<f64>,
 }
 
@@ -279,7 +290,30 @@ impl NetworkWallOperator<'_> {
         self.with_developed_transport(law, models, cancelled)
     }
 
-    /// Bind one original transport source to mixed circular and rectangular ducts.
+    /// Bind current gas transport to selected concentric annular passages.
+    ///
+    /// Prepared geometry retains exact logarithmic Poiseuille resistance, the
+    /// narrow-gap limit and both wetted surfaces. Nu is an explicitly authored
+    /// annular relation. Both cylinders share the contact's temperature and
+    /// axial velocity; distinct surface states require a different model.
+    /// Current material, support work, heat and rollback retain the original
+    /// [`Self::with_developed_transport`] owner and source-interval lag.
+    pub fn with_annular_laminar_transport<L: TransportLaw + Send + Sync + 'static>(
+        self,
+        law: L,
+        branches: Vec<Option<AnnularLaminarWall>>,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, WallExchangeError> {
+        poll(&mut cancelled)?;
+        let mut models = allocated(branches.len(), None)?;
+        for (model, branch) in models.iter_mut().zip(branches) {
+            poll(&mut cancelled)?;
+            *model = branch.map(DevelopedWallModel::Annular);
+        }
+        self.with_developed_transport(law, models, cancelled)
+    }
+
+    /// Bind one original transport source to mixed circular, rectangular and annular ducts.
     ///
     /// Each selected branch retains its own geometry and admissible flow regime.
     /// `None` preserves authored contact coefficients. The complete network uses
@@ -305,14 +339,24 @@ impl NetworkWallOperator<'_> {
                 "wall transport original source or branch axis",
             ));
         }
-        let (mut only_circular, mut only_rectangular) = (true, true);
+        let (mut only_circular, mut only_rectangular, mut only_annular) = (true, true, true);
         for (model, shape) in branches.iter().zip(&self.branches) {
             poll(&mut cancelled)?;
             if let Some(model) = model {
                 model.admit_mesh(&shape.mesh)?;
                 match model {
-                    DevelopedWallModel::Circular(_) => only_rectangular = false,
-                    DevelopedWallModel::Rectangular(_) => only_circular = false,
+                    DevelopedWallModel::Circular(_) => {
+                        only_rectangular = false;
+                        only_annular = false;
+                    }
+                    DevelopedWallModel::Rectangular(_) => {
+                        only_circular = false;
+                        only_annular = false;
+                    }
+                    DevelopedWallModel::Annular(_) => {
+                        only_circular = false;
+                        only_rectangular = false;
+                    }
                 }
             }
         }
@@ -326,13 +370,21 @@ impl NetworkWallOperator<'_> {
         } else {
             None
         };
+        let mut annular = if only_annular {
+            Some(allocated(branches.len(), None)?)
+        } else {
+            None
+        };
         for (index, model) in branches.iter().enumerate() {
             poll(&mut cancelled)?;
-            match (model, &mut circular, &mut rectangular) {
-                (Some(DevelopedWallModel::Circular(model)), Some(view), _) => {
+            match (model, &mut circular, &mut rectangular, &mut annular) {
+                (Some(DevelopedWallModel::Circular(model)), Some(view), _, _) => {
                     view[index] = Some(*model)
                 }
-                (Some(DevelopedWallModel::Rectangular(model)), _, Some(view)) => {
+                (Some(DevelopedWallModel::Rectangular(model)), _, Some(view), _) => {
+                    view[index] = Some(*model)
+                }
+                (Some(DevelopedWallModel::Annular(model)), _, _, Some(view)) => {
                     view[index] = Some(*model)
                 }
                 _ => {}
@@ -346,6 +398,7 @@ impl NetworkWallOperator<'_> {
             branches,
             circular,
             rectangular,
+            annular,
             binary,
         });
         Ok(self)
@@ -366,6 +419,11 @@ impl NetworkWallOperator<'_> {
     /// Original rectangular models for a homogeneous rectangular binding, otherwise None.
     pub fn rectangular_walls(&self) -> Option<&[Option<RectangularLaminarWall>]> {
         self.transport.as_ref()?.rectangular.as_deref()
+    }
+
+    /// Original annular models for a homogeneous annular binding, otherwise None.
+    pub fn annular_walls(&self) -> Option<&[Option<AnnularLaminarWall>]> {
+        self.transport.as_ref()?.annular.as_deref()
     }
 
     /// Complete original geometry and flow model in branch order, including mixtures.
@@ -445,6 +503,7 @@ impl DevelopedWallTransport {
                 (Some(factor), nu)
             }
             DevelopedWallModel::Rectangular(rectangular) => (None, rectangular.nusselt_number()),
+            DevelopedWallModel::Annular(annular) => (None, annular.nusselt_number()),
         };
         contact.drag = match model {
             DevelopedWallModel::Circular(CircularWallModel::Churchill(churchill)) => {
@@ -511,6 +570,16 @@ impl DevelopedWallTransport {
             }
             DevelopedWallModel::Rectangular(rectangular) => {
                 let rate_per_s = rectangular.linear_rate(viscosity, primitive.density)?;
+                match motion {
+                    Some(wall_velocity_m_s) => WallDrag::MovingLinear {
+                        rate_per_s,
+                        wall_velocity_m_s,
+                    },
+                    None => WallDrag::Linear { rate_per_s },
+                }
+            }
+            DevelopedWallModel::Annular(annular) => {
+                let rate_per_s = annular.linear_rate(viscosity, primitive.density)?;
                 match motion {
                     Some(wall_velocity_m_s) => WallDrag::MovingLinear {
                         rate_per_s,
