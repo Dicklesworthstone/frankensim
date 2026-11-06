@@ -2256,3 +2256,27 @@ off-center resonance discovery, inverse-speed tails, refinement of native
 flat/spectrum-weighted reaction rates, exact identity behavior, shared work,
 bounded output, cancellation and deterministic retry. They introduce no
 evaluated-isotope accuracy, resonance reconstruction or shielding claim.
+
+## Energy-group radiation deposition
+
+`radiation::grouped::GroupedRadiationResponse` binds a radiation kind and an
+explicit ascending SI energy grid to independently closed sparse response rows
+for each physical source and group. Changing isotope mixtures can therefore
+change receiver heating even when the total emitted energy is unchanged.
+Coefficients are supplied absorbed-energy fractions for the declared geometry,
+materials and within-group spectrum; attenuation, thermal emissivity and
+particle counts do not supply them automatically.
+
+Canonical physical-source/group pairs reuse `RadiationResponse` for all
+receiver reduction, coefficient closure, positive-product admission, numerical
+energy accounting and cancellation. Physical identifiers remain independent of
+internal row indices. Source coverage and group lengths are exact, including
+zero emitters. Preparation checks explicit source, group, source/group, receiver
+and transfer limits before the corresponding expansion. Application neither
+regroups nor rescales supplied integrated joules.
+
+G1/G3/G4 regressions cover changing spectral mixtures, split histories, sparse
+multiple sources, self-return, receiver overlap, deterministic ordering, exact
+coverage, per-group closure, allocation bounds, numerical refusal and early/late
+cancellation. Spectral completeness and reconciliation with a nuclear source's
+original outward-energy account remain obligations of the coupling owner.

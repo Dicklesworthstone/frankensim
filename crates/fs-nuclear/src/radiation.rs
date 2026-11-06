@@ -10,6 +10,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
+/// Energy-dependent deposition on an explicit emitted-radiation group grid.
+pub mod grouped;
+
 /// Fixed admission tolerance for the sum of a supplied response row.
 /// Coefficients are never renormalized; admitted defects are charged in joules.
 pub const ROW_CLOSURE_TOLERANCE: f64 = 16.0 * f64::EPSILON;
