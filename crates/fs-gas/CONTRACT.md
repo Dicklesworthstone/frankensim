@@ -4049,6 +4049,41 @@ The compact perfectly mixed chamber approximation remains. Rates are constant
 over each accepted step. Spatial piston shocks, branch-wall motion and piston
 inertia require other physical owners; this is not a spatial ALE solver.
 
+### Closed-network entropy admission with moving chambers
+
+`MixtureNetwork1d::step_with_entropy` and
+`step_with_volume_rates_and_entropy` apply one original-source entropy account
+to every branch cell and finite plenum inside the closed network. The source's
+temperature-dependent `Cv/T` integral and ideal-mixture composition entropy
+use actual local states and physical volumes. Internal characteristic-port
+exchanges are already inside this boundary and add no exterior entropy supply.
+Prescribed plenum pressure work retains the native energy quadrature and
+carries no entropy. Unconnected branch ends must be stationary reflecting
+walls; isolated periodic branches are also admitted.
+
+The optional gate uses the existing bounded SSP RK2 retry/publication loop.
+An entropy-decreasing candidate retries all owners from the accepted state;
+source-domain failures, exhaustion and cancellation publish no fields, volumes,
+clock or accepted work/exchange reports. The returned duration is the actual
+accepted duration. Every species inventory defect is independently bounded,
+with only its numerical source-reference entropy contribution removed from
+the gate and reported separately. No energy, species or temperature correction
+is applied. Original and final caloric states share one source/reference basis;
+moving-volume increments retain extensive mass differences and stable density
+remainders rather than subtracting large absolute entropies.
+
+Two bounded temperature arrays are prepared once per entropy-enabled call;
+retries reuse them and native numerical storage. Ordinary step arithmetic and
+all-zero-volume-rate identity are retained. G0/G1/G3/G4 regressions compare
+polynomial-Cp network entropy with independent extensive inventories, moving
+mixture chambers with reversible isentropes and pressure work, large independent
+source entropy/formation datums, whole-network retry, exhaustion and final
+cancellation. This is measured finite-step admission of the native engineering
+flux. It does not establish an entropy-stable semidiscrete port theorem, and a
+negative semidiscrete rate can exhaust retries. The tolerance is per accepted
+call; accumulated multi-step allowances remain caller-owned. Open reservoirs,
+chemistry, thermal sources and moving branch walls need their own entropy inputs.
+
 ### Frozen-composition chambers with wall and gravity coupling
 
 `dynamics::network::GasNetwork1d::step_with_volume_rates` supplies the same

@@ -7,6 +7,7 @@ use super::{
     Accumulator, BranchEnd, MixtureNetwork1d, NetworkStepReport, NetworkTotals, PlenumBoundaryWork,
     PortExchange,
 };
+use crate::multicomponent::dissipation::entropy::EntropyTracker;
 use fs_qty::Time;
 
 impl MixtureNetwork1d {
@@ -40,7 +41,7 @@ impl MixtureNetwork1d {
         controls: StepControl,
         cancelled: impl FnMut() -> bool,
     ) -> Result<NetworkStepReport, Error> {
-        self.step_impl(maximum_duration, controls, None, None, cancelled)
+        self.step_impl(maximum_duration, controls, None, None, None, cancelled)
     }
 
     /// Advance prescribed compact-volume motion and branch flow simultaneously.
@@ -73,6 +74,7 @@ impl MixtureNetwork1d {
             maximum_duration,
             controls,
             moving.then_some(volume_rates_m3_s),
+            None,
             None,
             cancelled,
         )
@@ -118,6 +120,7 @@ impl MixtureNetwork1d {
             controls,
             None,
             active.then_some(reservoirs),
+            None,
             cancelled,
         )
     }
@@ -148,11 +151,12 @@ impl MixtureNetwork1d {
             controls,
             moving.then_some(volume_rates_m3_s),
             active.then_some(reservoirs),
+            None,
             cancelled,
         )
     }
 
-    fn admit_volume_rates(
+    pub(super) fn admit_volume_rates(
         &self,
         volume_rates_m3_s: &[f64],
         cancelled: &mut impl FnMut() -> bool,
@@ -213,12 +217,13 @@ impl MixtureNetwork1d {
         Ok(true)
     }
 
-    fn step_impl(
+    pub(super) fn step_impl(
         &mut self,
         maximum_duration: Time,
         controls: StepControl,
         volume_rates: Option<&[f64]>,
         reservoirs: Option<&[[Option<Cell<'_>>; 2]]>,
+        mut entropy: Option<&mut EntropyTracker>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<NetworkStepReport, Error> {
         poll(&mut cancelled)?;
@@ -319,6 +324,7 @@ impl MixtureNetwork1d {
                 reconstruction,
                 volume_rates,
                 reservoirs,
+                entropy.as_deref_mut(),
                 &mut cancelled,
             ) {
                 Ok(maximum_rate) => {
@@ -372,6 +378,7 @@ impl MixtureNetwork1d {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn attempt(
         &mut self,
         dt: f64,
@@ -379,8 +386,12 @@ impl MixtureNetwork1d {
         reconstruction: Reconstruction,
         volume_rates: Option<&[f64]>,
         reservoirs: Option<&[[Option<Cell<'_>>; 2]]>,
+        mut entropy: Option<&mut EntropyTracker>,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<f64, Error> {
+        if let Some(account) = entropy.as_deref_mut() {
+            account.begin_closed_attempt();
+        }
         // Admit actual, represented geometry before evaluating either stage.
         for (i, plenum) in self.plenums.iter().enumerate() {
             poll(cancelled)?;
@@ -403,10 +414,13 @@ impl MixtureNetwork1d {
         }
         let a = self.evaluate(false, reconstruction, volume_rates, reservoirs, cancelled)?;
         admit_cfl(a, dt, cfl)?;
-        self.forward_stage(false, dt, volume_rates, cancelled)?;
+        self.forward_stage(false, dt, volume_rates, None, cancelled)?;
         let b = self.evaluate(true, reconstruction, volume_rates, reservoirs, cancelled)?;
         admit_cfl(b, dt, cfl)?;
-        self.forward_stage(true, dt, volume_rates, cancelled)?;
+        self.forward_stage(true, dt, volume_rates, entropy.as_deref_mut(), cancelled)?;
+        if let Some(account) = entropy {
+            account.admit_single_step(self.gas(), cancelled)?;
+        }
         Ok(a.max(b))
     }
 
@@ -592,11 +606,13 @@ impl MixtureNetwork1d {
         second: bool,
         dt: f64,
         volume_rates: Option<&[f64]>,
+        mut entropy: Option<&mut EntropyTracker>,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<(), Error> {
         let n = self.gas().species_count();
         let m = n + 2;
         let mut advanced = [0.0; MAX_COMPONENTS];
+        let mut cell_index = 0;
         for branch in &mut self.branches {
             for i in 0..branch.cell_count() {
                 poll(cancelled)?;
@@ -625,14 +641,26 @@ impl MixtureNetwork1d {
                     for k in 0..m {
                         candidate[k] = 0.5 * branch.states[i * m + k] + 0.5 * advanced[k];
                     }
-                    branch.gas.decode(
+                    let primitive = branch.gas.decode(
                         candidate,
                         Some(branch.work.primitive[i].temperature),
                         cancelled,
                     )?;
+                    if let Some(account) = entropy.as_deref_mut() {
+                        account.candidate_cell(
+                            &branch.gas,
+                            cell_index,
+                            &branch.states[i * m..(i + 1) * m],
+                            candidate,
+                            primitive.temperature,
+                            branch.mesh.volumes()[i],
+                            cancelled,
+                        )?;
+                    }
                 } else {
                     branch.work.stage[i * m..(i + 1) * m].copy_from_slice(&advanced[..m]);
                 }
+                cell_index += 1;
             }
         }
         for (i, plenum) in self.plenums.iter().enumerate() {
@@ -673,11 +701,23 @@ impl MixtureNetwork1d {
                 } else {
                     extensive_energy / final_volume
                 };
-                self.branches[0].gas.decode(
+                let primitive = self.branches[0].gas.decode(
                     &advanced[..m],
                     Some(self.work.plenum_primitive[i].temperature),
                     cancelled,
                 )?;
+                if let Some(account) = entropy.as_deref_mut() {
+                    account.candidate_moving_cell(
+                        &self.branches[0].gas,
+                        cell_index + i,
+                        plenum.state().partial_densities,
+                        &advanced[..m],
+                        primitive.temperature,
+                        initial_volume,
+                        final_volume,
+                        cancelled,
+                    )?;
+                }
                 let work =
                     self.work.plenum_work_candidate[i].work_on_gas_j + (0.5 * dt) * pressure_power;
                 if !work.is_finite() {
@@ -710,11 +750,22 @@ impl MixtureNetwork1d {
                 }
                 candidate[n] = 0.0;
                 candidate[n + 1] = 0.5 * plenum.state.energy + 0.5 * advanced[n + 1];
-                self.branches[0].gas.decode(
+                let primitive = self.branches[0].gas.decode(
                     candidate,
                     Some(self.work.plenum_primitive[i].temperature),
                     cancelled,
                 )?;
+                if let Some(account) = entropy.as_deref_mut() {
+                    account.candidate_cell(
+                        &self.branches[0].gas,
+                        cell_index + i,
+                        plenum.state().partial_densities,
+                        candidate,
+                        primitive.temperature,
+                        plenum.volume_m3,
+                        cancelled,
+                    )?;
+                }
             } else {
                 self.work.plenum_stage[i * m..(i + 1) * m].copy_from_slice(&advanced[..m]);
             }

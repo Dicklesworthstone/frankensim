@@ -19,7 +19,8 @@
 
 use super::super::wall::log_ratio;
 use super::super::{
-    CaloricDomain, Error as FlowError, MAX_SPECIES, MixtureEuler1d, MixtureGas, Primitive, allocated, poll,
+    CaloricDomain, Cell, Error as FlowError, MAX_SPECIES, MixtureEuler1d, MixtureGas, Primitive,
+    allocated, poll,
 };
 use super::{
     Boundaries, Boundary, DissipationControl, DissipationError, DissipationOperator,
@@ -409,26 +410,67 @@ impl EntropyTracker {
             }
         }
         let gas = flow.gas();
+        let m = gas.species_count() + 2;
+        Self::from_cells(
+            gas,
+            flow.cell_count(),
+            controls,
+            basis,
+            flow.states
+                .chunks_exact(m)
+                .zip(flow.mesh.volumes())
+                .map(|(q, &volume)| (super::super::cell(q, gas.species_count()), volume)),
+            cancelled,
+        )
+    }
+
+    /// One source/reference basis for heterogeneous native storage owners.
+    /// Cells retain their actual local density and physical volume; no flattened
+    /// state copy, composition averaging or extra thermodynamic model is needed.
+    pub(in crate::multicomponent) fn from_cells<'a>(
+        gas: &MixtureGas,
+        count: usize,
+        controls: MolecularEntropyControl,
+        basis: Option<&Self>,
+        cells: impl IntoIterator<Item = (Cell<'a>, f64)>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self, FlowError> {
+        controls.validate()?;
+        poll(cancelled)?;
+        if !(1..=crate::dynamics::MAX_EULER_CELLS).contains(&count) {
+            return Err(FlowError::EntropyDomain("entropy storage count"));
+        }
         if basis.is_some_and(|basis| !basis.matches_source(gas)) {
-            return Err(FlowError::EntropyDomain("entropy basis source or caloric domain mismatch"));
+            return Err(FlowError::EntropyDomain(
+                "entropy basis source or caloric domain mismatch",
+            ));
         }
         let n = gas.species_count();
-        let m = n + 2;
-        let mut temperature = allocated(flow.cell_count(), 0.0)?;
+        let mut temperature = allocated(count, 0.0)?;
         let mut masses = [Dd::ZERO; MAX_SPECIES];
         let mut volume = Dd::ZERO;
         let mut reference_density = [1.0; MAX_SPECIES];
-        for (i, q) in flow.states.chunks_exact(m).enumerate() {
+        let mut seen = 0;
+        for (i, (q, cell_volume)) in cells.into_iter().enumerate() {
             poll(cancelled)?;
-            temperature[i] = gas.decode(q, None, cancelled)?.temperature;
-            let v = Dd::from_f64(flow.mesh.volumes()[i]);
+            if i >= count || !positive(cell_volume) {
+                return Err(FlowError::EntropyDomain(
+                    "entropy storage count or cell volume",
+                ));
+            }
+            temperature[i] = gas.decode_cell(q, None, cancelled)?.temperature;
+            let v = Dd::from_f64(cell_volume);
             volume = volume + v;
             for k in 0..n {
-                masses[k] = masses[k] + v * Dd::from_f64(q[k]);
-                if q[k] > 0.0 {
-                    reference_density[k] = q[k];
+                masses[k] = masses[k] + v * Dd::from_f64(q.partial_densities[k]);
+                if q.partial_densities[k] > 0.0 {
+                    reference_density[k] = q.partial_densities[k];
                 }
             }
+            seen += 1;
+        }
+        if seen != count {
+            return Err(FlowError::EntropyDomain("entropy storage count"));
         }
         let volume = scalar(volume)?;
         if !positive(volume) {
@@ -527,6 +569,17 @@ impl EntropyTracker {
         self.trial_relative = 0.0;
     }
 
+    /// Retry a complete closed native step from its original accepted storage.
+    /// Network primitive scratch may contain a rejected stage; initial admitted
+    /// temperatures remain the entropy anchors until publication.
+    pub(in crate::multicomponent) fn begin_closed_attempt(&mut self) {
+        self.current_temperature
+            .copy_from_slice(&self.initial_temperature);
+        self.trial_entropy = Dd::ZERO;
+        self.trial_mass.fill(Dd::ZERO);
+        self.trial_relative = 0.0;
+    }
+
     pub(in crate::multicomponent) fn candidate_cell(
         &mut self,
         gas: &MixtureGas,
@@ -554,6 +607,46 @@ impl EntropyTracker {
         for k in 0..gas.species_count() {
             self.trial_mass[k] = self.trial_mass[k]
                 + Dd::from_f64(volume) * (Dd::from_f64(new[k]) - Dd::from_f64(old[k]));
+        }
+        Ok(())
+    }
+
+    /// Account actual extensive storage during prescribed chamber-volume motion.
+    /// Mechanical pressure work changes the caloric state but carries no entropy.
+    /// The unchanged-volume path keeps the existing field arithmetic exactly.
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::multicomponent) fn candidate_moving_cell(
+        &mut self,
+        gas: &MixtureGas,
+        cell: usize,
+        old: &[f64],
+        new: &[f64],
+        temperature: f64,
+        old_volume: f64,
+        new_volume: f64,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(), FlowError> {
+        if old_volume == new_volume {
+            return self.candidate_cell(gas, cell, old, new, temperature, old_volume, cancelled);
+        }
+        let increment = moving_cell_change(
+            gas,
+            &self.reference_density,
+            self.reference_temperature,
+            old,
+            new,
+            self.current_temperature[cell],
+            temperature,
+            old_volume,
+            new_volume,
+            cancelled,
+        )?;
+        self.trial_entropy = self.trial_entropy + increment;
+        self.current_temperature[cell] = temperature;
+        for k in 0..gas.species_count() {
+            self.trial_mass[k] = self.trial_mass[k]
+                + (Dd::from_f64(new_volume) * Dd::from_f64(new[k])
+                    - Dd::from_f64(old_volume) * Dd::from_f64(old[k]));
         }
         Ok(())
     }
@@ -914,6 +1007,69 @@ pub(super) fn cell_change(
             };
             change = change + delta * phi0 - Dd::from_f64(R) * mixing;
         }
+        entropy = entropy + change / Dd::from_f64(model.molar_mass().value());
+    }
+    scalar(entropy)?;
+    Ok(entropy)
+}
+
+/// Extensive version of the same original-mixture entropy primitive, with
+/// actual endpoint volumes. Write m=V*rho before differencing; rescaling a final
+/// density into the old volume can invent a species-roundoff contribution.
+#[allow(clippy::too_many_arguments)]
+fn moving_cell_change(
+    gas: &MixtureGas,
+    reference_density: &[f64; MAX_SPECIES],
+    reference_temperature: f64,
+    old: &[f64],
+    new: &[f64],
+    old_temperature: f64,
+    new_temperature: f64,
+    old_volume: f64,
+    new_volume: f64,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<Dd, FlowError> {
+    let mut entropy = Dd::ZERO;
+    let reference = Temperature::new(reference_temperature);
+    let initial = Temperature::new(old_temperature);
+    let final_t = Temperature::new(new_temperature);
+    let log_t = log_ratio(new_temperature, old_temperature);
+    let v0 = Dd::from_f64(old_volume);
+    let v1 = Dd::from_f64(new_volume);
+    for (k, model) in gas.source().models().iter().enumerate() {
+        poll(cancelled)?;
+        let (rho0, rho1) = (old[k], new[k]);
+        if rho0 == 0.0 && rho1 == 0.0 {
+            continue;
+        }
+        let m0 = v0 * Dd::from_f64(rho0);
+        let m1 = v1 * Dd::from_f64(rho1);
+        let delta = m1 - m0;
+        let mut change = Dd::ZERO;
+        if rho1 > 0.0 && old_temperature != new_temperature {
+            let ds = model
+                .molar_entropy_change(initial, final_t)
+                .map_err(super::FlowError::from)?
+                .value();
+            change = m1 * (Dd::from_f64(ds) - Dd::from_f64(R) * Dd::from_f64(log_t));
+        }
+        let ds0 = model
+            .molar_entropy_change(reference, initial)
+            .map_err(super::FlowError::from)?
+            .value();
+        let phi0 = Dd::from_f64(ds0)
+            - Dd::from_f64(R) * Dd::from_f64(log_ratio(old_temperature, reference_temperature));
+        // Delta[m*(ln(rho/rho*)-1)], retaining its quadratic weak-change
+        // remainder and the finite zero-population limit. The last term is
+        // essential: expansion changes density without changing species mass.
+        let mixing = if rho0 == 0.0 {
+            m1 * Dd::from_f64(log_ratio(rho1, reference_density[k]) - 1.0)
+        } else {
+            delta * Dd::from_f64(log_ratio(rho0, reference_density[k]))
+                + v1 * relative_density_remainder(rho0, rho1)
+                - (v1 - v0) * Dd::from_f64(rho0)
+        };
+        change = change + delta * phi0 - Dd::from_f64(R) * mixing;
         entropy = entropy + change / Dd::from_f64(model.molar_mass().value());
     }
     scalar(entropy)?;

@@ -29,6 +29,7 @@ use crate::dynamics::{Boundaries, MAX_EULER_CELLS};
 use fs_qty::Time;
 
 mod coupled;
+mod entropy;
 mod step;
 
 /// Reversible adiabatic compact-volume changes with explicit boundary work.
@@ -215,7 +216,9 @@ struct NetworkWorkspace {
 /// Sources, canonical species order, caloric intervals, per-species energy gauges
 /// and accepted clocks must match exactly. Local composition and temperature may
 /// differ. Immutable branch access prevents separately advancing a network owner.
-/// Successful numerical steps reuse construction-time buffers without allocation.
+/// Native numerical steps reuse construction-time buffers without allocation.
+/// Optional entropy admission prepares two bounded temperature arrays per call;
+/// all retries reuse that account and the original numerical buffers.
 /// [`Self::step_with_reservoirs`] supplies prescribed pressure, temperature and
 /// composition at unconnected physical ends without depleting those sources.
 pub struct MixtureNetwork1d {
