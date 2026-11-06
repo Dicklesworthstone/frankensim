@@ -19,6 +19,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::convert::Infallible;
 use std::sync::Arc;
 
+use crate::iqn_ils::driver::CouplingMethod;
+use crate::iqn_ils::{IqnIls, IqnIlsError};
+
 use fs_exec::Cx;
 use fs_matdb::MaterialCard;
 use fs_material::SmallStrainLaw;
@@ -49,6 +52,8 @@ pub enum CreepCouplingError<E = Infallible> {
     Mechanical(CreepTetError),
     Thermal(DepositionError),
     Observer(E),
+    /// The shared interface accelerator refused its controls or arithmetic.
+    Accelerator(IqnIlsError),
     Cancelled,
     NotConverged {
         iterations: usize,
@@ -394,6 +399,33 @@ impl<'a, S: CreepSourceFamily<'a>> CreepSolid<'a, S> {
         config: CreepConfig,
         cx: &Cx<'_>,
     ) -> Result<CreepCandidate<'a, 't, O, S>, CreepCouplingError<O::Error>> {
+        self.advance_with_coupling(
+            thermal, observer, target_s, prescribed_m, nodal_forces_n, settings,
+            thermal_config, config, CouplingMethod::RelaxedPicard, cx,
+        )
+    }
+
+    /// Advance the original physical owners with an explicit interface method.
+    ///
+    /// IQN-ILS acts on the vector of specific caloric enthalpies in J/kg. Its
+    /// bounded history belongs to this interval only; it never advances creep,
+    /// plastic, thermal or observer history from a rejected trial. Extrapolated
+    /// values must pass the original caloric and material domains. Temperature,
+    /// per-cell heat, thermal energy and combined work gates remain independent.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_with_coupling<'t, O: DepositionObserver>(
+        &self,
+        thermal: &DepositionSimulation<'t>,
+        observer: &O,
+        target_s: f64,
+        prescribed_m: &[(usize, f64)],
+        nodal_forces_n: &[(usize, f64)],
+        settings: IncrementSettings,
+        thermal_config: StepConfig,
+        config: CreepConfig,
+        method: CouplingMethod,
+        cx: &Cx<'_>,
+    ) -> Result<CreepCandidate<'a, 't, O, S>, CreepCouplingError<O::Error>> {
         poll(cx)?;
         let duration_s = target_s - self.time_s;
         if thermal.time_s() != self.time_s
@@ -415,6 +447,13 @@ impl<'a, S: CreepSourceFamily<'a>> CreepSolid<'a, S> {
             ));
         }
         let mut enthalpies = self.enthalpies(thermal, true, cx)?;
+        let mut accelerator = match method {
+            CouplingMethod::RelaxedPicard => None,
+            CouplingMethod::IqnIls(controls) => Some(
+                IqnIls::new(enthalpies.len(), controls)
+                    .map_err(CreepCouplingError::Accelerator)?,
+            ),
+        };
         let mut defects = [f64::INFINITY; 4];
         for iteration in 1..=config.maximum_iterations {
             poll(cx)?;
@@ -464,13 +503,10 @@ impl<'a, S: CreepSourceFamily<'a>> CreepSolid<'a, S> {
             if temperature_defect > config.temperature_tolerance_k
                 && iteration < config.maximum_iterations
             {
-                for (h, end_h) in enthalpies.iter_mut().zip(final_h) {
-                    poll(cx)?;
-                    *h = finite(
-                        (1.0 - config.enthalpy_relaxation) * *h
-                            + config.enthalpy_relaxation * end_h,
-                    )?;
-                }
+                update_enthalpies(
+                    &mut enthalpies, &final_h, config.enthalpy_relaxation,
+                    &mut accelerator, cx,
+                )?;
                 continue;
             }
             let actual = self.mechanics(
@@ -549,11 +585,14 @@ impl<'a, S: CreepSourceFamily<'a>> CreepSolid<'a, S> {
                     report,
                 });
             }
-            for (h, end_h) in enthalpies.iter_mut().zip(final_h) {
-                *h = finite(
-                    (1.0 - config.enthalpy_relaxation) * *h + config.enthalpy_relaxation * end_h,
-                )?;
+            // An unevaluated update cannot improve the last physical report.
+            if iteration == config.maximum_iterations {
+                break;
             }
+            update_enthalpies(
+                &mut enthalpies, &final_h, config.enthalpy_relaxation,
+                &mut accelerator, cx,
+            )?;
         }
         poll(cx)?;
         Err(CreepCouplingError::NotConverged {
@@ -564,6 +603,31 @@ impl<'a, S: CreepSourceFamily<'a>> CreepSolid<'a, S> {
             combined_residual_j: defects[3],
         })
     }
+}
+
+// Both rejection paths must feed the same actual map evaluation to IQN-ILS.
+// This helper proposes enthalpy only; the caller owns physical admission.
+fn update_enthalpies<E>(
+    current: &mut Vec<f64>,
+    image: &[f64],
+    relaxation: f64,
+    accelerator: &mut Option<IqnIls>,
+    cx: &Cx<'_>,
+) -> Result<(), CreepCouplingError<E>> {
+    poll(cx)?;
+    if let Some(accelerator) = accelerator {
+        let step = accelerator
+            .step(current, image, relaxation)
+            .map_err(CreepCouplingError::Accelerator)?;
+        poll(cx)?;
+        *current = step.values;
+    } else {
+        for (h, &end_h) in current.iter_mut().zip(image) {
+            poll(cx)?;
+            *h = finite((1.0 - relaxation) * *h + relaxation * end_h)?;
+        }
+    }
+    poll(cx)
 }
 
 struct MechanicalProposal<L: CreepLaw> {

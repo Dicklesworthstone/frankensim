@@ -746,3 +746,127 @@ fn g4_feedback_observer_source_and_cancellation_refusals_preserve_all_accepted_s
         assert_eq!(solid.time_s(), 0.0);
     });
 }
+
+
+#[test]
+fn g1_iqn_creep_heating_reaches_the_independent_solution_within_a_small_work_budget() {
+    use fs_couple::iqn_ils::IqnIlsConfig;
+    use fs_couple::iqn_ils::driver::CouplingMethod;
+
+    with_cx(|cx| {
+        // Low finite heat capacity makes the actual Arrhenius rate feed back
+        // into the temperature. The oracle solves that physical equation.
+        let f = Fixture::new(0.1, RATE, 30_000.0);
+        let mut thermal = initial(&f, &[300.0], V, &[], false);
+        let mut solid = bind(&f, &thermal, &NODES, &TETS, cx);
+        let controls = CreepConfig { maximum_iterations: 8, ..config() };
+        let forces = [(3, STRESS * V / L)];
+        let (mut expected_temperature, mut expected_creep) = (300.0, 0.0);
+        for interval in 1..=2 {
+            let original_cells = thermal.cells().clone();
+            let original_solution = solid.solution().clone();
+            let target = interval as f64 * 0.5;
+            assert!(matches!(
+                solid.advance(
+                    &thermal, &(), target, &ROLLERS, &forces,
+                    IncrementSettings::default(), heat_config(0.05), controls, cx,
+                ),
+                Err(CreepCouplingError::NotConverged { iterations: 8, .. })
+            ));
+            let (temperature, increment) = reference(&f, expected_temperature, 0.5);
+            expected_temperature = temperature;
+            expected_creep += increment;
+            let candidate = solid.advance_with_coupling(
+                &thermal, &(), target, &ROLLERS, &forces,
+                IncrementSettings::default(), heat_config(0.05), controls,
+                CouplingMethod::IqnIls(IqnIlsConfig::default()), cx,
+            ).unwrap();
+            let report = candidate.report();
+            assert!(report.iterations <= controls.maximum_iterations);
+            assert!(report.temperature_defect_k <= controls.temperature_tolerance_k);
+            assert!(report.heat_defect_j <= controls.energy_tolerance_j);
+            assert!(report.thermal_residual_j.abs() <= controls.energy_tolerance_j);
+            assert!(report.combined_residual_j.abs() <= controls.energy_tolerance_j);
+            close(
+                candidate.thermal().temperature_k(CellId(0)).unwrap(),
+                expected_temperature, 2e-7,
+            );
+            close(
+                candidate.solid().solution().element_states[0].equivalent_creep_strain,
+                expected_creep, 2e-10,
+            );
+            close(
+                candidate.solid().solution().displacement_m[1][0],
+                L * (STRESS / E + expected_creep), 2e-12,
+            );
+            close(
+                report.thermal_audit.stored_energy_change_j,
+                STRESS * V * increment, 1e-10,
+            );
+            // Even successful proposals leave both accepted inputs untouched.
+            assert_eq!(thermal.cells(), &original_cells);
+            assert_eq!(solid.solution(), &original_solution);
+            assert_eq!(thermal.time_s(), (interval - 1) as f64 * 0.5);
+            assert_eq!(solid.time_s(), thermal.time_s());
+            (thermal, solid, _, _) = candidate.into_parts();
+        }
+    });
+}
+
+#[test]
+fn g4_iqn_creep_refusal_preserves_thermal_material_and_observer_history() {
+    use fs_couple::iqn_ils::{IqnIlsConfig, IqnIlsError};
+    use fs_couple::iqn_ils::driver::CouplingMethod;
+
+    let gate = CancelGate::new();
+    with_gate(&gate, |cx| {
+        let f = Fixture::new(5.0, RATE, 30_000.0);
+        let thermal = initial(&f, &[300.0], V, &[], true);
+        let solid = bind(&f, &thermal, &NODES, &TETS, cx);
+        let cells = thermal.cells().clone();
+        let solution = solid.solution().clone();
+        let forces = [(3, STRESS * V / L)];
+        let method = CouplingMethod::IqnIls(IqnIlsConfig::default());
+        let invalid = CouplingMethod::IqnIls(IqnIlsConfig {
+            max_history: 0, ..IqnIlsConfig::default()
+        });
+        assert!(matches!(
+            solid.advance_with_coupling(
+                &thermal, &(), 0.5, &ROLLERS, &forces,
+                IncrementSettings::default(), heat_config(0.05), config(), invalid, cx,
+            ),
+            Err(CreepCouplingError::Accelerator(IqnIlsError::InvalidHistoryLimit(0)))
+        ));
+        let mut observer = observer();
+        observer.fail_after = Some(2);
+        let original_observer = observer.clone();
+        assert!(matches!(
+            solid.advance_with_coupling(
+                &thermal, &observer, 0.5, &ROLLERS, &forces,
+                IncrementSettings::default(), heat_config(0.05), config(), method, cx,
+            ),
+            Err(CreepCouplingError::Observer(_))
+        ));
+        let exhausted = CreepConfig { maximum_iterations: 1, ..config() };
+        assert!(matches!(
+            solid.advance_with_coupling(
+                &thermal, &(), 0.5, &ROLLERS, &forces,
+                IncrementSettings::default(), heat_config(0.05), exhausted, method, cx,
+            ),
+            Err(CreepCouplingError::NotConverged { iterations: 1, .. })
+        ));
+        gate.request();
+        assert!(matches!(
+            solid.advance_with_coupling(
+                &thermal, &(), 0.5, &ROLLERS, &forces,
+                IncrementSettings::default(), heat_config(0.05), config(), method, cx,
+            ),
+            Err(CreepCouplingError::Cancelled)
+        ));
+        assert_eq!(thermal.cells(), &cells);
+        assert_eq!(solid.solution(), &solution);
+        assert_eq!(observer, original_observer);
+        assert_eq!(thermal.time_s(), 0.0);
+        assert_eq!(solid.time_s(), 0.0);
+    });
+}
