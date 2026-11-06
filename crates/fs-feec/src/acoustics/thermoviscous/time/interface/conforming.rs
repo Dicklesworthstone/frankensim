@@ -8,23 +8,7 @@
 //! heat term in the acoustic work ledger is theta*q, not the caloric flux q.
 use super::*;
 
-/// Original hierarchical P2 coordinates in a common physical ordering.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ConformingThermoviscousInterface {
-    /// Left and right global P2 DOF numbers: geometric vertices followed by
-    /// geometric edges. Edge bubbles are matched by their endpoint positions,
-    /// never by local node numbering or a midpoint-only coincidence test.
-    pub trace_dofs: [Vec<usize>; 2],
-    /// Indices into `trace_dofs[side]` carrying the active P2 test space.
-    /// With DOFs constrained to zero on BOTH sides, traction is represented
-    /// in that active space, modulo loads doing no work on the admissible
-    /// trace. Omitted coefficients do NOT assert zero physical stress.
-    /// A one-sided zero trace still constrains the free side.
-    pub traction_indices: Vec<usize>,
-    /// The analogous active P2 conductive-flux basis. Temperature is the
-    /// translational temperature; molecular reservoirs retain their own fields.
-    pub heat_flux_indices: Vec<usize>,
-}
+pub use super::super::super::interface::ConformingThermoviscousInterface;
 
 /// Same complete trajectory and original work owners as the normal connection.
 pub struct PreparedConformingThermoviscousTimePair<'p, 'a, 'c> {
@@ -105,7 +89,7 @@ impl<'a, 'c> PreparedThermoviscousTime<'a, 'c> {
             ));
         }
         let (layout, selected, columns, heat_flux_areas_m2) =
-            binding(regions, [left_faces, right_faces], cancelled)?;
+            binding(regions, [left_faces, right_faces], limits, cancelled)?;
         let inner = PreparedThermoviscousTimePair::prepare(
             regions,
             selected,
@@ -149,8 +133,12 @@ impl<'p, 'a, 'c> PreparedConformingThermoviscousTimePair<'p, 'a, 'c> {
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<ConformingThermoviscousTimePairStep, ThermoviscousTimeError> {
         self.step_with_volume_sources(
-            initial, external_traction_pa, wall_forces_n_per_sqrt_kg,
-            [&[]; 2], [&[]; 2], cancelled,
+            initial,
+            external_traction_pa,
+            wall_forces_n_per_sqrt_kg,
+            [&[]; 2],
+            [&[]; 2],
+            cancelled,
         )
     }
 
@@ -165,8 +153,12 @@ impl<'p, 'a, 'c> PreparedConformingThermoviscousTimePair<'p, 'a, 'c> {
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<ConformingThermoviscousTimePairStep, ThermoviscousTimeError> {
         let frame = self.inner.evaluate_with_volume_sources(
-            initial, external_traction_pa, wall_forces_n_per_sqrt_kg,
-            force_drive_n, heat_drive_w, cancelled,
+            initial,
+            external_traction_pa,
+            wall_forces_n_per_sqrt_kg,
+            force_drive_n,
+            heat_drive_w,
+            cancelled,
         )?;
         let nv = self.layout.traction_indices.len();
         let vectors = |reaction: &[f64]| {
@@ -209,111 +201,10 @@ impl<'p, 'a, 'c> PreparedConformingThermoviscousTimePair<'p, 'a, 'c> {
     }
 }
 
-type PointKey = [u64; 3];
-type DofKey = (u8, PointKey, PointKey);
-fn point_key(point: [f64; 3]) -> PointKey {
-    point.map(|x| {
-        if x == 0.0 {
-            0.0_f64.to_bits()
-        } else {
-            x.to_bits()
-        }
-    })
-}
-fn face_key(model: &ThermoviscousFe<'_>, face: [u32; 3]) -> FaceKey {
-    let mut key = face.map(|v| point_key(model.fe.positions()[v as usize]));
-    key.sort_unstable();
-    key
-}
-struct Surface {
-    faces: BTreeMap<FaceKey, ([f64; 3], f64)>,
-    dofs: BTreeMap<DofKey, usize>,
-    selected: Vec<usize>,
-}
-fn surface(
-    model: &ThermoviscousFe<'_>,
-    selected_faces: &[[u32; 3]],
-    cancelled: &mut impl FnMut() -> bool,
-) -> Result<Surface, ThermoviscousTimeError> {
-    if selected_faces.is_empty() || selected_faces.len() > model.space.complex.faces.len() {
-        return Err(invalid("nonempty original boundary interface required"));
-    }
-    let mut faces = BTreeMap::new();
-    let mut dofs = BTreeMap::new();
-    let mut insert = |key, global| -> Result<(), ThermoviscousTimeError> {
-        if dofs
-            .insert(key, global)
-            .is_some_and(|prior| prior != global)
-        {
-            return Err(invalid(
-                "coincident distinct original interface coordinates refused",
-            ));
-        }
-        Ok(())
-    };
-    for &face in selected_faces {
-        poll(cancelled)?;
-        let (_, normal, area) = model
-            .fe
-            .boundary_geometry(face)
-            .map_err(ThermoviscousError::from)?;
-        if model.wall_faces.contains(&canonical(face))
-            || faces
-                .insert(face_key(model, face), (normal, area))
-                .is_some()
-        {
-            return Err(invalid("unique original free interface faces required"));
-        }
-        for &v in &face {
-            let p = point_key(model.fe.positions()[v as usize]);
-            insert((0, p, p), v as usize)?;
-        }
-        for a in 0..3 {
-            for b in a + 1..3 {
-                let mut edge = [face[a], face[b]];
-                edge.sort_unstable();
-                let id = model
-                    .space
-                    .complex
-                    .edges
-                    .binary_search(&edge)
-                    .map_err(|_| invalid("original P2 interface edge required"))?;
-                let mut points = edge.map(|v| point_key(model.fe.positions()[v as usize]));
-                points.sort_unstable();
-                insert((1, points[0], points[1]), model.space.edge_off + id)?;
-            }
-        }
-    }
-    let mut selected = Vec::new();
-    for (mode, traces) in model.physical_modes.iter().enumerate() {
-        let overlaps = traces
-            .iter()
-            .filter(|trace| faces.contains_key(&trace.vertices))
-            .count();
-        if overlaps > 0 {
-            if overlaps != traces.len() {
-                return Err(invalid(
-                    "one pressure mode cannot straddle internal and external faces",
-                ));
-            }
-            selected.push(mode);
-        }
-    }
-    if selected.is_empty() {
-        return Err(invalid(
-            "original interface pressure-face ownership required",
-        ));
-    }
-    Ok(Surface {
-        faces,
-        dofs,
-        selected,
-    })
-}
-
 fn binding(
     regions: [&PreparedThermoviscousTime<'_, '_>; 2],
     faces: [&[[u32; 3]]; 2],
+    limits: ThermoviscousTimeLimits,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<
     (
@@ -324,155 +215,48 @@ fn binding(
     ),
     ThermoviscousTimeError,
 > {
-    let surfaces = [
-        surface(regions[0].model, faces[0], cancelled)?,
-        surface(regions[1].model, faces[1], cancelled)?,
-    ];
-    if surfaces[0].faces.keys().ne(surfaces[1].faces.keys())
-        || surfaces[0].dofs.keys().ne(surfaces[1].dofs.keys())
-    {
-        return Err(invalid(
-            "complete original P2 interface triangulations must match",
-        ));
-    }
-    for (key, &(normal, area)) in &surfaces[0].faces {
-        poll(cancelled)?;
-        let (other, other_area) = surfaces[1].faces[key];
-        let dot: f64 = normal.iter().zip(other).map(|(a, b)| a * b).sum();
-        if (dot + 1.0).abs() > 1e-12 || (area - other_area).abs() > 1e-12 * area {
-            return Err(invalid(
-                "opposite interface normals and equal original areas required",
-            ));
-        }
-    }
-    let trace_dofs: [Vec<_>; 2] =
-        std::array::from_fn(|s| surfaces[s].dofs.values().copied().collect());
-    let m = trace_dofs[0].len();
-    let sizes = regions.map(|region| region.system.state_dim());
+    let original = super::super::super::interface::trace::prepare(
+        regions.map(|source| source.model),
+        faces,
+        limits.max_states,
+        limits.preparation.max_dense_bytes,
+        cancelled,
+    )?;
+    let mechanical = 3 * original.layout.traction_indices.len();
+    let count = mechanical + original.layout.heat_flux_indices.len();
+    let sizes = regions.map(|source| source.system.state_dim());
     let starts = [0, sizes[0]];
     let n = sizes.iter().sum::<usize>();
-    for side in 0..2 {
-        if let Some(wall) = &regions[side].model.moving_wall {
-            for &dof in &trace_dofs[side] {
-                if wall
-                    .velocity_shapes
-                    .iter()
-                    .any(|shape| shape[dof].iter().any(|x| *x != 0.0))
-                {
-                    return Err(invalid(
-                        "moving structural and fluid interface traces require one kinematic owner",
-                    ));
-                }
-            }
-        }
-    }
-    let traction_indices: Vec<_> = (0..m)
-        .filter(|&i| (0..2).any(|s| regions[s].model.velocity_map[trace_dofs[s][i]].is_some()))
-        .collect();
-    let heat_flux_indices: Vec<_> = (0..m)
-        .filter(|&i| (0..2).any(|s| regions[s].model.temperature_map[trace_dofs[s][i]].is_some()))
-        .collect();
-    let mechanical = 3 * traction_indices.len();
-    let count = mechanical + heat_flux_indices.len();
-    if count == 0 || count > n {
-        return Err(invalid(
-            "nonzero complete original conforming trace rank required",
-        ));
-    }
-    // Reuse the ORIGINAL P2 surface quadrature. Compare the complete physical
-    // matrices under the geometry-derived permutation before sharing the left
-    // matrix. No fitted area, diagonal/lumped mass or reduced trace is used.
-    let mut mass = [vec![0.0; m * m], vec![0.0; m * m]];
-    for side in 0..2 {
-        let source = regions[side]
-            .model
-            .fe
-            .boundary_mass(faces[side])
-            .map_err(ThermoviscousError::from)?;
-        let indices: BTreeMap<_, _> = trace_dofs[side]
-            .iter()
-            .enumerate()
-            .map(|(i, &g)| (g, i))
-            .collect();
-        for (i, &global) in trace_dofs[side].iter().enumerate() {
-            poll(cancelled)?;
-            let (columns, values) = source.row(global);
-            for (&column, &value) in columns.iter().zip(values) {
-                if let Some(&j) = indices.get(&column) {
-                    mass[side][i * m + j] = value;
-                }
-            }
-        }
-    }
-    for (a, b) in mass[0].iter().zip(&mass[1]) {
-        if !a.is_finite()
-            || !b.is_finite()
-            || (a - b).abs() > 512.0 * f64::EPSILON * (a.abs() + b.abs())
-        {
-            return Err(invalid(
-                "original P2 physical surface mass must agree without truncation",
-            ));
-        }
-    }
     let mut loads = vec![0.0; n * count];
     for side in 0..2 {
         let source = regions[side];
-        let model = source.model;
         let size = sizes[side];
-        let sign = if side == 0 { 1.0 } else { -1.0 };
         let mut physical = vec![0.0; size * count];
-        for (i, &global) in trace_dofs[side].iter().enumerate() {
-            if let Some(v) = model.velocity_map[global] {
-                for c in 0..3 {
-                    let row = c * model.velocity_count + v;
-                    for (j, &trace) in traction_indices.iter().enumerate() {
-                        physical[row * count + c * traction_indices.len() + j] =
-                            sign * mass[0][i * m + trace] / source.scale[row];
-                    }
-                }
-            }
-            if let Some(t) = model.temperature_map[global] {
-                let row = model.temperature_start + t;
-                for (j, &trace) in heat_flux_indices.iter().enumerate() {
-                    // The original thermal equation and storage use theta=T'/T0;
-                    // its physical load is q, so NO extra T0 belongs here.
-                    physical[row * count + mechanical + j] =
-                        sign * mass[0][i * m + trace] / source.scale[row];
-                }
+        for row in 0..source.model.n {
+            poll(cancelled)?;
+            for column in 0..count {
+                physical[row * count + column] =
+                    original.loads[side][row * count + column] / source.scale[row];
             }
         }
         for row in 0..size {
             poll(cancelled)?;
-            for a in 0..count {
-                loads[(starts[side] + row) * count + a] = (0..size)
-                    .map(|k| source.inverse_mass[row * size + k] * physical[k * count + a])
+            for column in 0..count {
+                loads[(starts[side] + row) * count + column] = (0..size)
+                    .map(|k| source.inverse_mass[row * size + k] * physical[k * count + column])
                     .sum();
             }
         }
     }
-    let (areas, _) = regions[0]
-        .model
-        .fe
-        .boundary_load(faces[0])
-        .map_err(ThermoviscousError::from)?;
-    let heat_flux_areas_m2 = heat_flux_indices
-        .iter()
-        .map(|&i| areas[trace_dofs[0][i]])
-        .collect();
-    let selected = surfaces.map(|surface| surface.selected);
     Ok((
-        ConformingThermoviscousInterface {
-            trace_dofs,
-            traction_indices,
-            heat_flux_indices,
-        },
-        selected,
+        original.layout,
+        original.selected,
         InterfaceColumns {
             count,
             mechanical,
             loads,
         },
-        heat_flux_areas_m2,
+        original.heat_flux_areas_m2,
     ))
 }
 

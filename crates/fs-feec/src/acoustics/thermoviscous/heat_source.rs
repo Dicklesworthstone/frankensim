@@ -108,7 +108,7 @@ impl<'c> ThermoviscousFe<'c> {
 
 // The same physical RHS and source-work pairing serve traction and loaded
 // scattering solves. Port loads have no thermal entries.
-fn add_sources(
+pub(super) fn add_sources(
     model: &ThermoviscousFe<'_>,
     rhs: &mut [C64],
     wall_forces: &[C64],
@@ -147,7 +147,7 @@ fn add_sources(
     Ok(())
 }
 
-fn field_with_source_work(
+pub(super) fn field_with_source_work(
     prepared: &PreparedThermoviscous<'_, '_>,
     drive: &[C64],
     wall_forces: &[C64],

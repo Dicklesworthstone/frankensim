@@ -59,6 +59,8 @@ pub mod body_force;
 pub mod time;
 /// Local physical stresses and surface tractions on the original mixed fields.
 pub mod stress;
+/// Complete velocity/temperature continuity between original resolved regions.
+pub mod interface;
 
 /// Hard dense-solver cap, independent of the caller's smaller budget.
 pub const MAX_LNS_DOFS: usize = 1536;

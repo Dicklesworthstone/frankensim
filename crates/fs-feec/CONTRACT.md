@@ -1570,6 +1570,40 @@ cover the original constrained equations, transmission with complete caloric
 fields and independent work, time subdivision, and transactional refusals;
 their native FE execution remains unperformed in this environment.
 
+### Complete conforming resolved-fluid harmonic interface
+
+`PreparedThermoviscous::connect_conforming` couples the complete original P2
+Cartesian velocity and translational-temperature traces at one frequency.
+It shares geometric matching, original surface mass, active-coordinate selection
+and physical weak loads with the resolved time interface below. The original
+P1 pressure fields remain independent; balancing total vector traction carries
+both tangential shear components. Inward conductive flux is dual to `T'/T0`.
+
+Preparation builds and equilibrates one bounded interface Schur factor from
+the retained, physically corrected region LUs. It holds only one volume response
+column at a time. Subsequent independently phased pressure, structural-force,
+body-force and heat-source drives reuse those factors, including complex heat
+capacity and disjoint moving/conductive walls. Corrections check the original
+physical trace equations, with separate velocity and temperature scales that
+retain the free-field reference when a stationary constraint arrests a trace.
+
+Each returned region retains its original volume and wall loss quadrature.
+Signed mechanical and conductive interface work are reported separately and
+cancel across the pair; neither is dissipative heat. The external power balance
+excludes internal transfers. A failed continuity/work residual, cancellation,
+rank loss, overlapping moving trace, mismatched triangulation/equilibrium or
+exceeded trace/dense budget refuses the candidate. This is a fixed-geometry,
+conforming resolved-fluid connection; it supplies no mesh, mean-flow or material
+accuracy certificate.
+
+Four executed tests of the actual Schur module and original complex LU cover
+analytical impedances/work, independent primal vector/thermal solves over
+sixteen orders of trace-basis scaling, one-sided stationary constraints and
+cancellation/reuse. Native tetrahedral regressions additionally specify
+permuted geometry, different fluids, complex heat capacity, phased body/heat
+sources and original primal-coefficient identification; their full FE execution
+remains unperformed in this environment.
+
 ### Complete conforming resolved-fluid time interface
 
 `PreparedThermoviscousTime::connect_conforming` joins matching original boundary
