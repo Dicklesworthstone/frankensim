@@ -39,13 +39,17 @@ pub struct GasDiscreteGradientStep {
     pub final_volume_m3: f64,
     /// Whole-step heat into the gas [J].
     pub supplied_heat_j: f64,
-    /// Work out of the gas using the returned thermodynamic mean pressure [J].
+    /// Discrete pressure effort paired with the ACTUAL volume change [Pa].
+    /// Use this for work and momentum. For a nonideal gas it can differ from
+    /// the EOS pressure of the source-bearing sampling state.
+    pub work_pressure_pa: f64,
+    /// Work out of the gas, work_pressure_pa*(V1-V0) [J].
     pub work_by_gas_j: f64,
     /// Original-law m Delta u, independent of formation references [J].
     pub stored_energy_change_j: f64,
     /// Delta U + work - supplied heat [J].
     pub energy_residual_j: f64,
-    /// Original-law m (Delta s_cv + R ln(V1/V0)) [J/K].
+    /// Original-law entropy change at the two conserved states [J/K].
     pub entropy_change_j_k: f64,
     /// Supplied heat divided by the returned thermodynamic mean temperature.
     /// This is the gas-side entropy transfer, not the external bath's entropy.
@@ -55,7 +59,7 @@ pub struct GasDiscreteGradientStep {
     /// Delta U + work - theta Delta S [J].
     pub gibbs_residual_j: f64,
     /// d(p_bar)/d(V1), holding the old state and supplied heat fixed [Pa/m3].
-    /// Near-equal temperature moments use the bounded source quadrature above.
+    /// Near-coincident source moments use the implementing owner's bounded quadrature.
     pub pressure_final_volume_derivative_pa_m3: f64,
     /// d(p_bar)/d(Q), holding both volumes and the old state fixed [Pa/J].
     pub pressure_heat_derivative_pa_j: f64,
@@ -65,24 +69,26 @@ pub struct GasDiscreteGradientStep {
 
 /// An immutable trial; publish only after the complete coupled step accepts.
 #[derive(Clone, Debug, PartialEq)]
-pub struct GasDiscreteGradientCandidate {
-    endpoint: ClosedGasParcel,
-    thermodynamic_mean: ResolvedThermochemicalGasState,
-    step: GasDiscreteGradientStep,
+pub struct GasDiscreteGradientCandidate<P = ClosedGasParcel, S = ResolvedThermochemicalGasState> {
+    pub(crate) endpoint: P,
+    pub(crate) thermodynamic_mean: S,
+    pub(crate) step: GasDiscreteGradientStep,
 }
-impl GasDiscreteGradientCandidate {
+impl<P, S> GasDiscreteGradientCandidate<P, S> {
     #[must_use]
-    pub const fn endpoint(&self) -> &ClosedGasParcel { &self.endpoint }
-    /// Original material resolved at theta and logarithmic-mean volume.
-    /// Its pressure and temperature are the two discrete conjugate efforts.
+    pub const fn endpoint(&self) -> &P { &self.endpoint }
+    /// Original material resolved at the entropy-conjugate temperature.
+    /// Ideal gas uses logarithmic-mean volume; the PR implementation uses
+    /// arithmetic mean specific volume. The latter state's EOS pressure need
+    /// not be the discrete work effort: always use step().work_pressure_pa.
     #[must_use]
-    pub const fn thermodynamic_mean(&self) -> &ResolvedThermochemicalGasState {
+    pub const fn thermodynamic_mean(&self) -> &S {
         &self.thermodynamic_mean
     }
     #[must_use]
     pub const fn step(&self) -> &GasDiscreteGradientStep { &self.step }
     #[must_use]
-    pub fn into_parts(self) -> (ClosedGasParcel, GasDiscreteGradientStep) {
+    pub fn into_parts(self) -> (P, GasDiscreteGradientStep) {
         (self.endpoint, self.step)
     }
 }
@@ -350,10 +356,12 @@ impl ClosedGasParcel {
             return Err(invalid("discrete gas Gibbs, energy, entropy or sensitivity budget refused"));
         }
         poll(&mut cancelled)?;
+        let work_pressure_pa = mean.state().pressure;
         Ok(GasDiscreteGradientCandidate { endpoint, thermodynamic_mean: mean,
             step: GasDiscreteGradientStep {
                 initial_volume_m3: old.volume_m3, final_volume_m3: volume_m3,
-                supplied_heat_j: heat_j, work_by_gas_j: work, stored_energy_change_j: stored,
+                supplied_heat_j: heat_j, work_pressure_pa,
+                work_by_gas_j: work, stored_energy_change_j: stored,
                 energy_residual_j: energy_residual, entropy_change_j_k: entropy,
                 entropy_transfer_j_k: transferred, entropy_residual_j_k: entropy_residual,
                 gibbs_residual_j: gibbs_residual,

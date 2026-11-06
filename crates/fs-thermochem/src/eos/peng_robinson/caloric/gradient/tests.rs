@@ -161,3 +161,90 @@ fn rectangle_refuses_nonsmooth_alpha_crossing_even_with_admissible_endpoints() {
         [Temperature::new(300.0), Temperature::new(3000.0)],
     ).is_err());
 }
+
+#[test]
+fn mechanically_stable_rectangle_still_requires_positive_pressure_at_largest_volume() {
+    let model = methane();
+    let t = 150.0;
+    // Obtain b from the original native EOS rather than copying a model constant.
+    let b = at_volume(&model, t, 0.001).covolume_m3_per_mol();
+    let initial = at_volume(&model, t, 1.4 * b);
+    let final_density = Density::new(model.molar_mass().value() / (2.0 * b));
+    let reference = model
+        .prepare_density_caloric_change(initial.temperature(), initial.density(), final_density)
+        .unwrap();
+
+    // Recover this same state's attraction from its original pressure. On
+    // 1.4 <= v/b <= 2 the spinodal threshold decreases to f(2)=49/6,
+    // so alpha<f(2) admits mechanical stability on the COMPLETE interval.
+    let v0 = initial.molar_volume_m3_per_mol();
+    let d0 = v0 * v0 + 2.0 * b * v0 - b * b;
+    let attraction = (R * t / (v0 - b) - initial.pressure().value()) * d0;
+    let alpha = attraction / (R * t * b);
+    assert!(alpha > 8.1 && alpha < 49.0 / 6.0);
+    assert!(initial.pressure().value() > 0.0);
+    assert!(initial.pressure_derivatives().1 < 0.0);
+
+    // Despite that negative pressure slope everywhere, p crosses zero:
+    // about +15.57 MPa at 1.4b and -7.59 MPa at 2b.
+    let v1 = model.molar_mass().value() / final_density.value();
+    let d1 = v1 * v1 + 2.0 * b * v1 - b * b;
+    let final_pressure = R * t / (v1 - b) - attraction / d1;
+    let final_slope =
+        -R * t / ((v1 - b) * (v1 - b)) + attraction * (2.0 * v1 + 2.0 * b) / (d1 * d1);
+    assert!(final_pressure < -7.0e6);
+    assert!(final_slope < 0.0);
+    assert_eq!(
+        reference.admit_stable_rectangle([Temperature::new(t), Temperature::new(t)]),
+        Err(PengRobinsonErrorV1::Unrepresentable {
+            what: "rectangle cannot guarantee positive pressure",
+        }),
+    );
+}
+
+#[test]
+fn negative_residual_cv_uses_the_cold_dense_corner_without_rejecting_the_rectangle() {
+    let model = PengRobinsonMixtureV1::new(
+        vec![PengRobinsonComponentV1 {
+            critical_temperature: Temperature::new(5.1953),
+            critical_pressure: Pressure::new(227460.0),
+            acentric_factor: -0.385,
+            molar_mass: MolarMass::new(0.004002602),
+        }],
+        vec![1.0],
+        vec![],
+    )
+    .unwrap();
+    let reference = model
+        .prepare_density_caloric_change(
+            Temperature::new(300.0),
+            Density::new(1.0),
+            Density::new(50.0),
+        )
+        .unwrap();
+    let bound = reference
+        .admit_stable_rectangle([Temperature::new(300.0), Temperature::new(500.0)])
+        .unwrap();
+    let cold_dense_cv = model
+        .evaluate_density_caloric(Temperature::new(300.0), Density::new(50.0))
+        .unwrap()
+        .residual_cv_j_mol_k();
+    // Here kappa=-0.259138992 and B<0. The minimum switches to the
+    // LOW-temperature, HIGH-density corner; residual Cv need not be positive.
+    assert!(bound < 0.0 && bound <= cold_dense_cv);
+    assert!((cold_dense_cv + 0.09778055534009236).abs() < 1e-12);
+    assert!((bound - cold_dense_cv).abs() < 1e-12);
+    // An explicitly supplied positive ideal Cv still admits total calorics.
+    assert!(1.5 * R + bound > 0.0);
+    for t in [300.0, 350.0, 400.0, 450.0, 500.0] {
+        for rho in [1.0, 10.0, 20.0, 35.0, 50.0] {
+            let state = model
+                .evaluate_density_caloric(Temperature::new(t), Density::new(rho))
+                .unwrap();
+            assert!(state.residual_cv_j_mol_k() < 0.0);
+            assert!(state.residual_cv_j_mol_k() >= bound);
+            assert!(state.pressure().value() > 0.0);
+            assert!(state.pressure_derivatives().1 < 0.0);
+        }
+    }
+}

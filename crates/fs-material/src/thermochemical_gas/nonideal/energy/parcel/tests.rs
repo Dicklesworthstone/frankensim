@@ -13,6 +13,7 @@ use fs_thermochem::{Composition, CompositionBasis, SpeciesId};
 
 mod volume;
 mod midpoint;
+mod discrete_gradient;
 
 fn bound(source: ThermochemicalGasModel) -> ThermochemicalPengRobinsonModel {
     ThermochemicalPengRobinsonModel::new(

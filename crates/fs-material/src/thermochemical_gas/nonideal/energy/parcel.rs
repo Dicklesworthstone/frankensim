@@ -11,6 +11,8 @@ mod volume;
 
 /// Simultaneous heat and volume updates with source-backed midpoint pressure work.
 pub mod midpoint;
+/// Entropy-compatible finite heat and volume work on the original PR/NASA source.
+pub mod discrete_gradient;
 /// Conservative species/enthalpy transfer between compatible original PR sources.
 pub mod transfer;
 
