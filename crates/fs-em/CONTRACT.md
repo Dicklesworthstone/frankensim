@@ -4880,3 +4880,19 @@ and cancellation. This is a fixed-geometry, fixed-material-state local
 derivative. It does not supply finite-amplitude circuit evolution,
 frequency-dependent impedance, hysteresis, propagated source uncertainty or
 a spatial-discretization certificate.
+
+## Photoionization state in existing electrical consumers
+
+The `ionization_feedback` integration regression also specifies illumination
+of a gas with exactly zero initial free electrons, using the published H I
+bound-free source and the photon-conserving `fs-gas` column update. The returned
+original thermochemical state supplies the existing momentum-relaxation,
+DC conductivity, harmonic carrier response and FEEC conduction owners.
+Independent Drude current and electrical-work/heat accounts use the actual
+photo-created carrier populations. A subsequent electron-impact interval uses
+the same atom/ion/electron channel and retains the absorbed photon energy in
+the original gas energy account.
+
+These are sequentially declared illumination, field evaluation and collision
+intervals. The regression does not assert a simultaneous radiation/field/
+chemistry integrator or attach an arbitrary conductivity to illumination.

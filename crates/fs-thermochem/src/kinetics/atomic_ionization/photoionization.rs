@@ -13,14 +13,17 @@
 //! secondary ionization, stimulated recombination and transport are not supplied.
 //! A thermal consumer must explicitly assume photoelectron thermalization.
 //!
-//! The tabulated source, interpolation and finite energy interval remain
-//! explicit; no hydrogen fit, high-energy tail or spectral quadrature is
-//! invented. Published atomic photoionization sources include Verner et al.,
-//! ApJ 465, 487 (1996), <https://arxiv.org/abs/astro-ph/9601009>.
+//! Source tables retain their interpolation and finite energy interval. The
+//! optional hydrogen preset directly evaluates the published Verner et al.
+//! fit (1996), <https://arxiv.org/abs/astro-ph/9601009>, within its original
+//! range; no high-energy continuation or spectral quadrature is inferred.
 
 use super::AtomicIonizationV1;
-use crate::electron_collision::{AVOGADRO_PER_MOL, MAX_CROSS_SECTION_POINTS_V1};
+use crate::electron_collision::{
+    AVOGADRO_PER_MOL, ELECTRON_MASS_KG, ELECTRONVOLT_J, MAX_CROSS_SECTION_POINTS_V1,
+};
 use fs_matdb::Provenance;
+use fs_math::det::{exp, ln, sqrt};
 use fs_qty::{Area, Energy};
 
 /// Maximum discrete photon groups in one local evaluation.
@@ -54,7 +57,7 @@ pub struct PhotonNumberFluxV1 {
 pub enum PhotoionizationErrorV1 {
     /// Invalid physical data, provenance or bounded source size.
     Invalid(&'static str),
-    /// Photon energy exceeds the last original source sample.
+    /// Photon energy exceeds the source's declared upper limit.
     OutsideEnergyDomain,
     /// A nonnegative rate or energy moment is outside binary64 range.
     Arithmetic(&'static str),
@@ -68,12 +71,18 @@ impl core::fmt::Display for PhotoionizationErrorV1 {
 }
 impl std::error::Error for PhotoionizationErrorV1 {}
 
+#[derive(Clone, Debug, PartialEq)]
+enum PhotoionizationLaw {
+    Table(std::sync::Arc<[PhotoionizationCrossSectionPointV1]>),
+    HydrogenVerner,
+}
+
 /// Immutable photon source on the original validated atomic species bank.
 #[derive(Clone, Debug, PartialEq)]
 pub struct AtomicPhotoionizationV1 {
     channel: AtomicIonizationV1,
     provenance: Provenance,
-    points: std::sync::Arc<[PhotoionizationCrossSectionPointV1]>,
+    law: PhotoionizationLaw,
     threshold: Energy,
 }
 impl AtomicPhotoionizationV1 {
@@ -124,8 +133,70 @@ impl AtomicPhotoionizationV1 {
         Ok(Self {
             channel,
             provenance,
-            points: points.into(),
+            law: PhotoionizationLaw::Table(points.into()),
             threshold: Energy::new(first.max(gap)),
+        })
+    }
+
+    /// Published Verner et al. (1996) H I ground-state fit, Table 1 / Eq.(1).
+    ///
+    /// Original support is 13.60..=50000 eV. The rounded 13.60 eV onset is
+    /// retained; it does not replace the original source gap in energy accounts.
+    /// The gap must lie within the table's 0.005 eV rounding allowance below
+    /// that onset. Source charges, the H elemental row, electronic weights
+    /// (2,1), and proton/atom masses are checked without reading species names.
+    /// The 1e-3 relative mass allowance is an identity-admission policy, not
+    /// fit uncertainty or an isotope correction; D/T masses do not qualify.
+    ///
+    /// Parameters: E0=0.4298 eV, sigma0=54750 Mb, ya=32.88, P=2.963,
+    /// yw=y0=y1=0; 1 Mb=1e-22 m². Sources:
+    /// <https://www.pa.uky.edu/~verner/dima/photo/photo.dat>,
+    /// <https://arxiv.org/abs/astro-ph/9601009>.
+    /// This is a nonrelativistic fitted cross section, not an exact hydrogen
+    /// wavefunction calculation or a certified physical-error bound.
+    pub fn verner_hydrogen(
+        channel: AtomicIonizationV1,
+    ) -> Result<Self, PhotoionizationErrorV1> {
+        let bank = channel.thermodynamics();
+        let matrix = bank.elemental_matrix();
+        let h = matrix.elements().iter().position(|element| element.as_str() == "H")
+            .ok_or(PhotoionizationErrorV1::Invalid("Verner H I requires the H elemental row"))?;
+        let indices = [channel.neutral_index(), channel.ion_index(), channel.electron_index()];
+        let weights = channel.statistical_weights();
+        if matrix.get(h, indices[0]) != Some(1)
+            || matrix.get(h, indices[1]) != Some(1)
+            || matrix.get(h, indices[2]) != Some(0)
+            || indices.map(|i| bank.charge_vector().get(i)) != [Some(0), Some(1), Some(-1)]
+            || weights.neutral != 2
+            || weights.ion != 1
+        {
+            return Err(PhotoionizationErrorV1::Invalid("Verner H I ground-state identities"));
+        }
+        // CODATA 2022; the electron mass is the shared collision constant.
+        // https://physics.nist.gov/cuu/pdf/wall_2022.pdf
+        const PROTON_MASS_KG: f64 = 1.672_621_925_95e-27;
+        for (i, expected) in indices.into_iter().zip([
+            PROTON_MASS_KG + ELECTRON_MASS_KG, PROTON_MASS_KG, ELECTRON_MASS_KG,
+        ]) {
+            let mass = bank.models()[i].molar_mass().value() / AVOGADRO_PER_MOL;
+            if (mass / expected - 1.0).abs() > 1e-3 {
+                return Err(PhotoionizationErrorV1::Invalid("Verner H I source masses"));
+            }
+        }
+        let gap = channel.ionization_energy_j_mol() / AVOGADRO_PER_MOL;
+        let edge = 13.60 * ELECTRONVOLT_J;
+        if gap < 13.595 * ELECTRONVOLT_J || gap - edge > 64.0 * f64::EPSILON * edge {
+            return Err(PhotoionizationErrorV1::Invalid("Verner H I source ionization gap"));
+        }
+        Ok(Self {
+            channel,
+            provenance: Provenance {
+                source: "Verner, Ferland, Korista & Yakovlev (1996), ApJ 465, 487, Eq.(1), Table 1 H I; https://www.pa.uky.edu/~verner/dima/photo/photo.dat; https://doi.org/10.1086/177435".into(),
+                license: "Published numerical fit parameters; independently implemented equation".into(),
+                artifact: None,
+            },
+            law: PhotoionizationLaw::HydrogenVerner,
+            threshold: Energy::new(edge.max(gap)),
         })
     }
 
@@ -143,14 +214,21 @@ impl AtomicPhotoionizationV1 {
     }
     /// Last supported original source energy [J].
     pub fn maximum_energy(&self) -> Energy {
-        self.points[self.points.len() - 1].photon_energy
+        match &self.law {
+            PhotoionizationLaw::Table(points) => points[points.len() - 1].photon_energy,
+            PhotoionizationLaw::HydrogenVerner => Energy::new(50_000.0 * ELECTRONVOLT_J),
+        }
     }
-    /// Unmodified original interpolation samples.
-    pub fn points(&self) -> &[PhotoionizationCrossSectionPointV1] {
-        &self.points
+    /// Unmodified original samples; absent for the analytic hydrogen fit.
+    pub fn points(&self) -> Option<&[PhotoionizationCrossSectionPointV1]> {
+        match &self.law {
+            PhotoionizationLaw::Table(points) => Some(points.as_ref()),
+            PhotoionizationLaw::HydrogenVerner => None,
+        }
     }
 
-    /// Allocation-free O(log(samples)) evaluation with no upper extrapolation.
+    /// Allocation-free evaluation: O(log(samples)) for tables, O(1) for the fit.
+    /// No source law permits upper extrapolation.
     pub fn cross_section(&self, energy: Energy) -> Result<Area, PhotoionizationErrorV1> {
         let e = energy.value();
         if !nonnegative(e) {
@@ -164,25 +242,37 @@ impl AtomicPhotoionizationV1 {
         if e < self.threshold.value() {
             return Ok(Area::new(0.0));
         }
-        let upper = self.points.partition_point(|p| p.photon_energy.value() < e);
-        if self.points[upper].photon_energy.value() == e {
-            return Ok(self.points[upper].cross_section);
-        }
-        let left = self.points[upper - 1];
-        let right = self.points[upper];
-        let fraction = (e - left.photon_energy.value())
-            / (right.photon_energy.value() - left.photon_energy.value());
-        let a = left.cross_section.value();
-        let b = right.cross_section.value();
-        // Preserve nonnegativity and avoid cancellation on decreasing edges.
-        let sigma = if a <= b {
-            a + fraction * (b - a)
-        } else {
-            b + (1.0 - fraction) * (a - b)
+        let sigma = match &self.law {
+            PhotoionizationLaw::HydrogenVerner => {
+                // H I has yw=y0=y1=0, hence y=x. Square and SI conversion
+                // remain ordinary arithmetic; powers use deterministic ln/exp.
+                let x = (e / ELECTRONVOLT_J) / 0.4298;
+                let exponent = (0.5 * 2.963 - 5.5) * ln(x)
+                    - 2.963 * ln(1.0 + sqrt(x / 32.88));
+                (54_750.0 * 1e-22) * (x - 1.0) * (x - 1.0) * exp(exponent)
+            }
+            PhotoionizationLaw::Table(points) => {
+                let upper = points.partition_point(|p| p.photon_energy.value() < e);
+                if points[upper].photon_energy.value() == e {
+                    return Ok(points[upper].cross_section);
+                }
+                let left = points[upper - 1];
+                let right = points[upper];
+                let fraction = (e - left.photon_energy.value())
+                    / (right.photon_energy.value() - left.photon_energy.value());
+                let a = left.cross_section.value();
+                let b = right.cross_section.value();
+                // Avoid cancellation on decreasing edges.
+                if a <= b {
+                    a + fraction * (b - a)
+                } else {
+                    b + (1.0 - fraction) * (a - b)
+                }
+            }
         };
         if !nonnegative(sigma) {
             return Err(PhotoionizationErrorV1::Arithmetic(
-                "interpolated photon cross section",
+                "photon cross section",
             ));
         }
         Ok(Area::new(sigma))

@@ -184,3 +184,94 @@ fn g1_two_temperature_atomic_ionization_changes_current_and_closes_electrical_wo
         .resistance_ohm();
     assert!(resistance_after < resistance_before);
 }
+
+#[test]
+fn g1_photons_seed_a_neutral_gas_and_feed_existing_current_and_impact_owners() {
+    use fs_gas::chemistry::photoionization::{
+        PhotoionizationControls, PhotoionizationExposure, advance_monochromatic_photoionization,
+    };
+    use fs_qty::{Area, Energy};
+    use fs_thermochem::kinetics::atomic_ionization::photoionization::{
+        AtomicPhotoionizationV1, PhotonNumberFluxV1,
+    };
+
+    let initial = fixture::frozen_state(0.0, 6000.0, 16000.0, 0.2);
+    let channel = AtomicIonizationV1::new(
+        initial.thermodynamics().clone(),
+        ReactionId::new("photo-seeded-hydrogen-impact").unwrap(),
+        fixture::id("H+"),
+        ElectronImpactRateV1::new(
+            fixture::id("e-"), nist::hydrogen(fixture::id("H")),
+            MaxwellianRateControlsV1 { relative_tolerance: 1e-10, maximum_subdivisions: 4096 },
+            0.1,
+        ).unwrap(),
+        AtomicStatisticalWeightsV1 { neutral: 2, ion: 1 },
+        1e-12,
+    ).unwrap();
+    let photon_source = AtomicPhotoionizationV1::verner_hydrogen(channel.clone()).unwrap();
+    let photo = advance_monochromatic_photoionization(
+        &initial, &photon_source,
+        PhotoionizationExposure {
+            beam: PhotonNumberFluxV1 {
+                photon_energy: Energy::new(16.0 * fixture::E),
+                number_flux_per_m2_s: 1e-3 * fixture::NA / 1e-7,
+            },
+            illuminated_area: Area::new(1.0), duration: Time::new(1e-7),
+        },
+        PhotoionizationControls { relative_charge_tolerance: 1e-12, energy_tolerance_j: 1e-7 },
+        || false,
+    ).unwrap();
+    let seeded = photo.state();
+    assert!(seeded.amounts()[2].value() > 0.0);
+    fixture::relative(seeded.amounts()[2].value(), 1e-3, 1e-12);
+    assert_eq!(seeded.amounts()[1], seeded.amounts()[2]);
+    assert!(photo.balance().absorbed_photons <= photo.balance().incident_photons * (1.0 + 1e-14));
+    assert_eq!(seeded.thermodynamics(), initial.thermodynamics());
+
+    // Original transport sources are evaluated at the actual new composition
+    // and temperatures; no arbitrary conductivity is attached to illumination.
+    let conductor = material(seeded);
+    assert_eq!(conductor.state().amounts(), seeded.amounts());
+    let sigma = conductor.conductivity_s_m();
+    assert!(sigma > 0.0);
+    {
+        use fs_math::c64::C64;
+        let omega = 1e12;
+        let transport = conductor.prepare_harmonic(|| false).unwrap();
+        let response = transport.response(
+            omega, [C64::from_re(0.001), C64::ZERO, C64::ZERO], || false,
+        ).unwrap();
+        let expected = conductor.carriers().iter().fold(C64::ZERO, |sum, carrier| {
+            let q = carrier.charge_number() as f64 * fixture::E;
+            sum + C64::from_re(carrier.number_density_per_m3() * q * q / carrier.mass_kg())
+                / C64::new(carrier.relaxation().rate_per_s(), omega)
+        });
+        assert!((response.conductivity_s_m - expected).abs() <= 3e-12 * expected.abs());
+        fixture::relative(response.mean_electrical_power_w_m3,
+            response.mean_heating_w_m3.total_power_density_w_m3(), 3e-12);
+    }
+    let operator = PlanarConduction::new(
+        layered(0.5, 1.0, 0.2), vec![conductor; 4], limits(), &mut || false,
+    ).unwrap();
+    let field = operator.solve(&ends(2.0), field_controls(), &mut || false).unwrap();
+    fixture::relative(field.current_density_a_m2()[0][0], -2.0 * sigma, 1e-12);
+    fixture::relative(field.power_w(), 0.8 * sigma, 1e-12);
+
+    // A subsequent collision-only interval consumes the photo-created
+    // electrons through the existing channel, with no artificial seed or LTE reset.
+    let mut controls = AtomicIonizationSolve::new(
+        Temperature::new(2000.0), Temperature::new(20000.0),
+    );
+    controls.relative_tolerance = 1e-7;
+    controls.energy_tolerance_j = 1e-8;
+    controls.initial_step_s = 1e-12;
+    controls.maximum_step_s = 1e-11;
+    let reacted = advance_atomic_ionization(
+        seeded, &channel, Power::new(0.0), Power::new(0.0), Time::new(1e-11),
+        controls, || false,
+    ).unwrap();
+    assert!(reacted.reaction_extent().value() > 0.0);
+    assert_eq!(reacted.state().amounts()[1], reacted.state().amounts()[2]);
+    let total_gain = reacted.state().internal_energy().value() - initial.internal_energy().value();
+    assert!((total_gain - photo.balance().absorbed_energy_j).abs() < 2e-7);
+}

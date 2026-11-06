@@ -3445,3 +3445,21 @@ ionization event per absorbed photon and stationary heavy targets; it does not
 infer excited-state, multielectron, recoil, secondary-ionization or nonthermal
 photoelectron behavior. Focused tests specify edge/support refusal, independent
 event/energy moments and in-loop cancellation.
+
+### Published H I photoionization fit
+
+`AtomicPhotoionizationV1::verner_hydrogen` supplies the Verner, Ferland,
+Korista and Yakovlev (1996, ApJ 465, 487) ground-state H I analytic fit using
+the published H I parameters and megabarn-to-SI conversion. Its published
+13.60 eV onset and 50000 eV upper support remain distinct from the original
+thermochemical gap used in every energy account. Structural hydrogen,
+ground-state weights, mass and gap compatibility are checked before admission;
+species display names do not select the law.
+
+The fit evaluates without allocating or tabulating an invented interpolation
+grid. Original caller tables remain available, and `points()` distinguishes
+actual interpolation samples from the analytic source. This single bound-free
+event fit does not supply total opacity, excited levels, secondary electron
+cascades or relativistic/thermal validity for a gas consumer. Published source:
+<https://www.pa.uky.edu/~verner/photo.html> and
+<https://arxiv.org/abs/astro-ph/9601009>.
