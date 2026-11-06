@@ -15,6 +15,10 @@
 //! Geometry, normal loading, unequal static/kinetic history and heat partition
 //! remain with their physical owners.
 
+/// Distinct static/kinetic bounds with explicit coupled mode admissibility.
+#[path = "relaxation/stiction.rs"]
+pub mod stiction;
+
 use super::{
     CoupledFrictionImpulseControls, CoupledFrictionImpulseError, CoupledFrictionImpulseInput,
     Factor, MAX_FRICTION_IMPULSE_PORTS, Vector, normalized, positive,
@@ -98,6 +102,10 @@ pub struct CoupledFrictionFlowReport {
     pub displacement_m: Vector,
     /// Integral of the absolute port velocity, including every reversal [m].
     pub distance_m: Vector,
+    /// Smallest absolute speed on the whole affine path, including every stop [m/s].
+    pub minimum_speed_m_s: Vector,
+    /// Largest absolute speed on the whole affine path, including internal events [m/s].
+    pub maximum_speed_m_s: Vector,
     /// Nonpositive continuous friction work, separately integrated per port [J].
     pub friction_work_j: Vector,
     /// Signed continuous source work, separately integrated per port [J].
@@ -171,12 +179,63 @@ impl std::error::Error for CoupledFrictionFlowError {}
 /// physical budgets refuse without changing borrowed input or returning a
 /// partial path. Success retains actual original-matrix endpoint and kinetic
 /// audits, including numerical resting/event residuals.
-#[allow(clippy::too_many_lines)]
 pub fn advance_coupled_friction(
     input: &CoupledFrictionFlowInput<'_>,
     controls: CoupledFrictionFlowControls,
-    mut cancelled: impl FnMut() -> bool,
+    cancelled: impl FnMut() -> bool,
 ) -> Result<CoupledFrictionFlowReport, CoupledFrictionFlowError> {
+    advance_with_law(input, controls, &mut EqualBounds, cancelled)
+}
+
+// One event/path owner for both physical force laws. The equal-bound branch
+// retains its original acceleration selection and all arithmetic unchanged.
+struct PhaseForces {
+    friction: Vector,
+    // None selects the original equal-bound projection rule. Some declares the
+    // already resolved resting coordinates; their actual residual is still gated.
+    holding_mask: Option<u32>,
+}
+trait PhaseLaw {
+    type Error: From<CoupledFrictionFlowError> + From<CoupledFrictionImpulseError>;
+    #[allow(clippy::too_many_arguments)]
+    fn resolve<C: FnMut() -> bool>(
+        &mut self,
+        input: &CoupledFrictionFlowInput<'_>,
+        controls: CoupledFrictionFlowControls,
+        velocity: &Accurate,
+        scales: &Vector,
+        remaining: Dd,
+        sums: &mut Path,
+        cancelled: &mut C,
+    ) -> Result<PhaseForces, Self::Error>;
+}
+struct EqualBounds;
+impl PhaseLaw for EqualBounds {
+    type Error = CoupledFrictionFlowError;
+    fn resolve<C: FnMut() -> bool>(
+        &mut self,
+        input: &CoupledFrictionFlowInput<'_>,
+        controls: CoupledFrictionFlowControls,
+        velocity: &Accurate,
+        _scales: &Vector,
+        remaining: Dd,
+        sums: &mut Path,
+        cancelled: &mut C,
+    ) -> Result<PhaseForces, Self::Error> {
+        Ok(PhaseForces {
+            friction: forces(input, controls, velocity, remaining, sums, cancelled)?,
+            holding_mask: None,
+        })
+    }
+}
+
+#[allow(clippy::too_many_lines)]
+fn advance_with_law<L: PhaseLaw>(
+    input: &CoupledFrictionFlowInput<'_>,
+    controls: CoupledFrictionFlowControls,
+    law: &mut L,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<CoupledFrictionFlowReport, L::Error> {
     poll(&mut cancelled)?;
     controls.validate()?;
     let n = input.velocity_before_m_s.len();
@@ -187,9 +246,7 @@ pub fn advance_coupled_friction(
         || !input.duration_s.is_finite()
         || input.duration_s < 0.0
     {
-        return Err(CoupledFrictionFlowError::Invalid(
-            "flow dimensions or duration",
-        ));
+        return Err((CoupledFrictionFlowError::Invalid("flow dimensions or duration")).into());
     }
     let mut scales = [0.0; MAX_FRICTION_IMPULSE_PORTS];
     let mut velocity = [Dd::ZERO; MAX_FRICTION_IMPULSE_PORTS];
@@ -201,7 +258,7 @@ pub fn advance_coupled_friction(
             || input.capacity_n[i] < 0.0
             || !positive(input.mobility_per_kg[i * n + i])
         {
-            return Err(CoupledFrictionFlowError::Invalid("flow port data"));
+            return Err((CoupledFrictionFlowError::Invalid("flow port data")).into());
         }
         scales[i] = input.mobility_per_kg[i * n + i].sqrt();
         velocity[i] = Dd::from_f64(input.velocity_before_m_s[i]);
@@ -213,7 +270,7 @@ pub fn advance_coupled_friction(
             let a = normalized(input.mobility_per_kg[i * n + j], scales[i], scales[j])?;
             let b = normalized(input.mobility_per_kg[j * n + i], scales[j], scales[i])?;
             if (a - b).abs() > controls.projection.relative_matrix_tolerance {
-                return Err(CoupledFrictionFlowError::Invalid("mobility symmetry"));
+                return Err((CoupledFrictionFlowError::Invalid("mobility symmetry")).into());
             }
         }
     }
@@ -227,30 +284,53 @@ pub fn advance_coupled_friction(
     let mut factor = Factor::empty();
     factor.prepare(&original, &scales, all, controls.projection, &mut cancelled)?;
     let mut sums = Path::new(n);
+    for i in 0..n {
+        sums.minimum_speed[i] = input.velocity_before_m_s[i].abs();
+        sums.maximum_speed[i] = input.velocity_before_m_s[i].abs();
+    }
     let duration = Dd::from_f64(input.duration_s);
     let mut elapsed = Dd::ZERO;
     while n != 0 && elapsed.lt(duration) {
         poll(&mut cancelled)?;
         if sums.segments == controls.maximum_segments {
-            return Err(CoupledFrictionFlowError::SegmentLimit {
+            return Err((CoupledFrictionFlowError::SegmentLimit {
                 segments: sums.segments,
                 elapsed_s: elapsed.to_f64(),
-            });
+            })
+            .into());
         }
         let remaining = checked(duration - elapsed, "remaining time")?;
-        let force = forces(
+        let phase = law.resolve(
             input,
             controls,
             &velocity,
+            &scales,
             remaining,
             &mut sums,
             &mut cancelled,
         )?;
+        let force = phase.friction;
         let mut acceleration = [Dd::ZERO; MAX_FRICTION_IMPULSE_PORTS];
         for i in 0..n {
             poll(&mut cancelled)?;
             let raw = response_row(input, i, &force)?;
-            acceleration[i] = if velocity[i] == Dd::ZERO && input.capacity_n[i] != 0.0 {
+            acceleration[i] = if phase
+                .holding_mask
+                .is_some_and(|mask| mask & (1_u32 << i) != 0)
+            {
+                if velocity[i] != Dd::ZERO
+                    || raw.abs().to_f64() > controls.acceleration_tolerance_m_s2
+                {
+                    return Err(CoupledFrictionFlowError::Unresolved(
+                        "declared resting force balance",
+                    )
+                    .into());
+                }
+                Dd::ZERO
+            } else if phase.holding_mask.is_none()
+                && velocity[i] == Dd::ZERO
+                && input.capacity_n[i] != 0.0
+            {
                 // Rest is an original state or an isolated mathematical event.
                 // The interior force face imposes zero acceleration, with its
                 // actual original force-balance error retained by final audits.
@@ -262,9 +342,9 @@ pub fn advance_coupled_friction(
                 } else if raw.abs().to_f64() <= controls.acceleration_tolerance_m_s2 {
                     Dd::ZERO
                 } else {
-                    return Err(CoupledFrictionFlowError::Unresolved(
-                        "resting force balance",
-                    ));
+                    return Err(
+                        (CoupledFrictionFlowError::Unresolved("resting force balance")).into(),
+                    );
                 }
             } else {
                 raw
@@ -287,9 +367,9 @@ pub fn advance_coupled_friction(
             }
             let crossing = checked(-velocity[i] / acceleration[i], "stopping time")?;
             if crossing.to_f64() <= 0.0 {
-                return Err(CoupledFrictionFlowError::Unresolved(
-                    "representable stopping time",
-                ));
+                return Err(
+                    (CoupledFrictionFlowError::Unresolved("representable stopping time")).into(),
+                );
             }
             if crossing.lt(step) {
                 step = crossing;
@@ -304,18 +384,16 @@ pub fn advance_coupled_friction(
             checked(elapsed + step, "elapsed time")?
         };
         if step.to_f64() <= 0.0 || !elapsed.lt(next_time) || duration.lt(next_time) {
-            return Err(CoupledFrictionFlowError::Unresolved(
-                "physical time progress",
-            ));
+            return Err((CoupledFrictionFlowError::Unresolved("physical time progress")).into());
         }
         for i in 0..n {
             poll(&mut cancelled)?;
             let raw_after = checked(velocity[i] + acceleration[i] * step, "segment velocity")?;
             let after = if stopping & (1_u32 << i) != 0 {
                 if raw_after.abs().to_f64() > controls.projection.velocity_tolerance_m_s {
-                    return Err(CoupledFrictionFlowError::Unresolved(
-                        "stopping event residual",
-                    ));
+                    return Err(
+                        (CoupledFrictionFlowError::Unresolved("stopping event residual")).into(),
+                    );
                 }
                 Dd::ZERO
             } else {
@@ -324,7 +402,9 @@ pub fn advance_coupled_friction(
                     && velocity[i].to_f64().is_sign_positive()
                         != raw_after.to_f64().is_sign_positive()
                 {
-                    return Err(CoupledFrictionFlowError::Unresolved("stopping event order"));
+                    return Err(
+                        (CoupledFrictionFlowError::Unresolved("stopping event order")).into(),
+                    );
                 }
                 raw_after
             };
@@ -332,9 +412,10 @@ pub fn advance_coupled_friction(
             let travel = checked(midpoint * step, "segment travel")?;
             let friction_work = checked(Dd::from_f64(force[i]) * travel, "friction work")?;
             if friction_work.to_f64() > 0.0 {
-                return Err(CoupledFrictionFlowError::Unresolved(
+                return Err((CoupledFrictionFlowError::Unresolved(
                     "continuous friction passivity",
-                ));
+                ))
+                .into());
             }
             sums.displacement[i] = checked(sums.displacement[i] + travel, "signed path")?;
             sums.distance[i] = checked(sums.distance[i] + travel.abs(), "absolute path")?;
@@ -344,6 +425,9 @@ pub fn advance_coupled_friction(
             )?;
             sums.friction_work[i] =
                 checked(sums.friction_work[i] + friction_work, "friction loss")?;
+            let endpoint_speed = after.abs().to_f64();
+            sums.minimum_speed[i] = sums.minimum_speed[i].min(endpoint_speed);
+            sums.maximum_speed[i] = sums.maximum_speed[i].max(endpoint_speed);
             velocity[i] = after;
         }
         sums.segments += 1;
@@ -359,6 +443,7 @@ pub fn advance_coupled_friction(
         &sums,
         &mut cancelled,
     )
+    .map_err(Into::into)
 }
 
 struct Path {
@@ -366,6 +451,8 @@ struct Path {
     distance: Accurate,
     friction_impulse: Accurate,
     friction_work: Accurate,
+    minimum_speed: Vector,
+    maximum_speed: Vector,
     segments: usize,
     stops: usize,
     projection_iterations: usize,
@@ -378,6 +465,8 @@ impl Path {
             distance: [Dd::ZERO; MAX_FRICTION_IMPULSE_PORTS],
             friction_impulse: [Dd::ZERO; MAX_FRICTION_IMPULSE_PORTS],
             friction_work: [Dd::ZERO; MAX_FRICTION_IMPULSE_PORTS],
+            minimum_speed: [0.0; MAX_FRICTION_IMPULSE_PORTS],
+            maximum_speed: [0.0; MAX_FRICTION_IMPULSE_PORTS],
             segments: 0,
             stops: 0,
             projection_iterations: 0,
@@ -533,6 +622,8 @@ fn finish(
         impulse_capacity_residual_ns: [0.0; MAX_FRICTION_IMPULSE_PORTS],
         displacement_m: [0.0; MAX_FRICTION_IMPULSE_PORTS],
         distance_m: [0.0; MAX_FRICTION_IMPULSE_PORTS],
+        minimum_speed_m_s: sums.minimum_speed,
+        maximum_speed_m_s: sums.maximum_speed,
         friction_work_j: [0.0; MAX_FRICTION_IMPULSE_PORTS],
         drive_work_j: [0.0; MAX_FRICTION_IMPULSE_PORTS],
         dissipated_j: 0.0,

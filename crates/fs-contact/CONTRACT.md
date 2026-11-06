@@ -3325,3 +3325,36 @@ Normal work, plastic work and signed material-parameter work remain explicit
 separate accounts. This API supplies prescribed-temperature continuation, not
 caloric evolution, a heat partition, or a thermodynamic closure for those work
 ports.
+
+## Coupled static breakaway and kinetic sliding
+
+The original `tangential::impact::multiple::relaxation` event and continuous-work
+owner now accepts a distinct-bound law through its `stiction` child. Each source
+supplies nonnegative kinetic capacity no greater than its static capacity, the
+full positive-definite mobility, held drive and physical duration. Any nonzero
+velocity slides at the kinetic force; exact resting coordinates may hold within
+the static interval. There is no numerical capture speed.
+
+The declared ideal-law continuation preserves maximal admissible sticking sets
+by set inclusion. Original principal mobility factors resolve coupled holding
+forces and test released directions. Multiple incomparable continuations, or
+multiple surviving directions, return a structured ambiguity refusal rather
+than an order-selected branch. Unresolved static-bound rounding refuses rather
+than widening the physical threshold. This convention does not claim global
+uniqueness for discontinuous stiction or supply compliant presliding history.
+
+Distinct-bound islands have at most six ports, at most 729 candidate modes per
+phase, and an explicit total mode-evaluation budget. Principal factors are reused
+across release signs; storage retains one witness and one factor workspace.
+Common bounds delegate to the existing solver. Both laws share isolated stop
+events, double-double path integration, signed drive work, passive friction work,
+endpoint momentum/energy audits, cancellation and physical resource gates.
+Receipts now retain minimum and maximum absolute speed over the entire path,
+including internal events, for downstream material applicability.
+
+Nine new tests cover exact static thresholds, one-ULP breakaway, arbitrarily
+small genuine sliding, recapture/reversal, full-mobility holding reactions,
+partial release, interior speed extrema, ambiguity in both port orders,
+work-conjugate scaling, exact legacy equivalence, all 729 six-port candidates,
+budget exhaustion and cancellation. The eight existing continuous-flow tests
+also pass against the shared implementation.
