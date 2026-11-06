@@ -29,6 +29,11 @@
 //! consistent partition, or with a tie the rule cannot break, keeps the walk's
 //! refusal unchanged.
 //!
+//! Inside bound nonlinear storage, a step is staged once per reaction trial.
+//! Only when those trials exhaust their budget is the step solved again with
+//! a held pass, and only in that pass does the plain rescue first try the
+//! partition the previous trial resolved (`held_partition`).
+//!
 //! This module solves a consistent partition directly. It runs ONLY after the
 //! Gauss-Seidel sweep has failed, so every step the sweep already converges is
 //! bit-identical. It fixes a partition, joint-Newtons the effective load line
@@ -645,6 +650,41 @@ pub(super) fn nearest_consistent_partition(
             .map(|(&b, &n)| if n == 0.0 { ModalFrictionRegime::Released } else { regime_of(b) }).collect())),
         _ => None,
     })
+}
+
+/// The plain rescue's first try inside the reaction iteration's held pass
+/// (`NonlinearFrictionState::stage_trial`): the partition `held` that the
+/// previous reaction trial resolved. It is solved and accepted exactly as one
+/// candidate of [`nearest_consistent_partition`]: the residual on the actual slip
+/// within 1e-12, then [`consistent_at`]. Returns `None` when that partition no
+/// longer holds a consistent state; the rescue then runs as before.
+///
+/// This is the same hysteresis rule, carried across reaction trials. The walk
+/// starts at all-stuck on every trial. Where sticking is consistent under one
+/// trial's reaction and not under the next, the walk alternates with the trials
+/// and the reaction iteration cannot settle.
+pub(super) fn held_partition(
+    a: &[f64],
+    f: &[f64],
+    normal: &[f64],
+    law: &[&FrictionLaw],
+    dt: f64,
+    held: &[Branch],
+) -> Result<Option<(Vec<f64>, Vec<ModalFrictionRegime>)>, ModalFrictionError> {
+    if held.len() != f.len() {
+        return Ok(None);
+    }
+    // At zero load S/+/- all denote the same released row, as in the enumeration.
+    let cells: Vec<Branch> = held.iter().zip(normal)
+        .map(|(&b, &n)| if n == 0.0 { Branch::Stuck } else { b }).collect();
+    let Some(t) = solve_partition_by_speed(a, f, normal, law, dt, &cells, 100) else {
+        return Ok(None);
+    };
+    if !consistent_at(&slips(a, f, &t), normal, law, dt, &cells, &t)? {
+        return Ok(None);
+    }
+    Ok(Some((t, cells.iter().zip(normal)
+        .map(|(&b, &n)| if n == 0.0 { ModalFrictionRegime::Released } else { regime_of(b) }).collect())))
 }
 
 /// The slip speed past which a sliding row's own residual is monotone. It comes

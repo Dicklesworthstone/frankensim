@@ -39,13 +39,14 @@ fn weakening() -> FrictionLaw {
 fn port(shapes: Vec<f64>) -> ModalFrictionPort {
     ModalFrictionPort { left: ModalAttachment { component: 0, shapes }, right: None, law: weakening() }
 }
-fn single() -> FrictionModalSystem {
+fn single() -> FrictionModalSystem { bowed(vec![20.0, 0.0]) }
+fn bowed(shapes: Vec<f64>) -> FrictionModalSystem {
     let gate = CancelGate::new();
     let model = ModalAcousticTimeModel::try_new(48_000, [800.0, 1100.0].iter().map(|&angular_frequency_rad_s|
         ModalAcousticMode { angular_frequency_rad_s, damping_ratio: 0.0,
             pressure_per_modal_velocity: C64::ZERO }).collect(), ModalAcousticTimeBudget::audible_reference()).unwrap();
     FrictionModalSystem::new(CoupledModalSystem::new(vec![model], vec![], budgets(), &gate).unwrap(),
-        port(vec![20.0, 0.0]), config(), &gate).unwrap()
+        port(shapes), config(), &gate).unwrap()
         .with_nonlinear_potentials(vec![ModalPotentialBinding { component: 0, coordinate_start: 0,
             potential: Box::new(StretchQuartic(1.7e20)) }], NonlinearModalConfig {
             max_iterations: 64, maximum_generalized_force: 1e5,
@@ -56,6 +57,13 @@ fn single() -> FrictionModalSystem {
 // port reaches the same edge through the joint sweep (the bow-ribbon route).
 fn joint() -> MultiFrictionModalSystem {
     single().with_additional_ports(vec![(port(vec![0.0, 10.0]), config())], joint_config(), &CancelGate::new()).unwrap()
+}
+// Two bowed ports with nearly the same shapes on both modes, as neighbouring
+// stations of a bow ribbon have. Their joint sweep cannot converge in its 128
+// sweeps, so every reaction trial goes to the active-set rescue.
+fn ribbon() -> MultiFrictionModalSystem {
+    bowed(vec![20.0, 1.0]).with_additional_ports(vec![(port(vec![19.0, -1.0]), config())], joint_config(),
+        &CancelGate::new()).unwrap()
 }
 fn edge_load(sticking_traction_n: f64) -> f64 { sticking_traction_n / MU_S * (1.0 - 1e-6) }
 
@@ -93,5 +101,34 @@ fn g1_cone_edge_port_slides_through_the_joint_sweep() {
     let after = system.total_energy_j().unwrap();
     let work = frame.external_work_j + frame.drive_work_j;
     let loss = frame.network_dissipation_j + frame.friction_dissipation_j + frame.declared_slip_work_j;
+    assert!((after - before + loss - work).abs() <= 1e-12 + 1e-8 * work.abs().max(loss));
+}
+
+// Each port is loaded at its own cone edge. The rescue keeps no branch memory
+// and starts its walk at all-stuck on every reaction trial. A partition that
+// holds under the reaction of another partition's response and not under its
+// own makes the walk alternate with the trials, until the held pass keeps the
+// partition it last resolved.
+#[test]
+fn g1_cone_edge_ribbon_slides_through_the_active_set_rescue() {
+    let drives = |normal: [f64; 2]| [drive(BOW_M_S, normal[0]), drive(BOW_M_S, normal[1])];
+    let mut probe = ribbon();
+    let stuck = probe.step(&[0.0, 0.0], &drives([75.0, 75.0])).unwrap().clone();
+    assert_eq!((stuck.sweeps, stuck.active_set_rescues), (128, 1), "the probe goes through the rescue");
+    assert!(stuck.ports.iter().all(|port| port.regime == ModalFrictionRegime::Sticking));
+    let normal = [edge_load(stuck.ports[0].traction_n.abs()), edge_load(stuck.ports[1].traction_n.abs())];
+    let mut system = ribbon();
+    let before = system.total_energy_j().unwrap();
+    let frame = system.step(&[0.0, 0.0], &drives(normal))
+        .unwrap_or_else(|error| panic!("cone-edge ribbon step refused at {normal:?} N: {error}")).clone();
+    assert_eq!((frame.sweeps, frame.active_set_rescues), (128, 1));
+    assert!(frame.ports.iter().any(|port| port.regime == ModalFrictionRegime::Sliding));
+    for (port, normal) in frame.ports.iter().zip(normal) {
+        assert!(port.traction_n.abs() <= MU_S * normal * (1.0 + 1e-9));
+    }
+    let after = system.total_energy_j().unwrap();
+    let work = frame.external_work_j + frame.drive_work_j;
+    let loss = frame.network_dissipation_j + frame.friction_dissipation_j + frame.declared_slip_work_j;
+    assert!(frame.energy_residual_j.abs() <= frame.energy_tolerance_j);
     assert!((after - before + loss - work).abs() <= 1e-12 + 1e-8 * work.abs().max(loss));
 }

@@ -7,7 +7,8 @@
 //! balance close. fs-phs owns DG; this adapter changes neither the exponential
 //! linear propagator nor the friction law, its stick/slip branch rule or work
 //! port. Only a step whose reaction iteration exhausts its budget is solved
-//! again, with each port's branch memory held across trials (`stage_trial`).
+//! again, with each port's branch memory and any joint rescue's stick/slip
+//! partition held across trials (`stage_trial`).
 //! This is a bounded iterated discrete-gradient composition, not SAV, a unique
 //! nonlinear-solution claim, a trajectory certificate or a real-time guarantee.
 use super::*;
@@ -172,6 +173,13 @@ pub(super) trait NonlinearTrial {
     fn set_branch_memory(&mut self, memory: &[ContactBranch]);
     /// Each port's branch as the last `stage` resolved it, not yet committed.
     fn staged_branches(&self) -> Vec<ContactBranch>;
+    /// Held pass only: keeps the joint stick/slip partition the last `stage`
+    /// resolved, for the next stage's active-set rescue to try first. Returns,
+    /// per port, whether it differs from the partition held before (none differ
+    /// on the first call). A trial without a joint rescue holds nothing.
+    fn hold_partition(&mut self) -> Vec<bool> { Vec::new() }
+    /// Releases the held partition, so later stages rescue as before.
+    fn release_partition(&mut self) {}
 }
 pub(super) struct NonlinearTrialWork {
     pub observer_pressure_pa: f64,
@@ -565,9 +573,13 @@ impl NonlinearFrictionState {
     // alternate until the budget ends. Only then is the step solved again from
     // the same accepted state with each trial's memory set to the previous
     // trial's resolved branches: a port that had to leave its branch keeps the
-    // new one while that branch's root exists. A port may change branch once
-    // in this pass; a second change, or any failure, returns the first pass's
-    // refusal. A step the first pass accepts is never solved again.
+    // new one while that branch's root exists. A step the joint sweep cannot
+    // converge goes to the active-set rescue, which keeps no branch memory and
+    // restarts its walk at all-stuck on every trial. So in this pass the
+    // rescue first tries the partition the previous trial resolved, kept while
+    // it holds a consistent state. A port may change branch once, and partition
+    // once, in this pass; a second change, or any failure, returns the first
+    // pass's refusal. A step the first pass accepts is never solved again.
     pub(super) fn stage_trial<T: NonlinearTrial>(
         &mut self,
         trial: &mut T,
@@ -584,6 +596,7 @@ impl NonlinearFrictionState {
         let accepted_memory = trial.branch_memory();
         let held = self.iterate(trial, external, gate, true);
         trial.set_branch_memory(&accepted_memory);
+        trial.release_partition();
         if let Ok(Ok(mut accepted)) = held {
             // Disclosed: every trial staged for this step, both passes.
             accepted.diagnostics.nonlinear_iterations = self.config.max_iterations
@@ -631,6 +644,7 @@ impl NonlinearFrictionState {
         let mut last_energy = (0.0, 0.0);
         let mut held: Option<Vec<ContactBranch>> = None;
         let mut changes: Vec<u8> = Vec::new();
+        let mut partition_changes: Vec<u8> = Vec::new();
         for iteration in 1..=self.config.max_iterations {
             poll(gate)?;
             for i in 0..forces.len() {
@@ -653,6 +667,12 @@ impl NonlinearFrictionState {
                     changes = vec![0; staged.len()];
                 }
                 held = Some(staged);
+                let moved = trial.hold_partition();
+                partition_changes.resize(moved.len(), 0);
+                for (count, moved) in partition_changes.iter_mut().zip(moved) {
+                    if moved { *count = count.saturating_add(1); }
+                }
+                if partition_changes.iter().any(|&count| count > 1) { break; }
             }
             let inner = trial.core();
             let after_q = coordinates(&inner.network.candidates);

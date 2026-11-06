@@ -224,6 +224,9 @@ pub struct MultiFrictionModalSystem {
     // trial, and the per-port load line and disclosed roots scratch.
     branches: Vec<ContactBranch>,
     staged_branches: Vec<ContactBranch>,
+    // The joint stick/slip partition the reaction iteration's held pass carries
+    // from one trial to the next, for the rescue to try first. None otherwise.
+    held_partition: Option<Vec<active_set::Branch>>,
     load_lines: Vec<Option<StribeckLoadLine>>,
     port_roots: Vec<Option<FrictionRoots>>,
     // Each endpoint port's actual slip since its stuck run's entry step [m],
@@ -366,7 +369,7 @@ impl MultiFrictionModalSystem {
         Ok(Self { core, points, config, compliance, endpoint, free_delta: vec![0.0; n],
             free_slip: vec![0.0; p], tractions: vec![0.0; p],
             regimes: vec![ModalFrictionRegime::Released; p], iterations: vec![0; p],
-            staged_branches: branches.clone(), branches,
+            staged_branches: branches.clone(), branches, held_partition: None,
             load_lines: vec![None; p], port_roots: vec![None; p],
             creeps: vec![0.0; p], staged_creeps: vec![0.0; p],
             staged_ports: vec![FrictionPortFrame::default(); p],
@@ -859,8 +862,18 @@ impl MultiFrictionModalSystem {
                 _ => active_set::Branch::Stuck,
             })
             .collect();
-        match active_set::solve_active_set_with_hysteresis(&a, &f, &normal, &lawrefs, dt, &seed, &previous,
-            self.active_set_budget)? {
+        // In the reaction iteration's held pass, the partition the previous
+        // trial resolved goes first, while it still holds a consistent state.
+        let held = match &self.held_partition {
+            Some(held) => active_set::held_partition(&a, &f, &normal, &lawrefs, dt, held)?,
+            None => None,
+        };
+        let resolution = match held {
+            Some((tractions, regimes)) => active_set::Resolution::Solved(tractions, regimes),
+            None => active_set::solve_active_set_with_hysteresis(&a, &f, &normal, &lawrefs, dt, &seed, &previous,
+                self.active_set_budget)?,
+        };
+        match resolution {
             active_set::Resolution::Solved(tractions, regimes) => {
                 poll(gate)?;
                 if let Some(stops) = &self.obstacles {

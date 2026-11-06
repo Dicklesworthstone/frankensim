@@ -56,6 +56,22 @@ impl NonlinearTrial for MultipleTrial<'_> {
         self.inner.branches.copy_from_slice(memory);
     }
     fn staged_branches(&self) -> Vec<crate::stribeck_friction::ContactBranch> { self.inner.staged_branches.clone() }
+    // Read from the staged ports as the rescue reads an accepted frame: a
+    // sliding port in its traction's direction, any other port stuck.
+    fn hold_partition(&mut self) -> Vec<bool> {
+        let staged: Vec<active_set::Branch> = self.inner.staged_ports.iter().map(|port| match port.regime {
+            ModalFrictionRegime::Sliding if port.traction_n > 0.0 => active_set::Branch::SlidePos,
+            ModalFrictionRegime::Sliding if port.traction_n < 0.0 => active_set::Branch::SlideNeg,
+            _ => active_set::Branch::Stuck,
+        }).collect();
+        let moved = match &self.inner.held_partition {
+            Some(before) => staged.iter().zip(before).map(|(now, before)| now != before).collect(),
+            None => vec![false; staged.len()],
+        };
+        self.inner.held_partition = Some(staged);
+        moved
+    }
+    fn release_partition(&mut self) { self.inner.held_partition = None; }
 }
 impl MultiFrictionModalSystem {
     pub(super) fn stage_with_nonlinear(&mut self, external: &[f64],
