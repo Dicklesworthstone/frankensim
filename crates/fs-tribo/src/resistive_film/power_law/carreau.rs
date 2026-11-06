@@ -169,6 +169,37 @@ impl CarreauFilm {
         &self.film
     }
 
+    // The conservative cavitation owner needs the SAME combined pressure and
+    // sliding profile, independently of mean-wall liquid-content transport.
+    // Even constant original laws pass through their source-rate admission.
+    pub(in crate::resistive_film) fn passage_pressure_response(
+        &self,
+        index: usize,
+        gap: f64,
+        core_conductance: f64,
+        pressure_drop: f64,
+        relative_wall_speed: f64,
+        check: &mut impl FnMut() -> Result<(), FilmError>,
+    ) -> Result<(f64, f64), FilmError> {
+        if gap <= 0.0 && relative_wall_speed != 0.0 {
+            return fail("moving Carreau passage needs a positive gap");
+        }
+        let channel = self.channel_response(
+            index,
+            gap,
+            core_conductance,
+            pressure_drop,
+            Motion {
+                mean: 0.0,
+                relative: relative_wall_speed,
+                entrainment: 0.0,
+            },
+            relative_wall_speed != 0.0,
+            check,
+        )?;
+        Ok((channel.flow, channel.differential))
+    }
+
     /// Refresh actual source temperatures/laws without inventing a thermal
     /// state or elapsed time. Geometry, wall mappings and supplies are retained.
     pub fn with_passages(&self, passages: Vec<LaminarCarreauSlit>) -> Result<Self, FilmError> {

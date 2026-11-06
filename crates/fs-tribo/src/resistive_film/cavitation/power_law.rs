@@ -3,7 +3,7 @@
 //! The original cavitation owner retains volume, inventory, absolute-pressure
 //! supplies, complementarity and the independent mass audit. Each face uses
 //! `Q = Qp(delta_p, Uupper-Ulower) + Qentrained*theta_upwind`; Qp and its
-//! positive pressure differential come from the existing exact nonlinear
+//! positive pressure differential come from the existing source-owned nonlinear
 //! Couette--Poiseuille profile. There is no separately superposed shear law.
 //!
 //! One unknown per cell represents either positive excess pressure or missing
@@ -17,12 +17,15 @@
 //! Only endpoint NORMAL pressure force and liquid inventory are returned.
 //! Cavitated tangential traction, viscous heat partition, latent heat, thermal
 //! evolution and compressible trapped liquid are not supplied by this model.
+//! The private borrowed transport below also serves original Carreau passages;
+//! both families retain this same pressure/content iteration and mass audit.
 
 use super::{
     CavitatingFilm, CavitatingFilmState, CavitationLiquid, CavitationReservoir,
     CavitationSolveConfig, CavitationStep, FilmError, FlowBalance, MAX_CELLS, MAX_CHANNELS,
     ResistiveFilm, dot, fail, poll, solve_local,
 };
+use crate::resistive_film::carreau::CarreauFilm;
 use crate::resistive_film::power_law::{PowerLawControls, PowerLawFilm, RegularizedPowerLaw};
 
 /// The original liquid-content owner with explicit SI power-law rheology.
@@ -276,7 +279,7 @@ impl CavitatingPowerLawFilm {
         let transport = if self.rheology.is_newtonian() {
             None
         } else {
-            Some(Transport {
+            Some(Transport::PowerLaw {
                 rheology: &self.rheology,
                 relative: relative_wall_speed_m_s,
             })
@@ -293,9 +296,57 @@ impl CavitatingPowerLawFilm {
     }
 }
 
-pub(super) struct Transport<'a> {
-    rheology: &'a PowerLawFilm,
-    relative: &'a [f64],
+// Both original material owners use the same conservative pressure/content
+// iteration. The bounded borrowed choice adds no per-face heap allocation or
+// independent constitutive approximation.
+pub(super) enum Transport<'a> {
+    PowerLaw {
+        rheology: &'a PowerLawFilm,
+        relative: &'a [f64],
+    },
+    Carreau {
+        rheology: &'a CarreauFilm,
+        relative: &'a [f64],
+    },
+}
+
+impl Transport<'_> {
+    fn pressure_response(
+        &self,
+        channel: usize,
+        gap: f64,
+        core_conductance: f64,
+        dp: f64,
+        check: &mut impl FnMut() -> Result<(), FilmError>,
+    ) -> Result<(f64, f64), FilmError> {
+        match self {
+            Self::PowerLaw { rheology, relative } => rheology.passage_pressure_response(
+                channel,
+                gap,
+                core_conductance,
+                dp,
+                relative[channel],
+                check,
+            ),
+            Self::Carreau { rheology, relative } => rheology.passage_pressure_response(
+                channel,
+                gap,
+                core_conductance,
+                dp,
+                relative[channel],
+                check,
+            ),
+        }
+    }
+
+    fn maximum_line_search_steps(&self) -> usize {
+        match self {
+            Self::PowerLaw { rheology, .. } => rheology.controls().maximum_line_search_steps,
+            Self::Carreau { rheology, .. } => {
+                rheology.controls().pressure.maximum_line_search_steps
+            }
+        }
+    }
 }
 
 struct Candidate {
@@ -352,12 +403,11 @@ impl Step<'_> {
         dp: f64,
         cancelled: &mut dyn FnMut() -> bool,
     ) -> Result<(f64, f64), FilmError> {
-        self.transport.rheology.passage_pressure_response(
+        self.transport.pressure_response(
             channel,
             self.gaps[channel],
             self.core_conductance[channel],
             dp,
-            self.transport.relative[channel],
             &mut || poll(cancelled),
         )
     }
@@ -397,7 +447,7 @@ impl Step<'_> {
                 .any(|x| !x.is_finite())
                 || g < 0.0
             {
-                return fail("unrepresentable cavitating power-law face response");
+                return fail("unrepresentable nonlinear cavitating face response");
             }
             let i = edge.from;
             pressure_transfer[i].add(pressure_amount);
@@ -431,7 +481,7 @@ impl Step<'_> {
                 + self.film.solve.relative_mass_tolerance * rho * scale;
             let defect = rho * state.residual[i];
             if !scale.is_finite() || !tolerance.is_finite() || !defect.is_finite() {
-                return fail("unrepresentable cavitating power-law mass residual");
+                return fail("unrepresentable nonlinear cavitating mass residual");
             }
             state.admitted &= defect.abs() <= tolerance;
         }
@@ -473,7 +523,7 @@ pub(super) fn advance(
     let maximum_pressure = (film.liquid.ambient_pressure_pa - film.liquid.cavitation_pressure_pa)
         + film.geometry.limits.maximum_pressure_pa;
     if !maximum_pressure.is_finite() || maximum_pressure <= 0.0 {
-        return fail("unrepresentable cavitating power-law pressure domain");
+        return fail("unrepresentable nonlinear cavitating pressure domain");
     }
     let mut state = Candidate::new();
     state.full = *initial_full;
@@ -491,7 +541,7 @@ pub(super) fn advance(
     for iteration in 0..=film.solve.maximum_iterations {
         poll(cancelled)?;
         if iteration == film.solve.maximum_iterations && !state.admitted {
-            return fail("cavitating power-law pressure/content iteration budget exhausted");
+            return fail("nonlinear cavitating pressure/content iteration budget exhausted");
         }
         let mut matrix = [0.0; MAX_CELLS * MAX_CELLS];
         let mut direction = state.residual.map(|r| -r);
@@ -503,7 +553,7 @@ pub(super) fn advance(
             if a > 0.0 {
                 scale[j] = b / a;
                 if !scale[j].is_finite() || scale[j] <= 0.0 {
-                    return fail("unrepresentable cavitating power-law pressure scale");
+                    return fail("unrepresentable nonlinear cavitating pressure scale");
                 }
             } else if state.full[j] {
                 return fail("fully filled undrained film requires liquid compressibility");
@@ -579,10 +629,10 @@ pub(super) fn advance(
             fraction *= 0.99;
         }
         if !fraction.is_finite() || fraction <= 0.0 {
-            return fail("cavitating power-law correction cannot remain in its physical domain");
+            return fail("nonlinear cavitating correction cannot remain in its physical domain");
         }
         let mut accepted = false;
-        for _ in 0..step.transport.rheology.controls().maximum_line_search_steps {
+        for _ in 0..step.transport.maximum_line_search_steps() {
             poll(cancelled)?;
             for i in 0..n {
                 let next = coordinate[i] + fraction * direction[i];
@@ -620,8 +670,8 @@ pub(super) fn advance(
             fraction *= 0.5;
         }
         if !accepted {
-            return fail("cavitating power-law line-search budget exhausted");
+            return fail("nonlinear cavitating line-search budget exhausted");
         }
     }
-    fail("cavitating power-law pressure/content iteration budget exhausted")
+    fail("nonlinear cavitating pressure/content iteration budget exhausted")
 }

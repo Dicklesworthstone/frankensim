@@ -1,6 +1,7 @@
 use super::*;
 use crate::resistive_film::{FilmCell, FilmChannel, FilmLimits, GapPort};
 
+mod carreau;
 mod compressible;
 mod power_law;
 mod reservoirs;

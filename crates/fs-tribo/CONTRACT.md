@@ -1350,6 +1350,54 @@ retained versus changed liquid identities, explicit supply/Barus refusal and
 late cancellation. All 136 original-source film tests pass in the same focused
 native-source lane; full constellation and cross-ISA validation remain open.
 
+`cavitation::CavitatingCarreauFilm` now binds original prepared
+`LaminarCarreauSlit` passages to that same liquid-content owner. Every face
+retains the source's thermal Carreau-Yasuda law, viscosity plateaus, transition,
+temperature, supported shear-rate ceiling and bounded constitutive controls.
+Width/length must match the original graph; the actual affine aperture is
+rebound through the source's `with_gap`. Its simultaneous pressure/sliding
+profile supplies `Q_pressure` and the positive pressure derivative, while the
+native conservative flux remains
+`Q_pressure(delta_p, U_upper-U_lower) + Q_entrained*theta_upwind`.
+
+A private borrowed constitutive choice shares the existing nonlinear
+pressure/content engine, compensated incidence assembly, bounded backtracking,
+phase pivots and independent cell/global mass audit with the power-law owner.
+There is no second pressure solver or apparent-viscosity fit. Source checks
+remain active for constant Carreau laws as well: dispatch to an unrestricted
+Newtonian flux must not bypass the original rate ceiling. The existing native
+Newtonian limit is recovered numerically; bitwise trajectory equivalence is not
+claimed for this bounded-source nonlinear path. Iteration workspaces remain
+bounded stack storage without per-iteration allocation.
+
+`CavitatingFilm::with_carreau` binds the source to compatible accepted liquid
+inventory. Reservoir and passage refresh preserve that identity. Explicit
+`advance_with_liquid` continues old mass through endpoint density, rupture and
+passage changes using the native backward-Euler balance; changed liquid data
+receive a new identity, and the returned `CavitatingCarreauContinuation` pairs
+the refreshed owner with its matching candidate. Source temperatures change
+only through explicit replacement. Original source, pressure, mass, geometry,
+work-budget and cancellation refusals publish no candidate. An existing Barus
+law and relative sliding in a closed channel refuse explicitly.
+
+The returned quantities are liquid inventory, signed face flow and endpoint
+normal pressure force. Full-gap stress profiles do not determine liquid
+streamer geometry in a partly filled passage; their dissipation is therefore
+not returned as cavitated heat or traction. Cavitated tangential work, caloric
+or latent energy, thermal evolution, compressible trapped liquid, bubble
+inertia and EHL remain outside this owner. `CarreauCavitationControls` bounds
+original slit work and line search; the native `CavitationSolveConfig` retains
+authority over pressure/content iterations and mass admission.
+
+Seven new G1/G3/G4 groups check the constant-source native limit; rupture and
+refill against an independent analytic stress inverse and physical-gap
+momentum integral; manufactured combined sliding/pressure transport at actual
+apertures; multi-cell reformation, reversal and shared-face mass; source and
+endpoint-liquid continuation; source ceilings and invalid-domain refusals; and
+late cancellation with exact retry. All 13 existing nonlinear power-law
+cavitation groups also pass against the shared engine. These are focused
+original-source numerical checks, not experimental or full-workspace evidence.
+
 A common Barus law now uses `chi=(1-exp(-alpha*(p-p_c)))/alpha`, with channel
 conductances multiplied by `exp(alpha*(p_ambient-p_c))`; supplied viscosities
 remain referenced to the reservoir pressure. Zero potential is exactly rupture,

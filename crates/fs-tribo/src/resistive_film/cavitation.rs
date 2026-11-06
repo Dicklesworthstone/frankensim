@@ -39,6 +39,12 @@ use std::sync::Arc;
 /// Generalized-Newtonian pressure transport with the same retained inventory.
 pub mod power_law;
 pub use power_law::{CavitatingPowerLawContinuation, CavitatingPowerLawFilm};
+
+/// Original thermal Carreau passages with retained conservative liquid content.
+pub mod carreau;
+pub use carreau::{
+    CarreauCavitationControls, CavitatingCarreauContinuation, CavitatingCarreauFilm,
+};
 /// Finite bulk modulus, compressive storage and pressure-dependent mass flux.
 pub mod compressible;
 pub use compressible::{
