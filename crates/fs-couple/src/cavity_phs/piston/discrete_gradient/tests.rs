@@ -152,3 +152,5 @@ fn g3_stationary_state_and_failure_preserve_accepted_physics_and_ports() {
     assert_eq!(piston.last_window_duration_s(), duration);
     assert_eq!(piston.last_window_transfers().map(<[_]>::to_vec), transfers);
 }
+
+mod real_gas;

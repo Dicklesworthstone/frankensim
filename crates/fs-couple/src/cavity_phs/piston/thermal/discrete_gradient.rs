@@ -7,7 +7,9 @@
 //! / (T_bar_body T_bar_gas), including sensible heat and latent plateaus.
 //! Neither an unspecified heat reservoir nor spatial equilibration is inferred.
 
-use super::super::{PistonSupport, discrete_gradient::DiscreteGradientPistonStep};
+use super::super::{
+    PistonGas, PistonGasState, PistonSupport, discrete_gradient::DiscreteGradientPistonStep,
+};
 use super::{
     ConductanceSample, GasPiston, HeatExchangeSolve, PistonInput, PistonSolve,
     ResolvedThermochemicalGasState, ThermalPistonError, feedback, poll, positive,
@@ -19,9 +21,9 @@ use fs_material::thermochemical_gas::energy::parcel::ClosedGasParcel;
 
 /// Independently reconstructed energy and entropy of the accepted contact.
 #[derive(Clone, Debug, PartialEq)]
-pub struct DiscreteGradientThermalStep {
+pub struct DiscreteGradientThermalStep<S = ResolvedThermochemicalGasState> {
     /// Original gas, momentum, pressure work and discrete Gibbs account.
-    pub piston: DiscreteGradientPistonStep,
+    pub piston: DiscreteGradientPistonStep<S>,
     /// Original material state at midpoint body ENTHALPY. The interface source
     /// uses this unique phase coordinate, including fraction on a latent plateau.
     pub thermal_midpoint: EquilibriumPhaseState,
@@ -72,15 +74,15 @@ pub struct DiscreteGradientThermalStep {
 
 /// A single proposal containing both endpoints and the concrete interface source.
 #[derive(Clone, Debug, PartialEq)]
-pub struct DiscreteGradientThermalCandidate<S> {
-    piston: GasPiston<ClosedGasParcel>,
+pub struct DiscreteGradientThermalCandidate<S, G: PistonGas = ClosedGasParcel> {
+    piston: GasPiston<G>,
     thermal: UniformEnthalpyStep<S>,
-    step: DiscreteGradientThermalStep,
+    step: DiscreteGradientThermalStep<G::State>,
 }
 
-impl<S> DiscreteGradientThermalCandidate<S> {
+impl<S, G: PistonGas> DiscreteGradientThermalCandidate<S, G> {
     /// Proposed gas, volume and momentum; the input owner remains unchanged.
-    pub const fn piston(&self) -> &GasPiston<ClosedGasParcel> {
+    pub const fn piston(&self) -> &GasPiston<G> {
         &self.piston
     }
     /// Original thermal carrier with the accepted phase state and source.
@@ -88,22 +90,22 @@ impl<S> DiscreteGradientThermalCandidate<S> {
         &self.thermal
     }
     /// Actual combined energy, entropy and contact balances.
-    pub const fn step(&self) -> &DiscreteGradientThermalStep {
+    pub const fn step(&self) -> &DiscreteGradientThermalStep<G::State> {
         &self.step
     }
     /// Publish both physical states together. Do not apply exchanged heat again.
     pub fn into_parts(
         self,
     ) -> (
-        GasPiston<ClosedGasParcel>,
+        GasPiston<G>,
         UniformEnthalpyStep<S>,
-        DiscreteGradientThermalStep,
+        DiscreteGradientThermalStep<G::State>,
     ) {
         (self.piston, self.thermal, self.step)
     }
 }
 
-impl GasPiston<ClosedGasParcel> {
+impl<G: PistonGas> GasPiston<G> {
     /// Solve finite-body conduction and discrete-gradient gas/piston motion.
     ///
     /// The two prescribed inputs `input.heat_j` and `body.internal_heat_j`
@@ -124,7 +126,10 @@ impl GasPiston<ClosedGasParcel> {
     /// The body's original fixed-mass, negligible-pV-work enthalpy storage model
     /// is retained. Geometry/density consistency and uniform-body validity are
     /// caller assumptions; phase change does not silently move the piston.
-    /// The gas remains the original frozen-composition ideal mixture.
+    /// The gas retains its original frozen ideal or homogeneous Peng--Robinson
+    /// source. A nonideal sampling state keeps its actual EOS pressure and
+    /// transport; mechanical work uses the separate discrete conjugate pressure.
+    /// Stable homogeneous paths remain caller-admitted, with no equilibrium flash.
     ///
     /// Work is bounded by the existing exchange, mechanical and material solve
     /// controls. Every queried heat must lie in all original source domains.
@@ -142,12 +147,9 @@ impl GasPiston<ClosedGasParcel> {
         body: UniformEnthalpyStepInput<'_>,
         controls: PistonSolve,
         exchange: HeatExchangeSolve,
-        mut resolve: impl FnMut(
-            &ResolvedThermochemicalGasState,
-            EquilibriumPhaseState,
-        ) -> Result<ConductanceSample<S>, E>,
+        mut resolve: impl FnMut(&G::State, EquilibriumPhaseState) -> Result<ConductanceSample<S>, E>,
         mut cancelled: impl FnMut() -> bool,
-    ) -> Result<DiscreteGradientThermalCandidate<S>, ThermalPistonError<E>> {
+    ) -> Result<DiscreteGradientThermalCandidate<S, G>, ThermalPistonError<E>> {
         poll(&mut cancelled)?;
         feedback::admit(exchange)?;
         if !positive(body.mass_kg)
@@ -222,7 +224,7 @@ impl GasPiston<ClosedGasParcel> {
                 let sample = resolve(&piston.thermodynamic_mean, thermal_midpoint)
                     .map_err(ThermalPistonError::Interface)?;
                 let g = sample.conductance_w_k;
-                let gas_temperature = piston.thermodynamic_mean.state().temperature;
+                let gas_temperature = piston.thermodynamic_mean.temperature_k();
                 let delta = body_temperature - gas_temperature;
                 let power = g * delta;
                 let heat = input.duration_s * power;
@@ -346,9 +348,9 @@ impl GasPiston<ClosedGasParcel> {
             && input.heat_j == 0.0
             && body.internal_heat_j == 0.0
         {
-            let initial_gap = body.initial.temperature_k() - self.gas().state().state().temperature;
+            let initial_gap = body.initial.temperature_k() - self.gas().state().temperature_k();
             let final_gap = candidate.thermal.state.temperature_k()
-                - candidate.piston.gas().state().state().temperature;
+                - candidate.piston.gas().state().temperature_k();
             if (initial_gap > 0.0 && final_gap < 0.0) || (initial_gap < 0.0 && final_gap > 0.0) {
                 return Err(ThermalPistonError::Invalid(
                     "closed fixed-wall heat contact crossed thermal equilibrium; refine the timestep",

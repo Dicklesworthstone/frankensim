@@ -561,3 +561,5 @@ fn source_refusal_and_late_cancellation_preserve_both_physical_owners_and_accept
         curve.state_at_specific_enthalpy(225000.0).unwrap()
     );
 }
+
+mod real_gas;

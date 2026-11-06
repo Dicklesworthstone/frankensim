@@ -6,6 +6,7 @@
 
 use super::{ClosedGasParcel, GasEnergyError, GasEnergySolve, GasHeatVolumeCandidate};
 use fs_material::thermochemical_gas::ResolvedThermochemicalGasState;
+use fs_material::thermochemical_gas::energy::parcel::discrete_gradient::GasDiscreteGradientCandidate;
 use fs_material::thermochemical_gas::nonideal::ResolvedThermochemicalRealGasState;
 use fs_material::thermochemical_gas::nonideal::energy::parcel::IsochoricRealGasParcel;
 
@@ -30,12 +31,14 @@ pub trait PistonGasState: sealed::State + Clone + core::fmt::Debug + PartialEq {
 
 /// Original conserved gas storage used by [`super::GasPiston`].
 ///
-/// The constitutive owner supplies the work-conjugate midpoint pressure and
-/// its discrete volume tangent. Piston geometry, impulse, acceptance and port
+/// The constitutive owner supplies the chosen midpoint or discrete-Gibbs work
+/// pressure and its consistent volume tangent. Piston geometry, impulse, acceptance and port
 /// accounting remain entirely within the existing mechanical integrator.
 pub trait PistonGas: sealed::Gas + Clone + core::fmt::Debug + PartialEq {
     /// Complete resolved state; source identities remain on the material owner.
     type State: PistonGasState;
+    /// Conserved gas mass [kg], independent of wall inertia.
+    fn mass_kg(&self) -> f64;
     /// Accepted gas volume [m3], also the sole piston-position coordinate.
     fn volume_m3(&self) -> f64;
     /// Accepted coherent thermodynamic, acoustic and transport state.
@@ -48,6 +51,16 @@ pub trait PistonGas: sealed::Gas + Clone + core::fmt::Debug + PartialEq {
         controls: GasEnergySolve,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<GasHeatVolumeCandidate<Self, Self::State>, GasEnergyError>;
+    /// Original energy/entropy-compatible heat and volume proposal.
+    /// Its work pressure is a discrete conjugate effort; the coherent resolved
+    /// mean state is retained separately for transport, acoustics and heat.
+    fn discrete_gradient_heat_volume(
+        &self,
+        volume_m3: f64,
+        heat_j: f64,
+        controls: GasEnergySolve,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<GasDiscreteGradientCandidate<Self, Self::State>, GasEnergyError>;
 }
 
 impl sealed::State for ResolvedThermochemicalGasState {}
@@ -85,6 +98,9 @@ impl PistonGasState for ResolvedThermochemicalRealGasState {
 impl sealed::Gas for ClosedGasParcel {}
 impl PistonGas for ClosedGasParcel {
     type State = ResolvedThermochemicalGasState;
+    fn mass_kg(&self) -> f64 {
+        Self::mass_kg(self)
+    }
     fn volume_m3(&self) -> f64 {
         Self::volume_m3(self)
     }
@@ -99,12 +115,24 @@ impl PistonGas for ClosedGasParcel {
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<GasHeatVolumeCandidate<Self, Self::State>, GasEnergyError> {
         Self::midpoint_heat_volume(self, volume_m3, heat_j, controls, cancelled)
+    }
+    fn discrete_gradient_heat_volume(
+        &self,
+        volume_m3: f64,
+        heat_j: f64,
+        controls: GasEnergySolve,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<GasDiscreteGradientCandidate<Self, Self::State>, GasEnergyError> {
+        Self::discrete_gradient_heat_volume(self, volume_m3, heat_j, controls, cancelled)
     }
 }
 
 impl sealed::Gas for IsochoricRealGasParcel {}
 impl PistonGas for IsochoricRealGasParcel {
     type State = ResolvedThermochemicalRealGasState;
+    fn mass_kg(&self) -> f64 {
+        Self::mass_kg(self)
+    }
     fn volume_m3(&self) -> f64 {
         Self::volume_m3(self)
     }
@@ -119,5 +147,14 @@ impl PistonGas for IsochoricRealGasParcel {
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<GasHeatVolumeCandidate<Self, Self::State>, GasEnergyError> {
         Self::midpoint_heat_volume(self, volume_m3, heat_j, controls, cancelled)
+    }
+    fn discrete_gradient_heat_volume(
+        &self,
+        volume_m3: f64,
+        heat_j: f64,
+        controls: GasEnergySolve,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<GasDiscreteGradientCandidate<Self, Self::State>, GasEnergyError> {
+        Self::discrete_gradient_heat_volume(self, volume_m3, heat_j, controls, cancelled)
     }
 }

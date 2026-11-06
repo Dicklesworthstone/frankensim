@@ -1,4 +1,4 @@
-//! One inertial wall between two entropy-compatible ideal-gas stores.
+//! One inertial wall between two entropy-compatible source-gas stores.
 //!
 //! Each original material supplies its discrete Gibbs pressure and temperature.
 //! Both pressures act on the SAME displacement, so their work cancels the
@@ -8,8 +8,9 @@
 //! inventing a second wall inertia, an exterior reservoir or copied caloric law.
 
 use super::super::{
-    ClosedGasParcel, PistonError, PistonInput, ResolvedThermochemicalGasState,
-    discrete_gradient::Trial as PrimaryTrial, impulse, invalid, poll, positive,
+    ClosedGasParcel, PistonError, PistonGas, PistonGasState, PistonInput,
+    ResolvedThermochemicalGasState, discrete_gradient::Trial as PrimaryTrial, impulse, invalid,
+    poll, positive,
 };
 use super::{DoubleActingGasPiston, DoublePistonInput, DoublePistonSolve};
 use fs_material::thermochemical_gas::energy::parcel::discrete_gradient::{
@@ -18,12 +19,13 @@ use fs_material::thermochemical_gas::energy::parcel::discrete_gradient::{
 
 /// Energy, entropy and momentum of the two original gases and their shared wall.
 #[derive(Clone, Debug, PartialEq)]
-pub struct DiscreteGradientDoublePistonStep {
+pub struct DiscreteGradientDoublePistonStep<S = ResolvedThermochemicalGasState> {
     /// Original gas heat/work/entropy results, [primary, opposing].
     pub gas: [GasDiscreteGradientStep; 2],
-    /// Each material's pressure/entropy-conjugate state; these are not
-    /// arithmetic midpoint temperatures or volumes.
-    pub thermodynamic_mean: [ResolvedThermochemicalGasState; 2],
+    /// Each original material at its entropy-conjugate temperature, used for
+    /// source sampling and acoustics. The two work pressures are carried in
+    /// `gas`; a nonideal material's sampling pressure need not equal its effort.
+    pub thermodynamic_mean: [S; 2],
     /// Signed common wall displacement [m], expanding the primary chamber.
     pub displacement_m: f64,
     /// Initial and final velocity of the ONE wall [m/s].
@@ -46,21 +48,21 @@ pub struct DiscreteGradientDoublePistonStep {
     pub material_trials: usize,
 }
 
-struct PairTrial {
-    primary: PrimaryTrial,
-    opposing: GasDiscreteGradientCandidate,
+struct PairTrial<G: PistonGas = ClosedGasParcel> {
+    primary: PrimaryTrial<G>,
+    opposing: GasDiscreteGradientCandidate<G, G::State>,
     primary_input: PistonInput,
     volume_residual_m3: f64,
 }
 
-impl DoubleActingGasPiston<ClosedGasParcel> {
+impl<G: PistonGas> DoubleActingGasPiston<G> {
     fn discrete_gradient_trial(
         &self,
         volume_m3: f64,
         input: DoublePistonInput,
         controls: DoublePistonSolve,
         cancelled: &mut impl FnMut() -> bool,
-    ) -> Result<impulse::Trial<PairTrial>, PistonError> {
+    ) -> Result<impulse::Trial<PairTrial<G>>, PistonError> {
         poll(cancelled)?;
         let opposing_volume = self.opposing_volume(volume_m3)?;
         let opposing = self.opposing.discrete_gradient_heat_volume(
@@ -70,7 +72,7 @@ impl DoubleActingGasPiston<ClosedGasParcel> {
             &mut *cancelled,
         )?;
         let ratio = self.opposing_area_m2 / self.primary.area_m2();
-        let exterior = opposing.thermodynamic_mean().state().pressure * ratio;
+        let exterior = opposing.step().work_pressure_pa * ratio;
         if !positive(exterior) {
             return Err(invalid(
                 "opposing discrete-gradient pressure load is unrepresentable",
@@ -130,8 +132,9 @@ impl DoubleActingGasPiston<ClosedGasParcel> {
     /// BOTH gas stiffnesses at the initial, thermodynamic-mean and final states.
     /// At most 2*(maximum_iterations+3) source-material proposals are made.
     ///
-    /// Frozen ideal gases only; this does not extend the discrete-gradient rule
-    /// to the nonideal, reacting, valve, circuit or acoustic-feedback entry points.
+    /// Both chambers may use the original ideal owner or the original
+    /// homogeneous Peng--Robinson owner, retaining its stable-branch admission.
+    /// This does not change reacting, valve, circuit or acoustic-feedback rules.
     /// Supplied heat has a gas-side entropy contribution, but no unspecified
     /// reservoir entropy is inferred. Failure or cancellation preserves both
     /// physical states and every previously accepted port window.
@@ -140,7 +143,7 @@ impl DoubleActingGasPiston<ClosedGasParcel> {
         input: DoublePistonInput,
         controls: DoublePistonSolve,
         mut cancelled: impl FnMut() -> bool,
-    ) -> Result<DiscreteGradientDoublePistonStep, PistonError> {
+    ) -> Result<DiscreteGradientDoublePistonStep<G::State>, PistonError> {
         poll(&mut cancelled)?;
         let [lo, hi] = controls.piston.volume_bracket_m3;
         if !positive(input.duration_s)
@@ -180,8 +183,8 @@ impl DoubleActingGasPiston<ClosedGasParcel> {
                 opposing.thermodynamic_mean(),
             ],
             [
-                self.primary.gas().mass_kg() / primary.gas.thermodynamic_mean().state().density,
-                self.opposing.mass_kg() / opposing.thermodynamic_mean().state().density,
+                self.primary.gas().mass_kg() / primary.gas.thermodynamic_mean().density_kg_m3(),
+                self.opposing.mass_kg() / opposing.thermodynamic_mean().density_kg_m3(),
             ],
             input.duration_s,
         )?;
@@ -207,8 +210,8 @@ impl DoubleActingGasPiston<ClosedGasParcel> {
             &mut cancelled,
         )?;
         let (next_opposing, opposing_step) = opposing.into_parts();
-        let force = self.primary.area_m2() * primary_step.thermodynamic_mean.state().pressure
-            - self.opposing_area_m2 * opposing_mean.state().pressure
+        let force = self.primary.area_m2() * primary_step.gas.work_pressure_pa
+            - self.opposing_area_m2 * opposing_step.work_pressure_pa
             + input.external_force_n;
         let momentum = self.primary.mass_kg()
             * (primary_step.velocity_m_s[1] - primary_step.velocity_m_s[0])
@@ -249,8 +252,8 @@ impl DoubleActingGasPiston<ClosedGasParcel> {
         };
         poll(&mut cancelled)?;
         let forces = [
-            self.primary.area_m2() * report.thermodynamic_mean[0].state().pressure,
-            -self.opposing_area_m2 * report.thermodynamic_mean[1].state().pressure,
+            self.primary.area_m2() * report.gas[0].work_pressure_pa,
+            -self.opposing_area_m2 * report.gas[1].work_pressure_pa,
         ];
         self.ports.accept(
             crate::port_adoption::StepAccount {
@@ -277,11 +280,11 @@ impl DoubleActingGasPiston<ClosedGasParcel> {
                 ),
                 crate::port_adoption::PortTransfer::heat(
                     input.heat_j[0],
-                    report.thermodynamic_mean[0].state().temperature,
+                    report.thermodynamic_mean[0].temperature_k(),
                 ),
                 crate::port_adoption::PortTransfer::heat(
                     input.heat_j[1],
-                    report.thermodynamic_mean[1].state().temperature,
+                    report.thermodynamic_mean[1].temperature_k(),
                 ),
             ],
         );

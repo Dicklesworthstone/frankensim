@@ -1,15 +1,16 @@
-//! Entropy-compatible ideal-gas work on the original inertial piston.
+//! Entropy-compatible source-gas work on the original inertial piston.
 //!
 //! Gas calorics and the discrete Gibbs identity belong to the material parcel.
-//! This adapter uses that SAME pressure in the original wall kinematics,
+//! This adapter uses that SAME conjugate work pressure in the original wall kinematics,
 //! safeguarded impulse solve and port account. It retains both the material
 //! entropy residual and the independently measured mechanical energy residual.
 //! The implicit midpoint momentum rule remains second order. Entropy balance
 //! does not establish spatial accuracy or resolve a physical heat reservoir.
 
 use super::{
-    ClosedGasParcel, GasPiston, MechanicalTrial, PistonError, PistonInput, PistonSolve,
-    PistonSupport, ResolvedThermochemicalGasState, impulse, invalid, poll, positive,
+    ClosedGasParcel, GasPiston, MechanicalTrial, PistonError, PistonGas, PistonGasState,
+    PistonInput, PistonSolve, PistonSupport, ResolvedThermochemicalGasState, impulse, invalid,
+    poll, positive,
 };
 use fs_material::thermochemical_gas::energy::parcel::discrete_gradient::{
     GasDiscreteGradientCandidate, GasDiscreteGradientStep,
@@ -17,12 +18,13 @@ use fs_material::thermochemical_gas::energy::parcel::discrete_gradient::{
 
 /// Accepted material and wall state for the discrete-gradient gas work rule.
 #[derive(Clone, Debug, PartialEq)]
-pub struct DiscreteGradientPistonStep {
+pub struct DiscreteGradientPistonStep<S = ResolvedThermochemicalGasState> {
     /// Original material energy, entropy, Gibbs balance and pressure derivatives.
     pub gas: GasDiscreteGradientStep,
-    /// Source-bearing thermodynamic mean used in pressure work and the heat port.
-    /// It is not an arithmetic midpoint of temperatures or volumes.
-    pub thermodynamic_mean: ResolvedThermochemicalGasState,
+    /// Coherent original source state at the entropy-conjugate temperature.
+    /// Transport and acoustics use this state. Wall force and work use
+    /// `gas.work_pressure_pa`, which need not equal this state's EOS pressure.
+    pub thermodynamic_mean: S,
     /// Signed wall displacement [m], positive towards gas expansion.
     pub displacement_m: f64,
     /// Initial and final wall velocities [m/s].
@@ -49,19 +51,19 @@ pub struct DiscreteGradientPistonStep {
     pub material_trials: usize,
 }
 
-pub(super) struct Trial {
-    pub(super) gas: GasDiscreteGradientCandidate,
+pub(super) struct Trial<G: PistonGas = ClosedGasParcel> {
+    pub(super) gas: GasDiscreteGradientCandidate<G, G::State>,
     pub(super) motion: MechanicalTrial,
 }
 
-impl GasPiston<ClosedGasParcel> {
+impl<G: PistonGas> GasPiston<G> {
     pub(super) fn discrete_gradient_trial(
         &self,
         volume_m3: f64,
         input: PistonInput,
         controls: PistonSolve,
         cancelled: &mut impl FnMut() -> bool,
-    ) -> Result<impulse::Trial<Trial>, PistonError> {
+    ) -> Result<impulse::Trial<Trial<G>>, PistonError> {
         poll(cancelled)?;
         let gas = self.gas.discrete_gradient_heat_volume(
             volume_m3,
@@ -69,8 +71,7 @@ impl GasPiston<ClosedGasParcel> {
             controls.gas,
             &mut *cancelled,
         )?;
-        let motion =
-            self.mechanical_trial(volume_m3, gas.thermodynamic_mean().state().pressure, input)?;
+        let motion = self.mechanical_trial(volume_m3, gas.step().work_pressure_pa, input)?;
         let tangent = (2.0 * (self.mass_kg / self.area_m2)) / input.duration_s
             - (input.duration_s * self.area_m2) * gas.step().pressure_final_volume_derivative_pa_m3;
         if self.support == PistonSupport::Free && !positive(tangent) {
@@ -94,8 +95,10 @@ impl GasPiston<ClosedGasParcel> {
     /// Adiabatic steps therefore avoid midpoint gas entropy drift while closing
     /// gas and wall energy together. The heat port uses the conjugate T_bar.
     ///
-    /// Frozen-composition ideal mixtures only. This does not extend the rule
-    /// to a real-gas EOS or assign entropy to an unspecified external reservoir.
+    /// Supports the original frozen-composition ideal and homogeneous
+    /// Peng--Robinson parcels. Nonideal proposals retain the material owner's
+    /// admitted stable-branch restriction; this is not an equilibrium flash.
+    /// No entropy is assigned to an unspecified external reservoir.
     /// Existing midpoint, reacting, nozzle and finite-wall thermal entry points
     /// retain their own integration rules; this choice applies to this call.
     /// Fixed support preserves the original volume and zero wall velocity.
@@ -106,7 +109,7 @@ impl GasPiston<ClosedGasParcel> {
         input: PistonInput,
         controls: PistonSolve,
         mut cancelled: impl FnMut() -> bool,
-    ) -> Result<DiscreteGradientPistonStep, PistonError> {
+    ) -> Result<DiscreteGradientPistonStep<G::State>, PistonError> {
         poll(&mut cancelled)?;
         let [lo, hi] = controls.volume_bracket_m3;
         if !positive(input.duration_s)
@@ -158,15 +161,15 @@ impl GasPiston<ClosedGasParcel> {
     // walls. A coupled owner calls this only on its private primary candidate.
     pub(super) fn finish_discrete_gradient(
         &mut self,
-        trial: Trial,
+        trial: Trial<G>,
         input: PistonInput,
         controls: PistonSolve,
         iterations: usize,
         material_trials: usize,
         mut cancelled: impl FnMut() -> bool,
-    ) -> Result<DiscreteGradientPistonStep, PistonError> {
+    ) -> Result<DiscreteGradientPistonStep<G::State>, PistonError> {
         let mean = trial.gas.thermodynamic_mean();
-        let mean_volume = self.gas.mass_kg() / mean.state().density;
+        let mean_volume = self.gas.mass_kg() / mean.density_kg_m3();
         self.admit_linear_clock(mean, mean_volume, input.duration_s)?;
         self.admit_linear_clock(
             trial.gas.endpoint().state(),
@@ -180,7 +183,7 @@ impl GasPiston<ClosedGasParcel> {
             input.exterior_pressure_pa * (trial.gas.endpoint().volume_m3() - self.gas.volume_m3());
         let external = input.external_force_n * trial.motion.displacement;
         let support = trial.motion.support_impulse * f64::midpoint(before, after);
-        let force = self.area_m2 * (mean.state().pressure - input.exterior_pressure_pa)
+        let force = self.area_m2 * (trial.gas.step().work_pressure_pa - input.exterior_pressure_pa)
             + input.external_force_n;
         let momentum = self.mass_kg * (after - before)
             - input.duration_s * force
@@ -238,7 +241,7 @@ impl GasPiston<ClosedGasParcel> {
                 crate::port_adoption::PortTransfer::work(external - exterior + support, true),
                 crate::port_adoption::PortTransfer::heat(
                     input.heat_j,
-                    report.thermodynamic_mean.state().temperature,
+                    report.thermodynamic_mean.temperature_k(),
                 ),
             ],
         );
