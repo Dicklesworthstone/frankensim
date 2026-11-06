@@ -184,6 +184,90 @@ fn g1_contact_press_yields_native_shell_and_sliding_work_keeps_drilling_separate
 }
 
 #[test]
+fn g1_loaded_contact_restarts_with_identical_gaps_through_elastic_unload_and_reload() {
+    with_cx(|_, cx| {
+        let mesh = triangle();
+        // Use the native plastic law below yield: a closed elastic cycle must
+        // not invent plastic history during repeated contact response trials.
+        let material = section(metal());
+        let fixed: Vec<_> = (0..18).filter(|d| *d != 6).map(|d| (d, 0.0)).collect();
+        let p = problem(&mesh, &material, &fixed, &[], &[1.0], 0.37);
+        let gauge = p.prepare_reference_drilling(cx).unwrap();
+        let weighted = ShellContactWitness {
+            barycentric: [0.2, 0.3, 0.5],
+            reference_obstacle_point_m: [0.3, 0.5 + 0.07, 0.5 * H],
+            ..witness(0.0)
+        };
+        let contacts = PlasticShellContacts::prepare(&mesh, &p, &[weighted], 1, cx).unwrap();
+        let mut old = p.solve(cx).unwrap();
+        let virgin = old.section_states[0].points[0].history.clone();
+        let mut policy = controls();
+        // Representable positive closure residuals have an explicit small
+        // budget. The signed floating-point gap is never clamped.
+        policy.maximum_normal_numerical_loss_j = 1e-12;
+        let mut start = [0.0; 3];
+        let mut force = [0.0; 3];
+        let mut previous_gap = 0.0_f64;
+        let stiffness = E * H * 0.5 / (1.0 - NU * NU);
+        for depth in [
+            0.00010352029791283241,
+            0.000032590353908501725,
+            0.00006321098765,
+            0.00014789012345,
+            0.0,
+            0.00010352029791283241,
+            0.00006321098765,
+            0.0,
+        ] {
+            let step = ShellContactStep {
+                obstacle_start_displacement_m: start,
+                friction_coefficient: 0.0,
+                initial_force_n: force,
+                ..interval([-depth, 0.0, 0.0])
+            };
+            let saved = old.clone();
+            let next = p
+                .solve_from_with_contacts(
+                    &old.coordinates,
+                    &old.section_states,
+                    &gauge,
+                    &contacts,
+                    &[step],
+                    policy,
+                    cx,
+                )
+                .unwrap();
+            let report = &next.contacts[0];
+            assert_eq!(report.initial_gap_m.to_bits(), previous_gap.to_bits());
+            assert!(report.final_gap_m >= 0.0);
+            near(next.solution.coordinates[1][0], -depth / 0.3, 2e-9);
+            near(report.force_n[0], stiffness * depth / (0.3 * 0.3), 2e-8);
+            near(report.work_residual_j, 0.0, policy.work_tolerance_j);
+            assert_eq!(report.friction_loss_j, 0.0);
+            assert!(report.normal_numerical_loss_j <= policy.maximum_normal_numerical_loss_j);
+            assert_eq!(next.solution.increments[0].evolving_elements, 0);
+            for point in next
+                .solution
+                .section_states
+                .iter()
+                .flat_map(|state| &state.points)
+            {
+                assert_eq!(point.history, virgin);
+            }
+            assert_eq!(old, saved);
+            start = step.obstacle_end_displacement_m;
+            force = report.force_n;
+            previous_gap = report.final_gap_m;
+            old = next.solution;
+        }
+        near(old.coordinates[1][0], 0.0, 2e-9);
+        for resultant in old.section_resultants.iter().flatten() {
+            near(*resultant, 0.0, 2e-7);
+        }
+    });
+}
+
+#[test]
 fn g1_dynamic_contact_uses_original_mass_and_separates_open_gap_approach_from_heat() {
     with_cx(|_, cx| {
         let mesh = triangle();

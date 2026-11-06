@@ -353,9 +353,11 @@ impl<'m> PlasticShellContacts<'m> {
                     "finite obstacle endpoint translations required",
                 ));
             }
-            let initial = point.observe(old, None)[0];
-            let gap = point.reference_gap_m + initial
-                - dot3(witness.axes_world[0], step.obstacle_start_displacement_m);
+            let gap = point.normal_gap(
+                old,
+                witness.axes_world[0],
+                step.obstacle_start_displacement_m,
+            );
             if !gap.is_finite() || gap < 0.0 {
                 return Err(ShellContactError::Invalid(
                     "initial physical point/plane gap must be nonnegative",
@@ -400,14 +402,12 @@ impl<'m> PlasticShellContacts<'m> {
         old: Option<&[[f64; 6]]>,
         new: &[[f64; 6]],
         steps: &[ShellContactStep],
-        gaps: &[f64],
     ) -> Vec<[f64; 3]> {
         self.points
             .iter()
             .zip(&self.witnesses)
             .zip(steps)
-            .zip(gaps)
-            .map(|(((point, witness), step), gap)| {
+            .map(|((point, witness), step)| {
                 let delta = point.observe(Some(new), old);
                 let obstacle = core::array::from_fn(|axis| {
                     step.obstacle_end_displacement_m[axis]
@@ -416,22 +416,42 @@ impl<'m> PlasticShellContacts<'m> {
                 let relative: [f64; 3] = core::array::from_fn(|axis| {
                     delta[axis] - dot3(witness.axes_world[axis], obstacle)
                 });
-                [gap + relative[0], relative[1], relative[2]]
+                // Use the same absolute endpoint arithmetic as restart
+                // admission. Incrementally accumulating g0 + B*dq - dplane
+                // can accept a gap that recomputes as negative on continuation.
+                let gap = point.normal_gap(
+                    Some(new),
+                    witness.axes_world[0],
+                    step.obstacle_end_displacement_m,
+                );
+                [gap, relative[1], relative[2]]
             })
             .collect()
     }
 }
 
 impl Point {
+    fn normal_gap(
+        &self,
+        coordinates: Option<&[[f64; 6]]>,
+        normal: [f64; 3],
+        obstacle_displacement_m: [f64; 3],
+    ) -> f64 {
+        self.reference_gap_m + self.observe_axis(0, coordinates, None)
+            - dot3(normal, obstacle_displacement_m)
+    }
+
     /// Physical metres/radians; rotations are never multiplied by solver length.
     fn observe(&self, new: Option<&[[f64; 6]]>, old: Option<&[[f64; 6]]>) -> [f64; 3] {
-        core::array::from_fn(|axis| {
-            (0..3).fold(0.0, |sum, a| {
-                (0..6).fold(sum, |sum, d| {
-                    let delta = new.map_or(0.0, |q| q[self.nodes[a]][d])
-                        - old.map_or(0.0, |q| q[self.nodes[a]][d]);
-                    self.rows[axis][a][d].mul_add(delta, sum)
-                })
+        core::array::from_fn(|axis| self.observe_axis(axis, new, old))
+    }
+
+    fn observe_axis(&self, axis: usize, new: Option<&[[f64; 6]]>, old: Option<&[[f64; 6]]>) -> f64 {
+        (0..3).fold(0.0, |sum, a| {
+            (0..6).fold(sum, |sum, d| {
+                let delta = new.map_or(0.0, |q| q[self.nodes[a]][d])
+                    - old.map_or(0.0, |q| q[self.nodes[a]][d]);
+                self.rows[axis][a][d].mul_add(delta, sum)
             })
         })
     }
@@ -629,7 +649,7 @@ impl PlasticShellContacts<'_> {
                 }
                 checkpoint(cx)?;
                 let (solution, drilling, motion) = mechanical(force)?;
-                let paths = self.paths(old, &solution.coordinates, steps, gaps);
+                let paths = self.paths(old, &solution.coordinates, steps);
                 accepted = Some(Candidate {
                     solution,
                     drilling,
