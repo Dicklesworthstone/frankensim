@@ -9330,10 +9330,48 @@ rotations with opposing signed defects, and geometric/damage/cancellation
 refusals. The build executes the original material, reference geometry,
 Newton/FGMRES, allocation and cancellation owners; unrelated modules and unused
 hyperelastic generic defaults are omitted. This is not the full workspace
-Cargo or constellation gate. This owner advances one quasistatic interval;
-callers refine refused increments. It does not yet supply finite ductile
-inertia, evolving caloric feedback, crack topology, erosion or fragment/contact
-transfer. MR63's post-failure topology requirements remain open.
+Cargo or constellation gate. The quasistatic entry advances one physical
+interval; callers refine refused increments. Evolving caloric feedback, crack
+topology, erosion and fragment/contact transfer remain outside this owner.
+MR63's post-failure topology requirements remain open.
+
+### Consistent momentum through finite ductile softening
+
+`hyper3::plastic::ductile::dynamics::FiniteDuctileTetMotion` retains the complete
+finite ductile specimen, physical nodal velocity and one original consistent
+`P1ReferenceMass`. The supplied positive reference densities declare the mass
+inventory without claiming material-card calibration. Mass and reference
+density are admitted once and shared across accepted endpoints; neither damage
+nor current volume changes the inventory. Free bodies require no artificial
+supports. Nonzero initial velocity and moving prescribed supports are retained.
+
+The original `BackwardEulerInertia` supplies momentum forces, the mass tangent,
+endpoint velocity and kinetic work. Material and momentum share the SAME
+nonpotential Newton/FGMRES solve. The inertia residual and derivative enter
+exactly once. One `DuctileStepConditions.duration_s` drives both momentum and
+rate-dependent initiation; no independent constitutive clock is introduced.
+All material, geometry, directional-band and signed-defect gates from the
+quasistatic owner remain active.
+
+Native support reactions include inertia. The original endpoint-work owner
+removes inertial work from the material account exactly once; independent
+checks retain storage, plastic dissipation, damage release, signed material
+work defect, kinetic change and `1/2 delta_v M delta_v` numerical loss. Material
+absolute-defect and kinetic-loss budgets are separate. Both component work
+identities and their combined balance must pass before displacement, velocity
+and histories publish together. Numerical losses never become heating or
+fracture energy. Refusal leaves the original complete motion available for
+deterministic retry or physical-interval refinement.
+
+All four new regressions in `tests/finite_ductile/dynamics.rs` pass alongside the
+four affected quasistatic regressions in the same actual-source build. They
+exercise nonzero-velocity free acceleration and retained mass, an independently
+forced free coordinate with simultaneous damage and inertia at two physical
+durations, moving-support work, independent material/kinetic loss refusals,
+replay, refined retry and cancellation rollback. This is one backward-Euler
+interval with held temperature and original reference inventory. It adds no
+adaptive path controller, impulses, evolving caloric feedback or fragment
+transfer, and the loss budgets do not certify trajectory accuracy.
 
 ## Adaptive brittle load intervals
 

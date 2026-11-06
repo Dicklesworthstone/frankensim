@@ -33,9 +33,15 @@ use super::{
 };
 use crate::brittle::{TetCrackBandGeometry, TetCrackBandGeometryError};
 use crate::ductile::{DuctileStepConditions, DuctileTemperatures};
+use crate::inertia::{BackwardEulerInertia, InertialEnergy};
 use crate::loads3::TetLoadGeometry3;
 use crate::plastic3::increment::{self, IncrementControls, IncrementOperator};
 use crate::plastic3::{IncrementRecord, IncrementSettings, SmallStrainTetError};
+
+/// Consistent reference inertia on the same nonpotential finite ductile solve.
+pub mod dynamics;
+
+type Motion = (Vec<[f64; 3]>, InertialEnergy);
 
 /// Original geometry, material, solver or physical-work refusal.
 #[derive(Debug)]
@@ -147,7 +153,9 @@ pub struct FiniteDuctileTetEnergy {
     pub endpoint_work_defect_j: f64,
     /// Sum of absolute element defects; this quantity consumes the work budget.
     pub absolute_endpoint_work_defect_j: f64,
+    /// External/support work minus material and any attached inertial work.
     pub equilibrium_work_residual_j: f64,
+    /// Complete material balance after subtracting any attached inertial work.
     pub balance_error_j: f64,
 }
 
@@ -182,6 +190,7 @@ where
     materials: &'m [&'m FiniteDuctileJ2<L>],
     accepted: &'s [FiniteDuctileState<'m, L>],
     conditions: &'s [DuctileJ2Conditions],
+    inertia: Option<&'s BackwardEulerInertia<'s>>,
     dofs: usize,
 }
 
@@ -269,6 +278,11 @@ where
             return Err(invalid(
                 "finite ductile assembled force cannot be represented",
             ));
+        }
+        // The shared increment owner adds inertia to residual forces. Its
+        // operator must add the SAME original derivative exactly once.
+        if let (Some(matrix), Some(inertia)) = (&mut matrix, self.inertia) {
+            inertia.add_tangent(matrix, cx)?;
         }
         checkpoint(cx)?;
         Ok((force, scale, matrix.map(|coo| coo.assemble())))
@@ -462,6 +476,33 @@ where
         controls: FinitePlasticStepControls,
         cx: &Cx<'_>,
     ) -> Result<FiniteDuctileTetStep<'g, 'm, L>, FiniteDuctileTetError> {
+        self.advance_loaded(
+            prescribed_m,
+            nodal_forces_n,
+            body_force_n_m3,
+            conditions,
+            settings,
+            controls,
+            None,
+            cx,
+        )
+        .map(|(step, _)| step)
+    }
+
+    /// Common material, equilibrium and work owner for static and moving
+    /// specimens. Only the original inertia owner supplies momentum or velocity.
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    fn advance_loaded(
+        &self,
+        prescribed_m: &[(usize, f64)],
+        nodal_forces_n: &[(usize, f64)],
+        body_force_n_m3: [f64; 3],
+        conditions: DuctileStepConditions<'_>,
+        settings: IncrementSettings,
+        controls: FinitePlasticStepControls,
+        inertia: Option<&BackwardEulerInertia<'_>>,
+        cx: &Cx<'_>,
+    ) -> Result<(FiniteDuctileTetStep<'g, 'm, L>, Option<Motion>), FiniteDuctileTetError> {
         checkpoint(cx)?;
         let count = self.materials.len();
         let covered = match conditions.temperatures_k {
@@ -551,6 +592,7 @@ where
             materials: self.materials,
             accepted: &self.state.element_states,
             conditions: &point_conditions,
+            inertia,
             dofs: self.state.nodes_m.len() * 3,
         };
         let solved = increment::solve(
@@ -566,9 +608,13 @@ where
                 self.state.displacement_m.as_flattened(),
                 &self.state.element_states,
             )),
-            None,
+            inertia,
             cx,
         )?;
+        let motion = inertia
+            .map(|inertia| inertia.motion(&solved.displacement_m, cx))
+            .transpose()
+            .map_err(SmallStrainTetError::from)?;
         let record = solved
             .increments
             .into_iter()
@@ -628,7 +674,7 @@ where
             &force,
             &deformation,
             &piola,
-            None,
+            motion.as_ref().map(|(_, account)| account.inertial_work_j),
             cx,
         )?;
         let energy = FiniteDuctileTetEnergy {
@@ -646,7 +692,10 @@ where
                 - (values[0] - self.state.stored_energy_j))
                 - values[1]
                 - values[2]
-                - values[4],
+                - values[4]
+                - motion
+                    .as_ref()
+                    .map_or(0.0, |(_, account)| account.inertial_work_j),
         };
         for (name, value) in [
             ("element work consistency", values[6]),
@@ -673,24 +722,27 @@ where
             .chunks_exact(3)
             .map(|v| [v[0], v[1], v[2]])
             .collect();
-        Ok(FiniteDuctileTetStep {
-            solid: Self {
-                materials: self.materials,
-                bands: self.bands,
-                state: FinitePlasticTetState {
-                    nodes_m: self.state.nodes_m,
-                    tetrahedra: self.state.tetrahedra,
-                    elements: Arc::clone(&self.state.elements),
-                    budget: self.state.budget,
-                    displacement_m,
-                    element_deformation: deformation,
-                    element_states: solved.point_states,
-                    element_first_piola_pa: piola,
-                    stored_energy_j: energy.stored_after_j,
+        Ok((
+            FiniteDuctileTetStep {
+                solid: Self {
+                    materials: self.materials,
+                    bands: self.bands,
+                    state: FinitePlasticTetState {
+                        nodes_m: self.state.nodes_m,
+                        tetrahedra: self.state.tetrahedra,
+                        elements: Arc::clone(&self.state.elements),
+                        budget: self.state.budget,
+                        displacement_m,
+                        element_deformation: deformation,
+                        element_states: solved.point_states,
+                        element_first_piola_pa: piola,
+                        stored_energy_j: energy.stored_after_j,
+                    },
                 },
+                equilibrium: record,
+                energy,
             },
-            equilibrium: record,
-            energy,
-        })
+            motion,
+        ))
     }
 }

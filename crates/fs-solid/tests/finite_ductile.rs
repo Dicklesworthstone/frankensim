@@ -2,6 +2,9 @@
 //! Synthetic constants exercise the numerical law; no alloy is qualified here.
 #![deny(unsafe_code)]
 
+#[path = "finite_ductile/dynamics.rs"]
+mod dynamics;
+
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_material::ductile::evolution::DuctileJ2Settings;
