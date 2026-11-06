@@ -46,6 +46,9 @@ pub mod burnup;
 /// Point-neutron kinetics with independent delayed-neutron precursor history.
 pub mod kinetics;
 
+/// Conservative deposition of emitted radiation using explicit transport responses.
+pub mod radiation;
+
 /// Disjoint energy destinations, in joules (or joules per fission in a model).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct EnergyChannels {

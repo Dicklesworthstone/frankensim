@@ -1634,3 +1634,74 @@ are explicitly fixed. Mean-flux/mean-inventory time correlation still requires
 timestep refinement. This addition does not solve carrier-fluid dynamics or
 bulk material/enthalpy advection, and does not establish a certified global
 error bound or evaluated-reactor qualification.
+
+## Nonlocal radiation energy responses
+
+`radiation::RadiationResponse` applies caller-supplied absorbed-energy fractions
+to integrated outward-radiation joules. Each source row names explicit receivers
+and an explicit escape fraction. Source and receiver IDs are opaque physical
+identities, independent of the optional thermal crate. Immutable rows are shared
+through `Arc`; canonical sparse ordering provides deterministic application
+without a dense all-cell response matrix.
+
+Fractions are finite and nonnegative. Each row must close to one within a fixed
+16-machine-epsilon admission allowance; coefficients are never renormalized.
+Any admitted row-closure defect is retained and charged in joules at the actual
+emission magnitude. Duplicate source rows or receiver paths, missing/extra
+emission coverage, work-limit violations and unrepresentable transfers refuse.
+Exact zero emission and complete escape remain valid physical limits.
+
+The result separates per-receiver deposition, total emission, deposition,
+escape, signed residual and noncancelling numerical defects. Product rounding,
+row closure, receiver reductions and scalar exports cannot cancel one another
+to satisfy the caller's energy allowance. Positive products below representable
+range refuse rather than disappearing. Checkpoints bracket work, each sparse
+row/path and final publication. The response has no mutable physical history.
+
+These coefficients describe absorbed ENERGY, not photon extinction or collision
+probabilities. The distinction between production, local heating and separately
+transported photon deposition follows the public
+[OpenMC energy-deposition documentation](https://docs.openmc.org/en/stable/methods/energy_deposition.html).
+In particular, attenuation is not automatically absorption; the underlying
+quantities are distinguished in [NIST's photon energy-absorption description](https://physics.nist.gov/PhysRefData/XrayMassCoef/chap3.html).
+No evaluated response data, radiation spectrum, transport solution, flight-time
+delay, dose or data-uncertainty certificate is inferred. The response must be
+valid for the complete emitted energy mix, material state and geometry to which
+the caller applies it. Nuclear emission histories remain with their source owners.
+
+Eleven focused G0/G3/G4/G5 regressions exercise unequal partitions, shared
+receivers, deterministic ordering, complete escape/deposition, coefficient and
+coverage admission, bounded work, small coefficient defects amplified by large
+emission, scalar-export loss, subnormal arithmetic and cancellation.
+All eleven passed in a standalone build of the actual response module using
+the pinned `nightly-2026-07-06` compiler. This validates the response equations
+and numerical boundaries, not external transport data or a workspace Cargo gate.
+
+## Evaluated fission-neutron multiplicities
+
+`endf::neutron_yield::FissionNeutronYield` imports the distinct MF1/MT452 total,
+MT456 prompt and MT455 delayed neutron yields from supplied ENDF-6 text. Exact
+MAT, nuclide/isomer and metadata temperature select one section. The original
+bounded reader admits histogram/linear TAB1 laws, preserves multiplicities
+above one, converts incident energies to joules and rejects duplicate matching
+sections, truncation, unsupported interpolation and excess work or storage.
+MT455 with LDG=0 retains the ordered positive precursor decay constants in
+inverse seconds. Family abundances and outgoing neutron spectra are separate
+data; the importer does not infer either from these constants. Polynomial
+LNU=1 and energy-dependent delayed constants LDG=1 explicitly refuse.
+
+MF1 yield data can come from an unreconstructed zero-temperature evaluation.
+The existing MF3 cross-section importer still requires reconstructed processed
+data at its declared positive temperature. `collapse` admits their common
+isotope, target mass and library/revision identity, retaining both metadata
+records. It reuses the original reaction-weighted integration to preserve
+`integral(sigma_f * phi * nu)`, with no representative-energy sampling or yield
+normalization. A zero-reaction group has an undefined yield (`None`), not an
+invented neutron multiplicity. The output retains prompt/delayed/total meaning.
+
+Synthetic regressions exercise raw evaluation import, isomers, native spatial
+prompt growth and delayed release against analytical solutions, weighted
+production, incompatible data, malformed/unsupported records and late
+cancellation. They establish format and equation behavior, not validation of
+an evaluated isotope. The format follows ENDF-102 (2023), sections 1.2–1.4,
+<https://www.nndc.bnl.gov/endfdocs/ENDF-102-2023.pdf>.
