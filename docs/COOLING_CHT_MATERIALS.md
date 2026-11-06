@@ -578,9 +578,14 @@ time averages or energy records.
 For native constant-property fluids this selects
 `march_conjugate_implicit_buoyancy`: a heated wall can drive flow within the
 first interval, starting from a uniform initial temperature. Nonzero declared
-gravity and laminar flow are required. Authored solid conductivity tables keep
-their original integrated boundary/interface evaluation, contacts and compact
-storage; the coupling does not replace them with frozen cell conductivities.
+gravity is required. Laminar flow and explicitly selected transient
+Smagorinsky, WALE or Vreman transport are supported; equilibrium LVEL still
+refuses. SGS is recomputed from each native momentum iterate, and its accepted
+heat diffusivity uses the same projected velocity and declared turbulent
+Prandtl number. Authored solid conductivity tables keep their original
+integrated boundary/interface evaluation, contacts and compact storage; the
+coupling does not replace them with frozen cell conductivities or apply eddy
+conductivity inside solids.
 
 For temperature-dependent gas or liquid sources this selects the existing
 material endpoint owner. It also composes with `fluid_enthalpy`,
@@ -592,7 +597,8 @@ The frozen-flow and steady-on-mean-flow modes cannot select this coupling.
 The top-level `endpoint_coupling` result reports all supplied controls, actual
 momentum/energy solves and source refreshes, maximum accepted defects and
 per-step pass/defect records (at most 200 samples, including the last step).
-Native runs identify `solver: "fv-simplec-unsteady-boussinesq-implicit"`;
+Native runs identify `solver: "fv-simplec-unsteady-boussinesq-implicit"` or
+`"fv-simplec-unsteady-sgs-boussinesq-implicit"` when SGS is selected;
 material runs retain their material/SGS solver name and identify the coupling
 in `material_feedback`. The existing thermal closure and physical flow-step
 reports remain available. Closing the nonlinear coupling does not establish

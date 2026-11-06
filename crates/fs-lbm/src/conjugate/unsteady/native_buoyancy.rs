@@ -4,7 +4,7 @@
 //! retains its integrated solid k(T), contact, wall and compact-storage laws.
 
 use super::{
-    Boussinesq, ChtError, ConjugateMarch, EnergyConfig, FluidProperties, MaterialCoefficients,
+    Boussinesq, ChtError, ConjugateMarch, EnergyConfig, FluidProperties, FvSgsConfig, MaterialCoefficients,
     MaterialEndpointConfig, MaterialEndpointCoupling, MaterialEndpointMarch, MaterialHeatStep,
     RadiationConfig, SimpleConfig, SolidMaterial, ThermalSetup, Turbulence, UnsteadyConfig,
     VoxelDomain, finite, finite_positive, march_conjugate_with_material, poll,
@@ -51,13 +51,87 @@ pub fn march_conjugate_implicit_buoyancy(
     radiation: Option<&RadiationConfig>,
     gate: &CancelGate,
 ) -> Result<MaterialEndpointMarch<ConjugateMarch>, ChtError> {
+    march_with_sgs(
+        domain, fluid, solids, setup, config, unsteady, None, buoyancy,
+        endpoint, initial_temperature, inlet_schedule, power_schedule,
+        energy, radiation, gate,
+    )
+}
+
+/// Converge native buoyancy and heat with explicit transient SGS transport.
+///
+/// Each nonlinear trial solves the original momentum equations with the
+/// selected Smagorinsky, WALE or Vreman model. Its projected velocity supplies
+/// one heat-diffusion field `rho * cp * nu_t / Pr_t`, using the independently
+/// declared [`SimpleConfig::turbulent_prandtl`]. That field is replaced on every
+/// trial; it is never accumulated into molecular conductivity. Wall and
+/// solid-interface heat transfer retain their native molecular laws.
+///
+/// Previous/older momentum states and the old temperature stay fixed through
+/// the coupling trials as in [`march_conjugate_implicit_buoyancy`]. Native
+/// nonlinear solid conductivity, compact storage and radiation remain inside
+/// the same heat solve. A zero model coefficient exactly recovers the
+/// laminar implicit entry. This is an explicit exploratory SGS closure, with
+/// its original viscosity cap and use policy; it adds no SGS dissipation heat
+/// or thermal wall model and establishes no resolved turbulent spectrum.
+///
+/// # Errors
+///
+/// The refusals of [`march_conjugate_implicit_buoyancy`] and the original SGS
+/// controls, including an incompatible closure, viscosity cap or use policy.
+#[allow(clippy::too_many_arguments)]
+pub fn march_conjugate_with_sgs_implicit_buoyancy(
+    domain: &VoxelDomain,
+    fluid: &FluidProperties,
+    solids: &[SolidMaterial],
+    setup: &ThermalSetup,
+    config: &SimpleConfig,
+    unsteady: &UnsteadyConfig,
+    sgs: FvSgsConfig,
+    buoyancy: &Boussinesq,
+    endpoint: MaterialEndpointConfig,
+    initial_temperature: &[f64],
+    inlet_schedule: impl Fn(f64) -> f64,
+    power_schedule: impl Fn(f64) -> f64,
+    energy: &EnergyConfig,
+    radiation: Option<&RadiationConfig>,
+    gate: &CancelGate,
+) -> Result<MaterialEndpointMarch<ConjugateMarch>, ChtError> {
+    march_with_sgs(
+        domain, fluid, solids, setup, config, unsteady, Some(sgs), buoyancy,
+        endpoint, initial_temperature, inlet_schedule, power_schedule,
+        energy, radiation, gate,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn march_with_sgs(
+    domain: &VoxelDomain,
+    fluid: &FluidProperties,
+    solids: &[SolidMaterial],
+    setup: &ThermalSetup,
+    config: &SimpleConfig,
+    unsteady: &UnsteadyConfig,
+    sgs: Option<FvSgsConfig>,
+    buoyancy: &Boussinesq,
+    endpoint: MaterialEndpointConfig,
+    initial_temperature: &[f64],
+    inlet_schedule: impl Fn(f64) -> f64,
+    power_schedule: impl Fn(f64) -> f64,
+    energy: &EnergyConfig,
+    radiation: Option<&RadiationConfig>,
+    gate: &CancelGate,
+) -> Result<MaterialEndpointMarch<ConjugateMarch>, ChtError> {
     poll(gate)?;
+    if let Some(sgs) = sgs {
+        sgs.validate()?;
+    }
     fluid.validate()?;
     domain.check_materials(solids.len())?;
     if config.turbulence != Turbulence::Laminar || !setup.eddy_conductivity_w_m_k.is_empty() {
         return Err(ChtError::InvalidInput {
             field: "unsteady.implicit_buoyancy",
-            reason: "native implicit buoyancy requires laminar molecular transport without an authored eddy-conductivity field".into(),
+            reason: "native implicit buoyancy excludes equilibrium turbulence and authored eddy conductivity".into(),
         });
     }
     finite("buoyancy.expansion_per_k", buoyancy.expansion_per_k)?;
@@ -91,7 +165,7 @@ pub fn march_conjugate_implicit_buoyancy(
         setup,
         config,
         unsteady,
-        None,
+        sgs,
         #[cfg(feature = "enthalpy-coupling")]
         None,
         initial_temperature,

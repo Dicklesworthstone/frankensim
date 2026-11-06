@@ -1,4 +1,7 @@
 //! Native endpoint buoyancy, physical heat closure and retained time histories.
+
+#[path = "native_implicit_buoyancy/sgs.rs"]
+mod sgs;
 use fs_exec::CancelGate;
 use fs_lbm::conjugate::{
     Boussinesq, ChtError, ConvectionScheme, EnergyConfig, FlowResistance, FluidProperties,

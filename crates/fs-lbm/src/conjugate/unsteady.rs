@@ -46,7 +46,7 @@ use fs_exec::CancelGate;
 
 mod endpoint;
 mod native_buoyancy;
-pub use native_buoyancy::march_conjugate_implicit_buoyancy;
+pub use native_buoyancy::{march_conjugate_implicit_buoyancy, march_conjugate_with_sgs_implicit_buoyancy};
 pub(crate) use endpoint::MaterialEndpointCoupling;
 pub use endpoint::{MaterialEndpointConfig, MaterialEndpointMarch, MaterialEndpointStepReport};
 

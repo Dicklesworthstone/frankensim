@@ -149,3 +149,62 @@ fn endpoint_controls_cannot_be_ignored_and_budget_exhaustion_publishes_no_march(
         assert!(result.get("material_feedback").is_none());
     }
 }
+
+#[test]
+fn native_sgs_and_buoyancy_share_the_implicit_heat_endpoint() {
+    let native = implicit(&unsteady_material_atmosphere("300 100000 0", -9.81)
+        .replace(
+            r#""fluid":{"mode":"temperature-dependent","gas":"300 100000 0"}"#,
+            r#""fluid":"dry-air-300k","reference_temperature_k":300"#,
+        ));
+    for model in ["smagorinsky", "wale", "vreman"] {
+        let scene = native.replace(r#""solver":{"#, &format!(r#""solver":{{
+            "sgs":{{"model":"{model}","coefficient":0.17,"filter_width_factor":1,
+                "maximum_eddy_to_molecular":50,"usage":"exploration"}},
+            "turbulent_prandtl":0.7,"#));
+        let (code, result, error) =
+            run(&scratch(&format!("endpoint-native-sgs-{model}.json"), &scene));
+        assert_eq!(code, 0, "{error}");
+        assert_eq!(result.str_field("solver"),
+            Some("fv-simplec-unsteady-sgs-boussinesq-implicit"));
+        assert_closed(&result, 4);
+        assert!(f(&result, &["flow", "final_kinetic_energy_j"]) > 0.0);
+        let sgs = result.path(&["flow", "sgs"]).unwrap();
+        assert_eq!(sgs.str_field("model"), Some(model));
+        assert_eq!(f(sgs, &["thermal_prandtl"]), 0.7);
+        assert!(f(sgs, &["final_max_eddy_viscosity_m2_s"]) > 0.0);
+        assert!(f(sgs, &["final_max_turbulent_conductivity_w_m_k"]) > 0.0);
+        // Nonlinear trials are work, not additional physical intervals.
+        assert_eq!(result.path(&["transient", "records"]).unwrap().as_array().unwrap().len(), 4);
+    }
+}
+
+#[test]
+fn zero_native_sgs_retains_the_implicit_laminar_solution_and_capped_sgs_refuses() {
+    let native = implicit(&unsteady_material_atmosphere("300 100000 0", -9.81)
+        .replace(
+            r#""fluid":{"mode":"temperature-dependent","gas":"300 100000 0"}"#,
+            r#""fluid":"dry-air-300k","reference_temperature_k":300"#,
+        ));
+    let (code, laminar, error) = run(&scratch("endpoint-native-sgs-limit-base.json", &native));
+    assert_eq!(code, 0, "{error}");
+    let zero = native.replace(r#""solver":{"#, r#""solver":{"sgs":{
+        "model":"smagorinsky","coefficient":0,"filter_width_factor":1,
+        "maximum_eddy_to_molecular":0,"usage":"exploration"},"#);
+    let (code, result, error) = run(&scratch("endpoint-native-sgs-limit-zero.json", &zero));
+    assert_eq!(code, 0, "{error}");
+    assert_closed(&result, 4);
+    for quantity in ["final_kinetic_energy_j", "final_mass_residual", "final_momentum_residual"] {
+        let expected = f(&laminar, &["flow", quantity]);
+        let actual = f(&result, &["flow", quantity]);
+        assert!((actual - expected).abs() <= 1e-12 * expected.abs().max(1.0));
+    }
+    assert_eq!(f(&result, &["flow", "sgs", "final_max_eddy_viscosity_m2_s"]), 0.0);
+    assert_eq!(f(&result, &["flow", "sgs", "final_max_turbulent_conductivity_w_m_k"]), 0.0);
+    let capped = zero.replace(r#""coefficient":0,"#, r#""coefficient":0.17,"#);
+    let (code, refused, error) = run(&scratch("endpoint-native-sgs-limit-refused.json", &capped));
+    assert_ne!(code, 0);
+    assert!(error.contains("eddy/molecular ratio"), "{error}");
+    assert!(refused.get("flow").is_none());
+    assert!(refused.get("endpoint_coupling").is_none());
+}

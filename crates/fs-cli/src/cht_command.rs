@@ -34,7 +34,8 @@ use fs_lbm::conjugate::{
     FvFlow, FvSgsConfig, InternalFan, RadiationConfig, SimpleConfig, SolidMaterial, ThermalFace,
     ThermalSetup, TimeScheme, TransientConfig, Turbulence, UnsteadyConfig, Voxel, VoxelDomain,
     fv_natural_convection, march_conjugate, march_conjugate_implicit_buoyancy,
-    march_conjugate_with_sgs, march_energy, simple_flow,
+    march_conjugate_with_sgs, march_conjugate_with_sgs_implicit_buoyancy,
+    march_energy, simple_flow,
     simple_unsteady, solve_energy, solve_energy_radiating,
 };
 use fs_material::thermal::transport::storage::{MAX_TABULATED_HEAT_STORAGE_KNOTS, TabulatedHeatStorage};
@@ -1573,8 +1574,8 @@ impl Scene {
         )?;
         let convection = convection::Selection::parse(solver, fluid_enthalpy.is_some())?;
         if transient.as_ref().is_some_and(|t| t.endpoint_coupling.is_some()) && !evolving {
-            if turbulence != Turbulence::Laminar || sgs.is_some() {
-                return Err(bad("native endpoint_coupling requires laminar flow without solver.sgs"));
+            if turbulence != Turbulence::Laminar {
+                return Err(bad("native endpoint_coupling cannot use equilibrium solver.turbulence"));
             }
             if gravity.is_none_or(|g| g.iter().all(|v| *v == 0.0)) {
                 return Err(bad("native endpoint_coupling requires nonzero gravity_m_s2"));
@@ -1848,12 +1849,20 @@ fn execute_unsteady(
         let buoyancy = buoyancy.as_ref().ok_or_else(|| {
             bad("native endpoint_coupling requires Boussinesq buoyancy")
         })?;
-        let coupled = march_conjugate_implicit_buoyancy(
-            domain, &scene.fluid, &scene.materials, setup, flow_config, &unsteady,
-            buoyancy, controls, &initial_temperature,
-            |t| interpolate(&options.inlet_schedule, t), |t| transient.scale(t),
-            &scene.convection.energy_config(), radiation, gate,
-        ).map_err(|e| solver_failure(&e))?;
+        let coupled = match scene.sgs {
+            Some(sgs) => march_conjugate_with_sgs_implicit_buoyancy(
+                domain, &scene.fluid, &scene.materials, setup, flow_config, &unsteady,
+                sgs, buoyancy, controls, &initial_temperature,
+                |t| interpolate(&options.inlet_schedule, t), |t| transient.scale(t),
+                &scene.convection.energy_config(), radiation, gate,
+            ),
+            None => march_conjugate_implicit_buoyancy(
+                domain, &scene.fluid, &scene.materials, setup, flow_config, &unsteady,
+                buoyancy, controls, &initial_temperature,
+                |t| interpolate(&options.inlet_schedule, t), |t| transient.scale(t),
+                &scene.convection.energy_config(), radiation, gate,
+            ),
+        }.map_err(|e| solver_failure(&e))?;
         let (run, feedback) = endpoint::take(coupled, gate)?;
         (run, None, None, Some(feedback))
     } else {
@@ -1965,6 +1974,8 @@ fn execute_unsteady(
         "fv-simplec-unsteady-material-sgs"
     } else if material_feedback.is_some() {
         "fv-simplec-unsteady-material"
+    } else if endpoint_feedback.is_some() && scene.sgs.is_some() {
+        "fv-simplec-unsteady-sgs-boussinesq-implicit"
     } else if endpoint_feedback.is_some() {
         "fv-simplec-unsteady-boussinesq-implicit"
     } else if scene.sgs.is_some() && buoyancy.is_some() {
