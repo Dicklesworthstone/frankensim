@@ -337,6 +337,9 @@ impl<O> Advected<O> {
     /// compositions and shared energy reference are checked on every advance.
     /// Inlet enthalpy remains the INLET law's enthalpy; it is never interpreted
     /// as the receiving mixture's temperature or a transferable temperature.
+    /// Native implicit conduction can bind this same stationary graph without
+    /// a flow CFL limit. Compositions stay frozen while mixture enthalpy and
+    /// temperature evolve; no transient species or chemical entropy is inferred.
     pub fn with_stationary_species(
         mut self, species: Vec<String>, inlets: Vec<InletSpecies>,
         max_cells: usize, max_species: usize,

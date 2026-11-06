@@ -96,8 +96,9 @@ impl Advected<()> {
     /// latent heat or entropy source is introduced.
     ///
     /// This stateless query does not advance an observer or impose an explicit
-    /// flow CFL. Species, selective outlets and attached flow histories retain
-    /// the implicit owner's refusal. Reconstructed face enthalpies require their
+    /// flow CFL. Stationary species still require a chemical-mixing entropy
+    /// closure even when their energy transport is implicit. Selective outlets
+    /// and attached flow histories also refuse. Reconstructed faces require their
     /// own entropy closure and are not substituted here.
     pub fn endpoint_transport_with_entropy(
         &self,
@@ -115,6 +116,9 @@ impl Advected<()> {
     ) -> Result<(TransportStepCoefficients<()>, EndpointAdvectionEntropy), DepositionError> {
         checkpoint()?;
         self.admit_implicit_transport()?;
+        if self.stationary_species.is_some() {
+            return Err(invalid("thermal advection entropy does not cover stationary species mixing"));
+        }
         let transport = self.endpoint_transport(thermal, &mut checkpoint)?;
         let mut enthalpies = BTreeMap::new();
         let mut temperatures = BTreeMap::new();

@@ -338,12 +338,10 @@ impl<O> Advected<O> {
 
 impl Advected<()> {
     fn admit_implicit_transport(&self) -> Result<(), DepositionError> {
-        if self.stationary_species.is_some()
-            || !self.selective_outlets.is_empty()
-            || self.entropy.is_some()
+        if !self.selective_outlets.is_empty() || self.entropy.is_some()
         {
             return Err(invalid(
-                "implicit enthalpy excludes species, selective streams and flow entropy histories",
+                "implicit enthalpy excludes selective streams and flow entropy histories",
             ));
         }
         Ok(())
@@ -353,7 +351,10 @@ impl Advected<()> {
     /// to each cell's CARRIED specific enthalpy, in kg/s. Ordinary bulk flow
     /// carries the stored h itself. A liquid carrier must additionally apply
     /// its original phase-dependent dh_liquid/dh at each proposed endpoint.
-    /// Entropy/species histories require their own endpoint closure.
+    /// Frozen stationary species carry the stored mixture h on this same
+    /// tangent: composition and cell mass are constant during the solve. The
+    /// original endpoint rechecks each mixture law and common enthalpy datum.
+    /// Selective streams and flow entropy histories need separate closures.
     pub(super) fn implicit_enthalpy_tangent(
         &self,
         mut checkpoint: impl FnMut() -> Result<(), DepositionError>,

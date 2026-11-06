@@ -139,9 +139,16 @@ impl ImplicitConductionChain<'_> {
     /// on its latent plateau and one on its fully liquid branch, reevaluated at
     /// every trial. Thus liquid circulation does not advect stationary-solid
     /// latent energy. Fully solid flow still refuses; no mobility is inferred.
-    /// Stationary species, selective outlets and an attached flow entropy
-    /// history require separate closures and refuse. The native thermal entropy
-    /// account leaves mass-carried transfers unclassified unless
+    ///
+    /// Stationary species may use distinct immutable mixture caloric laws.
+    /// Their original inlet-fed species balances, exact cell compositions and
+    /// common enthalpy reference remain authoritative at every endpoint. The
+    /// compiled tangent transports stored mixture h, so unlike heat capacities
+    /// are never averaged into a temperature flux. Species do not evolve here.
+    /// Selective outlets and an attached flow entropy history still refuse.
+    /// Stationary mixing requires its own chemical entropy closure and cannot
+    /// select the entropy opt-in. The native thermal entropy account otherwise
+    /// leaves mass-carried transfers unclassified unless
     /// [`Self::with_implicit_advection_entropy`] is selected. The supplied
     /// observer's history is unchanged, including on success.
     ///

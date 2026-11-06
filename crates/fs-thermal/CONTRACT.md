@@ -2314,8 +2314,19 @@ a material-domain exit for the existing line search; no accepted trajectory
 crosses that support boundary. Source identity, fixed density, pure-liquid
 inlet and conservative endpoint admission remain owned by the original carrier.
 
-Stationary species, selective streams and flow-entropy histories still refuse
-until their own endpoint closures exist. Thermal entropy leaves mass-carried
+The same implicit binding admits frozen stationary-species graphs, including
+inlet-fed recirculation and mixtures with different heat capacities and formation
+enthalpies. The existing species solver fixes each cell's composition before
+binding. Every residual retains its exact composition-aware caloric law, common
+enthalpy reference, inlet-law support and local mass/species admission. The
+compiled directed enthalpy tangent is unchanged; each cell's original nonlinear
+law still maps its own stored h to temperature. Convection and conduction use
+the same BE/SDIRK stages without an explicit flow CFL. This does not evolve
+species, invent reaction heat, change density, or supply chemical mixing entropy.
+
+Selective streams and flow-entropy histories still refuse until their own
+endpoint closures exist. Stationary mixtures explicitly refuse the thermal-only
+advection entropy opt-in. Thermal entropy leaves mass-carried
 transfers unclassified unless the caller selects
 `with_implicit_advection_entropy` after binding an admitted bulk or liquid
 upwind flow.
