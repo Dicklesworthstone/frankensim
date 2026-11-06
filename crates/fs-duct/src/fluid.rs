@@ -31,9 +31,14 @@
 //! with the acoustic period and remains a local linearization: this pipe owner
 //! evolves neither phase inventories nor nonlinear phase fronts. Neither mixture
 //! supplies thermoviscous loss coefficients through the lossless interface.
+//! Declared finite-rate water compression uses [`relaxation::RelaxingWaterDuct`],
+//! retaining one original thermal density and complex response throughout the chain.
 //! Gas-only tone-hole radiation is not
 //! inferred for a liquid: those branches need their own pressure/flow boundary.
 //! The caller retains the source material and its original query receipts.
+
+/// Source-bound finite-rate water phase compression in native pressure/flow chains.
+pub mod relaxation;
 
 /// Distinct original fluid materials in the same axial pressure/flow chain.
 pub mod regional;

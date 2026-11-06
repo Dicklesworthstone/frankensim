@@ -4072,3 +4072,30 @@ regressions. Native execution of these new full DG tests is pending.
 `prepare_porous_heat` independently integrates static drag and each original positive source square on that complete trajectory. It reports viscous and thermal joules without advancing state or allocating total energy deficit to heat. Caller-owned scratch permits allocation-free warm observation. Both caches share the declared byte/work budget; the existing positive-integral owner requires at most 128 complete state coordinates and never truncates arms to fit. Thermal deposition and live temperature/source refresh remain receiving-owner transactions. Circular-wall model getters do not imply losslessness when absent; intrinsic porous memory has its own source/model view.
 
 Six production-source material tests and five native stamp/propagation/source-integral tests passed. The latter use the actual DenseSeries and positive heat kernels with a prescribed skew acoustic image; full DG geometry/scattering integration regressions are authored but remain unrun because sibling Cargo dependencies are unavailable.
+
+### Finite-rate water density in the original pressure/flow chain
+
+fluid::relaxation::RelaxingWaterDuct borrows one original
+RelaxingRegionalWater and evaluates its response once at a positive angular
+frequency. Every segment and complete chain retains that same material,
+frequency, density and complex wavenumber. The existing native dispersive
+fluid entry points supply cylinders, cones, profiles, compliant walls,
+momentum impedance rho*omega/k, stable composition and cancellation. The
+frozen endpoint supplies the original density and positive real port reference;
+the propagated response remains the finite-rate constitutive response.
+
+The adapter does not infer a gas EOS, a separate attenuation fit, wall loss
+or a different phase inventory. Original small-signal, homogenization,
+kinetic-validity, geometry and conditioning requirements remain in force.
+Rebinding after an accepted thermal step changes propagation through the new
+original density and source moduli, without silently evolving heat inside
+the acoustic pipe.
+
+The native fs-duct library compiled with the exact new consumer and current
+fluid entry points against genuine dependencies. Four focused consumer
+tests passed: low/high-pressure matched impedance, phase and absorbed power
+under both composition rules; 32-piece subdivision and a 900-attenuation-length
+line; actual heating-driven density/response change; and native geometry,
+frequency, work-budget and cancellation refusal. Rustfmt passed. Together
+with the material/history source tests this gives 25 focused native passes;
+it does not assert a whole-workspace Cargo/DSR result.
