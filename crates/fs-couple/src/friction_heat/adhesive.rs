@@ -10,6 +10,9 @@
 
 /// Curved finite-time slip/spin, arrest and original finite-cell heat together.
 pub mod transient;
+
+/// Native DMT normal/shear motion and bounded frozen-footprint finite-body heat.
+pub mod dmt;
 /// Original normal snap release and explicitly declared finite-cell heat.
 pub mod snap;
 
