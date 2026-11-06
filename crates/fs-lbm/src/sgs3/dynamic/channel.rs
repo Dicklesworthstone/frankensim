@@ -175,6 +175,17 @@ impl ChannelDynamicSgs {
         self.inner.viscosities()
     }
 
+    /// Plane-fitted nonnegative C_s squared for a consuming face strain.
+    /// Valid only after successful preparation; out-of-grid indices return None.
+    pub fn coefficient_squared(&self, cell: usize) -> Option<f64> {
+        self.inner.coefficient_squared(cell)
+    }
+
+    /// Allocation-free traversal of the successfully fitted coefficients.
+    pub fn coefficients_squared(&self) -> impl ExactSizeIterator<Item = f64> + '_ {
+        self.inner.coefficients_squared()
+    }
+
     /// Fit from the current physical flow and both current wall velocities.
     /// Each wall's normal velocity must be zero. Wall values participate in
     /// reference subtraction and normalization, including uniform fluid fields.

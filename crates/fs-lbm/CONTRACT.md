@@ -13665,3 +13665,16 @@ baths at zero net storage change. The mixed-face case also checks original
 caloric identity, unsupported material-face temperature, exclusive ownership
 and cancellation/retry. Held geometry, fixed external conditions, original
 source domains and the first-order heat/flow split remain authoritative.
+
+## Fitted dynamic-SGS coefficients
+
+`PeriodicDynamicSgs` and `ChannelDynamicSgs` expose the admitted nonnegative
+`C_s²` independently of cell-centered viscosity, through an indexed accessor
+and an allocation-free iterator. Outputs are consumable only after successful
+preparation; an out-of-grid index returns `None`. The completed stress-basis
+scratch stores these coefficients, so numerical storage budgets are unchanged.
+Spatial and Lagrangian fits retain their original viscosity arithmetic; a
+uniform-flow preparation clears the coefficient cache. Regression sources
+compare the coefficients against the existing independent full-tensor Germano
+oracle and check that scalar preparation preserves them without extra storage.
+The coefficient remains an exploratory model estimate, not DNS validation.

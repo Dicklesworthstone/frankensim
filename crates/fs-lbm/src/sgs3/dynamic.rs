@@ -130,6 +130,9 @@ pub struct PeriodicDynamicSgs {
     wall_velocity: [[f64; 3]; 2],
     velocity: Vec<[f64; 3]>,
     filtered: Vec<[f64; 4]>,
+    // The stress tensor is needed only through prepare_contractions. A
+    // successful fit then reuses lane 0 for its nonnegative C_s squared;
+    // scalar fits and Lagrangian history never read this retired tensor.
     basis: Vec<[f64; 6]>,
     strain_rate: Vec<f64>,
     contraction: Vec<[f64; 2]>,
@@ -419,6 +422,20 @@ impl PeriodicDynamicSgs {
         &self.viscosity
     }
 
+    /// Fitted nonnegative C_s squared, independent of the cell-centered strain.
+    /// Finite-volume consumers can apply this coefficient to their own face
+    /// strain instead of interpolating a cell viscosity that misses alternating
+    /// shear. Valid only after successful preparation, like viscosities.
+    /// Out-of-grid indices return None.
+    pub fn coefficient_squared(&self, cell: usize) -> Option<f64> {
+        self.basis.get(cell).map(|basis| basis[0])
+    }
+
+    /// Allocation-free traversal of the same successfully fitted coefficients.
+    pub fn coefficients_squared(&self) -> impl ExactSizeIterator<Item = f64> + '_ {
+        self.basis.iter().map(|basis| basis[0])
+    }
+
     /// Evaluate on the same-time physical density and velocity fields.
     /// Normalizing by density and velocity scales keeps the fourth-degree
     /// least-squares contractions representable. Subtracting a reference
@@ -537,6 +554,7 @@ impl PeriodicDynamicSgs {
                 poll(&mut cancelled, cell)?;
                 self.strain_rate[cell] = 0.0;
                 self.contraction[cell] = [0.0; 2];
+                self.basis[cell][0] = 0.0;
             }
             poll(&mut cancelled, 0)?;
             return Ok((
@@ -734,6 +752,7 @@ impl PeriodicDynamicSgs {
                 });
             }
             self.viscosity[cell] = nu;
+            self.basis[cell][0] = coefficient;
             report.maximum_coefficient_squared =
                 report.maximum_coefficient_squared.max(coefficient);
             report.maximum_eddy_viscosity = report.maximum_eddy_viscosity.max(nu);

@@ -307,6 +307,7 @@ impl LagrangianDynamicSgs {
                 });
             }
             self.flow.viscosity[cell] = viscosity;
+            self.flow.basis[cell][0] = coefficient;
             self.candidate[cell] = pair;
             amplitude = amplitude.max(pair[0].abs()).max(pair[1]);
             report.maximum_coefficient_squared =

@@ -179,6 +179,12 @@ fn dynamic_favre_filter_matches_independent_full_tensor_reference() {
                 .prepare(config(averaging), density, &u, || false)
                 .unwrap();
             let (coefficient, expected) = reference([n; 3], [1.0; 3], density, &u, averaging);
+            assert_eq!(work.coefficients_squared().len(), u.len());
+            for (cell, (a, b)) in work.coefficients_squared().zip(&coefficient).enumerate() {
+                assert_eq!(work.coefficient_squared(cell), Some(a));
+                assert!((a - b.max(0.0)).abs() < 2e-14, "{averaging:?}: {a} != {b}");
+            }
+            assert_eq!(work.coefficient_squared(u.len()), None);
             for (a, b) in work.viscosities().iter().zip(expected) {
                 assert!((a - b).abs() < 2e-14, "{averaging:?}: {a} != {b}");
             }
@@ -208,6 +214,9 @@ fn cartesian_favre_momentum_matches_independent_physical_tensor_reference() {
                 .prepare(config(averaging), density, &u, || false)
                 .unwrap();
             let (coefficient, expected) = reference(shape, spacing, density, &u, averaging);
+            for (a, b) in work.coefficients_squared().zip(&coefficient) {
+                assert!((a - b.max(0.0)).abs() < 2e-13, "{averaging:?}: {a} != {b}");
+            }
             for (a, b) in work.viscosities().iter().zip(expected) {
                 assert!((a - b).abs() < 2e-13, "{averaging:?}: {a} != {b}");
             }
@@ -418,4 +427,44 @@ fn dynamic_admission_and_cancellation_are_bounded() {
         .validate()
         .is_err()
     );
+}
+
+#[test]
+fn fitted_coefficients_survive_scalar_preparation_and_clear_with_uniform_flow() {
+    use super::scalar::{DynamicScalarConfig, PeriodicDynamicScalar};
+
+    let n = 7;
+    let (rho, mut velocity) = field(n);
+    let scalar: Vec<_> = velocity.iter().map(|u| 2.0 + u[0] - 0.3 * u[1]).collect();
+    let controls = config(DynamicAveraging::LocalBox);
+    let mut work = PeriodicDynamicSgs::new([n; 3], 0.25, usize::MAX).unwrap();
+    let bytes = work.workspace_bytes();
+    work.prepare(controls, &rho, &velocity, || false).unwrap();
+    let coefficients: Vec<_> = work.coefficients_squared().collect();
+    let viscosity = work.viscosities().to_vec();
+    assert!(coefficients.iter().any(|&c| c > 0.0));
+    let mut heat = PeriodicDynamicScalar::new([n; 3], usize::MAX).unwrap();
+    work.prepare_with_scalar(
+        controls,
+        DynamicScalarConfig {
+            averaging: DynamicAveraging::LocalBox,
+            maximum_coefficient: 100.0,
+            maximum_diffusivity_to_molecular: 1000.0,
+            usage: SgsUse::Exploration,
+        },
+        &rho,
+        &velocity,
+        &scalar,
+        &mut heat,
+        || false,
+    )
+    .unwrap();
+    assert_eq!(work.coefficients_squared().collect::<Vec<_>>(), coefficients);
+    assert_eq!(work.viscosities(), viscosity);
+    assert_eq!(work.workspace_bytes(), bytes);
+
+    velocity.fill([0.2, -0.1, 0.3]);
+    work.prepare(controls, &rho, &velocity, || false).unwrap();
+    assert!(work.coefficients_squared().all(|c| c == 0.0));
+    assert!(work.viscosities().iter().all(|&nu| nu == 0.0));
 }
