@@ -16,9 +16,14 @@
 //! There is no condensation, hysteresis, gas momentum or moving interface.
 
 pub mod pair;
+mod sdirk;
+pub use sdirk::{
+    CartesianAtmosphereSdirk2Candidate, CartesianAtmosphereSdirk2Step,
+    SharedCartesianAtmosphereSdirk2Candidate,
+};
 
 use super::cartesian::{MoistureCartesian, MoistureCartesianReport};
-use super::reservoir::{ReservoirField, ReservoirParticipant};
+use super::reservoir::{ReservoirField, ReservoirParticipant, water_sum};
 use super::surface::{DryBasisSurfaceTransfer, ResolvedMoistureFace, admit_environment};
 use super::{
     MaterialCard, MaterialPropertySelection, MoistureError, MoistureNonlinearConfig, MoistureSlab,
@@ -743,9 +748,6 @@ impl FiniteMoistureAtmosphere {
         }
         let evaluate = |rh| -> Result<_, AtmosphereMoistureError> {
             let mut solids = Vec::with_capacity(ordered.len());
-            // Balance increments: large pre-existing bound-water inventories
-            // must not provide an artificial tolerance scale for vapor exchange.
-            let mut water_change = 0.0;
             for body in &ordered {
                 poll(cx)?;
                 let (moisture, transport) = body.field.advance_activity(
@@ -756,13 +758,17 @@ impl FiniteMoistureAtmosphere {
                     body.transport,
                     cx,
                 )?;
-                water_change += body.field.water_change_to(&moisture);
                 solids.push(SharedMoistureSolid {
                     id: body.id,
                     moisture,
                     transport,
                 });
             }
+            // Compensated local increments retain small net exchange between
+            // specimens that simultaneously absorb and release water.
+            let water_change = water_sum(ordered.iter().zip(&solids).map(|(body, solid)| {
+                body.field.water_change_to(&solid.moisture)
+            }));
             let end_time = solids[0].moisture.inventory().time_s;
             Ok((solids, water_change, end_time))
         };

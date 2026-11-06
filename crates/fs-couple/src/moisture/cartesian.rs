@@ -383,7 +383,7 @@ impl MoistureCartesian {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn advance_stage(
+    pub(super) fn advance_stage(
         &self,
         dt_s: f64,
         implicit_dt_s: f64,
@@ -454,7 +454,14 @@ impl MoistureCartesian {
             // linear stability. Classify this before querying material support
             // so adaptive callers can shorten the interval transactionally.
             if let Some(known) = known {
-                known.check_range(&candidate, self.geometry.maximum_moisture, cx)?;
+                known.check_range_with(
+                    &candidate,
+                    self.geometry.maximum_moisture,
+                    system.faces.iter()
+                        .filter(|face| face.coefficient != 0.0)
+                        .map(|face| reservoir[face.side].expect("active boundary")),
+                    cx,
+                )?;
             }
             let endpoint = self.transport_states(&candidate, cx)?;
             let mut endpoint_system =
@@ -478,6 +485,16 @@ impl MoistureCartesian {
                 && balance.is_finite()
                 && balance.abs() <= config.water_balance_tolerance_kg
             {
+                if let Some(known) = known {
+                    known.check_range_with(
+                        &candidate,
+                        self.geometry.maximum_moisture,
+                        endpoint_system.faces.iter()
+                            .filter(|face| face.coefficient != 0.0)
+                            .map(|face| reservoir[face.side].expect("active boundary")),
+                        cx,
+                    )?;
+                }
                 let lower = reference;
                 let upper = self
                     .moisture
@@ -490,8 +507,8 @@ impl MoistureCartesian {
                     if !new.is_finite()
                         || new < 0.0
                         || new > self.geometry.maximum_moisture
-                        || new < lower - roundoff
-                        || new > upper + roundoff
+                        || (known.is_none()
+                            && (new < lower - roundoff || new > upper + roundoff))
                     {
                         return Err(MoistureError::Invalid(
                             "Cartesian candidate violates maximum principle or domain",

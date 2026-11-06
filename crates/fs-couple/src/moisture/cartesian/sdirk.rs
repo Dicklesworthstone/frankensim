@@ -34,8 +34,9 @@ impl MoistureCartesian {
     /// changes. Linear stability does not guarantee positivity: an inadmissible
     /// second stage returns `StageRange` and needs a shorter interval. Returned
     /// states remain directly usable by the existing solid/plate consumers.
-    /// This does not supply a second-order finite-reservoir coupling or a global
-    /// temporal-error bound. Ordinary `advance` remains backward Euler.
+    /// The atmosphere owner supplies the corresponding finite-vapor coupling.
+    /// This method does not supply a global temporal-error bound. Ordinary
+    /// `advance` remains backward Euler.
     pub fn advance_sdirk2(
         &self,
         dt_s: f64,
@@ -69,6 +70,35 @@ impl MoistureCartesian {
             faces[5].resolve(temperature)?,
         ];
         let (first, first_stage) = self.advance(implicit_dt, faces, config, nonlinear, cx)?;
+        let known = self.sdirk_load(dt_s, &first, &first_stage, &boundaries, cx)?;
+        let (next, endpoint) = self.advance_stage(
+            dt_s,
+            implicit_dt,
+            boundaries,
+            config,
+            nonlinear,
+            Some(&known),
+            cx,
+        )?;
+        poll(cx)?;
+        Ok((
+            next,
+            MoistureCartesianSdirk2Report {
+                endpoint,
+                first_stage,
+            },
+        ))
+    }
+    /// Reuse actual first-stage face fluxes for fixed or evolving reservoirs.
+    /// The original field defines storage and Kirchhoff source intervals.
+    pub(in crate::moisture) fn sdirk_load(
+        &self,
+        dt_s: f64,
+        first: &Self,
+        first_stage: &MoistureCartesianReport,
+        boundaries: &[ResolvedMoistureFace; 6],
+        cx: &Cx<'_>,
+    ) -> Result<StageLoad<6>, MoistureError> {
         let reservoir = std::array::from_fn(|k| boundaries[k].equilibrium);
         let profiles = if self.kirchhoff_diffusivity {
             Some(self.kirchhoff_profiles(reservoir, cx)?)
@@ -77,7 +107,7 @@ impl MoistureCartesian {
         };
         let system = self.system(
             (1.0 - GAMMA) * dt_s,
-            &boundaries,
+            boundaries,
             &first_stage.transport_end,
             profiles.as_ref(),
             cx,
@@ -115,21 +145,10 @@ impl MoistureCartesian {
                 "Cartesian SDIRK face increment overflow",
             ));
         }
-        let known = StageLoad::new(
+        Ok(StageLoad::new(
             increment,
-            self.transfers(&first.moisture, &boundaries, &system),
+            self.transfers(&first.moisture, boundaries, &system),
             [lower, upper],
-        );
-        let (next, endpoint) = self.advance_stage(
-            dt_s,
-            implicit_dt,
-            boundaries,
-            config,
-            nonlinear,
-            Some(&known),
-            cx,
-        )?;
-        poll(cx)?;
-        Ok((next, MoistureCartesianSdirk2Report { endpoint, first_stage }))
+        ))
     }
 }

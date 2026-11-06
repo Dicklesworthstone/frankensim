@@ -4,6 +4,9 @@ use super::super::{atmosphere as air, solution as bath, surface as emission};
 use super::*;
 use fs_couple::moisture::atmosphere::{CartesianMoistureParticipant, DryBasisSorption};
 
+#[path = "reservoir/sdirk.rs"]
+mod sdirk;
+
 fn participant<'a>(
     id: u64,
     moisture: &'a MoistureCartesian,

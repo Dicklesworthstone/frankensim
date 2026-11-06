@@ -69,7 +69,27 @@ impl<const FACES: usize> StageLoad<FACES> {
         maximum: f64,
         cx: &Cx<'_>,
     ) -> Result<(), MoistureError> {
-        let [lower, upper] = self.bounds;
+        self.check_range_with(candidate, maximum, std::iter::empty(), cx)
+    }
+
+    /// The second stage may see a different finite-reservoir activity. Only
+    /// equilibria with an actual nonzero current face coefficient extend the
+    /// retained first-stage envelope; a scalar search bracket is not a boundary.
+    pub(super) fn check_range_with(
+        &self,
+        candidate: &[f64],
+        maximum: f64,
+        active_equilibria: impl IntoIterator<Item = f64>,
+        cx: &Cx<'_>,
+    ) -> Result<(), MoistureError> {
+        let [mut lower, mut upper] = self.bounds;
+        for (i, equilibrium) in active_equilibria.into_iter().enumerate() {
+            if i % 128 == 0 {
+                poll(cx)?;
+            }
+            lower = lower.min(equilibrium);
+            upper = upper.max(equilibrium);
+        }
         let roundoff = 128.0 * f64::EPSILON * upper.max(1.0);
         for (cell, &moisture) in candidate.iter().enumerate() {
             if cell % 128 == 0 {
@@ -84,7 +104,7 @@ impl<const FACES: usize> StageLoad<FACES> {
                 return Err(MoistureError::StageRange {
                     cell,
                     moisture,
-                    bounds: self.bounds,
+                    bounds: [lower, upper],
                 });
             }
         }

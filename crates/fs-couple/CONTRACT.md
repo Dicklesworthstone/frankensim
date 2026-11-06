@@ -549,3 +549,30 @@ rate exhaustion estimates still require physical timestep refinement.
 Four focused groups cover manual endpoint composition and source allocation,
 dry/wet/dry/wet continuation, native wall latent storage and late atomic
 refusal; existing window and single-endpoint regression groups also pass.
+
+### Second-order Cartesian diffusion with finite vapor
+
+`FiniteMoistureAtmosphere::advance_cartesian_sdirk2` and
+`advance_shared_cartesian_sdirk2` solve the actual finite vapor inventory at
+both SDIRK stages. Shared specimens use one RH per stage, stable-ID ordering,
+their original anisotropic/nonlinear material owners and one compensated sum
+of local water changes. Stage two retains the ORIGINAL gas and solid storage
+references and adds the explicitly weighted first-stage physical face fluxes;
+stage-one uptake is never debited twice. Its first-stage transport receipt is
+diagnostic. Endpoint face transfers, vapor, carrier species and gas energy
+changes describe only the original-to-final physical interval.
+
+Sorption and optional surface emission refresh at each trial RH. The accepted
+stage envelope includes original field extrema and only equilibria connected
+by nonzero first-stage or current second-stage physical face coefficients.
+Both pre-source and final admission use that envelope. Inadmissible stages
+refuse without clipping or committing a partial atmosphere/specimen state.
+Every scalar-bracket trial must remain inside admitted source support; an
+inadmissible extreme trial may require a shorter timestep.
+
+The original prescribed-temperature, fixed-volume dilute-vapor scope remains.
+There is no condensation, sorption heat, moving interface, global temporal
+error certificate or experimental-material validation implied here. G1
+manufactured coupled relaxation, nonlinear flux/source and shared-inventory
+fixtures check the method; G0/G4 fixtures cover equilibrium, cancellation and
+stiff-stage refusal. Existing backward-Euler entry points retain their method.
