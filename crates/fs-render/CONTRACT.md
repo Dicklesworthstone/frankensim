@@ -7482,12 +7482,32 @@ endpoint, without an unintegrated position offset or a GRIN arrival collar.
 explicitly paired contact, checking its private original-owner/face witness.
 The API supplies no implicit branching tree or unbounded reflection loop.
 
+`with_coating_stack` binds an original borrowed `DielectricCoatingStack` in
+side-0-to-side-1 order. Reverse incidence reverses the physical film traversal
+and uses the actual reversed thermal indices and Snell angle. Transparent and
+absorbing films retain their original wavelength domains, dispersion,
+extinction, thickness and source identities, including zero-thickness films.
+One native coherent solve supplies the signed Fresnel matrices and positive
+dissipative film work. `coating_absorbed_power_fraction` weights that work by
+the actual incident s/p powers and retains losses below the rounded R+T
+residual. It refers to this contact relative to the original launch, excluding
+bulk attenuation and earlier contact losses. Native diagonal-Jones application
+also retains weak reflected polarization channels near Brewster incidence.
+
+The coating is a local planar scattering boundary. Its phase affects R/T and
+polarization, but the ray is not displaced across its geometric thickness and
+no film group delay or heat deposition into the conduction state is inferred.
+The unchanged bulk phase/group integrals therefore describe the two original
+elements, not pulse transit or resonant residence inside the films.
+
 Preparation stores eight native one-triangle charts. A split uses bounded
-constant work, at most twelve triangle-intersection queries, no query allocation
-and the original cancellation checkpoints. Edges, ambiguous faces, foreign
+work, at most twelve triangle-intersection queries, no query allocation and
+the original cancellation checkpoints. Optional coating work is linear in the
+native limit of 64 films; bare interfaces retain their direct Fresnel path.
+Edges, ambiguous faces, foreign
 snapshots/materials, unsupported wavelengths, invalid launches and nonuniform
 elements refuse. The model is smooth-interface polarized geometrical power
-transport: it adds no coherent interference between paths, coatings, roughness,
+transport: it adds no coherent interference between paths, roughness,
 discontinuous-index GRIN continuation, angular-bundle derivatives or global
 mesh locator. Thermal contact resistance is not assigned optical absorption;
 bulk absorption remains with each original glass.

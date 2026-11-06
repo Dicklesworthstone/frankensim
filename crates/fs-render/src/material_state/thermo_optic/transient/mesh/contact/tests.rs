@@ -1,4 +1,8 @@
 use super::*;
+use crate::conductor::{
+    CoatingIorSample, CoatingLayer, CoherentAbsorbingCoating, CoherentDielectricCoating,
+    ConductorDataStatus, ConductorSource,
+};
 use crate::dielectric::{BeerLambertAbsorption, DielectricGlass, GlassProvenance, SellmeierIor};
 use fs_blake3::ContentHash;
 use fs_conduction::ConductionMesh;
@@ -84,7 +88,7 @@ fn fixture(
     temperature: [f64; 2],
     indices: [f64; 2],
     absorption: [f64; 2],
-    f: impl FnOnce(&CancelGate, &Cx<'_>, &P1ContactInterface<'_>),
+    f: impl FnOnce(&CancelGate, &Cx<'_>, P1ContactInterface<'_>),
 ) {
     with_cx(|gate, cx| {
         let mesh = pair(reverse);
@@ -107,7 +111,7 @@ fn fixture(
         let ba = MaterialThermoOpticField::try_new(&ga, &law, &a, ContentHash([114; 32])).unwrap();
         let bb = MaterialThermoOpticField::try_new(&gb, &law, &b, ContentHash([114; 32])).unwrap();
         let contact = P1ContactInterface::try_new(cx, [&ba, &bb], [3, 3]).unwrap();
-        f(gate, cx, &contact);
+        f(gate, cx, contact);
     });
 }
 fn launch(sine: f64, from_top: bool) -> Ray {
@@ -121,6 +125,26 @@ fn launch(sine: f64, from_top: bool) -> Ray {
     }
 }
 const AXIS: Vec3 = Vec3::new(0.0, 1.0, 0.0);
+
+fn film_source() -> ConductorSource {
+    ConductorSource::try_new(ContentHash([115; 32]), ConductorDataStatus::Representative).unwrap()
+}
+fn transparent_film(n: f64, thickness_m: f64) -> CoherentDielectricCoating {
+    let law =
+        SellmeierIor::try_new_in_band([n * n - 1.0, 0.0, 0.0], [0.0; 3], (1000.0, 2000.0)).unwrap();
+    CoherentDielectricCoating::try_new(law, thickness_m, film_source()).unwrap()
+}
+fn absorbing_film(n: f64, k: f64, thickness_m: f64) -> CoherentAbsorbingCoating {
+    CoherentAbsorbingCoating::try_new_in_band(
+        core::array::from_fn(|i| {
+            CoatingIorSample::try_new_in_band(1000.0 + 125.0 * i as f64, n, k).unwrap()
+        }),
+        thickness_m,
+        125.0,
+        film_source(),
+    )
+    .unwrap()
+}
 
 #[test]
 fn g1_native_snell_split_preserves_each_materials_path_and_power() {
@@ -476,4 +500,251 @@ fn g3_nonuniform_unpaired_foreign_spectral_and_cancelled_inputs_refuse() {
             ));
         },
     );
+}
+
+#[test]
+fn g1_contact_quarter_wave_coating_removes_reflection_without_adding_bulk_path() {
+    let n = (1.2_f64 * 1.8).sqrt();
+    let films = [transparent_film(n, 1500e-9 / (4.0 * n))];
+    let stack = DielectricCoatingStack::try_new_in_band(&films, (1000.0, 2000.0)).unwrap();
+    fixture(
+        false,
+        [300.0; 2],
+        [1.2, 1.8],
+        [0.2, 0.6],
+        |_, cx, contact| {
+            assert!(contact.coating_stack().is_none());
+            let bare = contact
+                .split(cx, 0, launch(0.0, false), AXIS, 1500.0, 0.05)
+                .unwrap();
+            near(bare.fresnel.reflectance, 0.04, 3e-15);
+            assert_eq!(bare.coating_absorbed_power_fraction, 0.0);
+            let contact = contact.with_coating_stack(stack);
+            assert_eq!(
+                contact.coating_stack().unwrap().wavelength_bounds_nm(),
+                (1000.0, 2000.0)
+            );
+            let coated = contact
+                .split(cx, 0, launch(0.0, false), AXIS, 1500.0, 0.05)
+                .unwrap();
+            // Independent quarter-wave matching: n_film²=n_left*n_right.
+            assert!(coated.fresnel.reflectance < 1e-28);
+            assert_eq!(coated.coating_absorbed_power_fraction, 0.0);
+            let transmitted = coated.transmitted.unwrap();
+            near(transmitted.power_fraction(), (-0.07_f64).exp(), 2e-14);
+            assert!(transmitted.power_fraction() > bare.transmitted.unwrap().power_fraction());
+            assert_eq!(
+                transmitted.propagation(),
+                bare.transmitted.unwrap().propagation()
+            );
+        },
+    );
+}
+
+#[test]
+fn g1_contact_mixed_films_preserve_reverse_order_reciprocity_and_stokes_weights() {
+    let transparent = transparent_film(1.4, 225e-9);
+    let absorbing = absorbing_film(2.1, 0.12, 180e-9);
+    let films = [
+        CoatingLayer::Dielectric(&transparent),
+        CoatingLayer::Absorbing(&absorbing),
+    ];
+    let stack = DielectricCoatingStack::try_mixed_in_band(&films, (1000.0, 2000.0)).unwrap();
+    // Independent complex characteristic matrices, exp(-i omega t), with
+    // q_j=sqrt(n_j²-k_parallel²), Y_s=q_j, Y_p=n_j²/q_j and phase=2*pi*q_j*d/lambda.
+    // Reversing both the films and the physical port indices preserves T,
+    // while an absorbing asymmetric stack has different forward/reverse R.
+    // Rows: incident side; columns: s/p; entries: R,T,A at 1500 nm.
+    let reference = [
+        [
+            [0.06570139486987908, 0.7729547986894787, 0.16134380644064228],
+            [0.0343781678055786, 0.7980701299636407, 0.16755170223078075],
+        ],
+        [
+            [0.07191413592084563, 0.7729547986894787, 0.1551310653896757],
+            [0.03432987708993757, 0.7980701299636406, 0.1675999929464218],
+        ],
+    ];
+    fixture(false, [300.0; 2], [1.2, 1.8], [0.0; 2], |_, cx, contact| {
+        let contact = contact.with_coating_stack(stack);
+        let mut transmitted_power = [[0.0; 2]; 2];
+        for side in 0..2 {
+            for (case, q) in [1.0, -1.0, 0.3].into_iter().enumerate() {
+                let input =
+                    Stokes::try_new(1.0, q, if case == 2 { 0.4 } else { 0.0 }, 0.0).unwrap();
+                let split = contact
+                    .split_polarized(
+                        cx,
+                        side,
+                        launch([0.6, 0.4][side], side == 1),
+                        AXIS,
+                        input,
+                        1500.0,
+                        0.0,
+                    )
+                    .unwrap();
+                let weights = [0.5 * (1.0 + q), 0.5 * (1.0 - q)];
+                let expected = |column| {
+                    weights[0] * reference[side][0][column]
+                        + weights[1] * reference[side][1][column]
+                };
+                let reflected = split.reflected.unwrap();
+                let transmitted = split.transmitted.unwrap();
+                near(reflected.power_fraction(), expected(0), 3e-13);
+                near(transmitted.power_fraction(), expected(1), 3e-13);
+                near(split.coating_absorbed_power_fraction, expected(2), 3e-13);
+                for (branch, column) in [(reflected, 0), (transmitted, 1)] {
+                    near(
+                        branch.stokes().q,
+                        weights[0] * reference[side][0][column]
+                            - weights[1] * reference[side][1][column],
+                        3e-13,
+                    );
+                }
+                near(
+                    reflected.power_fraction()
+                        + transmitted.power_fraction()
+                        + split.coating_absorbed_power_fraction,
+                    1.0,
+                    3e-13,
+                );
+                assert_eq!(transmitted.element_index(), 1 - side);
+                near(transmitted.propagation().ray.dir.x, [0.4, 0.6][side], 4e-15);
+                if case < 2 {
+                    transmitted_power[side][case] = transmitted.power_fraction();
+                }
+            }
+        }
+        for pol in 0..2 {
+            near(transmitted_power[0][pol], transmitted_power[1][pol], 4e-14);
+        }
+    });
+}
+
+#[test]
+fn g1_contact_reports_sub_ulp_film_absorption_after_original_incident_beer_loss() {
+    let film = absorbing_film(1.5, 1e-20, 100e-9);
+    let films = [CoatingLayer::Absorbing(&film)];
+    let stack = DielectricCoatingStack::try_mixed_in_band(&films, (1000.0, 2000.0)).unwrap();
+    fixture(false, [300.0; 2], [1.5; 2], [0.4; 2], |_, cx, contact| {
+        let split = contact
+            .with_coating_stack(stack)
+            .split(cx, 0, launch(0.0, false), AXIS, 1500.0, 0.0)
+            .unwrap();
+        // Matched real indices make reflection O(k²). Positive first-order
+        // absorption survives even when the transmitted fraction rounds to one.
+        let incident = (-0.08_f64).exp();
+        let expected = incident * 4.0 * core::f64::consts::PI * 1e-20 * 100.0 / 1500.0;
+        assert!(split.coating_absorbed_power_fraction > 0.0);
+        assert!(split.coating_absorbed_power_fraction < f64::EPSILON * incident);
+        near(split.coating_absorbed_power_fraction / expected, 1.0, 5e-13);
+        near(split.incident_stokes.i, incident, 3e-15);
+        near(split.transmitted.unwrap().power_fraction(), incident, 3e-14);
+        near(
+            split.transmitted.unwrap().propagation().optical_depth,
+            0.08,
+            3e-15,
+        );
+    });
+}
+
+#[test]
+fn g1_contact_total_internal_reflection_absorbs_in_film_without_exit_ray() {
+    let film = absorbing_film(1.5, 0.05, 180e-9);
+    let films = [CoatingLayer::Absorbing(&film)];
+    let stack = DielectricCoatingStack::try_mixed_in_band(&films, (1000.0, 2000.0)).unwrap();
+    fixture(false, [300.0; 2], [1.0, 1.5], [0.0; 2], |_, cx, contact| {
+        let contact = contact.with_coating_stack(stack);
+        for q in [-1.0, 0.2, 1.0] {
+            let input = Stokes::try_new(1.0, q, 0.0, 0.0).unwrap();
+            let split = contact
+                .split_polarized(cx, 1, launch(0.8, true), AXIS, input, 1500.0, 0.0)
+                .unwrap();
+            assert!(split.fresnel.total_internal_reflection);
+            assert_eq!(split.fresnel.transmittance, 0.0);
+            assert!(split.transmitted.is_none());
+            let reflected = split.reflected.unwrap();
+            assert_eq!(reflected.element_index(), 1);
+            assert!(split.coating_absorbed_power_fraction > 1e-3);
+            assert!(reflected.power_fraction() < 1.0);
+            near(
+                reflected.power_fraction() + split.coating_absorbed_power_fraction,
+                1.0,
+                5e-13,
+            );
+            vector(reflected.propagation().ray.dir, Vec3::new(0.8, 0.0, 0.6));
+        }
+    });
+}
+
+#[test]
+fn g0_g4_zero_thickness_contact_films_keep_band_admission_and_cancellation() {
+    let film = absorbing_film(2.1, 0.12, 0.0);
+    let films = [CoatingLayer::Absorbing(&film)];
+    let stack = DielectricCoatingStack::try_mixed_in_band(&films, (1400.0, 1600.0)).unwrap();
+    fixture(
+        false,
+        [300.0; 2],
+        [1.2, 1.8],
+        [0.0; 2],
+        |gate, cx, contact| {
+            let ray = launch(0.4, false);
+            contact.split(cx, 0, ray, AXIS, 1300.0, 0.0).unwrap();
+            let bare = contact.split(cx, 0, ray, AXIS, 1500.0, 0.0).unwrap();
+            let contact = contact.with_coating_stack(stack);
+            assert!(matches!(
+                contact.split(cx, 0, ray, AXIS, 1300.0, 0.0),
+                Err(P1ContactError::Dielectric(
+                    DielectricError::InvalidWavelength
+                ))
+            ));
+            let zero = contact.split(cx, 0, ray, AXIS, 1500.0, 0.0).unwrap();
+            assert_eq!(zero.fresnel, bare.fresnel);
+            assert_eq!(zero.coating_absorbed_power_fraction, 0.0);
+            assert_eq!(
+                zero.transmitted.unwrap().stokes(),
+                bare.transmitted.unwrap().stokes()
+            );
+            gate.request();
+            assert!(matches!(
+                contact.split(cx, 0, ray, AXIS, 1500.0, 0.0),
+                Err(P1ContactError::Mesh(P1MeshError::Propagation(
+                    GradientIndexError::Cancelled
+                )))
+            ));
+        },
+    );
+}
+
+#[test]
+fn g1_contact_retains_weak_p_reflection_adjacent_to_brewster_incidence() {
+    fixture(false, [300.0; 2], [1.2, 1.8], [0.0; 2], |_, cx, contact| {
+        let cosine = 1.0 / (1.0_f64 + (1.8_f64 / 1.2).powi(2)).sqrt() + 1e-9;
+        let input = Stokes::try_new(1.0, -1.0, 0.0, 0.0).unwrap();
+        let split = contact
+            .split_polarized(
+                cx,
+                0,
+                launch((1.0 - cosine * cosine).sqrt(), false),
+                AXIS,
+                input,
+                1500.0,
+                0.0,
+            )
+            .unwrap();
+        let ni = split.incident.final_sample.phase_index();
+        let nt = optical_sample(contact.sides[1].binding, 1500.0)
+            .unwrap()
+            .phase_index();
+        let ci = split.incident.ray.dir.z;
+        let ct = (1.0 - (ni / nt).powi(2) * (1.0 - ci * ci)).sqrt();
+        let expected = ((nt * ci - ni * ct) / (nt * ci + ni * ct)).powi(2);
+        assert!(expected > 0.0 && expected < 1e-16);
+        let reflected = split
+            .reflected
+            .expect("nonzero p Fresnel amplitude must survive");
+        near(reflected.power_fraction() / expected, 1.0, 2e-6);
+        near(reflected.stokes().q / expected, -1.0, 2e-6);
+        assert_eq!(split.coating_absorbed_power_fraction, 0.0);
+    });
 }

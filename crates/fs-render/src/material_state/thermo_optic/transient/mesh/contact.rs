@@ -9,18 +9,24 @@
 //! directions and total-internal-reflection phase. Actual s/p frames and the
 //! complete Stokes state survive every contact. Thermal contact resistance supplies
 //! no optical absorption: bulk Beer loss remains with each original glass.
+//! An explicitly bound coherent coating uses its original spectral layer laws,
+//! ordered from side 0 to side 1. Its positive dissipative work is reported
+//! separately from either bulk path, including losses below the R+T residual.
 //!
 //! Preparation stores eight one-triangle native charts. Queries allocate nothing
 //! and make at most twelve triangle intersection queries. Returned branches can
 //! be passed to another explicitly prepared contact on the same original
 //! thermal snapshot. This is geometrical, incoherent, smooth-interface power
-//! transport; it adds no coherent path amplitudes, coatings, interference, roughness,
-//! gradient-element continuation or bundle derivatives.
+//! transport; a coating is a local planar scattering boundary, without a ray
+//! displacement or film transit delay. It adds no coherence between distinct
+//! paths, roughness, gradient-element continuation or bundle derivatives.
 
 use super::*;
 use crate::charts::proximity::segment_clearance;
 use crate::charts::{MeshHit, TriMesh};
-use crate::dielectric::{DielectricError, FresnelDielectric, reflect, refract};
+use crate::dielectric::{
+    DielectricCoatingStack, DielectricError, FresnelDielectric, reflect, refract,
+};
 use crate::gradient_index::{
     GradientIndexField, GradientIndexOptions, GradientIndexSample, propagate_with_control,
 };
@@ -42,6 +48,7 @@ struct ContactSide<'a> {
 /// opposite sides. Pairing establishes local contact, not global mesh validity.
 pub struct P1ContactInterface<'a> {
     sides: [ContactSide<'a>; 2],
+    coating: Option<DielectricCoatingStack<'a>>,
 }
 
 /// Complete deterministic power split at one actual contact.
@@ -56,6 +63,12 @@ pub struct P1ContactSplit<'a> {
     /// Native unpolarized diagnostic coefficients. Actual branch powers use
     /// the retained Stokes state, not repeated products of these averages.
     pub fresnel: FresnelDielectric,
+    /// Power absorbed in the finite coating at THIS contact, relative to the
+    /// original unit-intensity launch. Uses positive film work weighted by the
+    /// actual incident s/p powers, not the rounded `1 - R - T` residual. Bare
+    /// and lossless contacts return exact zero. Bulk attenuation, earlier
+    /// contact losses and any later branch propagation are excluded.
+    pub coating_absorbed_power_fraction: f64,
     /// Absent for an exactly null reflected channel.
     pub reflected: Option<P1ContactBranch<'a>>,
     /// Absent for total internal reflection or zero transmitted power.
@@ -184,7 +197,30 @@ impl<'a> P1ContactInterface<'a> {
             face: local_faces[i],
             faces: faces[i].map(|vertices| TriMesh::new(vertices.to_vec(), vec![[0, 1, 2]])),
         });
-        Ok(Self { sides })
+        Ok(Self {
+            sides,
+            coating: None,
+        })
+    }
+
+    /// Bind original coherent films in physical order from side 0 to side 1.
+    /// Incidence from side 1 reverses their traversal automatically. The stack
+    /// retains its declared wavelength band, including zero-thickness films;
+    /// each adjacent index still comes from that side's accepted thermal state.
+    ///
+    /// Films are modeled as a local planar boundary: their coherent phases
+    /// affect R/T and polarization, but no geometric thickness, group delay or
+    /// thermal-state update is added to the bulk path. Returned absorbed power
+    /// is an optical result, not an applied conduction source.
+    #[must_use]
+    pub fn with_coating_stack(mut self, coating: DielectricCoatingStack<'a>) -> Self {
+        self.coating = Some(coating);
+        self
+    }
+
+    /// Original borrowed film laws, with side-0-to-side-1 ordering.
+    pub const fn coating_stack(&self) -> Option<DielectricCoatingStack<'a>> {
+        self.coating
     }
 
     /// Trace an initially unpolarized interior launch to this contact, then propagate both nonzero
@@ -333,7 +369,24 @@ impl<'a> P1ContactInterface<'a> {
         }
         let ni = sample_i.phase_index();
         let nt = sample_t.phase_index();
-        let response = fresnel_dielectric_polarized(cosine.min(1.0), ni, nt)?;
+        // One native solve supplies both branch matrices and positive film
+        // work. Do not reconstruct small absorbed power by subtracting R+T.
+        let coating_balance = self
+            .coating
+            .map(|coating| {
+                coating.layer_power_balance(
+                    wavelength_nm,
+                    incident_side == 1,
+                    cosine.min(1.0),
+                    ni,
+                    nt,
+                )
+            })
+            .transpose()?;
+        let response = match &coating_balance {
+            Some(balance) => balance.fresnel,
+            None => fresnel_dielectric_polarized(cosine.min(1.0), ni, nt)?,
+        };
         let fresnel = response.scalar;
         let normal = outward.scale(-1.0);
         let wo = incident.ray.dir.scale(-1.0);
@@ -352,6 +405,11 @@ impl<'a> P1ContactInterface<'a> {
         )?;
         let reflected_power = apply_power(response.reflection, input)?;
         let transmitted_power = apply_power(response.transmission, input)?;
+        let coating_absorbed_power_fraction = coating_balance.map_or(0.0, |balance| {
+            let s_power = (0.5 * input.i + 0.5 * input.q).max(0.0);
+            let p_power = (0.5 * input.i - 0.5 * input.q).max(0.0);
+            s_power * balance.absorbed[0] + p_power * balance.absorbed[1]
+        });
         let reflected = if reflected_power.i > 0.0 {
             Some(self.branch(
                 cx,
@@ -388,6 +446,7 @@ impl<'a> P1ContactInterface<'a> {
             incident_stokes,
             incident_frame,
             fresnel,
+            coating_absorbed_power_fraction,
             reflected,
             transmitted,
         })
@@ -564,7 +623,13 @@ fn apply_power(matrix: Mueller, input: Stokes) -> Result<Stokes, P1ContactError>
         .iter()
         .flatten()
         .fold(0.0_f64, |m, v| m.max(v.abs()));
-    Ok(physical_roundoff(matrix.apply(input), input.i * magnitude)?)
+    // Every native bare/coated interface is diagonal Jones in this s/p frame.
+    // Preserve its weak polarization channel near Brewster incidence instead
+    // of subtracting two rounded, nearly equal Mueller intensity entries.
+    Ok(physical_roundoff(
+        matrix.apply_diagonal_jones(input),
+        input.i * magnitude,
+    )?)
 }
 fn cross(a: Vec3, b: Vec3) -> Vec3 {
     Vec3::new(
