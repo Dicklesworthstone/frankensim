@@ -363,3 +363,5 @@ fn g4_reacting_entropy_refuses_unowned_reconstruction_and_advective_boundary_ent
 mod exterior;
 
 mod exterior_molecular;
+
+mod exterior_interval;

@@ -6,11 +6,13 @@
 //! arbitrary-reference effect of numerical species-source drift is separated.
 
 mod exterior;
+mod interval_exterior;
 mod molecular;
 pub use exterior::{
     ReactiveExteriorEntropyReport, ReactiveExteriorEntropyStepReport,
     SplitExteriorMolecularEntropyReport,
 };
+pub use interval_exterior::StabilizedReactiveExteriorEntropyIntervalReport;
 pub use molecular::StabilizedReactiveExteriorEntropyStepReport;
 
 use super::*;
@@ -262,8 +264,8 @@ impl CoupledEntropy {
 }
 
 
-/// One complete-window anchor plus accepted-step chemistry only. The original
-/// native interval owner retains its conserved-state rollback buffer and loop.
+/// One complete-window anchor plus accepted chemistry and optional exterior
+/// exchange. The original native owner retains its conserved rollback rows/loop.
 pub(super) struct IntervalEntropy {
     controls: MixtureEntropyControl,
     account: ReactiveEntropyAccount,
@@ -271,6 +273,7 @@ pub(super) struct IntervalEntropy {
     minimum_step_entropy_change_j_k: f64,
     maximum_step_relative_species_residual: f64,
     completed: Option<ReactiveEntropyReport>,
+    completed_exterior: Option<ReactiveExteriorEntropyReport>,
 }
 
 impl IntervalEntropy {
@@ -289,7 +292,36 @@ impl IntervalEntropy {
             minimum_step_entropy_change_j_k: 0.0,
             maximum_step_relative_species_residual: 0.0,
             completed: None,
+            completed_exterior: None,
         })
+    }
+
+    pub(super) fn new_with_exterior_states(
+        flow: &MixtureEuler1d,
+        transport: StepControl,
+        controls: MixtureEntropyControl,
+        exterior_states: [Option<Cell<'_>>; 2],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self, ReactiveError> {
+        if exterior_states.iter().all(Option::is_none) {
+            return Self::new(flow, transport, controls, cancelled);
+        }
+        let initial = CoupledEntropy::new_with_exterior_states(
+            flow, transport, controls, exterior_states, cancelled,
+        )?;
+        Ok(Self {
+            controls,
+            account: initial.account,
+            accepted_steps: 0,
+            minimum_step_entropy_change_j_k: 0.0,
+            maximum_step_relative_species_residual: 0.0,
+            completed: None,
+            completed_exterior: None,
+        })
+    }
+
+    pub(super) fn has_exterior_states(&self) -> bool {
+        self.account.has_exterior_states()
     }
 
     pub(super) const fn controls(&self) -> MixtureEntropyControl {
@@ -304,7 +336,13 @@ impl IntervalEntropy {
         transport: StepControl,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<CoupledEntropy, ReactiveError> {
-        CoupledEntropy::new(flow, transport, self.controls, cancelled)
+        if self.has_exterior_states() {
+            CoupledEntropy::new_step_in_exterior_basis(
+                flow, transport, self.controls, &self.account, cancelled,
+            )
+        } else {
+            CoupledEntropy::new(flow, transport, self.controls, cancelled)
+        }
     }
 
     pub(super) fn accept_step(
@@ -312,6 +350,24 @@ impl IntervalEntropy {
         step: &CoupledEntropy,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<(), ReactiveError> {
+        if self.has_exterior_states() {
+            let report = step.completed_exterior_entropy().ok_or(ReactiveError::Invalid(
+                "reacting interval requires a completely admitted exterior entropy step",
+            ))?;
+            let accepted_steps = self.accepted_steps.checked_add(1).ok_or(
+                ReactiveError::Invalid("reacting entropy interval step count overflow"),
+            )?;
+            self.account.merge_exterior_step(&step.account, cancelled)?;
+            self.minimum_step_entropy_change_j_k = if self.accepted_steps == 0 {
+                report.entropy_generation_j_k
+            } else {
+                self.minimum_step_entropy_change_j_k.min(report.entropy_generation_j_k)
+            };
+            self.maximum_step_relative_species_residual = self.maximum_step_relative_species_residual
+                .max(report.maximum_relative_species_residual);
+            self.accepted_steps = accepted_steps;
+            return Ok(());
+        }
         let (report, _, _) = step.completed.as_ref().ok_or(ReactiveError::Invalid(
             "reacting interval requires a completely admitted entropy step",
         ))?;
@@ -339,10 +395,31 @@ impl IntervalEntropy {
         temperature_bounds: [f64; 2],
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<(), ReactiveError> {
+        if self.has_exterior_states() {
+            self.completed_exterior = Some(self.account.check_candidate_exterior_rows(
+                initial, candidate, Some(temperature_bounds), cancelled,
+            )?);
+            return Ok(());
+        }
         self.completed = Some(self.account.check_candidate_rows(
             initial, candidate, Some(temperature_bounds), cancelled,
         )?);
         Ok(())
+    }
+
+    /// The full original-to-final gate has already completed inside the native
+    /// rollback-protected interval. Per-step allowances are never summed.
+    pub(super) fn complete_exterior(
+        self,
+        coupled: super::stabilized::StabilizedReactiveIntervalReport,
+    ) -> StabilizedReactiveExteriorEntropyIntervalReport {
+        StabilizedReactiveExteriorEntropyIntervalReport {
+            coupled,
+            entropy: self.completed_exterior
+                .expect("accepted reacting interval retained complete exterior entropy admission"),
+            minimum_step_entropy_generation_j_k: self.minimum_step_entropy_change_j_k,
+            maximum_step_relative_species_residual: self.maximum_step_relative_species_residual,
+        }
     }
 
     /// All fallible source, inventory, entropy and report arithmetic precedes

@@ -5,11 +5,11 @@ use super::*;
 use crate::multicomponent::Conserved;
 use crate::multicomponent::dissipation::{DissipationError, StabilizedDissipationControl};
 
-const CALORICS: [[f64; 3]; 2] = [[3.5, 0.2, 0.0], [4.0, 0.1, 1.5]];
-const WITHOUT_DATUM: [[f64; 3]; 2] = [[3.5, 0.2, 0.0], [4.0, 0.1, 0.0]];
+pub(super) const CALORICS: [[f64; 3]; 2] = [[3.5, 0.2, 0.0], [4.0, 0.1, 1.5]];
+pub(super) const WITHOUT_DATUM: [[f64; 3]; 2] = [[3.5, 0.2, 0.0], [4.0, 0.1, 0.0]];
 const T0: f64 = 0.001;
 
-fn fixture() -> (ReactingEuler1d, DissipationOperator<ConstantTransport>, [Conserved; 2]) {
+pub(super) fn fixture() -> (ReactingEuler1d, DissipationOperator<ConstantTransport>, [Conserved; 2]) {
     let (simulation, _) = variable_caloric();
     let mechanism = simulation.mechanism().clone();
     let chemistry = simulation.chemistry_controls();
@@ -58,7 +58,7 @@ fn near(actual: f64, expected: f64) {
 // The SAME effort contracts actual inviscid and molecular transfers, including
 // partial enthalpy and the bath's viscous energy share. No Fourier-only heat
 // surrogate or production entropy routine enters this independent oracle.
-fn supply(
+pub(super) fn supply(
     rho: [f64; 2],
     temperature: f64,
     calorics: &[[f64; 3]; 2],

@@ -6330,3 +6330,42 @@ selected unchanged-path regressions therefore have no completed result. No
 native test pass, whole-workspace Cargo pass or DSR pass is claimed for this
 increment. The focused integration target is
 `cargo test -p fs-gas --features experimental-euler --test mixture_gravity`.
+
+### Complete open reacting durations in one original entropy basis
+
+`ReactingEuler1d::advance_stabilized_entropy_consistent_with_exterior_states_for`
+and its `_to` companion complete the requested duration or represented target
+through the ORIGINAL RKL2 reacting interval owner. Every accepted D-C-A-C-D
+step uses the same stationary prescribed exterior states. Two absent states
+delegate to the original closed entropy interval and map its exact reports.
+
+The window retains its original thermochemical source, caloric domain,
+reference temperature, species reference densities and entropy constants.
+Local steps collect fresh initial temperatures and inventories while borrowing
+that immutable basis and cached exterior efforts. No per-step report rebasing,
+source-entropy reevaluation or sum of entropy allowances is used to complete
+the window. Source/domain, reference-basis and exterior-effort compatibility
+are required before merging a complete admitted step.
+
+Only accepted chemical changes and actual molecular/advective boundary
+transfers enter the compensated window account. Chemistry, boundary entropy,
+species transfers and absolute stage throughputs merge transactionally.
+The final gate reduces the original conserved rollback rows and actual final
+state directly, retaining real chemical entropy and applying ONE whole-window
+allowance. Per-step generation and species residual extrema are diagnostics.
+
+The native interval keeps one reused conserved backup, shared coupled-attempt
+and molecular-RHS work limits, actual final-remainder integration and exact
+represented clock semantics. Any late entropy, source, work or cancellation
+refusal restores the whole original field and clock, including an accepted
+internal prefix. A zero duration still admits the original operator/source,
+stationary baths and entropy scope.
+
+The fixed-area, first-order, stationary prescribed-bath and common species
+support restrictions remain. These entries do not evolve finite exterior
+storage, establish higher-order positivity, or supply a global temporal-error
+estimate. Six focused regressions cover independent complete source/boundary
+entropy reconstruction, work exhaustion after an accepted prefix, late
+cancellation and reuse, zero-duration admission, represented clock refusal,
+and rejection when individually tolerated local entropy decreases exceed the
+single original-window allowance.

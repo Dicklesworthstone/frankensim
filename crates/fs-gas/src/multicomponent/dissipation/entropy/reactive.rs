@@ -89,7 +89,7 @@ impl ReactiveEntropyAccount {
         self.chemical_change.fill(Dd::ZERO);
         self.chemical_throughput.fill(Dd::ZERO);
         if let Some(exterior) = self.exterior.first_mut() {
-            exterior.reset_molecular();
+            exterior.begin_attempt();
         }
     }
 
@@ -120,6 +120,23 @@ impl ReactiveEntropyAccount {
         inventory: &ReactionInventory,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<(), FlowError> {
+        let merged = self.merged_inventory(inventory, cancelled)?;
+        self.chemical_change = merged.chemical_change;
+        self.chemical_throughput = merged.chemical_throughput;
+        self.rejected_entropy_steps = merged.rejected_entropy_steps;
+        if let Some(exterior) = self.exterior.first_mut() {
+            exterior.invalidate_receipt();
+        }
+        Ok(())
+    }
+
+    /// Prepare both arrays and the counter before any caller commits them.
+    /// Open interval admission combines this with its boundary merge atomically.
+    fn merged_inventory(
+        &self,
+        inventory: &ReactionInventory,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<ReactionInventory, FlowError> {
         poll(cancelled)?;
         if inventory.species_count != self.species_count {
             return Err(FlowError::EntropyDomain("reacting entropy source species axis"));
@@ -137,10 +154,12 @@ impl ReactiveEntropyAccount {
             scalar(throughput[k])?;
         }
         poll(cancelled)?;
-        self.chemical_change = change;
-        self.chemical_throughput = throughput;
-        self.rejected_entropy_steps = rejected_entropy_steps;
-        Ok(())
+        Ok(ReactionInventory {
+            species_count: self.species_count,
+            chemical_change: change,
+            chemical_throughput: throughput,
+            rejected_entropy_steps,
+        })
     }
 
     /// Observe the actual represented cell update after the original chemistry
@@ -182,6 +201,9 @@ impl ReactiveEntropyAccount {
         }
         self.chemical_change = change;
         self.chemical_throughput = throughput;
+        if let Some(exterior) = self.exterior.first_mut() {
+            exterior.invalidate_receipt();
+        }
         Ok(())
     }
 
@@ -238,6 +260,7 @@ impl ReactiveEntropyAccount {
         let n = self.species_count;
         let width = n + 2;
         if gas.species_count() != n
+            || !self.state.matches_source(gas)
             || initial.len() != candidate.states.len()
             || candidate.cell_count() != self.state.initial_temperature.len()
         {

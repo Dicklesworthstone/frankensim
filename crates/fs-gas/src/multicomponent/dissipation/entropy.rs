@@ -19,7 +19,7 @@
 
 use super::super::wall::log_ratio;
 use super::super::{
-    Error as FlowError, MAX_SPECIES, MixtureEuler1d, MixtureGas, Primitive, allocated, poll,
+    CaloricDomain, Error as FlowError, MAX_SPECIES, MixtureEuler1d, MixtureGas, Primitive, allocated, poll,
 };
 use super::{
     Boundaries, Boundary, DissipationControl, DissipationError, DissipationOperator,
@@ -28,6 +28,7 @@ use super::{
 use fs_math::dd::Dd;
 use fs_qty::{Temperature, Time};
 use fs_thermochem::UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K as R;
+use fs_thermochem::equilibrium::composition::IdealGasEquilibriumV1;
 
 mod advection;
 mod reservoir;
@@ -353,6 +354,10 @@ impl<L: TransportLaw> DissipationOperator<L> {
 /// The fixed basis is shared by every actual trial and the final direct check.
 pub(in crate::multicomponent) struct EntropyTracker {
     controls: MolecularEntropyControl,
+    // The original source owns immutable shared models. Retaining it verifies
+    // borrowed basis identity without another field clone or caloric query.
+    source_owner: IdealGasEquilibriumV1,
+    source_domain: CaloricDomain,
     reference_temperature: f64,
     reference_density: [f64; MAX_SPECIES],
     reference_entropy: [f64; MAX_SPECIES],
@@ -378,6 +383,18 @@ impl EntropyTracker {
         controls: MolecularEntropyControl,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Self, FlowError> {
+        Self::new_with_basis(flow, controls, None, cancelled)
+    }
+
+    /// Keep fresh LOCAL initial temperatures and inventories while optionally
+    /// sharing an immutable complete-window source/reference basis. The borrowed
+    /// basis changes no state, density, temperature, source or numerical allowance.
+    pub(in crate::multicomponent) fn new_with_basis(
+        flow: &MixtureEuler1d,
+        controls: MolecularEntropyControl,
+        basis: Option<&Self>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self, FlowError> {
         controls.validate()?;
         poll(cancelled)?;
         match flow.boundaries {
@@ -392,6 +409,9 @@ impl EntropyTracker {
             }
         }
         let gas = flow.gas();
+        if basis.is_some_and(|basis| !basis.matches_source(gas)) {
+            return Err(FlowError::EntropyDomain("entropy basis source or caloric domain mismatch"));
+        }
         let n = gas.species_count();
         let m = n + 2;
         let mut temperature = allocated(flow.cell_count(), 0.0)?;
@@ -414,37 +434,48 @@ impl EntropyTracker {
         if !positive(volume) {
             return Err(FlowError::EntropyDomain("closed molecular entropy volume"));
         }
-        let reference_temperature = temperature[0];
+        let reference_temperature = basis.map_or(temperature[0], |basis| basis.reference_temperature);
         let t_ref = Temperature::new(reference_temperature);
         let mut reference_entropy = [0.0; MAX_SPECIES];
         let mut original_mass = [0.0; MAX_SPECIES];
-        for (k, model) in gas.source().models().iter().enumerate() {
-            poll(cancelled)?;
-            original_mass[k] = scalar(masses[k])?;
-            let mean = original_mass[k] / volume;
-            if positive(mean) {
-                reference_density[k] = mean;
+        if let Some(basis) = basis {
+            reference_density = basis.reference_density;
+            reference_entropy = basis.reference_entropy;
+            for k in 0..n {
+                poll(cancelled)?;
+                original_mass[k] = scalar(masses[k])?;
             }
-            let log_partial_pressure = log_ratio(reference_density[k], model.molar_mass().value())
-                + fs_math::det::ln(R)
-                + fs_math::det::ln(reference_temperature)
-                - fs_math::det::ln(model.convention().reference_pressure().value());
-            reference_entropy[k] = model
-                .evaluate_properties(t_ref)
-                .map_err(super::FlowError::from)?
-                .s()
-                .value()
-                - R * (log_partial_pressure + 1.0);
-            if !reference_entropy[k].is_finite() {
-                return Err(FlowError::EntropyDomain(
-                    "unrepresentable source entropy reference",
-                ));
+        } else {
+            for (k, model) in gas.source().models().iter().enumerate() {
+                poll(cancelled)?;
+                original_mass[k] = scalar(masses[k])?;
+                let mean = original_mass[k] / volume;
+                if positive(mean) {
+                    reference_density[k] = mean;
+                }
+                let log_partial_pressure = log_ratio(reference_density[k], model.molar_mass().value())
+                    + fs_math::det::ln(R)
+                    + fs_math::det::ln(reference_temperature)
+                    - fs_math::det::ln(model.convention().reference_pressure().value());
+                reference_entropy[k] = model
+                    .evaluate_properties(t_ref)
+                    .map_err(super::FlowError::from)?
+                    .s()
+                    .value()
+                    - R * (log_partial_pressure + 1.0);
+                if !reference_entropy[k].is_finite() {
+                    return Err(FlowError::EntropyDomain(
+                        "unrepresentable source entropy reference",
+                    ));
+                }
             }
         }
         let mut current_temperature = allocated(temperature.len(), 0.0)?;
         current_temperature.copy_from_slice(&temperature);
         Ok(Self {
             controls,
+            source_owner: gas.source().clone(),
+            source_domain: gas.domain(),
             reference_temperature,
             reference_density,
             reference_entropy,
@@ -461,6 +492,22 @@ impl EntropyTracker {
             exterior: Vec::new(),
             completed_exterior_report: None,
         })
+    }
+
+    fn matches_source(&self, gas: &MixtureGas) -> bool {
+        self.source_domain == gas.domain() && &self.source_owner == gas.source()
+    }
+
+    /// A normalized transfer can be summed directly only in the identical
+    /// source chart and bit-exact fixed reference basis. No report rebasing occurs.
+    fn same_basis(&self, other: &Self) -> bool {
+        self.source_domain == other.source_domain
+            && self.source_owner == other.source_owner
+            && self.reference_temperature.to_bits() == other.reference_temperature.to_bits()
+            && self.reference_density.iter().zip(&other.reference_density)
+                .all(|(a, b)| a.to_bits() == b.to_bits())
+            && self.reference_entropy.iter().zip(&other.reference_entropy)
+                .all(|(a, b)| a.to_bits() == b.to_bits())
     }
 
     pub(in crate::multicomponent) fn begin_attempt(&mut self, primitive: &[Primitive]) {

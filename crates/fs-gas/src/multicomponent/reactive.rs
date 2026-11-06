@@ -26,7 +26,8 @@ mod entropy;
 pub use entropy::{
     ReactiveEntropyReport, ReactiveEntropyStepReport, ReactiveExteriorEntropyReport,
     ReactiveExteriorEntropyStepReport, SplitExteriorMolecularEntropyReport,
-    StabilizedReactiveExteriorEntropyStepReport, SplitMolecularEntropyReport,
+    StabilizedReactiveExteriorEntropyStepReport, StabilizedReactiveExteriorEntropyIntervalReport,
+    SplitMolecularEntropyReport,
 };
 mod reservoir;
 mod stabilized;

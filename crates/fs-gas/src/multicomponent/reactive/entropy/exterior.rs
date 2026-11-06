@@ -214,6 +214,38 @@ impl CoupledEntropy {
         Ok(Self { controls, account, completed: None, exterior })
     }
 
+    /// A local coupled step retains its own original state and inventory while
+    /// sharing the complete interval's immutable source/exterior entropy basis.
+    pub(super) fn new_step_in_exterior_basis(
+        flow: &MixtureEuler1d,
+        transport: StepControl,
+        controls: MixtureEntropyControl,
+        original: &ReactiveEntropyAccount,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self, ReactiveError> {
+        poll(cancelled)?;
+        if transport.reconstruction != Reconstruction::FirstOrder
+            || flow.mesh.uniform_cross_section().is_none()
+        {
+            return Err(FlowError::EntropyDomain(
+                "reacting interval entropy requires first-order fixed constant-area transport",
+            ).into());
+        }
+        let account = ReactiveEntropyAccount::new_step_in_basis(
+            flow, original, controls, cancelled,
+        )?;
+        let mut exterior = Vec::new();
+        exterior.try_reserve_exact(1).map_err(|_| FlowError::Allocation)?;
+        exterior.push(ExteriorCoupling { transport: None, completed: None });
+        poll(cancelled)?;
+        Ok(Self { controls, account, completed: None, exterior })
+    }
+
+    pub(super) fn completed_exterior_entropy(&self) -> Option<ReactiveExteriorEntropyReport> {
+        self.exterior.first().and_then(|exterior| exterior.completed.as_ref())
+            .map(|(report, _, _)| *report)
+    }
+
     pub(in crate::multicomponent::reactive) fn has_exterior_states(&self) -> bool {
         !self.exterior.is_empty()
     }

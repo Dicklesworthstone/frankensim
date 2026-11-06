@@ -19,6 +19,7 @@ use crate::multicomponent::MAX_SPECIES;
 
 /// Cached for one prescribed exterior trace and one immutable entropy basis.
 /// No source inversion, heap allocation or logarithm is needed per RK stage.
+#[derive(Clone)]
 pub(in crate::multicomponent) struct ExteriorEntropyEffort {
     species_count: usize,
     positive_species: [bool; MAX_SPECIES],
@@ -27,6 +28,19 @@ pub(in crate::multicomponent) struct ExteriorEntropyEffort {
 }
 
 impl ExteriorEntropyEffort {
+    /// Compatibility of the immutable exterior entropy effort, independent of
+    /// accepted transfer history. Window steps clone this exact cached basis.
+    pub(in crate::multicomponent) fn same_effort(&self, other: &Self) -> bool {
+        self.species_count == other.species_count
+            && self.positive_species == other.positive_species
+            && self.potential.hi.to_bits() == other.potential.hi.to_bits()
+            && self.potential.lo.to_bits() == other.potential.lo.to_bits()
+            && self.variables.iter().zip(&other.variables).all(|(left, right)| {
+                left.hi.to_bits() == right.hi.to_bits()
+                    && left.lo.to_bits() == right.lo.to_bits()
+            })
+    }
+
     pub(in crate::multicomponent) fn new(
         gas: &MixtureGas,
         exterior: Cell<'_>,

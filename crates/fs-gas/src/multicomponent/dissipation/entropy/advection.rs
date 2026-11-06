@@ -90,6 +90,27 @@ pub(super) struct ExteriorEntropyAccount {
 }
 
 impl ExteriorEntropyAccount {
+    /// Equal source reference coordinates alone do not identify the prescribed
+    /// exterior states. Accepted transfers must use the same cached efforts.
+    pub(super) fn same_efforts(&self, other: &Self) -> bool {
+        self.ends.iter().zip(&other.ends).all(|(left, right)| match (left, right) {
+            (None, None) => true,
+            (Some(left), Some(right)) => left.same_effort(right),
+            _ => false,
+        })
+    }
+
+    /// A complete interval keeps the same prescribed exterior states and
+    /// immutable entropy basis. Copy their cached efforts for a fresh local
+    /// step without repeating source intervals/logarithms or retaining an old
+    /// accepted transport inventory.
+    pub(super) fn clone_efforts(&self) -> Self {
+        Self {
+            ends: self.ends.clone(),
+            accepted_inventory: None,
+        }
+    }
+
     pub(super) fn new(
         gas: &MixtureGas,
         reference_temperature: f64,

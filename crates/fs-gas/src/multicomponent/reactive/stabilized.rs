@@ -548,7 +548,7 @@ impl ReactingEuler1d {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn advance_stabilized_for_inner<L: TransportLaw>(
+    pub(super) fn advance_stabilized_for_inner<L: TransportLaw>(
         &mut self,
         operator: &mut DissipationOperator<L>,
         duration: Time,
@@ -615,7 +615,7 @@ impl ReactingEuler1d {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn advance_stabilized_to_inner<L: TransportLaw>(
+    pub(super) fn advance_stabilized_to_inner<L: TransportLaw>(
         &mut self,
         operator: &mut DissipationOperator<L>,
         target: Time,
@@ -651,14 +651,28 @@ impl ReactingEuler1d {
             if target.value() == start {
                 // A no-op still admits the exact original operator and source.
                 if let Some(account) = entropy.as_deref_mut() {
-                    operator.advance_stabilized_entropy_consistent_budget(
-                        &mut self.accepted,
-                        Time::new(0.0),
-                        controls.dissipation,
-                        account.controls(),
-                        &mut evaluations,
-                        &mut cancelled,
-                    )?;
+                    if account.has_exterior_states() {
+                        // Even a zero interval admits the original stationary
+                        // baths and molecular operator under the same RHS budget.
+                        operator.advance_stabilized_entropy_consistent_with_reservoir_inventory_budget(
+                            &mut self.accepted,
+                            Time::new(0.0),
+                            controls.dissipation,
+                            account.controls(),
+                            reservoirs,
+                            &mut evaluations,
+                            &mut cancelled,
+                        )?;
+                    } else {
+                        operator.advance_stabilized_entropy_consistent_budget(
+                            &mut self.accepted,
+                            Time::new(0.0),
+                            controls.dissipation,
+                            account.controls(),
+                            &mut evaluations,
+                            &mut cancelled,
+                        )?;
+                    }
                 } else {
                     operator.advance_stabilized_with_reservoirs_budget(
                         &mut self.accepted,
