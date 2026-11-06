@@ -37,6 +37,9 @@ pub mod cross_sections;
 /// Bounded processed ENDF/PENDF import and declared spectrum collapse.
 pub mod endf;
 
+/// Spatial multigroup neutron histories and composition-coupled depletion.
+pub mod diffusion;
+
 /// Product-forming fission, capture and radioactive transmutation networks.
 pub mod burnup;
 

@@ -1110,3 +1110,50 @@ representable extreme-scale products, domain/zero-flux/work/cancellation
 refusals, and processed ENDF temperature rows driving original burnup counts,
 products and prompt heat. These are manufactured verification fixtures; the
 supplied spectrum and processed evaluation remain caller-owned physical data.
+
+## Spatial multigroup neutron diffusion and delayed emission
+
+`diffusion` retains extensive neutron counts per cell/energy group and explicit
+stationary precursor counts per cell/family. Scalar group flux is `v_g N_cg/V_c`.
+An authored macroscopic reaction removes incident neutrons at `Sigma_g v_g`;
+capture, group scattering, prompt fission multiplicities and delayed-family
+yields remain distinct channels. A precursor disappearance emits its declared
+normalized group spectrum. Fission yields are expected multiplicities and are
+never normalized as probabilities. No equilibrium precursor history is inferred.
+
+Reciprocal interfaces carry `K_g(phi_a-phi_b)`, with K in square metres. Two
+positive transfers give the same conservative current across unequal-volume
+cells. A planar orthogonal face can supply `K=A/(d_a/D_a+d_b/D_b)` using the
+physical diffusion coefficients D in metres and centre-to-face distances.
+Exterior conductances explicitly remove neutrons; omitted faces are reflecting.
+Boundary extrapolation lengths and incoming exterior sources are not invented.
+The conventional multigroup/precursor equations and the limits of the diffusion
+approximation are described in the original
+[Moltres theory documentation](https://arfc.github.io/moltres/getting_started/theory.html).
+
+The existing positive reaction owner propagates the frozen spatial/group operator
+and its population integrals. Physical reaction, face-transfer, leakage and
+precursor counts are attributed independently; fluence includes particles born
+and transferred during the interval, including zero-removal receiving groups.
+A single immutable preparation is shared across clones and reused for exact
+model/duration/work inputs. Coefficient rebinding preserves volumes, ordered
+face/boundary correspondence, grid, speeds and complete precursor identities.
+
+Work, coefficients, allocation, cancellation and numerical particle-account
+allowances are explicit. The exported noncancelling defect is rounded upward
+when its retained low part exceeds the ordinary scalar export. Trials preserve
+all accepted populations on refusal. The current dense numerical owner limits
+the total neutron-plus-precursor population nodes to 64; this is a bounded
+spatial diffusion model, not a scalable angular transport or criticality solver.
+Cross sections, speeds, conductances, emission spectra and their physical
+applicability remain explicitly supplied data. No precursor advection or
+resonance/self-shielding processing is inferred.
+
+Twelve focused regressions cover analytic absorption/leakage and multiplication,
+down-scattering into a zero-loss group, unequal-volume conservative exchange,
+delayed release and same-interval precursor ingrowth, self-scattering, interval
+composition, cache/rebinding behavior, work/cancellation and representability,
+and upward defect export. The final merged actual-owner nuclear lane passed
+188 tests, including the separately integrated burnup/thermal paths and current
+uniform-production additions. Full workspace Cargo and evaluated reactor
+benchmarks remain separate validation gates.
