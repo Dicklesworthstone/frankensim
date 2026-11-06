@@ -17,7 +17,10 @@ pub mod thermal;
 
 use super::{DriverAssembly, PanelMode, SpeakerError, TsCard, assemble_driver, declared_air};
 use fs_material::gas::GasState;
-use fs_phs::{DescriptorPortHamiltonian, QuadraticStorage, StepRecord, Storage, step_descriptor};
+use fs_phs::{
+    ConstitutiveDiscreteGradient, DescriptorPortHamiltonian, QuadraticStorage, StepRecord, Storage,
+    step_descriptor,
+};
 
 fn invalid(what: &'static str) -> SpeakerError {
     SpeakerError::Invalid { what }
@@ -148,7 +151,45 @@ struct CoilStorage {
     exact_q: Option<Vec<f64>>,
 }
 
+impl CoilStorage {
+    // Exact polynomial secants, without dividing by a displacement increment.
+    // Coincident positions retain the same current/force law and Jacobian.
+    fn magnetic_chord(&self, a: &[f64], b: &[f64]) -> Option<[f64; 4]> {
+        let n = a.len();
+        if n < 3
+            || b.len() != n
+            || n.checked_mul(n) != Some(self.mechanical.matrix().len())
+            || a.iter().chain(b).any(|v| !v.is_finite())
+        {
+            return None;
+        }
+        let la = self.profile.sample(a[1]).ok()?;
+        let lb = self.profile.sample(b[1]).ok()?;
+        let ia = (a[0] - la.permanent_linkage_wb) / la.inductance_h;
+        let ib = (b[0] - lb.permanent_linkage_wb) / lb.inductance_h;
+        let scale = self.profile.displacement_scale_m;
+        let ua = a[1] / scale;
+        let ub = b[1] / scale;
+        let c = self.profile.force_factor_tm;
+        let psi_secant =
+            c[0] + 0.5 * c[1] * (ua + ub) + c[2] / 3.0 * (ua * ua + ua * ub + ub * ub);
+        let l = self.profile.inductance_h;
+        let l_secant = (l[1] + l[2] * (ua + ub)) / scale;
+        let chord = [ia, ib, psi_secant, l_secant];
+        chord.iter().all(|v| v.is_finite()).then_some(chord)
+    }
+}
+
 impl Storage for CoilStorage {
+    fn discrete_gradient_rule(&self) -> Option<&dyn ConstitutiveDiscreteGradient> {
+        // Preserve the existing factorized exact-quadratic Newton path.
+        if self.exact_q.is_some() {
+            None
+        } else {
+            Some(self)
+        }
+    }
+
     fn hamiltonian(&self, x: &[f64]) -> f64 {
         let Ok(local) = self.profile.sample(x[1]) else {
             return f64::NAN;
@@ -183,28 +224,24 @@ impl Storage for CoilStorage {
     }
 
     fn midpoint_energy_remainder(&self, a: &[f64], b: &[f64], mid: &[f64]) -> Option<f64> {
-        let (Ok(la), Ok(lb), Ok(lm)) = (
-            self.profile.sample(a[1]),
-            self.profile.sample(b[1]),
-            self.profile.sample(mid[1]),
-        ) else {
+        let Some([ia, ib, psi_secant, l_secant]) = self.magnetic_chord(a, b) else {
             return Some(f64::NAN);
         };
-        let ia = (a[0] - la.permanent_linkage_wb) / la.inductance_h;
-        let ib = (b[0] - lb.permanent_linkage_wb) / lb.inductance_h;
+        if mid.len() != a.len() || mid.iter().any(|v| !v.is_finite()) {
+            return Some(f64::NAN);
+        }
+        let Ok(lm) = self.profile.sample(mid[1]) else {
+            return Some(f64::NAN);
+        };
         let im = (mid[0] - lm.permanent_linkage_wb) / lm.inductance_h;
-        let ua = a[1] / self.profile.displacement_scale_m;
-        let ub = b[1] / self.profile.displacement_scale_m;
-        let c = self.profile.force_factor_tm;
-        let psi_secant = c[0] + 0.5 * c[1] * (ua + ub) + c[2] / 3.0 * (ua * ua + ua * ub + ub * ub);
-        let l = self.profile.inductance_h;
-        let l_secant = (l[1] + l[2] * (ua + ub)) / self.profile.displacement_scale_m;
         // Delta Hm = (ia+ib)/2 * Delta(lambda-psi) - ia*ib/2 * Delta L.
-        // Subtract the midpoint gradient algebraically; no large endpoint
-        // energies or nearly equal permanent linkage values are subtracted.
+        // Keep the original quadratic remainder too: a represented midpoint
+        // can differ from the exact endpoint mean even in the mechanical store.
+        let mechanical = self.mechanical.midpoint_energy_remainder(a, b, mid)?;
         let avg_i = f64::midpoint(ia, ib);
         Some(
-            (avg_i - im) * (b[0] - a[0])
+            mechanical
+                + (avg_i - im) * (b[0] - a[0])
                 + (im * lm.force_factor_tm + 0.5 * im * im * lm.inductance_gradient_h_per_m
                     - avg_i * psi_secant
                     - 0.5 * ia * ib * l_secant)
@@ -213,13 +250,93 @@ impl Storage for CoilStorage {
     }
 }
 
+impl ConstitutiveDiscreteGradient for CoilStorage {
+    fn evaluate(&self, a: &[f64], b: &[f64], mid: &[f64], out: &mut [f64]) {
+        let Some([ia, ib, psi_secant, l_secant]) = self.magnetic_chord(a, b) else {
+            out.fill(f64::NAN);
+            return;
+        };
+        let n = a.len();
+        if out.len() != n || mid.len() != n || mid.iter().any(|v| !v.is_finite()) {
+            out.fill(f64::NAN);
+            return;
+        }
+        self.mechanical.gradient(mid, out);
+        let q = self.mechanical.matrix();
+        for (i, value) in out.iter_mut().enumerate() {
+            let mut correction = 0.0;
+            for j in 0..n {
+                let qij = q[i * n + j];
+                let qji = q[j * n + i];
+                let offset = (a[j] - mid[j]) + (b[j] - mid[j]);
+                correction += (0.25 * qij + 0.25 * qji) * offset
+                    + (0.5 * qji - 0.5 * qij) * mid[j];
+            }
+            *value += correction;
+        }
+        let avg_i = f64::midpoint(ia, ib);
+        // This exact magnetic work is confined to linkage and excursion.
+        // Cone/panel kinetic energy and cavity work keep their own efforts.
+        out[0] += avg_i;
+        out[1] -= avg_i * psi_secant + 0.5 * ia * ib * l_secant;
+        if out.iter().any(|v| !v.is_finite()) {
+            out.fill(f64::NAN);
+        }
+    }
+
+    fn end_jacobian_action(
+        &self,
+        a: &[f64],
+        b: &[f64],
+        direction: &[f64],
+        out: &mut [f64],
+    ) -> bool {
+        let Some([ia, ib, psi_secant, l_secant]) = self.magnetic_chord(a, b) else {
+            out.fill(f64::NAN);
+            return false;
+        };
+        let n = a.len();
+        if out.len() != n || direction.len() != n || direction.iter().any(|v| !v.is_finite()) {
+            out.fill(f64::NAN);
+            return false;
+        }
+        let Ok(lb) = self.profile.sample(b[1]) else {
+            out.fill(f64::NAN);
+            return false;
+        };
+        let scale = self.profile.displacement_scale_m;
+        let ua = a[1] / scale;
+        let ub = b[1] / scale;
+        let c = self.profile.force_factor_tm;
+        let di = (direction[0]
+            - (lb.force_factor_tm + ib * lb.inductance_gradient_h_per_m) * direction[1])
+            / lb.inductance_h;
+        let dpsi = ((0.5 * c[1] + c[2] / 3.0 * (ua + 2.0 * ub)) / scale) * direction[1];
+        let dl = ((self.profile.inductance_h[2] / scale) / scale) * direction[1];
+        let q = self.mechanical.matrix();
+        for (i, value) in out.iter_mut().enumerate() {
+            *value = (0..n)
+                .map(|j| (0.25 * q[i * n + j] + 0.25 * q[j * n + i]) * direction[j])
+                .sum();
+        }
+        out[0] += 0.5 * di;
+        out[1] -= 0.5 * di * psi_secant
+            + f64::midpoint(ia, ib) * dpsi
+            + 0.5 * ia * di * l_secant
+            + 0.5 * ia * ib * dl;
+        out.iter().all(|v| v.is_finite())
+    }
+}
+
 /// Opt-in nonlinear magnetic speaker, retaining the original TS cone, sealed
 /// cavity and optional panel mechanics. State 0 is TOTAL linkage, not L*i.
 ///
 /// The existing descriptor discrete-gradient solver advances electrical and
 /// mechanical states jointly. It conserves the original discrete energy/work
-/// balance; time accuracy remains second order, unlike the linear TsDriver's
-/// exact held-input propagator. Resolve the nonlinear response by timestep
+/// balance. A symmetric magnetic chord supplies mean current and reciprocal
+/// force without distributing magnetic corrections into other state efforts.
+/// Its endpoint Jacobian is analytic; time accuracy remains second order,
+/// unlike the linear TsDriver's exact held-input propagator. Resolve the nonlinear response by timestep
 /// refinement. This small dense reference owner is not an audio callback.
 pub struct MagneticTsDriver {
     phs: DescriptorPortHamiltonian,

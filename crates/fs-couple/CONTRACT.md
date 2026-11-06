@@ -476,3 +476,24 @@ boiling, drainage, spatial gas gradients, displacement work or an entropy
 theorem. Focused coupled regressions check actual finite-wall/gas feedback,
 complete dry-out, retained latent wall storage and transactional refusal.
 
+### Local discrete magnetic work in nonlinear voice coils
+
+`speaker::magnetic` supplies a storage-owned symmetric magnetic chord for
+`H_m = (lambda - psi_pm(x))^2 / (2 L(x))`. Endpoint-mean current and analytic
+polynomial linkage/inductance secants close magnetic work in linkage and
+excursion alone, including permanent-field and reluctance force. Independent
+cone/panel inertia and reciprocal cavity energy keep their original quadratic
+mean efforts and represented-midpoint energy remainder. The rule remains
+well-defined at coincident displacements without dividing by their increment.
+
+The original descriptor solver consumes the analytic endpoint derivative of
+this complete rule. Constant `Bl`/`L` profiles retain the exact-quadratic
+factorization. The existing thermal coupling observes the same discrete
+current for coil-resistance heating. Source-support and arithmetic refusals
+remain transactional; finite-step response still requires timestep refinement.
+This displacement-dependent reversible law adds no current saturation,
+hysteresis, skin/proximity loss or measured coefficient claims.
+
+Focused regression definitions cover local and total work, independence from
+unrelated mechanical momenta, reverse-step symmetry, endpoint derivatives,
+coincident states, the constant-law path and invalid-support refusal.

@@ -276,3 +276,185 @@ fn magnetic_profile_coordinate_scale_changes_no_physics() {
         );
     }
 }
+
+fn chord_storage() -> CoilStorage {
+    // Independent cone/panel inertia with a reciprocal cavity cross term.
+    let mut q = vec![0.0; 25];
+    q[6] = 4.0;
+    q[12] = 2.0;
+    q[18] = 6.0;
+    q[24] = 3.0;
+    q[8] = -1.0;
+    q[16] = -1.0;
+    CoilStorage {
+        mechanical: QuadraticStorage::new(q, 5).unwrap(),
+        profile: profile(true),
+        exact_q: None,
+    }
+}
+
+#[test]
+fn magnetic_chord_keeps_local_work_and_independent_mechanical_efforts() {
+    let storage = chord_storage();
+    let rule = storage.discrete_gradient_rule().unwrap();
+    let a = [0.2, -0.006, 0.5, 0.002, -0.2];
+    let b = [-0.1, 0.011, -0.3, -0.001, 0.4];
+    let mid: [f64; 5] = std::array::from_fn(|i| f64::midpoint(a[i], b[i]));
+    let mut effort = [0.0; 5];
+    let mut reverse = [0.0; 5];
+    rule.evaluate(&a, &b, &mid, &mut effort);
+    rule.evaluate(&b, &a, &mid, &mut reverse);
+    let la = storage.profile.sample(a[1]).unwrap();
+    let lb = storage.profile.sample(b[1]).unwrap();
+    let ia = (a[0] - la.permanent_linkage_wb) / la.inductance_h;
+    let ib = (b[0] - lb.permanent_linkage_wb) / lb.inductance_h;
+    let current = f64::midpoint(ia, ib);
+    let force = current * (lb.permanent_linkage_wb - la.permanent_linkage_wb) / (b[1] - a[1])
+        + 0.5 * ia * ib * (lb.inductance_h - la.inductance_h) / (b[1] - a[1]);
+    near(effort[0], current, 2e-15);
+    near(effort[1], 4.0 * mid[1] - mid[3] - force, 2e-14);
+    let magnetic_change = 0.5 * lb.inductance_h * ib * ib - 0.5 * la.inductance_h * ia * ia;
+    near(
+        current * (b[0] - a[0]) - force * (b[1] - a[1]),
+        magnetic_change,
+        2e-15,
+    );
+    let work: f64 = (0..5).map(|i| effort[i] * (b[i] - a[i])).sum();
+    near(work, storage.hamiltonian(&b) - storage.hamiltonian(&a), 2e-14);
+    for i in 0..5 {
+        near(effort[i], reverse[i], 2e-14);
+    }
+    near(effort[2], 2.0 * mid[2], 2e-15);
+    near(effort[3], 6.0 * mid[3] - mid[1], 2e-15);
+    near(effort[4], 3.0 * mid[4], 2e-15);
+
+    let mut other_a = a;
+    let mut other_b = b;
+    other_a[2] = 10.0;
+    other_b[2] = -4.0;
+    other_a[4] = -6.0;
+    other_b[4] = 9.0;
+    let other_mid: [f64; 5] = std::array::from_fn(|i| f64::midpoint(other_a[i], other_b[i]));
+    let mut other_effort = [0.0; 5];
+    rule.evaluate(&other_a, &other_b, &other_mid, &mut other_effort);
+    assert_eq!(effort[..2], other_effort[..2]);
+    near(other_effort[2], 6.0, 2e-15);
+    near(other_effort[4], 4.5, 2e-15);
+
+    // The original mechanical energy still owns its sub-ulp midpoint remainder.
+    let mut adjacent = a;
+    adjacent[2] = 1.0;
+    let mut next = adjacent;
+    next[2] += f64::EPSILON;
+    let rounded: [f64; 5] = std::array::from_fn(|i| f64::midpoint(adjacent[i], next[i]));
+    near(
+        storage
+            .midpoint_energy_remainder(&adjacent, &next, &rounded)
+            .unwrap(),
+        f64::EPSILON * f64::EPSILON,
+        1e-45,
+    );
+}
+
+#[test]
+fn magnetic_chord_analytic_endpoint_action_matches_the_actual_rule() {
+    let storage = chord_storage();
+    let rule = storage.discrete_gradient_rule().unwrap();
+    let a = [0.2, -0.006, 0.5, 0.002, -0.2];
+    for b in [
+        [-0.1, 0.011, -0.3, -0.001, 0.4],
+        [-0.1, a[1], -0.3, -0.001, 0.4],
+        a,
+    ] {
+        for direction in [
+            [1.0, 0.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0, 0.0],
+            [0.3, -0.02, 0.4, -0.1, 0.2],
+        ] {
+            let mut exact = [0.0; 5];
+            assert!(rule.end_jacobian_action(&a, &b, &direction, &mut exact));
+            let h = 1e-7;
+            let minus: [f64; 5] = std::array::from_fn(|i| b[i] - h * direction[i]);
+            let plus: [f64; 5] = std::array::from_fn(|i| b[i] + h * direction[i]);
+            let minus_mid: [f64; 5] = std::array::from_fn(|i| f64::midpoint(a[i], minus[i]));
+            let plus_mid: [f64; 5] = std::array::from_fn(|i| f64::midpoint(a[i], plus[i]));
+            let mut gm = [0.0; 5];
+            let mut gp = [0.0; 5];
+            rule.evaluate(&a, &minus, &minus_mid, &mut gm);
+            rule.evaluate(&a, &plus, &plus_mid, &mut gp);
+            for i in 0..5 {
+                near(
+                    (gp[i] - gm[i]) / (2.0 * h),
+                    exact[i],
+                    5e-7 * (1.0 + exact[i].abs()),
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn constant_magnetic_chord_retains_the_exact_quadratic_solver_path() {
+    let driver = MagneticTsDriver::new(card(), None, None, profile(false)).unwrap();
+    assert!(driver.storage.discrete_gradient_rule().is_none());
+    assert!(driver.phs.storage().discrete_gradient_rule().is_none());
+    assert!(driver.phs.storage().exact_quadratic_matrix().is_some());
+    let a = [0.2, -0.006, 0.5];
+    let b = [-0.1, 0.011, -0.3];
+    let mid: [f64; 3] = std::array::from_fn(|i| f64::midpoint(a[i], b[i]));
+    let mut ga = [0.0; 3];
+    let mut gb = [0.0; 3];
+    let mut chord = [0.0; 3];
+    driver.storage.gradient(&a, &mut ga);
+    driver.storage.gradient(&b, &mut gb);
+    driver.storage.evaluate(&a, &b, &mid, &mut chord);
+    for i in 0..3 {
+        near(chord[i], f64::midpoint(ga[i], gb[i]), 2e-14);
+    }
+    let direction = [0.3, -0.02, 0.4];
+    let mut tangent = [0.0; 3];
+    let mut analytic = [0.0; 3];
+    driver.storage.gradient(&direction, &mut tangent);
+    assert!(
+        driver
+            .storage
+            .end_jacobian_action(&a, &b, &direction, &mut analytic)
+    );
+    for i in 0..3 {
+        near(analytic[i], 0.5 * tangent[i], 2e-14);
+    }
+}
+
+#[test]
+fn magnetic_chord_refuses_invalid_support_shape_and_unrepresentable_current() {
+    let storage = chord_storage();
+    let rule = storage.discrete_gradient_rule().unwrap();
+    let a = [0.2, -0.006, 0.5, 0.002, -0.2];
+    for (axis, value) in [
+        (1, 0.051),
+        (0, f64::NAN),
+        (2, f64::INFINITY),
+        (0, f64::MAX),
+    ] {
+        let mut b = a;
+        b[axis] = value;
+        let mid: [f64; 5] = std::array::from_fn(|i| f64::midpoint(a[i], b[i]));
+        let mut out = [0.0; 5];
+        rule.evaluate(&a, &b, &mid, &mut out);
+        assert!(out.iter().all(|v| v.is_nan()));
+        assert!(!rule.end_jacobian_action(&a, &b, &[1.0; 5], &mut out));
+        assert!(
+            storage
+                .midpoint_energy_remainder(&a, &b, &mid)
+                .unwrap()
+                .is_nan()
+        );
+    }
+    let mut out = [0.0; 5];
+    rule.evaluate(&a[..2], &a, &a, &mut out);
+    assert!(out.iter().all(|v| v.is_nan()));
+    assert!(!rule.end_jacobian_action(&a, &a, &[1.0; 4], &mut out));
+    let mut short = [0.0; 4];
+    rule.evaluate(&a, &a, &a, &mut short);
+    assert!(short.iter().all(|v| v.is_nan()));
+}
