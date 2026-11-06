@@ -11987,6 +11987,25 @@ inventory, temperature departure and equilibrium-overshoot limits refuse an
 oversized step without publishing either phase. This frozen-film update is
 first order and requires physical timestep refinement.
 
+`evaporation::gas::equilibrium::advance_equilibrium_surface` explicitly binds
+that same finite-gas film owner to an original sharp solid/liquid enthalpy chart.
+Pure-liquid constituent enthalpy supplies vaporization compatibility and density;
+bulk condensed enthalpy supplies sensible and fusion storage. Their difference
+is retained in the original extensive mass/energy update, so evaporative cooling
+can freeze liquid at melting temperature and condensation can melt old solid.
+Upstream vapor sensible enthalpy remains included exactly once. Only initial
+liquid inventory can fund evaporation; solid inventory cannot supply a liquid
+interface. Final solid/liquid masses and signed fusion release are reconstructed
+from the original chart, and fusion release is a diagnostic, never a second heat
+source. Complete melting continues onto the original liquid sensible branch.
+
+Exposed liquid area is explicitly authored; phase mass fraction does not infer
+surface coverage. A positive liquid seed must remain at both endpoints. Complete
+freezing requires an interface event owner before sublimation or nucleation can
+take over. The original frozen-rate step bounds and fixed gas/reference geometry
+remain in force. This reduction does not infer mushy alloys, pressure-dependent
+phase diagrams, separate constituent temperatures or moving-interface geometry.
+
 `advance_surface_with_gas_mass_selection` accepts a native inventory selector
 before the existing caloric solve. The selected signed transfer must preserve
 direction and nonzero mass within the original absolute mass budget. Both

@@ -25,6 +25,8 @@
 
 /// Simultaneous retained liquid films sharing one finite gas inventory.
 pub mod chamber;
+/// Liquid-interface exchange with sensible and fusion storage in one condensed body.
+pub mod equilibrium;
 /// Implicit reciprocal sensible film heat, separately from vapor-carried energy.
 pub mod heat;
 /// Simultaneous original heat-network, vapor-inventory and gas-energy endpoints.
@@ -369,6 +371,41 @@ struct PreparedGasLiquidSurface {
     recession_m: f64,
 }
 
+/// The original bulk chart supplies its liquid constituent separately from
+/// bulk storage. They coincide in the legacy pure-liquid path.
+struct LiquidCaloricState {
+    temperature_k: f64,
+    liquid_enthalpy_j_kg: f64,
+    liquid_mass_fraction: f64,
+    /// A resolved mixed-phase source can require its actual liquid density.
+    liquid_density_kg_m3: Option<f64>,
+}
+impl LiquidCaloricState {
+    fn admit_phase(
+        &self,
+        phase: fs_thermal::evaporation::EvaporationProperties,
+    ) -> Result<(), GasEvaporationError> {
+        if !self.liquid_enthalpy_j_kg.is_finite()
+            || !positive(self.liquid_mass_fraction)
+            || self.liquid_mass_fraction > 1.0
+        {
+            return Err(GasEvaporationError::Invalid(
+                "original caloric state requires a finite liquid constituent and positive liquid fraction",
+            ));
+        }
+        if let Some(density) = self.liquid_density_kg_m3 {
+            if !positive(density)
+                || (phase.liquid_density_kg_m3 / density - 1.0).abs() > 64.0 * f64::EPSILON
+            {
+                return Err(GasEvaporationError::Invalid(
+                    "evaporation density disagrees with the original LIQUID caloric branch",
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn prepare_surface<L: EvaporationLaw + ?Sized>(
     law: &L,
@@ -377,6 +414,44 @@ fn prepare_surface<L: EvaporationLaw + ?Sized>(
     gas: &ClosedGasParcel,
     catalog: &ThermochemicalGasModel,
     temperature_from_enthalpy: impl Fn(f64) -> Result<f64, EvaporationError>,
+    mass_transfer_coefficient_m_s: f64,
+    duration_s: f64,
+    controls: GasEvaporationSolve,
+    select_mass: impl FnOnce(f64) -> Result<f64, GasEvaporationError>,
+    cancelled: impl FnMut() -> bool,
+) -> Result<PreparedGasLiquidSurface, GasEvaporationError> {
+    prepare_surface_with_caloric(
+        law,
+        binding,
+        liquid,
+        gas,
+        catalog,
+        |h| {
+            Ok(LiquidCaloricState {
+                temperature_k: temperature_from_enthalpy(h)?,
+                liquid_enthalpy_j_kg: h,
+                liquid_mass_fraction: 1.0,
+                liquid_density_kg_m3: None,
+            })
+        },
+        mass_transfer_coefficient_m_s,
+        duration_s,
+        controls,
+        select_mass,
+        cancelled,
+    )
+}
+
+/// Shared film, represented mass, source alignment and extensive storage owner.
+/// Only constituent admission differs between pure and sharply melting bodies.
+#[allow(clippy::too_many_arguments)]
+fn prepare_surface_with_caloric<L: EvaporationLaw + ?Sized>(
+    law: &L,
+    binding: &GasLiquidBinding,
+    liquid: LiquidSurfaceState,
+    gas: &ClosedGasParcel,
+    catalog: &ThermochemicalGasModel,
+    caloric_at_enthalpy: impl Fn(f64) -> Result<LiquidCaloricState, GasEvaporationError>,
     mass_transfer_coefficient_m_s: f64,
     duration_s: f64,
     controls: GasEvaporationSolve,
@@ -395,7 +470,8 @@ fn prepare_surface<L: EvaporationLaw + ?Sized>(
             "finite liquid/film data and positive bounded solve controls required",
         ));
     }
-    let surface_t = temperature_from_enthalpy(liquid.specific_enthalpy_j_kg)?;
+    let initial_caloric = caloric_at_enthalpy(liquid.specific_enthalpy_j_kg)?;
+    let surface_t = initial_caloric.temperature_k;
     let gas_t = gas.state().state().temperature;
     let partial_pressure = gas.species_partial_pressure_pa(&binding.species)?;
     let film = GasFilm {
@@ -410,10 +486,11 @@ fn prepare_surface<L: EvaporationLaw + ?Sized>(
         binding,
         catalog,
         surface_t,
-        liquid.specific_enthalpy_j_kg,
+        initial_caloric.liquid_enthalpy_j_kg,
         controls,
     )?;
     let phase = source.phase;
+    initial_caloric.admit_phase(phase)?;
     let molecular_mass = source.molecular_mass;
     let alignment = source.alignment;
     let exposure = liquid.area_m2 * duration_s;
@@ -442,7 +519,7 @@ fn prepare_surface<L: EvaporationLaw + ?Sized>(
     let donor_mass = if dm < 0.0 {
         old_vapor_mass
     } else {
-        liquid.mass_kg
+        liquid.mass_kg * initial_caloric.liquid_mass_fraction
     };
     let withdrawal = dm.abs().max(requested_dm.abs());
     if dm != 0.0
@@ -471,8 +548,12 @@ fn prepare_surface<L: EvaporationLaw + ?Sized>(
     } else {
         catalog.species_specific_enthalpy_change_j_kg(&binding.species, gas_t, surface_t)?
     };
-    let carried_gap =
-        phase.latent_heat_j_kg + alignment - if dm < 0.0 { vapor_h_difference } else { 0.0 };
+    // Vaporization uses pure liquid h, whereas the original storage coordinate
+    // is bulk h. Their difference retains fusion without a second heat source.
+    let carried_gap = phase.latent_heat_j_kg
+        + alignment
+        + (initial_caloric.liquid_enthalpy_j_kg - liquid.specific_enthalpy_j_kg)
+        - if dm < 0.0 { vapor_h_difference } else { 0.0 };
     let liquid_thermal_target = -dm * carried_gap;
     let delta_h = liquid_thermal_target / next_mass;
     let next_h = liquid.specific_enthalpy_j_kg + delta_h;
@@ -486,11 +567,13 @@ fn prepare_surface<L: EvaporationLaw + ?Sized>(
             "liquid caloric increment is unrepresentable",
         ));
     }
-    let final_surface_t = temperature_from_enthalpy(next_h)?;
+    let final_caloric = caloric_at_enthalpy(next_h)?;
+    let final_surface_t = final_caloric.temperature_k;
     let final_phase = properties(law, final_surface_t)?;
+    final_caloric.admit_phase(final_phase)?;
     compatibility(
         catalog.species_specific_enthalpy_j_kg(&binding.species, final_surface_t)?,
-        next_h,
+        final_caloric.liquid_enthalpy_j_kg,
         binding.liquid_enthalpy_offset_j_kg,
         final_phase.latent_heat_j_kg,
         final_surface_t,
@@ -653,6 +736,33 @@ pub fn advance_surface_with_gas_mass_selection<'catalog, L: EvaporationLaw + ?Si
         select_mass,
         &mut cancelled,
     )?;
+    finish_surface(
+        prepared,
+        law,
+        binding,
+        gas,
+        catalog,
+        mass_transfer_coefficient_m_s,
+        duration_s,
+        controls,
+        cancelled,
+    )
+}
+
+/// Publish the original gas reconstruction and the same prepared bulk endpoint
+/// together. Phase-aware callers share all finite-gas and conservation checks.
+#[allow(clippy::too_many_arguments)]
+fn finish_surface<'catalog, L: EvaporationLaw + ?Sized>(
+    prepared: PreparedGasLiquidSurface,
+    law: &L,
+    binding: &GasLiquidBinding,
+    gas: &ClosedGasParcel,
+    catalog: &'catalog ThermochemicalGasModel,
+    mass_transfer_coefficient_m_s: f64,
+    duration_s: f64,
+    controls: GasEvaporationSolve,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<GasEvaporationCandidate<'catalog>, GasEvaporationError> {
     poll(&mut cancelled)?;
     let endpoint = gas.exchange_species_boundary_relative(
         catalog,
@@ -674,7 +784,7 @@ pub fn advance_surface_with_gas_mass_selection<'catalog, L: EvaporationLaw + ?Si
         controls,
     )?;
     let residual = prepared.liquid_energy_residual_j + endpoint.step().energy_residual_j;
-    let mass_residual = (prepared.liquid.mass_kg - liquid.mass_kg)
+    let mass_residual = (prepared.liquid.mass_kg - prepared.original.mass_kg)
         + (endpoint.gas().species_mass_kg(&binding.species)? - prepared.old_vapor_mass_kg);
     if !residual.is_finite()
         || !mass_residual.is_finite()
