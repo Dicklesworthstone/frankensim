@@ -197,7 +197,9 @@ pub struct CircuitEnthalpyReport<S, D = MaterialCircuitStep> {
     pub maximum_cell_residual_j: f64,
     /// All electrical evaluations, including discarded stencils and final check.
     pub circuit_trials: usize,
-    /// Joules handed to the receiving cells, reconstructed from actual powers.
+    /// Physical driver heat handed to the receiving cells, reconstructed from
+    /// actual powers. Magnetic-history drivers include both Joule and pinning
+    /// heat here; their native step retains each channel separately.
     pub deposited_joule_j: f64,
     /// Authored and callback source/boundary heat, EXCLUDING internal Joule heat.
     pub non_electrical_heat_j: f64,

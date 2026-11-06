@@ -90,7 +90,7 @@ impl<'m> ThermalDriver for PlanarNonlinearEddyCandidate<'m> {
         PlanarNonlinearEddyCandidate::into_parts(self)
     }
 }
-fn induction(error: NonlinearEddyError) -> Error {
+pub(super) fn induction(error: NonlinearEddyError) -> Error {
     match error {
         NonlinearEddyError::Cancelled => CircuitEnthalpyError::Cancelled,
         other => CircuitEnthalpyError::Source(MagneticThermalError::NonlinearInduction(other)),

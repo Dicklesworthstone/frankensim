@@ -258,6 +258,47 @@ pub fn nonlinear_heat_assembly_candidate<'t, 'm, A: HeatAssembly + ?Sized>(
     Ok(next)
 }
 
+/// Continue original vector magnetic memory with the complete shared heat
+/// assembly: finite coolant, thermal contacts, integrated layers and enclosure
+/// radiation see the same endpoint as the native conductivity. Per-triangle
+/// pinning heat, including in insulating cores, and resolved Joule heat are
+/// deposited once. Numerical loss never reaches a thermal receiver.
+///
+/// The original fitted magnetic coefficients remain constant within their
+/// explicit source temperature support. Source and geometry admission, graph
+/// electrical-work refusal and closed enclosure accounting are shared with
+/// `fixed_heat_assembly_candidate`. All failed trials leave history untouched.
+#[cfg(feature = "magnetic-hysteresis")]
+#[allow(clippy::too_many_arguments)]
+pub fn hysteretic_heat_assembly_candidate<'t, 'm, A: HeatAssembly + ?Sized>(
+    provider: &A, cx: &Cx<'_>, thermal: &DepositionSimulation<'t>, target_s: f64,
+    field: &fs_em::planar::eddy::hysteretic::PlanarHystereticEddy<'m>,
+    impressed_jz_a_m2: &[f64], regions: &[MagneticRegion], volume_tolerance_m3: f64,
+    controls: CircuitEnthalpySolve,
+    field_controls: fs_em::planar::eddy::hysteretic::HystereticEddyControls,
+    initial_energy_increments_j: &[f64],
+) -> Result<super::super::hysteretic::HystereticEddyEnthalpyCandidate<'t, 'm, A::Sample>, HeatError<A::Error>> {
+    let cancel = RefCell::new(|| cx.checkpoint().is_err());
+    check(&cancel).map_err(native_error)?;
+    let prepared = provider.prepared_heat_network();
+    let bulk = prepared.thermal_material_network().map_err(assembly_heat_error)?;
+    prepared.admit_field_independent_boundaries(cx, &[]).map_err(assembly_heat_error)?;
+    let layout = MagneticThermalNetwork {
+        cells: bulk.cells, links: bulk.links, magnetic_regions: regions, volume_tolerance_m3,
+    };
+    let next = layout.step_hysteretic_eddy_resolved_candidate(
+        thermal, target_s, field, impressed_jz_a_m2, controls, field_controls,
+        initial_energy_increments_j,
+        |trial| resolve_heat(provider, cx, trial),
+        |sample: &A::Sample| &sample.as_ref().material, &cancel,
+    )?;
+    closed_balance(target_s - thermal.time_s(), next.report.total_energy_residual_j,
+        next.report.source.network.as_ref(), controls.total_energy_tolerance_j)
+        .map_err(assembly_heat_error)?;
+    check(&cancel).map_err(native_error)?;
+    Ok(next)
+}
+
 impl PreparedHeatNetwork<'_, '_> {
     /// Continue the original planar thermal magnetic history through the same
     /// complete `heat_assembly_candidate` entry.

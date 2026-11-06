@@ -6,6 +6,9 @@
 //! source work, conduction, boundary heat and total enthalpy share one audit.
 //! Geometry and magnetic permeability remain fixed; no core-loss map is added.
 
+/// Spatial vector magnetic memory, pinning heat and resolved Joule heating.
+#[cfg(feature = "magnetic-hysteresis")]
+pub mod hysteretic;
 /// Reversible nonlinear induction with physical Joule heating and a separately
 /// audited backward-Euler numerical loss on the same finite thermal timeline.
 pub mod nonlinear;

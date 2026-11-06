@@ -1,3 +1,43 @@
+## Spatial hysteretic induction on the original finite thermal timeline
+
+The default-off `magnetic-hysteresis` feature adds
+`MagneticThermalNetwork::step_hysteretic_eddy_candidate` and
+`circuit_enthalpy::eddy::thermal::heat::hysteretic_heat_assembly_candidate`.
+They compose the original planar vector-history induction owner with the
+existing finite-enthalpy residual and complete heat assembly. Every thermal
+trial restarts the same accepted potential and all accepted vector branch
+polarizations. Conductivity is resolved from the original material card at the
+actual trial temperature; fitted magnetic coefficients retain their original
+sources, values and explicit constant-temperature validity. Temperature cannot
+silently change the magnetic fit or erase remanence.
+
+Native per-triangle Joule heat and irreversible pinning heat are deposited once
+into their actual caloric receivers. Pinning heat from electrically insulating
+core cells is included. A dissipating fixed region without a finite thermal
+destination refuses the candidate. Original magnetic/thermal cell identities,
+whole represented solid volumes, source selections and clocks are checked.
+Passive coolant cells can belong to the complete heat assembly without lying
+inside the magnetic mesh; existing contact, conduction and radiation owners
+continue to resolve at the same endpoint.
+
+The work account uses the native stable magnetic energy increment:
+`delta W_magnetic + delta E_thermal + D_numerical = W_impressed + Q_external`.
+The report's existing `deposited_joule_j` field includes both physical loss
+channels, while `electrical.joule_heat_j` and `electrical.hysteresis_heat_j`
+retain their separate values. Backward-Euler numerical dissipation never heats
+the material. Complete heat providers retain the original enclosure-balance
+gate and refuse independent graph electrical work without its circuit owner.
+All source, work-budget, numerical and cancellation refusals publish neither
+accepted history. No residual correction or extra empirical core-loss term is
+introduced.
+
+This is first-order, fixed-geometry, isotropic estimated MQS coupling with
+constant fitted magnetic coefficients. Source-supported electrical transport
+can vary with temperature; temperature-dependent hysteresis parameters,
+magnetic entropy, phase-changing geometry and measured device validation are
+not implied. The focused `hysteretic_eddy_enthalpy` tests use manufactured
+scalar-play/P1 balances, physical heat separation and transactional refusals.
+
 ## Nonlinear membrane damping and source-bound finite heat storage
 
 `membrane_thermal::advance_candidate` composes the existing nonlinear
