@@ -6,8 +6,10 @@
 //! The shared extensive update retains their difference exactly once: cooling
 //! can freeze liquid while T stays at melting, and condensation can melt solid.
 //!
-//! Only initially liquid mass can evaporate. Liquid formed later in an interval
-//! cannot finance its frozen rate. The caller supplies exposed LIQUID area;
+//! Only liquid present at the start of the vapor substep can evaporate. The
+//! optional heat-first split supplies its accepted post-heat inventory; liquid
+//! formed later within vapor transfer cannot finance that frozen rate.
+//! The caller supplies exposed LIQUID area;
 //! phase mass fraction does not determine surface coverage. A remaining liquid
 //! seed is required at both endpoints; complete freezing needs a surrounding
 //! interface event owner before sublimation or nucleation can take over.
@@ -17,6 +19,9 @@
 //! Mushy alloys, separate phase temperatures, moving geometry and inferred
 //! pressure-dependent phase boundaries are outside this reduction. The parent
 //! film's frozen-rate, fixed-gas-volume and caloric-account assumptions apply.
+
+/// Reciprocal gas-film sensible heat on the same original fusion inventory.
+pub mod heat;
 
 use super::{
     ClosedGasParcel, EvaporationLaw, GasEvaporationCandidate, GasEvaporationError,

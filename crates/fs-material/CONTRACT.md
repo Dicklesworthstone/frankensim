@@ -12042,6 +12042,25 @@ take over. The original frozen-rate step bounds and fixed gas/reference geometry
 remain in force. This reduction does not infer mushy alloys, pressure-dependent
 phase diagrams, separate constituent temperatures or moving-interface geometry.
 
+`evaporation::gas::equilibrium::heat::advance_equilibrium_surface_with_heat`
+adds reciprocal gas-film heat through the existing implicit heat owner, evaluated
+on that same bulk enthalpy chart. Fusion plateaus require neither apparent heat
+capacity nor a unique condensed-body inverse h(T). Explicit controls name a bulk-enthalpy
+interval; accepted original, heated and final endpoints retain a liquid seed.
+The exact post-heat bulk state supplies the following vapor substep, including
+its changed liquid inventory. Heat acts first and vapor transfer follows over
+the same physical interval: this is a first-order Lie split that requires
+complete-step refinement, not a simultaneous heat/phase solve.
+
+The whole-interval phase partition includes heat-induced and vapor-induced
+fusion once, with separate heat and vapor subreceipts. Signed storage defects
+are reported, and the sum of both absolute substep energy defects must fit the
+single original joule allowance. Original-to-final temperature limits and late
+cancellation cover the combined proposal. Zero heat coefficient delegates
+exactly to the phase-only path before inspecting unused heat controls. The
+sensible coefficient must exclude vapor-carried sensible and latent energy.
+The original fixed-volume, authored-area and interface-event limitations apply.
+
 `advance_surface_with_gas_mass_selection` accepts a native inventory selector
 before the existing caloric solve. The selected signed transfer must preserve
 direction and nonzero mass within the original absolute mass budget. Both
