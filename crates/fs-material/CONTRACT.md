@@ -12008,6 +12008,45 @@ and surface area remain fixed. The frozen-rate/time-equilibrated closure require
 physical timestep refinement and does not include film drainage, liquid motion,
 boiling, ice, gas momentum or liquid displacement work.
 
+### Simultaneous zero-capable wall-film endpoints
+
+`evaporation::gas::wall_film::endpoint::GasWallFilmEndpoint` exposes the original
+wall-film phase law and finite-gas residuals to a coupled thermal solver. Its
+trials resolve the actual proposed gas inventory, pressure, temperature and
+transport through the original source catalog without an inner caloric root.
+The same wall-film preparation serves the existing frozen-initial-gas advance
+and this endpoint evaluation; no second saturation, latent-heat or gas law is
+introduced. The caller supplies the original liquid-chart wall enthalpy and an
+explicit nonadvective gas heat port, separate from vapor-carried enthalpy.
+
+At the endpoint, condensation uses the upstream FINAL gas enthalpy. Evaporation
+uses the interface enthalpy and is limited by the actual initial liquid mass.
+Dry surfaces cannot evaporate, and supersaturation can create a positive film
+without seeding. The wall debit includes original film equilibration plus the
+complete vapor/liquid enthalpy gap, including at complete dry-out. Condensation
+is bounded against the original vapor donor; neither newly transferred mass nor
+another species can enlarge that allowance. The gas balance retains species
+pressure-flow energy, with formation references canceled before evaluating the
+small thermal defect. Volume, carrier inventories, source identities and
+auxiliary gas query coordinates remain fixed.
+
+Mass and energy residuals have independent physical gates. `finalize` performs
+one original species/energy reconstruction and one fresh endpoint-rate and
+energy evaluation against the returned gas. Its absolute audit additionally
+charges the original reconstruction defect. Failure or cancellation returns no
+joint candidate. A finite wall must close the opposite wall heat port and
+accept its own storage together with this gas/film candidate. The endpoint
+owner supplies no nonlinear algorithm, wall heat capacity or external heat law.
+
+The endpoint complementarity permits exactly zero liquid storage. Its dry-out
+time is a diagnostic obtained by freezing the ENDPOINT rate over the interval,
+not an exact event time for the continuous trajectory. Physical timestep
+refinement remains necessary. Fully-wetting, fixed-area, fixed-gas-volume and
+pure-liquid source limits remain unchanged; this does not add nucleation,
+boiling, drainage, gas momentum or liquid displacement work. Focused regressions
+manufacture independent nonlinear-caloric endpoints for dry condensation,
+complete evaporation, separate gas/liquid datum shifts and atomic refusal.
+
 ### Reciprocal sensible heat through the gas film
 
 `evaporation::gas::advance_surface_with_gas_and_heat` adds a caller-supplied

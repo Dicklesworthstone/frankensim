@@ -20,6 +20,9 @@
 //! Sensible gas-wall convection belongs to a separate declared thermal owner.
 //! A finite wall must debit the returned heat through its own caloric state.
 
+/// Original phase and gas residuals for simultaneous finite-wall feedback.
+pub mod endpoint;
+
 use super::{
     ClosedGasParcel, EvaporationError, EvaporationLaw, GasEvaporationError, GasEvaporationSolve,
     GasFilm, GasLiquidBinding, GasSpeciesBoundaryCandidate, SpeciesBoundaryRelativeTransfer,
@@ -69,7 +72,9 @@ pub struct GasWallFilmSurface<'a> {
     pub mass_transfer_coefficient_m_s: f64,
 }
 
-/// Full requested interval, with an exact event for its frozen Stefan rate.
+/// Full requested interval, with exhaustion under the selected frozen rate.
+/// The original advance freezes the initial gas; the endpoint owner uses the
+/// final gas. Neither dry-out diagnostic is an exact continuous event time.
 #[derive(Clone, Debug, PartialEq)]
 pub struct GasWallFilmStep {
     pub duration_s: f64,
@@ -164,6 +169,48 @@ pub fn advance_wall_film_with_gas<'catalog>(
     controls: GasEvaporationSolve,
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<GasWallFilmCandidate<'catalog>, GasEvaporationError> {
+    let prepared = prepare_wall_film(
+        surface,
+        gas,
+        gas,
+        catalog,
+        duration_s,
+        controls,
+        &mut cancelled,
+    )?;
+    poll(&mut cancelled)?;
+    let endpoint = gas.exchange_species_boundary_relative(
+        catalog,
+        std::slice::from_ref(&prepared.transfer),
+        controls.gas,
+        &mut cancelled,
+    )?;
+    let candidate = finish_wall_film(surface, gas, endpoint, prepared, controls)?;
+    poll(&mut cancelled)?;
+    Ok(candidate)
+}
+
+/// Shared constitutive and caloric owner. `rate_gas` selects both the Stefan
+/// rate and the upstream condensation enthalpy; `gas` retains the ORIGINAL
+/// donor inventory and source-relative energy datum for the entire proposal.
+struct PreparedWallFilm {
+    film: GasWallFilmInventory,
+    transfer: SpeciesBoundaryRelativeTransfer,
+    step: GasWallFilmStep,
+    film_energy_residual_j: f64,
+    wall_heat_roundoff_j: f64,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_wall_film(
+    surface: GasWallFilmSurface<'_>,
+    gas: &ClosedGasParcel,
+    rate_gas: &ClosedGasParcel,
+    catalog: &ThermochemicalGasModel,
+    duration_s: f64,
+    controls: GasEvaporationSolve,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<PreparedWallFilm, GasEvaporationError> {
     poll(&mut cancelled)?;
     validate_controls(controls, duration_s, surface.mass_transfer_coefficient_m_s)?;
     if !nonnegative(surface.area_m2) || !surface.interface_liquid_enthalpy_j_kg.is_finite() {
@@ -211,14 +258,15 @@ pub fn advance_wall_film_with_gas<'catalog>(
         }
     };
     let gas_t = gas.state().state().temperature;
-    let partial_pressure = gas.species_partial_pressure_pa(&surface.binding.species)?;
+    let rate_gas_t = rate_gas.state().state().temperature;
+    let partial_pressure = rate_gas.species_partial_pressure_pa(&surface.binding.species)?;
     let flux = surface_flux(
         surface.law,
         wall_t,
         GasFilm {
-            total_pressure_pa: gas.state().state().pressure,
+            total_pressure_pa: rate_gas.state().state().pressure,
             vapor_partial_pressure_pa: partial_pressure,
-            temperature_k: gas_t,
+            temperature_k: rate_gas_t,
             mass_transfer_coefficient_m_s: surface.mass_transfer_coefficient_m_s,
         },
     )?;
@@ -287,7 +335,11 @@ pub fn advance_wall_film_with_gas<'catalog>(
     let vapor_delta_h = if dm == 0.0 {
         0.0
     } else {
-        catalog.species_specific_enthalpy_change_j_kg(&surface.binding.species, gas_t, wall_t)?
+        catalog.species_specific_enthalpy_change_j_kg(
+            &surface.binding.species,
+            rate_gas_t,
+            wall_t,
+        )?
     };
     let carried_gap = finite(
         source.phase.latent_heat_j_kg + source.alignment
@@ -303,33 +355,18 @@ pub fn advance_wall_film_with_gas<'catalog>(
     let (wall_heat, wall_heat_roundoff) = fs_math::eft::two_sum(sensible, phase_wall_heat);
     finite(wall_heat)?;
     finite(wall_heat_roundoff)?;
-    let relative_energy = if dm > 0.0 {
-        finite(dm * vapor_delta_h)?
-    } else {
+    let relative_energy = if dm == 0.0 {
         0.0
+    } else {
+        let upstream = if dm > 0.0 { wall_t } else { rate_gas_t };
+        finite(
+            dm * catalog.species_specific_enthalpy_change_j_kg(
+                &surface.binding.species,
+                gas_t,
+                upstream,
+            )?,
+        )?
     };
-    poll(&mut cancelled)?;
-    let endpoint = gas.exchange_species_boundary_relative(
-        catalog,
-        &[SpeciesBoundaryRelativeTransfer {
-            species: surface.binding.species.clone(),
-            mass_into_gas_kg: dm,
-            relative_energy_into_gas_j: relative_energy,
-        }],
-        controls.gas,
-        &mut cancelled,
-    )?;
-    let final_pressure = check_interface_endpoint(
-        surface.law,
-        surface.binding,
-        wall_t,
-        gas_t,
-        dm,
-        endpoint.gas(),
-        surface.mass_transfer_coefficient_m_s,
-        duration_s,
-        controls,
-    )?;
     let offset = surface.binding.liquid_enthalpy_offset_j_kg;
     // This form is exactly -m0*h0 at exhaustion; it does not subtract a
     // fictitious final film enthalpy or retain a zero-mass caloric state.
@@ -341,6 +378,96 @@ pub fn advance_wall_film_with_gas<'catalog>(
         } => finite(next_mass * delta_h - dm * (specific_enthalpy_j_kg + offset))?,
     };
     let film_energy_residual = finite(liquid_mass_residual * delta_h)?;
+    let film = if next_mass == 0.0 {
+        GasWallFilmInventory::Dry
+    } else if duration_s == 0.0 {
+        surface.film
+    } else {
+        GasWallFilmInventory::Wet {
+            mass_kg: next_mass,
+            specific_enthalpy_j_kg: h,
+        }
+    };
+    let recession = if surface.area_m2 == 0.0 {
+        0.0
+    } else {
+        finite(dm / source.phase.liquid_density_kg_m3 / surface.area_m2)?
+    };
+    let step = GasWallFilmStep {
+        duration_s,
+        phase_active_duration_s: active_duration,
+        dry_out_time_s: dry_out_time,
+        film_formed: matches!(surface.film, GasWallFilmInventory::Dry) && next_mass > 0.0,
+        liquid_mass_kg: [old_mass, next_mass],
+        wall_temperature_k: wall_t,
+        gas_temperature_k: [gas_t, rate_gas_t],
+        vapor_partial_pressure_pa: [
+            gas.species_partial_pressure_pa(&surface.binding.species)?,
+            partial_pressure,
+        ],
+        requested_transferred_mass_kg: requested,
+        transferred_mass_kg: dm,
+        latent_energy_j: finite(dm * source.phase.latent_heat_j_kg)?,
+        energy_into_gas_j: if dm == 0.0 {
+            0.0
+        } else {
+            finite(
+                dm * catalog.species_specific_enthalpy_j_kg(&surface.binding.species, gas_t)?
+                    + relative_energy,
+            )?
+        },
+        film_sensible_energy_j: sensible,
+        film_enthalpy_change_j: film_energy,
+        gas_internal_energy_change_j: 0.0,
+        wall_heat_into_system_j: wall_heat,
+        energy_residual_j: 0.0,
+        sum_absolute_energy_residual_j: 0.0,
+        mass_residual_kg: 0.0,
+        liquid_mass_residual_kg: liquid_mass_residual,
+        recession_m: recession,
+    };
+    poll(&mut cancelled)?;
+    Ok(PreparedWallFilm {
+        film,
+        transfer: SpeciesBoundaryRelativeTransfer {
+            species: surface.binding.species.clone(),
+            mass_into_gas_kg: dm,
+            relative_energy_into_gas_j: relative_energy,
+        },
+        step,
+        film_energy_residual_j: film_energy_residual,
+        wall_heat_roundoff_j: wall_heat_roundoff,
+    })
+}
+
+fn finish_wall_film<'catalog>(
+    surface: GasWallFilmSurface<'_>,
+    gas: &ClosedGasParcel,
+    endpoint: GasSpeciesBoundaryCandidate<'catalog>,
+    prepared: PreparedWallFilm,
+    controls: GasEvaporationSolve,
+) -> Result<GasWallFilmCandidate<'catalog>, GasEvaporationError> {
+    let PreparedWallFilm {
+        film,
+        mut step,
+        film_energy_residual_j: film_energy_residual,
+        wall_heat_roundoff_j: wall_heat_roundoff,
+        ..
+    } = prepared;
+    let [old_mass, next_mass] = step.liquid_mass_kg;
+    let liquid_mass_residual = step.liquid_mass_residual_kg;
+    let final_pressure = check_interface_endpoint(
+        surface.law,
+        surface.binding,
+        step.wall_temperature_k,
+        gas.state().state().temperature,
+        step.transferred_mass_kg,
+        endpoint.gas(),
+        surface.mass_transfer_coefficient_m_s,
+        step.duration_s,
+        controls,
+    )?;
+    let old_vapor_mass = gas.species_mass_kg(&surface.binding.species)?;
     // Qwall is an actual port supplied to a different thermal owner. Any
     // addition residual lost while publishing that port is an energy defect,
     // even when opposing sensible/phase terms nearly cancel.
@@ -375,45 +502,13 @@ pub fn advance_wall_film_with_gas<'catalog>(
             tolerance_j: controls.gas.energy_tolerance_j,
         });
     }
-    let film = if next_mass == 0.0 {
-        GasWallFilmInventory::Dry
-    } else if duration_s == 0.0 {
-        surface.film
-    } else {
-        GasWallFilmInventory::Wet {
-            mass_kg: next_mass,
-            specific_enthalpy_j_kg: h,
-        }
-    };
-    let recession = if surface.area_m2 == 0.0 {
-        0.0
-    } else {
-        finite(dm / source.phase.liquid_density_kg_m3 / surface.area_m2)?
-    };
-    let step = GasWallFilmStep {
-        duration_s,
-        phase_active_duration_s: active_duration,
-        dry_out_time_s: dry_out_time,
-        film_formed: matches!(surface.film, GasWallFilmInventory::Dry) && next_mass > 0.0,
-        liquid_mass_kg: [old_mass, next_mass],
-        wall_temperature_k: wall_t,
-        gas_temperature_k: [gas_t, endpoint.gas().state().state().temperature],
-        vapor_partial_pressure_pa: [partial_pressure, final_pressure],
-        requested_transferred_mass_kg: requested,
-        transferred_mass_kg: dm,
-        latent_energy_j: finite(dm * source.phase.latent_heat_j_kg)?,
-        energy_into_gas_j: endpoint.step().energy_into_gas_j,
-        film_sensible_energy_j: sensible,
-        film_enthalpy_change_j: film_energy,
-        gas_internal_energy_change_j: endpoint.step().stored_energy_change_j,
-        wall_heat_into_system_j: wall_heat,
-        energy_residual_j: residual,
-        sum_absolute_energy_residual_j: absolute_residual,
-        mass_residual_kg: mass_residual,
-        liquid_mass_residual_kg: liquid_mass_residual,
-        recession_m: recession,
-    };
-    poll(&mut cancelled)?;
+    step.gas_temperature_k[1] = endpoint.gas().state().state().temperature;
+    step.vapor_partial_pressure_pa[1] = final_pressure;
+    step.energy_into_gas_j = endpoint.step().energy_into_gas_j;
+    step.gas_internal_energy_change_j = endpoint.step().stored_energy_change_j;
+    step.energy_residual_j = residual;
+    step.sum_absolute_energy_residual_j = absolute_residual;
+    step.mass_residual_kg = mass_residual;
     Ok(GasWallFilmCandidate {
         film,
         gas: endpoint,
