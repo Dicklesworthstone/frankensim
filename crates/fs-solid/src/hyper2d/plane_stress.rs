@@ -5,13 +5,16 @@
 //! that SAME reduced energy. Reference geometry is prepared once and the
 //! existing load-stepped Newton solver owns global equilibrium. Loads,
 //! forces and energies use unit original thickness, not current thickness.
+//! The crate-private motion entry scales this original continuum by its
+//! declared thickness and adds consistent physical inertia and nodal forces.
 //! This is an in-plane continuum, with no shell bending or wrinkling model.
 
 use super::{
     HyperProblem, NewtonReport, PlaneMaterial, PlaneMaterialPoint, Reduction, material_quadrature,
 };
 use crate::SolidError;
-use crate::mesh2::{Mesh2, shapes_at};
+use crate::inertia::{BackwardEulerInertia, InertiaError};
+use crate::mesh2::{Mesh2, checked_reference_element, shapes_at};
 use fs_exec::Cx;
 use fs_material::hyper::incompressible_plane_stress::{
     self, IncompressiblePlaneStressResponse, IncompressiblePlaneStressState,
@@ -22,12 +25,22 @@ use fs_material::hyper::plane_stress::{
 use fs_sparse::{Coo, Csr};
 use std::collections::BTreeMap;
 
+#[cfg(test)]
+mod dynamics_tests;
+
 fn invalid(what: impl Into<String>) -> SolidError {
     SolidError::InvalidInput { what: what.into() }
 }
 
 fn checkpoint(cx: &Cx<'_>) -> Result<(), SolidError> {
     cx.checkpoint().map_err(|_| SolidError::Cancelled)
+}
+
+fn inertia_error(error: InertiaError) -> SolidError {
+    match error {
+        InertiaError::InvalidInput { what } => SolidError::InvalidInput { what },
+        InertiaError::Cancelled => SolidError::Cancelled,
+    }
 }
 
 fn material_error(element: usize, error: fs_material::MaterialError) -> SolidError {
@@ -169,10 +182,13 @@ struct Geometry {
     elements: Vec<Element>,
 }
 
-pub(super) struct Prepared {
+pub(super) struct Prepared<'a> {
     geometry: Geometry,
     local: PlaneStressSettings,
     constraint: Constraint,
+    reference_thickness_m: f64,
+    inertia: Option<&'a BackwardEulerInertia<'a>>,
+    nodal_forces_n: &'a [(usize, f64)],
 }
 
 impl Geometry {
@@ -201,31 +217,18 @@ impl Geometry {
         for (index, conn) in mesh.elems.iter().enumerate() {
             checkpoint(cx)?;
             let arity = conn.len();
-            if !(arity == 3 || arity == 4)
-                || conn.iter().any(|&a| a >= mesh.nodes.len())
-                || (0..arity).any(|a| (0..a).any(|b| conn[a] == conn[b]))
-            {
-                return Err(invalid(format!(
-                    "plane-stress element {index} must be a valid P1 triangle or Q1 quad"
-                )));
-            }
+            let reference = checked_reference_element(&mesh.nodes, conn).ok_or_else(|| {
+                invalid(format!(
+                    "plane-stress element {index} must be an oriented P1 triangle or Q1 quad"
+                ))
+            })?;
             let mut element = Element {
                 nodes: [0; 4],
                 arity,
-                reference: [[0.0; 2]; 4],
+                reference,
                 points: Vec::new(),
             };
             element.nodes[..arity].copy_from_slice(conn);
-            for (a, &node) in conn.iter().enumerate() {
-                for i in 0..2 {
-                    element.reference[a][i] = mesh.nodes[node][i] - mesh.nodes[conn[0]][i];
-                }
-            }
-            if !element.positive_orientation(None) {
-                return Err(invalid(format!(
-                    "plane-stress element {index} is folded or reversed"
-                )));
-            }
             for (xi, eta, w) in material_quadrature(arity) {
                 let (_, gradients, det) =
                     shapes_at(&element.reference, &[0, 1, 2, 3][..arity], xi, eta);
@@ -332,7 +335,7 @@ pub(super) fn material_point_kinematics(
     Ok(points)
 }
 
-impl Prepared {
+impl<'a> Prepared<'a> {
     fn new(
         problem: &HyperProblem<'_>,
         local: PlaneStressSettings,
@@ -347,7 +350,112 @@ impl Prepared {
             geometry: Geometry::new(problem.mesh, cx)?,
             local,
             constraint,
+            reference_thickness_m: 1.0,
+            inertia: None,
+            nodal_forces_n: &[],
         })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn dynamic(
+        problem: &HyperProblem<'_>,
+        local: PlaneStressSettings,
+        exact: bool,
+        reference_thickness_m: f64,
+        inertia: &'a BackwardEulerInertia<'a>,
+        nodal_forces_n: &'a [(usize, f64)],
+        cx: &Cx<'_>,
+    ) -> Result<Self, SolidError> {
+        if !reference_thickness_m.is_finite()
+            || reference_thickness_m <= 0.0
+            || problem.settings.load_steps != 1
+        {
+            return Err(invalid(
+                "plane motion needs positive original thickness and one physical endpoint",
+            ));
+        }
+        let constraint = if exact {
+            Constraint::Incompressible
+        } else {
+            Constraint::FiniteBulk
+        };
+        let mut prepared = Self::new(problem, local, constraint, cx)?;
+        for (index, &(dof, force)) in nodal_forces_n.iter().enumerate() {
+            if index % 256 == 0 {
+                checkpoint(cx)?;
+            }
+            if dof >= prepared.geometry.ndof || !force.is_finite() {
+                return Err(invalid(
+                    "physical nodal force needs an admitted DOF and finite value",
+                ));
+            }
+        }
+        prepared.reference_thickness_m = reference_thickness_m;
+        prepared.inertia = Some(inertia);
+        prepared.nodal_forces_n = nodal_forces_n;
+        Ok(prepared)
+    }
+
+    /// Complete the caller's free dead-traction vector in physical force units.
+    /// Point/body forces are endpoint values and are never multiplied by the
+    /// load ramp or by thickness a second time. Duplicate DOFs accumulate.
+    pub(super) fn complete_applied_force(
+        &self,
+        applied: &mut [f64],
+        fixed: &BTreeMap<usize, f64>,
+        cx: &Cx<'_>,
+    ) -> Result<(), SolidError> {
+        for (dof, value) in applied.iter_mut().enumerate() {
+            if dof % 256 == 0 {
+                checkpoint(cx)?;
+            }
+            *value *= self.reference_thickness_m;
+        }
+        for (index, &(dof, value)) in self.nodal_forces_n.iter().enumerate() {
+            if index % 256 == 0 {
+                checkpoint(cx)?;
+            }
+            if !fixed.contains_key(&dof) {
+                applied[dof] += value;
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn is_dynamic(&self) -> bool {
+        self.inertia.is_some()
+    }
+
+    /// Use momentum and actual free forces, never stiffness times rigid travel.
+    /// The same normalization is used for current and globalization trial states.
+    pub(super) fn dynamic_force_scale(
+        &self,
+        u: &[f64],
+        residual: &[f64],
+        external: &[f64],
+        free: &[usize],
+        cx: &Cx<'_>,
+    ) -> Result<Option<f64>, SolidError> {
+        let Some(inertia) = self.inertia else {
+            return Ok(None);
+        };
+        let mut inertial = vec![0.0; self.geometry.ndof];
+        inertia
+            .add_force(u, &mut inertial, cx)
+            .map_err(inertia_error)?;
+        let mut elastic_norm = 0.0_f64;
+        let mut external_norm = 0.0_f64;
+        for (index, &dof) in free.iter().enumerate() {
+            if index % 256 == 0 {
+                checkpoint(cx)?;
+            }
+            elastic_norm = elastic_norm.hypot(residual[dof] - inertial[dof] + external[dof]);
+            external_norm = external_norm.hypot(external[dof]);
+        }
+        inertia
+            .force_scale(u, free, elastic_norm, external_norm, cx)
+            .map(Some)
+            .map_err(inertia_error)
     }
 
     fn for_points(
@@ -402,13 +510,14 @@ impl Prepared {
                         .map(|response| (response.piola, response.tangent)),
                 }
                 .map_err(|error| material_error(index, error))?;
+                let weight = point.weight * self.reference_thickness_m;
                 for (a, &na) in element.nodes[..element.arity].iter().enumerate() {
                     for i in 0..2 {
                         let ia = 2 * na + i;
                         if fixed.contains_key(&ia) {
                             continue;
                         }
-                        residual[ia] += point.weight
+                        residual[ia] += weight
                             * (piola[2 * i] * point.gradients[a][0]
                                 + piola[2 * i + 1] * point.gradients[a][1]);
                         for (b, &nb) in element.nodes[..element.arity].iter().enumerate() {
@@ -425,7 +534,7 @@ impl Prepared {
                                             * point.gradients[b][l];
                                     }
                                 }
-                                coo.push(ia, ib, point.weight * value);
+                                coo.push(ia, ib, weight * value);
                             }
                         }
                     }
@@ -435,10 +544,25 @@ impl Prepared {
         )?;
         problem.for_traction(load, |dof, value| {
             if !fixed.contains_key(&dof) {
-                residual[dof] -= value;
+                residual[dof] -= self.reference_thickness_m * value;
             }
         })?;
+        for (index, &(dof, force)) in self.nodal_forces_n.iter().enumerate() {
+            if index % 256 == 0 {
+                checkpoint(cx)?;
+            }
+            residual[dof] -= force;
+        }
+        if let Some(inertia) = self.inertia {
+            inertia
+                .add_force(u, &mut residual, cx)
+                .map_err(inertia_error)?;
+            inertia
+                .add_tangent_where(&mut coo, |dof| !fixed.contains_key(&dof), cx)
+                .map_err(inertia_error)?;
+        }
         for &dof in fixed.keys() {
+            residual[dof] = 0.0;
             coo.push(dof, dof, 1.0);
         }
         let tangent = coo.assemble();
@@ -474,9 +598,10 @@ impl Prepared {
                     }
                 }
                 .map_err(|error| material_error(index, error))?;
+                let weight = point.weight * self.reference_thickness_m;
                 for (a, &node) in element.nodes[..element.arity].iter().enumerate() {
                     for i in 0..2 {
-                        residual[2 * node + i] += point.weight
+                        residual[2 * node + i] += weight
                             * (piola[2 * i] * point.gradients[a][0]
                                 + piola[2 * i + 1] * point.gradients[a][1]);
                     }
@@ -484,7 +609,20 @@ impl Prepared {
                 Ok(())
             },
         )?;
-        problem.for_traction(load, |dof, force| residual[dof] -= force)?;
+        problem.for_traction(load, |dof, force| {
+            residual[dof] -= self.reference_thickness_m * force;
+        })?;
+        for (index, &(dof, force)) in self.nodal_forces_n.iter().enumerate() {
+            if index % 256 == 0 {
+                checkpoint(cx)?;
+            }
+            residual[dof] -= force;
+        }
+        if let Some(inertia) = self.inertia {
+            inertia
+                .add_force(u, &mut residual, cx)
+                .map_err(inertia_error)?;
+        }
         if residual.iter().any(|value| !value.is_finite()) {
             return Err(invalid("plane-stress assembled force is nonfinite"));
         }
@@ -513,11 +651,22 @@ impl Prepared {
                         .map(|state| state.energy_density_pa),
                 }
                 .map_err(|error| material_error(index, error))?;
-                potential += point.weight * energy_density;
+                potential += (point.weight * self.reference_thickness_m) * energy_density;
                 Ok(())
             },
         )?;
-        problem.for_traction(load, |dof, value| potential -= value * u[dof])?;
+        problem.for_traction(load, |dof, value| {
+            potential -= (self.reference_thickness_m * value) * u[dof];
+        })?;
+        for (index, &(dof, force)) in self.nodal_forces_n.iter().enumerate() {
+            if index % 256 == 0 {
+                checkpoint(cx)?;
+            }
+            potential -= force * u[dof];
+        }
+        if let Some(inertia) = self.inertia {
+            potential += inertia.potential(u, cx).map_err(inertia_error)?;
+        }
         if !potential.is_finite() {
             return Err(invalid("unrepresentable plane-stress potential energy"));
         }
@@ -527,6 +676,61 @@ impl Prepared {
 }
 
 impl HyperProblem<'_> {
+    /// One physical endpoint through the existing native Newton owner. Material
+    /// and dead tractions use original thickness; M and nodal loads are already
+    /// physical. No material history is accepted by this solve.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn solve_plane_stress_dynamic_from(
+        &self,
+        initial_displacement: &[[f64; 2]],
+        local: PlaneStressSettings,
+        exact: bool,
+        reference_thickness_m: f64,
+        inertia: &BackwardEulerInertia<'_>,
+        nodal_forces_n: &[(usize, f64)],
+        cx: &Cx<'_>,
+    ) -> Result<(Vec<[f64; 2]>, NewtonReport), SolidError> {
+        let prepared = Prepared::dynamic(
+            self,
+            local,
+            exact,
+            reference_thickness_m,
+            inertia,
+            nodal_forces_n,
+            cx,
+        )?;
+        self.solve_with_projection_from(
+            Some(Reduction::PlaneStress(&prepared, cx)),
+            Some(initial_displacement),
+        )
+    }
+
+    /// Full physical residual, retaining constrained-row reactions. Explicit
+    /// nodal forces are endpoint values; only dead tractions follow load.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn plane_stress_dynamic_unconstrained_residual(
+        &self,
+        u: &[f64],
+        load: f64,
+        local: PlaneStressSettings,
+        exact: bool,
+        reference_thickness_m: f64,
+        inertia: &BackwardEulerInertia<'_>,
+        nodal_forces_n: &[(usize, f64)],
+        cx: &Cx<'_>,
+    ) -> Result<Vec<f64>, SolidError> {
+        Prepared::dynamic(
+            self,
+            local,
+            exact,
+            reference_thickness_m,
+            inertia,
+            nodal_forces_n,
+            cx,
+        )?
+        .force_residual(self, u, load, cx)
+    }
+
     /// Solve a thin P1/Q1 hyperelastic continuum with traction-free thickness.
     ///
     /// Reuses the original supports, dead tractions, load steps, Newton and

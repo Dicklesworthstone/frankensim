@@ -599,3 +599,6 @@ fn g4_cancellation_during_load_query_leaves_accepted_strain_history_energy_and_t
 
 #[path = "visco_plane_stress/reference_change.rs"]
 mod reference_change;
+
+#[path = "visco_plane_stress/dynamics.rs"]
+mod dynamics;

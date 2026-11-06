@@ -85,7 +85,7 @@ fn material_quadrature(arity: usize) -> Vec<(f64, f64, f64)> {
 #[derive(Clone, Copy)]
 enum Reduction<'a, 'cx> {
     MeanDilatation(&'a mean_dilatation::Prepared, &'a Cx<'cx>),
-    PlaneStress(&'a plane_stress::Prepared, &'a Cx<'cx>),
+    PlaneStress(&'a plane_stress::Prepared<'a>, &'a Cx<'cx>),
 }
 
 type Projection<'a, 'cx> = Option<Reduction<'a, 'cx>>;
@@ -497,6 +497,15 @@ impl HyperProblem<'_> {
                     applied[dof] += value;
                 }
             })?;
+            if let Some(Reduction::PlaneStress(prepared, cx)) = projection {
+                prepared.complete_applied_force(&mut applied, &fixed, cx)?;
+            }
+            let free: Vec<usize> = match projection {
+                Some(Reduction::PlaneStress(prepared, _)) if prepared.is_dynamic() => (0..u.len())
+                    .filter(|dof| !fixed.contains_key(dof))
+                    .collect(),
+                _ => Vec::new(),
+            };
             let applied_norm = norm(&applied);
             if !applied_norm.is_finite() {
                 return Err(SolidError::InvalidInput {
@@ -516,7 +525,15 @@ impl HyperProblem<'_> {
                         what: "Newton free-force residual is not finite".into(),
                     });
                 }
-                if history.is_empty() {
+                let momentum_scale = match projection {
+                    Some(Reduction::PlaneStress(prepared, cx)) => {
+                        prepared.dynamic_force_scale(&u, &resid, &applied, &free, cx)?
+                    }
+                    _ => None,
+                };
+                if let Some(scale) = momentum_scale {
+                    force_scale = scale;
+                } else if history.is_empty() {
                     force_scale = force_scale.max(rnorm);
                 }
                 let relative = if rnorm == 0.0 {
@@ -619,10 +636,22 @@ impl HyperProblem<'_> {
                             match self.residual_with_projection(&trial, load, &fixed, projection) {
                                 Ok(trial_residual) => {
                                     let trial_norm = norm(&trial_residual);
+                                    let trial_scale = match projection {
+                                        Some(Reduction::PlaneStress(prepared, cx)) => prepared
+                                            .dynamic_force_scale(
+                                                &trial,
+                                                &trial_residual,
+                                                &applied,
+                                                &free,
+                                                cx,
+                                            )?
+                                            .unwrap_or(force_scale),
+                                        _ => force_scale,
+                                    };
                                     acceptable = trial_norm.is_finite()
                                         && trial_norm < (1.0 - 1e-4 * alpha) * rnorm
                                         && (force_merit
-                                            || trial_norm / force_scale < self.settings.tol);
+                                            || trial_norm / trial_scale < self.settings.tol);
                                 }
                                 Err(SolidError::MaterialRefused { .. }) => {}
                                 Err(error) => return Err(error),

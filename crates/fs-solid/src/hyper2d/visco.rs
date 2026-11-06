@@ -7,8 +7,10 @@
 //! The solver's incremental potential and signed endpoint-work error remain
 //! separate accounts. Exact elastic incompressibility uses bulk-free histories.
 //!
-//! This is quasistatic in-plane P1/Q1 mechanics with local transverse traction
-//! relaxation. It adds no inertia, shell bending, wrinkling or caloric law.
+//! The solid owner's default step is quasistatic in-plane P1/Q1 mechanics with
+//! local transverse traction relaxation. [`dynamics`] couples the same accepted
+//! history to consistent reference inertia. Neither path adds shell bending,
+//! wrinkling or a caloric law.
 //! Nonuniform histories are retained at all four Q1 points; P1 has constant
 //! deformation and one centroid. Time/load refinement controls the reported
 //! work defect, including transverse motion during a held in-plane interval.
@@ -17,6 +19,7 @@ use super::{
     HyperProblem, HyperelasticMaterials, NewtonReport, NewtonSettings, PlaneMaterial,
     PlaneMaterialPoint, material_point_kinematics,
 };
+use crate::inertia::{BackwardEulerInertia, InertiaError, InertialEnergy};
 use crate::{Mesh2, Patch, SolidError};
 use fs_exec::Cx;
 use fs_material::MaterialError;
@@ -37,6 +40,11 @@ pub use crate::hyper3::visco::{
 /// Prescribed reference-strain changes with retained quadrature histories.
 pub mod reference_change;
 pub use reference_change::{FiniteViscoPlaneReferenceChange, FiniteViscoPlaneReferenceEnergy};
+
+/// Consistent reference inertia and retained in-plane material motion.
+pub mod dynamics;
+
+type AcceptedPlaneMotion = (Vec<f64>, InertialEnergy);
 
 /// The transverse constraint used throughout initialization and every interval.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -385,6 +393,12 @@ impl std::error::Error for FiniteViscoPlaneError {}
 fn invalid(what: &str) -> FiniteViscoPlaneError {
     SolidError::InvalidInput { what: what.into() }.into()
 }
+fn inertia_error(error: InertiaError) -> FiniteViscoPlaneError {
+    match error {
+        InertiaError::Cancelled => SolidError::Cancelled.into(),
+        InertiaError::InvalidInput { what } => SolidError::InvalidInput { what }.into(),
+    }
+}
 fn checkpoint(cx: &Cx<'_>) -> Result<(), FiniteViscoPlaneError> {
     cx.checkpoint().map_err(|_| SolidError::Cancelled.into())
 }
@@ -617,6 +631,23 @@ impl<'a> FiniteViscoPlaneSolid<'a> {
         controls: FiniteViscoStepControls,
         cx: &Cx<'_>,
     ) -> Result<FiniteViscoPlaneStep<'a>, FiniteViscoPlaneError> {
+        self.advance_loaded(dt_s, dirichlet, traction, &[], settings, controls, None, cx)
+            .map(|(step, _)| step)
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    fn advance_loaded(
+        &self,
+        dt_s: f64,
+        dirichlet: &[(Patch, &dyn Fn(f64, f64) -> [f64; 2])],
+        traction: &[(Patch, &dyn Fn(f64, f64) -> [f64; 2])],
+        nodal_forces_n: &[(usize, f64)],
+        settings: NewtonSettings,
+        controls: FiniteViscoStepControls,
+        inertia: Option<&BackwardEulerInertia<'_>>,
+        cx: &Cx<'_>,
+    ) -> Result<(FiniteViscoPlaneStep<'a>, Option<AcceptedPlaneMotion>), FiniteViscoPlaneError>
+    {
         checkpoint(cx)?;
         let time_s = self.time_s + dt_s;
         if !dt_s.is_finite()
@@ -635,6 +666,15 @@ impl<'a> FiniteViscoPlaneSolid<'a> {
                 "one endpoint, representable nonnegative interval and finite work allowances required",
             ));
         }
+        if (inertia.is_none() && !nodal_forces_n.is_empty())
+            || nodal_forces_n
+                .iter()
+                .any(|(dof, force)| *dof >= self.displacement_m.len() * 2 || !force.is_finite())
+        {
+            return Err(invalid(
+                "finite physical nodal forces on original dynamic DOFs required",
+            ));
+        }
         let frozen = self.freeze(dt_s, cx)?;
         let problem = HyperProblem {
             mesh: self.mesh,
@@ -643,12 +683,23 @@ impl<'a> FiniteViscoPlaneSolid<'a> {
             traction: traction.to_vec(),
             settings,
         };
-        let (displacement_m, equilibrium) = match self.mode {
-            FiniteViscoPlaneMode::FiniteBulk => {
-                problem.solve_plane_stress_from(&self.displacement_m, self.local, cx)
-            }
-            FiniteViscoPlaneMode::Incompressible => {
-                problem.solve_incompressible_plane_stress_from(&self.displacement_m, self.local, cx)
+        let (displacement_m, equilibrium) = if let Some(inertia) = inertia {
+            problem.solve_plane_stress_dynamic_from(
+                &self.displacement_m,
+                self.local,
+                self.mode == FiniteViscoPlaneMode::Incompressible,
+                self.reference_thickness_m,
+                inertia,
+                nodal_forces_n,
+                cx,
+            )
+        } else {
+            match self.mode {
+                FiniteViscoPlaneMode::FiniteBulk => {
+                    problem.solve_plane_stress_from(&self.displacement_m, self.local, cx)
+                }
+                FiniteViscoPlaneMode::Incompressible => problem
+                    .solve_incompressible_plane_stress_from(&self.displacement_m, self.local, cx),
             }
         }?;
         let points = material_point_kinematics(self.mesh, &displacement_m, cx)?;
@@ -693,7 +744,32 @@ impl<'a> FiniteViscoPlaneSolid<'a> {
         };
         let mut external = vec![0.0; u.len()];
         problem.for_traction(1.0, |dof, value| external[dof] += value)?;
+        let dynamic = inertia.is_some();
+        if dynamic {
+            for value in &mut external {
+                *value *= self.reference_thickness_m;
+            }
+            for &(dof, force) in nodal_forces_n {
+                external[dof] += force;
+            }
+        }
+        if external.iter().any(|value| !value.is_finite()) {
+            return Err(invalid("external physical load is unrepresentable"));
+        }
+        let (inertial_force, motion) = if let Some(inertia) = inertia {
+            let mut force = vec![0.0; u.len()];
+            inertia
+                .add_force(u, &mut force, cx)
+                .map_err(inertia_error)?;
+            let motion = inertia.motion_flat(u, cx).map_err(inertia_error)?;
+            (force, Some(motion))
+        } else {
+            (Vec::new(), None)
+        };
         let mut energy = endpoint.energy;
+        if let Some((_, inertial_energy)) = &motion {
+            energy.inertial_endpoint_work_j = inertial_energy.inertial_work_j;
+        }
         for dof in 0..u.len() {
             if dof % 256 == 0 {
                 checkpoint(cx)?;
@@ -701,15 +777,22 @@ impl<'a> FiniteViscoPlaneSolid<'a> {
             let increment = u[dof] - old[dof];
             energy.internal_endpoint_work_j +=
                 self.reference_thickness_m * internal[dof] * increment;
-            energy.dead_load_endpoint_work_j +=
-                self.reference_thickness_m * external[dof] * increment;
+            energy.dead_load_endpoint_work_j += if dynamic {
+                external[dof] * increment
+            } else {
+                self.reference_thickness_m * external[dof] * increment
+            };
         }
         let mut reactions_n = Vec::new();
         for &dof in problem.fixed_dofs(1.0)?.keys() {
             if reactions_n.len() % 256 == 0 {
                 checkpoint(cx)?;
             }
-            let reaction = self.reference_thickness_m * (internal[dof] - external[dof]);
+            let reaction = if dynamic {
+                self.reference_thickness_m * internal[dof] + inertial_force[dof] - external[dof]
+            } else {
+                self.reference_thickness_m * (internal[dof] - external[dof])
+            };
             if !reaction.is_finite() {
                 return Err(invalid("support reaction is unrepresentable"));
             }
@@ -723,7 +806,8 @@ impl<'a> FiniteViscoPlaneSolid<'a> {
             energy.internal_endpoint_work_j - stored_change - energy.dissipated_j;
         energy.equilibrium_work_residual_j = energy.dead_load_endpoint_work_j
             + energy.support_endpoint_work_j
-            - energy.internal_endpoint_work_j;
+            - energy.internal_endpoint_work_j
+            - energy.inertial_endpoint_work_j;
         gate(
             "native material balance",
             energy.material_balance_error_j,
@@ -745,25 +829,28 @@ impl<'a> FiniteViscoPlaneSolid<'a> {
             controls.maximum_endpoint_work_defect_j,
         )?;
         checkpoint(cx)?;
-        Ok(FiniteViscoPlaneStep {
-            solid: Self {
-                mesh: self.mesh,
-                material: self.material,
-                mode: self.mode,
-                reference_thickness_m: self.reference_thickness_m,
-                local: self.local,
-                displacement_m: displacement_m.into(),
-                points: points.into(),
-                offsets: Arc::clone(&self.offsets),
-                histories: endpoint.histories,
-                first_piola_pa: endpoint.first_piola_pa,
-                pressure_pa: endpoint.pressure_pa,
-                stored_energy_j: energy.stored_after_j,
-                time_s,
+        Ok((
+            FiniteViscoPlaneStep {
+                solid: Self {
+                    mesh: self.mesh,
+                    material: self.material,
+                    mode: self.mode,
+                    reference_thickness_m: self.reference_thickness_m,
+                    local: self.local,
+                    displacement_m: displacement_m.into(),
+                    points: points.into(),
+                    offsets: Arc::clone(&self.offsets),
+                    histories: endpoint.histories,
+                    first_piola_pa: endpoint.first_piola_pa,
+                    pressure_pa: endpoint.pressure_pa,
+                    stored_energy_j: energy.stored_after_j,
+                    time_s,
+                },
+                equilibrium,
+                energy,
+                reactions_n,
             },
-            equilibrium,
-            energy,
-            reactions_n,
-        })
+            motion,
+        ))
     }
 }
