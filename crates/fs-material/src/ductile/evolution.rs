@@ -18,7 +18,7 @@
 //! Initiation retains the parent's endpoint quadrature on the undegraded trial
 //! stress, which is the physical stress before damage. A first crossing spends
 //! only the estimated post-onset part of that plastic increment. Its moving
-//! onset is differentiated, including triaxiality and rate dependence. Once
+//! onset is differentiated, including triaxiality, Lode and rate dependence. Once
 //! reached, the initiation observation freezes; ongoing plastic strain belongs
 //! to `native_state()`. Subsequent evolution does not reapply an initiation
 //! rate/triaxiality envelope to an already initiated point. Original temperature
@@ -33,7 +33,7 @@
 //!
 //! Characteristic-length scaling alone does not establish mesh-objective crack
 //! paths. No element deletion, residual-stiffness floor, finite-strain law,
-//! crack-face contact, Lode dependence, heat partition or measured validation
+//! crack-face contact, heat partition or measured validation
 //! is supplied. Exponential integrity stays positive; an unrepresentable value
 //! refuses instead of creating a hidden erosion threshold.
 
@@ -42,7 +42,8 @@ use fs_evidence::{Ambition, ModelCard, ValidityDomain};
 use fs_math::det;
 
 use super::{
-    DuctileError, DuctileInitiationLaw, DuctileState, JohnsonCookInitiation, TabulatedDuctileLocus,
+    DuctileError, DuctileInitiationLaw, DuctileState, DuctileStressState, JohnsonCookInitiation,
+    TabulatedDuctileLocus,
 };
 use crate::plastic::energy::{EnergyError, EnergyTolerances};
 use crate::plastic::{J2Plasticity, J2State};
@@ -53,10 +54,12 @@ use crate::{MaterialAdmissibility, SmallStrainLaw, Tangent6, Voigt};
 pub mod source;
 
 /// Endpoint-locus derivatives needed only while a trial crosses initiation.
-/// Derivatives use tensile-positive triaxiality and physical inverse seconds.
+/// Derivatives use tensile-positive triaxiality, the normalized third
+/// deviatoric invariant xi and physical inverse seconds.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DuctileLocusGradient {
     pub triaxiality: f64,
+    pub lode_parameter: f64,
     pub strain_rate_s_inv: f64,
 }
 
@@ -70,6 +73,19 @@ pub trait DifferentiableDuctileInitiationLaw: DuctileInitiationLaw {
         rate: f64,
         temperature_k: f64,
     ) -> Result<DuctileLocusGradient, DuctileError>;
+
+    /// Full-invariant derivative on the same branch as `fracture_strain_at`.
+    /// Lode-dependent laws override this entry point and refuse the scalar
+    /// derivative when xi is absent. Reduced laws retain a zero xi derivative.
+    fn fracture_strain_gradient_at(
+        &self,
+        stress: DuctileStressState,
+        rate: f64,
+        temperature_k: f64,
+    ) -> Result<DuctileLocusGradient, DuctileError> {
+        stress.validate()?;
+        self.fracture_strain_gradient(stress.triaxiality, rate, temperature_k)
+    }
 }
 
 impl<L: DifferentiableDuctileInitiationLaw + ?Sized> DifferentiableDuctileInitiationLaw for &L {
@@ -80,6 +96,15 @@ impl<L: DifferentiableDuctileInitiationLaw + ?Sized> DifferentiableDuctileInitia
         temperature: f64,
     ) -> Result<DuctileLocusGradient, DuctileError> {
         (**self).fracture_strain_gradient(eta, rate, temperature)
+    }
+
+    fn fracture_strain_gradient_at(
+        &self,
+        stress: DuctileStressState,
+        rate: f64,
+        temperature: f64,
+    ) -> Result<DuctileLocusGradient, DuctileError> {
+        (**self).fracture_strain_gradient_at(stress, rate, temperature)
     }
 }
 
@@ -132,17 +157,6 @@ impl DifferentiableDuctileInitiationLaw for JohnsonCookInitiation {
     }
 }
 
-impl DifferentiableDuctileInitiationLaw for super::source::ResolvedDuctileLocus {
-    fn fracture_strain_gradient(
-        &self,
-        eta: f64,
-        rate: f64,
-        temperature: f64,
-    ) -> Result<DuctileLocusGradient, DuctileError> {
-        self.law().fracture_strain_gradient(eta, rate, temperature)
-    }
-}
-
 fn locus_gradient(
     triaxiality: f64,
     strain_rate_s_inv: f64,
@@ -150,6 +164,7 @@ fn locus_gradient(
     if triaxiality.is_finite() && strain_rate_s_inv.is_finite() {
         Ok(DuctileLocusGradient {
             triaxiality,
+            lode_parameter: 0.0,
             strain_rate_s_inv,
         })
     } else {
@@ -408,23 +423,28 @@ impl<L: DifferentiableDuctileInitiationLaw> DuctileJ2<L> {
                 onset_alpha = finite(old.native.alpha + remaining * fracture_strain)?;
                 // Differentiate the same endpoint-held onset estimate, rather
                 // than silently freezing it during the first Newton increment.
-                let eta = step
-                    .triaxiality
-                    .ok_or(DuctileEvolutionError::Invalid("missing onset triaxiality"))?;
-                let gradient = self.initiation.fracture_strain_gradient(
-                    eta,
+                let stress_state = DuctileStressState {
+                    triaxiality: step
+                        .triaxiality
+                        .ok_or(DuctileEvolutionError::Invalid("missing onset triaxiality"))?,
+                    lode_parameter: step
+                        .lode_parameter
+                        .ok_or(DuctileEvolutionError::Invalid("missing onset Lode parameter"))?,
+                };
+                let gradient = self.initiation.fracture_strain_gradient_at(
+                    stress_state,
                     step.strain_rate_s_inv,
                     conditions.temperature_k,
                 )?;
-                let eta_gradient = if gradient.triaxiality == 0.0 {
+                let stress_gradient = if gradient.triaxiality == 0.0 && gradient.lode_parameter == 0.0 {
                     [0.0; 6]
                 } else {
-                    triaxiality_gradient(&native.stress_pa, &native_tangent, eta)?
+                    locus_stress_gradient(&native.stress_pa, &native_tangent, stress_state, gradient)?
                 };
                 for j in 0..6 {
                     onset_gradient[j] = finite(
                         remaining
-                            * (gradient.triaxiality * eta_gradient[j]
+                            * (stress_gradient[j]
                                 + gradient.strain_rate_s_inv
                                     * (alpha_gradient[j] / conditions.duration_s)),
                     )?;
@@ -759,13 +779,15 @@ impl<'a, L: DifferentiableDuctileInitiationLaw + Clone + Debug + PartialEq> Smal
     }
 }
 
-// Derivative of mean(sigma)/q(sigma) through the native endpoint tangent. The
-// stress is scaled before forming a squared invariant; Voigt shears are tensor
-// components and therefore receive their contraction weight exactly once.
-fn triaxiality_gradient(
+// Chain rule of the initiation locus through the native endpoint stress. With
+// U = s/q, d(xi) = [27/2 dev(U^2) - 9/2 xi U] : d(sigma) / q. This polynomial
+// derivative remains regular at xi=+/-1; no acos/sin Lode-angle singularity is
+// introduced. Voigt shears receive their contraction weight exactly once.
+fn locus_stress_gradient(
     stress: &Voigt,
     tangent: &Tangent6,
-    eta: f64,
+    state: DuctileStressState,
+    locus: DuctileLocusGradient,
 ) -> Result<Voigt, DuctileEvolutionError> {
     let scale = positive(stress.iter().fold(0.0_f64, |a, b| a.max(b.abs())))?;
     let s = stress.map(|x| x / scale);
@@ -786,14 +808,44 @@ fn triaxiality_gradient(
         s[5] / dev_scale,
     ];
     let q = positive(det::sqrt(1.5 * contract(&dev, &dev)))?;
+    let unit = dev.map(|value| value / q);
+    let xi_derivative = if locus.lode_parameter == 0.0 {
+        [0.0; 6]
+    } else {
+        let square = [
+            unit[0] * unit[0] + unit[3] * unit[3] + unit[5] * unit[5],
+            unit[1] * unit[1] + unit[3] * unit[3] + unit[4] * unit[4],
+            unit[2] * unit[2] + unit[4] * unit[4] + unit[5] * unit[5],
+            unit[3] * (unit[0] + unit[1]) + unit[5] * unit[4],
+            unit[4] * (unit[1] + unit[2]) + unit[3] * unit[5],
+            unit[5] * (unit[0] + unit[2]) + unit[3] * unit[4],
+        ];
+        let mean_square = trace(&square) / 3.0;
+        core::array::from_fn(|i| {
+            13.5 * (square[i] - if i < 3 { mean_square } else { 0.0 })
+                - 4.5 * state.lode_parameter * unit[i]
+        })
+    };
     let mut gradient = [0.0; 6];
     for j in 0..6 {
-        let mean_gradient = tangent[0][j] / 3.0 + tangent[1][j] / 3.0 + tangent[2][j] / 3.0;
-        let mut q_gradient = 0.0;
-        for i in 0..6 {
-            q_gradient += (1.5 * dev[i] / q) * tangent[i][j] * if i < 3 { 1.0 } else { 2.0 };
+        let mut derivative = 0.0;
+        if locus.triaxiality != 0.0 {
+            let mean_gradient = tangent[0][j] / 3.0 + tangent[1][j] / 3.0 + tangent[2][j] / 3.0;
+            let mut q_gradient = 0.0;
+            for i in 0..6 {
+                q_gradient += (1.5 * dev[i] / q) * tangent[i][j] * if i < 3 { 1.0 } else { 2.0 };
+            }
+            derivative += locus.triaxiality
+                * finite((((mean_gradient - state.triaxiality * q_gradient) / scale) / dev_scale) / q)?;
         }
-        gradient[j] = finite((((mean_gradient - eta * q_gradient) / scale) / dev_scale) / q)?;
+        if locus.lode_parameter != 0.0 {
+            let mut xi_gradient = 0.0;
+            for i in 0..6 {
+                xi_gradient += xi_derivative[i] * tangent[i][j] * if i < 3 { 1.0 } else { 2.0 };
+            }
+            derivative += locus.lode_parameter * finite(((xi_gradient / scale) / dev_scale) / q)?;
+        }
+        gradient[j] = finite(derivative)?;
     }
     Ok(gradient)
 }

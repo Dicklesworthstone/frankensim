@@ -235,6 +235,77 @@ fn analytic_tangent_includes_moving_onset_rate_and_compressive_reclosure() {
 }
 
 #[test]
+fn analytic_tangent_includes_lode_dependent_onset_and_is_regular_at_meridians() {
+    // Manufactured smooth locus with independent eta, xi and rate derivatives.
+    // Both scalar entry points refuse, proving full-stress forwarding through
+    // borrowed laws as well as the return map's complete onset chain rule.
+    #[derive(Clone, Debug, PartialEq)]
+    struct LodeFixture(DuctileDomain);
+    impl DuctileInitiationLaw for LodeFixture {
+        fn domain(&self) -> &DuctileDomain {
+            &self.0
+        }
+        fn fracture_strain(&self, _: f64, _: f64, _: f64) -> Result<f64, DuctileError> {
+            Err(DuctileError::Invalid("this locus requires the Lode parameter"))
+        }
+        fn fracture_strain_at(
+            &self,
+            stress: DuctileStressState,
+            rate: f64,
+            temperature: f64,
+        ) -> Result<f64, DuctileError> {
+            stress.validate()?;
+            self.0.check(stress.triaxiality, rate, temperature)?;
+            Ok(0.0015 * (1.0 + 0.03 * stress.triaxiality
+                + 0.2 * stress.lode_parameter + 0.025 * det::ln(rate / 0.004)))
+        }
+    }
+    impl DifferentiableDuctileInitiationLaw for LodeFixture {
+        fn fracture_strain_gradient(
+            &self, _: f64, _: f64, _: f64,
+        ) -> Result<DuctileLocusGradient, DuctileError> {
+            Err(DuctileError::Invalid("this locus requires the Lode parameter"))
+        }
+        fn fracture_strain_gradient_at(
+            &self,
+            stress: DuctileStressState,
+            rate: f64,
+            temperature: f64,
+        ) -> Result<DuctileLocusGradient, DuctileError> {
+            self.fracture_strain_at(stress, rate, temperature)?;
+            Ok(DuctileLocusGradient {
+                triaxiality: 0.0015 * 0.03,
+                lode_parameter: 0.0015 * 0.2,
+                strain_rate_s_inv: 0.0015 * 0.025 / rate,
+            })
+        }
+    }
+    let initiation = LodeFixture(domain());
+    let material = DuctileJ2::new(native(50.0, 20.0), &initiation, settings(0.02, 0.0005)).unwrap();
+    let virgin = material.initial_state();
+    let prior = material.trial(
+        &shear_at_alpha(material.native(), 0.0003), &virgin, conditions(),
+    ).unwrap();
+    assert!(!prior.state.initiation().initiated());
+    assert!(prior.state.initiation().utilization() > 0.0);
+    let mixed = [0.006, -0.001, -0.001, 0.002, 0.0004, -0.0006];
+    let physical = DuctileJ2Conditions { duration_s: 0.25, ..conditions() };
+    let initiated = material.trial(&mixed, &prior.state, physical).unwrap();
+    assert!(initiated.state.initiation().initiated());
+    assert!(initiated.state.damage() > 0.0);
+    check_tangent(&material, &prior.state, mixed, physical);
+
+    // A normalized-invariant derivative has no angle-coordinate singularity
+    // where principal deviatoric stresses coincide, including both signs.
+    let axial = axial_at_alpha(material.native(), 0.006);
+    for strain in [axial, axial.map(|value| -value)] {
+        let step = material.trial(&strain, &virgin, physical).unwrap();
+        assert!(step.state.initiation().initiated());
+        check_tangent(&material, &virgin, strain, physical);
+    }
+}
+
+#[test]
 fn compression_retains_bulk_stiffness_without_healing_or_requerying_onset() {
     let initiation = TabulatedDuctileLocus::new(
         vec![(0.2, 0.001), (0.5, 0.001)],

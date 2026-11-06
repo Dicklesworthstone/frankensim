@@ -15,8 +15,9 @@ use fs_material::ductile::evolution::source::{
     resolve_ductile_j2,
 };
 use fs_material::ductile::source::{
-    DuctileSourceRequest, FRACTURE_PLASTIC_STRAIN_PROPERTY, PLASTIC_STRAIN_RATE_AXIS,
-    ResolvedDuctileLocus, STRESS_TRIAXIALITY_AXIS, resolve_ductile_locus,
+    DuctileSourceRequest, FRACTURE_PLASTIC_STRAIN_PROPERTY, LODE_PARAMETER_AXIS,
+    PLASTIC_STRAIN_RATE_AXIS, ResolvedDuctileLocus, STRESS_TRIAXIALITY_AXIS, resolve_ductile_locus,
+    resolve_ductile_stress_locus,
 };
 use fs_material::plastic::energy::EnergyTolerances;
 use fs_material::plastic::source::{HardeningPropertyBasis, resolve_j2_plasticity};
@@ -112,7 +113,7 @@ fn card(rows: Vec<PropertyClaim>) -> MaterialCard {
             chemistry: "synthetic ductile coupon".into(),
             phase: "solid".into(),
             process: "numerical verification".into(),
-            revision: 1,
+            revision: 0,
         },
         set,
         vec![],
@@ -191,6 +192,102 @@ fn shear_retention(resolved: &ResolvedDuctileJ2) -> f64 {
     let undamaged = native.stress(&strain, &native.initial_state());
     assert!(stress.iter().all(|value| value.is_finite()));
     stress[3] / undamaged[3]
+}
+
+#[test]
+fn original_lode_surface_changes_native_softening_without_replacing_j2_or_work_sources() {
+    let mut rows = claims(0.001);
+    let locus = rows
+        .iter_mut()
+        .find(|row| row.key.name() == FRACTURE_PLASTIC_STRAIN_PROPERTY)
+        .unwrap();
+    locus.value = PropertyValue::Surface2D {
+        axes: [STRESS_TRIAXIALITY_AXIS.into(), LODE_PARAMETER_AXIS.into()],
+        axis_dims: [Dims::NONE; 2],
+        samples: [[-1.0, -1.0], [1.0, -1.0], [1.0, 1.0], [-1.0, 1.0]]
+            .into_iter()
+            .map(|at| (at, 0.002 + 0.0008 * at[1]))
+            .collect(),
+        triangles: vec![[0, 1, 2], [0, 2, 3]],
+        dims: Dims::NONE,
+    };
+    locus.validity = locus.validity.clone().with_quantity(
+        LODE_PARAMETER_AXIS,
+        QuantitySpec::dimensional(Dims::NONE),
+        -1.0,
+        1.0,
+    );
+    locus.interpolation = InterpolationPolicy::LinearInside;
+    let source = card(rows);
+    let anchor = fixed_point()
+        .with_quantity(
+            STRESS_TRIAXIALITY_AXIS,
+            QuantitySpec::dimensional(Dims::NONE),
+            -1.0,
+        )
+        .unwrap()
+        .with_quantity(
+            LODE_PARAMETER_AXIS,
+            QuantitySpec::dimensional(Dims::NONE),
+            -1.0,
+        )
+        .unwrap()
+        .with_quantity(
+            PLASTIC_STRAIN_RATE_AXIS,
+            QuantitySpec::dimensional(RATE),
+            0.01,
+        )
+        .unwrap();
+    let initiation = resolve_ductile_stress_locus(
+        &source,
+        &anchor,
+        &DuctileSourceRequest {
+            temperature_axis: TEMPERATURE.into(),
+            maximum_points: 4,
+        },
+        SINGLE,
+    )
+    .unwrap();
+    let resolved = resolve_ductile_j2(
+        &source,
+        &fixed_point(),
+        MaterialPropertySelection::SingleClaimOnly,
+        BASIS,
+        0.05,
+        initiation,
+        settings(0.01),
+    )
+    .unwrap();
+    let model = resolved.law();
+    let old = model.initial_state();
+    let shear = model
+        .trial(&[0.0, 0.0, 0.0, 0.01, 0.0, 0.0], &old, conditions())
+        .unwrap();
+    let a = 0.02 / 3.0_f64.sqrt();
+    let meridian = model
+        .trial(&[a, -0.5 * a, -0.5 * a, 0.0, 0.0, 0.0], &old, conditions())
+        .unwrap();
+    near(
+        shear.state.native_state().alpha,
+        meridian.state.native_state().alpha,
+    );
+    assert!(shear.state.damage() > meridian.state.damage());
+    // Independent native radial-return and calibrated post-onset work for
+    // equal q, but different source fracture strains at xi=0 and xi=1.
+    let alpha = (3.0_f64.sqrt() * 10.0 - 3.0) / 1600.0;
+    for (state, onset) in [(&shear.state, 0.002_f64), (&meridian.state, 0.0028_f64)] {
+        let work_density = 3.0 * (alpha - onset) + 50.0 * (alpha * alpha - onset * onset);
+        near(state.integrity(), (-0.01 * work_density / 0.001).exp());
+    }
+    assert_eq!(resolved.material().card_identity(), source.content_hash());
+    assert_eq!(model.native(), resolved.plastic().law());
+    assert_eq!(old, model.initial_state());
+    for (_, observation) in model.initiation_law().source().observations() {
+        source
+            .claims()
+            .verify_receipt(&observation.receipt)
+            .unwrap();
+    }
 }
 
 #[test]

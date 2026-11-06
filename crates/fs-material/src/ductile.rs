@@ -2,7 +2,7 @@
 //!
 //! The accumulated criterion is `omega = integral d(alpha)/epsilon_f`, where
 //! `alpha` is the native accumulated equivalent PLASTIC strain. Each proposed
-//! increment holds its endpoint stress triaxiality and temperature and its
+//! increment holds its endpoint stress invariants and temperature and its
 //! interval-averaged plastic strain rate fixed: `delta_omega=delta_alpha/epsilon_f`.
 //! This is endpoint quadrature, not exact integration of an unresolved stress
 //! path. Newton trials borrow the same accepted history; a consumer commits
@@ -19,7 +19,9 @@
 //! Initiation is reached at `omega >= 1`; overshoot is retained. These laws
 //! supply no post-initiation stress degradation, fracture energy, length-scale
 //! regularization, crack topology, healing, necking solution or fragment state.
-//! They omit Lode-angle dependence and cannot predict every shear failure.
+//! Lode-dependent loci receive the normalized third deviatoric invariant
+//! `xi = (27/2) det(s) / q^3`; triaxiality-only loci retain their original
+//! reduced model. Neither choice alone predicts every shear-failure mechanism.
 //! Coupon elongation at break and cyclic fatigue-ductility coefficients are
 //! not local equivalent plastic strain at damage initiation. Native plasticity
 //! and material calibration retain their own applicability and evidence limits.
@@ -33,8 +35,10 @@ pub mod source;
 /// Progressive length-scaled ductile degradation on the native J2 owner.
 pub mod evolution;
 
-/// Complete rectangular calibration bounds. Every interval is closed; a
-/// degenerate interval represents a fixed calibrated condition.
+/// Calibration bounds for triaxiality, rate and temperature. Every interval
+/// is closed; a degenerate interval represents a fixed calibrated condition.
+/// Multiaxis laws additionally enforce their original support: these bounds
+/// alone do not fill unmeasured stress-state regions or holes in that support.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DuctileDomain {
     /// Tensile-positive mean stress divided by Mises equivalent stress.
@@ -71,6 +75,30 @@ impl DuctileDomain {
     }
 }
 
+/// Dimensionless invariants of the actual symmetric Cauchy/Kirchhoff stress.
+/// Positive scaling and rigid rotation leave both unchanged. The Lode
+/// parameter is the normalized third invariant, not an angle in radians nor
+/// `1 - 2*acos(xi)/pi`; those conventions require an explicit conversion.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DuctileStressState {
+    /// Tensile-positive mean stress divided by Mises equivalent stress.
+    pub triaxiality: f64,
+    /// `xi = (27/2) det(s) / q^3`, in [-1,1]. Uniaxial tension is +1,
+    /// uniaxial compression is -1 and pure shear is zero.
+    pub lode_parameter: f64,
+}
+
+impl DuctileStressState {
+    /// Check representability and the physical invariant range. A material
+    /// still has to admit this point against its own calibration support.
+    pub fn validate(&self) -> Result<(), DuctileError> {
+        if !self.triaxiality.is_finite() {
+            return Err(DuctileError::Invalid("stress triaxiality must be finite"));
+        }
+        in_domain("lode_parameter", self.lode_parameter, [-1.0, 1.0])
+    }
+}
+
 /// A local equivalent-plastic-strain initiation locus, independent of the
 /// constitutive owner that produces plastic strain and physical stress.
 pub trait DuctileInitiationLaw {
@@ -85,6 +113,20 @@ pub trait DuctileInitiationLaw {
         strain_rate_s_inv: f64,
         temperature_k: f64,
     ) -> Result<f64, DuctileError>;
+
+    /// Evaluate the complete stress state. Triaxiality-only laws retain their
+    /// original reduced model through this default. Lode-dependent laws must
+    /// override it and refuse their scalar entry point when xi is missing;
+    /// silently assuming a tensile meridian or pure shear is not permitted.
+    fn fracture_strain_at(
+        &self,
+        stress: DuctileStressState,
+        strain_rate_s_inv: f64,
+        temperature_k: f64,
+    ) -> Result<f64, DuctileError> {
+        stress.validate()?;
+        self.fracture_strain(stress.triaxiality, strain_rate_s_inv, temperature_k)
+    }
 }
 
 impl<L: DuctileInitiationLaw + ?Sized> DuctileInitiationLaw for &L {
@@ -94,6 +136,15 @@ impl<L: DuctileInitiationLaw + ?Sized> DuctileInitiationLaw for &L {
 
     fn fracture_strain(&self, eta: f64, rate: f64, temperature: f64) -> Result<f64, DuctileError> {
         (**self).fracture_strain(eta, rate, temperature)
+    }
+
+    fn fracture_strain_at(
+        &self,
+        stress: DuctileStressState,
+        rate: f64,
+        temperature: f64,
+    ) -> Result<f64, DuctileError> {
+        (**self).fracture_strain_at(stress, rate, temperature)
     }
 }
 
@@ -320,6 +371,8 @@ pub struct DuctileStep {
     pub increment_utilization: f64,
     /// Undefined and unnecessary for zero plastic flow.
     pub triaxiality: Option<f64>,
+    /// Normalized third deviatoric invariant xi; absent for zero plastic flow.
+    pub lode_parameter: Option<f64>,
     /// Not evaluated for zero plastic flow.
     pub fracture_strain: Option<f64>,
     /// Fraction of this PLASTIC increment that would reach omega=1 if its
@@ -355,8 +408,9 @@ impl DuctileState {
     /// is the actual positive physical duration; no pseudo-time is inferred.
     /// Stress is the actual symmetric Cauchy or Kirchhoff tensor, NOT effective
     /// stress minus backstress or first Piola stress. Their common positive
-    /// Jacobian scaling leaves triaxiality unchanged. Rate/eta support is checked
-    /// only when plastic flow occurs; temperature support applies on every step.
+    /// Jacobian scaling leaves both invariants unchanged. Rate/stress-state
+    /// support is checked only when plastic flow occurs; temperature support
+    /// applies on every step.
     /// All refusals leave this accepted state unchanged.
     pub fn trial<L: DuctileInitiationLaw + ?Sized>(
         &self,
@@ -384,7 +438,8 @@ impl DuctileState {
         if plastic_increment == 0.0 {
             return Ok(DuctileStep {
                 state: *self, plastic_increment, strain_rate_s_inv: 0.0,
-                increment_utilization: 0.0, triaxiality: None, fracture_strain: None,
+                increment_utilization: 0.0, triaxiality: None, lode_parameter: None,
+                fracture_strain: None,
                 initiation_fraction: if self.initiated() { Some(0.0) } else { None },
             });
         }
@@ -392,9 +447,9 @@ impl DuctileState {
         if !positive(rate) {
             return Err(DuctileError::Numerical("plastic strain rate is not representable"));
         }
-        let eta = stress_triaxiality(stress_pa)?.ok_or(DuctileError::HydrostaticPlasticFlow)?;
-        law.domain().check(eta, rate, temperature_k)?;
-        let strain = law.fracture_strain(eta, rate, temperature_k)?;
+        let stress = stress_state(stress_pa)?.ok_or(DuctileError::HydrostaticPlasticFlow)?;
+        law.domain().check(stress.triaxiality, rate, temperature_k)?;
+        let strain = law.fracture_strain_at(stress, rate, temperature_k)?;
         if !positive(strain) {
             return Err(DuctileError::Invalid("initiation law returned nonpositive or nonfinite strain"));
         }
@@ -413,7 +468,9 @@ impl DuctileState {
         Ok(DuctileStep {
             state: Self { accumulated_plastic_strain: endpoint_alpha, utilization },
             plastic_increment, strain_rate_s_inv: rate, increment_utilization,
-            triaxiality: Some(eta), fracture_strain: Some(strain), initiation_fraction,
+            triaxiality: Some(stress.triaxiality),
+            lode_parameter: Some(stress.lode_parameter),
+            fracture_strain: Some(strain), initiation_fraction,
         })
     }
 }
@@ -423,6 +480,16 @@ impl DuctileState {
 /// stages avoid overflow of stress squares and underflow of a small deviator.
 /// No arbitrary equivalent-stress threshold or compressive cutoff is applied.
 pub fn stress_triaxiality(stress_pa: &Voigt) -> Result<Option<f64>, DuctileError> {
+    Ok(stress_state(stress_pa)?.map(|state| state.triaxiality))
+}
+
+/// Triaxiality and normalized third deviatoric invariant from tensor-Voigt
+/// Cauchy/Kirchhoff stress. Returns `None` for exactly hydrostatic stress.
+/// The stress and its deviator are scaled separately before squares or a
+/// determinant are formed, retaining tiny representable deviators and avoiding
+/// overflow for large finite stresses. Only roundoff beyond the theoretical
+/// xi endpoints is rounded back; a larger invariant defect refuses.
+pub fn stress_state(stress_pa: &Voigt) -> Result<Option<DuctileStressState>, DuctileError> {
     if stress_pa.iter().any(|x| !x.is_finite()) {
         return Err(DuctileError::Invalid("stress tensor must be finite"));
     }
@@ -441,15 +508,36 @@ pub fn stress_triaxiality(stress_pa: &Voigt) -> Result<Option<f64>, DuctileError
     }
     let diagonal = differences.map(|x| x / deviator_scale);
     let shear = [s[3], s[4], s[5]].map(|x| x / deviator_scale);
-    let q = deviator_scale * det::sqrt(
+    let q = det::sqrt(
         0.5 * diagonal.iter().map(|x| x * x).sum::<f64>()
             + 3.0 * shear.iter().map(|x| x * x).sum::<f64>(),
     );
-    let eta = ((s[0] + s[1] + s[2]) / 3.0) / q;
+    let eta = ((s[0] + s[1] + s[2]) / 3.0) / (deviator_scale * q);
     if !eta.is_finite() {
         return Err(DuctileError::Numerical("stress triaxiality is not representable"));
     }
-    Ok(Some(eta))
+    // S/q is bounded even when q itself is extremely large or small. Forming
+    // the diagonal deviator from pair differences also avoids subtracting a
+    // rounded hydrostatic mean from almost equal principal stresses.
+    let unit = [
+        (diagonal[0] - diagonal[2]) / (3.0 * q),
+        (diagonal[1] - diagonal[0]) / (3.0 * q),
+        (diagonal[2] - diagonal[1]) / (3.0 * q),
+        shear[0] / q,
+        shear[1] / q,
+        shear[2] / q,
+    ];
+    let determinant = unit[0] * (unit[1] * unit[2] - unit[4] * unit[4])
+        - unit[3] * (unit[3] * unit[2] - unit[4] * unit[5])
+        + unit[5] * (unit[3] * unit[4] - unit[1] * unit[5]);
+    let xi = 13.5 * determinant;
+    if !xi.is_finite() || xi.abs() > 1.0 + 64.0 * f64::EPSILON {
+        return Err(DuctileError::Numerical("normalized third stress invariant is outside [-1,1]"));
+    }
+    Ok(Some(DuctileStressState {
+        triaxiality: eta,
+        lode_parameter: xi.clamp(-1.0, 1.0),
+    }))
 }
 
 /// Typed refusal without mutation of accepted material or mechanics history.

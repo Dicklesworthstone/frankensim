@@ -165,6 +165,90 @@ fn g3_triaxiality_is_rotation_and_positive_stress_scale_invariant() {
 }
 
 #[test]
+fn g3_lode_invariant_retains_meridians_rotation_and_extreme_scales() {
+    for (stress, eta, xi) in [
+        ([3.0, 0.0, 0.0, 0.0, 0.0, 0.0], 1.0 / 3.0, 1.0),
+        ([-3.0, 0.0, 0.0, 0.0, 0.0, 0.0], -1.0 / 3.0, -1.0),
+        ([0.0, 0.0, 0.0, 7.0, 0.0, 0.0], 0.0, 0.0),
+    ] {
+        let state = stress_state(&stress).unwrap().unwrap();
+        close(state.triaxiality, eta);
+        close(state.lode_parameter, xi);
+        state.validate().unwrap();
+    }
+    // Independent determinant and Mises invariant for a fully populated tensor.
+    let stress = [3.0, 2.0, 1.0, 0.2, -0.3, 0.4];
+    let q = (3.0_f64 + 3.0 * (0.2 * 0.2 + 0.3 * 0.3 + 0.4 * 0.4)).sqrt();
+    let determinant = -0.3 * 0.3 + 2.0 * 0.2 * -0.3 * 0.4 + 0.2 * 0.2;
+    let expected = DuctileStressState {
+        triaxiality: 2.0 / q,
+        lode_parameter: 13.5 * determinant / q.powi(3),
+    };
+    let axis = [2.0 / 3.0, -1.0 / 3.0, 2.0 / 3.0];
+    let rotation = crate::tensor::rotation(axis, 0.7);
+    for tensor in [stress, crate::tensor::rotate(&stress, &rotation)] {
+        for factor in [1e-300, 1.0, 1e300] {
+            let state = stress_state(&tensor.map(|x| x * factor)).unwrap().unwrap();
+            close(state.triaxiality, expected.triaxiality);
+            close(state.lode_parameter, expected.lode_parameter);
+        }
+    }
+    // The shear deviator is 200 orders below the hydrostatic part. Cubing it
+    // directly would underflow, but its normalized third invariant is finite.
+    let tiny = stress_state(&[1.0, 1.0, 1.0, 2e-200, 3e-200, -4e-200])
+        .unwrap().unwrap();
+    close(tiny.triaxiality, 1e200 / 87.0_f64.sqrt());
+    close(tiny.lode_parameter, 13.5 * (-48.0) / 87.0_f64.powf(1.5));
+    for hydrostatic in [[0.0; 6], [7.0, 7.0, 7.0, 0.0, 0.0, 0.0]] {
+        assert_eq!(stress_state(&hydrostatic).unwrap(), None);
+    }
+    assert!(stress_state(&[f64::INFINITY, 0.0, 0.0, 0.0, 0.0, 0.0]).is_err());
+    for bad in [f64::NAN, -1.01, 1.01] {
+        assert!(constant_locus().fracture_strain_at(
+            DuctileStressState { triaxiality: 0.0, lode_parameter: bad }, 1.0, 300.0,
+        ).is_err());
+    }
+}
+
+#[test]
+fn g3_full_stress_dispatch_distinguishes_equal_triaxiality_and_preserves_history() {
+    // Manufactured locus: the tensile meridian has 50% more initiation strain
+    // than shear at the same triaxiality. The scalar API deliberately refuses.
+    struct LodeFixture(DuctileDomain);
+    impl DuctileInitiationLaw for LodeFixture {
+        fn domain(&self) -> &DuctileDomain { &self.0 }
+        fn fracture_strain(&self, _: f64, _: f64, _: f64) -> Result<f64, DuctileError> {
+            Err(DuctileError::Invalid("this locus requires the Lode parameter"))
+        }
+        fn fracture_strain_at(
+            &self, stress: DuctileStressState, rate: f64, temperature: f64,
+        ) -> Result<f64, DuctileError> {
+            stress.validate()?;
+            self.0.check(stress.triaxiality, rate, temperature)?;
+            Ok(0.25 * (1.0 + 0.5 * stress.lode_parameter))
+        }
+    }
+    let law = LodeFixture(domain());
+    let borrowed: &dyn DuctileInitiationLaw = &law;
+    let old = DuctileState::virgin();
+    let tensile = old.trial(&law, 0.125, 1.0, 300.0, &[3.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        .unwrap();
+    let shear = old.trial(&borrowed, 0.125, 1.0, 300.0,
+        &[1.0, 1.0, 1.0, 3.0_f64.sqrt(), 0.0, 0.0]).unwrap();
+    close(tensile.triaxiality.unwrap(), shear.triaxiality.unwrap());
+    close(tensile.lode_parameter.unwrap(), 1.0);
+    close(shear.lode_parameter.unwrap(), 0.0);
+    close(tensile.fracture_strain.unwrap(), 0.375);
+    close(shear.fracture_strain.unwrap(), 0.25);
+    close(tensile.state.utilization(), 1.0 / 3.0);
+    close(shear.state.utilization(), 0.5);
+    assert_eq!(old, DuctileState::virgin());
+    let unload = shear.state.trial(&borrowed, 0.125, 1.0, 300.0, &[0.0; 6]).unwrap();
+    assert_eq!(unload.state, shear.state);
+    assert_eq!(unload.lode_parameter, None);
+}
+
+#[test]
 fn g0_invalid_or_unsupported_plastic_trials_leave_accepted_history_unchanged() {
     let law = constant_locus();
     let stress = [100.0, 0.0, 0.0, 0.0, 0.0, 0.0];

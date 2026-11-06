@@ -1,4 +1,4 @@
-//! Original fracture-equivalent plastic strain versus stress-triaxiality data.
+//! Original fracture-equivalent plastic strain versus physical stress invariants.
 //!
 //! The exact ordinate is accumulated equivalent plastic strain at ductile
 //! initiation. Engineering elongation, total strain at rupture, reduction of
@@ -9,10 +9,12 @@
 //! Construction explicitly authors a piecewise-linear locus between original
 //! observations. It does not change the claim's interpolation policy or create
 //! measured values between knots. Every source knot and receipt is retained.
-//! This one-dimensional reduction is frozen at the selected absolute
+//! Each prepared locus is frozen at the selected absolute
 //! temperature, and uses only the original positive plastic-strain-rate
 //! applicability interval. Both are checked against actual runtime inputs.
-//! Lode-angle dependence and other unsupported evolving coordinates refuse.
+//! Curves depend on triaxiality alone. Two-coordinate loci retain the original
+//! source triangles in triaxiality and `xi = (27/2) det(s) / q^3`; neither a
+//! bounding rectangle nor an inferred convex hull fills gaps in those data.
 //! Initiation is an empirical criterion, not stiffness degradation, fracture
 //! energy, a separated surface, or experimentally validated component failure.
 
@@ -24,13 +26,23 @@ use fs_matdb::{
 use fs_qty::semantic::{QuantityKind, ValueForm};
 use fs_qty::{Dims, QuantitySpec};
 
-use super::{DuctileDomain, DuctileError, DuctileInitiationLaw, TabulatedDuctileLocus};
+use super::evolution::{DifferentiableDuctileInitiationLaw, DuctileLocusGradient};
+use super::{
+    DuctileDomain, DuctileError, DuctileInitiationLaw, DuctileStressState, TabulatedDuctileLocus,
+};
 use crate::state_point::{ResolvedMaterialStatePoint, is_fixed_external_coordinate};
+
+mod stress_state;
+pub use stress_state::{DuctileStressSurface, resolve_ductile_stress_locus};
 
 /// Local accumulated equivalent plastic strain at ductile initiation.
 pub const FRACTURE_PLASTIC_STRAIN_PROPERTY: &str = "ductile-fracture-equivalent-plastic-strain";
 /// `eta = mean tensile stress / von Mises stress`, dimensionless.
 pub const STRESS_TRIAXIALITY_AXIS: &str = "stress-triaxiality";
+/// `xi = (27/2) det(s) / q^3 = cos(3 theta)`, dimensionless in [-1,1].
+/// Positive one is the tensile meridian; this is not a Lode angle in radians
+/// or the differently normalized parameter `1 - 6 theta / pi`.
+pub const LODE_PARAMETER_AXIS: &str = "stress-lode-parameter";
 /// Actual accumulated equivalent plastic strain rate, in inverse seconds.
 /// A crosshead speed or cyclic frequency cannot supply this coordinate.
 pub const PLASTIC_STRAIN_RATE_AXIS: &str = "equivalent-plastic-strain-rate";
@@ -43,7 +55,7 @@ const RATE_DIMS: Dims = Dims([0, 0, -1, 0, 0, 0]);
 pub struct DuctileSourceRequest {
     /// Source axis carrying semantic static absolute temperature, in kelvin.
     pub temperature_axis: String,
-    /// Maximum original knot count; at least two are needed for this locus.
+    /// Maximum original sample count; curves need two and surfaces three.
     pub maximum_points: usize,
 }
 
@@ -56,7 +68,7 @@ pub struct DuctileCalibrationSource {
     request: DuctileSourceRequest,
     query: QueryPoint,
     selection: ClaimSelection,
-    observations: Vec<(f64, MaterialAnswer)>,
+    observations: Vec<(QueryPoint, MaterialAnswer)>,
 }
 
 impl DuctileCalibrationSource {
@@ -78,13 +90,14 @@ impl DuctileCalibrationSource {
     pub const fn selection(&self) -> ClaimSelection {
         self.selection
     }
-    /// Original `(triaxiality, answer)` observations, in source order.
-    pub fn observations(&self) -> &[(f64, MaterialAnswer)] {
+    /// Original fully typed sample coordinates and answers, in source order.
+    /// Curves retain triaxiality; surfaces retain both actual stress invariants.
+    pub fn observations(&self) -> &[(QueryPoint, MaterialAnswer)] {
         &self.observations
     }
 
     /// Match the native mechanical material's original card, named state and
-    /// complete fixed context. Only triaxiality and plastic strain rate are
+    /// complete fixed context. Only actual response axes and plastic rate are
     /// excluded: their actual runtime values are checked by the numeric law.
     /// Temperature remains the original fixed calibration temperature.
     pub fn matches_material_state(
@@ -96,19 +109,25 @@ impl DuctileCalibrationSource {
         self.card_identity == card_identity
             && &self.material_state == material
             && self.query.axes().iter().all(|(axis, value)| {
-                axis == STRESS_TRIAXIALITY_AXIS
-                    || axis == PLASTIC_STRAIN_RATE_AXIS
+                self.is_runtime_axis(axis)
                     || point.axes().get(axis) == Some(value)
                         && point.axis_quantities().get(axis)
                             == self.query.axis_quantities().get(axis)
             })
             && point.axes().iter().all(|(axis, value)| {
-                axis == STRESS_TRIAXIALITY_AXIS
-                    || axis == PLASTIC_STRAIN_RATE_AXIS
+                self.is_runtime_axis(axis)
                     || self.query.axes().get(axis) == Some(value)
                         && self.query.axis_quantities().get(axis)
                             == point.axis_quantities().get(axis)
             })
+    }
+
+    fn is_runtime_axis(&self, axis: &str) -> bool {
+        axis == STRESS_TRIAXIALITY_AXIS
+            || axis == PLASTIC_STRAIN_RATE_AXIS
+            || axis == LODE_PARAMETER_AXIS
+                && matches!(&self.claim.value, PropertyValue::Surface2D { axes, .. }
+                    if axes.iter().any(|name| name == LODE_PARAMETER_AXIS))
     }
 
     /// Direct binding for the shared bundle used by source-resolved J2 laws.
@@ -125,12 +144,12 @@ impl DuctileCalibrationSource {
 /// Evaluation neither queries a database nor allocates source objects.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResolvedDuctileLocus {
-    law: TabulatedDuctileLocus,
+    law: PreparedDuctileLocus,
     source: DuctileCalibrationSource,
 }
 
 impl ResolvedDuctileLocus {
-    pub const fn law(&self) -> &TabulatedDuctileLocus {
+    pub const fn law(&self) -> &PreparedDuctileLocus {
         &self.law
     }
     pub const fn source(&self) -> &DuctileCalibrationSource {
@@ -151,6 +170,97 @@ impl DuctileInitiationLaw for ResolvedDuctileLocus {
     ) -> Result<f64, DuctileError> {
         self.law
             .fracture_strain(triaxiality, strain_rate_s_inv, temperature_k)
+    }
+
+    fn fracture_strain_at(
+        &self,
+        stress: DuctileStressState,
+        rate: f64,
+        temperature: f64,
+    ) -> Result<f64, DuctileError> {
+        self.law.fracture_strain_at(stress, rate, temperature)
+    }
+}
+
+/// Prepared numeric response on exactly the original one- or two-axis support.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PreparedDuctileLocus {
+    Triaxiality(TabulatedDuctileLocus),
+    StressState(DuctileStressSurface),
+}
+
+impl DuctileInitiationLaw for PreparedDuctileLocus {
+    fn domain(&self) -> &DuctileDomain {
+        match self {
+            Self::Triaxiality(law) => law.domain(),
+            Self::StressState(law) => law.domain(),
+        }
+    }
+
+    fn fracture_strain(&self, eta: f64, rate: f64, temperature: f64) -> Result<f64, DuctileError> {
+        match self {
+            Self::Triaxiality(law) => law.fracture_strain(eta, rate, temperature),
+            Self::StressState(law) => law.fracture_strain(eta, rate, temperature),
+        }
+    }
+
+    fn fracture_strain_at(
+        &self,
+        stress: DuctileStressState,
+        rate: f64,
+        temperature: f64,
+    ) -> Result<f64, DuctileError> {
+        match self {
+            Self::Triaxiality(law) => law.fracture_strain_at(stress, rate, temperature),
+            Self::StressState(law) => law.fracture_strain_at(stress, rate, temperature),
+        }
+    }
+}
+
+impl DifferentiableDuctileInitiationLaw for PreparedDuctileLocus {
+    fn fracture_strain_gradient(
+        &self,
+        eta: f64,
+        rate: f64,
+        temperature: f64,
+    ) -> Result<DuctileLocusGradient, DuctileError> {
+        match self {
+            Self::Triaxiality(law) => law.fracture_strain_gradient(eta, rate, temperature),
+            Self::StressState(law) => law.fracture_strain_gradient(eta, rate, temperature),
+        }
+    }
+
+    fn fracture_strain_gradient_at(
+        &self,
+        stress: DuctileStressState,
+        rate: f64,
+        temperature: f64,
+    ) -> Result<DuctileLocusGradient, DuctileError> {
+        match self {
+            Self::Triaxiality(law) => law.fracture_strain_gradient_at(stress, rate, temperature),
+            Self::StressState(law) => law.fracture_strain_gradient_at(stress, rate, temperature),
+        }
+    }
+}
+
+impl DifferentiableDuctileInitiationLaw for ResolvedDuctileLocus {
+    fn fracture_strain_gradient(
+        &self,
+        eta: f64,
+        rate: f64,
+        temperature: f64,
+    ) -> Result<DuctileLocusGradient, DuctileError> {
+        self.law.fracture_strain_gradient(eta, rate, temperature)
+    }
+
+    fn fracture_strain_gradient_at(
+        &self,
+        stress: DuctileStressState,
+        rate: f64,
+        temperature: f64,
+    ) -> Result<DuctileLocusGradient, DuctileError> {
+        self.law
+            .fracture_strain_gradient_at(stress, rate, temperature)
     }
 }
 
@@ -224,10 +334,12 @@ pub fn resolve_ductile_locus(
     )?;
     let key = PropertyKey::new(FRACTURE_PLASTIC_STRAIN_PROPERTY, Dims::NONE);
     let selected = query(card, &key, point, selection)?;
-    let claim = card
-        .claims()
-        .claim(selected.receipt.selected)
-        .ok_or(DuctileSourceError::Invalid("selected ductile source is absent"))?;
+    let claim =
+        card.claims()
+            .claim(selected.receipt.selected)
+            .ok_or(DuctileSourceError::Invalid(
+                "selected ductile source is absent",
+            ))?;
     let knots = match &claim.value {
         PropertyValue::Curve {
             abscissa,
@@ -251,8 +363,14 @@ pub fn resolve_ductile_locus(
         "original ductile table exceeds the declared knot budget or has fewer than two knots",
     )?;
     for (axis, quantity) in [
-        (STRESS_TRIAXIALITY_AXIS, QuantitySpec::dimensional(Dims::NONE)),
-        (PLASTIC_STRAIN_RATE_AXIS, QuantitySpec::dimensional(RATE_DIMS)),
+        (
+            STRESS_TRIAXIALITY_AXIS,
+            QuantitySpec::dimensional(Dims::NONE),
+        ),
+        (
+            PLASTIC_STRAIN_RATE_AXIS,
+            QuantitySpec::dimensional(RATE_DIMS),
+        ),
     ] {
         require(
             point.axis_quantities().get(axis) == Some(&quantity)
@@ -268,9 +386,15 @@ pub fn resolve_ductile_locus(
     require(
         temperature.semantic_type().is_some_and(|q| {
             q.kind() == QuantityKind::AbsoluteTemperature && q.form() == ValueForm::Static
-        }) && claim.validity.axis_quantities().get(&request.temperature_axis)
+        }) && claim
+            .validity
+            .axis_quantities()
+            .get(&request.temperature_axis)
             == Some(temperature)
-            && claim.validity.bounds().contains_key(&request.temperature_axis),
+            && claim
+                .validity
+                .bounds()
+                .contains_key(&request.temperature_axis),
         "source temperature must be declared static absolute kelvin",
     )?;
     let temperature_k = *point
@@ -297,9 +421,9 @@ pub fn resolve_ductile_locus(
                 point.axis_quantities().get(axis).copied(),
                 point.axes().get(axis).copied(),
             ) && point.axis_quantities().get(axis).is_none_or(|quantity| {
-                quantity.semantic_type().is_none_or(|q| {
-                    q.kind() != QuantityKind::AbsoluteTemperature
-                })
+                quantity
+                    .semantic_type()
+                    .is_none_or(|q| q.kind() != QuantityKind::AbsoluteTemperature)
             }) && axis != "T",
             "a one-dimensional ductile locus cannot freeze an evolving or second temperature axis",
         )?;
@@ -308,7 +432,9 @@ pub fn resolve_ductile_locus(
         .validity
         .bounds()
         .get(PLASTIC_STRAIN_RATE_AXIS)
-        .ok_or(DuctileSourceError::Invalid("plastic strain rate bounds are absent"))?;
+        .ok_or(DuctileSourceError::Invalid(
+            "plastic strain rate bounds are absent",
+        ))?;
     let domain = DuctileDomain {
         triaxiality: [knots[0].0, knots[knots.len() - 1].0],
         strain_rate_s_inv: [minimum_rate, maximum_rate],
@@ -324,10 +450,10 @@ pub fn resolve_ductile_locus(
                 && answer.evidence.value.value == strain,
             "every original knot must retain its selected source and exact plastic strain",
         )?;
-        observations.push((eta, answer));
+        observations.push((at, answer));
     }
     Ok(ResolvedDuctileLocus {
-        law,
+        law: PreparedDuctileLocus::Triaxiality(law),
         source: DuctileCalibrationSource {
             card_identity: card.content_hash(),
             material_state: card.id().clone(),
