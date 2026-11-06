@@ -33,6 +33,7 @@ pub use resonance::{PhsPortResonanceRequest, PhsPortResonanceResponse};
 pub use sensitivity::PhsPortSidebandCarrierDerivativeResponse;
 pub use stability::{
     PhsBaseStabilityControls, PhsBaseStabilityError, PhsBaseStabilityLevel, PhsBaseStabilityReport,
+    PhsBaseTransientControls, PhsBaseTransientError, PhsBaseTransientLevel, PhsBaseTransientReport,
 };
 
 /// A complete physical response with independently measured sideband convergence.

@@ -24,6 +24,8 @@ mod driven_feedback;
 mod resonance;
 #[path = "phs_sideband/stability.rs"]
 mod stability;
+#[path = "phs_sideband/transient.rs"]
+mod transient;
 
 fn controls(
     states: usize,

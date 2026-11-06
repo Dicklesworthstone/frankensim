@@ -16,6 +16,11 @@ use fs_spectral::floquet::{
     assess_monodromy_with_multipliers,
 };
 
+mod transient;
+pub use transient::{
+    PhsBaseTransientControls, PhsBaseTransientError, PhsBaseTransientLevel, PhsBaseTransientReport,
+};
+
 /// Independent temporal, spectral and TOTAL stability-operation limits.
 #[derive(Clone, Debug)]
 pub struct PhsBaseStabilityControls {

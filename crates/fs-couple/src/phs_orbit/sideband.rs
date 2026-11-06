@@ -29,7 +29,8 @@ mod prepared;
 pub use prepared::{
     AdaptivePhsPortResonanceResponse, AdaptivePhsPortSidebandCarrierDerivativeResponse,
     AdaptivePhsPortSidebandResponse, FactoredPhsPortSidebands, PhsBaseStabilityControls,
-    PhsBaseStabilityError, PhsBaseStabilityLevel, PhsBaseStabilityReport,
+    PhsBaseStabilityError, PhsBaseStabilityLevel, PhsBaseStabilityReport, PhsBaseTransientControls,
+    PhsBaseTransientError, PhsBaseTransientLevel, PhsBaseTransientReport,
     PhsPortAdaptiveResonanceRequest, PhsPortResonanceRefinementCheck, PhsPortResonanceRequest,
     PhsPortResonanceResponse, PhsPortSidebandCarrierDerivativeResponse, PhsPortSidebandSource,
     PreparedPhsPortSidebands, solve_forced_feedback_port_sideband_response,
