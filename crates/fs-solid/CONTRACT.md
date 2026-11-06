@@ -9298,3 +9298,33 @@ yielded cantilever load/unload work against independent yield-increment heat
 and pure-drilling storage/loss with zero material heat. Source/API review and
 rustfmt checks are complete; native compilation and regression execution remain
 unverified because the runner exhausted its available disk and memory.
+
+
+## Oriented Hill48 compression, release and confinement
+
+`tests/plastic_hill_compression.rs` extends the original directional cases
+through `OrientedHill48` and the native P1 tetrahedral and P1/Q1 plane solvers.
+Three principal material orientations and an independent 45-degree oracle
+exercise compressive yield, elastic unloading, reversal and reaction balance.
+Lateral unknowns remain free apart from rigid-motion constraints, so oblique
+plastic shear and unequal width/thickness flow are solved rather than pinned
+away. Comparisons convert original material-coordinate history through
+`plastic_strain_spatial`. A rotated Q1 Standard/BBar affine comparison retains
+plane-strain confinement and transverse plastic history.
+
+`examples/anisotropic_compression.rs` resolves nine original scalar properties
+through `plastic::hill::source::planar`, including explicit plastic r0/r45/r90
+and both independent transverse shear yield ratios. The 100 x 20 x 10 mm
+coupon is compressed and released in rolling, cross, thickness and 45-degree
+orientations. CSV output separates stress, reaction, width/thickness strain,
+plastic shear, Hill accumulation, permanent dimensions, lateral end offset
+and residual released stress. Width and thickness use same-section gauges,
+so plastic shear is not mislabeled as a width change. Run with
+`cargo run -p fs-solid --example anisotropic_compression -- 0.004`.
+
+These are synthetic constitutive examples, not measurements or calibrated
+forming limits. The fixed-axis small-strain symmetric-yield model does not
+add finite forging, contact, evolving texture, buckling, necking or damage.
+The additional FE cases are authored and statically reviewed; their full
+native Cargo execution remains outstanding under shared executor resource
+constraints. Focused constitutive execution is not an FE integration pass.
