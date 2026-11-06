@@ -1721,11 +1721,30 @@ bisection solves `tau + |x_observer-X(tau)|/c = t`; all real-tesseral source
 coefficients use one complete 16-tap Lanczos-8 stencil at `tau`, and their
 direction is rotated by the emission pose before physical `1/r` spreading.
 All observers share the intersection of their complete arrival-time horizons
-and are returned transactionally in caller order. Admission enforces exact
-source/basis/gas/clock identities, the conservative broadband far-field gate,
-and a caller-bounded surface Mach number. This remains `EstimateOnly` under
-`RETARDED_FAR_FIELD_OBSERVER_NO_CLAIM`; in particular it is not moving-boundary
-FW-H, exact Doppler amplitude, near-field, room/head, or calibrated SPL.
+and are returned transactionally in caller order. The output sample clock is
+explicit and independent of the original source-stem clock. Admission requires
+a declared source band within source Nyquist, a declared receiver band covering
+the outward-rounded fixed-microphone Doppler ceiling `f_source/(1-M_max)`,
+and receiver bandwidth strictly below output Nyquist. The receiver declaration
+also owns pose/directivity and geometric amplitude modulation; neither sampled
+BEM fit frequencies nor a modal list supplies spectral authority. Lanczos-8
+reconstruction is not an antialias filter for time compression. Pressure
+identities bind both clocks and both bandwidth declarations.
+
+The cinematic moving-disc paths reserve the complete discrete source band,
+observe at 96 kHz, and use the original `fs-couple` pressure half-band
+decimator before joining the 48 kHz stationary-plate mix. Only complete
+master-clock cells with the full real FIR history are retained. The incomplete
+80-output-frame prefix is discarded and the existing 40-output-frame group
+delay is removed from their timestamps; no missing source history or tail is
+padded. Analytic two-tone regressions check 30 kHz foldover rejection and
+2 kHz phase on both possible incoming high-rate grid phases.
+
+Admission also enforces exact source/basis/gas identities, the conservative
+broadband far-field gate, and the existing caller-bounded surface Mach checks.
+This remains `EstimateOnly` under `RETARDED_FAR_FIELD_OBSERVER_NO_CLAIM`;
+in particular it is not a certified spectral enclosure, moving-boundary FW-H,
+exact Doppler amplitude, near-field, room/head, or calibrated SPL.
 
 The modal initial condition is explicit. `Zero` is admissible only when the
 retained horizon begins before excitation; a cropped horizon that begins under

@@ -265,6 +265,10 @@ const CRITIQUE_AUDIO_CONVERGENCE_PASSBAND_HZ: f64 = 8_000.0;
 /// spatial spectrum, and mechanics-force bandwidth authority; this passband
 /// does not itself establish any of those source properties.
 const CRITIQUE_PHYSICAL_FORCE_RECONSTRUCTION_PASSBAND_HZ: f64 = 18_000.0;
+// Retarded time compression can move a full-band 48 kHz stem above 24 kHz.
+// Observe first at 96 kHz, then use the existing pressure decimator before
+// combining with the stationary support-plate signal on the master clock.
+const CRITIQUE_RETARDED_SAMPLE_RATE_HZ: u32 = 2 * SOUND_MASTER_SAMPLE_RATE_HZ;
 /// Stable caller-ledgered root for animation frame render jobs.
 const CRITIQUE_RENDER_RUN: RunId = RunId(0x4555_4c45_5252_454e);
 /// Stable placement-only seed for the reusable parked render crew.
@@ -8841,28 +8845,31 @@ fn build_physical_audio(
             .map_err(pipeline)?;
         let maximum_output_frames = usize::try_from(
             u64::from(config.frames + config.mechanics_preroll_video_frames)
-                * u64::from(SOUND_MASTER_SAMPLE_RATE_HZ / CRITIQUE_FPS)
-                + u64::from(SOUND_MASTER_SAMPLE_RATE_HZ),
+                * u64::from(CRITIQUE_RETARDED_SAMPLE_RATE_HZ / CRITIQUE_FPS)
+                + u64::from(CRITIQUE_RETARDED_SAMPLE_RATE_HZ),
         )
         .map_err(|_| CinematicFixtureError::Pipeline("disc observer budget overflow".into()))?;
-        Some(
-            synthesize_retarded_far_field_world_observers(
-                disc_source,
-                &stem,
-                disc_basis,
-                preroll_trajectory.trajectory(),
-                &observers,
-                RetardedFarFieldObserverControls {
-                    maximum_surface_mach: 0.08,
-                    root_time_tolerance_s: 1.0e-9,
-                    maximum_root_iterations: 64,
-                    interpolation_radius_frames: 8,
-                    maximum_output_frames,
-                },
-                cx,
-            )
-            .map_err(pipeline)?,
+        let pressure = synthesize_retarded_far_field_world_observers(
+            disc_source,
+            &stem,
+            disc_basis,
+            preroll_trajectory.trajectory(),
+            &observers,
+            RetardedFarFieldObserverControls {
+                output_sample_rate_hz: CRITIQUE_RETARDED_SAMPLE_RATE_HZ,
+                source_bandwidth_hz: 0.5 * f64::from(stem.sample_rate_hz),
+                receiver_bandwidth_hz:
+                    (0.5 * f64::from(CRITIQUE_RETARDED_SAMPLE_RATE_HZ)).next_down(),
+                maximum_surface_mach: 0.08,
+                root_time_tolerance_s: 1.0e-9,
+                maximum_root_iterations: 64,
+                interpolation_radius_frames: 8,
+                maximum_output_frames,
+            },
+            cx,
         )
+        .map_err(pipeline)?;
+        Some(decimate_retarded_pressure_observers(pressure, cx)?)
     } else {
         None
     };
@@ -8877,30 +8884,33 @@ fn build_physical_audio(
                 .map_err(pipeline)?;
             let maximum_output_frames = usize::try_from(
                 u64::from(config.frames + config.mechanics_preroll_video_frames)
-                    * u64::from(SOUND_MASTER_SAMPLE_RATE_HZ / CRITIQUE_FPS)
-                    + u64::from(SOUND_MASTER_SAMPLE_RATE_HZ),
+                    * u64::from(CRITIQUE_RETARDED_SAMPLE_RATE_HZ / CRITIQUE_FPS)
+                    + u64::from(CRITIQUE_RETARDED_SAMPLE_RATE_HZ),
             )
             .map_err(|_| {
                 CinematicFixtureError::Pipeline("rigid-disc observer budget overflow".into())
             })?;
-            Some(
-                synthesize_rigid_disc_retarded_far_field_world_observers(
-                    source,
-                    &stem,
-                    basis,
-                    preroll_trajectory.trajectory(),
-                    &observers,
-                    RetardedFarFieldObserverControls {
-                        maximum_surface_mach: 0.08,
-                        root_time_tolerance_s: 1.0e-9,
-                        maximum_root_iterations: 64,
-                        interpolation_radius_frames: 8,
-                        maximum_output_frames,
-                    },
-                    cx,
-                )
-                .map_err(pipeline)?,
+            let pressure = synthesize_rigid_disc_retarded_far_field_world_observers(
+                source,
+                &stem,
+                basis,
+                preroll_trajectory.trajectory(),
+                &observers,
+                RetardedFarFieldObserverControls {
+                    output_sample_rate_hz: CRITIQUE_RETARDED_SAMPLE_RATE_HZ,
+                    source_bandwidth_hz: 0.5 * f64::from(stem.sample_rate_hz),
+                    receiver_bandwidth_hz:
+                        (0.5 * f64::from(CRITIQUE_RETARDED_SAMPLE_RATE_HZ)).next_down(),
+                    maximum_surface_mach: 0.08,
+                    root_time_tolerance_s: 1.0e-9,
+                    maximum_root_iterations: 64,
+                    interpolation_radius_frames: 8,
+                    maximum_output_frames,
+                },
+                cx,
             )
+            .map_err(pipeline)?;
+            Some(decimate_retarded_pressure_observers(pressure, cx)?)
         }
         (Some(_), Some(_), None) | (Some(_), None, None) | (None, None, None) => None,
         _ => {
@@ -9250,6 +9260,95 @@ fn physical_pressure_observers_manifest_json() -> String {
         right.position_world_m[1],
         right.position_world_m[2],
     )
+}
+
+fn decimate_retarded_pressure_observers(
+    pressure: Vec<PhysicalPressureSignal>,
+    cx: &Cx<'_>,
+) -> Result<Vec<PhysicalPressureSignal>, CinematicFixtureError> {
+    pressure
+        .into_iter()
+        .map(|signal| decimate_retarded_pressure_to_master(signal, cx))
+        .collect()
+}
+
+// The shared causal half-band has a 40-master-frame delay and 80-frame
+// complete-support prefix. Discard that incomplete prefix, then subtract the
+// physical delay from the retained sample timestamps. No source history is
+// reflected, padded or invented, and every microphone keeps the same clock.
+fn decimate_retarded_pressure_to_master(
+    mut signal: PhysicalPressureSignal,
+    cx: &Cx<'_>,
+) -> Result<PhysicalPressureSignal, CinematicFixtureError> {
+    let source_rate = f64::from(CRITIQUE_RETARDED_SAMPLE_RATE_HZ);
+    let coordinate = signal.start_time_s * source_rate;
+    let rounded = coordinate.round();
+    if signal.sample_rate_hz != CRITIQUE_RETARDED_SAMPLE_RATE_HZ
+        || !coordinate.is_finite()
+        || rounded.abs() > 9_007_199_254_740_991.0
+        || (coordinate - rounded).abs() > 1.0e-6
+    {
+        return Err(CinematicFixtureError::Pipeline(
+            "retarded pressure must retain its explicit twice-master sample clock".into(),
+        ));
+    }
+    // Each output is centered on an ORIGINAL master closing boundary. If the
+    // common retarded horizon starts halfway through a master cell, retain
+    // only the following complete cells rather than shifting their times.
+    let skipped_input = rounded.rem_euclid(2.0) as usize;
+    let input = signal.pressure_pa.get(skipped_input..).ok_or_else(|| {
+        CinematicFixtureError::Pipeline("retarded pressure has no complete input group".into())
+    })?;
+    let mut filter = fs_couple::pcm_wav::decimate::Decimator::new(2, 1)
+        .map_err(pipeline)?;
+    let delay = filter.delay_output_frames();
+    let unsupported_prefix = (2.0 * delay) as usize;
+    let retained = (input.len() / 2)
+        .checked_sub(unsupported_prefix)
+        .filter(|&count| count > 0)
+        .ok_or_else(|| {
+            CinematicFixtureError::Pipeline(
+                "retarded pressure has no complete antialias-filter interior".into(),
+            )
+        })?;
+    let start_time_s = signal.start_time_s
+        + skipped_input as f64 / source_rate
+        + (unsupported_prefix as f64 - delay) / f64::from(SOUND_MASTER_SAMPLE_RATE_HZ);
+    let mut identity =
+        DomainHasher::new("org.frankensim.euler-disc.retarded-pressure-decimation.v1");
+    identity.update(signal.identity.as_bytes());
+    identity.update(b"blackman-harris-integer-decimator-v1");
+    identity.update(&SOUND_MASTER_SAMPLE_RATE_HZ.to_le_bytes());
+    identity.update(&start_time_s.to_bits().to_le_bytes());
+    identity.update(&delay.to_bits().to_le_bytes());
+    identity.update(&(skipped_input as u64).to_le_bytes());
+    identity.update(&(retained as u64).to_le_bytes());
+    let mut output = Vec::new();
+    output.try_reserve_exact(retained).map_err(|_| {
+        CinematicFixtureError::Pipeline("retarded pressure decimation allocation refused".into())
+    })?;
+    let mut peak_abs_pressure_pa = 0.0_f64;
+    for (frame, samples) in input.chunks_exact(2).enumerate() {
+        if frame % 64 == 0 {
+            cx.checkpoint()
+                .map_err(|_| CinematicFixtureError::Cancelled)?;
+        }
+        let value = filter.preview(samples).map_err(pipeline)?[0];
+        filter.commit();
+        if frame >= unsupported_prefix {
+            output.push(value);
+            peak_abs_pressure_pa = peak_abs_pressure_pa.max(value.abs());
+            identity.update(&value.to_bits().to_le_bytes());
+        }
+    }
+    cx.checkpoint()
+        .map_err(|_| CinematicFixtureError::Cancelled)?;
+    signal.start_time_s = start_time_s;
+    signal.sample_rate_hz = SOUND_MASTER_SAMPLE_RATE_HZ;
+    signal.pressure_pa = output;
+    signal.peak_abs_pressure_pa = peak_abs_pressure_pa;
+    signal.identity = identity.finalize();
+    Ok(signal)
 }
 
 fn crop_physical_pressure_window(
@@ -12712,6 +12811,82 @@ mod tests {
             .sum::<f64>()
             .sqrt();
         assert!((spacing - 2.0 * CRITIQUE_PHYSICAL_MICROPHONE_HALF_SPACING_M).abs() < 1.0e-14);
+    }
+
+    fn retarded_pressure_test_signal(
+        opening_index: u32,
+        frames: usize,
+    ) -> PhysicalPressureSignal {
+        let rate = f64::from(CRITIQUE_RETARDED_SAMPLE_RATE_HZ);
+        let start_time_s = f64::from(opening_index) / rate;
+        let pressure_pa: Vec<_> = (0..frames)
+            .map(|index| {
+                let time = start_time_s + (index + 1) as f64 / rate;
+                // The 30 kHz term would alias to 18 kHz at the master rate.
+                0.8 * det::sin(core::f64::consts::TAU * 2_000.0 * time)
+                    + 0.5 * det::sin(core::f64::consts::TAU * 30_000.0 * time)
+            })
+            .collect();
+        let peak_abs_pressure_pa =
+            pressure_pa.iter().fold(0.0_f64, |peak, value| peak.max(value.abs()));
+        PhysicalPressureSignal {
+            start_time_s,
+            sample_rate_hz: CRITIQUE_RETARDED_SAMPLE_RATE_HZ,
+            pressure_pa,
+            peak_abs_pressure_pa,
+            contact_force_sampling: crate::structural_acoustics::PhysicalContactForceSampling::IntervalMeasureAtClosingElseOpeningEndpointBandLimitedV1,
+            observer: crate::structural_acoustics::PhysicalPressureObserver::WorldFixed(
+                physical_pressure_observers()[0],
+            ),
+            structural_basis_identity: ContentHash([1; 32]),
+            radiation_identity: ContentHash([2; 32]),
+            damping_model_identity: ContentHash([3; 32]),
+            identity: ContentHash([4; 32]),
+        }
+    }
+
+    #[test]
+    fn retarded_pressure_decimation_rejects_foldover_without_shifting_physical_time() {
+        for opening_index in [0, 1, 2] {
+            let input = retarded_pressure_test_signal(opening_index, 4_097);
+            let identity = input.identity;
+            let output =
+                with_test_cx(|cx| decimate_retarded_pressure_to_master(input, cx)).unwrap();
+            assert_eq!(output.sample_rate_hz, SOUND_MASTER_SAMPLE_RATE_HZ);
+            assert_ne!(output.identity, identity);
+            let opening = output.start_time_s * f64::from(SOUND_MASTER_SAMPLE_RATE_HZ);
+            assert!((opening - opening.round()).abs() < 1.0e-10);
+            assert!(output.pressure_pa.len() > 1_900);
+            for (index, pressure) in output.pressure_pa.iter().enumerate() {
+                let physical_time = output.start_time_s
+                    + (index + 1) as f64 / f64::from(SOUND_MASTER_SAMPLE_RATE_HZ);
+                let expected = 0.8 * det::sin(core::f64::consts::TAU * 2_000.0 * physical_time);
+                assert!(
+                    (pressure - expected).abs() < 2.0e-5,
+                    "opening {opening_index}, sample {index}: {pressure} vs {expected}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn retarded_pressure_decimation_requires_real_filter_history_and_aligned_clock() {
+        assert!(
+            with_test_cx(|cx| {
+                decimate_retarded_pressure_to_master(retarded_pressure_test_signal(0, 100), cx)
+            })
+            .is_err()
+        );
+        let mut wrong_rate = retarded_pressure_test_signal(0, 1_000);
+        wrong_rate.sample_rate_hz = SOUND_MASTER_SAMPLE_RATE_HZ;
+        assert!(
+            with_test_cx(|cx| decimate_retarded_pressure_to_master(wrong_rate, cx)).is_err()
+        );
+        let mut off_clock = retarded_pressure_test_signal(0, 1_000);
+        off_clock.start_time_s = 0.5 / f64::from(CRITIQUE_RETARDED_SAMPLE_RATE_HZ);
+        assert!(
+            with_test_cx(|cx| decimate_retarded_pressure_to_master(off_clock, cx)).is_err()
+        );
     }
 
     #[test]

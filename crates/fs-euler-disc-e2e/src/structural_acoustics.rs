@@ -108,7 +108,7 @@ const RIGID_DISC_BROADBAND_SOURCE_IDENTITY_DOMAIN: &str =
 const RIGID_DISC_BROADBAND_ARTIFACT_IDENTITY_DOMAIN: &str =
     "org.frankensim.fs-euler-disc-e2e.rigid-disc-broadband-artifact.v1";
 const RETARDED_FAR_FIELD_SIGNAL_IDENTITY_DOMAIN: &str =
-    "org.frankensim.fs-euler-disc-e2e.retarded-far-field-signal.v1";
+    "org.frankensim.fs-euler-disc-e2e.retarded-far-field-signal.v2";
 const MODAL_ACOUSTIC_RADIATION_IDENTITY_DOMAIN: &str =
     "org.frankensim.fs-euler-disc-e2e.modal-acoustic-radiation.v1";
 const MODAL_ACOUSTIC_DIRECTIVITY_IDENTITY_DOMAIN: &str =
@@ -538,7 +538,19 @@ impl StructuralBroadbandSourceStem {
 /// Controls for the deterministic rigid-source retarded far-field evaluator.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RetardedFarFieldObserverControls {
+    /// Pressure observation rate [Hz], independent of the source-stem clock.
+    /// Render sufficiently fast before applying an antialiasing decimator.
+    pub output_sample_rate_hz: u32,
+    /// Declared coefficient bandwidth [Hz], including all source harmonics.
+    /// Must fit the original stem Nyquist; fit frequencies do not establish it.
+    pub source_bandwidth_hz: f64,
+    /// Declared observed bandwidth [Hz], including Doppler compression and
+    /// emission-pose/directivity and geometric amplitude modulation. Must lie
+    /// strictly below output Nyquist. Admission checks the Doppler requirement;
+    /// interpolation and modulation convergence remain producer obligations.
+    pub receiver_bandwidth_hz: f64,
     /// Maximum admitted source-surface speed divided by sound speed.
+    /// Zero admits stationary sources; the low-Mach ceiling remains 0.1.
     pub maximum_surface_mach: f64,
     /// Absolute emission-time bisection tolerance [s].
     pub root_time_tolerance_s: f64,
@@ -5438,8 +5450,11 @@ pub fn synthesize_rigid_disc_retarded_far_field_world_observers(
 /// broadband far-field coefficients using physical retarded time.
 ///
 /// Version one is interior-only: every accepted emission query has a complete
-/// 16-tap Lanczos-8 stencil. All observers are validated and synthesized into
-/// private candidates before any signal is returned.
+/// 16-tap Lanczos-8 stencil. Source interpolation stays on the original stem
+/// clock; observation uses the explicitly admitted output clock and bandwidth.
+/// Lanczos reconstruction is not an antialias filter for time compression.
+/// All observers are validated and synthesized into private candidates before
+/// any signal is returned.
 pub fn synthesize_retarded_far_field_world_observers(
     source: &StructuralBroadbandRadiationArtifact,
     stem: &StructuralBroadbandSourceStem,
@@ -5450,10 +5465,12 @@ pub fn synthesize_retarded_far_field_world_observers(
     cx: &Cx<'_>,
 ) -> Result<Vec<PhysicalPressureSignal>, StructuralModalBasisError> {
     validate_retarded_observer_inputs(source, stem, basis, trajectory, observers, controls, cx)?;
-    let fs = f64::from(stem.sample_rate_hz);
-    let period = fs.recip();
-    let first_emission_s = stem.start_time_s + 8.0 * period;
-    let last_emission_s = stem.start_time_s + (stem.frame_count() as f64 - 8.0) * period;
+    let source_rate_hz = f64::from(stem.sample_rate_hz);
+    let source_period_s = source_rate_hz.recip();
+    let period = f64::from(controls.output_sample_rate_hz).recip();
+    let first_emission_s = stem.start_time_s + 8.0 * source_period_s;
+    let last_emission_s =
+        stem.start_time_s + (stem.frame_count() as f64 - 8.0) * source_period_s;
     let timeline = TimelineResampler::new(trajectory);
     let mut arrival_bounds = Vec::with_capacity(observers.len());
     for observer in observers {
@@ -5479,18 +5496,8 @@ pub fn synthesize_retarded_far_field_world_observers(
         .iter()
         .map(|bound| bound.1)
         .fold(f64::INFINITY, f64::min);
-    let first_frame = ((common_start - stem.start_time_s) * fs).ceil().max(1.0) as usize;
-    let end_frame = ((common_end - stem.start_time_s) * fs).floor() as usize;
-    let frame_count = end_frame
-        .checked_sub(first_frame)
-        .and_then(|span| span.checked_add(1))
-        .unwrap_or(0);
-    if frame_count == 0 || frame_count > controls.maximum_output_frames {
-        return Err(StructuralModalBasisError::ControlTimeline {
-            what: "retarded observers have no bounded common interior arrival horizon",
-        });
-    }
-    let output_start_s = stem.start_time_s + (first_frame - 1) as f64 * period;
+    let (first_frame, frame_count, output_start_s) =
+        retarded_output_window(stem.start_time_s, common_start, common_end, controls)?;
     let capacity = frame_count.checked_mul(observers.len()).ok_or(
         StructuralModalBasisError::PressureCapacity {
             requested: usize::MAX,
@@ -5513,7 +5520,7 @@ pub fn synthesize_retarded_far_field_world_observers(
     }
     let mut coefficient_scratch = vec![0.0; stem.channels.len()];
     let mut complex_scratch = vec![C64::ZERO; stem.channels.len()];
-    let minimum_far_field_m = minimum_broadband_far_field_distance(source, fs);
+    let minimum_far_field_m = minimum_broadband_far_field_distance(source, source_rate_hz);
     for frame in 0..frame_count {
         if frame % 64 == 0 {
             cx.checkpoint()
@@ -5581,7 +5588,7 @@ pub fn synthesize_retarded_far_field_world_observers(
             );
             PhysicalPressureSignal {
                 start_time_s: output_start_s,
-                sample_rate_hz: stem.sample_rate_hz,
+                sample_rate_hz: controls.output_sample_rate_hz,
                 pressure_pa,
                 peak_abs_pressure_pa,
                 contact_force_sampling:
@@ -5605,6 +5612,7 @@ fn validate_retarded_observer_inputs(
     controls: RetardedFarFieldObserverControls,
     cx: &Cx<'_>,
 ) -> Result<(), StructuralModalBasisError> {
+    validate_retarded_sampling(stem.sample_rate_hz, controls)?;
     drop(source.radiation.try_runtime()?);
     if source.identity == ContentHash([0; 32])
         || source.authority != BroadbandRadiationAuthority::EstimateOnly
@@ -5642,7 +5650,6 @@ fn validate_retarded_observer_inputs(
                 .iter()
                 .any(|value| !value.is_finite())
         })
-        || !(controls.maximum_surface_mach > 0.0 && controls.maximum_surface_mach <= 0.1)
         || !(controls.root_time_tolerance_s > 0.0 && controls.root_time_tolerance_s.is_finite())
         || controls.maximum_root_iterations == 0
         || controls.maximum_root_iterations > 256
@@ -5681,6 +5688,89 @@ fn validate_retarded_observer_inputs(
         }
     }
     Ok(())
+}
+
+// For a fixed microphone, d tau/d t = 1/(1 - n.v/c). The admitted surface
+// speed bounds the translational speed, so this ceiling applies in every
+// direction without inferring bandwidth from the radiation fit or modal list.
+fn validate_retarded_sampling(
+    source_rate_hz: u32,
+    controls: RetardedFarFieldObserverControls,
+) -> Result<(), StructuralModalBasisError> {
+    if source_rate_hz == 0
+        || controls.output_sample_rate_hz == 0
+        || !controls.maximum_surface_mach.is_finite()
+        || !(0.0..=0.1).contains(&controls.maximum_surface_mach)
+        || !controls.source_bandwidth_hz.is_finite()
+        || controls.source_bandwidth_hz < 0.0
+        || controls.source_bandwidth_hz > 0.5 * f64::from(source_rate_hz)
+        || !controls.receiver_bandwidth_hz.is_finite()
+        || controls.receiver_bandwidth_hz < 0.0
+        || controls.receiver_bandwidth_hz
+            >= 0.5 * f64::from(controls.output_sample_rate_hz)
+    {
+        return Err(StructuralModalBasisError::InvalidRequest {
+            what: "retarded source and receiver bandwidths must fit their explicit sample clocks",
+        });
+    }
+    // Round outward; exact stationary/DC cases retain their original bandwidth.
+    let required_hz = if controls.maximum_surface_mach == 0.0
+        || controls.source_bandwidth_hz == 0.0
+    {
+        controls.source_bandwidth_hz
+    } else {
+        (controls.source_bandwidth_hz
+            / (1.0 - controls.maximum_surface_mach).next_down())
+        .next_up()
+    };
+    if controls.receiver_bandwidth_hz < required_hz {
+        return Err(StructuralModalBasisError::InvalidRequest {
+            what: "retarded receiver bandwidth does not include source Doppler compression",
+        });
+    }
+    Ok(())
+}
+
+// Output cells use the same physical epoch as the stem, but have their OWN
+// closing boundaries. Only complete common interior arrival cells are retained.
+fn retarded_output_window(
+    origin_s: f64,
+    first_arrival_s: f64,
+    last_arrival_s: f64,
+    controls: RetardedFarFieldObserverControls,
+) -> Result<(usize, usize, f64), StructuralModalBasisError> {
+    let rate = f64::from(controls.output_sample_rate_hz);
+    let first = ((first_arrival_s - origin_s) * rate).ceil().max(1.0);
+    let last = ((last_arrival_s - origin_s) * rate).floor();
+    if controls.output_sample_rate_hz == 0
+        || !origin_s.is_finite()
+        || !first_arrival_s.is_finite()
+        || !last_arrival_s.is_finite()
+        || !first.is_finite()
+        || !last.is_finite()
+        || last < first
+        || last >= usize::MAX as f64
+        || last > 9_007_199_254_740_991.0
+    {
+        return Err(StructuralModalBasisError::ControlTimeline {
+            what: "retarded observers have no representable common output clock",
+        });
+    }
+    let first = first as usize;
+    let count = (last as usize)
+        .checked_sub(first)
+        .and_then(|span| span.checked_add(1))
+        .filter(|&count| count <= controls.maximum_output_frames)
+        .ok_or(StructuralModalBasisError::ControlTimeline {
+            what: "retarded observers exceed the common interior output-frame budget",
+        })?;
+    let start = origin_s + (first - 1) as f64 / rate;
+    if !start.is_finite() || origin_s + first as f64 / rate <= start {
+        return Err(StructuralModalBasisError::ControlTimeline {
+            what: "retarded output timestamps are not distinguishable",
+        });
+    }
+    Ok((first, count, start))
 }
 
 fn broadband_source_id_from_report(
@@ -5916,6 +6006,8 @@ fn retarded_pressure_identity(
         &mut h,
         [
             start_time_s,
+            controls.source_bandwidth_hz,
+            controls.receiver_bandwidth_hz,
             controls.maximum_surface_mach,
             controls.root_time_tolerance_s,
         ],
@@ -5923,6 +6015,8 @@ fn retarded_pressure_identity(
     hash_usizes(
         &mut h,
         [
+            stem.sample_rate_hz as usize,
+            controls.output_sample_rate_hz as usize,
             controls.maximum_root_iterations as usize,
             controls.interpolation_radius_frames as usize,
             pressure_pa.len(),
@@ -7727,6 +7821,130 @@ mod tests {
         )
         .unwrap();
         assert_eq!(acceleration[0].to_bits(), 0.0_f64.to_bits());
+    }
+
+    fn retarded_test_controls() -> RetardedFarFieldObserverControls {
+        RetardedFarFieldObserverControls {
+            output_sample_rate_hz: 48_000,
+            source_bandwidth_hz: 23_500.0,
+            receiver_bandwidth_hz: 23_750.0,
+            maximum_surface_mach: 0.0,
+            root_time_tolerance_s: 1.0e-12,
+            maximum_root_iterations: 64,
+            interpolation_radius_frames: 8,
+            maximum_output_frames: 1_000_000,
+        }
+    }
+
+    #[test]
+    fn retarded_sampling_requires_room_for_the_actual_doppler_band() {
+        let stationary = retarded_test_controls();
+        validate_retarded_sampling(48_000, stationary).unwrap();
+
+        let approaching = RetardedFarFieldObserverControls {
+            maximum_surface_mach: 0.1,
+            ..stationary
+        };
+        // A 23.5 kHz source becomes 26.111... kHz at Mach 0.1. Lanczos
+        // reconstruction at 48 kHz cannot prevent its foldover to 21.889 kHz.
+        assert!(23_500.0 / 0.9 > 24_000.0);
+        assert!(validate_retarded_sampling(48_000, approaching).is_err());
+        let resolved = RetardedFarFieldObserverControls {
+            output_sample_rate_hz: 96_000,
+            receiver_bandwidth_hz: 27_000.0,
+            ..approaching
+        };
+        validate_retarded_sampling(48_000, resolved).unwrap();
+        assert!(
+            validate_retarded_sampling(
+                48_000,
+                RetardedFarFieldObserverControls {
+                    output_sample_rate_hz: 48_000,
+                    ..resolved
+                }
+            )
+            .is_err()
+        );
+        assert!(
+            validate_retarded_sampling(
+                48_000,
+                RetardedFarFieldObserverControls {
+                    receiver_bandwidth_hz: 26_000.0,
+                    ..resolved
+                }
+            )
+            .is_err()
+        );
+        // Increasing the receiver rate cannot repair an unresolved source.
+        assert!(
+            validate_retarded_sampling(
+                48_000,
+                RetardedFarFieldObserverControls {
+                    source_bandwidth_hz: 24_001.0,
+                    ..resolved
+                }
+            )
+            .is_err()
+        );
+        for bandwidth in [f64::NAN, f64::INFINITY, -1.0] {
+            assert!(
+                validate_retarded_sampling(
+                    48_000,
+                    RetardedFarFieldObserverControls {
+                        source_bandwidth_hz: bandwidth,
+                        ..resolved
+                    }
+                )
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn retarded_output_clock_preserves_interior_coverage_and_frame_budget() {
+        let controls = RetardedFarFieldObserverControls {
+            output_sample_rate_hz: 16,
+            maximum_output_frames: 17,
+            ..retarded_test_controls()
+        };
+        assert_eq!(
+            retarded_output_window(10.0, 10.5, 11.0, controls).unwrap(),
+            (8, 9, 10.4375)
+        );
+        let higher_rate = RetardedFarFieldObserverControls {
+            output_sample_rate_hz: 32,
+            ..controls
+        };
+        assert_eq!(
+            retarded_output_window(10.0, 10.5, 11.0, higher_rate).unwrap(),
+            (16, 17, 10.46875)
+        );
+        assert!(
+            retarded_output_window(
+                10.0,
+                10.5,
+                11.0,
+                RetardedFarFieldObserverControls {
+                    maximum_output_frames: 16,
+                    ..higher_rate
+                }
+            )
+            .is_err()
+        );
+        assert!(retarded_output_window(10.0, 11.0, 10.5, controls).is_err());
+        assert!(retarded_output_window(10.0, f64::NAN, 11.0, controls).is_err());
+        assert!(
+            retarded_output_window(
+                10.0,
+                10.5,
+                11.0,
+                RetardedFarFieldObserverControls {
+                    output_sample_rate_hz: 0,
+                    ..controls
+                }
+            )
+            .is_err()
+        );
     }
 
     #[test]
