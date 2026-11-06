@@ -64,6 +64,10 @@ pub mod hertz;
 pub mod hertz_rolling;
 pub mod rolling;
 
+/// Continuous native joint friction, finite-cell heat and endpoint source feedback.
+#[path = "friction_heat/joints.rs"]
+pub mod joints;
+
 /// Retained source Mindlin histories, shared native bodies and finite heat.
 pub mod mindlin;
 
@@ -553,3 +557,4 @@ pub fn tangential_heat_candidate<L: TangentialLaw>(
     }
     Ok(step)
 }
+
