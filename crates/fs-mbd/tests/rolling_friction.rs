@@ -276,6 +276,58 @@ fn reference(
 }
 
 #[test]
+fn common_translation_keeps_resolved_rolling_loss_and_native_recoil() {
+    let f = fixture(TAU, INITIAL_RATE, 0.001);
+    let mut reference_bodies = f.bodies;
+    let mut reference_history = RigidRollingHistory::new();
+    let reference = advance(
+        &f,
+        &mut reference_bodies,
+        &mut reference_history,
+        0.2,
+        controls(0.2),
+    );
+    let mut boosted = f.bodies;
+    for (body, property) in boosted.iter_mut().zip(f.properties) {
+        *body = RigidBodyState::new(
+            body.pose(),
+            body.linear_momentum_world()
+                .add(Vec3::new(0.0, 0.0, 1e6 * property.mass())),
+            body.angular_momentum_body(),
+        )
+        .unwrap();
+    }
+    let mut history = RigidRollingHistory::new();
+    let report = advance(&f, &mut boosted, &mut history, 0.2, controls(0.2));
+    // Absolute endpoint energies round to the same number in this frame. The
+    // independent constitutive loss and accepted transverse motion stay real.
+    assert_eq!(report.kinetic_after_j, report.kinetic_before_j);
+    assert!(report.dissipated_heat_j > 0.0);
+    close(
+        report.kinetic_energy_change_j,
+        -reference.dissipated_heat_j,
+        1e-17,
+    );
+    assert_eq!(report.dissipated_heat_j, reference.dissipated_heat_j);
+    close(report.total_energy_residual_j, 0.0, 1e-17);
+    close(report.work_energy_residual_j, 0.0, 1e-17);
+    for (actual, expected) in boosted.iter().zip(reference_bodies) {
+        assert_eq!(
+            actual.linear_momentum_world().x,
+            expected.linear_momentum_world().x
+        );
+        assert_eq!(
+            actual.linear_momentum_world().y,
+            expected.linear_momentum_world().y
+        );
+        assert_eq!(
+            actual.angular_momentum_body(),
+            expected.angular_momentum_body()
+        );
+    }
+}
+
+#[test]
 fn both_axes_slow_the_sphere_and_recoil_the_finite_support_with_original_heat() {
     let f = fixture(TAU, INITIAL_RATE, 0.001);
     let mut bodies = f.bodies;

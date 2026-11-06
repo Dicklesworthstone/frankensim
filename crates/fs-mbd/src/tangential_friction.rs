@@ -451,6 +451,33 @@ fn rounded_components(sum: [Dd; 3]) -> Vec3 {
     Vec3::new(sum[0].to_f64(), sum[1].to_f64(), sum[2].to_f64())
 }
 
+/// Each original body's actual kinetic increment enters exactly once, including
+/// any rounded-away impulse. Absolute background storage is never subtracted.
+fn kinetic_change(
+    before: &[RigidBodyState],
+    after: &[RigidBodyState],
+    properties: &[MassProperties],
+    gate: &CancelGate,
+) -> Result<f64, RigidFrictionError> {
+    if before.len() != after.len() || before.len() != properties.len() {
+        return Err(RigidFrictionError::Invalid(
+            "kinetic increment body coverage",
+        ));
+    }
+    let mut change = crate::MomentumWork::default();
+    for ((&old, &new), &property) in before.iter().zip(after).zip(properties) {
+        poll(gate)?;
+        old.accumulate_kinetic_energy_change(property, new, &mut change)?;
+    }
+    let value = change.total().to_f64();
+    if !value.is_finite() {
+        return Err(RigidFrictionError::Invalid(
+            "unrepresentable kinetic increment",
+        ));
+    }
+    Ok(value)
+}
+
 fn totals(
     bodies: &[RigidBodyState],
     properties: &[MassProperties],
@@ -498,6 +525,113 @@ fn poll(gate: &CancelGate) -> Result<(), RigidFrictionError> {
 mod impulse_tests {
     use super::*;
     use crate::Pose;
+
+    #[test]
+    fn kinetic_increment_retains_small_motion_beside_unchanged_storage() {
+        let property = MassProperties::new(2.0, Vec3::ZERO, Vec3::new(2.0, 3.0, 4.0)).unwrap();
+        let before = RigidBodyState::new(
+            Pose::identity(),
+            Vec3::new(4.0, 0.0, 1e12),
+            Vec3::new(2.0, 0.0, 1e12),
+        )
+        .unwrap();
+        let after = RigidBodyState::new(
+            Pose::identity(),
+            Vec3::new(2.0, 0.0, 1e12),
+            Vec3::new(0.0, 0.0, 1e12),
+        )
+        .unwrap();
+        assert_eq!(
+            before.kinetic_energy(property).unwrap(),
+            after.kinetic_energy(property).unwrap()
+        );
+        // delta(px²/2m) = -3 J, delta(Lx²/2Ixx) = -1 J.
+        assert_eq!(
+            before.kinetic_energy_change_to(property, after).unwrap(),
+            -4.0
+        );
+        assert_eq!(
+            after.kinetic_energy_change_to(property, before).unwrap(),
+            4.0
+        );
+        assert_eq!(
+            before.kinetic_energy_change_to(property, before).unwrap(),
+            0.0
+        );
+    }
+
+    #[test]
+    fn paired_kinetic_increment_rounds_after_opposite_large_transfers_cancel() {
+        let p = 2.0_f64.powi(54);
+        let before =
+            RigidBodyState::new(Pose::identity(), Vec3::new(p, 0.0, 0.0), Vec3::ZERO).unwrap();
+        let after = [4.0, -4.0].map(|impulse| {
+            RigidBodyState::new(
+                Pose::identity(),
+                Vec3::new(p + impulse, 0.0, 0.0),
+                Vec3::ZERO,
+            )
+            .unwrap()
+        });
+        for mass in [2.0, 3.0, 7.0] {
+            let property =
+                MassProperties::new(mass, Vec3::ZERO, Vec3::new(1.0, 1.0, 1.0)).unwrap();
+            // Exact opposite 4 Ns impulses leave 4²/m J. Both the quotient
+            // tails and the opposite transfers must survive until reduction.
+            let expected = 16.0 / mass;
+            let actual =
+                kinetic_change(&[before; 2], &after, &[property; 2], &CancelGate::new()).unwrap();
+            assert!((actual - expected).abs() <= 8.0 * f64::EPSILON * expected);
+        }
+    }
+
+    #[test]
+    fn paired_spin_increment_preserves_nondyadic_inertia_quotients() {
+        let p = 2.0_f64.powi(54);
+        let before =
+            RigidBodyState::new(Pose::identity(), Vec3::ZERO, Vec3::new(p, 0.0, 0.0)).unwrap();
+        let after = [4.0, -4.0].map(|impulse| {
+            RigidBodyState::new(
+                Pose::identity(),
+                Vec3::ZERO,
+                Vec3::new(p + impulse, 0.0, 0.0),
+            )
+            .unwrap()
+        });
+        for moment in [2.0, 3.0, 7.0] {
+            let property =
+                MassProperties::new(1.0, Vec3::ZERO, Vec3::new(moment, moment, moment)).unwrap();
+            let expected = 16.0 / moment;
+            let actual =
+                kinetic_change(&[before; 2], &after, &[property; 2], &CancelGate::new()).unwrap();
+            assert!((actual - expected).abs() <= 8.0 * f64::EPSILON * expected);
+        }
+    }
+
+    #[test]
+    fn kinetic_increment_uses_the_original_nondiagonal_inertia_form() {
+        let axes = crate::UnitQuaternion::from_axis_angle(
+            Vec3::new(0.0, 0.0, 1.0),
+            core::f64::consts::FRAC_PI_4,
+        )
+        .unwrap();
+        let property =
+            MassProperties::from_principal_frame(3.0, Vec3::ZERO, Vec3::new(2.0, 3.0, 4.0), axes)
+                .unwrap();
+        let before =
+            RigidBodyState::new(Pose::identity(), Vec3::ZERO, Vec3::new(1.0, -2.0, 1e12)).unwrap();
+        let after =
+            RigidBodyState::new(Pose::identity(), Vec3::ZERO, Vec3::new(-2.0, 4.0, 1e12)).unwrap();
+        // The independently formed inverse tensor has xx=yy=5/12,
+        // xy=yx=1/12 and zz=1/4. Its xy kinetic form changes by 21/8 J;
+        // the unchanged z storage must not participate in that subtraction.
+        assert_eq!(
+            before.kinetic_energy(property).unwrap(),
+            after.kinetic_energy(property).unwrap()
+        );
+        let actual = before.kinetic_energy_change_to(property, after).unwrap();
+        assert!((actual - 21.0 / 8.0).abs() < 2e-14);
+    }
 
     #[test]
     fn simultaneous_opposing_wrenches_preserve_small_momentum_and_net_load() {

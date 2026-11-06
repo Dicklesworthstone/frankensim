@@ -34,7 +34,7 @@ use super::hertz::{
     apply_pair_wrench, points, relative_point, relative_spin, scaled_response,
 };
 use super::rolling::RigidRollingHistory;
-use super::{RigidContactBinding, RigidFrictionError, magnitude, poll, totals};
+use super::{RigidContactBinding, RigidFrictionError, kinetic_change, magnitude, poll, totals};
 use crate::{DynamicsError, MassProperties, PointKinematics, RigidBodyState, Vec3, Wrench};
 use fs_exec::CancelGate;
 use fs_tribo::partial_slip::TangentFrame;
@@ -103,6 +103,8 @@ pub struct RigidHertzRollingReport {
     pub bulk_heat_j: f64,
     pub kinetic_before_j: f64,
     pub kinetic_after_j: f64,
+    /// Actual original-pair kinetic increment from accepted momenta [J].
+    pub kinetic_energy_change_j: f64,
     pub surface_midpoint_work_j: f64,
     pub rolling_midpoint_work_j: f64,
     /// Work of contact impulses only; held external wrenches have their own port.
@@ -701,6 +703,8 @@ impl<'a> PreparedRigidHertzRollingPair<'a> {
         let (energy_before, linear_before, angular_before) = self.core.totals_before;
         let (energy_after, linear_after, angular_after) =
             totals(&after, &self.core.pair_properties, gate)?;
+        let kinetic_energy_change_j =
+            kinetic_change(&self.core.before, &after, &self.core.pair_properties, gate)?;
         let external_work = self.drive.work(&self.core, after_points)?;
         let (external_linear, external_angular) = self.drive.impulses(&self.core)?;
         let linear_change = linear_after.sub(linear_before);
@@ -741,12 +745,13 @@ impl<'a> PreparedRigidHertzRollingPair<'a> {
             bulk_heat_j: bulk_heat,
             kinetic_before_j: energy_before,
             kinetic_after_j: energy_after,
+            kinetic_energy_change_j,
             surface_midpoint_work_j: surface_work,
             rolling_midpoint_work_j: rolling_work,
             midpoint_impulse_work_j: work,
             external_wrench_work_j: external_work,
-            work_energy_residual_j: energy_after - energy_before - work - external_work,
-            total_energy_residual_j: energy_after - energy_before + surface_heat + bulk_heat
+            work_energy_residual_j: kinetic_energy_change_j - work - external_work,
+            total_energy_residual_j: kinetic_energy_change_j + surface_heat + bulk_heat
                 - external_work,
             rolling_work_residual_j: rolling_work + bulk_heat,
             history_heat_residual_j: history_heat - bulk_heat,

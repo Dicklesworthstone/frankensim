@@ -3676,6 +3676,15 @@ kinetic energies cannot erase the pair's physical loss in an energy subtraction.
 Report kinetic and momentum totals belong to that pair; their changes equal
 the whole-system changes. Original body indices and source roles are preserved.
 
+The rolling, joint Hertz/rolling, resolved collinear and shared-island reports
+retain `kinetic_energy_change_j` from the actual accepted momentum endpoints.
+The native fixed-inertia polarized pairing accumulates all participating bodies'
+compensated products before rounding, so unchanged common motion and opposite
+large transfers cannot erase smaller resolved kinetic changes. Absolute totals
+remain descriptive outputs; work/heat gates and the original finite-caloric
+rolling adapters consume the retained increment. Commanded work and material
+heat remain independent, and rounded-away momentum still enters the defect.
+
 This is one held-geometry, held-normal-load pure-rolling phase. The surrounding
 owner still advances poses and normal contact. It does not solve contact
 discovery, lift-off, externally driven no-slip constraints, simultaneous

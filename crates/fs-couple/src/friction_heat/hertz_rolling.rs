@@ -490,7 +490,7 @@ pub fn propose_rigid_hertz_rolling_driven_heat<'m, P, E>(
             - mechanical.bulk_heat_j,
     )?;
     let combined = finite(
-        (mechanical.kinetic_after_j - mechanical.kinetic_before_j) + caloric_change
+        mechanical.kinetic_energy_change_j + caloric_change
             - staged.external_heat_j
             - mechanical.external_wrench_work_j,
     )?;

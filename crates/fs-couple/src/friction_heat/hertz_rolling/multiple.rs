@@ -688,7 +688,7 @@ fn propose_heat<'m, P, E>(
         caloric_change - staged.external_heat_j - native.surface_heat_j - native.bulk_heat_j,
     )?;
     let combined = finite(
-        native.kinetic_after_j - native.kinetic_before_j + caloric_change
+        native.kinetic_energy_change_j + caloric_change
             - staged.external_heat_j
             - native.external_work_j,
     )?;

@@ -411,6 +411,46 @@ fn energy_change(a: &DepositionSimulation<'_>, b: &DepositionSimulation<'_>) -> 
 }
 
 #[test]
+fn rolling_heat_reaches_the_caloric_cells_under_large_common_translation() {
+    let mut f = fixture(TAU, RATE, 0.001);
+    let thermal = thermal(&f, [300.0; 2], G, &SPHERE_CALORIC);
+    let history = RigidRollingHistory::new();
+    let reference = propose(&f, &history, &thermal);
+    for (body, property) in f.bodies.iter_mut().zip(f.properties) {
+        *body = RigidBodyState::new(
+            body.pose(),
+            body.linear_momentum_world()
+                .add(Vec3::new(0.0, 0.0, 1e6 * property.mass())),
+            body.angular_momentum_body(),
+        )
+        .unwrap();
+    }
+    let candidate = propose(&f, &history, &thermal);
+    let report = candidate.report();
+    assert_eq!(
+        report.mechanical.kinetic_before_j,
+        report.mechanical.kinetic_after_j
+    );
+    assert!(report.mechanical.dissipated_heat_j > 0.0);
+    assert_eq!(
+        report.mechanical.dissipated_heat_j,
+        reference.report().mechanical.dissipated_heat_j
+    );
+    for cell in IDS {
+        assert_eq!(
+            candidate.thermal().cells()[&cell].specific_h_j_kg,
+            reference.thermal().cells()[&cell].specific_h_j_kg
+        );
+    }
+    close(
+        report.mechanical.kinetic_energy_change_j + energy_change(&thermal, candidate.thermal()),
+        0.0,
+        2e-12,
+    );
+    close(report.combined_energy_residual_j, 0.0, 2e-12);
+}
+
+#[test]
 fn native_both_body_recoil_and_single_bulk_heat_match_independent_caloric_conduction() {
     let f = fixture(TAU, RATE, 0.001);
     let thermal = thermal(&f, [300.0; 2], G, &SPHERE_CALORIC);

@@ -262,6 +262,50 @@ fn kinetic(bodies: &[RigidBodyState; 2], properties: &[MassProperties; 2]) -> f6
 }
 
 #[test]
+fn mixed_contact_heat_survives_large_common_translation() {
+    let f = fixture(TAU, MIXED_SLIP, MIXED_ROLL, MIXED_SPIN, [0.3, 0.2]);
+    let mut reference_bodies = f.bodies;
+    let mut reference_history = RigidRollingHistory::new();
+    let reference = advance(&f, &mut reference_bodies, &mut reference_history, DT);
+    let mut boosted = f.bodies;
+    for (body, property) in boosted.iter_mut().zip(f.properties) {
+        *body = RigidBodyState::new(
+            body.pose(),
+            body.linear_momentum_world()
+                .add(Vec3::new(0.0, 0.0, 1e6 * property.mass())),
+            body.angular_momentum_body(),
+        )
+        .unwrap();
+    }
+    let mut history = RigidRollingHistory::new();
+    let report = advance(&f, &mut boosted, &mut history, DT);
+    assert_eq!(report.kinetic_after_j, report.kinetic_before_j);
+    assert!(report.surface_heat_j > 0.0 && report.bulk_heat_j > 0.0);
+    close(
+        report.kinetic_energy_change_j,
+        -reference.surface_heat_j - reference.bulk_heat_j,
+        1e-14,
+    );
+    assert_eq!(report.surface_heat_j, reference.surface_heat_j);
+    assert_eq!(report.bulk_heat_j, reference.bulk_heat_j);
+    close(report.total_energy_residual_j, 0.0, 1e-14);
+    for (actual, expected) in boosted.iter().zip(reference_bodies) {
+        assert_eq!(
+            actual.linear_momentum_world().x,
+            expected.linear_momentum_world().x
+        );
+        assert_eq!(
+            actual.linear_momentum_world().y,
+            expected.linear_momentum_world().y
+        );
+        assert_eq!(
+            actual.angular_momentum_body(),
+            expected.angular_momentum_body()
+        );
+    }
+}
+
+#[test]
 fn planar_static_sliding_and_traction_induced_rolling_match_independent_equations() {
     let h = 0.002;
     for (slip, q0, static_mode) in [(0.0, 0.03, true), (0.1, 0.03, false), (0.1, 0.0, false)] {

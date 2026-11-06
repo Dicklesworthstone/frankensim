@@ -1187,6 +1187,86 @@ impl RigidBodyState {
         )?;
         finite_derived(translational + rotational, "kinetic_energy.total_j")
     }
+
+    /// Actual kinetic-energy change to another state of the same rigid body [J].
+    ///
+    /// The mass and body-frame inertia must remain fixed. This evaluates
+    /// `delta_p . mean_v + delta_L . mean_omega` using the represented endpoint
+    /// momenta and compensated products, without subtracting absolute energies.
+    /// Mean rates come from compensated mean momenta through the fixed mass and
+    /// principal-inertia form, not separately rounded endpoint velocities.
+    /// Unchanged common translation or spin therefore cannot erase a smaller
+    /// physical change. This measures storage only; source work and losses must
+    /// still be recovered independently from their original physical laws.
+    pub fn kinetic_energy_change_to(
+        self,
+        properties: MassProperties,
+        after: Self,
+    ) -> Result<f64, DynamicsError> {
+        let mut change = MomentumWork::default();
+        self.accumulate_kinetic_energy_change(properties, after, &mut change)?;
+        finite_derived(change.total().to_f64(), "kinetic_energy.change_j")
+    }
+
+    // Shared contact owners retain all bodies' compensated products before
+    // rounding: large opposite transfers must cancel before their small loss.
+    fn accumulate_kinetic_energy_change(
+        self,
+        properties: MassProperties,
+        after: Self,
+        change: &mut MomentumWork,
+    ) -> Result<(), DynamicsError> {
+        self.validate()?;
+        after.validate()?;
+        properties.validate()?;
+        let midpoint = |before: Vec3, after: Vec3| -> [Dd; 3] {
+            let old = [before.x, before.y, before.z];
+            let new = [after.x, after.y, after.z];
+            core::array::from_fn(|i| {
+                Dd::from_f64(0.5 * old[i]) + Dd::from_f64(0.5 * new[i])
+            })
+        };
+        change.add_compensated(
+            midpoint(self.linear_momentum_world, after.linear_momentum_world)
+                .map(|value| value / Dd::from_f64(properties.mass)),
+            momentum_difference(self.linear_momentum_world, after.linear_momentum_world),
+        );
+        let mut mean = midpoint(self.angular_momentum_body, after.angular_momentum_body);
+        let mut delta =
+            momentum_difference(self.angular_momentum_body, after.angular_momentum_body);
+        let moments = properties.principal_inertia_body;
+        if properties.principal_to_body != UnitQuaternion::IDENTITY
+            && !(moments.x == moments.y && moments.y == moments.z)
+        {
+            // Evaluate the fixed inertia quadratic form in its cached principal
+            // frame. Rotate both the midpoint and the actual increment BEFORE
+            // division, retaining their tails through the quaternion action.
+            // The projective normalization is arithmetic only; no pose changes.
+            let [w, x, y, z] = properties.principal_to_body.components().map(Dd::from_f64);
+            let axis = [-x, -y, -z];
+            let twice_inverse_norm = Dd::from_f64(2.0) / (w * w + x * x + y * y + z * z);
+            let cross = |a: [Dd; 3], b: [Dd; 3]| {
+                [
+                    a[1] * b[2] - a[2] * b[1],
+                    a[2] * b[0] - a[0] * b[2],
+                    a[0] * b[1] - a[1] * b[0],
+                ]
+            };
+            let principal = |value: [Dd; 3]| -> [Dd; 3] {
+                let t = cross(axis, value).map(|value| value * twice_inverse_norm);
+                let correction = cross(axis, t);
+                core::array::from_fn(|i| value[i] + w * t[i] + correction[i])
+            };
+            mean = principal(mean);
+            delta = principal(delta);
+        }
+        let moments = [moments.x, moments.y, moments.z];
+        change.add_compensated(
+            core::array::from_fn(|i| mean[i] / Dd::from_f64(moments[i])),
+            delta,
+        );
+        Ok(())
+    }
 }
 
 /// Centre-of-mass-relative point kinematics in both declared frames.
@@ -1335,12 +1415,16 @@ struct MomentumWork {
 
 impl MomentumWork {
     fn add(&mut self, before: Vec3, after: Vec3, momentum: [Dd; 3]) {
-        for ((old, new), delta) in [before.x, before.y, before.z]
-            .into_iter()
-            .zip([after.x, after.y, after.z])
-            .zip(momentum)
-        {
-            let mean = Dd::from_f64(0.5 * old) + Dd::from_f64(0.5 * new);
+        let old = [before.x, before.y, before.z];
+        let new = [after.x, after.y, after.z];
+        let mean = core::array::from_fn(|i| {
+            Dd::from_f64(0.5 * old[i]) + Dd::from_f64(0.5 * new[i])
+        });
+        self.add_compensated(mean, momentum);
+    }
+
+    fn add_compensated(&mut self, mean: [Dd; 3], momentum: [Dd; 3]) {
+        for (mean, delta) in mean.into_iter().zip(momentum) {
             self.leading = self.leading + Dd::from_f64(mean.hi) * Dd::from_f64(delta.hi);
             self.cross = self.cross
                 + Dd::from_f64(mean.hi) * Dd::from_f64(delta.lo)

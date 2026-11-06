@@ -423,7 +423,7 @@ pub fn propose_rigid_rolling_heat<'m, P, E>(
     let heat_transfer_residual_j =
         finite(trial.audit().stored_energy_change_j - trial.payload().external_heat_j - heat_j)?;
     let combined_energy_residual_j = finite(
-        (mechanical.kinetic_after_j - mechanical.kinetic_before_j)
+        mechanical.kinetic_energy_change_j
             + trial.audit().stored_energy_change_j
             - trial.payload().external_heat_j,
     )?;
@@ -476,6 +476,7 @@ fn same_physics(a: &RigidRollingReport, b: &RigidRollingReport) -> bool {
         && a.dissipated_heat_j == b.dissipated_heat_j
         && a.kinetic_before_j == b.kinetic_before_j
         && a.kinetic_after_j == b.kinetic_after_j
+        && a.kinetic_energy_change_j == b.kinetic_energy_change_j
         && a.midpoint_impulse_work_j == b.midpoint_impulse_work_j
         && a.static_reaction_work_j == b.static_reaction_work_j
         && a.linear_momentum_change_ns == b.linear_momentum_change_ns

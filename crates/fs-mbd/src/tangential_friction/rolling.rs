@@ -17,7 +17,10 @@
 //! lane must resolve those modes. There is no added shear/spin dissipation.
 //! The normal patch, temperature and frequency stay held over this phase.
 
-use super::{RigidContactBinding, RigidFrictionError, components, magnitude, poll, totals, vector};
+use super::{
+    RigidContactBinding, RigidFrictionError, components, kinetic_change, magnitude, poll, totals,
+    vector,
+};
 use crate::{DynamicsError, MassProperties, PointKinematics, RigidBodyState, Vec3};
 use fs_exec::CancelGate;
 use fs_tribo::partial_slip::TangentFrame;
@@ -139,6 +142,8 @@ pub struct RigidRollingReport {
     pub kinetic_before_j: f64,
     /// Contacted-pair kinetic energy after the phase [J].
     pub kinetic_after_j: f64,
+    /// Actual momentum-based change; retains losses beside common motion [J].
+    pub kinetic_energy_change_j: f64,
     pub midpoint_impulse_work_j: f64,
     /// Work of the no-slip reactions; independently required to vanish.
     pub static_reaction_work_j: f64,
@@ -363,7 +368,8 @@ pub fn apply_rigid_rolling(
             1.0 + half_damping * rolling_mobility[1][1],
         ],
     ];
-    let (energy_before, linear_before, angular_before) = totals(&next, &pair_properties, gate)?;
+    let before = next;
+    let (energy_before, linear_before, angular_before) = totals(&before, &pair_properties, gate)?;
     let mut next_history = history.clone();
     let mut final_step = None;
     let mut heat = 0.0;
@@ -481,6 +487,7 @@ pub fn apply_rigid_rolling(
         final_step = Some(step);
     }
     let (energy_after, linear_after, angular_after) = totals(&next, &pair_properties, gate)?;
+    let kinetic_energy_change_j = kinetic_change(&before, &next, &pair_properties, gate)?;
     let final_step = final_step.ok_or_else(|| invalid("missing native rolling substep"))?;
     next_history.checkpoint = Some(final_step.checkpoint.clone());
     let report = RigidRollingReport {
@@ -500,10 +507,11 @@ pub fn apply_rigid_rolling(
         dissipated_heat_j: heat,
         kinetic_before_j: energy_before,
         kinetic_after_j: energy_after,
+        kinetic_energy_change_j,
         midpoint_impulse_work_j: midpoint_work,
         static_reaction_work_j: static_work,
-        work_energy_residual_j: energy_after - energy_before - midpoint_work,
-        total_energy_residual_j: energy_after - energy_before + heat,
+        work_energy_residual_j: kinetic_energy_change_j - midpoint_work,
+        total_energy_residual_j: kinetic_energy_change_j + heat,
         linear_momentum_change_ns: linear_after.sub(linear_before),
         angular_momentum_change_nms: angular_after.sub(angular_before),
         maximum_point_speed_m_s: maximum_point_speed,

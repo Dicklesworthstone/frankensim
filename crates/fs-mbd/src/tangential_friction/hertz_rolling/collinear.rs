@@ -25,7 +25,7 @@ use crate::tangential_friction::hertz::{
 };
 use crate::tangential_friction::rolling::RigidRollingHistory;
 use crate::tangential_friction::{
-    RigidContactBinding, RigidFrictionError, magnitude, poll, totals,
+    RigidContactBinding, RigidFrictionError, kinetic_change, magnitude, poll, totals,
 };
 use crate::{DynamicsError, MassProperties, RigidBodyState, Vec3, Wrench};
 use fs_exec::CancelGate;
@@ -169,6 +169,8 @@ pub struct RigidHertzRollingCollinearReport {
     pub external_work_j: f64,
     pub kinetic_before_j: f64,
     pub kinetic_after_j: f64,
+    /// Actual complete endpoint kinetic increment, without total subtraction [J].
+    pub kinetic_energy_change_j: f64,
     pub total_energy_residual_j: f64,
     pub history_heat_residual_j: f64,
     pub force_impulse_world_ns: Vec3,
@@ -611,8 +613,8 @@ impl<'a> PreparedRigidHertzRollingCollinear<'a> {
                         .dot(self.pair.core.axes[2])
                         .abs(),
                 );
-            let energy_before = totals(&current, &self.pair.core.pair_properties, gate)?.0;
-            let energy_after = totals(&after, &self.pair.core.pair_properties, gate)?.0;
+            let kinetic_energy_change_j =
+                kinetic_change(&current, &after, &self.pair.core.pair_properties, gate)?;
             let bulk_heat = rolling.rolling.dissipation.total_heat_j;
             let external_work = self.drive.work(
                 current,
@@ -644,8 +646,8 @@ impl<'a> PreparedRigidHertzRollingCollinear<'a> {
                 native_shear_velocity_after_m_s: after_rates[0],
                 native_rolling_rate_after_rad_s: after_rates[4] / radius,
                 maximum_velocity_residual_m_s: velocity_residual,
-                kinetic_energy_change_j: energy_after - energy_before,
-                energy_residual_j: energy_after - energy_before + surface_heat + bulk_heat
+                kinetic_energy_change_j,
+                energy_residual_j: kinetic_energy_change_j + surface_heat + bulk_heat
                     - external_work,
                 rolling,
             };
@@ -689,6 +691,12 @@ impl<'a> PreparedRigidHertzRollingCollinear<'a> {
         let after = self.drive.apply(friction_after, dt)?;
         let before_totals = self.pair.core.totals_before;
         let after_totals = totals(&after, &self.pair.core.pair_properties, gate)?;
+        let kinetic_energy_change_j = kinetic_change(
+            &self.pair.core.before,
+            &after,
+            &self.pair.core.pair_properties,
+            gate,
+        )?;
         let final_points = points(after, self.pair.core.pair_properties, self.pair.core.arms)?;
         let final_rates = rates(
             final_points,
@@ -752,7 +760,8 @@ impl<'a> PreparedRigidHertzRollingCollinear<'a> {
             external_work_j: external_work,
             kinetic_before_j: before_totals.0,
             kinetic_after_j: after_totals.0,
-            total_energy_residual_j: after_totals.0 - before_totals.0 + surface_heat + bulk_heat
+            kinetic_energy_change_j,
+            total_energy_residual_j: kinetic_energy_change_j + surface_heat + bulk_heat
                 - external_work,
             history_heat_residual_j: rolling_history.state().cumulative_heat_j()
                 - self.history.rolling.state().cumulative_heat_j()

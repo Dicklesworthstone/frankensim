@@ -25,7 +25,7 @@ use crate::tangential_friction::hertz::multiple::RigidHertzIslandControls;
 use crate::tangential_friction::hertz::{accepted_phase, points, relative_point, relative_spin};
 use crate::tangential_friction::rolling::RigidRollingHistory;
 use crate::tangential_friction::{
-    RigidContactBinding, RigidFrictionError, components, magnitude, poll, totals,
+    RigidContactBinding, RigidFrictionError, components, kinetic_change, magnitude, poll, totals,
 };
 use crate::{DynamicsError, MassProperties, PointKinematics, RigidBodyState, Vec3, Wrench};
 use fs_exec::CancelGate;
@@ -173,6 +173,8 @@ pub struct RigidHertzRollingIslandReport {
     pub native: MultipleHertzRollingStep,
     pub kinetic_before_j: f64,
     pub kinetic_after_j: f64,
+    /// Sum of original-body kinetic increments, counting shared bodies once [J].
+    pub kinetic_energy_change_j: f64,
     pub surface_heat_j: f64,
     pub bulk_heat_j: f64,
     /// Contact work only; each body's external wrench has its own work port.
@@ -939,6 +941,7 @@ impl<'a> PreparedRigidHertzRollingIsland<'a> {
         }
         let (energy_before, linear_before, angular_before) = self.totals_before;
         let (energy_after, linear_after, angular_after) = totals(&after, &self.properties, gate)?;
+        let kinetic_energy_change_j = kinetic_change(&self.before, &after, &self.properties, gate)?;
         let surface_heat = reports.iter().map(|r| r.surface_heat_j).sum::<f64>();
         let bulk_heat = reports.iter().map(|r| r.bulk_heat_j).sum::<f64>();
         let work = reports
@@ -959,12 +962,13 @@ impl<'a> PreparedRigidHertzRollingIsland<'a> {
             native,
             kinetic_before_j: energy_before,
             kinetic_after_j: energy_after,
+            kinetic_energy_change_j,
             surface_heat_j: surface_heat,
             bulk_heat_j: bulk_heat,
             midpoint_impulse_work_j: work,
             external_work_j: external_work,
-            work_energy_residual_j: energy_after - energy_before - work - external_work,
-            total_energy_residual_j: energy_after - energy_before + surface_heat + bulk_heat
+            work_energy_residual_j: kinetic_energy_change_j - work - external_work,
+            total_energy_residual_j: kinetic_energy_change_j + surface_heat + bulk_heat
                 - external_work,
             linear_momentum_change_ns: linear_change,
             angular_momentum_change_nms: angular_change,
