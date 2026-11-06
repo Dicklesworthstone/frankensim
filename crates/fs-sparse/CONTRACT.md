@@ -52,15 +52,21 @@ results are machine-specific, not a universal throughput guarantee.
   from "wrap, do not copy"). Round-trip `Csr → snapshot → Csr` is the identity,
   bitwise on values.
 - `precond::{Precond, IdentityPrecond, Chebyshev, Ilu0/ilu0/IluBreakdown,
-  SaAmg, pcg/PcgReport, lambda_max_estimate}` — the solver-stack toolkit.
+  SaAmg, pcg/PcgReport, lambda_max_estimate, spectral_radius_upper_bound}`
+  — the solver-stack toolkit.
   `Precond::apply(r, z)` is the operator interface. Chebyshev: degree-k
-  three-term recurrence on the band [λmax/α, λmax], λmax by deterministic
-  power iteration (fixed libm-free start, 1.1 safety — enclosure tested
-  vs analytic spectra). ILU(0): zero-fill on the CSR pattern, sequential
+  three-term recurrence on the band [λmax/α, λmax], with the upper endpoint
+  at least the outward-rounded maximum absolute row sum. Deterministic power
+  iteration is a heuristic only; its historical 1.1-scaled estimate is retained
+  when it gives a wider band. The row-sum bound covers the supplied finite
+  coefficients, not symmetry or positive definiteness, which remain caller
+  assumptions. ILU(0): zero-fill on the CSR pattern, sequential
   v1, typed `IluBreakdown{row}` (shift-retry is caller policy). SaAmg:
   symmetric strength graph, GREEDY INDEX-ORDER aggregation with
   lowest-index tie-breaks (P2 on setup), Jacobi-smoothed prolongator
-  (ω = 4/3·λmax(D⁻¹A)), Galerkin triple product via in-crate SpGEMM,
+  (the historical power-estimate weight is retained only when the conservative
+  bound proves ω·ρ(D⁻¹A) < 2; otherwise ω targets 4/3 using that bound),
+  Galerkin triple product via in-crate SpGEMM,
   V-cycle with Chebyshev smoothing and ILU-PCG coarsest solve;
   `operator_complexity()` and `level_sizes` are the memory-honesty
   evidence. `pcg` is a REFERENCE driver (solver stack supersedes it).
@@ -156,9 +162,11 @@ growth. These new gates have not yet run centrally.
    very-wide products; it changes accumulator storage only, not numerical
    order or output canonicalization.
 8. Preconditioner setup and solves are rerun-deterministic BITWISE
-   (hierarchy shapes, iteration counts, and solutions — tested), and the
-   spectral-bound estimate ENCLOSES the true λmax on tested fixtures
-   (over-estimation safe by construction, safety factor 1.1).
+   (hierarchy shapes, iteration counts, and solutions — tested). Chebyshev's
+   band and AMG's Jacobi relaxation use an outward-rounded absolute-row-sum
+   bound, so a dominant eigenspace missed by the fixed power seed cannot
+   make their spectral admission unsafe. Focused adversarial tests exercise
+   that missed-mode failure and extreme power-normalization scales.
 9. AMG on 2D Poisson: near-grid-independent PCG iterations (32² vs 64²
    within a tested band), operator complexity < 2, and the anisotropic
    ε = 1e-3 fixture converges (tested).
@@ -186,12 +194,15 @@ the inertia count downstream certification treats as authority.
 and sharded kernels preserve their serial twins' logical accumulation order.
 Evidence: the conformance battery (three-matrix zoo × three formats ×
 transpose/symmetrize/SpGEMM) folds all output bits into FNV-64 golden hash
-`0xbcf5_52b6_c5bf_aed6`; the preconditioner battery (Chebyshev apply +
-ILU-PCG + AMG-PCG solutions + hierarchy shapes) hashes to
-`0x752f_215a_26e3_2fea`. Both recorded on aarch64-apple (M4 Pro) and
-verified identical on x86-64 (Threadripper). Golden-evidence policy
-applies. NO platform libm feeds any solver state (workspace contract
-rule).
+`0xbcf5_52b6_c5bf_aed6`, recorded on aarch64-apple (M4 Pro) and verified
+identical on x86-64 (Threadripper), remains unchanged. The preconditioner
+battery's historical pin `0x752f_215a_26e3_2fea` predates the conservative
+spectral admission. Safer coarse-level bands change the AMG trajectory and
+solution bits while retaining the numerical convergence checks. That old pin
+is deliberately unchanged and currently fails; re-admitting a replacement
+requires the golden-evidence policy's reference-ISA runs. Single-machine
+regressions and repeatability do not establish fresh cross-ISA evidence for
+the repaired preconditioners.
 
 ## Cancellation behavior
 The serial and `std`-threaded numeric kernels do not accept an asupersync `Cx`
