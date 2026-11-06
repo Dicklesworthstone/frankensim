@@ -18,7 +18,11 @@
 //!
 //! Scope, stated plainly: the distances are the AXIAL distances between hole stations (the
 //! azimuths of the holes are not known), which is an upper bound for holes on opposite sides of
-//! the bore; every open hole must be fully open (a vent fraction has no single mouth flow); the
+//! the bore, but never less than the sum of the two mouth radii: two openings cannot overlap, so
+//! their centres are at least that far apart, and two holes at ONE station (a doubled hole) are
+//! coupled at that touching distance, the strongest coupling their geometry allows and the same
+//! kind of upper bound (no spacing is invented; the single-station case used to refuse);
+//! every open hole must be fully open (a vent fraction has no single mouth flow); the
 //! bell is one more opening when the termination radiates. The feedback response and reflection
 //! and the hole mouth flows use the coupled solution. The nonlinear orifice port reflection of
 //! each hole keeps its independent chimney.
@@ -91,6 +95,8 @@ pub(crate) fn mutual_radiation_impedance(
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct CoupledPort {
     pub position_m: f64,
+    /// Radius of the mouth: two openings are never closer than the sum of their radii. Zero for the bore's open end.
+    pub radius_m: f64,
     pub chimney: [C64; 4],
     pub self_radiation: C64,
 }
@@ -98,7 +104,7 @@ pub(crate) struct CoupledPort {
 impl CoupledPort {
     /// The open end of the bore: no chimney, the termination's load is its self radiation.
     pub(crate) fn open_end(position_m: f64, load: C64) -> Self {
-        Self { position_m, chimney: [C64::ONE, C64::ZERO, C64::ZERO, C64::ONE], self_radiation: load }
+        Self { position_m, radius_m: 0.0, chimney: [C64::ONE, C64::ZERO, C64::ZERO, C64::ONE], self_radiation: load }
     }
 
     /// A fully open tone hole built exactly as `chimney_open_response_with_wall` builds it: the
@@ -126,8 +132,16 @@ impl CoupledPort {
         let (radiation, _) = crate::exterior::termination_impedance(
             Termination::FlangedOpen, state, exterior, hole_radius, omega)?;
         let self_radiation = radiation.ok_or_else(|| bad("an open hole needs a radiating mouth"))?;
-        Ok(Self { position_m, chimney: line.abcd()?, self_radiation })
+        Ok(Self { position_m, radius_m: hole_radius, chimney: line.abcd()?, self_radiation })
     }
+}
+
+/// The distance two openings are coupled at: the axial distance between their stations, but never
+/// less than the sum of their mouth radii (two mouths cannot overlap). Where the axial distance is
+/// the larger, as for every pair of separate holes on a real bore, it is the original distance
+/// bit for bit; two holes at one station are coupled at the touching distance.
+fn pair_distance(a: &CoupledPort, b: &CoupledPort) -> f64 {
+    (a.position_m - b.position_m).abs().max(a.radius_m + b.radius_m)
 }
 
 /// Everything the coupling gives, per opening in the order of the supplied ports.
@@ -163,8 +177,7 @@ fn couple(
             let z = if i == j {
                 C64::ZERO
             } else {
-                mutual_radiation_impedance(
-                    exterior, omega, (ports[i].position_m - ports[j].position_m).abs(), interaction)?
+                mutual_radiation_impedance(exterior, omega, pair_distance(&ports[i], &ports[j]), interaction)?
             };
             rhs[i * q + j] = z * w[j];
             m[i * q + j] = z * (w[j] * ports[j].chimney[0]) + if i == j { C64::ONE } else { C64::ZERO };

@@ -193,3 +193,91 @@ fn coupled_radiation_survives_half_and_full_wave_bore_runs() {
         }
     }
 }
+
+fn zero_chimney_port(position_m: f64, radius_m: f64, load: C64) -> CoupledPort {
+    CoupledPort { position_m, radius_m, chimney: [C64::ONE, C64::ZERO, C64::ZERO, C64::ONE], self_radiation: load }
+}
+
+#[test]
+fn a_pair_is_coupled_at_its_axial_distance_unless_the_mouths_would_overlap() {
+    // Separate holes of a real bore (axial spacing above the radii) keep the original distance bit for bit.
+    let load = C64::new(1.2e4, -3.0e4);
+    let (a, b) = (zero_chimney_port(0.10, 0.0025, load), zero_chimney_port(0.13, 0.0025, load));
+    assert_eq!(pair_distance(&a, &b), (0.10_f64 - 0.13).abs());
+    assert_eq!(pair_distance(&b, &a), pair_distance(&a, &b));
+    // The bore's open end has radius 0: only the axial distance counts.
+    let end = zero_chimney_port(0.4, 0.0, load);
+    assert_eq!(pair_distance(&a, &end), (0.10_f64 - 0.4).abs());
+    // Mouths 0.5 mm apart on the axis cannot overlap: they are at least the sum of the radii apart.
+    let close_by = zero_chimney_port(0.1005, 0.0025, load);
+    assert_eq!(pair_distance(&a, &close_by), 0.005);
+    // One station: the touching distance, with no spacing invented.
+    let same = zero_chimney_port(0.10, 0.0021, load);
+    let twin = zero_chimney_port(0.10, 0.0021, load);
+    assert_eq!(pair_distance(&same, &twin), 0.0042);
+}
+
+#[test]
+fn two_holes_at_one_station_couple_like_two_holes_a_touching_distance_apart() {
+    let gas = air();
+    let omega = TAU * 900.0;
+    let load = C64::new(2.0e4, -9.0e4);
+    let radius = 0.0021;
+    let same = [zero_chimney_port(0.230, radius, load), zero_chimney_port(0.230, radius, load)];
+    let apart = [zero_chimney_port(0.230, radius, load), zero_chimney_port(0.230 + 2.0 * radius, radius, load)];
+    let (a, b) = (couple(&same, &gas, omega, interaction(2.0)).unwrap(), couple(&apart, &gas, omega, interaction(2.0)).unwrap());
+    for (x, y) in a.admittance.iter().zip(&b.admittance) {
+        assert!(close(*x, *y, 1.0e-12), "{x:?} vs {y:?}");
+    }
+    // Hand solution for two identical zero-chimney mouths: Z = [[z, zm], [zm, z]], so Y = [[z, -zm], [-zm, z]] / (z^2 - zm^2),
+    // with zm the monopole impedance at the touching distance 2 r.
+    let zm = mutual_radiation_impedance(&gas, omega, 2.0 * radius, interaction(2.0)).unwrap();
+    let determinant = load * load - zm * zm;
+    let expected = [load / determinant, -zm / determinant, -zm / determinant, load / determinant];
+    for (got, want) in a.admittance.iter().zip(expected) {
+        assert!(close(*got, want, 1.0e-12), "{got:?} vs {want:?}");
+    }
+    // Two zero-radius openings at one station still refuse: no distance exists.
+    let bells = [zero_chimney_port(0.2, 0.0, load), zero_chimney_port(0.2, 0.0, load)];
+    assert!(couple(&bells, &gas, omega, interaction(2.0)).is_err());
+}
+
+#[test]
+fn a_doubled_hole_solves_and_shares_the_flow_between_its_two_mouths() {
+    // The Bb4 oboe card has two holes at one station. With ideal through bore blocks around them and no chimney, both mouths see the
+    // junction pressure p, so the input impedance of the closed bore is 1 / (1^T Z^-1 1) = (z + zm) / 2 with Z = [[z, zm], [zm, z]],
+    // zm at the touching distance, and each mouth carries half of the unit flow.
+    let gas = air();
+    let omega = TAU * 900.0;
+    let reference = gas.density * gas.sound_speed / (core::f64::consts::PI * 0.007_f64.powi(2));
+    let load = C64::new(0.6, -0.4).scale(reference);
+    let through = TwoPort::through(reference).unwrap();
+    let chain = PreparedChain { blocks: vec![through; 4], reference_impedance: reference, min_shear_number: f64::INFINITY };
+    let radius = 0.0021;
+    let hole = |block_index: usize| PreparedOpenHole {
+        block_index,
+        axial_position_m: 0.230,
+        effective_radius_m: radius,
+        chimney_length_m: 0.0,
+        sigma: 1.0,
+        half_series_impedance: C64::ZERO,
+        open_chimney_impedance: load,
+        closed_return_coordinates: [C64::ONE, C64::ZERO],
+        chimney_u_mouth_over_u_in: C64::ONE,
+        shunt_port_reference_pa_s_m3: reference,
+        orifice_quadratic_coeff_pa_s2_m6: 0.0,
+    };
+    let holes = [hole(1), hole(2)];
+    let ports = [zero_chimney_port(0.230, radius, load), zero_chimney_port(0.230, radius, load)];
+    let zm = mutual_radiation_impedance(&gas, omega, 2.0 * radius, interaction(2.0)).unwrap();
+    let solved = solve(&chain, &holes, &ports, None, &gas, omega, interaction(2.0), 1.0e12).unwrap();
+    let expected = (load + zm).scale(0.5);
+    assert!(close(solved.input_impedance, expected, 1.0e-10), "{:?} vs {expected:?}", solved.input_impedance);
+    for flow in &solved.hole_mouth_flows {
+        assert!(close(*flow, C64::from_re(0.5), 1.0e-10), "{flow:?}");
+    }
+    assert!(solved.input_impedance.re > 0.0);
+    // Uncoupled (eps -> infinity) it is the two independent holes in parallel, z / 2.
+    let free = solve(&chain, &holes, &ports, None, &gas, omega, interaction(1.0e15), 1.0e12).unwrap();
+    assert!(close(free.input_impedance, load.scale(0.5), 1.0e-9));
+}
