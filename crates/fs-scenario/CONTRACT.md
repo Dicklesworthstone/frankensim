@@ -1361,12 +1361,20 @@ differentiation happen once. Sampling allocates nothing and performs no tree
 lookup or history rescan. Table rate lookup is logarithmic; smooth polynomial
 value/rate queries poll per coefficient, and composition polls per frame.
 
-`FrameKinematics` retains WORLD pose, origin, origin velocity and angular
-velocity at one physical time. `velocity_at_world_point` evaluates the rigid
+`FrameKinematics` retains WORLD pose, origin, origin/angular velocities and
+origin/angular accelerations at one physical time. `velocity_at_world_point`
+evaluates the rigid
 carrier field at an Eulerian query location. `point_in_world` instead maps a
 local point and its explicitly relative rate, adding origin transport and
 angular transport to the rotated relative velocity. These distinct operations
 do not change the rotation-only semantics of existing absolute vector payloads.
+
+`point_motion_in_world` and `point_motion_in_frame` are reciprocal analytic
+point-motion maps at the sampled time. The inverse returns source-frame
+coordinates and their first two derivatives, subtracting origin, Euler,
+centripetal and Coriolis transport before rotating into local axes. Both
+queries allocate nothing and refuse nonfinite inputs or unrepresentable results.
+They do not integrate motion or apply fictitious forces to another solver.
 
 Rates are analytic derivatives of the same clamped scalar histories. Ramp
 corners, Hold jumps and unequal represented one-sided Linear knot rates refuse;
@@ -1374,13 +1382,15 @@ Chebyshev endpoints require a zero rate to meet the constant exterior. No
 temporal side, impulse, finite-difference scale or trajectory smoothing is
 invented. Malformed paths/data, unrepresentable rates, budget excess and
 cancellation publish no partial result. This supplies instantaneous rigid
-kinematics, not swept-geometry certification, mesh motion, acceleration,
-fictitious forces or recovery of coordinate information already rounded away.
+kinematics, not swept-geometry certification, mesh motion, a rotating-frame
+integrator or recovery of coordinate information already rounded away.
 
 G0/G1/G3/G4 cases in `tests/frame_kinematics.rs` use independent analytic point
 trajectories, off-center rotation, noncommuting moving ancestors, explicit
 relative motion, fixed WORLD probes, translating schedules, polynomial rates,
 clamp/jump refusal, dimensions/topology, budgets and cancellation.
+Inverse-motion tests additionally differentiate inertial straight lines in
+both rotation directions and independently compose nested accelerated frames.
 
 ## Translating scenario frames
 

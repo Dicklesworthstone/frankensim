@@ -30,7 +30,7 @@ pub const DISPLACEMENT_DIMS: Dims = Dims([1, 0, 0, 0, 0, 0]);
 mod kinematics;
 pub use kinematics::{
     FrameKinematics, FrameKinematicsBudget, FrameKinematicsError, FramePointKinematics,
-    PreparedFrameKinematics,
+    FramePointMotion, FrameRelativePointMotion, PreparedFrameKinematics,
 };
 
 /// How a frame moves relative to its parent.

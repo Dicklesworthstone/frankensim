@@ -520,6 +520,20 @@ pub struct FramePointMotion {
     pub acceleration_world: Vec3,
 }
 
+/// Point coordinates and their first two derivatives in the sampled source frame.
+///
+/// Relative velocity and acceleration are derivatives of moving-frame
+/// coordinates, not merely inertial WORLD vectors expressed in different axes.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FrameRelativePointMotion {
+    /// Position relative to the frame origin, in frame axes [m].
+    pub position_frame: Vec3,
+    /// Time derivative of `position_frame`, in frame axes [m/s].
+    pub velocity_relative: Vec3,
+    /// Time derivative of `velocity_relative`, in frame axes [m/s²].
+    pub acceleration_relative: Vec3,
+}
+
 impl PreparedFrameKinematics<'_> {
     /// Source frame whose admitted path this object borrows.
     #[must_use]
@@ -753,6 +767,56 @@ impl FrameKinematics {
             position_world,
             velocity_world,
             acceleration_world,
+        })
+    }
+
+    /// Express inertial WORLD point motion relative to this sampled frame.
+    ///
+    /// This is the inverse of [`Self::point_motion_in_world`] at the same time.
+    /// With WORLD offset `r = point_world - origin` and relative velocity
+    /// `u = velocity_world - V - omega cross r` expressed in WORLD axes,
+    /// the returned acceleration is
+    /// `R^T (acceleration_world - A - alpha cross r
+    ///       - omega cross (omega cross r) - 2 omega cross u)`.
+    ///
+    /// Translation, Euler, centripetal and Coriolis transport are removed
+    /// exactly once. No force, trajectory or time step is inferred. This
+    /// constant-work query allocates nothing; nonfinite inputs or results
+    /// refuse. Coordinate information already rounded out of an absolute
+    /// WORLD position cannot be recovered.
+    pub fn point_motion_in_frame(
+        &self,
+        point_world: Vec3,
+        velocity_world: Vec3,
+        acceleration_world: Vec3,
+    ) -> Result<FrameRelativePointMotion, FrameKinematicsError> {
+        finite_vector(point_world, "WORLD point position")?;
+        finite_vector(velocity_world, "WORLD point velocity")?;
+        finite_vector(acceleration_world, "WORLD point acceleration")?;
+        let offset = finite_vector(point_world - self.origin, "WORLD point offset")?;
+        let relative_velocity_world = finite_vector(
+            velocity_world - self.linear - self.angular.cross(offset),
+            "WORLD relative velocity",
+        )?;
+        let relative_acceleration_world = finite_vector(
+            acceleration_world
+                - self.linear_acceleration
+                - self.angular_acceleration.cross(offset)
+                - self.angular.cross(self.angular.cross(offset))
+                - self.angular.scale(2.0).cross(relative_velocity_world),
+            "WORLD relative acceleration",
+        )?;
+        let inverse_rotation = Quat::from_rotor(&self.pose).conjugate();
+        Ok(FrameRelativePointMotion {
+            position_frame: finite_vector(inverse_rotation.rotate(offset), "local point")?,
+            velocity_relative: finite_vector(
+                inverse_rotation.rotate(relative_velocity_world),
+                "local relative velocity",
+            )?,
+            acceleration_relative: finite_vector(
+                inverse_rotation.rotate(relative_acceleration_world),
+                "local relative acceleration",
+            )?,
         })
     }
 

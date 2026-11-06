@@ -78,23 +78,23 @@ fn chebyshev_translation_and_tilt_expose_exact_second_derivatives() {
     tree.add(frame(
         1,
         WORLD,
-        FrameMotion::Translating {
-            direction: [1.0, 0.0, 0.0],
-            displacement: TimeSignal::Chebfun(ChebProfile {
-                cheb: Cheb1::from_coeffs(-1.0, 1.0, vec![1.0, 0.0, 0.5]),
-                dims: LENGTH,
-            }),
-        },
-    ));
-    tree.add(frame(
-        2,
-        FrameId(1),
         FrameMotion::Tilt {
             axis: [0.0, 0.0, 1.0],
             center: Vec3::default(),
             angle: TimeSignal::Chebfun(ChebProfile {
                 cheb: Cheb1::from_coeffs(-1.0, 1.0, vec![0.5, 0.0, 0.25]),
                 dims: Dims::NONE,
+            }),
+        },
+    ));
+    tree.add(frame(
+        2,
+        FrameId(1),
+        FrameMotion::Translating {
+            direction: [1.0, 0.0, 0.0],
+            displacement: TimeSignal::Chebfun(ChebProfile {
+                cheb: Cheb1::from_coeffs(-1.0, 1.0, vec![1.0, 0.0, 0.5]),
+                dims: LENGTH,
             }),
         },
     ));
@@ -402,6 +402,170 @@ fn translating_child_and_noncommuting_ancestors_compose_analytic_rates() {
         );
         assert_eq!(sample, path.sample(time_s, &mut keep_going).unwrap());
     }
+}
+
+#[test]
+fn inverse_motion_recovers_inertial_straight_lines_with_coriolis_signs() {
+    let initial_world = Vec3::new(1.0, -0.2, 0.7);
+    let velocity_world = Vec3::new(0.3, -0.4, 0.2);
+    for omega in [-0.8, 0.0, 0.8] {
+        let mut tree = FrameTree::new();
+        tree.add(frame(
+            1,
+            WORLD,
+            rotating([0.0, 0.0, 1.0], Vec3::default(), omega),
+        ));
+        let path = tree
+            .prepare_kinematics(
+                FrameId(1),
+                FrameKinematicsBudget::default(),
+                &mut keep_going,
+            )
+            .unwrap();
+        for time_s in [-0.4, 0.0, 0.6] {
+            let sample = path.sample(time_s, &mut keep_going).unwrap();
+            let position_world = initial_world + velocity_world.scale(time_s);
+            // Differentiate Rz(-omega*t) * (initial_world + velocity_world*t)
+            // directly, independently of the forward transport implementation.
+            let position = rotate_z(position_world, -omega * time_s);
+            let rotated_velocity = rotate_z(velocity_world, -omega * time_s);
+            let velocity = Vec3::new(
+                rotated_velocity.x + omega * position.y,
+                rotated_velocity.y - omega * position.x,
+                rotated_velocity.z,
+            );
+            let acceleration = Vec3::new(
+                2.0 * omega * rotated_velocity.y - omega * omega * position.x,
+                -2.0 * omega * rotated_velocity.x - omega * omega * position.y,
+                0.0,
+            );
+            let relative = sample
+                .point_motion_in_frame(position_world, velocity_world, Vec3::default())
+                .unwrap();
+            near(relative.position_frame, position, 3e-13);
+            near(relative.velocity_relative, velocity, 3e-13);
+            near(relative.acceleration_relative, acceleration, 3e-13);
+            let recovered = sample
+                .point_motion_in_world(
+                    relative.position_frame,
+                    relative.velocity_relative,
+                    relative.acceleration_relative,
+                )
+                .unwrap();
+            near(recovered.position_world, position_world, 3e-13);
+            near(recovered.velocity_world, velocity_world, 3e-13);
+            near(recovered.acceleration_world, Vec3::default(), 3e-13);
+        }
+    }
+}
+
+#[test]
+fn inverse_motion_removes_nested_euler_translation_and_coriolis_transport() {
+    // Independent composition: Rz(t²/2) Ry(b*t) (q + t² e_x).
+    let mut tree = tilt_tree(TimeSignal::Chebfun(ChebProfile {
+        cheb: Cheb1::from_coeffs(-1.0, 1.0, vec![0.5, 0.0, 0.25]),
+        dims: Dims::NONE,
+    }));
+    let b = -0.9;
+    tree.add(frame(
+        2,
+        FrameId(1),
+        rotating([0.0, 1.0, 0.0], Vec3::default(), b),
+    ));
+    tree.add(frame(
+        3,
+        FrameId(2),
+        FrameMotion::Translating {
+            direction: [1.0, 0.0, 0.0],
+            displacement: TimeSignal::Chebfun(ChebProfile {
+                cheb: Cheb1::from_coeffs(-1.0, 1.0, vec![1.0, 0.0, 0.5]),
+                dims: LENGTH,
+            }),
+        },
+    ));
+    let path = tree
+        .prepare_kinematics(
+            FrameId(3),
+            FrameKinematicsBudget::default(),
+            &mut keep_going,
+        )
+        .unwrap();
+    let point = Vec3::new(0.3, 0.5, -0.2);
+    let velocity = Vec3::new(0.4, -0.2, 0.3);
+    let acceleration = Vec3::new(0.2, 0.1, -0.4);
+    for time_s in [-0.5, 0.25, 0.7] {
+        let sample = path.sample(time_s, &mut keep_going).unwrap();
+        let inner = rotate_y(point + Vec3::new(time_s * time_s, 0.0, 0.0), b * time_s);
+        let inner_rotated_velocity =
+            rotate_y(velocity + Vec3::new(2.0 * time_s, 0.0, 0.0), b * time_s);
+        let inner_velocity =
+            inner_rotated_velocity + Vec3::new(b * inner.z, 0.0, -b * inner.x);
+        let inner_acceleration =
+            rotate_y(acceleration + Vec3::new(2.0, 0.0, 0.0), b * time_s)
+                + Vec3::new(
+                    2.0 * b * inner_rotated_velocity.z - b * b * inner.x,
+                    0.0,
+                    -2.0 * b * inner_rotated_velocity.x - b * b * inner.z,
+                );
+        let angle = 0.5 * time_s * time_s;
+        let position_world = rotate_z(inner, angle);
+        let rotated_velocity = rotate_z(inner_velocity, angle);
+        let velocity_world = rotated_velocity
+            + Vec3::new(-time_s * position_world.y, time_s * position_world.x, 0.0);
+        let acceleration_world = rotate_z(inner_acceleration, angle)
+            + Vec3::new(
+                -position_world.y
+                    - 2.0 * time_s * rotated_velocity.y
+                    - time_s * time_s * position_world.x,
+                position_world.x
+                    + 2.0 * time_s * rotated_velocity.x
+                    - time_s * time_s * position_world.y,
+                0.0,
+            );
+        let relative = sample
+            .point_motion_in_frame(position_world, velocity_world, acceleration_world)
+            .unwrap();
+        near(relative.position_frame, point, 5e-13);
+        near(relative.velocity_relative, velocity, 5e-13);
+        near(relative.acceleration_relative, acceleration, 5e-13);
+    }
+}
+
+#[test]
+fn inverse_motion_refuses_nonfinite_inputs_and_unrepresentable_transport() {
+    let mut tree = FrameTree::new();
+    tree.add(frame(
+        1,
+        WORLD,
+        rotating([0.0, 0.0, 1.0], Vec3::default(), 2.0),
+    ));
+    let sample = tree
+        .prepare_kinematics(
+            FrameId(1),
+            FrameKinematicsBudget::default(),
+            &mut keep_going,
+        )
+        .unwrap()
+        .sample(0.0, &mut keep_going)
+        .unwrap();
+    let zero = Vec3::default();
+    for bad in [
+        Vec3::new(f64::NAN, 0.0, 0.0),
+        Vec3::new(0.0, f64::INFINITY, 0.0),
+    ] {
+        for (point, velocity, acceleration) in
+            [(bad, zero, zero), (zero, bad, zero), (zero, zero, bad)]
+        {
+            assert!(matches!(
+                sample.point_motion_in_frame(point, velocity, acceleration),
+                Err(FrameKinematicsError::NonFinite(_))
+            ));
+        }
+    }
+    assert!(matches!(
+        sample.point_motion_in_frame(Vec3::new(f64::MAX, 0.0, 0.0), zero, zero),
+        Err(FrameKinematicsError::NonFinite(_))
+    ));
 }
 
 #[test]
