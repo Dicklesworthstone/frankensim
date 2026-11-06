@@ -1242,6 +1242,42 @@ unequal static/kinetic coefficients, general anisotropic or multicontact
 friction, calibrated material authority, or certified nonintersection is
 claimed by these two primitives.
 
+## Coupled normal restitution and Hertz patch impulses
+
+`tangential::impact::hertz::solve_hertz_impact` resolves one normal impulse
+together with finite Hertz sliding and spin. The complete four-coordinate
+mobility acts on `[Jn, Jtx, Jty, L/radius]` and returns
+`[vn, vtx, vty, radius*spin]`. Each bounded normal trial delegates to the
+original `fs-tribo::HertzImpulsePatch` with the normal-induced tangent/spin
+velocity included. Its friction response then closes the original Newton
+normal target. No associated-cone dilation, independent spin clamp, or
+normal-first/tangent-after approximation replaces this non-associated law.
+
+A sufficient global existence/uniqueness region is admitted before a root is
+selected. For `W=[a,b';b,C]`, positive `a-mu*|b|` bounds normal growth.
+With `S=C-b*b'/a`, the normalized Hertz wrench set's unit-ball containment gives
+the sufficient uniqueness bound
+`(mu/a)*sqrt(b'*S^-1*b)*sqrt(lambda_max(S)) < 1`.
+Original SPD factors, a conservative Schur row-sum bound and a reconstructed
+inverse residual supply the numerical witness. This is not an interval
+certificate or a classification of every inconsistent/nonunique contact;
+unproven feedback regions refuse explicitly.
+
+Original four-coordinate endpoint compatibility, normal complementarity,
+inverse-mobility impulse reconstruction, kinetic change and simultaneous
+midpoint work govern acceptance. Coupled Newton candidates that create energy
+beyond the explicit allowance refuse even when restitution is at most one.
+Tiny signed roundoff remains visible and is neither clipped nor assigned heat.
+The conditional patch loss is not an independently additive part of the total
+impact loss. Global support evaluations, outer iterations, original patch
+trial limits and cancellation are bounded independently.
+
+The effective radius and normalized Hertz pressure-impulse shape are supplied
+physical assumptions. The operation does not resolve an evolving footprint,
+normal compliance/contact duration, multicontact, retained elastic history or
+thermal partition. Opening contact returns the zero action within the admitted
+model; nonzero closing speeds are not removed by a tolerance band.
+
 ## Continuous coupled dry-friction motion
 
 `tangential::impact::multiple::relaxation::advance_coupled_friction`

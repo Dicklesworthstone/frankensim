@@ -21,6 +21,10 @@ use fs_tribo::TriboError;
 #[path = "impact/multiple.rs"]
 pub mod multiple;
 
+/// Coupled normal restitution and finite Hertz sliding/spin impulses.
+#[path = "impact/hertz.rs"]
+pub mod hertz;
+
 /// The original constitutive owner and branch labels; no new coefficient law.
 pub use fs_tribo::{FrictionLaw, FrictionRegime};
 

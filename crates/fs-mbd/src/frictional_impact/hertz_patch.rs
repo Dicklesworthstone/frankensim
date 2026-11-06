@@ -8,6 +8,9 @@
 //! a contact duration, discard elastic history or allocate mechanical loss as
 //! heat.
 
+/// Coupled normal restitution and finite-patch sliding/spin on the same bodies.
+pub mod impact;
+
 use super::{
     ImpulseAccumulator, RigidImpactPoint, add_cross, add_vector, components, influence, magnitude,
     material_separation, rounded_vector,
@@ -77,6 +80,11 @@ pub struct RigidHertzImpulseControls {
 #[must_use]
 pub struct RigidHertzImpulseReport {
     pub contact: HertzImpulseReport,
+    /// Normal impulse applied by the coupled impact owner, or exactly zero for
+    /// the conditional tangent/spin operation. The contact report retains its
+    /// own conditional friction work; the native totals below include this
+    /// normal action when present.
+    pub normal_impulse_applied_ns: f64,
     /// [tangent one, tangent two, normal], normalized from the authored frame.
     pub axes_world: [Vec3; 3],
     /// Maps [p_x,p_y,L/a] to [dv_x,dv_y,a*domega], retaining every cross term.
@@ -104,7 +112,10 @@ pub struct RigidHertzImpulseReport {
     /// Signed force/couple work supplied by the prescribed patch, or zero.
     pub support_work_j: f64,
     pub relative_impulse_work_j: f64,
-    /// Actual native relative midpoint work, with no thermal partition [J].
+    /// Negative actual native relative midpoint work, with no thermal partition
+    /// [J]. A coupled elastic impact retains signed floating-point roundoff
+    /// within its explicit energy allowance; the conditional phase is passive
+    /// without such an allowance.
     pub dissipated_energy_j: f64,
     pub work_energy_residual_j: f64,
     pub total_energy_residual_j: f64,
@@ -174,7 +185,9 @@ struct Rates {
 ///
 /// Repeated normal-impulse or friction-coefficient trials start from this same
 /// native state; the radius and physical geometry cannot change. Successful
-/// preparation and trials use fixed stack storage and no heap allocation.
+/// preparation and conditional tangent/spin trials use fixed stack storage and
+/// no heap allocation. Coupled impact trials additionally own their bounded
+/// numerical matrix factors.
 #[derive(Clone, Debug)]
 pub struct PreparedRigidHertzImpulse {
     point: RigidImpactPoint,
@@ -185,6 +198,7 @@ pub struct PreparedRigidHertzImpulse {
     radius_m: f64,
     mobility: [[f64; 3]; 3],
     normal_cross: [f64; 3],
+    normal_mobility: f64,
     before: Rates,
     controls: RigidHertzImpulseControls,
 }
@@ -282,6 +296,7 @@ impl PreparedRigidHertzImpulse {
         let radius_m = contact.law.radius_m();
         let mut mobility = [[Dd::ZERO; 3]; 3];
         let mut normal_cross = [Dd::ZERO; 3];
+        let mut normal_mobility = Dd::ZERO;
         for point in [
             Some(contact.point),
             match contact.other {
@@ -298,6 +313,7 @@ impl PreparedRigidHertzImpulse {
             // normal-axis free couple. Its removed row supplies normal coupling.
             let mut factor = influence(bodies, properties, point, axes).factor;
             let normal_factor = factor[2];
+            normal_mobility = normal_mobility + dot6(normal_factor, normal_factor);
             let rotation = properties[point.body].angular_mobility_factor(
                 bodies[point.body]
                     .pose()
@@ -315,11 +331,14 @@ impl PreparedRigidHertzImpulse {
         }
         let mobility = mobility.map(|row| row.map(Dd::to_f64));
         let normal_cross = normal_cross.map(Dd::to_f64);
+        let normal_mobility = normal_mobility.to_f64();
         if mobility
             .iter()
             .flatten()
             .chain(&normal_cross)
             .any(|x| !x.is_finite())
+            || !normal_mobility.is_finite()
+            || normal_mobility <= 0.0
         {
             return Err(RigidHertzImpulseError::Invalid(
                 "unrepresentable original Hertz mobility",
@@ -341,6 +360,7 @@ impl PreparedRigidHertzImpulse {
             radius_m,
             mobility,
             normal_cross,
+            normal_mobility,
             before,
             controls,
         })
@@ -361,6 +381,11 @@ impl PreparedRigidHertzImpulse {
     #[must_use]
     pub const fn normal_cross_mobility_per_kg(&self) -> &[f64; 3] {
         &self.normal_cross
+    }
+    /// Original inverse effective normal mass, including full inertia and arms.
+    #[must_use]
+    pub const fn normal_mobility_per_kg(&self) -> f64 {
+        self.normal_mobility
     }
 
     /// Solve one candidate normal-budget/coefficient trial on the fixed snapshot.
@@ -391,17 +416,46 @@ impl PreparedRigidHertzImpulse {
             self.controls.contact,
             &mut cancelled,
         )?;
-        let impulse = self.axes[0]
+        self.apply_solution(contact, 0.0, contact.dissipated_j, 0.0, &mut cancelled)
+    }
+
+    // Both the conditional phase and the coupled normal impact use this one
+    // original-body application/account. The coupled contact owner admits its
+    // normal impulse and supplies the complete four-coordinate mechanical loss.
+    #[allow(clippy::too_many_lines)]
+    fn apply_solution(
+        &self,
+        contact: HertzImpulseReport,
+        normal_impulse_ns: f64,
+        dissipated_j: f64,
+        passivity_tolerance_j: f64,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<RigidHertzImpulseReport, RigidHertzImpulseError> {
+        poll(&mut cancelled)?;
+        if !normal_impulse_ns.is_finite()
+            || normal_impulse_ns < 0.0
+            || !dissipated_j.is_finite()
+            || !passivity_tolerance_j.is_finite()
+            || passivity_tolerance_j < 0.0
+            || passivity_tolerance_j > self.controls.energy_tolerance_j
+            || dissipated_j < -passivity_tolerance_j
+        {
+            return Err(RigidHertzImpulseError::Invalid(
+                "finite normal action and mechanical loss within the explicit energy allowance required",
+            ));
+        }
+        let tangent_impulse = self.axes[0]
             .scale(contact.impulse_ns[0])
             .add(self.axes[1].scale(contact.impulse_ns[1]));
+        let impulse = tangent_impulse.add(self.axes[2].scale(normal_impulse_ns));
         let couple = self.axes[2].scale(contact.spin_impulse_nms);
         if !impulse.is_finite()
             || !couple.is_finite()
-            || magnitude(impulse) > self.controls.contact.maximum_impulse_ns
+            || magnitude(tangent_impulse) > self.controls.contact.maximum_impulse_ns
             || magnitude(couple) > self.controls.contact.maximum_spin_impulse_nms
         {
             return Err(HertzImpulseError::ImpulseBudget {
-                impulse_ns: magnitude(impulse),
+                impulse_ns: magnitude(tangent_impulse),
                 spin_impulse_nms: magnitude(couple),
             }
             .into());
@@ -472,9 +526,10 @@ impl PreparedRigidHertzImpulse {
                 contact.impulse_ns[1],
                 contact.spin_impulse_nms / self.radius_m,
             ])
-            .fold(Dd::ZERO, |sum, (w, p)| {
-                sum + Dd::from_f64(w) * Dd::from_f64(p)
-            });
+            .fold(
+                Dd::from_f64(self.normal_mobility) * Dd::from_f64(normal_impulse_ns),
+                |sum, (w, p)| sum + Dd::from_f64(w) * Dd::from_f64(p),
+            );
         let endpoint_tangent_residual_m_s = (0..2)
             .map(|i| (after.tangent[i] - contact.velocity_after_m_s[i]).abs())
             .fold(0.0_f64, f64::max);
@@ -484,6 +539,7 @@ impl PreparedRigidHertzImpulse {
                 .to_f64()
                 .abs();
         let report = RigidHertzImpulseReport {
+            normal_impulse_applied_ns: normal_impulse_ns,
             axes_world: self.axes,
             scaled_mobility_per_kg: self.mobility,
             normal_cross_mobility_per_kg: self.normal_cross,
@@ -504,9 +560,8 @@ impl PreparedRigidHertzImpulse {
             relative_impulse_work_j: relative_work.to_f64(),
             dissipated_energy_j: -relative_work.to_f64(),
             work_energy_residual_j: (kinetic - support_work - relative_work).to_f64(),
-            total_energy_residual_j: (kinetic - support_work + Dd::from_f64(contact.dissipated_j))
-                .to_f64(),
-            contact_work_residual_j: (relative_work + Dd::from_f64(contact.dissipated_j)).to_f64(),
+            total_energy_residual_j: (kinetic - support_work + Dd::from_f64(dissipated_j)).to_f64(),
+            contact_work_residual_j: (relative_work + Dd::from_f64(dissipated_j)).to_f64(),
             support_impulse_ns: rounded_vector(support_linear),
             support_angular_impulse_nms: rounded_vector(support_angular),
             linear_momentum_residual_ns: rounded_vector(core::array::from_fn(|i| {
@@ -545,7 +600,7 @@ impl PreparedRigidHertzImpulse {
         ]
         .into_iter()
         .any(|x| !x.is_finite())
-            || report.dissipated_energy_j < 0.0
+            || report.dissipated_energy_j < -passivity_tolerance_j
             || report.work_energy_residual_j.abs() > c.energy_tolerance_j
             || report.total_energy_residual_j.abs() > c.energy_tolerance_j
             || report.contact_work_residual_j.abs() > c.energy_tolerance_j

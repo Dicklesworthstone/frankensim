@@ -3116,6 +3116,40 @@ leaves all caller bodies and reusable preparation unchanged. Mechanical loss
 remains unallocated; contact duration, elastic-memory evolution, heat partition
 and subsequent pose integration belong to their existing owners.
 
+## Coupled normal and finite-patch impacts on native bodies
+
+`frictional_impact::hertz_patch::impact::apply_rigid_hertz_impact` connects the
+coupled normal/Hertz owner to the original finite body pair or prescribed
+moving/spinning patch. `PreparedRigidHertzImpulse::solve_impact` reuses a
+fixed native snapshot for coefficient/restitution trials. The cached full
+four-coordinate Gram response contains normal, both tangent directions and
+radius-scaled spin, including all original inertia and off-centre cross terms.
+
+The normal impulse is determined together with sliding/spin and applied
+exactly once. Each touched body receives one summed native point impulse and
+central spin couple. The conditional and coupled APIs share the original
+native application, polarized momentum/kinetic account and support-work
+calculation. Normal restitution/complementarity, actual tangent/spin
+endpoints, complete linear/angular momentum, total relative work and the
+constitutive energy result are independently gated before publication. Moving
+support work includes its normal and tangent translation plus angular motion.
+
+The native report exposes the applied normal impulse. Its conditional patch
+receipt keeps its own conditional work, while the native and coupled totals
+refer to the complete event. The coupled elastic limit retains signed
+roundoff within the explicit energy allowance; genuine active impact candidates
+refuse. No negative loss is hidden by clipping or relabeled thermal energy.
+Existing conditional tangent/spin calls still apply no normal impulse and
+retain their original strict passivity gate.
+
+Only one or two native states are staged, poses stay fixed, and every failure
+or cancellation preserves the caller's bodies. Prepared geometry uses fixed
+storage; the coupled contact solve additionally owns its bounded original
+numerical factors. Both layers retain the same patch impulse bounds. This
+single-impact model assumes a caller-supplied effective Hertz radius and
+pressure-impulse shape; a transient footprint, compliant impact duration,
+multicontact restitution and heat allocation remain separate physical owners.
+
 ## Complete finite-mass two-sphere trajectories
 
 `sphere_pair::advance_sphere_pair` advances two original rigid-body states
