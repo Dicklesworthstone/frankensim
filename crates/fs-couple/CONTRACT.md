@@ -1508,6 +1508,41 @@ atomic refusal, detected LC turning points and small transfers beneath large
 unrelated energy biases. Both native and combined audits use the original
 solver's stable energy increment.
 
+### Finite thermal feedback for retained dielectric switching
+
+With the same default-off `experimental-dielectric-hysteresis` feature,
+`material_circuit::dielectric_hysteretic::thermal::ThermalDielectricHystereticCircuit`
+couples accepted charge/polarization to the existing finite-cell enthalpy driver.
+The original `PreparedMaterialNetwork` resolves caloric storage, resistance and
+conduction at each proposed temperature. `HeatAssembly` providers retain that
+bulk network and can supply thermal contacts, layers, closed radiation and
+finite coolant. Every trial restarts the SAME accepted electrical history;
+this adds no thermal, constitutive or nonlinear solver.
+
+Switching work enters the actual whole fixed solid dielectric volume; native
+resistor work enters its original material cell. An explicitly authored leakage
+resistor may share that receiver: both physical losses accumulate once. Their
+separate receipts survive, while `deposited_heat_j()` reports the total.
+Numerical dissipation is never deposited as heat. Original circuit, finite-cell
+thermal, total-energy and closed-radiation gates remain active.
+
+Source-bound switching requires the exact original caloric card and accepted
+query, plus explicit support for the entire admitted temperature interval in
+every selected constant coefficient. Each trial refreshes that same fit; source
+query, polarization, charge and thermal clock publish together. Both actual
+cell volume and mass/density must reproduce capacitor area times gap, with a
+wholly solid constant-density caloric chart. Cancellation, source domains and
+combined nested circuit-work budgets refuse the complete proposal.
+
+Endpoint resistance with backward-Euler heat is generally first order; charge
+reversals and source/thermal events require interval cuts and refinement.
+Electrical contact work and field-dependent thermal boundaries remain outside
+this lane. No changing switching coefficients, electrocaloric heat, geometry
+evolution, breakdown or empirical accuracy is inferred.
+`tests/dielectric_hysteretic_thermal.rs` supplies independent two-cell
+leakage/switching/R(T) balances through the native heat assembly, major-loop
+finite heating, source/history continuation and atomic refusal regressions.
+
 ## Accelerating stress histories through the original PCM renderer
 
 `MovingQuadrupoleSourceWindow<M>` and `MovingQuadrupoleRenderer<F,M>` now

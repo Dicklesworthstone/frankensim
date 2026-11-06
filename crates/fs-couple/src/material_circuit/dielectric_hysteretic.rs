@@ -34,6 +34,9 @@ use fs_solver::{
 };
 use std::cell::{Cell, RefCell};
 
+/// Finite enthalpy, source-resolved resistance and retained switching memory.
+pub mod thermal;
+
 type Result<T> = core::result::Result<T, HystereticCircuitError>;
 
 /// Explicit prepared polarization plus all other native conserved coordinates.
