@@ -15,15 +15,20 @@ use crate::circuit_enthalpy::{
 use fs_em::{
     spatial::vector_potential::induction::nonlinear::winding::{
         SpatialNonlinearWindingCandidate, SpatialNonlinearWindingCircuit,
-        SpatialNonlinearWindingError, SpatialNonlinearWindingStep, SpatialWindingConductor,
+        SpatialNonlinearWindingError, SpatialNonlinearWindingStep, SpatialWindingCellHeat,
+        SpatialWindingConductor,
     },
-    winding::nonlinear::{NonlinearWindingControls, resistors::GraphResistorMaterial},
+    winding::{
+        nonlinear::{NonlinearWindingControls, resistors::GraphResistorMaterial},
+        ohmic::WindingGraphResistorHeat,
+    },
 };
 use fs_exec::Cx;
 use fs_material::{
     conductor::ElectricalPropertyBasis, field_storage::admit_source_temperature_refresh,
+    state_point::ResolvedMaterialStatePoint,
 };
-use fs_phs::circuit::Branch;
+use fs_phs::circuit::{Branch, CircuitGraph};
 use std::collections::BTreeSet;
 
 #[derive(Debug)]
@@ -43,15 +48,20 @@ impl<E: core::fmt::Debug> core::fmt::Display for SpatialWindingThermalError<E> {
     }
 }
 impl<E: core::fmt::Debug> std::error::Error for SpatialWindingThermalError<E> {}
-type WindingError<E = HeatNetworkError> = CircuitEnthalpyError<SpatialWindingThermalError<E>>;
+pub(in crate::circuit_enthalpy::spatial_induction) type WindingError<E = HeatNetworkError> =
+    CircuitEnthalpyError<SpatialWindingThermalError<E>>;
 
-fn electrical<E>(error: SpatialNonlinearWindingError) -> WindingError<E> {
+pub(in crate::circuit_enthalpy::spatial_induction) fn electrical<E>(
+    error: SpatialNonlinearWindingError,
+) -> WindingError<E> {
     match error {
         SpatialNonlinearWindingError::Cancelled => CircuitEnthalpyError::Cancelled,
         other => CircuitEnthalpyError::Source(SpatialWindingThermalError::Winding(other)),
     }
 }
-fn heat_error<E: From<HeatNetworkError>>(error: HeatNetworkError) -> WindingError<E> {
+pub(in crate::circuit_enthalpy::spatial_induction) fn heat_error<E: From<HeatNetworkError>>(
+    error: HeatNetworkError,
+) -> WindingError<E> {
     match error {
         HeatNetworkError::Cancelled => CircuitEnthalpyError::Cancelled,
         other => CircuitEnthalpyError::Source(SpatialWindingThermalError::Heat(other.into())),
@@ -141,9 +151,9 @@ impl<C: SpatialConductorMaterial> InductionThermalDriver
     }
 }
 
-struct Routes {
-    winding: BTreeMap<usize, CellId>,
-    graph: BTreeMap<usize, CellId>,
+pub(in crate::circuit_enthalpy::spatial_induction) struct Routes {
+    pub(in crate::circuit_enthalpy::spatial_induction) winding: BTreeMap<usize, CellId>,
+    pub(in crate::circuit_enthalpy::spatial_induction) graph: BTreeMap<usize, CellId>,
 }
 
 impl SpatialWindingThermalNetwork<'_> {
@@ -279,24 +289,7 @@ impl SpatialWindingThermalNetwork<'_> {
         circuit: &SpatialNonlinearWindingCircuit<'_, C>,
         cancel: &RefCell<impl FnMut() -> bool>,
     ) -> Result<Routes, Error> {
-        check(cancel)?;
-        if circuit.time_s().to_bits() != thermal.time_s().to_bits()
-            || !self.fill_tolerance.is_finite()
-            || self.fill_tolerance < 0.0
-            || self.fill_tolerance > 1e-10
-        {
-            return Err(invalid(
-                "matching circuit/thermal clocks and bounded fill roundoff required",
-            ));
-        }
         let problem = circuit.field().problem();
-        let regions = self.magnetic.regions();
-        let layout = MagneticThermalNetwork {
-            cells: self.magnetic.cells,
-            links: self.magnetic.links,
-            magnetic_regions: &regions,
-            volume_tolerance_m3: self.magnetic.volume_tolerance_m3,
-        };
         let volumes = (0..problem.mesh().tets.len())
             .map(|cell| {
                 check(cancel)?;
@@ -305,17 +298,67 @@ impl SpatialWindingThermalNetwork<'_> {
                     .ok_or_else(|| invalid("winding tetrahedron lacks original physical volume"))
             })
             .collect::<Result<Vec<_>, _>>()?;
+        let originals = problem
+            .materials()
+            .iter()
+            .map(SpatialNonlinearMaterial::material)
+            .collect::<Vec<_>>();
+        self.routes_for_sources(
+            thermal,
+            circuit.time_s(),
+            &volumes,
+            &originals,
+            circuit.conductors(),
+            circuit.graph(),
+            cancel,
+        )
+    }
+
+    // Reversible and hysteretic circuit owners share this original physical
+    // volume/source correspondence; neither supplies another thermal topology.
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::circuit_enthalpy::spatial_induction) fn routes_for_sources(
+        &self,
+        thermal: &DepositionSimulation<'_>,
+        accepted_time_s: f64,
+        volumes: &[f64],
+        originals: &[&ResolvedMaterialStatePoint],
+        strands: &[SpatialWindingConductor],
+        circuit_graph: &CircuitGraph,
+        cancel: &RefCell<impl FnMut() -> bool>,
+    ) -> Result<Routes, Error> {
+        check(cancel)?;
+        if accepted_time_s.to_bits() != thermal.time_s().to_bits()
+            || !self.fill_tolerance.is_finite()
+            || self.fill_tolerance < 0.0
+            || self.fill_tolerance > 1e-10
+        {
+            return Err(invalid(
+                "matching circuit/thermal clocks and bounded fill roundoff required",
+            ));
+        }
+        if originals.len() != volumes.len() {
+            return Err(invalid(
+                "complete original winding geometry/material maps required",
+            ));
+        }
+        let regions = self.magnetic.regions();
+        let layout = MagneticThermalNetwork {
+            cells: self.magnetic.cells,
+            links: self.magnetic.links,
+            magnetic_regions: &regions,
+            volume_tolerance_m3: self.magnetic.volume_tolerance_m3,
+        };
         let mut fills = BTreeMap::<usize, f64>::new();
-        let mut material_by_cell = BTreeMap::new();
-        for source in circuit.conductors() {
+        let mut material_by_cell = BTreeMap::<usize, &ResolvedMaterialStatePoint>::new();
+        for source in strands {
             check(cancel)?;
             let fill = fills.entry(source.cell).or_default();
             *fill = finite(*fill + source.fill_fraction)?;
-            let original = problem
-                .materials()
+            let original = originals
                 .get(source.cell)
                 .ok_or_else(|| invalid("winding thermal source names a foreign tetrahedron"))?;
-            if source.conductor.material().card_identity() != original.material().card_identity()
+            if source.conductor.material().card_identity() != original.card_identity()
                 || material_by_cell
                     .get(&source.cell)
                     .is_some_and(|previous| !same_material(source.conductor.material(), previous))
@@ -324,7 +367,7 @@ impl SpatialWindingThermalNetwork<'_> {
                     "winding caloric volume requires one original material source",
                 ));
             }
-            material_by_cell.insert(source.cell, source.conductor.material().clone());
+            material_by_cell.insert(source.cell, source.conductor.material());
         }
         if fills
             .values()
@@ -339,7 +382,7 @@ impl SpatialWindingThermalNetwork<'_> {
             ..
         } = layout.routes_for_volumes(
             thermal,
-            &volumes,
+            volumes,
             &fills.keys().copied().collect::<Vec<_>>(),
             cancel,
         )?;
@@ -348,7 +391,7 @@ impl SpatialWindingThermalNetwork<'_> {
             check(cancel)?;
             if !thermal.cells().contains_key(&route.cell)
                 || !matches!(
-                    circuit.graph().branches.get(route.branch),
+                    circuit_graph.branches.get(route.branch),
                     Some((_, _, Branch::Resistor { .. }))
                 )
                 || graph.insert(route.branch, route.cell).is_some()
@@ -358,8 +401,7 @@ impl SpatialWindingThermalNetwork<'_> {
                 ));
             }
         }
-        if circuit
-            .graph()
+        if circuit_graph
             .branches
             .iter()
             .filter(|(_, _, branch)| matches!(branch, Branch::Resistor { .. }))
@@ -371,6 +413,111 @@ impl SpatialWindingThermalNetwork<'_> {
             ));
         }
         Ok(Routes { winding, graph })
+    }
+
+    pub(in crate::circuit_enthalpy::spatial_induction) fn admit_graph_material_bindings(
+        &self,
+        retained: &[GraphResistorMaterial],
+        bindings: Option<&[CellResistor]>,
+        routes: &Routes,
+        cancel: &RefCell<impl FnMut() -> bool>,
+    ) -> Result<(), Error> {
+        check(cancel)?;
+        if bindings.is_none() && !retained.is_empty() {
+            return Err(invalid(
+                "retained graph resistor sources require their complete thermal bindings",
+            ));
+        }
+        if let Some(bindings) = bindings {
+            if bindings.len() != routes.graph.len() {
+                return Err(invalid(
+                    "graph material bindings need exact heat routes and separate whole-cell volumes",
+                ));
+            }
+            if bindings.is_empty() {
+                return Ok(());
+            }
+            let mut magnetic_cells = BTreeSet::new();
+            for region in self.magnetic.magnetic_regions {
+                check(cancel)?;
+                if let super::super::SpatialMagneticRegion::Cell { cell, .. } = *region {
+                    magnetic_cells.insert(cell);
+                }
+            }
+            for binding in bindings {
+                check(cancel)?;
+                if routes.graph.get(&binding.destination.branch) != Some(&binding.destination.cell)
+                    || magnetic_cells.contains(&binding.destination.cell)
+                {
+                    return Err(invalid(
+                        "graph material bindings need exact heat routes and separate whole-cell volumes",
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    // Resolve each original stranded source at the same endpoint phase as the
+    // field. Build the thermal lookups once, not once per strand/cell pair.
+    pub(in crate::circuit_enthalpy::spatial_induction) fn refresh_winding_sources(
+        &self,
+        strands: &[SpatialWindingConductor],
+        routes: &Routes,
+        sample: &MaterialNetworkSample,
+        cancel: &RefCell<impl FnMut() -> bool>,
+    ) -> Result<Vec<SpatialWindingConductor>, Error> {
+        check(cancel)?;
+        if strands.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut bindings = BTreeMap::new();
+        for binding in self.magnetic.cells {
+            check(cancel)?;
+            bindings.entry(binding.cell).or_insert(binding);
+        }
+        let mut phases = BTreeMap::new();
+        for source in &sample.cells {
+            check(cancel)?;
+            phases.entry(source.cell).or_insert(source.phase);
+        }
+        strands
+            .iter()
+            .map(|original| {
+                check(cancel)?;
+                let receiver = *routes
+                    .winding
+                    .get(&original.cell)
+                    .ok_or_else(|| invalid("winding source lacks its original thermal receiver"))?;
+                let binding = bindings.get(&receiver).ok_or_else(|| {
+                    invalid("winding receiver lacks its original material binding")
+                })?;
+                let phase = *phases
+                    .get(&receiver)
+                    .ok_or_else(|| invalid("winding receiver lacks its resolved endpoint phase"))?;
+                let query = binding.point.at(phase).map_err(|e| {
+                    material(crate::circuit_enthalpy::material::MaterialNetworkError::Material(e))
+                })?;
+                let refreshed = original
+                    .conductor
+                    .material()
+                    .at_query_point(binding.point.material, &query)
+                    .map_err(|e| {
+                        material(
+                            crate::circuit_enthalpy::material::MaterialNetworkError::Material(
+                                fs_material::thermal::source::ThermalMaterialError::Material(e),
+                            ),
+                        )
+                    })?;
+                let conductor = original.conductor.with_material(refreshed).map_err(|e| {
+                    CircuitEnthalpyError::Source(MagneticThermalError::Conductor(e))
+                })?;
+                Ok(SpatialWindingConductor {
+                    conductor,
+                    ..original.clone()
+                })
+            })
+            .collect()
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -394,103 +541,25 @@ impl SpatialWindingThermalNetwork<'_> {
         let routes = self
             .routes(thermal, circuit, cancel)
             .map_err(native_error)?;
-        if graph_material.is_none() && !circuit.graph_resistor_materials().is_empty() {
-            return Err(native_error(invalid(
-                "retained graph resistor sources require their complete thermal bindings",
-            )));
-        }
-        if let Some(bindings) = graph_material {
-            if bindings.len() != routes.graph.len()
-                || bindings.iter().any(|binding| {
-                    routes.graph.get(&binding.destination.branch) != Some(&binding.destination.cell)
-                        || self.magnetic.magnetic_regions.iter().any(|region| {
-                            matches!(region, super::super::SpatialMagneticRegion::Cell { cell, .. }
-                            if *cell == binding.destination.cell)
-                        })
-                })
-            {
-                return Err(native_error(invalid(
-                    "graph material bindings need exact heat routes and separate whole-cell volumes",
-                )));
-            }
-        }
+        self.admit_graph_material_bindings(
+            circuit.graph_resistor_materials(),
+            graph_material,
+            &routes,
+            cancel,
+        )
+        .map_err(native_error)?;
         let refresh = |sources: &MaterialNetworkSample| {
-            circuit
-                .conductors()
-                .iter()
-                .map(|original| {
-                    check(cancel)?;
-                    let receiver = routes.winding[&original.cell];
-                    let binding = self
-                        .magnetic
-                        .cells
-                        .iter()
-                        .find(|b| b.cell == receiver)
-                        .ok_or_else(|| {
-                            invalid("winding receiver lacks its original material binding")
-                        })?;
-                    let phase = sources
-                        .cells
-                        .iter()
-                        .find(|c| c.cell == receiver)
-                        .ok_or_else(|| {
-                            invalid("winding receiver lacks its resolved endpoint phase")
-                        })?
-                        .phase;
-                    let query = binding.point.at(phase).map_err(|e| {
-                        material(
-                            crate::circuit_enthalpy::material::MaterialNetworkError::Material(e),
-                        )
-                    })?;
-                    let refreshed = original
-                        .conductor
-                        .material()
-                        .at_query_point(binding.point.material, &query)
-                        .map_err(|e| {
-                            material(
-                                crate::circuit_enthalpy::material::MaterialNetworkError::Material(
-                                    fs_material::thermal::source::ThermalMaterialError::Material(e),
-                                ),
-                            )
-                        })?;
-                    let conductor = original.conductor.with_material(refreshed).map_err(|e| {
-                        CircuitEnthalpyError::Source(MagneticThermalError::Conductor(e))
-                    })?;
-                    Ok(SpatialWindingConductor {
-                        conductor,
-                        ..original.clone()
-                    })
-                })
-                .collect::<Result<Vec<_>, Error>>()
+            self.refresh_winding_sources(circuit.conductors(), &routes, sources, cancel)
         };
         let initial = resolve(thermal)?;
-        if initial.resistors.len() != graph_material.map_or(0, |bindings| bindings.len()) {
-            return Err(native_error(invalid(
-                "graph thermal source coverage changed",
-            )));
-        }
-        for source in &initial.resistors {
-            check(cancel).map_err(native_error)?;
-            let Some((_, _, Branch::Resistor { ohms })) =
-                circuit.graph().branches.get(source.branch)
-            else {
-                return Err(native_error(invalid(
-                    "material graph source names a non-resistor branch",
-                )));
-            };
-            if ohms.to_bits() != source.conductor.resistance_ohm().to_bits()
-                || !circuit.graph_resistor_materials().is_empty()
-                    && !circuit.graph_resistor_materials().iter().any(|old| {
-                        old.branch == source.branch
-                            && same_graph_geometry(&old.conductor, &source.conductor)
-                            && same_material(old.conductor.material(), source.conductor.material())
-                    })
-            {
-                return Err(native_error(invalid(
-                    "accepted graph resistance/source does not match its original thermal state",
-                )));
-            }
-        }
+        admit_initial_graph_sources(
+            circuit.graph(),
+            circuit.graph_resistor_materials(),
+            graph_material.map_or(0, |bindings| bindings.len()),
+            &initial.resistors,
+            cancel,
+        )
+        .map_err(native_error)?;
         let accepted = refresh(sample(&initial.source)).map_err(native_error)?;
         for (original, refreshed) in circuit.conductors().iter().zip(&accepted) {
             check(cancel).map_err(native_error)?;
@@ -572,38 +641,16 @@ impl SpatialWindingThermalNetwork<'_> {
             },
             |candidate, powers, dt, checkpoint| {
                 let step = candidate.step();
-                let mut seen = BTreeSet::new();
-                for loss in &step.cells {
-                    checkpoint()?;
-                    let receiver = *routes.winding.get(&loss.cell).ok_or_else(|| {
-                        native_error(invalid("spatial strand heat lacks its original receiver"))
-                    })?;
-                    if !seen.insert((loss.winding, loss.cell)) {
-                        return Err(native_error(invalid(
-                            "repeated spatial strand heat receipt",
-                        )));
-                    }
-                    add_heat(powers, receiver, loss.heat_j, dt).map_err(native_error)?;
-                }
-                if seen.len() != circuit.conductors().len()
-                    || step.graph_resistors.len() != routes.graph.len()
-                {
-                    return Err(native_error(invalid(
-                        "native winding/graph heat receipt is incomplete",
-                    )));
-                }
-                let mut seen_graph = BTreeSet::new();
-                for loss in &step.graph_resistors {
-                    checkpoint()?;
-                    let receiver = *routes.graph.get(&loss.branch).ok_or_else(|| {
-                        native_error(invalid("native graph heat lacks its original receiver"))
-                    })?;
-                    if !seen_graph.insert(loss.branch) {
-                        return Err(native_error(invalid("repeated native graph heat receipt")));
-                    }
-                    add_heat(powers, receiver, loss.heat_j, dt).map_err(native_error)?;
-                }
-                Ok(())
+                deposit_winding_heat(
+                    &step.cells,
+                    &step.graph_resistors,
+                    circuit.conductors().len(),
+                    &routes,
+                    powers,
+                    dt,
+                    checkpoint,
+                )
+                .map_err(native_error)
             },
             cancel,
         )?;
@@ -613,6 +660,79 @@ impl SpatialWindingThermalNetwork<'_> {
             report,
         })
     }
+}
+
+pub(in crate::circuit_enthalpy::spatial_induction) fn admit_initial_graph_sources(
+    graph: &CircuitGraph,
+    retained: &[GraphResistorMaterial],
+    expected_count: usize,
+    sources: &[crate::material_circuit::MaterialResistor],
+    cancel: &RefCell<impl FnMut() -> bool>,
+) -> Result<(), Error> {
+    if sources.len() != expected_count {
+        return Err(invalid("graph thermal source coverage changed"));
+    }
+    for source in sources {
+        check(cancel)?;
+        let Some((_, _, Branch::Resistor { ohms })) = graph.branches.get(source.branch) else {
+            return Err(invalid("material graph source names a non-resistor branch"));
+        };
+        if ohms.to_bits() != source.conductor.resistance_ohm().to_bits()
+            || !retained.is_empty()
+                && !retained.iter().any(|old| {
+                    old.branch == source.branch
+                        && same_graph_geometry(&old.conductor, &source.conductor)
+                        && same_material(old.conductor.material(), source.conductor.material())
+                })
+        {
+            return Err(invalid(
+                "accepted graph resistance/source does not match its original thermal state",
+            ));
+        }
+    }
+    Ok(())
+}
+
+// Both magnetic histories consume the exact same original native strand and
+// graph loss receipts. Core Joule/pinning heat belongs to their field adapter.
+#[allow(clippy::too_many_arguments)]
+pub(in crate::circuit_enthalpy::spatial_induction) fn deposit_winding_heat(
+    cells: &[SpatialWindingCellHeat],
+    graph_losses: &[WindingGraphResistorHeat],
+    expected_strands: usize,
+    routes: &Routes,
+    powers: &mut BTreeMap<CellId, f64>,
+    dt: f64,
+    checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+) -> Result<(), Error> {
+    let mut seen = BTreeSet::new();
+    for loss in cells {
+        checkpoint()?;
+        let receiver = *routes
+            .winding
+            .get(&loss.cell)
+            .ok_or_else(|| invalid("spatial strand heat lacks its original receiver"))?;
+        if !seen.insert((loss.winding, loss.cell)) {
+            return Err(invalid("repeated spatial strand heat receipt"));
+        }
+        add_heat(powers, receiver, loss.heat_j, dt)?;
+    }
+    if seen.len() != expected_strands || graph_losses.len() != routes.graph.len() {
+        return Err(invalid("native winding/graph heat receipt is incomplete"));
+    }
+    let mut seen_graph = BTreeSet::new();
+    for loss in graph_losses {
+        checkpoint()?;
+        let receiver = *routes
+            .graph
+            .get(&loss.branch)
+            .ok_or_else(|| invalid("native graph heat lacks its original receiver"))?;
+        if !seen_graph.insert(loss.branch) {
+            return Err(invalid("repeated native graph heat receipt"));
+        }
+        add_heat(powers, receiver, loss.heat_j, dt)?;
+    }
+    Ok(())
 }
 
 fn add_heat(
@@ -632,7 +752,7 @@ fn add_heat(
     Ok(())
 }
 
-fn same_graph_geometry(
+pub(in crate::circuit_enthalpy::spatial_induction) fn same_graph_geometry(
     original: &fs_material::conductor::ResolvedConductor,
     proposed: &fs_material::conductor::ResolvedConductor,
 ) -> bool {
@@ -644,7 +764,7 @@ fn same_graph_geometry(
 
 // A heat provider may choose transport coefficients, but it cannot replace an
 // accepted resistor's original material source while solving its temperature.
-fn pinned_graph_sources(
+pub(in crate::circuit_enthalpy::spatial_induction) fn pinned_graph_sources(
     original: &[crate::material_circuit::MaterialResistor],
     proposed: &[crate::material_circuit::MaterialResistor],
     cancel: &RefCell<impl FnMut() -> bool>,
@@ -652,14 +772,18 @@ fn pinned_graph_sources(
     if original.len() != proposed.len() {
         return Err(invalid("graph resistor thermal source coverage changed"));
     }
+    let mut originals = BTreeMap::new();
+    for source in original {
+        check(cancel)?;
+        originals.entry(source.branch).or_insert(source);
+    }
     let mut seen = BTreeSet::new();
     proposed
         .iter()
         .map(|source| {
             check(cancel)?;
-            let old = original
-                .iter()
-                .find(|old| old.branch == source.branch)
+            let old = originals
+                .get(&source.branch)
                 .ok_or_else(|| invalid("thermal trial changed the graph resistor branch"))?;
             if !seen.insert(source.branch)
                 || !same_graph_geometry(&old.conductor, &source.conductor)

@@ -1,5 +1,8 @@
 //! G1/G3/G4: original three-dimensional terminal currents respond to finite heat.
 //! Manufactured cards check equations and conservation, not measured devices.
+#[cfg(feature = "magnetic-hysteresis")]
+#[path = "spatial_induction_winding_enthalpy/hysteretic.rs"]
+mod hysteretic;
 #[path = "../../fs-em/tests/winding_ohmic/common.rs"]
 mod source;
 

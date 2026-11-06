@@ -1,3 +1,35 @@
+## Native 3D hysteretic winding circuits and finite enthalpy
+
+With `magnetic-hysteresis`, the existing `SpatialWindingThermalNetwork` supplies
+`step_hysteretic_candidate` and `step_hysteretic_material_candidate`. The native
+3D graph/winding, A–phi/vector-memory field and finite caloric inventory advance
+in one candidate. The material form additionally resolves every ordinary graph
+resistor from its separate finite body. The complete
+`spatial_induction::hysteretic::winding::heat_assembly_candidate` retains original
+contact, layer, radiation and coolant source payloads and closed-heat accounting.
+
+The original field thermal residual and the existing winding source/heat routes
+serve both excitation forms. Each thermal endpoint resolves actual strand
+resistivity, core scalar/tensor conductivity and sourced graph R(T). Magnetic fit
+coefficients remain constant over the complete admitted caloric interval.
+Neither thermal nor terminal trials reset or partially publish accepted circuit,
+field, polarization or caloric history. The shared thermal budget counts nested
+field trials, including discarded terminal proposals.
+
+Core eddy, all-tetrahedron pinning, strand copper and graph-resistor heat are
+deposited once into their original finite receivers. Insulating dissipative
+cores require receivers too. Strand fills must cover their whole original
+caloric volume; partial composites require a separate mixture owner. Ordinary
+material graph bodies must be distinct from those whole magnetic volumes.
+Numerical field/end loss remains outside caloric heating. The stable account is
+`delta W_graph+field+end + delta H_caloric + D_numerical = W_external + Q_external`.
+
+All source, original-volume, clock, terminal, finite-enthalpy and total-work gates
+precede joint publication. Source changes, cancellation and exhausted budgets
+leave every accepted history intact. These adapters remain stationary and fully
+solid; they do not infer transported/rotated magnetic memory or a
+temperature-dependent hysteresis free energy from a fixed fitted law.
+
 ## Three-dimensional hysteretic induction and finite heat
 
 With `magnetic-hysteresis` (also selected by `hysteretic-eddy-heating`),

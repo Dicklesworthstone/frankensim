@@ -8,6 +8,9 @@
 //! over its complete admitted caloric interval. Geometry and material occupancy
 //! are stationary; this adapter supplies no transport of magnetic memory.
 
+/// Native winding circuits on the same retained vector-memory thermal solve.
+pub mod winding;
+
 use super::{
     CircuitEnthalpyError, CircuitEnthalpySolve, CircuitThermalCoefficients, DrivenCoefficients,
     DriverAccount, Error, MagneticThermalError, MagneticThermalNetwork, MaterialNetwork,
@@ -77,7 +80,28 @@ impl<'m, C: SpatialConductorMaterial> ThermalDriver for SpatialHystereticInducti
     type Model = SpatialHystereticInduction<'m, C>;
     type Step = SpatialHystereticInductionStep;
     fn account(&self) -> DriverAccount<'_> {
-        let step = self.step();
+        Self::receipt_account(self.step())
+    }
+    fn into_parts(self) -> (Self::Model, Self::Step) {
+        SpatialHystereticInductionCandidate::into_parts(self)
+    }
+}
+
+// Current excitation and native circuit terminals share the original magnetic
+// source admission, finite-enthalpy residual and per-tetrahedron heat accounts.
+trait HystereticInductionDriver: ThermalDriver {
+    fn induction_step(&self) -> &SpatialHystereticInductionStep;
+    fn receipt_account(step: &Self::Step) -> DriverAccount<'_>;
+    fn field_trials(&self) -> usize;
+}
+
+impl<C: SpatialConductorMaterial> HystereticInductionDriver
+    for SpatialHystereticInductionCandidate<'_, C>
+{
+    fn induction_step(&self) -> &SpatialHystereticInductionStep {
+        self.step()
+    }
+    fn receipt_account(step: &Self::Step) -> DriverAccount<'_> {
         DriverAccount {
             resistors: &[],
             contacts: &[],
@@ -87,8 +111,8 @@ impl<'m, C: SpatialConductorMaterial> ThermalDriver for SpatialHystereticInducti
             supplied_j: step.impressed_work_j,
         }
     }
-    fn into_parts(self) -> (Self::Model, Self::Step) {
-        SpatialHystereticInductionCandidate::into_parts(self)
+    fn field_trials(&self) -> usize {
+        1
     }
 }
 
@@ -104,13 +128,12 @@ fn induction(error: SpatialHystereticInductionError) -> Error {
     }
 }
 
-fn deposit_heat<C: SpatialConductorMaterial>(
-    proposal: &SpatialHystereticInductionCandidate<'_, C>,
+fn deposit_heat(
+    step: &SpatialHystereticInductionStep,
     routes: &MagneticRoutes,
     dt: f64,
     checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
 ) -> Result<BTreeMap<CellId, f64>, Error> {
-    let step = proposal.step();
     let mut powers = deposit_cell_heat(&step.cells, routes, dt, checkpoint)?;
     if step.magnetic_cells.len() != routes.magnetic.len() {
         return Err(invalid(
@@ -239,6 +262,76 @@ impl SpatialMagneticThermalNetwork<'_> {
         cancel: &RefCell<impl FnMut() -> bool>,
     ) -> Result<SpatialHystereticInductionThermalCandidate<'t, 'm, S, C>, CircuitEnthalpyError<E>>
     {
+        let (thermal, field, report) = self.step_hysteretic_driver_candidate(
+            thermal,
+            target_s,
+            field,
+            controls,
+            initial_energy_increments_j,
+            resolve,
+            snapshot,
+            |_, _, conductors, _| {
+                field
+                    .step_with_conductors_candidate(
+                        endpoint_current_a_m2,
+                        target_s - thermal.time_s(),
+                        conductors,
+                        field_controls,
+                        &mut || (*cancel.borrow_mut())(),
+                    )
+                    .map_err(induction)
+                    .map_err(native_error)
+            },
+            |_, _, _, _| Ok(()),
+            cancel,
+        )?;
+        Ok(SpatialHystereticInductionThermalCandidate {
+            thermal,
+            field,
+            report,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn step_hysteretic_driver_candidate<
+        't,
+        'm,
+        S,
+        E: From<MagneticThermalError>,
+        C: SpatialConductorMaterial,
+        D: HystereticInductionDriver,
+    >(
+        &self,
+        thermal: &DepositionSimulation<'t>,
+        target_s: f64,
+        field: &SpatialHystereticInduction<'m, C>,
+        controls: CircuitEnthalpySolve,
+        initial_energy_increments_j: &[f64],
+        resolve: impl Fn(
+            &DepositionSimulation<'_>,
+        ) -> Result<CircuitThermalCoefficients<S>, CircuitEnthalpyError<E>>,
+        snapshot: impl Fn(&S) -> &MaterialNetworkSample,
+        drive: impl Fn(
+            &DepositionSimulation<'_>,
+            &CircuitThermalCoefficients<S>,
+            Vec<Option<C>>,
+            usize,
+        ) -> Result<D, CircuitEnthalpyError<E>>,
+        additional_heat: impl Fn(
+            &D,
+            &mut BTreeMap<CellId, f64>,
+            f64,
+            &mut dyn FnMut() -> Result<(), DepositionError>,
+        ) -> Result<(), CircuitEnthalpyError<E>>,
+        cancel: &RefCell<impl FnMut() -> bool>,
+    ) -> Result<
+        (
+            DepositionSimulation<'t>,
+            D::Model,
+            SpatialInductionThermalReport<D::Step, S>,
+        ),
+        CircuitEnthalpyError<E>,
+    > {
         check(cancel).map_err(native_error)?;
         crate::circuit_enthalpy::admit_driver_unknowns(
             thermal,
@@ -312,13 +405,12 @@ impl SpatialMagneticThermalNetwork<'_> {
                 "accepted hysteretic spatial conductor sources differ from their thermal state",
             )));
         }
-        let dt = target_s - thermal.time_s();
         let (thermal, field, report) = cell_driver_candidate(
             thermal,
             target_s,
             controls,
             initial_energy_increments_j,
-            |trial, _| {
+            |trial, remaining| {
                 check(cancel).map_err(native_error)?;
                 let coefficients = resolve(trial)?;
                 let (sources, magnetic) = resolve_materials(trial, snapshot(&coefficients.source))
@@ -327,25 +419,17 @@ impl SpatialMagneticThermalNetwork<'_> {
                 for (cell, source) in sources {
                     refreshed[cell] = Some(source);
                 }
-                let proposal = field
-                    .step_with_conductors_candidate(
-                        endpoint_current_a_m2,
-                        dt,
-                        refreshed,
-                        field_controls,
-                        &mut || (*cancel.borrow_mut())(),
-                    )
-                    .map_err(induction)
-                    .map_err(native_error)?;
+                let proposal = drive(trial, &coefficients, refreshed, remaining)?;
                 let field_internal_energy_j = [
-                    proposal.step().stored_before_j,
-                    proposal.step().stored_after_j,
+                    proposal.induction_step().stored_before_j,
+                    proposal.induction_step().stored_after_j,
                 ];
+                let circuit_trials = proposal.field_trials();
                 Ok(DrivenCoefficients {
                     circuit: proposal,
                     sources_w: coefficients.sources_w,
                     conductances_w_k: coefficients.conductances_w_k,
-                    circuit_trials: 1,
+                    circuit_trials,
                     source: SpatialInductionThermalSource {
                         network: coefficients.source,
                         magnetic: magnetic
@@ -362,20 +446,23 @@ impl SpatialMagneticThermalNetwork<'_> {
                     },
                 })
             },
-            |proposal, dt, checkpoint| {
-                deposit_heat(proposal, &routes, dt, checkpoint).map_err(native_error)
+            |proposal: &D, dt, checkpoint| {
+                let mut powers = deposit_heat(proposal.induction_step(), &routes, dt, checkpoint)
+                    .map_err(native_error)?;
+                additional_heat(proposal, &mut powers, dt, checkpoint)?;
+                Ok(powers)
             },
             || (*cancel.borrow_mut())(),
         )?;
         // Fixed magnetic coefficients give U=psi. Preserve the constitutive
         // stable increment instead of subtracting two large biased totals.
         let external_heat_j = report.non_electrical_heat_j;
-        let step = &report.electrical;
+        let account = D::receipt_account(&report.electrical);
         let total_energy_residual_j = finite(
-            step.stored_change_j
+            account.stored_change_j
                 + report.thermal.stored_energy_change_j
-                + step.numerical_dissipation_j
-                - step.impressed_work_j
+                + account.numerical_dissipation_j
+                - account.supplied_j
                 - external_heat_j,
         )?;
         if total_energy_residual_j.abs() > controls.total_energy_tolerance_j {
@@ -384,14 +471,14 @@ impl SpatialMagneticThermalNetwork<'_> {
             )));
         }
         check(cancel).map_err(native_error)?;
-        Ok(SpatialHystereticInductionThermalCandidate {
+        Ok((
             thermal,
             field,
-            report: SpatialInductionThermalReport {
+            SpatialInductionThermalReport {
                 coupled: report,
                 external_heat_j,
                 total_energy_residual_j,
             },
-        })
+        ))
     }
 }

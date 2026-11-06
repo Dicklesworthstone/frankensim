@@ -152,7 +152,7 @@ fn spatial_play_and_temperature_feedback_share_one_finite_energy_balance_and_his
         let numerical = h * (b - old_b) - change - pinning;
         let target = (index + 1) as f64 * DT;
         let before = (
-            heat.cells().to_vec(),
+            heat.cells().clone(),
             state.potential_wb().to_vec(),
             state.cell_states().to_vec(),
         );
@@ -232,7 +232,7 @@ fn spatial_play_and_temperature_feedback_share_one_finite_energy_balance_and_his
                 Err(CircuitEnthalpyError::Cancelled)
             ));
         }
-        assert_eq!(heat.cells(), before.0);
+        assert_eq!(heat.cells(), &before.0);
         assert_eq!(state.potential_wb(), before.1);
         assert_eq!(state.cell_states(), before.2);
         assert_eq!(state.time_s(), heat.time_s());
