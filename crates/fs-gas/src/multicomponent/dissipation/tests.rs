@@ -8,6 +8,7 @@ use fs_thermochem::transport::kinetic::ThermalConductivityQuantityV1;
 mod entropy;
 mod face;
 mod reservoir;
+mod reservoir_entropy;
 mod stabilized;
 mod thermodiffusion;
 mod variable_area;

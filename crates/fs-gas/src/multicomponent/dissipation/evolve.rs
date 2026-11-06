@@ -44,6 +44,19 @@ pub(super) fn advance_with_entropy<L: TransportLaw>(
     advance_inner(owner, flow, duration, controls, [None; 2], None, Some(entropy), cancelled)
 }
 
+
+pub(super) fn advance_with_reservoirs_and_entropy<L: TransportLaw>(
+    owner: &mut DissipationOperator<L>,
+    flow: &mut MixtureEuler1d,
+    duration: Time,
+    controls: DissipationControl,
+    reservoirs: ReservoirEnds<'_>,
+    entropy: &mut super::entropy::EntropyTracker,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<DissipationReport, DissipationError> {
+    advance_inner(owner, flow, duration, controls, reservoirs, None, Some(entropy), cancelled)
+}
+
 pub(super) fn advance_moving<L: TransportLaw>(
     owner: &mut DissipationOperator<L>,
     flow: &mut MixtureEuler1d,
@@ -274,14 +287,14 @@ fn advance_inner<L: TransportLaw>(
                     }
                 }
                 if let Some(account) = &mut entropy {
-                    account.check_attempt(n)?;
+                    account.check_attempt(n, &a, &b, step, end_areas, cancelled)?;
                 }
                 Ok::<_, DissipationError>(b)
             })();
             match attempt {
                 Ok(b) => {
                     if let Some(account) = &mut entropy {
-                        account.accept_attempt();
+                        account.accept_attempt(n)?;
                     }
                     for k in 0..m {
                         let transfers = [

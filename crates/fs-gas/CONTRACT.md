@@ -5412,3 +5412,53 @@ under all three admitted boundary types and large formation-reference shifts;
 independent thermal/mixing entropy with viscous conversion; an energy-conserving
 negative-entropy face that must refuse; complete-interval allowance and rollback;
 weak mixing, absent species, late cancellation and reuse.
+
+### Entropy admission with stationary molecular reservoirs
+
+`advance_with_reservoirs_and_entropy_for` applies the original axial SSP-RK2
+molecular update against the existing source-bearing stationary end baths,
+then admits actual state entropy minus actual bath entropy input. Each end
+retains its own temperature, species composition and original caloric source.
+The native species and energy transfers use the original two stage weights,
+physical end areas and half-cell boundary distances. Heat, species enthalpy
+and source chemical entropy are counted once; no advective flux is introduced.
+
+For signed transfers into the gas, the bath contribution is
+E_ref/T_b - sum_i[(h_i,ref/T_b-s_i,b)*dm_i/M_i]. This equals the native reduced
+heat divided by T_b plus the bath partial-species entropy transfer. Bath
+enthalpies are those already used by the native energy flux. The stationary
+bath has no mechanical-work contribution. Fourier and authored reciprocal
+Dufour heat enter through that same energy transfer, with no second heat source.
+
+The state and boundary accounts share one fixed original temperature/density
+basis. Original molar internal-energy and entropy intervals cancel arbitrary
+formation and entropy references before reduction. The report separately
+retains full-source state entropy, left/right full-source entropy input,
+inventory-corrected state-minus-input generation and the source-reference
+contribution from each species' continuity residual. These are finite-step
+state accounts, including spatial and temporal numerical effects, not isolated
+constitutive production integrals.
+
+Each species' residual is its actual mass change minus native boundary
+transfer. Its relative allowance scales against original mass plus accepted
+absolute stage/end throughput; opposing ends or stage reversals cannot cancel
+that scale. An initially absent species may enter from a declared bath.
+A bath species with zero activity must have zero flux in both actual stages;
+a finite chemical potential is never fabricated by flooring a concentration.
+A bath with absent species can still exchange heat when those species fluxes
+are exactly zero.
+
+The same absolute entropy allowance applies to every native substep and to
+the direct original-to-final state-minus-input account. Failed candidates keep
+the original bounded halving policy. All final entropy/report arithmetic is
+completed before the caller's field is published, including the full-source
+reference contribution. Cancellation, work limits, zero-activity refusal and
+final entropy refusal leave the complete original field and clock unchanged.
+Closed entry points retain their existing semantics. Moving baths, advection,
+chemistry, RKL2, and network/spatial entropy remain outside this entry point.
+
+Four focused native regression definitions cover unequal-temperature steady
+Fourier baths; composition baths that reduce body entropy while total generation
+is positive; original trajectory and formation-datum invariance; admission of
+initially absent incoming species; zero-activity refusal and heat-only admission;
+and cancellation before final publication followed by workspace reuse.

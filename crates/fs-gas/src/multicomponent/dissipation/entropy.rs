@@ -24,15 +24,21 @@ use fs_math::dd::Dd;
 use fs_qty::{Temperature, Time};
 use fs_thermochem::UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K as R;
 
-/// Absolute entropy and relative closed-species inventory allowances.
+mod reservoir;
+use reservoir::ReservoirEntropyAccount;
+
+/// Absolute entropy and relative species-continuity allowances.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MolecularEntropyControl {
-    /// Maximum admitted negative state increment, J/K, at every accepted
-    /// substep AND over the complete original-to-final interval.
+    /// Maximum admitted negative state-minus-reservoir-input increment, J/K,
+    /// at every accepted substep AND over the complete original-to-final interval.
+    /// The reservoir input is zero for the closed entry point.
     pub absolute_tolerance_j_k: f64,
-    /// Maximum absolute mass drift divided by the ORIGINAL mass of each species.
-    /// An originally absent species must remain exactly absent. This bounds the
-    /// continuity defect separately from its arbitrary entropy-reference effect.
+    /// Closed entry: maximum absolute mass drift divided by original species mass.
+    /// With reservoirs, subtract actual species transfer and scale by original
+    /// mass plus accepted absolute stage/end throughput. Exact-zero inventory
+    /// and throughput require zero drift. The continuity defect is independent
+    /// of its arbitrary entropy-reference effect.
     pub relative_species_tolerance: f64,
 }
 
@@ -85,7 +91,76 @@ pub struct MolecularEntropyReport {
     pub rejected_entropy_steps: usize,
 }
 
+
+/// Entropy of an open molecular interval with explicit stationary source baths.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ReservoirMolecularEntropyReport {
+    /// Original thermochemical source-state entropy change [J/K].
+    pub source_entropy_change_j_k: f64,
+    /// Actual entropy entering the gas from the left and right baths [J/K].
+    /// Heat and partial-species entropy use their own actual bath states.
+    pub boundary_entropy_input_j_k: [f64; 2],
+    /// State change minus bath input, with species-reference contributions
+    /// from numerical continuity residuals removed [J/K]. This is admitted.
+    pub entropy_generation_j_k: f64,
+    /// Same generation INCLUDING the explicitly bounded continuity defect [J/K].
+    pub source_entropy_generation_j_k: f64,
+    /// Source-reference entropy of (species change - boundary transfer) [J/K].
+    pub reference_entropy_residual_j_k: f64,
+    /// Smallest admitted substep state-minus-input value [J/K].
+    pub minimum_step_entropy_generation_j_k: f64,
+    /// Largest species residual divided by original mass plus accepted absolute
+    /// stage/end throughput. Exact-zero inventory and throughput require zero drift.
+    pub maximum_relative_species_residual: f64,
+    pub rejected_entropy_steps: usize,
+}
+
 impl<L: TransportLaw> DissipationOperator<L> {
+
+    /// Admit the original SSP-RK2 interval with stationary molecular reservoirs.
+    ///
+    /// Entropy entering each end is q_reduced/T_b + sum_i(s_i,b * j_i/M_i),
+    /// with the original partial enthalpies subtracted from the SAME native
+    /// energy transfer. Source chemical entropy, reciprocal heat and Fourier
+    /// heat are counted once. Actual stage/end species transfers enter the
+    /// continuity check; open exchange is not mistaken for a mass defect.
+    ///
+    /// Both native substeps and the complete interval must pass one declared
+    /// state-minus-input allowance. No fields or clock publish on final refusal.
+    /// A zero-activity bath species may carry no nonzero molecular flux; its
+    /// infinite ideal-mixture chemical potential is never replaced by a floor.
+    /// Reservoirs must be stationary and use the original source species/gauges,
+    /// as required by advance_with_reservoirs_for. No advective or reactive
+    /// entropy is included. Two absent baths also admit periodic closed fields.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_with_reservoirs_and_entropy_for(
+        &mut self,
+        flow: &mut MixtureEuler1d,
+        duration: Time,
+        controls: DissipationControl,
+        entropy: MolecularEntropyControl,
+        reservoirs: [Option<super::super::Cell<'_>>; 2],
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<(DissipationReport, ReservoirMolecularEntropyReport), DissipationError> {
+        controls.validate()?;
+        entropy.validate()?;
+        let reservoirs = if reservoirs.iter().all(Option::is_none) {
+            [None; 2]
+        } else {
+            super::reservoir::admit(&self.gas, self.boundaries, reservoirs, &mut cancelled)?
+        };
+        let mut account = EntropyTracker::new(flow, entropy, &mut cancelled)?;
+        account.boundary = Some(ReservoirEntropyAccount::new(
+            &self.gas, account.reference_temperature, &account.reference_density,
+            &account.reference_entropy, reservoirs, &mut cancelled,
+        )?);
+        let report = super::evolve::advance_with_reservoirs_and_entropy(
+            self, flow, duration, controls, reservoirs, &mut account, &mut cancelled,
+        )?;
+        Ok((report, account.completed_reservoir_report
+            .expect("native final admission retained reservoir entropy")))
+    }
+
     /// Evolve the existing molecular operator with an additional closed-system
     /// entropy gate. Periodic, stationary adiabatic reflecting, and zero-
     /// molecular-flux transmissive ends are admitted. Prescribed reservoirs,
@@ -139,6 +214,8 @@ pub(super) struct EntropyTracker {
     trial_relative: f64,
     accepted: usize,
     report: MolecularEntropyReport,
+    boundary: Option<ReservoirEntropyAccount>,
+    completed_reservoir_report: Option<ReservoirMolecularEntropyReport>,
 }
 
 impl EntropyTracker {
@@ -225,6 +302,8 @@ impl EntropyTracker {
             trial_relative: 0.0,
             accepted: 0,
             report: MolecularEntropyReport::default(),
+            boundary: None,
+            completed_reservoir_report: None,
         })
     }
 
@@ -276,29 +355,47 @@ impl EntropyTracker {
         Ok(())
     }
 
-    fn inventory(&self, n: usize) -> Result<f64, DissipationError> {
+    fn inventory(&self, n: usize, whole: bool) -> Result<f64, DissipationError> {
         let mut maximum = 0.0_f64;
         for k in 0..n {
-            let residual = scalar(self.trial_mass[k])?;
-            let tolerance = self.controls.relative_species_tolerance * self.original_mass[k];
+            let transfer = self.boundary.as_ref().map_or(Dd::ZERO, |b| {
+                if whole { b.total.species[k] } else { b.trial.species[k] }
+            });
+            let throughput = self.boundary.as_ref().map_or(Dd::ZERO, |b| {
+                if whole { b.total.throughput[k] }
+                else { b.total.throughput[k] + b.trial.throughput[k] }
+            });
+            let residual = scalar(self.trial_mass[k] - transfer)?;
+            let scale = scalar(Dd::from_f64(self.original_mass[k]) + throughput)?;
+            let tolerance = self.controls.relative_species_tolerance * scale;
             if !tolerance.is_finite() || residual.abs() > tolerance {
                 return Err(DissipationError::SpeciesInventoryDrift {
-                    species: k,
-                    residual_kg: residual,
-                    tolerance_kg: tolerance,
+                    species: k, residual_kg: residual, tolerance_kg: tolerance,
                 });
             }
-            if self.original_mass[k] > 0.0 {
-                maximum = maximum.max(residual.abs() / self.original_mass[k]);
+            if scale > 0.0 {
+                maximum = maximum.max(residual.abs() / scale);
             }
         }
         Ok(maximum)
     }
 
-    pub(super) fn check_attempt(&mut self, n: usize) -> Result<(), DissipationError> {
+    pub(super) fn check_attempt(
+        &mut self,
+        n: usize,
+        a: &super::evolve::Stage,
+        b: &super::evolve::Stage,
+        dt: f64,
+        areas: [f64; 2],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(), DissipationError> {
         let check = (|| {
-            self.trial_relative = self.inventory(n)?;
-            let change = scalar(self.trial_entropy)?;
+            if let Some(boundary) = &mut self.boundary {
+                boundary.stage_pair(a, b, dt, areas, n, cancelled)?;
+            }
+            self.trial_relative = self.inventory(n, false)?;
+            let input = self.boundary.as_ref().map_or(Dd::ZERO, |b| b.trial.input);
+            let change = scalar(self.trial_entropy - input)?;
             if change < -self.controls.absolute_tolerance_j_k {
                 return Err(DissipationError::EntropyDecrease {
                     change_j_k: change,
@@ -313,8 +410,10 @@ impl EntropyTracker {
         check
     }
 
-    pub(super) fn accept_attempt(&mut self) {
-        let change = self.trial_entropy.to_f64();
+    pub(super) fn accept_attempt(&mut self, n: usize) -> Result<(), DissipationError> {
+        let input = self.boundary.as_ref().map_or(Dd::ZERO, |b| b.trial.input);
+        let change = scalar(self.trial_entropy - input)?;
+        if let Some(boundary) = &mut self.boundary { boundary.accept(n)?; }
         if self.accepted == 0 {
             self.report.minimum_step_entropy_change_j_k = change;
         } else {
@@ -322,10 +421,30 @@ impl EntropyTracker {
                 self.report.minimum_step_entropy_change_j_k.min(change);
         }
         self.report.maximum_relative_species_residual = self
-            .report
-            .maximum_relative_species_residual
-            .max(self.trial_relative);
+            .report.maximum_relative_species_residual.max(self.trial_relative);
         self.accepted += 1;
+        Ok(())
+    }
+
+    fn reservoir_report(&self) -> Result<ReservoirMolecularEntropyReport, DissipationError> {
+        let boundary = self.boundary.as_ref().ok_or(DissipationError::Invalid(
+            "missing molecular reservoir entropy account",
+        ))?;
+        let generation = self.trial_entropy - boundary.total.input;
+        Ok(ReservoirMolecularEntropyReport {
+            source_entropy_change_j_k: self.report.source_entropy_change_j_k,
+            boundary_entropy_input_j_k: [
+                scalar(boundary.total.source_input[0])?,
+                scalar(boundary.total.source_input[1])?,
+            ],
+            entropy_generation_j_k: scalar(generation)?,
+            source_entropy_generation_j_k: scalar(generation
+                + Dd::from_f64(self.report.reference_entropy_residual_j_k))?,
+            reference_entropy_residual_j_k: self.report.reference_entropy_residual_j_k,
+            minimum_step_entropy_generation_j_k: self.report.minimum_step_entropy_change_j_k,
+            maximum_relative_species_residual: self.report.maximum_relative_species_residual,
+            rejected_entropy_steps: self.report.rejected_entropy_steps,
+        })
     }
 
     /// Recompute the original-to-final state difference, not a sum of accepted
@@ -366,8 +485,9 @@ impl EntropyTracker {
                     self.trial_mass[k] + volume * (Dd::from_f64(new[k]) - Dd::from_f64(old[k]));
             }
         }
-        let relative = self.inventory(n)?;
-        let change = scalar(self.trial_entropy)?;
+        let relative = self.inventory(n, true)?;
+        let input = self.boundary.as_ref().map_or(Dd::ZERO, |b| b.total.input);
+        let change = scalar(self.trial_entropy - input)?;
         if change < -self.controls.absolute_tolerance_j_k {
             return Err(DissipationError::EntropyDecrease {
                 change_j_k: change,
@@ -375,17 +495,26 @@ impl EntropyTracker {
             });
         }
         let mut reference = Dd::ZERO;
+        let mut reference_residual = Dd::ZERO;
         for (k, model) in gas.source().models().iter().enumerate() {
             poll(cancelled)?;
             reference = reference
                 + self.trial_mass[k] / Dd::from_f64(model.molar_mass().value())
                     * Dd::from_f64(self.reference_entropy[k]);
+            let transfer = self.boundary.as_ref().map_or(Dd::ZERO, |b| b.total.species[k]);
+            reference_residual = reference_residual
+                + (self.trial_mass[k] - transfer) / Dd::from_f64(model.molar_mass().value())
+                    * Dd::from_f64(self.reference_entropy[k]);
         }
-        self.report.entropy_change_j_k = change;
-        self.report.reference_entropy_residual_j_k = scalar(reference)?;
+        self.report.entropy_change_j_k = scalar(self.trial_entropy)?;
+        self.report.reference_entropy_residual_j_k = scalar(reference_residual)?;
         self.report.source_entropy_change_j_k = scalar(self.trial_entropy + reference)?;
         self.report.maximum_relative_species_residual =
             self.report.maximum_relative_species_residual.max(relative);
+        // Every fallible report reduction precedes the native caller-state copy.
+        if self.boundary.is_some() {
+            self.completed_reservoir_report = Some(self.reservoir_report()?);
+        }
         Ok(())
     }
 }
