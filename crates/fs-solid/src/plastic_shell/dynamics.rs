@@ -31,6 +31,7 @@ pub enum PlasticShellDensity<'a> {
 #[derive(Debug)]
 struct FacetInventory {
     bounds: Vec<[f64; 2]>,
+    densities_kg_m3: Vec<f64>,
     thickness_m: f64,
     moments: ReferenceDensityMoments,
 }
@@ -47,10 +48,43 @@ pub struct PlasticShellReferenceInertia<'m> {
     mass: ReferenceMass,
 }
 
-impl PlasticShellReferenceInertia<'_> {
+impl<'m> PlasticShellReferenceInertia<'m> {
+    /// Bind mass to a mesh independently of temporary source-derived section
+    /// laws. This is the same original inventory preparation as the problem
+    /// method; the separately supplied mesh must match the problem exactly.
+    pub fn prepare<L: SmallStrainLaw>(
+        mesh: &'m ShellMesh,
+        problem: &SmallStrainShellProblem<'_, L>,
+        density: PlasticShellDensity<'_>,
+        cx: &Cx<'_>,
+    ) -> Result<Self, SmallStrainTetError> {
+        checkpoint(cx)?;
+        if !std::ptr::eq(mesh, problem.mesh) && mesh != problem.mesh {
+            return Err(invalid(
+                "reference inertia mesh differs from its original shell",
+            ));
+        }
+        let (facets, mass) = problem.reference_inertia_data(density, cx)?;
+        Ok(Self {
+            mesh,
+            coordinate_length_m: problem.coordinate_length_m,
+            facets,
+            mass,
+        })
+    }
+
     /// Actual original material mass, excluding numerical drilling inertia.
     pub fn reference_mass_kg(&self) -> f64 {
         self.mass.reference_mass_kg()
+    }
+
+    /// Original physical layer densities [kg/m³], in section order. Coupled
+    /// source owners can bind the exact inventory, including eccentric moments;
+    /// equal total mass alone does not identify the reference inertia.
+    pub fn reference_layer_densities(&self, element: usize) -> Option<&[f64]> {
+        self.facets
+            .get(element)
+            .map(|facet| facet.densities_kg_m3.as_slice())
     }
 
     fn admit<L: SmallStrainLaw>(
@@ -118,6 +152,14 @@ impl<'m, L: SmallStrainLaw> SmallStrainShellProblem<'m, L> {
         density: PlasticShellDensity<'_>,
         cx: &Cx<'_>,
     ) -> Result<PlasticShellReferenceInertia<'m>, SmallStrainTetError> {
+        PlasticShellReferenceInertia::prepare(self.mesh, self, density, cx)
+    }
+
+    fn reference_inertia_data(
+        &self,
+        density: PlasticShellDensity<'_>,
+        cx: &Cx<'_>,
+    ) -> Result<(Vec<FacetInventory>, ReferenceMass), SmallStrainTetError> {
         let elements = self.prepare(cx)?;
         if let PlasticShellDensity::PerElement(values) = density
             && values.len() != elements.len()
@@ -146,6 +188,7 @@ impl<'m, L: SmallStrainLaw> SmallStrainShellProblem<'m, L> {
             let thickness = layers.last().expect("admitted section").top_z_m - layers[0].bottom_z_m;
             let mut q = [0.0; 3];
             let mut bounds = Vec::with_capacity(layers.len());
+            let mut densities_kg_m3 = Vec::with_capacity(layers.len());
             for (i, layer) in layers.iter().enumerate() {
                 let rho = match density {
                     PlasticShellDensity::Uniform(rho) => rho,
@@ -168,6 +211,7 @@ impl<'m, L: SmallStrainLaw> SmallStrainShellProblem<'m, L> {
                 q[1] += weight * center;
                 q[2] += weight * (center * center + fraction * fraction / 12.0);
                 bounds.push([layer.bottom_z_m, layer.top_z_m]);
+                densities_kg_m3.push(rho);
             }
             let moments = ReferenceDensityMoments::new(q[0], q[1], q[2])
                 .map_err(|e| invalid(e.to_string()))?;
@@ -212,18 +256,14 @@ impl<'m, L: SmallStrainLaw> SmallStrainShellProblem<'m, L> {
             }
             facets.push(FacetInventory {
                 bounds,
+                densities_kg_m3,
                 thickness_m: thickness,
                 moments,
             });
         }
         let mass = ReferenceMass::from_matrix(matrix.assemble(), total_mass, ndofs, cx)?;
         checkpoint(cx)?;
-        Ok(PlasticShellReferenceInertia {
-            mesh: self.mesh,
-            coordinate_length_m: self.coordinate_length_m,
-            facets,
-            mass,
-        })
+        Ok((facets, mass))
     }
 
     /// Advance exactly one physical interval from a retained endpoint (or

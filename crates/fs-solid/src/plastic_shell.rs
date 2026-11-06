@@ -34,6 +34,9 @@ pub mod energy;
 /// Retained reference inertia and native momentum evolution of plastic shells.
 pub mod dynamics;
 
+/// Immutable numerical drilling stiffness across changing material coefficients.
+pub mod drilling;
+
 /// Original immutable section assignments; no material averaging across facets.
 #[derive(Debug, Clone, Copy)]
 pub enum PlasticShellSections<'a, L: SmallStrainLaw> {
@@ -41,12 +44,15 @@ pub enum PlasticShellSections<'a, L: SmallStrainLaw> {
     Uniform(&'a LayeredPlaneStressSection<L>),
     /// Exactly one thickness stack per triangle, in connectivity order.
     PerElement(&'a [LayeredPlaneStressSection<L>]),
+    /// Borrow independently owned stacks without cloning their material laws.
+    PerElementBorrowed(&'a [&'a LayeredPlaneStressSection<L>]),
 }
 impl<L: SmallStrainLaw> PlasticShellSections<'_, L> {
     fn at(&self, element: usize) -> &LayeredPlaneStressSection<L> {
         match self {
             Self::Uniform(section) => section,
             Self::PerElement(sections) => &sections[element],
+            Self::PerElementBorrowed(sections) => sections[element],
         }
     }
 }
@@ -95,6 +101,7 @@ pub struct SmallStrainShellProblem<'a, L: SmallStrainLaw> {
     pub rotation_limit_rad: f64,
     /// Nonnegative numerical drilling-spin penalty relative to virgin A66.
     /// The original elastic shell uses `fs_plate::shell::DRILLING_ALPHA`.
+    /// Retain [`Self::prepare_reference_drilling`] when material coefficients evolve.
     pub drilling_alpha: f64,
     /// Prescribed `(6 * node + component, value)`: translations [m], rotations [rad].
     pub prescribed: &'a [(usize, f64)],
@@ -173,6 +180,14 @@ fn transform(row: &[f64; 18], frame: &[[f64; 3]; 3], length: f64) -> [f64; 18] {
 
 impl<L: SmallStrainLaw> SmallStrainShellProblem<'_, L> {
     fn prepare(&self, cx: &Cx<'_>) -> Result<Vec<Element>, SmallStrainTetError> {
+        self.prepare_with_reference_drilling(None, cx)
+    }
+
+    fn prepare_with_reference_drilling(
+        &self,
+        reference: Option<&drilling::PlasticShellReferenceDrilling<'_>>,
+        cx: &Cx<'_>,
+    ) -> Result<Vec<Element>, SmallStrainTetError> {
         checkpoint(cx)?;
         let n = self.mesh.nodes.len();
         let ne = self.mesh.tris.len();
@@ -205,9 +220,12 @@ impl<L: SmallStrainLaw> SmallStrainShellProblem<'_, L> {
                 "invalid shell geometry, controls, load path or budget",
             ));
         }
-        if let PlasticShellSections::PerElement(sections) = &self.sections
-            && sections.len() != ne
-        {
+        let section_count = match &self.sections {
+            PlasticShellSections::Uniform(_) => ne,
+            PlasticShellSections::PerElement(sections) => sections.len(),
+            PlasticShellSections::PerElementBorrowed(sections) => sections.len(),
+        };
+        if section_count != ne {
             return Err(invalid("shell section count must equal triangle count"));
         }
         let dofs = n
@@ -249,18 +267,33 @@ impl<L: SmallStrainLaw> SmallStrainShellProblem<'_, L> {
                 "shell thickness histories exceed allocation budget",
             ));
         }
-        let mut workspace = PlaneStressWorkspace::new().map_err(|e| invalid(e.to_string()))?;
+        if let Some(reference) = reference {
+            reference.admit(self, cx)?;
+        }
+        let mut workspace = if reference.is_none() && self.drilling_alpha != 0.0 {
+            Some(PlaneStressWorkspace::new().map_err(|e| invalid(e.to_string()))?)
+        } else {
+            None
+        };
         let mut elements = Vec::with_capacity(ne);
         for e in 0..ne {
             checkpoint(cx)?;
             let g = self.mesh.facet(e).map_err(|e| invalid(e.to_string()))?;
             let (curvature, _) = fs_plate::dkt_curvature_quadrature(&g.x, &g.y, e)
                 .map_err(|e| invalid(e.to_string()))?;
-            let section = self.sections.at(e);
-            let virgin = section
-                .evaluate_with_workspace([0.0; 6], &section.initial_state(), &mut workspace)
-                .map_err(|error| invalid(format!("shell element {e} virgin section: {error}")))?;
-            let drilling_weight = self.drilling_alpha * virgin.tangent[2][2] * g.area_m2 / 3.0;
+            let drilling_weight = if let Some(reference) = reference {
+                reference.weight(e)
+            } else if let Some(workspace) = &mut workspace {
+                let section = self.sections.at(e);
+                let virgin = section
+                    .evaluate_with_workspace([0.0; 6], &section.initial_state(), workspace)
+                    .map_err(|error| {
+                        invalid(format!("shell element {e} virgin section: {error}"))
+                    })?;
+                self.drilling_alpha * virgin.tangent[2][2] * g.area_m2 / 3.0
+            } else {
+                0.0
+            };
             if !drilling_weight.is_finite() || drilling_weight < 0.0 {
                 return Err(invalid("invalid virgin shell drilling stiffness"));
             }
@@ -325,6 +358,8 @@ impl<L: SmallStrainLaw> SmallStrainShellProblem<'_, L> {
     /// Continue from the same reference mesh, section assignments and history
     /// ordering. Callers own any material/coefficient change and its energy
     /// implications. Inputs remain unchanged even if a later path entry fails.
+    /// [`Self::solve_from_with_reference_drilling`] keeps the original numerical
+    /// gauge unchanged when refreshing temperature-dependent material laws.
     pub fn solve_from(
         &self,
         coordinates: &[[f64; 6]],

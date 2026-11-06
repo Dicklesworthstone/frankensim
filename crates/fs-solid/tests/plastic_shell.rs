@@ -472,3 +472,6 @@ mod energy;
 
 #[path = "plastic_shell/dynamics.rs"]
 mod dynamics;
+
+#[path = "plastic_shell/drilling.rs"]
+mod drilling;

@@ -9573,3 +9573,10 @@ physical/gauge kinetic separation, and material/inertial duration mismatch.
 Rustfmt, scoped whitespace and source/API/physical-account reviews completed.
 Native compilation and execution remain unverified under the shared runner's
 disk and memory exhaustion; these are regression definitions, not pass results.
+
+
+## Retained numerical drilling across thermal plasticity
+
+`plastic_shell::drilling::PlasticShellReferenceDrilling` binds the original numerical spin-gauge weights to the reference mesh, physical layer bounds, coordinate length and drilling coefficient. Native static and backward-Euler entry points retain these weights across thermal/material-coefficient changes, reusing the original CST/DKT, Newton and consistent-inertia owners. Preparation with a retained gauge skips evaluation of the endpoint virgin material. Gauge endpoint work, storage and integration loss use one shared native integration kernel and are independently reported; none becomes physical heat. This retains the original small-strain/rotation and thickness quadrature scope, not a finite-forming claim.
+
+`PerElementBorrowed` admits separately owned thermal sections without cloning material laws. Independent-mesh-lifetime constructors allow the gauge and mass to outlive temporary endpoint laws. The mass owner exposes its exact original per-layer density inventory: coupled consumers must match each layer, since equal total mass alone does not establish equal eccentric inertia. Three focused native regressions cover response under material softening, dynamic parity and temporary law lifetimes, incompatible references, incomplete fields and cancellation. These are numerical model checks, not experimental accuracy or throughput claims.

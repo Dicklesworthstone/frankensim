@@ -6,9 +6,10 @@
 //! drilling integration loss remain separate. Transverse residual work is
 //! signed and explicitly included in the balance, rather than treated as heat.
 
+use super::drilling::ShellDrillingEnergy;
 use super::dynamics::{PlasticShellReferenceInertia, ShellInertialEnergy};
 use super::{
-    Element, Operator, SmallStrainShellProblem, SmallStrainShellSolution, checkpoint, dot, invalid,
+    Element, Operator, SmallStrainShellProblem, SmallStrainShellSolution, checkpoint, invalid,
 };
 use crate::plastic3::SmallStrainTetError;
 use crate::plastic3::increment::IncrementOperator;
@@ -307,6 +308,7 @@ impl<L: NativeSectionEnergyLaw> SmallStrainShellProblem<'_, L> {
             inertial_work_j,
             ..PlasticShellEnergy::default()
         };
+        let mut drilling = ShellDrillingEnergy::default();
         for (e, element) in elements.iter().enumerate() {
             checkpoint(cx)?;
             for q in 0..3 {
@@ -335,17 +337,12 @@ impl<L: NativeSectionEnergyLaw> SmallStrainShellProblem<'_, L> {
             }
             let old_local = operator.local_coordinates(element, &old_q)?;
             let new_local = operator.local_coordinates(element, &new_q)?;
-            for row in &element.drilling {
-                let before = dot(row, &old_local);
-                let after = dot(row, &new_local);
-                let delta = after - before;
-                let weight = element.drilling_weight;
-                energy.drilling_initial_j += 0.5 * weight * before * before;
-                energy.drilling_final_j += 0.5 * weight * after * after;
-                energy.drilling_work_j += weight * after * delta;
-                energy.drilling_numerical_loss_j += 0.5 * weight * delta * delta;
-            }
+            drilling.add(element, &old_local, &new_local);
         }
+        energy.drilling_initial_j = drilling.initial_j;
+        energy.drilling_final_j = drilling.final_j;
+        energy.drilling_work_j = drilling.work_j;
+        energy.drilling_numerical_loss_j = drilling.numerical_loss_j;
         let increment = &solution.increments[0];
         let displacement = |d: usize| {
             solution.coordinates[d / 6][d % 6]
