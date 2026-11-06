@@ -46,6 +46,17 @@ pub mod fission {
 #[cfg(feature = "nuclear-thermal")]
 pub mod radioactive {
     pub use fs_nuclear::EnergyChannels;
+    pub use fs_nuclear::endf::decay::{
+        DecayEvaluation, EndfDecayReadLimits, EndfDecaySelection,
+    };
+    pub use fs_nuclear::endf::decay::model::{
+        DecayEnergyFractions, DecayEnergyRouting, DecayModelEntry, EvaluatedDecayAssembly,
+    };
+    pub use fs_nuclear::endf::decay::model::emissions::{
+        BurnupDecayEmission, DecayEmissionCoverage, DecayEmissionLimits, DecayEmissionStep,
+        PreparedDecayEmission, UnreportedDecayEmission,
+    };
+    pub use fs_nuclear::endf::decay::spectra::DecayRadiation;
     pub use fs_nuclear::decay::{
         DecayBranch, DecayBudget, DecayError, DecayInventory, DecayModel,
         DecayNuclide, DecayStep, PreparedDecay,

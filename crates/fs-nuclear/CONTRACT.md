@@ -1640,6 +1640,56 @@ cancellation. They establish format and equation behavior, not validation of
 an evaluated isotope. The format follows ENDF-102 (2023), sections 1.2–1.4,
 <https://www.nndc.bnl.gov/endfdocs/ENDF-102-2023.pdf>.
 
+## Energy-resolved emission from integrated decay histories
+
+`endf::decay::model::emissions::PreparedDecayEmission` prepares one selected
+radiation type on an explicit energy grid. It retains per-parent particle and
+first-energy-moment coefficients, the original evaluated assembly and spectral
+coverage. The same map applies across interval durations and histories without
+reintegrating the spectral records. Application scales by original integrated
+parent transformations, including daughters produced and decayed within the
+interval; endpoint activity is not used as an interval rectangle.
+
+Absolute intensities use FD times RI for discrete records and FC times RP(E)
+for continua. Parent-wide branching is already included and is not applied
+again. Histogram and linear continua use positive analytical count and energy
+integrals over their intersections with the group grid. No midpoint energy or
+silent renormalization replaces the supplied distribution. Internal grid edges
+belong to the upper group; the last upper edge is inclusive. Positive spectral
+support outside the grid refuses instead of silently dropping radiation.
+
+Admitted monoenergetic lines include gamma/X-ray photons, alpha particles,
+neutrons, protons and discrete electrons. Beta endpoints do not become emitted
+line energies. Supplied beta-minus continua can be grouped, while unresolved
+electron-capture/positron intensity, fragment/unknown radiation semantics and
+unsupported positive interpolation laws refuse. Covariance propagation, beta
+shape reconstruction, angular transport, material attenuation and dose remain
+separate work. A missing spectral record is explicit `Unreported` coverage;
+the result lists any actual transformations with missing radiation data.
+
+`bind_burnup` checks nuclide identities/laws and the original evaluated decay
+branches, source labels, products and energy routing. Additional capture/fission
+channels and reordered reactions are allowed. The bound response consumes only
+physical decay reaction counts, including each compartment's original local
+report from `BurnupTransportStep`. Movement does not emit particles or relocate
+past emissions. Both entry points require the producing owner's original model
+Arc; source reports themselves are caller-supplied values, not authenticated
+receipts. These source observables never add heat to the original average-energy
+calorimetry or change material mass and caloric laws.
+
+Preparation and application retain bounded storage/work and cooperative
+cancellation. Scaled positive accumulation avoids intermediate product overflow.
+Unrepresentable positive per-decay coefficients refuse; amplification of a
+subnormal prepared coefficient by more than one decay also refuses because its
+lost preparation precision cannot be recovered by later multiplication. These
+are numerical admission limits, not nuclear-data uncertainty bounds.
+
+The `evaluated_decay_emissions` example imports the original cobalt-60/nickel-60
+records, evolves two physical half-lives and emits a two-group gamma history.
+It independently checks the quarter-parent endpoint and the six-line evaluated
+multiplicity of 1.99848902 photons per decay. `fs_couple::radioactive` re-exports
+the original evaluated-data and emission owners under `nuclear-thermal`.
+
 ## Evaluated independent fission products in burnup
 
 `endf::fission_yields` imports identified ENDF-6 neutron-induced independent

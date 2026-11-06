@@ -27,6 +27,9 @@ use crate::decay::{DecayBranch, DecayError, DecayModel, DecayNuclide};
 use crate::irradiation::{NeutronGroups, NuclideId};
 use crate::{Accumulator, EnergyChannels, FissionError, nonnegative, positive, sum};
 
+/// Energy-resolved emissions driven by the original integrated decay events.
+pub mod emissions;
+
 /// Explicit fractions of one category's emitted energy sent to each destination.
 /// Fractions must be finite, nonnegative, and sum to one within rounding; they
 /// are never renormalized. The routing is a caller-supplied deposition model.
