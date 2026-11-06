@@ -7019,6 +7019,50 @@ closed single-phase Boussinesq/Stokes restrictions and introduces no additional
 solver, state clock or gravitational-potential reservoir. Its actual entry tests
 cover material source identity, bounded support and data-only coupled response.
 
+### Local rotating flow in the conjugate finite-volume momentum owner
+
+`SimpleConfig::coriolis_angular_velocity_rad_s` configures constant local
+rotation [rad/s] for the original steady and native transient SIMPLE solver.
+Velocities and wall motions are relative to the grid axes; centrifugal
+potential belongs to caller-supplied effective gravity or pressure. No Euler
+acceleration, spherical metric or moving-grid transform is inferred.
+
+The momentum equations include the skew action
+`C = P^T V [2*rho*Omega]x P`, where P averages the two native normal faces
+of each cell and V is its physical volume. The transpose distributes each
+cell's force back through its actual half volumes, including graded meshes.
+The density is the SAME constant reference density used by native inertia;
+material Boussinesq departures continue to weight gravity only. The three
+mass-rate coefficients are cached once, with no rotation-sized field buffer.
+
+The action is separate from refreshed material/external body loads, Darcy
+resistance and physical dissipation. Each component solve uses the current
+coupled velocity. Prospective convergence and final pressure projection both
+check the frozen coupled momentum residual, so stale cross-component forces
+cannot be mistaken for convergence. Zero rotation skips the additional source
+arithmetic and coupled-residual work.
+
+Supported normal boundaries are closed walls and symmetry, including internal
+solid voxels and moving tangential walls. Normal pressure/inlet/outlet rows
+need a separate adjoint boundary-work treatment and are refused with nonzero
+rotation. The distinct molecular-viscosity split with heterogeneous face
+masses retains zero spin; combining nonzero rotation with that inertia metric
+is explicitly refused rather than assigning the wrong inertial frequency.
+
+Coriolis contributes no physical work or heat. Native backward Euler/BDF2 keep
+their endpoint time convention; backward-Euler kinetic damping remains in the
+existing numerical-loss receipt and is never deposited into enthalpy. Strong
+rotation may require shorter timesteps, tighter relaxation or more coupled
+iterations; exhausted convergence refuses the candidate. The shared solver
+carries the same source through its original material convection and thermal
+accounts, without a second flow step or altered material-query ownership.
+
+Focused regression definitions cover a manufactured rotating free-slip vortex
+and its pressure through the real momentum solve, arbitrary-axis graded-grid
+transpose/no-work identities, invalid/open/heterogeneous-inertia admission,
+zero configuration, native transient mechanical accounting and refused material
+advance followed by clean retry.
+
 ### Implicit material flow closes on the thermal endpoint
 
 With the existing `implicit-enthalpy-coupling` feature,

@@ -221,5 +221,64 @@ fn molecular_heat_uses_the_existing_joint_fluid_solid_caloric_owner() {
     }
 }
 
+
+#[test]
+fn rotating_material_march_keeps_coriolis_out_of_heat_and_be_loss_out_of_enthalpy() {
+    let domain = VoxelDomain::new(4, 4, 2, 0.25).unwrap();
+    let transport = |t: f64| FluidTransportState::try_new(
+        1.0 - 0.001 * (t - 300.0), 2.0 + 0.05 * (t - 300.0), 0.01, mu(t),
+    );
+    let reference = transport(300.0).unwrap();
+    let bound = MaterialChtFluid::try_new(&reference).unwrap();
+    let initial = vec![300.0; domain.cell_count()];
+    let thermal = ThermalSetup::new([ThermalFace::Adiabatic; 6]);
+    let unsteady = clock(0.1, 4);
+    let mut limits = caloric_bounds();
+    limits.gravity_m_s2 = [0.0, -9.81, 0.0];
+    let mut rotating = wall_flow(0.025);
+    rotating.coriolis_angular_velocity_rad_s = [1.3, -0.7, 0.5];
+    let run = |flow: &SimpleConfig| bound.march_natural_convection_with_enthalpy_and_viscous_heat(
+        &domain, &[], flow, &thermal, &energy(), &initial, limits,
+        &Caloric, controls(), &unsteady, heat_controls(), |_| 1.0, |_| 1.0,
+        None, &CancelGate::new(), |_, t, _| transport(t),
+    ).unwrap();
+    let result = run(&rotating);
+    let baseline = run(&wall_flow(0.025));
+    let march = &result.thermal.convection.march;
+    let difference = march.flow.flow.velocity_m_s.iter()
+        .zip(&baseline.thermal.convection.march.flow.flow.velocity_m_s)
+        .flat_map(|(a, b)| (0..3).map(move |axis| (a[axis] - b[axis]).abs()))
+        .fold(0.0_f64, f64::max);
+    assert!(difference > 1e-8, "rotation must reach the 3-D native momentum owner");
+    assert_eq!(result.heating.substeps, unsteady.steps);
+    close(result.heating.duration_s, 0.4, 1e-14);
+    assert!(result.heating.backward_euler_loss_j > 0.0);
+    for pair in result.mechanical_steps.windows(2) {
+        assert_eq!(pair[0].final_kinetic_energy_j.to_bits(),
+            pair[1].initial_kinetic_energy_j.to_bits());
+        assert_eq!(pair[0].end_s.to_bits(), pair[1].start_s.to_bits());
+    }
+    for step in &result.mechanical_steps {
+        // The only authored body force is material buoyancy. Coriolis never
+        // enters either the source work channel or the molecular heat cells.
+        close(step.power.supplied_body_power_w, step.supplied_buoyancy_power_w, 1e-13);
+        close(step.power.heat_w, step.power.molecular_heat_w, 1e-13);
+        close(step.residual_j, 0.0, step.duration_s * heat_controls().power_tolerance_w);
+    }
+    let stored: f64 = march.temperature.iter().enumerate()
+        .map(|(cell, &t)| domain.volume(cell) * h(t)).sum();
+    close(stored, result.heating.generated_heat_j, 1e-8);
+    close(march.energy_records.iter().map(|r| r.source_j).sum(),
+        result.heating.generated_heat_j, 1e-10);
+    let kinetic_change = result.heating.final_kinetic_energy_j
+        - result.heating.initial_kinetic_energy_j;
+    let supply = result.heating.supplied_wall_work_j + result.heating.supplied_body_work_j
+        + result.heating.pressure_constraint_work_j;
+    close(supply, stored + kinetic_change + result.heating.backward_euler_loss_j, 1e-8);
+    assert!((stored - result.heating.generated_heat_j).abs()
+        < 0.05 * result.heating.backward_euler_loss_j,
+        "backward-Euler loss is numerical damping, not physical heat");
+}
+
 #[path = "caloric_viscous_heat/implicit.rs"]
 mod implicit;

@@ -104,6 +104,7 @@ mod momentum_reconstruction;
 pub mod sgs;
 pub mod viscous_heat;
 pub use momentum_reconstruction::MomentumReconstruction;
+mod coriolis;
 mod darcy;
 use darcy::DarcyCross;
 pub(in crate::conjugate) mod forchheimer;
@@ -406,6 +407,24 @@ const PRESSURE_POLISH_PASSES: usize = 4;
 pub struct SimpleConfig {
     /// One rule per domain face in [`Face3::ALL`] order.
     pub faces: [FvBoundary; 6],
+    /// Constant local-frame angular velocity [rad/s], expressed in the grid
+    /// axes. Adds -2*rho*Omega cross u to the original momentum equations.
+    /// Velocities and wall motions are relative to that frame. Zero (the
+    /// default) preserves the original equations and arithmetic.
+    ///
+    /// Requires finite components and closed normal Wall/Symmetry boundaries.
+    /// Uses the same constant reference inertia as SIMPLE and its Boussinesq
+    /// consumers; custom heterogeneous face inertia is not supported. Material
+    /// density departures continue to affect only their authored buoyancy.
+    /// Centrifugal potential must be included in effective gravity/pressure by
+    /// the caller; no Euler acceleration or moving-grid transform is inferred.
+    ///
+    /// The volume-weighted staggered source is skew: it supplies no physical
+    /// heat or body work. Native backward Euler/BDF2 evaluate it at the solved
+    /// endpoint. Backward Euler retains numerical kinetic damping, accounted
+    /// separately from physical heat. Strong rotation may require tighter
+    /// relaxation, shorter time steps or a larger coupled iteration budget.
+    pub coriolis_angular_velocity_rad_s: [f64; 3],
     /// Optional static pressure at every original face of each Pressure/Outlet
     /// plane [Pa], replacing that plane's uniform pressure. Entries use the
     /// same gauge as `faces`; None retains the original uniform boundary.
@@ -579,6 +598,7 @@ impl SimpleConfig {
     pub const fn new(faces: [FvBoundary; 6]) -> Self {
         Self {
             faces,
+            coriolis_angular_velocity_rad_s: [0.0; 3],
             pressure_profiles_pa: [None, None, None, None, None, None],
             backflow_tangential_velocity_m_s: [None; 6],
             scheme: ConvectionScheme::PowerLaw,
@@ -776,6 +796,8 @@ pub(super) struct Solver<'a> {
     pressure_krylov: usize,
     /// Body force per cell, N/m^3 (empty: none).
     force: Vec<[f64; 3]>,
+    /// Constant 2*rho*Omega [kg/(m^3 s)], separate from refreshed body loads.
+    coriolis_mass_rate: [f64; 3],
     /// Face rules in force (a fan updates its inlet velocity).
     faces: [FvBoundary; 6],
     /// Fan state, when declared.
@@ -1134,6 +1156,13 @@ impl<'a> Solver<'a> {
             momentum_krylov: 0,
             pressure_krylov: 0,
             force: Vec::new(),
+            coriolis_mass_rate: if config.coriolis_angular_velocity_rad_s == [0.0; 3] {
+                [0.0; 3]
+            } else {
+                config
+                    .coriolis_angular_velocity_rad_s
+                    .map(|omega| 2.0 * (density_kg_m3 * omega))
+            },
             faces: config.faces,
             sweeps: 0,
             amg: None,
@@ -1621,7 +1650,8 @@ impl<'a> Solver<'a> {
         // coupled residual. Ordinary diagonal paths keep their exact arithmetic.
         if (!self.porous_cross.is_empty()
             || self.porous_nonlinear
-            || self.pressure_work_axis.is_some())
+            || self.pressure_work_axis.is_some()
+            || self.has_coriolis())
             && mass <= self.config.tolerance
             && steady <= self.config.tolerance
         {
@@ -1852,6 +1882,7 @@ impl<'a> Solver<'a> {
         solve: bool,
         gate: &CancelGate,
     ) -> Result<MomentumResidual, ChtError> {
+        self.admit_coriolis_inertia()?;
         let rows = self.comps[a].unknowns.len();
         if rows == 0 {
             self.momentum_rms[a] = 0.0;
@@ -2130,6 +2161,11 @@ impl<'a> Solver<'a> {
             }
             if !self.porous_cross.is_empty() {
                 rhs -= self.darcy_cross_force(a, minus_cell, plus_cell);
+            }
+            if self.has_coriolis() {
+                let force = self.coriolis_face_force(a, minus_cell, plus_cell);
+                finite("simple.coriolis_force_n", force)?;
+                rhs -= force;
             }
             if !self.porous_framed.is_empty() {
                 let [diagonal, cross_force] = self.forchheimer_face_row(minus_cell, plus_cell);
@@ -2470,6 +2506,7 @@ pub(super) fn admit(
     config: &SimpleConfig,
 ) -> Result<(), ChtError> {
     fluid.validate()?;
+    config.admit_coriolis(fluid.density_kg_m3)?;
     finite_positive("simple.turbulent_prandtl", config.turbulent_prandtl)?;
     if config.scheme == ConvectionScheme::EnthalpyMinmod {
         return Err(ChtError::InvalidInput {
