@@ -1229,6 +1229,46 @@ physical source-domain checks remain active, including at approximate validity
 endpoints. The existing mean-Robin goal owner retains the reference residual
 check and complete transpose. No artificial convection is needed for vacuum.
 
+`EnclosureRadiationGradient::compare_goal_at` and `compare_open_goal_at` supply
+the corresponding complete comparisons for fixed or absent contacts and closed
+or open reflected gray-diffuse enclosures. The live-source entry points are
+`TemperatureContacts::compare_steady_goal_with_gray_diffuse_enclosure` and
+`compare_steady_goal_with_open_gray_diffuse_enclosure`; all four share one
+physical comparison owner. Original Robin rows contain `[h,r,dh,dr]` at the
+reference and `[h,r]` at the approximation, with an additional row-major
+reference-feedback map. The selected Robin list may be empty or omit fixed
+convection. All physical radiation patches contribute their complete
+`G (dq/dmean) W` operator independently of that list, including Robin/Robin
+reflection and genuine authored nonzero Neumann fluxes. No placeholder
+convection or shifted `r-q/h` reference enters either residual or tangent.
+
+Both fields are reassembled by the original enclosure equilibrium owner with
+their own fresh physical radiosity and original convection. Live contact laws
+are queried anew at each field; only the reference takes complete independent
+A/B source derivatives. A private endpoint binder admits the material/contact
+tangent only after the actual direct-load free-node residual and global energy
+closure pass explicit absolute watt gates. Radiosity equations and closed
+radiative energy separately pass the explicit heat allowance at both fields.
+An open bath is retained at its original temperature, including every reflected
+path, and its algebraic heat is excluded from the solid's external account.
+Original conduction must retain its thermal anchor.
+
+Approximate material, contact and emissivity queries need physical support,
+including supported source endpoints, but no unused tangent. Reference source
+corners and validity endpoints still refuse, even for a zero objective. The
+same source, exact mesh/region coverage, prescribed values and cancellation
+checks remain authoritative. At most 64 Robin controls and 64 physical patches
+are admitted; `4*n*controls + 2*n*patches` factor entries must fit the declared
+budget, separately from the original contact trace allowance. Reported nodal
+terms use the difference of the two physical residuals, and the finite
+linearization remainder closes their sum to the unchanged goal difference.
+The primal relative diagnostic uses the physical eliminated load norm; its
+admission is still absolute W. The dual relative diagnostic is the residual of
+the complete thermal transpose; the iteration count additionally includes
+the independently checked radiosity transposes needed for its patch Jacobian.
+Reflected radiation is a nonlinear tangent even with constant bulk/contact
+laws. These are discrete refinement diagnostics, not continuum bounds.
+
 ## Temperature-dependent source laws on nonmatching thermal interfaces
 
 `TemperatureContact::new_nonmatching` assigns an ordered source law to two

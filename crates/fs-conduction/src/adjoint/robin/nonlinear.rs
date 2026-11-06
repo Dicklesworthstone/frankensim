@@ -14,6 +14,7 @@ use crate::assemble::{assemble_jacobian_with_optional_interfaces, reduce_matrix_
 mod mean_feedback;
 pub use mean_feedback::MeanFluxFeedback;
 mod contact;
+mod enclosure;
 mod material_controls;
 mod mean_feedback_goal;
 mod prescribed;

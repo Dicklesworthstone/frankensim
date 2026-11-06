@@ -247,7 +247,7 @@ impl TemperatureContacts<'_, '_> {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn admit_goal_comparison(
+    pub(crate) fn admit_goal_comparison(
         &self,
         cx: &Cx<'_>,
         problem: ConductionProblem<'_>,

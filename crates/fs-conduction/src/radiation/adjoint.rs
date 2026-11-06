@@ -20,6 +20,8 @@ use crate::{
     adjoint::{MeanFluxFeedback, RobinGradient, RobinResponse},
 };
 
+mod goal;
+
 /// Discrete local derivatives through the complete reflected-radiation law.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EnclosureRadiationGradient {
