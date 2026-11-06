@@ -23,6 +23,8 @@ pub mod chaboche;
 pub mod finite;
 /// Pressure-sensitive associated flow with retained volumetric plastic strain.
 pub mod porous;
+/// Directional metal yielding and associated flow in an explicit material frame.
+pub mod hill;
 
 use crate::elastic::IsotropicElastic;
 use crate::tensor::{contract, deviator, trace};

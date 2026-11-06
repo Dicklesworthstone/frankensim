@@ -17083,6 +17083,48 @@ mode refinement, temperature-dependent transport against an independent ODE,
 partial-sweep work charging, source failures and atomic work/cancellation gates.
 
 
+## Directional metal yielding and permanent strain (Hill48)
+
+`plastic::hill::Hill48` implements small-strain associated Hill48 plasticity
+with isotropic elasticity and explicitly energetic linear isotropic hardening.
+The six authored dimensionless coefficients define
+`q² = F(syy-szz)² + G(szz-sxx)² + H(sxx-syy)² + 2L syz² + 2M szx² + 2N sxy²`.
+The quadratic must be positive definite on all five deviatoric directions;
+valid negative individual F/G/H are admitted. Hydrostatic pressure does not
+yield this dense-metal law, and retained plastic strain is isochoric.
+
+The distinct `HillState::alpha` is accumulated work-conjugate flow, not a
+silently reused von Mises equivalent strain. Five orthonormal modes are
+prepared at construction. The backward-Euler update uses fixed-size arrays,
+one bounded monotone scalar solve, and its analytical consistent tangent.
+No numerical derivative, per-point matrix eigensolve or heap allocation enters
+the checked return. Failed updates leave accepted history untouched; the
+infallible material trait returns nonfinite stresses/tangents on refusal.
+
+`stored_energy` inspects elastic and hardening storage without evolving state.
+`advance_with_energy` separates yield-offset physical dissipation from stored
+hardening and backward-Euler numerical loss. Neither of the latter is heat.
+`oriented::OrientedHill48` precomputes proper tensor transformations for fixed
+material axes, returns spatial stress/tangents and retains local-axis history.
+Identity orientation preserves the native arithmetic. It rejects reflections
+and nonorthogonal frames rather than normalizing them.
+
+`source::ResolvedHill48` binds the complete original material bundle and its
+ten scalar requirements at one fixed physical point. Reference yield radius,
+Hill work-conjugate hardening and all six directional coefficients have
+explicit property names; generic tensile yield, J2 hardening, hardness and
+elongation do not fill missing data. Original claims, conditions, quantities,
+uncertainty, extra physics receipts and explicit orientation survive. Evolving
+strain/rate/history-dependent coefficients cannot be frozen into this model.
+
+G0/G1/G3 regressions in `plastic_hill`, `plastic_hill_orientation` and
+`plastic_hill_source` compare J2 limits, independent directional yield/flow,
+nonproportional tangent finite differences, pressure and coordinate changes,
+work/heat balance and original source admission. Native 2-D/3-D consumers are
+covered by `fs-solid/tests/plastic_hill.rs`. These are numerical constitutive
+checks, not measured-metal calibration, finite-strain anisotropic forming,
+texture evolution, necking, fracture, fatigue or forming-limit predictions.
+
 ### Full three-dimensional piezoelectric thermal storage
 
 `piezoelectric::thermal::ThermalTensorPiezoelectric` binds complete affine original stress-charge stiffness, signed coupling and clamped-permittivity source tensors over a positive absolute-temperature interval with constant reference density. It preserves full source selections, nonthermal context and the fixed frame transformation. At fixed full Mandel strain and Cartesian electric displacement, the native tensor/factor owner supplies Helmholtz energy, exact entropy, internal energy and nonpositive field heat capacity, without scalar projection or fresh response-time factorization. Complete endpoint tensor admission establishes affine-source stability. A rotation-invariant norm bound supplies a conservative whole-interval capacity floor under explicit strain/displacement envelopes; consuming caloric owners must add their actual capacity and enforce those bounds. Reversible thermal exchange is separate from material loss. No pyroelectric offset, expansion, hysteresis, phase transition, depoling or measured-material validation is implied. Focused synthetic G0/G1/G3 regression sources cover independent diagonal/dense potentials, co-rotation and domain refusal; native execution remains a separate verification obligation.

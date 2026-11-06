@@ -1865,6 +1865,25 @@ is implied. Existing `solve()` and continuation retain plane-strain semantics.
 under nominal traction and reports displacement, relaxed thickness and support
 reaction. Its constitutive coefficients are explicitly authored model inputs.
 
+## Directional small-strain forming through the native solid solvers
+
+The existing generic `plastic2::SmallStrainPlaneProblem` and
+`plastic3::SmallStrainTetProblem` consume `fs-material::plastic::hill::Hill48`
+without replacing the element, quadrature, plane-stress reduction or Newton
+owner. Each point retains its complete Hill plastic strain and work-conjugate
+accumulation. Directional yielding therefore changes actual nodal deformation,
+support reactions and solved transverse strain, including permanent width and
+thickness changes after unloading. Fixed rotated material axes may be supplied
+through `OrientedHill48`; this does not introduce finite-rotation kinematics.
+
+G0/G1/G3 `tests/plastic_hill.rs` uses independent free-sided uniaxial flow
+equations for P1/Q1 plane stress and native tetrahedra, both loading signs and
+all three principal material directions. It also checks the condensed
+algorithmic tangent against assembled-force differences on skew Q1 elements.
+The original small-strain/rotation and locking limits remain binding. The
+separate finite-plastic sheet owner retains its existing J2 history type;
+these additions make no finite-strain anisotropic-sheet claim.
+
 ## Retained finite-plastic sheet forming
 
 `hyper2d::plastic::FinitePlasticSheet` advances a P1/Q1 sheet through the
