@@ -1796,3 +1796,42 @@ Focused regressions cover independent polynomial kinetic integrals, constant
 profile bit parity, discontinuous-density rigid inertia across three mesh
 levels, equal-mass redistribution and density scaling of the actual spectrum,
 attached inertia, and invalid-profile/numeric refusals.
+
+### Retained plastic bending and quasistatic springback
+
+`plastic::PlasticBendingPlate<L>` integrates an existing `SmallStrainLaw` through
+the thickness of the original DKT elements. Every original area/thickness point
+retains its complete native three-dimensional strain and internal variables.
+The existing checked plane-stress reduction eliminates transverse tractions and
+condenses the same algorithmic tangent; engineering twisting curvature is
+converted to tensor shear exactly once. Section moments, constrained membrane
+resultants, DKT internal forces and their tangent use those same point returns.
+Composite three-point Gauss–Lobatto thickness integration includes both faces
+and exactly reproduces the existing elastic DKT stiffness. Yield-front accuracy
+depends on the caller's thickness resolution; no plastic-front error certificate
+is inferred from elastic quadrature exactness.
+
+`evaluate` returns a candidate for imposed bending. `equilibrate` follows one
+caller-selected dead-load/prescribed-coordinate increment using shared sparse
+LDLT, a reused symbolic pattern, diagonal equilibration, a recomputed linear
+residual and independent force/moment tolerances. Every Newton and backtracking
+trial starts from the same accepted history. Unloading retains plastic strains
+and can produce residual curvature and springback. State is sealed to its owner;
+foreign states, domain violations, failed local/global solves, memory limits and
+cancellation cannot mutate accepted history. Cancellation is polled at material
+points and around sparse calls; an individual sparse factor/solve is synchronous.
+
+This owner assumes a flat, homogeneous thin plate with zero midsurface extension,
+small material strains and a caller-bounded DKT rotation field. A Bernstein bound
+checks that quadratic rotation field throughout each triangle. Reported membrane
+resultants are constraint reactions, not a solved free-extension condition.
+Material axes are mesh axes unless the native law explicitly transforms them.
+Finite rotation, membrane stretching, thickness change, forming limits, damage,
+fracture, instability continuation and plastic-to-heat conversion are not claimed.
+The returned force/tangent is numerical model output, not a material calibration.
+
+G0/G1/G4 regressions cover equality with original elastic DKT stiffness including
+twist, an independently derived J2 rectangular-section bending/springback law
+under equal-and-opposite principal curvatures, actual incremental nodal-load
+equilibrium and release, frozen-history tangent finite differences, and refused
+or cancelled attempts with unchanged accepted histories.

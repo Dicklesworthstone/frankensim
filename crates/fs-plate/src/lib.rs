@@ -45,6 +45,8 @@
 //! downstream through fs-modal).
 
 pub mod loading;
+/// Retained plane-stress plastic histories on the original DKT bending field.
+pub mod plastic;
 pub mod viscosity;
 pub mod shell;
 mod edge_cubic;
