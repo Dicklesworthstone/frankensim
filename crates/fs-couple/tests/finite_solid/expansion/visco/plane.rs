@@ -1,4 +1,6 @@
 //! Source-bound thin thermal events keep quadrature memory and accept atomically.
+mod dynamics;
+
 use super::*;
 use fs_couple::finite_solid::thermal::visco::plane::{
     ExpansionViscoPlaneError, ExpansionViscoPlaneField, ExpansionViscoPlaneSolid,

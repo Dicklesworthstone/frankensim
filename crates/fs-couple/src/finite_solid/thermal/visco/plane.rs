@@ -11,6 +11,9 @@
 //! volume-constraint actuation. Neither is relaxation heat. This quasistatic
 //! adapter introduces no temperature-dependent mass or caloric closure.
 
+/// Source-bound native momentum evolution with immutable reference inertia.
+pub mod dynamics;
+
 use super::{ExpansionViscoelastic, ExpansionViscoelasticError};
 use fs_exec::Cx;
 use fs_matdb::MaterialCard;
