@@ -2652,3 +2652,41 @@ transverse-wavenumber integrations with J2/J3 angular moments were executed at
 coefficients agreed at all 30 printed significant digits. Pinned
 formatter/parser checks passed; the native Rust regressions were added but
 were not executed in the shared editing environment.
+
+
+## Full volume-stress transmission through a coherent finite fluid layer
+
+`full_wave::layer::PreparedLayeredFullWaveQuadrupole` propagates the original
+six physical symmetric stress moments [N m] from the incident fluid to a
+receiver beyond the layer. Analytic source Hessians and receiving derivatives
+retain trace, both shear contractions, complex pressure and every velocity
+component, including transverse, near, critical and evanescent contributions.
+Source-normal and receiving-normal derivatives use their respective original
+fluid wavenumbers; pressure divided by a plane-wave impedance is not substituted.
+
+Fourteen normalized cylindrical channels share the existing resonant layer
+Green kernel, branch regularization, logarithmic scaling, cancellation and
+bounded adaptive quadrature. The original layer denominator retains all coherent
+internal returns. Quadratic pressure and cubic velocity tail envelopes use the
+physical source/layer/receiver clearance and original density factors. Diagnostics
+retain separate quadrature estimates and analytic omitted-spectrum bounds in
+Frobenius norms per unit stress; neither is an interval or total floating-point
+certificate. An absent layer or three identical fluids delegate to the original
+single-interface owner with its exact reductions.
+
+Preparation caches one Cartesian 4-by-6 transfer. Warm field and harmonic-line
+observations perform fixed-order DD reductions without allocation, quadrature,
+transcendental calls or another propagation delay. Signed active/reactive
+intensity follows coherent pressure/velocity contraction. The scope remains
+prescribed compact sources in stationary, lossless, infinite planar nontrapping
+fluids. Source loading, unresolved SGS stresses, finite edges, absorption, moving
+media and guided-pole regimes are not supplied.
+
+Six integration regressions specify collapsed/identical reductions, independent
+convergent spherical images for every stress component, native force-source
+finite-difference references in both exterior speed orders, Helmholtz trace and
+on-axis shear, receiving momentum/mass continuity, density scaling, physical
+error norms and domain/work/cancellation refusals. One unit regression checks
+the cubic tail by an independent integration-by-parts recurrence. Pinned Rust
+formatting/parser checks passed; the native regressions were authored but not
+executed in the shared editing environment.

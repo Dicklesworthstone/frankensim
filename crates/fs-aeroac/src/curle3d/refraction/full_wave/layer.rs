@@ -41,6 +41,11 @@ pub mod interior;
 pub use force::{
     FULL_WAVE_LAYER_FORCE_SCOPE, FullWaveLayerForceDiagnostics, PreparedLayeredFullWaveForce,
 };
+mod quadrupole;
+pub use quadrupole::{
+    FULL_WAVE_LAYER_QUADRUPOLE_SCOPE, FullWaveLayerQuadrupoleDiagnostics,
+    PreparedLayeredFullWaveQuadrupole,
+};
 pub mod reflection;
 
 /// Applicability of the original finite-layer source-to-receiver transfer.
@@ -651,7 +656,7 @@ impl LayerKernel {
         })
     }
 
-    /// Shared degree-0/1/2 absolute evanescent envelopes. Scales are logarithms
+    /// Shared degree-0/1/2/3 absolute evanescent envelopes. Scales are logarithms
     /// of physical field prefactors BEFORE multiplying E/L by q or zeta.
     fn prepare_tail(
         &mut self,
@@ -664,7 +669,7 @@ impl LayerKernel {
         let h = (self.coordinates.a + self.coordinates.b + Dd::from_f64(self.layer.thickness_m))
             .to_f64();
         let hk = h * self.critical[self.critical_count - 1];
-        if !hk.is_finite() || degrees.iter().any(|d| *d > 2) || channels.contains(&0) {
+        if !hk.is_finite() || degrees.iter().any(|d| *d > 3) || channels.contains(&0) {
             return Err(nonfinite("layer tail clearance or derivative degree"));
         }
         let rho1 = self.layer.incident_state().density_kg_m3();
@@ -681,10 +686,15 @@ impl LayerKernel {
         let logs = |s: f64| {
             core::array::from_fn::<_, 2, _>(|i| {
                 let shifted = s + hk + 1.0;
+                let inverse = 1.0 / shifted;
                 let polynomial = match degrees[i] {
                     0 => 0.0,
                     1 => det::ln(shifted),
-                    _ => 2.0 * det::ln(shifted) + det::ln(1.0 + (1.0 / shifted) * (1.0 / shifted)),
+                    2 => 2.0 * det::ln(shifted) + det::ln(1.0 + inverse * inverse),
+                    _ => {
+                        3.0 * det::ln(shifted)
+                            + det::ln(1.0 + inverse * inverse * (3.0 + 2.0 * inverse))
+                    }
                 };
                 log_scales[i] + log_density - f64::from(degrees[i] + 1) * det::ln(h) - s
                     + polynomial
