@@ -166,6 +166,111 @@ impl ReservoirEntropyAccount {
         Ok(())
     }
 
+    /// Start one native multistage quadrature attempt. Rejected attempts never
+    /// contribute to accepted throughput or entropy input.
+    pub fn begin_quadrature(&mut self) {
+        self.trial = EntropyExchange::default();
+    }
+
+    /// Account for each actual RHS contribution with its SIGNED tableau weight.
+    /// The final conservative transfer is retained by the native recurrence;
+    /// only absolute stage throughput and zero-activity admission are needed here.
+    pub fn observe_quadrature_stage(
+        &mut self,
+        stage: &Stage,
+        weighted_dt: f64,
+        areas: [f64; 2],
+        n: usize,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(), DissipationError> {
+        if !weighted_dt.is_finite() {
+            return Err(DissipationError::Invalid("non-finite molecular quadrature weight"));
+        }
+        if weighted_dt == 0.0 {
+            return Ok(());
+        }
+        for end in 0..2 {
+            poll(cancelled)?;
+            let flux = if end == 0 { &stage.left } else { &stage.right };
+            if self.baths[end].is_none() && flux[n + 1] != 0.0 {
+                return Err(DissipationError::Invalid("unowned molecular boundary heat"));
+            }
+            let measure = Dd::from_f64(weighted_dt.abs()) * Dd::from_f64(areas[end]);
+            for k in 0..n {
+                match &self.baths[end] {
+                    Some(bath) if !bath.positive_species[k] && flux[k] != 0.0 => {
+                        return Err(DissipationError::Invalid(
+                            "nonzero molecular transfer at zero bath species activity",
+                        ));
+                    }
+                    None if flux[k] != 0.0 => {
+                        return Err(DissipationError::Invalid("unowned molecular boundary species"));
+                    }
+                    _ => {}
+                }
+                self.trial.throughput[k] = self.trial.throughput[k]
+                    + measure * Dd::from_f64(flux[k].abs());
+                scalar(self.trial.throughput[k])?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Use the actual final native signed end transfers, not a separately
+    /// rounded reconstruction of them. Stationary bath chemical efforts make
+    /// entropy a linear function of these SAME energy/species integrals.
+    pub fn finish_quadrature(
+        &mut self,
+        transfers: &[[f64; super::super::MAX_COMPONENTS]; 2],
+        n: usize,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(), DissipationError> {
+        let mut trial = EntropyExchange {
+            throughput: self.trial.throughput,
+            ..EntropyExchange::default()
+        };
+        for end in 0..2 {
+            poll(cancelled)?;
+            let energy = transfers[end][n + 1];
+            let mut input = match &self.baths[end] {
+                Some(bath) => Dd::from_f64(energy) / Dd::from_f64(bath.temperature),
+                None if energy != 0.0 => {
+                    return Err(DissipationError::Invalid("unowned molecular boundary heat"));
+                }
+                None => Dd::ZERO,
+            };
+            let mut reference = Dd::ZERO;
+            for k in 0..n {
+                let transfer = transfers[end][k];
+                let mass = Dd::from_f64(transfer);
+                trial.species[k] = trial.species[k] + mass;
+                match &self.baths[end] {
+                    Some(bath) => {
+                        if !bath.positive_species[k] && transfer != 0.0 {
+                            return Err(DissipationError::Invalid(
+                                "nonzero molecular transfer at zero bath species activity",
+                            ));
+                        }
+                        let moles = mass / Dd::from_f64(self.molar_mass[k]);
+                        input = input - moles * Dd::from_f64(bath.normalized_mu_over_t[k]);
+                        reference = reference + moles * Dd::from_f64(self.reference_entropy[k]);
+                    }
+                    None if transfer != 0.0 => {
+                        return Err(DissipationError::Invalid("unowned molecular boundary species"));
+                    }
+                    None => {}
+                }
+                scalar(trial.species[k])?;
+            }
+            trial.input = trial.input + input;
+            trial.source_input[end] = input + reference;
+            scalar(trial.source_input[end])?;
+        }
+        scalar(trial.input)?;
+        self.trial = trial;
+        Ok(())
+    }
+
     pub fn accept(&mut self, n: usize) -> Result<(), DissipationError> {
         let mut total = self.total;
         total.input = total.input + self.trial.input;

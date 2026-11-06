@@ -8,7 +8,7 @@
 
 use super::*;
 use crate::multicomponent::dissipation::{
-    StabilizedDissipationControl, StabilizedDissipationReport,
+    Rkl2Scheme, StabilizedDissipationControl, StabilizedDissipationReport,
 };
 
 impl<L: TransportLaw> DissipationOperator<L> {
@@ -44,15 +44,94 @@ impl<L: TransportLaw> DissipationOperator<L> {
         controls.validate()?;
         let mut account = EntropyTracker::new(flow, entropy, &mut cancelled)?;
         let report = crate::multicomponent::dissipation::stabilized::advance_entropy_consistent(
-            self, flow, duration, controls, &mut account, &mut cancelled,
+            self, flow, duration, controls, [None; 2], &mut account, &mut cancelled,
         )?;
         Ok((report, account.report))
+    }
+
+    /// Advance source-conjugate RKL2 transport with stationary thermal/species baths.
+    ///
+    /// Bath entropy and species continuity use the SAME signed native RKL2
+    /// boundary transfers as the conservative field. Relative inventory
+    /// tolerances use absolute throughput from the actual tableau weights,
+    /// including the negative anchor weight and every contributing stage/end.
+    /// Cancellation between stages or ends cannot hide this throughput.
+    ///
+    /// Each actual endpoint and the complete requested interval must pass
+    /// state-minus-bath entropy admission before the field publishes. Source
+    /// gauges, stationary bath chemical efforts, common species support and
+    /// original caloric/constitutive domains remain those of the SSP entry point
+    /// `advance_entropy_consistent_with_reservoirs_for`. Time-varying or moving
+    /// baths and advective/reactive exchange are not included.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_stabilized_entropy_consistent_with_reservoirs_for(
+        &mut self,
+        flow: &mut MixtureEuler1d,
+        duration: Time,
+        controls: StabilizedDissipationControl,
+        entropy: MolecularEntropyControl,
+        reservoirs: [Option<super::super::super::Cell<'_>>; 2],
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<(StabilizedDissipationReport, ReservoirMolecularEntropyReport), DissipationError> {
+        controls.validate()?;
+        entropy.validate()?;
+        let reservoirs = if reservoirs.iter().all(Option::is_none) {
+            [None; 2]
+        } else {
+            crate::multicomponent::dissipation::reservoir::admit(
+                &self.gas, self.boundaries, reservoirs, &mut cancelled,
+            )?
+        };
+        let mut account = EntropyTracker::new(flow, entropy, &mut cancelled)?;
+        account.boundary = Some(ReservoirEntropyAccount::new(
+            &self.gas, account.reference_temperature, &account.reference_density,
+            &account.reference_entropy, reservoirs, &mut cancelled,
+        )?);
+        let report = crate::multicomponent::dissipation::stabilized::advance_entropy_consistent(
+            self, flow, duration, controls, reservoirs, &mut account, &mut cancelled,
+        )?;
+        Ok((report, account.completed_reservoir_report
+            .expect("native RKL2 final admission retained reservoir entropy")))
     }
 }
 
 impl EntropyTracker {
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::multicomponent::dissipation) fn begin_stabilized_quadrature(
+        &mut self,
+        scheme: Rkl2Scheme,
+        weights: &mut [f64; 256],
+        anchor: &crate::multicomponent::dissipation::evolve::Stage,
+        dt: f64,
+        areas: [f64; 2],
+        n: usize,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(), DissipationError> {
+        if let Some(boundary) = &mut self.boundary {
+            scheme.rhs_weights(&mut weights[..scheme.stage_count()])?;
+            boundary.begin_quadrature();
+            boundary.observe_quadrature_stage(anchor, dt * weights[0], areas, n, cancelled)?;
+        }
+        Ok(())
+    }
+
+    pub(in crate::multicomponent::dissipation) fn observe_stabilized_quadrature(
+        &mut self,
+        stage: &crate::multicomponent::dissipation::evolve::Stage,
+        weighted_dt: f64,
+        areas: [f64; 2],
+        n: usize,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(), DissipationError> {
+        if let Some(boundary) = &mut self.boundary {
+            boundary.observe_quadrature_stage(stage, weighted_dt, areas, n, cancelled)?;
+        }
+        Ok(())
+    }
+
     /// Measure a complete RKL2 candidate against its unchanged physical anchor.
     /// Rejected endpoint temperatures must not become the next retry's anchor.
+    #[allow(clippy::too_many_arguments)]
     pub(in crate::multicomponent::dissipation) fn check_stabilized_candidate(
         &mut self,
         gas: &MixtureGas,
@@ -60,6 +139,7 @@ impl EntropyTracker {
         old: &[f64],
         new: &[f64],
         primitive: &[Primitive],
+        transfers: &[[f64; crate::multicomponent::dissipation::MAX_COMPONENTS]; 2],
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<(), DissipationError> {
         let n = gas.species_count();
@@ -86,8 +166,12 @@ impl EntropyTracker {
                         + volume * (Dd::from_f64(candidate[k]) - Dd::from_f64(previous[k]));
                 }
             }
+            if let Some(boundary) = &mut self.boundary {
+                boundary.finish_quadrature(transfers, n, cancelled)?;
+            }
             self.trial_relative = self.inventory(n, false)?;
-            let change = scalar(self.trial_entropy)?;
+            let input = self.boundary.as_ref().map_or(Dd::ZERO, |b| b.trial.input);
+            let change = scalar(self.trial_entropy - input)?;
             if change < -self.controls.absolute_tolerance_j_k {
                 return Err(DissipationError::EntropyDecrease {
                     change_j_k: change,
@@ -120,3 +204,5 @@ impl EntropyTracker {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod reservoir_tests;

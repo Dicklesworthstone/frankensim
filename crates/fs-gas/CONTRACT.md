@@ -5684,3 +5684,57 @@ parabolic limits yet yields a negative-entropy long RKL2 endpoint; the new
 gate rejects it, retains the correct retry anchor, and accepts shorter
 physical macrosteps. This is a concrete counterexample to inferring nonlinear
 entropy admission from the linear stability interval alone.
+
+
+### Accelerated source-conjugate transport with stationary baths
+
+`advance_stabilized_entropy_consistent_with_reservoirs_for` connects the
+source-conjugate reservoir faces to the SAME native RKL2 recurrence. Both
+thermal and species exchange now use the accelerated operator with original
+calorics, material/kinetic transport, Soret/Dufour coupling and viscous work.
+The bath states are fixed over the requested interval; their entropy efforts
+are formed once from the original source and the existing reference basis.
+
+The entropy input and per-species continuity checks use the final signed
+left/right energy and species transfers retained by the native conservative
+RKL2 recurrence. They are not replaced by SSP weights, a separate quadrature
+reconstruction, or reduced Fourier/Dufour heat. Stationary bath entropy is
+linear in these actual transfers, so no repeated bath-source evaluation is
+required. The extra final RHS admission has zero quadrature weight.
+
+RKL2 has signed effective RHS weights: its two-stage form has weights
+[-1/2, 3/2]. `Rkl2Scheme::rhs_weights` obtains the native tableau weights by
+reverse accumulation in O(s) work using caller storage. No normalization or
+positivity repair is applied. Inventory tolerances use original species mass
+plus accepted absolute weighted stage/end throughput. Taking the absolute
+value only after stages or ends cancel would understate this numerical scale;
+taking absolute values at every recurrence level would inflate it. Neither
+shortcut is used. These are numerical quadrature throughputs, not separate
+physical evolution of the auxiliary Legendre states.
+
+Each retry clears its trial boundary account. Only an accepted macrostep adds
+to the cumulative transfer and throughput. Each actual endpoint and the
+direct original-to-final state-minus-bath account must satisfy the same
+absolute entropy allowance, while each species retains its independent
+continuity bound. Complete source-entropy report arithmetic precedes native
+field publication. Late cancellation, source/domain refusal, exhausted work,
+or final entropy refusal leaves the caller field and clock unchanged.
+
+This adds bounded O(s) weight work and bounded stack storage, with no extra
+RHS, EOS inversion, or per-stage allocation. Original RKL2 work budgets,
+physical macrostep accuracy controls and intermediate state admission remain
+active. The admitted closure is fixed axial geometry and stationary
+source-bearing ideal-mixture baths, with common support on both traces of
+every active face. It does not establish nonlinear unconditional stability,
+a general positivity theorem, moving/time-dependent baths, or advective,
+reactive, network or spatial entropy evolution.
+
+Three focused native regression definitions cover a multistage Dirichlet heat
+transient with separate actual bath temperatures and an independent Legendre
+mode oracle; signed two-stage binary species exchange, source-reference
+invariance and direct accepted-throughput inspection; and late cancellation,
+incompatible bath support and reuse. Both thermal and composition fixtures
+have negative body entropy change but positive state-minus-bath generation.
+The binary fixture has near-zero net species transfer across the complete
+boundary while retaining nonzero absolute contributions from both stages
+and both ends.

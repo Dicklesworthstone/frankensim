@@ -76,6 +76,39 @@ impl Rkl2Scheme {
         })
     }
 
+    /// Weights of the actual RHS evaluations L(Y_0), ..., L(Y_(s-1))
+    /// in the complete macrostep boundary integral, divided by dt.
+    ///
+    /// Reverse accumulation of the native recurrence gives these weights in
+    /// O(s) work and caller-owned storage. They include the negative anchor
+    /// contribution (for s=2: [-1/2, 3/2]); absolute throughput must take each
+    /// weighted flux's magnitude before summing. No weight normalization or
+    /// replacement by positive SSP weights is applied.
+    pub fn rhs_weights(self, out: &mut [f64]) -> Result<(), DissipationError> {
+        if out.len() != self.stages {
+            return Err(DissipationError::Invalid("RKL2 RHS weight dimension"));
+        }
+        out.fill(0.0);
+        let mut adjoint = 1.0;
+        let mut previous = 0.0;
+        let mut anchor = 0.0;
+        let mut correction = 0.0;
+        for stage in (2..=self.stages).rev() {
+            let [mu, nu, mu_tilde, gamma_tilde] = self.coefficients(stage)?;
+            out[stage - 1] = adjoint * mu_tilde;
+            accumulate(&mut anchor, &mut correction, adjoint * gamma_tilde);
+            let older = adjoint * nu;
+            adjoint = previous + adjoint * mu;
+            previous = older;
+        }
+        accumulate(&mut anchor, &mut correction, adjoint * self.first_weight());
+        out[0] = anchor;
+        if !out.iter().all(|weight| weight.is_finite()) {
+            return Err(DissipationError::Invalid("RKL2 RHS weight overflow"));
+        }
+        Ok(())
+    }
+
     /// `[mu, nu, mu_tilde, gamma_tilde]` for each stage `j` in `2..=s`:
     /// `Yj = Y0 + mu*(Yj-1-Y0) + nu*(Yj-2-Y0)`
     /// `     + dt*(mu_tilde*L(Yj-1) + gamma_tilde*L(Y0))`.
@@ -316,11 +349,12 @@ pub(super) fn advance_entropy_consistent<L: TransportLaw>(
     flow: &mut MixtureEuler1d,
     duration: Time,
     controls: StabilizedDissipationControl,
+    reservoirs: ReservoirEnds<'_>,
     account: &mut EntropyTracker,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<StabilizedDissipationReport, DissipationError> {
     advance_inner::<true, L>(
-        owner, flow, duration, controls, [None; 2], &mut 0, Some(account), cancelled,
+        owner, flow, duration, controls, reservoirs, &mut 0, Some(account), cancelled,
     )
 }
 
@@ -474,8 +508,14 @@ fn advance_inner<const ENTROPY_FACES: bool, L: TransportLaw>(
             let mut previous_ends = [[0.0; MAX_COMPONENTS]; 2];
             let mut older_ends = [[0.0; MAX_COMPONENTS]; 2];
             let mut peak = a;
+            let mut entropy_weights = [0.0; 256];
             let attempt = (|| {
                 check_rate(step, a.rate, limit)?;
+                if let Some(account) = &mut entropy {
+                    account.begin_stabilized_quadrature(
+                        scheme, &mut entropy_weights, &a, step, end_areas, n, cancelled,
+                    )?;
+                }
                 forward(
                     gas,
                     mesh,
@@ -528,6 +568,12 @@ fn advance_inner<const ENTROPY_FACES: bool, L: TransportLaw>(
                     if j > stages {
                         break;
                     }
+                    if let Some(account) = &mut entropy {
+                        account.observe_stabilized_quadrature(
+                            &evaluated, step * entropy_weights[j - 1],
+                            end_areas, n, cancelled,
+                        )?;
+                    }
                     let [mu, nu, mu_tilde, gamma_tilde] = scheme.coefficients(j)?;
                     recurrence(
                         gas,
@@ -564,7 +610,7 @@ fn advance_inner<const ENTROPY_FACES: bool, L: TransportLaw>(
                     // needed, and refused endpoints cannot alter the anchor.
                     account.check_stabilized_candidate(
                         gas, mesh.volumes(), &work.current, &work.stage,
-                        &work.primitive, cancelled,
+                        &work.primitive, &previous_ends, cancelled,
                     )?;
                 }
                 Ok::<_, DissipationError>(())
