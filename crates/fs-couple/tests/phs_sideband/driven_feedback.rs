@@ -753,3 +753,226 @@ fn carrier_derivative_has_independent_output_checks_and_atomic_combined_observat
     assert_eq!(pair.total_hessian_actions, 1792);
     assert_eq!(base.coeffs, original);
 }
+
+#[test]
+fn joint_adaptive_driven_feedback_preserves_original_maxwell_source_derivative_and_dc_velocity() {
+    use fs_orbit::sideband::sensitivity::refinement::{
+        SidebandCarrierRefinementControls, SidebandCarrierRefinementTolerances,
+    };
+    let gain = 0.7;
+    let feedback = VelocityFeedback(gain);
+    let system = fs_phs::mass_spring_damper(MASS, STIFFNESS, DAMPING)
+        .unwrap()
+        .with_relaxation_branches(vec![RelaxationBranch {
+            projection: vec![1.0, 0.0],
+            stiffness: ARM,
+            relaxation_time_s: TAU,
+        }])
+        .unwrap();
+    let base_force = C64::new(0.04, -0.02);
+    let base = orbit(
+        OMEGA,
+        exact(OMEGA, base_force, gain)
+            .into_iter()
+            .map(|z| vec![C64::ZERO, z])
+            .collect(),
+    );
+    let input = PeriodicPortInput::new(OMEGA, vec![vec![C64::ZERO, base_force]]).unwrap();
+    let derivative = |_: &[f64], _: &[f64], out: &mut [f64]| {
+        out.fill(0.0);
+        out[1] = -gain / MASS;
+        true
+    };
+    let mut c = controls(3, 1, 1, 1);
+    c.sideband.maximum_unknowns = 21;
+    c.max_hessian_actions = 1792;
+    let refinement = SidebandCarrierRefinementControls {
+        maximum_harmonics: 3,
+        tolerances: SidebandCarrierRefinementTolerances {
+            equation_tolerances: vec![2e-10; 3],
+            state_tolerances: vec![2e-10; 3],
+            derivative_equation_tolerances: vec![2e-10; 3],
+            derivative_state_tolerances: vec![2e-10; 3],
+        },
+    };
+    let forcing = [
+        C64::from_re(0.2),
+        C64::new(0.1, -0.07),
+        C64::new(0.03, 0.09),
+    ];
+    let slope = [
+        C64::new(-0.03, 0.04),
+        C64::new(0.02, -0.05),
+        C64::new(0.01, 0.03),
+    ];
+    let mut source = PhsPortSidebandSource::forced_feedback_analytic(
+        &system,
+        &input,
+        &feedback,
+        &derivative,
+        &base,
+        &c,
+        &full_hessian,
+    )
+    .unwrap();
+    assert!(matches!(
+        source.solve_adaptive_with_carrier_derivative(
+            OMEGA,
+            &forcing,
+            Some(&slope),
+            &scales(3),
+            derivative_controls(),
+            &[2e-10],
+            &refinement,
+            || true,
+        ),
+        Err(PhsPortSidebandError::Cancelled)
+    ));
+    for carrier in [OMEGA, -0.4] {
+        let resolved = source
+            .solve_adaptive_with_carrier_derivative(
+                carrier,
+                &forcing,
+                Some(&slope),
+                &scales(3),
+                derivative_controls(),
+                &[2e-10],
+                &refinement,
+                || false,
+            )
+            .unwrap();
+        assert_eq!(
+            resolved
+                .refinement_trace
+                .iter()
+                .map(|c| c.response.harmonics)
+                .collect::<Vec<_>>(),
+            [1, 3]
+        );
+        assert!(resolved.refinement_trace.last().unwrap().is_resolved());
+        let pair = resolved.response;
+        assert_eq!(pair.response.state_harmonics, 3);
+        assert_eq!(pair.response.output_harmonics, 1);
+        assert_eq!(pair.total_hessian_actions, 1792);
+        for k in -3_isize..=3 {
+            let (force, slope) = if k.unsigned_abs() <= 1 {
+                (forcing[(k + 1) as usize], slope[(k + 1) as usize])
+            } else {
+                (C64::ZERO, C64::ZERO)
+            };
+            let w = carrier + k as f64 * OMEGA;
+            let expected = exact(w, force, gain);
+            let expected_slope = exact_derivative(w, force, slope, gain);
+            for j in 0..3 {
+                near(
+                    pair.response.state_response.coefficients[(k + 3) as usize * 3 + j],
+                    expected[j],
+                    6e-12,
+                );
+                near(
+                    pair.state_angular_derivative.coefficients[(k + 3) as usize * 3 + j],
+                    expected_slope[j],
+                    8e-12,
+                );
+            }
+            if k.unsigned_abs() <= 1 {
+                near(
+                    pair.response.port_coefficients[(k + 1) as usize],
+                    expected[1].scale(1.0 / MASS),
+                    6e-12,
+                );
+                near(
+                    pair.port_angular_derivative[(k + 1) as usize],
+                    expected_slope[1].scale(1.0 / MASS),
+                    8e-12,
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn joint_adaptive_refuses_hidden_output_derivative_and_combined_physical_actions() {
+    use fs_orbit::sideband::sensitivity::refinement::{
+        SidebandCarrierRefinementControls, SidebandCarrierRefinementTolerances,
+    };
+    let system =
+        PortHamiltonian::new(1, 1, vec![0.0], vec![0.0], vec![1.0], Box::new(QuarticOnly)).unwrap();
+    let (omega, amplitude, phase, carrier) = (1.1, 0.4, 0.2, 0.01);
+    let q1 = C64::new(det::cos(phase), det::sin(phase)).scale(0.5 * amplitude);
+    let base = orbit(omega, vec![vec![C64::ZERO, q1]]);
+    let input =
+        PeriodicPortInput::new(omega, vec![vec![C64::ZERO, C64::new(0.0, omega) * q1]]).unwrap();
+    let force = C64::from_re(1e-9);
+    let refinement = SidebandCarrierRefinementControls {
+        maximum_harmonics: 1,
+        tolerances: SidebandCarrierRefinementTolerances {
+            equation_tolerances: vec![2e-10],
+            state_tolerances: vec![2e-10],
+            derivative_equation_tolerances: vec![2e-10],
+            derivative_state_tolerances: vec![2e-10],
+        },
+    };
+    let mut c = controls(1, 1, 0, 0);
+    c.sideband.maximum_unknowns = 3;
+    c.max_hessian_actions = 1792;
+    c.envelope_tolerances = vec![1e-6];
+    let mut source = PhsPortSidebandSource::forced(&system, &input, &base, &c).unwrap();
+    assert!(matches!(
+        source.solve_adaptive_with_carrier_derivative(
+            carrier,
+            &[force],
+            None,
+            &scales(1),
+            derivative_controls(),
+            &[1e-8],
+            &refinement,
+            || false,
+        ),
+        Err(PhsPortSidebandError::DerivativeObservationUnresolved { .. })
+    ));
+    c.output_harmonics = 2;
+    c.max_hessian_actions = 1791;
+    let mut source = PhsPortSidebandSource::forced(&system, &input, &base, &c).unwrap();
+    assert!(matches!(
+        source.solve_adaptive_with_carrier_derivative(
+            carrier,
+            &[force],
+            None,
+            &scales(1),
+            derivative_controls(),
+            &[1e-8],
+            &refinement,
+            || false,
+        ),
+        Err(PhsPortSidebandError::Budget(_))
+    ));
+    c.max_hessian_actions = 1792;
+    let mut source = PhsPortSidebandSource::forced(&system, &input, &base, &c).unwrap();
+    let pair = source
+        .solve_adaptive_with_carrier_derivative(
+            carrier,
+            &[force],
+            None,
+            &scales(1),
+            derivative_controls(),
+            &[1e-8],
+            &refinement,
+            || false,
+        )
+        .unwrap()
+        .response;
+    let state = force / C64::new(0.0, carrier);
+    let slope = state.scale(-1.0 / carrier);
+    near(pair.state_angular_derivative.coefficients[1], slope, 2e-12);
+    near(
+        pair.port_angular_derivative[0],
+        (q1.conj() * q1.conj()).scale(9.0) * slope,
+        2e-12,
+    );
+    near(
+        pair.port_angular_derivative[4],
+        (q1 * q1).scale(9.0) * slope,
+        2e-12,
+    );
+}

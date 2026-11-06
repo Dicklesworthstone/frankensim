@@ -5,10 +5,13 @@ use super::super::{
     observe_with_budget,
 };
 use super::{
-    C64, FactoredPhsPortSidebands, PhsPortSidebandError, PhsPortSidebandResponse, Result,
-    SidebandResponse, admit_forcing, input_forcing, poll,
+    C64, FactoredPhsPortSidebands, PhsPortSidebandControls, PhsPortSidebandError,
+    PhsPortSidebandResponse, PhsPortSidebandSource, Result, SidebandResponse, admit_forcing,
+    input_forcing, poll,
 };
-use fs_orbit::sideband::sensitivity::SidebandCarrierDerivativeControls;
+use fs_orbit::sideband::sensitivity::{
+    SidebandCarrierDerivativeControls, SidebandCarrierDerivativeResponse,
+};
 
 /// Complete physical response and its analytic derivative per angular frequency.
 ///
@@ -85,15 +88,7 @@ impl FactoredPhsPortSidebands<'_, '_> {
         if let Some(slope) = forcing_angular_derivative {
             admit_forcing(system, slope, c)?;
         }
-        if derivative_envelope_tolerances.len() != m
-            || derivative_envelope_tolerances
-                .iter()
-                .any(|x| !x.is_finite() || *x <= 0.0)
-        {
-            return Err(PhsPortSidebandError::Invalid(
-                "positive original-port output derivative tolerances required",
-            ));
-        }
+        admit_port_tolerances(m, derivative_envelope_tolerances)?;
         // Both envelopes require their own initial, doubled and quadrupled
         // grids. Admit their unavoidable combined cost before any new source
         // map or derivative preparation. Include the known complete iI fills.
@@ -129,81 +124,125 @@ impl FactoredPhsPortSidebands<'_, '_> {
             };
             let workspace = self.factor.prepare_carrier_derivative(
                 controls,
-                |_, out| {
-                    if out.len() != n * n {
-                        return false;
-                    }
-                    out.fill(C64::ZERO);
-                    for i in 0..n {
-                        out[i * n + i] = C64::new(0.0, 1.0);
-                    }
-                    true
-                },
+                |_, out| ode_carrier_derivative(n, out),
                 &mut cancelled,
             )?;
             workspace.solve(&rhs, &derivative_rhs, &mut cancelled)?
         }; // Release mapped inputs and derivative matrices before FFT observation.
-        let (port_coefficients, observation_trace, hessian_actions) = observe_with_budget(
-            original,
-            self.source.orbit,
-            &pair.response.coefficients,
-            c,
-            &c.envelope_tolerances,
-            &mut budget,
-            &mut cancelled,
-        )?;
-        // The existing 32*n*bands allowance covers BOTH retained state arrays.
-        // Add the first physical output/trace while the second observer's grids
-        // and spectra are live; no caller-owned result has been published yet.
-        budget.retained_bytes = core::mem::size_of::<C64>() as u128
-            * port_coefficients.capacity() as u128
-            + core::mem::size_of::<PhsPortSidebandCheck>() as u128
-                * observation_trace.capacity() as u128
-            + 8 * observation_trace
-                .iter()
-                .map(|check| {
-                    check.omitted_envelope_norm.capacity() as u128
-                        + check
-                            .sampling_change_norm
-                            .as_ref()
-                            .map_or(0, |x| x.capacity() as u128)
-                })
-                .sum::<u128>();
-        let (port_angular_derivative, derivative_observation_trace, _) = observe_with_budget(
-            original,
-            self.source.orbit,
-            &pair.angular_derivative.coefficients,
+        observe_pair(
+            self.source,
+            self.carrier_angular_frequency(),
+            pair,
             c,
             derivative_envelope_tolerances,
+            self.base_residual,
+            self.tangent_sampling_defect,
             &mut budget,
             &mut cancelled,
         )
-        .map_err(|error| match error {
-            PhsPortSidebandError::ObservationUnresolved { last } => {
-                PhsPortSidebandError::DerivativeObservationUnresolved { last }
-            }
-            other => other,
-        })?;
-        poll(&mut cancelled)?;
-        Ok(PhsPortSidebandCarrierDerivativeResponse {
-            response: PhsPortSidebandResponse {
-                omega_rad_s: self.source.orbit.omega,
-                carrier_angular_frequency: self.carrier_angular_frequency(),
-                state_harmonics: c.sideband.harmonics,
-                output_harmonics: c.output_harmonics,
-                state_dimension: n,
-                port_count: m,
-                state_response: pair.response,
-                port_coefficients,
-                base_residual: self.base_residual,
-                tangent_sampling_defect: self.tangent_sampling_defect,
-                observation_trace,
-                hessian_actions,
-            },
-            state_angular_derivative: pair.angular_derivative,
-            port_angular_derivative,
-            derivative_observation_trace,
-            total_hessian_actions: budget.actions,
-        })
     }
+}
+
+pub(super) fn admit_port_tolerances(ports: usize, tolerances: &[f64]) -> Result<()> {
+    if tolerances.len() != ports || tolerances.iter().any(|x| !x.is_finite() || *x <= 0.0) {
+        return Err(PhsPortSidebandError::Invalid(
+            "positive original-port tolerances required for every output",
+        ));
+    }
+    Ok(())
+}
+
+pub(super) fn ode_carrier_derivative(dimension: usize, out: &mut [C64]) -> bool {
+    if out.len() != dimension * dimension {
+        return false;
+    }
+    out.fill(C64::ZERO);
+    for i in 0..dimension {
+        out[i * dimension + i] = C64::new(0.0, 1.0);
+    }
+    true
+}
+
+pub(super) fn trace_payload(trace: &[PhsPortSidebandCheck], capacity: usize) -> u128 {
+    core::mem::size_of::<PhsPortSidebandCheck>() as u128 * capacity as u128
+        + 8 * trace
+            .iter()
+            .map(|check| {
+                check.omitted_envelope_norm.capacity() as u128
+                    + check
+                        .sampling_change_norm
+                        .as_ref()
+                        .map_or(0, |x| x.capacity() as u128)
+            })
+            .sum::<u128>()
+}
+
+// The sole paired original-output owner. Related solves can share the same
+// action/work budget; retained caller scratch is restored after success.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn observe_pair(
+    source: &PhsPortSidebandSource<'_>,
+    carrier: f64,
+    pair: SidebandCarrierDerivativeResponse,
+    controls: &PhsPortSidebandControls,
+    derivative_tolerances: &[f64],
+    base_residual: f64,
+    tangent_sampling_defect: f64,
+    budget: &mut ObservationBudget,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<PhsPortSidebandCarrierDerivativeResponse> {
+    let original = source.problem.original();
+    let initial_actions = budget.actions;
+    let retained = budget.retained_bytes;
+    let (port_coefficients, observation_trace, hessian_actions) = observe_with_budget(
+        original,
+        source.orbit,
+        &pair.response.coefficients,
+        controls,
+        &controls.envelope_tolerances,
+        budget,
+        cancelled,
+    )?;
+    // The baseline 32*n*bands term admits both state arrays. Add the first
+    // physical output/history while the second observation is live.
+    budget.retained_bytes = retained
+        + 16 * port_coefficients.capacity() as u128
+        + trace_payload(&observation_trace, observation_trace.capacity());
+    let (port_angular_derivative, derivative_observation_trace, _) = observe_with_budget(
+        original,
+        source.orbit,
+        &pair.angular_derivative.coefficients,
+        controls,
+        derivative_tolerances,
+        budget,
+        cancelled,
+    )
+    .map_err(|error| match error {
+        PhsPortSidebandError::ObservationUnresolved { last } => {
+            PhsPortSidebandError::DerivativeObservationUnresolved { last }
+        }
+        other => other,
+    })?;
+    poll(cancelled)?;
+    budget.retained_bytes = retained;
+    Ok(PhsPortSidebandCarrierDerivativeResponse {
+        response: PhsPortSidebandResponse {
+            omega_rad_s: source.orbit.omega,
+            carrier_angular_frequency: carrier,
+            state_harmonics: controls.sideband.harmonics,
+            output_harmonics: controls.output_harmonics,
+            state_dimension: original.system.state_dim(),
+            port_count: original.system.port_dim(),
+            state_response: pair.response,
+            port_coefficients,
+            base_residual,
+            tangent_sampling_defect,
+            observation_trace,
+            hessian_actions,
+        },
+        state_angular_derivative: pair.angular_derivative,
+        port_angular_derivative,
+        derivative_observation_trace,
+        total_hessian_actions: budget.actions - initial_actions,
+    })
 }

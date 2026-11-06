@@ -664,3 +664,132 @@ fn autonomous_carrier_derivative_matches_rotating_filters_original_memory_and_no
     assert!(pair.port_angular_derivative[16].abs() > 1e-6);
     assert_eq!(base.coeffs, original);
 }
+
+#[test]
+fn joint_adaptive_autonomous_pair_resolves_complete_rotating_and_memory_fields_before_ports() {
+    use fs_orbit::sideband::sensitivity::refinement::{
+        SidebandCarrierRefinementControls, SidebandCarrierRefinementTolerances,
+    };
+    let drive = CycleDrive {
+        omega: 1.2,
+        gain: 0.45,
+        resistance: 0.2,
+        cubic: 0.6,
+        memory: 0.3,
+    };
+    let (tau, phase, carrier) = (0.7, 0.31, 0.47);
+    let system = system(&drive, tau, None);
+    let base = candidate(&drive, tau, phase);
+    let derivative = |x: &[f64], y: &[f64], out: &mut [f64]| drive.total_derivative(x, y, out);
+    let mut c = controls(3, 2, 1, 4);
+    c.sideband.maximum_unknowns = 45;
+    c.max_hessian_actions = 1792;
+    let refinement = SidebandCarrierRefinementControls {
+        maximum_harmonics: 7,
+        tolerances: SidebandCarrierRefinementTolerances {
+            equation_tolerances: vec![2e-9; 3],
+            state_tolerances: vec![2e-9; 3],
+            derivative_equation_tolerances: vec![2e-9; 3],
+            derivative_state_tolerances: vec![2e-9; 3],
+        },
+    };
+    let force = [C64::new(0.08, -0.03), C64::new(-0.04, 0.06)];
+    let forcing = [
+        C64::ZERO,
+        C64::ZERO,
+        force[0],
+        force[1],
+        C64::ZERO,
+        C64::ZERO,
+    ];
+    let mut source =
+        PhsPortSidebandSource::autonomous_feedback(&system, &drive, &derivative, &base, &c)
+            .unwrap();
+    let resolved = source
+        .solve_adaptive_with_carrier_derivative(
+            carrier,
+            &forcing,
+            None,
+            &scales(3),
+            derivative_controls(),
+            &[2e-10; 2],
+            &refinement,
+            || false,
+        )
+        .unwrap();
+    assert_eq!(
+        resolved
+            .refinement_trace
+            .iter()
+            .map(|c| c.response.harmonics)
+            .collect::<Vec<_>>(),
+        [1, 3, 7]
+    );
+    assert!(!resolved.refinement_trace[0].equations_resolved());
+    assert!(
+        resolved.refinement_trace[1]
+            .angular_derivative
+            .state_change_ratio
+            .unwrap()
+            > 1.0
+    );
+    assert!(resolved.refinement_trace[2].is_resolved());
+    let pair = resolved.response;
+    assert_eq!(pair.response.state_harmonics, 7);
+    assert_eq!(pair.response.output_harmonics, 4);
+    assert_eq!(pair.total_hessian_actions, 1792);
+    let mechanics = exact_mechanical(&drive, phase, carrier, force);
+    let slope = exact_mechanical_derivative(&drive, phase, carrier, force);
+    let exact = |k: isize, j: usize, derivative: bool| {
+        if k.unsigned_abs() > 2 {
+            return C64::ZERO;
+        }
+        let band = (k + 2) as usize;
+        if j < 2 {
+            return if derivative {
+                slope[band][j]
+            } else {
+                mechanics[band][j]
+            };
+        }
+        let r = C64::new(1.0, tau * (carrier + k as f64 * drive.omega));
+        let memory = mechanics[band][0].scale(det::sqrt(drive.memory)) / r;
+        if derivative {
+            slope[band][0].scale(det::sqrt(drive.memory)) / r - C64::new(0.0, tau) * memory / r
+        } else {
+            memory
+        }
+    };
+    for k in -7..=7 {
+        for j in 0..3 {
+            near(
+                pair.response.state_response.coefficients[(k + 7) as usize * 3 + j],
+                exact(k, j, false),
+                8e-11,
+            );
+            near(
+                pair.state_angular_derivative.coefficients[(k + 7) as usize * 3 + j],
+                exact(k, j, true),
+                1e-10,
+            );
+        }
+    }
+    let modulation = (base.coeffs[0][1] * base.coeffs[0][1]).scale(3.0 * drive.cubic);
+    for (field, differentiated) in [
+        (&pair.response.port_coefficients, false),
+        (&pair.port_angular_derivative, true),
+    ] {
+        for k in -4..=4 {
+            let effort = exact(k, 0, differentiated).scale(1.0 + drive.memory + 1.5 * drive.cubic)
+                + modulation * exact(k - 2, 0, differentiated)
+                + modulation.conj() * exact(k + 2, 0, differentiated)
+                - exact(k, 2, differentiated).scale(det::sqrt(drive.memory));
+            near(field[(k + 4) as usize * 2], effort, 1e-10);
+            near(
+                field[(k + 4) as usize * 2 + 1],
+                exact(k, 1, differentiated),
+                1e-10,
+            );
+        }
+    }
+}

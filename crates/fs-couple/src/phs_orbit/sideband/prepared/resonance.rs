@@ -139,52 +139,64 @@ impl PreparedPhsPortSidebands<'_, '_> {
                 angular_derivative: result.port_angular_derivative[coefficient].conj(),
             })
         };
-        let peak = refine_transfer_extremum_with_cancel(
-            request.peak_bracket_rad_s,
-            request.controls,
-            || (gate.borrow_mut())(),
+        refine_query(
+            request,
+            maximum,
+            &mut || (gate.borrow_mut())(),
             &mut evaluate,
         )
-        .map_err(|error| campaign_error(error, maximum))?;
-        let bandwidth = match request.half_power_brackets_rad_s {
-            None => None,
-            Some((lower, upper)) => {
-                let remaining = maximum - peak.evaluations;
-                // Each flank needs two endpoints before any refinement. Avoid
-                // converting campaign exhaustion into invalid search controls.
-                if remaining < 4 {
-                    return Err(ResonanceError::EvaluationBudget {
-                        maximum_evaluations: maximum,
-                    });
-                }
-                let mut controls = request.controls;
-                controls.maximum_evaluations = remaining;
-                Some(
-                    refine_half_power_bandwidth_with_cancel(
-                        &peak,
-                        lower,
-                        upper,
-                        controls,
-                        || (gate.borrow_mut())(),
-                        &mut evaluate,
-                    )
-                    .map_err(|error| campaign_error(error, maximum))?,
-                )
-            }
-        };
-        let evaluations = peak.evaluations + bandwidth.as_ref().map_or(0, |b| b.evaluations);
-        if (gate.borrow_mut())() {
-            return Err(ResonanceError::Cancelled);
-        }
-        Ok(PhsPortResonanceResponse {
-            peak,
-            bandwidth,
-            evaluations,
-        })
+        .map_err(|error| campaign_error(error, maximum))
     }
 }
 
-fn campaign_error(
+// Keep orchestration and the shared peak/flank allowance identical for fixed
+// and adaptively assessed physical evaluators. Search mathematics stays modal.
+pub(super) fn refine_query<E>(
+    request: &PhsPortResonanceRequest<'_>,
+    maximum: usize,
+    cancelled: &mut impl FnMut() -> bool,
+    evaluate: &mut impl FnMut(f64) -> core::result::Result<HarmonicTransferSample, E>,
+) -> core::result::Result<PhsPortResonanceResponse, ResonanceError<E>> {
+    let mut controls = request.controls;
+    controls.maximum_evaluations = maximum;
+    let peak = refine_transfer_extremum_with_cancel(
+        request.peak_bracket_rad_s,
+        controls,
+        &mut *cancelled,
+        &mut *evaluate,
+    )?;
+    let bandwidth = match request.half_power_brackets_rad_s {
+        None => None,
+        Some((lower, upper)) => {
+            let remaining = maximum - peak.evaluations;
+            if remaining < 4 {
+                return Err(ResonanceError::EvaluationBudget {
+                    maximum_evaluations: maximum,
+                });
+            }
+            controls.maximum_evaluations = remaining;
+            Some(refine_half_power_bandwidth_with_cancel(
+                &peak,
+                lower,
+                upper,
+                controls,
+                &mut *cancelled,
+                &mut *evaluate,
+            )?)
+        }
+    };
+    let evaluations = peak.evaluations + bandwidth.as_ref().map_or(0, |b| b.evaluations);
+    if cancelled() {
+        return Err(ResonanceError::Cancelled);
+    }
+    Ok(PhsPortResonanceResponse {
+        peak,
+        bandwidth,
+        evaluations,
+    })
+}
+
+pub(super) fn campaign_error(
     error: ResonanceError<PhsPortSidebandError>,
     maximum: usize,
 ) -> ResonanceError<PhsPortSidebandError> {
@@ -197,7 +209,10 @@ fn campaign_error(
     }
 }
 
-fn admit_frequency_span(request: &PhsPortResonanceRequest<'_>, omega: f64) -> Result<()> {
+pub(super) fn admit_frequency_span(
+    request: &PhsPortResonanceRequest<'_>,
+    omega: f64,
+) -> Result<()> {
     let valid = |(lower, upper): (f64, f64)| {
         lower.is_finite() && upper.is_finite() && lower > 0.0 && upper > lower
     };
