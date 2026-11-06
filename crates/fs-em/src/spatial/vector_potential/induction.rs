@@ -22,15 +22,16 @@
 //! A-v formulation reference: https://getdp.info/doc/texinfo/getdp.html .
 
 mod coupling;
-mod kernel;
 /// Stationary A–phi evolution with the original three-dimensional vector memory.
 #[cfg(feature = "magnetic-hysteresis")]
 pub mod hysteretic;
+mod kernel;
 pub mod mechanical;
 pub mod nonlinear;
 /// Physical conductor electrodes, terminal currents and their electrical work.
 pub mod terminals;
 pub mod thermal;
+mod winding_kernel;
 
 use super::super::{SpatialMagneticError, SpatialMagneticMaterial, dot, finite, invalid, poll};
 use super::{SpatialVectorField, SpatialVectorMagnetostatics, apply};

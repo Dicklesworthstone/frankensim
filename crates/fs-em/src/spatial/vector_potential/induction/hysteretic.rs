@@ -14,6 +14,9 @@
 //! This owner supplies no motion/transport law, anisotropic hysteresis fit,
 //! empirical excess-loss correction or experimental material qualification.
 
+/// Native graph terminals, stranded copper and retained vector magnetic memory.
+pub mod winding;
+
 use super::super::super::{
     SpatialGeometry, SpatialMagneticError, dot, finite, invalid, poll, prepare_geometry,
 };
@@ -415,9 +418,26 @@ impl<'m, C: SpatialConductorMaterial> SpatialHystereticInduction<'m, C> {
         controls: SpatialHystereticInductionControls,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<SpatialHystereticInductionCandidate<'m, C>> {
+        let prepared = self.prepare_conductors(conductors, cancelled)?;
+        self.step_prepared_candidate(
+            prepared,
+            endpoint_current_a_m2,
+            duration_s,
+            controls,
+            cancelled,
+        )
+    }
+
+    // Terminal Newton trials share this conductivity update while each starts
+    // from the SAME accepted vector memories and edge cochains.
+    fn prepare_conductors(
+        &self,
+        conductors: Vec<Option<C>>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Arc<Prepared<C>>> {
         poll(cancelled)?;
         if conductors == self.prepared.coupling.sources {
-            return self.step_candidate(endpoint_current_a_m2, duration_s, controls, cancelled);
+            return Ok(self.prepared.clone());
         }
         let coupling = self.prepared.coupling.refresh_sources(
             self.problem.geometry(),
@@ -444,16 +464,10 @@ impl<'m, C: SpatialConductorMaterial> SpatialHystereticInduction<'m, C> {
             },
             cancelled,
         )?;
-        self.step_prepared_candidate(
-            Arc::new(Prepared {
-                coupling,
-                stationary: self.prepared.stationary.clone(),
-            }),
-            endpoint_current_a_m2,
-            duration_s,
-            controls,
-            cancelled,
-        )
+        Ok(Arc::new(Prepared {
+            coupling,
+            stationary: self.prepared.stationary.clone(),
+        }))
     }
 
     fn magnetic(

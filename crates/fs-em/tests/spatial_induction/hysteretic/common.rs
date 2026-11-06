@@ -74,6 +74,9 @@ fn roles() -> HysteresisSources {
     }
 }
 pub fn card(fit_upper: f64) -> Arc<MaterialCard> {
+    card_with_heat_capacity(fit_upper, CP)
+}
+pub fn card_with_heat_capacity(fit_upper: f64, heat_capacity: f64) -> Arc<MaterialCard> {
     let roles = roles();
     let branch = &roles.branches[0];
     let mut claims = ClaimSet::new();
@@ -103,7 +106,7 @@ pub fn card(fit_upper: f64) -> Arc<MaterialCard> {
         (PropertyKey::new("density", Density::DIMS), 1.0, 500.0),
         (
             PropertyKey::new("specific_heat_capacity", SPECIFIC_HEAT_CAPACITY_DIMS),
-            CP,
+            heat_capacity,
             500.0,
         ),
     ] {

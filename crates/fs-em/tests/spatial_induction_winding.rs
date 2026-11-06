@@ -2,6 +2,9 @@
 //! These manufactured materials check the equations, not measured-device fidelity.
 #[path = "spatial_induction_winding/end.rs"]
 mod end;
+#[cfg(feature = "magnetic-hysteresis")]
+#[path = "spatial_induction_winding/hysteretic.rs"]
+mod hysteretic;
 #[path = "spatial_induction_winding/resistors.rs"]
 mod resistors;
 use fs_em::{

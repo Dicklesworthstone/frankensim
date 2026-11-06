@@ -1,5 +1,37 @@
 # fs-em contract
 
+## Native three-dimensional hysteretic winding circuits
+
+With the default-off `magnetic-hysteresis` feature,
+`spatial::vector_potential::induction::hysteretic::winding` connects the original
+tetrahedral vector-memory field to native Kirchhoff circuits. Its
+`SpatialHystereticWindingCircuit` retains every accepted Whitney edge, vector
+branch polarization, graph storage coordinate and winding current. All nested
+terminal trials restart those same accepted histories; the native A–phi solve
+continues to enforce conductor charge balance at each endpoint.
+
+Reversible and hysteretic fields share one private spatial terminal kernel.
+Original closed, signed winding profiles provide `J = F I` and reciprocal
+`V = F^T delta(A)/dt + L_end delta(I)/dt + R I`. Current-input and voltage-input
+ports retain their native graph meaning. Explicit passive end modes preserve
+self/mutual storage and numerical endpoint loss; they do not replace the
+distributed core. Source-bound strand resistance and ordinary graph-resistor
+refresh preserve their original material choices, geometry and accepted states.
+Resolved core conductors and homogenized stranded cells remain disjoint.
+
+The combined receipt separates core eddy heat, vector pinning heat, strand copper
+heat and graph-resistor heat. Private port work cancels once against actual
+field/winding work. The stable total storage increment and independent numerical
+loss close against external graph supply. Retained field source preparation is
+shared across terminal trials, while each constitutive evaluation freezes the
+accepted cell memory. Gauge, source closure, terminal, field and energy admission
+all precede candidate publication; failures and cancellation advance no state.
+
+The admitted scope remains stationary, fixed-geometry, first-order MQS with
+source-selected isotropic vector hysteresis and constant fitted coefficients.
+Moving magnetic memory, temperature-dependent fit thermodynamics and empirical
+device qualification are not supplied by terminal coupling.
+
 ## Retained three-dimensional vector hysteretic induction
 
 The default-off `magnetic-hysteresis` feature exposes
