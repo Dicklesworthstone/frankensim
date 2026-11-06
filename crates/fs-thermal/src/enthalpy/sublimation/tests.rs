@@ -543,3 +543,172 @@ fn empty_prebirth_time_jumps_with_zero_thermal_work_allowance() {
     assert_eq!(audit.phase_steps, 0);
     assert_eq!(audit.transferred_mass_kg, 0.0);
 }
+
+#[test]
+fn decimal_phase_intervals_do_not_create_a_roundoff_tail() {
+    let thermal = scheduled(vec![birth(0.0, cell(1, 0.0, 0.0))], 32)
+        .advance_to(0.0, config(1.0), || Ok(()))
+        .unwrap()
+        .0;
+    let (next, _, audit) = thermal
+        .advance_sublimating_to(
+            CellId(1),
+            &Ice,
+            kinetics(),
+            vacuum(),
+            1.0,
+            config(0.1),
+            phase(),
+            || Ok(()),
+        )
+        .unwrap();
+
+    // Repeated addition stops first at 0.9999999999999999 and used to
+    // invoke an eleventh phase solve for the remaining roundoff interval.
+    assert_eq!(next.time_s(), 1.0);
+    assert_eq!(audit.phase_steps, 10);
+    assert!(audit.transferred_mass_kg > 0.0);
+    assert!(next.temperature_k(CellId(1)).unwrap() < 250.0);
+    close(
+        next.mass_kg() - thermal.mass_kg() + audit.transferred_mass_kg,
+        0.0,
+        1e-16,
+    );
+    close(
+        next.energy_j() - thermal.energy_j() + audit.vapor_energy_j,
+        0.0,
+        1e-7,
+    );
+    close(audit.energy_residual_j, 0.0, 1e-7);
+    assert_eq!(thermal.time_s(), 0.0);
+}
+
+#[test]
+fn decimal_phase_epochs_restart_at_birth_and_cover_events() {
+    let mut covered = boundary(0.0);
+    covered.reservoir = Some(Reservoir {
+        area_m2: 0.001,
+        conductance_w_k: 0.0,
+        temperature_k: 250.0,
+    });
+    let thermal = scheduled(
+        vec![
+            birth(0.35, cell(1, 0.0, 0.0)),
+            TimedEvent {
+                time_s: 0.85,
+                event: Event::Boundary(CellId(1), covered),
+            },
+        ],
+        32,
+    );
+    let run = |target| {
+        thermal
+            .advance_sublimating_to(
+                CellId(1),
+                &Ice,
+                kinetics(),
+                vacuum(),
+                target,
+                config(0.1),
+                phase(),
+                || Ok(()),
+            )
+            .unwrap()
+    };
+    let (at_cover, _, exposed) = run(0.85);
+    let (next, _, audit) = run(1.35);
+
+    // Empty time has no phase work. The five exposed intervals precede
+    // coverage, and five covered intervals follow that new epoch.
+    assert_eq!(exposed.phase_steps, 5);
+    assert_eq!(audit.phase_steps, 10);
+    assert_eq!(next.time_s(), 1.35);
+    assert_eq!(audit.thermal.events, 2);
+    assert!(exposed.transferred_mass_kg > 0.0);
+    assert_eq!(next.cells(), at_cover.cells());
+    assert_eq!(audit.transferred_mass_kg, exposed.transferred_mass_kg);
+    assert_eq!(audit.latent_energy_j, exposed.latent_energy_j);
+    assert_eq!(next.exposed_area_m2(CellId(1)), Ok(0.0));
+    close(audit.energy_residual_j, 0.0, 1e-7);
+}
+
+#[test]
+fn sublimation_and_deposition_balance_ignore_unchanged_neighbor_energy() {
+    struct ShiftedCaloric(f64);
+    impl ThermalLaw for ShiftedCaloric {
+        fn temperature_k(&self, h: f64) -> Result<f64, DepositionError> {
+            CALORIC.temperature_k(h - self.0)
+        }
+        fn maximum_temperature_slope(&self) -> f64 {
+            1.0 / 2000.0
+        }
+    }
+
+    let neighbor_datum = 2.0_f64.powi(80);
+    let neighbor_law = ShiftedCaloric(neighbor_datum);
+    for birth_s in [0.0, 0.5] {
+        for partial_pressure_pa in [0.0, 200.0] {
+            let gas = VaporReservoir::Prescribed {
+                partial_pressure_pa,
+                temperature_k: 250.0,
+            };
+            let mut neighbor = cell(2, neighbor_datum, 0.0);
+            neighbor.material_id = MaterialId(2);
+            let thermal = DepositionSimulation::new(
+                vec![
+                    birth(0.0, neighbor.clone()),
+                    birth(birth_s, cell(1, 0.0, 0.0)),
+                ],
+                &[
+                    (MaterialId(1), &CALORIC as &dyn ThermalLaw),
+                    (MaterialId(2), &neighbor_law as &dyn ThermalLaw),
+                ],
+                DepositionBudget {
+                    max_cells: 2,
+                    max_links: 0,
+                    max_events: 2,
+                    max_substeps: 16,
+                },
+            )
+            .unwrap()
+            .advance_to(0.0, config(1.0), || Ok(()))
+            .unwrap()
+            .0;
+            let reference = scheduled(vec![birth(birth_s, cell(1, 0.0, 0.0))], 16)
+                .advance_to(0.0, config(1.0), || Ok(()))
+                .unwrap()
+                .0;
+            let (expected, expected_gas, expected_audit) = reference
+                .advance_sublimating_to(
+                    CellId(1), &Ice, kinetics(), gas, 1.0, config(0.125), phase(), || Ok(()),
+                )
+                .unwrap();
+            let (next, next_gas, audit) = thermal
+                .advance_sublimating_to(
+                    CellId(1), &Ice, kinetics(), gas, 1.0, config(0.125), phase(), || Ok(()),
+                )
+                .unwrap();
+
+            assert_eq!(next.cells()[&CellId(2)], neighbor);
+            assert_eq!(next.cells()[&CellId(1)], expected.cells()[&CellId(1)]);
+            assert_eq!(next_gas, expected_gas);
+            assert_eq!(audit.transferred_mass_kg, expected_audit.transferred_mass_kg);
+            assert_eq!(audit.latent_energy_j, expected_audit.latent_energy_j);
+            assert_eq!(audit.vapor_energy_j, expected_audit.vapor_energy_j);
+            assert_eq!(audit.phase_steps, expected_audit.phase_steps);
+            assert_eq!(audit.thermal.incoming_mass_kg, expected_audit.thermal.incoming_mass_kg);
+            close(audit.energy_residual_j, 0.0, 1e-7);
+            close(audit.mass_balance_residual_kg, 0.0, 1e-16);
+            close(
+                audit.stored_energy_change_j,
+                expected_audit.stored_energy_change_j,
+                1e-12,
+            );
+            assert_eq!(audit.transferred_mass_kg > 0.0, partial_pressure_pa == 0.0);
+            assert_eq!(next.energy_j(), thermal.energy_j());
+            assert!(audit.vapor_energy_j.abs() > 0.01);
+            assert!(audit.stored_energy_change_j.abs() > 0.01);
+            assert_eq!(thermal.time_s(), 0.0);
+        }
+    }
+}

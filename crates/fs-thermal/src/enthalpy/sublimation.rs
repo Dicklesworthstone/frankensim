@@ -30,6 +30,7 @@ pub mod chamber;
 #[path = "sublimation/external.rs"]
 pub mod external;
 
+use super::observe::EnergySum;
 use super::{CellId, DepositionError, DepositionSimulation, EnergyAudit, Event, StepConfig};
 use crate::sublimation::{
     SolidSurfaceState, SolverConfig, SublimationError, SublimationLaw, SurfaceKinetics,
@@ -88,6 +89,8 @@ pub struct SublimationAudit {
     /// Stored solid mass change minus births plus vapor transfer [kg].
     pub mass_balance_residual_kg: f64,
     /// Stored energy change minus births minus external heat plus vapor energy [J].
+    /// Evaluated from compensated per-cell relative enthalpies, independently of
+    /// the mass-balance gate. Rounded aggregate energies can erase small transfers.
     pub energy_residual_j: f64,
     /// Number of phase operators, separate from ordinary conductive substeps.
     pub phase_steps: usize,
@@ -279,21 +282,22 @@ impl DepositionSimulation<'_> {
             )
             .into());
         }
-        let mut known = self.cells.contains_key(&id);
+        let mut phase_reference_h = self.cells.get(&id).map(|cell| cell.specific_h_j_kg);
         for (index, event) in self.schedule[self.cursor..].iter().enumerate() {
             if index % 256 == 0 {
                 checkpoint()?;
             }
-            known |= matches!(&event.event, Event::Birth(cell) if cell.id == id);
+            if let Event::Birth(cell) = &event.event {
+                if cell.id == id && phase_reference_h.is_none() {
+                    phase_reference_h = Some(cell.specific_h_j_kg);
+                }
+            }
         }
-        if !known {
-            return Err(DepositionError::InvalidInput(
-                "sublimating cell is neither active nor scheduled",
-            )
-            .into());
-        }
+        let phase_reference_h = phase_reference_h.ok_or(DepositionError::InvalidInput(
+            "sublimating cell is neither active nor scheduled",
+        ))?;
         let initial_mass = super::finite(self.mass_kg())?;
-        let initial_energy = super::finite(self.energy_j())?;
+        super::finite(self.energy_j())?;
         // Activate exactly the ordinary same-time events before taking an area.
         let (mut next, initial_thermal) =
             self.advance_to(self.time_s, thermal_config, &mut checkpoint)?;
@@ -309,6 +313,17 @@ impl DepositionSimulation<'_> {
             phase_steps: 0,
             last_step: None,
         };
+        let mut phase_mass = EnergySum::default();
+        let mut latent_energy = EnergySum::default();
+        let mut vapor_energy = EnergySum::default();
+        let mut relative_vapor = EnergySum::default();
+        let mut recession = EnergySum::default();
+        let mut external_heat = EnergySum::default();
+        external_heat.add(audit.thermal.external_heat_j)?;
+        // Indexed endpoints avoid an extra phase solve caused only by adding
+        // decimal timesteps repeatedly. Native heat substeps keep their budget.
+        let mut epoch_s = next.time_s;
+        let mut interval = 1usize;
         while next.time_s < target_s {
             checkpoint()?;
             let start_s = next.time_s;
@@ -317,15 +332,18 @@ impl DepositionSimulation<'_> {
             } else {
                 None
             };
+            let empty = next.cells.is_empty();
+            let event_time = next.schedule.get(next.cursor).map(|event| event.time_s);
             // No heat or phase work exists before the first active cell.
             // Jump to the next event/target instead of renewing empty intervals.
-            let mut stop_s = if next.cells.is_empty() {
+            let mut stop_s = if empty {
                 target_s
             } else {
-                (start_s + thermal_config.max_dt_s).min(target_s)
+                super::finite(epoch_s + (interval as f64) * thermal_config.max_dt_s)?
+                    .min(target_s)
             };
-            if let Some(event) = next.schedule.get(next.cursor) {
-                stop_s = stop_s.min(event.time_s);
+            if let Some(event_time) = event_time {
+                stop_s = stop_s.min(event_time);
             }
             if !stop_s.is_finite() || stop_s <= start_s {
                 return Err(DepositionError::Arithmetic.into());
@@ -342,6 +360,7 @@ impl DepositionSimulation<'_> {
                 remaining,
                 &mut checkpoint,
             )?;
+            external_heat.add(heat.external_heat_j)?;
             next = heated;
             add_thermal(&mut audit.thermal, heat)?;
             if let Some(area) = start_area {
@@ -355,22 +374,80 @@ impl DepositionSimulation<'_> {
                     phase_config,
                     &mut checkpoint,
                 )?;
-                audit.transferred_mass_kg =
-                    sum(audit.transferred_mass_kg, step.transferred_mass_kg)?;
-                audit.latent_energy_j = sum(audit.latent_energy_j, step.latent_energy_j)?;
-                audit.vapor_energy_j = sum(audit.vapor_energy_j, step.vapor_energy_j)?;
-                audit.recession_m = sum(audit.recession_m, step.recession_m)?;
+                phase_mass.add(step.transferred_mass_kg)?;
+                latent_energy.add(step.latent_energy_j)?;
+                vapor_energy.add(step.vapor_energy_j)?;
+                relative_vapor.add(super::finite(
+                    step.transferred_mass_kg
+                        * super::finite(step.solid.specific_enthalpy_j_kg - phase_reference_h)?,
+                )?)?;
+                relative_vapor.add(step.latent_energy_j)?;
+                recession.add(step.recession_m)?;
                 audit.phase_steps = audit
                     .phase_steps
                     .checked_add(1)
                     .ok_or(DepositionError::Arithmetic)?;
                 audit.last_step = Some(step);
             }
+            if empty || event_time == Some(stop_s) {
+                epoch_s = stop_s;
+                interval = 1;
+            } else {
+                interval = interval.checked_add(1).ok_or(DepositionError::Arithmetic)?;
+            }
         }
+        audit.transferred_mass_kg = phase_mass.value()?;
+        audit.latent_energy_j = latent_energy.value()?;
+        audit.vapor_energy_j = vapor_energy.value()?;
+        audit.recession_m = recession.value()?;
+        audit.thermal.external_heat_j = external_heat.value()?;
+
+        // Cancel each cell's original or birth datum before reducing. Keeping
+        // the mass balance separate avoids turning mass roundoff into a heat
+        // source proportional to an arbitrary formation-enthalpy reference.
+        let mut births = super::BTreeMap::new();
+        let mut incoming_mass = EnergySum::default();
+        let mut incoming_energy = EnergySum::default();
+        for (index, event) in next.schedule[self.cursor..next.cursor].iter().enumerate() {
+            if index % 256 == 0 {
+                checkpoint()?;
+            }
+            if let Event::Birth(cell) = &event.event {
+                births.insert(cell.id, (cell.mass_kg, cell.specific_h_j_kg));
+                incoming_mass.add(cell.mass_kg)?;
+                incoming_energy.add(super::finite(cell.mass_kg * cell.specific_h_j_kg)?)?;
+            }
+        }
+        audit.thermal.incoming_mass_kg = incoming_mass.value()?;
+        audit.thermal.incoming_energy_j = incoming_energy.value()?;
+        let mut mass_balance = EnergySum::default();
+        let mut storage = EnergySum::default();
+        let mut energy_balance = EnergySum::default();
+        for (index, (&cell_id, cell)) in next.cells.iter().enumerate() {
+            if index % 256 == 0 {
+                checkpoint()?;
+            }
+            let original = self.cells.get(&cell_id);
+            let (mass, h) = match original {
+                Some(old) => (old.mass_kg, old.specific_h_j_kg),
+                None => *births.get(&cell_id).ok_or(DepositionError::Arithmetic)?,
+            };
+            let relative_energy =
+                super::finite(cell.mass_kg * super::finite(cell.specific_h_j_kg - h)?)?;
+            energy_balance.add(relative_energy)?;
+            storage.add(relative_energy)?;
+            storage.add(if original.is_some() {
+                super::finite(super::finite(cell.mass_kg - mass)? * h)?
+            } else {
+                super::finite(cell.mass_kg * h)?
+            })?;
+            mass_balance.add(super::finite(cell.mass_kg - mass)?)?;
+        }
+        mass_balance.add(audit.transferred_mass_kg)?;
+        energy_balance.add(relative_vapor.value()?)?;
+        energy_balance.add(-audit.thermal.external_heat_j)?;
         let final_mass = super::finite(next.mass_kg())?;
-        audit.mass_balance_residual_kg = super::finite(
-            final_mass - initial_mass - audit.thermal.incoming_mass_kg + audit.transferred_mass_kg,
-        )?;
+        audit.mass_balance_residual_kg = mass_balance.value()?;
         let scale = initial_mass
             .abs()
             .max(final_mass.abs())
@@ -388,13 +465,9 @@ impl DepositionSimulation<'_> {
                 tolerance_kg: mass_tolerance,
             });
         }
-        audit.stored_energy_change_j = super::finite(next.energy_j() - initial_energy)?;
-        audit.energy_residual_j = super::finite(
-            audit.stored_energy_change_j
-                - audit.thermal.incoming_energy_j
-                - audit.thermal.external_heat_j
-                + audit.vapor_energy_j,
-        )?;
+        super::finite(next.energy_j())?;
+        audit.stored_energy_change_j = storage.value()?;
+        audit.energy_residual_j = energy_balance.value()?;
         if audit.energy_residual_j.abs() > thermal_config.energy_tolerance_j {
             return Err(DepositionError::EnergyBalance(audit.energy_residual_j).into());
         }

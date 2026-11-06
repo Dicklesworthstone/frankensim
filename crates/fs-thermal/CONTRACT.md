@@ -835,6 +835,17 @@ existing caloric chart remains authoritative; rejected out-of-domain trial
 points do not invalidate a successfully converged in-domain endpoint. All
 failures and cancellation preserve the original timeline and reservoir.
 
+The whole-window audit uses compensated per-cell changes relative to each
+cell's starting or birth enthalpy, together with vapor enthalpy on that same
+relative reference. Mass conservation is checked separately. Unchanged large
+stored energies therefore do not erase sublimation cooling or deposition
+heating; full original-datum storage and vapor diagnostics remain available.
+Maximum phase intervals use integer-indexed endpoints and restart at birth or
+boundary events, avoiding a fictitious terminal phase solve from accumulated
+clock roundoff. Native conductive substeps retain their original budget.
+Regressions compare sublimation and deposition with an insulated high-energy
+neighbor against isolated runs, and check decimal-step and birth/cover timing.
+
 The whole cell must remain a pure solid on its original caloric branch.
 Temperature alone cannot establish solid fraction on a melting plateau;
 mixed-phase inventories require a separately owned partition. The supplied
