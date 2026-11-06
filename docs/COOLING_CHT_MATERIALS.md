@@ -498,33 +498,106 @@ storage and transport above. Both source density and Cp must remain within
 Pressure, composition, source choices and source domains retain the same rules
 as in the steady path.
 
-This retains **first-order fluid-material/thermal coupling**, even when the
-momentum scheme is BDF2. The viscosity update preserves native velocity,
-pressure and BDF history. This coupling order is reported separately from the
-requested momentum scheme; time refinement is still required to assess error.
+Without endpoint controls this retains **first-order fluid-material/thermal
+coupling**, even when the momentum scheme is BDF2. The viscosity update
+preserves native velocity, pressure and BDF history. Select the implicit
+coupling below to converge the flow and thermal endpoint together. Neither
+choice raises backward-Euler thermal storage to second order; time refinement
+is still required to assess error.
 The original inlet and power schedules, material contacts, internal fans,
 hydraulic resistances and optional surface-radiation owner remain available.
 The existing transient face-fan and compact-component restrictions still apply.
 
 The fluid law requires `transient.flow: "unsteady"` and marched energy.
-Frozen-flow transient energy, `energy: "steady-on-mean-flow"`, LVEL and SGS
-cannot represent this evolving material path and refuse. An authored
+Frozen-flow transient energy, `energy: "steady-on-mean-flow"` and equilibrium
+LVEL cannot represent this evolving material path and refuse. Explicitly
+selected transient SGS retains its existing exploratory scope and can compose
+with either material coupling mode. An authored
 `expansion_per_k` also refuses, because actual source density owns buoyancy.
 For an enclosed scene without another initial temperature, the declared fluid
 reference temperature supplies the initial condition.
 
 Results identify `solver: "fv-simplec-unsteady-material"` and retain the native
 flow-step records, thermal storage closure, probes, time averages and VTK
-output. `material_feedback` reports `coupling: "explicit-first-order"`,
-`applied_time_s` and `endpoint_time_s`. `fluid_applied` describes the source
-samples used during the final step; `fluid_endpoint` describes the checked
-sources at its accepted final temperature. They are deliberately distinct
-epochs. Source, departure-bound, convergence or cancellation failure returns
-no partial march.
+output. `material_feedback` reports `coupling: "explicit-first-order"` by
+default or `"implicit-endpoint"` when selected, plus `applied_time_s` and
+`endpoint_time_s`. `fluid_applied` describes the source samples used during the
+final accepted solve; `fluid_endpoint` describes the checked sources at its
+output temperature. The explicit path has different physical epochs. The
+implicit path uses the same physical time and reports their remaining
+nonlinear defects. Source, departure-bound, convergence or cancellation
+failure returns no partial march.
 
 These additions retain the existing laminar, fixed-geometry Boussinesq
 approximation. They do not supply compressible gas dynamics, evolving mass,
 latent heat or experimental validation.
+
+### Implicit flow and heat at the same time level
+
+Add `endpoint_coupling` inside an unsteady `transient` block to converge
+buoyancy and material feedback against the temperature returned by the current
+heat solve:
+
+```json
+{
+  "flow": "unsteady",
+  "time_step_s": 0.025,
+  "steps": 40,
+  "scheme": "bdf2",
+  "initial_temperature_k": 300,
+  "inner_iterations": 2000,
+  "inner_tolerance": 1e-9,
+  "endpoint_coupling": {
+    "maximum_passes_per_step": 80,
+    "maximum_momentum_solves": 4000,
+    "maximum_energy_solves": 50000,
+    "maximum_source_refreshes": 8001,
+    "temperature_tolerance_k": 1e-7,
+    "transport_relative_tolerance": 1e-7,
+    "force_tolerance_n_m3": 1e-8,
+    "temperature_relaxation": 0.8
+  }
+}
+```
+
+All eight coupling controls are required. The solve and source-refresh limits
+cover the **whole march**, including discarded nonlinear trials. The energy
+counter counts native heat-kernel calls, including outer caloric, compact-storage
+and radiation trials; nested conductivity, reconstruction and linear iterations
+retain their own limits. It is not a count of individual linear solves. The
+pass limit applies separately to each physical step. A failed or exhausted
+coupling returns no completed result.
+
+Each trial recomputes native momentum and heat from the same accepted old
+temperature and BE/BDF2 velocity history. Relaxation changes only the next
+nonlinear temperature guess. Acceptance checks the unrelaxed temperature
+difference, relative molecular viscosity/conductivity difference and absolute
+buoyancy-force difference. Discarded trials do not enter physical histories,
+time averages or energy records.
+
+For native constant-property fluids this selects
+`march_conjugate_implicit_buoyancy`: a heated wall can drive flow within the
+first interval, starting from a uniform initial temperature. Nonzero declared
+gravity and laminar flow are required. Authored solid conductivity tables keep
+their original integrated boundary/interface evaluation, contacts and compact
+storage; the coupling does not replace them with frozen cell conductivities.
+
+For temperature-dependent gas or liquid sources this selects the existing
+material endpoint owner. It also composes with `fluid_enthalpy`,
+temperature-dependent solid heat storage and explicitly selected transient SGS
+where those owners already admit the combination. Each keeps its original
+source identity, density/Cp departure limits, caloric storage and work bounds.
+The frozen-flow and steady-on-mean-flow modes cannot select this coupling.
+
+The top-level `endpoint_coupling` result reports all supplied controls, actual
+momentum/energy solves and source refreshes, maximum accepted defects and
+per-step pass/defect records (at most 200 samples, including the last step).
+Native runs identify `solver: "fv-simplec-unsteady-boussinesq-implicit"`;
+material runs retain their material/SGS solver name and identify the coupling
+in `material_feedback`. The existing thermal closure and physical flow-step
+reports remain available. Closing the nonlinear coupling does not establish
+grid convergence, change the storage integrator's order, or validate the
+underlying Boussinesq/SGS approximation.
 
 ### Temperature-dependent solid heat storage
 

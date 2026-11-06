@@ -12,6 +12,8 @@ use std::process::Command;
 
 #[path = "cooling_cht/sgs.rs"]
 mod sgs;
+#[path = "cooling_cht/endpoint.rs"]
+mod endpoint;
 
 /// Registers the one raw observation a compiled pack must retain. For these
 /// fixtures it is the authored synthetic law itself, not a measurement.

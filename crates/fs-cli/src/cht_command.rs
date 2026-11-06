@@ -10,6 +10,7 @@
 
 mod convection;
 mod convergence;
+mod endpoint;
 mod material;
 mod sgs;
 mod study;
@@ -32,7 +33,8 @@ use fs_lbm::conjugate::{
     FacePatch, FanCurve, FanInlet, FlowResistance, FluidProperties, FvBoundary, FvBuoyancyConfig,
     FvFlow, FvSgsConfig, InternalFan, RadiationConfig, SimpleConfig, SolidMaterial, ThermalFace,
     ThermalSetup, TimeScheme, TransientConfig, Turbulence, UnsteadyConfig, Voxel, VoxelDomain,
-    fv_natural_convection, march_conjugate, march_conjugate_with_sgs, march_energy, simple_flow,
+    fv_natural_convection, march_conjugate, march_conjugate_implicit_buoyancy,
+    march_conjugate_with_sgs, march_energy, simple_flow,
     simple_unsteady, solve_energy, solve_energy_radiating,
 };
 use fs_material::thermal::transport::storage::{MAX_TABULATED_HEAT_STORAGE_KNOTS, TabulatedHeatStorage};
@@ -739,6 +741,8 @@ struct Transient {
     unsteady: Option<UnsteadyOptions>,
     /// Nonlinear solid conductivity and integrated heat-storage acceptance.
     solid_storage: Option<fs_lbm::material::conjugate::buoyant::SolidThermalConfig>,
+    /// Optional nonlinear flow/heat closure at each physical time level.
+    endpoint_coupling: Option<fs_lbm::conjugate::MaterialEndpointConfig>,
 }
 
 /// Controls of the unsteady flow march.
@@ -858,6 +862,15 @@ impl Transient {
                 )));
             }
         };
+        let endpoint_coupling = value.get("endpoint_coupling")
+            .map(|controls| endpoint::parse(controls, steps as usize)).transpose()?;
+        if endpoint_coupling.is_some()
+            && unsteady.as_ref().is_none_or(|options| options.mean_flow_energy)
+        {
+            return Err(bad(
+                "transient.endpoint_coupling requires flow \"unsteady\" and energy \"march\"",
+            ));
+        }
         Ok(Self {
             time_step_s,
             steps: steps as usize,
@@ -865,6 +878,7 @@ impl Transient {
             schedule,
             unsteady,
             solid_storage: value.get("solid_storage").map(material::storage_controls).transpose()?,
+            endpoint_coupling,
         })
     }
 
@@ -1558,6 +1572,14 @@ impl Scene {
             root.get("fluid_enthalpy"), fluid_source.as_ref(), transient.is_some(),
         )?;
         let convection = convection::Selection::parse(solver, fluid_enthalpy.is_some())?;
+        if transient.as_ref().is_some_and(|t| t.endpoint_coupling.is_some()) && !evolving {
+            if turbulence != Turbulence::Laminar || sgs.is_some() {
+                return Err(bad("native endpoint_coupling requires laminar flow without solver.sgs"));
+            }
+            if gravity.is_none_or(|g| g.iter().all(|v| *v == 0.0)) {
+                return Err(bad("native endpoint_coupling requires nonzero gravity_m_s2"));
+            }
+        }
         Ok(Self {
             dx,
             grid,
@@ -1815,13 +1837,25 @@ fn execute_unsteady(
     unsteady.inner_tolerance = options.inner_tolerance;
     let started = Instant::now();
     let initial_temperature = vec![initial; domain.cell_count()];
-    let (run, material_feedback, material_sgs) = if scene.temperature_dependent() {
-        let (run, feedback, fields) = material::march(
+    let (run, material_feedback, material_sgs, endpoint_feedback) = if scene.temperature_dependent() {
+        let (run, feedback, fields, endpoint_feedback) = material::march(
             scene, domain, flow_config, setup, &initial_temperature, &unsteady,
             |t| interpolate(&options.inlet_schedule, t), |t| transient.scale(t),
             radiation, gate,
         )?;
-        (run, Some(feedback), fields)
+        (run, Some(feedback), fields, endpoint_feedback)
+    } else if let Some(controls) = transient.endpoint_coupling {
+        let buoyancy = buoyancy.as_ref().ok_or_else(|| {
+            bad("native endpoint_coupling requires Boussinesq buoyancy")
+        })?;
+        let coupled = march_conjugate_implicit_buoyancy(
+            domain, &scene.fluid, &scene.materials, setup, flow_config, &unsteady,
+            buoyancy, controls, &initial_temperature,
+            |t| interpolate(&options.inlet_schedule, t), |t| transient.scale(t),
+            &scene.convection.energy_config(), radiation, gate,
+        ).map_err(|e| solver_failure(&e))?;
+        let (run, feedback) = endpoint::take(coupled, gate)?;
+        (run, None, None, Some(feedback))
     } else {
         let run = match scene.sgs {
         Some(sgs) => march_conjugate_with_sgs(
@@ -1857,7 +1891,7 @@ fn execute_unsteady(
         ),
     }
         .map_err(|e| solver_failure(&e))?;
-        (run, None, None)
+        (run, None, None, None)
     };
     let wall_s = started.elapsed().as_secs_f64();
     let records = &run.energy_records;
@@ -1931,6 +1965,8 @@ fn execute_unsteady(
         "fv-simplec-unsteady-material-sgs"
     } else if material_feedback.is_some() {
         "fv-simplec-unsteady-material"
+    } else if endpoint_feedback.is_some() {
+        "fv-simplec-unsteady-boussinesq-implicit"
     } else if scene.sgs.is_some() && buoyancy.is_some() {
         "fv-simplec-unsteady-sgs-boussinesq"
     } else if scene.sgs.is_some() {
@@ -1963,6 +1999,9 @@ fn execute_unsteady(
         scene.append_material_inputs(&mut out);
         if let Some(feedback) = &material_feedback {
             let _ = write!(out, ",\"material_feedback\":{feedback}");
+        }
+        if let Some(feedback) = &endpoint_feedback {
+            let _ = write!(out, ",\"endpoint_coupling\":{feedback}");
         }
         let _ = write!(
             out,
@@ -2054,6 +2093,9 @@ fn execute_unsteady(
         }
         if let Some(feedback) = &material_feedback {
             let _ = writeln!(out, "material_feedback={feedback}");
+        }
+        if let Some(feedback) = &endpoint_feedback {
+            let _ = writeln!(out, "endpoint_coupling={feedback}");
         }
         for (name, power, last_max, mean_max) in &source_rows {
             let _ = writeln!(
@@ -2771,9 +2813,10 @@ fn execute_within_budget(scene: &Scene, json_mode: bool) -> Result<String> {
 pub(super) fn run(args: &[OsString], json_mode: bool) -> CommandOutput {
     if args.len() == 1 && (args[0] == "--help" || args[0] == "-h") {
         let mut help = format!(
-            "{HELP}\nSource-backed materials: fluid may declare {{mode: \"frozen\", gas: <shared gas record>}}\nor {{mode: \"frozen\", pack, state, viscosity: \"dynamic\"|\"kinematic\"}}.\nA solid material may declare source: {{mode: \"frozen\", pack, state}}.\nUse mode \"temperature-dependent\" on the gas or liquid and every solid\nsource to close steady laminar temperature feedback. For transient runs,\nuse flow \"unsteady\" with evolving fluid; resolved solids may use fixed\nstorage or all evolve with a source storage_temperature_range_k. The latter\nintegrates original Cp at fixed reference mass and solves endpoint conductivity;\ntransient.solid_storage controls nonlinear acceptance. Compact components\nuse authored constant or tabulated junction capacity alongside either\nstorage model; their occupied voxels require no material source or volumetric\ncapacity. Fluid-material\nfeedback is first order even with BDF2 momentum. Liquids and evolving solids\nrequire temperature_axis; gas uses its original pressure and composition.\nActual fluid density owns buoyancy; no expansion_per_k override is allowed.\nCanonical packs and typed state coordinates are shared with the material\nlibraries; source coefficients cannot be overridden. See docs/COOLING_CHT_MATERIALS.md.\n"
+            "{HELP}\nSource-backed materials: fluid may declare {{mode: \"frozen\", gas: <shared gas record>}}\nor {{mode: \"frozen\", pack, state, viscosity: \"dynamic\"|\"kinematic\"}}.\nA solid material may declare source: {{mode: \"frozen\", pack, state}}.\nUse mode \"temperature-dependent\" on the gas or liquid and every solid\nsource to close steady laminar temperature feedback. For transient runs,\nuse flow \"unsteady\" with evolving fluid; resolved solids may use fixed\nstorage or all evolve with a source storage_temperature_range_k. The latter\nintegrates original Cp at fixed reference mass and solves endpoint conductivity;\ntransient.solid_storage controls nonlinear acceptance. Compact components\nuse authored constant or tabulated junction capacity alongside either\nstorage model; their occupied voxels require no material source or volumetric\ncapacity. Fluid-material\nfeedback defaults to first order even with BDF2 momentum; declare\ntransient.endpoint_coupling to converge the common physical endpoint.\nLiquids and evolving solids\nrequire temperature_axis; gas uses its original pressure and composition.\nActual fluid density owns buoyancy; no expansion_per_k override is allowed.\nCanonical packs and typed state coordinates are shared with the material\nlibraries; source coefficients cannot be overridden. See docs/COOLING_CHT_MATERIALS.md.\n"
         );
         help.push_str(convection::HELP);
+        help.push_str(endpoint::HELP);
         help.push_str(sgs::HELP);
         return CommandOutput {
             exit_code: exit::SUCCESS,
