@@ -14,6 +14,9 @@ use fs_material::state_point::{
 };
 use fs_material::strength::{IsotropicTensileLimit, TensileAssessment};
 
+/// Direction-dependent tensile limits in the original material-axis frame.
+pub mod orthotropic;
+
 /// A tensile criterion and the source-derived elastic state it may assess.
 ///
 /// Elasticity and strength can have different property selections, but must
@@ -201,6 +204,7 @@ pub enum TensileAssessmentError {
     Budget,
     SourceMismatch { element: usize, point: Option<usize> },
     Material(MaterialStatePointError),
+    Elastic(crate::linear3::TetElasticError),
     Cancelled,
 }
 impl core::fmt::Display for TensileAssessmentError {

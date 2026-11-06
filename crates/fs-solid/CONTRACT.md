@@ -8531,6 +8531,44 @@ or ductile failure laws, or predict crack growth, fracture energy, plastic
 failure, fragmentation or service life. Finite-strain Piola stress is not
 accepted as Cauchy stress by these small-strain adapters.
 
+## Direction-dependent tensile assessment on native solid stresses
+
+`strength::orthotropic::OrthotropicTensileMaterialBinding` binds the three
+explicitly named `fs-material::strength::OrthotropicTensileLimit` sources to
+the original source-derived orthotropic elastic state. Card, material
+condition, complete query and typed axes must agree. The same validated
+proper rotation and orientation identity construct the native
+`TetElasticMaterial` and the cached stress pullback. A stress-principal frame
+is never substituted for the material frame.
+
+`TetThermalStressReport::assess_orthotropic_tensile_strength` and
+`QuadraticThermalResponse::assess_orthotropic_tensile_strength` consume the
+actual P1 or native stiffness-quadrature stress in its original oriented
+constitutive state. Mandel stress is converted to tensor shear once and
+pulled back as `Q^T sigma Q`, then the shared material owner compares each
+positive normal component with that material axis's own strength. The native
+response identity, oriented constitutive identity, source bundle, property
+axis order and full local stress are retained in the observation identity.
+Uniform, per-element and per-point bindings admit heterogeneous temperature
+and orientation without averaging away tensile bending peaks. No tangent,
+eigensolve or second mechanical solve is created during assessment.
+
+The first sample at maximum directional utilization governs. Each sample
+retains its governing material axis. Size budgets precede allocation and
+every sample checks cancellation. Wrong source state, wrong orientation,
+invalid field count, failed allocation or invalid arithmetic refuses the
+whole observation while preserving the mechanical response. G1/G3/G4 tests
+in `tests/orthotropic_tensile_strength.rs` exercise unequal directional
+strengths, rotation, material-axis shear, compressive loading, zero-mean
+Q1/Q2 bending, local thermal/orientation changes and atomic refusals.
+
+These are the tensile branches of the explicitly selected maximum-stress
+criterion, not a general composite failure law or a component safety
+certificate. Compression/shear strength, interaction, delamination, damage,
+fracture energy, fragmentation and stresses between retained samples remain
+unassessed. Engineering ultimate strength is not converted to finite-strain
+Cauchy failure strength.
+
 ## Finite-strain tensile assessment on prepared P1 solids
 
 `HyperTetProblem<ResolvedTensileHyperelastic>::assess_tensile_strength` and the
