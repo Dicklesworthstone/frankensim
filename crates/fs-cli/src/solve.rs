@@ -332,7 +332,10 @@ pub const SOLVE_RUN_IDENTITY_DOMAIN: &str = "org.frankensim.fs-cli.solve-run.v1"
 /// closed/open enclosure histories, including one shared black-bath control.
 /// Version 131 admits adaptive spatial refinement through original temperature-
 /// dependent contacts, including complete natural and transported-air feedback.
-pub const SOLVE_DRIVER_VERSION: u32 = 131;
+/// Version 132 includes ambient radiation in those live-contact adaptive goals,
+/// admitting radiation-only traces for fixed and live contact and measuring
+/// adaptive rise tolerances from declared radiative reservoirs as well.
+pub const SOLVE_DRIVER_VERSION: u32 = 132;
 
 const SOLVE_STAGE_SCHEMA: &str = "frankensim.cli.solve-stage.v1";
 const SOLVE_RUN_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-run-receipt.v1";
@@ -1906,7 +1909,7 @@ fn adaptive_study(
             Some(region),
         );
         // Accuracy is relative to the temperature RISE above the coolest
-        // declared reference (inlet, fluid or Dirichlet temperature): a
+        // declared reference (inlet, fluid, Dirichlet or radiative bath): a
         // 1% tolerance on absolute kelvin is ~3 K near room temperature,
         // coarser than the whole rise of a lightly loaded part.
         let tolerance_k = accuracy_rel * reference_k.map_or(coarse_max.abs(), |reference| (coarse_max - reference).abs());
@@ -2104,7 +2107,7 @@ fn adaptive_study(
         achieved.as_deref().unwrap_or("null"),
         history.join(","),
         json_string(
-            "same-model nodal-maximum comparison against a globally enriched mesh; the actual residual/Jacobian retains fixed or admitted source-backed temperature contact, nonlinear conductivity, complete admitted natural-convection coefficient feedback, and independent-branch air feedback at fixed mass flows and coefficients, with explicit linearization and maximum remainders; source-backed contact currently excludes radiative and transient adaptive compositions; incidence-distributed absolute contributions only mark cells; no continuum error, asymptotic order, equal-accuracy efficiency, physical validation, or complete uncertainty claim; output mesh counts do not certify allocator peak memory"
+            "same-model nodal-maximum comparison against a globally enriched mesh; the actual residual/Jacobian retains fixed or admitted source-backed temperature contact, nonlinear conductivity, complete admitted natural-convection coefficient feedback, independent-branch air feedback at fixed mass flows and coefficients, and admitted area-mean ambient-radiation feedback, with explicit linearization and maximum remainders; source-backed contact currently excludes reflected-enclosure and transient adaptive compositions; incidence-distributed absolute contributions only mark cells; no continuum error, asymptotic order, equal-accuracy efficiency, physical validation, or complete uncertainty claim; output mesh counts do not certify allocator peak memory"
         ),
     );
     // The published mesh was just compared with its uniform ratio-2
@@ -2120,9 +2123,9 @@ fn adaptive_study(
     Ok((complex, solved, receipt, discretization))
 }
 
-/// The coolest declared boundary temperature (fluid reference, airflow inlet
-/// or Dirichlet value): the base the adaptive tolerance's rise is measured
-/// from. `None` when the project declares no temperature on any boundary.
+/// The coolest declared boundary temperature (fluid reference, airflow inlet,
+/// Dirichlet value or ambient-radiation reservoir): the base the tolerance's
+/// rise is measured from. `None` when no boundary temperature is declared.
 fn coolest_declared_temperature(setup: &ConductionSetup) -> Option<f64> {
     setup
         .boundaries
@@ -2134,6 +2137,8 @@ fn coolest_declared_temperature(setup: &ConductionSetup) -> Option<f64> {
             ThermalBoundaryCondition::NaturalConvection { ambient_temperature, .. } => Some(ambient_temperature.value),
             _ => None,
         })
+        .chain(setup.radiation.iter().flat_map(|radiation| radiation.surfaces.iter())
+            .map(|surface| surface.reservoir_temperature.value))
         .filter(|value| value.is_finite())
         .reduce(f64::min)
 }

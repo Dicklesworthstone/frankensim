@@ -1,5 +1,38 @@
 # CONTRACT: fs-cli
 
+## Adaptive live contact with ambient radiation — driver 132
+
+Steady adaptive projects now compose source-backed temperature-dependent contact
+with area-mean ambient radiation, including prescribed convection, natural
+convection, transported air and genuine radiation-only zero-flux traces. Each
+enriched comparison independently evaluates the original contact, conductivity,
+convection, physical air march and radiative secant at both temperature fields.
+The reference transpose retains contact-temperature columns, the radiative
+coefficient and weighted-reference derivatives, and all admitted local and
+cross-wall convection feedback. Only original convection transfers heat to air.
+
+The accepted reference still passes the original physical watt residual and
+heat-balance gates. A radiation-only trace retains zero convective controls;
+its declared bath supplies the rise scale for adaptive accuracy. More generally,
+ambient-radiation reservoirs participate in the coolest declared reference used
+by the adaptive stopping tolerance. A comparison field needs physical source
+values, not an emissivity derivative at its validity endpoint.
+
+The existing ambient comparison for fixed contacts and continuous solids also
+admits original zero-flux radiating traces through the same radiation owner.
+Vacuum adaptation therefore does not require temperature-dependent contact or a
+fictitious convective coefficient. Its original fixed-contact comparison and
+physical residual checks retain their existing meaning.
+
+The algebraic receipt identifies `source-contact-radiation-full-transpose` and
+records both contact-temperature and radiation feedback. Signed residual terms,
+observed nonlinear remainder and maximum relocation remain in the existing
+Estimated discretization comparison and marking path. Driver 132 invalidates
+cached results from earlier producers. Reflected-enclosure and transient
+contact adaptation, steady pointwise radiation and continuum error certificates
+remain outside this increment. Focused native regressions cover radiation-only,
+prescribed, natural and transported-air cases through the existing project path.
+
 ## Original material-source adjoints through reflected enclosures — driver 130
 
 Final-temperature and sampled-peak adjoints now consume the original accepted
@@ -1218,8 +1251,10 @@ receipt identities. Equal curve endpoints cannot hide interior variation.
 Explicit claim pins disambiguate sources without bypassing validity checks.
 The later driver sections above extend enclosure radiation and complete
 derivatives. Driver 131 additionally admits adaptive goals with prescribed,
-natural-convection and transported-air boundaries; radiative and transient
-adaptive compositions still refuse with `cli-solve-conduction-contact-composition`.
+natural-convection and transported-air boundaries; driver 132 includes
+area-mean ambient radiation and radiation-only traces. Reflected-enclosure
+and transient adaptive compositions still refuse with
+`cli-solve-conduction-contact-composition`.
 No frozen-contact inverse or roundoff certificate is published. Constant-contact projects retain their
 existing solver and derivative paths. Tests in
 `native_contact_adjoint/temperature.rs` exercise real imported projects,

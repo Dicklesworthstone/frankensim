@@ -72,10 +72,10 @@ pub(in crate::solve) fn probe(
         return Err(bad("radiation patches and their accepted combined boundary must be retained together"));
     }
     let live_contact = data.temperature_contact.is_some();
-    if live_contact && (combined.is_some() || data.interfaces.is_some()
+    if live_contact && (data.interfaces.is_some()
         || data.enclosure.is_some() || data.open_enclosure.is_some())
     {
-        return Err(bad("adaptive live contact requires its original source with nonradiating convection; frozen contact or radiation feedback cannot substitute"));
+        return Err(bad("adaptive live contact requires its original source and admitted convection/ambient-radiation laws; frozen contact or reflected-enclosure feedback cannot substitute"));
     }
     if combined.is_none()
         && !(data.natural_goal.is_some() && !data.air_paths.is_empty())
@@ -113,6 +113,20 @@ pub(in crate::solve) fn probe(
                 other.push([*h, *r]);
             }
             ThermalBc::Robin { .. } => return Err(bad("coupled adaptive goals require uniform original Robin traces")),
+            ThermalBc::Neumann { outward_flux: ScalarField::Uniform(flux) }
+                if *flux == 0.0 => {
+                let name = data.boundary.region_names()[i].as_str();
+                if let Some(patch) = data.radiation_patches.iter().find(|patch| patch.region() == name) {
+                    if names.len() == MAX_REGIONS { return Err(bad("coupled adaptive goal exceeds 64 thermal traces")); }
+                    // This is still the original zero-convection trace. Its
+                    // reservoir placeholder is inert; the radiation owner
+                    // supplies the actual secant and weighted reference.
+                    names.push(name);
+                    regions.push(i);
+                    points.push([0.0, patch.ambient_temperature_k(), 0.0, 0.0]);
+                    other.push([0.0, patch.ambient_temperature_k()]);
+                }
+            }
             _ => {},
         }
     }
@@ -142,7 +156,7 @@ pub(in crate::solve) fn probe(
         means[i][1] = finite(face.area.mul_add(approximate_mean, means[i][1]))?;
     }
     for i in 0..m {
-        if areas[i] <= 0.0 { return Err(bad("coupled adaptive Robin trace has no positive area")); }
+        if areas[i] <= 0.0 { return Err(bad("coupled adaptive thermal trace has no positive area")); }
         let inverse_area = 1.0 / areas[i];
         means[i][0] = finite(means[i][0] * inverse_area)?;
         means[i][1] = finite(means[i][1] * inverse_area)?;
@@ -215,9 +229,15 @@ pub(in crate::solve) fn probe(
     let problem = ConductionProblem { mesh: &fine.mesh, boundary: &data.boundary,
         material: &data.fallback, element_materials: Some(&data.materials), source: &data.source };
     let dual = if let Some(contact) = &data.temperature_contact {
-        contact.compare_goal_with_robin_feedback(cx, problem,
-            &fine.solution.temperature, approximate, data.linear, &names,
-            &points, &other, &feedback, &weights, entries)?
+        if combined.is_some() {
+            contact.compare_goal_with_ambient_radiation(cx, problem,
+                &fine.solution.temperature, approximate, data.linear, &names,
+                &points, &other, &feedback, &data.radiation_patches, &weights, entries)?
+        } else {
+            contact.compare_goal_with_robin_feedback(cx, problem,
+                &fine.solution.temperature, approximate, data.linear, &names,
+                &points, &other, &feedback, &weights, entries)?
+        }
     } else if combined.is_some() {
         AmbientRadiationGradient::compare_goal_at(cx, problem, data.interfaces.as_ref(),
             data.linear, &fine.solution.temperature, approximate, &names, &points, &other,

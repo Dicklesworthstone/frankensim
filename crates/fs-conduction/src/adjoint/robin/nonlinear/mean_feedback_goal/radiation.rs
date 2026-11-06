@@ -3,13 +3,14 @@
 
 use super::{ConductionError, ConductionProblem, Cx, DiscreteGoalComparison,
     LinearConfig, RobinResponse, ThermalInterfaces, checked, invalid, poll, vector};
-use crate::radiation::{AmbientRadiationGradient, AmbientRadiationPatch};
+use crate::radiation::{AmbientRadiationGradient, AmbientRadiationLinearization, AmbientRadiationPatch};
+use crate::{ScalarField, ThermalBc};
 use std::collections::BTreeSet;
 
 impl AmbientRadiationGradient {
     /// Compare a linear nodal-temperature goal through convection and radiation.
     ///
-    /// `problem.boundary` is the ORIGINAL convective partition. In `regions`
+    /// `problem.boundary` is the ORIGINAL convection/zero-flux partition. In `regions`
     /// order, `reference_convection` supplies [h_c, r_c, dh_c/dmean, dr_c/dmean]
     /// at the reference field and `approximate_convection` supplies [h_c, r_c]
     /// at the approximate field. Units are W/(m^2 K), K, W/(m^2 K^2), and K/K.
@@ -17,6 +18,11 @@ impl AmbientRadiationGradient {
     /// to convective references. Do not repeat its diagonal in the local slope.
     /// Supply zeros for fixed references. The caller owns the convection law,
     /// evaluates BOTH physical states, and supplies its exact derivative.
+    ///
+    /// A radiation-only trace retains its original uniform zero-flux boundary.
+    /// Its coefficients, coefficient/reference slopes and feedback ROW must
+    /// all be zero; positive reference inputs are inert placeholders. Its own
+    /// patch supplies the radiative reservoir without manufacturing convection.
     ///
     /// Every radiation patch must occur exactly once in `regions`. Its original
     /// emissivity card, query, domain and reservoir are retained. The actual
@@ -35,6 +41,9 @@ impl AmbientRadiationGradient {
     /// At most 64 regions and patches are admitted; four nodal factor vectors
     /// per region and the m-by-m feedback must fit `max_feedback_entries`.
     /// That cap is not total allocator/RSS. Failure never mutates input fields.
+    /// Only the reference needs a unique emissivity tangent. The approximate
+    /// field may reach a supported validity endpoint because it needs physical
+    /// secant values, not a derivative or neighboring source-temperature query.
     #[allow(clippy::too_many_arguments)]
     pub fn compare_goal_at(
         cx: &Cx<'_>, problem: ConductionProblem<'_>, interfaces: Option<&ThermalInterfaces>,
@@ -63,55 +72,75 @@ impl AmbientRadiationGradient {
         seen.clear();
         for patch in patches {
             if !seen.insert(patch.region()) || !regions.contains(&patch.region()) {
-                return Err(invalid("every radiation patch needs one unique selected convective region"));
+                return Err(invalid("every radiation patch needs one unique selected thermal region"));
             }
         }
-        let mut points = reference_convection.to_vec();
-        let mut other = approximate_convection.to_vec();
+        let mut selected = [0; 64];
+        let mut reference_rows = [(0, 0.0, 0.0); 64];
+        let mut approximate_rows = [(0, 0.0, 0.0); 64];
+        let mut slopes = [0.0; 64];
+        let mut convection_rows = 0;
         let mut feedback = reference_feedback.to_vec();
         for (i, &name) in regions.iter().enumerate() {
             poll(cx, i)?;
-            vector(cx, &points[i], 4)?;
-            vector(cx, &other[i], 2)?;
-            let [hc, tc, dhc, dtc] = points[i];
-            let [ha, ta] = other[i];
-            if hc <= 0.0 || ha <= 0.0 || tc <= 0.0 || ta <= 0.0 {
-                return Err(invalid("radiative goal needs positive convection coefficients and absolute references"));
+            vector(cx, &reference_convection[i], 4)?;
+            vector(cx, &approximate_convection[i], 2)?;
+            let [hc, tc, dhc, dtc] = reference_convection[i];
+            let [ha, ta] = approximate_convection[i];
+            if tc <= 0.0 || ta <= 0.0 {
+                return Err(invalid("radiative goal needs positive absolute reference values"));
             }
-            let Some(patch) = patches.iter().find(|p| p.region() == name) else { continue; };
             let region = problem.boundary.region_names().iter().position(|r| r == name)
                 .ok_or_else(|| invalid("radiative-goal region is absent from the original partition"))?;
-            let mut area = 0.0;
-            let mut sums = [0.0; 2];
-            for (slot, face) in problem.mesh.boundary().iter().enumerate() {
-                if slot % 512 == 0 { poll(cx, slot)?; }
-                if problem.boundary.region_for(slot) != Some(region) { continue; }
-                area = checked(area + face.area)?;
-                for &v in &face.vertices {
-                    sums[0] = checked(sums[0] + (face.area/3.0)*reference[v as usize])?;
-                    sums[1] = checked(sums[1] + (face.area/3.0)*approximate[v as usize])?;
+            match problem.boundary.conditions()[region] {
+                ThermalBc::Robin { htc: ScalarField::Uniform(_), t_ref: ScalarField::Uniform(_) }
+                    if hc > 0.0 && ha > 0.0 => {
+                    reference_rows[convection_rows] = (region, hc, tc);
+                    approximate_rows[convection_rows] = (region, ha, ta);
+                    convection_rows += 1;
                 }
+                ThermalBc::Neumann { outward_flux: ScalarField::Uniform(flux) }
+                    if flux == 0.0 && hc == 0.0 && ha == 0.0 && dhc == 0.0 && dtc == 0.0
+                        && patches.iter().any(|patch| patch.region() == name)
+                        && reference_feedback[i*m..(i+1)*m].iter().all(|&v| v == 0.0) => {}
+                _ => return Err(invalid(
+                    "retain uniform convection or radiation-only zero-flux ownership without invented convection or feedback")),
             }
-            if area <= 0.0 { return Err(invalid("radiative-goal patch has no positive trace area")); }
-            let wall = checked(sums[0]/area)?;
-            let other_wall = checked(sums[1]/area)?;
-            let hr = patch.secant_coefficient_w_m2_k(wall)?;
-            let hra = patch.secant_coefficient_w_m2_k(other_wall)?;
-            let dhr = patch.secant_partials_w_m2_k2(wall)?[0];
-            let reservoir = patch.ambient_temperature_k();
-            let h = checked(hc + hr)?;
-            let other_h = checked(ha + hra)?;
-            let r = checked((hc/h)*tc + (hr/h)*reservoir)?;
-            points[i] = [h, r, checked(dhc + dhr)?, checked(
-                (dhc/h)*(tc-r) + (dhr/h)*(reservoir-r) + (hc/h)*dtc)?];
-            other[i] = [other_h, checked((ha/other_h)*ta + (hra/other_h)*reservoir)?];
-            for value in &mut feedback[i*m..(i+1)*m] {
-                *value = checked((hc/h)*(*value))?;
-            }
+            selected[i] = region;
+            slopes[i] = dhc;
+            // Radiation weights the entire original reference derivative.
+            // Its own local weighted-reference slope is added separately.
+            feedback[i*m+i] = checked(reference_feedback[i*m+i] + dtc)?;
         }
+        let reference_boundary = problem.boundary
+            .with_uniform_robin_replacements(&reference_rows[..convection_rows])?;
+        let approximate_boundary = problem.boundary
+            .with_uniform_robin_replacements(&approximate_rows[..convection_rows])?;
+        let bound = AmbientRadiationLinearization::bind(cx,
+            ConductionProblem { boundary: &reference_boundary, ..problem }, reference,
+            regions, &slopes[..m], Some(&feedback), patches, max_feedback_entries)?;
+        let other_boundary = AmbientRadiationLinearization::physical_boundary_at(cx,
+            ConductionProblem { boundary: &approximate_boundary, ..problem }, approximate,
+            regions, patches, max_feedback_entries)?;
+        let mut points = [[0.0; 4]; 64];
+        let mut other = [[0.0; 2]; 64];
+        for (i, &region) in selected[..m].iter().enumerate() {
+            poll(cx, i)?;
+            let ThermalBc::Robin { htc: ScalarField::Uniform(h), t_ref: ScalarField::Uniform(r) }
+                = bound.boundary().conditions()[region]
+            else { return Err(invalid("radiation binding lost its combined reference Robin row")); };
+            let ThermalBc::Robin { htc: ScalarField::Uniform(ha), t_ref: ScalarField::Uniform(ra) }
+                = other_boundary.conditions()[region]
+            else { return Err(invalid("radiation binding lost its combined approximate Robin row")); };
+            points[i] = [h, r, bound.coefficient_mean_slopes()[i], bound.local_reference_slopes()[i]];
+            other[i] = [ha, ra];
+        }
+        let total_feedback = bound.reference_feedback()
+            .ok_or_else(|| invalid("radiation binding lost its original reference-feedback map"))?;
         RobinResponse::compare_mean_robin_goal_with_reference_feedback_at(
-            cx, problem, interfaces, linear, reference, approximate, regions,
-            &points, &other, &feedback, weights, max_feedback_entries,
+            cx, ConductionProblem { boundary: bound.boundary(), ..problem }, interfaces,
+            linear, reference, approximate, regions, &points[..m], &other[..m],
+            total_feedback, weights, max_feedback_entries,
         )
     }
 }

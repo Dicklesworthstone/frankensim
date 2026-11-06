@@ -202,6 +202,9 @@ pub(super) fn probe_pair(
     // This method is a full core FGMRES transpose, not the legacy IQN-ILS
     // interface iteration. Preserve that distinction in retained evidence.
     let comparison = match fine.adjoint_data.as_ref() {
+        Some(data) if data.temperature_contact.is_some() && data.radiating_boundary.is_some() => format!(
+            ",\"comparison_model\":\"source-contact-radiation-full-transpose\",\"contact_temperature_feedback\":true,\"radiation_feedback\":true,\"air_reference_feedback\":{}",
+            !data.air_paths.is_empty()),
         Some(data) if data.temperature_contact.is_some() => format!(
             ",\"comparison_model\":\"source-contact-full-transpose\",\"contact_temperature_feedback\":true,\"air_reference_feedback\":{}",
             !data.air_paths.is_empty()),

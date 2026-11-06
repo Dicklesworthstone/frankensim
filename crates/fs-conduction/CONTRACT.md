@@ -1212,6 +1212,15 @@ A radiation-only slab checks physical emissivity-endpoint admission, source
 domain exits, retained bath ownership, dirty references, exhausted budgets,
 invalid zero-convection feedback and cancellation.
 
+`AmbientRadiationGradient::compare_goal_at` uses the same reference binding and
+physical-only approximate binding for continuous solids and fixed thermal
+interfaces. Original uniform zero-flux radiating regions are admitted with the
+same zero-convection ownership rules; ordinary Robin values are rebound from
+the supplied law at both fields. Complete weighted-reference feedback and
+physical source-domain checks remain active, including at approximate validity
+endpoints. The existing mean-Robin goal owner retains the reference residual
+check and complete transpose. No artificial convection is needed for vacuum.
+
 ## Temperature-dependent source laws on nonmatching thermal interfaces
 
 `TemperatureContact::new_nonmatching` assigns an ordered source law to two

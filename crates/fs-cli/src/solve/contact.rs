@@ -29,8 +29,8 @@ pub(super) const NO_CLAIM: &str = concat!(
     "Ambient derivatives add the original mean-temperature secant and weighted-reference feedback, including radiation-only traces with zero convection controls. ",
     "Inlet, fan, contact-law, emissivity and radiative-bath controls retain their original physical owners. ",
     "Boundary-extended reports reuse the same complete dual for prescribed-temperature controls, retaining both contact-temperature columns, all fixed-node wall-mean weights and the direct objective term. ",
-    "Adaptive refinement re-queries the original contact law at both fields and uses the complete contact/bulk transpose, including the actual natural-convection coefficients and transported-air reference feedback when declared. The observed nonlinear and maximum-relocation remainders remain part of the Estimated comparison. ",
-    "Adaptive contact with radiative feedback or transient storage, steady pointwise radiation and inverse/roundoff certificates for this nonlinear contact path are not supplied. ",
+    "Adaptive refinement re-queries the original contact law at both fields and uses the complete contact/bulk transpose, including the actual natural-convection coefficients, transported-air reference feedback and area-mean ambient-radiation secants when declared. Radiation-only traces retain zero convection, and the observed nonlinear and maximum-relocation remainders remain part of the Estimated comparison. ",
+    "Adaptive contact with reflected-enclosure feedback or transient storage, steady pointwise radiation and inverse/roundoff certificates for this nonlinear contact path are not supplied. ",
     "Uniform spatial ladder differences retain their existing Estimated meaning. No evolving pressure, geometry or new material authority is inferred.",
 );
 
@@ -136,6 +136,35 @@ impl Retained {
             cx, problem, reference, approximate, linear, self.tolerance_w,
             self.tolerance_w, regions, reference_points, approximate_values,
             reference_feedback, weights, max_feedback_entries, max_pairs,
+        ).map_err(lower)
+    }
+
+    /// Preserve the original convection and radiation owners at both fields,
+    /// including genuine radiation-only traces and the live contact tangent.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn compare_goal_with_ambient_radiation(
+        &self,
+        cx: &Cx<'_>,
+        problem: ConductionProblem<'_>,
+        reference: &[f64],
+        approximate: &[f64],
+        linear: fs_conduction::LinearConfig,
+        regions: &[&str],
+        reference_points: &[[f64; 4]],
+        approximate_values: &[[f64; 2]],
+        reference_feedback: &[f64],
+        patches: &[fs_conduction::AmbientRadiationPatch],
+        weights: &[f64],
+        max_feedback_entries: usize,
+    ) -> Result<fs_conduction::adjoint::DiscreteGoalComparison, SolveRefusal> {
+        let max_pairs = self.resolution.pairs.len();
+        let contacts = self.prepared.bind(
+            cx, problem.mesh, problem.boundary, &self.resolution, max_pairs,
+        )?;
+        contacts.compare_steady_goal_with_ambient_radiation(
+            cx, problem, reference, approximate, linear, self.tolerance_w,
+            self.tolerance_w, regions, reference_points, approximate_values,
+            reference_feedback, patches, weights, max_feedback_entries, max_pairs,
         ).map_err(lower)
     }
 }
@@ -494,12 +523,14 @@ pub(super) fn admit(
     let adaptive = spec.solver.as_ref()
         .is_some_and(|solver| solver.fidelity == super::SOLVER_FIDELITY_ADAPTIVE);
     let unsupported_adaptive = adaptive && (transient.is_some()
-        || setup.radiation.is_some() || setup.enclosure_radiation.is_some());
+        || setup.enclosure_radiation.is_some()
+        || setup.radiation.as_ref().is_some_and(|row|
+            row.spatial_model == Some(fs_project::RadiationSpatialModel::Pointwise)));
     if unsupported_adaptive {
         return Err(conduction_error(
             "cli-solve-conduction-contact-composition",
-            "adaptive source-backed contact admits steady prescribed, natural-convection and transported-air boundaries; radiation and transient storage require their own complete two-field goal comparison",
-            "use base or uniform-ladder fidelity for radiation or transient storage; do not freeze the contact or boundary laws",
+            "adaptive source-backed contact admits steady prescribed, natural-convection and transported-air boundaries with optional area-mean ambient radiation; enclosure exchange and transient storage require their own complete two-field goal comparison, while steady pointwise radiation is not admitted",
+            "use an admitted steady boundary composition or base/uniform-ladder fidelity for enclosure exchange or transient storage; do not freeze the contact or boundary laws",
         ));
     }
     if unsupported_transient

@@ -5,7 +5,35 @@ use fs_qty::QtyAny;
 
 fn solved(f: &Fixture, ordinal: usize) -> (J, J, J) {
     let (source, contact, ledger) = prepare(f, ordinal, None);
-    let output = run(f, &source, &contact, &ledger);
+    let output = if f
+        .project
+        .cooling
+        .as_ref()
+        .unwrap()
+        .conduction
+        .as_ref()
+        .unwrap()
+        .radiation
+        .is_some()
+    {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        fs_cli::run(vec![
+            "--json".into(),
+            "solve".into(),
+            source.display().to_string(),
+            ledger.display().to_string(),
+            "--materials".into(),
+            f.dir.join("solid.fsmcdpk").display().to_string(),
+            "--materials".into(),
+            root.join("data/reference-project/gray-surface.fsmcdpk")
+                .display()
+                .to_string(),
+            "--interfaces".into(),
+            contact.display().to_string(),
+        ])
+    } else {
+        run(f, &source, &contact, &ledger)
+    };
     assert_eq!(
         output.exit_code,
         fs_cli::exit::SUCCESS,
@@ -409,4 +437,280 @@ fn live_contact_adaptive_natural_air_and_mixed_goals_retain_complete_boundary_fe
             "natural={natural} air={air}: the independent physical uniform solve disagrees with the adaptive probe"
         );
     }
+}
+
+#[test]
+fn live_contact_adaptive_radiation_keeps_vacuum_natural_and_air_heat_physical() {
+    let number = |row: &J, key: &str| row.f64_field(key).unwrap();
+    // The same imported bodies and source curve exercise real radiation-only
+    // cooling and each original convection owner, with nonlinear bulk K(T).
+    for mode in ["vacuum", "robin", "natural", "air"] {
+        let mut f = Fixture::new(true, true);
+        let setup = f
+            .project
+            .cooling
+            .as_mut()
+            .unwrap()
+            .conduction
+            .as_mut()
+            .unwrap();
+        let bath = setup.radiation.as_ref().unwrap().surfaces[0]
+            .reservoir_temperature
+            .value;
+        setup.boundaries[0].condition = match mode {
+            "vacuum" => B::HeatFlux {
+                outward_flux: QtyAny::new(0.0, dims::HEAT_FLUX),
+            },
+            "robin" => B::Convection {
+                coefficient: QtyAny::new(8.0, dims::HEAT_TRANSFER_COEFFICIENT),
+                reference_temperature: QtyAny::new(297.0, dims::TEMPERATURE),
+            },
+            "natural" => B::NaturalConvection {
+                characteristic_length: QtyAny::new(1.0, dims::LENGTH),
+                ambient_temperature: QtyAny::new(297.0, dims::TEMPERATURE),
+                correlation: "convection.churchill-chu-vertical-plate".into(),
+            },
+            "air" => setup.boundaries[0].condition.clone(),
+            _ => unreachable!(),
+        };
+        let envelope = f.project.envelope.as_mut().unwrap();
+        envelope.ambient_lo.value = bath;
+        envelope.ambient_hi.value = bath;
+        f.project.solver.as_mut().unwrap().fidelity = "adaptive".into();
+        f.project.solver.as_mut().unwrap().tolerance_rel = 1e-8;
+        f.project.budgets.as_mut().unwrap().accuracy_rel = 0.2;
+        let (receipt, field, qoi) = solved(&f, 100);
+        let adaptive = receipt.get("adaptive").unwrap();
+        assert_eq!(
+            adaptive.str_field("status"),
+            Some("observed-tolerance-met"),
+            "{mode}"
+        );
+        assert!(number(adaptive, "solved_meshes") > 1.0);
+        assert_eq!(adaptive.get("continuum_error_bound"), Some(&J::Bool(false)));
+        assert_eq!(receipt.get("solver_control"), Some(&J::Null));
+        let history = adaptive.get("history").unwrap().as_array().unwrap();
+        assert!(!history.is_empty());
+        for row in history {
+            let balance = row.get("algebraic_balance").unwrap();
+            assert_eq!(
+                balance.str_field("comparison_model"),
+                Some("source-contact-radiation-full-transpose")
+            );
+            assert_eq!(balance.str_field("status"), Some("unsupported-model"));
+            assert_eq!(
+                balance.get("contact_temperature_feedback"),
+                Some(&J::Bool(true))
+            );
+            assert_eq!(balance.get("radiation_feedback"), Some(&J::Bool(true)));
+            assert_eq!(
+                balance.get("air_reference_feedback"),
+                Some(&J::Bool(mode == "air"))
+            );
+            assert_eq!(
+                row.get("natural_coefficient_feedback"),
+                Some(&J::Bool(mode == "natural"))
+            );
+            assert_eq!(row.get("uses_nonlinear_jacobian"), Some(&J::Bool(true)));
+            assert_eq!(row.get("coupled_adjoint"), Some(&J::Null));
+            assert!(number(row, "interface_pairs") > 0.0);
+            assert_eq!(
+                number(row, "probe_interface_pairs"),
+                4.0 * number(row, "interface_pairs")
+            );
+            assert!(number(row, "absolute_contribution_sum_k") > 0.0);
+            let measured = number(row, "measured_change_k");
+            assert!(
+                (number(row, "signed_linear_change_k")
+                    + number(row, "linearization_remainder_k")
+                    + number(row, "maximum_remainder_k")
+                    - measured)
+                    .abs()
+                    < 1e-9
+            );
+            assert!(number(row, "estimated_change_k") + 1e-12 >= measured.abs());
+            assert!(number(row, "dual_residual") <= 1e-9);
+            if mode == "vacuum" {
+                // With no convection or prescribed bath, the radiative
+                // reservoir defines the rise; absolute kelvin is not an
+                // admissible shortcut to a very loose accuracy target.
+                let tolerance = 0.2 * (number(row, "t_max_k") - bath).abs();
+                assert_eq!(number(row, "tolerance_k").to_bits(), tolerance.to_bits());
+            }
+        }
+        let last = history.last().unwrap();
+        assert!((maximum(&field) - number(last, "t_max_k")).abs() < 1e-9);
+        assert_eq!(
+            receipt.get("natural_convection").unwrap() != &J::Null,
+            mode == "natural"
+        );
+        assert_eq!(receipt.get("conjugate").unwrap() != &J::Null, mode == "air");
+        let contact = receipt.get("temperature_contact").unwrap();
+        assert!(number(contact, "residual_norm_w") <= number(contact, "residual_tolerance_w"));
+        assert!(number(contact, "energy_closure_w").abs() <= number(contact, "energy_tolerance_w"));
+        assert_eq!(
+            contact
+                .get("ambient_radiation")
+                .unwrap()
+                .get("physical_endpoint_reassembled"),
+            Some(&J::Bool(true))
+        );
+        let (_, _, selected) = temperature_pack();
+        for face in contact.get("face_states").unwrap().as_array().unwrap() {
+            let mean = 0.5 * number(face, "side_a_temperature_k")
+                + 0.5 * number(face, "side_b_temperature_k");
+            assert_eq!(number(face, "query_temperature_k"), mean);
+            assert!((number(face, "resistance_m2_k_w") - 0.001 * mean).abs() < 1e-14);
+            assert_eq!(face.str_field("selected_claim"), Some(selected.as_str()));
+            assert_eq!(face.str_field("usage_receipt").unwrap().len(), 64);
+        }
+        let radiation = receipt.get("radiation").unwrap();
+        let convective = number(radiation, "convective_out_w");
+        let radiative = number(radiation, "nonlinear_radiative_out_w");
+        let energy = receipt.get("energy").unwrap();
+        let source = number(energy, "source_w");
+        assert!((source - 4.44).abs() < 1e-9);
+        assert!((source - convective - radiative).abs() <= number(contact, "energy_tolerance_w"));
+        assert!(
+            radiative.abs() > 0.1,
+            "{mode}: radiation must materially affect this heat balance"
+        );
+        if mode == "vacuum" {
+            assert_eq!(
+                convective, 0.0,
+                "a radiation-only trace must not acquire a convection bath"
+            );
+        } else if mode == "air" {
+            let exchange = receipt.get("conjugate").unwrap();
+            assert!((number(exchange, "solid_total_w") - convective).abs() < 1e-9);
+            assert!(
+                (number(exchange, "air_total_w") - convective).abs()
+                    <= number(contact, "residual_tolerance_w")
+            );
+            assert!(
+                (number(exchange, "air_total_w") - (convective + radiative)).abs() > 0.1,
+                "radiation exchanges with its independent reservoir, not transported air"
+            );
+        }
+        let term = discretization(&qoi);
+        assert_eq!(qoi.str_field("authority"), Some("estimated-candidate"));
+        assert_eq!(term.str_field("state"), Some("interval"));
+        assert_eq!(
+            term.get("derivation").unwrap().str_field("method"),
+            Some("adaptive-enrichment-order-one")
+        );
+        let half_width = 2.0
+            * number(last, "estimated_change_k")
+                .abs()
+                .max(number(last, "measured_change_k").abs());
+        assert_eq!(number(term, "upper_kelvin").to_bits(), half_width.to_bits());
+
+        if mode == "vacuum" {
+            let (replayed, replayed_field, _) = solved(&f, 101);
+            assert_eq!(receipt.get("adaptive"), replayed.get("adaptive"));
+            assert_eq!(field.get("temperature"), replayed_field.get("temperature"));
+            // Resolve the identical first enrichment independently, without
+            // paying for an unrelated third uniform rung in every composition.
+            let first = &history[0];
+            f.project.solver.as_mut().unwrap().fidelity = "ladder".into();
+            f.project.budgets.as_mut().unwrap().memory_bytes = (number(first, "probe_tets") as u64)
+                .checked_mul(256)
+                .unwrap();
+            let (uniform, _, _) = solved(&f, 102);
+            let rungs = uniform
+                .get("ladder")
+                .unwrap()
+                .get("rungs")
+                .unwrap()
+                .as_array()
+                .unwrap();
+            assert_eq!(rungs.len(), 2);
+            assert_eq!(first.f64_field("probe_tets"), rungs[1].f64_field("tets"));
+            assert!(
+                (number(first, "probe_t_max_k") - number(&rungs[1], "t_max_k")).abs() < 1e-6,
+                "the independent uniform radiative/contact solve must reproduce the enriched field"
+            );
+        }
+    }
+}
+
+#[test]
+fn fixed_contact_adaptive_vacuum_uses_the_same_physical_radiation_comparison() {
+    let mut f = Fixture::new(true, true);
+    let setup = f
+        .project
+        .cooling
+        .as_mut()
+        .unwrap()
+        .conduction
+        .as_mut()
+        .unwrap();
+    let bath = setup.radiation.as_ref().unwrap().surfaces[0]
+        .reservoir_temperature
+        .value;
+    setup.boundaries[0].condition = B::HeatFlux {
+        outward_flux: QtyAny::new(0.0, dims::HEAT_FLUX),
+    };
+    let envelope = f.project.envelope.as_mut().unwrap();
+    envelope.ambient_lo.value = bath;
+    envelope.ambient_hi.value = bath;
+    f.project.solver.as_mut().unwrap().fidelity = "adaptive".into();
+    f.project.solver.as_mut().unwrap().tolerance_rel = 1e-8;
+    f.project.budgets.as_mut().unwrap().accuracy_rel = 0.2;
+    // This uses the original scalar resistance pack, not temperature_pack:
+    // vacuum adaptation must also work without a live contact source.
+    let (receipt, field, _) = f.solve(0.13, None, 110);
+    assert!(receipt.get("temperature_contact").is_none());
+    assert_eq!(receipt.get("conjugate"), Some(&J::Null));
+    let adaptive = receipt.get("adaptive").unwrap();
+    assert_eq!(adaptive.str_field("status"), Some("observed-tolerance-met"));
+    assert!(adaptive.f64_field("solved_meshes").unwrap() > 1.0);
+    assert_eq!(adaptive.get("continuum_error_bound"), Some(&J::Bool(false)));
+    let history = adaptive.get("history").unwrap().as_array().unwrap();
+    assert!(!history.is_empty());
+    for row in history {
+        let balance = row.get("algebraic_balance").unwrap();
+        assert_eq!(
+            balance.str_field("comparison_model"),
+            Some("area-mean-radiation-full-transpose")
+        );
+        assert_eq!(balance.get("air_reference_feedback"), Some(&J::Bool(false)));
+        assert!(row.f64_field("interface_pairs").unwrap() > 0.0);
+        assert_eq!(
+            row.f64_field("probe_interface_pairs").unwrap(),
+            4.0 * row.f64_field("interface_pairs").unwrap()
+        );
+        assert!(row.f64_field("absolute_contribution_sum_k").unwrap() > 0.0);
+        assert!(row.f64_field("dual_residual").unwrap() <= 1e-9);
+        let tolerance = 0.2 * (row.f64_field("t_max_k").unwrap() - bath).abs();
+        assert_eq!(
+            row.f64_field("tolerance_k").unwrap().to_bits(),
+            tolerance.to_bits()
+        );
+    }
+    assert!((maximum(&field) - history.last().unwrap().f64_field("t_max_k").unwrap()).abs() < 1e-9);
+    let radiation = receipt.get("radiation").unwrap();
+    assert_eq!(radiation.f64_field("convective_out_w"), Some(0.0));
+    assert!((radiation.f64_field("nonlinear_radiative_out_w").unwrap() - 4.44).abs() < 1e-7);
+
+    let first = &history[0];
+    f.project.solver.as_mut().unwrap().fidelity = "ladder".into();
+    f.project.budgets.as_mut().unwrap().memory_bytes = (first.f64_field("probe_tets").unwrap()
+        as u64)
+        .checked_mul(256)
+        .unwrap();
+    let (uniform, _, _) = f.solve(0.13, None, 111);
+    let rungs = uniform
+        .get("ladder")
+        .unwrap()
+        .get("rungs")
+        .unwrap()
+        .as_array()
+        .unwrap();
+    assert_eq!(rungs.len(), 2);
+    assert_eq!(first.f64_field("probe_tets"), rungs[1].f64_field("tets"));
+    assert!(
+        (first.f64_field("probe_t_max_k").unwrap() - rungs[1].f64_field("t_max_k").unwrap()).abs()
+            < 1e-6
+    );
 }

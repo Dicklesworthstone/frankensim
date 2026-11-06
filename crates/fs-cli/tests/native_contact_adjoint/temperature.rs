@@ -406,7 +406,7 @@ fn temperature_contact_is_rebound_on_each_native_uniform_rung() {
 }
 
 #[test]
-fn temperature_contact_never_substitutes_frozen_derivatives_for_adaptive_goals() {
+fn temperature_contact_adaptive_refuses_steady_pointwise_radiation() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let solve_radiating = |f: &Fixture, source: &Path, contact: &Path, ledger: &Path| fs_cli::run(vec![
         "--json".into(),
@@ -422,17 +422,18 @@ fn temperature_contact_never_substitutes_frozen_derivatives_for_adaptive_goals()
         "--interfaces".into(),
         contact.display().to_string(),
     ]);
-    // A complete local contact/radiation adjoint does not provide the
-    // goal-error estimate needed by the adaptive spatial controller.
+    // The complete area-mean secant comparison does not supply a pointwise
+    // fourth-power radiation model for the steady adaptive contact solver.
     let mut f = Fixture::new(false, true);
     f.project.solver.as_mut().unwrap().fidelity = "adaptive".into();
+    f.project.cooling.as_mut().unwrap().conduction.as_mut().unwrap()
+        .radiation.as_mut().unwrap().spatial_model = Some(fs_project::RadiationSpatialModel::Pointwise);
     let (source, contact, ledger) = prepare(&f, 21, None);
     let result = solve_radiating(&f, &source, &contact, &ledger);
     assert_ne!(result.exit_code, fs_cli::exit::SUCCESS);
-    assert!(
-        format!("{}{}", result.stdout, result.stderr)
-            .contains("cli-solve-conduction-contact-composition")
-    );
+    let diagnostic = format!("{}{}", result.stdout, result.stderr);
+    assert!(diagnostic.contains("cli-solve-conduction-contact-composition"), "{diagnostic}");
+    assert!(diagnostic.contains("steady pointwise radiation is not admitted"), "{diagnostic}");
 }
 
 #[path = "temperature/transient_storage.rs"]

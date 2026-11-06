@@ -179,6 +179,18 @@ fn radiation_goal_keeps_cross_wall_reference_feedback_and_its_radiative_weight()
                 comparison_config(),&reference,&approximate,&["left","right"],&convection(means),
                 &other,feedback,&patches,&weights,8*n).unwrap();
             let full = run(&[0.10,0.25,0.05,0.12]);
+            // Moving local reference slopes out of the matrix diagonal must
+            // preserve the same derivative, including its radiative weight.
+            let mut local = convection(means);
+            local[0][3] = 0.10;
+            local[1][3] = 0.12;
+            let stale = coupled_boundary(&mesh, [[2.0,270.0,0.0,0.0], [3.0,310.0,0.0,0.0]]);
+            let rebound = AmbientRadiationGradient::compare_goal_at(cx,
+                ConductionProblem { boundary: &stale, ..problem }, None, comparison_config(),
+                &reference, &approximate, &["left","right"], &local, &other,
+                &[0.0,0.25,0.05,0.0], &patches, &weights, 8*n).unwrap();
+            assert!((rebound.signed_residual_change-full.signed_residual_change).abs() < 1e-10,
+                "the supplied physical convection rows and each reference derivative must enter once");
             let frozen = run(&[0.0;4]);
             assert!(full.linearization_remainder.abs() < 0.1*frozen.linearization_remainder.abs());
             remainders.push(full.linearization_remainder.abs());
@@ -195,5 +207,93 @@ fn radiation_goal_keeps_cross_wall_reference_feedback_and_its_radiative_weight()
         let gate = CancelGate::new_clock_free(); gate.request();
         context(&gate,|cancelled| assert!(matches!(run(cancelled,&reference,8*n),
             Err(ConductionError::Cancelled { .. }))));
+    });
+}
+
+#[test]
+fn radiation_only_goal_matches_scalar_heat_balance_and_preserves_source_support() {
+    context(&CancelGate::new_clock_free(), |cx| {
+        let mesh = mesh();
+        let material = ConductivityModel::isotropic_declared(10.0).unwrap();
+        let source = ScalarField::Uniform(0.0);
+        let boundary_at = |hot| ThermalBoundaryBuilder::new(&mesh)
+            .region("left", |f| on_box_face(f.centroid[0],0.0), ThermalBc::dirichlet(hot).unwrap()).unwrap()
+            .region("right", |f| on_box_face(f.centroid[0],1.0), ThermalBc::neumann(0.0).unwrap()).unwrap()
+            .adiabatic_remainder().finish().unwrap();
+        let boundary = boundary_at(340.0);
+        let original = boundary.clone();
+        let problem = ConductionProblem { mesh: &mesh, boundary: &boundary,
+            material: &material, element_materials: None, source: &source };
+        let patches = [patch(300.0)];
+        let n = mesh.vertex_count();
+        let linear = config().linear;
+        let mut weights = vec![0.0;n]; weights[n-1] = 1.0;
+        // Unit-length, unit-area conduction to a radiation-only planar wall:
+        // 10 (T_wall - 340) + epsilon sigma (T_wall^4 - 300^4) = 0.
+        // Its exact linear P1 field and scalar tangent form an independent
+        // heat-balance oracle, without another radiation or thermal solve.
+        let emission = 0.8 * crate::STEFAN_BOLTZMANN_W_M2_K4;
+        let residual = |wall: f64| 10.0*(wall-340.0)
+            + emission*(wall.powi(4)-300.0_f64.powi(4));
+        let (mut lower, mut upper) = (300.0_f64,340.0_f64);
+        for _ in 0..80 {
+            let wall = 0.5*(lower+upper);
+            if residual(wall) > 0.0 { upper = wall; } else { lower = wall; }
+        }
+        let wall = 0.5*(lower+upper);
+        let field = |wall| mesh.positions().iter()
+            .map(|x| 340.0+x[0]*(wall-340.0)).collect::<Vec<_>>();
+        let reference = field(wall);
+        let compare = |approximate: &[f64], point: [f64;4], other: [f64;2], feedback: f64| {
+            AmbientRadiationGradient::compare_goal_at(cx, problem, None, linear,
+                &reference, approximate, &["right"], &[point], &[other], &[feedback],
+                &patches, &weights, 4*n)
+        };
+        let mut previous = None;
+        for step in [1.0,0.5,0.25] {
+            let approximate = field(wall-step);
+            // The placeholder temperatures deliberately differ from the bath.
+            // Zero convection means they cannot affect either physical state.
+            let full = compare(&approximate, [0.0,280.0,0.0,0.0], [0.0,370.0], 0.0).unwrap();
+            let expected = (residual(wall)-residual(wall-step))
+                /(10.0+4.0*emission*wall.powi(3));
+            assert!((full.signed_residual_change-expected).abs() < 2e-10);
+            assert!((full.signed_goal_change-step).abs() < 1e-12);
+            assert!((full.nodal_contributions.iter().sum::<f64>()-expected).abs() < 2e-10);
+            assert!(full.primal_relative_residual < linear.tolerance);
+            assert!(full.dual_relative_residual < linear.tolerance);
+            let remainder = full.linearization_remainder.abs();
+            assert!(remainder > 1e-6);
+            if let Some(old) = previous { assert!((3.8..4.2).contains(&(old/remainder))); }
+            previous = Some(remainder);
+        }
+        for endpoint in [250.0,500.0] {
+            let at_endpoint = compare(&field(endpoint), [0.0,300.0,0.0,0.0], [0.0,300.0], 0.0);
+            assert!(at_endpoint.is_ok(), "an approximate source endpoint needs only a physical value: {at_endpoint:?}");
+        }
+        for outside in [249.0,501.0] {
+            assert!(compare(&field(outside), [0.0,300.0,0.0,0.0], [0.0,300.0], 0.0).is_err());
+        }
+        for point in [[1.0,300.0,0.0,0.0], [0.0,300.0,1.0,0.0], [0.0,300.0,0.0,1.0]] {
+            assert!(compare(&reference, point, [0.0,300.0], 0.0).is_err(),
+                "an original radiation-only trace cannot acquire convection or its slopes");
+        }
+        assert!(compare(&reference, [0.0,300.0,0.0,0.0], [1.0,300.0], 0.0).is_err());
+        assert!(compare(&reference, [0.0,300.0,0.0,0.0], [0.0,300.0], 0.1).is_err());
+        let index = boundary.region_names().iter().position(|name| name == "right").unwrap();
+        let prescribed_flux = boundary.with_uniform_neumann_additions(&[(index,1.0)]).unwrap();
+        assert!(AmbientRadiationGradient::compare_goal_at(cx,
+            ConductionProblem { boundary: &prescribed_flux, ..problem }, None, linear,
+            &reference, &reference, &["right"], &[[0.0,300.0,0.0,0.0]], &[[0.0,300.0]],
+            &[0.0], &patches, &weights, 4*n).is_err(), "nonzero authored heat must not be erased");
+        // This is an exact isothermal equilibrium and a zero goal. Its
+        // reference lies at the emissivity support edge, so no two-sided
+        // tangent is supplied even though the physical secant is defined.
+        let edge_boundary = boundary_at(250.0);
+        assert!(AmbientRadiationGradient::compare_goal_at(cx,
+            ConductionProblem { boundary: &edge_boundary, ..problem }, None, linear,
+            &vec![250.0;n], &vec![250.0;n], &["right"], &[[0.0,300.0,0.0,0.0]],
+            &[[0.0,300.0]], &[0.0], &[patch(250.0)], &vec![0.0;n], 4*n).is_err());
+        assert_eq!(boundary, original);
     });
 }
