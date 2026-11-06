@@ -1,4 +1,6 @@
 //! Prescribed thermal reference changes retain source datum and viscous memory.
+mod plane;
+
 use super::*;
 use fs_couple::finite_solid::thermal::visco::{
     ExpansionViscoelastic, ExpansionViscoelasticError, ThermalReferenceOrder,

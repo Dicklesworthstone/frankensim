@@ -17,6 +17,9 @@
 //! composition with thermal expansion. The original prestrain and source frame
 //! are immutable across the trajectory; there is no inferred frame transport.
 
+/// Source-bound native thin-solid histories and thermal reference events.
+pub mod plane;
+
 use std::sync::Arc;
 
 use super::ExpansionThermalReference;
