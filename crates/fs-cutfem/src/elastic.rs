@@ -25,6 +25,9 @@ use fs_solver::op::LinearOp;
 use fs_sparse::{Coo, Csr};
 use std::collections::{BTreeMap, BTreeSet};
 
+/// Original-material strain, stress and elastic-energy observations.
+pub mod strain;
+
 /// Stable prefix for content-addressed linear displacement apply VJP keys.
 #[cfg(feature = "adjoint-vjp")]
 pub const ELASTICITY_APPLY_VJP_OP: &str = "fs-cutfem.elasticity-apply.v1";
@@ -47,6 +50,19 @@ pub enum ElasticPlane {
     /// The transverse stresses vanish and thickness strain relaxes locally.
     /// This is an in-plane thin-body model, without bending or transverse inertia.
     Stress,
+}
+
+fn reduced_lame(material: &IsotropicElastic, plane: ElasticPlane) -> (f64, f64) {
+    match plane {
+        ElasticPlane::Strain => material.lame(),
+        ElasticPlane::Stress => {
+            // Eliminate sigma_zz = 0 before forming the 3-D lambda that diverges
+            // as nu approaches 1/2. Bower, Applied Mechanics of Solids, §3.2.3.
+            let e = material.youngs;
+            let nu = material.poisson;
+            (e * nu / ((1.0 + nu) * (1.0 - nu)), e / (2.0 * (1.0 + nu)))
+        }
+    }
 }
 
 type FaceKey = (CellKey, CellKey);
@@ -306,6 +322,8 @@ impl core::fmt::Debug for CutElasticity<'_> {
 #[derive(Debug, Clone)]
 pub struct CutElasticityOperator {
     plane: ElasticPlane,
+    material: IsotropicElastic,
+    lattice_level: u32,
     matrix: Csr,
     rhs: Vec<f64>,
     node_ids: TerminalIds,
@@ -537,6 +555,8 @@ fn solve_cg_to_true_euclidean_gate(
 #[derive(Debug, Clone)]
 pub struct CutElasticitySolution {
     plane: ElasticPlane,
+    material: IsotropicElastic,
+    lattice_level: u32,
     coefficients: Vec<f64>,
     nodal: BTreeMap<NodeKey, [f64; 2]>,
     active: Vec<CellKey>,
@@ -634,6 +654,11 @@ impl CutElasticitySolution {
         cell: CellKey,
         point: [f64; 2],
     ) -> Result<([f64; 2], [[f64; 2]; 2]), CutFemError> {
+        if grid.max_level() != self.lattice_level {
+            return Err(CutFemError::InvalidElasticityInput {
+                what: "elasticity observation requires the original node lattice".into(),
+            });
+        }
         if self.active.binary_search(&cell).is_err() {
             return Err(CutFemError::InvalidElasticityInput {
                 what: format!("cannot evaluate inactive elasticity cell {cell:?}"),
@@ -679,16 +704,12 @@ impl CutElasticitySolution {
             });
         }
         let mut displacement = [0.0; 2];
-        let mut gradient = [[0.0; 2]; 2];
         for corner in 0..4 {
             for component in 0..2 {
                 displacement[component] += shapes[corner] * values[corner][component];
-                for axis in 0..2 {
-                    gradient[component][axis] +=
-                        gradients[corner][axis] * values[corner][component];
-                }
             }
         }
+        let gradient = strain::gradient_from_values(&gradients, &values);
         if displacement
             .iter()
             .chain(gradient.iter().flatten())
@@ -761,17 +782,7 @@ impl CutElasticity<'_> {
                 ),
             });
         }
-        let (lambda, mu) = match plane {
-            ElasticPlane::Strain => self.material.lame(),
-            ElasticPlane::Stress => {
-                // Eliminate sigma_zz = 0 analytically, before evaluating the
-                // three-dimensional lambda that diverges as nu approaches 1/2.
-                // Bower, Applied Mechanics of Solids, section 3.2.3.
-                let e = self.material.youngs;
-                let nu = self.material.poisson;
-                (e * nu / ((1.0 + nu) * (1.0 - nu)), e / (2.0 * (1.0 + nu)))
-            }
-        };
+        let (lambda, mu) = reduced_lame(self.material, plane);
         let bulk_2d = lambda + mu;
         if !(lambda.is_finite()
             && mu > 0.0
@@ -1135,6 +1146,8 @@ impl CutElasticity<'_> {
         }
         Ok(CutElasticityOperator {
             plane,
+            material: self.material.clone(),
+            lattice_level: self.grid.max_level(),
             matrix: coo.assemble(),
             rhs,
             node_ids,
@@ -1465,6 +1478,8 @@ impl CutElasticity<'_> {
         let compliance = operator.algebraic_compliance(&coefficients)?;
         Ok(CutElasticitySolution {
             plane,
+            material: operator.material,
+            lattice_level: operator.lattice_level,
             coefficients,
             nodal,
             active: operator.active,

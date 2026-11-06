@@ -516,3 +516,43 @@ and graded cut meshes, auxetic and near-incompressible thin materials,
 three-rung curved-domain manufactured L2/H1 displacement orders, checked
 traction resultants, controlled-solve parity, and identical original operator
 bits at nu=0. These are numerical model checks, not experimental qualification.
+
+### Original-material strain and stress recovery
+
+`elastic::strain::ElasticStrainStress` observes the original Q1 displacement
+field through both `CutElasticitySolution::strain_stress` and
+`CutElasticityOperator::strain_stress`. The latter also accepts the original
+controlled solver's coefficients and reconstructs only the four required nodes,
+including hanging-node expansions, without a heap allocation. Operator and
+solution retain the original material, plane reduction and node lattice.
+Observation refuses a different node lattice instead of silently relabeling
+the retained displacement field. Gradients subtract one nodal translation
+before differentiation so rigid motion does not generate cancellation strain.
+
+Strain and Cauchy stress use fs-material's tensor-shear order
+`[xx, yy, zz, xy, yz, zx]`. Plane strain retains transverse stress; plane stress
+retains thickness contraction `epsilon_zz=-nu*(epsilon_xx+epsilon_yy)/(1-nu)`
+and exactly zero transverse stress. Stress reuses the assembly's reduced Lamé
+coefficients, avoiding cancellation of divergent 3D bulk terms near nu=1/2.
+Physical bulk storage is `sigma:epsilon/2`, without artificial ghost/Nitsche
+terms or prescribed-boundary work. The complete Frobenius strain norm, including
+thickness and both symmetric shear entries, must fit the original material's
+declared strain ceiling; algebraic convergence alone is not that admission.
+
+`CutElasticityOperator::admit_strain_domain` checks all four corners of each
+active cell. The Q1 gradient and the reconstructed thickness strain are affine,
+so convexity of the tensor norm bounds the entire cell, including strain peaks
+between quadrature sites. This is a floating-point bound on the discrete field,
+not an interval or continuum-error certificate. It includes the fictitious
+extension of cut cells and can therefore refuse conservatively. Point queries
+do not classify physical SDF membership. Cancellation is checked per cell and
+before returning a complete bound. All observation methods keep assembly and
+solver arithmetic unchanged apart from translation-stable gradient recovery.
+
+`tests/strain_recovery.rs` checks analytic extension/shear and energy against
+the original stiffness on uniform/graded grids, auxetic and nearly incompressible
+plane-stress materials, rigid translations/infinitesimal rotations, missed
+quadrature-site peaks, thickness/shear strain limits, controlled/ordinary solve
+parity, original lattice ownership and transactional cancellation. These are
+G0/G1/G3 checks of the stated small-strain model, not finite-rotation, plasticity
+or experimental validation.
