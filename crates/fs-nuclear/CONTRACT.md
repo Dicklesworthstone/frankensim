@@ -2280,3 +2280,27 @@ multiple sources, self-return, receiver overlap, deterministic ordering, exact
 coverage, per-group closure, allocation bounds, numerical refusal and early/late
 cancellation. Spectral completeness and reconciliation with a nuclear source's
 original outward-energy account remain obligations of the coupling owner.
+
+## Evaluated fission-energy components
+
+`endf::fission_energy::FissionEnergyRelease` reads identified ENDF-6 MF1/MT458
+records through the original bounded reader. All nine components, native
+polynomial coefficient/uncertainty pairs, reference energies and component
+TAB1 overrides retain their source identities. Histogram/linear overrides
+preserve LDRV and IFC; duplicate components, malformed shapes, unsupported
+laws, inconsistent identities, excess work and cancellation refuse.
+
+Incident-energy queries return J/fission. Signed polynomials use the original
+electronvolt coefficient convention; no historical unit-repair heuristic or
+source-total normalization is applied. NPLY=0 without a component table is a
+thermal/threshold reference, and cannot silently become a constant law at all
+incident energies. Reference access remains explicit. Outgoing fragment,
+neutron and photon energies, delayed components and reported ER/ET totals stay
+distinct; importing these records does not add heat or invent decay lifetimes.
+
+Nine focused regressions passed in the pinned native build of the actual
+`fs-nuclear` crate root using the original applicable numerical owners. They
+cover format, component meaning, SI conversion, interpolation, reference-only
+refusal, numerical range, resource limits and cancellation. This is not a full
+workspace Cargo gate or independent validation of an evaluated isotope.
+Format and physical distinctions follow [ENDF-102 (2023), section 1.5](https://www.nndc.bnl.gov/endfdocs/ENDF-102-2023.pdf).

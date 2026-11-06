@@ -28,6 +28,9 @@ pub mod doppler;
 /// Evaluated prompt, delayed and total fission-neutron multiplicities.
 pub mod neutron_yield;
 
+/// Evaluated prompt and delayed fission-energy components from MF1/MT458.
+pub mod fission_energy;
+
 /// Independent fission products connected to the original burnup inventory.
 pub mod fission_yields;
 
