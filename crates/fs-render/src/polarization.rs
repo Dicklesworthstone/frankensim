@@ -296,6 +296,10 @@ pub mod photometry {
     #[derive(Clone, Debug)]
     pub struct SpectralOptics {
         matrices: [Mueller; SPECTRAL_BINS],
+        // Native Fresnel/coherent-film matrices are diagonal Jones in their
+        // declared s/p frame. Their U/V block retains a weak channel that a
+        // generic Mueller intensity subtraction can round to exact darkness.
+        diagonal_jones: bool,
     }
 
     impl SpectralOptics {
@@ -327,7 +331,7 @@ pub mod photometry {
                     [0.0, 0.0, 0.0, g],
                 ])
             });
-            Ok(Self { matrices })
+            Ok(Self { matrices, diagonal_jones: false })
         }
 
         /// Ideal achromatic polarizer. Unpolarized light loses half its power.
@@ -352,7 +356,7 @@ pub mod photometry {
             // Reduce before doubling to avoid overflow for finite authored angles.
             let angle = angle_rad.rem_euclid(PI);
             let matrices = phase_rad.map(|phase| Mueller::linear_retarder(angle, phase.rem_euclid(TAU)));
-            Ok(Self { matrices })
+            Ok(Self { matrices, diagonal_jones: false })
         }
 
         /// Phase-only, normal-incidence waveplate using two native spectral index
@@ -412,7 +416,7 @@ pub mod photometry {
                     DielectricEvent::Transmission => f.transmission,
                 };
             }
-            Ok(Self { matrices })
+            Ok(Self { matrices, diagonal_jones: true })
         }
 
         /// Reflected power from the original metal optics, including any authored
@@ -435,7 +439,7 @@ pub mod photometry {
                 *matrix = optics.fresnel_mueller(wavelength, eta, incident_cosine)
                     .map_err(|_| SourceError::InvalidFilter)?;
             }
-            Ok(Self { matrices })
+            Ok(Self { matrices, diagonal_jones: true })
         }
 
         /// Reflected power from an original ordered spectral stack on a metal.
@@ -458,7 +462,7 @@ pub mod photometry {
                 *matrix = stack.fresnel_mueller(substrate, wavelength, eta, incident_cosine)
                     .map_err(|_| SourceError::InvalidFilter)?;
             }
-            Ok(Self { matrices })
+            Ok(Self { matrices, diagonal_jones: true })
         }
 
         /// One coherent multilayer reflection/transmission channel between the
@@ -492,7 +496,7 @@ pub mod photometry {
                     DielectricEvent::Transmission => response.transmission,
                 };
             }
-            Ok(Self { matrices })
+            Ok(Self { matrices, diagonal_jones: true })
         }
     }
 
@@ -530,7 +534,12 @@ pub mod photometry {
         pub fn through(&self, optic: &SpectralOptics) -> Result<Self, SourceError> {
             let mut relative = self.relative;
             for (bin, state) in relative.iter_mut().enumerate() {
-                *state = passive_roundoff(optic.matrices[bin].apply(*state), state.i)?;
+                let transmitted = if optic.diagonal_jones {
+                    optic.matrices[bin].apply_diagonal_jones(*state)
+                } else {
+                    optic.matrices[bin].apply(*state)
+                };
+                *state = passive_roundoff(transmitted, state.i)?;
             }
             // Project absolute surviving power only once relative to the ORIGINAL
             // spectrum. Normalizing Stokes after each element would erase extinction.
@@ -710,6 +719,82 @@ pub mod photometry {
                     r.relative_stokes()[0].i,
                     r.relative_stokes()[SPECTRAL_BINS - 1].i
                 );
+            }
+        }
+
+        #[test]
+        fn g1_weak_brewster_channels_retain_calibrated_source_power() {
+            let ni = 1.0_f64;
+            let nt = 1.5_f64;
+            let cosine = ni / ni.hypot(nt) + 1e-9;
+            let transmitted_cosine =
+                (1.0 - (ni / nt).powi(2) * (1.0 - cosine * cosine)).sqrt();
+            // Independent electric-field Fresnel amplitude. Its power is
+            // representable, but below the roundoff of the dominant s channel.
+            let rp = (nt * cosine - ni * transmitted_cosine)
+                / (nt * cosine + ni * transmitted_cosine);
+            let expected = rp * rp;
+            assert!(expected > 0.0 && expected < 1e-16);
+            let air = CauchyIor::try_constant(ni).unwrap();
+            let glass = CauchyIor::try_constant(nt).unwrap();
+            let films = DielectricCoatingStack::try_new(&[]).unwrap();
+            let input = PolarizedSource::try_new(
+                source(), [Stokes::try_new(1.0, -1.0, 0.0, 0.0).unwrap(); SPECTRAL_BINS],
+            ).unwrap();
+            for optic in [
+                SpectralOptics::dielectric_channel(
+                    cosine, air, glass, DielectricEvent::Reflection,
+                ).unwrap(),
+                SpectralOptics::coated_dielectric_channel(
+                    cosine, air, glass, films, false, DielectricEvent::Reflection,
+                ).unwrap(),
+            ] {
+                let output = input.through(&optic).unwrap();
+                for state in output.relative_stokes() {
+                    assert!(state.i > 0.0);
+                    assert!((state.i / expected - 1.0).abs() < 2e-6);
+                    assert_eq!(state.q, -state.i);
+                }
+                assert!((output.intensity_source().flux_lm() / (1000.0 * expected) - 1.0)
+                    .abs() < 2e-6);
+                // Reusing the same original source must not normalize this
+                // very weak surviving signal back to the source's old flux.
+                let twice = output.through(&optic).unwrap();
+                assert!((twice.intensity_source().flux_lm() / (1000.0 * expected * expected)
+                    - 1.0).abs() < 4e-6);
+            }
+            assert_eq!(input.intensity_source().flux_lm(), 1000.0);
+        }
+
+        #[test]
+        fn g1_absorbing_brewster_minimum_survives_bare_and_stack_source_optics() {
+            let eta = 1.5_f64;
+            let k = 1e-9;
+            let cosine = 1.0 / eta.hypot(1.0);
+            let optics = ConductorOptics::try_new(core::array::from_fn(|i| {
+                ConductorIorSample::try_new(380.0 + 50.0 * i as f64, eta, k).unwrap()
+            }), metal().source()).unwrap();
+            let stack = CoherentCoatingStack::try_new(&[]).unwrap();
+            let air = CauchyIor::try_constant(1.0).unwrap();
+            let input = PolarizedSource::try_new(
+                source(), [Stokes::try_new(1.0, -1.0, 0.0, 0.0).unwrap(); SPECTRAL_BINS],
+            ).unwrap();
+            // First-order complex-index derivative of the p Fresnel amplitude
+            // at Brewster incidence; the next relative term is O(k²).
+            let amplitude = k * (eta * eta - 1.0) / (2.0 * eta.powi(3));
+            let expected = amplitude * amplitude;
+            for optic in [
+                SpectralOptics::conductor_reflection(cosine, air, &optics).unwrap(),
+                SpectralOptics::conductor_stack_reflection(cosine, air, &optics, stack).unwrap(),
+            ] {
+                let output = input.through(&optic).unwrap();
+                for state in output.relative_stokes() {
+                    assert!(state.i > 0.0);
+                    assert!((state.i / expected - 1.0).abs() < 2e-6);
+                    assert_eq!(state.q, -state.i);
+                }
+                assert!((output.intensity_source().flux_lm() / (1000.0 * expected) - 1.0)
+                    .abs() < 2e-6);
             }
         }
 
