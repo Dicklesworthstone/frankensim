@@ -384,3 +384,199 @@ fn sphere_film_conductive_and_buoyant_limits_exchange_signed_heat_with_original_
         );
     }
 }
+
+fn bulk_duct(
+    correlation: CorrelationId,
+    reynolds: f64,
+    gas: &impl FluidTransport,
+) -> ForcedGasSurface {
+    let transport = gas.transport_state().unwrap();
+    ForcedGasSurface {
+        correlation,
+        speed_m_s: reynolds * transport.dynamic_viscosity_pa_s()
+            / (transport.density_kg_m3() * 0.1),
+        settings: ForcedConvectionSettings {
+            length_over_hydraulic_diameter: Some(20.0),
+            direction: ThermalDirection::CoolingFluid,
+            ..ForcedConvectionSettings::default()
+        },
+        ..surface()
+    }
+}
+
+#[test]
+fn bulk_duct_properties_and_heat_direction_match_the_original_correlations() {
+    let bank = source::model_transport(1.0, true);
+    let bulk = bank.evaluate(&source::point(400.0, 100000.0)).unwrap();
+    let transport = bulk.transport_state().unwrap();
+    let pr = transport.prandtl();
+    let curve = source::body_curve();
+    for (correlation, reynolds) in [
+        (CorrelationId::CircularDuctHausen, 1000.0),
+        (CorrelationId::DittusBoelter, 20000.0),
+        (CorrelationId::Gnielinski, 20000.0),
+    ] {
+        let patch = bulk_duct(correlation, reynolds, &bulk);
+        // A modest +/- 5% wall/bulk contrast distinguishes the references.
+        // These manufactured properties do not validate an empirical gas.
+        for enthalpy in [80000.0, 120000.0] {
+            let wall = body(&curve, enthalpy).initial;
+            let result = FilmGasSurface {
+                model: &bank,
+                law: FilmGasHeatLaw::BulkForced(patch),
+            }
+            .resolve(&bulk, wall)
+            .unwrap();
+            let property = result.source.property_gas.as_ref().unwrap();
+            let evaluation = result.source.interface.evaluation.as_ref().unwrap();
+            assert_eq!(property.state().temperature, 400.0);
+            assert_eq!(property.state().pressure, bulk.state().pressure);
+            assert_eq!(property.source_packs(), bulk.source_packs());
+            assert_eq!(property.thermodynamics().receipt().declared_fraction_bits(),
+                bulk.thermodynamics().receipt().declared_fraction_bits());
+            assert_eq!(evaluation.transport, transport);
+            assert_eq!(result.source.interface.gas, bulk);
+            near(evaluation.nusselt.groups()["Re"], reynolds, 1e-9);
+            near(evaluation.nusselt.groups()["Pr"], pr, 1e-14);
+            let nu = match correlation {
+                CorrelationId::CircularDuctHausen => {
+                    let gz = reynolds * pr / 20.0;
+                    3.66 + 0.0668 * gz / (1.0 + 0.04 * gz.powf(2.0 / 3.0))
+                }
+                CorrelationId::DittusBoelter => {
+                    let exponent = if enthalpy > 100000.0 { 0.4 } else { 0.3 };
+                    0.023 * reynolds.powf(0.8) * pr.powf(exponent)
+                }
+                CorrelationId::Gnielinski => {
+                    let friction = (0.79 * reynolds.ln() - 1.64).powi(-2);
+                    (friction / 8.0) * (reynolds - 1000.0) * pr
+                        / (1.0 + 12.7 * (friction / 8.0).sqrt()
+                            * (pr.powf(2.0 / 3.0) - 1.0))
+                }
+                _ => unreachable!("only the three declared duct laws enter this oracle"),
+            };
+            let expected_h = nu * transport.thermal_conductivity_w_m_k() / 0.1;
+            near(evaluation.nusselt.evidence().value, nu, 1e-10);
+            near(evaluation.coefficient.value.value(), expected_h, 1e-10);
+            near(result.conductance_w_k, patch.area_m2 * expected_h, 1e-12);
+
+            let film = bank.evaluate_temperature_from_snapshot(
+                &bulk, Temperature::new(0.5 * (400.0 + wall.temperature_k())),
+            ).unwrap();
+            let mut settings = patch.settings;
+            if enthalpy > 100000.0 {
+                settings.direction = ThermalDirection::HeatingFluid;
+            }
+            let wrong_reference = evaluate_forced_from_material(
+                correlation, &film, patch.speed_m_s, patch.characteristic_length, settings,
+            ).unwrap();
+            assert!((wrong_reference.coefficient().value.value() - expected_h).abs() > 1e-3);
+            assert!(FilmGasSurface {
+                model: &bank, law: FilmGasHeatLaw::Forced(patch),
+            }.resolve(&bulk, wall).is_err());
+        }
+    }
+}
+
+#[test]
+fn bulk_reference_still_checks_source_identity_and_keeps_external_film_properties() {
+    let bank = source::model_transport(1.0, true);
+    let bulk = bank.evaluate(&source::point(400.0, 100000.0)).unwrap();
+    let curve = source::body_curve();
+    let patch = bulk_duct(CorrelationId::Gnielinski, 20000.0, &bulk);
+    // Equal numerical properties at 400 K do not make different source cards
+    // interchangeable, including at exact thermal equilibrium.
+    let wrong_bank = source::model_transport(1.0, false);
+    assert!(FilmGasSurface {
+        model: &wrong_bank, law: FilmGasHeatLaw::BulkForced(patch),
+    }.resolve(&bulk, body(&curve, 100000.0).initial).is_err());
+    let wall = body(&curve, 120000.0).initial;
+    let external = FilmGasSurface {
+        model: &bank, law: FilmGasHeatLaw::Forced(surface()),
+    }.resolve(&bulk, wall).unwrap();
+    assert_eq!(external.source.property_gas.as_ref().unwrap().state().temperature, 410.0);
+    assert!(FilmGasSurface {
+        model: &bank, law: FilmGasHeatLaw::BulkForced(surface()),
+    }.resolve(&bulk, wall).is_err());
+}
+
+#[test]
+fn bulk_duct_heat_closes_the_original_piston_body_energy_in_both_directions() {
+    let curve = source::body_curve();
+    let old = GasPiston::new(
+        ClosedGasParcel::new(
+            source::model_transport(1.0, true), source::point(400.0, 100000.0), 0.001,
+        ).unwrap(),
+        1.0, 0.01, 0.0,
+    ).unwrap();
+    let saved = old.clone();
+    let patch = bulk_duct(CorrelationId::Gnielinski, 20000.0, old.gas().state());
+    let law = FilmGasSurface {
+        model: old.gas().model(), law: FilmGasHeatLaw::BulkForced(patch),
+    };
+    for enthalpy in [80000.0, 120000.0] {
+        let thermal = body(&curve, enthalpy);
+        let next = law.finite_body_candidate(
+            &old, input(), thermal, controls(), exchange(), || false,
+        ).unwrap();
+        let report = next.step();
+        let sample = &next.thermal().report;
+        let gas = &sample.interface.gas;
+        let property = sample.property_gas.as_ref().unwrap();
+        assert_eq!(*gas, report.piston.midpoint);
+        assert_eq!(property.state().temperature, gas.state().temperature);
+        assert_eq!(sample.interface.evaluation.as_ref().unwrap().transport,
+            gas.transport_state().unwrap());
+        assert_eq!(report.exchanged_heat_j > 0.0, enthalpy > 100000.0);
+        near(report.exchanged_heat_j,
+            DT * report.conductance_w_k
+                * (sample.interface.body.temperature_k() - gas.state().temperature),
+            exchange().source_tolerance_j);
+        let du = old.gas().mass_kg()
+            * (next.piston().gas().state().specific_internal_energy_j_kg()
+                - old.gas().state().specific_internal_energy_j_kg());
+        let dh = thermal.mass_kg
+            * (next.thermal().state.specific_enthalpy_j_kg()
+                - thermal.initial.specific_enthalpy_j_kg());
+        let kinetic = 0.5 * old.mass_kg() * next.piston().velocity_m_s().powi(2);
+        let work = input().exterior_pressure_pa
+            * (next.piston().gas().volume_m3() - old.gas().volume_m3());
+        near(du + dh + kinetic + work, 0.0, exchange().energy_tolerance_j);
+        near(dh + report.exchanged_heat_j, 0.0, exchange().energy_tolerance_j);
+        assert_eq!(next.thermal().external_heat_j, -report.exchanged_heat_j);
+    }
+    assert_eq!(old, saved);
+}
+
+#[test]
+fn isothermal_piston_surfaces_reject_constant_heat_flux_duct_laws() {
+    let old = piston(1.0, 400.0, 100000.0);
+    let saved = old.clone();
+    let curve = source::body_curve();
+    let thermal = body(&curve, 120000.0);
+    for correlation in [
+        CorrelationId::CircularDuctLaminarChf,
+        CorrelationId::RectangularDuctLaminarChf,
+    ] {
+        let mut patch = bulk_duct(correlation, 1000.0, old.gas().state());
+        patch.settings.aspect_ratio = Some(0.5);
+        assert!(patch.resolve(old.gas().state(), thermal.initial).is_err());
+        assert!(matches!(patch.finite_body_candidate(
+            &old, input(), thermal, controls(), exchange(), || false,
+        ), Err(ThermalPistonError::Interface(_))));
+        for law in [FilmGasHeatLaw::Forced(patch), FilmGasHeatLaw::BulkForced(patch)] {
+            let source_law = FilmGasSurface { model: old.gas().model(), law };
+            assert!(source_law.resolve(old.gas().state(), thermal.initial).is_err());
+            assert!(matches!(source_law.finite_body_candidate(
+                &old, input(), thermal, controls(), exchange(), || false,
+            ), Err(ThermalPistonError::Interface(_))));
+        }
+        let inactive = ForcedGasSurface { area_m2: 0.0, speed_m_s: 0.0, ..patch };
+        let insulated = FilmGasSurface {
+            model: old.gas().model(), law: FilmGasHeatLaw::BulkForced(inactive),
+        }.resolve(old.gas().state(), thermal.initial).unwrap();
+        assert_eq!(insulated.conductance_w_k, 0.0);
+        assert!(insulated.source.property_gas.is_none());
+    }
+    assert_eq!(old, saved);
+}

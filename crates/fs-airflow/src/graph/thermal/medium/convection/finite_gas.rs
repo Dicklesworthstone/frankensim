@@ -43,6 +43,8 @@ use fs_qty::Length;
 /// and temperature-contrast regime admitting that reference; no film-temperature
 /// or stagnant-gas model is silently substituted. The prescribed speed is the
 /// relative flow magnitude over this interval, not the translating wall velocity.
+/// The finite body is spatially isothermal, so active constant-heat-flux duct
+/// correlations are incompatible with every resolver using this surface.
 #[derive(Clone, Copy, Debug)]
 pub struct ForcedGasSurface {
     pub area_m2: f64,
@@ -106,6 +108,13 @@ impl ForcedGasSurface {
         {
             return Err(invalid(
                 "finite gas forced convection requires nonnegative area, positive speed for active heat transfer and positive length",
+            ));
+        }
+        if self.area_m2 > 0.0 && matches!(self.correlation,
+            CorrelationId::CircularDuctLaminarChf | CorrelationId::RectangularDuctLaminarChf)
+        {
+            return Err(invalid(
+                "an isothermal finite body cannot impose a constant-heat-flux duct correlation",
             ));
         }
         Ok(())
@@ -215,13 +224,6 @@ impl ForcedGasSurface {
         {
             return Err(ConvectionError::Thermal(ThermalPistonError::Invalid(
                 "isochoric convection must cover the complete body surface or be explicitly insulated",
-            )));
-        }
-        if self.area_m2 > 0.0 && matches!(self.correlation,
-            CorrelationId::CircularDuctLaminarChf | CorrelationId::RectangularDuctLaminarChf)
-        {
-            return Err(ConvectionError::Convection(invalid(
-                "endpoint gas-only convection requires a wall-temperature-independent isothermal correlation",
             )));
         }
         environment.advance_with_convection_feedback(cx, body, |gas, heat_into_gas_j| {

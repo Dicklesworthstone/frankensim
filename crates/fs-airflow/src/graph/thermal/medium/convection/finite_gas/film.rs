@@ -1,5 +1,5 @@
-//! Film-temperature properties on the original finite gas/body heat residual.
-//! Film evaluation has no independent energy or mass; bulk gas keeps both.
+//! Source-pinned property temperatures on the original finite gas/body heat residual.
+//! Property evaluation has no independent energy or mass; bulk gas keeps both.
 mod source;
 pub use source::{FilmGasSource, PengRobinsonFilmSource};
 
@@ -12,10 +12,18 @@ use fs_material::fluid_transport::{FluidTransport, ThermalFluidTransport};
 use fs_material::thermochemical_gas::ThermochemicalGasModel;
 use fs_qty::Temperature;
 
-/// The existing correlation/geometry, with an explicit mean-film convention.
+/// The existing correlation/geometry, with an explicit property-temperature convention.
 #[derive(Clone, Copy, Debug)]
 pub enum FilmGasHeatLaw {
+    /// External flat-plate or cross-flow cylinder law at (T_wall + T_bulk)/2.
+    /// Bulk-property duct laws must use `BulkForced`.
     Forced(ForcedGasSurface),
+    /// Isothermal circular/rectangular duct law at the actual bulk temperature.
+    /// This admits the existing laminar CWT, developing CWT, Dittus-Boelter and
+    /// Gnielinski cards. Their original geometry, regime and modest-property-
+    /// variation assumptions still apply; no wall-viscosity correction is added.
+    /// The source bank is checked even though the requested temperature is bulk.
+    BulkForced(ForcedGasSurface),
     /// A physical streamwise strip; its boundary layer begins at the original
     /// upstream edge, not at this thermal patch's start.
     ForcedPlateSection(ForcedPlateGasSurface),
@@ -93,7 +101,7 @@ impl AidingVerticalPlateGasSurface {
 /// Source bank and constitutive boundary law for one finite gas/body patch.
 /// The bank may contain more species than the current gas, or different initial
 /// fractions. Each query reconstructs the ACTUAL active gas composition and
-/// preserves its original source claims before evaluating film properties.
+/// preserves its original source claims before evaluating the selected properties.
 #[derive(Debug)]
 pub struct FilmGasSurface<'a, M: FilmGasSource = ThermochemicalGasModel> {
     pub model: &'a M,
@@ -105,11 +113,12 @@ impl<M: FilmGasSource> Clone for FilmGasSurface<'_, M> {
 }
 
 /// The actual bulk gas/body states and the separate property evaluation.
-/// Bulk gas remains the thermodynamic/acoustic state; film never replaces it.
+/// Bulk gas remains the thermodynamic/acoustic state; the property query never replaces it.
 #[derive(Debug)]
 pub struct FilmGasConvectionSample<S = ResolvedThermochemicalGasState, W = EquilibriumPhaseState> {
     pub interface: FiniteGasConvectionSample<S, W>,
-    /// None only for an explicitly isolated zero-area patch.
+    /// Source-validated bulk properties for `BulkForced`, mean-film properties
+    /// otherwise. None only for an explicitly isolated zero-area patch.
     pub property_gas: Option<S>,
 }
 
@@ -118,6 +127,31 @@ impl FilmGasHeatLaw {
         match self {
             Self::Forced(surface) => {
                 surface.validate()?;
+                if surface.area_m2 > 0.0 && !matches!(surface.correlation,
+                    CorrelationId::FlatPlateLaminarAverage
+                    | CorrelationId::FlatPlateTurbulentAverage
+                    | CorrelationId::ChurchillBernsteinCylinder)
+                {
+                    return Err(invalid(
+                        "mean-film forced convection requires an external plate or cylinder correlation; use BulkForced for bulk-property duct laws",
+                    ));
+                }
+                Ok(surface.area_m2)
+            }
+            Self::BulkForced(surface) => {
+                surface.validate()?;
+                if surface.area_m2 > 0.0 && !matches!(surface.correlation,
+                    CorrelationId::CircularDuctLaminarCwt
+                    | CorrelationId::CircularDuctHausen
+                    | CorrelationId::RectangularDuctLaminarCwt
+                    | CorrelationId::RectangularDuctLaminarCwtDevelopingPr072
+                    | CorrelationId::DittusBoelter
+                    | CorrelationId::Gnielinski)
+                {
+                    return Err(invalid(
+                        "bulk forced convection requires an isothermal duct correlation without a separate wall-viscosity input",
+                    ));
+                }
                 Ok(surface.area_m2)
             }
             Self::ForcedPlateSection(surface) => {
@@ -137,10 +171,11 @@ impl FilmGasHeatLaw {
 }
 
 impl<M: FilmGasSource> FilmGasSurface<'_, M> {
-    /// Re-query source-pinned properties at (T_wall + T_bulk)/2 and actual bulk
-    /// pressure. Both signed heat flow and Rayleigh forcing retain the FULL
-    /// wall-to-bulk temperature contrast. The film is not a replacement gas
-    /// endpoint, a second parcel, or an invented finite-capacity reservoir.
+    /// Re-query source-pinned properties at the actual bulk pressure and the
+    /// selected reference temperature: T_bulk for `BulkForced`, otherwise
+    /// (T_wall + T_bulk)/2. Both signed heat flow and Rayleigh forcing retain
+    /// the full wall-to-bulk temperature contrast. The property query is not
+    /// a replacement gas endpoint or a second finite-capacity reservoir.
     ///
     /// The original correlation must support this property convention and the
     /// declared geometry. The original ideal or explicit-branch real-gas owner
@@ -181,12 +216,18 @@ impl<M: FilmGasSource> FilmGasSurface<'_, M> {
                 },
             });
         }
-        let film = self
+        let property_temperature = match self.law {
+            FilmGasHeatLaw::BulkForced(_) => bulk,
+            _ => 0.5 * wall + 0.5 * bulk,
+        };
+        // Re-query even at T_bulk: cloning the snapshot here would bypass the
+        // original source-bank and real-gas branch-identity checks.
+        let property = self
             .model
-            .evaluate_property_temperature(gas, Temperature::new(0.5 * wall + 0.5 * bulk))?;
+            .evaluate_property_temperature(gas, Temperature::new(property_temperature))?;
         let expansion = || -> Result<f64, MaterialConvectionError> {
-            let thermal = film.thermal_transport_state()?;
-            if thermal.transport() != film.transport_state()? || thermal.temperature_k() != film.temperature_k() {
+            let thermal = property.thermal_transport_state()?;
+            if thermal.transport() != property.transport_state()? || thermal.temperature_k() != property.temperature_k() {
                 return Err(invalid("film thermal and momentum views must describe the same material state"));
             }
             thermal.volumetric_expansion_per_k()
@@ -195,14 +236,14 @@ impl<M: FilmGasSource> FilmGasSurface<'_, M> {
         let evaluation = match self.law {
             FilmGasHeatLaw::ForcedPlateSection(surface) => {
                 let evaluated = evaluate_flat_plate_section_from_material(
-                    surface.correlation, &film, surface.speed_m_s, surface.start, surface.end,
+                    surface.correlation, &property, surface.speed_m_s, surface.start, surface.end,
                 ).map_err(MaterialConvectionError::from)?;
                 let (transport, nusselt, coefficient, section) = evaluated.into_parts();
                 Some(GasConvectionEvaluation {
                     transport, nusselt, coefficient, section: Some(section),
                 })
             }
-            FilmGasHeatLaw::Forced(surface) => {
+            FilmGasHeatLaw::Forced(surface) | FilmGasHeatLaw::BulkForced(surface) => {
                 let mut settings = surface.settings;
                 if wall > bulk {
                     settings.direction = ThermalDirection::HeatingFluid;
@@ -212,7 +253,7 @@ impl<M: FilmGasSource> FilmGasSurface<'_, M> {
                 Some(GasConvectionEvaluation::from_material(
                     evaluate_forced_from_material(
                         surface.correlation,
-                        &film,
+                        &property,
                         surface.speed_m_s,
                         surface.characteristic_length,
                         settings,
@@ -226,7 +267,7 @@ impl<M: FilmGasSource> FilmGasSurface<'_, M> {
                     Some(GasConvectionEvaluation::from_material(
                         evaluate_natural_from_material(
                             surface.geometry,
-                            &film,
+                            &property,
                             surface.gravity_m_s2,
                             expansion()?,
                             Temperature::new(wall),
@@ -238,14 +279,14 @@ impl<M: FilmGasSource> FilmGasSurface<'_, M> {
             }
             FilmGasHeatLaw::AidingVerticalPlate(surface) => {
                 if wall == bulk && surface.settings.speed_up_m_s == 0.0 {
-                    mixed::inputs(film.transport_state()?, surface.settings,
+                    mixed::inputs(property.transport_state()?, surface.settings,
                         expansion()?, Temperature::new(wall),
                         Temperature::new(bulk), surface.characteristic_length)?;
                     None
                 } else {
                     Some(GasConvectionEvaluation::from_material(
                         evaluate_aiding_vertical_plate_from_material(
-                            &film, surface.settings, expansion()?,
+                            &property, surface.settings, expansion()?,
                             Temperature::new(wall), Temperature::new(bulk),
                             surface.characteristic_length,
                         )?,
@@ -274,7 +315,7 @@ impl<M: FilmGasSource> FilmGasSurface<'_, M> {
                     area_m2,
                     evaluation,
                 },
-                property_gas: Some(film),
+                property_gas: Some(property),
             },
         })
     }
@@ -282,7 +323,7 @@ impl<M: FilmGasSource> FilmGasSurface<'_, M> {
     /// Advance heat, source-backed gas energy, finite body enthalpy and piston
     /// momentum together through the existing heat/motion residual. The same
     /// proposed bulk gas determines pressure work, storage and acoustic state;
-    /// only the transfer coefficient uses its source-pinned film properties.
+    /// only the transfer coefficient uses the selected source-pinned properties.
     /// Both original physical endpoints are returned together or neither.
     #[allow(clippy::too_many_arguments)]
     pub fn finite_body_candidate<G: PistonGas<State = M::State>>(
@@ -319,7 +360,7 @@ impl<M: FilmGasSource> FilmGasSurface<'_, M> {
         )
     }
 
-    /// Resolve film properties at the coupled wall and fixed-volume gas
+    /// Resolve source properties at the coupled wall and fixed-volume gas
     /// endpoints through the original reciprocal heat and wall-feedback solve.
     /// The retained wall query is a temperature, not an inferred phase fraction;
     /// the body owner retains its actual enthalpy, latent heat and phase state.
@@ -351,14 +392,6 @@ impl<M: FilmGasSource> FilmGasSurface<'_, M> {
             return Err(ConvectionError::Thermal(ThermalPistonError::Invalid(
                 "isochoric film convection must cover the complete body surface or be explicitly insulated",
             )));
-        }
-        if area > 0.0 && matches!(self.law, FilmGasHeatLaw::Forced(ForcedGasSurface {
-            correlation: CorrelationId::CircularDuctLaminarChf | CorrelationId::RectangularDuctLaminarChf,
-            ..
-        })) {
-            return Err(ConvectionError::Convection(WallConvectionError::Source(invalid(
-                "an isothermal finite body cannot impose a constant-heat-flux duct correlation",
-            ))));
         }
         environment.advance_with_wall_convection(cx, body, wall, |gas, temperature_k| {
             let sample = self.resolve_at_temperature(gas, temperature_k, Temperature::new(temperature_k))?;

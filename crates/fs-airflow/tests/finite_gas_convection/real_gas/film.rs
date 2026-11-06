@@ -115,6 +115,9 @@ fn forced_oriented_natural_and_aiding_films_use_real_density_cp_and_expansion() 
         let ra = 9.80665 * beta * 5.0 * 0.01_f64.powi(3) * rho.powi(2) * cp / (mu * k);
         let groups = evaluated.nusselt.groups();
         let nu = match law {
+            FilmGasHeatLaw::BulkForced(_) | FilmGasHeatLaw::ForcedPlateSection(_) => {
+                unreachable!("only whole external surfaces enter this mean-film oracle")
+            }
             FilmGasHeatLaw::Forced(surface) => {
                 let re = rho * surface.speed_m_s * 0.01 / mu;
                 near(groups["Re"], re, re * 1e-12);

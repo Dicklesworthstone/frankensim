@@ -333,7 +333,7 @@ fn isochoric_wall_adapters_preserve_inputs_on_source_area_biot_and_cancellation_
             Err(ConvectionError::Convection(WallConvectionError::Source(_)))
         ));
         let heat_flux = FilmGasSurface {
-            law: FilmGasHeatLaw::Forced(ForcedGasSurface {
+            law: FilmGasHeatLaw::BulkForced(ForcedGasSurface {
                 correlation: CorrelationId::CircularDuctLaminarChf,
                 ..surface()
             }),
@@ -384,6 +384,72 @@ fn isochoric_wall_adapters_preserve_inputs_on_source_area_biot_and_cancellation_
             sphere.isochoric_body_candidate(cx, &environment, thermal, wall_solve()),
             Err(ConvectionError::Thermal(ThermalPistonError::Cancelled))
         ));
+        assert_eq!(old, saved);
+    });
+}
+
+#[test]
+fn isochoric_bulk_duct_feedback_keeps_endpoint_properties_and_reciprocal_heat() {
+    scope(|cx, _| {
+        let old = gas(400.0);
+        let saved = old.clone();
+        let curve = source::body_curve();
+        let boundary = uniform_boundary();
+        let environment = uniform_environment(&old, &boundary);
+        let transport = old.state().transport_state().unwrap();
+        let patch = ForcedGasSurface {
+            correlation: CorrelationId::DittusBoelter,
+            speed_m_s: 20000.0 * transport.dynamic_viscosity_pa_s()
+                / (transport.density_kg_m3() * 0.1),
+            settings: ForcedConvectionSettings {
+                length_over_hydraulic_diameter: Some(20.0),
+                direction: ThermalDirection::CoolingFluid,
+                ..ForcedConvectionSettings::default()
+            },
+            ..surface()
+        };
+        let law = FilmGasSurface {
+            model: old.model(), law: FilmGasHeatLaw::BulkForced(patch),
+        };
+        for enthalpy in [80000.0, 120000.0] {
+            let thermal = UniformEnthalpyStepInput {
+                duration_s: 0.2, ..body(&curve, enthalpy)
+            };
+            let next = law.isochoric_body_candidate(
+                cx, &environment, thermal, wall_solve(),
+            ).unwrap();
+            let report = &next.report;
+            let wall = &report.convection.source;
+            let sample = &wall.source;
+            let bulk = report.next_gas.state();
+            let property = sample.property_gas.as_ref().unwrap();
+            assert_eq!(&sample.interface.gas, bulk);
+            assert_eq!(property.state().temperature, bulk.state().temperature);
+            assert_eq!(property.state().pressure, bulk.state().pressure);
+            assert_eq!(property.source_packs(), bulk.source_packs());
+            assert_eq!(sample.interface.evaluation.as_ref().unwrap().transport,
+                bulk.transport_state().unwrap());
+            let settings = ForcedConvectionSettings {
+                direction: if wall.temperature_k > bulk.state().temperature {
+                    ThermalDirection::HeatingFluid
+                } else {
+                    ThermalDirection::CoolingFluid
+                },
+                ..patch.settings
+            };
+            let expected = evaluate_forced_from_material(
+                patch.correlation, bulk, patch.speed_m_s, patch.characteristic_length, settings,
+            ).unwrap();
+            near(report.convection.coefficient_w_per_m2_k,
+                expected.coefficient().value.value(), 1e-12);
+            near(report.solid_to_gas_heat_j,
+                thermal.duration_s * thermal.surface_area_m2
+                    * report.convection.coefficient_w_per_m2_k
+                    * (next.state.temperature_k() - bulk.state().temperature),
+                environment.exchange.source_tolerance_j);
+            assert_eq!(report.solid_to_gas_heat_j > 0.0, enthalpy > 100000.0);
+            closed(&old, thermal, &next);
+        }
         assert_eq!(old, saved);
     });
 }

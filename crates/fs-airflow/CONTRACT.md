@@ -1376,14 +1376,34 @@ phase, resolve boundary layers, or claim experimental accuracy. Hydraulic
 `dp*Q` is reported separately and neglected in the thermal equation; it is not
 silently added to wall heat or enthalpy.
 
-### Source-preserving film properties in finite gas/body coupling
+### Source-preserving property temperatures in finite gas/body coupling
 
-`finite_gas::film::FilmGasSurface` evaluates forced or natural convection at
-the mean of the actual bulk gas and wall temperatures, while the existing
-finite-gas/body/piston residual owns both heat debits, gas pressure work and
-mechanical motion. The film state supplies properties only; the original bulk
-gas retains mass, energy, composition and acoustic state. Rayleigh forcing and
-signed exchange retain the full wall-to-bulk temperature difference.
+`finite_gas::film::FilmGasSurface` evaluates external forced or natural
+convection at the mean of the actual bulk gas and wall temperatures.
+`FilmGasHeatLaw::BulkForced` instead selects the actual bulk temperature for
+the existing circular/rectangular isothermal duct cards, including Hausen,
+Dittus-Boelter and Gnielinski. The original correlation's geometry, flow regime
+and modest-property-variation assumptions remain necessary. Bulk sampling is
+the convention stated after Eq. (6) of [Hata and Noda's primary study](https://www.jstage.jst.go.jp/article/jsmeicone/2007.15/0/2007.15__ICONE1510_15/_pdf/-char/en);
+it does not supply a missing wall-viscosity correction.
+
+The existing finite-gas/body/piston residual owns both heat debits, gas pressure
+work and mechanical motion. The property state supplies coefficients only;
+the original bulk gas retains mass, energy, composition and acoustic state.
+Rayleigh forcing and signed exchange retain the full wall-to-bulk temperature
+difference. Duct cards passed to mean-film `Forced` refuse with guidance to use
+`BulkForced`; external plate/cylinder cards remain in `Forced`. Active
+constant-heat-flux duct cards refuse in the shared `ForcedGasSurface` admission,
+including piston, isochoric and network paths, because the body is isothermal.
+Zero-area insulation remains explicit.
+
+The bulk-property path still re-queries the source bank at every actual gas
+trial. It cannot bypass composition, original source or real-gas branch checks
+by cloning the supplied snapshot. Regression source checks variable properties
+and actual heat direction against three original duct equations, wrong-source
+refusal at equilibrium, external-film preservation, reciprocal finite-body
+energy and incompatible heat-flux laws. These new Rust tests were not executed
+in the implementation session because the execution environment was unavailable.
 
 `ThermochemicalGasModel::evaluate_temperature_from_snapshot` reconstructs
 the actual active species and declared composition basis from the snapshot,
@@ -1401,8 +1421,9 @@ Rayleigh/heat algebra, actual piston/body energy closure and atomic refusal.
 owner to real gas with an explicit Vapor or Liquid branch. The material owner
 pins the original PR critical properties, both interaction-matrix axes and
 actual active source composition; ambiguous Stable selection or a bulk-root
-mismatch refuses. Forced, oriented natural and aiding mixed correlations use
-the actual film density and Cp. Buoyancy uses its source-owned isobaric expansion
+mismatch refuses. External forced, oriented natural and aiding mixed
+correlations use the actual film density and Cp; `BulkForced` instead re-queries
+their bulk counterparts under the same source and branch checks. Buoyancy uses its source-owned isobaric expansion
 derivative, including real-gas departure from `1/T`. The full wall/bulk contrast
 remains in Rayleigh forcing and signed heat. A shared immutable PR law avoids
 rebuilding its vectors and interaction matrix during ordinary thermal trials.

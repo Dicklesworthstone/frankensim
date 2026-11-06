@@ -37,7 +37,7 @@ pub enum GasHeatLaw<'a> {
     ForcedConvection(ForcedGasSurface),
     /// Buoyant vertical-plate transfer from the same material gas and wall state.
     NaturalConvection(NaturalGasSurface),
-    /// Source-pinned mean-film forced, oriented natural or aiding mixed convection.
+    /// Source-pinned bulk-duct or mean-film external/natural/mixed convection.
     FilmConvection(FilmGasSurface<'a>),
     /// Bulk transport with separately sourced viscosity at the actual wall.
     ForcedSphereConvection(ForcedSphereGasSurface<'a>),
