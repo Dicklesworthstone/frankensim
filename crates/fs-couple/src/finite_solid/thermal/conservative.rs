@@ -7,9 +7,12 @@
 //! original finite-bulk storage. Original geometry and consistent mass do not
 //! change. No constitutive parameters, frame or temperature path are inferred.
 //!
-//! This is a held-reference conservative elastic trajectory. Prescribed
-//! temperature evolution, heat, viscous memory and reference-change work need
-//! their own admitted events; replacing a field does not mutate an accepted body.
+//! Explicit same-source endpoints can change the thermal reference at fixed
+//! total deformation, or together with a native conservative interval. The
+//! signed storage change and exact-volume actuation remain source work; they
+//! are not caloric heat. The latter entry uses an endpoint reference split,
+//! not an inferred continuous temperature path or second-order thermal coupling.
+//! Every refused candidate leaves the accepted source and motion unchanged.
 
 use super::{FiniteSolidMaterial, ThermalReference};
 use fs_exec::Cx;
@@ -18,8 +21,9 @@ use fs_material::hyper::Hyperelastic;
 use fs_material::hyper::discrete_gradient::DiscreteGradientSettings;
 use fs_material::hyper::reference::ReferenceDeformation;
 use fs_solid::hyper3::mixed::conservative::{
-    ConservativeFormulation, ConservativeReferenceField, ConservativeTetDefinition,
-    ConservativeTetEnergy, ConservativeTetError, ConservativeTetSolid, InertialEnergy,
+    ConservativeFormulation, ConservativeReferenceEnergy, ConservativeReferenceField,
+    ConservativeTetDefinition, ConservativeTetEnergy, ConservativeTetError, ConservativeTetSolid,
+    ConservativeTetStep, InertialEnergy,
 };
 use fs_solid::hyper3::mixed::{MixedLawField, MixedUpSettings};
 use fs_solid::linear3::TetAssemblyBudget;
@@ -28,6 +32,10 @@ use fs_solver::nonlinear::NewtonReport;
 #[derive(Debug)]
 pub enum ConservativeThermalError {
     Invalid(&'static str),
+    IncompatibleSource {
+        element: usize,
+        reason: &'static str,
+    },
     Reference {
         element: usize,
         source: MaterialError,
@@ -77,6 +85,77 @@ fn compose_reference(
         .map_err(|source| ConservativeThermalError::Reference { element, source })
 }
 
+fn admit_source_transition(
+    previous: &FiniteSolidMaterial,
+    target: &FiniteSolidMaterial,
+    element: usize,
+) -> Result<(), ConservativeThermalError> {
+    let incompatible = |reason| ConservativeThermalError::IncompatibleSource { element, reason };
+    if previous.density() != target.density()
+        || previous.model_index() != target.model_index()
+        || previous.law().model_card() != target.law().model_card()
+    {
+        return Err(incompatible(
+            "a thermal trajectory must retain its original material card, model and reference-density source",
+        ));
+    }
+    match (previous.thermal_reference(), target.thermal_reference()) {
+        (None, None) if previous == target => return Ok(()),
+        (Some(before), Some(after))
+            if before.material_card_identity() == after.material_card_identity()
+                && before.reference_context() == after.reference_context() => {}
+        _ => {
+            return Err(incompatible(
+                "a thermal trajectory must retain its thermal source convention, original datum and fixed external conditions",
+            ));
+        }
+    }
+    match (previous.thermal_reference(), target.thermal_reference()) {
+        (Some(ThermalReference::Expansion(before)), Some(ThermalReference::Expansion(after))) => {
+            if before.source().identity() != after.source().identity()
+                || before.frame() != after.frame()
+            {
+                return Err(incompatible(
+                    "directional expansion must retain its original source path and material frame",
+                ));
+            }
+        }
+        (Some(ThermalReference::Mean(before)), Some(ThermalReference::Mean(after))) => {
+            let source_before = before.source().resolved();
+            let source_after = after.source().resolved();
+            let property_before = &source_before.properties()[0];
+            let property_after = &source_after.properties()[0];
+            if before.reference_axis() != after.reference_axis()
+                || before.endpoint_axis() != after.endpoint_axis()
+                || property_before.requirement() != property_after.requirement()
+                || property_before.answer().receipt.selected
+                    != property_after.answer().receipt.selected
+                || source_before.axis_quantities() != source_after.axis_quantities()
+                || source_before.query_point().len() != source_after.query_point().len()
+                || source_before
+                    .query_point()
+                    .iter()
+                    .zip(source_after.query_point())
+                    .any(|((axis_before, value_before), (axis_after, value_after))| {
+                        axis_before != axis_after
+                            || (axis_before != before.endpoint_axis()
+                                && value_before != value_after)
+                    })
+            {
+                return Err(incompatible(
+                    "mean expansion must retain its selected source, coordinate meanings and reference/endpoint roles",
+                ));
+            }
+        }
+        _ => {
+            return Err(incompatible(
+                "a thermal trajectory cannot switch its expansion convention",
+            ));
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug)]
 enum SourceField {
     Uniform {
@@ -113,6 +192,63 @@ pub struct ConservativeThermalPreparation {
 }
 
 impl ConservativeThermalField {
+    fn native_binding(&self) -> (MixedLawField<'_>, ConservativeReferenceField<'_>) {
+        match &self.source {
+            SourceField::Uniform {
+                material,
+                reference,
+                ..
+            } => (
+                MixedLawField::Uniform(material.law().law()),
+                ConservativeReferenceField::Uniform(reference),
+            ),
+            SourceField::PerElement {
+                laws, references, ..
+            } => (
+                MixedLawField::PerElement(laws),
+                ConservativeReferenceField::PerElement(references),
+            ),
+        }
+    }
+
+    fn check_transition(&self, target: &Self, cx: &Cx<'_>) -> Result<(), ConservativeThermalError> {
+        checkpoint(cx)?;
+        if self.element_count() != target.element_count() {
+            return Err(ConservativeThermalError::Invalid(
+                "a thermal endpoint must cover the same original elements",
+            ));
+        }
+        // Uniform source identity is admitted once, without repeating the
+        // immutable model-card comparison for every element in a large mesh.
+        let count = if matches!(&self.source, SourceField::Uniform { .. })
+            && matches!(&target.source, SourceField::Uniform { .. })
+        {
+            1
+        } else {
+            self.element_count()
+        };
+        for element in 0..count {
+            checkpoint(cx)?;
+            if self.reference_before_thermal_at(element)
+                != target.reference_before_thermal_at(element)
+            {
+                return Err(ConservativeThermalError::IncompatibleSource {
+                    element,
+                    reason: "a thermal trajectory must retain its original manufactured reference",
+                });
+            }
+            admit_source_transition(
+                self.material_at(element)
+                    .expect("original source covers the element"),
+                target
+                    .material_at(element)
+                    .expect("target source covers the element"),
+                element,
+            )?;
+        }
+        checkpoint(cx)
+    }
+
     /// Repeat one admitted source over an explicit nonempty original mesh.
     /// The output frame of `before_thermal` must be the thermal source's input
     /// frame; the caller supplies that physical convention explicitly.
@@ -240,22 +376,7 @@ impl ConservativeThermalField {
                 "source field must cover every original element exactly",
             ));
         }
-        let (material, references) = match &self.source {
-            SourceField::Uniform {
-                material,
-                reference,
-                ..
-            } => (
-                MixedLawField::Uniform(material.law().law()),
-                ConservativeReferenceField::Uniform(reference),
-            ),
-            SourceField::PerElement {
-                laws, references, ..
-            } => (
-                MixedLawField::PerElement(laws),
-                ConservativeReferenceField::PerElement(references),
-            ),
-        };
+        let (material, references) = self.native_binding();
         let definition = ConservativeTetDefinition {
             nodes_m,
             elements,
@@ -301,6 +422,41 @@ pub struct ConservativeThermalStep<'a> {
     pub pressure_residual_m3: Vec<f64>,
 }
 
+impl<'a> ConservativeThermalStep<'a> {
+    fn from_native(field: &'a ConservativeThermalField, step: ConservativeTetStep<'a>) -> Self {
+        Self {
+            solid: ConservativeThermalSolid {
+                field,
+                native: step.solid,
+            },
+            newton: step.newton,
+            reactions_n: step.reactions_n,
+            energy: step.energy,
+            inertia: step.inertia,
+            min_det_f: step.min_det_f,
+            pressure_residual_m3: step.pressure_residual_m3,
+        }
+    }
+}
+
+/// An admitted same-source endpoint at unchanged physical time, displacement,
+/// velocity and original mass. Its signed work is external reference supply.
+#[derive(Debug)]
+pub struct ConservativeThermalReferenceChange<'a> {
+    pub solid: ConservativeThermalSolid<'a>,
+    pub energy: ConservativeReferenceEnergy,
+}
+
+/// An atomic source endpoint followed by the native mechanical interval.
+/// `reference.reference_work_j` supplies the fixed-deformation storage change;
+/// `step.energy.constraint_reference_work_j` supplies exact-volume actuation.
+/// The native cumulative balance retains both accounts exactly once.
+#[derive(Debug)]
+pub struct ConservativeThermalReferenceStep<'a> {
+    pub step: ConservativeThermalStep<'a>,
+    pub reference: ConservativeReferenceEnergy,
+}
+
 impl<'a> ConservativeThermalSolid<'a> {
     pub fn native(&self) -> &ConservativeTetSolid<'a> {
         &self.native
@@ -342,17 +498,96 @@ impl<'a> ConservativeThermalSolid<'a> {
             maximum_work_error_j,
             cx,
         )?;
-        Ok(ConservativeThermalStep {
-            solid: Self {
-                field: self.field,
-                native: step.solid,
+        Ok(ConservativeThermalStep::from_native(self.field, step))
+    }
+
+    /// Change an explicitly prepared thermal endpoint at fixed total F and
+    /// physical velocity. The original source card/model, density datum,
+    /// expansion convention, material frame and manufactured map must agree.
+    /// A new mean-coefficient endpoint must be admitted by its actual source;
+    /// no instantaneous-alpha interpretation or endpoint interpolation occurs.
+    ///
+    /// Full and original finite-bulk modes retain the complete physical storage
+    /// and the latter's total mixed volumes. Exact incompressibility requires
+    /// the new weak natural volume already to match the accepted deformation;
+    /// use [`Self::change_reference_and_advance`] when it must change. Pressure
+    /// is an explicit native interval predictor, not a volume reset or a load.
+    /// Reference work is signed source input, not heat or dissipation.
+    pub fn change_reference<'b>(
+        &self,
+        target: &'b ConservativeThermalField,
+        pressure_predictor_pa: &[f64],
+        maximum_work_error_j: f64,
+        cx: &Cx<'_>,
+    ) -> Result<ConservativeThermalReferenceChange<'b>, ConservativeThermalError>
+    where
+        'a: 'b,
+    {
+        self.field.check_transition(target, cx)?;
+        let (material, references) = target.native_binding();
+        let change = self.native.change_reference(
+            material,
+            references,
+            pressure_predictor_pa,
+            maximum_work_error_j,
+            cx,
+        )?;
+        checkpoint(cx)?;
+        Ok(ConservativeThermalReferenceChange {
+            solid: ConservativeThermalSolid {
+                field: target,
+                native: change.solid,
             },
-            newton: step.newton,
-            reactions_n: step.reactions_n,
-            energy: step.energy,
-            inertia: step.inertia,
-            min_det_f: step.min_det_f,
-            pressure_residual_m3: step.pressure_residual_m3,
+            energy: change.energy,
+        })
+    }
+
+    /// Admit a source endpoint and solve its mechanical interval atomically.
+    /// This permits exact-incompressible natural-volume changes without
+    /// exposing an incompatible intermediate body or projecting its motion.
+    /// Native signed pressure actuation uses the actual solved interval
+    /// multiplier, separately from support work and fixed-F reference work.
+    ///
+    /// This is an explicit endpoint split: the supplied target reference is
+    /// held for the constitutive interval. The caller owns temperature-path
+    /// refinement, heat transport and caloric/entropy coupling. Mechanical
+    /// conservative order for a held source does not establish thermal order.
+    /// All source, material, solver, work and cancellation refusals preserve
+    /// the complete previous trajectory and cumulative energy baseline.
+    #[allow(clippy::too_many_arguments)]
+    pub fn change_reference_and_advance<'b>(
+        &self,
+        target: &'b ConservativeThermalField,
+        pressure_predictor_pa: &[f64],
+        dt_s: f64,
+        prescribed_m: &[(usize, f64)],
+        nodal_forces_n: &[(usize, f64)],
+        body_force_n_m3: [f64; 3],
+        settings: MixedUpSettings,
+        maximum_work_error_j: f64,
+        cx: &Cx<'_>,
+    ) -> Result<ConservativeThermalReferenceStep<'b>, ConservativeThermalError>
+    where
+        'a: 'b,
+    {
+        self.field.check_transition(target, cx)?;
+        let (material, references) = target.native_binding();
+        let change = self.native.change_reference_and_advance(
+            material,
+            references,
+            pressure_predictor_pa,
+            dt_s,
+            prescribed_m,
+            nodal_forces_n,
+            body_force_n_m3,
+            settings,
+            maximum_work_error_j,
+            cx,
+        )?;
+        checkpoint(cx)?;
+        Ok(ConservativeThermalReferenceStep {
+            step: ConservativeThermalStep::from_native(target, change.step),
+            reference: change.reference,
         })
     }
 }

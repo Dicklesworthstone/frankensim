@@ -12,9 +12,10 @@
 //! isotropy these reduce to W0 = s^3 W(Fe), P0 = s^2 Pe and A0 = s Ae.
 //! Density belongs to the original reference at T_ref.
 //! Temperature is held per element during mechanics. This preparation supplies
-//! no heat equation or entropy evolution. The explicit [`visco`] owner retains
-//! finite viscoelastic histories across prescribed temperature changes and
-//! reports their signed reference work separately from viscous heat.
+//! no heat equation or entropy evolution. The [`visco`] and [`conservative`]
+//! owners retain their native history or motion across prescribed temperature
+//! changes, with signed reference work separate from viscous heat and caloric
+//! transport.
 
 mod expansion;
 pub use expansion::{ExpansionThermalFrame, ExpansionThermalReference};
@@ -44,6 +45,8 @@ use fs_material::state_point::{
 #[derive(Debug, Clone, PartialEq)]
 pub struct MeanThermalReference {
     source: MeanThermalExpansionStrain,
+    reference_axis: String,
+    endpoint_axis: String,
     reference_context: QueryPoint,
     current_context: QueryPoint,
     stretch: f64,
@@ -150,6 +153,8 @@ impl MeanThermalReference {
         }
         Ok(Self {
             source,
+            reference_axis: reference_axis.to_owned(),
+            endpoint_axis: endpoint_axis.to_owned(),
             reference_context,
             current_context,
             stretch,
@@ -161,6 +166,16 @@ impl MeanThermalReference {
     /// Original mean coefficient, source interval, receipts and identity.
     pub const fn source(&self) -> &MeanThermalExpansionStrain {
         &self.source
+    }
+    /// Original source coordinate defining the reference length. Retained
+    /// separately from the canonical mechanical temperature coordinate so a
+    /// later endpoint cannot silently exchange reference and endpoint roles.
+    pub fn reference_axis(&self) -> &str {
+        &self.reference_axis
+    }
+    /// Original source coordinate at which the endpoint length is evaluated.
+    pub fn endpoint_axis(&self) -> &str {
+        &self.endpoint_axis
     }
     /// Exact physical context for the original reference density.
     pub const fn reference_context(&self) -> &QueryPoint {
@@ -367,6 +382,78 @@ impl FiniteSolidMaterial {
         .map_err(|error| FiniteSolidError::Source(error.to_string()))?;
         material.thermal = Some(thermal);
         Ok(material)
+    }
+
+    /// Prepare another temperature on the same immutable thermal source.
+    /// Original density and its complete receipt remain unchanged. Directional
+    /// expansion retains its original path and frame; a mean coefficient is
+    /// re-evaluated at the new endpoint with its original claim pinned, never
+    /// reused as a constant instantaneous expansion coefficient.
+    ///
+    /// Only the endpoint temperature changes. The original datum, source axis
+    /// roles and fixed external coordinates remain intact, and the same model
+    /// is readmitted at the new physical context. This prepares an endpoint;
+    /// accepted mechanics still needs an explicit reference-work transaction.
+    pub fn at_temperature(
+        &self,
+        card: &MaterialCard,
+        temperature_k: f64,
+    ) -> Result<Self, FiniteSolidError> {
+        let before = self.thermal.as_ref().ok_or(FiniteSolidError::Invalid(
+            "temperature refresh requires an original sourced thermal reference",
+        ))?;
+        if self.density.card_identity() != card.content_hash() {
+            return Err(FiniteSolidError::Source(
+                "temperature refresh requires the original immutable material card".into(),
+            ));
+        }
+        let thermal = match before {
+            ThermalReference::Expansion(source) => {
+                ThermalReference::Expansion(ExpansionThermalReference::try_new(
+                    card,
+                    source.source().clone(),
+                    temperature_k,
+                    source.frame(),
+                )?)
+            }
+            ThermalReference::Mean(source) => {
+                let resolved = source.source().resolved();
+                let property = &resolved.properties()[0];
+                let selected = property.answer().receipt.selected;
+                let claim = card
+                    .claims()
+                    .claim(selected)
+                    .ok_or(FiniteSolidError::Invalid(
+                        "mean expansion lost its original selected source",
+                    ))?;
+                let point = resolved
+                    .query()
+                    .with(source.endpoint_axis(), temperature_k)
+                    .map_err(|error| FiniteSolidError::Source(error.to_string()))?;
+                ThermalReference::Mean(MeanThermalReference::resolve(
+                    card,
+                    &claim.key,
+                    &point,
+                    source.reference_axis(),
+                    source.endpoint_axis(),
+                    MaterialPropertySelection::PinnedByProperty(vec![(
+                        property.requirement().name().into(),
+                        selected,
+                    )]),
+                )?)
+            }
+        };
+        let law = ResolvedHyperelastic::try_from_model_card_at(
+            self.law.model_card(),
+            thermal.current_context(),
+        )
+        .map_err(|error| FiniteSolidError::Source(error.to_string()))?;
+        Ok(Self {
+            law,
+            density: self.density.clone(),
+            model_index: self.model_index,
+            thermal: Some(thermal),
+        })
     }
 
     /// Present only when this material has a source-declared thermal reference.
