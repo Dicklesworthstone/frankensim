@@ -72,6 +72,43 @@ magnetic entropy, phase-changing geometry and measured device validation are
 not implied. The focused `hysteretic_eddy_enthalpy` tests use manufactured
 scalar-play/P1 balances, physical heat separation and transactional refusals.
 
+## Nonlinear tetrahedral current and finite thermal storage
+
+`circuit_enthalpy::conduction::spatial::response` closes the original
+`SpatialConductionResponse` and finite caloric cells at one backward-Euler
+endpoint. Each proposed temperature/phase refreshes the same complete pinned
+bulk sources, then the native tetrahedral owner closes their actual E/J
+coordinates. Boundary voltage/current density and mixed equipotential
+voltage/current electrodes retain their native meanings. Immutable geometry,
+source identity, query schema, caloric charts and the selected source-coordinate
+relaxation policy persist through feedback and continuation.
+
+`step_response_contact_candidate` refreshes both actual contact temperatures,
+declared mean temperature and phase coordinates while retaining the accepted
+electrical coordinates as native solve seeds. Explicit native nonlinear
+contact bindings own any voltage-jump/current-density response. Their uniform
+trace admission, source bounds and dimensional constitutive gates remain
+mandatory. Each contact requires its original adjacent-volume heat receivers
+and an explicit physical partition. Native volume E.J and exact surface work
+enter those original finite enthalpies once; constitutive defects are only
+diagnostics. Independent terminal source work closes against that deposited
+heat before publication.
+
+`step_spatial_conduction_response_candidate` composes any complete
+`HeatAssembly`, retaining its source samples, thermal contacts, layers,
+radiation, reservoirs and finite links at that same endpoint. Caloric and heat
+transport claims must be independent of electrical response/applicability;
+this path supplies no reversible field storage. Every native basis solve,
+including discarded constitutive and thermal stencils and final fresh
+admission, consumes the original common field-work allowance. Source-domain
+refusal, work exhaustion, late cancellation and failed balances publish
+neither history. Original fixed-geometry and confined-phase restrictions apply.
+
+Planar `ConductionResponseCircuit` retains the complete original bulk/contact
+source bundle and relaxation policy across frozen-operator transfers. Its
+report retains actual-field contact source evaluations beside bulk source
+defects and native circuit work.
+
 ## Relaxed nonlinear electrical source closure
 
 `ConductivitySolve::with_relaxation(weight)` explicitly selects a finite weight

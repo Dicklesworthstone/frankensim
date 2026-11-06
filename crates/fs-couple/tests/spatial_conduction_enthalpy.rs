@@ -11,6 +11,8 @@ mod current;
 mod heat;
 #[path = "spatial_conduction_enthalpy/motion.rs"]
 mod motion;
+#[path = "spatial_conduction_enthalpy/response.rs"]
+mod response;
 use common::{config, initial, near};
 use fs_couple::circuit_enthalpy::{
     CircuitEnthalpyError,

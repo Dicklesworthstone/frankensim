@@ -4,6 +4,8 @@
 mod mixed;
 #[path = "contacts/motion.rs"]
 mod motion;
+#[path = "contacts/response.rs"]
+mod response;
 
 use super::*;
 use fs_conduction::{

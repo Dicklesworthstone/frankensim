@@ -9,11 +9,11 @@
 pub mod circuit;
 /// Source-refreshed surface conduction and explicit two-sided Joule heating.
 pub mod contacts;
-/// Retained dielectric charge and local conduction heat on this same material network.
-pub mod dielectric;
 /// Distributed dielectric memory loss on the original finite thermal network.
 #[cfg(feature = "resolved-dielectric-thermal")]
 pub mod debye;
+/// Retained dielectric charge and local conduction heat on this same material network.
+pub mod dielectric;
 /// Complete sourced heat assemblies on the same electrical/thermal residual.
 pub mod heat;
 /// Source-driven nonlinear spatial current and the original finite heat network.
@@ -143,6 +143,7 @@ pub enum ConductionThermalError {
     Conductor(ConductorError),
     Field(ConductionError),
     SpatialField(fs_em::spatial::conduction::SpatialConductionError),
+    SpatialResponse(fs_em::spatial::conduction::response::SpatialConductionResponseError),
     Response(fs_em::conduction::response::ConductionResponseError),
     Storage(super::field_storage::FieldThermalError),
     Dielectric(fs_em::electrostatic::relaxation::DielectricRelaxationError),
@@ -568,11 +569,13 @@ impl ConductionThermalNetwork<'_> {
         mesh: &fs_rep_mesh::TriComplex2,
         cancel: &RefCell<impl FnMut() -> bool>,
     ) -> Result<Vec<CellId>, Error> {
-        let volumes = (0..mesh.faces().len()).map(|cell| {
-            check(cancel)?;
-            mesh.face_measure(cell)
-                .ok_or_else(|| invalid("electrical triangle lacks physical volume"))
-        }).collect::<Result<Vec<_>, Error>>()?;
+        let volumes = (0..mesh.faces().len())
+            .map(|cell| {
+                check(cancel)?;
+                mesh.face_measure(cell)
+                    .ok_or_else(|| invalid("electrical triangle lacks physical volume"))
+            })
+            .collect::<Result<Vec<_>, Error>>()?;
         self.admit_volume_routes(thermal, &volumes, cancel)
     }
 
@@ -606,7 +609,8 @@ impl ConductionThermalNetwork<'_> {
                 ));
             }
             let volume = volumes_m3
-                .get(region.triangle).copied()
+                .get(region.triangle)
+                .copied()
                 .ok_or_else(|| invalid("electrical triangle lacks physical volume"))?;
             let sum = volumes.entry(region.cell).or_insert(0.0);
             *sum = finite(*sum + volume)?;

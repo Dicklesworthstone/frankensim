@@ -15,6 +15,8 @@ pub mod circuit;
 pub mod mechanical;
 /// Conductor-frame Joule heating under prescribed motion and magnetic field.
 pub mod motion;
+/// Nonlinear source E/J response and local Joule heat on the same endpoint.
+pub mod response;
 
 use super::contacts::{self, ConductionContactThermal, SolvedContactPressure};
 use super::{
@@ -114,9 +116,9 @@ impl<'a> SpatialConductionDrive<'a> {
     // The ideal source fixes current, not the recovered reaction. Account its
     // work independently from the Joule integral and native reaction work so
     // the shared energy gate also detects a terminal-current mismatch.
-    fn supplied_power_w<C: SpatialConductorMaterial>(
+    fn supplied_power_w(
         self,
-        problem: &SpatialConduction<C>,
+        mesh: &fs_rep_mesh::TetComplex,
         field: &SpatialConductionField,
         cancel: &RefCell<impl FnMut() -> bool>,
     ) -> Result<f64, Error> {
@@ -133,7 +135,7 @@ impl<'a> SpatialConductionDrive<'a> {
         let potential = |faces: &[usize]| {
             faces
                 .first()
-                .and_then(|&face| problem.mesh().faces.get(face))
+                .and_then(|&face| mesh.faces.get(face))
                 .and_then(|vertices| field.voltage_v.get(vertices[0] as usize))
                 .copied()
                 .ok_or_else(|| invalid("current electrode lost its solved potential"))
@@ -194,7 +196,7 @@ impl<'a> SpatialConductionDrive<'a> {
                     let mut vertices = BTreeSet::new();
                     for &face in terminals[terminal] {
                         check(cancel)?;
-                        vertices.extend(problem.mesh().faces[face]);
+                        vertices.extend(mesh.faces[face]);
                     }
                     let (mut current, mut current_correction) = (0.0, 0.0);
                     for vertex in vertices {
@@ -437,23 +439,42 @@ impl SpatialConductionThermalNetwork<'_> {
         controls: CircuitEnthalpySolve,
         initial_energy_increments_j: &[f64],
     ) -> Result<f64, Error> {
+        self.admit_mesh_step(
+            thermal,
+            target_s,
+            problem.mesh(),
+            problem.contacts().len(),
+            assembly,
+            controls,
+            initial_energy_increments_j,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn admit_mesh_step(
+        &self,
+        thermal: &DepositionSimulation<'_>,
+        target_s: f64,
+        mesh: &fs_rep_mesh::TetComplex,
+        contact_count: usize,
+        assembly: WeightedAssemblyLimits,
+        controls: CircuitEnthalpySolve,
+        initial_energy_increments_j: &[f64],
+    ) -> Result<f64, Error> {
         super::super::admit_driver_unknowns(thermal, controls, initial_energy_increments_j)?;
         let dt = finite(target_s - thermal.time_s())?;
         if dt <= 0.0
             || self.cells.len() != thermal.cells().len()
-            || self.regions.len() != problem.mesh().tets.len()
-            || problem.mesh().tets.len() > assembly.max_cells
-            || problem.mesh().vertex_count > assembly.max_dofs
-            || problem.mesh().edges.len() > assembly.max_dofs
-            || problem
-                .mesh()
+            || self.regions.len() != mesh.tets.len()
+            || mesh.tets.len() > assembly.max_cells
+            || mesh.vertex_count > assembly.max_dofs
+            || mesh.edges.len() > assembly.max_dofs
+            || mesh
                 .tets
                 .len()
                 .checked_mul(36)
                 .and_then(|bulk| {
-                    problem
-                        .contacts()
-                        .len()
+                    contact_count
                         .checked_mul(36)
                         .and_then(|contact| bulk.checked_add(contact))
                 })
@@ -658,7 +679,7 @@ impl SpatialConductionThermalNetwork<'_> {
                 let heat_j = finite(dt * field.power_w)?;
                 let supplied_work_j = finite(
                     dt * drive
-                        .supplied_power_w(&next, &field, cancel)
+                        .supplied_power_w(next.mesh(), &field, cancel)
                         .map_err(map_conduction_error)?,
                 )?;
                 if (field.power_w > 0.0 && heat_j == 0.0)
