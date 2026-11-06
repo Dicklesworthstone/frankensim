@@ -680,6 +680,25 @@ where claimed below.
   five are live during construction. The interval elementary-function
   assumptions remain those of `fs-ivl`. This first-order enclosure can wrap
   badly; a refusal does not prove that the ODE itself is ill-posed.
+- `validated::trajectory::{validated_trajectory, TrajectoryTube}` composes
+  those conditional enclosures over a finite forward horizon. Each accepted
+  endpoint is the next initial set verbatim; no midpoint replacement discards
+  uncertainty. Failed Picard inclusion or excessive width triggers deterministic
+  midpoint subdivision, subject to the minimum step. Callback refusals,
+  cancellation and arithmetic failures stop immediately. Accepted step sizes
+  are retained without heuristic growth, and the final time is clamped exactly
+  to the requested horizon. A zero-duration request checks its initial set
+  without invoking the RHS.
+  One ambient accountant and whole-trajectory attempt, RHS and component-work
+  caps cover initial retention, all accepted steps and all refused attempts.
+  Per-step limits remain additional bounds. The step count and dimension caps
+  bound retained storage, with fallible allocation. Publication occurs only
+  after each step's final checkpoint. `TrajectoryFailure` exposes the completed
+  contiguous prefix and recorded total consumption, never a tube for the
+  uncomputed suffix; an empty prefix covers only its initial time. The caller
+  must keep the same deterministic RHS and its interval-extension assumptions
+  throughout. G0/G1/G3/G4/G5 tests use analytic flows, subdivision, exact budget
+  edges, callback/cancellation refusal and deterministic repeated execution.
 - `se3` module (bead 3ol0): canonical `fs-ga::Twist` uses
   `[angular, linear]` ordering. `se3_exp_step(T, twist_body, h)` performs the
   right/body update `T Exp(h twist_body)` and
@@ -845,7 +864,9 @@ in identity unless named by its exact trace ID.
 
 ## Cancellation behavior
 
-All entry points are synchronous and run to completion for one bounded step.
+All entry points are synchronous. Single-step owners run one bounded step;
+the validated trajectory owner additionally enforces whole-run step, attempt,
+RHS and work caps and preserves only completed steps on refusal.
 Operator generalized-alpha bounds work by the configured Newton outer and
 FGMRES cycle/restart budgets; operator IMEX bounds each stage by its configured
 FGMRES budget. `OperatorImex2::step_controlled` and `step_vjp` additionally

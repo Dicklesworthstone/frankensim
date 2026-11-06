@@ -25,6 +25,8 @@
 use fs_exec::{AdmittedBudget, BudgetRefusal, Cx};
 use fs_ivl::Interval;
 
+pub mod trajectory;
+
 #[cfg(test)]
 #[path = "validated/tests.rs"]
 mod tests;
