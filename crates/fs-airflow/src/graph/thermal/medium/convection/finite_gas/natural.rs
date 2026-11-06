@@ -126,6 +126,7 @@ impl NaturalGasSurface {
                     nusselt,
                     coefficient,
                     section: None,
+                    tube_section: None,
                 }),
             },
         })

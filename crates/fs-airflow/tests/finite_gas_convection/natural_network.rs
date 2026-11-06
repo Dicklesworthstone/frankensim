@@ -365,3 +365,70 @@ fn combined_transport_late_heat_refusal_preserves_every_accepted_owner() {
         assert_eq!(state.chambers(), &saved_gases); assert_eq!(state.circuit(), &saved_circuit);
     }));
 }
+
+
+#[test]
+fn developing_tube_sections_share_native_network_heat_without_resetting_the_entrance() {
+    use fs_airflow::graph::thermal::medium::convection::finite_gas::film::{
+        FilmGasHeatLaw, FilmGasSurface, ForcedTurbulentTubeSectionGasSurface,
+    };
+    use fs_material::fluid_transport::FluidTransport;
+
+    fixture(|assembly, thermal, circuit| scope(|cx, _| {
+        let prepared = assembly.prepare(cx, &thermal).unwrap();
+        let old = piston(1.0, 400.0, 100000.0);
+        let saved = old.clone();
+        let bank = source::model(0.25);
+        let transport = old.gas().state().transport_state().unwrap();
+        let speed_m_s = 20000.0 * transport.dynamic_viscosity_pa_s()
+            / (transport.density_kg_m3() * 0.01);
+        let patch = |id, cell, start, end, area_m2| ExchangeContact {
+            contact: Contact { id, chamber: 7, cell },
+            law: GasHeatLaw::FilmConvection(FilmGasSurface { model: &bank,
+                law: FilmGasHeatLaw::BulkForcedTubeSection(ForcedTurbulentTubeSectionGasSurface {
+                    area_m2, diameter: Length::new(0.01), start: Length::new(start),
+                    end: Length::new(end), speed_m_s,
+                }),
+            }),
+        };
+        let patches = [patch(1, HOT, 0.0, 0.5, 0.01), patch(2, HOT, 0.5, 1.0, 0.01),
+            patch(3, COLD, 0.2, 1.0, 0.02)];
+        let chambers = [Chamber { id: 7, piston: &old, input: input(),
+            piston_solve: controls(), exchange: exchange() }];
+        let next = coupled::step_candidate(&prepared, cx, &thermal, DT, &circuit, &[],
+            &chambers, &[], &patches, network_controls(), &[0.0; 2]).unwrap();
+        let accepted = &next.chambers()[0];
+        let mut heat = BTreeMap::<CellId, f64>::new();
+        for surface in &accepted.surfaces {
+            let (contact, GasHeatSample::FilmConvection(sample)) = &surface.source else {
+                panic!("tube section lost its original finite-gas law sample");
+            };
+            let evaluation = sample.interface.evaluation.as_ref().unwrap();
+            let tube = evaluation.tube_section.as_ref().unwrap();
+            assert_eq!(sample.interface.gas, accepted.boundary.piston.midpoint);
+            let property = sample.property_gas.as_ref().unwrap();
+            assert_eq!(property.state().temperature, sample.interface.gas.state().temperature);
+            assert_eq!(property.state().pressure, sample.interface.gas.state().pressure);
+            assert_eq!(property.source_packs(), old.gas().state().source_packs());
+            assert_eq!(evaluation.transport, property.transport_state().unwrap());
+            let expected_start = match contact.id { 1 => 0.0, 2 => 0.5, 3 => 0.2, _ => unreachable!() };
+            assert_eq!(tube.start.value(), expected_start);
+            assert_eq!(tube.upstream.is_some(), contact.id != 1);
+            let q = DT * sample.interface.area_m2 * evaluation.coefficient.value.value()
+                * (sample.interface.body.temperature_k() - sample.interface.gas.state().temperature);
+            *heat.entry(contact.cell).or_default() += q;
+        }
+        assert!(heat[&HOT] > 0.0 && heat[&COLD] < 0.0);
+        for cell in [HOT, COLD] {
+            near(MASS * (next.thermal().cells()[&cell].specific_h_j_kg
+                - thermal.cells()[&cell].specific_h_j_kg), -heat[&cell], 1e-7);
+        }
+        let gas_energy = old.gas().mass_kg() * (accepted.piston.gas().state().specific_internal_energy_j_kg()
+            - old.gas().state().specific_internal_energy_j_kg());
+        let kinetic = 0.5 * old.mass_kg() * accepted.piston.velocity_m_s().powi(2);
+        let outside = input().exterior_pressure_pa * (accepted.piston.gas().volume_m3() - old.gas().volume_m3());
+        near(next.thermal().energy_j() - thermal.energy_j() + gas_energy + kinetic + outside, 0.0, 1e-6);
+        assert_eq!(next.circuit().charges_c(), circuit.charges_c());
+        assert_eq!(old, saved);
+    }));
+}

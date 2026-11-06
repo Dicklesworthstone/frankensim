@@ -60,24 +60,32 @@ pub struct ForcedGasSurface {
 #[derive(Debug)]
 pub struct GasConvectionEvaluation {
     pub transport: FluidTransportState,
-    /// Original mean evaluation. For a strip this is the downstream cumulative
-    /// mean; use effective_nusselt() for the coefficient's actual strip Nu.
+    /// Original mean evaluation. For a plate or tube section this is the
+    /// downstream cumulative mean; use effective_nusselt() for its actual Nu.
     pub nusselt: NusseltEvaluation,
     pub coefficient: Evidence<HeatTransferCoefficient>,
     pub section: Option<super::PlateSectionDetails>,
+    /// Physical circular-tube entrance distances and diameter, separate from
+    /// the downstream cumulative mean. Present only for a tube-section law.
+    pub tube_section: Option<super::TurbulentTubeSectionDetails>,
 }
 
 impl GasConvectionEvaluation {
-    /// Actual Nu used by the heat coefficient, based on the declared length.
+    /// Actual Nu used by the coefficient: tube diameter for tube sections,
+    /// downstream distance for plate sections, or the original card's length.
     pub fn effective_nusselt(&self) -> f64 {
-        self.section.as_ref().map_or(self.nusselt.evidence().value, |section| section.nusselt)
+        if let Some(section) = &self.tube_section {
+            section.nusselt
+        } else {
+            self.section.as_ref().map_or(self.nusselt.evidence().value, |section| section.nusselt)
+        }
     }
 
     fn from_material<F: fs_material::fluid_transport::FluidTransport + ?Sized>(
         evaluation: super::MaterialConvection<'_, F>,
     ) -> Self {
         let (transport, nusselt, coefficient) = evaluation.into_parts();
-        Self { transport, nusselt, coefficient, section: None }
+        Self { transport, nusselt, coefficient, section: None, tube_section: None }
     }
 }
 
@@ -116,6 +124,13 @@ impl ForcedGasSurface {
         {
             return Err(invalid(
                 "an isothermal finite body cannot impose a constant-heat-flux duct correlation",
+            ));
+        }
+        if self.area_m2 > 0.0 && self.correlation == CorrelationId::GnielinskiDeveloping
+            && self.settings.aspect_ratio.is_some()
+        {
+            return Err(invalid(
+                "developing Gnielinski convection requires a circular inside diameter, not rectangular geometry",
             ));
         }
         Ok(())
@@ -157,7 +172,7 @@ impl ForcedGasSurface {
         }
         Ok(ConductanceSample { conductance_w_k: conductance,
             source: FiniteGasConvectionSample { gas: gas.clone(), body, area_m2: self.area_m2,
-                evaluation: Some(GasConvectionEvaluation { transport, nusselt, coefficient, section: None }) } })
+                evaluation: Some(GasConvectionEvaluation { transport, nusselt, coefficient, section: None, tube_section: None }) } })
     }
 
     /// Couple a finite source-backed gas, inertial piston and finite enthalpy body.
@@ -250,7 +265,7 @@ impl ForcedGasSurface {
             let (transport, nusselt, coefficient) = evaluated.into_parts();
             Ok(ConvectionCoefficient {
                 coefficient_w_per_m2_k: coefficient.value.value(),
-                source: Some(GasConvectionEvaluation { transport, nusselt, coefficient, section: None }),
+                source: Some(GasConvectionEvaluation { transport, nusselt, coefficient, section: None, tube_section: None }),
             })
         })
     }

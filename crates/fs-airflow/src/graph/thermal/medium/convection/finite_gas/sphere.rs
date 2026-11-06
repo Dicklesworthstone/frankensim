@@ -121,6 +121,7 @@ impl<M: FilmGasSource> ForcedSphereGasSurface<'_, M> {
                         nusselt,
                         coefficient,
                         section: None,
+                        tube_section: None,
                     }),
                 },
                 surface_gas: Some(surface_gas),

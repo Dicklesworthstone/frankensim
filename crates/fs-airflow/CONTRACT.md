@@ -4408,3 +4408,28 @@ their actual section Nu, while native surface elimination, conduction,
 radiation, body storage and time integration remain the existing owners.
 Focused regressions cover material queries, signed reciprocal heat, entrance
 position, analytic film chains and native body energy/entropy closure.
+
+## Developing tube sections on finite gas heat owners
+
+`FilmGasHeatLaw::BulkForcedTubeSection(ForcedTurbulentTubeSectionGasSurface)`
+carries physical heated-entrance distances and the actual circular diameter
+through the existing finite-gas/body, piston, fixed-volume wall-feedback and
+mixed heat-network callbacks. Patch area cannot exceed pi D (end-start), and
+flow reversal requires rebinding the physical distances. Each active callback
+resolves one source-pinned bulk property state at the actual trial gas
+temperature, pressure and composition, retaining the original ideal or explicit
+real-gas branch. The shared developing Gnielinski evaluator uses K=1 without a
+film-temperature or wall-viscosity correction.
+
+`GasConvectionEvaluation::tube_section` retains physical geometry and upstream
+mean evidence; `effective_nusselt()` returns the actual section Nu while
+`nusselt` remains the original downstream cumulative mean. Existing finite
+heat owners retain one signed reciprocal exchange, body enthalpy, pressure
+work, area/Biot admission and atomic publication. Section additivity requires
+common bulk properties and thermal driving; local refresh does not resolve
+spatially nonuniform entrance history. Original correlation domains and the
+modest-property-variation assumption remain active. The ordinary
+`BulkForced` path also admits the developing mean with explicit circular
+geometry and heated length. Regressions cover subdivision, source identity,
+piston/body and fixed-volume energy, latent heat, and mixed heat-network
+exchange.

@@ -5,7 +5,8 @@ pub use source::{FilmGasSource, PengRobinsonFilmSource};
 
 use super::super::{
     AidingVerticalPlateSettings, evaluate_aiding_vertical_plate_from_material,
-    evaluate_natural_from_material, evaluate_flat_plate_section_from_material, mixed,
+    evaluate_natural_from_material, evaluate_flat_plate_section_from_material,
+    evaluate_turbulent_tube_section_from_material, mixed,
 };
 use super::*;
 use fs_material::fluid_transport::{FluidTransport, ThermalFluidTransport};
@@ -20,13 +21,19 @@ pub enum FilmGasHeatLaw {
     Forced(ForcedGasSurface),
     /// Isothermal circular/rectangular duct law at the actual bulk temperature.
     /// This admits the existing laminar CWT, developing CWT, Dittus-Boelter and
-    /// Gnielinski cards. Their original geometry, regime and modest-property-
-    /// variation assumptions still apply; no wall-viscosity correction is added.
+    /// fully developed/developing Gnielinski cards. Their original geometry,
+    /// regime and modest-property-variation assumptions still apply;
+    /// no wall-viscosity correction is added.
     /// The source bank is checked even though the requested temperature is bulk.
     BulkForced(ForcedGasSurface),
     /// A physical streamwise strip; its boundary layer begins at the original
     /// upstream edge, not at this thermal patch's start.
     ForcedPlateSection(ForcedPlateGasSurface),
+    /// Developing turbulent circular-tube section at the actual bulk state.
+    /// The original physical entrance survives thermal-patch subdivision.
+    /// This is the shared constant-property Gnielinski specialization K=1,
+    /// with no wall-viscosity query or correction.
+    BulkForcedTubeSection(ForcedTurbulentTubeSectionGasSurface),
     Natural(NaturalGasSurface),
     /// Laminar aiding mixed convection with explicitly bounded density departure.
     AidingVerticalPlate(AidingVerticalPlateGasSurface),
@@ -68,6 +75,51 @@ impl ForcedPlateGasSurface {
             CorrelationId::FlatPlateLaminarAverage | CorrelationId::FlatPlateTurbulentAverage)
         {
             return Err(invalid("finite gas plate sections require an original flat-plate mean correlation"));
+        }
+        Ok(())
+    }
+}
+
+/// One inside-wall section of a smooth, straight turbulent circular tube.
+///
+/// `start` and `end` are distances from the same physical heated entrance,
+/// not distances from this thermal patch. Flow reversal requires rebinding
+/// them from the other entrance. The explicit area cannot exceed the actual
+/// circular inside-wall section area pi D (end-start). Uniform bulk properties
+/// and thermal driving make adjacent sections additive; local property refresh
+/// does not solve spatially nonuniform entrance history. The original card's
+/// Re, Pr and positive-endpoint L/D bounds remain mandatory on every trial.
+#[derive(Clone, Copy, Debug)]
+pub struct ForcedTurbulentTubeSectionGasSurface {
+    pub area_m2: f64,
+    pub diameter: Length,
+    pub start: Length,
+    pub end: Length,
+    pub speed_m_s: f64,
+}
+
+impl ForcedTurbulentTubeSectionGasSurface {
+    fn validate(self) -> Result<(), MaterialConvectionError> {
+        let diameter = self.diameter.value();
+        let start = self.start.value();
+        let end = self.end.value();
+        let start_ratio = start / diameter;
+        let end_ratio = end / diameter;
+        let inside_area = core::f64::consts::PI * diameter * (end - start);
+        if !self.area_m2.is_finite() || self.area_m2 < 0.0
+            || !diameter.is_finite() || diameter <= 0.0
+            || !start.is_finite() || start < 0.0
+            || !end.is_finite() || end <= start
+            || !start_ratio.is_finite() || (start > 0.0 && start_ratio == 0.0)
+            || !end_ratio.is_finite() || end_ratio <= start_ratio
+            || !inside_area.is_finite() || inside_area <= 0.0
+            || self.area_m2 > inside_area
+            || !self.speed_m_s.is_finite() || self.speed_m_s < 0.0
+            || (self.area_m2 > 0.0 && self.speed_m_s == 0.0)
+        {
+            return Err(invalid(
+                "finite gas turbulent tube sections need positive diameter, finite 0 <= start < end from one entrance, positive active speed and a patch no larger than pi D (end-start)",
+            ));
         }
         Ok(())
     }
@@ -117,7 +169,8 @@ impl<M: FilmGasSource> Clone for FilmGasSurface<'_, M> {
 #[derive(Debug)]
 pub struct FilmGasConvectionSample<S = ResolvedThermochemicalGasState, W = EquilibriumPhaseState> {
     pub interface: FiniteGasConvectionSample<S, W>,
-    /// Source-validated bulk properties for `BulkForced`, mean-film properties
+    /// Source-validated bulk properties for `BulkForced` and
+    /// `BulkForcedTubeSection`, mean-film properties
     /// otherwise. None only for an explicitly isolated zero-area patch.
     pub property_gas: Option<S>,
 }
@@ -146,12 +199,17 @@ impl FilmGasHeatLaw {
                     | CorrelationId::RectangularDuctLaminarCwt
                     | CorrelationId::RectangularDuctLaminarCwtDevelopingPr072
                     | CorrelationId::DittusBoelter
-                    | CorrelationId::Gnielinski)
+                    | CorrelationId::Gnielinski
+                    | CorrelationId::GnielinskiDeveloping)
                 {
                     return Err(invalid(
                         "bulk forced convection requires an isothermal duct correlation without a separate wall-viscosity input",
                     ));
                 }
+                Ok(surface.area_m2)
+            }
+            Self::BulkForcedTubeSection(surface) => {
+                surface.validate()?;
                 Ok(surface.area_m2)
             }
             Self::ForcedPlateSection(surface) => {
@@ -172,7 +230,8 @@ impl FilmGasHeatLaw {
 
 impl<M: FilmGasSource> FilmGasSurface<'_, M> {
     /// Re-query source-pinned properties at the actual bulk pressure and the
-    /// selected reference temperature: T_bulk for `BulkForced`, otherwise
+    /// selected reference temperature: T_bulk for `BulkForced` and
+    /// `BulkForcedTubeSection`, otherwise
     /// (T_wall + T_bulk)/2. Both signed heat flow and Rayleigh forcing retain
     /// the full wall-to-bulk temperature contrast. The property query is not
     /// a replacement gas endpoint or a second finite-capacity reservoir.
@@ -217,7 +276,7 @@ impl<M: FilmGasSource> FilmGasSurface<'_, M> {
             });
         }
         let property_temperature = match self.law {
-            FilmGasHeatLaw::BulkForced(_) => bulk,
+            FilmGasHeatLaw::BulkForced(_) | FilmGasHeatLaw::BulkForcedTubeSection(_) => bulk,
             _ => 0.5 * wall + 0.5 * bulk,
         };
         // Re-query even at T_bulk: cloning the snapshot here would bypass the
@@ -240,7 +299,16 @@ impl<M: FilmGasSource> FilmGasSurface<'_, M> {
                 ).map_err(MaterialConvectionError::from)?;
                 let (transport, nusselt, coefficient, section) = evaluated.into_parts();
                 Some(GasConvectionEvaluation {
-                    transport, nusselt, coefficient, section: Some(section),
+                    transport, nusselt, coefficient, section: Some(section), tube_section: None,
+                })
+            }
+            FilmGasHeatLaw::BulkForcedTubeSection(surface) => {
+                let evaluated = evaluate_turbulent_tube_section_from_material(
+                    &property, surface.speed_m_s, surface.diameter, surface.start, surface.end,
+                )?;
+                let (transport, nusselt, coefficient, tube_section) = evaluated.into_parts();
+                Some(GasConvectionEvaluation {
+                    transport, nusselt, coefficient, section: None, tube_section: Some(tube_section),
                 })
             }
             FilmGasHeatLaw::Forced(surface) | FilmGasHeatLaw::BulkForced(surface) => {

@@ -38,7 +38,8 @@ pub enum GasHeatLaw<'a> {
     ForcedConvection(ForcedGasSurface),
     /// Buoyant vertical-plate transfer from the same material gas and wall state.
     NaturalConvection(NaturalGasSurface),
-    /// Source-pinned bulk-duct or mean-film external/natural/mixed convection.
+    /// Source-pinned bulk-duct or mean-film external/natural/mixed convection,
+    /// including turbulent tube sections retaining their physical entrance.
     FilmConvection(FilmGasSurface<'a>),
     /// Bulk transport with separately sourced viscosity at the actual wall.
     ForcedSphereConvection(ForcedSphereGasSurface<'a>),
@@ -177,7 +178,9 @@ fn flow_patches<'a, 'source>(
 /// physical patch; a chamber ID does not establish enclosure applicability.
 /// External/natural/mixed film laws query their bank at the mean of this
 /// trial's gas and wall temperatures; bulk-duct film laws retain bulk properties.
-/// Sphere and turbulent-tube laws retain bulk transport and query wall viscosity.
+/// Developing tube sections retain their actual start/end entrance distances
+/// through each callback; numerical patches do not create new entrances.
+/// Sphere and Sieder--Tate tube laws retain bulk transport and query wall viscosity.
 /// All pin the actual reacted/transported composition, pressure and source
 /// identities; a bank's initial fractions never replace the trial gas.
 /// Their full temperature contrast and source/correlation domains remain active.
