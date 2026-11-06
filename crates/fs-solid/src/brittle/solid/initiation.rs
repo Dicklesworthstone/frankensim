@@ -13,10 +13,15 @@
 //! their brackets are not accepted fracture times. Elements without a predicted
 //! crossing retain their explicitly supplied source plane. Resolve physical
 //! increments and any plane sensitivity. No rotating cracks, all-plane mixed-
-//! mode detection, topology change, contact or dynamic fracture is supplied.
+//! mode detection, topology change or contact is supplied. The [`dynamics`]
+//! owner applies the same detector to native inertial endpoint strain chords
+//! and transfers the original motion before replay through brittle dynamics.
 
 /// Native replay toward the first tensile event and an explicit load remainder.
 pub mod first_event;
+
+/// Native inertial prediction and conservative elastic-to-brittle motion transfer.
+pub mod dynamics;
 
 use fs_exec::Cx;
 use fs_material::brittle::initiation::TensileInitiationSettings;
@@ -212,25 +217,7 @@ impl<'a> TensileElasticTetSolid<'a> {
         cx: &Cx<'_>,
     ) -> Result<TensileTetProbe<'a>, TensileTetInitiationError> {
         checkpoint(cx)?;
-        let dofs = self.solution.displacement_m.len() * 3;
-        if prescribed_m.len() > dofs
-            || nodal_forces_n.len() > dofs
-            || direction_hints.is_some_and(|h| h.len() != self.materials.len())
-        {
-            return Err(TensileTetInitiationError::Invalid(
-                "endpoint arrays must fit the original DOF and element counts",
-            ));
-        }
-        let mut supports: Vec<_> = prescribed_m.iter().map(|&(dof, _)| dof).collect();
-        supports.sort_unstable();
-        if supports.iter().any(|&dof| dof >= dofs)
-            || supports.windows(2).any(|pair| pair[0] == pair[1])
-            || self.supports.as_ref().is_some_and(|old| old != &supports)
-        {
-            return Err(TensileTetInitiationError::Invalid(
-                "elastic history requires the same unique prescribed DOF set",
-            ));
-        }
+        let supports = self.admit_endpoint(prescribed_m, nodal_forces_n, direction_hints)?;
         let mut laws = Vec::with_capacity(self.materials.len());
         for (element, source) in self.materials.iter().enumerate() {
             checkpoint(cx)?;
@@ -254,6 +241,62 @@ impl<'a> TensileElasticTetSolid<'a> {
             &self.solution.element_states,
             cx,
         )?;
+        self.inspect_endpoint(
+            solution,
+            supports,
+            prescribed_m,
+            nodal_forces_n,
+            solver_settings,
+            initiation_settings,
+            direction_hints,
+            cx,
+        )
+        .map(|(probe, _storage)| probe)
+    }
+
+    /// Both native equilibrium and inertial owners retain these exact inputs.
+    fn admit_endpoint(
+        &self,
+        prescribed_m: &[(usize, f64)],
+        nodal_forces_n: &[(usize, f64)],
+        direction_hints: Option<&[Option<[f64; 3]>]>,
+    ) -> Result<Vec<usize>, TensileTetInitiationError> {
+        let dofs = self.solution.displacement_m.len() * 3;
+        if prescribed_m.len() > dofs
+            || nodal_forces_n.len() > dofs
+            || direction_hints.is_some_and(|h| h.len() != self.materials.len())
+        {
+            return Err(TensileTetInitiationError::Invalid(
+                "endpoint arrays must fit the original DOF and element counts",
+            ));
+        }
+        let mut supports: Vec<_> = prescribed_m.iter().map(|&(dof, _)| dof).collect();
+        supports.sort_unstable();
+        if supports.iter().any(|&dof| dof >= dofs)
+            || supports.windows(2).any(|pair| pair[0] == pair[1])
+            || self.supports.as_ref().is_some_and(|old| old != &supports)
+        {
+            return Err(TensileTetInitiationError::Invalid(
+                "elastic history requires the same unique prescribed DOF set",
+            ));
+        }
+        Ok(supports)
+    }
+
+    /// Source detector and storage observation shared without changing their
+    /// path semantics: the caller owns the native solve and interval meaning.
+    #[allow(clippy::too_many_arguments)]
+    fn inspect_endpoint(
+        &self,
+        solution: SmallStrainTetSolution<()>,
+        supports: Vec<usize>,
+        prescribed_m: &[(usize, f64)],
+        nodal_forces_n: &[(usize, f64)],
+        solver_settings: IncrementSettings,
+        initiation_settings: TensileInitiationSettings,
+        direction_hints: Option<&[Option<[f64; 3]>]>,
+        cx: &Cx<'_>,
+    ) -> Result<(TensileTetProbe<'a>, f64), TensileTetInitiationError> {
         let mut events = Vec::with_capacity(self.materials.len());
         let mut first_fraction = [1.0_f64; 2];
         let mut first_candidate = None;
@@ -303,32 +346,38 @@ impl<'a> TensileElasticTetSolid<'a> {
         }
         checkpoint(cx)?;
         match first_candidate {
-            None => Ok(TensileTetProbe::Elastic(Self {
-                geometry: self.geometry,
-                materials: self.materials,
-                budget: self.budget,
-                solution,
+            None => Ok((
+                TensileTetProbe::Elastic(Self {
+                    geometry: self.geometry,
+                    materials: self.materials,
+                    budget: self.budget,
+                    solution,
+                    stored_energy_j,
+                    supports: Some(supports),
+                    nodal_forces_n: nodal_forces_n.to_vec(),
+                }),
                 stored_energy_j,
-                supports: Some(supports),
-                nodal_forces_n: nodal_forces_n.to_vec(),
-            })),
-            Some(first_candidate) => Ok(TensileTetProbe::Onset(TensileTetOnset {
-                geometry: self.geometry,
-                materials: self.materials,
-                budget: self.budget,
-                initial: self.solution.clone(),
-                predictor: solution,
-                elastic_storage_j: self.stored_energy_j,
-                events,
-                first_fraction,
-                first_candidate,
-                settings: initiation_settings,
-                initial_forces_n: self.nodal_forces_n.clone(),
-                prescribed_end_m: prescribed_m.to_vec(),
-                nodal_forces_end_n: nodal_forces_n.to_vec(),
-                solver_settings,
-                direction_hints: direction_hints.map(|hints| hints.to_vec()),
-            })),
+            )),
+            Some(first_candidate) => Ok((
+                TensileTetProbe::Onset(TensileTetOnset {
+                    geometry: self.geometry,
+                    materials: self.materials,
+                    budget: self.budget,
+                    initial: self.solution.clone(),
+                    predictor: solution,
+                    elastic_storage_j: self.stored_energy_j,
+                    events,
+                    first_fraction,
+                    first_candidate,
+                    settings: initiation_settings,
+                    initial_forces_n: self.nodal_forces_n.clone(),
+                    prescribed_end_m: prescribed_m.to_vec(),
+                    nodal_forces_end_n: nodal_forces_n.to_vec(),
+                    solver_settings,
+                    direction_hints: direction_hints.map(|hints| hints.to_vec()),
+                }),
+                stored_energy_j,
+            )),
         }
     }
 }

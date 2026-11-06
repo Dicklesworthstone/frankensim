@@ -1,5 +1,44 @@
 # fs-solid CONTRACT
 
+## Native inertial tensile initiation and conservative brittle replay
+
+`initiation::dynamics::TensileElasticTetMotion` continues an accepted elastic
+solid with its original source density, cached consistent reference mass,
+actual velocity, clock and step allowance. Initial strains must be strictly
+elastic under the retained source-bound tensile criterion. The existing native
+backward-Euler owner solves each physical candidate endpoint; shared original
+tensile detection then inspects every accepted-to-candidate strain chord.
+
+An entirely elastic chord admits the motion only after independent material
+storage/work, endpoint force/support work and native kinetic accounts pass.
+Reversible elastic work, endpoint quadrature and backward-Euler numerical
+kinetic loss remain separate; none becomes fracture dissipation or heat.
+A crossing returns a disposable `TensileTetMotionOnset`, never an accepted
+over-strength elastic body.
+
+The onset retains the original physical interval, exact ordered endpoint
+supports and applied forces, and solver settings. `resolve_bands` reuses
+native discovered planes, original source bundles and geometry-derived widths.
+`handoff` seeds the OLD accepted strain through the existing source/stress/
+storage continuity gates and retains the SAME mass operator, density inventory,
+velocity, kinetic storage, clock and consumed steps. `replay` re-solves the
+original interval through native nonlinear brittle motion. Source mismatch,
+work refusal or cancellation leaves the original motion and prediction usable.
+
+This is small-strain, fixed-plane, tensile-only, first-order endpoint dynamics.
+A detector fraction parameterizes the affine STRAIN CHORD, not physical event
+time. Continuous reversals and oscillations require resolved physical intervals;
+a smaller interval is solved again using its actual loads and support values.
+No continuous-event certificate, new constitutive law or adaptive crack-path
+claim is inferred.
+
+Two native regressions specify consistent-mass free acceleration and an
+inertial crossing that selects a y-plane from a dormant x-plane source. They
+include an already consumed elastic step, a shorter physical re-solve that
+differs from interpolation, analytic softening replay, retained momentum/
+mass/time/budget, changed-density source refusal and late-refusal retry.
+
+
 ## Prescribed natural-strain events on installed viscoelastic membranes
 
 `membrane::visco::FiniteViscoMembrane::change_reference` and the matching

@@ -395,3 +395,6 @@ fn independent_sources_keep_nontriggered_elements_elastic_through_fracture_repla
 
 #[path = "initiation/first_event.rs"]
 mod first_event;
+
+#[path = "initiation/dynamics.rs"]
+mod dynamics;

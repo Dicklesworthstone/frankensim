@@ -141,6 +141,44 @@ impl From<SmallStrainTetError> for BrittleTetDynamicError {
 }
 
 impl<'a> BrittleTetMotion<'a> {
+    /// The tensile predecessor already bound this exact reference inventory.
+    /// Its native material handoff checks source, geometry, strain and storage;
+    /// this internal transfer preserves the original inertia and clock verbatim.
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::brittle::solid) fn from_tensile_handoff(
+        solid: BrittleTetSolid<'a>,
+        velocity_mps: Vec<[f64; 3]>,
+        reference_density_kg_m3: Arc<[f64]>,
+        mass: Arc<P1ReferenceMass>,
+        kinetic_energy_j: f64,
+        time_s: f64,
+        maximum_steps: usize,
+        accepted_steps: usize,
+        cx: &Cx<'_>,
+    ) -> Result<Self, BrittleTetDynamicError> {
+        checkpoint(cx)?;
+        if velocity_mps.len() != solid.geometry.nodes_m().len()
+            || mass.ndofs() != 3 * velocity_mps.len()
+            || reference_density_kg_m3.len() != solid.materials.len()
+            || accepted_steps > maximum_steps
+            || maximum_steps == 0
+        {
+            return Err(BrittleTetDynamicError::Invalid(
+                "tensile handoff must preserve original motion and inventory dimensions",
+            ));
+        }
+        Ok(Self {
+            solid,
+            velocity_mps,
+            reference_density_kg_m3,
+            mass,
+            kinetic_energy_j,
+            time_s,
+            maximum_steps,
+            accepted_steps,
+        })
+    }
+
     /// Start motion from an existing accepted solid, retaining all fracture
     /// history and storage. The caller supplies actual initial nodal velocity.
     ///
