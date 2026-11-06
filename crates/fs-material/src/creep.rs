@@ -15,6 +15,11 @@
 //! <https://mooseframework.inl.gov/source/materials/PowerLawCreepStressUpdate.html>
 //! <https://doc.comsol.com/6.4/doc/com.comsol.help.sme/sme_ug_theory.06.039.html>.
 //! Parameters are authored model inputs until separately bound to source data.
+//! An explicit [`StrainHardeningCreep`] multiplier additionally models primary
+//! creep using the same accumulated history, implicit return and heat account.
+
+mod hardening;
+pub use hardening::StrainHardeningCreep;
 
 /// Simultaneous secondary creep and energetic isotropic J2 plasticity.
 pub mod plastic;
@@ -213,6 +218,7 @@ pub struct NortonCreep {
     log_step_scale: f64,
     shear_pa: f64,
     bulk_pa: f64,
+    strain_hardening: Option<StrainHardeningCreep>,
 }
 struct Update {
     stress: Voigt,
@@ -312,6 +318,7 @@ impl NortonCreep {
             log_step_scale,
             shear_pa,
             bulk_pa,
+            strain_hardening: None,
         })
     }
     pub const fn elastic(&self) -> &IsotropicElastic {
@@ -331,16 +338,24 @@ impl NortonCreep {
         self.log_rate_at_reference_stress
             + self.parameters.stress_exponent * (det::ln(q) - self.log_reference_stress)
     }
-    /// Evaluate equivalent rate at a nonnegative stress inside the selected law.
+    /// Evaluate the virgin equivalent rate at a nonnegative stress. For a
+    /// history-dependent law use `equivalent_creep_rate_at_strain_s` to inspect
+    /// an already crept specimen without advancing its state.
     pub fn equivalent_creep_rate_s(&self, q: f64) -> Result<f64> {
+        self.equivalent_creep_rate_at_strain_s(q, 0.0)
+    }
+
+    /// Instantaneous equivalent rate at the supplied accumulated creep strain.
+    /// This is a pure query; neither time nor accepted history is advanced.
+    pub fn equivalent_creep_rate_at_strain_s(&self, q: f64, alpha: f64) -> Result<f64> {
         require(
-            q.is_finite() && q >= 0.0,
-            "equivalent stress must be finite and nonnegative",
+            q.is_finite() && q >= 0.0 && alpha.is_finite() && alpha >= 0.0,
+            "equivalent stress and accumulated creep must be finite and nonnegative",
         )?;
         if q == 0.0 {
             return Ok(0.0);
         }
-        let rate = det::exp(self.log_rate(q));
+        let rate = det::exp(self.log_rate(q) + self.hardening_value(alpha)?.0);
         require(positive(rate), "creep rate is not representable")?;
         Ok(rate)
     }
@@ -541,7 +556,12 @@ impl NortonCreep {
             delta_alpha,
             ratio,
             radial,
-        } = self.relaxation(q_trial, self.log_step_scale)?;
+        } = self.relaxation_from(
+            q_trial,
+            self.log_step_scale,
+            det::ln(3.0 * self.shear_pa),
+            old.equivalent_creep_strain,
+        )?;
         let mut state = old.clone();
         if delta_alpha > 0.0 {
             for i in 0..6 {
@@ -694,16 +714,29 @@ impl SmallStrainLaw for NortonCreep {
             dissipation_nonnegative: true,
             polyconvex: None,
             tangent_symmetric: true,
-            failure_envelope: "bounded small-strain isotropic secondary creep; no rupture or damage law",
+            failure_envelope: if self.strain_hardening.is_some() {
+                "bounded small-strain isotropic primary/secondary creep; no rupture or damage law"
+            } else {
+                "bounded small-strain isotropic secondary creep; no rupture or damage law"
+            },
         }
     }
     fn card(&self) -> ModelCard {
+        let primary = self.strain_hardening.is_some();
         ModelCard::new(
-            "material.norton-arrhenius-creep",
+            if primary {
+                "material.strain-hardening-norton-creep"
+            } else {
+                "material.norton-arrhenius-creep"
+            },
             "0.1.0",
             Ambition::Solid,
             vec![
-                "isotropic small-strain J2 secondary creep without a yield threshold".into(),
+                if primary {
+                    "isotropic small-strain primary/secondary creep with accumulated-strain hardening".into()
+                } else {
+                    "isotropic small-strain J2 secondary creep without a yield threshold".into()
+                },
                 "Norton exponent >= 1; Arrhenius shift at absolute temperature".into(),
                 "backward Euler with separate physical heat and numerical loss".into(),
             ],
@@ -715,7 +748,11 @@ impl SmallStrainLaw for NortonCreep {
                     self.parameters.temperature_range_k[1],
                 ),
             vec![
-                "no primary/tertiary creep, finite deformation, plasticity or rupture".into(),
+                if primary {
+                    "no tertiary creep, recovery, finite deformation, plasticity or rupture".into()
+                } else {
+                    "no primary/tertiary creep, finite deformation, plasticity or rupture".into()
+                },
                 "no measured material qualification without source binding".into(),
             ],
             0.05,

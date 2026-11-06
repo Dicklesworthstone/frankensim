@@ -2,7 +2,8 @@
 //!
 //! The elastic strain is `e = epsilon - epsilon_c - epsilon_p`. Both flows are
 //! coaxial with the endpoint deviatoric stress, so one radial update satisfies
-//! `q + 3G (delta_c + delta_p) = q_trial`, `delta_c = dt rate(q)` and the J2
+//! `q + 3G (delta_c + delta_p) = q_trial`,
+//! `delta_c = dt rate(q, alpha_c_old + delta_c)` and the J2
 //! complementarity conditions. The plastic branch reduces exactly to the same
 //! bounded logarithmic Norton root with effective stiffness `3G H/(3G+H)`.
 //! This is a simultaneous solve, not sequential creep/plastic return maps.
@@ -65,6 +66,7 @@ struct CoupledStiffness {
     log_modulus: f64,
     log_step_scale: f64,
     hardening_weight: f64,
+    log_effective_modulus: f64,
     log_effective_step_scale: f64,
 }
 
@@ -80,11 +82,17 @@ impl CoupledStiffness {
         } else {
             f64::NEG_INFINITY
         };
+        let log_effective_modulus = if hardening > 0.0 {
+            log_modulus + det::ln(hardening) - det::ln(denominator)
+        } else {
+            f64::NEG_INFINITY
+        };
         Self {
             modulus_pa,
             log_modulus,
             log_step_scale,
             hardening_weight: hardening / denominator,
+            log_effective_modulus,
             log_effective_step_scale,
         }
     }
@@ -162,6 +170,7 @@ impl NortonJ2 {
         &self,
         q_trial: f64,
         alpha: f64,
+        creep_alpha: f64,
         stiffness: &CoupledStiffness,
     ) -> Result<CoupledRelaxation> {
         let h = stiffness.modulus_pa;
@@ -169,7 +178,12 @@ impl NortonJ2 {
         // Monotonicity selects the branch with one rate evaluation, avoiding a
         // preliminary creep-only root. Logs avoid an overflowing rate at yield.
         let inactive = q_trial <= yield_stress || {
-            let log_rate = self.creep.log_rate(yield_stress);
+            // At the yield crossing, the creep-only increment is exactly the
+            // elastic trial gap/h. Evaluate hardening at that endpoint, not at
+            // frozen old history; otherwise the wrong plastic branch is chosen.
+            let crossing_creep = (q_trial - yield_stress) / h;
+            let log_rate = self.creep.log_rate(yield_stress)
+                + self.creep.hardening_value(creep_alpha + crossing_creep)?.0;
             let log_flow = stiffness.log_modulus + self.creep.log_duration + log_rate;
             let log_gap = det::ln(q_trial - yield_stress);
             // At sustained yield, log rounding can spuriously activate plasticity
@@ -190,7 +204,12 @@ impl NortonJ2 {
                 delta_alpha,
                 ratio,
                 radial,
-            } = self.creep.relaxation(q_trial, stiffness.log_step_scale)?;
+            } = self.creep.relaxation_from(
+                q_trial,
+                stiffness.log_step_scale,
+                stiffness.log_modulus,
+                creep_alpha,
+            )?;
             return Ok(CoupledRelaxation {
                 q,
                 delta_c: delta_alpha,
@@ -202,15 +221,22 @@ impl NortonJ2 {
         let (q, delta_c, radial) = if self.plastic.hardening == 0.0 {
             (
                 yield_stress,
-                det::exp(self.creep.log_duration + self.creep.log_rate(yield_stress)),
+                self.creep.fixed_stress_increment(
+                    yield_stress,
+                    creep_alpha,
+                    (q_trial - yield_stress) / h,
+                )?,
                 0.0,
             )
         } else {
             let effective_trial =
                 yield_stress + stiffness.hardening_weight * (q_trial - yield_stress);
-            let relaxed = self
-                .creep
-                .relaxation(effective_trial, stiffness.log_effective_step_scale)?;
+            let relaxed = self.creep.relaxation_from(
+                effective_trial,
+                stiffness.log_effective_step_scale,
+                stiffness.log_effective_modulus,
+                creep_alpha,
+            )?;
             (
                 relaxed.q,
                 relaxed.delta_alpha,
@@ -238,7 +264,12 @@ impl NortonJ2 {
     fn update(&self, strain: &Voigt, old: &NortonJ2State) -> Result<Update> {
         self.validate_history(strain, old)?;
         let trial = self.creep.predictor(&Self::elastic_strain(strain, old))?;
-        let relaxed = self.relaxation(trial.q, old.plastic.alpha, &self.stiffness)?;
+        let relaxed = self.relaxation(
+            trial.q,
+            old.plastic.alpha,
+            old.creep.equivalent_creep_strain,
+            &self.stiffness,
+        )?;
         let mut state = old.clone();
         if relaxed.delta_c > 0.0 {
             for i in 0..6 {
@@ -434,12 +465,20 @@ impl SmallStrainLaw for NortonJ2 {
             dissipation_nonnegative: true,
             polyconvex: None,
             tangent_symmetric: true,
-            failure_envelope: "bounded small-strain secondary creep and energetic isotropic J2 plasticity",
+            failure_envelope: if self.creep.strain_hardening().is_some() {
+                "bounded small-strain primary/secondary creep and energetic isotropic J2 plasticity"
+            } else {
+                "bounded small-strain secondary creep and energetic isotropic J2 plasticity"
+            },
         }
     }
     fn card(&self) -> ModelCard {
         ModelCard::new(
-            "material.norton-isotropic-j2",
+            if self.creep.strain_hardening().is_some() {
+                "material.strain-hardening-norton-isotropic-j2"
+            } else {
+                "material.norton-isotropic-j2"
+            },
             "0.1.0",
             Ambition::Solid,
             vec![

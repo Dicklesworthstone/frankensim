@@ -114,7 +114,12 @@ impl UniaxialNorton {
             .validate_history(&old_tensor.creep_strain, &old_tensor)?;
         let trial = self.backbone.elastic.youngs * (strain - old.creep_strain);
         require(trial.is_finite(), "axial trial stress is not representable")?;
-        let relaxed = self.backbone.relaxation(trial.abs(), self.log_step_scale)?;
+        let relaxed = self.backbone.relaxation_from(
+            trial.abs(),
+            self.log_step_scale,
+            det::ln(self.backbone.elastic.youngs),
+            old.equivalent_creep_strain,
+        )?;
         let state = UniaxialNortonState {
             creep_strain: old.creep_strain + trial.signum() * relaxed.delta_alpha,
             equivalent_creep_strain: old.equivalent_creep_strain + relaxed.delta_alpha,

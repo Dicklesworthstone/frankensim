@@ -414,6 +414,8 @@ impl Frame2d {
                     require(
                         old.kinetics().elastic() == law.kinetics().elastic()
                             && old.kinetics().parameters() == law.kinetics().parameters()
+                            && old.kinetics().strain_hardening()
+                                == law.kinetics().strain_hardening()
                             && old.hardening() == law.hardening(),
                         "creep history cannot silently change elastic/hardening storage or kinetic parameters",
                     )?;

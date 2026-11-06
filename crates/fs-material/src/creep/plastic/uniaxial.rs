@@ -155,8 +155,12 @@ impl UniaxialNortonJ2 {
         let e = backbone.creep().elastic().youngs;
         let trial = e * (strain - old.creep_strain - old.plastic_strain);
         require(trial.is_finite(), "axial trial stress is not representable")?;
-        let relaxed =
-            backbone.relaxation(trial.abs(), old.equivalent_plastic_strain, &self.stiffness)?;
+        let relaxed = backbone.relaxation(
+            trial.abs(),
+            old.equivalent_plastic_strain,
+            old.equivalent_creep_strain,
+            &self.stiffness,
+        )?;
         let state = UniaxialNortonJ2State {
             creep_strain: old.creep_strain + trial.signum() * relaxed.delta_c,
             plastic_strain: old.plastic_strain + trial.signum() * relaxed.delta_p,
