@@ -32,6 +32,8 @@ pub mod coefficients;
 pub mod impulse;
 /// Complete-network continuous force records with independent physical heat.
 pub mod linear_forcing;
+/// Original adhesive pressure fields transferred through affine modal traces.
+pub mod adhesive_traction;
 pub use exact::prepared::{MAX_PREPARED_MODAL_MODES, PreparedModalBudget};
 
 /// One attachment in a component's unchanged mass-normalized modal basis.
