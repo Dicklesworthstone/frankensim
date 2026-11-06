@@ -30,6 +30,9 @@ use crate::state_point::{
 use fs_matdb::{MaterialCard, QueryPoint};
 use fs_qty::{Pressure, QuantitySpec};
 
+/// Coupled plane-stress failure with an explicitly sourced interaction term.
+pub mod tsai_wu;
+
 /// Explicit property roles in the original elastic material 1/2 frame.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LaminaStrengthProperties {
