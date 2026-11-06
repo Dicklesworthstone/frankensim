@@ -71,13 +71,27 @@ stiffness is used to invent a loss coefficient.
 irreversible power. It uses engineering Green-strain rate and integrates
 against reference area times reference thickness. This is an explicit
 reference-configuration constitutive choice; it does not establish that
-small-strain source data are calibrated at finite strain. Explicit nonthermal
-natural references use the hyperelastic owner's same transformation:
+small-strain source data are calibrated at finite strain. Admitted natural
+references use the hyperelastic owner's same transformation:
 for G=diag(g1,g2,g3), D=diag(g1^-2,g2^-2,(g1*g2)^-1), the installed
 viscosity is det(G) D V D. Original mesh area, thickness and mass remain
 unchanged; the normal reference length contributes through det(G). An identity
-reference preserves the original arithmetic. Thermal references still refuse
-until viscosity is bound to the corresponding endpoint material state.
+reference preserves the original arithmetic.
+
+For a thermal natural reference, use
+`MembraneViscosity::new_with_thermal_endpoints` with the original per-triangle
+viscosity laws and original material cards. It first verifies each complete
+reference sheet bundle, then re-evaluates those same six pinned viscosity claims
+at the hyperelastic model's exact endpoint material context. Endpoint passivity,
+axes and the complete source frequency band are checked again. A different hot
+claim cannot replace an expired original source. Reference thickness and areal
+mass retain their original source receipts and are never queried at the hot
+endpoint. `reference_laws()` retains the original laws; `laws()` exposes the
+actual endpoint coefficients used for force and heat.
+
+The ordinary `new` constructor still refuses a thermal natural reference without
+this explicit binding. Endpoint binding prepares a fixed-temperature mechanical
+model; it does not evolve temperature or silently rebind an accepted trajectory.
 
 `project_modes` uses the exact geometry retained by `MembraneModes` and
 preserves the complete matrix `C = Phi^T C_spatial Phi`, including
@@ -150,9 +164,9 @@ Energy closure alone does not establish phase accuracy or stability.
 
 A flat prestretched transverse launch initially has zero material loss, but
 finite transverse deformation creates Green-strain rate and activates the
-corresponding damping. Source null directions remain intact. Explicit
-nonthermal natural references use the same transformed Gram rows described
-above. Trials that violate the material domain, step/work budget, energy
+corresponding damping. Source null directions remain intact. Admitted natural
+references, including explicitly bound thermal endpoints, use the same
+transformed Gram rows described above. Trials that violate the material domain, step/work budget, energy
 budget or cancellation leave accepted motion and heat unchanged.
 
 ## Focused native checks

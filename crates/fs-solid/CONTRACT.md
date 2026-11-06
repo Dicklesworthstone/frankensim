@@ -1253,12 +1253,18 @@ Engineering Green-strain rate gives objective resisting force and independently
 integrated power over reference area times thickness. Rigid motions and
 directional loss nullspaces are preserved. Flat prestressed transverse motion
 has zero first-order material strain-rate loss despite positive geometric
-stiffness. Explicit nonthermal natural references use the original hyperelastic
-convention Fe=F G^-1: rates transform by D=diag(g1^-2,g2^-2,(g1*g2)^-1),
-conjugate stress by det(G) D, and heat by det(G). The original mesh volume and
-inertia remain unchanged, and source Gram factors receive the same pullback.
-Identity references preserve the original arithmetic. Thermal references still
-require an endpoint viscosity source and refuse; no unmeasured loss is supplied.
+stiffness. Admitted natural references use the original hyperelastic convention
+Fe=F G^-1: rates transform by D=diag(g1^-2,g2^-2,(g1*g2)^-1), conjugate stress
+by det(G) D, and heat by det(G). The original mesh volume and inertia remain
+unchanged, and source Gram factors receive the same pullback. Identity references
+preserve the original arithmetic. Thermal references require the explicit
+`new_with_thermal_endpoints` binder: original full sheet bundles/card hashes and
+ordered axes are checked, and the same six pinned viscosity claims are resolved
+at the hyperelastic model's exact endpoint context. Endpoint passivity and band
+admission run again; an expired source cannot switch to another hot claim.
+`reference_laws()` retains reference receipts while `laws()` supplies the actual
+endpoint coefficients. Reference mass/thickness remain unchanged. This binds a
+fixed endpoint, not evolving temperature or a hot source/state replacement.
 
 `MembraneModes` retains the exact accepted linearization displacement.
 Projection keeps the complete modal resistance and source Gram rows, with

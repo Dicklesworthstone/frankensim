@@ -8,7 +8,8 @@
 //! original geometric/strain envelope both remain necessary.
 //!
 //! Reference area times reference thickness integrates power, with the original
-//! elastic owner's natural-volume pullback for shifted nonthermal references.
+//! elastic owner's natural-volume pullback for shifted references. Thermal
+//! references require the explicit same-claim endpoint constructor.
 //! Neither current area, inertia, geometric prestress nor an invented decay rate
 //! is damped.
 //! In particular, a flat prestretched sheet has ZERO linear transverse loss
@@ -33,6 +34,13 @@ pub enum MembraneViscosityError {
         /// Original material-law error.
         source: fs_material::MaterialError,
     },
+    /// Original pinned-claim or endpoint material query refusal.
+    Source {
+        /// Original triangle index.
+        element: usize,
+        /// Original material-state error, without source substitution.
+        source: fs_material::state_point::MaterialStatePointError,
+    },
     /// Source identity, axes, band or finite-value admission failed.
     Invalid(&'static str),
 }
@@ -54,6 +62,7 @@ impl std::error::Error for MembraneViscosityError {
         match self {
             Self::Membrane(error) => Some(error),
             Self::Material { source, .. } => Some(source),
+            Self::Source { source, .. } => Some(source),
             Self::Invalid(_) => None,
         }
     }
@@ -82,6 +91,7 @@ pub struct MembraneViscousResponse {
 pub struct MembraneViscosity<'a> {
     patch: &'a MembranePatch,
     laws: Vec<PlaneStressViscosity>,
+    reference_laws: Option<Vec<PlaneStressViscosity>>,
     volumes_m3: Vec<f64>,
     factors: Vec<[[f64; 6]; 3]>,
     natural_references: Vec<Option<NaturalReferencePullback>>,
@@ -197,7 +207,8 @@ impl<'a> MembraneViscosity<'a> {
     /// and det(G) times natural-volume power, exactly as the selected elastic
     /// energy. The original source stress and passive factors are pulled back
     /// to mesh coordinates without changing the source tensor or its nulls.
-    /// Thermal references still require a separately bound endpoint viscosity.
+    /// Thermal references require [`Self::new_with_thermal_endpoints`], which
+    /// refreshes only the pinned viscosity claims at the elastic endpoint.
     /// Reference thickness comes from the original sheet, independently of mass.
     ///
     /// The finite ordered resolved band must lie inside EVERY source band.
@@ -207,6 +218,18 @@ impl<'a> MembraneViscosity<'a> {
         patch: &'a MembranePatch,
         laws: Vec<PlaneStressViscosity>,
         resolved_band_rad_s: (f64, f64),
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<Self> {
+        Self::assemble(patch, laws, None, resolved_band_rad_s, cancelled)
+    }
+
+    // Endpoint laws can enter only through the private thermal source binder;
+    // their complete reference laws retain the original exact sheet binding.
+    fn assemble(
+        patch: &'a MembranePatch,
+        laws: Vec<PlaneStressViscosity>,
+        reference_laws: Option<Vec<PlaneStressViscosity>>,
+        resolved_band_rad_s: (f64, f64),
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<Self> {
         poll(&mut cancelled)?;
@@ -214,7 +237,9 @@ impl<'a> MembraneViscosity<'a> {
         if !lo.is_finite() || !hi.is_finite() || lo < 0.0 || hi < lo {
             return Err(invalid("finite ordered membrane viscosity band required"));
         }
-        if laws.len() != patch.elements.len() {
+        if laws.len() != patch.elements.len()
+            || reference_laws.as_ref().is_some_and(|sources| sources.len() != laws.len())
+        {
             return Err(invalid("one source viscosity per original triangle required"));
         }
         let mut volumes_m3 = Vec::with_capacity(laws.len());
@@ -224,11 +249,15 @@ impl<'a> MembraneViscosity<'a> {
             patch.elements.iter().zip(&patch.sheets).zip(&laws).enumerate()
         {
             poll(&mut cancelled)?;
-            if law.source() != sheet.material() || law.plane() != MaterialPlane::Axes12 {
+            let reference_law = reference_laws.as_ref().map_or(law, |sources| &sources[index]);
+            if reference_law.source() != sheet.material()
+                || reference_law.plane() != MaterialPlane::Axes12
+                || law.plane() != MaterialPlane::Axes12
+            {
                 return Err(invalid("viscosity needs the identical sheet source and warp/weft axes"));
             }
             let natural_reference = if let MembraneLaw::Hyperelastic(elastic) = &element.law {
-                if elastic.mean_thermal_expansion().is_some() {
+                if elastic.mean_thermal_expansion().is_some() && reference_laws.is_none() {
                     return Err(invalid("thermal membrane references need endpoint viscosity sources"));
                 }
                 NaturalReferencePullback::from_stretches(elastic.reference_stretches())?
@@ -259,7 +288,7 @@ impl<'a> MembraneViscosity<'a> {
             natural_references.push(natural_reference);
         }
         poll(&mut cancelled)?;
-        Ok(Self { patch, laws, volumes_m3, factors, natural_references, resolved_band_rad_s })
+        Ok(Self { patch, laws, reference_laws, volumes_m3, factors, natural_references, resolved_band_rad_s })
     }
 
     /// Exact original geometry, material and reference-inertia owner.
@@ -267,9 +296,18 @@ impl<'a> MembraneViscosity<'a> {
         self.patch
     }
 
-    /// Original immutable selected loss laws in reference triangle order.
+    /// Actual immutable loss laws used by force, heat and modal projection.
+    /// Thermal facets use the selected elastic endpoint context; coefficients
+    /// remain frozen there. Laws stay in their original material axes.
     pub fn laws(&self) -> &[PlaneStressViscosity] {
         &self.laws
+    }
+
+    /// Exact original sheet-bundle laws, before any thermal endpoint query.
+    /// Their mass/thickness context and every original usage receipt remain
+    /// unchanged. For [`Self::new`], these are also the actual [`Self::laws`].
+    pub fn reference_laws(&self) -> &[PlaneStressViscosity] {
+        self.reference_laws.as_deref().unwrap_or(&self.laws)
     }
 
     /// Declared resolved applicability interval [rad/s].
@@ -507,6 +545,9 @@ impl<'a> MembraneViscosity<'a> {
         Ok(MembraneModalViscosity { matrix_per_s, dissipation_rows, mode_count: n, row_count: rows })
     }
 }
+
+// Explicit pinned-claim endpoint construction; no thermal evolution or rebind.
+mod thermal;
 
 /// Exact coupled evolution of the complete source-derived modal resistance.
 pub mod modal;

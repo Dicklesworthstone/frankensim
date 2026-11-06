@@ -295,3 +295,5 @@ mod natural_reference;
 
 #[path = "membrane_viscosity/dynamics.rs"]
 mod dynamics;
+#[path = "membrane_viscosity/thermal_reference.rs"]
+mod thermal_reference;
