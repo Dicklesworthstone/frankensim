@@ -11,6 +11,9 @@
 //! location, persistent contact forces and finite sliding remain separate
 //! physical problems.
 
+/// Bounded native midpoint prefixes at the admitted thermal state.
+pub mod approach;
+
 use std::sync::Arc;
 
 use fs_contact::multicontact::MultiImpactResult;

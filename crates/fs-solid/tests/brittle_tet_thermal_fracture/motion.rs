@@ -9,6 +9,9 @@ use fs_solid::brittle::solid::dynamics::{BrittleTetDynamicControls, BrittleTetDy
 use fs_solid::brittle::solid::expansion::dynamics::ThermalBrittleTetMotion;
 use fs_solver::CheckedCgConfig;
 
+#[path = "motion/approach.rs"]
+mod approach;
+
 const SPEED: f64 = 1.0 / 16.0;
 const DRIFT: [f64; 2] = [1.0 / 32.0, -1.0 / 64.0];
 const INTERVAL: f64 = 1.0 / 64.0;

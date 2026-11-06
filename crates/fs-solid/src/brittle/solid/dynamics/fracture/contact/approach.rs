@@ -13,6 +13,7 @@ use crate::brittle::solid::dynamics::midpoint::{
     BrittleTetMidpointControls, BrittleTetMidpointStep,
 };
 use crate::brittle::solid::dynamics::{BrittleTetDynamicError, BrittleTetMotion};
+use crate::brittle::solid::fracture::ReleasedBrittleFace;
 use crate::brittle::solid::path::interpolate;
 use crate::brittle::solid::{BrittleTetError, checkpoint};
 use crate::plastic3::IncrementSettings;
@@ -123,130 +124,221 @@ impl<'a> BrittleTetMotion<'a> {
         controls: BrittleFaceApproachControls,
         cx: &Cx<'_>,
     ) -> Result<BrittleFaceApproachStep<'a>, BrittleFaceApproachError> {
-        use BrittleFaceApproachError as E;
-        checkpoint(cx)?;
-        let end_time_s = self.time_s + duration_s;
-        validate(duration_s, self.time_s, end_time_s, settings, controls)?;
-        let mut loads = PrefixLoads::new(self, prescribed_end_m, force_intervals_n, cx)?;
-        let scan = |motion: &BrittleTetMotion<'_>| {
-            scan_released_faces(
-                motion,
-                controls.activation_tolerance_m,
-                controls.velocity_tolerance_mps,
-                cx,
-            )
-        };
-        if let Some(contact) = scan(self)? {
-            return Ok(BrittleFaceApproachStep {
-                advance: None,
-                contact: Some(contact),
-                trials: 0,
-                numerical_tangent_evaluations: 0,
-            });
-        }
+        let result = approach_released_faces(
+            self.released_face_motion_view(),
+            duration_s,
+            prescribed_end_m,
+            force_intervals_n,
+            settings,
+            controls,
+            cx,
+            |dt_s, prescribed, forces| {
+                self.advance_midpoint(dt_s, prescribed, forces, settings, controls.work, cx)
+            },
+        )?;
+        Ok(BrittleFaceApproachStep {
+            advance: result.advance,
+            contact: result.contact,
+            trials: result.trials,
+            numerical_tangent_evaluations: result.numerical_tangent_evaluations,
+        })
+    }
 
-        let mut lower_time_s = self.time_s;
-        let mut upper_time_s = end_time_s;
-        let mut target = end_time_s;
-        let mut bracketed = false;
-        let mut safe = None;
-        let mut witness = None;
-        let mut trials = 0;
-        let mut tangent_evaluations = 0_usize;
-        loop {
-            checkpoint(cx)?;
-            if trials == controls.maximum_trials {
-                return Err(E::WorkLimit {
-                    trials,
-                    lower_time_s,
-                    upper_time_s,
-                });
-            }
-            let fraction = if target == end_time_s {
-                1.0
-            } else {
-                (target - self.time_s) / (end_time_s - self.time_s)
-            };
-            loads.at(fraction, cx)?;
-            trials += 1;
-            let result = self.advance_midpoint(
-                target - self.time_s,
-                &loads.prescribed,
-                &loads.forces,
-                settings,
-                controls.work,
-                cx,
-            );
-            match result {
-                Ok(step) => {
-                    tangent_evaluations = tangent_evaluations
-                        .checked_add(step.numerical_tangent_evaluations)
-                        .ok_or(E::Invalid("completed tangent count overflow"))?;
-                    if step.motion.time_s != target {
-                        return Err(E::Invalid("native clock did not reach requested prefix"));
-                    }
-                    match scan(&step.motion) {
-                        Ok(contact) => {
-                            if !bracketed {
-                                return Ok(BrittleFaceApproachStep {
-                                    advance: Some(step),
-                                    contact,
-                                    trials,
-                                    numerical_tangent_evaluations: tangent_evaluations,
-                                });
-                            }
-                            lower_time_s = target;
-                            safe = Some(step);
-                            witness = contact;
-                        }
-                        Err(E::Overlap { .. }) => {
-                            bracketed = true;
-                            upper_time_s = target;
-                        }
-                        Err(error) => return Err(error),
-                    }
-                }
-                Err(BrittleTetDynamicError::Solid(BrittleTetError::ReleasedFaceClosure {
-                    ..
-                })) => {
-                    bracketed = true;
-                    upper_time_s = target;
-                }
-                Err(error) => return Err(E::Endpoint(error)),
-            }
-            if upper_time_s - lower_time_s <= controls.time_tolerance_s
-                && let Some(mut contact) = witness
-            {
-                contact.bracket_end_time_s = upper_time_s;
-                return Ok(BrittleFaceApproachStep {
-                    advance: safe,
-                    contact: Some(contact),
-                    trials,
-                    numerical_tangent_evaluations: tangent_evaluations,
-                });
-            }
-            target = lower_time_s + 0.5 * (upper_time_s - lower_time_s);
-            if target <= lower_time_s || target >= upper_time_s {
-                return Err(E::Unresolved {
-                    lower_time_s,
-                    upper_time_s,
-                    reason: "no representable safe approaching prefix within both allowances",
-                });
-            }
+    pub(crate) fn released_face_motion_view(&self) -> ReleasedFaceMotionView<'_> {
+        ReleasedFaceMotionView {
+            displacement_m: &self.solid.solution.displacement_m,
+            velocity_mps: &self.velocity_mps,
+            released_faces: &self.solid.released_faces,
+            time_s: self.time_s,
         }
     }
 }
 
-/// Scan every non-tied pair before returning the first ordered witness.
-/// A later negative pair cannot be hidden by an earlier active approach.
+/// Physical fields needed by event localization, without a material conversion.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ReleasedFaceMotionView<'a> {
+    pub(crate) displacement_m: &'a [[f64; 3]],
+    pub(crate) velocity_mps: &'a [[f64; 3]],
+    pub(crate) released_faces: &'a [ReleasedBrittleFace],
+    pub(crate) time_s: f64,
+}
+
+/// A complete native prefix keeps its original constitutive and work receipt.
+pub(crate) struct NativeFaceApproach<Step> {
+    pub(crate) advance: Option<Step>,
+    pub(crate) contact: Option<BrittleFaceContactLocation>,
+    pub(crate) trials: usize,
+    pub(crate) numerical_tangent_evaluations: usize,
+}
+
+/// Read-only recovery from the actual native mechanical or thermal endpoint.
+pub(crate) trait NativeFaceApproachTrial {
+    fn face_motion(&self) -> ReleasedFaceMotionView<'_>;
+    fn tangent_evaluations(&self) -> usize;
+}
+
+impl NativeFaceApproachTrial for BrittleTetMidpointStep<'_> {
+    fn face_motion(&self) -> ReleasedFaceMotionView<'_> {
+        self.motion.released_face_motion_view()
+    }
+
+    fn tangent_evaluations(&self) -> usize {
+        self.numerical_tangent_evaluations
+    }
+}
+
+/// One bounded localization algorithm for both original material owners.
+/// Each callback replays its accepted native history; only a returned prefix
+/// can consume physical time. No interpolated constitutive state enters here.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+pub(crate) fn approach_released_faces<Step: NativeFaceApproachTrial>(
+    initial: ReleasedFaceMotionView<'_>,
+    duration_s: f64,
+    prescribed_end_m: &[(usize, f64)],
+    force_intervals_n: &[(usize, [f64; 2])],
+    settings: IncrementSettings,
+    controls: BrittleFaceApproachControls,
+    cx: &Cx<'_>,
+    mut advance: impl FnMut(
+        f64,
+        &[(usize, f64)],
+        &[(usize, f64)],
+    ) -> Result<Step, BrittleTetDynamicError>,
+) -> Result<NativeFaceApproach<Step>, BrittleFaceApproachError> {
+    use BrittleFaceApproachError as E;
+    checkpoint(cx)?;
+    let end_time_s = initial.time_s + duration_s;
+    validate(duration_s, initial.time_s, end_time_s, settings, controls)?;
+    let mut loads = PrefixLoads::new(
+        initial.displacement_m.as_flattened(),
+        prescribed_end_m,
+        force_intervals_n,
+        cx,
+    )?;
+    let scan = |motion: ReleasedFaceMotionView<'_>| {
+        scan_released_face_motion(
+            motion,
+            controls.activation_tolerance_m,
+            controls.velocity_tolerance_mps,
+            cx,
+        )
+    };
+    if let Some(contact) = scan(initial)? {
+        return Ok(NativeFaceApproach {
+            advance: None,
+            contact: Some(contact),
+            trials: 0,
+            numerical_tangent_evaluations: 0,
+        });
+    }
+
+    let mut lower_time_s = initial.time_s;
+    let mut upper_time_s = end_time_s;
+    let mut target = end_time_s;
+    let mut bracketed = false;
+    let mut safe = None;
+    let mut witness = None;
+    let mut trials = 0;
+    let mut tangent_evaluations = 0_usize;
+    loop {
+        checkpoint(cx)?;
+        if trials == controls.maximum_trials {
+            return Err(E::WorkLimit {
+                trials,
+                lower_time_s,
+                upper_time_s,
+            });
+        }
+        let fraction = if target == end_time_s {
+            1.0
+        } else {
+            (target - initial.time_s) / (end_time_s - initial.time_s)
+        };
+        loads.at(fraction, cx)?;
+        trials += 1;
+        let result = advance(target - initial.time_s, &loads.prescribed, &loads.forces);
+        match result {
+            Ok(step) => {
+                tangent_evaluations = tangent_evaluations
+                    .checked_add(step.tangent_evaluations())
+                    .ok_or(E::Invalid("completed tangent count overflow"))?;
+                if step.face_motion().time_s != target {
+                    return Err(E::Invalid("native clock did not reach requested prefix"));
+                }
+                match scan(step.face_motion()) {
+                    Ok(contact) => {
+                        if !bracketed {
+                            return Ok(NativeFaceApproach {
+                                advance: Some(step),
+                                contact,
+                                trials,
+                                numerical_tangent_evaluations: tangent_evaluations,
+                            });
+                        }
+                        lower_time_s = target;
+                        safe = Some(step);
+                        witness = contact;
+                    }
+                    Err(E::Overlap { .. }) => {
+                        bracketed = true;
+                        upper_time_s = target;
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            Err(BrittleTetDynamicError::Solid(BrittleTetError::ReleasedFaceClosure { .. })) => {
+                bracketed = true;
+                upper_time_s = target;
+            }
+            Err(error) => return Err(E::Endpoint(error)),
+        }
+        if upper_time_s - lower_time_s <= controls.time_tolerance_s
+            && let Some(mut contact) = witness
+        {
+            contact.bracket_end_time_s = upper_time_s;
+            return Ok(NativeFaceApproach {
+                advance: safe,
+                contact: Some(contact),
+                trials,
+                numerical_tangent_evaluations: tangent_evaluations,
+            });
+        }
+        target = lower_time_s + 0.5 * (upper_time_s - lower_time_s);
+        if target <= lower_time_s || target >= upper_time_s {
+            return Err(E::Unresolved {
+                lower_time_s,
+                upper_time_s,
+                reason: "no representable safe approaching prefix within both allowances",
+            });
+        }
+    }
+}
+
+/// Original native-motion entry, retained for contact-time mode composition.
 pub(super) fn scan_released_faces(
     motion: &BrittleTetMotion<'_>,
     activation_tolerance_m: f64,
     velocity_tolerance_mps: f64,
     cx: &Cx<'_>,
 ) -> Result<Option<BrittleFaceContactLocation>, BrittleFaceApproachError> {
+    scan_released_face_motion(
+        motion.released_face_motion_view(),
+        activation_tolerance_m,
+        velocity_tolerance_mps,
+        cx,
+    )
+}
+
+/// Scan every non-tied pair before returning the first ordered witness.
+/// A later negative pair cannot be hidden by an earlier active approach.
+pub(crate) fn scan_released_face_motion(
+    motion: ReleasedFaceMotionView<'_>,
+    activation_tolerance_m: f64,
+    velocity_tolerance_mps: f64,
+    cx: &Cx<'_>,
+) -> Result<Option<BrittleFaceContactLocation>, BrittleFaceApproachError> {
     let mut witness = None;
-    for face in motion.solid.released_faces.iter() {
+    for face in motion.released_faces {
         checkpoint(cx)?;
         for vertex in 0..3 {
             let [a, b] = [face.paired_nodes[0][vertex], face.paired_nodes[1][vertex]];
@@ -256,8 +348,7 @@ pub(super) fn scan_released_faces(
             // Equal reference coordinates cancel before arithmetic, just as
             // in the original released-face impact owner.
             let separation = core::array::from_fn(|axis| {
-                motion.solid.solution.displacement_m[b][axis]
-                    - motion.solid.solution.displacement_m[a][axis]
+                motion.displacement_m[b][axis] - motion.displacement_m[a][axis]
             });
             let relative_velocity = core::array::from_fn(|axis| {
                 motion.velocity_mps[b][axis] - motion.velocity_mps[a][axis]
@@ -294,7 +385,7 @@ pub(super) fn scan_released_faces(
     Ok(witness)
 }
 
-pub(super) fn validate(
+pub(crate) fn validate(
     duration_s: f64,
     start: f64,
     end: f64,
@@ -345,13 +436,12 @@ struct PrefixLoads<'a> {
 }
 impl<'a> PrefixLoads<'a> {
     fn new(
-        old: &'a BrittleTetMotion<'_>,
+        initial_u: &'a [f64],
         prescribed_end: &'a [(usize, f64)],
         force_intervals: &'a [(usize, [f64; 2])],
         cx: &Cx<'_>,
     ) -> Result<Self, BrittleFaceApproachError> {
         use BrittleFaceApproachError as E;
-        let initial_u = old.solid.solution.displacement_m.as_flattened();
         if prescribed_end.len() > initial_u.len() || force_intervals.len() > initial_u.len() {
             return Err(E::Invalid("load entries exceed original DOF count"));
         }
