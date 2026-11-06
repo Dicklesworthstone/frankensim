@@ -31,9 +31,10 @@ use fs_gas::dynamics::{
     Boundaries, Boundary, Conserved, Error as GasError, Euler1d, FaceFlux, FrozenGas, Mesh1d,
     PortStage, Primitive, Reconstruction, StepControl, StepReport,
 };
+use fs_material::fluid_transport::FluidTransportState;
 use fs_math::det;
 use fs_phs::ZkDiffusiveBasis;
-use fs_qty::Time;
+use fs_qty::{Pressure, Temperature, Time};
 
 /// Zwikker–Kosten wall-memory admission for every cell.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -46,7 +47,13 @@ pub struct WallMemory {
     pub maximum_relative_error: f64,
 }
 
-/// Transport of the bore gas at the wall, from the same source as the field.
+/// Transport at the stationary room/wall reference state.
+///
+/// Density and gamma must match the field's original caloric source at the
+/// room temperature and pressure. [`NonlinearBore::new`] checks this before
+/// binding the wall memory. Viscosity and Prandtl number remain caller-owned
+/// transport data at that same state; [`Self::from_source`] derives Prandtl
+/// from the original Cp(T) and a supplied thermal conductivity.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct WallGas {
     /// Density [kg/m³].
@@ -57,6 +64,91 @@ pub struct WallGas {
     pub gamma: f64,
     /// Prandtl number.
     pub prandtl: f64,
+}
+
+impl WallGas {
+    /// Combine the field's original thermodynamics at `(T [K], p [Pa])` with
+    /// viscosity [Pa s] and thermal conductivity [W/(m K)] at that same state.
+    ///
+    /// The source supplies density, gamma = Cp(T)/Cv(T), and the Cp(T) used in
+    /// Pr = mu Cp(T)/k. The reference must lie in the field's declared caloric
+    /// domain. Transport coefficients carry their caller's source authority;
+    /// this constructor does not supply transport fits or change their domain.
+    /// The resulting wall coefficients stay fixed during bore evolution.
+    pub fn from_source(
+        gas: &FrozenGas,
+        temperature_k: f64,
+        pressure_pa: f64,
+        dynamic_viscosity_pa_s: f64,
+        thermal_conductivity_w_m_k: f64,
+    ) -> Result<Self, NonlinearDuctError> {
+        let (density, cp, gamma) = Self::reference(gas, temperature_k, pressure_pa)?;
+        let transport = FluidTransportState::try_new(
+            density,
+            cp,
+            thermal_conductivity_w_m_k,
+            dynamic_viscosity_pa_s,
+        )
+        .map_err(|_| unsupported("wall viscosity, conductivity or derived transport is invalid"))?;
+        Ok(Self {
+            density_kg_m3: density,
+            dynamic_viscosity_pa_s,
+            gamma,
+            prandtl: transport.prandtl(),
+        })
+    }
+
+    fn reference(
+        gas: &FrozenGas,
+        temperature_k: f64,
+        pressure_pa: f64,
+    ) -> Result<(f64, f64, f64), NonlinearDuctError> {
+        let domain = gas.domain();
+        if !(domain.minimum_temperature..=domain.maximum_temperature).contains(&temperature_k) {
+            return Err(GasError::CaloricPath(
+                "wall reference temperature outside declared interval",
+            )
+            .into());
+        }
+        // Evaluate the explicit reference directly, without perturbing its
+        // temperature through a conservative-energy inversion.
+        let properties = gas
+            .source()
+            .evaluate_properties(Temperature::new(temperature_k), Pressure::new(pressure_pa))
+            .map_err(GasError::from)?;
+        let density = pressure_pa / (gas.gas_constant() * temperature_k);
+        let cp = properties.mass_specific_cp().value();
+        let gamma = cp / properties.mass_specific_cv().value();
+        if ![density, cp, gamma].into_iter().all(positive) {
+            return Err(unsupported(
+                "wall reference thermodynamics is unrepresentable",
+            ));
+        }
+        Ok((density, cp, gamma))
+    }
+
+    fn validate_at(
+        self,
+        gas: &FrozenGas,
+        temperature_k: f64,
+        pressure_pa: f64,
+    ) -> Result<(), NonlinearDuctError> {
+        let (density, _, gamma) = Self::reference(gas, temperature_k, pressure_pa)?;
+        let close = |actual: f64, expected: f64| {
+            positive(actual) && (actual - expected).abs() <= 2.0e-12 * actual.max(expected)
+        };
+        if !close(self.density_kg_m3, density) {
+            return Err(unsupported(
+                "wall density disagrees with the source at the room state",
+            ));
+        }
+        if !close(self.gamma, gamma) {
+            return Err(unsupported(
+                "wall gamma disagrees with source Cp/Cv at the room state",
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// Discretization of a sounding bore.
@@ -122,7 +214,9 @@ impl NonlinearBore {
     /// `room` is the stationary exterior (and initial bore) state: its density
     /// and sound speed set the piston's radiation, and its temperature is the
     /// reference of the thermal wall arms. `wall_gas` is required with
-    /// `spec.wall` and is ignored without it.
+    /// `spec.wall` and is ignored without it. Its density and gamma must agree
+    /// with the original source at the declared room temperature and pressure
+    /// to relative roundoff (2e-12); stale snapshots refuse before wall binding.
     pub fn new(
         duct: &Duct,
         gas: FrozenGas,
@@ -152,13 +246,16 @@ impl NonlinearBore {
         let walls = match (spec.wall, wall_gas) {
             (None, _) => None,
             (Some(_), None) => return Err(unsupported("wall memory needs the wall gas transport")),
-            (Some(memory), Some(transport)) => Some(Walls::new(
-                &geometry.wall_radii,
-                memory,
-                transport,
-                room.temperature,
-                spec.step_s,
-            )?),
+            (Some(memory), Some(transport)) => {
+                transport.validate_at(&gas, room_temperature_k, room_pressure_pa)?;
+                Some(Walls::new(
+                    &geometry.wall_radii,
+                    memory,
+                    transport,
+                    room_temperature_k,
+                    spec.step_s,
+                )?)
+            }
         };
         let solver = Euler1d::new_on_mesh(
             gas.clone(),
@@ -453,8 +550,7 @@ fn bore_mesh(
 
 // Share the normalized impulse kernel with the other pressure/flow owners.
 fn piston_weights(step_s: f64, transit_s: f64) -> Result<Vec<f64>, NonlinearDuctError> {
-    fs_math::special::semicircle_hat_weights(step_s / transit_s, 1_048_576)
-        .map_err(unsupported)
+    fs_math::special::semicircle_hat_weights(step_s / transit_s, 1_048_576).map_err(unsupported)
 }
 
 struct PistonRadiation {

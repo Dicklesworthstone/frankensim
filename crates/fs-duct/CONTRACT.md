@@ -2399,6 +2399,15 @@ NASA-9 source and adds what a played bore needs:
   binding of the gas's own density, viscosity, gamma and Prandtl number on a
   declared band and error: viscous drag plus series arms on the momentum,
   thermal drag plus series arms on temperature relative to the room wall.
+  The density and gamma in a supplied `WallGas` must match the field's original
+  source at the declared room temperature and pressure within relative
+  roundoff (2e-12); stale caloric or density snapshots refuse before binding.
+  `WallGas::from_source` accepts the original `FrozenGas`, that reference state,
+  and the caller's viscosity and thermal conductivity; it derives density,
+  gamma = Cp(T)/Cv(T) and Pr = mu Cp(T)/k from the same local source state.
+  The reference is evaluated directly within the field's declared caloric
+  domain, without an energy-to-temperature round trip. Transport source
+  applicability remains the caller's responsibility.
   Each cell's arms advance between accepted steps
   by the exact propagator `exp(G dt)` of a symmetric negative-semidefinite
   generator, held in the generator's eigen-coordinates (fs-la cyclic Jacobi,
@@ -2455,7 +2464,10 @@ Density regressions preserve zero heat across isothermal density variations,
 retain thermal history through density changes, and reach the wall temperature
 at different densities. A bounded frequency oracle compares the actual thermal
 generator with the exact Bessel acoustic compliance across density, gamma and
-the admitted band.
+the admitted band. Source-bound bore regressions additionally refuse stale
+gamma and density, retain the declared caloric domain, and compare constant
+and variable-Cp wall bindings at different room temperatures with that Bessel
+oracle. Accepted bore steps preserve the corresponding quiescent room states.
 
 ### Conservative molecular transport in nonlinear bores
 

@@ -94,6 +94,151 @@ fn wall_gas(state: &GasState) -> WallGas {
     }
 }
 
+fn reference_bore(
+    gas: &FrozenGas,
+    temperature: f64,
+    pressure: f64,
+    transport: WallGas,
+) -> Result<NonlinearBore, NonlinearDuctError> {
+    NonlinearBore::new(
+        &Duct {
+            segments: vec![Segment::Cylinder {
+                radius: 1.0e-3,
+                length: 0.02,
+            }],
+        },
+        gas.clone(),
+        temperature,
+        pressure,
+        Some(transport),
+        BoreSpec {
+            maximum_cell_m: 0.01,
+            inlet_volume_m3: 0.0,
+            step_s: 1.0e-7,
+            cfl: 0.45,
+            wall: Some(WallMemory {
+                poles: 24,
+                band_hz: [20.0, 8000.0],
+                maximum_relative_error: 1e-2,
+            }),
+        },
+    )
+}
+
+#[test]
+fn g0_bore_refuses_stale_wall_gamma_and_density() {
+    let state = air();
+    let slope = 0.003;
+    let gas = caloric_source(&state, slope);
+    let (temperature, pressure) = (600.0, 150_000.0);
+    let cp = state.specific_heat_cp + state.specific_gas_constant * slope * temperature;
+    let transport = WallGas {
+        density_kg_m3: pressure / (state.specific_gas_constant * temperature),
+        dynamic_viscosity_pa_s: state.dynamic_viscosity,
+        gamma: cp / (cp - state.specific_gas_constant),
+        prandtl: state.dynamic_viscosity * cp / state.thermal_conductivity,
+    };
+    for (coefficient, stale) in [
+        (
+            "gamma",
+            WallGas {
+                gamma: state.gamma,
+                ..transport
+            },
+        ),
+        (
+            "density",
+            WallGas {
+                density_kg_m3: 1.01 * transport.density_kg_m3,
+                ..transport
+            },
+        ),
+        (
+            "gamma",
+            WallGas {
+                gamma: f64::NAN,
+                ..transport
+            },
+        ),
+        (
+            "density",
+            WallGas {
+                density_kg_m3: f64::INFINITY,
+                ..transport
+            },
+        ),
+    ] {
+        let error = reference_bore(&gas, temperature, pressure, stale)
+            .err()
+            .expect("inconsistent wall snapshot must refuse")
+            .to_string();
+        assert!(
+            error.contains(coefficient) && error.contains("room state"),
+            "{error}"
+        );
+    }
+    // An independent analytic snapshot at the actual reference remains valid.
+    reference_bore(&gas, temperature, pressure, transport).unwrap();
+}
+
+#[test]
+fn g0_source_wall_gas_retains_the_field_domain_and_transport_admission() {
+    let state = air();
+    let source = caloric_source(&state, 0.003);
+    let gas = FrozenGas::new(
+        source.source().clone(),
+        CaloricDomain::new(Temperature::new(200.0), Temperature::new(700.0)),
+        || false,
+    )
+    .unwrap();
+    for temperature in [150.0, 750.0, f64::NAN] {
+        assert!(matches!(
+            WallGas::from_source(&gas, temperature, 100_000.0, 2e-5, 0.03),
+            Err(NonlinearDuctError::Gas(GasError::CaloricPath(_)))
+        ));
+    }
+    for (viscosity, conductivity) in [(0.0, 0.03), (2e-5, 0.0)] {
+        assert!(WallGas::from_source(&gas, 300.0, 100_000.0, viscosity, conductivity).is_err());
+    }
+}
+
+#[test]
+fn g1_source_wall_gas_uses_local_cp_in_gamma_prandtl_and_compliance() {
+    let state = air();
+    let r = state.specific_gas_constant;
+    for slope in [0.0, 0.003] {
+        let gas = caloric_source(&state, slope);
+        for temperature in [250.0, 650.0] {
+            let (pressure, viscosity, conductivity) = (175_000.0, 2e-5, 0.03);
+            let cp = state.specific_heat_cp + r * slope * temperature;
+            let transport =
+                WallGas::from_source(&gas, temperature, pressure, viscosity, conductivity).unwrap();
+            assert!((transport.density_kg_m3 / (pressure / (r * temperature)) - 1.0).abs() < 1e-12);
+            assert!((transport.gamma / (cp / (cp - r)) - 1.0).abs() < 1e-12);
+            assert!((transport.prandtl / (viscosity * cp / conductivity) - 1.0).abs() < 1e-12);
+
+            let mut bore = reference_bore(&gas, temperature, pressure, transport).unwrap();
+            let walls = bore.walls.as_ref().unwrap();
+            assert_eq!(walls.wall_temperature, temperature);
+            assert_wall_compliance(walls, transport, 1.0e-3, bore.step_s);
+            // The source-bound wall and radiation also retain a quiescent
+            // nonstandard-temperature room through actual accepted steps.
+            let initial = bore.solver.states().to_vec();
+            for _ in 0..3 {
+                bore.step(|_| Ok(None)).unwrap();
+            }
+            for (before, after) in initial.iter().zip(bore.solver.states()) {
+                assert!((after.density / before.density - 1.0).abs() < 1e-12);
+                assert!((after.energy / before.energy - 1.0).abs() < 1e-12);
+                assert!(
+                    (gas.primitive(*after, || false).unwrap().temperature - temperature).abs()
+                        < 1e-8
+                );
+            }
+        }
+    }
+}
+
 // A single, exactly soluble thermal arm: gain=rate=1 and exp(-2*dt)=1/5.
 // From zero history its temperature response is 3/5 of the initial perturbation.
 fn caloric_walls(cells: usize, wall_temperature: f64, drag: f64, thermal: bool) -> Walls {
@@ -280,6 +425,40 @@ fn g1_caloric_wall_history_retains_temperature_meaning_across_density_changes() 
     }
 }
 
+fn assert_wall_compliance(walls: &Walls, transport: WallGas, radius: f64, dt: f64) {
+    let thermal = &walls.propagators[walls.thermal_of[0]];
+    let gamma = transport.gamma;
+    for frequency in [20.0, 100.0, 1000.0, 4000.0, 8000.0] {
+        let omega = core::f64::consts::TAU * frequency;
+        let s = C64::new(0.0, omega);
+        // The mean response of the ACTUAL bound generator to a
+        // heating source is e0^T(sI-G)^-1 e0 = 1/(s+H(s)).
+        let response =
+            thermal
+                .head
+                .iter()
+                .zip(&thermal.decay)
+                .fold(C64::ZERO, |total, (&head, &decay)| {
+                    let rate = -det::ln(decay) / dt;
+                    total + C64::from_re(head * head) / (s + C64::from_re(rate))
+                });
+        // T' is driven by (gamma-1) T0 rho'/rho0; the ideal-gas
+        // relation then gives p'/(R T0 rho') below.
+        let actual = C64::from_re(1.0) + (s * response).scale(gamma - 1.0);
+        let shear = det::sqrt(
+            omega * transport.density_kg_m3 * radius * radius * transport.prandtl
+                / transport.dynamic_viscosity_pa_s,
+        );
+        let f = fs_phs::zwikker_kosten_f(shear).unwrap();
+        let expected = C64::from_re(gamma) / (C64::from_re(1.0) + f.scale(gamma - 1.0));
+        let error = (actual - expected).abs() / expected.abs();
+        assert!(
+            error < 1e-3,
+            "wall gas {transport:?}, f {frequency}: {error}"
+        );
+    }
+}
+
 #[test]
 fn g1_temperature_wall_preserves_the_exact_zk_compliance() {
     let state = air();
@@ -304,34 +483,7 @@ fn g1_temperature_wall_preserves_the_exact_zk_compliance() {
                 dt,
             )
             .unwrap();
-            let thermal = &walls.propagators[walls.thermal_of[0]];
-            for frequency in [20.0, 100.0, 1000.0, 4000.0, 8000.0] {
-                let omega = core::f64::consts::TAU * frequency;
-                let s = C64::new(0.0, omega);
-                // The mean response of the ACTUAL bound generator to a
-                // heating source is e0^T(sI-G)^-1 e0 = 1/(s+H(s)).
-                let response = thermal.head.iter().zip(&thermal.decay).fold(
-                    C64::ZERO,
-                    |total, (&head, &decay)| {
-                        let rate = -det::ln(decay) / dt;
-                        total + C64::from_re(head * head) / (s + C64::from_re(rate))
-                    },
-                );
-                // T' is driven by (gamma-1) T0 rho'/rho0; the ideal-gas
-                // relation then gives p'/(R T0 rho') below.
-                let actual = C64::from_re(1.0) + (s * response).scale(gamma - 1.0);
-                let shear = det::sqrt(
-                    omega * transport.density_kg_m3 * radius * radius * transport.prandtl
-                        / transport.dynamic_viscosity_pa_s,
-                );
-                let f = fs_phs::zwikker_kosten_f(shear).unwrap();
-                let expected = C64::from_re(gamma) / (C64::from_re(1.0) + f.scale(gamma - 1.0));
-                let error = (actual - expected).abs() / expected.abs();
-                assert!(
-                    error < 1e-3,
-                    "rho factor {density_factor}, gamma {gamma}, f {frequency}: {error}"
-                );
-            }
+            assert_wall_compliance(&walls, transport, radius, dt);
         }
     }
 }
