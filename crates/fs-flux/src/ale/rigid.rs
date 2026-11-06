@@ -307,6 +307,8 @@ impl<'s, 'm, 'a, F: FluidTransport + ?Sized> RigidAleFlow<'s, 'm, 'a, F> {
     /// Initially R=I, X=reference_pivot and time=0, so geometry is unchanged.
     /// Initial mesh rates are recorded, but absolute history needs no invented
     /// acceleration source when those rates change.
+    /// A configured relative-velocity Coriolis operator is incompatible with
+    /// this absolute-velocity formulation and is refused before binding.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         system: &'s FluxSystem<'m>,
@@ -316,6 +318,11 @@ impl<'s, 'm, 'a, F: FluidTransport + ?Sized> RigidAleFlow<'s, 'm, 'a, F> {
         initial_motion: RigidAleMotion,
         initial_world_velocity: &[f64],
     ) -> Result<Self, RigidAleError> {
+        if system.coriolis_parameter() != 0.0 {
+            return Err(invalid(
+                "relative-velocity Coriolis is incompatible with absolute-velocity rigid ALE",
+            ));
+        }
         if initial_world_velocity.len() != system.n_u
             || !reference_pivot_m
                 .iter()

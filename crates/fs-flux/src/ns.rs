@@ -301,6 +301,8 @@ pub struct FluxSystem<'m> {
     pub(crate) pressure_component: Vec<usize>,
     /// First triangle in each component, in increasing triangle order.
     pressure_roots: Vec<usize>,
+    // Signed local f = 2 Omega_z [1/s], zero on the original inertial path.
+    coriolis_parameter_s_inv: f64,
 }
 
 impl<'m> FluxSystem<'m> {
@@ -342,7 +344,48 @@ impl<'m> FluxSystem<'m> {
             n: n_u + mesh.tris.len(),
             pressure_component,
             pressure_roots,
+            coriolis_parameter_s_inv: 0.0,
         }
+    }
+
+    /// Configure constant planar Coriolis coupling for frame-relative velocity.
+    ///
+    /// The signed parameter is f = 2 Omega_z [1/s]. The momentum equation gains
+    /// +f J u on the left, with J(u_x, u_y) = (-u_y, u_x): positive f turns an
+    /// unforced velocity clockwise. Velocity, boundary data and loads use the
+    /// same local frame. Centrifugal, Euler and origin acceleration, when
+    /// applicable, remain explicit contributions to the existing body force.
+    ///
+    /// The native BDM operator integrates this skew coupling with the same
+    /// current density metric as inertia. It contributes no instantaneous
+    /// kinetic-energy work or viscous heat. BDF1 and BDF2 retain their existing
+    /// time discretization; in particular, BDF1 damps inertial oscillations.
+    /// Zero skips all additional assembly and preserves the original path.
+    ///
+    /// This is a local f-plane model on the fixed chart. The translating and
+    /// rigid ALE owners interpret velocities relative to WORLD and refuse a
+    /// nonzero parameter rather than mix their distinct coordinate laws.
+    ///
+    /// # Errors
+    /// Refuses a nonfinite parameter. Checked assembly also refuses arithmetic
+    /// overflow before publishing an operator or a solved field.
+    pub fn with_coriolis_parameter(
+        mut self,
+        parameter_s_inv: f64,
+    ) -> Result<Self, boundary::StokesBoundaryError> {
+        if !parameter_s_inv.is_finite() {
+            return Err(boundary::StokesBoundaryError::InvalidInput(
+                "finite signed Coriolis parameter in inverse seconds required",
+            ));
+        }
+        self.coriolis_parameter_s_inv = parameter_s_inv;
+        Ok(self)
+    }
+
+    /// Configured signed local f = 2 Omega_z [1/s], zero by default.
+    #[must_use]
+    pub const fn coriolis_parameter(&self) -> f64 {
+        self.coriolis_parameter_s_inv
     }
 
     /// Number of independently connected pressure domains.
@@ -571,6 +614,34 @@ impl<'m> FluxSystem<'m> {
             if let Some(weights) = inertia_weights {
                 for (q, (_, weight)) in mass_quadrature.iter_mut().enumerate() {
                     *weight = weights[t][q];
+                }
+            }
+            if self.coriolis_parameter_s_inv != 0.0 {
+                // BDM coefficients are normal moments, not Cartesian pairs.
+                // Integrate f * v.Ju in the ORIGINAL physical vector basis,
+                // using the current inertia weights even for transported rho.
+                // Accumulate each pair once and mirror it: the local operator
+                // is exactly skew with a zero diagonal before constraints.
+                let mut coriolis = [[0.0; 6]; 6];
+                for (point, weight) in mass_quadrature {
+                    let values: [[f64; 2]; 6] =
+                        core::array::from_fn(|i| eval_basis(basis, i, point));
+                    let scaled_weight = weight * self.coriolis_parameter_s_inv;
+                    for i in 0..6 {
+                        for j in (i + 1)..6 {
+                            coriolis[i][j] += scaled_weight
+                                * (values[i][1] * values[j][0] - values[i][0] * values[j][1]);
+                        }
+                    }
+                }
+                for (i, row) in coriolis.iter().enumerate() {
+                    for (j, &value) in row.iter().enumerate().skip(i + 1) {
+                        if value != 0.0 {
+                            let (gi, gj) = (self.dof(t, i), self.dof(t, j));
+                            momentum_entry(&mut coo, &mut reactions, &con, gi, gj, value);
+                            momentum_entry(&mut coo, &mut reactions, &con, gj, gi, -value);
+                        }
+                    }
                 }
             }
             // A rigid moving chart changes vector axes between time levels.

@@ -1520,6 +1520,38 @@ without viscous/SIP loss. `tests/material_flow/density.rs` carries original
 two-layer gas sources through BDF2 and checks physical pressure/energy, source
 reuse, both immutable histories and the homogeneous source adapter.
 
+### Local Coriolis coupling on native incompressible momentum
+
+`FluxSystem::with_coriolis_parameter(f)` admits a finite signed planar
+`f = 2*Omega_z` [s^-1] for frame-relative velocity. The common BDM momentum
+owner adds `+f*J*u` on the left, with `J(u_x,u_y)=(-u_y,u_x)`; positive
+f turns an unforced velocity clockwise. Velocity, loads and boundary data
+must use the same local frame.
+
+The cell operator integrates `r*f*v dot J*u` using the original physical
+vector basis and the same current density ratio `r=rho/rho_reference`
+quadrature as inertia, including fixed and conservatively transported density.
+BDM edge-normal coefficients are never treated as Cartesian velocity pairs.
+Each local pair is accumulated once and mirrored with its negative, with a
+zero diagonal before constraints. Existing boundary-reaction recovery and
+shared rheology, Newton, material and porous assemblies retain the coupling.
+The added cell block uses fixed-size storage; zero f skips it entirely.
+
+The skew source supplies no instantaneous kinetic-energy work or viscous heat.
+Existing BDF1/BDF2 time integration is unchanged: for example, uniform BDF1
+inertial oscillations retain amplitude `1/sqrt(1+(f*dt)^2)` per step. The
+skew spatial operator therefore does not imply energy conservation of the
+complete time discretization. This is a constant-f local planar model;
+centrifugal, Euler and origin acceleration remain explicit body forces.
+
+The translating and rigid ALE owners evolve WORLD/absolute velocity and
+refuse nonzero relative-velocity Coriolis configuration; the checked rigid
+history assembly also enforces this boundary. Regression definitions in
+`tests/coriolis.rs` cover both signs of inertial oscillation, a density-weighted
+analytic bilinear integral, zero source work, a geostrophic pressure/reaction
+case, material-density scaling, sparse solution, zero equivalence and invalid
+or incompatible inputs.
+
 ## Nonlinear pressure-driven flow with explicit backflow behavior
 
 `solve_navier_stokes_mixed`, its frozen spatial-viscosity variant, and

@@ -508,6 +508,11 @@ impl<'m> FluxSystem<'m> {
         advecting_velocity: Option<&[f64]>,
         history_rotation: Option<[f64; 2]>,
     ) -> Result<StokesAssembly<'a, 'm>, StokesBoundaryError> {
+        if history_rotation.is_some() && self.coriolis_parameter() != 0.0 {
+            return Err(StokesBoundaryError::InvalidInput(
+                "relative-velocity Coriolis is incompatible with absolute-velocity rigid ALE",
+            ));
+        }
         self.assemble_stokes_admitted_density(
             params,
             viscosity,

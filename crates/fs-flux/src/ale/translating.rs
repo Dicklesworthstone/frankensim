@@ -222,6 +222,8 @@ impl<'s, 'm, 'a, F: FluidTransport + ?Sized> TranslatingAleFlow<'s, 'm, 'a, F> {
     ///
     /// # Errors
     /// Refuses invalid initial rates/history, source data or numerical controls.
+    /// A nonzero native Coriolis parameter is refused: this WORLD translation
+    /// law does not transform rotational forces with the mesh velocity.
     pub fn new(
         system: &'s FluxSystem<'m>,
         material: &'a F,
@@ -229,6 +231,11 @@ impl<'s, 'm, 'a, F: FluidTransport + ?Sized> TranslatingAleFlow<'s, 'm, 'a, F> {
         initial_mesh_velocity_m_s: [f64; 2],
         initial_world_velocity: &[f64],
     ) -> Result<Self, TranslatingAleError> {
+        if system.coriolis_parameter() != 0.0 {
+            return Err(TranslatingAleError::Invalid(
+                "relative-velocity Coriolis is incompatible with WORLD translating ALE",
+            ));
+        }
         let relative_velocity = shifted_velocity(
             system,
             initial_world_velocity,
