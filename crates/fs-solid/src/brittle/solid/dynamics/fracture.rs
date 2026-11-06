@@ -117,99 +117,155 @@ impl<'a> BrittleTetMotion<'a> {
         let fracture = self
             .solid
             .split_fracture(topology, target_geometry, controls, cx)?;
-        let transfer = topology
-            .transfer_motion(
-                self.solid.solution.displacement_m.as_flattened(),
-                self.velocity_mps.as_flattened(),
-                &self.reference_density_kg_m3,
-                cx,
-            )
-            .map_err(BrittleTetFractureError::Topology)?;
-        if transfer.displacement_m != fracture.solid.solution.displacement_m.as_flattened() {
-            return Err(BrittleTetDynamicError::Invalid(
-                "solid and motion handoffs must retain the same displacement field",
-            )
-            .into());
-        }
-        let mass = P1ReferenceMass::new(
-            target_geometry
-                .tetrahedra()
-                .iter()
-                .zip(target_geometry.element_volumes_m3())
-                .map(|(&nodes, &volume)| (nodes, volume)),
-            &self.reference_density_kg_m3,
-            transfer.velocity_m_s.len(),
+        let transfer = transfer_fracture_motion(
+            FractureMotionView {
+                displacement_m: &self.solid.solution.displacement_m,
+                velocity_mps: &self.velocity_mps,
+                reference_density_kg_m3: &self.reference_density_kg_m3,
+                mass: &self.mass,
+                kinetic_energy_j: self.kinetic_energy_j,
+            },
+            topology,
+            target_geometry,
+            &fracture.solid.solution.displacement_m,
+            kinetic_tolerance_j,
             cx,
-        )
-        .map_err(SmallStrainTetError::from)
-        .map_err(BrittleTetDynamicError::from)?;
-        // Element order, volume and density are unchanged, so both native
-        // mass constructors perform the identical scalar inventory reduction.
-        if mass.reference_mass_kg() != self.mass.reference_mass_kg() {
-            return Err(BrittleTetDynamicError::Invalid(
-                "a fracture cut cannot change the native reference mass inventory",
-            )
-            .into());
-        }
-        let momentum = mass
-            .action(&transfer.velocity_m_s, cx)
-            .map_err(SmallStrainTetError::from)
-            .map_err(BrittleTetDynamicError::from)?;
-        let mut kinetic_after_j = 0.0;
-        for (dof, (&velocity, &momentum)) in transfer.velocity_m_s.iter().zip(&momentum).enumerate()
-        {
-            if dof % 256 == 0 {
-                checkpoint(cx)?;
-            }
-            kinetic_after_j = velocity.mul_add(momentum, kinetic_after_j);
-        }
-        kinetic_after_j *= 0.5;
-        if !kinetic_after_j.is_finite() || kinetic_after_j < 0.0 {
-            return Err(BrittleTetDynamicError::Invalid(
-                "finite nonnegative native kinetic storage required after a cut",
-            )
-            .into());
-        }
-        let kinetic_defect_j = kinetic_after_j - self.kinetic_energy_j;
-        for (account, defect) in [
-            (
-                "pre-fracture consistent kinetic inventory",
-                transfer.before.kinetic_energy_j - self.kinetic_energy_j,
-            ),
-            (
-                "post-fracture consistent kinetic inventory",
-                kinetic_after_j - transfer.after.kinetic_energy_j,
-            ),
-            ("fracture kinetic-storage continuity", kinetic_defect_j),
-        ] {
-            energy_gate(account, defect, kinetic_tolerance_j)?;
-        }
-        let mut velocity_mps = Vec::with_capacity(target_geometry.nodes_m().len());
-        for (index, velocity) in transfer.velocity_m_s.chunks_exact(3).enumerate() {
-            if index % 256 == 0 {
-                checkpoint(cx)?;
-            }
-            velocity_mps.push([velocity[0], velocity[1], velocity[2]]);
-        }
+        )?;
         checkpoint(cx)?;
         Ok(BrittleTetFractureMotionStep {
             motion: BrittleTetMotion {
                 solid: fracture.solid,
-                velocity_mps,
+                velocity_mps: transfer.velocity_mps,
                 reference_density_kg_m3: Arc::clone(&self.reference_density_kg_m3),
-                mass: Arc::new(mass),
-                kinetic_energy_j: kinetic_after_j,
+                mass: Arc::new(transfer.mass),
+                kinetic_energy_j: transfer.kinetic_after_j,
                 time_s: self.time_s,
                 maximum_steps: self.maximum_steps,
                 accepted_steps: self.accepted_steps,
             },
             energy: fracture.energy,
-            inventory_before: transfer.before,
-            inventory_after: transfer.after,
+            inventory_before: transfer.inventory_before,
+            inventory_after: transfer.inventory_after,
             fragments: transfer.fragments,
             kinetic_before_j: self.kinetic_energy_j,
-            kinetic_after_j,
-            kinetic_defect_j,
+            kinetic_after_j: transfer.kinetic_after_j,
+            kinetic_defect_j: transfer.kinetic_defect_j,
         })
     }
+}
+
+/// Native nodal motion and its already accepted reference inventory.
+/// Constitutive and source histories stay with their original solid owner.
+pub(crate) struct FractureMotionView<'a> {
+    pub displacement_m: &'a [[f64; 3]],
+    pub velocity_mps: &'a [[f64; 3]],
+    pub reference_density_kg_m3: &'a [f64],
+    pub mass: &'a P1ReferenceMass,
+    pub kinetic_energy_j: f64,
+}
+
+/// Physical transfer shared by thermal and nonthermal completed-fracture bodies.
+pub(crate) struct PreparedFractureMotion {
+    pub velocity_mps: Vec<[f64; 3]>,
+    pub mass: P1ReferenceMass,
+    pub inventory_before: P1PhysicalInventory,
+    pub inventory_after: P1PhysicalInventory,
+    pub fragments: Vec<P1PhysicalInventory>,
+    pub kinetic_after_j: f64,
+    pub kinetic_defect_j: f64,
+}
+
+/// The solid owner first admits the exact split mesh and its material history.
+/// This transfer changes only the nodal stars of the same reference matter.
+pub(crate) fn transfer_fracture_motion(
+    old: FractureMotionView<'_>,
+    topology: &TetFractureTopology<'_>,
+    target_geometry: &TetLoadGeometry3<'_>,
+    target_displacement_m: &[[f64; 3]],
+    kinetic_tolerance_j: f64,
+    cx: &Cx<'_>,
+) -> Result<PreparedFractureMotion, BrittleTetFractureMotionError> {
+    let transfer = topology
+        .transfer_motion(
+            old.displacement_m.as_flattened(),
+            old.velocity_mps.as_flattened(),
+            old.reference_density_kg_m3,
+            cx,
+        )
+        .map_err(BrittleTetFractureError::Topology)?;
+    if transfer.displacement_m != target_displacement_m.as_flattened() {
+        return Err(BrittleTetDynamicError::Invalid(
+            "solid and motion handoffs must retain the same displacement field",
+        )
+        .into());
+    }
+    let mass = P1ReferenceMass::new(
+        target_geometry
+            .tetrahedra()
+            .iter()
+            .zip(target_geometry.element_volumes_m3())
+            .map(|(&nodes, &volume)| (nodes, volume)),
+        old.reference_density_kg_m3,
+        transfer.velocity_m_s.len(),
+        cx,
+    )
+    .map_err(SmallStrainTetError::from)
+    .map_err(BrittleTetDynamicError::from)?;
+    // Element order, volume and density are unchanged, so both native
+    // mass constructors perform the identical scalar inventory reduction.
+    if mass.reference_mass_kg() != old.mass.reference_mass_kg() {
+        return Err(BrittleTetDynamicError::Invalid(
+            "a fracture cut cannot change the native reference mass inventory",
+        )
+        .into());
+    }
+    let momentum = mass
+        .action(&transfer.velocity_m_s, cx)
+        .map_err(SmallStrainTetError::from)
+        .map_err(BrittleTetDynamicError::from)?;
+    let mut kinetic_after_j = 0.0;
+    for (dof, (&velocity, &momentum)) in transfer.velocity_m_s.iter().zip(&momentum).enumerate() {
+        if dof % 256 == 0 {
+            checkpoint(cx)?;
+        }
+        kinetic_after_j = velocity.mul_add(momentum, kinetic_after_j);
+    }
+    kinetic_after_j *= 0.5;
+    if !kinetic_after_j.is_finite() || kinetic_after_j < 0.0 {
+        return Err(BrittleTetDynamicError::Invalid(
+            "finite nonnegative native kinetic storage required after a cut",
+        )
+        .into());
+    }
+    let kinetic_defect_j = kinetic_after_j - old.kinetic_energy_j;
+    for (account, defect) in [
+        (
+            "pre-fracture consistent kinetic inventory",
+            transfer.before.kinetic_energy_j - old.kinetic_energy_j,
+        ),
+        (
+            "post-fracture consistent kinetic inventory",
+            kinetic_after_j - transfer.after.kinetic_energy_j,
+        ),
+        ("fracture kinetic-storage continuity", kinetic_defect_j),
+    ] {
+        energy_gate(account, defect, kinetic_tolerance_j)?;
+    }
+    let mut velocity_mps = Vec::with_capacity(target_geometry.nodes_m().len());
+    for (index, velocity) in transfer.velocity_m_s.chunks_exact(3).enumerate() {
+        if index % 256 == 0 {
+            checkpoint(cx)?;
+        }
+        velocity_mps.push([velocity[0], velocity[1], velocity[2]]);
+    }
+    checkpoint(cx)?;
+    Ok(PreparedFractureMotion {
+        velocity_mps,
+        mass,
+        inventory_before: transfer.before,
+        inventory_after: transfer.after,
+        fragments: transfer.fragments,
+        kinetic_after_j,
+        kinetic_defect_j,
+    })
 }

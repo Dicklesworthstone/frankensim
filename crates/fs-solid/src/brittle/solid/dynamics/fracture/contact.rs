@@ -26,7 +26,9 @@ use fs_contact::multicontact::{
 use fs_exec::Cx;
 
 use crate::brittle::solid::dynamics::{BrittleTetDynamicError, BrittleTetMotion};
+use crate::brittle::solid::fracture::ReleasedBrittleFace;
 use crate::brittle::solid::{BrittleTetError, BrittleTetSolid, checkpoint, energy_gate};
+use crate::inertia::P1ReferenceMass;
 pub use crate::inertia::{SolidImpulseControls, SolidImpulseReport};
 use crate::plastic3::SmallStrainTetError;
 
@@ -140,200 +142,30 @@ impl<'a> BrittleTetMotion<'a> {
         controls: BrittleFaceImpactControls,
         cx: &Cx<'_>,
     ) -> Result<BrittleFaceImpactStep<'a>, BrittleFaceImpactError> {
-        use BrittleFaceImpactError as E;
-        checkpoint(cx)?;
-        if restitution.len() != self.solid.released_faces.len()
-            || restitution
-                .iter()
-                .any(|e| !e.is_finite() || !(0.0..=1.0).contains(e))
-            || !(1..=64).contains(&controls.maximum_contact_rows)
-            || [
-                controls.activation_tolerance_m,
-                controls.tangential_tolerance_m,
-                controls.velocity_tolerance_mps,
-                controls.energy_tolerance_j,
-            ]
-            .iter()
-            .any(|v| !v.is_finite() || *v < 0.0)
-            || origin_m.iter().any(|v| !v.is_finite())
-        {
-            return Err(E::Invalid(
-                "complete restitution, bounded rows and finite nonnegative gates required",
-            ));
-        }
-        let mut rows = Vec::with_capacity(controls.maximum_contact_rows);
-        let mut normals = Vec::with_capacity(controls.maximum_contact_rows);
-        let mut separations = Vec::with_capacity(controls.maximum_contact_rows);
-        let mut contacts = Vec::with_capacity(controls.maximum_contact_rows);
-        for (face, &restitution) in self.solid.released_faces.iter().zip(restitution) {
-            checkpoint(cx)?;
-            for vertex in 0..3 {
-                let [a, b] = [face.paired_nodes[0][vertex], face.paired_nodes[1][vertex]];
-                if a == b {
-                    continue;
-                }
-                // Corresponding reference coordinates are identical by the
-                // original topology admission. Subtract displacements directly;
-                // adding a large common spatial origin first can erase opening.
-                let separation = core::array::from_fn(|axis| {
-                    self.solid.solution.displacement_m[b][axis]
-                        - self.solid.solution.displacement_m[a][axis]
-                });
-                let gap = finite(dot(face.normal, separation))?;
-                if gap < 0.0 {
-                    return Err(E::Geometry {
-                        face: face.id,
-                        vertex,
-                        reason: "negative paired opening; penetration cannot be repaired",
-                    });
-                }
-                if gap > controls.activation_tolerance_m {
-                    continue;
-                }
-                let tangent =
-                    core::array::from_fn(|axis| separation[axis] - gap * face.normal[axis]);
-                if norm(tangent) > controls.tangential_tolerance_m {
-                    return Err(E::Geometry {
-                        face: face.id,
-                        vertex,
-                        reason: "active paired witnesses are tangentially separated",
-                    });
-                }
-                if rows.len() == controls.maximum_contact_rows
-                    || rows.len() >= controls.impact.solver.max_variables
-                {
-                    return Err(E::Invalid(
-                        "all active released-face rows must fit the contact budget",
-                    ));
-                }
-                let row = BrittleFaceImpactRow {
-                    face_id: face.id,
-                    vertex,
-                    nodes: [a, b],
-                };
-                contacts.push(NormalContactImpact {
-                    gap,
-                    activation_tolerance: controls.activation_tolerance_m,
-                    relative_normal_speed: speed(&self.velocity_mps, row, face.normal)?,
-                    restitution,
-                });
-                rows.push(row);
-                normals.push(face.normal);
-                separations.push(separation);
-            }
-        }
-        if rows.is_empty() {
-            return Err(E::Invalid("no active released-face contact rows"));
-        }
-        let count = rows.len();
-        let mut mobility = vec![0.0; count * count];
-        for (column, (&row, &normal)) in rows.iter().zip(&normals).enumerate() {
-            checkpoint(cx)?;
-            let (response, _) = self
-                .mass
-                .free_velocity_response(
-                    held_velocity_dofs,
-                    &loads(row, normal, 1.0),
-                    controls.impulse,
-                    cx,
-                )
-                .map_err(SmallStrainTetError::from)?;
-            for i in 0..count {
-                mobility[i * count + column] = speed(&response, rows[i], normals[i])?;
-            }
-        }
-        let contact = solve_normal_impacts(&contacts, &mobility, controls.impact, || {
-            cx.checkpoint().is_err()
-        })
-        .map_err(E::Contact)?;
-        let mut impulses = Vec::with_capacity(6 * count);
-        let mut absolute_contact_couple_kg_m2_s = 0.0;
-        for (i, &amount) in contact.normal_impulses.iter().enumerate() {
-            checkpoint(cx)?;
-            impulses.extend_from_slice(&loads(rows[i], normals[i], amount));
-            let impulse = normals[i].map(|n| n * amount);
-            absolute_contact_couple_kg_m2_s =
-                finite(absolute_contact_couple_kg_m2_s + norm(cross(separations[i], impulse)))?;
-        }
-        let mut positions = Vec::with_capacity(self.velocity_mps.len());
-        for (node, (reference, displacement)) in self
-            .solid
-            .geometry
-            .nodes_m()
-            .iter()
-            .zip(&self.solid.solution.displacement_m)
-            .enumerate()
-        {
-            if node % 256 == 0 {
-                checkpoint(cx)?;
-            }
-            let position = core::array::from_fn(|axis| reference[axis] + displacement[axis]);
-            if position.iter().any(|x| !x.is_finite()) {
-                return Err(E::Invalid("unrepresentable physical position"));
-            }
-            positions.push(position);
-        }
-        let (velocity_mps, impulse) = self
-            .mass
-            .impulse_candidate(
-                &positions,
-                &self.velocity_mps,
-                held_velocity_dofs,
-                &impulses,
-                origin_m,
-                controls.impulse,
-                cx,
-            )
-            .map_err(SmallStrainTetError::from)?;
-        let linear = norm(impulse.applied.linear_kg_m_s);
-        let angular = norm(impulse.applied.angular_kg_m2_s);
-        if linear > controls.impulse.linear_tolerance_kg_m_s
-            || angular > controls.impulse.angular_tolerance_kg_m2_s
-            || absolute_contact_couple_kg_m2_s > controls.impulse.angular_tolerance_kg_m2_s
-        {
-            return Err(E::InternalImpulse {
-                linear_norm_kg_m_s: linear,
-                angular_norm_kg_m2_s: angular,
-                absolute_couple_kg_m2_s: absolute_contact_couple_kg_m2_s,
-            });
-        }
-        let mut maximum_velocity_residual_mps = 0.0_f64;
-        for (i, &row) in rows.iter().enumerate() {
-            checkpoint(cx)?;
-            let actual = speed(&velocity_mps, row, normals[i])?;
-            let stationarity = finite(actual - contact.restitution_targets[i])?;
-            let kkt = if contact.normal_impulses[i] > 0.0 {
-                stationarity.abs()
-            } else {
-                (-stationarity).max(0.0)
-            };
-            let residual = finite(actual - contact.relative_normal_speeds_after[i])?
-                .abs()
-                .max(kkt);
-            maximum_velocity_residual_mps = maximum_velocity_residual_mps.max(residual);
-            if residual > controls.velocity_tolerance_mps {
-                return Err(E::Response {
-                    face: row.face_id,
-                    vertex: row.vertex,
-                    residual_mps: residual,
-                    tolerance_mps: controls.velocity_tolerance_mps,
-                });
-            }
-        }
-        let relative_work_error_j =
-            (impulse.kinetic_change_j - impulse.support_work_j) - contact.relative_work;
-        let energy_balance_error_j =
-            (impulse.kinetic_change_j - impulse.support_work_j) + contact.dissipated_energy;
-        for (account, defect) in [
-            (
-                "impact retained kinetic storage",
-                impulse.kinetic_before_j - self.kinetic_energy_j,
-            ),
-            ("impact native/contact relative work", relative_work_error_j),
-            ("impact native/contact dissipation", energy_balance_error_j),
-        ] {
-            energy_gate(account, defect, controls.energy_tolerance_j)?;
-        }
+        let ReleasedFaceImpactResponse {
+            velocity_mps,
+            contact,
+            impulse,
+            rows,
+            maximum_velocity_residual_mps,
+            relative_work_error_j,
+            energy_balance_error_j,
+            absolute_contact_couple_kg_m2_s,
+        } = released_face_impact(
+            ReleasedFaceImpactBody {
+                reference_nodes_m: self.solid.geometry.nodes_m(),
+                displacement_m: &self.solid.solution.displacement_m,
+                released_faces: &self.solid.released_faces,
+                mass: &self.mass,
+                velocity_mps: &self.velocity_mps,
+                kinetic_energy_j: self.kinetic_energy_j,
+            },
+            restitution,
+            held_velocity_dofs,
+            origin_m,
+            controls,
+            cx,
+        )?;
         let solid = BrittleTetSolid {
             geometry: self.solid.geometry,
             materials: self.solid.materials,
@@ -365,6 +197,240 @@ impl<'a> BrittleTetMotion<'a> {
             absolute_contact_couple_kg_m2_s,
         })
     }
+}
+
+/// Read-only native geometry and inertia; constitutive owners stay with callers.
+/// Both thermal and isothermal bodies enter the identical physical impulse law.
+pub(crate) struct ReleasedFaceImpactBody<'a> {
+    pub(crate) reference_nodes_m: &'a [[f64; 3]],
+    pub(crate) displacement_m: &'a [[f64; 3]],
+    pub(crate) released_faces: &'a [ReleasedBrittleFace],
+    pub(crate) mass: &'a P1ReferenceMass,
+    pub(crate) velocity_mps: &'a [[f64; 3]],
+    pub(crate) kinetic_energy_j: f64,
+}
+
+/// Native event result before its caller publishes the unchanged material owner.
+pub(crate) struct ReleasedFaceImpactResponse {
+    pub(crate) velocity_mps: Vec<[f64; 3]>,
+    pub(crate) contact: MultiImpactResult,
+    pub(crate) impulse: SolidImpulseReport,
+    pub(crate) rows: Vec<BrittleFaceImpactRow>,
+    pub(crate) maximum_velocity_residual_mps: f64,
+    pub(crate) relative_work_error_j: f64,
+    pub(crate) energy_balance_error_j: f64,
+    pub(crate) absolute_contact_couple_kg_m2_s: f64,
+}
+
+pub(crate) fn released_face_impact(
+    body: ReleasedFaceImpactBody<'_>,
+    restitution: &[f64],
+    held_velocity_dofs: &[usize],
+    origin_m: [f64; 3],
+    controls: BrittleFaceImpactControls,
+    cx: &Cx<'_>,
+) -> Result<ReleasedFaceImpactResponse, BrittleFaceImpactError> {
+    use BrittleFaceImpactError as E;
+    checkpoint(cx)?;
+    if restitution.len() != body.released_faces.len()
+        || restitution
+            .iter()
+            .any(|e| !e.is_finite() || !(0.0..=1.0).contains(e))
+        || !(1..=64).contains(&controls.maximum_contact_rows)
+        || [
+            controls.activation_tolerance_m,
+            controls.tangential_tolerance_m,
+            controls.velocity_tolerance_mps,
+            controls.energy_tolerance_j,
+        ]
+        .iter()
+        .any(|v| !v.is_finite() || *v < 0.0)
+        || origin_m.iter().any(|v| !v.is_finite())
+    {
+        return Err(E::Invalid(
+            "complete restitution, bounded rows and finite nonnegative gates required",
+        ));
+    }
+    let mut rows = Vec::with_capacity(controls.maximum_contact_rows);
+    let mut normals = Vec::with_capacity(controls.maximum_contact_rows);
+    let mut separations = Vec::with_capacity(controls.maximum_contact_rows);
+    let mut contacts = Vec::with_capacity(controls.maximum_contact_rows);
+    for (face, &restitution) in body.released_faces.iter().zip(restitution) {
+        checkpoint(cx)?;
+        for vertex in 0..3 {
+            let [a, b] = [face.paired_nodes[0][vertex], face.paired_nodes[1][vertex]];
+            if a == b {
+                continue;
+            }
+            // Corresponding reference coordinates are identical by the
+            // original topology admission. Subtract displacements directly;
+            // adding a large common spatial origin first can erase opening.
+            let separation = core::array::from_fn(|axis| {
+                body.displacement_m[b][axis] - body.displacement_m[a][axis]
+            });
+            let gap = finite(dot(face.normal, separation))?;
+            if gap < 0.0 {
+                return Err(E::Geometry {
+                    face: face.id,
+                    vertex,
+                    reason: "negative paired opening; penetration cannot be repaired",
+                });
+            }
+            if gap > controls.activation_tolerance_m {
+                continue;
+            }
+            let tangent = core::array::from_fn(|axis| separation[axis] - gap * face.normal[axis]);
+            if norm(tangent) > controls.tangential_tolerance_m {
+                return Err(E::Geometry {
+                    face: face.id,
+                    vertex,
+                    reason: "active paired witnesses are tangentially separated",
+                });
+            }
+            if rows.len() == controls.maximum_contact_rows
+                || rows.len() >= controls.impact.solver.max_variables
+            {
+                return Err(E::Invalid(
+                    "all active released-face rows must fit the contact budget",
+                ));
+            }
+            let row = BrittleFaceImpactRow {
+                face_id: face.id,
+                vertex,
+                nodes: [a, b],
+            };
+            contacts.push(NormalContactImpact {
+                gap,
+                activation_tolerance: controls.activation_tolerance_m,
+                relative_normal_speed: speed(body.velocity_mps, row, face.normal)?,
+                restitution,
+            });
+            rows.push(row);
+            normals.push(face.normal);
+            separations.push(separation);
+        }
+    }
+    if rows.is_empty() {
+        return Err(E::Invalid("no active released-face contact rows"));
+    }
+    let count = rows.len();
+    let mut mobility = vec![0.0; count * count];
+    for (column, (&row, &normal)) in rows.iter().zip(&normals).enumerate() {
+        checkpoint(cx)?;
+        let (response, _) = body
+            .mass
+            .free_velocity_response(
+                held_velocity_dofs,
+                &loads(row, normal, 1.0),
+                controls.impulse,
+                cx,
+            )
+            .map_err(SmallStrainTetError::from)?;
+        for i in 0..count {
+            mobility[i * count + column] = speed(&response, rows[i], normals[i])?;
+        }
+    }
+    let contact = solve_normal_impacts(&contacts, &mobility, controls.impact, || {
+        cx.checkpoint().is_err()
+    })
+    .map_err(E::Contact)?;
+    let mut impulses = Vec::with_capacity(6 * count);
+    let mut absolute_contact_couple_kg_m2_s = 0.0;
+    for (i, &amount) in contact.normal_impulses.iter().enumerate() {
+        checkpoint(cx)?;
+        impulses.extend_from_slice(&loads(rows[i], normals[i], amount));
+        let impulse = normals[i].map(|n| n * amount);
+        absolute_contact_couple_kg_m2_s =
+            finite(absolute_contact_couple_kg_m2_s + norm(cross(separations[i], impulse)))?;
+    }
+    let mut positions = Vec::with_capacity(body.velocity_mps.len());
+    for (node, (reference, displacement)) in body
+        .reference_nodes_m
+        .iter()
+        .zip(body.displacement_m)
+        .enumerate()
+    {
+        if node % 256 == 0 {
+            checkpoint(cx)?;
+        }
+        let position = core::array::from_fn(|axis| reference[axis] + displacement[axis]);
+        if position.iter().any(|x| !x.is_finite()) {
+            return Err(E::Invalid("unrepresentable physical position"));
+        }
+        positions.push(position);
+    }
+    let (velocity_mps, impulse) = body
+        .mass
+        .impulse_candidate(
+            &positions,
+            body.velocity_mps,
+            held_velocity_dofs,
+            &impulses,
+            origin_m,
+            controls.impulse,
+            cx,
+        )
+        .map_err(SmallStrainTetError::from)?;
+    let linear = norm(impulse.applied.linear_kg_m_s);
+    let angular = norm(impulse.applied.angular_kg_m2_s);
+    if linear > controls.impulse.linear_tolerance_kg_m_s
+        || angular > controls.impulse.angular_tolerance_kg_m2_s
+        || absolute_contact_couple_kg_m2_s > controls.impulse.angular_tolerance_kg_m2_s
+    {
+        return Err(E::InternalImpulse {
+            linear_norm_kg_m_s: linear,
+            angular_norm_kg_m2_s: angular,
+            absolute_couple_kg_m2_s: absolute_contact_couple_kg_m2_s,
+        });
+    }
+    let mut maximum_velocity_residual_mps = 0.0_f64;
+    for (i, &row) in rows.iter().enumerate() {
+        checkpoint(cx)?;
+        let actual = speed(&velocity_mps, row, normals[i])?;
+        let stationarity = finite(actual - contact.restitution_targets[i])?;
+        let kkt = if contact.normal_impulses[i] > 0.0 {
+            stationarity.abs()
+        } else {
+            (-stationarity).max(0.0)
+        };
+        let residual = finite(actual - contact.relative_normal_speeds_after[i])?
+            .abs()
+            .max(kkt);
+        maximum_velocity_residual_mps = maximum_velocity_residual_mps.max(residual);
+        if residual > controls.velocity_tolerance_mps {
+            return Err(E::Response {
+                face: row.face_id,
+                vertex: row.vertex,
+                residual_mps: residual,
+                tolerance_mps: controls.velocity_tolerance_mps,
+            });
+        }
+    }
+    let relative_work_error_j =
+        (impulse.kinetic_change_j - impulse.support_work_j) - contact.relative_work;
+    let energy_balance_error_j =
+        (impulse.kinetic_change_j - impulse.support_work_j) + contact.dissipated_energy;
+    for (account, defect) in [
+        (
+            "impact retained kinetic storage",
+            impulse.kinetic_before_j - body.kinetic_energy_j,
+        ),
+        ("impact native/contact relative work", relative_work_error_j),
+        ("impact native/contact dissipation", energy_balance_error_j),
+    ] {
+        energy_gate(account, defect, controls.energy_tolerance_j)?;
+    }
+    checkpoint(cx)?;
+    Ok(ReleasedFaceImpactResponse {
+        velocity_mps,
+        contact,
+        impulse,
+        rows,
+        maximum_velocity_residual_mps,
+        relative_work_error_j,
+        energy_balance_error_j,
+        absolute_contact_couple_kg_m2_s,
+    })
 }
 
 fn speed(

@@ -16,9 +16,12 @@
 //! endpoint constitutive quadrature and backward-Euler kinetic loss have
 //! distinct accounts. The default step is first-order backward Euler; the
 //! midpoint path retains centered momentum and analytic mean forces. Thermal
-//! coefficient splitting, small strain and fixed planes remain explicit; this
-//! owner does not import fracture cuts or invent fragment contact.
+//! coefficient splitting, small strain and fixed planes remain explicit.
+//! Completed-fracture continuation retains this same thermal state while the
+//! original topology, consistent mass and normal-impact owners handle fragments.
 
+/// Completed thermally driven cuts with conserved native fragment motion.
+pub mod fracture;
 /// Work-conjugate thermal fracture with centered native momentum.
 pub mod midpoint;
 

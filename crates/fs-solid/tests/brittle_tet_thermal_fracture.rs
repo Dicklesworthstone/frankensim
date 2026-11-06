@@ -297,7 +297,21 @@ fn restrained_thermal_fracture_preserves_native_mechanical_history_and_continues
             released.solid.solution().element_stress,
             cooled.solution().element_stress
         );
-        assert_eq!(released.solid.band_geometry(), cooled.band_geometry());
+        for (old, new) in cooled
+            .band_geometry()
+            .iter()
+            .zip(released.solid.band_geometry())
+        {
+            assert_eq!(new.element(), old.element());
+            assert_eq!(
+                new.nodes().map(|node| cut.original_nodes()[node]),
+                old.nodes()
+            );
+            assert_eq!(new.normal(), old.normal());
+            assert_eq!(new.reference_volume_m3(), old.reference_volume_m3());
+            assert_eq!(new.projected_area_m2(), old.projected_area_m2());
+            assert_eq!(new.band_width_m(), old.band_width_m());
+        }
         assert!(released.solid.solution().increments.is_empty());
         assert_eq!(released.solid.released_faces().len(), 1);
         assert_eq!(released.solid.released_faces()[0].id, 598);
@@ -482,3 +496,6 @@ fn unfinished_loaded_and_closing_thermal_faces_refuse_without_losing_original_hi
         close(split.fracture_dissipation_j(), GC, 1e-14);
     });
 }
+
+#[path = "brittle_tet_thermal_fracture/motion.rs"]
+mod motion;
