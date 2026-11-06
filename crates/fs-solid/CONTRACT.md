@@ -6392,9 +6392,16 @@ weights therefore carry metres. In a shear-deformable member, symmetric
 curvature and constant shear share one displacement coordinate: their exact
 integrated loss coefficients add in that port. The other two ports retain
 axial and antisymmetric-curvature work. Public Euler–Bernoulli strain traces
-still refuse these members. Existing frame thermal feedback also refuses
-them until layer heat partition and temperature-dependent shear reconstruction
-are supported. `material_damping_energy` and
+still refuse these members. `reference_damping_n_s_m` and
+`reference_layer_heat_fractions` expose the same native decomposition without
+allocation or source queries: original layers receive axial eta*A, curvature
+eta*I, and corrected transverse eta_s*A work separately. Symmetric bending and
+shear share one physical port; antisymmetric curvature has no shear loss.
+`with_material_section` retains every viscosity selector, the original
+named/derived G role and the authored correction across source refreshes.
+The finite-cell thermal consumer admits temperature-dependent viscosity with
+fixed sourced elasticity; live thermoelastic shear storage remains separate.
+`material_damping_energy` and
 `rayleigh_damping_energy` are separate parts of the existing total damping work,
 not additional heat sources.
 

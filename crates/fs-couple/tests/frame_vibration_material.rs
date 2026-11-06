@@ -259,7 +259,7 @@ fn data_only_viscosity_changes_actual_ordinary_and_prepared_motion_and_loss() {
 
 /// G1: native transverse material loss reaches both original coupled propagators.
 #[test]
-fn shear_viscosity_drives_coupled_motion_and_refuses_incomplete_thermal_partition() {
+fn shear_viscosity_drives_coupled_motion_and_requires_complete_thermal_inventory() {
     let length = 0.25_f64;
     let correction = 0.85;
     let eta = 2.0;
@@ -317,8 +317,8 @@ fn shear_viscosity_drives_coupled_motion_and_refuses_incomplete_thermal_partitio
         assert!(dissipated > 0.0);
     }
 
-    // The current heat owner partitions only axial/bending loss. Reject before
-    // source/cell routing can silently erase the original shear model.
+    // Shear heating requires the same complete original caloric inventory as
+    // axial/bending heating; an empty routing table cannot discard its work.
     use fs_couple::circuit_enthalpy::{CircuitEnthalpyError, material::MaterialNetwork};
     use fs_thermal::enthalpy::{DepositionBudget, DepositionSimulation};
     let thermal = DepositionSimulation::new(vec![], &[], DepositionBudget {
@@ -327,7 +327,7 @@ fn shear_viscosity_drives_coupled_motion_and_refuses_incomplete_thermal_partitio
     let network = MaterialNetwork { cells: &[], resistors: &[], links: &[] };
     assert!(matches!(component().into_thermal_system(&thermal, &network, &[], config(), None,
         &CancelGate::new_clock_free()), Err(CircuitEnthalpyError::Invalid(
-            "frame thermal feedback does not yet partition transverse shear viscosity"))));
+            "exactly one destination for every original member layer required"))));
 }
 
 fn chain_matrices() -> ([[f64; 2]; 2], [[f64; 2]; 2], [[f64; 2]; 2]) {

@@ -1,22 +1,22 @@
 //! Original frame viscosity heats its own finite source-bound material layers.
 //!
 //! The native coupled propagator integrates each physical port's work. Common
-//! axial strain partitions it by eta*A, and common curvature by eta*I, using
-//! the original section integrals. Every whole-layer receiver has the SAME
+//! axial strain partitions it by eta*A, curvature by eta*I, and transverse
+//! shear by the original corrected eta_s*A. Symmetric bending/shear work uses
+//! the native Timoshenko strain interpolation. Every whole-layer receiver has the SAME
 //! material card, caloric law, reference volume and mass as its frame source.
 //! The existing enthalpy/Newton owner advances conduction and reservoirs, and
 //! both histories publish only after independent work, heat and storage gates.
 //!
-//! Geometry, density and E remain fixed; both original viscosity laws may vary
+//! Geometry, density, E and G remain fixed; original viscosity laws may vary
 //! with temperature. Each interval uses its accepted starting resistances. Its
 //! actual work heats the finite cells, then their accepted endpoint sources
 //! rebuild the SAME mechanical propagator for the next interval. This is a
 //! first-order thermal/coefficient split; refine the shared clock for accuracy.
 //! A dashpot stores no energy, so changing eta adds no parameter-work impulse.
 //! Elastic thermal feedback and expansion use [`thermoelastic`]. Melting needs
-//! a different material/geometry owner. Shear-deformable frame ports are refused:
-//! their combined bending/shear work needs its own layer heat partition and
-//! temperature-dependent Timoshenko reconstruction.
+//! a different material/geometry owner. Shear source roles and the authored
+//! correction remain attached across every viscosity/temperature refresh.
 
 pub mod thermoelastic;
 /// Joint solid-layer viscosity/enthalpy feedback with complete exterior fluid memory.
@@ -40,8 +40,8 @@ use fs_exec::CancelGate;
 use fs_matdb::EvaluationDecision;
 use fs_material::section::ConcentricElasticSection;
 use fs_material::section_temperature::ConcentricSectionTemperatureLaw;
-use fs_material::state_point::{DENSITY_PROPERTY, MaterialStatePointError, YOUNG_MODULUS_PROPERTY};
-use fs_solid::frame2d::FrameViscousSection;
+use fs_material::state_point::MaterialStatePointError;
+use fs_solid::frame2d::{FrameViscousHeatFractions, FrameViscousSection};
 use fs_solver::{NewtonKrylovConfig, NewtonReport};
 use fs_thermal::enthalpy::{
     CellId, DepositedCell, DepositionError, DepositionSimulation, EnergyAudit,
@@ -168,8 +168,7 @@ struct Receiver {
     binding: FrameLayerCell,
     original: DepositedCell,
     temperature_axis: String,
-    axial_share: f64,
-    bending_share: f64,
+    heat_fractions: FrameViscousHeatFractions,
 }
 struct Region<'a> {
     element: usize,
@@ -194,11 +193,34 @@ pub struct FrameLayerHeat {
     pub destination: FrameLayerCell,
     pub axial_heat_j: f64,
     pub bending_heat_j: f64,
+    /// Actual transverse shear dissipation, excluding curvature loss.
+    pub shear_heat_j: f64,
 }
 impl FrameLayerHeat {
     pub fn total_j(self) -> f64 {
-        self.axial_heat_j + self.bending_heat_j
+        self.axial_heat_j + self.bending_heat_j + self.shear_heat_j
     }
+}
+
+fn solid(error: fs_solid::SolidError) -> FrameThermalError {
+    CircuitEnthalpyError::Source(FrameThermalSourceError::Frame(error.into()))
+}
+
+fn layer_heat(
+    destination: FrameLayerCell,
+    fractions: FrameViscousHeatFractions,
+    port_heat_j: [f64; 3],
+) -> Result<FrameLayerHeat> {
+    let [axial_heat_j, bending_heat_j, shear_heat_j] =
+        fractions.partition_energy_j(port_heat_j).map_err(solid)?;
+    let heat = FrameLayerHeat {
+        destination,
+        axial_heat_j,
+        bending_heat_j,
+        shear_heat_j,
+    };
+    finite(heat.total_j())?;
+    Ok(heat)
 }
 
 /// Original entropy integrals and endpoint quadrature, in J/K. The signed
@@ -330,9 +352,14 @@ fn bind_regions_with_links<'n, 'a>(
     let operator = basis
         .material_damping()
         .ok_or_else(|| invalid("frame heat requires its original material viscosity"))?;
-    if operator.sections().iter().any(|(_, section)| section.transverse().is_some()) {
+    if !frozen_elasticity
+        && operator
+            .sections()
+            .iter()
+            .any(|(_, section)| section.transverse().is_some())
+    {
         return Err(invalid(
-            "frame thermal feedback does not yet partition transverse shear viscosity",
+            "live frame thermoelasticity requires an accounted transverse shear storage law",
         ));
     }
     let binding = match additional_links {
@@ -411,14 +438,15 @@ fn bind_regions_with_links<'n, 'a>(
                     "frame layer must retain its whole fixed-solid mass, volume and original physical source context",
                 ));
             }
-            for key in [DENSITY_PROPERTY, YOUNG_MODULUS_PROPERTY]
-                .into_iter()
-                .filter(|key| frozen_elasticity || *key == DENSITY_PROPERTY)
-            {
-                let coefficient = solid
-                    .material
-                    .property(key)
-                    .ok_or_else(|| invalid("frame heat lost an original mechanical source"))?;
+            let mut coefficients = if frozen_elasticity {
+                section.elastic().elastic_source_properties(layer).map_err(material)?
+            } else {
+                vec![section.elastic().density_source_property(layer).map_err(material)?]
+            };
+            if let Some(transverse) = section.transverse() {
+                coefficients.extend(transverse.shear().source_properties(layer).map_err(material)?);
+            }
+            for coefficient in coefficients {
                 if !coefficient.source_axes().is_empty()
                     || coefficient.answer().receipt.decision
                         != EvaluationDecision::ConstantWithinValidity
@@ -436,14 +464,8 @@ fn bind_regions_with_links<'n, 'a>(
                 },
                 original: original.clone(),
                 temperature_axis: caloric.point.temperature_axis.to_owned(),
-                axial_share: share(
-                    section.axial().layer_viscous_rigidity_n_s()[layer],
-                    section.axial().viscous_rigidity_n_s(),
-                )?,
-                bending_share: share(
-                    section.bending().layer_viscous_stiffness_n_m2_s()[layer],
-                    section.bending().viscous_stiffness_n_m2_s(),
-                )?,
+                heat_fractions: section.reference_layer_heat_fractions(length, layer)
+                    .map_err(|error| CircuitEnthalpyError::Source(FrameThermalSourceError::Frame(error.into())))?,
             });
             cards.push(caloric.point.material);
             axes.push(caloric.point.temperature_axis);
@@ -544,18 +566,7 @@ impl FrameThermalSystem<'_, '_> {
                         if *value < 0.0 { return Err(invalid("material dashpot port supplied negative heat")); }
                     }
                     for receiver in &region.receivers {
-                        let partition = |share: f64, joules: f64| -> Result<f64> {
-                            let heat = finite(share * joules)?;
-                            if share > 0.0 && joules > 0.0 && heat == 0.0 {
-                                return Err(invalid("physical layer heat underflow"));
-                            }
-                            Ok(heat)
-                        };
-                        let heat = FrameLayerHeat {
-                            destination: receiver.binding,
-                            axial_heat_j: partition(receiver.axial_share, loss[0])?,
-                            bending_heat_j: partition(receiver.bending_share, finite(loss[1] + loss[2])?)?,
-                        };
+                        let heat = self::layer_heat(receiver.binding, receiver.heat_fractions, loss)?;
                         let power = finite(heat.total_j() / (target - start))?;
                         if heat.total_j() != 0.0 && power == 0.0 { return Err(invalid("frame heat power underflow")); }
                         powers.insert(receiver.binding.cell, power);
@@ -584,9 +595,7 @@ impl FrameThermalSystem<'_, '_> {
                                 temperatures.push(state.temperature_k(cell.id)?);
                             }
                             let section = region.law.at_temperatures_k(&temperatures).map_err(material)?;
-                            let section = FrameViscousSection::try_new(section,
-                                previous.axial().viscosity_property(), previous.bending().viscosity_property())
-                                .map_err(|error| CircuitEnthalpyError::Source(FrameThermalSourceError::Frame(error.into())))?;
+                            let section = previous.with_material_section(section).map_err(solid)?;
                             let band = section.omega_band_rad_s();
                             if band.0 != 0.0 || band.1 < core::f64::consts::PI / dt {
                                 return Err(invalid("refreshed frame viscosity must support DC through the actual Nyquist band"));
@@ -608,21 +617,13 @@ impl FrameThermalSystem<'_, '_> {
                 let mut next_shares = Vec::new();
                 for (index, (region, (_, section))) in regions.iter().zip(&audit.source.1).enumerate() {
                     check(gate)?;
-                    let axial = finite(section.axial().viscous_rigidity_n_s() / region.length_m)?;
-                    let bending = finite(section.bending().viscous_stiffness_n_m2_s()
-                        / region.length_m / region.length_m / region.length_m)?;
-                    if (section.axial().viscous_rigidity_n_s() > 0.0 && axial == 0.0)
-                        || (section.bending().viscous_stiffness_n_m2_s() > 0.0 && bending == 0.0) {
-                        return Err(invalid("refreshed frame viscosity is unrepresentable on the original geometry"));
-                    }
-                    for (k, damping_n_s_m) in [axial, finite(3.0 * bending)?, bending].into_iter().enumerate() {
+                    for (k, damping_n_s_m) in section.reference_damping_n_s_m(region.length_m)
+                        .map_err(solid)?.into_iter().enumerate() {
                         updates.push(ConnectionDamping { connection: 3 * index + k, damping_n_s_m });
                     }
                     for layer in 0..region.receivers.len() {
-                        next_shares.push((
-                            share(section.axial().layer_viscous_rigidity_n_s()[layer], section.axial().viscous_rigidity_n_s())?,
-                            share(section.bending().layer_viscous_stiffness_n_m2_s()[layer], section.bending().viscous_stiffness_n_m2_s())?,
-                        ));
+                        next_shares.push(section.reference_layer_heat_fractions(region.length_m, layer)
+                            .map_err(solid)?);
                     }
                 }
                 let damping = mechanical.prepare_staged_connection_damping(&updates, gate)?;
@@ -645,14 +646,13 @@ impl FrameThermalSystem<'_, '_> {
         // The native stage/admit/publish boundary made the final cancellation
         // check. These infallible moves publish the matching finite-cell state.
         self.mechanical.install_connection_damping(damping);
-        for (receiver, (axial, bending)) in self
+        for (receiver, fractions) in self
             .regions
             .iter_mut()
             .flat_map(|region| &mut region.receivers)
             .zip(next_shares)
         {
-            receiver.axial_share = axial;
-            receiver.bending_share = bending;
+            receiver.heat_fractions = fractions;
         }
         self.viscosity = next_viscosity;
         *thermal = next_thermal;

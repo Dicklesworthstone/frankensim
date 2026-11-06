@@ -735,16 +735,70 @@ fn timoshenko_viscous_forces_match_integrated_section_stress_rates() {
                         .sum();
                     near(actual, expected, 2e-12 * matrix_scale * length.max(1.0));
                 }
-                let port_power: f64 = operator.ports().iter().map(|port| {
+                let port_power: Vec<_> = operator.ports().iter().map(|port| {
                     let rate: f64 = port.displacement_weights.iter().zip(velocity)
                         .map(|(weight, v)| weight * v).sum();
                     port.damping_n_s_m * rate * rate
-                }).sum();
-                near(port_power, virtual_work(rates(velocity), rates(velocity)),
+                }).collect();
+                near(port_power.iter().sum(), virtual_work(rates(velocity), rates(velocity)),
                     3e-12 * matrix_scale * length.max(1.0).powi(2));
+                let [axial, bending, transverse] = section.reference_layer_heat_fractions(length, 0)
+                    .unwrap().partition_energy_j(port_power.try_into().unwrap()).unwrap();
+                let strain = rates(velocity);
+                let tolerance = 3e-12 * matrix_scale * length.max(1.0).powi(2);
+                near(axial, length * 2e5 * area * strain[0].powi(2), tolerance);
+                near(bending, 0.5 * length * 4e6 * inertia * (strain[2].powi(2) + strain[3].powi(2)), tolerance);
+                near(transverse, length * SHEAR_CORRECTION * 3e5 * area * strain[1].powi(2), tolerance);
             }
         }
     }
+}
+
+#[test]
+fn viscosity_refresh_keeps_explicit_isotropic_shear_roles_and_correction() {
+    use fs_material::section::LayerIsotropicParameters;
+    use fs_material::state_point::IsotropicElasticParameters;
+    let original = elastic_source(2e5, 4e6, BAND, Some((3e5, BAND)));
+    let requirement = |name, dims| {
+        ScalarPropertyRequirement::try_new(name, dims, ScalarAdmissibility::Finite).unwrap()
+    };
+    let binding = LayerIsotropicParameters {
+        density: requirement("density", Density::DIMS),
+        parameters: IsotropicElasticParameters::YoungShear {
+            young_modulus: requirement("young_modulus", Pressure::DIMS),
+            shear_modulus: requirement("shear_modulus", Pressure::DIMS),
+        },
+    };
+    let elastic = ConcentricElasticSection::try_new_with_isotropic_parameters(
+        0.0,
+        original.layers().to_vec(),
+        &[binding],
+    )
+    .unwrap();
+    let section = FrameViscousSection::try_new_with_shear(
+        elastic
+            .with_isotropic_shear(SHEAR_CORRECTION)
+            .unwrap()
+            .with_transverse_viscosity("shear_eta")
+            .unwrap(),
+        "axial_eta",
+        "bending_eta",
+    )
+    .unwrap();
+    let fresh = section
+        .with_material_section(section.elastic().clone())
+        .unwrap();
+    assert_eq!(fresh.transverse().unwrap().shear().shear_property(), None);
+    assert_eq!(
+        fresh.transverse().unwrap().shear().shear_correction(),
+        SHEAR_CORRECTION
+    );
+    assert_eq!(fresh.transverse(), section.transverse());
+    assert_eq!(
+        fresh.reference_damping_n_s_m(0.2).unwrap(),
+        section.reference_damping_n_s_m(0.2).unwrap()
+    );
+    assert!(section.with_material_section(original).is_err());
 }
 
 /// G1: physical continuous oscillator and harmonic impedance, including heat.

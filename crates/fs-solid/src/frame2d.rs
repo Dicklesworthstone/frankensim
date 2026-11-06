@@ -86,7 +86,9 @@ pub mod sustained;
 mod modes;
 pub use modes::{FrameModalAnalysis, FrameMode, FrameModeStatus};
 mod viscosity;
-pub use viscosity::{FrameMaterialDamping, FrameViscousPort, FrameViscousSection};
+pub use viscosity::{
+    FrameMaterialDamping, FrameViscousHeatFractions, FrameViscousPort, FrameViscousSection,
+};
 
 /// A section constitutive model for frame elements.
 #[derive(Debug, Clone)]

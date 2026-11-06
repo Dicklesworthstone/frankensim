@@ -59,10 +59,12 @@ const DESTINATIONS: [FrameLayerCell; 2] = [
 struct Spec {
     axial: f64,
     bending: f64,
+    shear: f64,
     cp: f64,
     mechanical_upper: f64,
     curved_eta: bool,
     curved_elastic: bool,
+    curved_shear_modulus: bool,
     modulus_slope: f64,
     alpha: f64,
 }
@@ -71,20 +73,24 @@ fn specimens() -> [Spec; 2] {
         Spec {
             axial: 2.0,
             bending: 10.0,
+            shear: 0.1,
             cp: 0.5,
             mechanical_upper: 600.0,
             curved_eta: false,
             curved_elastic: false,
+            curved_shear_modulus: false,
             modulus_slope: 0.0,
             alpha: 0.0,
         },
         Spec {
             axial: 8.0,
             bending: 40.0,
+            shear: 0.4,
             cp: 1.0,
             mechanical_upper: 600.0,
             curved_eta: false,
             curved_elastic: false,
+            curved_shear_modulus: false,
             modulus_slope: 0.0,
             alpha: 0.0,
         },
@@ -110,6 +116,7 @@ fn material(index: usize, spec: Spec) -> (MaterialCard, ResolvedHeatCapacityCurv
     for (name, value, dims) in [
         ("density", RHO, Density::DIMS),
         ("young_modulus", YOUNG, Pressure::DIMS),
+        ("shear_modulus", YOUNG / 50.0, Pressure::DIMS),
         (
             fs_material::state_point::LINEAR_THERMAL_EXPANSION_COEFFICIENT_PROPERTY,
             spec.alpha,
@@ -117,6 +124,7 @@ fn material(index: usize, spec: Spec) -> (MaterialCard, ResolvedHeatCapacityCurv
         ),
         ("axial_eta", spec.axial, DynViscosity::DIMS),
         ("bending_eta", spec.bending, DynViscosity::DIMS),
+        ("shear_eta", spec.shear, DynViscosity::DIMS),
         (
             "specific_heat_capacity",
             spec.cp,
@@ -143,7 +151,8 @@ fn material(index: usize, spec: Spec) -> (MaterialCard, ResolvedHeatCapacityCurv
             validity = validity.with("omega", 0.0, 4096.0);
         }
         let curved = (viscosity && spec.curved_eta)
-            || (name == "young_modulus" && (spec.curved_elastic || spec.modulus_slope != 0.0));
+            || (name == "young_modulus" && (spec.curved_elastic || spec.modulus_slope != 0.0))
+            || (name == "shear_modulus" && spec.curved_shear_modulus);
         claims
             .insert_claim(PropertyClaim {
                 key: PropertyKey::new(name, dims),
@@ -255,17 +264,30 @@ fn fixture<R>(
     authored_zeta: f64,
     run: impl FnOnce(FrameVibrationComponent, DepositionSimulation<'_>, &MaterialNetwork<'_>) -> R,
 ) -> R {
+    fixture_with_shear(specs, bending, conduction, authored_zeta, None, run)
+}
+
+fn fixture_with_shear<R>(
+    specs: [Spec; 2],
+    bending: bool,
+    conduction: bool,
+    authored_zeta: f64,
+    shear_correction: Option<f64>,
+    run: impl FnOnce(FrameVibrationComponent, DepositionSimulation<'_>, &MaterialNetwork<'_>) -> R,
+) -> R {
     let sources = [material(0, specs[0]), material(1, specs[1])];
     let context = point(300.0);
     let requirement = [
         ("density", Density::DIMS),
         ("young_modulus", Pressure::DIMS),
+        ("shear_modulus", Pressure::DIMS),
         (
             fs_material::state_point::LINEAR_THERMAL_EXPANSION_COEFFICIENT_PROPERTY,
             fs_material::state_point::INVERSE_TEMPERATURE_DIMS,
         ),
         ("axial_eta", DynViscosity::DIMS),
         ("bending_eta", DynViscosity::DIMS),
+        ("shear_eta", DynViscosity::DIMS),
     ]
     .map(|(key, dims)| {
         ScalarPropertyRequirement::try_new(key, dims, ScalarAdmissibility::Finite).unwrap()
@@ -284,11 +306,19 @@ fn fixture<R>(
             .unwrap(),
         })
         .collect();
-    let section = FrameViscousSection::try_new(
-        ConcentricElasticSection::try_new(0.0, layers).unwrap(),
-        "axial_eta",
-        "bending_eta",
-    )
+    let elastic = ConcentricElasticSection::try_new(0.0, layers).unwrap();
+    let section = match shear_correction {
+        Some(correction) => FrameViscousSection::try_new_with_shear(
+            elastic
+                .with_shear_modulus("shear_modulus", correction)
+                .unwrap()
+                .with_transverse_viscosity("shear_eta")
+                .unwrap(),
+            "axial_eta",
+            "bending_eta",
+        ),
+        None => FrameViscousSection::try_new(elastic, "axial_eta", "bending_eta"),
+    }
     .unwrap();
     let mut frame =
         Frame2d::with_mass_formulation(Geometry::Linear, FrameMassFormulation::ConsistentReference);
@@ -458,6 +488,228 @@ fn oscillator_from(
     let q = (-a * time).exp() * (q0 * c + b * s);
     let v = (-a * time).exp() * (-q0 * w * s + b * w * c) - a * q;
     (q, v, 0.5 * mass * v * v + 0.5 * stiffness * q * q)
+}
+
+#[test]
+fn timoshenko_layer_heat_and_temperature_feedback_match_physical_strain_work() {
+    let correction = 0.8;
+    let area = areas();
+    let moment = moments();
+    let ei = YOUNG * moment.iter().sum::<f64>();
+    let ga = correction * (YOUNG / 50.0) * area.iter().sum::<f64>();
+    let beta = 1.0 / (1.0 + 12.0 * ei / (ga * LENGTH * LENGTH));
+    let shear = 1.0 - beta;
+    // Independent analytic integrals for a restrained member with only its
+    // tip rotation free: v/L=p1*x+p2*x²+p3*x³ and theta=r1*x+r2*x².
+    let (p1, p2, p3) = (-0.5 * shear, 0.5 - 1.5 * beta, beta);
+    let translation = p1 * p1 / 3.0
+        + p1 * p2 / 2.0
+        + (p2 * p2 + 2.0 * p1 * p3) / 5.0
+        + p2 * p3 / 3.0
+        + p3 * p3 / 7.0;
+    let rotation = 1.0 / 3.0 - beta / 2.0 + 3.0 * beta * beta / 10.0;
+    let mass = RHO
+        * (area.iter().sum::<f64>() * LENGTH.powi(3) * translation
+            + moment.iter().sum::<f64>() * LENGTH * rotation);
+    let stiffness = ei * (1.0 + 3.0 * beta) / LENGTH;
+    let dt = 1.0 / f64::from(RATE);
+    for shear_only in [false, true] {
+        for preparation in [None, Some(prepared())] {
+            let specs = specimens().map(|mut spec| {
+                spec.cp *= 1e-5;
+                spec.curved_eta = true;
+                if shear_only {
+                    spec.bending = 0.0;
+                }
+                spec
+            });
+            fixture_with_shear(
+                specs,
+                true,
+                false,
+                0.0,
+                Some(correction),
+                |component, mut thermal, network| {
+                    let gate = CancelGate::new_clock_free();
+                    let mut owner = component
+                        .into_thermal_system(
+                            &thermal,
+                            network,
+                            &DESTINATIONS,
+                            config(),
+                            preparation,
+                            &gate,
+                        )
+                        .unwrap();
+                    let total = owner.mechanical().total_energy_j().unwrap() + thermal.energy_j();
+                    let (mut q, mut v) = (0.01, 0.03);
+                    let mut temperatures = [300.0; 2];
+                    let capacity: [f64; 2] =
+                        std::array::from_fn(|i| RHO * area[i] * LENGTH * specs[i].cp);
+                    for _ in 0..32 {
+                        // Constitutive heat follows each source's eta(T), with
+                        // the correction applied once to eta_s*A. The shared
+                        // symmetric port also contains curvature, while the
+                        // antisymmetric port has no transverse shear.
+                        let bending: [f64; 2] = std::array::from_fn(|i| {
+                            specs[i].bending
+                                * (0.005 * temperatures[i] - 0.5)
+                                * moment[i]
+                                * (1.0 + 3.0 * beta * beta)
+                                / LENGTH
+                        });
+                        let transverse: [f64; 2] = std::array::from_fn(|i| {
+                            correction
+                                * specs[i].shear
+                                * (0.005 * temperatures[i] - 0.5)
+                                * area[i]
+                                * shear
+                                * shear
+                                * LENGTH
+                                / 4.0
+                        });
+                        let damping = bending.iter().chain(&transverse).sum::<f64>();
+                        let before = 0.5 * mass * v * v + 0.5 * stiffness * q * q;
+                        let expected = oscillator_from(mass, stiffness, damping, dt, q, v);
+                        let loss = before - expected.2;
+                        let report = owner
+                            .step(&mut thermal, &[0.0], solve(), &[0.0; 2], &gate)
+                            .unwrap();
+                        let state = owner.mechanical().components()[0].states()[0];
+                        let shape = owner.basis().modes()[0].displacement[5];
+                        near(shape * state.displacement_m_sqrt_kg, expected.0, 2e-10);
+                        near(shape * state.velocity_m_sqrt_kg_per_s, expected.1, 2e-9);
+                        near(report.deposited_material_heat_j, loss, 1e-10);
+                        let next = &report.next_viscosity[0].1;
+                        let original_shear = next.transverse().unwrap();
+                        assert_eq!(original_shear.viscosity_property(), "shear_eta");
+                        assert_eq!(
+                            original_shear.shear().shear_property(),
+                            Some("shear_modulus")
+                        );
+                        assert_eq!(original_shear.shear().shear_correction(), correction);
+                        for i in 0..2 {
+                            let heat = report.layer_heat[i];
+                            assert_eq!(heat.axial_heat_j, 0.0);
+                            near(heat.bending_heat_j, loss * bending[i] / damping, 1e-11);
+                            near(heat.shear_heat_j, loss * transverse[i] / damping, 1e-11);
+                            assert!(heat.shear_heat_j > 0.0);
+                            if shear_only {
+                                assert_eq!(heat.bending_heat_j, 0.0);
+                            }
+                            temperatures[i] +=
+                                loss * (bending[i] + transverse[i]) / damping / capacity[i];
+                            near(
+                                thermal.temperature_k(CELLS[i]).unwrap(),
+                                temperatures[i],
+                                1e-5,
+                            );
+                            near(
+                                original_shear.layer_viscous_rigidity_n_s()[i],
+                                correction
+                                    * specs[i].shear
+                                    * (0.005 * temperatures[i] - 0.5)
+                                    * area[i],
+                                1e-10,
+                            );
+                            assert_eq!(
+                                original_shear.shear().layer_shear_modulus_pa(i).unwrap(),
+                                YOUNG / 50.0
+                            );
+                        }
+                        near(
+                            owner.mechanical().total_energy_j().unwrap() + thermal.energy_j(),
+                            total,
+                            2e-10,
+                        );
+                        (q, v) = (expected.0, expected.1);
+                    }
+                    assert!(temperatures.iter().all(|t| *t > 300.01));
+                },
+            );
+        }
+    }
+}
+
+#[test]
+fn shear_thermal_source_refusals_preserve_motion_cells_and_original_binding() {
+    let gate = CancelGate::new_clock_free();
+    let varying_g = specimens().map(|spec| Spec {
+        curved_shear_modulus: true,
+        ..spec
+    });
+    fixture_with_shear(
+        varying_g,
+        true,
+        false,
+        0.0,
+        Some(0.8),
+        |component, thermal, network| {
+            assert!(matches!(
+                component.into_thermal_system(
+                    &thermal,
+                    network,
+                    &DESTINATIONS,
+                    config(),
+                    None,
+                    &gate
+                ),
+                Err(CircuitEnthalpyError::Invalid(
+                    "frame self-heating requires source-declared temperature-independent density and elasticity"
+                ))
+            ));
+        },
+    );
+    let bounded = specimens().map(|spec| Spec {
+        mechanical_upper: 300.000001,
+        curved_eta: true,
+        ..spec
+    });
+    fixture_with_shear(
+        bounded,
+        true,
+        false,
+        0.0,
+        Some(0.8),
+        |component, mut thermal, network| {
+            let mut owner = component
+                .into_thermal_system(&thermal, network, &DESTINATIONS, config(), None, &gate)
+                .unwrap();
+            let motion = owner.mechanical().components()[0].states().to_vec();
+            let enthalpy = CELLS.map(|cell| thermal.cells()[&cell].specific_h_j_kg);
+            let coefficients = owner.viscous_sections()[0]
+                .1
+                .reference_damping_n_s_m(LENGTH)
+                .unwrap();
+            assert!(
+                owner
+                    .step(&mut thermal, &[0.0], solve(), &[0.0; 2], &gate)
+                    .is_err()
+            );
+            assert_eq!(owner.mechanical().components()[0].states(), motion);
+            assert_eq!(thermal.time_s(), 0.0);
+            assert_eq!(
+                CELLS.map(|cell| thermal.cells()[&cell].specific_h_j_kg),
+                enthalpy
+            );
+            assert_eq!(
+                owner.viscous_sections()[0]
+                    .1
+                    .reference_damping_n_s_m(LENGTH)
+                    .unwrap(),
+                coefficients
+            );
+            assert_eq!(
+                owner.viscous_sections()[0]
+                    .1
+                    .transverse()
+                    .unwrap()
+                    .shear()
+                    .shear_correction(),
+                0.8
+            );
+        },
+    );
 }
 
 #[test]

@@ -160,18 +160,208 @@ fn source_only_temperature_dependence_reaches_motion_in_the_same_accepted_interv
     assert!(outputs[0]-outputs[1]>1e-9);
 }
 
-fn layered_frame(cards:&[MaterialCard],radii:&[f64]) -> Frame2d {
-    let requirements:Vec<_>=[("density",Density::DIMS),("young_modulus",Pressure::DIMS),
-        ("axial_eta",DynViscosity::DIMS),("bending_eta",DynViscosity::DIMS)].into_iter()
-        .map(|(n,d)|ScalarPropertyRequirement::try_new(n,d,ScalarAdmissibility::Finite).unwrap()).collect();
-    let layers=cards.iter().zip(radii).map(|(card,&outer_radius_m)|ConcentricMaterialLayer {
-        outer_radius_m,material:resolve_material_state_point(card,&point(300.0),&requirements,
-            MaterialPropertySelection::SingleClaimOnly).unwrap()}).collect();
-    let section=ConcentricElasticSection::try_new(0.0,layers).unwrap();
-    let section=FrameViscousSection::try_new(section,"axial_eta","bending_eta").unwrap();
-    let mut frame=Frame2d::with_mass_formulation(Geometry::Linear,FrameMassFormulation::ConsistentReference);
-    frame.add_node(0.0,0.0);frame.add_node(1.0,0.0);frame.fix(0,[true;3]);frame.fix(1,[true,false,true]);
-    frame.add_material_viscous_element(0,1,3,section).unwrap();frame
+fn layered_frame(cards: &[MaterialCard], radii: &[f64]) -> Frame2d {
+    layered_frame_with_shear(cards, radii, false)
+}
+
+fn layered_frame_with_shear(cards: &[MaterialCard], radii: &[f64], shear: bool) -> Frame2d {
+    let mut properties = vec![
+        ("density", Density::DIMS),
+        ("young_modulus", Pressure::DIMS),
+        ("axial_eta", DynViscosity::DIMS),
+        ("bending_eta", DynViscosity::DIMS),
+    ];
+    if shear {
+        properties.extend([
+            ("shear_modulus", Pressure::DIMS),
+            ("shear_eta", DynViscosity::DIMS),
+        ]);
+    }
+    let requirements: Vec<_> = properties
+        .into_iter()
+        .map(|(n, d)| {
+            ScalarPropertyRequirement::try_new(n, d, ScalarAdmissibility::Finite).unwrap()
+        })
+        .collect();
+    let layers = cards
+        .iter()
+        .zip(radii)
+        .map(|(card, &outer_radius_m)| ConcentricMaterialLayer {
+            outer_radius_m,
+            material: resolve_material_state_point(
+                card,
+                &point(300.0),
+                &requirements,
+                MaterialPropertySelection::SingleClaimOnly,
+            )
+            .unwrap(),
+        })
+        .collect();
+    let section = ConcentricElasticSection::try_new(0.0, layers).unwrap();
+    let section = if shear {
+        FrameViscousSection::try_new_with_shear(
+            section
+                .with_shear_modulus("shear_modulus", 0.8)
+                .unwrap()
+                .with_transverse_viscosity("shear_eta")
+                .unwrap(),
+            "axial_eta",
+            "bending_eta",
+        )
+    } else {
+        FrameViscousSection::try_new(section, "axial_eta", "bending_eta")
+    }
+    .unwrap();
+    let mut frame =
+        Frame2d::with_mass_formulation(Geometry::Linear, FrameMassFormulation::ConsistentReference);
+    frame.add_node(0.0, 0.0);
+    frame.add_node(1.0, 0.0);
+    frame.fix(0, [true; 3]);
+    frame.fix(1, [true, false, true]);
+    frame
+        .add_material_viscous_element(0, 1, 3, section)
+        .unwrap();
+    frame
+}
+
+fn shear_card(alpha: f64) -> MaterialCard {
+    let mut claims = ClaimSet::new();
+    for (name, dims, value) in [
+        ("density", Density::DIMS, 1000.0),
+        ("young_modulus", Pressure::DIMS, 2e6),
+        ("shear_modulus", Pressure::DIMS, 2e3),
+        ("specific_heat_capacity", SPECIFIC_HEAT_CAPACITY_DIMS, 10.0),
+        ("axial_eta", DynViscosity::DIMS, 500.0),
+        ("bending_eta", DynViscosity::DIMS, 500.0),
+        ("shear_eta", DynViscosity::DIMS, 2.0),
+    ] {
+        let viscous = name.ends_with("_eta");
+        let mut validity = ValidityDomain::unconstrained().with("T", 290.0, 500.0);
+        if viscous {
+            validity = validity.with("omega", 0.0, 1e7);
+        }
+        claims
+            .insert_claim(PropertyClaim {
+                key: PropertyKey::new(name, dims),
+                value: if viscous {
+                    PropertyValue::Curve {
+                        abscissa: "T".into(),
+                        abscissa_dims: Temperature::DIMS,
+                        knots: vec![
+                            (290.0, value * (1.0 - 10.0 * alpha)),
+                            (500.0, value * (1.0 + 200.0 * alpha)),
+                        ],
+                        dims,
+                    }
+                } else {
+                    PropertyValue::Scalar { value, dims }
+                },
+                validity,
+                interpolation: if viscous {
+                    InterpolationPolicy::LinearInside
+                } else {
+                    InterpolationPolicy::ConstantWithinValidity
+                },
+                uncertainty: UncertaintyModel::Unstated,
+                observations: vec![],
+                provenance: Provenance {
+                    source: "manufactured shear thermal test".into(),
+                    license: "CC0-1.0".into(),
+                    artifact: None,
+                },
+            })
+            .unwrap();
+    }
+    MaterialCard::assemble(
+        MaterialStateId {
+            chemistry: "manufactured shear medium".into(),
+            phase: "solid".into(),
+            process: "analytic test".into(),
+            revision: 0,
+        },
+        claims,
+        vec![],
+    )
+    .unwrap()
+}
+
+#[test]
+fn timoshenko_heat_uses_endpoint_layer_shear_viscosity_with_full_fluid_memory() {
+    let cards = [shear_card(0.05), shear_card(0.0)];
+    let radii = [RADIUS / 2.0_f64.sqrt(), RADIUS];
+    let f = layered_frame_with_shear(&cards, &radii, true);
+    let curves = [caloric(&cards[0]), caloric(&cards[1])];
+    let context = point(300.0);
+    let mut thermal = initial(&[&curves[0], &curves[1]], &radii, &[1000.0, 0.0], 0.0);
+    let cells = [
+        binding(0, &cards[0], &curves[0], &context),
+        binding(1, &cards[1], &curves[1], &context),
+    ];
+    let network = MaterialNetwork {
+        cells: &cells,
+        resistors: &[],
+        links: &[],
+    };
+    let model = model(&f, exterior());
+    let gate = CancelGate::new_clock_free();
+    let state = motion(&model);
+    let initial_energy = model.system().hamiltonian(&state) + thermal.energy_j();
+    let mut coupled =
+        FrameFluidThermalSystem::new(&model, state, &thermal, &network, &routes(2), &gate).unwrap();
+    let area = [
+        core::f64::consts::PI * radii[0].powi(2),
+        core::f64::consts::PI * (radii[1].powi(2) - radii[0].powi(2)),
+    ];
+    let inertia = [
+        core::f64::consts::PI * radii[0].powi(4) / 4.0,
+        core::f64::consts::PI * (radii[1].powi(4) - radii[0].powi(4)) / 4.0,
+    ];
+    let beta = 1.0
+        / (1.0 + 12.0 * 2e6 * inertia.iter().sum::<f64>() / (0.8 * 2e3 * area.iter().sum::<f64>()));
+    let (mut fluid_heat, mut supplied) = (0.0, 0.0);
+    for _ in 0..12 {
+        let target = coupled.time_s() + 0.005;
+        let report = coupled
+            .step(
+                &mut thermal,
+                target,
+                &[0.0; 6],
+                controls(),
+                &[5.0, 0.0],
+                &gate,
+            )
+            .unwrap();
+        let hot = 1.0 + 0.05 * (thermal.temperature_k(CELL).unwrap() - 300.0);
+        let factors = [hot, 1.0];
+        let bending: [f64; 2] =
+            std::array::from_fn(|i| 3.0 * 500.0 * factors[i] * inertia[i] * beta * beta);
+        let shear: [f64; 2] =
+            std::array::from_fn(|i| 0.8 * 2.0 * factors[i] * area[i] * (1.0 - beta).powi(2) / 4.0);
+        let total = bending.iter().chain(&shear).sum::<f64>();
+        for i in 0..2 {
+            assert_eq!(report.layer_heat[i].axial_heat_j, 0.0);
+            near(
+                report.layer_heat[i].bending_heat_j / report.deposited_solid_heat_j,
+                bending[i] / total,
+                2e-10,
+            );
+            near(
+                report.layer_heat[i].shear_heat_j / report.deposited_solid_heat_j,
+                shear[i] / total,
+                2e-10,
+            );
+        }
+        assert!(report.viscosity[0].1.transverse().is_some());
+        fluid_heat += report.exported_fluid_heat_j;
+        supplied += report.external_thermal_heat_j + report.mechanical.nodal_work_j;
+        near(
+            model.system().hamiltonian(coupled.state()) + thermal.energy_j() + fluid_heat,
+            initial_energy + supplied,
+            2e-8,
+        );
+    }
+    assert!(thermal.temperature_k(CELL).unwrap() > 305.0);
+    assert!(fluid_heat > 0.0);
 }
 
 #[test]

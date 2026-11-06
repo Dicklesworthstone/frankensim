@@ -4,7 +4,7 @@
 //! enthalpy/Newton owner. Every thermal trial resolves the original solid
 //! viscosities and reruns the SAME prepared mechanical state with ALL fluid
 //! momenta intact. Layer heat uses that trial's actual discrete-effort losses
-//! and fresh eta*A / eta*I partitions. No coefficient-lag fallback or second
+//! and fresh native axial/curvature/transverse-shear partitions. No coefficient-lag fallback or second
 //! thermal/mechanical integrator is introduced.
 //!
 //! Solid density, elastic energy and reference geometry stay fixed. The fluid
@@ -222,9 +222,7 @@ fn resolve_sections(regions: &[Region<'_>], previous: &[(usize,FrameViscousSecti
             temperatures.push(state.temperature_k(cell.id)?);
         }
         let section = region.law.at_temperatures_k(&temperatures).map_err(material)?;
-        let section = FrameViscousSection::try_new(section,
-            old.axial().viscosity_property(), old.bending().viscosity_property())
-            .map_err(|e| CircuitEnthalpyError::Source(FrameThermalSourceError::Frame(e.into())))?;
+        let section = old.with_material_section(section).map_err(solid)?;
         let band = section.omega_band_rad_s();
         if band.0 != 0.0 || band.1 < core::f64::consts::PI/dt {
             return Err(invalid("refreshed solid viscosity does not admit the actual sampled band"));
@@ -234,26 +232,22 @@ fn resolve_sections(regions: &[Region<'_>], previous: &[(usize,FrameViscousSecti
     Ok(sections)
 }
 
-// SAME axial / symmetric-bending / antisymmetric-bending factors and original
+// SAME axial / symmetric bending-shear / antisymmetric bending factors and original
 // member length as FrameMaterialDamping and the existing thermal frame owner.
 fn original_resistances(regions: &[Region<'_>], sections: &[(usize,FrameViscousSection)])
     -> Result<Vec<f64>> {
     let mut values = Vec::with_capacity(3*regions.len());
     for (region, (_, section)) in regions.iter().zip(sections) {
-        let axial = finite(section.axial().viscous_rigidity_n_s()/region.length_m)?;
-        let bending = finite(section.bending().viscous_stiffness_n_m2_s()
-            /region.length_m/region.length_m/region.length_m)?;
-        if section.axial().viscous_rigidity_n_s()>0.0 && axial==0.0
-            || section.bending().viscous_stiffness_n_m2_s()>0.0 && bending==0.0 {
-            return Err(invalid("original source viscosity underflow on the physical member geometry"));
-        }
-        values.extend([axial,finite(3.0*bending)?,bending]);
+        values.extend(section.reference_damping_n_s_m(region.length_m).map_err(solid)?);
     }
     Ok(values)
 }
 
-fn partition_heat(regions: &[Region<'_>], sections: &[(usize,FrameViscousSection)],
-    port_heat: &[f64]) -> Result<Vec<FrameLayerHeat>> {
+fn partition_heat(
+    regions: &[Region<'_>],
+    sections: &[(usize, FrameViscousSection)],
+    port_heat: &[f64],
+) -> Result<Vec<FrameLayerHeat>> {
     if port_heat.len() != 3*regions.len() || sections.len() != regions.len()
         || port_heat.iter().any(|h| !h.is_finite() || *h<0.0) {
         return Err(invalid("complete nonnegative original solid-port losses required"));
@@ -261,20 +255,10 @@ fn partition_heat(regions: &[Region<'_>], sections: &[(usize,FrameViscousSection
     let mut result = Vec::new();
     for (index,(region,(_,section))) in regions.iter().zip(sections).enumerate() {
         for (layer,receiver) in region.receivers.iter().enumerate() {
-            let a = share(section.axial().layer_viscous_rigidity_n_s()[layer],
-                section.axial().viscous_rigidity_n_s())?;
-            let b = share(section.bending().layer_viscous_stiffness_n_m2_s()[layer],
-                section.bending().viscous_stiffness_n_m2_s())?;
-            let partition = |fraction:f64,energy:f64| -> Result<f64> {
-                let value = finite(fraction*energy)?;
-                if fraction>0.0 && energy>0.0 && value==0.0 {
-                    return Err(invalid("physical solid-layer heat underflow"));
-                }
-                Ok(value)
-            };
-            result.push(FrameLayerHeat {destination:receiver.binding,
-                axial_heat_j:partition(a,port_heat[3*index])?,
-                bending_heat_j:partition(b,finite(port_heat[3*index+1]+port_heat[3*index+2])?)?});
+            let fractions = section.reference_layer_heat_fractions(region.length_m, layer)
+                .map_err(solid)?;
+            result.push(layer_heat(receiver.binding, fractions,
+                [port_heat[3*index], port_heat[3*index+1], port_heat[3*index+2]])?);
         }
     }
     Ok(result)

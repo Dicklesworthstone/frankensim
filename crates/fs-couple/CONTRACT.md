@@ -1656,6 +1656,30 @@ Physical sources and facet bindings are shared immutably; borrowed endpoint sect
 
 Four focused synthetic regressions cover an independent heated uniaxial plastic membrane/permanent-set oracle, layer-gradient thermal moment reversal with original conduction, late-refusal checkpoint preservation, and prescribed plastic motion with an independent P1 kinetic integral, incorrect eccentric mass rejection and no heat from numerical stopping loss. They also exercise a cold reference binding whose free-coordinate budget is smaller than its total physical coordinate count. Formatting and source checks do not substitute for execution of these native numerical tests.
 
+## Source-bound Timoshenko frame self-heating
+
+`frame_vibration::thermal` and its complete exterior-fluid thermal consumer
+retain native axial, symmetric bending/shear and antisymmetric bending ports.
+The `fs-solid` owner supplies their common damping and original-layer work
+fractions. `FrameLayerHeat` reports axial, curvature and transverse shear heat
+separately; corrected shear viscosity follows its original layer area, while
+curvature loss follows its original second moment. Their sum is the actual
+native dissipated work, deposited once into the same finite caloric inventory.
+
+Temperature refresh preserves original viscosity selectors, named/derived G
+parents, frequency support and the authored shear correction. Geometry, density
+and the actual source parents of E and G must be temperature independent in
+this fixed-elasticity owner. Ordinary thermal feedback uses accepted starting
+viscosities per interval; the fluid thermal owner resolves endpoint viscosity
+and the complete fluid-memory trajectory jointly. Their existing work, entropy,
+finite-cell, source-domain and atomic publication gates remain in force.
+
+Live E/G-dependent thermoelasticity still refuses transverse members because
+its elastic storage, interpolation, inertia and parameter work require a
+separate accounted extension. Focused synthetic regressions cover independent
+Timoshenko oscillator/strain-work references, distinct layer temperatures,
+shear-only dissipation, full exterior-fluid memory and late source refusal.
+
 
 ## Source-bound creep and reciprocal heat in layered shells
 

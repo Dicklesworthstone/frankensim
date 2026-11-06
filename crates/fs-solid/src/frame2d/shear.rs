@@ -62,6 +62,23 @@ impl ShearElement {
                 }
             }
         }
+        let (flexibility, bending_fraction, shear_fraction) =
+            Self::compliance_partition(&source, length)?;
+        Ok(Self {
+            source,
+            flexibility,
+            bending_fraction,
+            shear_fraction,
+        })
+    }
+
+    // Shared by native interpolation and its source-owned viscosity/heat
+    // decomposition. Keep the two fractions independently even for slender
+    // members: subtracting beta from one would erase representable shear.
+    pub(super) fn compliance_partition(
+        source: &ConcentricShearSection,
+        length: f64,
+    ) -> Result<(f64, f64, f64), SolidError> {
         let flexibility = 1.0 / source.shear_stiffness_n() / length;
         let bending = length / source.elastic().bending_stiffness_n_m2() / 12.0;
         if !length.is_finite()
@@ -85,12 +102,7 @@ impl ShearElement {
             let ratio = bending / flexibility;
             (ratio / (1.0 + ratio), 1.0 / (1.0 + ratio))
         };
-        Ok(Self {
-            source,
-            flexibility,
-            bending_fraction,
-            shear_fraction,
-        })
+        Ok((flexibility, bending_fraction, shear_fraction))
     }
 
     pub(super) fn consistent_mass(
