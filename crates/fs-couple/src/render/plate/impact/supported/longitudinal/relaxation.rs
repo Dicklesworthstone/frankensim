@@ -51,6 +51,9 @@ impl SupportedStrings {
             let Some(SupportedPotential::Longitudinal(p))=self.0.potentials.get(arm.string) else {
                 return Err(invalid("supported memory requires the original longitudinal strain image"));
             };
+            if p.tensile.is_some() {
+                return Err(invalid("hereditary support tensile admission needs actual layer memory stresses"));
+            }
             if !arm.axial_rigidity_n.is_finite() || arm.axial_rigidity_n<=0.0
                 || !arm.relaxation_time_s.is_finite() || arm.relaxation_time_s<=0.0 {
                 return Err(invalid("supported memory needs positive finite relaxing rigidity and time"));

@@ -4,7 +4,10 @@
 //! never an authored gain. The reference is already tensioned and equilibrated:
 //! static prestress reactions are not applied a second time here.
 use super::*;
+use super::super::string::StringTensileGuard;
 use fs_nlmodal::{KcStringParams, longitudinal::LongitudinalString};
+use std::sync::Arc;
+mod strength;
 mod viscosity;
 pub mod relaxation;
 
@@ -182,6 +185,7 @@ pub(super) struct LongitudinalPotential {
     tension: f64,
     maximum_slope: f64,
     maximum_strain: f64,
+    tensile: Option<Arc<StringTensileGuard>>,
 }
 struct Strain {
     slopes: Vec<f64>,
@@ -208,7 +212,7 @@ impl LongitudinalPotential {
             det::sqrt(2.0/(wire.linear_density_kg_m*length))*n as f64*core::f64::consts::PI/length).collect(),
             chord,lift_stiffness:wire.tension_n*length*(chord[0]*chord[0]+chord[1]*chord[1]),
             ea:law.axial_rigidity_n,tension:wire.tension_n,maximum_slope:law.maximum_slope,
-            maximum_strain:selection.maximum_strain})
+            maximum_strain:selection.maximum_strain,tensile:None})
     }
     pub(super) fn axial_omegas(&self) -> &[f64] { self.model.axial_omegas() }
     pub(super) fn axial_shape(&self,station:f64,length:f64) -> Vec<f64> {
@@ -289,7 +293,7 @@ impl LongitudinalPotential {
         for (g,h) in g.iter_mut().zip(second) {*g+=h;}
         self.pull_gradient(&g,mean,&harmonics,d,out);
     }
-    pub(super) fn observe(&self,q:&[f64]) -> Result<(StringObservation,LongitudinalSupportObservation),ImpactError> {
+    fn observe_kinematics(&self,q:&[f64]) -> Result<(StringObservation,LongitudinalSupportObservation),ImpactError> {
         let s=self.strain(q)?;let n=self.scales.len();
         let mut slope=det::hypot(s.slopes[0],s.slopes[n+1]);
         for i in 1..=n {slope+=det::hypot(s.slopes[i],s.slopes[n+1+i]);}
@@ -301,5 +305,15 @@ impl LongitudinalPotential {
             tension_n:self.tension+self.ea*s.mean,stretching_energy_j:s.energy},
             LongitudinalSupportObservation {mean_dynamic_strain:s.mean,maximum_abs_dynamic_strain:maximum,
                 minimum_tension_n:minimum_tension,maximum_tension_n:self.tension+self.ea*(s.mean+s.spread),strain_energy_j:s.energy}))
+    }
+
+    pub(super) fn observe(&self,q:&[f64]) -> Result<(StringObservation,LongitudinalSupportObservation),ImpactError> {
+        let observation=self.observe_kinematics(q)?;
+        if let Some(guard)=&self.tensile {
+            // The mean tension misses propagating axial peaks. The native
+            // Fourier strain owner already bounds every point on the span.
+            guard.admit(q,2,observation.1.maximum_tension_n)?;
+        }
+        Ok(observation)
     }
 }

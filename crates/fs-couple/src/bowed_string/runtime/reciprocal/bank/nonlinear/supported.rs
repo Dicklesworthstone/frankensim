@@ -305,6 +305,18 @@ impl MaterialSupportRun {
     pub const fn source(&self) -> &SupportedMaterialStrings { &self.source }
     /// Read accepted physical state, time, storage and support diagnostics.
     pub const fn system(&self) -> &PreparedImpactSystem { &self.system }
+    /// Selected elastic tensile demand on one accepted supported string. Uses
+    /// its actual nonuniform axial strain and endpoint motion when retained;
+    /// receiver/torsion and material-history coordinates are never reinterpreted
+    /// as transverse bending. No selected criterion remains explicit as None.
+    pub fn tensile_assessment(&self,string:usize)
+        -> Result<Option<crate::render::plate::impact::string::StringTensileAssessment>,ImpactError>
+    {
+        let count=self.source.supported.mode_count();
+        let mut q=[0.0;MAX_IMPACT_MODES];
+        for (i,value) in q[..count].iter_mut().enumerate() {*value=self.system.state()[2*i];}
+        self.source.supported.tensile_assessment(string,&q[..count])
+    }
     /// One original transactional mechanical step; no extra clock or integrator.
     pub fn step(&mut self, external: &[f64], gate: &CancelGate) -> Result<ImpactFrame, ImpactError> {
         self.system.step(external, gate)

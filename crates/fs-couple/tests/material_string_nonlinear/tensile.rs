@@ -22,6 +22,8 @@ const RADIUS: f64 = 0.0003;
 const LENGTH: f64 = 0.5;
 const YOUNG: f64 = 200e9;
 
+mod supported;
+
 fn strength_material(
     young: f64,
     limit: f64,

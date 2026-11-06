@@ -16,7 +16,7 @@ use fs_math::det;
 use crate::modal_acoustic_time::ModalAcousticState;
 use super::{BodyPotential, ImpactBody, ImpactError, MAX_IMPACT_MODES, invalid};
 use super::linear::wire::{LineContact, WireSpan};
-use super::string::{StringObservation, StringPotential, StringStretching};
+use super::string::{StringObservation, StringPotential, StringStretching, StringTensileAssessment};
 
 pub mod longitudinal;
 use longitudinal::{LongitudinalPotential, LongitudinalSupportModes, LongitudinalSupportObservation,
@@ -202,15 +202,24 @@ impl SupportedStrings {
             return Err(invalid("one original tensile selection per supported wire"));
         }
         if capacities.iter().all(Option::is_none) { return Ok(self); }
+        if self.0.axial_relaxation.is_some() {
+            return Err(invalid("hereditary support tensile admission needs actual layer memory stresses"));
+        }
         let data = Rc::make_mut(&mut self.0);
         for (index, capacity) in capacities.iter().copied().enumerate() {
             let Some(capacity) = capacity else { continue; };
-            let SupportedPotential::Transverse(potential) = &mut data.potentials[index] else {
-                return Err(invalid("longitudinal support waves require their own local tensile stress assessment"));
-            };
-            *potential = potential.clone().with_tensile_capacity(
-                capacity.clone(), data.wires[index].length_m(),
-            )?;
+            match &mut data.potentials[index] {
+                SupportedPotential::Transverse(potential) => {
+                    *potential = potential.clone().with_tensile_capacity(
+                        capacity.clone(), data.wires[index].length_m(),
+                    )?;
+                }
+                SupportedPotential::Longitudinal(potential) => {
+                    *potential = potential.clone().with_tensile_capacity(
+                        capacity.clone(), data.wires[index].length_m(),
+                    )?;
+                }
+            }
         }
         Ok(self)
     }
@@ -727,6 +736,29 @@ impl SupportedStrings {
         let mut local=[0.0;MAX_IMPACT_MODES];
         let count=self.local_coordinates(wire,&q,z[self.support_coordinate()]*self.0.weight,&mut local);
         self.0.potentials[wire].observe(&local[..count])
+    }
+    /// Selected elastic tensile envelope on the original wire, after the
+    /// native kinetic pullback. Retained longitudinal waves use their maximum
+    /// local tension, including actual endpoint extension and both transverse
+    /// planes, rather than the mean tension. Affine lifts add no curvature.
+    ///
+    /// This diagnoses an overlimit trial without enforcing its tensile limit;
+    /// the original finite, slope, strain and positive-tension domain still
+    /// applies. It adds no viscous stress, fracture law or new time owner.
+    pub fn tensile_assessment(&self,wire:usize,z:&[f64])
+        ->Result<Option<StringTensileAssessment>,ImpactError>
+    {
+        let potential=self.0.potentials.get(wire).ok_or_else(||invalid("unknown supported wire"))?;
+        let mut q=[0.0;MAX_IMPACT_MODES];
+        if !self.relative(z,&mut q[..self.support_coordinate()]) {
+            return Err(invalid("invalid supported tensile state"));
+        }
+        let mut local=[0.0;MAX_IMPACT_MODES];
+        let count=self.local_coordinates(wire,&q,z[self.support_coordinate()]*self.0.weight,&mut local);
+        match potential {
+            SupportedPotential::Transverse(p)=>p.tensile_assessment(&local[..count]),
+            SupportedPotential::Longitudinal(p)=>p.tensile_assessment(&local[..count]),
+        }
     }
     /// Continuous-span strain and tension bounds, including actual endpoint
     /// extension and the retained propagating axial strains.

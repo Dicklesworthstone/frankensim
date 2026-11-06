@@ -1474,9 +1474,9 @@ original laws. Successful checks allocate nothing; preparation retains the
 bounded modal factors and original capacity. Native reference, prepared and
 pressure-rendering paths share the same check. Transversely moving supported
 strings retain the guard through their original kinetic transformation: the
-affine endpoint adds its actual stretching but has zero curvature. Conversion
-to local longitudinal-wave support refuses a selected guard until that
-owner's nonuniform axial stress is included. Transfer of a guarded potential
+affine endpoint adds its actual stretching but has zero curvature. The
+longitudinal moving-support extension below includes the original owner's
+nonuniform axial stress. Transfer of a guarded potential
 to the bow bank's geometric-only storage also refuses: that owner can add
 independent axial material histories. Independently constructed bow banks do
 not acquire this opt-in through source-property presence alone.
@@ -1708,3 +1708,41 @@ shear-only dissipation, full exterior-fluid memory and late source refusal.
 `ShellThermoplasticEnergy::creep_heat_j` and `ShellLayerHeat::creep_j` report native creep work already included in total physical heat. Only total physical plus signed reciprocal heat enters the caloric timeline, exactly once. Numerical material/inertial loss and drilling energy remain excluded. Accepted thermal histories must match their actual enthalpy-derived temperatures, and all trials restart from the same accepted state and physical clock. Original thermal transport pinning and static-domain checks apply to creep sources as well as plasticity sources.
 
 Two focused synthetic regressions define an independently reconstructed load/hold/unload/reload primary-creep membrane with nonzero expansion and thermal activation, late-refusal preservation, and incompatible caloric/history/card rejection. They are regression definitions, not executed results. The original fully solid, small-strain/rotation and fixed-geometry shell reduction remains bounded; measured material calibration, tertiary creep, damage, rupture and qualified service life remain separate work.
+
+## Tensile envelopes with longitudinal waves and moving string ends
+
+`SupportedMaterialStrings::in_stationary_gas_with_longitudinal_waves` carries
+each source's selected tensile capacity into its original longitudinal
+potential. The native `fs-nlmodal::longitudinal` strain polynomial supplies
+`T_max = T0 + EA (epsilon_mean + sum_j |epsilon_j|)`. Actual oblique endpoint
+extension, both transverse polarizations, their affine-chord cross terms and
+the explicitly selected solid-inertia axial modes all contribute. Testing
+only mean tension would miss a local tensile peak. Unretained axial channels
+remain statically equilibrated as in that original reduction; this extension
+does not supply their inertia or claim converged propagation.
+
+The existing common tensile kernel combines that continuous-span axial bound
+with each original layer's `E_i`, outer radius and selected static strength:
+`sigma_i <= E_i (T_max/EA + r_outer_i K)`. Curvature factors are cached from
+the actual transverse normalization, independently of solid axial inertia or
+sparse axial mode indices. The guard adds no successful-check allocation,
+new force, stiffness, energy, mode, clock or solver. Native initial admission
+and accepted-step gates enforce it after the original kinetic pullback;
+generic copied bodies retain it and a failed trial publishes no partial state.
+
+`SupportedStrings::tensile_assessment` diagnoses a complete candidate in the
+original support coordinates without enforcing its selected strength limit;
+`MaterialSupportRun::tensile_assessment` reads accepted native state. In this
+longitudinal lane `StringTensileAssessment::tension_n` is the upper local
+elastic tension bound, not the mean. The envelope can be conservative when
+axial and bending maxima occur at different positions. It remains a fixed-state
+elastic normal-stress estimate, with no viscous stress, shear failure,
+fracture evolution or guarantee between accepted temporal samples. A positive
+hereditary arm on a guarded wire is refused until actual layer memory stresses
+can participate; copying a body cannot bypass that boundary.
+
+G0/G1/G3 cases in `tests/material_string_nonlinear/tensile/supported.rs` specify
+independent sparse-wave and endpoint-extension formulas, two-plane rotation
+and bonded-layer load sharing, continuous-span sample containment, native and
+prepared rollback on an actual axial tensile crossing, unchanged admitted
+mechanics, malformed-coordinate refusals and the hereditary boundary.

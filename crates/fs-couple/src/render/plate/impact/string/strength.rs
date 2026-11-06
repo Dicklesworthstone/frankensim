@@ -18,7 +18,9 @@ use std::sync::Arc;
 /// when its actual maximum is lower. No material state is altered.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct StringTensileAssessment {
-    /// Actual tension from the original nonlinear storage [N].
+    /// Axial tension used for the elastic envelope [N]. This is the original
+    /// uniform KC tension, or the continuous-span upper tension bound when
+    /// the original support retains longitudinal waves.
     pub tension_n: f64,
     /// Continuous-span upper envelope of the transverse curvature norm [1/m].
     pub curvature_bound_per_m: f64,
@@ -38,14 +40,54 @@ impl StringTensileAssessment {
     }
 }
 
-#[derive(Clone)]
-pub(super) struct StringTensileGuard {
-    pub(super) capacity: AxialTensileCapacity,
+#[derive(Clone, Debug)]
+pub(in crate::render::plate::impact) struct StringTensileGuard {
+    pub(in crate::render::plate::impact) capacity: AxialTensileCapacity,
     curvature_scales: Vec<f64>,
 }
 
 impl StringTensileGuard {
-    pub(super) fn assess(
+    pub(in crate::render::plate::impact) fn new(
+        capacity: AxialTensileCapacity,
+        axial_rigidity_n: f64,
+        curvature_scales: Vec<f64>,
+    ) -> Result<Self, ImpactError> {
+        let ea = capacity.section().axial_stiffness_n();
+        if !axial_rigidity_n.is_finite()
+            || (ea - axial_rigidity_n).abs() > 32.0 * f64::EPSILON * ea
+            || curvature_scales.is_empty()
+            || curvature_scales.iter().any(|s| !s.is_finite() || *s <= 0.0)
+        {
+            return Err(invalid(
+                "string tensile capacity requires its original section EA and finite modal curvature scales",
+            ));
+        }
+        Ok(Self {
+            capacity,
+            curvature_scales,
+        })
+    }
+
+    pub(in crate::render::plate::impact) fn admit(
+        &self,
+        q: &[f64],
+        planes: usize,
+        tension_n: f64,
+    ) -> Result<(), ImpactError> {
+        let assessment = self.assess(q, planes, tension_n)?;
+        if assessment.exceeds_limit() {
+            return Err(ImpactError::Owner(format!(
+                "string tensile envelope exceeds '{}' in layer {}: {} Pa, utilization {}",
+                self.capacity.limit_property(),
+                assessment.governing_layer,
+                assessment.governing_tensile_stress_bound_pa,
+                assessment.utilization,
+            )));
+        }
+        Ok(())
+    }
+
+    pub(in crate::render::plate::impact) fn assess(
         &self,
         q: &[f64],
         planes: usize,
@@ -145,15 +187,9 @@ impl StringPotential {
         capacity: AxialTensileCapacity,
         length_m: f64,
     ) -> Result<Self, ImpactError> {
-        let ea = capacity.section().axial_stiffness_n();
-        let difference = (ea - self.stretching.axial_rigidity_n).abs();
-        if self.tensile.is_some()
-            || !length_m.is_finite()
-            || length_m <= 0.0
-            || difference > 32.0 * f64::EPSILON * ea
-        {
+        if self.tensile.is_some() || !length_m.is_finite() || length_m <= 0.0 {
             return Err(invalid(
-                "string tensile capacity requires its original section EA, finite span and exclusive limit",
+                "string tensile capacity requires a finite span and exclusive limit",
             ));
         }
         let total = self.mode_count();
@@ -170,10 +206,11 @@ impl StringPotential {
             }
             curvature_scales.push(scale);
         }
-        self.tensile = Some(Arc::new(StringTensileGuard {
+        self.tensile = Some(Arc::new(StringTensileGuard::new(
             capacity,
+            self.stretching.axial_rigidity_n,
             curvature_scales,
-        }));
+        )?));
         Ok(self)
     }
 }

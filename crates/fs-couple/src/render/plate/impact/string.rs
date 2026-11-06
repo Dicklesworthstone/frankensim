@@ -15,7 +15,7 @@ use crate::modal_acoustic_time::ModalAcousticState;
 
 mod strength;
 pub use strength::StringTensileAssessment;
-use strength::StringTensileGuard;
+pub(super) use strength::StringTensileGuard;
 
 /// An explicit constitutive input and moderate-slope validity bound.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -275,14 +275,7 @@ impl StringPotential {
     pub fn observe(&self, q: &[f64]) -> Result<StringObservation, ImpactError> {
         let observation = self.observe_kinematics(q)?;
         if let Some(guard) = &self.tensile {
-            let assessment = guard.assess(q, self.transverse_planes, observation.tension_n)?;
-            if assessment.exceeds_limit() {
-                return Err(ImpactError::Owner(format!(
-                    "string tensile envelope exceeds '{}' in layer {}: {} Pa, utilization {}",
-                    guard.capacity.limit_property(), assessment.governing_layer,
-                    assessment.governing_tensile_stress_bound_pa, assessment.utilization,
-                )));
-            }
+            guard.admit(q, self.transverse_planes, observation.tension_n)?;
         }
         Ok(observation)
     }
