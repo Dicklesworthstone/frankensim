@@ -6,7 +6,9 @@ use fs_thermochem::coulomb::test_particle::TestParticleCoulombV1;
 
 mod solve;
 mod state;
+mod volume;
 pub use state::KineticFusionState;
+pub use volume::{KineticFusionVolumeResult, advance_adiabatic_kinetic_fusion_volume};
 
 /// Explicit dilute-alpha domain and bounded collision work. The retained source
 /// supplies the original projectile and background masses, charges and cutoffs.

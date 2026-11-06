@@ -231,20 +231,24 @@ pub fn advance_adiabatic_fusion_volume(
     })
 }
 
-/// Signed work on fixed-stock monatomic pools, in heavy/electron order.
-pub(super) fn adiabatic_work_on_pools(
-    energies: [f64; 2],
+/// Signed work on fixed-stock nonrelativistic isotropic components. A kinetic
+/// component may be empty; each thermal owner still admits positive storage.
+pub(super) fn adiabatic_work_on_pools<const N: usize>(
+    energies: [f64; N],
     from: Volume,
     to: Volume,
-) -> Result<[f64; 2], DtFusionError> {
-    if energies.iter().any(|&energy| !positive(energy)) {
+) -> Result<[f64; N], DtFusionError> {
+    if energies
+        .iter()
+        .any(|&energy| !energy.is_finite() || energy < 0.0)
+    {
         return Err(DtFusionError::Invalid(
-            "positive finite adiabatic pool energies",
+            "nonnegative finite adiabatic component energies",
         ));
     }
     let logarithm = log_volume_ratio(from, to)?;
     if logarithm == 0.0 {
-        return Ok([0.0; 2]);
+        return Ok([0.0; N]);
     }
     let fraction = expm1((-2.0 / 3.0) * logarithm);
     let work = energies.map(|energy| energy * fraction);

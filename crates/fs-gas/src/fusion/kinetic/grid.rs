@@ -16,6 +16,12 @@ pub struct AlphaEnergyGrid {
     widths_j: Arc<[f64]>,
 }
 
+/// Physical geometry for a frozen stage, without allocating another grid.
+pub(super) struct ScaledGridGeometry {
+    pub(super) energies: [Energy; MAX_ALPHA_BINS],
+    pub(super) widths_j: [f64; MAX_ALPHA_BINS],
+}
+
 impl AlphaEnergyGrid {
     /// Retain an explicitly authored energy grid without sorting or repair.
     pub fn new(
@@ -176,6 +182,82 @@ impl AlphaEnergyGrid {
         self.energies.is_empty()
     }
 
+    /// Publish the same cells at uniformly scaled physical energies. Cell
+    /// populations do not change under this coordinate motion. A scale of one
+    /// retains the existing immutable arrays; other scales allocate only the
+    /// published grid. Numerical stages use fixed-size scaled geometry instead.
+    ///
+    /// The factor must be positive and finite. Unrepresentable physical centers
+    /// or midpoint widths refuse without clipping, merging or moving a center.
+    pub fn scaled(
+        &self,
+        factor: f64,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, DtFusionError> {
+        poll(&mut cancelled)?;
+        if factor == 1.0 {
+            return Ok(self.clone());
+        }
+        let geometry = self.scaled_geometry(factor, &mut cancelled)?;
+        let result = Self {
+            energies: geometry.energies[..self.len()].to_vec().into(),
+            widths_j: geometry.widths_j[..self.len()].to_vec().into(),
+        };
+        poll(&mut cancelled)?;
+        Ok(result)
+    }
+
+    /// Admit every represented physical center and midpoint width at a stage.
+    pub(crate) fn admit_scale(&self, scale: f64) -> Result<(), DtFusionError> {
+        self.scaled_geometry(scale, || false).map(|_| ())
+    }
+
+    pub(super) fn scaled_geometry(
+        &self,
+        scale: f64,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<ScaledGridGeometry, DtFusionError> {
+        poll(&mut cancelled)?;
+        if !positive(scale) {
+            return Err(DtFusionError::Invalid(
+                "positive finite alpha energy scale required",
+            ));
+        }
+        let mut geometry = ScaledGridGeometry {
+            energies: [Energy::new(0.0); MAX_ALPHA_BINS],
+            widths_j: [0.0; MAX_ALPHA_BINS],
+        };
+        for (i, original) in self.energies.iter().enumerate() {
+            poll(&mut cancelled)?;
+            let energy = Energy::new(original.value() * scale);
+            if !positive(energy.value()) || (i > 0 && energy <= geometry.energies[i - 1]) {
+                return Err(DtFusionError::OutsideDomain);
+            }
+            geometry.energies[i] = energy;
+        }
+        let mut left_face = 0.0;
+        for i in 0..self.len() {
+            poll(&mut cancelled)?;
+            let energy = geometry.energies[i].value();
+            let right_face = if i + 1 < self.len() {
+                energy + 0.5 * (geometry.energies[i + 1].value() - energy)
+            } else {
+                energy + 0.5 * (energy - geometry.energies[i - 1].value())
+            };
+            let width = right_face - left_face;
+            if !positive(right_face) || !positive(width) {
+                return Err(DtFusionError::OutsideDomain);
+            }
+            // Recompute faces from represented physical centers, as publication
+            // does. This keeps collisions and restart on the same cell geometry
+            // even when scaling and subtraction round differently.
+            geometry.widths_j[i] = width;
+            left_face = right_face;
+        }
+        poll(&mut cancelled)?;
+        Ok(geometry)
+    }
+
     /// Place a monoenergetic birth between adjacent centers, preserving its
     /// number and first energy moment to floating-point precision. Refusal
     /// leaves the input population array unchanged; no edge clipping occurs.
@@ -185,6 +267,38 @@ impl AlphaEnergyGrid {
         amount: Amount,
         particle_energy: Energy,
     ) -> Result<(), DtFusionError> {
+        self.inject_at_centers(amounts, amount, particle_energy, &self.energies)
+    }
+
+    /// Inject a physical birth into cells moving with a common energy scale.
+    /// Interpolate on represented physical centers rather than dividing the
+    /// birth energy: division can move an exact endpoint outside its support.
+    pub(crate) fn inject_scaled(
+        &self,
+        amounts: &mut [f64; MAX_ALPHA_BINS],
+        amount: Amount,
+        particle_energy: Energy,
+        scale: f64,
+    ) -> Result<(), DtFusionError> {
+        if scale == 1.0 {
+            return self.inject(amounts, amount, particle_energy);
+        }
+        let geometry = self.scaled_geometry(scale, || false)?;
+        self.inject_at_centers(
+            amounts,
+            amount,
+            particle_energy,
+            &geometry.energies[..self.len()],
+        )
+    }
+
+    fn inject_at_centers(
+        &self,
+        amounts: &mut [f64; MAX_ALPHA_BINS],
+        amount: Amount,
+        particle_energy: Energy,
+        centers: &[Energy],
+    ) -> Result<(), DtFusionError> {
         self.admit_amounts(amounts)?;
         let (n, e) = (amount.value(), particle_energy.value());
         if !n.is_finite() || n < 0.0 || !positive(e) {
@@ -192,23 +306,21 @@ impl AlphaEnergyGrid {
                 "nonnegative finite alpha birth amount and positive finite particle energy",
             ));
         }
-        if particle_energy < self.energies[0] || particle_energy > self.energies[self.len() - 1] {
+        if particle_energy < centers[0] || particle_energy > centers[self.len() - 1] {
             return Err(DtFusionError::OutsideDomain);
         }
         if n == 0.0 {
             return Ok(());
         }
-        let high = self
-            .energies
-            .partition_point(|value| *value < particle_energy);
+        let high = centers.partition_point(|value| *value < particle_energy);
         let mut next = *amounts;
-        if self.energies[high] == particle_energy {
+        if centers[high] == particle_energy {
             next[high] += n;
         } else {
             let low = high - 1;
-            let from_low = e - self.energies[low].value();
-            let from_high = self.energies[high].value() - e;
-            let gap = self.energies[high].value() - self.energies[low].value();
+            let from_low = e - centers[low].value();
+            let from_high = centers[high].value() - e;
+            let gap = centers[high].value() - centers[low].value();
             // Compute the smaller population directly; its complement retains
             // the full birth amount without subtracting nearby energy ratios.
             let (lower, upper) = if from_low <= from_high {

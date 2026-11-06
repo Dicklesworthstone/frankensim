@@ -19,6 +19,9 @@ pub use super::network::kinetic::{
     KineticAlphaBalance, KineticAlphaTransport, KineticFusionResult, KineticFusionState,
     advance_kinetic_fusion,
 };
+pub use super::network::kinetic::{
+    KineticFusionVolumeResult, advance_adiabatic_kinetic_fusion_volume,
+};
 
 pub(crate) use collision::AlphaCollisionOperator;
 
