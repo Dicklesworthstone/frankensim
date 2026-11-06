@@ -48,6 +48,10 @@ pub use fs_material::plane_stress_viscosity::PlaneStressViscosity;
 /// Immutable source-bound elastic data and physical striker geometry for kit builders.
 pub mod materials;
 
+/// Spatial original density for the same plate inertia, dynamics and couplings.
+pub mod reference_inertia;
+pub use reference_inertia::PlateReferenceDensity;
+
 /// Baked exterior modal loading of drum heads' motion beyond their compact volume model.
 pub mod radiation;
 
@@ -722,14 +726,14 @@ fn sigmas(t60: [(f64, f64); 2], beta2: &dyn Fn(f64) -> f64) -> (f64, f64) {
 
 impl Body {
     pub fn plate(name: &str, s: &PlateSpec) -> Result<Body, String> {
-        Self::plate_impl(name, s, None, true)
+        Self::plate_impl(name, s, None, true, None)
     }
 
     /// Same operators with no surface loss at all: `s.t60` is ignored, and
     /// support and muffle dashpots remain. For a surface whose loss the caller
     /// declares a stated unknown entered as zero.
     pub fn plate_without_surface_loss(name: &str, s: &PlateSpec) -> Result<Body, String> {
-        Self::plate_impl(name, s, None, false)
+        Self::plate_impl(name, s, None, false, None)
     }
 
     /// Same elastic/geometry operators with a sourced reduced plane-stress
@@ -739,11 +743,13 @@ impl Body {
     pub fn plate_with_viscosity(name: &str, s: &PlateSpec,
         source: &PlaneStressViscosity, angle_rad: f64) -> Result<Body, String> {
         if !s.bending { return Err("bending viscosity requires the plate bending operator".into()); }
-        Self::plate_impl(name, s, Some((source, angle_rad)), false)
+        Self::plate_impl(name, s, Some((source, angle_rad)), false, None)
     }
 
     fn plate_impl(name: &str, s: &PlateSpec,
-        viscosity: Option<(&PlaneStressViscosity, f64)>, t60_loss: bool) -> Result<Body, String> {
+        viscosity: Option<(&PlaneStressViscosity, f64)>, t60_loss: bool,
+        reference_density: Option<PlateReferenceDensity<'_>>) -> Result<Body, String> {
+        reference_inertia::validate_grid(s)?;
         let h = s.grid;
         let m = (s.radius / h).ceil() as i64 + 3;
         let inside = |i: i64, j: i64| {
@@ -791,7 +797,9 @@ impl Body {
         let at = |i: i64, j: i64| grid_index.get(&(i, j)).copied();
         let r_of = |p: [f64; 2]| (p[0] * p[0] + p[1] * p[1]).sqrt();
         let thick: Vec<f64> = xy.iter().map(|&p| (s.thickness)(r_of(p))).collect();
-        let mut mass: Vec<f64> = thick.iter().map(|t| s.density * t * h * h).collect();
+        // Original physical quadrature, admitted before any damping or inverse
+        // action divides by mass. No numerical mass floor changes inventory.
+        let mass = reference_inertia::nodal_masses(name, s, &xy, &thick, reference_density)?;
         // graph Laplacian (membrane energy T/2 sum (w_i - w_j)^2), Dirichlet outside when clamped
         let mut lrows = vec![BTreeMap::new(); n];
         for (&(i, j), &a) in &grid_index {
@@ -930,16 +938,19 @@ impl Body {
             }
         }
         let stiff = Csr::from_rows(&krows);
-        // loss from the dispersion of the thinnest region (the bow of a cymbal, the head itself)
-        let t_min = thick.iter().cloned().fold(f64::INFINITY, f64::min);
-        let rho_t = s.density * t_min;
-        let dd = if s.bending { s.young * t_min.powi(3) / (12.0 * (1.0 - nu * nu)) } else { 0.0 };
-        let (tt, ddc) = (s.tension / rho_t, dd / rho_t);
-        let beta2 = move |f: f64| {
-            let om2 = (2.0 * PI * f).powi(2);
-            if ddc > 0.0 { (-tt + (tt * tt + 4.0 * ddc * om2).sqrt()) / (2.0 * ddc) } else { om2 / tt }
-        };
-        let (s0, s1) = if t60_loss { sigmas(s.t60, &beta2) } else { (0.0, 0.0) };
+        let (s0, s1) = if t60_loss {
+            // Legacy fitted loss uses the dispersion of the thinnest region.
+            // Spatial-density entries select no such uniform-density fit.
+            let t_min = thick.iter().cloned().fold(f64::INFINITY, f64::min);
+            let rho_t = s.density * t_min;
+            let dd = if s.bending { s.young * t_min.powi(3) / (12.0 * (1.0 - nu * nu)) } else { 0.0 };
+            let (tt, ddc) = (s.tension / rho_t, dd / rho_t);
+            let beta2 = move |f: f64| {
+                let om2 = (2.0 * PI * f).powi(2);
+                if ddc > 0.0 { (-tt + (tt * tt + 4.0 * ddc * om2).sqrt()) / (2.0 * ddc) } else { om2 / tt }
+            };
+            sigmas(s.t60, &beta2)
+        } else { (0.0, 0.0) };
         let s0v: Vec<f64> = (0..n).map(|k| s0 + s0_extra[k]).collect();
         let area = PI * (s.radius * s.radius - s.hole * s.hole);
         let t_mean = thick.iter().sum::<f64>() / n as f64;
@@ -1044,10 +1055,6 @@ impl Body {
         } else {
             None
         };
-        // edge nodes of a free plate outside the true disc carry real mass but a staircase rim
-        for m_ in mass.iter_mut() {
-            *m_ = m_.max(1e-12);
-        }
         Ok(Body {
             name: name.into(), h, n, xy, rest_z, grid_index, mass, s0: s0v, s1, lap, stiff, viscosity, modal: None, tension: s.tension, berger, vk,
             w: vec![0.0; n], wp: vec![0.0; n], wn: vec![0.0; n], f: vec![0.0; n], bias: vec![0.0; n], tmp: vec![0.0; n], lw: vec![0.0; n], lwp: vec![0.0; n], g: vec![0.0; n], psi: 0.0, psi_next: 0.0, sav: false, r_prev: 0.0, budget: 0.0, kc: 0.0, cf: vec![], flux_zero: vec![], flux_rows: vec![],
@@ -1805,9 +1812,19 @@ impl Body {
                 }
             }
             let y: Vec<f64> = (0..n).map(|i| -self.f[i] / self.mass[i].sqrt()).collect();
-            let norm = y.iter().map(|a| a * a).sum::<f64>().sqrt();
-            let vn = v.iter().map(|a| a * a).sum::<f64>().sqrt();
+            let norm = reference_inertia::spectral_norm(&y);
+            let vn = reference_inertia::spectral_norm(&v);
+            if !norm.is_finite() || !vn.is_finite() || vn == 0.0 {
+                // A failed estimate must not become a zero rate on its next
+                // iterate. The existing tail restores the original motion.
+                lam = f64::INFINITY;
+                break;
+            }
             lam = norm / vn.max(1e-300);
+            if !lam.is_finite() {
+                lam = f64::INFINITY;
+                break;
+            }
             if norm == 0.0 {
                 break;
             }
@@ -1832,7 +1849,11 @@ impl Body {
         let mut tangent = self.vk.as_ref().and_then(|vk| vk.annulus.as_ref()
             .map(|a| (a.rest_jacobian(&vk.z0), vec![0.0; vk.f.len()])));
         for _ in 0..400 {
-            let vn = v.iter().map(|a| a * a).sum::<f64>().sqrt();
+            let vn = reference_inertia::spectral_norm(&v);
+            if !vn.is_finite() || vn == 0.0 {
+                lam = f64::INFINITY;
+                break;
+            }
             for i in 0..n {
                 self.w[i] = v[i] / vn / self.mass[i].sqrt();
             }
@@ -1854,7 +1875,11 @@ impl Body {
                 eps
             };
             let y: Vec<f64> = (0..n).map(|i| (-self.f[i] + self.g[i] / gradient_divisor) / self.mass[i].sqrt()).collect();
-            let norm = y.iter().map(|a| a * a).sum::<f64>().sqrt();
+            let norm = reference_inertia::spectral_norm(&y);
+            if !norm.is_finite() {
+                lam = f64::INFINITY;
+                break;
+            }
             lam = norm;
             if norm == 0.0 {
                 break;
@@ -4083,7 +4108,9 @@ impl Instrument {
     pub fn stability(&mut self) -> (f64, String) {
         let k = self.k();
         let (lam, who) = self.admission_rate2();
-        (k * k * lam / 4.0, who)
+        // A refused operator estimate stays refused even if k² underflows:
+        // multiplying zero by infinity must not turn the clock gate into NaN.
+        (if lam.is_finite() { k * k * lam / 4.0 } else { f64::INFINITY }, who)
     }
 
     fn prepare(&mut self) {

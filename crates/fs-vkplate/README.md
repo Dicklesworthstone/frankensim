@@ -13,6 +13,59 @@ and that is what those renders sounded like. A grid solver avoids a prescribed m
 but its usable bandwidth and dispersion still require spatial and temporal convergence checks.
 Node count alone does not establish audio-band fidelity.
 
+## Spatial reference density
+
+`Body::plate_with_reference_density` prepares a spatially graded physical
+inventory on the same native plate grid. `PlateReferenceDensity::Volumetric`
+accepts `rho0([x,y])` in kg/m³ and forms `rho0 * thickness * h²` at each node.
+`PlateReferenceDensity::Areal` accepts an already integrated `sigma0([x,y])`
+in kg/m² and forms `sigma0 * h²`, so a film or layered mass is not multiplied
+by thickness twice. The explicit field replaces `PlateSpec::density` only.
+Geometry, thickness, elastic response, pretension and nonlinear strain energy
+retain their original owners; callers author these physical inputs coherently.
+
+Coordinates and mass measures belong to the original reference plane. The
+existing nodal `h²` quadrature and staircase boundary remain the discretization;
+there is no mass renormalization to the analytic circular area or exact
+cut-cell claim. A callback is sampled once per grid node during preparation.
+Only the existing `Body::mass` array is retained, so warm steps, cloned states,
+force/impulse responses, contacts, attached air and radiation use the same
+physical inventory without resampling density. This transverse thin-plate
+model does not add laminate first-moment or rotary inertia; those belong to
+the native MITC shell formulation.
+
+The new entry omits the legacy fitted T60 surface loss: that fit uses a
+uniform-density dispersion relation, which does not identify a graded
+surface's modal decay. Authored support and muffle dashpots remain.
+`plate_with_reference_density_and_viscosity` retains the existing source-bound
+plane-stress Kelvin–Voigt bending law, its physical loss account and its
+mass-normalized clock bound. It does not infer loss coefficients from density.
+
+Both scalar and field preparation require positive finite thickness, density
+and representable positive nodal mass before mass-dependent divisions. The
+former `1e-12 kg` mass floor is removed: light physical inventories remain
+light, while zero, underflowed or nonfinite inventory refuses construction.
+Ordinary scalar masses retain their multiplication order and values.
+
+Call the receiving instrument's `stability()` check at the actual integration
+rate, and require a finite fraction below one. That existing check applies
+the actual stiffness and damping operators in the retained mass metric; a
+total-mass comparison or scalar dispersion estimate is insufficient. Its two
+power-iteration paths preserve their ordinary norm arithmetic and use scaled
+norms when squares overflow or underflow. Unrepresentable operator images
+return an infinite refusal-sized rate after restoring the supplied motion,
+so extremely light mass cannot collapse a large estimate to zero. This is
+still an iterative rest-state estimate; nonlinear/contact behavior and
+spatial/time convergence retain their existing qualification limits.
+
+Focused regressions in `src/reference_inertia/tests.rs` cover scalar/field
+equivalence and single sampling, subfloor masses and equal-total-mass
+redistribution, actual clock scaling across large density contrasts, physical
+acceleration/kinetic/impulse balance, the shared contact inverse with attached
+air inertia, source viscosity and support-loss work, and invalid inventory.
+These manufactured checks exercise the numerical model rather than claiming
+measured-material fidelity or real-time throughput.
+
 ## Physics
 
 - **Membranes**: `rho t w_tt = T Lap(w) - D Lap^2(w) + ...`, rim clamped, with the Mylar film's
