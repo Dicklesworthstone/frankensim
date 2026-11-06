@@ -6,17 +6,20 @@
 //! Native momenta, original contact history and all finite-cell temperatures
 //! are admitted together, including actual work from prescribed body wrenches.
 //!
-//! Mechanical sources and the incoming conducting footprint are frozen over
-//! this increment. True DMT area still evolves in the mechanical path; an
-//! authored fractional-change bound limits the transport geometry lag. This is
-//! a first-order split, not an implicit thermomechanical or footprint-accuracy
-//! guarantee. The pose/topology owner must consume the native reported travel,
-//! update thermal coverage and rebind the route before continuing. Original
-//! source temperature continuation belongs at that accepted boundary.
+//! Mechanical sources and cell geometry are frozen over this increment. The
+//! native affine contact-discretization path supplies its exact mean real area
+//! to both contact conduction and ambient surface coverage. The true endpoint
+//! area is installed with the
+//! caloric endpoint. This remains backward-Euler transport with endpoint
+//! temperatures/conductivities, not an implicit thermomechanical accuracy
+//! guarantee. The returned endpoint route continues on these original cells.
+//! The pose/topology owner still consumes native travel and rebinds moved face
+//! centres. Original source temperature continuation belongs at that boundary.
 
 use super::super::FrictionHeatRoute;
 use super::super::cohesive::{CohesiveHeatError, solve_frozen_cohesive_heat};
 use super::super::network::{FrictionHeatNetworkReport, FrictionHeatNetworkStep};
+use super::area::{ContactAreaEvolution, ContactAreaPath};
 use fs_contact::normal_patch::dmt::coupled::{DmtCoupledError, DmtCoupledState};
 use fs_exec::CancelGate;
 use fs_matdb::MaterialStateId;
@@ -63,7 +66,7 @@ pub struct RigidDmtHeatControls {
 /// Original true solid areas, excluding the noncontact attractive annulus.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RigidDmtHeatAreas {
-    /// Also the conducting-face area held in this thermal increment.
+    /// Original physical footprint before this increment.
     pub incoming_m2: f64,
     pub endpoint_m2: f64,
     pub path_mean_m2: f64,
@@ -110,6 +113,9 @@ pub struct HeatedRigidDmtReport<P> {
     pub thermal_trials: usize,
     pub target_time_s: f64,
     pub areas: RigidDmtHeatAreas,
+    /// Actual endpoint footprint on the unchanged original finite cells.
+    /// Retains reference conductance per area; the next callback resolves k.
+    pub route_after: FrictionHeatRoute,
     /// Delta K + Delta U_normal + Delta H - external body work - other heat.
     pub combined_energy_residual_j: f64,
     /// Sum of the independent native mechanical and transport residuals.
@@ -129,13 +135,20 @@ pub struct HeatedRigidDmtCandidate<'t, P> {
 ///
 /// The full straight normal path must have positive real area. Touch, gap,
 /// detachment and thermal-face/source/body mismatches refuse before publication.
-/// The existing route retains its original k*A/d, coverage, material and mass;
-/// there is no heat fraction, added capacity or invented traction distribution.
+/// Original k*A/d and ambient exposed area use the exact time mean of the
+/// native affine contact-discretization path. Accepted coverage and
+/// `route_after` retain its true endpoint area, original cells, material and
+/// mass. Endpoint coverage
+/// must fit every original face and the complete shared-cell surface budget.
+/// Scheduled topology events at that endpoint refuse a changed patch until
+/// their original owner processes them. There is no heat fraction, added
+/// capacity or invented traction distribution.
 /// Unequal body temperatures can make one body's signed heat negative.
 ///
 /// `resolve` supplies endpoint bulk conductivities and OTHER thermal sources,
 /// retaining staged source receipts in its payload. It must not publish history
 /// or reinsert friction loss. Thermal trials never repeat mechanical evolution.
+/// The callback sees the mean-area thermal geometry used by this residual.
 /// Source coefficients remain frozen even when the solved temperature changes;
 /// use the native DMT temperature refresh at the next accepted geometry boundary
 /// and refine both time and thermal space for feedback/transport accuracy.
@@ -181,20 +194,13 @@ pub fn propose_rigid_dmt_heat<'t, P, E>(
             "synchronized positive duration, area bound and thermal seed required",
         ));
     }
-    let routes = [contact.route];
-    let network = FrictionHeatNetworkStep::new(
-        thermal,
-        target,
-        &routes,
-        controls.thermal.maximum_interfaces,
-        check,
-    )?;
+    contact.route.validate(thermal)?;
     // Use the thermal owner's represented interval for the actual native step.
     let mut prepared = PreparedRigidDmtPair::new(
         bodies,
         properties,
         contact.contact,
-        network.duration_s(),
+        target - accepted_time_s,
         controls.mechanical,
         gate,
     )?;
@@ -248,8 +254,27 @@ pub fn propose_rigid_dmt_heat<'t, P, E>(
             "native source and actual body friction loss differ",
         ));
     }
-    let solved = solve_frozen_cohesive_heat(
+    let area_path = ContactAreaEvolution::new(
         thermal,
+        &[ContactAreaPath {
+            route: contact.route,
+            mean_area_m2: path.mean_real_area_m2,
+            endpoint_area_m2: a1,
+        }],
+        controls.thermal.maximum_interfaces,
+        check,
+    )?;
+    let mean_thermal = area_path.thermal();
+    let routes: Vec<_> = area_path.routes().iter().collect();
+    let network = FrictionHeatNetworkStep::new(
+        mean_thermal,
+        target,
+        &routes,
+        controls.thermal.maximum_interfaces,
+        check,
+    )?;
+    let solved = solve_frozen_cohesive_heat(
+        mean_thermal,
         &network,
         &[contact.temperature_guess_k],
         &[loss],
@@ -278,11 +303,14 @@ pub fn propose_rigid_dmt_heat<'t, P, E>(
             "original DMT normal/shear motion and finite heat do not balance",
         ));
     }
+    let (thermal, mut routes_after) = area_path.finish(solved.thermal, check)?;
+    // This adapter admits exactly one original contact throughout.
+    let route_after = routes_after.remove(0);
     check()?;
     Ok(HeatedRigidDmtCandidate {
         bodies_after: mechanical.bodies_after,
         state_after: mechanical.state_after,
-        thermal: solved.thermal,
+        thermal,
         report: HeatedRigidDmtReport {
             mechanical: mechanical.report,
             heat: solved.heat,
@@ -291,6 +319,7 @@ pub fn propose_rigid_dmt_heat<'t, P, E>(
             thermal_trials: solved.trials,
             target_time_s: target,
             areas,
+            route_after,
             combined_energy_residual_j: combined,
             summed_energy_residual_j: summed,
         },
@@ -340,7 +369,7 @@ pub fn apply_rigid_dmt_heat<'t, P, E>(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn validate_binding<E>(
+pub(super) fn validate_binding<E>(
     bodies: &[RigidBodyState],
     properties: &[MassProperties],
     prepared: &PreparedRigidDmtPair<'_>,

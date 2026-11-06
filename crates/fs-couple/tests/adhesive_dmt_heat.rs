@@ -7,6 +7,7 @@ use fs_contact::interface_binding::adhesive_shear::SourceAdhesiveShear;
 use fs_contact::normal_patch::dmt::{SourceDmtSphereContact, coupled::DmtCoupledState};
 use fs_couple::friction_heat::adhesive::dmt::*;
 use fs_couple::friction_heat::cohesive::CohesiveHeatError;
+use fs_couple::friction_heat::network::FrictionHeatNetworkStep;
 use fs_couple::friction_heat::{FrictionHeatRoute, FrictionHeatTolerances};
 use fs_exec::CancelGate;
 use fs_mbd::tangential_friction::RigidContactBinding;
@@ -213,6 +214,10 @@ fn thermal_with_ends(
     initial: [f64; 2],
     ends: [[f64; 2]; 2],
 ) -> DepositionSimulation<'static> {
+    from_events(thermal_events(area, initial, ends))
+}
+
+fn thermal_events(area: f64, initial: [f64; 2], ends: [[f64; 2]; 2]) -> Vec<TimedEvent> {
     let mut events: Vec<_> = (0..2)
         .map(|i| {
             let volume = MASS[i] / 1000.0;
@@ -252,6 +257,10 @@ fn thermal_with_ends(
             conductance_w_k: series_conductance_w_k(area, [LENGTH; 2], K).unwrap(),
         }),
     });
+    events
+}
+
+fn from_events(events: Vec<TimedEvent>) -> DepositionSimulation<'static> {
     DepositionSimulation::new(
         events,
         &[
@@ -260,8 +269,8 @@ fn thermal_with_ends(
         ],
         DepositionBudget {
             max_cells: 2,
-            max_links: 1,
-            max_events: 3,
+            max_links: 2,
+            max_events: 6,
             max_substeps: 4,
         },
     )
@@ -424,11 +433,27 @@ fn changing_attached_area_is_bounded_and_reversible_normal_work_is_not_heat() {
     assert_eq!(report.heat.dissipated_j, 0.0);
     assert_eq!(report.heat.interfaces[0].body_heat_j, [0.0; 2]);
     assert_eq!(report.heat.thermal.stored_energy_change_j, 0.0);
-    // Conductance uses the actual incoming face, never the mechanical mean area.
+    // Exact native mean area drives transport; endpoint area drives continuation.
     close(
         report.heat.interfaces[0].conductances_w_k[0],
-        K[0] * area.incoming_m2 / LENGTH,
+        K[0] * area.path_mean_m2 / LENGTH,
         1e-24,
+    );
+    assert_eq!(report.route_after.contact_area_m2(), area.endpoint_m2);
+    let endpoint = candidate.thermal.contact_patch(LINK).unwrap();
+    assert_eq!(endpoint.link.area_m2, area.endpoint_m2);
+    assert_eq!(endpoint.covered_area_m2, [area.endpoint_m2; 2]);
+    FrictionHeatNetworkStep::new(
+        &candidate.thermal,
+        2.0 * DT,
+        &[&report.route_after],
+        1,
+        || Ok(()),
+    )
+    .unwrap();
+    assert!(
+        FrictionHeatNetworkStep::new(&candidate.thermal, 2.0 * DT, &[&route], 1, || Ok(()))
+            .is_err()
     );
     let mut strict = controls();
     strict.maximum_fractional_area_change = 0.5 * area.maximum_fractional_change;
@@ -442,6 +467,197 @@ fn changing_attached_area_is_bounded_and_reversible_normal_work_is_not_heat() {
         ),
         Err(RigidDmtHeatError::AreaChange { .. })
     ));
+}
+
+#[test]
+fn evolving_real_area_integrates_contact_and_ambient_heat_without_changing_other_links() {
+    let fixture = Fixture::new(0.2 * common::Z, Vec3::new(0.12, 0.0, 0.02));
+    let incoming = fixture.area();
+    let initial = [302.0, 292.0];
+    let ambient = [280.0, 330.0];
+    let htc = [1e6, 2e6];
+    let mut events = thermal_events(
+        incoming,
+        initial,
+        [[-2.0 * LENGTH, 0.0], [0.0, 2.0 * LENGTH]],
+    );
+    for event in &mut events {
+        if let Event::Birth(cell) = &mut event.event {
+            let i = cell.id.0 as usize;
+            cell.boundary.ambient_k = ambient[i];
+            cell.boundary.htc_w_m2_k = htc[i];
+        }
+    }
+    let other = ThermalLink {
+        id: LINK + 1,
+        a: CellId(0),
+        b: CellId(1),
+        area_m2: 0.25 * incoming,
+        conductance_w_k: 2e-10,
+    };
+    events.push(TimedEvent {
+        time_s: 0.0,
+        event: Event::Contact(other),
+    });
+    let thermal = from_events(events);
+    let route = FrictionHeatRoute::from_link(&thermal, LINK, K).unwrap();
+    let mut limits = controls();
+    limits.thermal.newton.relative_tolerance = 1e-14;
+    let candidate = run(
+        &fixture,
+        &thermal,
+        &route,
+        fixture.balanced_normal(),
+        limits,
+    )
+    .unwrap();
+    let report = &candidate.report;
+    let endpoint = report.mechanical.contact.path.contact.contact_area_m2;
+    let mean = 0.5 * (incoming + endpoint);
+    let loss = report.mechanical.contact.friction_dissipation_j;
+    assert!(endpoint > incoming);
+    assert!(loss > 0.0);
+
+    // Independent finite-body Schur elimination with exactly integrated area.
+    // The unchanged secondary link exchanges opposite heat; ambient exposure
+    // subtracts the SAME mean contact area used by the two half conductances.
+    let g = K.map(|k| k * mean / LENGTH);
+    let capacity = MASS.map(|m| CP * m);
+    let coupling = DT * (g[0] * g[1] / (g[0] + g[1]) + other.conductance_w_k);
+    let boundary = std::array::from_fn::<_, 2, _>(|i| {
+        DT * htc[i]
+            * (thermal.cells()[&CellId(i as u64)].geometry.surface_area_m2 - mean - other.area_m2)
+    });
+    let diagonal = std::array::from_fn::<_, 2, _>(|i| capacity[i] + coupling + boundary[i]);
+    let rhs = std::array::from_fn::<_, 2, _>(|i| {
+        capacity[i] * (initial[i] - 300.0)
+            + boundary[i] * (ambient[i] - 300.0)
+            + g[i] / (g[0] + g[1]) * loss
+    });
+    let theta0 = (rhs[0] + coupling * rhs[1] / diagonal[1])
+        / (diagonal[0] - coupling * coupling / diagonal[1]);
+    let theta = [theta0, (rhs[1] + coupling * theta0) / diagonal[1]];
+    let face = (g[0] * theta[0] + g[1] * theta[1] + loss / DT) / (g[0] + g[1]);
+    let heat = &report.heat.interfaces[0];
+    common::close(heat.interface_temperature_k, 300.0 + face, 2e-10, 1e-13);
+    for i in 0..2 {
+        common::close(
+            candidate.thermal.temperature_k(CellId(i as u64)).unwrap(),
+            300.0 + theta[i],
+            2e-10,
+            1e-13,
+        );
+        common::close(heat.conductances_w_k[i], g[i], 1e-24, 1e-13);
+        common::close(
+            heat.body_heat_j[i],
+            DT * g[i] * (face - theta[i]),
+            2e-26,
+            1e-12,
+        );
+        let cell = &thermal.cells()[&CellId(i as u64)];
+        close(
+            candidate.thermal.exposed_area_m2(cell.id).unwrap(),
+            cell.geometry.surface_area_m2 - endpoint - other.area_m2,
+            1e-28,
+        );
+    }
+    let ambient_heat: f64 = (0..2)
+        .map(|i| boundary[i] * (ambient[i] - 300.0 - theta[i]))
+        .sum();
+    common::close(report.heat.external_heat_j, ambient_heat, 4e-26, 1e-13);
+    assert_eq!(candidate.thermal.links()[&(LINK + 1)], other);
+    assert_eq!(
+        candidate.thermal.contact_patch(LINK + 1),
+        thermal.contact_patch(LINK + 1)
+    );
+    assert_eq!(thermal.contact_patch(LINK).unwrap().link.area_m2, incoming);
+    assert_eq!(
+        candidate.thermal.contact_patch(LINK).unwrap().link.area_m2,
+        endpoint
+    );
+    // The returned route also passes the original material/geometry binding.
+    let rebound = FrictionHeatRoute::from_link(&candidate.thermal, LINK, K).unwrap();
+    assert_eq!(
+        report.route_after.contact_area_m2(),
+        rebound.contact_area_m2()
+    );
+}
+
+#[test]
+fn mean_and_endpoint_face_caps_and_pending_topology_preserve_every_owner() {
+    let fixture = Fixture::new(0.2 * common::Z, Vec3::new(0.12, 0.0, 0.02));
+    let native = fixture
+        .prepared()
+        .advance_with_wrenches(
+            fixture.history(),
+            fixture.balanced_normal(),
+            &CancelGate::new(),
+        )
+        .unwrap();
+    let incoming = fixture.area();
+    let endpoint = native.report.contact.path.contact.contact_area_m2;
+    let mean = 0.5 * (incoming + endpoint);
+    for case in 0..3 {
+        let mut events = thermal_events(
+            incoming,
+            [300.0; 2],
+            [[-2.0 * LENGTH, 0.0], [0.0, 2.0 * LENGTH]],
+        );
+        if case < 2 {
+            // Incoming area fits. First mean, then only endpoint, exceeds the
+            // original physical face; total surface alone cannot admit it.
+            let face = if case == 0 {
+                0.5 * (incoming + mean)
+            } else {
+                0.5 * (mean + endpoint)
+            };
+            for event in &mut events {
+                if let Event::Birth(cell) = &mut event.event {
+                    cell.geometry.volume_m3 = 2.0 * LENGTH * face;
+                }
+            }
+        } else {
+            events.push(TimedEvent {
+                time_s: DT,
+                event: Event::Separation(LINK),
+            });
+        }
+        let mut thermal = from_events(events);
+        let original = thermal.clone();
+        let route = FrictionHeatRoute::from_link(&thermal, LINK, K).unwrap();
+        let mut bodies = fixture.bodies;
+        let mut history = fixture.history();
+        let calls = Cell::new(0usize);
+        let result = apply_rigid_dmt_heat(
+            &mut bodies,
+            &fixture.properties,
+            fixture.heat_contact(&route),
+            &mut history,
+            fixture.balanced_normal(),
+            &mut thermal,
+            0.0,
+            DT,
+            controls(),
+            &[0.0; 2],
+            |state, ids, temperatures| {
+                calls.set(calls.get() + 1);
+                transport(state, ids, temperatures)
+            },
+            &CancelGate::new(),
+        );
+        assert!(result.is_err());
+        assert_eq!(bodies, fixture.bodies);
+        assert_eq!(history, fixture.history());
+        assert_eq!(thermal.cells(), original.cells());
+        assert_eq!(thermal.links(), original.links());
+        assert_eq!(thermal.contact_patch(LINK), original.contact_patch(LINK));
+        assert_eq!(thermal.time_s(), 0.0);
+        if case < 2 {
+            assert_eq!(calls.get(), 0);
+        } else {
+            assert!(calls.get() > 0);
+        }
+    }
 }
 
 #[test]

@@ -8,6 +8,8 @@
 //! thermal evolution and reversible surface/normal energy remain with the normal
 //! owner, and are not silently inferred from the tangential heat calculation.
 
+mod area;
+
 /// Curved finite-time slip/spin, arrest and original finite-cell heat together.
 pub mod transient;
 
