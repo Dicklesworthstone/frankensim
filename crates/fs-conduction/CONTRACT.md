@@ -4622,9 +4622,9 @@ The optional gate checks each weighted stage's signed bulk/contact, Robin and
 admitted radiation production before checking the whole interval's
 storage-minus-input and closure. An energy-conserving coarse
 prescribed-temperature history can fail this gate; no state or partial interval
-is returned on refusal. Pointwise ambient radiation admits the closed black-bath
-account below; mean-patch and reflected-enclosure entropy remain explicitly
-unsupported. Photon entropy requires its separate original owner. The existing
+is returned on refusal. Pointwise ambient and reflected-enclosure radiation
+admit the closed material/field/black-bath accounts below; mean-patch entropy
+remains unsupported. Photon entropy requires its separate original owner. The existing
 energy-only API takes the same implementation with entropy disabled. Additional
 work consists of scalar accumulation in the existing stage loop and one entropy
 pass per converged stage, with no additional spatial assembly or Newton solve.
@@ -4661,9 +4661,9 @@ exchange generation are not entropy carried by photons. Total emissivity does
 not determine a photon spectrum or gray occupation law, and no spectral
 entropy is inferred here. The separate photon owner must retain its explicit
 physical assumptions; its emitted entropy must not be added again to this
-closed heat-reservoir balance. Mean-temperature outer radiation iterations and
-reflected enclosures require different entropy accounting and are refused
-before a nonlinear entropy-admitted solve.
+closed heat-reservoir balance. Mean-temperature outer radiation iterations
+remain unsupported. Native reflected enclosures use their own independent
+external bath row in the account described below.
 
 Positive radiative material coefficients do not make the P1 receiving-node
 entropy test positive for every nonuniform face. Signed production is retained
@@ -4720,9 +4720,9 @@ policy. Source laws may change between calls while the original caloric owners
 and fixed reference masses remain bound to the history.
 
 `advance_to_with_radiation` and its observed counterpart admit the existing
-fixed and material-state pointwise ambient radiation owners with their actual
-black-bath account. Mean-patch and reflected-enclosure radiation remain
-unsupported. No photon entropy is inferred. Regression definitions compare
+fixed and material-state pointwise ambient or enclosure radiation owners with
+their actual internal-reflection and external black-bath accounts. Mean-patch
+radiation remains unsupported. No photon entropy is inferred. Regression definitions compare
 native accepted trajectory bits, budget-resumed totals, rejected-work
 exclusion, latent storage and signed source cancellation, observer
 cancellation, and radiative cooling with the original native energy path.
@@ -4753,11 +4753,55 @@ stage temperatures and interval-end left limits for held sources and boundary
 schedules. Its internal stages and stage carry are not independently accepted
 physical intervals or external heat. The shared stage sampler supplies the
 same native source, boundary, material and contact declarations to either
-finish mode. Unsupported entropy models, including the scheduled reflected
-enclosure radiation binding, retain their native refusal.
+finish mode. The scheduled material reflected-enclosure binding retains its
+original radiation at every sampled stage, including actual open-bath
+temperatures. Unsupported mean-patch entropy models retain their refusal.
 
 These scheduled reports cover one accepted pair per call; they do not create a
 persistent lifetime entropy account or multiply a lifetime allowance by the
 number of calls. Entropy admission is separate from the local temporal-error
 estimator and does not provide a global discretization or phase-transition-time
 certificate.
+
+## Entropy admission of native reflected spatial radiation
+
+The original pointwise enclosure variants, `PointwiseEnclosure` and
+`MaterialEnclosure`, now participate in the native backward-Euler,
+SDIRK2 and supplied-endpoint entropy paths on uniform and heterogeneous
+enthalpy storage. The same shared finish admits the existing scheduled SDIRK2
+material-enclosure binding. Resumable fixed-law adaptive histories retain the
+original energy-only coarse comparison and entropy-admitted fine endpoints.
+The original caloric objects, fixed reference masses, latent heat, films,
+material-emissivity queries, view factors and reflected heat operator remain
+unchanged.
+
+For the native nodal heat q_i oriented out of material, a closed enclosure has
+zero external radiative entropy input and signed generation
+-dt*sum_i(q_i/T_i). Reflection is internal to this material/field account.
+An open enclosure retains the independently evaluated black-bath row:
+Q_b is positive OUT OF THE BATH, so entropy input is dt*Q_b/B and generation
+is -dt*(sum_i(q_i/T_i)+Q_b/B). B is the actual positive bath temperature
+in that step or tableau stage. Physical surface heat is never counted again
+as an independent reservoir transfer.
+
+The bath row is not replaced by minus the physical surface sum. Their signed
+`system_energy_closure_w` remains separately available in the original
+radiation report under the original watt tolerance. No entropy correction,
+heat redistribution, coefficient clipping or fictitious material-temperature
+bath is created to force closure or production positivity. The measured P1
+nodal entropy production remains signed and uses the ordinary admission gate,
+including each positively weighted SDIRK2 stage.
+
+The entropy finish borrows the converged nodal heat and complete native report.
+It performs no extra radiosity solve, emissivity query or radiation quadrature.
+Source-dependent local emissivity retains its original temperature and phase
+state, and finite-window spectral heat retains its original model/truncation
+controls. This is a stationary radiation-field and thermal-reservoir account;
+it supplies neither spectral photon entropy nor an omitted-band entropy bound.
+Mean-temperature radiation approximations remain unsupported.
+
+Focused regression definitions compare closed exchange with independent
+parallel-patch equations, open exchange with actual stage bath temperatures,
+and material/latent endpoint accounts with independent simplex and radiosity
+moments. Native energy trajectories, entropy signs, original storage, adaptive
+accepted-pair parity and independent bath heat are retained.

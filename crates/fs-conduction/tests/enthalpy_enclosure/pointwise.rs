@@ -526,3 +526,6 @@ mod adjoint;
 mod open;
 #[path = "pointwise/spectral.rs"]
 mod spectral;
+
+#[path = "pointwise/entropy.rs"]
+mod entropy;

@@ -31,10 +31,12 @@ impl EnthalpyBackwardEuler<'_, '_> {
     /// interval must also pass storage-minus-input and closure admission.
     /// A temporal defect can have either sign; this is an actual-state check,
     /// not an unconditional entropy theorem or a time-accuracy certificate.
-    /// Pointwise frozen/material ambient radiation retains each original
-    /// black reservoir and the actual stage nodal heat. This closed account
-    /// does not infer photon entropy. Mean-patch and reflected-enclosure
-    /// entropy are refused before either stage is solved.
+    /// Pointwise frozen/material ambient and reflected-enclosure radiation
+    /// retain the actual stage nodal heat. Closed reflection has no external
+    /// input; an open stage retains its own original black-bath temperature
+    /// and independently evaluated heat. This closed material/field account
+    /// does not infer photon entropy. Mean-patch radiation is refused before
+    /// either stage is solved.
     #[allow(clippy::too_many_arguments)]
     pub fn advance_sdirk2_with_entropy(
         &self,

@@ -7,7 +7,7 @@
 
 use super::*;
 use crate::transient::enthalpy::entropy::{
-    EnthalpyEntropyBalance, EnthalpyEntropyError,
+    EnthalpyEntropyBalance, EnthalpyEntropyError, admit_radiation,
 };
 use fs_math::dd::Dd;
 use crate::transient::enthalpy::heterogeneous::EnthalpyRadiation;
@@ -116,9 +116,9 @@ impl<'s, 'm, 'c> AdaptiveEnthalpyEntropyState<'s, 'm, 'c> {
         )
     }
 
-    /// Include the original fixed or material-state pointwise ambient radiation.
-    /// This uses the declared black reservoirs' material entropy account;
-    /// spectral photon entropy is not inferred from total emissivity.
+    /// Include original fixed or material-state pointwise ambient or enclosure
+    /// radiation. Internal reflection and explicit external black reservoirs
+    /// retain their native heat accounts; photon entropy is not inferred.
     #[allow(clippy::too_many_arguments)]
     pub fn advance_to_with_radiation(
         &mut self,
@@ -136,8 +136,8 @@ impl<'s, 'm, 'c> AdaptiveEnthalpyEntropyState<'s, 'm, 'c> {
     }
 
     /// Observe only accepted radiative fine pairs with their original heat reports.
-    /// Mean-patch and reflected-enclosure radiation require another entropy chart
-    /// and refuse before any endpoint solve or accepted-history change.
+    /// Mean-patch radiation requires another entropy chart and refuses before
+    /// any endpoint solve or accepted-history change.
     #[allow(clippy::too_many_arguments)]
     pub fn advance_to_with_radiation_observed(
         &mut self,
@@ -149,13 +149,10 @@ impl<'s, 'm, 'c> AdaptiveEnthalpyEntropyState<'s, 'm, 'c> {
         max_trials: usize,
         observe: impl FnMut(EnthalpyAcceptedTrial<'_>) -> ControlFlow<()>,
     ) -> Result<AdaptiveEnthalpyEntropyReport, EnthalpyEntropyError> {
+        admit_radiation(radiation)?;
         let unsupported = || EnthalpyError::InvalidInput(
-            "adaptive entropy requires no radiation or pointwise black-bath ambient radiation",
+            "entropy does not support mean-temperature radiation approximations",
         );
-        if !matches!(radiation, EnthalpyRadiation::None
-            | EnthalpyRadiation::PointwiseAmbient(_) | EnthalpyRadiation::MaterialAmbient(_)) {
-            return Err(unsupported().into());
-        }
         let storage = self.history.storage;
         let config = self.history.config.endpoint;
         let tolerance = self.account.tolerance_j_k;
@@ -178,6 +175,14 @@ impl<'s, 'm, 'c> AdaptiveEnthalpyEntropyState<'s, 'm, 'c> {
                             )?,
                         EnthalpyRadiation::MaterialAmbient(owner) =>
                             storage.advance_with_material_ambient_radiation(
+                                cx, problem, interfaces, h, dt, config, owner,
+                            )?,
+                        EnthalpyRadiation::PointwiseEnclosure(owner) =>
+                            storage.advance_with_pointwise_enclosure_radiation(
+                                cx, problem, interfaces, h, dt, config, owner,
+                            )?,
+                        EnthalpyRadiation::MaterialEnclosure(owner) =>
+                            storage.advance_with_material_enclosure_radiation(
                                 cx, problem, interfaces, h, dt, config, owner,
                             )?,
                         _ => return Err(unsupported().into()),

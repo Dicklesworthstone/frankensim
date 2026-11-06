@@ -1,5 +1,7 @@
 //! Independent gray-patch equations with spatial material emissivity and latent h.
 mod support;
+#[path = "material_enclosure_radiation/entropy.rs"]
+mod entropy;
 #[path = "material_enclosure_radiation/adaptive.rs"]
 mod adaptive;
 #[path = "material_enclosure_radiation/adjoint.rs"]

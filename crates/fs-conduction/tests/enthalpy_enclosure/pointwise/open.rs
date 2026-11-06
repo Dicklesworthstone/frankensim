@@ -33,7 +33,7 @@ fn model(fixture: &Fixture, cx: &fs_exec::Cx<'_>, epsilon: [f64; 2]) -> OpenDiff
 
 // The local open model goes out of scope here. The prepared spatial owner must
 // retain its factors/evidence without borrowing that temporary declaration.
-fn spatial<'a>(
+pub(super) fn spatial<'a>(
     fixture: &'a Fixture,
     boundary: &'a ThermalBoundary,
     cx: &fs_exec::Cx<'_>,
@@ -54,7 +54,7 @@ fn spatial<'a>(
 
 // Independent simplex moments and explicit 2x2 elimination, not production
 // quadrature, shifted Planck differences, response factors or heat diagnostics.
-fn reference(
+pub(super) fn reference(
     fixture: &Fixture,
     temperature: &[f64],
     epsilon: [f64; 2],

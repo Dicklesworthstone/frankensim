@@ -13,9 +13,10 @@
 //!
 //! Each active Robin triangle retains its actual positive affine bath field.
 //! The original h(x), T(x) and B(x) determine its exact rational bath entropy;
-//! no patch mean substitutes. Pointwise ambient radiation retains the native
-//! nodal heat and each original black reservoir. Its closed material/field/bath
-//! exchange is distinct from photon entropy flux, which is not inferred here.
+//! no patch mean substitutes. Pointwise ambient and reflected enclosure
+//! radiation retain the native nodal heat and each original black reservoir.
+//! The closed material/field/bath exchange is distinct from photon entropy
+//! flux, which is not inferred here.
 //! Prescribed heat flux and volumetric watts remain unclassified inputs.
 
 use std::fmt;
@@ -47,7 +48,8 @@ pub struct EnthalpyEntropyBalance {
     pub dirichlet_entropy_input_j_k: f64,
     /// Integral of inward Robin heat divided by the actual affine bath B(x).
     pub robin_entropy_input_j_k: f64,
-    /// Inward pointwise radiative heat divided by each original black-bath T.
+    /// Inward external radiative heat divided by each original black-bath T.
+    /// Closed reflected enclosures have no external radiative entropy input.
     /// This is reservoir entropy transfer, not entropy carried by photons.
     pub radiation_entropy_input_j_k: f64,
     /// Signed discrete bulk, surface and contact generation on this state.
@@ -260,17 +262,20 @@ impl EnthalpyBackwardEuler<'_, '_> {
         )
     }
 
-    /// Advance with an original pointwise ambient radiation owner and admit
-    /// the closed material/field/black-reservoir entropy account.
+    /// Advance with an original pointwise ambient or enclosure radiation owner
+    /// and admit the closed material/field/black-reservoir entropy account.
     ///
     /// Frozen and source-dependent material emissivity retain their exact
     /// mesh, boundary, caloric chart and constitutive-domain checks. Radiation
     /// enters the original nonlinear residual once; its converged nodal load
     /// is reused for entropy. Each bath retains its own absolute temperature.
     ///
-    /// This does not infer a photon spectrum or photon entropy from total
-    /// emissivity. Mean-patch and reflected-enclosure models require distinct
-    /// entropy owners and are refused before solving. `None` uses the ordinary
+    /// Reflection is internal to the material/field account. Closed enclosures
+    /// have no external entropy input; open enclosures use the independently
+    /// evaluated black bath's actual heat and temperature. Its heat-closure
+    /// residual stays in the native report and is never redistributed.
+    /// This does not infer photon entropy from emissivity or radiosity.
+    /// Mean-patch radiation is refused before solving; `None` uses the ordinary
     /// conductive account. Signed finite-element radiation production is
     /// admitted under the same absolute allowance as conduction and Robin.
     #[allow(clippy::too_many_arguments)]
@@ -329,11 +334,11 @@ impl EnthalpyBackwardEuler<'_, '_> {
         )
     }
 
-    /// Measure the original pointwise ambient radiative endpoint and its
-    /// closed reservoir entropy without solving or applying an entropy gate.
-    /// The signed native production and true local residual are retained for
-    /// the coupled owner; a heat-only enclosure or mean-patch approximation is
-    /// not silently assigned a photon or black-reservoir entropy account.
+    /// Measure the original pointwise ambient or reflected radiative endpoint
+    /// and its closed reservoir entropy without solving or applying a gate.
+    /// The signed native production, independent black-bath heat and true local
+    /// residual are retained for the coupled owner. Mean-patch approximations
+    /// remain unsupported; no photon entropy is inferred.
     #[allow(clippy::too_many_arguments)]
     pub fn evaluate_endpoint_with_radiation_and_entropy(
         &self,
@@ -371,9 +376,10 @@ impl EnthalpyBackwardEuler<'_, '_> {
 pub(super) fn admit_radiation(radiation: EnthalpyRadiation<'_>) -> Result<(), EnthalpyError> {
     match radiation {
         EnthalpyRadiation::None | EnthalpyRadiation::PointwiseAmbient(_)
-            | EnthalpyRadiation::MaterialAmbient(_) => Ok(()),
+            | EnthalpyRadiation::MaterialAmbient(_) | EnthalpyRadiation::PointwiseEnclosure(_)
+            | EnthalpyRadiation::MaterialEnclosure(_) => Ok(()),
         _ => Err(EnthalpyError::InvalidInput(
-            "closed reservoir entropy requires an original pointwise ambient radiation owner",
+            "entropy does not support mean-temperature radiation approximations",
         )),
     }
 }
@@ -438,6 +444,19 @@ fn finite_dd(value: Dd) -> Result<f64, EnthalpyError> {
     finite(value.to_f64())
 }
 
+// Entropy gained by a prescribed black reservoir from outward material heat.
+// A reflected-enclosure bath supplies its independently evaluated opposite row.
+fn reservoir_entropy_rate(heat_into_bath_w: f64, temperature_k: f64) -> Result<Dd, EnthalpyError> {
+    if !temperature_k.is_finite() || temperature_k <= 0.0 {
+        return Err(EnthalpyError::InvalidInput(
+            "radiation entropy requires positive original black-reservoir temperatures",
+        ));
+    }
+    let rate = Dd::from_f64(finite(heat_into_bath_w)?) / Dd::from_f64(temperature_k);
+    finite_dd(rate)?;
+    Ok(rate)
+}
+
 // -Kij*(Ti-Tj)^2/(Ti*Tj), without squaring a dimensional temperature.
 fn pair_generation(entry: f64, ti: f64, tj: f64) -> Result<f64, EnthalpyError> {
     if entry == 0.0 || ti == tj {
@@ -455,16 +474,21 @@ pub(super) fn evaluate(
     dofs: &DofMap,
     radiation: Option<&(Vec<f64>, PointwiseBoundaryReport)>,
 ) -> Result<EnthalpyEntropyBalance, EnthalpyError> {
-    // Borrow precisely the native final heat pass. A reflected enclosure
-    // cannot be assigned the independent black-reservoir account below.
+    // Borrow precisely the native final heat pass. The matching report owns
+    // independent reservoir heat; reflection is never replaced by a patch mean
+    // or by an artificial bath at a material temperature.
     let radiation = match (context.pointwise_radiation, radiation) {
         (None, None) => None,
         (
             Some(PointwiseBoundary::Ambient(_) | PointwiseBoundary::MaterialAmbient(_)),
-            Some((load, PointwiseBoundaryReport::Ambient(report))),
+            Some((load, report @ PointwiseBoundaryReport::Ambient(_))),
+        )
+        | (
+            Some(PointwiseBoundary::Enclosure(_) | PointwiseBoundary::MaterialEnclosure(_)),
+            Some((load, report @ PointwiseBoundaryReport::Enclosure(_))),
         ) if load.len() == h.len() => Some((load, report)),
         _ => return Err(EnthalpyError::InvalidInput(
-            "entropy requires the complete original pointwise ambient nodal heat and report",
+            "entropy requires the complete original pointwise nodal heat and matching report",
         )),
     };
     let mut radiation_at_node = Dd::ZERO;
@@ -589,20 +613,30 @@ pub(super) fn evaluate(
     }
     let mut radiation_bath = Dd::ZERO;
     if let Some((_, report)) = radiation {
-        for (index, patch) in report.patches.iter().enumerate() {
-            if index % ASSEMBLY_TILE == 0 {
-                poll(context.cx, index)?;
+        match report {
+            PointwiseBoundaryReport::Ambient(report) => {
+                for (index, patch) in report.patches.iter().enumerate() {
+                    if index % ASSEMBLY_TILE == 0 {
+                        poll(context.cx, index)?;
+                    }
+                    radiation_bath = radiation_bath + reservoir_entropy_rate(
+                        patch.outward_heat_w, patch.patch.ambient_temperature_k(),
+                    )?;
+                    finite_dd(radiation_bath)?;
+                }
             }
-            let bath_temperature = patch.patch.ambient_temperature_k();
-            if !bath_temperature.is_finite() || bath_temperature <= 0.0 {
-                return Err(EnthalpyError::InvalidInput(
-                    "radiation entropy requires positive original black-reservoir temperatures",
-                ));
+            PointwiseBoundaryReport::Enclosure(report) => {
+                if let Some(bath) = &report.ambient {
+                    // The native bath row is oriented OUT OF THE RESERVOIR.
+                    // Its loss is an entropy input to the material/field domain.
+                    // Do not replace it by the negative surface sum: their
+                    // independently measured heat closure remains in the report.
+                    radiation_bath = reservoir_entropy_rate(
+                        -bath.outward_heat_w, bath.temperature_k,
+                    )?;
+                }
+                // With no external bath, all reflected exchange is internal.
             }
-            radiation_bath = radiation_bath
-                + Dd::from_f64(finite(patch.outward_heat_w)?)
-                    / Dd::from_f64(bath_temperature);
-            finite_dd(radiation_bath)?;
         }
     }
     // Extended reductions limit cancellation near equilibrium. Original

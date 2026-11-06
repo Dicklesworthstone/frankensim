@@ -227,12 +227,9 @@ impl EnthalpyBackwardEuler<'_, '_> {
         pointwise_radiation: Option<PointwiseBoundary<'_>>,
         with_entropy: bool,
     ) -> Result<(EnthalpyEndpointEvaluation, Option<super::entropy::EnthalpyEntropyBalance>), EnthalpyError> {
-        if with_entropy && (patches.is_some() || matches!(
-            pointwise_radiation,
-            Some(PointwiseBoundary::Enclosure(_) | PointwiseBoundary::MaterialEnclosure(_)),
-        )) {
+        if with_entropy && patches.is_some() {
             return Err(EnthalpyError::InvalidInput(
-                "closed reservoir entropy requires an original pointwise ambient radiation owner",
+                "entropy does not support mean-temperature radiation approximations",
             ));
         }
         self.admit_step(cx, problem, old_specific_h, dt_s, config)?;
