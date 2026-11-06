@@ -746,3 +746,82 @@ fn nonlinear_material_jet_refuses_missing_tension_and_preserves_state_on_cancel(
     assert_eq!(bound.state().time_s(), before_time);
     assert!(core::ptr::eq(bound.material(), &source));
 }
+
+#[test]
+fn g3_implicit_viscous_material_jet_keeps_original_coefficients_and_native_evolution() {
+    use fs_exec::CancelGate;
+    use fs_lbm::jet::material::nonlinear::MaterialPeriodicSlenderJet;
+    use fs_lbm::jet::nonlinear::{
+        NonlinearJetError, PeriodicSlenderJet, SlenderJetEvolution, SlenderJetIntegrationMethod,
+    };
+
+    let (length, radii, velocities, limits) = nonlinear_jet_fixture();
+    let gate = CancelGate::new_clock_free();
+    for basis in [
+        LiquidViscosityBasis::Dynamic,
+        LiquidViscosityBasis::Kinematic,
+    ] {
+        let source_card = card(basis, true, false);
+        let source = resolve(&source_card, basis, LiquidCapillarity::Sourced);
+        let mut bound = MaterialPeriodicSlenderJet::try_new(
+            &source,
+            length,
+            &radii,
+            &velocities,
+            limits,
+            &gate,
+        )
+        .unwrap();
+        let initial_parameters = bound.state().parameters();
+        let initial_diagnostics = bound.state().diagnostics();
+        let mut native = PeriodicSlenderJet::new(
+            initial_parameters,
+            length,
+            &radii,
+            &velocities,
+            limits,
+            &gate,
+        )
+        .unwrap();
+        let method = SlenderJetIntegrationMethod::ImplicitViscosity;
+        bound.set_integration_method(method, &gate).unwrap();
+        native.set_integration_method(method, &gate).unwrap();
+        assert_eq!(bound.integration_method(), method);
+        assert_eq!(bound.state().parameters(), initial_parameters);
+        assert_eq!(bound.state().diagnostics(), initial_diagnostics);
+        assert_eq!(bound.state().time_s(), 0.0);
+        assert!(core::ptr::eq(bound.material(), &source));
+        // The same generic interface used by vessel flight must dispatch the
+        // chosen integrator without replacing the material-owned trajectory.
+        let actual =
+            SlenderJetEvolution::advance(&mut bound, 0.001, nonlinear_jet_budget(), &gate).unwrap();
+        let expected = native
+            .advance(0.001, nonlinear_jet_budget(), &gate)
+            .unwrap();
+        assert_eq!(actual, expected);
+        assert_eq!(
+            bound.state().radius_squared_m2(),
+            native.radius_squared_m2()
+        );
+        assert_eq!(
+            bound.state().radius_squared_flux_m3_s(),
+            native.radius_squared_flux_m3_s()
+        );
+        assert_eq!(actual.integration_method, method);
+        assert!(actual.temporal_error.is_some());
+        near(actual.after.volume_m3, initial_diagnostics.volume_m3);
+        assert!(actual.after.minimum_radius_m < initial_diagnostics.minimum_radius_m);
+        assert!(core::ptr::eq(bound.material(), &source));
+
+        let before = bound.state().diagnostics();
+        let cancelled = CancelGate::new_clock_free();
+        cancelled.request();
+        assert!(matches!(
+            bound.set_integration_method(SlenderJetIntegrationMethod::ExplicitSspRk3, &cancelled),
+            Err(NonlinearJetError::Cancelled),
+        ));
+        assert_eq!(bound.integration_method(), method);
+        assert_eq!(bound.state().diagnostics(), before);
+        assert!(core::ptr::eq(bound.material(), &source));
+    }
+}

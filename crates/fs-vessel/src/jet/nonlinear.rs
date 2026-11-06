@@ -399,4 +399,64 @@ mod tests {
         let resumed = flight.advance(2.0, budget(), &gate).unwrap();
         assert_eq!(resumed.outcome, NonlinearFreeJetOutcome::FlightComplete);
     }
+    #[test]
+    fn g1_implicit_viscosity_completes_high_viscosity_flight_with_bounded_work() {
+        use fs_lbm::jet::nonlinear::SlenderJetIntegrationMethod;
+        let gate = CancelGate::new_clock_free();
+        let initial = seeded_jet(0.05, 0.5);
+        let radii: Vec<_> = initial.radii_m().collect();
+        let velocities: Vec<_> = initial.velocities_m_s().collect();
+        let mut parameters = initial.parameters();
+        parameters.kinematic_viscosity_m2_s = 50.0;
+        let mut implicit = PeriodicSlenderJet::new(
+            parameters,
+            initial.length_m(),
+            &radii,
+            &velocities,
+            initial.limits(),
+            &gate,
+        )
+        .unwrap();
+        let before = implicit.diagnostics();
+        let work = SlenderJetStepBudget {
+            maximum_substeps: 1000,
+            ..budget()
+        };
+        // The original explicit viscous restriction cannot reach this same
+        // physical residence within the authored work budget.
+        let mut explicit = implicit.clone();
+        assert!(matches!(
+            explicit.advance(0.1, work, &gate),
+            Err(NonlinearJetError::SubstepBudget),
+        ));
+        assert_eq!(explicit.time_s(), 0.0);
+        implicit
+            .set_integration_method(SlenderJetIntegrationMethod::ImplicitViscosity, &gate)
+            .unwrap();
+        let mut flight = NonlinearFreeJet::new(implicit, 0.005).unwrap();
+        let first = flight.advance(0.04, work, &gate).unwrap();
+        assert_eq!(first.outcome, NonlinearFreeJetOutcome::InFlight);
+        let last = flight.advance(0.1, work, &gate).unwrap();
+        assert_eq!(last.outcome, NonlinearFreeJetOutcome::FlightComplete);
+        near(last.elapsed_time_s, 0.1, 2e-14);
+        near(last.travelled_distance_m, 0.005, 2e-14);
+        near(last.state.volume_m3, before.volume_m3, 3e-12);
+        near(
+            last.state.axial_momentum_kg_m_s,
+            before.axial_momentum_kg_m_s,
+            3e-12,
+        );
+        let native = last.native.unwrap();
+        assert_eq!(
+            native.integration_method,
+            SlenderJetIntegrationMethod::ImplicitViscosity
+        );
+        assert!(native.accepted_substeps < work.maximum_substeps);
+        let error = native.temporal_error.unwrap();
+        assert!(error.maximum_radius_error_m.is_finite());
+        assert!(error.maximum_velocity_error_m_s.is_finite());
+        assert!(native.viscous_dissipation_j >= 0.0);
+        assert_eq!(flight.initial_radii_m(), radii);
+        assert_eq!(flight.initial_velocities_m_s(), velocities);
+    }
 }

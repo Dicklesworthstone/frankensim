@@ -13,9 +13,9 @@
 //! A is a cell value; q and u live at faces i+1/2. Centered curvature and
 //! viscosity preserve the circular geometry. Mass-consistent upwind
 //! momentum transport uses a minmod-limited linear reconstruction and exposes
-//! its numerical dissipation. SSPRK3 advances
-//! both conserved fields; adaptive steps obey advection, drainage, viscosity
-//! and a capillary-Jacobian rate bound. Smooth transport, capillary and viscous
+//! its numerical dissipation. Explicit SSPRK3 is the default; optional IMEX
+//! treats viscosity implicitly. Adaptive steps retain advection, drainage and
+//! capillary-Jacobian bounds; explicit mode also limits viscous diffusion. Smooth transport, capillary and viscous
 //! terms are second order in space; the limiter reduces order at extrema.
 //!
 //! All coefficients are constant. The liquid is incompressible/Newtonian,
@@ -25,11 +25,15 @@
 //! Authored radius, slope and resolution limits stop the calculation before
 //! leaving the admitted model. They are not error certificates.
 //!
-//! Eleven reusable f64 arrays give O(N) storage; stepping allocates nothing.
+//! Eleven reusable f64 arrays give O(N) storage in explicit mode. Selecting
+//! implicit viscosity prepares twelve additional arrays once; stepping allocates nothing.
 //! Fixed serial order and arithmetic/sqrt give deterministic evaluations.
 //! Cancellation is polled every 256 cells and immediately before publication.
 
 use fs_exec::CancelGate;
+
+mod implicit;
+pub use implicit::{SlenderJetIntegrationMethod, SlenderJetTemporalError};
 
 /// Constant SI properties of an explicitly Newtonian liquid.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -113,6 +117,11 @@ pub struct SlenderJetAdvance {
     pub outcome: SlenderJetOutcome,
     pub before: SlenderJetDiagnostics,
     pub after: SlenderJetDiagnostics,
+    /// Numerical integration policy used for this advance.
+    pub integration_method: SlenderJetIntegrationMethod,
+    /// Largest embedded local time-error indicator across accepted substeps.
+    /// Present for implicit viscosity; not a global error bound or certificate.
+    pub temporal_error: Option<SlenderJetTemporalError>,
     /// RK quadrature of 3*pi*rho*nu*integral(A*u_z^2 dz), not evolved heat.
     pub viscous_dissipation_j: f64,
     /// RK quadrature of limited-upwind momentum dissipation; not material viscosity.
@@ -198,6 +207,8 @@ pub struct PeriodicSlenderJet {
     rhs: Fields,
     spatial: Spatial,
     diagnostics: SlenderJetDiagnostics,
+    integration_method: SlenderJetIntegrationMethod,
+    implicit_workspace: Option<implicit::Workspace>,
 }
 
 impl PeriodicSlenderJet {
@@ -268,6 +279,8 @@ impl PeriodicSlenderJet {
             rhs,
             spatial,
             diagnostics: initial.diagnostics,
+            integration_method: SlenderJetIntegrationMethod::ExplicitSspRk3,
+            implicit_workspace: None,
         })
     }
 
@@ -318,7 +331,11 @@ impl PeriodicSlenderJet {
         self.diagnostics
     }
 
-    /// Advance toward a requested duration using adaptive SSPRK3.
+    /// Advance toward a requested duration using the selected integration policy.
+    ///
+    /// The default is explicit SSPRK3. ImplicitViscosity uses third-order
+    /// IMEX-SSP3(4,3,3), retaining capillary/advection limits and an embedded
+    /// local time-error indicator; maximum_step_s still controls accuracy.
     ///
     /// A domain stop publishes only completed, admitted substeps. Its last
     /// accepted time brackets neither an exact pinch event nor a precise
@@ -348,19 +365,23 @@ impl PeriodicSlenderJet {
             return Err(NonlinearJetError::NonRepresentable);
         }
         let before = self.diagnostics;
+        let explicit_viscosity =
+            self.integration_method == SlenderJetIntegrationMethod::ExplicitSspRk3;
+        let mut temporal_error = (!explicit_viscosity).then(SlenderJetTemporalError::default);
         let n = self.accepted.a.len();
         for i in 0..n {
             poll_at(gate, i)?;
             self.candidate.a[i] = self.accepted.a[i];
             self.candidate.q[i] = self.accepted.q[i];
         }
-        let mut base = evaluate(
+        let mut base = evaluate_split(
             &self.candidate,
             self.parameters,
             self.limits,
             self.spacing_m,
             &mut self.spatial,
             &mut self.rhs,
+            explicit_viscosity,
             gate,
         )?;
         let (mut elapsed, mut step_cap) = (0.0, budget.maximum_step_s);
@@ -386,13 +407,36 @@ impl PeriodicSlenderJet {
                 return Err(NonlinearJetError::NonRepresentable);
             }
             attempted_substeps += 1;
-            for i in 0..n {
-                poll_at(gate, i)?;
-                self.stage.a[i] = self.candidate.a[i] + dt * self.rhs.a[i];
-                self.stage.q[i] = self.candidate.q[i] + dt * self.rhs.q[i];
-            }
-            let result = self.finish_stages(dt, budget.cfl, base, gate);
-            let (end, physical_loss, numerical_loss) = match result {
+            let result = if explicit_viscosity {
+                for i in 0..n {
+                    poll_at(gate, i)?;
+                    self.stage.a[i] = self.candidate.a[i] + dt * self.rhs.a[i];
+                    self.stage.q[i] = self.candidate.q[i] + dt * self.rhs.q[i];
+                }
+                self.finish_stages(dt, budget.cfl, base, gate)
+                    .map(|result| {
+                        result.map(|(end, physical, numerical)| (end, physical, numerical, None))
+                    })
+            } else {
+                implicit::step(
+                    &self.candidate,
+                    &mut self.stage,
+                    &mut self.rhs,
+                    &mut self.spatial,
+                    self.implicit_workspace
+                        .as_mut()
+                        .ok_or(NonlinearJetError::InvalidState(
+                            "implicit workspace is absent",
+                        ))?,
+                    self.parameters,
+                    self.limits,
+                    self.spacing_m,
+                    dt,
+                    budget.cfl,
+                    gate,
+                )
+            };
+            let (end, physical_loss, numerical_loss, step_error) = match result {
                 Err(NonlinearJetError::InitialDomain(violation)) => {
                     outcome = SlenderJetOutcome::DomainLimit(violation);
                     break;
@@ -401,19 +445,28 @@ impl PeriodicSlenderJet {
                 Ok(None) => {
                     step_cap = positive(0.5 * dt)?;
                     // Rebuild the current-state RHS overwritten by the rejected stage.
-                    base = evaluate(
+                    base = evaluate_split(
                         &self.candidate,
                         self.parameters,
                         self.limits,
                         self.spacing_m,
                         &mut self.spatial,
                         &mut self.rhs,
+                        explicit_viscosity,
                         gate,
                     )?;
                     continue;
                 }
                 Ok(Some(result)) => result,
             };
+            if let (Some(maximum), Some(estimate)) = (&mut temporal_error, step_error) {
+                maximum.maximum_radius_error_m = maximum
+                    .maximum_radius_error_m
+                    .max(estimate.maximum_radius_error_m);
+                maximum.maximum_velocity_error_m_s = maximum
+                    .maximum_velocity_error_m_s
+                    .max(estimate.maximum_velocity_error_m_s);
+            }
             viscous_loss = finite(viscous_loss + physical_loss)?;
             upwind_loss = finite(upwind_loss + numerical_loss)?;
             core::mem::swap(&mut self.candidate, &mut self.stage);
@@ -443,6 +496,8 @@ impl PeriodicSlenderJet {
             outcome,
             before,
             after,
+            integration_method: self.integration_method,
+            temporal_error,
             viscous_dissipation_j: viscous_loss,
             upwind_dissipation_j: upwind_loss,
             energy_balance_residual_j: residual,
@@ -573,6 +628,19 @@ fn evaluate(
     rhs: &mut Fields,
     gate: &CancelGate,
 ) -> Result<Evaluation, NonlinearJetError> {
+    evaluate_split(fields, p, limits, dx, spatial, rhs, true, gate)
+}
+
+fn evaluate_split(
+    fields: &Fields,
+    p: SlenderJetParameters,
+    limits: SlenderJetLimits,
+    dx: f64,
+    spatial: &mut Spatial,
+    rhs: &mut Fields,
+    explicit_viscosity: bool,
+    gate: &CancelGate,
+) -> Result<Evaluation, NonlinearJetError> {
     let n = fields.a.len();
     let mut volume = Sum::default();
     let mut momentum = Sum::default();
@@ -678,8 +746,14 @@ fn evaluate(
         };
         let strain = velocity_jump / dx;
         let viscous_stress = 3.0 * p.kinematic_viscosity_m2_s * a * strain;
-        spatial.flux[i] =
-            finite(mass_flux * advected_u + coefficient * capillary_stress - viscous_stress)?;
+        spatial.flux[i] = finite(
+            mass_flux * advected_u + coefficient * capillary_stress
+                - if explicit_viscosity {
+                    viscous_stress
+                } else {
+                    0.0
+                },
+        )?;
         viscous.add(viscous_stress * strain);
         // minmod shares the jump's sign and has no larger magnitude, so this
         // kinetic loss is nonnegative. Reconstruction stays between the
@@ -706,12 +780,12 @@ fn evaluate(
         surface_energy_j: finite(2.0 * pi * p.surface_tension_n_m * dx * surface.total())?,
     };
     let capillary_rate = 2.0 * coefficient.sqrt() * capillary_jacobian.sqrt() / dx;
-    let rate_per_s = finite(
-        2.0 * max_u / dx
-            + 12.0 * p.kinematic_viscosity_m2_s / dx / dx
-            + capillary_rate
-            + drainage_rate,
-    )?;
+    let viscous_rate = if explicit_viscosity {
+        12.0 * p.kinematic_viscosity_m2_s / dx / dx
+    } else {
+        0.0
+    };
+    let rate_per_s = finite(2.0 * max_u / dx + viscous_rate + capillary_rate + drainage_rate)?;
     Ok(Evaluation {
         diagnostics,
         rate_per_s,

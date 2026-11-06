@@ -6,7 +6,7 @@
 
 use super::super::nonlinear::{
     NonlinearJetError, PeriodicSlenderJet, SlenderJetAdvance, SlenderJetEvolution,
-    SlenderJetLimits, SlenderJetParameters, SlenderJetStepBudget,
+    SlenderJetIntegrationMethod, SlenderJetLimits, SlenderJetParameters, SlenderJetStepBudget,
 };
 use fs_exec::CancelGate;
 use fs_material::liquid::surface::ResolvedLiquidSurfaceState;
@@ -74,6 +74,31 @@ impl<'a> MaterialPeriodicSlenderJet<'a> {
     #[must_use]
     pub const fn state(&self) -> &PeriodicSlenderJet {
         &self.jet
+    }
+
+    /// Numerical policy currently used by this source-bound trajectory.
+    #[must_use]
+    pub const fn integration_method(&self) -> SlenderJetIntegrationMethod {
+        self.jet.integration_method()
+    }
+
+    /// Select the native explicit or implicit-viscosity integrator.
+    ///
+    /// This changes only numerical policy and prepares reusable workspace;
+    /// source density, viscosity, surface tension, accepted state and time stay
+    /// attached to the same liquid. The implicit method removes the explicit
+    /// viscous timestep restriction. Capillary/transport limits and the caller's
+    /// accuracy timestep still apply. Errors preserve the previous policy.
+    ///
+    /// The existing generic vessel flight owner consumes this policy through
+    /// the same SlenderJetEvolution interface; no alternate physics path is
+    /// introduced by selecting it before constructing a flight.
+    pub fn set_integration_method(
+        &mut self,
+        method: SlenderJetIntegrationMethod,
+        gate: &CancelGate,
+    ) -> Result<(), NonlinearJetError> {
+        self.jet.set_integration_method(method, gate)
     }
 
     /// Evolve the original sourced state with the native conservative operator.

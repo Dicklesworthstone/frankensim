@@ -477,3 +477,21 @@ Focused synthetic regressions specify exact constant-source parity under both
 contact models and actual changes to the native pour field and speed when the
 original viscosity curve varies with physical shear. They do not establish
 measured-fluid calibration, a laminar transition threshold or 3-D breakup.
+
+
+## Implicit-viscosity nonlinear capillary flight
+
+The existing generic `NonlinearFreeJet` consumes the integration policy of its
+original native or material-bound `SlenderJetEvolution`. Selecting implicit
+viscosity before flight allows stiff Newtonian jets to advance without the
+explicit viscous timestep restriction, while retaining the same conservative
+geometry, liquid source, initial profile, mean transport and residence time.
+Flight reports retain the native method and local embedded error indicators.
+No flight-specific PDE, retuned amplification score or replacement source is used.
+
+The high-viscosity flight regression covers two resumed chunks, physical
+residence/distance, volume and axial momentum conservation, retained initial
+profiles and a work budget that refuses the equivalent explicit run.
+Capillary/advection stability and maximum-step accuracy requirements still
+apply. A slender-domain stop is not a prediction of resolved pinch-off or
+post-breakup droplets.

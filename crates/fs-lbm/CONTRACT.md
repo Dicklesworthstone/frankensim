@@ -14214,3 +14214,40 @@ endpoints, temperature/tension/calibration changes and domain refusal.
 Integration regressions exercise actual original-source native wetting and
 thermal context. These are model/numerical checks, not experimental calibration
 or a resolved microscopic contact-line claim.
+
+
+## Optional implicit-viscosity capillary-jet evolution
+
+The original `PeriodicSlenderJet` and `MaterialPeriodicSlenderJet` can select
+`SlenderJetIntegrationMethod::ImplicitViscosity`. The explicit SSPRK3 policy
+remains the default. Selection preserves physical state, time, density, tension,
+viscosity and source identity; cancellation refuses without changing policy.
+
+The four-stage third-order IMEX-SSP3(4,3,3) method advances the SAME conservative
+area/momentum operator. Newtonian extensional viscosity is solved implicitly
+in face velocity with an O(N) cyclic tridiagonal LDL/rank-one solve. Twelve
+additional N-element work arrays are allocated only when first selecting this
+policy and are reused across substeps. The solve retains the uniform-velocity
+null mode, restores momentum to roundoff and checks the componentwise residual.
+
+Removing the explicit viscous restriction does not remove capillary, advection,
+drainage, physical-domain or authored maximum-step limits. The implicit tableau
+is L-stable but not stiffly accurate; unresolved stiff transients do not acquire
+uniform accuracy. The optional temporal report gives the maximum accepted-step
+radius/velocity difference from an embedded second-order estimate in SI units.
+It is not a global bound or an automatic tolerance controller.
+
+Positive final stage weights integrate physical and numerical loss rates
+separately. The signed energy residual retains temporal/spatial truncation;
+implicit damping is not reported as molecular heat or an unconditional
+nonlinear energy theorem. Whole-call cancellation, numerical errors and work
+exhaustion roll back the accepted state; physical-domain stops keep admitted
+substeps. Existing sourced jets and generic resumable vessel flight use this
+policy without a duplicate equation or detached material trajectory.
+
+Native regressions check a manufactured nonuniform periodic solve, resolved
+third-order viscous decay, high-viscosity agreement/work against an explicit
+reference, the inviscid limit, conservation, policy/call rollback and domain
+stops. Material regressions keep the original dynamic/kinematic viscosity
+sources and compare the same native trajectory. Model restrictions remain
+axisymmetric, periodic, slender, Newtonian and pre-pinch-off.
