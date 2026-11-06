@@ -29,8 +29,8 @@ pub enum MolecularWall<const D: usize> {
     /// This equals actual fluid traction work `t·u_f + chi D + q_heat`.
     /// No separate volume heat source is added.
     ///
-    /// Frozen-composition planar and spatial molecular owners and the evolving-
-    /// species spatial owner support this condition, including its coupled and
+    /// Frozen-composition and evolving-species planar and spatial molecular
+    /// owners support this condition, including their coupled and
     /// reactive steps. It is a continuum boundary law, not a rarefied-gas
     /// model: no mean free path, accommodation or temperature jump is inferred.
     NavierSlip {

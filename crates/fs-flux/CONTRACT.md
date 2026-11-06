@@ -2864,14 +2864,16 @@ coupled temporal-order theorem is asserted.
 ### Finite Navier slip in planar and volumetric molecular gas flow
 
 `MolecularWall::NavierSlip` adds finite wall friction to the original frozen-gas
-`MolecularTransport2d` and `MolecularTransport3d` operators and the evolving-
-species `spatial::mixture::molecular::MolecularTransport3d` owner, including
-their coupled and reactive steps. The authored wall velocity is constant on a flat reflecting side
-and has zero normal component. Slip length `b` is finite and nonnegative; the
-friction-heat fraction `chi` is finite and in `[0,1]`. The original gas transport
-source still owns face viscosity, bulk viscosity and conductivity at the actual
-cell/wall temperature and pressure. No accommodation coefficient, mean free
-path or rarefied-gas applicability is inferred from `b`.
+`MolecularTransport2d` and `MolecularTransport3d` operators and both evolving-
+species owners: `mixture::molecular::MolecularTransport2d` and
+`spatial::mixture::molecular::MolecularTransport3d`. Their coupled and reactive
+steps consume the same wall law. The authored wall velocity is constant on a
+flat reflecting side and has zero normal component. Slip length `b` is finite
+and nonnegative; the friction-heat fraction `chi` is finite and in `[0,1]`.
+The original gas transport source still owns face viscosity, bulk viscosity
+and conductivity at the actual cell/wall temperature and pressure. No
+accommodation coefficient, mean free path or rarefied-gas applicability is
+inferred from `b`.
 
 For physical cell-to-wall distance `h = dx/2`, the tangential fluid trace and
 traction on the fluid are
@@ -2887,10 +2889,9 @@ wall velocity and `b` are constant on a side, the physical tangential derivative
 of the fluid trace is `b/(h+b)` times the adjacent-cell derivative; the complete
 normal viscous stress retains this contribution. Fourier conduction uses `h`,
 independently of momentum slip. `b = 0` uses the original no-slip arithmetic,
-and increasing `b` tends toward zero tangential traction. These updates add no
-stage allocations or new wall storage; the existing conservative face flux,
-boundary impulse integration, admissibility retries and atomic publication
-remain the owners.
+and increasing `b` tends toward zero tangential traction. Per-stage evaluation
+adds no allocations. The existing conservative face flux, boundary impulse
+integration, admissibility retries and atomic publication remain the owners.
 
 The massless interface dissipates
 `D = -t·(u_f-u_wall) = mu*b*|u_wall-u_cell|²/(h+b)² >= 0` per unit area.
@@ -2907,36 +2908,46 @@ original conservative energy update. The conductive thermal condition and
 this authored interface heat partition are separate physical inputs; wall
 temperature and conjugate wall heat storage are not solved here.
 
-The evolving-species spatial owner uses the same ghost, tangential-trace and
-traction/heat kernel as frozen gas. Its original `SpatialTransport` source
-admits the impermeable species boundary, normal stress and Fourier heat at the
-actual local mole composition and cell/wall temperature. The source's returned
-dynamic viscosity supplies the shared finite-slip stress, while its already
-evaluated conductive heat flux is retained exactly. This needs one material
-query per face, preserves zero wall flux for every species, and does not add
-another chemical or viscous volume heat source. Its original conservative
-boundary integration also carries the authored interface heat partition
+The evolving-species owners use the same ghost, tangential-trace and
+traction/heat kernel as frozen gas. Their original `PlanarTransport` and
+`SpatialTransport` sources admit the impermeable species boundary, normal
+stress and Fourier heat at actual local mole composition and cell/wall
+temperature. The returned dynamic viscosity supplies the shared finite-slip
+stress, while already evaluated conductive heat is retained exactly. This
+needs one material query per face, preserves zero wall flux for every species,
+and does not add another chemical or viscous volume heat source. Original
+conservative boundary integration carries the authored interface heat partition
 through both molecular halves of a reactive step. Zero slip uses the original
 no-slip source path and arithmetic.
+
+The planar evolving-species operator binds four fixed-size side values through
+`with_wall`; periodic/open sides and normal wall motion refuse. Its SSP RK2
+and stabilized RKL2 paths use the identical source/ghost/face owner, so adaptive
+and composed stepping retain the same physical boundary law. Complete held
+reservoirs keep their original exterior traces and source-owned heat/species
+efforts. Default free-slip configurations preserve their original behavior.
 
 Channel filters and equilibrium SGS wall closures that require no slip still
 refuse this condition explicitly, including when reconfiguring an existing
 operator. Prescribed wall acceleration and finite-inertia wall bindings remain
 limited to their supported no-slip interfaces. The law does not add slip to
-structural wall-load couplers or planar evolving-species flow. Original no-slip
-and free-slip configurations retain their behavior.
+structural wall-load couplers.
 
-Focused native wall tests cover all six oriented faces, series-resistance
-traction and analytic interface energy, the finite-slip normal-stress term,
-exact Couette velocity with physical viscous heating, actual conservative
-energy changes under different heat partitions, bit-identical zero-slip
-stepping and receipts, parameter refusals, and agreement between the planar
-owner and its three-dimensional extrusion. Evolving-species tests additionally
-check actual temperature/mole-composition-dependent transport on all six sides,
-zero species leakage, finite-slip normal stress, exact mixture Couette heating,
-bit-identical zero-slip updates and receipts, reactive species conversion with
-the complete absolute-energy balance under both heat partitions, and late
-reactive cancellation with unchanged composition, wall loads and replay.
+Focused native wall tests cover all six oriented spatial faces, series-
+resistance traction and analytic interface energy, the finite-slip normal-
+stress term, exact Couette velocity with physical viscous heating, actual
+conservative energy changes under different heat partitions, bit-identical
+zero-slip stepping and receipts, parameter refusals, and agreement between
+the frozen planar owner and its three-dimensional extrusion. Evolving-species
+tests additionally check actual temperature/mole-composition-dependent
+transport on all four planar and six spatial sides, zero species leakage,
+finite-slip normal stress, mixture Couette heating, bit-identical zero-slip
+updates and receipts, reactive species conversion with the complete absolute-
+energy balance under both heat partitions, and late cancellation/replay.
+Planar regressions exercise the same exact Couette heat partition in SSP and
+RKL2, and independent finite-volume Poiseuille curvature and wall tractions.
+These manufactured tests do not calibrate a slip length or heat fraction,
+establish rarefied-gas validity, or certify arbitrary boundary-layer resolution.
 
 ### Evolving-species molecular transport and reacting diffusion in two dimensions
 
@@ -2961,13 +2972,20 @@ a duplicate pass on successful substeps. Both stages enforce the original
 source domain and a conservative engineering diffusion-scale estimate. This
 is not an unconditional positivity, entropy or stability theorem.
 
-Periodic axes and stationary adiabatic impermeable slip walls are admitted.
-At a wall, both normal velocity and tangential divergence contribute to its
-normal viscous traction; species, tangential traction, heat and wall work are
-zero. A transmissive Euler end without the explicit source-owned reservoir
-below still refuses molecular evolution: zero-gradient wave continuation
-supplies no molecular composition/temperature boundary law. Normal support
-traction includes signed `p-tau_nn` when composed with advection.
+Periodic axes and stationary adiabatic impermeable free-slip walls are the
+defaults. At a free-slip wall, normal velocity and tangential divergence
+contribute to normal viscous traction; species, tangential traction, heat and
+wall work are zero. `with_wall` also admits the shared no-slip and finite
+Navier-slip conditions described above, with fixed tangential wall velocity,
+adiabatic/isothermal conductive data and an explicit interfacial heat fraction.
+The source-owned no-slip closure supplies the full stress and heat at the
+actual local composition; finite slip retains its normal stress and conduction
+and uses the common fluid trace and tangential traction/work law. Species
+remain impermeable in every wall condition. A transmissive Euler end without
+the explicit source-owned reservoir below still refuses molecular evolution:
+zero-gradient wave continuation supplies no molecular composition/temperature
+boundary law. Normal support traction includes signed `p-tau_nn` when composed
+with advection.
 
 The operator advances a complete requested duration through bounded SSP RK2
 substeps without changing the Euler clock or advection metadata. Its field,

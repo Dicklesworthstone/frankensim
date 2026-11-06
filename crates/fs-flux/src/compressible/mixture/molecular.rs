@@ -11,12 +11,14 @@ use super::{
     MAX_MIXTURE_WORKSPACE_BYTES, MixtureEuler2d, Primitive, Totals, WIDTH_LIMIT, allocated,
     boundary_view, cartesian, cell, checked_totals, copy_values, sum_rows, update,
 };
+use crate::compressible::AxisBoundaries;
+pub use crate::compressible::molecular::MolecularWall2d;
 pub(in crate::compressible) mod adaptive;
 pub(in crate::compressible) mod interval;
 pub(in crate::compressible) mod stabilized;
 pub use adaptive::{AdaptiveDissipationControl, AdaptiveMolecularReport};
 pub use fs_gas::multicomponent::dissipation::{
-    DissipationControl, DissipationError, PlanarTransport, TransportLaw,
+    DissipationControl, DissipationError, PlanarTransport, TransportLaw, WallThermalCondition,
 };
 use fs_gas::multicomponent::{MixtureGas, NormalPrimitive};
 use fs_qty::Time;
@@ -104,9 +106,11 @@ struct Workspace {
 
 /// Prepared evolving-species transport with complete planar Newtonian stress.
 ///
-/// Periodic faces share identical flux bits. Reflecting faces are impermeable,
-/// adiabatic stationary slip walls: normal viscous traction loads their support,
-/// while species, tangent traction, heat and wall work vanish. Open faces need
+/// Periodic faces share identical flux bits. Reflecting faces default to
+/// impermeable, adiabatic free-slip walls. A side may instead prescribe no-slip
+/// or finite Navier slip, tangential wall velocity and conductive thermal data.
+/// Finite slip explicitly partitions interfacial friction heat between the
+/// fluid and wall; all species remain impermeable. Open faces need
 /// the field's explicit original-source reservoir used by its HLLC boundary.
 /// Species, enthalpy, heat and full viscous work use one two-trace molecular
 /// flux at half-cell normal distance. Constitutive values use the shared
@@ -117,6 +121,7 @@ pub struct MolecularTransport2d<L: TransportLaw> {
     source: PlanarTransport<L>,
     grid: CartesianGrid,
     boundaries: Boundaries2d,
+    walls: [MolecularWall2d; 4],
     maximum_workspace_bytes: usize,
     boundary_impulses: Vec<f64>,
     last_step: Option<MolecularReport>,
@@ -192,6 +197,7 @@ impl<L: TransportLaw> MolecularTransport2d<L> {
             source,
             grid,
             boundaries: flow.boundaries,
+            walls: [MolecularWall2d::SlipAdiabatic; 4],
             maximum_workspace_bytes,
             boundary_impulses: allocated(boundary, 0.0)?,
             last_step: None,
@@ -215,6 +221,41 @@ impl<L: TransportLaw> MolecularTransport2d<L> {
         poll(&mut cancelled)?;
         Ok(result)
     }
+
+    /// Configure one physical reflecting side using the shared molecular wall
+    /// law. Periodic and open sides have no such wall. Normal wall motion needs
+    /// a separate conservative moving-geometry owner and is refused here.
+    pub fn with_wall(
+        mut self,
+        side: BoundarySide,
+        wall: MolecularWall2d,
+    ) -> Result<Self, DissipationError> {
+        let AxisBoundaries::Ends { lower, upper } = self.boundaries.axis(side.axis()) else {
+            return Err(DissipationError::Invalid(
+                "periodic molecular side has no physical wall",
+            ));
+        };
+        let condition = if side.sign() < 0.0 { lower } else { upper };
+        if condition != BoundaryCondition::Reflecting {
+            return Err(DissipationError::Invalid(
+                "molecular wall model requires a reflecting Euler side",
+            ));
+        }
+        wall.validate(
+            side.axis(),
+            self.gas().domain().minimum_temperature,
+            self.gas().domain().maximum_temperature,
+        )
+        .map_err(DissipationError::Invalid)?;
+        self.walls[wall_index(side.axis(), side.sign())] = wall;
+        Ok(self)
+    }
+
+    /// Configured molecular model, including inert placeholders on periodic sides.
+    pub fn wall(&self, side: BoundarySide) -> MolecularWall2d {
+        self.walls[wall_index(side.axis(), side.sign())]
+    }
+
     /// Exact immutable source species and caloric path.
     pub fn gas(&self) -> &MixtureGas {
         self.source.gas()
@@ -310,6 +351,7 @@ impl<L: TransportLaw> MolecularTransport2d<L> {
                         &mut self.source,
                         &self.grid,
                         self.boundaries,
+                        &self.walls,
                         &flow.reservoirs,
                         &self.work.current,
                         &mut self.work.primitive,
@@ -330,6 +372,7 @@ impl<L: TransportLaw> MolecularTransport2d<L> {
                         &mut self.source,
                         &self.grid,
                         self.boundaries,
+                        &self.walls,
                         &flow.reservoirs,
                         &self.work.current,
                         &mut self.work.primitive,
@@ -368,6 +411,7 @@ impl<L: TransportLaw> MolecularTransport2d<L> {
                     &mut self.source,
                     &self.grid,
                     self.boundaries,
+                    &self.walls,
                     &flow.reservoirs,
                     &self.work.stage,
                     &mut self.work.primitive,
@@ -525,6 +569,7 @@ fn spatial<L: TransportLaw>(
     source: &mut PlanarTransport<L>,
     grid: &CartesianGrid,
     boundaries: Boundaries2d,
+    walls: &[MolecularWall2d; 4],
     reservoirs: &super::reservoir::Reservoirs,
     states: &[f64],
     primitive: &mut [Primitive],
@@ -542,12 +587,13 @@ fn spatial<L: TransportLaw>(
     for (index, row) in gradient.iter_mut().enumerate() {
         poll(cancelled)?;
         for axis in 0..2 {
+            let low = reservoirs
+                .velocity_neighbour(grid, boundaries, walls, primitive, index, axis, false)?;
+            let high = reservoirs
+                .velocity_neighbour(grid, boundaries, walls, primitive, index, axis, true)?;
             for component in 0..2 {
-                let low = reservoirs
-                    .velocity_neighbour(grid, boundaries, primitive, index, axis, component, false);
-                let high = reservoirs
-                    .velocity_neighbour(grid, boundaries, primitive, index, axis, component, true);
-                row[2 * axis + component] = (high - low) / (2.0 * grid.spacing[axis]);
+                row[2 * axis + component] =
+                    (high[component] - low[component]) / (2.0 * grid.spacing[axis]);
             }
         }
     }
@@ -592,13 +638,78 @@ fn spatial<L: TransportLaw>(
                 cell,
                 sign,
                 condition: BoundaryCondition::Reflecting,
-            } => source.wall_from_primitive(
-                normal(cell, axis),
-                -sign * 2.0 * primitive[cell].velocity[axis] / grid.spacing[axis],
-                gradient[cell][2 * tangent + tangent],
-                output,
-                &mut *cancelled,
-            )?,
+            } => {
+                let wall = walls[wall_index(axis, sign)];
+                match wall {
+                    MolecularWall2d::SlipAdiabatic => source.wall_from_primitive(
+                        normal(cell, axis),
+                        -sign * 2.0 * primitive[cell].velocity[axis] / grid.spacing[axis],
+                        gradient[cell][2 * tangent + tangent],
+                        output,
+                        &mut *cancelled,
+                    )?,
+                    MolecularWall2d::NoSlip { velocity, thermal }
+                    | MolecularWall2d::NavierSlip {
+                        velocity,
+                        thermal,
+                        slip_length_m: 0.0,
+                        ..
+                    } => source.no_slip_wall_from_primitive(
+                        normal(cell, axis),
+                        0.5 * grid.spacing[axis],
+                        sign,
+                        velocity[tangent],
+                        thermal,
+                        -sign * 2.0 * primitive[cell].velocity[axis] / grid.spacing[axis],
+                        0.0,
+                        output,
+                        &mut *cancelled,
+                    )?,
+                    MolecularWall2d::NavierSlip { thermal, .. } => {
+                        let distance = 0.5 * grid.spacing[axis];
+                        let p = primitive[cell];
+                        let ghost = wall
+                            .velocity_ghost(axis, distance, p.velocity)
+                            .ok_or(DissipationError::Invalid("missing Navier wall fluid trace"))?;
+                        let trace = 0.5 * p.velocity[tangent] + 0.5 * ghost[tangent];
+                        // The original source owns mole composition, wall/cell
+                        // temperature, impermeable species, full normal stress
+                        // and conduction. Query it once at the actual trace.
+                        let receipt = source.no_slip_wall_from_primitive(
+                            normal(cell, axis),
+                            distance,
+                            sign,
+                            trace,
+                            thermal,
+                            -sign * 2.0 * p.velocity[axis] / grid.spacing[axis],
+                            wall.tangential_trace_fraction(distance)
+                                * gradient[cell][2 * tangent + tangent],
+                            output,
+                            &mut *cancelled,
+                        )?;
+                        // Keep that source's conductive heat exactly. The
+                        // shared finite-slip kernel supplies only mechanical
+                        // work and the authored interfacial heat partition.
+                        let (shear, mechanical_energy) = wall.shear_and_energy(
+                            axis,
+                            sign,
+                            p.velocity,
+                            p.temperature,
+                            distance,
+                            receipt.dynamic_viscosity_pa_s,
+                            0.0,
+                        );
+                        output[species + 1] = -shear[tangent];
+                        output[species + 2] = mechanical_energy + receipt.reduced_heat_flux_w_m2;
+                        if !output.iter().all(|value| value.is_finite()) {
+                            return Err(DissipationError::Invalid(
+                                "Navier molecular wall flux overflow",
+                            ));
+                        }
+                        receipt
+                    }
+                }
+            }
             cartesian::FaceKind::Boundary {
                 cell,
                 sign,
@@ -696,4 +807,8 @@ fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<(), DissipationError> {
     } else {
         Ok(())
     }
+}
+
+fn wall_index(axis: usize, sign: f64) -> usize {
+    2 * axis + usize::from(sign > 0.0)
 }

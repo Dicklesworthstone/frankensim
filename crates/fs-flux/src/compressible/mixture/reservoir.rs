@@ -1,5 +1,6 @@
 //! Immutable source-admitted boundary gas shared by advection and molecules.
 use super::*;
+use crate::compressible::molecular::MolecularWall2d;
 use crate::compressible::{AxisBoundaries, SIDES};
 use fs_gas::multicomponent::dissipation::DissipationError;
 
@@ -178,12 +179,12 @@ impl Reservoirs {
         &self,
         grid: &CartesianGrid,
         topology: Boundaries2d,
+        walls: &[MolecularWall2d; 4],
         primitive: &[Primitive],
         cell: usize,
         axis: usize,
-        component: usize,
         upper: bool,
-    ) -> f64 {
+    ) -> Result<[f64; 2], DissipationError> {
         let position = if axis == 0 {
             cell % grid.shape[0]
         } else {
@@ -195,17 +196,32 @@ impl Reservoirs {
             position == 0
         };
         let sign = if upper { 1.0 } else { -1.0 };
-        if edge && let Some(index) = self.slots[side_index(axis, sign)] {
-            return 2.0 * self.primitive[index].velocity[component]
-                - primitive[cell].velocity[component];
-        }
-        let (other, reflect) = cartesian::neighbour(grid, topology, cell, axis, upper);
-        primitive[other].velocity[component]
-            * if reflect && component == axis {
-                -1.0
+        let velocity = if edge && let Some(index) = self.slots[side_index(axis, sign)] {
+            std::array::from_fn(|component| {
+                2.0 * self.primitive[index].velocity[component]
+                    - primitive[cell].velocity[component]
+            })
+        } else {
+            let (other, reflect) = cartesian::neighbour(grid, topology, cell, axis, upper);
+            if reflect {
+                walls[side_index(axis, sign)]
+                    .velocity_ghost(axis, 0.5 * grid.spacing[axis], primitive[cell].velocity)
+                    .unwrap_or_else(|| {
+                        std::array::from_fn(|component| {
+                            primitive[other].velocity[component]
+                                * if component == axis { -1.0 } else { 1.0 }
+                        })
+                    })
             } else {
-                1.0
+                primitive[other].velocity
             }
+        };
+        if !velocity.iter().all(|value| value.is_finite()) {
+            return Err(DissipationError::Invalid(
+                "molecular wall/reservoir ghost velocity overflow",
+            ));
+        }
+        Ok(velocity)
     }
 }
 fn side_index(axis: usize, sign: f64) -> usize {

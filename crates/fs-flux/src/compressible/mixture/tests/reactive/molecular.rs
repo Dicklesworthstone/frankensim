@@ -6,6 +6,7 @@ use crate::compressible::mixture::tests::molecular::{
 use fs_gas::multicomponent::dissipation::ConstantTransport;
 
 mod stabilized;
+mod walls;
 
 fn budget(flow: &ReactingEuler2d, operator: &MolecularTransport2d<ConstantTransport>) -> usize {
     flow.workspace_bytes() + operator.workspace_bytes()

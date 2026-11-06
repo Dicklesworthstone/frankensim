@@ -1,5 +1,6 @@
 mod adaptive;
 mod stabilized;
+mod walls;
 use super::*;
 use crate::compressible::mixture::molecular::{
     DissipationControl, DissipationError, MolecularReport, MolecularTransport2d, PlanarTransport,
