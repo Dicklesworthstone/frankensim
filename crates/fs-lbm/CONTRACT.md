@@ -13768,3 +13768,31 @@ limits and exploratory-use restrictions remain; this adds no wall, inflow,
 scalar-flux or turbulence-validation claim. `tests/lagrangian_forcing.rs`
 contains independent-owner, force-epoch, worker-identity, endpoint-refusal
 and late-cancellation regression sources.
+
+## Compressible gas gravity and mechanical work
+
+`NsfGrid3::with_gravity_si` and `set_gravity_si` bind uniform signed SI gravity
+to the original compressible momentum and total-energy equations. Every force
+epoch uses the evolving lattice density in `rho*g`, including characteristic
+and thermal correctors; no Boussinesq reference-density subtraction or
+caller-authored expansion coefficient is inserted. The exact endpoint
+trapezoid of `rho*g.u` supplies total energy and the separate
+`EnergyLedger::gravity_work_j` account. This work is not a heat source.
+Characteristic trials retain the binding and aggregate its work before their
+ordinary energy and cancellation checks.
+
+Changing gravity rebases the complete Guo half-source at fixed physical
+velocity and stress, refreshes the original conservative flux history and
+publishes only after admission. It advances no clock and supplies no impulse
+or heat. Zero gravity on an unforced grid is an exact no-op. Conversion is
+performed once at binding; force and energy evaluation add constant work per
+cell without another field allocation or material query.
+
+Seven regression definitions cover uniform acceleration and no artificial
+heating, density scaling, evolving-density gravity with mass supply, separate
+heat/work accounting, evolved stress-preserving rebinding, exact zero parity,
+and refused/cancelled characteristic publication. Native compilation and Rust
+execution remain outstanding; these definitions are not an executed
+qualification. Existing Mach, source/material, boundary and timestep limits
+remain. No hydrostatic well-balancing, exact discrete fluid-plus-potential
+energy conservation, self-gravity or measured performance is claimed.

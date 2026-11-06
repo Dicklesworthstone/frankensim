@@ -15,7 +15,10 @@
 //! energy is `E` minus the kinetic energy of the force-corrected velocity, so kinetic energy removed by
 //! viscosity or by a wall becomes internal energy; `theta = (gamma - 1) e` feeds back only through the force.
 //! Time coupling: the trapezoid rule on the flux divergences of the two time levels with a fixed number of
-//! predictor-corrector passes (`COUPLING_PASSES`).
+//! predictor-corrector passes (`COUPLING_PASSES`). Optional uniform physical gravity
+//! supplies rho*g to these same force epochs and rho*g.u to total energy with
+//! the same endpoint trapezoid. Its mechanical work is separate from heat;
+//! see [`NsfGrid3::with_gravity_si`]. No hydrostatic well-balancing is claimed.
 //!
 //! MATERIAL-OWNED GAS. NsfSpec also accepts ThermochemicalNsfGas. The same
 //! collision, pressure force, conservative face flux and fixed coupling passes
@@ -105,6 +108,7 @@ pub use open_boundary::{
     NsfCharacteristicBoundary, NsfCharacteristicPatch, NsfCharacteristicThermalPolicy,
 };
 mod characteristic_trial;
+mod gravity;
 /// Unpublished original NSF interval for reciprocal characteristic coupling.
 pub use characteristic_trial::NsfCharacteristicTrial;
 
@@ -392,7 +396,11 @@ pub struct EnergyLedger {
     /// sensible chart. Heat-only sources supply heat; arbitrary manufactured
     /// mass/momentum sources need not. Negative values remove energy.
     pub source_energy_j: f64,
-    /// `|change of total energy - wall heat - wall work - open energy - source energy| / total energy`.
+    /// Work supplied by physical gravity during this step [J]. The exact
+    /// endpoint trapezoid of rho*g.u used by the total-energy equation.
+    /// This mechanical supply is neither heat nor manufactured source energy.
+    pub gravity_work_j: f64,
+    /// `|change of total energy - wall heat - wall work - open energy - source energy - gravity work| / total energy`.
     pub residual_rel: f64,
 }
 
@@ -671,6 +679,7 @@ pub struct NsfGrid3<L: Lattice3<27>> {
     edge_velocity: [[[f64; 3]; 2]; 3],
     moving_walls: bool,
     sources: Option<SourceFn>,
+    gravity: Option<gravity::Gravity>,
     /// Sources at the current time level (empty without sources).
     src_now: Vec<(f64, [f64; 3], f64)>,
     marker: core::marker::PhantomData<L>,
@@ -877,6 +886,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             edge_velocity: [[[0.0; 3]; 2]; 3],
             moving_walls: false,
             sources,
+            gravity: None,
             src_now: Vec::new(),
             marker: core::marker::PhantomData,
         };
@@ -1188,11 +1198,17 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             if solid[i] {
                 return [0.0; 3];
             }
-            [
+            let mut force = [
                 -(face(i, 0, 1) - face(i, 0, -1)),
                 -(face(i, 1, 1) - face(i, 1, -1)),
                 -(face(i, 2, 1) - face(i, 2, -1)),
-            ]
+            ];
+            if let Some(gravity) = self.gravity {
+                for a in 0..3 {
+                    force[a] += rho[i] * gravity.acceleration_lattice[a];
+                }
+            }
+            force
         });
         out
     }
@@ -1676,6 +1692,9 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                 if have_sources {
                     e1[i] += 0.5 * (src_next[i].2 + self.src_now[i].2);
                 }
+                if let Some(gravity) = self.gravity {
+                    e1[i] += gravity.work(rho0[i], u0[i], rho1[i], u1[i]);
+                }
                 let ke = 0.5
                     * rho1[i]
                     * (u1[i][0] * u1[i][0] + u1[i][1] * u1[i][1] + u1[i][2] * u1[i][2]);
@@ -1767,6 +1786,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             self.sgs_field(&rho1, &u1, &th1, &material_new, endpoint_faces.as_ref())?;
         let unit = self.law.energy_unit_j();
         let (mut ke0, mut ke1, mut e_old, mut e_new, mut pw) = (0.0, 0.0, 0.0, 0.0, 0.0);
+        let mut gravity_work = 0.0;
         for i in 0..n {
             if self.solid[i] {
                 continue;
@@ -1777,6 +1797,14 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                 0.5 * rho1[i] * (u1[i][0] * u1[i][0] + u1[i][1] * u1[i][1] + u1[i][2] * u1[i][2]);
             e_old += self.e[i];
             e_new += e1[i];
+            if let Some(gravity) = self.gravity {
+                gravity_work += gravity.work(rho0[i], u0[i], rho1[i], u1[i]);
+            }
+        }
+        if self.gravity.is_some()
+            && (!gravity_work.is_finite() || !(unit * gravity_work).is_finite())
+        {
+            return Err(NsfError::Input("gravitational work overflowed"));
         }
         let p0 = self.pressure_work_density(&rho0, &u0, &self.theta, self.open_faces.as_ref());
         let p1 = self.pressure_work_density(&rho1, &u1, &th1, faces1.as_ref());
@@ -1811,6 +1839,9 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         let d_total = e_new - e_old;
         let d_kin = ke1 - ke0;
         let d_int = d_total - d_kin;
+        // Gravity supplies mechanical energy. Its work has already cancelled
+        // its contribution to d_kin; subtracting it again from d_int would
+        // manufacture negative viscous heating in uniformly accelerating gas.
         let pressure_work = -pw;
         let viscous = if self.open.is_some() {
             d_int - wall_heat_in - open_internal_in - pressure_work
@@ -1857,6 +1888,11 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         } else {
             balance - source_in
         };
+        let balance = if self.gravity.is_some() {
+            balance - gravity_work
+        } else {
+            balance
+        };
         let ledger = EnergyLedger {
             internal_j: unit * (e_new - ke1),
             kinetic_j: unit * ke1,
@@ -1868,6 +1904,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             open_boundary_energy_j: unit * open_in,
             open_energy_j: unit * prescribed_in,
             source_energy_j: unit * source_in,
+            gravity_work_j: if self.gravity.is_some() { unit * gravity_work } else { 0.0 },
             residual_rel: balance.abs() / e_new.abs().max(f64::MIN_POSITIVE),
         };
         let boundary_exchange = self.finish_boundary_exchange(
@@ -1911,6 +1948,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         self.cumulative.viscous_heating_j += ledger.viscous_heating_j;
         self.cumulative.unresolved_internal_exchange_j += ledger.unresolved_internal_exchange_j;
         self.cumulative.source_energy_j += ledger.source_energy_j;
+        self.cumulative.gravity_work_j += ledger.gravity_work_j;
         self.cumulative.pressure_work_j += ledger.pressure_work_j;
         self.cumulative.wall_heat_j += ledger.wall_heat_j;
         self.cumulative.wall_work_j += ledger.wall_work_j;
@@ -2085,6 +2123,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
     /// An attached characteristic patch also contributes its shape, side and accepted drive.
     /// An attached reservoir contributes its mutable accepted ghost state.
     /// Explicit incoming thermal controls contribute their location and values.
+    /// Nonzero physical gravity contributes its accepted SI components.
     #[must_use]
     pub fn state_hash(&self) -> u64 {
         let mut h: u64 = 0xcbf2_9ce4_8422_2325;
@@ -2157,6 +2196,12 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                 feed(side as f64);
                 feed(*resistance);
                 feed(self.characteristic_pressure_offset_pa[side].expect("resistive pressure drive"));
+            }
+        }
+        if let Some(gravity) = self.gravity {
+            feed(7.0);
+            for value in gravity.acceleration_m_s2 {
+                feed(value);
             }
         }
         h
