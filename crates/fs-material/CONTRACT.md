@@ -15524,6 +15524,58 @@ material accuracy. Focused G0/G1 controls cover analytic Newtonian pressure
 and heat, an independently inverted nonlinear stress law, pressure-derivative
 finite differences, signed flow, source ceilings and bounded-work refusal.
 
+`fluid_transport::rheology::slit::LaminarCarreauSlit` resolves fully developed,
+no-slip planar Couette--Poiseuille flow using the original thermal Carreau-Yasuda
+source law. The circular-pipe and slit reductions share one immutable prepared
+constitutive state and the original bounded stress inverse; neither duplicates
+the material fit or reinterprets dynamic viscosity as a kinematic coefficient.
+Geometry, uniform temperature and an explicit supported shear-rate ceiling are
+fixed during a solve. The zero-shear core and both actual wall states must remain
+inside the original temperature and reduced-rate support.
+
+Momentum gives `tau(y)=c+delta_p*(h/2-y)/L`. A bounded, bracketed offset solve
+enforces the upper-minus-lower wall speed. Pressure-driven and sliding shear
+therefore belong to one velocity profile. The resulting flux cannot be obtained
+by adding separately solved nonlinear Couette and Poiseuille responses or by
+substituting one apparent viscosity into a Newtonian conductance. Positive
+quadrature resolves the inverse stress law and splits at the original
+transition and zero stress. Near pure pressure flow, an interval identity avoids
+subtracting nearly equal opposite-shear primitives.
+
+The response retains pressure flow separately from mean-wall entrainment, both
+work-conjugate resisting wall tractions, pressure work, requested wall work and
+actual-profile dissipation. Heat is the nonnegative sum
+`delta_p*Q_pressure + width*length*c*delta_U_accepted`. The accepted relative
+wall-speed residual and its signed work defect are explicit; neither is hidden
+as extra heat. Common translation transfers equal opposite pressure/wall work
+and adds volume transport without changing viscous heat. Profile sampling
+returns actual velocity, signed velocity gradient and shear stress, source
+viscosity and local `tau*gamma` heating at the same frozen state.
+
+Pressure mobility, relative wall resistance and the cross derivative use the
+same accepted inverse stress tangent. Pressure mobility is a positive weighted
+central variance, accumulated without subtracting nearly equal second moments;
+the reciprocal wall/pressure cross response has the corresponding opposite
+sign. Positive nested Simpson weights reuse previous samples and require two
+successive refinement agreements. Exact constant-law and pure-Couette limits
+avoid numerical quadrature. Evaluation uses bounded scalar scratch and allocates
+no per-query storage. Checked solve and sampling entry points poll between
+capped constitutive inverses and before publication; all refusals leave the
+immutable owner available for an identical retry.
+
+This is a source-owned planar passage, not a Reynolds graph, free-surface,
+cavitation, entrance-flow or thermal-time solver. Width must be sufficient for
+side walls to be neglected. The caller owns thin-gap/laminar validity, pressure
+limits, source provenance and heat deposition; the rate ceiling alone certifies
+none of them. Observed quadrature changes are numerical estimates, not rigorous
+error bounds or calibration uncertainty. Focused regressions recover Newtonian
+profiles and all work/tangent limits, compare combined nonlinear flow and heat
+against an independent closed-form stress inverse and physical-gap quadrature,
+differentiate pressure/sliding response, retain both thermal shift conventions,
+check translation/reversal and source limits, and exercise bounded-work and
+late-cancellation refusal with exact retry. All original pipe regressions also
+remain applicable to the shared constitutive preparation.
+
 Existing LBM callbacks consume the bound state through their native nonlinear
 collision and viscous-heating path; the broader legacy lattice Carreau domain,
 units and prepared relaxation-time policy remain intact. Constitutive regressions

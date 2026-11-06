@@ -24,6 +24,8 @@ use crate::visco::temperature::{TemperatureShift, TemperatureShiftState};
 use fs_math::det;
 
 pub mod pipe;
+/// Fully developed planar films with simultaneous pressure and wall shear.
+pub mod slit;
 
 #[cfg(test)]
 mod tests;

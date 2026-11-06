@@ -43,7 +43,7 @@ impl Default for CarreauPipeControls {
 }
 
 impl CarreauPipeControls {
-    fn admit(self) -> Result<(), MaterialError> {
+    pub(super) fn admit(self) -> Result<(), MaterialError> {
         if ![
             self.relative_constitutive_tolerance,
             self.relative_quadrature_tolerance,
@@ -62,15 +62,174 @@ impl CarreauPipeControls {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-struct RateState {
-    rate: f64,
-    viscosity: f64,
-    tangent: f64,
+pub(super) struct RateState {
+    pub(super) rate: f64,
+    pub(super) viscosity: f64,
+    pub(super) tangent: f64,
 }
 
 impl RateState {
-    fn stress(self) -> f64 {
+    pub(super) fn stress(self) -> f64 {
         self.rate * self.viscosity
+    }
+}
+
+// Canonical immutable constitutive preparation shared by the circular-pipe
+// and planar-slit reductions. Geometry never enters this source-law owner.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct PreparedCarreau {
+    pub(super) law: ThermalCarreauYasuda,
+    pub(super) temperature: TemperatureShiftState,
+    pub(super) rest: RateState,
+    pub(super) ceiling: RateState,
+}
+
+impl PreparedCarreau {
+    pub(super) fn new(
+        law: ThermalCarreauYasuda,
+        temperature_k: f64,
+        maximum_rate_per_s: f64,
+    ) -> Result<Self, MaterialError> {
+        if !positive(maximum_rate_per_s) {
+            return Err(parameters(
+                "Carreau constitutive rate ceiling must be positive and finite",
+            ));
+        }
+        let rest = law.evaluate(temperature_k, 0.0)?;
+        let ceiling = law.evaluate(temperature_k, maximum_rate_per_s)?;
+        Ok(Self {
+            law,
+            temperature: *rest.temperature(),
+            rest: RateState {
+                rate: 0.0,
+                viscosity: rest.dynamic_viscosity_pa_s(),
+                tangent: rest.stress_tangent_pa_s(),
+            },
+            ceiling: RateState {
+                rate: maximum_rate_per_s,
+                viscosity: ceiling.dynamic_viscosity_pa_s(),
+                tangent: ceiling.stress_tangent_pa_s(),
+            },
+        })
+    }
+
+    pub(super) fn constant(&self) -> bool {
+        let [zero, infinity, time, n, _] = self.law.curve().parameters();
+        time == 0.0 || n == 1.0 || zero == infinity
+    }
+
+    // Reuse the canonical reference evaluator and frozen, original shift. Only
+    // stress and its positive tangent are needed; no singular scalar mu' is used.
+    pub(super) fn sample_rate(&self, rate: f64) -> Result<RateState, MaterialError> {
+        if rate == 0.0 {
+            return Ok(self.rest);
+        }
+        if rate == self.ceiling.rate {
+            return Ok(self.ceiling);
+        }
+        if !positive(rate) || rate > self.ceiling.rate {
+            return Err(state_error(
+                "Carreau constitutive rate leaves the declared laminar envelope",
+            ));
+        }
+        let reduced = match self.law.mode() {
+            ViscosityShiftMode::Vertical => rate,
+            ViscosityShiftMode::VerticalAndRate => self.temperature.factor() * rate,
+        };
+        if !positive(reduced) {
+            return Err(state_error(
+                "Carreau constitutive reduced rate is unrepresentable",
+            ));
+        }
+        let reference = self.law.curve().sample(reduced)?;
+        let viscosity = self.temperature.factor() * reference.viscosity;
+        let tangent = self.temperature.factor() * reference.stress_tangent;
+        if !positive(viscosity) || !positive(tangent) {
+            return Err(state_error(
+                "Carreau constitutive viscosity or stress tangent is unrepresentable",
+            ));
+        }
+        Ok(RateState {
+            rate,
+            viscosity,
+            tangent,
+        })
+    }
+
+    pub(super) fn inverse(
+        &self,
+        target: f64,
+        ceiling: RateState,
+        controls: CarreauPipeControls,
+    ) -> Result<(RateState, u32), MaterialError> {
+        if target == 0.0 {
+            return Ok((self.rest, 0));
+        }
+        if !positive(target) || target > ceiling.stress() {
+            return Err(state_error(
+                "Carreau constitutive stress exceeds the source or laminar wall-rate ceiling",
+            ));
+        }
+        if target == ceiling.stress() {
+            return Ok((ceiling, 0));
+        }
+        let mut low = 0.0;
+        let mut high = ceiling.rate;
+        let seed = target / self.rest.viscosity;
+        // The smallest representable rate is a numerical initial iterate, never
+        // a material cutoff. Its stress still has to meet the requested state.
+        let mut rate = if seed > 0.0 { seed } else { f64::from_bits(1) };
+        if rate >= high || !rate.is_finite() {
+            rate = 0.5 * high;
+        }
+        for iterations in 1..=controls.maximum_constitutive_iterations {
+            let sample = self.sample_rate(rate)?;
+            let stress = sample.stress();
+            let difference = stress - target;
+            let correction = difference / sample.tangent;
+            if positive(stress)
+                && (difference / target).abs() <= controls.relative_constitutive_tolerance
+                && (correction / rate).abs() <= controls.relative_constitutive_tolerance
+            {
+                return Ok((sample, iterations));
+            }
+            if stress < target {
+                low = rate;
+            } else {
+                high = rate;
+            }
+            let candidate = rate - correction;
+            let next = if candidate.is_finite() && candidate > low && candidate < high {
+                candidate
+            } else {
+                low + 0.5 * (high - low)
+            };
+            if next == rate || next <= low || next >= high {
+                return Err(state_error(
+                    "Carreau constitutive inverse lost floating-point resolution",
+                ));
+            }
+            rate = next;
+        }
+        Err(state_error(
+            "Carreau constitutive inverse exhausted its iteration budget",
+        ))
+    }
+
+    // Split quadrature at the original curve's transition, when it is interior.
+    // This is a numerical integration site, not an extension or a fitted law.
+    pub(super) fn transition_rate(&self, wall_rate: f64) -> Option<f64> {
+        let time = self.law.curve().parameters()[2];
+        if self.constant() || time == 0.0 {
+            return None;
+        }
+        let log_rate = -det::ln(time)
+            - match self.law.mode() {
+                ViscosityShiftMode::Vertical => 0.0,
+                ViscosityShiftMode::VerticalAndRate => self.temperature.log_factor(),
+            };
+        let rate = det::exp(log_rate);
+        (rate.is_finite() && rate > 0.0 && rate < wall_rate).then_some(rate)
     }
 }
 
@@ -79,12 +238,9 @@ impl RateState {
 /// source-supported: a pipe cannot invent an uncharacterized zero-shear core.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct LaminarCarreauPipe {
-    law: ThermalCarreauYasuda,
-    temperature: TemperatureShiftState,
+    prepared: PreparedCarreau,
     radius_m: f64,
     length_m: f64,
-    rest: RateState,
-    ceiling: RateState,
 }
 
 /// Integrated flow of the accepted constitutive state. Pressure and volume
@@ -188,32 +344,19 @@ impl LaminarCarreauPipe {
                 "Carreau pipe requires positive finite geometry and laminar rate ceiling",
             ));
         }
-        let rest = law.evaluate(temperature_k, 0.0)?;
-        let ceiling = law.evaluate(temperature_k, maximum_laminar_wall_rate_per_s)?;
         Ok(Self {
-            law,
-            temperature: *rest.temperature(),
+            prepared: PreparedCarreau::new(law, temperature_k, maximum_laminar_wall_rate_per_s)?,
             radius_m,
             length_m,
-            rest: RateState {
-                rate: 0.0,
-                viscosity: rest.dynamic_viscosity_pa_s(),
-                tangent: rest.stress_tangent_pa_s(),
-            },
-            ceiling: RateState {
-                rate: maximum_laminar_wall_rate_per_s,
-                viscosity: ceiling.dynamic_viscosity_pa_s(),
-                tangent: ceiling.stress_tangent_pa_s(),
-            },
         })
     }
 
     /// Exact authored law, including its original temperature-shift declaration.
     pub const fn law(&self) -> &ThermalCarreauYasuda {
-        &self.law
+        &self.prepared.law
     }
     pub const fn temperature_k(&self) -> f64 {
-        self.temperature.temperature_k()
+        self.prepared.temperature.temperature_k()
     }
     pub const fn radius_m(&self) -> f64 {
         self.radius_m
@@ -233,124 +376,7 @@ impl LaminarCarreauPipe {
         Ok(Self { length_m, ..*self })
     }
     pub const fn maximum_laminar_wall_rate_per_s(&self) -> f64 {
-        self.ceiling.rate
-    }
-
-    fn constant(&self) -> bool {
-        let [zero, infinity, time, n, _] = self.law.curve().parameters();
-        time == 0.0 || n == 1.0 || zero == infinity
-    }
-
-    // Reuse the canonical reference evaluator and frozen, original shift. Only
-    // stress and its positive tangent are needed; no singular scalar mu' is used.
-    fn sample_rate(&self, rate: f64) -> Result<RateState, MaterialError> {
-        if rate == 0.0 {
-            return Ok(self.rest);
-        }
-        if rate == self.ceiling.rate {
-            return Ok(self.ceiling);
-        }
-        if !positive(rate) || rate > self.ceiling.rate {
-            return Err(state_error(
-                "Carreau pipe rate leaves the declared laminar envelope",
-            ));
-        }
-        let reduced = match self.law.mode() {
-            ViscosityShiftMode::Vertical => rate,
-            ViscosityShiftMode::VerticalAndRate => self.temperature.factor() * rate,
-        };
-        if !positive(reduced) {
-            return Err(state_error("Carreau pipe reduced rate is unrepresentable"));
-        }
-        let reference = self.law.curve().sample(reduced)?;
-        let viscosity = self.temperature.factor() * reference.viscosity;
-        let tangent = self.temperature.factor() * reference.stress_tangent;
-        if !positive(viscosity) || !positive(tangent) {
-            return Err(state_error(
-                "Carreau pipe viscosity or stress tangent is unrepresentable",
-            ));
-        }
-        Ok(RateState {
-            rate,
-            viscosity,
-            tangent,
-        })
-    }
-
-    fn inverse(
-        &self,
-        target: f64,
-        ceiling: RateState,
-        controls: CarreauPipeControls,
-    ) -> Result<(RateState, u32), MaterialError> {
-        if target == 0.0 {
-            return Ok((self.rest, 0));
-        }
-        if !positive(target) || target > ceiling.stress() {
-            return Err(state_error(
-                "Carreau pipe stress exceeds the source or laminar wall-rate ceiling",
-            ));
-        }
-        if target == ceiling.stress() {
-            return Ok((ceiling, 0));
-        }
-        let mut low = 0.0;
-        let mut high = ceiling.rate;
-        let seed = target / self.rest.viscosity;
-        // The smallest representable rate is a numerical initial iterate, never
-        // a material cutoff. Its stress still has to meet the requested state.
-        let mut rate = if seed > 0.0 { seed } else { f64::from_bits(1) };
-        if rate >= high || !rate.is_finite() {
-            rate = 0.5 * high;
-        }
-        for iterations in 1..=controls.maximum_constitutive_iterations {
-            let sample = self.sample_rate(rate)?;
-            let stress = sample.stress();
-            let difference = stress - target;
-            let correction = difference / sample.tangent;
-            if positive(stress)
-                && (difference / target).abs() <= controls.relative_constitutive_tolerance
-                && (correction / rate).abs() <= controls.relative_constitutive_tolerance
-            {
-                return Ok((sample, iterations));
-            }
-            if stress < target {
-                low = rate;
-            } else {
-                high = rate;
-            }
-            let candidate = rate - correction;
-            let next = if candidate.is_finite() && candidate > low && candidate < high {
-                candidate
-            } else {
-                low + 0.5 * (high - low)
-            };
-            if next == rate || next <= low || next >= high {
-                return Err(state_error(
-                    "Carreau pipe constitutive inverse lost floating-point resolution",
-                ));
-            }
-            rate = next;
-        }
-        Err(state_error(
-            "Carreau pipe constitutive inverse exhausted its iteration budget",
-        ))
-    }
-
-    // Split quadrature at the original curve's transition, when it is interior.
-    // This is a numerical integration site, not an extension or a fitted law.
-    fn transition_rate(&self, wall_rate: f64) -> Option<f64> {
-        let time = self.law.curve().parameters()[2];
-        if self.constant() || time == 0.0 {
-            return None;
-        }
-        let log_rate = -det::ln(time)
-            - match self.law.mode() {
-                ViscosityShiftMode::Vertical => 0.0,
-                ViscosityShiftMode::VerticalAndRate => self.temperature.log_factor(),
-            };
-        let rate = det::exp(log_rate);
-        (rate.is_finite() && rate > 0.0 && rate < wall_rate).then_some(rate)
+        self.prepared.ceiling.rate
     }
 
     /// Resolve a signed frictional pressure into a complete frozen radial state.
@@ -382,7 +408,9 @@ impl LaminarCarreauPipe {
                 &[self.length_m],
             )?
         };
-        let (wall, iterations) = self.inverse(target, self.ceiling, controls)?;
+        let (wall, iterations) = self
+            .prepared
+            .inverse(target, self.prepared.ceiling, controls)?;
         self.profile_from_wall(wall, pressure_drop_pa, iterations, controls)
     }
 
@@ -450,13 +478,13 @@ impl LaminarCarreauPipe {
             ],
         )?;
         let mut low = 0.0;
-        let mut high = self.ceiling.rate;
+        let mut high = self.prepared.ceiling.rate;
         let mut bracketed = false;
         let mut rate = seed.min(high);
         for iterations in 1..=maximum_flow_iterations {
-            let profile = at_rate(self.sample_rate(rate)?)?;
+            let profile = at_rate(self.prepared.sample_rate(rate)?)?;
             let difference = profile.flow.volumetric_flow_m3_s.abs() - target;
-            if rate == self.ceiling.rate && difference < 0.0 {
+            if rate == self.prepared.ceiling.rate && difference < 0.0 {
                 return Err(state_error(
                     "prescribed flow exceeds the Carreau pipe wall-rate envelope",
                 ));
@@ -504,10 +532,10 @@ impl LaminarCarreauPipe {
         iterations: u32,
         controls: CarreauPipeControls,
     ) -> Result<CarreauPipeProfile, MaterialError> {
-        let transition = self.transition_rate(wall.rate);
+        let transition = self.prepared.transition_rate(wall.rate);
         let (integral, change) = if wall.rate == 0.0 {
             (0.25, 0.0)
-        } else if self.constant() {
+        } else if self.prepared.constant() {
             (0.25, 0.0)
         } else {
             integrate(
@@ -518,7 +546,7 @@ impl LaminarCarreauPipe {
                     let local = if t == 1.0 {
                         wall
                     } else {
-                        self.sample_rate(wall.rate * t)?
+                        self.prepared.sample_rate(wall.rate * t)?
                     };
                     let fraction = product_ratio(&[local.rate, local.viscosity], &[wall.stress()])?;
                     Ok(fraction * fraction * fraction * (local.tangent / local.viscosity))
@@ -561,7 +589,7 @@ impl LaminarCarreauPipe {
         }
         let transition_stress_fraction = transition
             .map(|rate| {
-                let sample = self.sample_rate(rate)?;
+                let sample = self.prepared.sample_rate(rate)?;
                 product_ratio(&[sample.rate, sample.viscosity], &[wall.stress()])
             })
             .transpose()?;
@@ -646,10 +674,13 @@ impl CarreauPipeProfile {
         } else {
             product_ratio(&[self.wall.stress(), radius_m], &[self.pipe.radius_m])?
         };
-        let (local, _) = self.pipe.inverse(stress, self.wall, self.controls)?;
+        let (local, _) = self
+            .pipe
+            .prepared
+            .inverse(stress, self.wall, self.controls)?;
         let (speed, change) = if self.wall.rate == 0.0 || radius_m == self.pipe.radius_m {
             (0.0, 0.0)
-        } else if self.pipe.constant() {
+        } else if self.pipe.prepared.constant() {
             (
                 product_ratio(
                     &[0.5, self.pipe.radius_m, self.wall.rate, distance, 1.0 + x],
@@ -672,7 +703,7 @@ impl CarreauPipeProfile {
                     } else {
                         1.0 - distance * (1.0 - q)
                     };
-                    let (state, _) = self.pipe.inverse(
+                    let (state, _) = self.pipe.prepared.inverse(
                         self.wall.stress() * fraction,
                         self.wall,
                         self.controls,
@@ -710,7 +741,10 @@ impl CarreauPipeProfile {
 // Ordinary SI arithmetic stays on the direct path. Log accumulation rescues
 // representable products whose intermediate geometry/constitutive scale would
 // overflow or underflow; a truly unrepresentable nonzero response still refuses.
-fn product_ratio(numerators: &[f64], denominators: &[f64]) -> Result<f64, MaterialError> {
+pub(super) fn product_ratio(
+    numerators: &[f64],
+    denominators: &[f64],
+) -> Result<f64, MaterialError> {
     let mut value = 1.0;
     let mut ordinary = true;
     for &factor in numerators {
@@ -744,7 +778,7 @@ fn product_ratio(numerators: &[f64], denominators: &[f64]) -> Result<f64, Materi
     Ok(value)
 }
 
-fn integrate(
+pub(super) fn integrate(
     f: &mut impl FnMut(f64) -> Result<f64, MaterialError>,
     split: Option<f64>,
     controls: CarreauPipeControls,
