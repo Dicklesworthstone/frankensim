@@ -13,6 +13,8 @@ pub mod thermal;
 pub mod rate;
 /// Exact axial and checked plane-stress reductions with retained native history.
 pub mod reduction;
+/// Layered membrane and bending resultants with native plane-stress histories.
+pub mod section;
 /// Saturating isotropic hardening on the original native J2 history and flow.
 pub mod voce;
 /// Independent Armstrong-Frederick/Chaboche backstresses with dynamic recovery.
