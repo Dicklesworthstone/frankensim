@@ -25,6 +25,9 @@
 //! realization of frequency-dependent wall data. Full spatial coordinates still
 //! require mesh/order convergence; dense harmonic preparation is explicitly bounded.
 
+/// Full original structural and pressure fields on one exact held-input timeline.
+pub mod time;
+
 use fs_exec::Cx;
 use fs_feec::acoustics::helmholtz::AcousticFeError;
 use fs_feec::acoustics::helmholtz::heterogeneous::time::ResistiveBoundary;
