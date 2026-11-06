@@ -77,6 +77,9 @@ pub struct EvaporationAudit {
     pub recession_m: f64,
     pub stored_energy_change_j: f64,
     pub mass_balance_residual_kg: f64,
+    /// Storage change plus vapor export minus births and external heat [J].
+    /// Reconstructed from per-cell relative enthalpies with compensated sums;
+    /// subtracting rounded whole-system totals can erase a latent heat transfer.
     pub energy_residual_j: f64,
     pub phase_steps: usize,
     pub last_step: Option<SurfaceStep>,
@@ -399,10 +402,12 @@ impl DepositionSimulation<'_> {
             )
             .into());
         }
-        let initial_mass = super::finite(self.mass_kg())?;
-        let initial_energy = super::finite(self.energy_j())?;
+        super::finite(self.mass_kg())?;
+        super::finite(self.energy_j())?;
         let (mut next, _, thermal) =
             self.advance_observed(&branch, self.time_s, thermal_config, &mut checkpoint)?;
+        let mut account = account::TimelineAccount::default();
+        account.thermal_interval(self, &next, &thermal, &mut checkpoint)?;
         let mut audit = EvaporationAudit {
             thermal,
             transferred_mass_kg: 0.0,
@@ -452,6 +457,7 @@ impl DepositionSimulation<'_> {
                 remaining,
                 &mut checkpoint,
             )?;
+            account.thermal_interval(&next, &heated, &heat, &mut checkpoint)?;
             next = heated;
             add_heat(&mut audit.thermal, heat)?;
             if let Some(area) = area {
@@ -465,16 +471,7 @@ impl DepositionSimulation<'_> {
                     phase_config,
                     &mut checkpoint,
                 )?;
-                audit.transferred_mass_kg =
-                    sum(audit.transferred_mass_kg, step.transferred_mass_kg)?;
-                audit.latent_energy_j = sum(audit.latent_energy_j, step.latent_energy_j)?;
-                audit.vapor_energy_j = sum(audit.vapor_energy_j, step.vapor_energy_j)?;
-                audit.recession_m = sum(audit.recession_m, step.recession_m)?;
-                audit.phase_steps = audit
-                    .phase_steps
-                    .checked_add(1)
-                    .ok_or(DepositionError::Arithmetic)?;
-                audit.last_step = Some(step);
+                account.phase(self, id, step)?;
             }
             if empty || event_time == Some(stop) {
                 epoch = stop;
@@ -483,37 +480,27 @@ impl DepositionSimulation<'_> {
                 interval = interval.checked_add(1).ok_or(DepositionError::Arithmetic)?;
             }
         }
-        let final_mass = super::finite(next.mass_kg())?;
-        audit.mass_balance_residual_kg = super::finite(
-            final_mass - initial_mass - audit.thermal.incoming_mass_kg + audit.transferred_mass_kg,
+        let closed = account.finish(
+            self,
+            &next,
+            audit.thermal.substeps,
+            audit.thermal.events,
+            thermal_config.energy_tolerance_j,
+            None,
+            &mut checkpoint,
         )?;
-        let scale = initial_mass
-            .abs()
-            .max(final_mass.abs())
-            .max(audit.thermal.incoming_mass_kg.abs())
-            .max(audit.transferred_mass_kg.abs());
-        let terms = self.cells.len() as f64
-            + next.cells.len() as f64
-            + audit.thermal.events as f64
-            + audit.phase_steps as f64
-            + 1.0;
-        let tolerance = super::finite(128.0 * f64::EPSILON * scale * terms)?;
-        if audit.mass_balance_residual_kg.abs() > tolerance {
-            return Err(ThermalEvaporationError::MassBalance {
-                residual_kg: audit.mass_balance_residual_kg,
-                tolerance_kg: tolerance,
-            });
-        }
-        audit.stored_energy_change_j = super::finite(next.energy_j() - initial_energy)?;
-        audit.energy_residual_j = super::finite(
-            audit.stored_energy_change_j
-                - audit.thermal.incoming_energy_j
-                - audit.thermal.external_heat_j
-                + audit.vapor_energy_j,
-        )?;
-        if audit.energy_residual_j.abs() > thermal_config.energy_tolerance_j {
-            return Err(DepositionError::EnergyBalance(audit.energy_residual_j).into());
-        }
+        audit.thermal.incoming_mass_kg = closed.incoming_mass_kg;
+        audit.thermal.incoming_energy_j = closed.incoming_energy_j;
+        audit.thermal.external_heat_j = closed.external_heat_j;
+        audit.transferred_mass_kg = closed.transferred_mass_kg;
+        audit.latent_energy_j = closed.latent_energy_j;
+        audit.vapor_energy_j = closed.vapor_energy_j;
+        audit.recession_m = closed.recession_m;
+        audit.stored_energy_change_j = closed.stored_energy_change_j;
+        audit.mass_balance_residual_kg = closed.mass_balance_residual_kg;
+        audit.energy_residual_j = closed.energy_residual_j;
+        audit.phase_steps = closed.phase_steps;
+        audit.last_step = closed.last_step;
         checkpoint()?;
         Ok((next, audit))
     }

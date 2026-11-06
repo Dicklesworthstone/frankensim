@@ -2,7 +2,7 @@
 
 use super::{CoupledEvaporationAudit, SurfaceStep, ThermalEvaporationError};
 use crate::enthalpy::observe::EnergySum;
-use crate::enthalpy::{CellId, DepositionError, DepositionSimulation, finite};
+use crate::enthalpy::{CellId, DepositionError, DepositionSimulation, EnergyAudit, Event, finite};
 use std::collections::BTreeMap;
 
 #[derive(Default)]
@@ -29,6 +29,27 @@ impl TimelineAccount {
 
     pub(super) fn heat(&mut self, joules: f64) -> Result<(), DepositionError> {
         self.external_heat.add(joules)
+    }
+
+    /// Retain births and external heat from an accepted native heat interval.
+    /// The split phase owner must use the same birth references as the coupled
+    /// owner, even when the evaporating cell activates at an interval endpoint.
+    pub(super) fn thermal_interval(
+        &mut self,
+        initial: &DepositionSimulation<'_>,
+        next: &DepositionSimulation<'_>,
+        heat: &EnergyAudit,
+        checkpoint: &mut impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(), DepositionError> {
+        for (index, event) in next.schedule[initial.cursor..next.cursor].iter().enumerate() {
+            if index % 256 == 0 {
+                checkpoint()?;
+            }
+            if let Event::Birth(cell) = &event.event {
+                self.birth(cell.id, cell.mass_kg, cell.specific_h_j_kg)?;
+            }
+        }
+        self.heat(heat.external_heat_j)
     }
 
     pub(super) fn phase(

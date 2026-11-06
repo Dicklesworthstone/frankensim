@@ -1601,6 +1601,16 @@ phase transfer on event-clipped intervals. The interval's initial exposed area
 survives endpoint covering, and no phase exchange occurs before cell birth.
 The whole request shares the original thermal work limit.
 
+The split timeline uses the same birth-relative, compensated open-mass account
+as the coupled and implicit evaporation owners. Its final gate reconstructs
+each cell's enthalpy change and the vapor stream relative to that cell's
+original or birth datum before reducing; an unchanged high-energy neighbor
+cannot hide or reject a smaller latent transfer. Actual mass changes have a
+separate balance. Full vapor enthalpy and storage changes remain reported on
+their original references, and latent heat is not counted again. The split
+regression compares both evaporation and condensation, including delayed
+birth, against the identical isolated specimen.
+
 `evaporation::advance_surface_with_heat` and the native
 `DepositionSimulation::evaporate_cell_with_heat` solve signed supplied heat
 and phase transfer at one endpoint. The original liquid chart closes

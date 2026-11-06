@@ -579,3 +579,93 @@ mod heating;
 
 #[path = "tests/coupled.rs"]
 mod coupled;
+
+#[test]
+fn split_phase_balance_is_independent_of_unchanged_neighbor_energy() {
+    struct ShiftedCaloric(f64);
+    impl ThermalLaw for ShiftedCaloric {
+        fn temperature_k(&self, h: f64) -> Result<f64, DepositionError> {
+            CALORIC.temperature_k(h - self.0)
+        }
+        fn maximum_temperature_slope(&self) -> f64 {
+            1.0 / CP
+        }
+    }
+
+    let neighbor_datum = 2.0_f64.powi(80);
+    let neighbor_law = ShiftedCaloric(neighbor_datum);
+    for birth_s in [0.0, 0.5] {
+        for vapor_pressure in [0.0, 7200.0] {
+            let mut neighbor = cell(2, neighbor_datum, 0.0);
+            neighbor.material_id = MaterialId(2);
+            let thermal = DepositionSimulation::new(
+                vec![
+                    birth(0.0, neighbor.clone()),
+                    birth(birth_s, cell(1, 0.0, 0.0)),
+                ],
+                &[
+                    (MaterialId(1), &CALORIC as &dyn ThermalLaw),
+                    (MaterialId(2), &neighbor_law as &dyn ThermalLaw),
+                ],
+                DepositionBudget {
+                    max_cells: 2,
+                    max_links: 0,
+                    max_events: 2,
+                    max_substeps: 16,
+                },
+            )
+            .unwrap()
+            .advance_to(0.0, config(1.0), || Ok(()))
+            .unwrap()
+            .0;
+            let reference = scheduled(vec![birth(birth_s, cell(1, 0.0, 0.0))], 16)
+                .advance_to(0.0, config(1.0), || Ok(()))
+                .unwrap()
+                .0;
+            let (expected, expected_audit) = reference
+                .advance_evaporating_to(
+                    CellId(1),
+                    &Liquid,
+                    film(vapor_pressure),
+                    1.0,
+                    config(0.125),
+                    phase(),
+                    || Ok(()),
+                )
+                .unwrap();
+            let (next, audit) = thermal
+                .advance_evaporating_to(
+                    CellId(1),
+                    &Liquid,
+                    film(vapor_pressure),
+                    1.0,
+                    config(0.125),
+                    phase(),
+                    || Ok(()),
+                )
+                .unwrap();
+
+            assert_eq!(next.cells()[&CellId(2)], neighbor);
+            assert_eq!(next.cells()[&CellId(1)], expected.cells()[&CellId(1)]);
+            assert_eq!(audit.transferred_mass_kg, expected_audit.transferred_mass_kg);
+            assert_eq!(audit.latent_energy_j, expected_audit.latent_energy_j);
+            assert_eq!(audit.vapor_energy_j, expected_audit.vapor_energy_j);
+            assert_eq!(audit.phase_steps, expected_audit.phase_steps);
+            assert_eq!(audit.thermal.incoming_mass_kg, expected_audit.thermal.incoming_mass_kg);
+            close(audit.energy_residual_j, 0.0, 1e-6);
+            close(audit.mass_balance_residual_kg, 0.0, 1e-16);
+            close(
+                audit.stored_energy_change_j,
+                expected_audit.stored_energy_change_j,
+                1e-12,
+            );
+            assert_eq!(audit.transferred_mass_kg > 0.0, vapor_pressure == 0.0);
+            // The spectator erases the physical change in aggregate subtraction.
+            // It must not erase or reject evaporation cooling/condensation heat.
+            assert_eq!(next.energy_j(), thermal.energy_j());
+            assert!(audit.vapor_energy_j.abs() > 0.01);
+            assert!(audit.stored_energy_change_j.abs() > 0.01);
+            assert_eq!(thermal.time_s(), 0.0);
+        }
+    }
+}
