@@ -21,6 +21,7 @@ use fs_ga::{GaError, So3, Vec3};
 
 mod derivatives;
 use derivatives::{RodEnergy, UniformEnergy};
+mod stability;
 
 /// Spatial material assignments using this same rod kinematics/Newton owner.
 pub mod material_field;

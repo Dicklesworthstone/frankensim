@@ -4186,6 +4186,17 @@ cancellation, budget and late-jump rollback.
   admission and refinement requirements.
   Arbitrary energy callbacks retain an element-local finite-difference fallback;
   SE(3) dynamics under fs-time integrators remain successor scope.
+  `Rod::is_stable_under_dead_load` independently checks the actual free residual
+  and original analytical tangent of a uniform rod with a dead tip force and
+  zero tip moment. Its symmetric second variation is diagonally equilibrated
+  and must remain Cholesky-positive after a `64 * ndof * EPSILON` dimensionless
+  margin. Negative, neutral or numerically unresolved tangents return false;
+  unconverged states, couples, inadmissible parameters and more than 64 segments
+  refuse. This immutable bounded query shares the raw rod's lack of cancellation
+  context and does not change Newton convergence or its accepted state.
+  `tests/rod_stability.rs` checks the clamped-free Euler threshold under refinement,
+  force/length rescaling, rigid rotation and explicit refusal cases. These are
+  local discrete stability screens, not dynamic or continuum stability proofs.
 - `fiber` (bead tfz.14): fiber sections over fs-material `Uniaxial`
   cards (Menegotto–Pinto steel; Mander concrete with the
   compression-positive convention flipped at the section boundary);

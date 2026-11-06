@@ -1809,14 +1809,16 @@ fn truss_006_rod_spot_check() {
     // A slender compression member: catalog-sized area must survive
     // 1.3× design; a fraction of that area must buckle.
     let (length, youngs, design) = (1.0f64, 1000.0f64, 0.5f64);
-    // Catalog area from the sizing rule.
+    // The rod check is clamped-free, so its Euler area is twice the
+    // pinned-pinned area used by the LP sizing rule. Using that smaller area
+    // here previously passed only by accepting an unstable straight solution.
     let a_euler =
-        (12.0 * design * length * length / (std::f64::consts::PI.powi(2) * youngs)).sqrt();
+        (48.0 * design * length * length / (std::f64::consts::PI.powi(2) * youngs)).sqrt();
     let a_catalog = a_euler * 1.4; // next size up
     let (stable, bow) = rod_buckling_check(length, a_catalog, youngs, design, 1.3, 0.002);
     let (unstable, bow_thin) =
         rod_buckling_check(length, 0.4 * a_euler, youngs, design, 1.3, 0.002);
-    let pass = stable && bow < 0.05 && (!unstable || bow_thin > 5.0 * bow);
+    let pass = stable && bow < 0.05 && !unstable;
     verdict(
         "truss-006",
         pass,

@@ -90,7 +90,14 @@ steel-and-concrete flagship's engine (§15.2).
   member post-snap re-checks as fs-constraint `Code` rows.
 - `rodcheck::rod_buckling_check`: the critical compression member as
   an fs-solid Cosserat rod with a seeded bow, loaded to factor×design
-  — stable/bow-ratio outcome (the tfz.14/tfz.15 spot check).
+  — stable/bow-ratio outcome (the tfz.14/tfz.15 spot check). The initial
+  bow perturbs the Newton iterate, not the straight stress-free reference.
+  Acceptance requires equilibrium, a positive free-coordinate conservative
+  tangent and bounded bow. A converged unstable straight branch is refused,
+  including zero/tiny initial bows. The clamped-free boundary has one quarter
+  of the pinned-pinned Euler load used by LP sizing. This is a local discrete
+  endpoint screen, not a stability proof for the whole loading path or a
+  certified continuum buckling load.
 
 ## Invariants
 
