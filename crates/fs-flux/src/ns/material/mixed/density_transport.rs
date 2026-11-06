@@ -138,9 +138,67 @@ impl<'m> FluxSystem<'m> {
         dynamic_viscosity: &dyn Fn(usize, [f64; 2]) -> f64,
         force_density: &dyn Fn([f64; 2]) -> [f64; 2],
         boundaries: &[MaterialStokesBoundary<'_>],
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<ConservativeMomentumAssembly<'s, 'm>> {
+        self.assemble_conservative_momentum_bdf1_with_gravity(
+            history,
+            controls,
+            numerics,
+            dynamic_viscosity,
+            force_density,
+            [0.0; 2],
+            boundaries,
+            cancelled,
+        )
+    }
+
+    /// Advance conservative variable-density momentum with physical gravity.
+    ///
+    /// The full body force is `rho_new * gravity_m_s2 + force_density`, where
+    /// rho_new is the density accepted by THIS step's original mass transport.
+    /// It uses exactly the same density and positive quadrature weights as
+    /// endpoint inertia. Callers need not locate material cells, resample an
+    /// EOS, or predict the transported density in an external force callback.
+    /// `force_density` supplies additional, nongravitational force [N/m³].
+    ///
+    /// Gravity points in the physical direction of falling acceleration
+    /// [m/s²], with either or both Cartesian components admitted. Pressure
+    /// retains the original total-stress datum: no reference hydrostatic
+    /// pressure is subtracted, and no Boussinesq density approximation is made.
+    /// Density contrast and the solved pressure therefore determine buoyancy.
+    /// A uniform-density hydrostatic gradient is balanced by the original
+    /// pressure-robust H(div) operator; boundary tractions must include the
+    /// corresponding hydrostatic pressure when those boundaries are open.
+    ///
+    /// The gravity load is accumulated in the existing inertia loop, with no
+    /// extra cell traversal or source queries. Zero gravity takes the original
+    /// arithmetic path. This is the existing first-order, fixed-mesh IMEX
+    /// scheme, not an energy-conserving gravity integrator or a thermal/EOS
+    /// closure. The original CFL, solver and cancellation limits still apply.
+    ///
+    /// # Errors
+    /// Refuses nonfinite acceleration before callbacks and unrepresentable
+    /// gravitational loads before publishing an assembly. Both histories are
+    /// immutable, including on cancellation or a failed solve.
+    #[allow(clippy::too_many_arguments)]
+    pub fn assemble_conservative_momentum_bdf1_with_gravity<'s>(
+        &'s self,
+        history: ConservativeMomentumHistory<'_>,
+        controls: ConservativeMomentumControls,
+        numerics: MaterialFluxNumerics,
+        dynamic_viscosity: &dyn Fn(usize, [f64; 2]) -> f64,
+        force_density: &dyn Fn([f64; 2]) -> [f64; 2],
+        gravity_m_s2: [f64; 2],
+        boundaries: &[MaterialStokesBoundary<'_>],
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<ConservativeMomentumAssembly<'s, 'm>> {
         poll(&mut cancelled)?;
+        if !gravity_m_s2.iter().all(|value| value.is_finite()) {
+            return Err(invalid(
+                "finite physical gravitational acceleration required",
+            ));
+        }
+        let gravity = (gravity_m_s2 != [0.0; 2]).then_some(gravity_m_s2);
         let reference = controls.reference_density_kg_m3;
         if !reference.is_finite()
             || reference <= 0.0
@@ -260,6 +318,18 @@ impl<'m> FluxSystem<'m> {
                     }
                     let row = self.dof(cell, i);
                     load[row] = load[row] + Dd::from_f64(value);
+                    if let Some(g) = gravity {
+                        // Use the endpoint mass metric, not the old density
+                        // or the arbitrary common numerical normalization.
+                        let body_load =
+                            current_weights[q] * (g[0] * test[0] + g[1] * test[1]);
+                        if !body_load.is_finite() {
+                            return Err(invalid(
+                                "gravitational momentum load is not representable",
+                            ));
+                        }
+                        load[row] = load[row] + Dd::from_f64(body_load);
+                    }
                 }
             }
             weights.push(current_weights);

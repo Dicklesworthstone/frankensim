@@ -406,3 +406,6 @@ fn complete_step_refuses_late_cancellation_without_modifying_either_history() {
     assert_eq!(density[1].density_kg_m3, 9.0);
     assert_eq!(velocity, constant(&mesh, [0.3, -0.2]));
 }
+
+#[path = "conservative_density_momentum/gravity.rs"]
+mod gravity;

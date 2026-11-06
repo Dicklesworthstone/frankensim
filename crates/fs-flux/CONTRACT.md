@@ -6923,3 +6923,31 @@ constitutive-history transfer. Focused `density_transport/remap.rs` regressions
 advance, refine, advance, coarsen and continue enthalpy/species-like inventories;
 they also cover extreme density contrast, small signed defects, physical-volume
 mismatch, cancellation and storage refusal.
+
+## Gravity from conservatively transported density
+
+`assemble_conservative_momentum_bdf1_with_gravity` couples physical Cartesian
+acceleration [m/s²] to the density accepted by the original mass-transport
+operation. The endpoint force is `rho_new * g`; the same positive quadrature
+weights already used by endpoint inertia integrate it into the native BDM1
+momentum load. Additional force density remains a separate [N/m³] callback.
+There is no point-to-cell search, additional source query, separate density
+prediction, or extra cell traversal.
+
+Pressure retains its original total-traction datum and sealed-component gauge.
+This is full variable-density gravity, with no Boussinesq linearization or
+implicit subtraction of hydrostatic pressure. Open boundaries must supply their
+physical hydrostatic traction. The original pressure-robust operator balances
+resolved conservative gravity loads; lateral density contrasts can drive
+buoyant circulation. Zero acceleration retains the original arithmetic path.
+
+The original first-order IMEX, fixed-mesh, density-CFL, solver and cancellation
+limits apply. This entry does not add an EOS, heat transport, variable gravity,
+an energy-conserving gravitational-work discretization or support reactions.
+Invalid acceleration is refused before callbacks; a failed/cancelled candidate
+leaves both histories unchanged.
+
+The focused G1/G3 regressions in `conservative_density_momentum/gravity.rs`
+cover transported-density free fall and reference-density invariance, layered
+hydrostatic rest and pressure, sinking/rising under lateral density contrast,
+gravity reversal, exact zero-gravity compatibility, and invalid/cancelled input.
