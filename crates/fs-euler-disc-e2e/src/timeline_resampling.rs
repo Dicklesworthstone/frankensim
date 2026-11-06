@@ -281,6 +281,70 @@ impl<'trajectory> TimelineResampler<'trajectory> {
         self.sample_at(time_s, event_side)
     }
 
+    /// Read the original continuous center-of-mass position without event work.
+    ///
+    /// Uses exactly the translation interpolant of `sample`, including original
+    /// knot values and the same finite domain. No quaternion, momentum, base-mode
+    /// or event reconstruction is performed, and successful queries allocate
+    /// nothing. This is the geometry-only seam for retarded arrival residuals.
+    pub fn position(&self, time_s: f64) -> Result<Vec3, TimelineResamplingError> {
+        validate_queries(self.trajectory, core::slice::from_ref(&time_s))?;
+        let samples = self.trajectory.samples();
+        match self.sample_source(time_s)? {
+            TimelineSampleSource::ExactSample { index } => {
+                Ok(samples[index].state().pose().position_world())
+            }
+            TimelineSampleSource::Interpolated {
+                left_index,
+                right_index,
+                alpha,
+                ..
+            } => {
+                let position = interpolate_position(
+                    samples[left_index].state(),
+                    samples[right_index].state(),
+                    self.trajectory.metadata().mass_properties.properties.mass(),
+                    samples[right_index].input().time_s - samples[left_index].input().time_s,
+                    alpha,
+                );
+                if [position.x, position.y, position.z]
+                    .iter()
+                    .any(|value| !value.is_finite())
+                {
+                    return Err(TimelineResamplingError::InvalidReconstruction(
+                        "position interpolation produced non-finite geometry".into(),
+                    ));
+                }
+                Ok(position)
+            }
+        }
+    }
+
+    /// Read the original continuous pose without reconstructing other channels.
+    ///
+    /// Pose is independent of the one-sided discrete contact/event convention.
+    /// Original knots and Hermite/SLERP arithmetic are shared with `sample`;
+    /// accepted queries allocate nothing and never extrapolate.
+    pub fn pose(&self, time_s: f64) -> Result<Pose, TimelineResamplingError> {
+        validate_queries(self.trajectory, core::slice::from_ref(&time_s))?;
+        let samples = self.trajectory.samples();
+        match self.sample_source(time_s)? {
+            TimelineSampleSource::ExactSample { index } => Ok(samples[index].state().pose()),
+            TimelineSampleSource::Interpolated {
+                left_index,
+                right_index,
+                alpha,
+                ..
+            } => interpolate_pose(
+                samples[left_index].state(),
+                samples[right_index].state(),
+                self.trajectory.metadata().mass_properties.properties.mass(),
+                samples[right_index].input().time_s - samples[left_index].input().time_s,
+                alpha,
+            ),
+        }
+    }
+
     /// Bound pose speed throughout a closed part of one original sample span.
     ///
     /// The left sample index selects the same Hermite/SLERP interpolant as
@@ -406,15 +470,8 @@ impl<'trajectory> TimelineResampler<'trajectory> {
         event_side: EventEvaluationSide,
     ) -> Result<ResampledTimelineSample, TimelineResamplingError> {
         let samples = self.trajectory.samples();
-        match samples.binary_search_by(|sample| {
-            let sample_time = sample.input().time_s;
-            if same_time(sample_time, time_s) {
-                core::cmp::Ordering::Equal
-            } else {
-                sample_time.total_cmp(&time_s)
-            }
-        }) {
-            Ok(index) => {
+        match self.sample_source(time_s)? {
+            TimelineSampleSource::ExactSample { index } => {
                 let sample = &samples[index];
                 let input = sample.input();
                 let interval_events = self.interval_events(index.saturating_sub(1), index);
@@ -443,23 +500,15 @@ impl<'trajectory> TimelineResampler<'trajectory> {
                     events_at_query,
                 })
             }
-            Err(right_index) => {
-                let left_index = right_index - 1;
+            TimelineSampleSource::Interpolated {
+                left_index,
+                right_index,
+                alpha,
+                ..
+            } => {
                 let left = &samples[left_index];
                 let right = &samples[right_index];
-                let start_s = left.input().time_s;
-                let duration_s = right.input().time_s - start_s;
-                let alpha = (time_s - start_s) / duration_s;
-                if !(duration_s.is_finite()
-                    && duration_s > 0.0
-                    && alpha.is_finite()
-                    && 0.0 < alpha
-                    && alpha < 1.0)
-                {
-                    return Err(TimelineResamplingError::InvalidReconstruction(
-                        "source interval is not representable".into(),
-                    ));
-                }
+                let duration_s = right.input().time_s - left.input().time_s;
                 let interval_events = self.interval_events(left_index, right_index);
                 let events_at_query = events_at_time(&interval_events, time_s);
                 let state = interpolate_state(
@@ -505,6 +554,45 @@ impl<'trajectory> TimelineResampler<'trajectory> {
                     },
                     interval_events,
                     events_at_query,
+                })
+            }
+        }
+    }
+
+    // All callers have admitted the finite query domain. Share the exact knot
+    // search and normalized interval arithmetic across full and geometry-only
+    // queries, including signed zero and unrepresentable interior fractions.
+    fn sample_source(&self, time_s: f64) -> Result<TimelineSampleSource, TimelineResamplingError> {
+        let samples = self.trajectory.samples();
+        match samples.binary_search_by(|sample| {
+            let sample_time = sample.input().time_s;
+            if same_time(sample_time, time_s) {
+                core::cmp::Ordering::Equal
+            } else {
+                sample_time.total_cmp(&time_s)
+            }
+        }) {
+            Ok(index) => Ok(TimelineSampleSource::ExactSample { index }),
+            Err(right_index) => {
+                let left_index = right_index - 1;
+                let start_s = samples[left_index].input().time_s;
+                let duration_s = samples[right_index].input().time_s - start_s;
+                let alpha = (time_s - start_s) / duration_s;
+                if !(duration_s.is_finite()
+                    && duration_s > 0.0
+                    && alpha.is_finite()
+                    && 0.0 < alpha
+                    && alpha < 1.0)
+                {
+                    return Err(TimelineResamplingError::InvalidReconstruction(
+                        "source interval is not representable".into(),
+                    ));
+                }
+                Ok(TimelineSampleSource::Interpolated {
+                    left_index,
+                    right_index,
+                    alpha,
+                    method: TimelineInterpolationMethod::CubicHermiteSlerpV1,
                 })
             }
         }
@@ -588,6 +676,38 @@ fn validate_queries(
     Ok(())
 }
 
+fn interpolate_position(
+    left: RigidBodyState,
+    right: RigidBodyState,
+    mass_kg: f64,
+    duration_s: f64,
+    alpha: f64,
+) -> Vec3 {
+    let left_velocity = left.linear_momentum_world().scale(mass_kg.recip());
+    let right_velocity = right.linear_momentum_world().scale(mass_kg.recip());
+    hermite(
+        left.pose().position_world(),
+        left_velocity,
+        right.pose().position_world(),
+        right_velocity,
+        duration_s,
+        alpha,
+    )
+}
+
+fn interpolate_pose(
+    left: RigidBodyState,
+    right: RigidBodyState,
+    mass_kg: f64,
+    duration_s: f64,
+    alpha: f64,
+) -> Result<Pose, TimelineResamplingError> {
+    let position = interpolate_position(left, right, mass_kg, duration_s, alpha);
+    let orientation = slerp_shortest(left.pose().orientation(), right.pose().orientation(), alpha)?;
+    Pose::new(position, orientation)
+        .map_err(|error| TimelineResamplingError::InvalidReconstruction(error.to_string()))
+}
+
 fn interpolate_state(
     left: RigidBodyState,
     right: RigidBodyState,
@@ -595,17 +715,7 @@ fn interpolate_state(
     duration_s: f64,
     alpha: f64,
 ) -> Result<RigidBodyState, TimelineResamplingError> {
-    let left_velocity = left.linear_momentum_world().scale(mass_kg.recip());
-    let right_velocity = right.linear_momentum_world().scale(mass_kg.recip());
-    let position = hermite(
-        left.pose().position_world(),
-        left_velocity,
-        right.pose().position_world(),
-        right_velocity,
-        duration_s,
-        alpha,
-    );
-    let orientation = slerp_shortest(left.pose().orientation(), right.pose().orientation(), alpha)?;
+    let pose = interpolate_pose(left, right, mass_kg, duration_s, alpha)?;
     let linear_momentum = lerp_vec(
         left.linear_momentum_world(),
         right.linear_momentum_world(),
@@ -616,8 +726,6 @@ fn interpolate_state(
         right.angular_momentum_body(),
         alpha,
     );
-    let pose = Pose::new(position, orientation)
-        .map_err(|error| TimelineResamplingError::InvalidReconstruction(error.to_string()))?;
     RigidBodyState::new(pose, linear_momentum, angular_momentum)
         .map_err(|error| TimelineResamplingError::InvalidReconstruction(error.to_string()))
 }

@@ -652,3 +652,72 @@ fn pose_speed_bounds_follow_geometry_while_preserving_mechanical_channels() {
     assert!(resampler.pose_speed_bounds(1, [0.0, 1.0]).is_err());
     assert!(resampler.pose_speed_bounds(usize::MAX, [0.0, 1.0]).is_err());
 }
+
+#[test]
+fn geometry_queries_preserve_knots_events_and_curved_pose_interpolation() {
+    let mut trajectories = vec![
+        analytic_trajectory(),
+        event_trajectory(),
+        terminal_trajectory(),
+    ];
+    for (start, end) in [
+        (0.2, 0.2 + 1.0e-13),
+        (0.2, 1.0),
+        (0.0, core::f64::consts::PI - 1.0e-10),
+    ] {
+        let mut first = input(
+            0.0,
+            0.35,
+            RenderContactBranch::Open,
+            RenderSampleDisposition::Continue,
+        );
+        let mut last = input(
+            1.0,
+            0.35,
+            RenderContactBranch::Open,
+            RenderSampleDisposition::HorizonCensored,
+        );
+        // Zero endpoint momenta leave a curved Hermite translation. Reversed
+        // quaternion representatives exercise the shortest-arc convention in
+        // the linearized, ordinary and near-pi rotation branches.
+        for (sample, spin) in [(&mut first, start), (&mut last, end)] {
+            sample.linear_momentum_world_kg_m_per_s = Vec3::ZERO;
+            sample.angular_momentum_body_kg_m2_per_s = Vec3::ZERO;
+            replace_orientation(sample, tilted_spin(spin));
+        }
+        for component in &mut last.orientation_body_to_world {
+            *component = -*component;
+        }
+        trajectories.push(RenderTrajectory::try_new(metadata(&first), vec![first, last]).unwrap());
+    }
+    for trajectory in &trajectories {
+        let resampler = TimelineResampler::new(trajectory);
+        for time_s in core::iter::once(-0.0).chain((0..=64).map(|index| f64::from(index) / 64.0)) {
+            let position = resampler.position(time_s).unwrap();
+            let pose = resampler.pose(time_s).unwrap();
+            for side in [
+                EventEvaluationSide::LeftLimit,
+                EventEvaluationSide::RightLimit,
+            ] {
+                let full = resampler.sample(time_s, side).unwrap();
+                assert_eq!(position, full.state.pose().position_world());
+                assert_eq!(pose, full.state.pose());
+            }
+        }
+        for time_s in [-0.1, 1.1] {
+            let expected = TimelineResamplingError::QueryOutOfRange { index: 0, time_s };
+            assert_eq!(resampler.position(time_s), Err(expected.clone()));
+            assert_eq!(resampler.pose(time_s), Err(expected));
+        }
+        for time_s in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert_eq!(
+                resampler.position(time_s),
+                Err(TimelineResamplingError::NonFiniteQuery(0)),
+            );
+            assert_eq!(
+                resampler.pose(time_s),
+                Err(TimelineResamplingError::NonFiniteQuery(0)),
+            );
+        }
+    }
+}

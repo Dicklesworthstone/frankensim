@@ -5528,7 +5528,7 @@ pub fn synthesize_retarded_far_field_world_observers(
         }
         let arrival_s = stem.start_time_s + (first_frame + frame) as f64 * period;
         for (observer_index, observer) in observers.iter().enumerate() {
-            let (emission_s, sample, direction_world, radius_m) = retarded_emission(
+            let (emission_s, pose, direction_world, radius_m) = retarded_emission(
                 &timeline,
                 *observer,
                 arrival_s,
@@ -5541,11 +5541,7 @@ pub fn synthesize_retarded_far_field_world_observers(
             // Interpolated momenta are not derivatives of the sampled pose.
             validate_retarded_radius(radius_m, minimum_far_field_m)?;
             interpolate_stem_lanczos8(stem, emission_s, &mut coefficient_scratch)?;
-            let direction_body = sample
-                .state
-                .pose()
-                .orientation()
-                .rotate_world_to_body(direction_world);
+            let direction_body = pose.orientation().rotate_world_to_body(direction_world);
             for (complex, real) in complex_scratch.iter_mut().zip(&coefficient_scratch) {
                 *complex = C64::from_re(*real);
             }
@@ -5946,8 +5942,10 @@ fn arrival_time(
     emission_s: f64,
     sound_speed_m_s: f64,
 ) -> Result<f64, StructuralModalBasisError> {
-    let sample = timeline.sample(emission_s, EventEvaluationSide::RightLimit)?;
-    let (_, radius) = observer_vector(observer, sample.state.pose().position_world());
+    // A scalar arrival residual needs only translation. Reuse the exact
+    // timeline polynomial without quaternion, momentum, base or event work.
+    let position = timeline.position(emission_s)?;
+    let (_, radius) = observer_vector(observer, position);
     let arrival = emission_s + radius / sound_speed_m_s;
     if !(radius > 0.0 && radius.is_finite() && arrival.is_finite()) {
         return Err(StructuralModalBasisError::InvalidRequest {
@@ -5965,15 +5963,7 @@ fn retarded_emission(
     high: f64,
     sound_speed_m_s: f64,
     controls: RetardedFarFieldObserverControls,
-) -> Result<
-    (
-        f64,
-        crate::timeline_resampling::ResampledTimelineSample,
-        Vec3,
-        f64,
-    ),
-    StructuralModalBasisError,
-> {
+) -> Result<(f64, Pose, Vec3, f64), StructuralModalBasisError> {
     let emission_s = bisect_retarded_emission_time(
         arrival_s,
         low,
@@ -5982,14 +5972,14 @@ fn retarded_emission(
         controls.maximum_root_iterations,
         |time_s| arrival_time(timeline, observer, time_s, sound_speed_m_s),
     )?;
-    let sample = timeline.sample(emission_s, EventEvaluationSide::RightLimit)?;
-    let (offset, radius_m) = observer_vector(observer, sample.state.pose().position_world());
+    let pose = timeline.pose(emission_s)?;
+    let (offset, radius_m) = observer_vector(observer, pose.position_world());
     if !(radius_m > 0.0 && radius_m.is_finite()) {
         return Err(StructuralModalBasisError::InvalidRequest {
             what: "retarded observer coincides with the source",
         });
     }
-    Ok((emission_s, sample, offset.scale(radius_m.recip()), radius_m))
+    Ok((emission_s, pose, offset.scale(radius_m.recip()), radius_m))
 }
 
 fn bisect_retarded_emission_time(

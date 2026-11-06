@@ -280,39 +280,40 @@ impl<'a, M: CompactMotion> MovingCompactRenderer<'a, M> {
                 }
                 intervals.push(compile_interval(pair[0].strength, pair[1].strength, h)?);
             }
-            for path in 0..source.motion.path_count() {
-                let first = prepare_path_history(
+            let window = [config.first_receiver_time_s, last_receiver_time];
+            let [first, last] = prepare_path_window(
+                &observer,
+                source,
+                0,
+                window,
+                config.maximum_time_residual_s,
+                cancelled,
+            )?;
+            for path in 1..source.motion.path_count() {
+                prepare_path_window(
                     &observer,
                     source,
                     path,
-                    config.first_receiver_time_s,
+                    window,
                     config.maximum_time_residual_s,
                     cancelled,
                 )?;
-                let last = prepare_path_history(
-                    &observer,
-                    source,
-                    path,
-                    last_receiver_time,
-                    config.maximum_time_residual_s,
-                    cancelled,
-                )?;
-                // Each path retains continuous geometry admission and a
-                // Doppler bound valid over its complete observation window.
-                let maximum_doppler = source
-                    .motion
-                    .admit_window(
-                        &observer,
-                        &first,
-                        &last,
-                        config.maximum_time_residual_s,
-                        cancelled,
-                    )?;
-                if source.source_bandwidth_hz * maximum_doppler > config.receiver_bandwidth_hz {
-                    return Err(sizing(
-                        "declared receiver bandwidth does not include source Doppler expansion",
-                    ));
-                }
+            }
+            // Every path retains its own endpoint/history/order checks above.
+            // The sealed motion owner admits continuous geometry and bounds
+            // the COMPLETE image group, so repeat neither bound work nor its
+            // source-span scan for each reflected path.
+            let maximum_doppler = source.motion.admit_window(
+                &observer,
+                &first,
+                &last,
+                config.maximum_time_residual_s,
+                cancelled,
+            )?;
+            if source.source_bandwidth_hz * maximum_doppler > config.receiver_bandwidth_hz {
+                return Err(sizing(
+                    "declared receiver bandwidth does not include source Doppler expansion",
+                ));
             }
             tracks.push(PreparedTrack {
                 source: *source,
@@ -573,6 +574,31 @@ fn prepare_history<M: CompactMotion, Cancel: FnMut() -> bool>(
     cancelled: &mut Cancel,
 ) -> Result<PreparedMovingCompactSample, RenderError> {
     prepare_path_history(observer, source, 0, time, tolerance, cancelled)
+}
+
+fn prepare_path_window<M: CompactMotion, Cancel: FnMut() -> bool>(
+    observer: &M::Observer,
+    source: &CompactSourceHistory<'_, M>,
+    path: usize,
+    receiver_window: [f64; 2],
+    tolerance: f64,
+    cancelled: &mut Cancel,
+) -> Result<[PreparedMovingCompactSample; 2], RenderError> {
+    let first = prepare_path_history(
+        observer, source, path, receiver_window[0], tolerance, cancelled,
+    )?;
+    let last = prepare_path_history(
+        observer, source, path, receiver_window[1], tolerance, cancelled,
+    )?;
+    // Keep this check on EVERY image before once-per-source admission.
+    // The original path queries also enforce their own trajectory/clock
+    // domains, and prepare_path_history retains physical strength coverage.
+    if first.source_time_s() > last.source_time_s()
+        || first.receiver_time_s() > last.receiver_time_s()
+    {
+        return Err(sizing("retarded path endpoints lost their physical time order"));
+    }
+    Ok([first, last])
 }
 
 fn prepare_path_history<M: CompactMotion, Cancel: FnMut() -> bool>(

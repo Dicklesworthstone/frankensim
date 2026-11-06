@@ -116,8 +116,14 @@ pub trait CompactMotion: sealed::Sealed + Copy {
         }
         self.prepare_endpoint(observer, source_time_s, receiver_time_s)
     }
-    /// Admit continuous geometry and return a whole-window Doppler-rate bound.
-    /// The residual tolerance is the original receiver-clock policy.
+    /// Admit continuous geometry and return a whole-window Doppler-rate bound
+    /// covering EVERY retained path. Called once per physical source after all
+    /// paths pass their individual endpoint/history/time-order checks.
+    ///
+    /// `first` and `last` are the direct path's prepared endpoints on the shared
+    /// receiver clock. Multi-path implementations must use their complete image
+    /// owner; the direct path's instantaneous or directional rate alone is not
+    /// an image-group bound. The residual tolerance is the original clock policy.
     fn admit_window<Cancel: FnMut() -> bool>(
         self,
         observer: &Self::Observer,
