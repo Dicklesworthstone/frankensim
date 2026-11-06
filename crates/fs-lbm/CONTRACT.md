@@ -14086,3 +14086,27 @@ exercise uniform equivalence to native gravity, separate source-work
 composition, evolving density under mass injection, actual vortical onset
 and spatial refinement, stress-preserving rebinding, cancellation/invalid
 inputs, stencil refusals, and characteristic trial/drop/accept behavior.
+
+### Joint Lagrangian momentum and scalar memories
+
+sgs3::dynamic::lagrangian::scalar::LagrangianDynamicScalar owns one momentum
+trajectory and an independent scalar Germano history. Both fits reuse the same
+current Favre fields, but transport separate signed numerator/denominator pairs
+with independently authored memory times. Scalar physical contraction scaling
+uses rho^2 u^2 phi^2, distinct from momentum rho^2 u^4. One trial commits both
+histories and their common sample time, or drops both; uniform current sources
+still advect and decay accepted history. The original scalar contraction kernel
+and a shared pathline/relaxation/normalization implementation supply the math.
+Fitted coefficients remain available independently of centered strain, reusing
+the consumed scalar vector-basis storage. Prepared numerical payload is 264
+bytes/cell, with checked required bytes and actual capacity admission.
+
+Six new focused tests and eight existing momentum-history tests compiled and
+passed in a bounded native source probe (14 passed, 0 failed, 0 ignored). That
+probe used the actual dynamic/filter/history modules and required pinned fs-math
+deterministic functions; it is not a Cargo crate build or DSR gate. Rustfmt and
+bounded source review also completed. The model remains first-order pathline
+integration on periodic Cartesian domains, with explicit authored timescales,
+nonnegative emitted transport and signed history. No adaptive-timescale
+calibration, wall/inflow memory, scalar variance, reaction-rate, SGS energy or
+DNS/turbulence-accuracy qualification is supplied.

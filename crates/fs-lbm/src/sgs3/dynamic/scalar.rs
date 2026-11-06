@@ -77,9 +77,9 @@ pub struct PeriodicDynamicScalar {
     boundary_gradient: ScalarBoundaryGradient,
     scalar: Vec<f64>,
     filtered: Vec<f64>,
-    basis: Vec<[f64; 3]>,
-    contraction: Vec<[f64; 2]>,
-    diffusivity: Vec<f64>,
+    pub(super) basis: Vec<[f64; 3]>,
+    pub(super) contraction: Vec<[f64; 2]>,
+    pub(super) diffusivity: Vec<f64>,
 }
 
 /// A flux owner may constrain a coupled flux without prescribing the scalar's
@@ -177,7 +177,7 @@ impl PeriodicDynamicScalar {
         &self.diffusivity
     }
 
-    fn normalize(
+    pub(super) fn normalize(
         &mut self,
         scalar: &[f64],
         cancelled: &mut impl FnMut() -> bool,
@@ -266,7 +266,7 @@ impl PeriodicDynamicScalar {
 
     // Both the single-scalar and common-component fits use this exact kernel.
     // `scalar` has already been centered and normalized by the caller.
-    fn prepare_contractions(
+    pub(super) fn prepare_contractions(
         &mut self,
         flow: &PeriodicDynamicSgs,
         density: &[f64],

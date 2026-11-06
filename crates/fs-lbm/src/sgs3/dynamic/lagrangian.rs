@@ -15,7 +15,8 @@
 //! caller-declared: the paper's adaptive timescale and calibration are NOT
 //! implemented. Initial history uses the existing local 27-cell average.
 //! The grid/test filters remain one/three cells on a uniform periodic box.
-//! No wall, inflow, backscatter-energy, scalar-flux or DNS claim is added.
+//! No wall, inflow, backscatter-energy or DNS claim is added. Independent
+//! scalar-flux histories are available through the opt-in [`scalar`] owner.
 //!
 //! A prepared trial borrows its owner. Dropping it rejects the history;
 //! committing it after the consuming flow step succeeds publishes history
@@ -23,6 +24,10 @@
 //! therefore cannot age the turbulence memory.
 
 use super::*;
+
+/// Joint momentum/scalar pathline histories with independent scalar transport.
+#[path = "lagrangian/scalar.rs"]
+pub mod scalar;
 
 /// Explicit controls; lengths, velocities, sample times and memory time must
 /// use one consistent unit system. Native lattice adapters use lattice units.
@@ -101,6 +106,11 @@ impl LagrangianSgsTrial<'_> {
     /// This iterator is available only on a fully admitted history trial.
     pub fn coefficients_squared(&self) -> impl ExactSizeIterator<Item = f64> + '_ {
         self.owner.flow.coefficients_squared()
+    }
+
+    /// Fitted coefficient for one cell; out-of-domain indices return None.
+    pub fn coefficient_squared(&self, cell: usize) -> Option<f64> {
+        self.owner.flow.coefficient_squared(cell)
     }
 
     pub const fn report(&self) -> DynamicSgsReport {
@@ -188,8 +198,22 @@ impl LagrangianDynamicSgs {
         time: f64,
         density: &[f64],
         velocity: &[[f64; 3]],
-        mut cancelled: impl FnMut() -> bool,
+        cancelled: impl FnMut() -> bool,
     ) -> Result<LagrangianSgsTrial<'_>, DynamicSgsError> {
+        self.prepare_scaled(config, time, density, velocity, cancelled)
+            .map(|(trial, _)| trial)
+    }
+
+    // Joint scalar preparation reuses these exact current Favre fields and
+    // scales. The standalone momentum path retains its original arithmetic.
+    fn prepare_scaled(
+        &mut self,
+        config: LagrangianSgsConfig,
+        time: f64,
+        density: &[f64],
+        velocity: &[[f64; 3]],
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<(LagrangianSgsTrial<'_>, InputScales), DynamicSgsError> {
         poll(&mut cancelled, 0)?;
         config.validate()?;
         if !time.is_finite()
@@ -206,26 +230,15 @@ impl LagrangianDynamicSgs {
                 .prepare_contractions(density, velocity, [[0.0; 3]; 2], &mut cancelled)?;
         let current_log = (scales.velocity > 0.0)
             .then(|| 2.0 * det::ln(scales.density) + 4.0 * det::ln(scales.velocity));
-        let common_log = match (self.history_log_scale, current_log) {
-            (Some(a), Some(b)) => a.max(b),
-            (Some(a), None) | (None, Some(a)) => a,
-            (None, None) => 0.0,
-        };
-        let old_scale = self
-            .history_log_scale
-            .map_or(0.0, |value| det::exp(value - common_log));
-        let new_scale = current_log.map_or(0.0, |value| det::exp(value - common_log));
-        let relaxation = elapsed / config.memory_time;
-        let fresh = -det::expm1(-relaxation);
-        // Subtracting fresh from one erases representable, physically relevant
-        // history once elapsed/T exceeds about 37, even while exp(-elapsed/T)
-        // remains nonzero. This matters when strong eddies decay into weak flow.
-        let old_weight = det::exp(-relaxation);
-        if self.accepted_time.is_some() && fresh == 0.0 {
-            return Err(DynamicSgsError::Invalid(
-                "unrepresentable Lagrangian relaxation interval",
-            ));
-        }
+        let update = HistoryUpdate::new(
+            &self.flow,
+            self.accepted_time.is_some(),
+            self.history_log_scale,
+            current_log,
+            elapsed,
+            config.memory_time,
+            config.maximum_departure_cells,
+        )?;
         let mut report = DynamicSgsReport {
             minimum_raw_coefficient_squared: f64::INFINITY,
             ..DynamicSgsReport::default()
@@ -233,58 +246,7 @@ impl LagrangianDynamicSgs {
         let mut amplitude: f64 = 0.0;
         for cell in 0..self.history.len() {
             poll(&mut cancelled, cell)?;
-            let pair = if self.accepted_time.is_none() {
-                let mut pair = [0.0; 2];
-                let mut determined = false;
-                each_box(self.flow.shape, cell, |j| {
-                    determined |= self.flow.contraction[j][1] != 0.0;
-                    for k in 0..2 {
-                        pair[k] += self.flow.contraction[j][k] / 27.0;
-                    }
-                });
-                if determined && pair[1] == 0.0 {
-                    return Err(DynamicSgsError::Cell {
-                        cell,
-                        reason: "underflow of initial Lagrangian denominator",
-                    });
-                }
-                pair
-            } else {
-                let departure = core::array::from_fn(|axis| {
-                    velocity[cell][axis] * (elapsed / self.flow.spacing[axis])
-                });
-                if departure
-                    .iter()
-                    .any(|d: &f64| !d.is_finite() || d.abs() > config.maximum_departure_cells)
-                {
-                    return Err(DynamicSgsError::Cell {
-                        cell,
-                        reason: "Lagrangian departure exceeds declared cell limit",
-                    });
-                }
-                let advected = sample_history(self.flow.shape, cell, departure, &self.history);
-                let current = self.flow.contraction[cell];
-                if (old_weight > 0.0 && old_scale == 0.0 && advected[1] != 0.0)
-                    || (fresh > 0.0 && new_scale == 0.0 && current[1] != 0.0)
-                {
-                    return Err(DynamicSgsError::Cell {
-                        cell,
-                        reason: "unrepresentable Lagrangian history scale separation",
-                    });
-                }
-                core::array::from_fn(|k| {
-                    old_weight * (old_scale * advected[k]) + fresh * (new_scale * current[k])
-                })
-            };
-            if pair.iter().any(|v| !v.is_finite())
-                || pair[1] < 0.0
-                || (pair[1] == 0.0 && pair[0] != 0.0)
-            {
-                return Err(DynamicSgsError::Cell {
-                    cell,
-                    reason: "unrepresentable Lagrangian contraction",
-                });
-            }
+            let pair = update.pair(cell, velocity[cell], &self.history, &self.flow.contraction)?;
             let raw = if pair[1] == 0.0 {
                 report.undetermined_cells += 1;
                 0.0
@@ -326,33 +288,163 @@ impl LagrangianDynamicSgs {
                 report.maximum_coefficient_squared.max(coefficient);
             report.maximum_eddy_viscosity = report.maximum_eddy_viscosity.max(viscosity);
         }
-        // Renormalize after the fit. Otherwise a formerly strong flow would
-        // eventually underflow its decaying memory while weaker new eddies form.
-        let log_scale = if amplitude == 0.0 {
-            None
-        } else {
-            for (cell, pair) in self.candidate.iter_mut().enumerate() {
-                poll(&mut cancelled, cell)?;
-                for value in pair {
-                    let normalized = *value / amplitude;
-                    if normalized == 0.0 && *value != 0.0 {
-                        return Err(DynamicSgsError::Cell {
-                            cell,
-                            reason: "Lagrangian history normalization underflow",
-                        });
-                    }
-                    *value = normalized;
-                }
-            }
-            Some(common_log + det::ln(amplitude))
-        };
+        let log_scale = update.normalize(&mut self.candidate, amplitude, &mut cancelled)?;
         poll(&mut cancelled, 0)?;
-        Ok(LagrangianSgsTrial {
-            owner: self,
-            time,
-            log_scale,
-            report,
+        Ok((
+            LagrangianSgsTrial {
+                owner: self,
+                time,
+                log_scale,
+                report,
+            },
+            scales,
+        ))
+    }
+}
+
+// Both stress and scalar contractions use the same pathline transport and
+// logarithmic history arithmetic. Only their physical normalization differs.
+struct HistoryUpdate {
+    shape: [usize; 3],
+    spacing: [f64; 3],
+    initialized: bool,
+    elapsed: f64,
+    maximum_departure_cells: f64,
+    common_log: f64,
+    old_scale: f64,
+    new_scale: f64,
+    old_weight: f64,
+    fresh: f64,
+}
+
+impl HistoryUpdate {
+    fn new(
+        flow: &PeriodicDynamicSgs,
+        initialized: bool,
+        previous_log: Option<f64>,
+        current_log: Option<f64>,
+        elapsed: f64,
+        memory_time: f64,
+        maximum_departure_cells: f64,
+    ) -> Result<Self, DynamicSgsError> {
+        let common_log = match (previous_log, current_log) {
+            (Some(a), Some(b)) => a.max(b),
+            (Some(a), None) | (None, Some(a)) => a,
+            (None, None) => 0.0,
+        };
+        let old_scale = previous_log.map_or(0.0, |value| det::exp(value - common_log));
+        let new_scale = current_log.map_or(0.0, |value| det::exp(value - common_log));
+        let relaxation = elapsed / memory_time;
+        let fresh = -det::expm1(-relaxation);
+        // Subtracting fresh from one loses representable old history when
+        // elapsed/T exceeds about 37. Evaluate the exponential independently.
+        let old_weight = det::exp(-relaxation);
+        if initialized && fresh == 0.0 {
+            return Err(DynamicSgsError::Invalid(
+                "unrepresentable Lagrangian relaxation interval",
+            ));
+        }
+        Ok(Self {
+            shape: flow.shape,
+            spacing: flow.spacing,
+            initialized,
+            elapsed,
+            maximum_departure_cells,
+            common_log,
+            old_scale,
+            new_scale,
+            old_weight,
+            fresh,
         })
+    }
+
+    fn pair(
+        &self,
+        cell: usize,
+        velocity: [f64; 3],
+        history: &[[f64; 2]],
+        contraction: &[[f64; 2]],
+    ) -> Result<[f64; 2], DynamicSgsError> {
+        let pair = if !self.initialized {
+            let mut pair = [0.0; 2];
+            let mut determined = false;
+            each_box(self.shape, cell, |j| {
+                determined |= contraction[j][1] != 0.0;
+                for k in 0..2 {
+                    pair[k] += contraction[j][k] / 27.0;
+                }
+            });
+            if determined && pair[1] == 0.0 {
+                return Err(DynamicSgsError::Cell {
+                    cell,
+                    reason: "underflow of initial Lagrangian denominator",
+                });
+            }
+            pair
+        } else {
+            let departure =
+                core::array::from_fn(|axis| velocity[axis] * (self.elapsed / self.spacing[axis]));
+            if departure
+                .iter()
+                .any(|d: &f64| !d.is_finite() || d.abs() > self.maximum_departure_cells)
+            {
+                return Err(DynamicSgsError::Cell {
+                    cell,
+                    reason: "Lagrangian departure exceeds declared cell limit",
+                });
+            }
+            let advected = sample_history(self.shape, cell, departure, history);
+            let current = contraction[cell];
+            if (self.old_weight > 0.0 && self.old_scale == 0.0 && advected[1] != 0.0)
+                || (self.fresh > 0.0 && self.new_scale == 0.0 && current[1] != 0.0)
+            {
+                return Err(DynamicSgsError::Cell {
+                    cell,
+                    reason: "unrepresentable Lagrangian history scale separation",
+                });
+            }
+            core::array::from_fn(|k| {
+                self.old_weight * (self.old_scale * advected[k])
+                    + self.fresh * (self.new_scale * current[k])
+            })
+        };
+        if pair.iter().any(|v| !v.is_finite())
+            || pair[1] < 0.0
+            || (pair[1] == 0.0 && pair[0] != 0.0)
+        {
+            return Err(DynamicSgsError::Cell {
+                cell,
+                reason: "unrepresentable Lagrangian contraction",
+            });
+        }
+        Ok(pair)
+    }
+
+    fn normalize(
+        &self,
+        candidate: &mut [[f64; 2]],
+        amplitude: f64,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Option<f64>, DynamicSgsError> {
+        // A formerly strong flow must not underflow its decaying memory while
+        // weaker new eddies form. Normalize only the candidate, never history.
+        if amplitude == 0.0 {
+            return Ok(None);
+        }
+        for (cell, pair) in candidate.iter_mut().enumerate() {
+            poll(cancelled, cell)?;
+            for value in pair {
+                let normalized = *value / amplitude;
+                if normalized == 0.0 && *value != 0.0 {
+                    return Err(DynamicSgsError::Cell {
+                        cell,
+                        reason: "Lagrangian history normalization underflow",
+                    });
+                }
+                *value = normalized;
+            }
+        }
+        Ok(Some(self.common_log + det::ln(amplitude)))
     }
 }
 
