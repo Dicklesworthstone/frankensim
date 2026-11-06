@@ -3,7 +3,7 @@
 //! A crank, compressor drive or moving geometry supplies the volume endpoint;
 //! the original gas material supplies pressure and the work returned to that
 //! drive. Every nozzle first sees the same accepted network. The original
-//! midpoint heat/volume owner then advances each post-transfer parcel. This
+//! midpoint or opt-in discrete-gradient owner advances each post-transfer parcel. This
 //! flow-then-motion split is first order overall and advances one physical
 //! interval. There is no independent piston inertia or duplicated gas law.
 //!
@@ -14,6 +14,7 @@
 
 use fs_material::thermochemical_gas::ResolvedThermochemicalGasState;
 use fs_material::thermochemical_gas::energy::parcel::ClosedGasParcel;
+use fs_material::thermochemical_gas::energy::parcel::discrete_gradient::GasDiscreteGradientStep;
 use fs_material::thermochemical_gas::energy::parcel::midpoint::GasHeatVolumeStep;
 use fs_material::thermochemical_gas::energy::parcel::transfer::nozzle::network::snapshot::{
     self, SnapshotNozzleError, SnapshotNozzleLink, SnapshotNozzleStep,
@@ -104,20 +105,45 @@ pub struct PrescribedGasParcelStep {
     pub energy_residual_j: f64,
 }
 
+/// Open-volume balance using the original entropy-compatible heat/work law.
+/// Material entropy quantities cover only the post-flow/post-reaction volume
+/// change. They are not entropy balances for mixing, nozzle flow or chemistry.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PrescribedGasDiscreteGradientParcelStep {
+    /// Original Gibbs-compatible update, including `work_pressure_pa`,
+    /// physical work, entropy transfer and the source-law residuals.
+    pub material: GasDiscreteGradientStep,
+    /// Original material at the entropy-conjugate temperature and logarithmic
+    /// mean volume. Use `material.work_pressure_pa` for the drive effort.
+    pub thermodynamic_mean: ResolvedThermochemicalGasState,
+    /// Actual full-interval mass change, including all inlets/outlets [kg].
+    pub mass_change_kg: f64,
+    /// Actual full-interval internal-energy change, including transported energy [J].
+    pub energy_change_j: f64,
+    /// Incoming minus outgoing upstream total enthalpy [J], counted once.
+    pub net_enthalpy_into_gas_j: f64,
+    /// Work delivered against the declared exterior pressure [J].
+    pub exterior_pressure_work_j: f64,
+    /// Gross gas work minus exterior-pressure work [J]; positive reaches the drive.
+    pub net_drive_work_j: f64,
+    /// Actual dU + gross gas work - external heat - net incoming enthalpy [J].
+    pub energy_residual_j: f64,
+}
+
 /// Complete same-interval flow, thermodynamics and mechanical-energy response.
 #[derive(Clone, Debug, PartialEq)]
-pub struct PrescribedGasStep {
+pub struct PrescribedGasStep<P = PrescribedGasParcelStep> {
     /// Physical interval used by every original nozzle [s].
     pub duration_s: f64,
     /// Original shared-inventory transfer and source-resolved throat reports.
     pub flow: SnapshotNozzleStep,
     /// Local heat/work and actual open-volume balances in chamber-id order.
-    pub parcels: BTreeMap<u64, PrescribedGasParcelStep>,
+    pub parcels: BTreeMap<u64, P>,
     /// Actual sum of final minus initial gas internal energies [J].
     pub gas_energy_change_j: f64,
     /// Sum of external heat into all volumes [J].
     pub supplied_heat_j: f64,
-    /// Sum of midpoint gas pressure times actual volume change [J].
+    /// Sum of the selected law's work pressure times actual volume change [J].
     pub gross_gas_work_j: f64,
     /// Sum of exterior pressure times actual volume change [J].
     pub exterior_pressure_work_j: f64,
@@ -136,11 +162,11 @@ pub struct PrescribedGasStep {
 /// All proposed gas owners together. The caller publishes only after accepting
 /// the returned pressure work at its prescribed mechanical boundary.
 #[derive(Clone, Debug, PartialEq)]
-pub struct PrescribedGasCandidate {
+pub struct PrescribedGasCandidate<P = PrescribedGasParcelStep> {
     parcels: BTreeMap<u64, ClosedGasParcel>,
-    step: PrescribedGasStep,
+    step: PrescribedGasStep<P>,
 }
-impl PrescribedGasCandidate {
+impl<P> PrescribedGasCandidate<P> {
     /// Complete proposed media, preserving original caloric and transport sources.
     #[must_use]
     pub fn parcels(&self) -> &BTreeMap<u64, ClosedGasParcel> {
@@ -148,15 +174,23 @@ impl PrescribedGasCandidate {
     }
     /// Actual physical balances and source evaluations.
     #[must_use]
-    pub const fn step(&self) -> &PrescribedGasStep {
+    pub const fn step(&self) -> &PrescribedGasStep<P> {
         &self.step
     }
     /// Accept every gas endpoint together without a second material query.
     #[must_use]
-    pub fn into_parts(self) -> (BTreeMap<u64, ClosedGasParcel>, PrescribedGasStep) {
+    pub fn into_parts(self) -> (BTreeMap<u64, ClosedGasParcel>, PrescribedGasStep<P>) {
         (self.parcels, self.step)
     }
 }
+
+/// Complete entropy-compatible prescribed-volume proposal.
+pub type PrescribedGasDiscreteGradientCandidate =
+    PrescribedGasCandidate<PrescribedGasDiscreteGradientParcelStep>;
+
+/// Network balances with each chamber's original discrete Gibbs report.
+pub type PrescribedGasDiscreteGradientStep =
+    PrescribedGasStep<PrescribedGasDiscreteGradientParcelStep>;
 
 use PrescribedGasError as Error;
 fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<(), Error> {
@@ -202,6 +236,98 @@ impl Sum {
     }
 }
 
+// The two material owners feed one flow/accounting transaction. These carry
+// their original results, not a second thermodynamic or pressure-work law.
+struct HeatVolumeUpdate<M> {
+    gas: ClosedGasParcel,
+    material: M,
+    mean: ResolvedThermochemicalGasState,
+    work_by_gas_j: f64,
+}
+
+struct ParcelBalance {
+    mass_change_kg: f64,
+    energy_change_j: f64,
+    net_enthalpy_into_gas_j: f64,
+    exterior_pressure_work_j: f64,
+    net_drive_work_j: f64,
+    energy_residual_j: f64,
+}
+
+fn midpoint_update<C: FnMut() -> bool>(
+    gas: &ClosedGasParcel,
+    drive: PrescribedGasDrive,
+    controls: GasEnergySolve,
+    cancelled: &mut C,
+) -> Result<HeatVolumeUpdate<GasHeatVolumeStep>, GasEnergyError> {
+    let trial =
+        gas.midpoint_heat_volume(drive.final_volume_m3, drive.heat_j, controls, cancelled)?;
+    let mean = trial.midpoint().clone();
+    let (gas, material) = trial.into_parts();
+    Ok(HeatVolumeUpdate {
+        gas,
+        work_by_gas_j: material.work_by_gas_j,
+        material,
+        mean,
+    })
+}
+
+fn discrete_gradient_update<C: FnMut() -> bool>(
+    gas: &ClosedGasParcel,
+    drive: PrescribedGasDrive,
+    controls: GasEnergySolve,
+    cancelled: &mut C,
+) -> Result<HeatVolumeUpdate<GasDiscreteGradientStep>, GasEnergyError> {
+    let trial = gas.discrete_gradient_heat_volume(
+        drive.final_volume_m3,
+        drive.heat_j,
+        controls,
+        cancelled,
+    )?;
+    let mean = trial.thermodynamic_mean().clone();
+    let (gas, material) = trial.into_parts();
+    Ok(HeatVolumeUpdate {
+        gas,
+        work_by_gas_j: material.work_by_gas_j,
+        material,
+        mean,
+    })
+}
+
+fn midpoint_report(
+    material: GasHeatVolumeStep,
+    midpoint: ResolvedThermochemicalGasState,
+    balance: ParcelBalance,
+) -> PrescribedGasParcelStep {
+    PrescribedGasParcelStep {
+        material,
+        midpoint,
+        mass_change_kg: balance.mass_change_kg,
+        energy_change_j: balance.energy_change_j,
+        net_enthalpy_into_gas_j: balance.net_enthalpy_into_gas_j,
+        exterior_pressure_work_j: balance.exterior_pressure_work_j,
+        net_drive_work_j: balance.net_drive_work_j,
+        energy_residual_j: balance.energy_residual_j,
+    }
+}
+
+fn discrete_gradient_report(
+    material: GasDiscreteGradientStep,
+    thermodynamic_mean: ResolvedThermochemicalGasState,
+    balance: ParcelBalance,
+) -> PrescribedGasDiscreteGradientParcelStep {
+    PrescribedGasDiscreteGradientParcelStep {
+        material,
+        thermodynamic_mean,
+        mass_change_kg: balance.mass_change_kg,
+        energy_change_j: balance.energy_change_j,
+        net_enthalpy_into_gas_j: balance.net_enthalpy_into_gas_j,
+        exterior_pressure_work_j: balance.exterior_pressure_work_j,
+        net_drive_work_j: balance.net_drive_work_j,
+        energy_residual_j: balance.energy_residual_j,
+    }
+}
+
 /// Drive finite, well-mixed chambers through prescribed volume/heat endpoints.
 ///
 /// `endpoints` and `drives` cover every parcel exactly, including held reservoirs.
@@ -241,6 +367,50 @@ pub fn step_candidate(
         drives,
         controls,
         |_, _| Ok(()),
+        midpoint_update,
+        midpoint_report,
+        cancelled,
+    )
+    .map(|(candidate, ())| candidate)
+}
+
+/// Drive the same network with entropy-compatible compression and expansion.
+///
+/// Flow still uses the common accepted snapshot. Each resulting parcel uses
+/// its original variable-Cv discrete Gibbs law: `dU + p_bar*dV = Q` and
+/// `dS = Q/theta`, to the material solve tolerance. Thus a sealed adiabatic
+/// chamber follows its source isentrope without midpoint entropy drift.
+/// The returned `material.work_pressure_pa` is the mechanical effort, and its
+/// actual work is included exactly once in every local and network balance.
+/// `thermodynamic_mean` is an entropy-conjugate sample, not an arithmetic midpoint.
+///
+/// The original material's positive-tangent admission can refuse an excessive
+/// contraction; refine that volume step or provide an appropriate source-backed
+/// temperature bracket. No silent clipping or constant-gamma replacement occurs.
+/// The gas-side heat/entropy transfer does not model a bath or certify the
+/// entropy of nozzle transport or mixing. Open flow/motion splitting remains
+/// first order, with the same source, withdrawal and pressure-crossing limits
+/// as [`step_candidate`]. No accepted input changes on failure or cancellation.
+#[allow(clippy::too_many_arguments)]
+pub fn step_discrete_gradient_candidate(
+    parcels: &BTreeMap<u64, ClosedGasParcel>,
+    links: &[SnapshotNozzleLink],
+    duration_s: f64,
+    endpoints: &BTreeMap<u64, GasEnergySolve>,
+    drives: &BTreeMap<u64, PrescribedGasDrive>,
+    controls: PrescribedGasSolve,
+    cancelled: impl FnMut() -> bool,
+) -> Result<PrescribedGasDiscreteGradientCandidate, Error> {
+    staged_candidate(
+        parcels,
+        links,
+        duration_s,
+        endpoints,
+        drives,
+        controls,
+        |_, _| Ok(()),
+        discrete_gradient_update,
+        discrete_gradient_report,
         cancelled,
     )
     .map(|(candidate, ())| candidate)
@@ -249,7 +419,7 @@ pub fn step_candidate(
 // The optional chemical stage shares every original flow, heat/volume and
 // original-to-final balance. It cannot advance a second mechanical clock.
 #[allow(clippy::too_many_arguments)]
-fn staged_candidate<R, C: FnMut() -> bool>(
+fn staged_candidate<R, M, P, C: FnMut() -> bool>(
     parcels: &BTreeMap<u64, ClosedGasParcel>,
     links: &[SnapshotNozzleLink],
     duration_s: f64,
@@ -257,8 +427,15 @@ fn staged_candidate<R, C: FnMut() -> bool>(
     drives: &BTreeMap<u64, PrescribedGasDrive>,
     controls: PrescribedGasSolve,
     stage: impl FnOnce(&mut BTreeMap<u64, ClosedGasParcel>, &mut C) -> Result<R, Error>,
+    heat_volume: impl Fn(
+        &ClosedGasParcel,
+        PrescribedGasDrive,
+        GasEnergySolve,
+        &mut C,
+    ) -> Result<HeatVolumeUpdate<M>, GasEnergyError>,
+    report: impl Fn(M, ResolvedThermochemicalGasState, ParcelBalance) -> P,
     mut cancelled: C,
-) -> Result<(PrescribedGasCandidate, R), Error> {
+) -> Result<(PrescribedGasCandidate<P>, R), Error> {
     poll(&mut cancelled)?;
     if parcels.is_empty()
         || parcels.len() > MAX_SNAPSHOT_PARCELS
@@ -322,16 +499,13 @@ fn staged_candidate<R, C: FnMut() -> bool>(
     for (&id, old) in parcels {
         poll(&mut cancelled)?;
         let drive = drives[&id];
-        let trial = post_flow[&id]
-            .midpoint_heat_volume(
-                drive.final_volume_m3,
-                drive.heat_j,
-                endpoints[&id],
-                &mut cancelled,
-            )
+        let HeatVolumeUpdate {
+            gas,
+            material,
+            mean,
+            work_by_gas_j,
+        } = heat_volume(&post_flow[&id], drive, endpoints[&id], &mut cancelled)
             .map_err(|error| material_error(id, error))?;
-        let midpoint = trial.midpoint().clone();
-        let (gas, material) = trial.into_parts();
         let dm = gas.mass_kg() - old.mass_kg();
         // Subtract specific storage before multiplying, retaining formation
         // references even when the chamber's total inventory changes.
@@ -340,10 +514,10 @@ fn staged_candidate<R, C: FnMut() -> bool>(
                 - old.state().specific_internal_energy_j_kg())
             + dm * old.state().specific_internal_energy_j_kg();
         let exterior_work = drive.exterior_pressure_pa * (drive.final_volume_m3 - old.volume_m3());
-        let net_work = material.work_by_gas_j - exterior_work;
+        let net_work = work_by_gas_j - exterior_work;
         let incoming = enthalpy[&id].value;
         let mut balance = Sum::default();
-        for value in [du, material.work_by_gas_j, -drive.heat_j, -incoming] {
+        for value in [du, work_by_gas_j, -drive.heat_j, -incoming] {
             balance.add(value)?;
         }
         if balance.value.abs() > controls.total_energy_tolerance_j {
@@ -355,21 +529,23 @@ fn staged_candidate<R, C: FnMut() -> bool>(
         energy.add(du)?;
         mass.add(dm)?;
         heat.add(drive.heat_j)?;
-        gross.add(material.work_by_gas_j)?;
+        gross.add(work_by_gas_j)?;
         outside.add(exterior_work)?;
         net.add(net_work)?;
         reports.insert(
             id,
-            PrescribedGasParcelStep {
+            report(
                 material,
-                midpoint,
-                mass_change_kg: dm,
-                energy_change_j: du,
-                net_enthalpy_into_gas_j: incoming,
-                exterior_pressure_work_j: exterior_work,
-                net_drive_work_j: net_work,
-                energy_residual_j: balance.value,
-            },
+                mean,
+                ParcelBalance {
+                    mass_change_kg: dm,
+                    energy_change_j: du,
+                    net_enthalpy_into_gas_j: incoming,
+                    exterior_pressure_work_j: exterior_work,
+                    net_drive_work_j: net_work,
+                    energy_residual_j: balance.value,
+                },
+            ),
         );
         next.insert(id, gas);
     }

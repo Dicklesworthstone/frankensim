@@ -4,7 +4,7 @@
 //! Every restriction sees the same accepted network. Incoming species then
 //! react in the actual mixed parcel, preserving total formation internal
 //! energy. The resulting composition, temperature and pressure drive the
-//! original midpoint pressure/volume work. No reaction enthalpy is added as
+//! selected original pressure/volume work. No reaction enthalpy is added as
 //! external heat; products become available to outflow on the next interval.
 //!
 //! This is a first-order operator split even when the chemical owner uses an
@@ -13,7 +13,8 @@
 //! a simultaneous chemical/mechanical endpoint or a measured engine model.
 
 use super::{
-    BTreeMap, ClosedGasParcel, Error, GasEnergySolve, PrescribedGasCandidate, PrescribedGasDrive,
+    BTreeMap, ClosedGasParcel, Error, GasEnergySolve, PrescribedGasCandidate,
+    PrescribedGasDiscreteGradientParcelStep, PrescribedGasDrive, PrescribedGasParcelStep,
     PrescribedGasSolve, PrescribedGasStep, SnapshotNozzleLink, Sum, poll, positive,
 };
 use crate::cavity_phs::piston::reactive::{
@@ -44,12 +45,12 @@ pub struct ReactivePrescribedGasSolve {
 
 /// The complete proposal, including source-resolved chemical evaluations.
 #[derive(Clone, Debug, PartialEq)]
-pub struct ReactivePrescribedGasCandidate {
-    motion: PrescribedGasCandidate,
+pub struct ReactivePrescribedGasCandidate<P = PrescribedGasParcelStep> {
+    motion: PrescribedGasCandidate<P>,
     reactions: BTreeMap<u64, GasReactionStep>,
     maximum_species_residual_mol: f64,
 }
-impl ReactivePrescribedGasCandidate {
+impl<P> ReactivePrescribedGasCandidate<P> {
     /// All finite gas stores, with reaction and pressure work already applied.
     #[must_use]
     pub fn parcels(&self) -> &BTreeMap<u64, ClosedGasParcel> {
@@ -63,7 +64,7 @@ impl ReactivePrescribedGasCandidate {
     /// The original report now measures accepted-input to final storage across
     /// ALL three stages. Local heat/volume reports start after chemistry.
     #[must_use]
-    pub const fn step(&self) -> &PrescribedGasStep {
+    pub const fn step(&self) -> &PrescribedGasStep<P> {
         self.motion.step()
     }
     /// Measured maximum complete-interval stoichiometric residual [mol].
@@ -77,7 +78,7 @@ impl ReactivePrescribedGasCandidate {
         self,
     ) -> (
         BTreeMap<u64, ClosedGasParcel>,
-        PrescribedGasStep,
+        PrescribedGasStep<P>,
         BTreeMap<u64, GasReactionStep>,
         f64,
     ) {
@@ -90,6 +91,10 @@ impl ReactivePrescribedGasCandidate {
         )
     }
 }
+
+/// Reactive network proposal with the original discrete Gibbs heat/work reports.
+pub type ReactivePrescribedGasDiscreteGradientCandidate =
+    ReactivePrescribedGasCandidate<PrescribedGasDiscreteGradientParcelStep>;
 
 /// Couple declared homogeneous chemistry to moving OR held finite volumes.
 ///
@@ -114,8 +119,74 @@ pub fn step_candidate(
     drives: &BTreeMap<u64, PrescribedGasDrive>,
     reactions: &[DrivenGasReaction<'_>],
     controls: ReactivePrescribedGasSolve,
-    mut cancelled: impl FnMut() -> bool,
+    cancelled: impl FnMut() -> bool,
 ) -> Result<ReactivePrescribedGasCandidate, Error> {
+    candidate_with_law(
+        parcels,
+        links,
+        duration_s,
+        endpoints,
+        drives,
+        reactions,
+        controls,
+        super::midpoint_update,
+        super::midpoint_report,
+        cancelled,
+    )
+}
+
+/// Apply the same conservative flow/chemistry stages, then source-integrated
+/// entropy-compatible compression or expansion to each resulting composition.
+///
+/// Every reaction retains its original interval and species/energy audit.
+/// Each material report's entropy identity starts AFTER that reaction; it is
+/// not an entropy certificate for the complete open reactive network. The
+/// mechanical drive must use `material.work_pressure_pa` and its returned work.
+/// See [`super::step_discrete_gradient_candidate`] for source-domain admission
+/// and the unchanged first-order splitting/nozzle limitations.
+#[allow(clippy::too_many_arguments)]
+pub fn step_discrete_gradient_candidate(
+    parcels: &BTreeMap<u64, ClosedGasParcel>,
+    links: &[SnapshotNozzleLink],
+    duration_s: f64,
+    endpoints: &BTreeMap<u64, GasEnergySolve>,
+    drives: &BTreeMap<u64, PrescribedGasDrive>,
+    reactions: &[DrivenGasReaction<'_>],
+    controls: ReactivePrescribedGasSolve,
+    cancelled: impl FnMut() -> bool,
+) -> Result<ReactivePrescribedGasDiscreteGradientCandidate, Error> {
+    candidate_with_law(
+        parcels,
+        links,
+        duration_s,
+        endpoints,
+        drives,
+        reactions,
+        controls,
+        super::discrete_gradient_update,
+        super::discrete_gradient_report,
+        cancelled,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn candidate_with_law<M, P, C: FnMut() -> bool>(
+    parcels: &BTreeMap<u64, ClosedGasParcel>,
+    links: &[SnapshotNozzleLink],
+    duration_s: f64,
+    endpoints: &BTreeMap<u64, GasEnergySolve>,
+    drives: &BTreeMap<u64, PrescribedGasDrive>,
+    reactions: &[DrivenGasReaction<'_>],
+    controls: ReactivePrescribedGasSolve,
+    heat_volume: impl Fn(
+        &ClosedGasParcel,
+        PrescribedGasDrive,
+        GasEnergySolve,
+        &mut C,
+    ) -> Result<super::HeatVolumeUpdate<M>, super::GasEnergyError>,
+    report: impl Fn(M, super::ResolvedThermochemicalGasState, super::ParcelBalance) -> P,
+    mut cancelled: C,
+) -> Result<ReactivePrescribedGasCandidate<P>, Error> {
     poll(&mut cancelled)?;
     if parcels.is_empty()
         || parcels.len() > super::MAX_SNAPSHOT_PARCELS
@@ -171,6 +242,8 @@ pub fn step_candidate(
             }
             Ok(reports)
         },
+        |gas, drive, controls, cancelled| heat_volume(gas, drive, controls, &mut **cancelled),
+        report,
         &mut cancelled,
     )?;
     let mut residuals: BTreeMap<SpeciesId, Sum> = BTreeMap::new();

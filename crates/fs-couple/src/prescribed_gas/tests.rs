@@ -1,4 +1,5 @@
 //! Public gas owners against independent ideal-gas and cycle equations.
+mod discrete_gradient;
 mod source;
 use super::*;
 use fs_material::thermochemical_gas::energy::parcel::transfer::nozzle::GasNozzle;
