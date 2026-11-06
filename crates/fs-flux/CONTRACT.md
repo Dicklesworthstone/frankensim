@@ -1587,6 +1587,18 @@ all of these entries remain fixed-mesh 2-D incompressible flow, without
 variable-density storage, thermal or turbulent closure, nonlinear adjoints,
 whole-scheme stability, scalable throughput or synchronous cancellation claims.
 
+The steady `MaterialFluxSystem::solve_navier_stokes_mixed` and
+`solve_navier_stokes_mixed_rheology` entries preserve the same source density
+for convection, viscosity, force, traction, slip, pressure and kinetic energy.
+The source-aware steady solve uses the original cell/rate cache and retains
+the exact accepted material owners; their dynamic viscosities also supply
+physical bulk heating. Source failure or changed density refuses publication,
+including when detected only during final endpoint assembly. Temperature and
+composition remain prescribed source context. Initial guesses are immutable
+and contribute no transient load. Existing material regressions now cover
+steady natural/backflow cases, retained responses, SI stress and heat, and
+the same endpoint from distinct initial guesses.
+
 ### Reservoir momentum through pressure openings
 
 `NavierStokesBoundary::OpenReservoir` supplies total traction and the velocity

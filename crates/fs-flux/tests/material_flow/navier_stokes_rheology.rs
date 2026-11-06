@@ -166,9 +166,11 @@ fn mixed_material_rheology_retains_endpoint_sources_and_coherent_pressure_inerti
     // gamma = sqrt(4*.2² + .3²) = .5. This synthetic source is shear thinning,
     // while temperature is retained source context, not an evolved field.
     let viscosity = |rate: f64| 1.2 / (1.0 + 0.8 * rate);
-    for (density, policy) in [
-        (2.0, OpenBoundaryPolicy::NaturalTraction),
-        (7.0, OpenBoundaryPolicy::DissipativeBackflow),
+    for (density, policy, steady) in [
+        (2.0, OpenBoundaryPolicy::NaturalTraction, false),
+        (7.0, OpenBoundaryPolicy::DissipativeBackflow, false),
+        (2.0, OpenBoundaryPolicy::NaturalTraction, true),
+        (7.0, OpenBoundaryPolicy::DissipativeBackflow, true),
     ] {
         let reference = transport(density, viscosity(0.0));
         let owner = MaterialFluxSystem::new(
@@ -180,11 +182,12 @@ fn mixed_material_rheology_retains_endpoint_sources_and_coherent_pressure_inerti
             },
         )
         .unwrap();
+        let inverse_dt = if steady { 0.0 } else { 1.0 / dt };
         let force = |p: [f64; 2]| {
             let u = target(p);
             [
-                density * (u[0] / dt + 0.04 * p[0] + 0.11) + 2.0,
-                density * (u[1] / dt + 0.04 * p[1] - 0.02) - 3.0,
+                density * (u[0] * inverse_dt + 0.04 * p[0] + 0.11) + 2.0,
+                density * (u[1] * inverse_dt + 0.04 * p[1] - 0.02) - 3.0,
             ]
         };
         let traction = |p: [f64; 2], n: [f64; 2]| {
@@ -225,30 +228,41 @@ fn mixed_material_rheology_retains_endpoint_sources_and_coherent_pressure_inerti
         let reads = Rc::new(Cell::new(0));
         let mut queries = 0;
         let mut last_query = vec![None; mesh.tris.len()];
-        let result = owner
-            .bdf1_navier_stokes_mixed_rheology_step(
+        let controls = NavierStokesControls {
+            relative_tolerance: 1e-10,
+            relaxation: 0.8,
+            ..NavierStokesControls::default()
+        };
+        let resolve = |point: MaterialFluxRheologyPoint, retained: &FluidTransportState| {
+            assert_eq!(retained, &reference);
+            queries += 1;
+            last_query[point.cell] = Some(point);
+            Ok(RheologyResponse {
+                transport: transport(density, viscosity(point.shear_rate_per_s)),
+                point,
+                temperature_k: 310.0,
+                reads: Rc::clone(&reads),
+            })
+        };
+        let result = if steady {
+            owner.solve_navier_stokes_mixed_rheology(
+                &force,
+                &boundaries,
+                &previous,
+                controls,
+                resolve,
+            )
+        } else {
+            owner.bdf1_navier_stokes_mixed_rheology_step(
                 &force,
                 &boundaries,
                 &previous,
                 dt,
-                NavierStokesControls {
-                    relative_tolerance: 1e-10,
-                    relaxation: 0.8,
-                    ..NavierStokesControls::default()
-                },
-                |point, retained| {
-                    assert_eq!(retained, &reference);
-                    queries += 1;
-                    last_query[point.cell] = Some(point);
-                    Ok(RheologyResponse {
-                        transport: transport(density, viscosity(point.shear_rate_per_s)),
-                        point,
-                        temperature_k: 310.0,
-                        reads: Rc::clone(&reads),
-                    })
-                },
+                controls,
+                resolve,
             )
-            .unwrap();
+        }
+        .unwrap();
         let step = &result.step;
         let (error, divergence) = system.velocity_error(&step.solution.discrete().x, &target);
         assert!(error < 3e-9 && divergence < 3e-9, "{error}, {divergence}");
@@ -360,15 +374,23 @@ fn mixed_material_rheology_retains_endpoint_sources_and_coherent_pressure_inerti
         );
         // Identical physical loads with the initial source viscosity cannot
         // reproduce the pressure-driven endpoint of the constitutive solve.
-        let frozen = owner
-            .bdf1_navier_stokes_mixed_step(
+        let frozen = if steady {
+            owner.solve_navier_stokes_mixed(
+                &force,
+                &boundaries,
+                &previous,
+                NavierStokesControls::default(),
+            )
+        } else {
+            owner.bdf1_navier_stokes_mixed_step(
                 &force,
                 &boundaries,
                 &previous,
                 dt,
                 NavierStokesControls::default(),
             )
-            .unwrap();
+        }
+        .unwrap();
         assert!(
             system
                 .velocity_error(&frozen.solution.discrete().x, &target)
@@ -500,5 +522,49 @@ fn mixed_material_rheology_preserves_endpoint_source_errors_and_history() {
         queries, 0,
         "invalid history/time must refuse before any source query"
     );
+    let result = owner.solve_navier_stokes_mixed_rheology(
+        &zero_force,
+        &boundaries,
+        &previous,
+        controls,
+        |point, _| {
+            if point.shear_rate_per_s > 1e-6 {
+                Err(refusal.clone())
+            } else {
+                Ok(reference)
+            }
+        },
+    );
+    assert!(matches!(result, Err(MaterialFluxError::Material(error)) if error == refusal));
+    let result = owner.solve_navier_stokes_mixed_rheology(
+        &zero_force,
+        &boundaries,
+        &previous,
+        controls,
+        |point, _| {
+            Ok(if point.shear_rate_per_s > 1e-6 {
+                transport(3.0, 1.0)
+            } else {
+                reference
+            })
+        },
+    );
+    assert!(matches!(result, Err(MaterialFluxError::Invalid(_))));
+    let invalid_guess = vec![f64::NAN; system.n_u];
+    let result = owner.solve_navier_stokes_mixed_rheology(
+        &zero_force,
+        &boundaries,
+        &invalid_guess,
+        controls,
+        |_, _| -> Result<FluidTransportState, MaterialError> {
+            panic!("invalid steady guess queried material source")
+        },
+    );
+    assert!(matches!(
+        result,
+        Err(MaterialFluxError::Boundary(
+            StokesBoundaryError::InvalidInput(_)
+        ))
+    ));
     assert!(previous.iter().all(|value| *value == 0.0));
 }

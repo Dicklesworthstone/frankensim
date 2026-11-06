@@ -76,7 +76,7 @@ pub struct MaterialNavierStokesStep {
     pub open_boundary_policies: Vec<(usize, OpenBoundaryPolicy)>,
 }
 
-/// Accepted pressure-driven transient and its exact endpoint material owners.
+/// Accepted pressure-driven flow and its exact endpoint material owners.
 pub struct MaterialNavierStokesRheologyStep<G> {
     /// Physical flow, convergence evidence and the declared open-boundary laws.
     /// The retained transport snapshot supplies the constant reference density;
@@ -96,6 +96,91 @@ impl<G> MaterialNavierStokesRheologyStep<G> {
 }
 
 impl<F: FluidTransport + ?Sized> MaterialFluxSystem<'_, '_, '_, F> {
+    /// Solve steady incompressible Navier–Stokes with physical force density
+    /// [N/m³], velocity [m/s] and total traction [Pa]. The initial velocity is
+    /// only a nonlinear guess: no timestep, history load or artificial inertia
+    /// enters the steady equations. The same retained source density scales
+    /// convection, dynamic viscosity, traction, pressure, slip and energy.
+    ///
+    /// Boundary callbacks must be pure. Steady rigid-mode anchoring, local
+    /// pressure datums and explicit open-boundary policies remain native.
+    /// Acceptance requires the independently reassembled endpoint equations
+    /// and the unrelaxed velocity correction to satisfy the supplied controls.
+    ///
+    /// # Errors
+    /// Preserves boundary, input, linear and nonlinear refusals. No partial
+    /// solution is returned and the caller's initial guess is never changed.
+    pub fn solve_navier_stokes_mixed(
+        &self,
+        force_density: &dyn Fn([f64; 2]) -> [f64; 2],
+        boundaries: &[MaterialNavierStokesBoundary<'_>],
+        initial_velocity: &[f64],
+        controls: NavierStokesControls,
+    ) -> Result<MaterialNavierStokesStep, MaterialFluxError> {
+        let density = self.transport.density_kg_m3();
+        let endpoint = with_kinematic_boundaries(density, boundaries, |native| {
+            self.system.solve_navier_stokes_mixed(
+                self.params,
+                &|point| {
+                    let force = force_density(point);
+                    [force[0] / density, force[1] / density]
+                },
+                native,
+                initial_velocity,
+                controls,
+            )
+        })
+        .map_err(MaterialFluxError::Boundary)?;
+        self.material_navier_stokes_step(endpoint)
+    }
+
+    /// Solve steady pressure-driven generalized-Newtonian flow using the
+    /// original material response at each candidate's actual cell strain.
+    /// Convection and viscosity converge together without a transient mass
+    /// term. The initial velocity supplies a guess, not fluid history.
+    ///
+    /// Each response must retain the reference density. Temperature and
+    /// composition captured by the resolver are prescribed fields; mechanical
+    /// pressure is not substituted into the source's thermodynamic state.
+    /// Repeated cell/rate queries use the shared cache, and the exact accepted
+    /// source owners are retained in the returned samples. Those viscosities
+    /// also supply physical bulk heating at the steady endpoint.
+    ///
+    /// # Errors
+    /// Preserves original material errors, changed-density refusal and native
+    /// steady anchoring/convergence failures. No fallback source is published.
+    pub fn solve_navier_stokes_mixed_rheology<G: FluidTransport>(
+        &self,
+        force_density: &dyn Fn([f64; 2]) -> [f64; 2],
+        boundaries: &[MaterialNavierStokesBoundary<'_>],
+        initial_velocity: &[f64],
+        controls: NavierStokesControls,
+        resolve: impl FnMut(MaterialFluxRheologyPoint, &FluidTransportState) -> Result<G, MaterialError>,
+    ) -> Result<MaterialNavierStokesRheologyStep<G>, MaterialFluxError> {
+        let density = self.transport.density_kg_m3();
+        let field = RheologyField::new(&self.system.mesh.centroids, &self.transport, resolve);
+        let result = with_kinematic_boundaries(density, boundaries, |native| {
+            self.system.solve_navier_stokes_mixed_rheology_checked(
+                self.params,
+                &|cell, _, rate| field.viscosity(cell, rate),
+                &|point| {
+                    let force = force_density(point);
+                    [force[0] / density, force[1] / density]
+                },
+                native,
+                initial_velocity,
+                controls,
+                &|| field.is_valid(),
+            )
+        })
+        .map_err(MaterialFluxError::Boundary);
+        let (endpoint, samples) = field.finish(result)?;
+        let step = self.material_navier_stokes_step_with_viscosity(endpoint, &|cell| {
+            samples[cell].transport().dynamic_viscosity_pa_s()
+        })?;
+        Ok(MaterialNavierStokesRheologyStep { step, samples })
+    }
+
     /// Advance fully implicit BDF1 Navier–Stokes with endpoint force density
     /// [N/m³], velocities [m/s] and physical total tractions [Pa]. The same
     /// retained material density scales inertia, convection, viscous stress,

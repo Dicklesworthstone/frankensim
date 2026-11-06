@@ -101,3 +101,86 @@ fn nonlinear_mixed_flow_keeps_shared_gas_density_and_viscous_traction_in_si() {
     }
     assert!(previous.iter().all(|value| *value == 0.0));
 }
+
+#[test]
+fn steady_material_flow_has_live_convection_and_no_initial_history_load() {
+    let mesh = TriMesh::from_mesh2(&Mesh2::triangles(1.0, 1.0, 2, 2));
+    let system = FluxSystem::new(&mesh);
+    let target = |point: [f64; 2]| [0.4 + 0.3 * point[1], 0.1];
+    // u.grad(u)=(0.03,0), gamma=0.3 and integral(|u|^2)/2=0.16.
+    for density in [2.0, 7.0] {
+        let mu = 0.5 * density;
+        let source = transport(density, mu);
+        let owner =
+            MaterialFluxSystem::new(&system, &source, MaterialFluxNumerics::default()).unwrap();
+        let force = |_: [f64; 2]| [0.03 * density + 2.0, -3.0];
+        let traction = |point: [f64; 2], normal: [f64; 2]| {
+            let pressure = 7.0 + 2.0 * point[0] - 3.0 * point[1];
+            [
+                -pressure * normal[0] + 0.3 * mu * normal[1],
+                0.3 * mu * normal[0] - pressure * normal[1],
+            ]
+        };
+        let boundaries: Vec<_> = mesh
+            .edges
+            .iter()
+            .enumerate()
+            .filter(|(edge, _)| mesh.is_boundary(*edge))
+            .map(|(edge, geometry)| {
+                if geometry.normal[0].abs() > 0.5 {
+                    MaterialNavierStokesBoundary::Open {
+                        edge,
+                        traction: &traction,
+                        backflow: OpenBoundaryPolicy::NaturalTraction,
+                    }
+                } else {
+                    MaterialNavierStokesBoundary::Velocity {
+                        edge,
+                        value: &target,
+                    }
+                }
+            })
+            .collect();
+        for initial_speed in [0.0, 0.2] {
+            let initial: Vec<_> = mesh
+                .edges
+                .iter()
+                .flat_map(|edge| [initial_speed * edge.normal[0], 0.0])
+                .collect();
+            let snapshot = initial.clone();
+            let result = owner
+                .solve_navier_stokes_mixed(
+                    &force,
+                    &boundaries,
+                    &initial,
+                    NavierStokesControls {
+                        relative_tolerance: 1e-10,
+                        ..NavierStokesControls::default()
+                    },
+                )
+                .unwrap();
+            let (error, divergence) = system.velocity_error(&result.solution.discrete().x, &target);
+            assert!(error < 3e-9 && divergence < 3e-9, "{error}, {divergence}");
+            assert!(result.nonlinear_residual <= 1e-10);
+            assert_eq!(result.solution.transport(), &source);
+            assert_eq!(
+                result.solution.pressure_reference(),
+                StokesPressureReference::TractionDatum
+            );
+            for (pressure, point) in result.solution.pressure_pa().iter().zip(&mesh.centroids) {
+                near(*pressure, 7.0 + 2.0 * point[0] - 3.0 * point[1], 4e-8);
+            }
+            near(
+                result.solution.kinetic_energy_j_per_m(),
+                0.16 * density,
+                3e-8,
+            );
+            near(
+                result.solution.viscous_dissipation().total_power_w_per_m(),
+                0.09 * mu,
+                3e-8,
+            );
+            assert_eq!(initial, snapshot);
+        }
+    }
+}
