@@ -319,6 +319,33 @@ impl PreparedVolumetricThermalTransport {
         self.check_temperature(temperature)?;
         Ok(self.on_segment(self.segment(temperature), temperature))
     }
+
+    /// Fused source values and the conductivity's one-sided temperature tangent.
+    /// Conductivity slopes use its original source intervals. Reconstructing
+    /// them on the union grid would amplify rounding when a capacity-only knot
+    /// lies very close to an original conductivity knot.
+    pub(super) fn conduction_values(
+        &self,
+        temperature: f64,
+    ) -> Result<([f64; 2], f64), ThermalTransportError> {
+        self.check_temperature(temperature)?;
+        let index = self.segment(temperature);
+        let source = &self.sources[1].knots;
+        let k_index = source
+            .partition_point(|(t, _)| *t <= temperature)
+            .min(source.len() - 1)
+            - 1;
+        let (a, ka) = &source[k_index];
+        let (b, kb) = &source[k_index + 1];
+        let difference = kb.evidence.value.value - ka.evidence.value.value;
+        let derivative = difference / (b - a);
+        if !derivative.is_finite() || (difference != 0.0 && derivative == 0.0) {
+            return Err(invalid(
+                "volumetric conductivity tangent is not representable",
+            ));
+        }
+        Ok((self.on_segment(index, temperature), derivative))
+    }
 }
 
 fn invalid(reason: &'static str) -> ThermalTransportError {

@@ -17,6 +17,10 @@ pub use prepared::{
 #[path = "volumetric/timeline.rs"]
 pub mod timeline;
 
+// Native implicit conduction on the same volumetric storage and source path.
+#[path = "volumetric/conduction.rs"]
+mod conduction;
+
 use super::{ThermalTransportError, admit_temperature_point, source_line, transport_values};
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_matdb::{ClaimSelection, MaterialAnswer, MaterialCard, PropertyKey, QueryPoint};

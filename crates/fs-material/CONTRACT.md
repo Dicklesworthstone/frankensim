@@ -1,5 +1,28 @@
 # fs-material — CONTRACT
 
+## Native implicit conduction from volumetric heat capacity
+
+`thermal::transport::volumetric::timeline::FixedVolumeThermalLaw` implements the
+existing `ConductivityLaw` and `ImplicitConductionLaw` directly. Its original
+source-integrated storage is `e = integral C_vol(T) dT / rho0`; the analytic
+tangents are `dT/de = rho0/C_vol` and `dk/de = (dk/dT)*rho0/C_vol`. Conductivity
+derivatives use original conductivity intervals, so a nearby capacity-only
+breakpoint cannot create a spurious slope. Knot derivatives are right-sided,
+except at the upper support endpoint. Runtime queries allocate and hash nothing.
+
+The native implicit chain, graph, SDIRK2 and adaptive owners retain time stepping,
+sources, signed pair heat, residual gates and cancellation. The same caloric
+object retains mass/volume admission, source receipts, datum and optional
+sensible entropy. `DeclaredSensibleStorage` remains distinct from Cp, Cv, stream
+enthalpy and phase-change storage. Fixed geometry and the explicitly selected
+scalar conduction direction remain required.
+
+`tests/volumetric_implicit.rs` covers analytic source tangents, independent
+nonlinear two-body heat balance on chain/graph owners, reference-mass/datum
+changes, crossed capacity knots, source boundaries, mass mismatch and
+cancellation. These are synthetic G0/G1/G3 model checks, not experimental
+material validation.
+
 ## Globally convex finite-compression bulk storage
 
 `hyper::Volumetric::SimoTaylor` explicitly selects
