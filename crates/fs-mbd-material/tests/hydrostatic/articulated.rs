@@ -1,4 +1,6 @@
 //! G0/G3 physical articulated buoyancy through the original dynamics owners.
+#[path = "articulated/finite.rs"]
+mod finite;
 use super::*;
 use fs_mbd::articulated::{
     BaseState, FreeFloatingBaseState, JointModel, forward_dynamics,

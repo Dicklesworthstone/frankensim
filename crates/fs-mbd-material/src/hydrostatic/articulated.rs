@@ -14,7 +14,11 @@ use crate::articulated::ResolvedArticulated;
 use crate::principal::PrincipalFrame;
 use fs_ga::{Se3, Twist, Wrench};
 use fs_material::fluid_transport::FluidTransport;
+use fs_mbd::RigidBodyState;
 use fs_mbd::articulated::{ArticulatedError, BaseState, forward_kinematics};
+
+mod finite;
+pub use finite::ArticulatedFiniteTankLoad;
 
 mod sealed {
     pub trait Prescribed {}
@@ -181,37 +185,17 @@ impl<'a> PreparedArticulatedHydrostatics<'a> {
         joint_position: &[f64],
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<ArticulatedHydrostaticLoad, ArticulatedHydrostaticError> {
-        poll(&mut cancelled)?;
-        let kinematics = forward_kinematics(
-            self.source.model(),
-            BaseState::stationary(world_from_base),
-            joint_position,
-            &vec![0.0; self.source.model().dof_count()],
-        )?;
-        poll(&mut cancelled)?;
+        let poses = self.link_poses(world_from_base, joint_position, &mut cancelled)?;
         let mut external_body_wrenches = Vec::with_capacity(self.frames.len());
         let mut link_loads = Vec::with_capacity(self.frames.len());
         let mut pressure_potential_j = 0.0;
-        for ((frame, mesh), pose) in self
-            .frames
-            .iter()
-            .zip(self.displacement)
-            .zip(&kinematics.world_from_link)
-        {
+        for ((frame, mesh), pose) in self.frames.iter().zip(self.displacement).zip(&poses) {
             poll(&mut cancelled)?;
             let state = frame
                 .state_from_kinematics(*pose, Twist::zero())
                 .map_err(HydrostaticError::from)?;
             let load = reservoir.load_frame(mesh, frame, state, &mut cancelled)?;
-            let rigid = load.wrench();
-            let force_principal = state
-                .pose()
-                .orientation()
-                .rotate_world_to_body(rigid.force_world);
-            let wrench = Wrench::new(ga(rigid.torque_body), ga(force_principal))
-                .transform_by(&frame.body_from_principal());
-            finite_vec(wrench.force)?;
-            finite_vec(wrench.torque)?;
+            let wrench = link_wrench(frame, state, load.wrench())?;
             pressure_potential_j = finite(pressure_potential_j + load.pressure_potential_j())?;
             external_body_wrenches.push(wrench);
             link_loads.push(load);
@@ -223,4 +207,38 @@ impl<'a> PreparedArticulatedHydrostatics<'a> {
             pressure_potential_j,
         })
     }
+
+    fn link_poses(
+        &self,
+        world_from_base: Se3,
+        joint_position: &[f64],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Vec<Se3>, ArticulatedHydrostaticError> {
+        poll(cancelled)?;
+        let kinematics = forward_kinematics(
+            self.source.model(),
+            BaseState::stationary(world_from_base),
+            joint_position,
+            &vec![0.0; self.source.model().dof_count()],
+        )?;
+        poll(cancelled)?;
+        Ok(kinematics.world_from_link)
+    }
+}
+
+/// Preserve the native authored-link origin as well as its axes.
+fn link_wrench(
+    frame: &PrincipalFrame,
+    state: RigidBodyState,
+    rigid: fs_mbd::Wrench,
+) -> Result<Wrench, HydrostaticError> {
+    let force_principal = state
+        .pose()
+        .orientation()
+        .rotate_world_to_body(rigid.force_world);
+    let wrench = Wrench::new(ga(rigid.torque_body), ga(force_principal))
+        .transform_by(&frame.body_from_principal());
+    finite_vec(wrench.force)?;
+    finite_vec(wrench.torque)?;
+    Ok(wrench)
 }

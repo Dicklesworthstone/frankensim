@@ -1920,3 +1920,34 @@ and displacement centroids, analytic submerged-hinge holding torque, partial
 immersion virtual work in all four prescribed media, linked-body rise/neutrality/
 sinking through free-floating dynamics, world-frame covariance, global budgets
 and transactional cancellation.
+
+## Articulated mechanisms in one conserved finite tank
+
+`PreparedArticulatedHydrostatics::load_finite_tank` and
+`load_finite_layered_tank` lower all link poses through native forward
+kinematics and evaluate the existing shared-body tank owner once. One cumulative
+inventory equation per liquid interface includes every link's displacement;
+moving one link therefore changes the buoyancy on other immersed links. Cached
+principal frames and the original coadjoint supply native authored-link
+wrenches about the correct link origins.
+
+`ArticulatedFiniteTankLoad` retains the original `FiniteTankBodiesLoad`:
+individual displaced mass moments accompany one common surface and one complete
+liquid gravitational-energy change. The liquid potential includes cross-link
+displacement terms and is counted once beside body energy. Body weight remains
+separate, supplied through the same tank gravity to native articulated dynamics.
+The prescribed-reservoir trait remains sealed against per-link finite-tank use.
+
+The native 64-body and global displacement-cell bounds apply. The stationary
+tank, disjoint envelopes, floor/wall clearance, overflow and immiscibility
+contracts are unchanged. All link states are prepared before the shared solve;
+cancellation or any native refusal publishes no partial load set. No new fluid
+inertia, contact law, sloshing model, material source or motion integrator is
+introduced.
+
+`tests/hydrostatic/articulated/finite.rs` adds physical regressions for analytic
+shared-waterline coupling between prismatic links, actual native holding forces,
+independent uniform/stratified liquid-energy integrals, hinge virtual work at
+moving interfaces, free-floating density ratios, and transactional refusal.
+Rustfmt parsed the changed Rust files. Native Cargo execution was unavailable
+during this extension; these added regressions are not a passing qualification.
