@@ -26,6 +26,8 @@
 //! Brennen, Cavitation and Bubble Dynamics, section 6.3,
 //! <https://media.library.caltech.edu/CaltechBOOK:1995.001/chap6.htm>.
 
+/// Declared finite-rate compression of original regional coexistence states.
+pub mod relaxation;
 /// Acoustic views of accepted regional heating and boiling states.
 pub mod thermal;
 

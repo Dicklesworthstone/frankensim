@@ -24,6 +24,32 @@ pub struct BulkRelaxationArm {
     pub relaxation_time_s: f64,
 }
 
+impl BulkRelaxationArm {
+    /// This arm's modulus increment in the `exp(-i omega t)` convention:
+    /// `delta_K * (-i omega tau)/(1 - i omega tau)`.
+    ///
+    /// The time is for relaxation at fixed compression, not fixed pressure.
+    /// This shared evaluation adds no equilibrium stiffness or material rate.
+    /// Publicly authored arms require finite positive strength/time; frequency
+    /// must be finite and nonnegative. Infinite `omega*tau` uses its exact limit.
+    pub fn response(&self, omega_rad_s: f64) -> Result<C64, MaterialError> {
+        if !positive(self.delta_bulk_modulus_pa) || !positive(self.relaxation_time_s) {
+            return Err(state_error(
+                "bulk relaxation arm requires finite positive strength and time",
+            ));
+        }
+        if !omega_rad_s.is_finite() || omega_rad_s < 0.0 {
+            return Err(state_error(
+                "bulk relaxation arm requires finite nonnegative frequency",
+            ));
+        }
+        // Reciprocal frequency retains the small real increment without
+        // subtracting nearly equal values and handles zero/overflowing omega*tau.
+        let (re, im) = debye((omega_rad_s * self.relaxation_time_s).recip());
+        Ok(C64::new(re, -im).scale(self.delta_bulk_modulus_pa))
+    }
+}
+
 /// The original molecular law expressed as equilibrium storage plus memory.
 #[derive(Clone, Debug, PartialEq)]
 pub struct BulkRelaxation {
@@ -182,11 +208,7 @@ impl BulkRelaxation {
         }
         let mut value = C64::from_re(self.equilibrium_bulk_modulus_pa);
         for arm in &self.arms {
-            // s/(s+1/tau), s=-i*omega. Using reciprocal frequency in the
-            // original Debye evaluator retains the small real increment and
-            // handles zero/infinite omega*tau without subtractive cancellation.
-            let (re, im) = debye((omega_rad_s * arm.relaxation_time_s).recip());
-            value = value + C64::new(re, -im).scale(arm.delta_bulk_modulus_pa);
+            value = value + arm.response(omega_rad_s)?;
         }
         if !positive(value.re) || !value.im.is_finite() || value.im > 0.0 {
             return Err(state_error("molecular bulk response is unrepresentable"));

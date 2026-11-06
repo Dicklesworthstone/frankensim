@@ -16804,3 +16804,38 @@ unstable or non-affine unexcited source directions. Source/API review and
 independent analytic calculations were performed. Native Rust compilation and
 execution remain unverified because the execution environment became
 unavailable.
+
+### Finite-rate density and compression response of regional water
+
+The source-retaining
+phase::water::acoustics::relaxation::RelaxingRegionalWater binds the original
+RegionalWaterState to its existing frozen and homogeneous-equilibrium acoustic
+responses. Its real density is exactly the thermal density. One declared
+positive fixed-compression relaxation time supplies a positive Maxwell arm
+with delta_K = K_frozen - K_equilibrium. The shared BulkRelaxationArm response
+also serves the original molecular bulk owner; no second Debye evaluator,
+new EOS query or source-property adjustment is introduced.
+
+With s=-i*omega, K=K_equilibrium+delta_K*s*tau/(1+s*tau). Compressibility,
+density susceptibility, forward wavenumber and pressure/velocity impedance
+all follow this same K and rho. The corresponding fixed-pressure compliance
+time is tau*K_frozen/K_equilibrium. The material evaluates DC explicitly,
+retains both endpoint owners and refuses unavailable coexistence tangents,
+invalid times/frequencies and nonpositive relaxation strength. Evaluation
+uses fixed-size scalar arithmetic without successful-path heap allocation.
+
+This is an explicitly selected single-time constitutive model. IF97 supplies
+the density and endpoint moduli, not the relaxation time or its validity band.
+The caller owns the rate data, small-amplitude coexistence range and common
+pressure/velocity homogenization. The model does not evolve phase-specific
+temperatures, vapor quality, bubble inertia, slip or noncondensable gas, and
+adds no molecular, wall or viscothermal loss. Source consistency defects stay
+with their original owners and do not become physical dissipation.
+
+Focused native validation compiled the exact changed source against genuine
+cached dependencies. All four new finite-rate response tests, ten existing
+water acoustic/thermal tests and three original molecular bulk-memory tests
+passed. The new tests check original low/high-pressure density and endpoints,
+complex-response and energy-flux coherence, independent native ramp histories
+with refinement, time/frequency scaling and input refusals. Rustfmt passed.
+This is a native source-module validation, not a whole-workspace Cargo/DSR pass.
