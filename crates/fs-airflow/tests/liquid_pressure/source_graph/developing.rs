@@ -71,6 +71,93 @@ fn hydraulic_controls() -> GraphSolveConfig {
 }
 
 #[test]
+fn turbulent_sections_follow_solved_flow_and_exchange_one_native_wall_heat() {
+    use fs_airflow::graph::thermal::transport::transient::material::convection::developing::DevelopingSectionEvaluation;
+    context(|cx| {
+        let card = card(false, 1.0);
+        let (law, caloric) = source_pair(&card);
+        let initial = section_fixture(&caloric, 400.0);
+        let graph = graph();
+        let inventory = bind_inventory(cx, &graph, &initial);
+        let laws = laws(1e6);
+        let owner = LiquidGraphSources::try_new(
+            cx, &law, &caloric, &initial,
+            SourceGraphBinding {
+                graph: &graph, inventory: &inventory, laws: &laws,
+                acceleration_m_s2: [0.0; 3],
+            }, caps(),
+        ).unwrap();
+        let mut bindings = sections();
+        for binding in &mut bindings {
+            binding.duct = DevelopingDuct::TurbulentCircular {
+                diameter: Length::new(diameter()),
+            };
+            binding.property_temperature = ConvectionPropertyTemperature::Reservoir;
+        }
+        // Independent corrected Gnielinski expression at the actual bulk
+        // Re=20000 and Pr=8, with a one-metre original heated passage.
+        let q = 20_000.0 * 0.002 * PIPE_AREA / (1000.0 * diameter());
+        let f = (1.8 * 20_000.0_f64.log10() - 1.5).powi(-2);
+        let nu_infinity = (f / 8.0) * 19_000.0 * 8.0
+            / (1.0 + 12.7 * (f / 8.0).sqrt() * (8.0_f64.powf(2.0 / 3.0) - 1.0));
+        let mean = |length: f64| nu_infinity * (1.0 + (diameter() / length).powf(2.0 / 3.0));
+        let total_conductance = core::f64::consts::PI * 0.5 * mean(1.0);
+        for sign in [-1.0, 1.0] {
+            let resolved = owner.resolve(cx, &initial, &[sign * q, sign * q, -sign * q]).unwrap();
+            let hydraulics = resolved.graph.solve(&[
+                FixedPressure { node: 0, pressure: Pressure::new(sign * A * 0.002 * q) },
+                FixedPressure { node: 1, pressure: Pressure::new(0.0) },
+            ], hydraulic_controls(), cx).unwrap();
+            near(hydraulics.branches[0].flow.value(), sign * q);
+            let heat = owner.evaluate_quasi_steady_developing_sections(
+                cx, &initial, &resolved.sources, &hydraulics, 0.25, &bindings, 2,
+            ).unwrap();
+            let samples = heat.convection.samples();
+            let expected = if sign > 0.0 {
+                [mean(0.5), 2.0 * mean(1.0) - mean(0.5)]
+            } else {
+                [2.0 * mean(1.0) - mean(0.5), mean(0.5)]
+            };
+            for (sample, nu) in samples.iter().zip(expected) {
+                assert!(matches!(sample.section, DevelopingSectionEvaluation::TurbulentCircular(_)));
+                assert_eq!(sample.section.downstream().card().id, CorrelationId::GnielinskiDeveloping);
+                near(sample.property_temperature_k, 300.0);
+                near(sample.section.nusselt(), nu);
+                near(sample.area_m2, area());
+                near(sample.conductance_w_k, area() * nu * 0.5 / diameter());
+                near(sample.heat_into_fluid_w, 100.0 * sample.conductance_w_k);
+            }
+            near(samples.iter().map(|s| s.conductance_w_k).sum(), total_conductance);
+            assert_eq!(samples[0].conductance_w_k > samples[1].conductance_w_k, sign > 0.0);
+            let mut links = BTreeMap::new();
+            let mut boundaries = BoundaryConductances::default();
+            heat.convection.apply_to(&mut links, &mut boundaries, || false).unwrap();
+            near(links[&9], samples[0].conductance_w_k);
+            near(boundaries.reservoir_w_k[&CellId(3)], samples[1].conductance_w_k);
+            let mut wrong = bindings;
+            wrong[0].property_temperature = ConvectionPropertyTemperature::FilmMean;
+            assert!(owner.evaluate_quasi_steady_developing_sections(
+                cx, &initial, &resolved.sources, &hydraulics, 0.25, &wrong, 2,
+            ).is_err());
+        }
+        // All inlet distances and the mean can be valid while an actual
+        // interval endpoint leaves turbulence. The original envelope refuses.
+        let average = [0.8 * q, 0.0, 0.8 * q];
+        let resolved = owner.resolve(cx, &initial, &average).unwrap();
+        let inertia = 1000.0 / PIPE_AREA;
+        let initial_rates = [0.4 * q, 0.0, 0.4 * q];
+        let drive = 0.8 * inertia * q / 0.1 + A * 0.002 * 0.8 * q;
+        let report = native_report(
+            cx, &resolved.graph, &inventory, initial_rates, [drive, 0.0, drive], average, 0.1,
+        );
+        assert!(owner.evaluate_developing_sections(
+            cx, &initial, &resolved.sources, &report, &bindings, 2,
+        ).is_err());
+        near(initial.temperature_k(CellId(2)).unwrap(), 300.0);
+    });
+}
+
+#[test]
 fn g1_g3_rectangular_native_sections_preserve_table_heat_and_reverse_the_entrance() {
     use fs_airflow::graph::thermal::transport::transient::material::convection::developing::DevelopingSectionEvaluation;
     use fs_convection::EvaluationSourceRegion;

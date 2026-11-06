@@ -4360,3 +4360,25 @@ cross-section property variation remains outside this held-property model.
 The tube tests include independent corrected-formula references, physical
 entrance subdivision, material query counts, native Robin lowering and closed
 finite-body heat exchange in both link orientations.
+
+## Turbulent entrance transfer on native coolant graphs
+
+`DevelopingDuct::TurbulentCircular` selects the corrected constant-property
+Gnielinski developing relation through the existing `GraphDevelopingSection`
+owner. Native pipe diameter, flow area, section length and full wetted-wall
+coverage must agree. The actual solved volume flow and the retained original
+bulk transport determine Re, Pr and conductivity; `Reservoir` property
+sampling is required by the explicit K=1 specialization.
+
+Forward and reverse flow use their respective authored physical entrance
+distances. Both endpoints and the interval-average native flow must remain
+inside the original correlation domain; an interval reversal crossing zero
+cannot hide behind an admissible average. Finite-wall links, prescribed
+reservoirs and source-integrated conducting wall layers reuse the same section
+evaluation, source/density admission and original thermal storage. Section
+conductances are applied once through the native link/boundary maps; diagnostic
+heat is not an extra source. Fixed-property partition additivity remains
+conditional on one isothermal passage and common bulk state. The
+`liquid_pressure/source_graph/developing` regression checks solved flow,
+upstream/downstream transfer, reversed entrance positions, bulk convention and
+the unsupported endpoint regime with independently evaluated formula values.

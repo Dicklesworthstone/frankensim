@@ -9,8 +9,9 @@ use super::*;
 use crate::graph::thermal::medium::convection::deposition::ConvectionSourceError;
 use fs_conduction::transient::deposition::backward_euler::BoundaryConductances;
 use fs_convection::developing::{
-    CircularDuctSection, RectangularDuctSection, evaluate_circular_duct_section,
-    evaluate_rectangular_duct_section,
+    CircularDuctSection, RectangularDuctSection, TurbulentCircularDuctSection,
+    evaluate_circular_duct_section, evaluate_rectangular_duct_section,
+    evaluate_turbulent_circular_duct_section,
 };
 use fs_convection::{CorrelationError, NusseltEvaluation, ThermalConductivity};
 use fs_material::fluid_transport::ThermalFluidTransportState;
@@ -34,6 +35,15 @@ pub enum DevelopingDuct {
         /// Physical inner diameter.
         diameter: Length,
     },
+    /// Smooth turbulent circular passage using the corrected Gnielinski
+    /// finite-heated-length relation. Bulk properties and K=1 are explicit:
+    /// select Reservoir, with no film substitution or wall-viscosity correction.
+    /// The original card must admit each positive entrance distance and the
+    /// full signed native flow envelope. Roughness, transition, secondary flow
+    /// and strong property variation require a different physical model.
+    TurbulentCircular {
+        diameter: Length,
+    },
     /// Simultaneously developing rectangular inlet, using the original
     /// Shah-London CWT table slice. Its aspect ratio must be 0.5 and the
     /// actual source Prandtl number must be 0.72; neither is adjusted to fit.
@@ -49,7 +59,7 @@ pub enum DevelopingDuct {
 impl DevelopingDuct {
     fn metrics(self) -> Result<DuctMetrics, GraphDevelopingConvectionError> {
         let (diameter, area, perimeter, aspect) = match self {
-            Self::Circular { diameter } => {
+            Self::Circular { diameter } | Self::TurbulentCircular { diameter } => {
                 let d = diameter.value();
                 (
                     d,
@@ -103,6 +113,8 @@ struct DuctMetrics {
 pub enum DevelopingSectionEvaluation {
     /// Circular Hausen mean and its conservative finite section.
     Circular(CircularDuctSection),
+    /// Corrected Gnielinski means and a section from their shared heated inlet.
+    TurbulentCircular(TurbulentCircularDuctSection),
     /// Original rectangular table means and their conservative finite section.
     Rectangular(RectangularDuctSection),
 }
@@ -112,6 +124,7 @@ impl DevelopingSectionEvaluation {
     pub fn nusselt(&self) -> f64 {
         match self {
             Self::Circular(s) => s.nusselt(),
+            Self::TurbulentCircular(s) => s.nusselt(),
             Self::Rectangular(s) => s.nusselt(),
         }
     }
@@ -119,6 +132,7 @@ impl DevelopingSectionEvaluation {
     pub fn upstream(&self) -> Option<&NusseltEvaluation> {
         match self {
             Self::Circular(s) => s.upstream(),
+            Self::TurbulentCircular(s) => s.upstream(),
             Self::Rectangular(s) => s.upstream(),
         }
     }
@@ -126,6 +140,7 @@ impl DevelopingSectionEvaluation {
     pub fn downstream(&self) -> &NusseltEvaluation {
         match self {
             Self::Circular(s) => s.downstream(),
+            Self::TurbulentCircular(s) => s.downstream(),
             Self::Rectangular(s) => s.downstream(),
         }
     }
@@ -133,6 +148,8 @@ impl DevelopingSectionEvaluation {
         let conductivity = ThermalConductivity::new(conductivity);
         match self {
             Self::Circular(s) => Ok(s.heat_transfer_coefficient(conductivity, diameter)?.value()),
+            Self::TurbulentCircular(s) => Ok(s
+                .heat_transfer_coefficient(conductivity, diameter)?.value.value()),
             Self::Rectangular(s) => Ok(s
                 .heat_transfer_coefficient(conductivity, diameter)?
                 .value
@@ -301,6 +318,13 @@ fn admit_sections<'a>(
     // Admit every whole-wall patch before calling any external material source.
     for binding in bindings {
         poll(cx).map_err(source)?;
+        if matches!(binding.duct, DevelopingDuct::TurbulentCircular { .. })
+            && binding.property_temperature != ConvectionPropertyTemperature::Reservoir
+        {
+            return Err(invalid(
+                "developing turbulent tubes require actual bulk properties with explicit K=1",
+            ));
+        }
         if !cells.insert(binding.fluid_cell) {
             return Err(invalid("a developing section must have one whole-wall convection owner"));
         }
@@ -411,6 +435,11 @@ fn evaluate_surface<M: ThermalFluidTransport>(
             return Err(invalid("positive developing distance cannot underflow to a new entrance"));
         }
         match g.duct.aspect {
+            None if matches!(binding.duct, DevelopingDuct::TurbulentCircular { .. }) => {
+                evaluate_turbulent_circular_duct_section(
+                    reynolds, transport.prandtl(), start_ratio, end_ratio,
+                ).map(DevelopingSectionEvaluation::TurbulentCircular)
+            }
             None => evaluate_circular_duct_section(
                 reynolds, transport.prandtl(), start_ratio, end_ratio,
             ).map(DevelopingSectionEvaluation::Circular),
