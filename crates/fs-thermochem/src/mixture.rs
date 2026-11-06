@@ -495,6 +495,70 @@ impl FrozenIdealGasMixtureModelV1 {
         .map(|(properties, _)| properties)
     }
 
+    /// Evaluate only frozen Cp/Cv in their molar and mass-specific bases.
+    ///
+    /// The original species Cp laws and canonical mixture reduction are the
+    /// same as [`Self::evaluate_properties`]. Successful calls allocate nothing
+    /// and evaluate no enthalpy, entropy, pressure or mixing logarithms. Ideal
+    /// frozen heat capacities are independent of pressure; no pressure input
+    /// or pressure-state admission is implied by this derivative-only query.
+    ///
+    /// # Errors
+    /// Refuses invalid/out-of-source temperatures, non-finite heat capacities,
+    /// or unrepresentable mass conversion. H/S/U/G and caloric reference
+    /// arithmetic are not evaluated. Positive Cp/Cv over a thermal path still
+    /// require the consuming solver's original caloric-stability admission.
+    pub fn evaluate_heat_capacities(
+        &self,
+        temperature: Temperature,
+    ) -> Result<FrozenIdealGasMixtureHeatCapacitiesV1, FrozenIdealGasMixtureErrorV1> {
+        let mut cp = 0.0;
+        let mut molar_mass = 0.0;
+        for (component, (model, &fraction)) in self
+            .components
+            .iter()
+            .zip(self.mole_composition.fractions())
+            .enumerate()
+        {
+            let capacity = model.evaluate_heat_capacity(temperature).map_err(|source| {
+                FrozenIdealGasMixtureErrorV1::ComponentEvaluation {
+                    component,
+                    species: model.species().clone(),
+                    source: Box::new(source),
+                }
+            })?;
+            cp += fraction * capacity.value();
+            molar_mass += fraction * model.molar_mass().value();
+        }
+        if !molar_mass.is_finite() || molar_mass <= 0.0 {
+            return Err(FrozenIdealGasMixtureErrorV1::InvalidMixtureMolarMass {
+                bits: molar_mass.to_bits(),
+            });
+        }
+        let cv = cp - UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K;
+        let mass_specific_cp = cp / molar_mass;
+        let mass_specific_cv = cv / molar_mass;
+        for (property, value) in [
+            (FrozenMixturePropertyV1::MolarCp, cp),
+            (FrozenMixturePropertyV1::MolarCv, cv),
+            (FrozenMixturePropertyV1::MassSpecificCp, mass_specific_cp),
+            (FrozenMixturePropertyV1::MassSpecificCv, mass_specific_cv),
+        ] {
+            if !value.is_finite() {
+                return Err(FrozenIdealGasMixtureErrorV1::NonFiniteEvaluation {
+                    property,
+                    bits: value.to_bits(),
+                });
+            }
+        }
+        Ok(FrozenIdealGasMixtureHeatCapacitiesV1 {
+            cp: MolarHeatCapacityV1::new(cp),
+            cv: MolarIsochoricHeatCapacityV1::new(cv),
+            mass_specific_cp: MassSpecificIsobaricHeatCapacityV1::new(mass_specific_cp),
+            mass_specific_cv: MassSpecificIsochoricHeatCapacityV1::new(mass_specific_cv),
+        })
+    }
+
     /// Evaluate frozen ideal-gas mixture properties at absolute `T` and `p`.
     ///
     /// Molar `cp`, `h`, and standard entropy are mole-fraction sums of species
@@ -676,6 +740,43 @@ impl FrozenIdealGasMixtureModelV1 {
             properties,
             receipt,
         })
+    }
+}
+
+/// Frozen ideal-gas heat capacities from the original temperature-dependent
+/// source laws. These local derivatives do not carry a full-state receipt or
+/// establish positive heat capacity over an interval.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FrozenIdealGasMixtureHeatCapacitiesV1 {
+    cp: MolarHeatCapacityV1,
+    cv: MolarIsochoricHeatCapacityV1,
+    mass_specific_cp: MassSpecificIsobaricHeatCapacityV1,
+    mass_specific_cv: MassSpecificIsochoricHeatCapacityV1,
+}
+
+impl FrozenIdealGasMixtureHeatCapacitiesV1 {
+    /// Frozen molar heat capacity at constant pressure.
+    #[must_use]
+    pub const fn cp(self) -> MolarHeatCapacityV1 {
+        self.cp
+    }
+
+    /// Frozen molar heat capacity at constant volume.
+    #[must_use]
+    pub const fn cv(self) -> MolarIsochoricHeatCapacityV1 {
+        self.cv
+    }
+
+    /// Frozen mass-specific heat capacity at constant pressure.
+    #[must_use]
+    pub const fn mass_specific_cp(self) -> MassSpecificIsobaricHeatCapacityV1 {
+        self.mass_specific_cp
+    }
+
+    /// Frozen mass-specific heat capacity at constant volume.
+    #[must_use]
+    pub const fn mass_specific_cv(self) -> MassSpecificIsochoricHeatCapacityV1 {
+        self.mass_specific_cv
     }
 }
 

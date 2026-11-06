@@ -57,6 +57,10 @@ fn g0_caloric_reconciliation_preserves_source_cp_and_the_declared_anchor() {
         let full = corrected.evaluate(Temperature::new(t)).unwrap();
         let p = full.properties();
         assert_eq!(p.cp().value().to_bits(), original.cp().value().to_bits());
+        assert_eq!(
+            corrected.evaluate_heat_capacity(Temperature::new(t)).unwrap().value().to_bits(),
+            original.cp().value().to_bits(),
+        );
         if t < 1000.0 {
             assert_eq!(p, original);
         }

@@ -1450,6 +1450,17 @@ semantics, exact absence and numerical underflow.
   composition bases, exact sums and `sum(x ln x)`, common conventions,
   evaluator/math/quantity versions, `T`, `p`, `p0`, mixture molar mass, and
   every nested species standard-state receipt.
+- `Nasa9StandardStateModelV1::evaluate_heat_capacity` and
+  `FrozenIdealGasMixtureModelV1::evaluate_heat_capacities` evaluate only the
+  original source Cp polynomial and frozen Cp/Cv mass/molar conversions. They
+  share the complete evaluator's operation tree, region selection and canonical
+  reduction, including at reconciled source seams, with no allocation or
+  logarithms. Their narrower admission checks temperature/source support and
+  finite requested capacities; it does not evaluate H/S/U/G, pressure, or
+  their reference arithmetic, and does not prove positive Cv over a path.
+  Complete accepted-state receipts and solver caloric-stability admission
+  remain separate. `tests/heat_capacity.rs` checks bitwise agreement, variable
+  capacities, both composition bases, source limits and arithmetic refusals.
 - `IdealGasEosV1` retains one positive finite caller-declared molar mass.
   `evaluate_pt` returns semantic wrappers for positive finite mass density,
   molar volume, the same canonical `MassSpecificGasConstantV1` used by frozen

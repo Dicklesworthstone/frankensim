@@ -812,6 +812,39 @@ impl Nasa9StandardStateModelV1 {
             .map(|(_, properties)| properties)
     }
 
+    /// Evaluate only the original source's molar Cp [J/(mol K)].
+    ///
+    /// This allocation-free derivative uses the same region selection and
+    /// polynomial operation tree as the complete evaluator, without evaluating
+    /// enthalpy, entropy, reference offsets or their logarithms. Caloric
+    /// reconciliation leaves Cp unchanged. Resolve complete accepted states
+    /// with [`Self::evaluate`] when their other properties and receipts are needed.
+    ///
+    /// # Errors
+    /// Refuses invalid/out-of-source temperatures and non-finite Cp. This
+    /// narrower query does not admit unrelated H/S/U/G arithmetic or establish
+    /// positive Cp/Cv over a thermal path; that remains a consumer obligation.
+    pub fn evaluate_heat_capacity(
+        &self,
+        temperature: Temperature,
+    ) -> Result<MolarHeatCapacityV1, ThermochemErrorV1> {
+        let t = temperature.value();
+        if !t.is_finite() || t <= 0.0 {
+            return Err(ThermochemErrorV1::InvalidEvaluationTemperature { bits: t.to_bits() });
+        }
+        let (_, region) = self
+            .region_for_temperature(t)
+            .ok_or(ThermochemErrorV1::TemperatureOutOfRange { bits: t.to_bits() })?;
+        let cp = source_heat_capacity(region, t);
+        if !cp.is_finite() {
+            return Err(ThermochemErrorV1::NonFiniteEvaluation {
+                property: Nasa9PropertyV1::HeatCapacity,
+                bits: cp.to_bits(),
+            });
+        }
+        Ok(MolarHeatCapacityV1::new(cp))
+    }
+
     /// Shared arithmetic for trial properties and receipt-bearing evaluations.
     ///
     /// The operation tree is the NASA/TP-2002-211556 nine-coefficient form.
@@ -852,8 +885,6 @@ impl Nasa9StandardStateModelV1 {
         // `t` is the coherent-SI kelvin scalar, so this is ln(T / 1 K).
         let ln_t = fs_math::det::ln(t);
 
-        let cp_over_r =
-            a0 * inverse_t2 + a1 * inverse_t + a2 + a3 * t + a4 * t2 + a5 * t3 + a6 * t4;
         let h_over_rt = -a0 * inverse_t2
             + a1 * ln_t * inverse_t
             + a2
@@ -870,7 +901,7 @@ impl Nasa9StandardStateModelV1 {
             + (a6 / 4.0) * t4
             + a8;
 
-        let cp = UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K * cp_over_r;
+        let cp = source_heat_capacity(region, t);
         let h = UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K * t * h_over_rt;
         let s = UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K * s_over_r;
         let rt = UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K * t;
@@ -957,6 +988,21 @@ impl Nasa9StandardStateModelV1 {
         }
         None
     }
+}
+
+// Shared source Cp operation tree. Inlining lets the complete evaluator reuse
+// its identical temperature powers; Cp-only callers perform no logarithms.
+#[inline]
+fn source_heat_capacity(region: &Nasa9RegionV1, t: f64) -> f64 {
+    let [a0, a1, a2, a3, a4, a5, a6, _, _] = region.coefficients;
+    let inverse_t = 1.0 / t;
+    let inverse_t2 = inverse_t * inverse_t;
+    let t2 = t * t;
+    let t3 = t2 * t;
+    let t4 = t2 * t2;
+    let cp_over_r =
+        a0 * inverse_t2 + a1 * inverse_t + a2 + a3 * t + a4 * t2 + a5 * t3 + a6 * t4;
+    UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K * cp_over_r
 }
 
 /// Typed standard-state molar properties from one evaluation.
@@ -1287,6 +1333,11 @@ mod tests {
             let full = species.evaluate(Temperature::new(t)).unwrap();
             let trial = species.evaluate_properties(Temperature::new(t)).unwrap();
             assert_eq!(bits(trial), bits(full.properties()), "T={t}");
+            assert_eq!(
+                species.evaluate_heat_capacity(Temperature::new(t)).unwrap().value().to_bits(),
+                trial.cp().value().to_bits(),
+                "Cp-only query at T={t}",
+            );
         }
         for t in [
             0.0,
@@ -1302,6 +1353,10 @@ mod tests {
                     .unwrap_err(),
                 species.evaluate(Temperature::new(t)).unwrap_err(),
             );
+            assert_eq!(
+                species.evaluate_heat_capacity(Temperature::new(t)).unwrap_err(),
+                species.evaluate(Temperature::new(t)).unwrap_err(),
+            );
         }
         let mut overflow = [0.0; 9];
         overflow[6] = f64::MAX;
@@ -1313,6 +1368,10 @@ mod tests {
             overflow_model
                 .evaluate(Temperature::new(300.0))
                 .unwrap_err(),
+        );
+        assert_eq!(
+            overflow_model.evaluate_heat_capacity(Temperature::new(300.0)).unwrap_err(),
+            overflow_model.evaluate(Temperature::new(300.0)).unwrap_err(),
         );
     }
 
@@ -1382,6 +1441,10 @@ mod tests {
             assert_close(
                 properties.cp().value() / UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K,
                 cp_over_r_weights[coefficient_index],
+            );
+            assert_eq!(
+                model.evaluate_heat_capacity(Temperature::new(temperature)).unwrap().value().to_bits(),
+                properties.cp().value().to_bits(),
             );
             assert_close(
                 properties.h().value() / (UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K * temperature),
