@@ -14,13 +14,16 @@
 //! gas-energy reconstruction only after convergence. A fresh physical recheck
 //! uses that reconstructed gas before either endpoint can be published.
 //!
-//! These are event-free, first-order intervals with fixed reference geometry,
+//! These are first-order intervals with native reference geometry,
 //! positive pure-liquid inventories, one volatile identity and caller-supplied
 //! film coefficients. The endpoint solve supplies algebraic acceptance; the
-//! adaptive window also controls local physical time error. Neither supplies
+//! adaptive window also controls local physical time error. The timeline clips
+//! those same intervals around native births, contacts and boundary changes.
+//! An empty interface roster advances original heat with unchanged gas; fully
+//! empty geometry advances through the native event owner. None supplies
 //! boiling, moving interfaces, dry-film onset or solid/liquid mixture advection.
-//! Process initial events first; interior events refuse and endpoint events
-//! remain pending.
+//! The endpoint and event-free adaptive APIs leave target events pending;
+//! the timeline API applies native events through the target inclusively.
 
 use std::collections::BTreeMap;
 
@@ -45,8 +48,13 @@ pub use solve::solve_deposition_with_gas;
 /// Physical time accuracy on a shared finite-gas/thermal event-free window.
 pub mod adaptive;
 
-/// One active native liquid cell, with explicit original sources and film data.
+/// Native births and exposure changes around the same adaptive coupled solve.
+pub mod timeline;
+
+/// One native liquid cell, with explicit original sources and film data.
 /// All selected cells share one volatile identity; caloric offsets may differ.
+/// Endpoint/event-free solves require active cells; the timeline also admits
+/// declared future births, whose physical source is checked at activation.
 #[derive(Clone, Copy)]
 pub struct ImplicitGasSurface<'a> {
     pub cell_id: CellId,

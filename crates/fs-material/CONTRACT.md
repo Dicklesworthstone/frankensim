@@ -11793,6 +11793,40 @@ propagate; only an admitted physical time-error estimate requests reduction.
 Events inside the requested window refuse upfront; exact-target events remain
 pending for the original timeline owner.
 
+An empty phase roster uses only the original thermal energy coordinates. Native
+nonlinear heat and contact transport still advance, while the complete gas state
+is preserved without a volatile identity, film or gas iteration. Original gas
+catalog identity, heat-source freshness, numerical work and cancellation gates
+remain. The endpoint still requires active heat geometry.
+
+The opt-in `implicit::timeline::advance_deposition_with_gas_timeline` carries the
+same adaptive coupled solve through native deposition births, contact/covering
+changes, separations and boundary changes. Comparisons stop exactly at each
+event. The original event owner applies same-time changes in authored order,
+including start and target events, with zero permitted heat substeps. Empty
+geometry advances directly to the next event or target; existing heat cells can
+advance before any selected liquid exists. Future selected births are admitted
+structurally, but their phase/caloric source is queried only after activation.
+Each phase interval uses its own original exposure and positive donor inventory.
+The canonical active roster is refreshed at event boundaries, not every trial.
+
+One comparison loop retains numerical, thermal-substep and conservation budgets
+across every event. Only accepted fine phase intervals enter transfer totals;
+birth mass and original-datum birth energy are reported separately, together
+with selected birth mass times its explicit gas/liquid enthalpy offset. Whole-
+window mass closure compares each final cell with its own initial or actual
+birth mass before reduction. Native event defects and accepted source-relative
+thermal/gas defects enter the same absolute energy allowance without subtracting
+large aggregate formation energies. A birth exactly at target is admitted but
+receives no earlier phase exchange. The last payload describes the preceding
+accepted fine endpoint; an all-empty/event-only advance has none. Source,
+topology, domain, budget or cancellation refusal discards the complete candidate.
+Callback-only source discontinuities require an authored event or explicit
+advance boundary, retaining their left-limit value on the preceding interval's
+endpoint. Native boundary events enforce this ordering directly. This adds
+scheduled integration, not boiling, dry-out, moving
+interfaces or a new phase constitutive law.
+
 ### Condensate onset and complete dry-out at a prescribed wall
 
 `evaporation::gas::wall_film` admits an explicitly fully wetting, locally planar

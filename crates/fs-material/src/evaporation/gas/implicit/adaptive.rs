@@ -2,11 +2,13 @@
 //!
 //! Only two conservative fine intervals are accepted. The coarse comparison
 //! and every rejected comparison spend the same numerical budgets but supply
-//! no physical account or final source payload. The complete window is event
-//! free; original events exactly at its target remain pending.
+//! no physical account or final source payload. The event-free and native
+//! deposition timeline APIs share this comparison, work and conservation owner.
 
 use super::super::chamber::Total;
+use super::timeline::{Birth, Roster};
 use super::*;
+use fs_thermal::enthalpy::EnergyAudit;
 use fs_thermal::enthalpy::conduction::implicit::adaptive::ConductionTimeOrder;
 use fs_thermal::enthalpy::evaporation::implicit::AdaptiveEvaporationControls;
 use fs_thermal::evaporation::SurfaceStep;
@@ -107,6 +109,16 @@ pub struct AdaptiveImplicitGasSurfaceTotals {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct AdaptiveImplicitGasReport {
+    /// Authored native events applied by the timeline; zero for an event-free window.
+    pub events: usize,
+    /// New native material, separate from internal liquid/gas phase exchange.
+    pub incoming_mass_kg: f64,
+    /// Birth energy in each cell's original thermal storage datum.
+    pub incoming_energy_j: f64,
+    /// Selected birth mass times its declared gas/liquid enthalpy offset.
+    /// Add to incoming_energy_j only when expressing birth energy in the gas
+    /// datum. The conservation gates retain source-relative increments instead.
+    pub liquid_datum_incoming_energy_j: f64,
     pub external_heat_j: f64,
     /// Signed sums of accepted source-relative owner defects, not differences
     /// of absolute formation-energy totals. Coarse/rejected work is excluded.
@@ -118,7 +130,8 @@ pub struct AdaptiveImplicitGasReport {
     pub gas_mass_residual_kg: f64,
     /// Same independent check using the actual volatile species inventory.
     pub vapor_mass_residual_kg: f64,
-    /// Sum of each selected liquid's actual mass change plus total-gas change.
+    /// Sum of native cell mass changes from their initial or actual birth
+    /// inventories, plus the total-gas change. Incoming births cancel per cell.
     pub mass_residual_kg: f64,
     pub maximum_carrier_mass_residual_kg: f64,
     /// Per fine interval: max(|native thermal account|, sum of selected local
@@ -142,6 +155,7 @@ pub struct AdaptiveImplicitGasReport {
     pub last_error: Option<ImplicitGasTimeError>,
     pub suggested_dt_s: f64,
     /// Last accepted fine endpoint, including its complete vapor corrections.
+    /// Timeline events at the target follow this endpoint and create no phase step.
     pub last_step: Option<ImplicitGasReport>,
 }
 
@@ -229,6 +243,7 @@ impl<'m, 'catalog, T> AdaptiveImplicitGasCandidate<'m, 'catalog, T> {
 /// Advance a positive, event-free window with joint h/T/liquid/species accuracy.
 /// Pending events strictly before target refuse before any source callback;
 /// events exactly at target remain pending. Every selected surface stays active.
+/// With an empty roster, existing heat cells advance and gas remains unchanged.
 ///
 /// Three original coupled solves form each comparison. Only its two fine
 /// intervals contribute mass, heat and payload. No extrapolated state or
@@ -248,6 +263,35 @@ pub fn advance_deposition_with_gas_adaptive<'m, 'catalog, T>(
     catalog: &'catalog ThermochemicalGasModel,
     target_s: f64,
     controls: AdaptiveImplicitGasControls,
+    resolve_heat: impl FnMut(
+        &DepositionSimulation<'m>,
+        &BTreeMap<CellId, LiquidSurfaceState>,
+        &ClosedGasParcel,
+    ) -> Result<BoundaryExchangeStepCoefficients<T>, ImplicitGasError>,
+    checkpoint: impl FnMut() -> Result<(), DepositionError>,
+) -> Result<AdaptiveImplicitGasCandidate<'m, 'catalog, T>, AdaptiveImplicitGasError> {
+    advance_window(
+        thermal,
+        surfaces,
+        gas,
+        catalog,
+        target_s,
+        controls,
+        false,
+        resolve_heat,
+        checkpoint,
+    )
+}
+
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+pub(super) fn advance_window<'m, 'catalog, T>(
+    thermal: &DepositionSimulation<'m>,
+    surfaces: &[ImplicitGasSurface<'_>],
+    gas: &ClosedGasParcel,
+    catalog: &'catalog ThermochemicalGasModel,
+    target_s: f64,
+    controls: AdaptiveImplicitGasControls,
+    scheduled: bool,
     mut resolve_heat: impl FnMut(
         &DepositionSimulation<'m>,
         &BTreeMap<CellId, LiquidSurfaceState>,
@@ -256,16 +300,17 @@ pub fn advance_deposition_with_gas_adaptive<'m, 'catalog, T>(
     mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
 ) -> Result<AdaptiveImplicitGasCandidate<'m, 'catalog, T>, AdaptiveImplicitGasError> {
     checkpoint()?;
-    if !target_s.is_finite() || target_s <= thermal.time_s() || surfaces.is_empty() {
+    if !target_s.is_finite() || target_s <= thermal.time_s() {
         return Err(AdaptiveImplicitGasError::Invalid(
-            "a positive window and active liquid surfaces are required",
+            "a finite positive window is required",
         ));
     }
     controls.validate(target_s - thermal.time_s())?;
-    if thermal
-        .pending_events()
-        .first()
-        .is_some_and(|event| event.time_s < target_s)
+    if !scheduled
+        && thermal
+            .pending_events()
+            .first()
+            .is_some_and(|event| event.time_s < target_s)
     {
         return Err(DepositionError::InvalidInput(
             "process pending events or split implicit step at the next event",
@@ -277,12 +322,26 @@ pub fn advance_deposition_with_gas_adaptive<'m, 'catalog, T>(
         if index % 256 == 0 {
             checkpoint()?;
         }
-        if !thermal.cells().contains_key(&surface.cell_id) || !ids.insert(surface.cell_id) {
+        if (!scheduled && !thermal.cells().contains_key(&surface.cell_id))
+            || !ids.insert(surface.cell_id)
+        {
             return Err(AdaptiveImplicitGasError::Invalid(
                 "unique active liquid cells required",
             ));
         }
     }
+    let roster = if scheduled {
+        Some(Roster::new(
+            thermal,
+            surfaces,
+            gas,
+            catalog,
+            controls.solve,
+            &mut checkpoint,
+        )?)
+    } else {
+        None
+    };
     let species_ids: BTreeSet<_> = catalog
         .thermodynamics()
         .components()
@@ -291,8 +350,14 @@ pub fn advance_deposition_with_gas_adaptive<'m, 'catalog, T>(
         .collect();
     let mut next_thermal = thermal.clone();
     let mut next_gas = gas.clone();
+    let mut active_surfaces = if let Some(roster) = &roster {
+        roster.active(&next_thermal, &mut checkpoint)?
+    } else {
+        Vec::new()
+    };
     let mut work = Work::default();
     let mut account = Account::default();
+    let mut births = BTreeMap::new();
     let mut accepted_intervals = 0usize;
     let mut comparisons = 0usize;
     let mut accepted_comparisons = 0usize;
@@ -305,8 +370,52 @@ pub fn advance_deposition_with_gas_adaptive<'m, 'catalog, T>(
     let mut last_payload = None;
     let mut span = controls.initial_dt_s.min(controls.maximum_dt_s);
     let order = ConductionTimeOrder::First;
-    while next_thermal.time_s() < target_s {
+    loop {
         checkpoint()?;
+        if let Some(roster) = &roster {
+            let now = next_thermal.time_s();
+            let event = next_thermal
+                .pending_events()
+                .first()
+                .map(|event| event.time_s);
+            let stop = if event == Some(now) {
+                Some(now)
+            } else if next_thermal.cells().is_empty() && now < target_s {
+                Some(event.map_or(target_s, |time| time.min(target_s)))
+            } else {
+                None
+            };
+            if let Some(stop) = stop {
+                // The native owner applies authored events and empty-geometry
+                // time only. Zero allowed substeps forbids a second heat solve.
+                let (advanced, incoming, audit) = roster.advance_events(
+                    &next_thermal,
+                    &next_gas,
+                    catalog,
+                    stop,
+                    controls.solve,
+                    &mut checkpoint,
+                )?;
+                account.add_events(&incoming, &audit, &mut checkpoint)?;
+                account.gate(controls)?;
+                for (id, birth) in incoming {
+                    if births.insert(id, birth).is_some() {
+                        return Err(DepositionError::InvalidInput(
+                            "duplicate native birth receipt",
+                        )
+                        .into());
+                    }
+                }
+                next_thermal = advanced;
+                active_surfaces = roster.active(&next_thermal, &mut checkpoint)?;
+                if next_thermal.cells().is_empty() && next_thermal.time_s() < target_s {
+                    continue;
+                }
+            }
+        }
+        if next_thermal.time_s() == target_s {
+            break;
+        }
         if thermal
             .work_budget()
             .max_substeps
@@ -319,8 +428,16 @@ pub fn advance_deposition_with_gas_adaptive<'m, 'catalog, T>(
             return Err(AdaptiveImplicitGasError::ComparisonBudget);
         }
         let start = next_thermal.time_s();
-        let end = if span >= target_s - start {
+        let stop = if scheduled {
+            next_thermal
+                .pending_events()
+                .first()
+                .map_or(target_s, |event| event.time_s.min(target_s))
+        } else {
             target_s
+        };
+        let end = if span >= stop - start {
+            stop
         } else {
             finite(start + span)?
         };
@@ -331,6 +448,11 @@ pub fn advance_deposition_with_gas_adaptive<'m, 'catalog, T>(
             ));
         }
         let dt = finite(end - start)?;
+        let surfaces = if scheduled {
+            active_surfaces.as_slice()
+        } else {
+            surfaces
+        };
         comparisons = add_count(comparisons, 1)?;
         let (coarse_thermal, coarse_gas, _, _, _) = solve_interval(
             &next_thermal,
@@ -444,9 +566,12 @@ pub fn advance_deposition_with_gas_adaptive<'m, 'catalog, T>(
         &next_thermal,
         gas,
         &next_gas,
-        &ids,
+        &births,
         &species_ids,
-        &surfaces[0].binding.species,
+        roster
+            .as_ref()
+            .and_then(Roster::species)
+            .or_else(|| surfaces.first().map(|surface| &surface.binding.species)),
         account.phase_mass.value()?,
         mass_tolerance(controls),
         &mut checkpoint,
@@ -459,6 +584,10 @@ pub fn advance_deposition_with_gas_adaptive<'m, 'catalog, T>(
         surface_totals.insert(id, sums.finish()?);
     }
     let report = AdaptiveImplicitGasReport {
+        events: account.events,
+        incoming_mass_kg: account.incoming_mass.value()?,
+        incoming_energy_j: account.incoming_energy.value()?,
+        liquid_datum_incoming_energy_j: account.incoming_offset.value()?,
         external_heat_j: account.external.value()?,
         thermal_energy_residual_j: account.thermal_energy.value()?,
         gas_energy_residual_j: account.gas_energy.value()?,
@@ -533,13 +662,15 @@ fn solve_interval<'m, 'catalog, T>(
     let gas_iterations = controls
         .maximum_gas_iterations
         .saturating_sub(work.gas_iterations);
-    if gas_iterations == 0 {
+    if gas_iterations == 0 && !surfaces.is_empty() {
         return Err(
             DepositionError::Budget("adaptive finite-gas whole-window gas iterations").into(),
         );
     }
-    solve.phase.gas.gas.maximum_iterations =
-        solve.phase.gas.gas.maximum_iterations.min(gas_iterations);
+    if !surfaces.is_empty() {
+        solve.phase.gas.gas.maximum_iterations =
+            solve.phase.gas.gas.maximum_iterations.min(gas_iterations);
+    }
     let next = solve_deposition_with_gas(
         thermal, surfaces, gas, catalog, target_s, solve, resolve, checkpoint,
     )?;
@@ -596,6 +727,10 @@ impl SurfaceTotals {
 
 #[derive(Default)]
 struct Account {
+    events: usize,
+    incoming_mass: Total,
+    incoming_energy: Total,
+    incoming_offset: Total,
     surfaces: BTreeMap<CellId, SurfaceTotals>,
     phase_mass: Total,
     external: Total,
@@ -607,6 +742,33 @@ struct Account {
     absolute_mass: Total,
 }
 impl Account {
+    fn add_events(
+        &mut self,
+        births: &BTreeMap<CellId, Birth>,
+        audit: &EnergyAudit,
+        checkpoint: &mut impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(), AdaptiveImplicitGasError> {
+        checkpoint()?;
+        if audit.substeps != 0 {
+            return Err(DepositionError::InvalidInput("event pass must not advance heat").into());
+        }
+        self.events = add_count(self.events, audit.events)?;
+        self.incoming_mass.add(audit.incoming_mass_kg)?;
+        self.incoming_energy.add(audit.incoming_energy_j)?;
+        self.external.add(audit.external_heat_j)?;
+        self.thermal_energy.add(audit.residual_j)?;
+        self.coupled_energy.add(audit.residual_j)?;
+        self.absolute_energy.add(audit.residual_j.abs())?;
+        for (index, birth) in births.values().enumerate() {
+            if index % 256 == 0 {
+                checkpoint()?;
+            }
+            self.incoming_offset
+                .add(finite(birth.mass_kg * birth.liquid_enthalpy_offset_j_kg)?)?;
+        }
+        Ok(())
+    }
+
     fn add(
         &mut self,
         part: &ImplicitGasReport,
@@ -769,22 +931,28 @@ fn final_mass_balance(
     final_thermal: &DepositionSimulation<'_>,
     initial_gas: &ClosedGasParcel,
     final_gas: &ClosedGasParcel,
-    selected: &BTreeSet<CellId>,
+    births: &BTreeMap<CellId, Birth>,
     species: &BTreeSet<SpeciesId>,
-    volatile: &SpeciesId,
+    volatile: Option<&SpeciesId>,
     transfer: f64,
     tolerance_kg: f64,
     checkpoint: &mut impl FnMut() -> Result<(), DepositionError>,
 ) -> Result<MassBalance, AdaptiveImplicitGasError> {
     let gas_change = finite(final_gas.mass_kg() - initial_gas.mass_kg())?;
     let mut coupled = Total::default();
-    for (index, id) in selected.iter().enumerate() {
+    for (index, (id, cell)) in final_thermal.cells().iter().enumerate() {
         if index % 256 == 0 {
             checkpoint()?;
         }
-        coupled.add(finite(
-            final_thermal.cells()[id].mass_kg - initial.cells()[id].mass_kg,
-        )?)?;
+        let initial_mass = initial
+            .cells()
+            .get(id)
+            .map(|cell| cell.mass_kg)
+            .or_else(|| births.get(id).map(|birth| birth.mass_kg))
+            .ok_or(DepositionError::InvalidInput(
+                "missing native cell mass baseline",
+            ))?;
+        coupled.add(finite(cell.mass_kg - initial_mass)?)?;
     }
     coupled.add(gas_change)?;
     let old = initial_gas.species_inventory_kg()?;
@@ -794,7 +962,7 @@ fn final_mass_balance(
         if index % 256 == 0 {
             checkpoint()?;
         }
-        if id != volatile {
+        if Some(id) != volatile {
             carrier = carrier.max(
                 finite(next.get(id).copied().unwrap_or(0.0) - old.get(id).copied().unwrap_or(0.0))?
                     .abs(),
@@ -803,12 +971,16 @@ fn final_mass_balance(
     }
     let mass = MassBalance {
         gas: finite(gas_change - transfer)?,
-        vapor: finite(
+        vapor: if let Some(volatile) = volatile {
             finite(
-                next.get(volatile).copied().unwrap_or(0.0)
-                    - old.get(volatile).copied().unwrap_or(0.0),
-            )? - transfer,
-        )?,
+                finite(
+                    next.get(volatile).copied().unwrap_or(0.0)
+                        - old.get(volatile).copied().unwrap_or(0.0),
+                )? - transfer,
+            )?
+        } else {
+            finite(-transfer)?
+        },
         coupled: coupled.value()?,
         carrier,
     };
