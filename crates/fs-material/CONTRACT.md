@@ -17533,8 +17533,8 @@ texture evolution, necking, fracture, fatigue or forming-limit predictions.
 
 `liquid::solution::multicomponent::MulticomponentLiquidSolutionLaw` binds the
 original N-component regular-solution owner to one pinned liquid-property
-bundle. Explicit species bindings carry molar masses and N-1 distinct typed
-mole-fraction axes; the remaining species is declared dependent. Sorting keeps
+bundle. Explicit species bindings carry molar masses and N or N-1 distinct typed
+mole-fraction axes; any dependent species is explicitly declared. Sorting keeps
 each species, mass and source coordinate together. Inventory inputs and all
 returned arrays use the thermodynamic owner's canonical species order.
 
@@ -17548,16 +17548,44 @@ and simplex curvature; negative curvature does not trigger an implicit flash.
 Positive traces lost in normalization or inaccurately represented by the
 dependent source coordinate refuse. An absent dependent component requires
 exactly zero chart remainder; a positive component requires relative agreement
-within 64 machine epsilons. An abundant dependent component avoids subtractive
-loss of trace fractions. Source failures and cancellation publish no partial cell.
+within 64 machine epsilons. N explicit coordinates avoid subtractive loss when
+no species remains abundant across all physical phases. Every explicit source
+coordinate is refreshed from the retained composition, including positive
+traces. Source failures and cancellation publish no partial cell.
 
 The caller qualifies pair parameters, ordered chemistry and mixture-property
-data. There is no pure-fluid averaging, inferred expansion, N-component phase
-equilibrium, spatial evolution or excess-enthalpy/Cp consistency claim. G0/G1/
+data. The homogeneous evaluation performs no phase search and introduces no
+pure-fluid averaging, inferred expansion, spatial evolution or
+excess-enthalpy/Cp consistency claim. G0/G1/
 G3/G4 fixtures in `tests/liquid_multicomponent.rs` exercise authored ternary
 surfaces, independent component/mass/volume accounts, exact equal-diffusivity
 fluxes, unstable homogeneous compositions, source/species permutation, traces,
 typed-coordinate refusal and atomic source/cancellation failures.
+
+## Source-resolved multicomponent equilibrium phases
+
+`liquid::solution::multicomponent::equilibrium` resolves every positive phase
+of an accepted `MulticomponentEquilibriumCandidateV1` through the original
+`MulticomponentLiquidSolutionLaw`. Complete model equality, common temperature,
+original feed and phase inventories, accepted phase compositions and species/
+mass conservation are checked with relative floating-point bounds and exact
+absences. Each phase retains its own source-resolved density, viscosity, heat
+capacity, conductivity, mass, volume and component inventory. Only extensive
+mass and actual phase volumes are aggregated; effective transport properties
+and morphology are not inferred.
+
+The original seeded local candidate and its numerical report are retained.
+Material resolution performs no additional phase search and provides no global
+Gibbs-minimum or phase-count certificate. Source support is required at the
+actual phases rather than a hypothetical homogeneous feed. Any phase source,
+domain, trace-coordinate or cancellation failure rejects the whole unpublished
+result. Complete explicit composition charts permit trace-sensitive source
+evaluation across strongly separated phases without subtractive reconstruction.
+
+Focused integration tests check distinct phase properties, finite-feed scaling,
+one-phase parity and closed supports, original-owner and source refusals,
+dependent-coordinate trace refusal, an all-explicit trace-sensitive source,
+and cancellation at every observed polling boundary.
 
 ### Full three-dimensional piezoelectric thermal storage
 

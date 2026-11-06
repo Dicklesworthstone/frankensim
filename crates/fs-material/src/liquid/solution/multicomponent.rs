@@ -1,13 +1,17 @@
 //! Homogeneous multicomponent liquids with their original material sources.
 //!
-//! A species-bound source chart uses N-1 explicit mole-fraction coordinates.
-//! The remaining species is declared, never inferred from a material label.
+//! A species-bound source chart uses N or N-1 explicit mole-fraction coordinates.
+//! Any dependent species is declared, never inferred from a material label.
+//! All-explicit charts preserve traces without subtracting from the carrier.
 //! The same homogeneous composition supplies regular-solution thermodynamics
 //! and every pinned transport claim, including in a spinodal region. This is
 //! not a multicomponent flash, a mixing rule for pure-fluid properties, or a
 //! caloric closure. Pressure and all other source coordinates remain fixed.
 
 use std::sync::Arc;
+
+/// Original material properties resolved separately for accepted liquid phases.
+pub mod equilibrium;
 
 use crate::MaterialError;
 use crate::fluid_transport::{
@@ -25,7 +29,8 @@ use fs_thermochem::solution::multicomponent::{
 };
 
 /// Explicit chemical identity, mass conversion and source-coordinate role.
-/// Exactly one component has no axis and is the dependent mole fraction.
+/// At most one component has no axis and is the dependent mole fraction.
+/// All N axes may instead be explicit, retaining trace source coordinates.
 #[derive(Clone, Debug, PartialEq)]
 pub struct MulticomponentLiquidComponent {
     pub species: SpeciesId,
@@ -66,7 +71,7 @@ struct SourceOwner {
     components: Box<[MulticomponentLiquidComponent]>,
     reference: ResolvedLiquidState,
     temperature_axis: String,
-    dependent_component: usize,
+    dependent_component: Option<usize>,
 }
 
 /// Original mixture sources and a species-bound homogeneous free-energy law.
@@ -75,15 +80,16 @@ struct SourceOwner {
 /// coordinate names. Inventory inputs subsequently use `species()` order.
 /// Chemical qualification of the mixture card and its pair coefficients is
 /// the caller's responsibility; a label or matching dimensions cannot supply it.
-/// Prefer an abundant dependent component: its fraction must be recoverable
-/// from the independent source coordinates within bounded relative precision.
+/// With N-1 axes, prefer an abundant dependent component: its fraction must be
+/// recoverable within bounded relative precision. Use N explicit coordinates
+/// when no component stays abundant across all physical phases.
 pub struct MulticomponentLiquidSolutionLaw<'card> {
     card: &'card MaterialCard,
     point: QueryPoint,
     owner: Arc<SourceOwner>,
 }
 impl<'card> MulticomponentLiquidSolutionLaw<'card> {
-    /// Bind one original liquid-property bundle and N-1 distinct, explicitly
+    /// Bind one original liquid-property bundle and N or N-1 distinct, explicitly
     /// typed mole-fraction axes. All species must occur exactly once. The
     /// initial source composition and temperature must be in the law's domain.
     pub fn try_new(
@@ -121,7 +127,7 @@ impl<'card> MulticomponentLiquidSolutionLaw<'card> {
             let Some(axis) = &component.mole_fraction_axis else {
                 if dependent.replace(i).is_some() {
                     return Err(MulticomponentLiquidError::Invalid(
-                        "exactly one dependent mole-fraction component is required",
+                        "at most one dependent mole-fraction component is permitted",
                     ));
                 }
                 continue;
@@ -142,9 +148,6 @@ impl<'card> MulticomponentLiquidSolutionLaw<'card> {
             }
             fractions[i] = point.axes()[axis];
         }
-        let dependent = dependent.ok_or(MulticomponentLiquidError::Invalid(
-            "exactly one dependent mole-fraction component is required",
-        ))?;
         if point.axis_quantities().iter().any(|(axis, quantity)| {
             *quantity == mole_fraction
                 && !components
@@ -155,14 +158,16 @@ impl<'card> MulticomponentLiquidSolutionLaw<'card> {
                 "every mole-fraction source coordinate must name an independent component",
             ));
         }
-        let independent_sum =
-            sum_nonnegative(fractions.iter().copied(), "reference mole-fraction sum")?;
-        if independent_sum > 1.0 {
-            return Err(MulticomponentLiquidError::Invalid(
-                "reference mole fractions exceed the composition simplex",
-            ));
+        if let Some(dependent) = dependent {
+            let independent_sum =
+                sum_nonnegative(fractions.iter().copied(), "reference mole-fraction sum")?;
+            if independent_sum > 1.0 {
+                return Err(MulticomponentLiquidError::Invalid(
+                    "reference mole fractions exceed the composition simplex",
+                ));
+            }
+            fractions[dependent] = 1.0 - independent_sum;
         }
-        fractions[dependent] = 1.0 - independent_sum;
         thermodynamics.evaluate(
             Temperature::new(point.axes()[temperature_axis]),
             &fractions,
@@ -234,27 +239,29 @@ impl<'card> MulticomponentLiquidSolutionLaw<'card> {
                 })?;
             }
         }
-        let source_remainder = 1.0
-            - sum_nonnegative(
-                fractions
-                    .iter()
-                    .enumerate()
-                    .filter(|(i, _)| *i != self.owner.dependent_component)
-                    .map(|(_, &x)| x),
-                "source mole-fraction sum",
-            )?;
-        let dependent_fraction = fractions[self.owner.dependent_component];
-        let source_matches = if dependent_fraction == 0.0 {
-            source_remainder == 0.0
-        } else {
-            source_remainder > 0.0
-                && (source_remainder - dependent_fraction).abs()
-                    <= 64.0 * f64::EPSILON * dependent_fraction
-        };
-        if !source_matches {
-            return Err(MulticomponentLiquidError::Arithmetic(
-                "dependent component is not accurately representable in the source composition chart",
-            ));
+        if let Some(dependent) = self.owner.dependent_component {
+            let source_remainder = 1.0
+                - sum_nonnegative(
+                    fractions
+                        .iter()
+                        .enumerate()
+                        .filter(|(i, _)| *i != dependent)
+                        .map(|(_, &x)| x),
+                    "source mole-fraction sum",
+                )?;
+            let dependent_fraction = fractions[dependent];
+            let source_matches = if dependent_fraction == 0.0 {
+                source_remainder == 0.0
+            } else {
+                source_remainder > 0.0
+                    && (source_remainder - dependent_fraction).abs()
+                        <= 64.0 * f64::EPSILON * dependent_fraction
+            };
+            if !source_matches {
+                return Err(MulticomponentLiquidError::Arithmetic(
+                    "dependent component is not accurately representable in the source composition chart",
+                ));
+            }
         }
         poll(&mut cancelled)?;
         let liquid = self.owner.reference.at_query_point(self.card, &point)?;
