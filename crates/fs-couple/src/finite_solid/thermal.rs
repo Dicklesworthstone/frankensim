@@ -25,6 +25,9 @@ pub mod visco;
 /// Source-backed natural strain in native conservative TET10 motion.
 pub mod conservative;
 
+/// Same-source finite thermoelastic capacity and entropy-constrained waves.
+pub mod thermodynamics;
+
 use super::{FiniteSolidError, FiniteSolidMaterial};
 use fs_blake3::ContentHash;
 use fs_matdb::{MaterialCard, PropertyKey, QueryPoint};

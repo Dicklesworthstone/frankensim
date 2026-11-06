@@ -1,6 +1,7 @@
 //! Directional finite expansion, original-mass mechanics and derivative oracles.
 mod conservative;
 mod plane;
+mod thermodynamics;
 mod visco;
 
 use super::*;
