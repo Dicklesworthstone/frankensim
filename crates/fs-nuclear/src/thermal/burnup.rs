@@ -45,7 +45,7 @@ pub struct BurnupCellSource {
 pub type BurnupHeating = NuclearHeating<BurnupCellSource>;
 
 impl BurnupCellSource {
-    fn worth(
+    pub(super) fn worth(
         &self,
         budget: BurnupHeatingBudget,
         checkpoint: &mut dyn FnMut() -> Result<(), FissionError>,

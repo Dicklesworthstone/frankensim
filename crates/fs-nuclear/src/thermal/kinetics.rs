@@ -268,14 +268,14 @@ impl<S: FluxDrivenHeatSource> NuclearHeatSource for KineticCellSource<S> {
             budget,
             &mut || Ok(()),
         )?;
-        self.irradiation
-            .trial_flux(
-                &flux,
-                0.0,
-                temperature_k,
-                budget.irradiation,
-                &mut || Ok(()),
-            )?;
+        self.irradiation.trial_flux_at(
+            time_s,
+            &flux,
+            0.0,
+            temperature_k,
+            budget.irradiation,
+            &mut || Ok(()),
+        )?;
         Ok(())
     }
     fn validate_temperature(&self, temperature_k: f64) -> Result<(), FissionThermalError> {
@@ -329,7 +329,8 @@ impl<S: FluxDrivenHeatSource> NuclearHeatSource for KineticCellSource<S> {
             return Err(KineticsError::Budget("mean flux integral conversion").into());
         }
         let flux = self.mean_flux(time_s, mean, budget, checkpoint)?;
-        let (irradiation, reaction_report) = self.irradiation.trial_flux(
+        let (irradiation, reaction_report) = self.irradiation.trial_flux_at(
+            time_s,
             &flux,
             duration_s,
             temperature_k,

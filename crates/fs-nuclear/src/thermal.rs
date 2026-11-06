@@ -33,6 +33,8 @@ pub use irradiation::{
 };
 mod burnup;
 pub use burnup::{BurnupCellSource, BurnupHeating, BurnupHeatingBudget};
+mod burnup_production;
+pub use burnup_production::{BurnupProductionCellSource, BurnupProductionHeating};
 
 mod production;
 pub use production::{DecayProductionCellSource, DecayProductionHeating};

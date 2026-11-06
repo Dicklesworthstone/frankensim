@@ -94,6 +94,26 @@ pub trait FluxDrivenHeatSource: NuclearHeatSource {
         budget: Self::Budget,
         checkpoint: &mut dyn FnMut() -> Result<(), FissionError>,
     ) -> Result<(Self, Self::Step), FissionThermalError>;
+    /// Advance on the shared absolute clock when another source history, such
+    /// as supplied nuclides, must be selected independently of neutron flux.
+    /// Existing flux-only laws reuse their original trial unchanged. Coupling
+    /// owners use this timed form so scheduled sources never guess a start time.
+    fn trial_flux_at(
+        &self,
+        time_s: f64,
+        flux: &GroupFlux,
+        duration_s: f64,
+        temperature_k: f64,
+        budget: Self::Budget,
+        checkpoint: &mut dyn FnMut() -> Result<(), FissionError>,
+    ) -> Result<(Self, Self::Step), FissionThermalError> {
+        if !time_s.is_finite() || time_s < 0.0 {
+            return Err(FissionThermalError::Invalid(
+                "invalid absolute flux-trial time",
+            ));
+        }
+        self.trial_flux(flux, duration_s, temperature_k, budget, checkpoint)
+    }
     /// Caller-supplied composition worth at the beginning of the interval.
     /// The parent-only model has no inferred composition-to-reactivity law.
     fn composition_reactivity(

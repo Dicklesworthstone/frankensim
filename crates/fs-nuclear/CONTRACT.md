@@ -1033,3 +1033,46 @@ products and decay heat, cyclic/self-return counts, partition/restart/cache
 reuse, temperature-dependent channel changes, model/schedule/work binding,
 atomic budget/grid/cancellation refusal and finite integrated supplies despite
 unrepresentable sums of instantaneous rates.
+
+## Scheduled production coupled to heat and neutron kinetics
+
+`thermal::BurnupProductionCellSource` binds the original `BurnupCellSource`
+to an exact-model-bound `BurnupProductionSchedule`.
+`BurnupProductionHeating` uses the existing `NuclearHeating` transaction,
+material binding, inventory cache and event-energy accounts. Each accepted
+interval integrates continuous supply and subsequent decay, capture and fission
+together. The next source boundary is the earlier of the neutron-flux and
+production transitions. Either history may stop independently; inventories
+continue their admitted reactions and radioactive daughters continue releasing
+their own decay energy.
+
+The source also implements the existing `FluxDrivenHeatSource` interface.
+Its backward-compatible `trial_flux_at` hook carries absolute start time from
+the neutron-kinetics owner, including initial admission and each reaction trial.
+Existing flux-only sources keep their original behavior through the default
+implementation. Scheduled production selects rates at the actual start time;
+an untimed trial with a changing production history, or a timed trial crossing
+its next production change, is refused. Constant production remains usable
+through the original untimed hook.
+
+The wrapper retains the original caller-supplied composition-worth law and
+checks its applicability on both the accepted and proposed inventories before
+publishing heat or history. Source-count reduction error is charged in addition
+to the original reaction ledger. Failed work, domain, budget and cancellation
+checks preserve accepted state. Incoming nuclei do not imply incoming enthalpy
+or a change of thermal cell mass; deposited reaction energy and explicit
+boundary heat retain their existing separate accounts.
+
+Neutron-driven use retains the original mean-flux approximation and frozen
+temperature during an interval. Exact integration of continuous supply under
+that admitted operator does not make the changing-rate coupled problem exact;
+flux, composition and thermal feedback still require timestep refinement.
+
+Five focused thermal regressions cover analytic competing-reaction heat,
+independent production/flux changes and shutdown tails, scheduled production
+under neutron kinetics with nonzero composition feedback, restart/cache reuse,
+and atomic model/work/domain/callback refusals. The final actual-root native
+nuclear run with thermal enabled passed all 160 tests, including the eight new
+physical production tests. The separate numerical decay/reaction gate passed
+44 tests. These manufactured checks do not substitute for the unavailable full
+workspace Cargo gate or empirical evaluated-data validation.

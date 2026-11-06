@@ -15,6 +15,9 @@ mod kinetics_tests;
 #[path = "burnup/tests.rs"]
 mod burnup_tests;
 
+#[path = "burnup_production/tests.rs"]
+mod burnup_production_tests;
+
 #[path = "temperature_tests.rs"]
 mod temperature_tests;
 
