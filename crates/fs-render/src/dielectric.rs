@@ -19,6 +19,9 @@ pub use coating::{
 mod anisotropic;
 pub use anisotropic::AnisotropicDielectricRoughness;
 
+mod slab;
+pub use slab::{IncoherentSlabResponse, SlabPowerBalance};
+
 #[cfg(feature = "material-state")]
 mod water;
 #[cfg(feature = "material-state")]

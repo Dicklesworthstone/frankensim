@@ -2122,6 +2122,35 @@ Controls cover transparent-cell exclusion, original interior spectral knots,
 probability/PDF normalization, infrared and extreme-ratio support, unchanged
 LTE transport, and the uniform-opacity compatibility path.
 
+## Finite-thickness glass opacity and transmission measurements
+
+`DielectricGlass::incoherent_slab_response` combines the original spectral
+index and absorption laws with normal thickness, refracted path length and
+every internal reflection between smooth parallel faces. The exterior medium
+must be the same on both sides. It sums s and p power independently before
+averaging unpolarized response. Reflection, transmission and true bulk
+absorption remain separate; direct absorption evaluation retains weak heating
+even when transmission rounds to its clear limit.
+
+`BeerLambertAbsorption` can import spectral internal transmission at a known
+path length, or normal-incidence external slab transmission under that same
+uncoated incoherent model. The latter accounts for both surface reflections
+and all internal-bounce orders when recovering the native intensity absorption
+law. External reflection must not be relabeled as bulk heat. Original
+wavelength support remains bounded and alpha interpolates linearly; zero
+transmission is a measurement limit rather than an infinite inferred
+coefficient. Impossible above-clear values refuse. The calculation adds no
+measurement or uncertainty authority.
+
+Controls compare independent bounce sums, power closure, polarization,
+thickness scaling, weak/opaque limits and inverse measurements propagated
+through the original Beer law at new thicknesses and angles. This retains the
+native real-index, weak-absorption interface approximation: no coherent
+thin-film interference, strongly absorbing complex-index faces, rough faces,
+scattering, coatings, lateral exit location or traversal delay. See
+[SCHOTT TIE-35, section 1](https://media.schott.com/api/public/content/110b56518128431b9f3134627d7f4c4e?v=012d3e7e)
+for the distinction between internal and external transmittance.
+
 ## High-index transparent dielectric transport
 
 Explicit finite-band Sellmeier and tabulated phase laws admit ordinary real
