@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::curle3d::quadrupole::recorded::RecordedQuadrupoleSpectrum;
-use fs_fft::welch::WelchCrossSpectrum;
+use fs_fft::welch::{WelchCrossSpectrum, WelchPeakBin};
 
 impl PreparedFullWaveQuadrupoleObserver {
     /// Propagate one recorded interior Welch bin without losing cell coherence.
@@ -37,31 +37,44 @@ impl PreparedFullWaveQuadrupoleObserver {
         for factor in measured.factors() {
             poll(&mut cancelled)?;
             let mut sums = [ComplexSum::default(); 4];
-            for (index, (transfer, channels)) in self
-                .transfers
-                .iter()
-                .zip(factor.chunks_exact(6))
-                .enumerate()
-            {
-                if index.is_multiple_of(256) {
-                    poll(&mut cancelled)?;
-                }
-                for (entry, coefficient) in channels.iter().enumerate() {
-                    let peak = measured
-                        .peak_factor(*coefficient)
-                        .map_err(AeroacError::Welch)?;
-                    let value = C64::new(peak.re, peak.im);
-                    if value != C64::ZERO {
-                        for (row, sum) in transfer.field.iter().zip(&mut sums) {
-                            sum.add(row[entry] * value)?;
-                        }
-                    }
-                }
-            }
+            self.accumulate_welch_factor(factor, measured, &mut sums, &mut cancelled)?;
             statistics.add(sums.map(ComplexSum::value))?;
         }
         poll(&mut cancelled)?;
         statistics.finish(self.scope())
+    }
+
+    /// Apply one admitted original stress factor to the shared p/u reduction.
+    /// The caller binds all six channels per cell and the combined work budget.
+    pub(in crate::curle3d::refraction::full_wave) fn accumulate_welch_factor(
+        &self,
+        factor: &[fs_fft::C64],
+        measured: WelchPeakBin<'_>,
+        sums: &mut [ComplexSum; 4],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(), AeroacError> {
+        for (index, (transfer, channels)) in self
+            .transfers
+            .iter()
+            .zip(factor.chunks_exact(6))
+            .enumerate()
+        {
+            if index.is_multiple_of(256) {
+                poll(cancelled)?;
+            }
+            for (entry, coefficient) in channels.iter().enumerate() {
+                let peak = measured
+                    .peak_factor(*coefficient)
+                    .map_err(AeroacError::Welch)?;
+                let value = C64::new(peak.re, peak.im);
+                if value != C64::ZERO {
+                    for (row, sum) in transfer.field.iter().zip(sums.iter_mut()) {
+                        sum.add(row[entry] * value)?;
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 }
 

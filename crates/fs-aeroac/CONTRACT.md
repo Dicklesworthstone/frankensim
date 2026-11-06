@@ -2726,3 +2726,35 @@ geometry/frequency preservation, finite self-fields, strict fluid sides and
 aggregate-work/cancellation refusals. Pinned Rust formatting/parser and bounded
 source/API review passed; native Rust test execution remains unperformed in the
 shared editing environment.
+
+## Joint recorded compact and volume-stress refraction
+
+`PreparedFullWaveCompactSourceObserver::evaluate_welch_bin` now propagates the
+original synchronized source-major `[Q,Fx,Fy,Fz]` channels through its cached
+pressure and full vector-velocity transfers. The companion
+`evaluate_welch_bin_with_quadrupoles` consumes one joint original record with
+those compact channels followed by the prepared physical stress blocks
+`[xx,yy,zz,xy,xz,yz]`. Volume flow is m³/s, force on fluid is N, and integrated
+stress moment is N m; shear entries are not pre-doubled.
+
+Both banks must share original fluid states, oriented interface, receiver,
+exact frequency and transmitted, reflected-only or incident-total field kind.
+Each original Welch factor enters one common DD pressure/velocity reduction
+before second moments are formed. This retains Q/F/stress, cell/component and
+direct/reflected interference, including velocity at pressure cancellation.
+The native peak-bin owner applies its normalization once; outputs are
+bin-integrated moments, not PSD/Hz or deterministic cross-frequency phases.
+
+Application is allocation-free O(total sources × original segments), reuses
+prepared transfers and checks the combined source/factor budget before reduction.
+No FFT, quadrature, source covariance or independent source spectrum is rebuilt.
+Original recording/channel geometry, disjoint-source responsibility,
+finite-record limitations and the stationary lossless infinite-plane model
+remain. Unknown correlation is not replaced by independence.
+
+Three focused G1/G3/G4 regression groups specify known synchronized phasors
+for all three fields and both equal/unequal sound speeds; analytic compact/stress
+pressure cancellation with surviving velocity and measured correlation changes;
+and source-domain, clock, shape, aggregate-work and cancellation refusals.
+Pinned Rust formatting/parser checks and bounded source/API review passed.
+Native Cargo tests were authored but not executed in the shared editing environment.
