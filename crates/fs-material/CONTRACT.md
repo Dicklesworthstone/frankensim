@@ -15061,6 +15061,14 @@ with the cancellation-free stress and loss calculations, in both full and
 remainder endpoints. This does not recover strain information already rounded
 out of the supplied deformation or stored inverse viscous metric.
 
+Near isotropic trial metrics, principal logarithmic stretches use a centered
+metric increment and the shared small-strain `log1p` evaluation. Representable
+tiny shear is resolved before forming unit-size stretch eigenvalues. Relaxed
+metrics likewise sum small exponential increments before adding the identity,
+preserving viscous memory through repeated small-strain holds. Larger
+distortions retain the original spectral path; no linear constitutive surrogate
+replaces the finite-strain energy, stress or algorithmic tangent.
+
 `tests/visco_incremental.rs` checks directional energy/stress/tangent consistency
 after nontrivial history, unchanged accepted states under repeated trial queries,
 and the distinct potential/storage/heat accounts during held-strain relaxation.

@@ -886,6 +886,14 @@ fn trial_stretch_tensor<T: Real>(f: &[T; 9], cv: &[f64; 9]) -> [T; 9] {
     })
 }
 
+struct TrialSpectrum {
+    tensor: [f64; 9],
+    values: [f64; 3],
+    // A common logarithmic stretch is immaterial to the isochoric branch.
+    log_stretches: [f64; 3],
+    vectors: [f64; 9],
+}
+
 // Second-order spectral lift of one branch's incremental potential.
 struct Lift {
     v: [f64; 9],
@@ -1201,20 +1209,77 @@ impl ViscoHyperelastic {
     }
 
     // Eigenvalues and eigenvectors of the trial tensor of one branch.
-    fn trial_spectrum(
-        cv: &[f64; 9],
-        f: &[f64; 9],
-    ) -> Result<([f64; 9], [f64; 3], [f64; 9]), MaterialError> {
+    fn trial_spectrum(cv: &[f64; 9], f: &[f64; 9]) -> Result<TrialSpectrum, MaterialError> {
         let ct = trial_stretch_tensor(f, cv);
         let sym: [f64; 9] = core::array::from_fn(|ij| 0.5 * (ct[ij] + ct[3 * (ij % 3) + ij / 3]));
-        let (d, v) = jacobi_eigh(&sym, 3);
-        if d.len() != 3 || d.iter().any(|x| !x.is_finite() || *x <= 0.0) {
+        // Resolve strain before adding the unit metric. The shared hyperelastic
+        // helper preserves quadratic shears in F F^T-I; the viscous correction
+        // F (C_v^{-1}-I) F^T retains off-diagonal history at the same scale.
+        let increment = if let Some(mut a) =
+            crate::hyper::small_objective_strain(&transpose(f), det3(f))
+        {
+            let delta_cv = core::array::from_fn(|ij| cv[ij] - if ij % 4 == 0 { 1.0 } else { 0.0 });
+            if delta_cv.iter().any(|x| *x != 0.0) {
+                let correction = mat_mul(&mat_mul(f, &delta_cv), &transpose(f));
+                for ij in 0..9 {
+                    a[ij] += 0.5 * (correction[ij] + correction[3 * (ij % 3) + ij / 3]);
+                }
+            }
+            a
+        } else {
+            core::array::from_fn(|ij| sym[ij] - if ij % 4 == 0 { 1.0 } else { 0.0 })
+        };
+        let mean = 1.0 + (increment[0] + increment[4] + increment[8]) / 3.0;
+        let eigen_scale = (sym[0] + sym[4] + sym[8]) / 3.0;
+        let mut matrix = sym;
+        let mut shifted = false;
+        if mean.is_finite() && mean > 0.0 && eigen_scale.is_finite() && eigen_scale > 0.0 {
+            // Center by differences, so uniform dilation cannot obscure a
+            // much smaller distortional strain. Eigenvectors are unchanged.
+            let mut centered = increment.map(|x| x / mean);
+            centered[0] =
+                ((increment[0] - increment[4]) + (increment[0] - increment[8])) / (3.0 * mean);
+            centered[4] =
+                ((increment[4] - increment[0]) + (increment[4] - increment[8])) / (3.0 * mean);
+            centered[8] = -centered[0] - centered[4];
+            let norm = (0..3)
+                .map(|i| (0..3).map(|j| centered[3 * i + j].abs()).sum::<f64>())
+                .fold(0.0_f64, f64::max);
+            // This also bounds every eigenvalue increment for the shared
+            // log1p series. Large distortions retain the original spectrum.
+            if centered.iter().all(|x| x.is_finite()) && norm <= 1.0 / 16.0 {
+                matrix = centered;
+                shifted = true;
+            }
+        }
+        let (mut d, v) = jacobi_eigh(&matrix, 3);
+        if d.len() != 3
+            || d.iter()
+                .any(|x| !x.is_finite() || *x <= if shifted { -1.0 } else { 0.0 })
+        {
             return Err(state_error(
                 "non-positive or non-finite trial stretch eigenvalue".to_string(),
             ));
         }
+        let log_stretches = core::array::from_fn(|i| {
+            0.5 * if shifted {
+                crate::hyper::small_log1p_and_remainder(d[i]).0
+            } else {
+                det::ln(d[i])
+            }
+        });
+        if shifted {
+            for value in &mut d {
+                *value = eigen_scale * (1.0 + *value);
+            }
+        }
         let vv: [f64; 9] = core::array::from_fn(|i| v[i]);
-        Ok((sym, [d[0], d[1], d[2]], vv))
+        Ok(TrialSpectrum {
+            tensor: sym,
+            values: [d[0], d[1], d[2]],
+            log_stretches,
+            vectors: vv,
+        })
     }
 
     fn local_at(
@@ -1223,16 +1288,28 @@ impl ViscoHyperelastic {
         dt: f64,
         d: &[f64; 3],
     ) -> Result<Local, MaterialError> {
-        let eta_tr = reduce([
-            0.5 * det::ln(d[0]),
-            0.5 * det::ln(d[1]),
-            0.5 * det::ln(d[2]),
-        ]);
+        self.local_at_log_stretches(
+            branch,
+            dt,
+            [
+                0.5 * det::ln(d[0]),
+                0.5 * det::ln(d[1]),
+                0.5 * det::ln(d[2]),
+            ],
+        )
+    }
+
+    fn local_at_log_stretches(
+        &self,
+        branch: &FiniteStrainBranch,
+        dt: f64,
+        log_stretches: [f64; 3],
+    ) -> Result<Local, MaterialError> {
         local_solve(
             &branch.energy,
             branch.tau_s,
             dt,
-            eta_tr,
+            reduce(log_stretches),
             self.newton_tolerance,
             self.newton_max_iterations,
         )
@@ -1246,8 +1323,13 @@ impl ViscoHyperelastic {
         dt: f64,
     ) -> Result<BranchPrimal, MaterialError> {
         let cv = sym_expand(cv6);
-        let (sym, d, v) = Self::trial_spectrum(&cv, f)?;
-        let local = self.local_at(branch, dt, &d)?;
+        let TrialSpectrum {
+            tensor: sym,
+            values: d,
+            log_stretches,
+            vectors: v,
+        } = Self::trial_spectrum(&cv, f)?;
+        let local = self.local_at_log_stretches(branch, dt, log_stretches)?;
         let (omega, w) = principal_derivatives(&local, &d);
         let mut dd = [[0.0; 3]; 3];
         for (i, j) in [(0usize, 1usize), (0, 2), (1, 2)] {
@@ -1282,13 +1364,27 @@ impl ViscoHyperelastic {
             let x_star = expand(local.eta);
             let j = det3(f);
             let jm23 = det::exp(-2.0 / 3.0 * det::ln(j));
+            let small_stretches = x_star.iter().all(|x| x.abs() <= 0.125);
             let mut bt = [0.0; 9];
             for a in 0..3 {
-                let e = det::exp(2.0 * x_star[a]);
+                let e = if small_stretches {
+                    det::expm1(2.0 * x_star[a])
+                } else {
+                    det::exp(2.0 * x_star[a])
+                };
                 for r in 0..3 {
                     for c in 0..3 {
                         bt[3 * r + c] += e * v[3 * r + a] * v[3 * c + a];
                     }
+                }
+            }
+            if small_stretches {
+                // Sum all small dyads before adding I. This retains tiny
+                // elastic shear without injecting unit-scale roundoff into
+                // the accepted metric. Large stretches keep the positive
+                // exponential sum, avoiding cancellation under compression.
+                for i in 0..3 {
+                    bt[4 * i] += 1.0;
                 }
             }
             let be: [f64; 9] = core::array::from_fn(|ij| bt[ij] / jm23);
@@ -1563,12 +1659,8 @@ impl ViscoHyperelastic {
         let mut total = self.equilibrium.energy(&elastic);
         for (branch, cv6) in self.branches.iter().zip(&s.inverse_viscous_cauchy_green) {
             let cv = sym_expand(cv6);
-            let (_, d, _) = Self::trial_spectrum(&cv, &elastic)?;
-            let x = expand(reduce([
-                0.5 * det::ln(d[0]),
-                0.5 * det::ln(d[1]),
-                0.5 * det::ln(d[2]),
-            ]));
+            let spectrum = Self::trial_spectrum(&cv, &elastic)?;
+            let x = expand(reduce(spectrum.log_stretches));
             total += branch.energy.terms(&x).0;
         }
         total *= self.reference_deformation.volume_ratio();
@@ -1611,12 +1703,8 @@ impl ViscoHyperelastic {
         let elastic = self.reference_deformation.elastic_deformation(f);
         let mut total = self.equilibrium.isochoric_energy(&elastic);
         for (branch, cv6) in self.branches.iter().zip(s.viscous_metrics()) {
-            let (_, d, _) = Self::trial_spectrum(&sym_expand(cv6), &elastic)?;
-            let x = expand(reduce([
-                0.5 * det::ln(d[0]),
-                0.5 * det::ln(d[1]),
-                0.5 * det::ln(d[2]),
-            ]));
+            let spectrum = Self::trial_spectrum(&sym_expand(cv6), &elastic)?;
+            let x = expand(reduce(spectrum.log_stretches));
             total += branch.energy.terms(&x).0;
         }
         total *= self.reference_deformation.volume_ratio();

@@ -225,7 +225,7 @@ fn cauchy_green_invariants<T: Real>(f: &[T; 9]) -> (T, T) {
 
 // C-I near any rigid rotation, shared by the coupled and decoupled laws.
 // Retain the quadratic squares even when a column's leading square is one.
-fn small_objective_strain<T: Real>(f: &[T; 9], j: T) -> Option<[T; 9]> {
+pub(crate) fn small_objective_strain<T: Real>(f: &[T; 9], j: T) -> Option<[T; 9]> {
     if !(j.value() > 0.0) {
         return None;
     }
@@ -258,7 +258,7 @@ fn small_objective_strain<T: Real>(f: &[T; 9], j: T) -> Option<[T; 9]> {
 // ln(1+d) and d-ln(1+d), without cancelling their first-order terms.
 // The caller bounds |d/(2+d)| < 0.073. The omitted atanh tail and its
 // first two derivatives are <1e-32, below f64 roundoff in this domain.
-fn small_log1p_and_remainder<T: Real>(d: T) -> (T, T) {
+pub(crate) fn small_log1p_and_remainder<T: Real>(d: T) -> (T, T) {
     let s = d / (T::from_f64(2.0) + d);
     let s2 = s * s;
     let mut power = s;

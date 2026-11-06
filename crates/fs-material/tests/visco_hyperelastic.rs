@@ -28,6 +28,18 @@ fn nh_equilibrium(mu: f64, lambda: f64) -> Hyperelastic {
     Hyperelastic::new(HyperelasticModel::NeoHookean { mu, lambda }, 6.0).unwrap()
 }
 
+fn decoupled_nh_equilibrium(mu: f64, kappa: f64) -> Hyperelastic {
+    Hyperelastic::new(
+        HyperelasticModel::MooneyRivlin {
+            c10: 0.5 * mu,
+            c01: 0.0,
+            kappa,
+        },
+        6.0,
+    )
+    .unwrap()
+}
+
 fn nh_law(mu_inf: f64, lambda: f64, branches: &[(f64, f64)]) -> ViscoHyperelastic {
     ViscoHyperelastic::new(
         nh_equilibrium(mu_inf, lambda),
@@ -145,7 +157,7 @@ fn nearly_relaxed_branches_retain_quadratic_storage() {
         // A negligible positive equilibrium modulus isolates branch storage
         // without subtracting two nearly equal total energies.
         let law = ViscoHyperelastic::new(
-            nh_equilibrium(1.0e-60, 0.0),
+            decoupled_nh_equilibrium(1.0e-60, 1.0e-60),
             vec![FiniteStrainBranch { energy, tau_s: 1.0 }],
         )
         .unwrap();
@@ -188,6 +200,181 @@ fn nearly_relaxed_branches_retain_quadratic_storage() {
             );
             assert!(full.dissipated_pa >= 0.0);
         }
+    }
+}
+
+#[test]
+fn tiny_shear_preserves_stress_storage_and_viscous_memory() {
+    let mut law = random_law();
+    law.equilibrium = decoupled_nh_equilibrium(1.0e5, 3.0e5);
+    let equilibrium_shear = 1.0e5;
+    // The fixture has a Neo-Hookean branch and a signed two-term Ogden
+    // branch, with these independent small-strain shear spectra.
+    let branches = [(4.0e4, 0.05), (5.5e4, 0.5)];
+    let dt = 0.07;
+    let rotation = [0.0, 0.0, 1.0, 0.0, -1.0, 0.0, 1.0, 0.0, 0.0];
+    for gamma in [0.0, 1.0e-8, 1.0e-12, 1.0e-16, 1.0e-20] {
+        let mut f = I;
+        f[1] = gamma;
+        let initial_storage = 0.5 * gamma * gamma * (equilibrium_shear + 9.5e4);
+        let mut state = law.initial_state();
+        let mut remaining = [1.0, 1.0];
+        for step in 0..=4 {
+            let interval = if step == 0 { 0.0 } else { dt };
+            let before = remaining;
+            for (fraction, (_, tau)) in remaining.iter_mut().zip(branches) {
+                *fraction /= 1.0 + interval / tau;
+            }
+            let response = law.step_response(&state, &f, interval).unwrap();
+            let stress_modulus = equilibrium_shear
+                + branches
+                    .iter()
+                    .zip(remaining)
+                    .map(|((g, _), q)| g * q)
+                    .sum::<f64>();
+            let storage_modulus = equilibrium_shear
+                + branches
+                    .iter()
+                    .zip(remaining)
+                    .map(|((g, _), q)| g * q * q)
+                    .sum::<f64>();
+            let expected_storage = 0.5 * gamma * gamma * storage_modulus;
+            let expected_loss = 0.5
+                * gamma
+                * gamma
+                * branches
+                    .iter()
+                    .zip(before.into_iter().zip(remaining))
+                    .map(|((g, _), (old, new))| g * (old * old - new * new))
+                    .sum::<f64>();
+            close(
+                response.first_piola_pa[1],
+                gamma * stress_modulus,
+                gamma * stress_modulus,
+                2.0e-8,
+            );
+            close(
+                response.state.stored,
+                expected_storage,
+                expected_storage,
+                2.0e-8,
+            );
+            close(
+                law.free_energy(&response.state, &f).unwrap(),
+                expected_storage,
+                expected_storage,
+                2.0e-8,
+            );
+            close(
+                law.mixed_remainder_free_energy(&response.state, &f)
+                    .unwrap(),
+                expected_storage,
+                expected_storage,
+                2.0e-8,
+            );
+            close(
+                response.dissipated_pa,
+                expected_loss,
+                initial_storage,
+                2.0e-8,
+            );
+            assert!(response.dissipated_pa >= 0.0);
+            close(
+                response.state.work,
+                initial_storage,
+                initial_storage,
+                2.0e-8,
+            );
+            if step == 1 {
+                // The accepted metric is fixed when differentiating: its
+                // algorithmic shear modulus is G_inf + sum G_i/(1+h/tau_i).
+                let modulus = equilibrium_shear
+                    + branches
+                        .iter()
+                        .map(|(g, tau)| g / (1.0 + dt / tau))
+                        .sum::<f64>();
+                let tangent = law.algorithmic_tangent(&state, &f, dt).unwrap();
+                close(tangent[1][1], modulus, modulus, 2.0e-8);
+                // An exactly representable finite rotation separates frame
+                // objectivity from rounding of the supplied deformation.
+                let rotated_f = matmul(&rotation, &f);
+                let rotated = law.step_response(&state, &rotated_f, dt).unwrap();
+                close_all(
+                    &rotated.first_piola_pa,
+                    &matmul(&rotation, &response.first_piola_pa),
+                    2.0e-11,
+                    0.0,
+                );
+                close(
+                    rotated.state.stored,
+                    response.state.stored,
+                    expected_storage,
+                    2.0e-11,
+                );
+            }
+            state = response.state;
+        }
+    }
+}
+
+#[test]
+fn tiny_shear_is_resolved_under_finite_uniform_dilation() {
+    let shear = 2.0e5;
+    let law = nh_law(1.0e-60, 0.0, &[(shear, 0.3)]);
+    let dt = 0.1;
+    let remaining = 1.0 / (1.0 + dt / 0.3);
+    for dilation in [0.4, 1.0, 2.0] {
+        for gamma in [1.0e-12, 1.0e-18] {
+            let mut f = I.map(|x| dilation * x);
+            f[1] = dilation * gamma;
+            let response = law.step_response(&law.initial_state(), &f, dt).unwrap();
+            let expected_storage = 0.5 * shear * gamma * gamma * remaining * remaining;
+            let expected_piola_shear = shear * gamma * remaining / dilation;
+            close(
+                response.state.stored,
+                expected_storage,
+                expected_storage,
+                2.0e-8,
+            );
+            close(
+                response.first_piola_pa[1],
+                expected_piola_shear,
+                expected_piola_shear,
+                2.0e-8,
+            );
+            close(
+                law.free_energy(&response.state, &f).unwrap(),
+                expected_storage,
+                expected_storage,
+                2.0e-8,
+            );
+        }
+    }
+}
+
+#[test]
+fn shifted_spectrum_preserves_finite_neo_hookean_shear() {
+    let shear = 3.0e5;
+    let law = nh_law(1.0e5, 3.0e5, &[(2.0e5, 0.2)]);
+    // The first two amplitudes straddle the shifted-spectrum bound. For
+    // finite simple shear, the full Neo-Hookean law has W=G gamma^2/2
+    // and P_xy=G gamma exactly; no infinitesimal-strain oracle is used.
+    for gamma in [0.04, 0.065, 0.2, 0.8] {
+        let mut f = I;
+        f[1] = gamma;
+        let response = law.step_response(&law.initial_state(), &f, 0.0).unwrap();
+        let energy = 0.5 * shear * gamma * gamma;
+        close(response.state.stored, energy, energy, 2.0e-12);
+        close(
+            response.first_piola_pa[1],
+            shear * gamma,
+            shear * gamma,
+            2.0e-12,
+        );
+        let tangent = law
+            .algorithmic_tangent(&law.initial_state(), &f, 0.0)
+            .unwrap();
+        close(tangent[1][1], shear, shear, 2.0e-11);
     }
 }
 
