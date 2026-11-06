@@ -96,6 +96,10 @@ impl Prepared {
         }
         // Coverage and every original law are admitted before geometry.
         problem.validate_materials_with(|| checkpoint(cx))?;
+        for element in 0..problem.material.material_count().unwrap_or(1) {
+            checkpoint(cx)?;
+            problem.mean_dilatation_material(element)?;
+        }
         for (_, edges) in &mesh.patches {
             if edges
                 .iter()
@@ -182,7 +186,7 @@ impl Prepared {
         let mut coo = Coo::new(self.ndof, self.ndof);
         for (index, element) in self.elements.iter().enumerate() {
             checkpoint(cx)?;
-            let material = problem.element_material(index)?;
+            let material = problem.mean_dilatation_material(index)?;
             let local = element.admitted_motion(material, u)?;
             let mut force = [0.0; 8];
             let mut stiffness = [[0.0; 8]; 8];
@@ -251,7 +255,7 @@ impl Prepared {
         let mut value = 0.0;
         for (index, element) in self.elements.iter().enumerate() {
             checkpoint(cx)?;
-            let material = problem.element_material(index)?;
+            let material = problem.mean_dilatation_material(index)?;
             let local = element.admitted_motion(material, u)?;
             value += element.energy(material, &local);
         }
@@ -417,7 +421,7 @@ impl HyperProblem<'_> {
         let mut states = Vec::with_capacity(prepared.elements.len());
         for (index, element) in prepared.elements.iter().enumerate() {
             checkpoint(cx)?;
-            let material = self.element_material(index)?;
+            let material = self.mean_dilatation_material(index)?;
             let local = element.admitted_motion(material, u)?;
             states.push(element.state(material, &local)?);
         }

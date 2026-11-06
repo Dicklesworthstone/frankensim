@@ -7,13 +7,16 @@
 //! forces and energies use unit original thickness, not current thickness.
 //! This is an in-plane continuum, with no shell bending or wrinkling model.
 
-use super::{HyperProblem, NewtonReport, Reduction};
+use super::{HyperProblem, NewtonReport, PlaneMaterial, Reduction};
 use crate::SolidError;
 use crate::mesh2::{quad_points, shapes_at};
 use fs_exec::Cx;
-use fs_material::hyper::Hyperelastic;
-use fs_material::hyper::incompressible_plane_stress::IncompressiblePlaneStressState;
-use fs_material::hyper::plane_stress::{PlaneStressSettings, PlaneStressState};
+use fs_material::hyper::incompressible_plane_stress::{
+    self, IncompressiblePlaneStressResponse, IncompressiblePlaneStressState,
+};
+use fs_material::hyper::plane_stress::{
+    self, PlaneStressResponse, PlaneStressSettings, PlaneStressState,
+};
 use fs_sparse::{Coo, Csr};
 use std::collections::BTreeMap;
 
@@ -28,6 +31,71 @@ fn checkpoint(cx: &Cx<'_>) -> Result<(), SolidError> {
 fn material_error(element: usize, error: fs_material::MaterialError) -> SolidError {
     SolidError::MaterialRefused {
         what: format!("plane-stress element {element}: {error}"),
+    }
+}
+
+fn reference_seed(material: &dyn PlaneMaterial, f: &[f64; 4]) -> [f64; 3] {
+    // This is an initial guess only: the finite-bulk solve still relaxes
+    // volume. Keeping the owner's natural volume avoids rejecting an expanded
+    // material merely because unit total thickness lies outside its elastic
+    // domain. The reducer retains its unit-thickness fallback for soft bulk.
+    [
+        0.0,
+        0.0,
+        material.incompressible_reference_volume_ratio() / (f[0] * f[3] - f[1] * f[2]),
+    ]
+}
+
+fn finite_state(
+    material: &dyn PlaneMaterial,
+    f: &[f64; 4],
+    settings: PlaneStressSettings,
+) -> Result<PlaneStressState, fs_material::MaterialError> {
+    if let Some(native) = material.native_hyperelastic() {
+        native.plane_stress_state(f, settings)
+    } else {
+        plane_stress::plane_stress_state_with_seed(
+            material,
+            f,
+            reference_seed(material, f),
+            settings,
+        )
+    }
+}
+
+fn finite_response(
+    material: &dyn PlaneMaterial,
+    f: &[f64; 4],
+    settings: PlaneStressSettings,
+) -> Result<PlaneStressResponse, fs_material::MaterialError> {
+    if let Some(native) = material.native_hyperelastic() {
+        native.plane_stress(f, settings)
+    } else {
+        plane_stress::plane_stress_with_seed(material, f, reference_seed(material, f), settings)
+    }
+}
+
+fn exact_state(
+    material: &dyn PlaneMaterial,
+    f: &[f64; 4],
+    settings: PlaneStressSettings,
+) -> Result<IncompressiblePlaneStressState, fs_material::MaterialError> {
+    if let Some(native) = material.native_hyperelastic() {
+        native.incompressible_plane_stress_state(f, settings)
+    } else {
+        incompressible_plane_stress::incompressible_plane_stress_state(material, f, settings)
+    }
+}
+
+fn exact_response(
+    material: &dyn PlaneMaterial,
+    f: &[f64; 4],
+    settings: PlaneStressSettings,
+) -> Result<IncompressiblePlaneStressResponse, fs_material::MaterialError> {
+    if let Some(native) = material.native_hyperelastic() {
+        native.incompressible_plane_stress(f, settings)
+    } else {
+        incompressible_plane_stress::incompressible_plane_stress(material, f, settings)
     }
 }
 
@@ -95,22 +163,11 @@ impl Prepared {
             .len()
             .checked_mul(2)
             .ok_or_else(|| invalid("plane-stress displacement count overflows"))?;
-        // Validate every original law and its transverse equilibrium before
-        // allocating geometry. Uniform material admission is performed once.
+        // Admit each original owner's parameters, then admit transverse
+        // equilibrium at the actual quadrature deformation. Identity can lie
+        // outside a prescribed-reference or accepted-history domain even when
+        // the requested deformed state is admissible.
         problem.validate_materials_with(|| checkpoint(cx))?;
-        for index in 0..problem.material.material_count().unwrap_or(1) {
-            checkpoint(cx)?;
-            let material = problem.element_material(index)?;
-            match constraint {
-                Constraint::FiniteBulk => material
-                    .plane_stress_state(&[1.0, 0.0, 0.0, 1.0], local)
-                    .map(|_| ()),
-                Constraint::Incompressible => material
-                    .incompressible_plane_stress_state(&[1.0, 0.0, 0.0, 1.0], local)
-                    .map(|_| ()),
-            }
-            .map_err(|error| material_error(index, error))?;
-        }
         for (_, edges) in &mesh.patches {
             if edges
                 .iter()
@@ -196,7 +253,7 @@ impl Prepared {
             usize,
             &Element,
             &Point,
-            &Hyperelastic,
+            &dyn PlaneMaterial,
             [f64; 4],
         ) -> Result<(), SolidError>,
     ) -> Result<(), SolidError> {
@@ -243,11 +300,9 @@ impl Prepared {
             cx,
             |index, element, point, material, f| {
                 let (piola, tangent) = match self.constraint {
-                    Constraint::FiniteBulk => material
-                        .plane_stress(&f, self.local)
+                    Constraint::FiniteBulk => finite_response(material, &f, self.local)
                         .map(|response| (response.piola, response.tangent)),
-                    Constraint::Incompressible => material
-                        .incompressible_plane_stress(&f, self.local)
+                    Constraint::Incompressible => exact_response(material, &f, self.local)
                         .map(|response| (response.piola, response.tangent)),
                 }
                 .map_err(|error| material_error(index, error))?;
@@ -310,12 +365,12 @@ impl Prepared {
         let mut potential = 0.0;
         self.for_points(problem, u, load, cx, |index, _, point, material, f| {
             let energy_density = match self.constraint {
-                Constraint::FiniteBulk => material
-                    .plane_stress_state(&f, self.local)
-                    .map(|state| state.energy_density_pa),
-                Constraint::Incompressible => material
-                    .incompressible_plane_stress_state(&f, self.local)
-                    .map(|state| state.energy_density_pa),
+                Constraint::FiniteBulk => {
+                    finite_state(material, &f, self.local).map(|state| state.energy_density_pa)
+                }
+                Constraint::Incompressible => {
+                    exact_state(material, &f, self.local).map(|state| state.energy_density_pa)
+                }
             }
             .map_err(|error| material_error(index, error))?;
             potential += point.weight * energy_density;
@@ -424,9 +479,7 @@ impl HyperProblem<'_> {
         let mut states = Vec::new();
         prepared.for_points(self, u, 0.0, cx, |index, _, _, material, f| {
             states.push(
-                material
-                    .plane_stress_state(&f, local)
-                    .map_err(|error| material_error(index, error))?,
+                finite_state(material, &f, local).map_err(|error| material_error(index, error))?,
             );
             Ok(())
         })?;
@@ -478,9 +531,7 @@ impl HyperProblem<'_> {
         let mut states = Vec::new();
         prepared.for_points(self, u, 0.0, cx, |index, _, _, material, f| {
             states.push(
-                material
-                    .incompressible_plane_stress_state(&f, local)
-                    .map_err(|error| material_error(index, error))?,
+                exact_state(material, &f, local).map_err(|error| material_error(index, error))?,
             );
             Ok(())
         })?;

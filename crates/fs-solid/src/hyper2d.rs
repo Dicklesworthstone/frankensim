@@ -24,6 +24,12 @@ use crate::SolidError;
 use crate::mesh2::{Mesh2, Patch, quad_points, shapes_at};
 use fs_exec::Cx;
 use fs_material::hyper::Hyperelastic;
+use fs_material::hyper::cards::{
+    FiniteStrainPotential, HyperelasticMaterial, ResolvedHyperelastic,
+};
+use fs_material::hyper::incompressible_plane_stress::IncompressiblePlaneStressPotential;
+use fs_material::hyper::reference::ReferencedHyperelastic;
+use fs_material::visco_hyper::FrozenViscoHyperelastic;
 use fs_solver::krylov::MinresState;
 use fs_solver::op::{CsrOp, LinearOp};
 use fs_sparse::Coo;
@@ -92,7 +98,62 @@ pub struct NewtonReport {
 /// A displacement/traction field on a patch.
 pub type VecField<'m> = &'m dyn Fn(f64, f64) -> [f64; 2];
 
-/// Native hyperelastic laws in mesh-element order.
+/// An immutable plane-continuum potential and its exact volume constraint.
+///
+/// Reference-deformation and frozen-history adapters retain their own energy,
+/// stress, tangent and relaxed-volume convention through every spatial trial.
+/// A frozen inelastic potential is an incremental potential; equilibrium does
+/// not commit its history or turn its value into physical stored energy/heat.
+pub trait PlaneMaterial: FiniteStrainPotential + IncompressiblePlaneStressPotential {
+    /// Admit public parameters once before spatial assembly. Actual deformation
+    /// and history admission remains with the constitutive evaluation at each
+    /// material point; identity need not lie in a prestrained law's domain.
+    fn validate_plane_material(&self) -> Result<(), fs_material::MaterialError> {
+        Ok(())
+    }
+
+    /// Return a bare native law only when it is the complete potential owner.
+    ///
+    /// This admits the existing scalar-generic mean-dilatation formulation and
+    /// preserves optimized native transverse reductions. Reference/history
+    /// adapters must keep the default `None`: extracting their elastic backbone
+    /// would discard the prescribed strain or material memory.
+    fn native_hyperelastic(&self) -> Option<&Hyperelastic> {
+        None
+    }
+}
+
+fn validate_native(material: &Hyperelastic) -> Result<(), fs_material::MaterialError> {
+    Hyperelastic::new(material.model.clone(), material.stretch_limit).map(|_| ())
+}
+
+impl PlaneMaterial for Hyperelastic {
+    fn validate_plane_material(&self) -> Result<(), fs_material::MaterialError> {
+        validate_native(self)
+    }
+
+    fn native_hyperelastic(&self) -> Option<&Hyperelastic> {
+        Some(self)
+    }
+}
+
+impl PlaneMaterial for ResolvedHyperelastic {
+    fn native_hyperelastic(&self) -> Option<&Hyperelastic> {
+        Some(self.hyperelastic())
+    }
+}
+
+impl<L: HyperelasticMaterial + IncompressiblePlaneStressPotential + ?Sized> PlaneMaterial
+    for ReferencedHyperelastic<'_, L>
+{
+    fn validate_plane_material(&self) -> Result<(), fs_material::MaterialError> {
+        validate_native(self.material().hyperelastic())
+    }
+}
+
+impl PlaneMaterial for FrozenViscoHyperelastic<'_> {}
+
+/// Original finite-strain potential owners in mesh-element order.
 ///
 /// A single law is uniform. Arrays, vectors and borrowed slices assign exactly
 /// one original law per element; no coefficients or fibre directions are
@@ -105,46 +166,46 @@ pub trait HyperelasticMaterials {
     /// Exact number of element laws, or `None` for a uniform law.
     fn material_count(&self) -> Option<usize>;
     /// Original law at this element, or `None` for missing coverage.
-    fn material_at(&self, element: usize) -> Option<&Hyperelastic>;
+    fn material_at(&self, element: usize) -> Option<&dyn PlaneMaterial>;
 }
 
-impl HyperelasticMaterials for Hyperelastic {
+impl<L: PlaneMaterial> HyperelasticMaterials for L {
     fn material_count(&self) -> Option<usize> {
         None
     }
 
-    fn material_at(&self, _: usize) -> Option<&Hyperelastic> {
+    fn material_at(&self, _: usize) -> Option<&dyn PlaneMaterial> {
         Some(self)
     }
 }
 
-impl HyperelasticMaterials for Vec<Hyperelastic> {
+impl<L: PlaneMaterial> HyperelasticMaterials for Vec<L> {
     fn material_count(&self) -> Option<usize> {
         Some(self.len())
     }
 
-    fn material_at(&self, element: usize) -> Option<&Hyperelastic> {
-        self.get(element)
+    fn material_at(&self, element: usize) -> Option<&dyn PlaneMaterial> {
+        self.get(element).map(|law| law as &dyn PlaneMaterial)
     }
 }
 
-impl<const N: usize> HyperelasticMaterials for [Hyperelastic; N] {
+impl<L: PlaneMaterial, const N: usize> HyperelasticMaterials for [L; N] {
     fn material_count(&self) -> Option<usize> {
         Some(N)
     }
 
-    fn material_at(&self, element: usize) -> Option<&Hyperelastic> {
-        self.get(element)
+    fn material_at(&self, element: usize) -> Option<&dyn PlaneMaterial> {
+        self.get(element).map(|law| law as &dyn PlaneMaterial)
     }
 }
 
-impl HyperelasticMaterials for &[Hyperelastic] {
+impl<L: PlaneMaterial> HyperelasticMaterials for &[L] {
     fn material_count(&self) -> Option<usize> {
         Some(self.len())
     }
 
-    fn material_at(&self, element: usize) -> Option<&Hyperelastic> {
-        self.get(element)
+    fn material_at(&self, element: usize) -> Option<&dyn PlaneMaterial> {
+        self.get(element).map(|law| law as &dyn PlaneMaterial)
     }
 }
 
@@ -154,8 +215,10 @@ pub struct HyperProblem<'m> {
     /// The mesh.
     pub mesh: &'m Mesh2,
     /// A uniform original law, or exactly one law per mesh element.
-    /// Existing `&Hyperelastic` inputs remain uniform; pass `&Vec<Hyperelastic>`,
-    /// an array reference, or a borrowed slice reference for heterogeneous bodies.
+    /// Native/source-bound, reference-deformation and frozen-history owners are
+    /// retained. Pass a vector, array or borrowed slice reference to assign one
+    /// owner per element. A frozen-history solve returns equilibrium only; its
+    /// material owner must subsequently accept the converged constitutive step.
     pub material: &'m dyn HyperelasticMaterials,
     /// Dirichlet patches (ramped by the load factor).
     pub dirichlet: Vec<(Patch, VecField<'m>)>,
@@ -166,11 +229,22 @@ pub struct HyperProblem<'m> {
 }
 
 impl HyperProblem<'_> {
-    fn element_material(&self, element: usize) -> Result<&Hyperelastic, SolidError> {
+    fn element_material(&self, element: usize) -> Result<&dyn PlaneMaterial, SolidError> {
         self.material
             .material_at(element)
             .ok_or_else(|| SolidError::InvalidInput {
                 what: format!("hyperelastic material missing at element {element}"),
+            })
+    }
+
+    fn mean_dilatation_material(&self, element: usize) -> Result<&Hyperelastic, SolidError> {
+        self.element_material(element)?
+            .native_hyperelastic()
+            .ok_or_else(|| SolidError::InvalidInput {
+                what: format!(
+                    "mean dilatation requires a bare native potential at element {element}; \
+                     reference-deformation and frozen-history adapters need their own condensation"
+                ),
             })
     }
 
@@ -193,16 +267,17 @@ impl HyperProblem<'_> {
                 ),
             });
         }
-        // The cards have public coefficients. Validate each original law once
-        // on entry, including laws beyond the first element.
+        // Validate each original owner's public parameters once on entry,
+        // including laws beyond the first element. Its actual-state admission
+        // must retain any prescribed reference and accepted material history.
         for element in 0..count.unwrap_or(1) {
             checkpoint()?;
             let material = self.element_material(element)?;
-            Hyperelastic::new(material.model.clone(), material.stretch_limit).map_err(|error| {
-                SolidError::MaterialRefused {
+            material
+                .validate_plane_material()
+                .map_err(|error| SolidError::MaterialRefused {
                     what: format!("hyperelastic element {element}: {error}"),
-                }
-            })?;
+                })?;
         }
         Ok(())
     }
@@ -507,7 +582,7 @@ impl HyperProblem<'_> {
                 let wq = w * det;
                 let f = Self::def_grad(&grads, conn, u);
                 let p = material
-                    .piola(&f)
+                    .first_piola(&f)
                     .map_err(|e| SolidError::MaterialRefused {
                         what: format!("{e:?}"),
                     })?;
@@ -593,15 +668,16 @@ impl HyperProblem<'_> {
                 let wq = w * det;
                 let f = Self::def_grad(&grads, conn, u);
                 let p = material
-                    .piola(&f)
+                    .first_piola(&f)
                     .map_err(|e| SolidError::MaterialRefused {
                         what: format!("{e:?}"),
                     })?;
-                let a_mat = material
-                    .tangent(&f)
-                    .map_err(|e| SolidError::MaterialRefused {
-                        what: format!("{e:?}"),
-                    })?;
+                let a_mat =
+                    material
+                        .consistent_tangent(&f)
+                        .map_err(|e| SolidError::MaterialRefused {
+                            what: format!("{e:?}"),
+                        })?;
                 for (a, &na) in conn.iter().enumerate() {
                     for i in 0..2 {
                         let ia = 2 * na + i;
@@ -682,8 +758,15 @@ impl HyperProblem<'_> {
                 }
                 // Each original law owns its stretch/domain admission. A
                 // permissive neighbour cannot authorize this trial state.
-                material.check_state(&f).ok()?;
-                internal += w * det * material.energy(&f);
+                let potential = if let Some(native) = material.native_hyperelastic() {
+                    native.check_state(&f).ok()?;
+                    native.energy(&f)
+                } else {
+                    // The combined operation lets frozen inelastic owners
+                    // prepare one return map for both admission and potential.
+                    material.stress_and_potential(&f).ok()?.1
+                };
+                internal += w * det * potential;
             }
         }
         let mut external = 0.0f64;

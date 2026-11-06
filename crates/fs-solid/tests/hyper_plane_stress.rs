@@ -6,6 +6,9 @@ use fs_material::hyper::plane_stress::PlaneStressSettings;
 use fs_material::hyper::{FibreInvariants, Hyperelastic, HyperelasticModel, Volumetric};
 use fs_solid::{HyperProblem, Mesh2, NewtonSettings, Patch, SolidError};
 
+#[path = "hyper_plane_stress/reference.rs"]
+mod reference;
+
 fn with_cx(f: impl FnOnce(&Cx<'_>, &CancelGate)) {
     let gate = CancelGate::new();
     ArenaPool::new(ArenaConfig::default()).scope(|arena| {
