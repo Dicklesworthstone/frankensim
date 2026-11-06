@@ -7,9 +7,11 @@
 //! explicit nonnegative declaration, never inferred from either source.
 
 mod binary;
+mod bulk;
 /// Original molecular faces driving finite material gas inventories.
 pub mod parcel;
 pub use binary::MaterialBinaryTransport;
+pub use bulk::{BulkViscosityMaterial, MaterialBulkViscosityTransport, ResolvedBulkViscosity};
 mod thermal_cross;
 pub use thermal_cross::{
     BinaryThermalDiffusionFactorMaterial, MaterialBinarySoretDufourTransport,

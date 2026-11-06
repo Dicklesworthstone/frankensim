@@ -1221,6 +1221,38 @@ composition/pressure diffusion and partial enthalpy against independent binary
 answers, conservative spatial mode refinement, data-only diffusivity changes,
 pair symmetry/coverage, source pinning and cancellation.
 
+### Material bulk viscosity in compressing gas
+
+`MaterialBulkViscosityTransport<L>` wraps any original `TransportLaw` with an
+explicitly assigned mixture bulk-viscosity card. The source supplies the local
+Newtonian coefficient zeta [Pa s], including a supported exact zero. Its
+nonnegative value replaces only the wrapped law's bulk viscosity; shear
+viscosity, conductivity, binary diffusion and Soret/Dufour heats retain their
+original owners. Existing gas consumers use this coefficient in compressive
+stress and its conservative energy flux. No extra viscous heating source is
+added.
+
+Every canonical species has an explicitly typed mole-fraction coordinate.
+The reference absolute T,p selects and pins the original source claim; actual
+T,p and the complete canonical composition refresh that same claim, retaining
+external conditions and original receipts. Shared simplex admission permits
+only native unit-sum roundoff. Source exits, negative coefficients, wrong
+units, coordinate aliases and nonstatic support refuse. A frequency-dependent
+apparent viscosity cannot replace relaxation memory. Callers composing a
+separate relaxation channel must ensure the coefficient does not include the
+same loss twice. Pure-species data do not imply a mixture law, and matching
+dimensions do not make shear viscosity a bulk coefficient.
+
+Identical-state queries reuse the last successful bulk resolution. Material
+queries may allocate. Refusal/cancellation preserves caller outputs and the
+last complete bulk receipt; wrapped workspaces/receipts are not accepted gas
+state. G0/G1/G3/G4 tests in `material::tests::transport::bulk` exercise live
+temperature/pressure/composition sources, compression and trace-free stresses
+with conservative work, bulk-only kinetic-to-thermal conversion at constant
+total energy, exact zero, coefficient/heat delegation, source admission and
+atomic refusal/cancellation. Manufactured fixtures verify coupling and
+numerical behavior, not empirical mixture calibration or a relaxation model.
+
 ## Reusable finite-rate reactor for cell-wise chemistry
 
 `chemistry::IsochoricReactor` owns one original immutable kinetic mechanism and

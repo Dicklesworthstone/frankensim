@@ -13,6 +13,7 @@ use std::cell::Cell;
 use std::rc::Rc;
 
 mod binary;
+mod bulk;
 mod thermal_cross;
 mod wall;
 

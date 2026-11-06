@@ -331,8 +331,8 @@ impl<L: TransportLaw> TransportLaw for MaterialSoretDufourTransport<L> {
     }
 }
 
-// Both kinetic-heat and binary-factor sources own the same evolving coordinates.
-fn reference_state(
+// Kinetic heat, binary factor and bulk-viscosity sources share these coordinates.
+pub(super) fn reference_state(
     source: &IdealGasEquilibriumV1,
     composition_axes: &mut [(SpeciesId, String)],
     reference_query: &QueryPoint,
@@ -387,7 +387,7 @@ fn reference_state(
     Ok((temperature, pressure, fractions))
 }
 
-fn face_query(
+pub(super) fn face_query(
     reference: &QueryPoint,
     axes: &[(SpeciesId, String)],
     t: Temperature,
