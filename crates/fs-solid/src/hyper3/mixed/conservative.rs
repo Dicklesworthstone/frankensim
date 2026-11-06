@@ -28,6 +28,7 @@ use fs_material::hyper::discrete_gradient::bulk::{DiscreteBulkPoint, DiscreteBul
 use fs_material::hyper::discrete_gradient::{
     DiscreteGradientPoint, DiscreteGradientSettings, EnergyPart,
 };
+use fs_material::hyper::reference::ReferenceDeformation;
 use fs_solver::nonlinear::{NewtonKrylovState, NewtonReport, NonlinearProblem, SolverRunProgress};
 use fs_sparse::{Coo, Csr, DirectOrdering, LdltFactor, LdltOptions, SymbolicLdlt};
 
@@ -52,7 +53,8 @@ pub enum ConservativeFormulation {
     /// Original full elastic energy on P2 displacement. Nearly incompressible
     /// displacement-only locking is not removed by the time discretization.
     FullMaterial,
-    /// P2 displacement / continuous P1 pressure enforcing endpoint weak J=1.
+    /// P2 displacement / continuous P1 pressure enforcing endpoint weak
+    /// J_total=det(G); the identity natural reference recovers weak J=1.
     /// Pressure is the interval's algebraic work multiplier, not an endpoint
     /// Cauchy pressure. Native remainder energy is independent of bulk modulus.
     /// Each weak pressure moment is bounded relative to total reference volume.
@@ -67,7 +69,9 @@ pub enum ConservativeFormulation {
     },
     /// Original finite-compliance bulk energy on retained quadrature volumes.
     /// P1 interval pressure is the original U secant, not an endpoint pressure.
-    /// Both geometric and retained volumes must stay in the declared bracket.
+    /// Both geometric and retained ELASTIC volumes J_total/J_ref must stay in
+    /// the declared bracket. Retained volumes and reported work remain in the
+    /// original total reference; prescribed natural volume is not reset to one.
     OriginalMaterial {
         bulk: DiscreteBulkSettings,
         maximum_relative_volume_residual: f64,
@@ -102,11 +106,16 @@ impl ConservativeFormulation {
         }
     }
 
-    fn admit_geometric_volume(self, volume: f64) -> Result<(), ConservativeTetError> {
+    fn admit_geometric_volume(
+        self,
+        volume: f64,
+        reference_volume: f64,
+    ) -> Result<(), ConservativeTetError> {
         if let Some(settings) = self.bulk_settings() {
-            if !volume.is_finite()
-                || volume < settings.minimum_volume_ratio
-                || volume > settings.maximum_volume_ratio
+            let elastic_volume = volume / reference_volume;
+            if !elastic_volume.is_finite()
+                || elastic_volume < settings.minimum_volume_ratio
+                || elastic_volume > settings.maximum_volume_ratio
             {
                 return Err(invalid(
                     "geometric volume is outside the original-bulk bracket",
@@ -114,6 +123,47 @@ impl ConservativeFormulation {
             }
         }
         Ok(())
+    }
+}
+
+/// Immutable natural deformations in the original material reference frame.
+/// Identity retains the original native arithmetic. Every explicit field is
+/// admitted against the original spatial quadrature before any point is bound.
+#[derive(Clone, Copy, Debug)]
+pub enum ConservativeReferenceField<'a> {
+    Identity,
+    Uniform(&'a ReferenceDeformation),
+    PerElement(&'a [ReferenceDeformation]),
+    /// Element-major, then the original deterministic Duffy quadrature order.
+    PerQuadrature(&'a [ReferenceDeformation]),
+}
+
+impl<'a> ConservativeReferenceField<'a> {
+    fn validate(
+        self,
+        elements: usize,
+        quadrature_count: usize,
+    ) -> Result<(), ConservativeTetError> {
+        let count = match self {
+            Self::Identity | Self::Uniform(_) => None,
+            Self::PerElement(values) => Some((values.len(), elements)),
+            Self::PerQuadrature(values) => Some((values.len(), quadrature_count)),
+        };
+        if count.is_some_and(|(actual, expected)| actual != expected) {
+            return Err(invalid(
+                "natural-deformation field must cover every original element or quadrature point",
+            ));
+        }
+        Ok(())
+    }
+
+    fn at(self, element: usize, point: usize, points: usize) -> Option<&'a ReferenceDeformation> {
+        match self {
+            Self::Identity => None,
+            Self::Uniform(value) => Some(value),
+            Self::PerElement(values) => Some(&values[element]),
+            Self::PerQuadrature(values) => Some(&values[element * points + point]),
+        }
     }
 }
 
@@ -294,7 +344,14 @@ impl<'a> ConservativeTetDefinition<'a> {
         initial_pressure_pa: &[f64],
         cx: &Cx<'_>,
     ) -> Result<ConservativeTetSolid<'a>, ConservativeTetError> {
-        self.prepare_density(displacement_m, velocity_mps, initial_pressure_pa, None, cx)
+        self.prepare_density(
+            displacement_m,
+            velocity_mps,
+            initial_pressure_pa,
+            None,
+            ConservativeReferenceField::Identity,
+            cx,
+        )
     }
 
     /// Bind a positive P1 reference density to the native conservative motion.
@@ -330,16 +387,69 @@ impl<'a> ConservativeTetDefinition<'a> {
             velocity_mps,
             initial_pressure_pa,
             Some(corner_density_kg_m3),
+            ConservativeReferenceField::Identity,
             cx,
         )
     }
 
+    /// Prepare conservative motion with held natural strain or manufactured
+    /// prestrain. The same original law evaluates F_elastic=F_total*G^-1;
+    /// original-volume energy, stress and tangent retain their exact pullback.
+    /// Exact elastic incompressibility targets det(F_total)=det(G), while the
+    /// original-bulk mode retains total volumes and J_ref*U(J_total/J_ref).
+    ///
+    /// Geometry, reference density and mass are not rescaled. Every interval
+    /// retains this immutable reference field. This is not a changing-reference
+    /// event or a thermal work/heat closure.
+    pub fn prepare_with_reference_deformations(
+        &self,
+        references: ConservativeReferenceField<'a>,
+        displacement_m: &[[f64; 3]],
+        velocity_mps: &[[f64; 3]],
+        initial_pressure_pa: &[f64],
+        cx: &Cx<'_>,
+    ) -> Result<ConservativeTetSolid<'a>, ConservativeTetError> {
+        self.prepare_density(
+            displacement_m,
+            velocity_mps,
+            initial_pressure_pa,
+            None,
+            references,
+            cx,
+        )
+    }
+
+    /// Combine held natural strain with the existing positive corner-density
+    /// inventory. Constitutive and inertia quadrature keep their original
+    /// separate meanings, ordering and geometric admission.
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare_with_reference_deformations_and_density(
+        &self,
+        references: ConservativeReferenceField<'a>,
+        corner_density_kg_m3: &'a [[f64; 4]],
+        displacement_m: &[[f64; 3]],
+        velocity_mps: &[[f64; 3]],
+        initial_pressure_pa: &[f64],
+        cx: &Cx<'_>,
+    ) -> Result<ConservativeTetSolid<'a>, ConservativeTetError> {
+        self.prepare_density(
+            displacement_m,
+            velocity_mps,
+            initial_pressure_pa,
+            Some(corner_density_kg_m3),
+            references,
+            cx,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn prepare_density(
         &self,
         displacement_m: &[[f64; 3]],
         velocity_mps: &[[f64; 3]],
         initial_pressure_pa: &[f64],
         corner_density_kg_m3: Option<&'a [[f64; 4]]>,
+        references: ConservativeReferenceField<'a>,
         cx: &Cx<'_>,
     ) -> Result<ConservativeTetSolid<'a>, ConservativeTetError> {
         checkpoint(cx)?;
@@ -399,6 +509,7 @@ impl<'a> ConservativeTetDefinition<'a> {
                 "elastic law field must cover the reference quadrature",
             ));
         }
+        references.validate(mesh.elements.len(), points)?;
         let (mass, corner_reference_density) = if let Some(densities) = corner_density_kg_m3 {
             for (element, density) in self.elements.iter().zip(densities) {
                 checkpoint(cx)?;
@@ -499,8 +610,14 @@ impl<'a> ConservativeTetDefinition<'a> {
         } else {
             initial_pressure_pa.to_vec()
         };
-        let frozen =
-            self.freeze_points(&mesh, displacement_m, None, &algorithmic_pressure_pa, cx)?;
+        let frozen = self.freeze_points(
+            &mesh,
+            displacement_m,
+            None,
+            &algorithmic_pressure_pa,
+            references,
+            cx,
+        )?;
         self.admit_volume(&mesh, &frozen.pressure_residual_m3)?;
         self.admit_initial_volume_rate(&mesh, &frozen.points, velocity_mps, cx)?;
         let momentum = mass
@@ -522,6 +639,7 @@ impl<'a> ConservativeTetDefinition<'a> {
         checkpoint(cx)?;
         Ok(ConservativeTetSolid {
             definition: *self,
+            references,
             mesh,
             mass,
             corner_reference_density,
@@ -548,6 +666,7 @@ impl<'a> ConservativeTetDefinition<'a> {
         u: &[[f64; 3]],
         retained_bulk_volumes: Option<&[f64]>,
         initial_pressure_pa: &[f64],
+        references: ConservativeReferenceField<'a>,
         cx: &Cx<'_>,
     ) -> Result<FrozenState<'a>, ConservativeTetError> {
         let count = mesh.elements.len() * mesh.points_per_element;
@@ -570,19 +689,27 @@ impl<'a> ConservativeTetDefinition<'a> {
             for (q, point) in element.points.iter().enumerate() {
                 checkpoint(cx)?;
                 let law = law_at(self.material, e, q, mesh.points_per_element);
+                let reference = references.at(e, q, mesh.points_per_element);
+                let reference_volume = reference.map_or(1.0, ReferenceDeformation::volume_ratio);
                 let f = deformation(element, point, u);
                 let j = determinant(&f);
-                self.formulation.admit_geometric_volume(j)?;
-                let frozen = DiscreteGradientPoint::try_new(
-                    law,
-                    if mixed {
-                        EnergyPart::Remainder
-                    } else {
-                        EnergyPart::Full
-                    },
-                    f,
-                    self.material_settings,
-                )
+                self.formulation
+                    .admit_geometric_volume(j, reference_volume)?;
+                let part = if mixed {
+                    EnergyPart::Remainder
+                } else {
+                    EnergyPart::Full
+                };
+                let frozen = match reference {
+                    Some(reference) => DiscreteGradientPoint::try_new_with_reference(
+                        law,
+                        part,
+                        reference,
+                        f,
+                        self.material_settings,
+                    ),
+                    None => DiscreteGradientPoint::try_new(law, part, f, self.material_settings),
+                }
                 .map_err(|error| material_error(e, q, error))?;
                 energy += point.weight_m3 * frozen.energy_before_pa();
                 let bulk_volume = if let Some(settings) = bulk_settings {
@@ -591,17 +718,30 @@ impl<'a> ConservativeTetDefinition<'a> {
                     // secant. Later endpoints retain their solved volume;
                     // replacing it by det(F) would destroy physical bulk work.
                     let bulk = match retained_bulk_volumes {
-                        Some(volumes) => DiscreteBulkPoint::try_new(
-                            law,
-                            volumes[e * mesh.points_per_element + q],
-                            settings,
-                        ),
+                        Some(volumes) => {
+                            let volume = volumes[e * mesh.points_per_element + q];
+                            match reference {
+                                Some(reference) => DiscreteBulkPoint::try_new_with_reference(
+                                    law, reference, volume, settings,
+                                ),
+                                None => DiscreteBulkPoint::try_new(law, volume, settings),
+                            }
+                        }
                         None => {
                             let pressure = (0..4).fold(0.0, |s, a| {
                                 point.pressure_shapes[a]
                                     .mul_add(initial_pressure_pa[element.pressure_indices[a]], s)
                             });
-                            DiscreteBulkPoint::from_endpoint_pressure(law, pressure, settings)
+                            match reference {
+                                Some(reference) => {
+                                    DiscreteBulkPoint::from_endpoint_pressure_with_reference(
+                                        law, reference, pressure, settings,
+                                    )
+                                }
+                                None => DiscreteBulkPoint::from_endpoint_pressure(
+                                    law, pressure, settings,
+                                ),
+                            }
                         }
                     }
                     .map_err(|error| material_error(e, q, error))?;
@@ -611,7 +751,7 @@ impl<'a> ConservativeTetDefinition<'a> {
                     bulk_volume_ratios.push(ratio);
                     ratio
                 } else {
-                    1.0
+                    reference_volume
                 };
                 if mixed {
                     let residual = j - bulk_volume;
@@ -739,6 +879,7 @@ struct FrozenState<'a> {
 #[derive(Debug)]
 pub struct ConservativeTetSolid<'a> {
     definition: ConservativeTetDefinition<'a>,
+    references: ConservativeReferenceField<'a>,
     mesh: Arc<PreparedMixedMesh>,
     mass: Arc<ReferenceMass>,
     corner_reference_density: Option<CornerReferenceDensity<'a>>,
@@ -810,6 +951,12 @@ struct Evaluation {
 }
 
 impl<'a> ConservativeTetSolid<'a> {
+    /// Original natural-strain binding, retained through every accepted
+    /// interval and impulse without resampling geometry or mass.
+    pub fn reference_deformations(&self) -> ConservativeReferenceField<'a> {
+        self.references
+    }
+
     pub fn displacement_m(&self) -> &[[f64; 3]] {
         &self.displacement_m
     }
@@ -1200,6 +1347,7 @@ impl<'a> ConservativeTetSolid<'a> {
                 .bulk_settings()
                 .map(|_| evaluation.bulk_volume_ratios.as_slice()),
             &pressure_pa,
+            self.references,
             cx,
         )?;
         self.definition
@@ -1218,6 +1366,7 @@ impl<'a> ConservativeTetSolid<'a> {
         Ok(ConservativeTetStep {
             solid: Self {
                 definition: self.definition,
+                references: self.references,
                 mesh: Arc::clone(&self.mesh),
                 mass: Arc::clone(&self.mass),
                 corner_reference_density: self.corner_reference_density.clone(),

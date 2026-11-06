@@ -15,6 +15,9 @@ use fs_solid::linear3::TetAssemblyBudget;
 use fs_solid::linear3::tet10::{TET10_EDGES, promote_p1_to_p2};
 use fs_solver::nonlinear::NewtonKrylovConfig;
 
+#[path = "mixed_conservative/reference.rs"]
+mod reference;
+
 const VOLUME: f64 = 1.0 / 6.0;
 const DENSITY: f64 = 6.0;
 const WORK_ALLOWANCE: f64 = 2e-9;

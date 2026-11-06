@@ -179,6 +179,7 @@ impl<'a> ConservativeTetSolid<'a> {
         )?;
         let solid = Self {
             definition: self.definition,
+            references: self.references,
             mesh: Arc::clone(&self.mesh),
             mass: Arc::clone(&self.mass),
             corner_reference_density: self.corner_reference_density.clone(),

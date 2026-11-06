@@ -67,6 +67,10 @@ impl ConservativeTetSolid<'_> {
             for (q, point) in element.points.iter().enumerate() {
                 checkpoint(cx)?;
                 let f = deformation(element, point, u);
+                let reference_volume = self
+                    .references
+                    .at(e, q, self.mesh.points_per_element)
+                    .map_or(1.0, |reference| reference.volume_ratio());
                 let frozen = &self.points[e * self.mesh.points_per_element + q];
                 let response = if with_tangent {
                     Some(
@@ -109,7 +113,9 @@ impl ConservativeTetSolid<'_> {
                     })
                 };
                 let det_f = determinant(&f);
-                self.definition.formulation.admit_geometric_volume(det_f)?;
+                self.definition
+                    .formulation
+                    .admit_geometric_volume(det_f, reference_volume)?;
                 let bulk = if self.bulk_points.is_empty() {
                     None
                 } else {
@@ -139,7 +145,9 @@ impl ConservativeTetSolid<'_> {
                         .weight_m3
                         .mul_add(pressure * volume.volume_work, pressure_work_j);
                     for a in 0..4 {
-                        let target_volume = bulk.as_ref().map_or(1.0, |b| b.volume_ratio_after);
+                        let target_volume = bulk
+                            .as_ref()
+                            .map_or(reference_volume, |b| b.volume_ratio_after);
                         local_r[30 + a] +=
                             point.weight_m3 * point.pressure_shapes[a] * (det_f - target_volume);
                     }
