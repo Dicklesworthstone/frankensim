@@ -21,6 +21,7 @@ impl ReactingNetwork1d {
             sources,
             volume_rates,
             reservoirs,
+            None,
             cancelled,
         )
         .map(|(report, _)| report)
@@ -36,6 +37,7 @@ impl ReactingNetwork1d {
         sources: NetworkSources<'_, '_>,
         volume_rates: Option<&[f64]>,
         reservoirs: Option<&[[Option<Cell<'_>>; 2]]>,
+        entropy: Option<&mut entropy::CoupledEntropy>,
         cancelled: impl FnMut() -> bool,
     ) -> Result<
         (
@@ -52,6 +54,7 @@ impl ReactingNetwork1d {
             sources,
             volume_rates,
             reservoirs,
+            entropy,
             cancelled,
         );
         if result.is_err() {
@@ -73,6 +76,7 @@ impl ReactingNetwork1d {
         mut sources: NetworkSources<'_, '_>,
         volume_rates: Option<&[f64]>,
         reservoirs: Option<&[[Option<Cell<'_>>; 2]]>,
+        mut entropy: Option<&mut entropy::CoupledEntropy>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<
         (
@@ -86,6 +90,11 @@ impl ReactingNetwork1d {
             || !positive(controls.transport.cfl) || controls.transport.cfl > 0.45
             || controls.transport.maximum_halvings > 32
         { return Err(ReactiveNetworkError::Invalid("reacting network duration, CFL or retry controls")); }
+        if entropy.is_some() && (volume_rates.is_some() || reservoirs.is_some() || !sources.is_empty()) {
+            return Err(ReactiveNetworkError::Invalid(
+                "closed reacting entropy excludes prescribed motion, reservoirs and additional sources",
+            ));
+        }
         let volume_rates = match volume_rates {
             Some(rates) => {
                 if rates.len() != self.accepted.plenums.len() {
@@ -139,6 +148,9 @@ impl ReactingNetwork1d {
                 || !positive(time + duration - time) || !(time + duration).is_finite()
             { return Err(ReactiveNetworkError::Invalid("reacting network increment cannot advance the clock")); }
             reset(&mut self.trial, &self.accepted, &mut cancelled)?;
+            if let Some(account) = entropy.as_deref_mut() {
+                account.begin_attempt();
+            }
             let mut chemistry = ChemistryReport::default();
             let attempt = (|| {
                 let half = Time::new(0.5 * duration);
@@ -162,8 +174,10 @@ impl ReactingNetwork1d {
                     None => None,
                 };
                 react_network(&mut self.trial, &mut self.reactor, &mut self.amounts,
-                    half.value(), &mut chemistry, &mut cancelled)?;
-                let transport = match (volume_rates, reservoirs) {
+                    half.value(), &mut chemistry, entropy.as_deref_mut(), &mut cancelled)?;
+                let transport = if let Some(account) = entropy.as_deref_mut() {
+                    account.advance_transport(&mut self.trial, Time::new(duration), controls.transport, &mut cancelled)?
+                } else { match (volume_rates, reservoirs) {
                     (Some(rates), Some(reservoirs)) => self.trial.step_with_reservoirs_and_volume_rates(
                         Time::new(duration), controls.transport, reservoirs, rates, &mut cancelled)?,
                     (Some(rates), None) => self.trial.step_with_volume_rates(
@@ -172,12 +186,12 @@ impl ReactingNetwork1d {
                         Time::new(duration), controls.transport, reservoirs, &mut cancelled)?,
                     (None, None) => self.trial.step(
                         Time::new(duration), controls.transport, &mut cancelled)?,
-                };
+                }};
                 if transport.elapsed.value() != duration {
                     return Ok((transport, false, None, MolecularDiagnostics::default(), None, None));
                 }
                 react_network(&mut self.trial, &mut self.reactor, &mut self.amounts,
-                    half.value(), &mut chemistry, &mut cancelled)?;
+                    half.value(), &mut chemistry, entropy.as_deref_mut(), &mut cancelled)?;
                 let second = match operator.as_deref_mut() {
                     Some(operator) => {
                         let report = molecular_method.advance(operator, &mut self.trial,
@@ -207,7 +221,7 @@ impl ReactingNetwork1d {
                 // A final valve can cool the donor or heat/change the receiver
                 // after chemistry has finished. Admission must include that final
                 // source, not only the states at the chemical endpoints.
-                if operator.is_some() || !sources.is_empty() {
+                if entropy.is_none() && (operator.is_some() || !sources.is_empty()) {
                     let chemistry_controls = self.reactor.controls();
                     for (branch, flow) in self.trial.branches.iter().enumerate() {
                         for cell in 0..flow.cell_count() {
@@ -228,6 +242,10 @@ impl ReactingNetwork1d {
                     None => (None, MolecularDiagnostics::default()),
                 };
                 let (wall, valves) = first_sources.pair(second_sources);
+                if let Some(account) = entropy.as_deref_mut() {
+                    account.finish(&self.accepted, &self.trial, self.reactor.controls(),
+                        diagnostics.entropy, &mut cancelled)?;
+                }
                 Ok::<_, ReactiveNetworkError>((transport, true, dissipation, diagnostics, wall, valves))
             })();
             match attempt {

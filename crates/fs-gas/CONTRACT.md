@@ -3192,6 +3192,42 @@ establish global second-order accuracy or a discrete entropy certificate. The
 molecular operator's constant-area, continuum, explicit mixing-length and
 transport-law applicability limits remain unchanged.
 
+### Complete source entropy in closed reacting networks
+
+`ReactingNetwork1d::step_with_entropy` admits C(dt/2)-A(dt)-C(dt/2) through the
+original complete-network retry transaction. `step_with_dissipation_and_entropy`
+adds source-conjugate molecular halves D(dt/2) on both sides. Every branch cell
+and finite plenum retains the original fixed-U,V reactor, caloric data, reaction
+mechanism and energy-reference conversion. Advection uses the existing measured
+network entropy gate; it remains the native engineering flux. Molecular faces
+use the existing divided caloric/chemical pairing and authored port lengths.
+
+One immutable pre-step source basis admits the actual original-to-final entropy.
+The account observes actual represented chemical species changes per cell and
+per half, retaining their physical source-entropy constants. Only numerical
+species-source continuity defects lose their arbitrary reference contribution;
+each defect is independently bounded against original mass plus absolute
+chemical throughput. Internal plenum transfers are enclosed in the state
+account. Summing component entropy reports or reactor tolerances cannot replace
+the complete endpoint gate, and no reaction or viscous heat is added twice.
+
+Acoustic shortening or entropy refusal restarts the complete composition. Both
+molecular intervals finish their exact half duration, but their accepted port
+and branch receipts remain unpublished until the complete source/energy/entropy
+checks and final cancellation poll succeed. The final molecular state is also
+admitted against the original chemistry temperature interval. Refusal preserves
+all accepted network fields, clocks and participating operator reports.
+
+These entries admit only fixed closed networks, with stationary reflecting
+exterior ends or isolated periodic branches. The molecular entry additionally
+requires constant-area branches and common species support at active faces.
+Baths, moving volumes, wall/valve sources and stabilized/adaptive molecular
+composition are excluded. Measured component and whole-step admission does not
+establish a fully discrete coupled entropy or global temporal-order theorem.
+Focused G1/G4 regressions reconstruct source entropy with variable Cp and a
+nonzero physical species entropy datum, create an initially absent product,
+exercise heat-release duration retries, and cancel/reuse the final transaction.
+
 ## Molecular N2/O2 shockwave manifold consumer
 
 `cargo run -p fs-gas --features experimental-euler --example mixture_manifold -- 64 molecular`

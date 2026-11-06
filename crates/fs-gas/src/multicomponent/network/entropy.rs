@@ -175,7 +175,7 @@ impl MixtureNetwork1d {
         }
     }
 
-    fn entropy_account(
+    pub(super) fn entropy_account(
         &self,
         controls: MixtureEntropyControl,
         reservoirs: Option<&[[Option<Cell<'_>>; 2]]>,

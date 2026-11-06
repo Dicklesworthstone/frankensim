@@ -30,10 +30,12 @@ use fs_qty::{Amount, Time};
 use fs_thermochem::kinetics::IdealGasKineticsV1;
 
 mod adaptive;
+mod entropy;
 mod stabilized;
 mod step;
 pub use super::coupled::molecular::{SplitAdaptiveNetworkDissipationReport, SplitStabilizedNetworkDissipationReport};
 pub use adaptive::AdaptiveReactiveNetworkReport;
+pub use entropy::ReactiveNetworkEntropyReport;
 pub use stabilized::StabilizedReactiveNetworkReport;
 
 /// Physical owner of one local chemistry or caloric reconstruction refusal.
@@ -450,14 +452,22 @@ impl ReactingNetwork1d {
 
 fn react_network(
     network: &mut MixtureNetwork1d, reactor: &mut IsochoricReactor, amounts: &mut [Amount],
-    duration: f64, report: &mut ChemistryReport, cancelled: &mut impl FnMut() -> bool,
+    duration: f64, report: &mut ChemistryReport, mut entropy: Option<&mut entropy::CoupledEntropy>,
+    cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(), ReactiveNetworkError> {
     let width = network.gas().species_count() + 2;
+    let mut previous = [0.0; MAX_COMPONENTS];
     for (branch, flow) in network.branches.iter_mut().enumerate() {
         for (cell, q) in flow.states.chunks_exact_mut(width).enumerate() {
+            if entropy.is_some() {
+                previous[..width].copy_from_slice(q);
+            }
             react_cell(&flow.gas, q, flow.mesh.volumes()[cell], cell, reactor, amounts,
                 duration, report, cancelled)
                 .map_err(|source| cell_error(ChemistryLocation::Branch { branch, cell }, source))?;
+            if let Some(account) = entropy.as_deref_mut() {
+                account.observe_chemistry_row(&previous[..width], q, flow.mesh.volumes()[cell], cancelled)?;
+            }
         }
     }
     let gas = &network.branches[0].gas;
@@ -467,9 +477,15 @@ fn react_network(
         q[..n].copy_from_slice(&volume.state.partial_densities);
         q[n] = volume.state.momentum;
         q[n + 1] = volume.state.energy;
+        if entropy.is_some() {
+            previous[..width].copy_from_slice(&q[..width]);
+        }
         react_cell(gas, &mut q[..width], volume.volume_m3, plenum, reactor, amounts,
             duration, report, cancelled)
             .map_err(|source| cell_error(ChemistryLocation::Plenum { plenum }, source))?;
+        if let Some(account) = entropy.as_deref_mut() {
+            account.observe_chemistry_row(&previous[..width], &q[..width], volume.volume_m3, cancelled)?;
+        }
         volume.state.partial_densities.copy_from_slice(&q[..n]);
         volume.state.momentum = q[n];
         volume.state.energy = q[n + 1];

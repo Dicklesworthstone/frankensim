@@ -10,7 +10,7 @@ mod exterior;
 pub use exterior::ReactiveExteriorEntropyReport;
 
 use super::{
-    Dd, EntropyTracker, FlowError, MAX_SPECIES, MixtureEuler1d, MolecularEntropyControl,
+    Cell, Dd, EntropyTracker, FlowError, MAX_SPECIES, MixtureEuler1d, MixtureGas, MolecularEntropyControl,
     poll, positive, scalar,
 };
 
@@ -72,14 +72,21 @@ impl ReactiveEntropyAccount {
         controls: MolecularEntropyControl,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Self, FlowError> {
-        Ok(Self {
-            state: EntropyTracker::new(initial, controls, cancelled)?,
-            species_count: initial.gas().species_count(),
+        Ok(Self::from_tracker(EntropyTracker::new(initial, controls, cancelled)?))
+    }
+
+    /// Retain the existing original storage/source account when a composition
+    /// contains multiple branch fields and finite compact volumes.
+    pub(in crate::multicomponent) fn from_tracker(state: EntropyTracker) -> Self {
+        let species_count = state.source_owner.models().len();
+        Self {
+            state,
+            species_count,
             chemical_change: [Dd::ZERO; MAX_SPECIES],
             chemical_throughput: [Dd::ZERO; MAX_SPECIES],
             rejected_entropy_steps: 0,
             exterior: Vec::new(),
-        })
+        }
     }
 
     /// Each complete retry returns to the same immutable original thermal basis.
@@ -247,6 +254,29 @@ impl ReactiveEntropyAccount {
         check
     }
 
+    /// Admit separate native storage owners on the same immutable original
+    /// basis. Chemical receipts are actual represented updates, independent of
+    /// how a caller stores its branch and compact-volume fields.
+    pub(in crate::multicomponent) fn check_candidate_cells<'a, 'b>(
+        &mut self,
+        gas: &MixtureGas,
+        cells: impl IntoIterator<Item = (Cell<'a>, Cell<'b>, f64)>,
+        temperature_bounds: Option<[f64; 2]>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<ReactiveEntropyReport, FlowError> {
+        self.reset_endpoint();
+        let check = (|| {
+            self.collect_candidate_cells(gas, cells, temperature_bounds, cancelled)?;
+            self.admit_collected(gas, cancelled)
+        })();
+        if matches!(&check, Err(
+            FlowError::EntropyDecrease { .. } | FlowError::SpeciesInventoryDrift { .. }
+        )) {
+            self.rejected_entropy_steps += 1;
+        }
+        check
+    }
+
     /// Shared original-to-final state reduction. The closed and open accounts
     /// use the identical native source inversion and temperature-domain check.
     fn collect_candidate_rows(
@@ -259,31 +289,54 @@ impl ReactiveEntropyAccount {
         let gas = candidate.gas();
         let n = self.species_count;
         let width = n + 2;
-        if gas.species_count() != n
-            || !self.state.matches_source(gas)
-            || initial.len() != candidate.states.len()
-            || candidate.cell_count() != self.state.initial_temperature.len()
-        {
+        if initial.len() != candidate.states.len() {
             return Err(FlowError::EntropyDomain("reacting entropy candidate owner or dimensions"));
+        }
+        let cells = initial.chunks_exact(width).zip(candidate.states.chunks_exact(width))
+            .zip(candidate.mesh.volumes()).map(|((old, new), &volume)| (
+                crate::multicomponent::cell(old, n), crate::multicomponent::cell(new, n), volume,
+            ));
+        self.collect_candidate_cells(gas, cells, temperature_bounds, cancelled)
+    }
+
+    fn collect_candidate_cells<'a, 'b>(
+        &mut self,
+        gas: &MixtureGas,
+        cells: impl IntoIterator<Item = (Cell<'a>, Cell<'b>, f64)>,
+        temperature_bounds: Option<[f64; 2]>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(), FlowError> {
+        let n = self.species_count;
+        if gas.species_count() != n || !self.state.matches_source(gas) {
+            return Err(FlowError::EntropyDomain("reacting entropy candidate source"));
         }
         if temperature_bounds.is_some_and(|[lower, upper]| {
             !positive(lower) || !positive(upper) || lower > upper
         }) {
             return Err(FlowError::EntropyDomain("reacting entropy temperature interval"));
         }
-        for (i, (old, new)) in initial.chunks_exact(width)
-            .zip(candidate.states.chunks_exact(width)).enumerate()
-        {
+        let mut count = 0;
+        for (i, (old, new, volume)) in cells.into_iter().enumerate() {
             poll(cancelled)?;
-            let primitive = gas.decode(new, Some(self.state.initial_temperature[i]), cancelled)?;
+            if i >= self.state.initial_temperature.len() || !positive(volume)
+                || old.partial_densities.len() != n || new.partial_densities.len() != n
+            {
+                return Err(FlowError::EntropyDomain("reacting entropy candidate storage dimensions"));
+            }
+            let primitive = gas.decode_cell(new, Some(self.state.initial_temperature[i]), cancelled)?;
             if let Some([lower, upper]) = temperature_bounds
                 && !(lower..=upper).contains(&primitive.temperature)
             {
                 return Err(FlowError::EntropyDomain("final molecular state is outside chemistry interval"));
             }
             self.state.candidate_cell(
-                gas, i, old, new, primitive.temperature, candidate.mesh.volumes()[i], cancelled,
+                gas, i, old.partial_densities, new.partial_densities,
+                primitive.temperature, volume, cancelled,
             )?;
+            count += 1;
+        }
+        if count != self.state.initial_temperature.len() {
+            return Err(FlowError::EntropyDomain("reacting entropy candidate storage count"));
         }
         Ok(())
     }
@@ -296,7 +349,16 @@ impl ReactiveEntropyAccount {
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<ReactiveEntropyReport, FlowError> {
         self.collect_candidate_rows(initial, candidate, temperature_bounds, cancelled)?;
-        let gas = candidate.gas();
+        self.admit_collected(candidate.gas(), cancelled)
+    }
+
+    /// The same original chemistry/source reduction admits axial and network
+    /// storage; no component entropy sums enter this complete endpoint gate.
+    fn admit_collected(
+        &self,
+        gas: &MixtureGas,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<ReactiveEntropyReport, FlowError> {
         let n = self.species_count;
         let relative = self.state.inventory_with_reaction(
             n, true, Some((&self.chemical_change, &self.chemical_throughput)),

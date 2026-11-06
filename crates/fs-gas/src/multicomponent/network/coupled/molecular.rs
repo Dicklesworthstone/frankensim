@@ -6,10 +6,11 @@ use super::super::dissipation::{
     NetworkDissipationOperator, NetworkDissipationReport, SplitNetworkDissipationReport,
     StabilizedNetworkDissipationReport,
 };
-use crate::multicomponent::Cell;
 use crate::multicomponent::dissipation::{
     DissipationControl, DissipationError, StabilizedDissipationControl, TransportLaw,
 };
+use crate::multicomponent::reactive::SplitMolecularEntropyReport;
+use crate::multicomponent::{Cell, MixtureEntropyControl, MixtureEntropyReport};
 use fs_qty::Time;
 
 /// Accepted RKL2 intervals on both sides of the original network composition.
@@ -31,10 +32,15 @@ pub struct SplitAdaptiveNetworkDissipationReport {
 pub(in crate::multicomponent::network) struct MolecularDiagnostics {
     pub stabilized: Option<SplitStabilizedNetworkDissipationReport>,
     pub adaptive: Option<SplitAdaptiveNetworkDissipationReport>,
+    pub entropy: Option<SplitMolecularEntropyReport>,
 }
 
 pub(in crate::multicomponent::network) enum MolecularMethod<'a> {
     Explicit(DissipationControl),
+    EntropyExplicit {
+        controls: DissipationControl,
+        entropy: MixtureEntropyControl,
+    },
     Stabilized {
         controls: StabilizedDissipationControl,
         /// Borrowed by the complete composition, never reset by a half or retry.
@@ -51,6 +57,7 @@ pub(in crate::multicomponent::network) struct MolecularHalf {
     physical: NetworkDissipationReport,
     stabilized: Option<StabilizedNetworkDissipationReport>,
     adaptive: Option<AdaptiveNetworkDissipationReport>,
+    entropy: Option<MixtureEntropyReport>,
 }
 
 impl MolecularMethod<'_> {
@@ -78,6 +85,23 @@ impl MolecularMethod<'_> {
                     physical,
                     stabilized: None,
                     adaptive: None,
+                    entropy: None,
+                })
+            }
+            Self::EntropyExplicit { controls, entropy } => {
+                if moving_volumes || reservoirs.is_some() {
+                    return Err(DissipationError::Invalid(
+                        "closed molecular entropy composition requires fixed volumes and no baths",
+                    ));
+                }
+                let (physical, measured) = operator.advance_entropy_for_trial::<true>(
+                    network, duration, *controls, *entropy, cancelled,
+                )?;
+                Ok(MolecularHalf {
+                    physical,
+                    stabilized: None,
+                    adaptive: None,
+                    entropy: Some(measured),
                 })
             }
             Self::Stabilized {
@@ -107,6 +131,7 @@ impl MolecularMethod<'_> {
                     physical: report.transport,
                     stabilized: Some(report),
                     adaptive: None,
+                    entropy: None,
                 })
             }
             Self::Adaptive {
@@ -136,6 +161,7 @@ impl MolecularMethod<'_> {
                     physical: report.stabilized.transport,
                     stabilized: Some(report.stabilized),
                     adaptive: Some(report),
+                    entropy: None,
                 })
             }
         }
@@ -160,6 +186,10 @@ pub(in crate::multicomponent::network) fn split_halves(
                 .adaptive
                 .zip(second.adaptive)
                 .map(|(first, second)| SplitAdaptiveNetworkDissipationReport { first, second }),
+            entropy: first
+                .entropy
+                .zip(second.entropy)
+                .map(|(first, second)| SplitMolecularEntropyReport { first, second }),
         },
     )
 }

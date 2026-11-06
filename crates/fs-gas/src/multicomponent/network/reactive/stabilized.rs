@@ -78,6 +78,7 @@ impl ReactingNetwork1d {
             sources,
             volume_rates_m3_s,
             reservoirs,
+            None,
             &mut cancelled,
         )?;
         Ok(StabilizedReactiveNetworkReport {

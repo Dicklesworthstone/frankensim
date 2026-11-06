@@ -70,6 +70,25 @@ impl<L: TransportLaw> NetworkDissipationOperator<L> {
         duration: Time,
         controls: DissipationControl,
         entropy: MolecularEntropyControl,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<(NetworkDissipationReport, MolecularEntropyReport), DissipationError> {
+        let report = self.advance_entropy_for_trial::<ENTROPY_FACES>(
+            network, duration, controls, entropy, cancelled,
+        )?;
+        self.publish_trial_report();
+        Ok(report)
+    }
+
+    /// A complete composing owner publishes these molecular receipts only after
+    /// its own final state, source and entropy checks succeed.
+    pub(in crate::multicomponent::network) fn advance_entropy_for_trial<
+        const ENTROPY_FACES: bool,
+    >(
+        &mut self,
+        network: &mut MixtureNetwork1d,
+        duration: Time,
+        controls: DissipationControl,
+        entropy: MolecularEntropyControl,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<(NetworkDissipationReport, MolecularEntropyReport), DissipationError> {
         controls.validate()?;
@@ -111,7 +130,6 @@ impl<L: TransportLaw> NetworkDissipationOperator<L> {
             &mut cancelled,
         )?;
         self.trial_report = Some(report);
-        self.publish_trial_report();
         Ok((report, account.report()))
     }
 }
