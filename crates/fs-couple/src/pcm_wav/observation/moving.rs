@@ -32,6 +32,8 @@ use fs_math::{dd::Dd, det};
 
 /// Coherent moving volume-source fields and ideal first-order microphones.
 pub mod field;
+/// Full moving force fields with explicit causal history and bounded integration.
+pub mod force;
 mod flow;
 /// Simultaneous independently moving microphones on the original pressure clocks.
 pub mod frames;
@@ -535,9 +537,30 @@ fn interpolate<M>(
             "retarded strength would extrapolate accepted source history",
         ));
     }
-    let left = upper - 1;
+    interpolate_interval(track, intervals, upper - 1, time)
+}
+
+// The force-history quadrature already knows the original strength interval.
+// Retain the same polynomial, including exact accepted endpoint values/slopes.
+fn interpolate_interval<M>(
+    track: &PreparedTrack<'_, M>,
+    intervals: &[CubicInterval],
+    left: usize,
+    time: f64,
+) -> Result<CompactSourceStrength, RenderError> {
+    let samples = track.source.samples;
     if time == samples[left].source_time_s {
         return Ok(samples[left].strength);
+    }
+    if left + 1 >= samples.len()
+        || !time.is_finite()
+        || time < samples[left].source_time_s
+        || time > samples[left + 1].source_time_s
+    {
+        return Err(sizing("strength query is outside its accepted source interval"));
+    }
+    if time == samples[left + 1].source_time_s {
+        return Ok(samples[left + 1].strength);
     }
     let h = samples[left + 1].source_time_s - samples[left].source_time_s;
     let u = Dd::from_f64((time - samples[left].source_time_s) / h);

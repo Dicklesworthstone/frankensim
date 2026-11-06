@@ -211,6 +211,11 @@ impl PreparedSourceTrajectory {
             self.segments[self.segments.len() - 1].polynomial.last_arrival,
         ]
     }
+    /// Continuous source Mach bound retained from the accepted velocity hulls.
+    /// This includes interior extrema, not only source-knot velocities.
+    pub const fn maximum_source_mach(&self) -> f64 {
+        self.maximum_mach
+    }
     /// Conservative whole-trajectory upper bound on d tau/d t.
     /// Geometric amplitude modulation still needs its own bandwidth declaration.
     pub const fn maximum_source_time_rate(&self) -> f64 {
@@ -259,6 +264,21 @@ impl PreparedSourceTrajectory {
     /// Number of original interpolation spans; bound subdivision adds no spans.
     pub fn segment_count(&self) -> usize {
         self.segments.len()
+    }
+
+    /// Next original source knot strictly after an admitted source time.
+    ///
+    /// Consumers integrating accepted histories can split at these knots without
+    /// copying or resampling the original geometry. The final knot returns None.
+    pub fn next_source_knot_after(&self, source_time: f64) -> Result<Option<f64>, AeroacError> {
+        let [first, last] = self.source_time_interval_s();
+        if !source_time.is_finite() || source_time < first || source_time > last {
+            return Err(invalid("source knot query is outside retained trajectory"));
+        }
+        let index = self.segments.partition_point(
+            |segment| segment.polynomial.last.source_time_s <= source_time,
+        );
+        Ok(self.segments.get(index).map(|segment| segment.polynomial.last.source_time_s))
     }
 
     /// Read the same C2 position polynomial and its first two derivatives.
