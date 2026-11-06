@@ -5,6 +5,7 @@ use fs_airflow::graph::thermal::medium::convection::{
     finite_gas::{
         film::{AidingVerticalPlateGasSurface, FilmGasHeatLaw, FilmGasSurface},
         sphere::ForcedSphereGasSurface,
+        tube::ForcedTubeGasSurface,
     },
 };
 use fs_convection::{HorizontalPlateFacing, NaturalConvectionGeometry};
@@ -448,6 +449,76 @@ fn isochoric_bulk_duct_feedback_keeps_endpoint_properties_and_reciprocal_heat() 
                     * (next.state.temperature_k() - bulk.state().temperature),
                 environment.exchange.source_tolerance_j);
             assert_eq!(report.solid_to_gas_heat_j > 0.0, enthalpy > 100000.0);
+            closed(&old, thermal, &next);
+        }
+        assert_eq!(old, saved);
+    });
+}
+
+#[test]
+fn isochoric_tube_feedback_uses_wall_viscosity_and_reciprocal_heat_in_both_directions() {
+    scope(|cx, _| {
+        let old = gas(400.0);
+        let saved = old.clone();
+        let curve = source::body_curve();
+        let boundary = uniform_boundary();
+        let environment = uniform_environment(&old, &boundary);
+        let transport = old.state().transport_state().unwrap();
+        let surface = ForcedTubeGasSurface {
+            model: old.model(),
+            area_m2: 0.02,
+            diameter: Length::new(0.01),
+            heated_length: Length::new(1.0),
+            speed_m_s: 20000.0 * transport.dynamic_viscosity_pa_s()
+                / (transport.density_kg_m3() * 0.01),
+        };
+        for enthalpy in [80000.0, 120000.0] {
+            let thermal = UniformEnthalpyStepInput {
+                duration_s: 0.2,
+                ..body(&curve, enthalpy)
+            };
+            let next = surface
+                .isochoric_body_candidate(cx, &environment, thermal, wall_solve())
+                .unwrap();
+            let report = &next.report;
+            let wall = &report.convection.source;
+            let sample = &wall.source;
+            let bulk = report.next_gas.state();
+            let at_wall = sample.surface_gas.as_ref().unwrap();
+            let evaluated = sample.interface.evaluation.as_ref().unwrap();
+            let transport = bulk.transport_state().unwrap();
+            assert_eq!(&sample.interface.gas, bulk);
+            assert_eq!(evaluated.transport, transport);
+            assert_eq!(at_wall.state().temperature, wall.temperature_k);
+            assert_eq!(at_wall.state().pressure, bulk.state().pressure);
+            assert_eq!(at_wall.source_packs(), bulk.source_packs());
+            near(
+                wall.endpoint_source.surface_gas.as_ref().unwrap().state().temperature,
+                next.state.temperature_k(),
+                1e-12,
+            );
+            let re = transport.density_kg_m3() * surface.speed_m_s * surface.diameter.value()
+                / transport.dynamic_viscosity_pa_s();
+            let ratio = transport.dynamic_viscosity_pa_s()
+                / at_wall.transport_state().unwrap().dynamic_viscosity_pa_s();
+            let nu = 0.027 * re.powf(0.8) * transport.prandtl().powf(1.0 / 3.0)
+                * ratio.powf(0.14);
+            near(evaluated.nusselt.groups()["mu_bulk_over_surface"], ratio, 1e-13);
+            near(
+                report.convection.coefficient_w_per_m2_k,
+                nu * transport.thermal_conductivity_w_m_k() / surface.diameter.value(),
+                1e-10,
+            );
+            near(
+                report.solid_to_gas_heat_j,
+                thermal.duration_s * thermal.surface_area_m2
+                    * report.convection.coefficient_w_per_m2_k
+                    * (next.state.temperature_k() - bulk.state().temperature),
+                environment.exchange.source_tolerance_j,
+            );
+            assert_eq!(report.solid_to_gas_heat_j > 0.0, enthalpy > 100000.0);
+            assert!(wall.temperature_residual_k.abs() <= wall_solve().temperature_tolerance_k);
+            assert!(wall.boundary_residual_j.abs() <= environment.exchange.source_tolerance_j);
             closed(&old, thermal, &next);
         }
         assert_eq!(old, saved);

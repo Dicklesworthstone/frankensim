@@ -4,6 +4,7 @@ use fs_airflow::graph::thermal::medium::convection::{
     AidingVerticalPlateSettings,
     finite_gas::{
         NaturalGasSurface,
+        tube::ForcedTubeGasSurface,
         film::{
             AidingVerticalPlateGasSurface, FilmGasHeatLaw, FilmGasSurface, PengRobinsonFilmSource,
         },
@@ -349,4 +350,73 @@ fn ambiguous_phase_density_policy_and_late_cancellation_cannot_publish_storage()
         thermal.initial,
         curve.state_at_specific_enthalpy(55000.0).unwrap()
     );
+}
+
+#[test]
+fn turbulent_tube_retains_the_real_bulk_eos_and_source_wall_viscosity() {
+    let model = ThermochemicalPengRobinsonModel::new(
+        source::model_transport(1.0, true),
+        vec![PengRobinsonSpeciesBinding {
+            species: SpeciesId::new("A").unwrap(),
+            critical_temperature: Temperature::new(190.564),
+            critical_pressure: Pressure::new(4.5992e6),
+            acentric_factor: 0.01142,
+        }],
+        vec![0.0],
+    ).unwrap();
+    let old = IsochoricRealGasParcel::new(
+        model,
+        source::point(350.0, 5.0e6),
+        0.0001,
+        PengRobinsonPhaseV1::Vapor,
+    ).unwrap();
+    let saved = old.clone();
+    let source = PengRobinsonFilmSource {
+        model: old.model(),
+        phase: PengRobinsonPhaseV1::Vapor,
+    };
+    let bulk = old.state();
+    let transport = bulk.transport_state().unwrap();
+    let surface = ForcedTubeGasSurface {
+        model: &source,
+        area_m2: 0.02,
+        diameter: Length::new(0.01),
+        heated_length: Length::new(1.0),
+        speed_m_s: 20000.0 * transport.dynamic_viscosity_pa_s()
+            / (transport.density_kg_m3() * 0.01),
+    };
+    let curve = source::body_curve();
+    // Small contrasts exercise wiring and both correction directions, not
+    // empirical accuracy in a strongly variable-property dense gas.
+    for enthalpy in [45000.0, 55000.0] {
+        let wall = body(&curve, enthalpy).initial;
+        let result = surface.resolve(bulk, wall).unwrap();
+        let at_wall = result.source.surface_gas.as_ref().unwrap();
+        let evaluated = result.source.interface.evaluation.as_ref().unwrap();
+        assert_eq!(evaluated.transport, transport);
+        assert_eq!(transport.density_kg_m3(), old.density_kg_m3());
+        assert_eq!(transport.specific_heat_j_kg_k(), bulk.specific_heat_cp_j_kg_k());
+        assert_ne!(transport.density_kg_m3(), bulk.source().state().density);
+        assert_eq!(at_wall.temperature_k(), wall.temperature_k());
+        assert_eq!(at_wall.pressure_pa(), bulk.pressure_pa());
+        assert!(std::ptr::eq(at_wall.constitutive_law(), bulk.constitutive_law()));
+        assert_eq!(at_wall.source().source_packs(), bulk.source().source_packs());
+        assert_eq!(
+            at_wall.source().components()[0].card_identity(),
+            bulk.source().components()[0].card_identity()
+        );
+        let ratio = transport.dynamic_viscosity_pa_s()
+            / at_wall.transport_state().unwrap().dynamic_viscosity_pa_s();
+        let nu = 0.027 * 20000.0_f64.powf(0.8) * transport.prandtl().powf(1.0 / 3.0)
+            * ratio.powf(0.14);
+        assert_eq!(evaluated.nusselt.card().id, CorrelationId::SiederTateTurbulent);
+        near(evaluated.nusselt.groups()["mu_bulk_over_surface"], ratio, 1e-13);
+        near(
+            result.conductance_w_k,
+            surface.area_m2 * nu * transport.thermal_conductivity_w_m_k()
+                / surface.diameter.value(),
+            1e-11,
+        );
+    }
+    assert_eq!(old, saved);
 }

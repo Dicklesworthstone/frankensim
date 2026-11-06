@@ -121,7 +121,8 @@ fn mixed_laws_use_reacted_midpoints_and_material_changes_reach_charge_heat_and_m
                         if entry.id==10 {assert_eq!(sample.gas.components().len(),2);}
                     }
                     GasHeatSample::Conduction(material)=>assert_eq!(Some(material),cell.conductivity.as_ref()),
-                    GasHeatSample::FilmConvection(_) | GasHeatSample::ForcedSphereConvection(_) =>
+                    GasHeatSample::FilmConvection(_) | GasHeatSample::ForcedSphereConvection(_)
+                        | GasHeatSample::ForcedTubeConvection(_) =>
                         panic!("legacy mixed-law fixture changed its constitutive law"),
                 }
             }}
@@ -216,7 +217,8 @@ fn live_transport_changes_the_mixture_seen_by_mixed_heat_before_atomic_publish()
                         GasHeatSample::ForcedConvection(sample) | GasHeatSample::NaturalConvection(sample)=>
                             assert_eq!(&sample.gas,&chamber.boundary.piston.midpoint),
                         GasHeatSample::Conduction(_) => {}
-                        GasHeatSample::FilmConvection(_) | GasHeatSample::ForcedSphereConvection(_) =>
+                        GasHeatSample::FilmConvection(_) | GasHeatSample::ForcedSphereConvection(_)
+                        | GasHeatSample::ForcedTubeConvection(_) =>
                             panic!("legacy mixed-law fixture changed its constitutive law"),
                     }
                 }

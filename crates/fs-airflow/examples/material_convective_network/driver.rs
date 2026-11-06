@@ -172,6 +172,7 @@ fn main() -> Result<()> {
         GasHeatLaw::Conduction(_) => eprintln!("conductive gas boundary"),
         GasHeatLaw::FilmConvection(_) => eprintln!("source-pinned film convection"),
         GasHeatLaw::ForcedSphereConvection(_) => eprintln!("source-pinned forced-sphere convection"),
+        GasHeatLaw::ForcedTubeConvection(_) => eprintln!("source-pinned turbulent-tube convection"),
     }
     let out = run_with_law(fraction, law, steps, true)?;
     eprintln!("final cell={} K, charge={} C, velocity={} m/s, sound={} m/s, balance={} J",

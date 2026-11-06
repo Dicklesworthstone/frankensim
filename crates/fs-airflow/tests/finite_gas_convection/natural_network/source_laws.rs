@@ -1,4 +1,4 @@
-//! Source-pinned film and sphere laws on the original multi-chamber owners.
+//! Source-pinned film, sphere and tube laws on the original multi-chamber owners.
 use super::*;
 use fs_airflow::graph::thermal::medium::convection::{
     AidingVerticalPlateSettings,
@@ -6,8 +6,10 @@ use fs_airflow::graph::thermal::medium::convection::{
         FiniteGasConvectionSample,
         film::{AidingVerticalPlateGasSurface, FilmGasHeatLaw, FilmGasSurface},
         sphere::ForcedSphereGasSurface,
+        tube::ForcedTubeGasSurface,
     },
 };
+use fs_convection::CorrelationId;
 use fs_couple::cavity_phs::piston::GasPiston;
 use fs_couple::cavity_phs::piston::thermal::boundary::ports::network::material::state::flow::MaterialGasLawFlowError;
 use fs_material::fluid_transport::FluidTransport;
@@ -38,6 +40,16 @@ fn sphere(model: &ThermochemicalGasModel, area_m2: f64) -> GasHeatLaw<'_> {
         area_m2,
         diameter: Length::new(0.1),
         speed_m_s: 1.0,
+    })
+}
+
+fn tube(model: &ThermochemicalGasModel, area_m2: f64) -> GasHeatLaw<'_> {
+    GasHeatLaw::ForcedTubeConvection(ForcedTubeGasSurface {
+        model,
+        area_m2,
+        diameter: Length::new(0.01),
+        heated_length: Length::new(1.0),
+        speed_m_s: 80.0,
     })
 }
 
@@ -102,6 +114,24 @@ fn check_source(sample: &GasHeatSample) -> &FiniteGasConvectionSample {
             );
             (&sample.interface, property)
         }
+        GasHeatSample::ForcedTubeConvection(sample) => {
+            let property = sample.surface_gas.as_ref().unwrap();
+            assert_eq!(
+                property.state().temperature,
+                sample.interface.body.temperature_k()
+            );
+            let transport = sample.interface.gas.transport_state().unwrap();
+            let evaluated = sample.interface.evaluation.as_ref().unwrap();
+            assert_eq!(evaluated.transport, transport);
+            assert_eq!(evaluated.nusselt.card().id, CorrelationId::SiederTateTurbulent);
+            let ratio = transport.dynamic_viscosity_pa_s()
+                / property.transport_state().unwrap().dynamic_viscosity_pa_s();
+            near(evaluated.nusselt.groups()["mu_bulk_over_surface"], ratio, 1e-13);
+            let nu = 0.027 * evaluated.nusselt.groups()["Re"].powf(0.8)
+                * transport.prandtl().powf(1.0 / 3.0) * ratio.powf(0.14);
+            near(evaluated.nusselt.evidence().value, nu, 1e-11);
+            (&sample.interface, property)
+        }
         _ => panic!("source-pinned patch lost its concrete material evaluation"),
     };
     assert_eq!(property.state().pressure, interface.gas.state().pressure);
@@ -153,7 +183,7 @@ fn sourced_network_laws_close_sensible_latent_and_two_chamber_energy_together() 
                 })
                 .collect::<Vec<_>>();
             let patches = [
-                patch(1, 7, COLD, sphere(&bank, 0.02)),
+                patch(1, 7, COLD, sphere(&bank, 0.01)),
                 patch(
                     2,
                     8,
@@ -168,10 +198,11 @@ fn sourced_network_laws_close_sensible_latent_and_two_chamber_energy_together() 
                 ),
                 patch(3, 8, HOT, film(&bank, natural(0.005))),
                 patch(4, 8, HOT, film(&bank, aiding(0.01))),
+                patch(5, 7, COLD, tube(&bank, 0.01)),
             ];
             let controls = NetworkSolve {
                 maximum_chambers: 2,
-                maximum_contacts: 4,
+                maximum_contacts: 5,
                 maximum_boundary_solves: 2000,
                 ..network_controls()
             };
@@ -253,11 +284,12 @@ fn sourced_network_laws_close_sensible_latent_and_two_chamber_energy_together() 
     });
 }
 
-fn transported_patches(bank: &ThermochemicalGasModel) -> [ExchangeContact<'_>; 3] {
+fn transported_patches(bank: &ThermochemicalGasModel) -> [ExchangeContact<'_>; 4] {
     [
         patch(1, 7, HOT, film(bank, natural(0.01))),
         patch(2, 7, HOT, film(bank, aiding(0.01))),
-        patch(3, 7, COLD, sphere(bank, 0.02)),
+        patch(3, 7, COLD, sphere(bank, 0.01)),
+        patch(4, 7, COLD, tube(bank, 0.01)),
     ]
 }
 
@@ -290,6 +322,7 @@ fn transported_composition_reaches_sources_and_late_refusals_roll_back_all_owner
             let drives = transport_drives(&state);
             let controls = NetworkSolve {
                 maximum_chambers: 3,
+                maximum_contacts: 4,
                 ..network_controls()
             };
             let bank = source::model_transport(0.6, true);

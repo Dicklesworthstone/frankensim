@@ -11,6 +11,7 @@ pub mod film;
 
 /// Forced spheres using bulk transport and source-pinned surface viscosity.
 pub mod sphere;
+pub mod tube;
 
 /// Multiple finite gases and convective patches on the existing circuit/thermal assembly.
 pub mod network;

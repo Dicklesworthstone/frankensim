@@ -1024,6 +1024,18 @@ owns inventory admission. Finite walls, source-integrated wall surfaces and
 prescribed reservoirs keep their original heat owner, conservation and clock.
 No diagnostic watts are added again as a source.
 
+`finite_gas::tube::ForcedTubeGasSurface` carries that same source-pinned wall
+viscosity into the original finite-body piston and fixed-volume wall-feedback
+solves. Its circular diameter and full heated length determine L/D and bound the
+inside-wall patch area. `GasHeatLaw::ForcedTubeConvection` uses the same resolver
+for reacting and transported-composition networks; the actual trial composition
+and selected source claims remain authoritative. Both heat directions and body
+latent heat retain the original reciprocal energy owner. Explicit homogeneous
+Peng--Robinson branches retain real bulk density and Cp. This is the existing
+engineering closure with bulk density, Cp and k frozen for the correlation,
+not empirical gas validation or support for strong property variation,
+compressibility, critical-region or fluid phase-change heat transfer.
+
 The correlation is restricted to its declared smooth, straight, fully developed,
 single-phase Newtonian regime. Geometry, pressure/composition identity and the
 frozen-property approximation remain caller obligations; generic borrowed

@@ -5,6 +5,7 @@ use super::super::{
     NaturalGasSurface,
     film::{FilmGasConvectionSample, FilmGasSurface},
     sphere::{ForcedSphereGasSurface, SphereGasConvectionSample},
+    tube::{ForcedTubeGasSurface, TubeGasConvectionSample},
 };
 use fs_couple::cavity_phs::piston::thermal::ConductanceSample;
 use fs_couple::cavity_phs::piston::thermal::boundary::network::material::GasConductionGeometry;
@@ -41,6 +42,8 @@ pub enum GasHeatLaw<'a> {
     FilmConvection(FilmGasSurface<'a>),
     /// Bulk transport with separately sourced viscosity at the actual wall.
     ForcedSphereConvection(ForcedSphereGasSurface<'a>),
+    /// Fully developed circular-tube transfer with original wall viscosity.
+    ForcedTubeConvection(ForcedTubeGasSurface<'a>),
 }
 /// One patch using the same chamber/cell IDs as the complete assembly.
 #[derive(Clone, Copy, Debug)]
@@ -56,6 +59,7 @@ pub enum GasHeatSample {
     NaturalConvection(FiniteGasConvectionSample),
     FilmConvection(FilmGasConvectionSample),
     ForcedSphereConvection(SphereGasConvectionSample),
+    ForcedTubeConvection(TubeGasConvectionSample),
 }
 /// Preserve the original domain refusal, not an invented substitute coefficient.
 #[derive(Debug)]
@@ -96,6 +100,10 @@ impl GasHeatLaw<'_> {
                 surface.validate().map_err(|_| "invalid forced-sphere geometry")?;
                 Ok(surface.area_m2)
             }
+            Self::ForcedTubeConvection(surface) => {
+                surface.validate().map_err(|_| "invalid forced-tube geometry")?;
+                Ok(surface.area_m2)
+            }
         }
     }
 
@@ -123,6 +131,8 @@ impl GasHeatLaw<'_> {
                 surface.resolve(gas, phase), GasHeatSample::FilmConvection),
             Self::ForcedSphereConvection(surface) => convection_sample(
                 surface.resolve(gas, phase), GasHeatSample::ForcedSphereConvection),
+            Self::ForcedTubeConvection(surface) => convection_sample(
+                surface.resolve(gas, phase), GasHeatSample::ForcedTubeConvection),
             Self::Conduction(_) => unreachable!("conduction returned above"),
         }
     }
@@ -165,10 +175,11 @@ fn flow_patches<'a, 'source>(
 /// the gas's ideal EOS, viscosity, conductivity and heat capacity. Its bulk-gas
 /// property convention and unconfined vertical-plate assumptions must fit the
 /// physical patch; a chamber ID does not establish enclosure applicability.
-/// Film laws instead query their bank at the mean of this trial's gas and wall
-/// temperatures. Sphere laws retain bulk transport and query only surface
-/// viscosity. Both pin the actual reacted/transported composition, pressure and
-/// source identities; a bank's initial fractions never replace the trial gas.
+/// External/natural/mixed film laws query their bank at the mean of this
+/// trial's gas and wall temperatures; bulk-duct film laws retain bulk properties.
+/// Sphere and turbulent-tube laws retain bulk transport and query wall viscosity.
+/// All pin the actual reacted/transported composition, pressure and source
+/// identities; a bank's initial fractions never replace the trial gas.
 /// Their full temperature contrast and source/correlation domains remain active.
 ///
 /// Each chemical stage runs once on its original gas (including optional
