@@ -1035,3 +1035,31 @@ regressions, including nine general-source cases: independent scalar/cyclic
 solutions, equal-rate multiplying daughters, self-return, composition/order,
 stable and zero intervals, full node capacity, stiff tiny events, fresh-source
 range refusal and exact work/cancellation boundaries.
+
+## Optional reaction population integrals
+
+`decay::reaction::ReactionPlan::prepare_with_population_integrals` retains
+`J = integral_0^dt exp(A s) ds` alongside the existing population and removal
+maps. `population_integral_matrix` observes the row-major map, while
+`integrate_populations[_with_cancel]` applies it to the original population.
+This accounts for population born within the interval, including zero-removal
+receiving nodes. Neutron fluence and residence therefore need no invented
+self-removal clock or division by a vanishing removal rate.
+
+The optional path reuses the original uniform-production owner's normalized
+population map J/dt, positive series, scalar diagonal updates and interval
+composition. Charged scaling retains dimensional J; it does not introduce a
+second exponential solver. Existing ordinary and uniform-production paths keep
+their prior behavior and work admission. Source-removal map preparation is an
+explicit additional cost of the opt-in integral path. Positive unrepresented
+coefficients/contributions refuse, and cancellation remains bounded. The
+independent removal map checks consistency with diag(lambda)J.
+
+Focused checks exercise isolated stable populations, stable receiving nodes,
+scalar absorption/self-return/multiplication, tiny and stiff transfers, cycles,
+interval composition, work limits and cancellation. The actual combined
+owner passed all 50 tests: 35 earlier decay/source/reaction tests, nine concurrent
+uniform-reaction-production tests and six new population-integral regressions.
+Numerical identities are admission checks, not certified floating-point
+forward-error bounds. Full workspace Cargo and cross-ISA verification remain
+separate gates.

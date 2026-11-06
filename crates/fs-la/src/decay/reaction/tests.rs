@@ -334,3 +334,242 @@ fn cancellation_is_bounded_transactional_and_replay_is_exact() {
     }
     assert_eq!(expected, prepared.apply(&initial).unwrap());
 }
+
+fn residence_plan(rates: &[f64], edges: &[ReactionEdge], time: f64) -> ReactionPlan {
+    ReactionPlan::prepare_with_population_integrals(
+        rates,
+        edges,
+        time,
+        DecayLimits::default(),
+        || false,
+    )
+    .unwrap()
+}
+
+#[test]
+fn optional_integrals_include_isolated_zero_loss_populations_and_zero_duration() {
+    let ordinary = plan(&[0.0, 0.0], &[edge(0, 1, 2.0)], 3.5);
+    assert!(ordinary.population_integral_matrix().is_none());
+    assert!(matches!(
+        ordinary.integrate_populations(&[7.0, 3.0]),
+        Err(DecayError::Invalid(_))
+    ));
+    let prepared = residence_plan(&[0.0, 0.0], &[edge(0, 1, 2.0)], 3.5);
+    assert_eq!(
+        prepared.population_integral_matrix().unwrap(),
+        &[3.5, 0.0, 0.0, 3.5]
+    );
+    assert_eq!(
+        prepared.integrate_populations(&[7.0, 3.0]).unwrap(),
+        vec![24.5, 10.5]
+    );
+    assert_eq!(
+        prepared.apply(&[7.0, 3.0]).unwrap(),
+        ordinary.apply(&[7.0, 3.0]).unwrap()
+    );
+    assert!(prepared.preparation_work() > ordinary.preparation_work());
+    let zero = residence_plan(&[1.0, 0.0], &[edge(0, 1, 2.0)], 0.0);
+    assert_eq!(zero.population_integral_matrix().unwrap(), &[0.0; 4]);
+    assert_eq!(
+        zero.integrate_populations(&[7.0, 3.0]).unwrap(),
+        vec![0.0, 0.0]
+    );
+}
+
+#[test]
+fn scalar_population_integrals_cover_loss_self_return_and_multiplication() {
+    for (rate, yield_, time, initial) in [
+        (0.8_f64, 0.0_f64, 2.4_f64, 7.0_f64),
+        (0.8, 1.0, 2.4, 7.0),
+        (0.3, 2.0, 4.0, 2.0),
+        (1.0e-20, 0.0, 3.0e5, 1.0e30),
+    ] {
+        let edges = if yield_ == 0.0 {
+            vec![]
+        } else {
+            vec![edge(0, 0, yield_)]
+        };
+        let prepared = residence_plan(&[rate], &edges, time);
+        let net = rate * (1.0 - yield_);
+        let expected = if net == 0.0 {
+            initial * time
+        } else {
+            initial * -(-net * time).exp_m1() / net
+        };
+        let integral = prepared.integrate_populations(&[initial]).unwrap()[0];
+        near(integral, expected, 2.0e-13);
+        near(
+            prepared.apply(&[initial]).unwrap().removals[0],
+            rate * integral,
+            2.0e-13,
+        );
+    }
+}
+
+#[test]
+fn zero_loss_receivers_retain_population_time_from_within_interval_production() {
+    let rate: f64 = 0.7;
+    let time: f64 = 2.3;
+    let initial = [50.0, 4.0];
+    let prepared = residence_plan(&[rate, 0.0], &[edge(0, 1, 2.0)], time);
+    let integral = prepared.integrate_populations(&initial).unwrap();
+    let parent_time = initial[0] * -(-rate * time).exp_m1() / rate;
+    near(integral[0], parent_time, 2.0e-13);
+    near(
+        integral[1],
+        initial[1] * time + 2.0 * (initial[0] * time - parent_time),
+        2.0e-13,
+    );
+    assert_eq!(prepared.apply(&initial).unwrap().removals[1], 0.0);
+    assert!(integral[1] > initial[1] * time);
+
+    // This residence is far below the endpoint-population rectangle and needs
+    // its own positive integral even at a tiny exposure.
+    let tiny = residence_plan(&[1.0e-18, 0.0], &[edge(0, 1, 2.0)], 1.0);
+    let integral = tiny.integrate_populations(&[1.0e20, 0.0]).unwrap();
+    near(integral[1], 100.0, 2.0e-13);
+    near(
+        tiny.apply(&[1.0e20, 0.0]).unwrap().populations[1],
+        200.0,
+        2.0e-13,
+    );
+}
+
+#[test]
+fn cyclic_integrals_match_the_equilibrium_oracle_and_semigroup_composition() {
+    let a = 0.7;
+    let b = 1.3;
+    let time = 4.3;
+    let total = 14.0;
+    let equilibrium = total * b / (a + b);
+    let excess = (10.0 - equilibrium) * -f64::exp_m1(-(a + b) * time) / (a + b);
+    let prepared = residence_plan(&[a, b], &[edge(0, 1, 1.0), edge(1, 0, 1.0)], time);
+    let integral = prepared.integrate_populations(&[10.0, 4.0]).unwrap();
+    near(integral[0], equilibrium * time + excess, 3.0e-13);
+    near(integral[1], (total - equilibrium) * time - excess, 3.0e-13);
+
+    let rates = [0.7, 0.2, 0.04, 0.0];
+    let edges = [
+        edge(0, 1, 1.7),
+        edge(1, 0, 0.35),
+        edge(1, 2, 1.1),
+        edge(2, 3, 1.0),
+    ];
+    let initial = [11.0, 3.0, 0.0, 0.5];
+    let full = residence_plan(&rates, &edges, 2.3);
+    let first = residence_plan(&rates, &edges, 0.9);
+    let second = residence_plan(&rates, &edges, 1.4);
+    let first_endpoint = first.apply(&initial).unwrap().populations;
+    let whole = full.integrate_populations(&initial).unwrap();
+    let one = first.integrate_populations(&initial).unwrap();
+    let two = second.integrate_populations(&first_endpoint).unwrap();
+    for i in 0..4 {
+        near(whole[i], one[i] + two[i], 4.0e-13);
+    }
+}
+
+#[test]
+fn population_integrals_keep_slow_transfer_beside_an_unrelated_stiff_component() {
+    let time = 3.0e5;
+    let prepared = residence_plan(
+        &[1.0e-20, 0.0, 1.0e20, 0.0],
+        &[edge(0, 1, 1.0), edge(2, 3, 1.0)],
+        time,
+    );
+    let integral = prepared
+        .integrate_populations(&[1.0e30, 0.0, 4.0, 0.0])
+        .unwrap();
+    let x = 1.0e-20 * time;
+    near(integral[0], 1.0e30 * -f64::exp_m1(-x) / 1.0e-20, 3.0e-13);
+    // Independent short-exposure integral of the product's ingrowth.
+    near(
+        integral[1],
+        1.0e30 * time * x * (0.5 - x / 6.0 + x * x / 24.0),
+        3.0e-13,
+    );
+    near(integral[2], 4.0e-20, 3.0e-13);
+    near(integral[3], 4.0 * (time - 1.0e-20), 3.0e-13);
+}
+
+#[test]
+fn optional_integral_work_cancellation_and_required_numeric_range_are_enforced() {
+    let rates = [0.7, 1.3];
+    let edges = [edge(0, 1, 1.0), edge(1, 0, 1.0)];
+    let ordinary = plan(&rates, &edges, 2.7);
+    let exact_old_work = DecayLimits {
+        maximum_work: ordinary.preparation_work(),
+        ..DecayLimits::default()
+    };
+    let same = ReactionPlan::prepare(&rates, &edges, 2.7, exact_old_work, || false).unwrap();
+    assert_eq!(same.transition_matrix(), ordinary.transition_matrix());
+    assert_eq!(
+        same.integrated_removal_matrix(),
+        ordinary.integrated_removal_matrix()
+    );
+    assert!(matches!(
+        ReactionPlan::prepare_with_population_integrals(
+            &rates,
+            &edges,
+            2.7,
+            exact_old_work,
+            || false
+        ),
+        Err(DecayError::Budget { .. })
+    ));
+
+    let mut polls = 0;
+    let prepared = ReactionPlan::prepare_with_population_integrals(
+        &rates,
+        &edges,
+        2.7,
+        DecayLimits::default(),
+        || {
+            polls += 1;
+            false
+        },
+    )
+    .unwrap();
+    for stop in [1, polls / 2, polls] {
+        let mut seen = 0;
+        assert_eq!(
+            ReactionPlan::prepare_with_population_integrals(
+                &rates,
+                &edges,
+                2.7,
+                DecayLimits::default(),
+                || {
+                    seen += 1;
+                    seen == stop
+                }
+            )
+            .unwrap_err(),
+            DecayError::Cancelled
+        );
+    }
+    let initial = [7.0, 2.0];
+    let expected = prepared.integrate_populations(&initial).unwrap();
+    for stop in 1..=4 {
+        let mut seen = 0;
+        assert_eq!(
+            prepared
+                .integrate_populations_with_cancel(&initial, || {
+                    seen += 1;
+                    seen == stop
+                })
+                .unwrap_err(),
+            DecayError::Cancelled
+        );
+        assert_eq!(initial, [7.0, 2.0]);
+    }
+    assert_eq!(expected, prepared.integrate_populations(&initial).unwrap());
+    assert!(prepared.integrate_populations(&[-1.0, 2.0]).is_err());
+    assert!(prepared.integrate_populations(&[1.0]).is_err());
+    assert!(matches!(
+        residence_plan(&[0.0], &[], 1.0e300).integrate_populations(&[1.0e100]),
+        Err(DecayError::Unrepresentable(_))
+    ));
+    assert!(matches!(
+        residence_plan(&[0.0], &[], 1.0e-300).integrate_populations(&[1.0e-100]),
+        Err(DecayError::Unrepresentable(_))
+    ));
+}
