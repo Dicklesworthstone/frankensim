@@ -414,6 +414,15 @@ pub(super) fn run_with_gas_sources(
         .join(",");
     let gas_sources =
         super::thermochemical::provenance(core::slice::from_ref(description.gas_record()));
+    // Only a performance with the `bore_gas` row writes the two gases it separates (the bore's and the room's complete
+    // states); every receipt written before the row existed is unchanged.
+    let bore_gas = description.bore_gas_record().map_or_else(String::new, |record| {
+        format!(
+            ",\"bore_gas\":{{\"bore\":{},\"room\":{}}}",
+            super::duct_metadata::gas_state(record.state()),
+            super::duct_metadata::gas_state(description.ambient_gas()),
+        )
+    });
     // Nonlinear bore only: gas steps accepted after a first-order retry of the failed second-order update.
     let fallbacks = performance.first_order_fallbacks().map_or_else(String::new, |n| {
         format!(",\"nonlinear_first_order_fallback_steps\":{n}")
@@ -454,7 +463,7 @@ pub(super) fn run_with_gas_sources(
          \"lip_windows_0p1s\":[{}],{tension_work_json},{jet_band}\
          \"observation\":{{\"mechanics_sample_rate_hz\":{mechanics_rate_hz},\"output_sample_rate_hz\":{},\"ratio\":{ratio},\
          \"filter\":\"{observation_filter}\",\
-         \"resampled\":false,\"declared_band_hz\":{}{observation_delay}}}{fallbacks}{gas_sources}}}",
+         \"resampled\":false,\"declared_band_hz\":{}{observation_delay}}}{fallbacks}{gas_sources}{bore_gas}}}",
         info.sample_rate_hz,
         info.full_scale_pa,
         rendered.clipped,

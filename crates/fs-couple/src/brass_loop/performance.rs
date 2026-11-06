@@ -19,6 +19,7 @@
 //! ambient moist_air <temperature_k> <pressure_pa> <relative_humidity>
 //! ambient mixture <temperature_k> <pressure_pa> <mole|mass> <count> <species fraction>...
 //! ambient thermochemical <temperature_k> <pressure_pa> <mole|mass> <count> <id fraction>...
+//! bore_gas <the same legacy, mixture or pack record as ambient>  optional; the gas the bore, cup and lip hold (needs modal_baffle)
 //! lip_response <f_hz> <q> <inverse_mu_m2_per_kg> <width_m> <rest_gap_m> <face_area_m2>
 //! lip_response_mode2 <f_hz> <q> <inverse_mu_m2_per_kg>      optional; the lip's second, inward-striking mode (a negative 1/mu)
 //! lip_area_exponent <q>                                    optional; flow area w h (h/H0)^(q-1), 1 <= q <= 4 (q = 1 is the plain w h)
@@ -73,6 +74,15 @@
 //! radial count is Gauss-Legendre nodes; radial and angular counts must be
 //! multiples of four for the quarter/half/full kernel convergence checks.
 //! Files without that record retain the original total-flow disk observation.
+//!
+//! `bore_gas` separates the gas inside the instrument from the room. Without it one `ambient` gas serves both, as it
+//! always did. With it the bore's propagation and wall loss, the line references, the cup compliance, and the lip's and
+//! the constriction noise's density and viscosity use this gas (a played bore holds warm, humid, CO2-rich breath), while the
+//! flanged modal radiation load, the receiver and the observer stay in the `ambient` room gas. It takes the grammar of
+//! `ambient` (so `pack` names a sourced seed gas), needs `modal_baffle` (whose exterior load names the room gas explicitly;
+//! the analytic mouth loads would radiate into the bore gas), and refuses a different static pressure (mean flow is not modeled).
+//! It is one uniform gas: no axial temperature or composition profile, no condensation. A file without the row is
+//! bit-identical to one written before it existed.
 //!
 //! `jet_noise` is the opt-in constriction noise of the lip jet, the voice's row on the lip channel
 //! ([`crate::turbulence_noise::LipJetNoise`]): a series
@@ -237,6 +247,8 @@ pub struct LipDescription {
     samples: u64,
     full_scale_pa: f64,
     gas: GasRecord,
+    /// The optional `bore_gas` record: the gas the bore, cup and lip hold. `None` is the ambient gas.
+    bore_gas: Option<GasRecord>,
     lip: LipIsland,
     lip_source: String,
     bore_source: String,
@@ -457,6 +469,7 @@ impl LipDescription {
         let mut audio: Option<(u32, u64)> = None;
         let mut full_scale: Option<f64> = None;
         let mut gas: Option<GasRecord> = None;
+        let mut bore_gas: Option<GasRecord> = None;
         let mut lip_core: Option<LipCore> = None;
         let mut lip_from_response = false;
         let mut lip_mode2_raw: Option<(f64, f64, f64)> = None;
@@ -518,6 +531,17 @@ impl LipDescription {
                     let record = read_gas_record(&mut f.words, None, sources)
                         .map_err(|e| format!("line {line}: ambient gas refused: {e}"))?;
                     once(&mut gas, record, &f)?;
+                    f.finish()?;
+                }
+                "bore_gas" => {
+                    // The grammar of `ambient`, including its optional legacy keyword; a thermochemical bore gas needs
+                    // the nonlinear bore, which this row refuses below (it needs `modal_baffle`, a linear bore).
+                    if f.words.clone().next() == Some("moist_air") {
+                        f.words.next();
+                    }
+                    let record = read_gas_record(&mut f.words, None, sources)
+                        .map_err(|e| format!("line {line}: bore_gas refused: {e}"))?;
+                    once(&mut bore_gas, record, &f)?;
                     f.finish()?;
                 }
                 "lip_response" => {
@@ -804,6 +828,14 @@ impl LipDescription {
             return Err("observer_gas is not supported with modal_baffle; the modal receiver has no material propagation path".into());
         }
         let gas = gas.ok_or_else(|| missing("ambient"))?;
+        if let Some(bore) = &bore_gas {
+            if modal_baffle.is_none() {
+                return Err("bore_gas needs modal_baffle: its flanged exterior load names the room gas, whereas the analytic mouth loads would radiate into the bore gas".into());
+            }
+            if bore.state().pressure != gas.state().pressure {
+                return Err("bore_gas and ambient need one static pressure; mean flow is not modeled".into());
+            }
+        }
         let observer_gas = observer_gas_record.map(|(line, record)| {
             GasPropagation::read_record_for_gas(&mut record.split_ascii_whitespace(), &gas)
                 .map_err(|error| format!("line {line}: observer_gas refused: {error}"))
@@ -881,6 +913,7 @@ impl LipDescription {
             samples,
             full_scale_pa: full_scale.ok_or_else(|| missing("full_scale_pa"))?,
             gas,
+            bore_gas,
             lip,
             lip_source,
             bore_source,
@@ -955,6 +988,19 @@ impl LipDescription {
         &self.gas
     }
 
+    /// The gas the bore, cup and lip hold: the `bore_gas` row's record when the file declared one, otherwise the ambient
+    /// gas (the room), as before the row existed.
+    #[must_use]
+    pub fn bore_gas(&self) -> &GasState {
+        self.bore_gas.as_ref().map_or_else(|| self.gas.state(), GasRecord::state)
+    }
+
+    /// The `bore_gas` row's original gas record, retained without constitutive conversion; `None` without the row.
+    #[must_use]
+    pub const fn bore_gas_record(&self) -> Option<&GasRecord> {
+        self.bore_gas.as_ref()
+    }
+
     /// Explicit exterior propagation on the original bell surface paths.
     #[must_use]
     pub const fn observer_gas(&self) -> Option<&GasPropagation> {
@@ -981,7 +1027,10 @@ impl LipDescription {
     /// # Errors
     /// The duct owner's refusal at any frequency (loss-model or radiation validity).
     pub fn bore_scan(&self, frequencies_hz: &[f64]) -> Result<BoreScan, String> {
-        let gas = self.gas.state();
+        // `room` is the exterior (the radiation load and the receiver); `gas` is what the bore holds (the same state
+        // unless a `bore_gas` row separates them).
+        let room = self.gas.state();
+        let gas = self.bore_gas();
         let radius = self
             .duct
             .segments
@@ -993,7 +1042,7 @@ impl LipDescription {
         for &frequency_hz in frequencies_hz {
             let omega = core::f64::consts::TAU * frequency_hz;
             let multimodal = if self.modal_baffle.is_some() {
-                fs_duct::modal::mm_input_impedance_flanged(&self.duct, gas, gas, omega,
+                fs_duct::modal::mm_input_impedance_flanged(&self.duct, gas, room, omega,
                     LossModel::Bessel, self.modes, self.extra_slices)
             } else { fs_duct::modal::mm_input_impedance(
                 &self.duct,
@@ -1026,7 +1075,8 @@ impl LipDescription {
         Ok(BoreScan {
             input_characteristic_impedance: gas.density * gas.sound_speed
                 / (core::f64::consts::PI * radius * radius),
-            density_kg_m3: gas.density,
+            // The receiver's medium: the room, which the pressure at the microphone is read in.
+            density_kg_m3: room.density,
             microphone_distance_m: x.hypot(y).hypot(z),
             rows,
         })
@@ -1067,10 +1117,13 @@ impl LipDescription {
                 self.rate_hz, self.microphone, gas, options, || false)?;
             Some((radius, receiver, report))
         } else { None };
+        // What the bore, cup and lip hold; `gas` stays the exterior (the room) for the radiation load and the receiver.
+        // Without a `bore_gas` row the two are the same state, so every operand below is the one it always was.
+        let bore_state = self.bore_gas();
         let voice = BrassVoice::new(
             core::slice::from_ref(&self.duct),
             &["held"],
-            gas,
+            bore_state,
             &load,
             &config,
             self.lip.clone(),
@@ -1113,7 +1166,7 @@ impl LipDescription {
             ..MouthFlowConfig::default()
         };
         let (mouth, mouth_receipt) = if self.modal_baffle.is_some() {
-            modal_flow_lines(&self.duct, gas, load, &config, voice.port_impedance(), output)
+            modal_flow_lines(&self.duct, bore_state, load, &config, voice.port_impedance(), output)
         } else {
             plane_flow_line(&self.duct, gas, load, &config, voice.port_impedance(), output)
                 .map(|(filter, receipt)| (vec![filter], receipt))
@@ -1285,7 +1338,7 @@ impl LipDescription {
         observer_gas: Option<GasPropagationReport>,
         ratio: usize,
     ) -> LipPerformance {
-        let gas = self.ambient_gas();
+        let gas = self.bore_gas();
         let info = LipInfo {
             input_hash: self.input_hash,
             sample_rate_hz: self.rate_hz,
@@ -1409,9 +1462,9 @@ pub struct LipInfo {
     pub bore_source: String,
     /// Lumped mouthpiece-cup volume [m^3].
     pub cup_volume_m3: f64,
-    /// Bore gas temperature [K].
+    /// Bore gas temperature [K] (the `bore_gas` row's gas when the file declared one, else the ambient gas).
     pub gas_temperature_k: f64,
-    /// Bore sound speed [m/s].
+    /// Bore sound speed [m/s] (as above).
     pub sound_speed_m_s: f64,
     /// The declared microphone.
     pub microphone: CircularOutletReceiver,
@@ -2327,6 +2380,103 @@ mod tests {
             "modal_baffle 1e-5 8000000\nmodal_baffle 1e-5 8000000\n"] {
             assert!(LipDescription::from_bytes(fixture(declaration).as_bytes()).is_err());
         }
+    }
+
+    // The woodwind exhaled-breath bore gas the clarinet and oboe cards cite (Coltman 1966, Nederveen 1969, Fletcher and
+    // Rossing 1998): 27 C, 101325 Pa, saturated, 4.5 % dry CO2, 16.5 % dry O2. Here as a test input, not as a claim for a brass bore.
+    const BREATH: &str = "bore_gas mixture 300.15 101325 mole 5 N2 0.7534 O2 0.1591 Ar 0.0090 CO2 0.0434 H2O 0.0351\n";
+    const MODAL: &str = "modal_baffle 1e-5 8000000\n";
+    // The fixture's modal mouth output does not meet the default tail tolerance (1e-10) even at 65536 taps (tail energy 5e-7 on the
+    // second and third stage), so a render declares one; the Bb3 page card declares 2e-6, as here.
+    const TAIL: &str = "mouth_flow_tail_tol 2e-6\n";
+
+    #[test]
+    fn bore_gas_defaults_to_the_room_and_is_refused_by_name() {
+        let parse = |extra: &str| LipDescription::from_bytes(fixture(extra).as_bytes());
+        let plain = parse(MODAL).expect("parses");
+        assert!(plain.bore_gas_record().is_none());
+        assert_eq!(plain.bore_gas(), plain.ambient_gas(), "without the row the bore holds the room gas");
+        let separated = parse(&format!("{MODAL}{BREATH}")).expect("parses");
+        assert_eq!(separated.bore_gas().temperature, 300.15);
+        assert_eq!(separated.ambient_gas().temperature, 293.15, "the room stays what ambient says");
+        assert!(separated.bore_gas().sound_speed != separated.ambient_gas().sound_speed);
+        assert!(separated.bore_gas_record().is_some());
+        // The optional legacy keyword and the legacy triple read as they do on `ambient`.
+        let legacy = parse(&format!("{MODAL}bore_gas moist_air 300.15 101325 1\n")).expect("parses");
+        assert_eq!(legacy.bore_gas().temperature, 300.15);
+        for (extra, needle) in [
+            (BREATH.to_string(), "bore_gas needs modal_baffle"),
+            (format!("{MODAL}{BREATH}{BREATH}"), "may only appear once"),
+            (format!("{MODAL}bore_gas mixture 300.15 90000 mole 1 N2 1\n"), "one static pressure"),
+            (format!("{MODAL}bore_gas\n"), "bore_gas refused"),
+            (format!("{MODAL}bore_gas mixture 300.15 101325 mole 1 unobtainium 1\n"), "bore_gas refused"),
+            (format!("{MODAL}bore_gas moist_air 300.15 101325 1 7\n"), "unexpected extra field"),
+        ] {
+            let error = parse(&extra).expect_err(&extra);
+            assert!(error.contains(needle), "{extra:?} -> {error}");
+        }
+    }
+
+    #[test]
+    fn bore_gas_equal_to_the_room_changes_no_bit_and_a_breath_bore_scales_the_resonances_by_the_sound_speed() {
+        let scan = |extra: &str, frequencies: &[f64]| {
+            LipDescription::from_bytes(fixture(extra).as_bytes()).unwrap().bore_scan(frequencies).unwrap()
+        };
+        let probe = [95.0, 131.0, 262.5, 411.0];
+        let plain = scan(MODAL, &probe);
+        let same = scan(&format!("{MODAL}bore_gas moist_air 293.15 101325 0\n"), &probe);
+        assert_eq!(plain.input_characteristic_impedance.to_bits(), same.input_characteristic_impedance.to_bits());
+        assert_eq!(plain.density_kg_m3.to_bits(), same.density_kg_m3.to_bits());
+        for (a, b) in plain.rows.iter().zip(&same.rows) {
+            for (x, y) in a.impedance_multimodal.iter().chain(&a.impedance_scalar).zip(b.impedance_multimodal.iter().chain(&b.impedance_scalar)) {
+                assert_eq!(x.to_bits(), y.to_bits());
+            }
+        }
+        // A breath bore: the input reference is the BORE gas's rho c / S; the pressure at the microphone is read in the ROOM's density.
+        let breath = scan(&format!("{MODAL}{BREATH}"), &probe);
+        let room = LipDescription::from_bytes(fixture(MODAL).as_bytes()).unwrap();
+        let bore = LipDescription::from_bytes(fixture(&format!("{MODAL}{BREATH}")).as_bytes()).unwrap();
+        let (r, c_room, c_bore) = (0.006_f64, room.ambient_gas().sound_speed, bore.bore_gas().sound_speed);
+        assert_eq!(breath.input_characteristic_impedance, bore.bore_gas().density * c_bore / (core::f64::consts::PI * r * r));
+        assert_eq!(breath.density_kg_m3.to_bits(), plain.density_kg_m3.to_bits());
+        // The first input-impedance maximum of the passive bore moves by the sound-speed ratio (the end correction and the
+        // room's radiation load do not depend on the bore gas; the wall loss shifts it a little).
+        let peak = |extra: &str| {
+            let description = LipDescription::from_bytes(fixture(extra).as_bytes()).unwrap();
+            let coarse: Vec<f64> = (0..400).map(|i| 60.0 + 0.5 * f64::from(i)).collect();
+            let magnitude = |scan: &BoreScan| scan.rows.iter().map(|row| row.impedance_multimodal[0].hypot(row.impedance_multimodal[1])).collect::<Vec<_>>();
+            // The first local maximum above the scan's start: a narrow bore's |Z| may also be large toward DC.
+            let first_peak = |values: &[f64]| (1..values.len() - 1).find(|&i| values[i - 1] < values[i] && values[i] >= values[i + 1]).expect("a peak");
+            let scan = description.bore_scan(&coarse).unwrap();
+            let centre = coarse[first_peak(&magnitude(&scan))];
+            let fine: Vec<f64> = (0..=240).map(|i| centre - 3.0 + 0.025 * f64::from(i)).collect();
+            let scan = description.bore_scan(&fine).unwrap();
+            fine[first_peak(&magnitude(&scan))]
+        };
+        let (f_room, f_bore) = (peak(MODAL), peak(&format!("{MODAL}{BREATH}")));
+        let ratio = f_bore / f_room;
+        let expected = c_bore / c_room;
+        assert!((ratio / expected - 1.0).abs() < 2e-3, "peak ratio {ratio} against sound-speed ratio {expected} ({f_room} Hz -> {f_bore} Hz)");
+        assert!(ratio > 1.0 + 0.5 * (expected - 1.0), "a breath bore must move the peak, not leave it");
+    }
+
+    #[test]
+    fn a_bore_gas_render_runs_the_bank_the_mouth_flow_and_the_lip_in_the_bore_gas_and_the_receiver_in_the_room() {
+        let separated = LipDescription::from_bytes(fixture(&format!("{MODAL}{TAIL}{BREATH}")).as_bytes()).unwrap();
+        let mut performance = separated.build().unwrap();
+        let info = performance.info();
+        assert_eq!(info.gas_temperature_k, 300.15);
+        assert_eq!(info.sound_speed_m_s, separated.bore_gas().sound_speed);
+        assert!(info.sound_speed_m_s != separated.ambient_gas().sound_speed);
+        let mut output = vec![0.0; 600];
+        for block in output.chunks_mut(61) {
+            performance.block(block).unwrap();
+        }
+        assert!(output.iter().all(|p| p.is_finite()));
+        assert!(output.iter().any(|p| p.abs() > 1e-9), "the loop must sound");
+        // Without the row the same file is the room-gas render it always was.
+        let plain = LipDescription::from_bytes(fixture(&format!("{MODAL}{TAIL}")).as_bytes()).unwrap().build().unwrap();
+        assert_eq!(plain.info().gas_temperature_k, 293.15);
     }
 
     #[test]
