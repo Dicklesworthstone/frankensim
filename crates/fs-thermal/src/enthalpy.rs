@@ -321,9 +321,10 @@ pub struct StepConfig {
     /// Maximum thermal step, s. CFL may reduce it further.
     pub max_dt_s: f64,
     /// Maximum stored-minus-incoming-minus-external defect, J.
-    /// Also bounds the cumulative absolute local work too small to change a
-    /// cell's enthalpy coordinate during an explicit advance. Opposing losses
-    /// count separately, so a zero global residual cannot conceal them.
+    /// Also bounds cumulative absolute roundoff when interval sources enter
+    /// cell/external power, and local work too small to change a cell's enthalpy
+    /// coordinate during an explicit advance. Opposing losses count separately,
+    /// so a zero global residual cannot conceal them.
     pub energy_tolerance_j: f64,
 }
 

@@ -125,7 +125,9 @@ pub trait DepositionObserver: Clone {
     /// candidate together. The unchanged thermal state still exposes start-state
     /// source/conductance overrides, but these rates are added directly to the
     /// already prepared heat balance and never persisted as boundary data.
-    /// All returned heat is counted once in `external_heat_j`.
+    /// All returned heat is counted once in `external_heat_j`. Roundoff when
+    /// merging these rates into cell power and the external-power ledger counts
+    /// against the same whole-call joule allowance as unrepresented storage work.
     ///
     /// This hook cannot alter the chosen timestep, topology, material law or
     /// conductances. Any needed stability bound belongs in `limit_timestep_s`;
@@ -284,6 +286,7 @@ impl<'a> DepositionSimulation<'a> {
     // Duration-dependent losses enter the SAME rate field and external-energy
     // audit after dt is fixed. Never evaluate boundaries/conduction a second time.
     fn add_interval_sources(&self, rates: &mut HeatRates, sources: &BTreeMap<CellId, f64>,
+        unrepresented_heat_j: &mut f64,
         checkpoint: &mut impl FnMut() -> Result<(), DepositionError>)
         -> Result<(), DepositionError> {
         if sources.is_empty() { return Ok(()); }
@@ -297,12 +300,34 @@ impl<'a> DepositionSimulation<'a> {
             }
             finite(watts)?;
         }
+        let dt_s = rates.explicit_dt_s;
+        let mut add_rate = |total: &mut f64, watts: f64| -> Result<(), DepositionError> {
+            let old = *total;
+            let next = finite(old + watts)?;
+            // Neumaier's addition residual retains either small operand.
+            // (next - old) - watts would miss old=1, watts=1e16.
+            let lost_w = finite(if old.abs() >= watts.abs() {
+                (old - next) + watts
+            } else {
+                (watts - next) + old
+            })?;
+            if lost_w != 0.0 {
+                // Round the joule bound outward even when the positive product
+                // underflows; opposite signed errors cannot cancel this account.
+                let lost_j = finite((lost_w.abs() * dt_s).next_up())?;
+                *unrepresented_heat_j =
+                    finite((*unrepresented_heat_j + lost_j).next_up())?;
+            }
+            *total = next;
+            Ok(())
+        };
         for (index, (&id, &watts)) in sources.iter().enumerate() {
             if index % 256 == 0 { checkpoint()?; }
             if watts == 0.0 { continue; }
             let total = rates.watts.get_mut(&id).expect("validated interval-source cell");
-            *total = finite(*total + watts)?;
-            rates.external_w = finite(rates.external_w + watts)?;
+            // Bound loss in physical cell power AND its external-energy ledger.
+            add_rate(total, watts)?;
+            add_rate(&mut rates.external_w, watts)?;
         }
         checkpoint()
     }
@@ -495,7 +520,9 @@ impl<'a> DepositionSimulation<'a> {
                 let interval_sources = observer.step_sources(
                     &next, start_s, rates.explicit_dt_s, end_s, &mut checkpoint,
                 )?;
-                next.add_interval_sources(&mut rates, &interval_sources, &mut checkpoint)?;
+                next.add_interval_sources(
+                    &mut rates, &interval_sources, &mut unrepresented_heat_j, &mut checkpoint,
+                )?;
                 let (dt, old_temperatures) = next.thermal_step(
                     rates, &mut audit, &mut unrepresented_heat_j, &mut checkpoint,
                 )?;

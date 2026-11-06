@@ -424,3 +424,105 @@ fn additional_conductance_bounds_refuse_invalid_inputs_and_preserve_zero_slope()
     ).unwrap();
     assert!(tiny > 0.0 && tiny <= 0.8 / 1e308);
 }
+
+#[derive(Clone)]
+struct IntervalSource {
+    cell: CellId,
+    watts: f64,
+}
+impl DepositionObserver for IntervalSource {
+    type Error = DepositionError;
+    fn requires_step_interval(&self) -> bool { true }
+    fn step_sources(
+        &mut self, _: &DepositionSimulation<'_>, _: f64, _: f64, _: f64,
+        _: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<BTreeMap<CellId, f64>, Self::Error> {
+        Ok(BTreeMap::from([(self.cell, self.watts)]))
+    }
+    fn event(&mut self, _: &Event, _: &DepositionSimulation<'_>) -> Result<(), Self::Error> {
+        Ok(())
+    }
+    fn step(
+        &mut self, _: f64, _: f64, _: &BTreeMap<CellId, f64>,
+        _: &DepositionSimulation<'_>,
+        _: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(), Self::Error> {
+        Ok(())
+    }
+}
+
+// Large mass keeps h in the original finite caloric domain while isolating
+// source-rate addition from loss on an already large enthalpy coordinate.
+fn rate_test_cell(id: u64, mass_kg: f64, source_w: f64) -> TimedEvent {
+    let mut event = birth(id, 0.0, 0.0, source_w);
+    if let Event::Birth(cell) = &mut event.event { cell.mass_kg = mass_kg; }
+    event
+}
+
+#[test]
+fn g0_interval_sources_refuse_hidden_local_rate_loss_in_either_operand_order() {
+    let law = ReferencedPhase { datum: 0.0 };
+    for (base, incoming) in [(1e16, 1.0), (1.0, 1e16)] {
+        let initial = prepare(&law, vec![rate_test_cell(1, 1e16, base)]);
+        let observer = IntervalSource { cell: CellId(1), watts: incoming };
+        // Both the cell rate and external-rate ledger round to 1e16 W.
+        // Their agreement must not conceal the missing one joule.
+        assert!(matches!(
+            initial.advance_observed(&observer, 1.0, config(), || Ok(())),
+            Err(DepositionError::Arithmetic)
+        ));
+        let (next, _, audit) = initial.advance_observed(
+            &observer, 1.0,
+            StepConfig { max_dt_s: 1.0, energy_tolerance_j: 4.0 },
+            || Ok(()),
+        ).unwrap();
+        assert_eq!(next.cells()[&CellId(1)].specific_h_j_kg, 1.0);
+        assert_eq!(audit.external_heat_j, 1e16);
+        assert_eq!(audit.residual_j, 0.0);
+        assert_eq!(initial.time_s(), 0.0);
+        assert_eq!(initial.cells()[&CellId(1)].specific_h_j_kg, 0.0);
+    }
+}
+
+#[test]
+fn g0_interval_sources_refuse_hidden_global_rate_loss() {
+    let law = ReferencedPhase { datum: 0.0 };
+    let initial = prepare(&law, vec![
+        rate_test_cell(1, 1e16, 1e16), rate_test_cell(2, 1.0, 0.0),
+    ]);
+    let observer = IntervalSource { cell: CellId(2), watts: 1.0 };
+    // Cell 2 receives its joule exactly. Only the aggregate external-rate
+    // ledger loses it; the aggregate stored-energy report loses it too.
+    assert!(matches!(
+        initial.advance_observed(&observer, 1.0, config(), || Ok(())),
+        Err(DepositionError::Arithmetic)
+    ));
+    let (next, _, audit) = initial.advance_observed(
+        &observer, 1.0,
+        StepConfig { max_dt_s: 1.0, energy_tolerance_j: 2.0 },
+        || Ok(()),
+    ).unwrap();
+    assert_eq!(next.cells()[&CellId(1)].specific_h_j_kg, 1.0);
+    assert_eq!(next.cells()[&CellId(2)].specific_h_j_kg, 1.0);
+    assert_eq!(audit.external_heat_j, 1e16);
+    assert_eq!(audit.residual_j, 0.0);
+    assert_eq!(initial.time_s(), 0.0);
+    assert_eq!(initial.cells()[&CellId(2)].specific_h_j_kg, 0.0);
+}
+
+#[test]
+fn g0_exact_interval_source_sums_keep_zero_tolerance_admission() {
+    let law = ReferencedPhase { datum: 0.0 };
+    for (base, incoming, mass) in [
+        (1e16, 2.0, 1e16), (2.0, 1e16, 1e16), (2.0, 1.0, 1.0), (1.0, 0.0, 1.0),
+    ] {
+        let initial = prepare(&law, vec![rate_test_cell(1, mass, base)]);
+        let observer = IntervalSource { cell: CellId(1), watts: incoming };
+        let (next, _, audit) = initial.advance_observed(
+            &observer, 1.0, config(), || Ok(()),
+        ).unwrap();
+        assert_eq!(next.cells()[&CellId(1)].specific_h_j_kg, (base + incoming) / mass);
+        assert_eq!(audit.external_heat_j, base + incoming);
+        assert_eq!(audit.residual_j, 0.0);
+    }
+}
