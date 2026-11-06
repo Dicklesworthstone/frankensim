@@ -5,12 +5,12 @@ use fs_material::{
     evaporation::gas::wall_film::GasWallFilmInventory, phase::UniformEnthalpyStepInput,
 };
 
-struct PhysicalBalance {
-    wall_capacity: f64,
-    carrier_mass: f64,
-    total_volatile_mass: f64,
-    sensible_conductance: f64,
-    phase_exposure: f64,
+pub(super) struct PhysicalBalance {
+    pub(super) wall_capacity: f64,
+    pub(super) carrier_mass: f64,
+    pub(super) total_volatile_mass: f64,
+    pub(super) sensible_conductance: f64,
+    pub(super) phase_exposure: f64,
 }
 impl PhysicalBalance {
     // y = [wall temperature, liquid mass, gas temperature]. All inventories
@@ -42,7 +42,7 @@ impl PhysicalBalance {
             / (2.5 * (self.carrier_mass * ra + vapor * R));
         [wall_rate, -rate, gas_rate]
     }
-    fn reference(&self, mut y: [f64; 3], duration: f64) -> [f64; 3] {
+    pub(super) fn reference(&self, mut y: [f64; 3], duration: f64) -> [f64; 3] {
         let dt = duration / 4096.0;
         for _ in 0..4096 {
             let a = self.derivative(y);

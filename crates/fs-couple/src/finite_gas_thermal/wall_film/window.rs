@@ -5,8 +5,9 @@
 //! cumulative source endpoints apportion them without renewing their totals on
 //! retries. Phase step limits discard the entire proposed interval. The nominal
 //! time grid resumes after a shortened interval reaches its original endpoint.
-//! This is admission-driven subdivision, not a temporal-error estimator: refine
-//! `maximum_step_s` to assess the complete coupled time discretization.
+//! The fixed-grid methods use admission-driven subdivision; refine their
+//! `maximum_step_s` to assess time error. [`adaptive`] adds local physical-time
+//! accuracy control to the simultaneous endpoint through the same accounts.
 
 use super::implicit::{WallFilmImplicitError, WallFilmImplicitReport};
 use super::{WallFilmThermalEnvironment, WallFilmThermalError, WallFilmThermalReport};
@@ -22,6 +23,8 @@ use fs_material::{
 
 mod implicit;
 pub use implicit::{WallFilmImplicitWindowControls, WallFilmImplicitWindowReport};
+
+pub mod adaptive;
 
 /// One physical-window work and conservation allowance, never renewed per step.
 #[derive(Clone, Copy, Debug, PartialEq)]

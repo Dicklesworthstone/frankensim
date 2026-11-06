@@ -603,3 +603,40 @@ water, carrier and total-mass checks admit both inventories together. Failed
 stages, rejected probes and a late work-limit failure publish no partial
 duration. G1/G4 fixtures independently check the coupled relaxation, all three
 error coordinates, stiff-stage retries and complete-stage work reservation.
+
+## Adaptive time accuracy through wall and film latent storage
+
+`WallFilmThermalEnvironment::advance_implicit_adaptive` compares one simultaneous
+endpoint with two consecutive half endpoints from the same accepted state.
+The original thermal first-order controller supplies the local-error correction,
+including unequal represented halves, and bounded step growth/reduction.
+Only the fine pair enters the shared physical window account and retained
+history; all three solves and rejected comparisons spend the same global
+Newton, residual, gas-inversion and attempt budgets.
+
+The componentwise error estimate observes original wall enthalpy, liquid phase
+fraction, wall and gas temperatures, actual film inventory, every catalog gas
+species, and liquid-film specific enthalpy when both endpoints are wet.
+Relative allowances scale changes from the interval's accepted start, so an
+arbitrary caloric datum cannot loosen accuracy. A latent wall plateau can
+therefore require refinement even when its temperature is exactly constant.
+A dry film has no invented caloric coordinate or positive mass seed.
+
+Uniform body and gas source totals are apportioned at absolute cumulative
+window endpoints. Coarse and rejected sources never reach accepted balances.
+Only an original phase donor step-limit refusal permits admission subdivision;
+other source, nonlinear, conservation and cancellation errors remain terminal.
+Represented admission spans never exceed the source's maximum. A bounded
+comparison/reduction count and minimum span prevent endless accuracy retries.
+
+The report exposes accepted/discarded work, actual fine samples, component
+differences, maximum accepted normalized error and an explicit next-span
+suggestion. This remains a first-order physical discretization with a local
+error estimate, not a global trajectory or continuous dry-out-time bound.
+Known changes of forcing require a new authored window. The endpoint's
+uniform-wall, pure-liquid, fixed-area and fixed-volume limits remain.
+
+Focused regressions compare tightened controls against independent continuous
+wall/film/gas balance equations, isolate phase-fraction refinement at constant
+wall temperature, and verify fine-only source composition, complete discarded
+work charging, bounded rejection and atomic refusal.
