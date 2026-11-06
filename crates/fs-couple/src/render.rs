@@ -786,22 +786,24 @@ impl ReedBoreVoice {
     }
 
     /// Select the double-reed staple's pressure recovery ([`crate::bernoulli_aperture::viscous::StapleRecovery`], Almeida,
-    /// Vergez and Caussé 2007 eqs. 14-17): the flow through the reed opening follows the viscous slit law on the constriction
+    /// Vergez and Caussé 2007 eqs. 14-17): the flow through the reed opening follows the slit law on the constriction
     /// drop `(dp)_c`, the blade is driven by `(dp)_c` and not by the total mouth-to-bore drop, and the bore input pressure is
-    /// raised by `C_P (1/2) rho (q/S_c)^2`. It needs the viscous slit (`set_viscous_slit_length`), a massive reed and a voice
-    /// that has not advanced, and the reed's rest opening area must be inside the law's domain. `C_P = 0` is the original
-    /// law and installs nothing, so the voice stays bit for bit what it was.
+    /// raised by `C_P (1/2) rho (q/S_c)^2`. The slit law is the viscous one if `set_viscous_slit_length` selected it (in either
+    /// order), and otherwise the inviscid Bernoulli law the cards without `slit_length` use, where Almeida's own model
+    /// neglects the viscous loss along the reed. It needs a massive reed and a voice that has not advanced, and the reed's
+    /// rest opening area must be inside the law's domain. `C_P = 0` is the original law and installs nothing, so the voice
+    /// stays bit for bit what it was.
     ///
     /// # Errors
-    /// No viscous slit selected, a massless reed, an advanced voice, or a rest opening area at or above `S_c / sqrt(C_P)`
-    /// (the refusal text is [`crate::bernoulli_aperture::viscous::STAPLE_RECOVERY_DOMAIN`]).
+    /// A massless reed, an advanced voice, or a rest opening area at or above `S_c / sqrt(C_P)` (the refusal text is
+    /// [`crate::bernoulli_aperture::viscous::STAPLE_RECOVERY_DOMAIN`]).
     pub fn set_staple_recovery(
         &mut self,
         recovery: crate::bernoulli_aperture::viscous::StapleRecovery,
     ) -> Result<(), AcousticRealizeError> {
-        if self.reed.mass_kg <= 0.0 || self.viscous_slit.is_none() || self.sample_index != 0 {
+        if self.reed.mass_kg <= 0.0 || self.sample_index != 0 {
             return Err(AcousticRealizeError::InvalidDescription {
-                what: "staple pressure recovery needs a massive reed, the viscous slit and a voice that has not advanced",
+                what: "staple pressure recovery needs a massive reed and a voice that has not advanced",
             });
         }
         // The reed starts at its rest opening, so the law must be defined there.

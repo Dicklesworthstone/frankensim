@@ -120,7 +120,7 @@ fn staple_recovery_row_selects_the_law_changes_the_sound_and_zero_changes_nothin
 }
 
 #[test]
-fn staple_recovery_row_is_refused_without_its_slit_a_massive_reed_or_a_defined_opening() {
+fn staple_recovery_row_is_refused_for_a_massless_reed_a_malformed_row_or_an_undefined_opening() {
     use crate::acoustic_realize::AcousticRealizeError;
     use crate::bernoulli_aperture::viscous::STAPLE_RECOVERY_DOMAIN;
     let refusal = |text: &str| match ReedPerformance::from_bytes(text.as_bytes(), 37) {
@@ -129,7 +129,6 @@ fn staple_recovery_row_is_refused_without_its_slit_a_massive_reed_or_a_defined_o
         other => panic!("expected a refusal, got {:?}", other.err()),
     };
     let row = Some("staple_recovery 0.8 4e-6");
-    assert!(refusal(&staple_source(row).replace("slit_length 0.001\n", "")).contains("slit_length"));
     assert!(refusal(&staple_source(row).replace("reed 0.000357 0.0056 17720 2.2e-5 3464 0.114",
         "reed 0.000357 0.0056 17720 0 0 0.114")).contains("massive reed"));
     for bad in ["staple_recovery", "staple_recovery 0.8", "staple_recovery 0.8 4e-6 extra",
@@ -141,4 +140,44 @@ fn staple_recovery_row_is_refused_without_its_slit_a_massive_reed_or_a_defined_o
     // The fixture's own clarinet-sized reed (0.4 mm x 13 mm = 5.2 mm^2) is above S_c / sqrt(C_P) = 4.47 mm^2.
     let wide = VISCOUS_INPUT.replace("slit_length 0.001\n", "slit_length 0.001\nstaple_recovery 0.8 4e-6\n");
     assert_eq!(refusal(&wide), STAPLE_RECOVERY_DOMAIN);
+    // The same on the inviscid law (no slit_length): the row loads there and the same opening is refused by name.
+    let wide_inviscid = INPUT.replace("reed 0.0004 0.013 6000 0 0 0.35",
+        "reed 0.0004 0.013 6000 0.00001 100 0.35\nstaple_recovery 0.8 4e-6");
+    assert_eq!(refusal(&wide_inviscid), STAPLE_RECOVERY_DOMAIN);
+}
+
+/// The oboe description's reed on the inviscid fixture card (no `slit_length`, as the live oboe cards), with or without the
+/// `staple_recovery` row right after the reed row.
+fn inviscid_staple_source(row: Option<&str>) -> String {
+    let reed = "reed 0.000357 0.0056 17720 2.2e-5 3464 0.114\n";
+    let base = INPUT.replace("reed 0.0004 0.013 6000 0 0 0.35\n", reed);
+    match row {
+        Some(row) => base.replace(reed, &format!("{reed}{row}\n")),
+        None => base,
+    }
+}
+
+#[test]
+fn staple_recovery_row_works_on_the_inviscid_law_of_a_card_without_slit_length() {
+    let plain_text = inviscid_staple_source(None);
+    assert!(!plain_text.contains("slit_length"));
+    let plain = pressure(&plain_text, 37);
+    let staple_text = inviscid_staple_source(Some("staple_recovery 0.8 4e-6"));
+    let loaded = ReedPerformance::from_bytes(staple_text.as_bytes(), 37).unwrap();
+    assert!(loaded.viscous_slit().is_none(), "this card has no slit_length");
+    let recovery = loaded.staple_recovery().unwrap();
+    assert_eq!((recovery.c_p(), recovery.constriction_area_m2()), (0.8, 4e-6));
+    let staple = pressure(&staple_text, 37);
+    assert_eq!(staple, pressure(&staple_text, 113), "callback partition");
+    let energy: f64 = plain.iter().map(|p| p * p).sum();
+    let changed: f64 = plain.iter().zip(&staple).map(|(a, b)| (a - b).powi(2)).sum();
+    assert!(energy > 0.0 && changed > 1e-8 * energy, "the recovery must change the sound");
+    // C_P = 0 is the original law: nothing installed, the same bits.
+    let zero_text = inviscid_staple_source(Some("staple_recovery 0 4e-6"));
+    assert!(ReedPerformance::from_bytes(zero_text.as_bytes(), 37).unwrap().staple_recovery().is_none());
+    assert_eq!(plain.iter().map(|p| p.to_bits()).collect::<Vec<_>>(),
+        pressure(&zero_text, 37).iter().map(|p| p.to_bits()).collect::<Vec<_>>());
+    // With the viscous slit the same row still loads, and then selects the viscous junction.
+    let slit_text = staple_source(Some("staple_recovery 0.8 4e-6"));
+    assert!(ReedPerformance::from_bytes(slit_text.as_bytes(), 37).unwrap().viscous_slit().is_some());
 }

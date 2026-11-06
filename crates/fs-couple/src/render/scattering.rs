@@ -80,6 +80,29 @@ impl ReedBoreVoice {
                 self.fast_stats.fallback_samples += 1;
             }
             result
+        } else if let Some(recovery) = self.staple_recovery {
+            // The same staple law on the inviscid Bernoulli junction, for the cards without `slit_length`: Almeida's own
+            // model neglects the viscous loss along the reed. Same midpoint step, lay and tongue force as the branches below.
+            let lay = self.lay.as_ref().expect("massive voices retain their physical lay");
+            let result = crate::reed_bore::OpeningPropagator::Midpoint.step_with_junction(
+                self.reed, self.rho, impedance, incoming, mouth_pressure_pa,
+                self.reed_y, self.reed_v, self.dt, body_flow_m3_s, lay,
+                |opening| Ok(opening.max(0.0)), material_force,
+                |opening, moving| {
+                    let junction = crate::bernoulli_aperture::moving::characteristic_junction_with_recovery(
+                        recovery, self.reed.width_m, opening, self.rho, impedance,
+                        incoming, mouth_pressure_pa, moving,
+                    )?;
+                    Ok(crate::reed_bore::JunctionPressure {
+                        outgoing: junction.outgoing_pa,
+                        blade_drop_pa: Some(junction.constriction_drop_pa),
+                    })
+                },
+            )?;
+            if self.solver_mode == ReedSolverMode::FastNewton {
+                self.fast_stats.fallback_samples += 1;
+            }
+            result
         } else if closing_force_n != 0.0 {
             let lay = self.lay.as_ref().expect("massive voices retain their physical lay");
             let result = crate::reed_bore::step_profiled_aperture(
@@ -264,25 +287,82 @@ mod tests {
     }
 
     #[test]
-    fn g0_staple_recovery_is_refused_without_its_slit_a_massive_reed_a_fresh_voice_or_a_defined_rest_opening() {
+    fn g0_staple_recovery_is_refused_for_a_massless_reed_a_fresh_voice_or_an_undefined_rest_opening() {
         use crate::bernoulli_aperture::viscous::{StapleRecovery, STAPLE_RECOVERY_DOMAIN};
         let recovery = StapleRecovery::new(0.8, 4e-6).unwrap();
-        assert!(voice_with(-0.2, oboe_reed()).set_staple_recovery(recovery).is_err(), "no viscous slit");
-        let mut massless = voice(-0.2, false);
-        massless.set_viscous_slit_length(1e-3).unwrap();
-        assert!(massless.set_staple_recovery(recovery).is_err(), "massless reed");
-        let mut advanced = voice_with(-0.2, oboe_reed());
-        advanced.set_viscous_slit_length(2.5e-2).unwrap();
-        advanced.step_block(&mut [0.0]).unwrap();
-        assert!(advanced.set_staple_recovery(recovery).is_err(), "advanced voice");
-        // Rest area 0.4 mm x 13 mm = 5.2 mm^2 is above S_c / sqrt(C_P) = 4.47 mm^2: refused, by name.
-        let mut wide = voice(-0.2, true);
-        wide.set_viscous_slit_length(1e-3).unwrap();
-        match wide.set_staple_recovery(recovery) {
-            Err(AcousticRealizeError::Reed { what }) => assert_eq!(what, STAPLE_RECOVERY_DOMAIN),
-            other => panic!("expected the staple domain refusal, got {other:?}"),
+        // With or without the viscous slit: the row works on both laws.
+        for slit in [None, Some(2.5e-2)] {
+            let prepared = |mut v: ReedBoreVoice| {
+                if let Some(length) = slit { v.set_viscous_slit_length(length).unwrap(); }
+                v
+            };
+            assert!(prepared(voice(-0.2, false)).set_staple_recovery(recovery).is_err(), "massless reed {slit:?}");
+            let mut advanced = prepared(voice_with(-0.2, oboe_reed()));
+            advanced.step_block(&mut [0.0]).unwrap();
+            assert!(advanced.set_staple_recovery(recovery).is_err(), "advanced voice {slit:?}");
+            // Rest area 0.4 mm x 13 mm = 5.2 mm^2 is above S_c / sqrt(C_P) = 4.47 mm^2: refused, by name.
+            let mut wide = prepared(voice(-0.2, true));
+            match wide.set_staple_recovery(recovery) {
+                Err(AcousticRealizeError::Reed { what }) => assert_eq!(what, STAPLE_RECOVERY_DOMAIN),
+                other => panic!("expected the staple domain refusal, got {other:?}"),
+            }
+            assert!(wide.staple_recovery().is_none());
+            assert!(prepared(voice_with(-0.2, oboe_reed())).set_staple_recovery(recovery).is_ok(), "{slit:?}");
         }
-        assert!(wide.staple_recovery().is_none());
+    }
+
+    // The same law on the inviscid Bernoulli junction, the one the oboe cards use (no `slit_length`).
+    fn inviscid_voice(recovery: Option<(f64, f64)>) -> ReedBoreVoice {
+        use crate::bernoulli_aperture::viscous::StapleRecovery;
+        let mut v = voice_with(-0.2, oboe_reed());
+        if let Some((c_p, s_c)) = recovery {
+            v.set_staple_recovery(StapleRecovery::new(c_p, s_c).unwrap()).unwrap();
+        }
+        v
+    }
+
+    fn inviscid_run(recovery: Option<(f64, f64)>, samples: usize) -> Vec<f64> {
+        let mut v = inviscid_voice(recovery);
+        let mut out = vec![0.0; samples];
+        v.step_block(&mut out).unwrap();
+        out
+    }
+
+    #[test]
+    fn g0_zero_or_absent_staple_recovery_is_the_original_inviscid_voice_bit_for_bit() {
+        let absent = inviscid_run(None, 1200);
+        let zero = inviscid_run(Some((0.0, 4e-6)), 1200);
+        assert!(absent.iter().all(|x| x.is_finite()));
+        assert_eq!(
+            absent.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+            zero.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+        );
+        assert!(inviscid_voice(Some((0.0, 4e-6))).staple_recovery().is_none());
+    }
+
+    #[test]
+    fn g1_inviscid_staple_recovery_reaches_the_sample_and_tracks_the_viscous_law_with_a_negligible_slit() {
+        let plain = inviscid_run(None, 2400);
+        let staple = inviscid_run(Some((0.8, 4e-6)), 2400);
+        assert!(staple.iter().all(|x| x.is_finite()));
+        let peak = plain.iter().fold(0.0_f64, |m, x| m.max(x.abs()));
+        let difference = plain.iter().zip(&staple).fold(0.0_f64, |m, (a, b)| m.max((a - b).abs()));
+        assert!(difference > 1e-3 * peak, "the recovery must change the inviscid voice: {difference:e} of {peak:e}");
+        // The callback partition cannot matter.
+        let (mut a, mut b) = (inviscid_voice(Some((0.8, 4e-6))), inviscid_voice(Some((0.8, 4e-6))));
+        let (mut x, mut y) = ([0.0; 600], [0.0; 600]);
+        a.step_block(&mut x).unwrap();
+        for chunk in y.chunks_mut(37) { b.step_block(chunk).unwrap(); }
+        assert_eq!(x, y);
+        // With a slit so short that its viscous term is negligible, the viscous law gives the same voice: the two junctions
+        // solve one equation (the junction-level test in `bernoulli_aperture::moving` pins the agreement to 1e-9).
+        let mut slit = inviscid_voice(None);
+        slit.set_viscous_slit_length(1e-9).unwrap();
+        slit.set_staple_recovery(crate::bernoulli_aperture::viscous::StapleRecovery::new(0.8, 4e-6).unwrap()).unwrap();
+        let mut viscous = vec![0.0; 600];
+        slit.step_block(&mut viscous).unwrap();
+        let drift = viscous.iter().zip(&staple[..600]).fold(0.0_f64, |m, (a, b)| m.max((a - b).abs()));
+        assert!(drift <= 1e-5 * peak, "negligible slit {drift:e} of {peak:e}");
     }
 
     // G5: the physical source, its history and receiver are independent of the

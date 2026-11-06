@@ -58,7 +58,8 @@ pub const STAPLE_RECOVERY_DOMAIN: &str = "staple pressure recovery left its doma
 /// constriction of area `S_c` into a cone, and a fraction `C_P` of the dynamic head at the constriction comes back as
 /// pressure. With `(dp)_c = p_m - p_c` the drop across the opening and `q` the flow through it,
 ///
-/// * flow: `q = S sqrt(2 (dp)_c / rho)` (here the viscous slit law of [`ViscousSlit`], which keeps its own linear term);
+/// * flow: `q = S sqrt(2 (dp)_c / rho)` (the inviscid Bernoulli law of `moving::characteristic_junction_with_recovery`, or
+///   the viscous slit law of [`ViscousSlit`] with its own linear term when the card has `slit_length`);
 /// * the blade is driven by `(dp)_c` (eq. 16), not by the total mouth-to-bore drop;
 /// * bore input: `p_r = p_m - (dp)_c + C_P (1/2) rho (q / S_c)^2` (eq. 17).
 ///

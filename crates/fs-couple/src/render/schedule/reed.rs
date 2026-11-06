@@ -18,9 +18,10 @@
 //! attack envelope; all retained reed and bore state survives release and resume.
 //! Optional `slit_length LENGTH_M` after the reed record selects the shared
 //! quasisteady viscous slit from the exact inlet gas, including axial fields.
-//! Optional `staple_recovery C_P S_C_M2` right after `slit_length` (so it needs that row, and a massive reed) selects the
-//! double reed's staple pressure recovery of Almeida, Vergez and Caussé (J. Acoust. Soc. Am. 121(1) 536-546, 2007, eqs.
-//! 14-17): the flow follows the slit law on the constriction drop, the blade is driven by that drop and not by the total
+//! Optional `staple_recovery C_P S_C_M2` right after `slit_length`, or right after the reed row on a card without one (it
+//! needs a massive reed), selects the double reed's staple pressure recovery of Almeida, Vergez and Caussé (J. Acoust.
+//! Soc. Am. 121(1) 536-546, 2007, eqs. 14-17): the flow follows the slit law on the constriction drop (the viscous one
+//! with `slit_length`, the inviscid Bernoulli law without it), the blade is driven by that drop and not by the total
 //! mouth-to-bore drop, and the bore input is raised by `C_P (1/2) rho (q/S_c)^2`. The only printed numbers are one
 //! oboe reed's (`C_P` 0.8, `S_c` 4e-6 m^2), borrowed for any other reed; the law refuses where `C_P (S/S_c)^2` reaches 1.
 //! `C_P` 0 is the original law and changes nothing. See `ReedBoreVoice::set_staple_recovery`.
@@ -689,8 +690,9 @@ impl ReedPerformance {
             row.finish()?;
             Some(length)
         } else { None };
-        // `staple_recovery C_P S_C_M2`, right after `slit_length`: the double reed's staple pressure recovery (Almeida,
-        // Vergez and Caussé 2007 eqs. 14-17). It acts through the viscous slit law, so it needs that row.
+        // `staple_recovery C_P S_C_M2`, right after `slit_length` (or right after the reed row on a card without one): the
+        // double reed's staple pressure recovery (Almeida, Vergez and Caussé 2007 eqs. 14-17). It acts on the viscous slit law
+        // if the card has `slit_length`, and on the inviscid Bernoulli law otherwise.
         let staple_recovery = if r.lines.clone().next()
             .and_then(|line| line.split_ascii_whitespace().next()) == Some("staple_recovery") {
             let mut row = r.row("staple_recovery")?;
@@ -698,9 +700,6 @@ impl ReedPerformance {
             let c_p = row.scalar()?;
             let constriction_area_m2 = row.positive()?;
             row.finish()?;
-            if slit_length_m.is_none() {
-                return Err(bad(line, "staple_recovery needs the slit_length row before it: the recovery acts through the viscous slit law"));
-            }
             if reed.mass_kg <= 0.0 {
                 return Err(bad(line, "staple_recovery requires a massive reed"));
             }

@@ -75,11 +75,13 @@ inertia, entrance development, turbulence, or measured-instrument validation.
 The optional channel uses the shared strict root solver; fast-Newton mode
 explicitly records a fallback rather than using the inviscid Jacobian.
 
-An optional `staple_recovery C_P S_C_M2` record immediately after `slit_length`
-adds the double reed's pressure recovery in the conical staple (Almeida, Vergez
-and Caussé 2007, eqs. 14-17): the flow follows the slit law on the constriction
-drop `(dp)_c`, the blade is driven by `(dp)_c` and not by the total mouth-to-bore
-drop, and the bore input is raised by `C_P (1/2) rho (q/S_c)^2`. For example:
+An optional `staple_recovery C_P S_C_M2` record immediately after `slit_length`,
+or after `reed` on a card without one, adds the double reed's pressure recovery in
+the conical staple (Almeida, Vergez and Caussé 2007, eqs. 14-17): the flow follows
+the slit law on the constriction drop `(dp)_c` (the viscous law with `slit_length`,
+the inviscid Bernoulli law without it), the blade is driven by `(dp)_c` and not by
+the total mouth-to-bore drop, and the bore input is raised by
+`C_P (1/2) rho (q/S_c)^2`. For example, on a card with a slit:
 
 ```
 reed 0.000357 0.0056 17720 2.2e-5 3464 0.114
@@ -87,11 +89,19 @@ slit_length 0.025
 staple_recovery 0.8 4e-6
 ```
 
+and on a card without `slit_length`, such as the oboe cards (Almeida's own model
+neglects the viscous loss along the reed):
+
+```
+reed 0.000357 0.0056 17720 2.2e-5 3464 0.114
+staple_recovery 0.8 4e-6
+```
+
 `C_P` is in [0, 1] and `S_C_M2` is the constriction area in m^2. **The two numbers
 here are one measured reed's** (a ready-to-play natural-cane oboe reed, humid air,
 masses added, no lips: `C_P` 0.8 on both pressure branches, `S_c` 4e-6 m^2), and a
-card that uses them borrows them for another reed. The record needs `slit_length`
-and a massive reed. The law is singular where `C_P (S/S_c)^2` reaches 1, so it
+card that uses them borrows them for another reed. The record needs a massive reed.
+The law is singular where `C_P (S/S_c)^2` reaches 1, so it
 refuses there and at a rest opening that is already there. `C_P` 0 is the original
 law and changes nothing. It acts on the jet flow of a quasistatic measurement; it
 is not a model of the moving reed's swept flow through the staple.
