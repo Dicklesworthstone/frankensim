@@ -295,6 +295,181 @@ impl<'a, K: CapacityKnot> CapacityCurve<'a, K> {
         self.integral(initial, final_t, true)
     }
 
+    /// Integrate C(T) dT/(reservoir-T) for passive linear heat exchange.
+    /// Only crossed source segments are visited; the final affine segment is
+    /// inverted without freezing C or introducing another caloric chart.
+    pub(super) fn temperature_after_linear_exchange(
+        &self,
+        initial: f64,
+        reservoir: f64,
+        exposure: f64,
+    ) -> Result<f64, ThermalTransportError> {
+        self.check_temperature(initial)?;
+        if !positive(reservoir) || !exposure.is_finite() || exposure < 0.0 {
+            return Err(invalid(
+                "linear heat exchange needs positive reservoir temperature and finite nonnegative exposure",
+            ));
+        }
+        if exposure == 0.0 || initial == reservoir {
+            return Ok(initial);
+        }
+        let heating = reservoir > initial;
+        let mut index = if heating {
+            self.segment(initial)
+        } else {
+            self.knots
+                .partition_point(|k| k.temperature() < initial)
+                .saturating_sub(1)
+        };
+        let mut current = initial;
+        let mut cumulative = 0.0;
+        let mut correction = 0.0;
+        for _ in 0..self.knots.len() - 1 {
+            let end = if heating {
+                self.knots[index + 1].temperature().min(reservoir)
+            } else {
+                self.knots[index].temperature().max(reservoir)
+            };
+            if end == current {
+                break;
+            }
+            let amount = self.exchange_integral(index, current, end, reservoir)?;
+            let corrected = amount - correction;
+            let next = cumulative + corrected;
+            if exposure <= next {
+                let temperature = if exposure == next {
+                    end
+                } else {
+                    self.exchange_inverse(index, current, end, reservoir, exposure - cumulative)?
+                };
+                if temperature == initial {
+                    return Err(invalid(
+                        "nonzero heat exchange is below temperature resolution",
+                    ));
+                }
+                return Ok(temperature);
+            }
+            correction = (next - cumulative) - corrected;
+            cumulative = next;
+            current = end;
+            if heating {
+                if index + 2 == self.knots.len() {
+                    break;
+                }
+                index += 1;
+            } else {
+                if index == 0 {
+                    break;
+                }
+                index -= 1;
+            }
+        }
+        Err(invalid(
+            "heat exchange exceeds the source temperature support",
+        ))
+    }
+
+    // In distance x=|reservoir-T|, C is still affine and the positive exchange
+    // integral is integral C(x)/x dx from the nearer to the farther endpoint.
+    // Carry the temperature width separately: subtracting two large reservoir
+    // distances can erase a small, representable fluid-temperature change.
+    fn exchange_integral(
+        &self,
+        index: usize,
+        initial: f64,
+        final_t: f64,
+        reservoir: f64,
+    ) -> Result<f64, ThermalTransportError> {
+        if initial == final_t {
+            return Ok(0.0);
+        }
+        if final_t == reservoir {
+            return Ok(f64::INFINITY);
+        }
+        let [near, far] = entropy_weights_with_width(
+            (reservoir - final_t).abs(),
+            (reservoir - initial).abs(),
+            (final_t - initial).abs(),
+        );
+        let amount = self.on_segment(index, final_t) * near + self.on_segment(index, initial) * far;
+        if amount.is_nan() || amount < 0.0 {
+            return Err(invalid("heat-exchange integral is not representable"));
+        }
+        // Infinity is a valid upper bracket for finite exposure. An underflowed
+        // zero can likewise bracket a trial; the final temperature must move.
+        Ok(amount)
+    }
+
+    fn exchange_inverse(
+        &self,
+        index: usize,
+        initial: f64,
+        end: f64,
+        reservoir: f64,
+        exposure: f64,
+    ) -> Result<f64, ThermalTransportError> {
+        let initial_c = self.on_segment(index, initial);
+        let exponential = exponential_exchange(initial, reservoir, exposure / initial_c);
+        let inside = |value: f64, a: f64, b: f64| value > a.min(b) && value < a.max(b);
+        if self.knots[index].capacity() == self.knots[index + 1].capacity() {
+            if exponential.is_finite()
+                && exponential >= initial.min(end)
+                && exponential <= initial.max(end)
+            {
+                return Ok(exponential);
+            }
+            return Err(invalid(
+                "constant-capacity exchange left its admitted segment",
+            ));
+        }
+        // Brackets are ordered by travel, so cooling uses exactly the same
+        // monotone positive integral and convergence rule as heating.
+        let (mut lower, mut upper) = (initial, end);
+        let (mut low_value, mut high_value) =
+            (0.0, self.exchange_integral(index, initial, end, reservoir)?);
+        let mut trial = if inside(exponential, lower, upper) {
+            exponential
+        } else {
+            lower + 0.5 * (upper - lower)
+        };
+        for iteration in 0..128 {
+            let value = self.exchange_integral(index, initial, trial, reservoir)?;
+            if value == exposure {
+                return Ok(trial);
+            }
+            if value < exposure {
+                lower = trial;
+                low_value = value;
+            } else {
+                upper = trial;
+                high_value = value;
+            }
+            if lower.min(upper).next_up() >= lower.max(upper) {
+                return Ok(if exposure - low_value <= high_value - exposure {
+                    lower
+                } else {
+                    upper
+                });
+            }
+            let midpoint = lower + 0.5 * (upper - lower);
+            let direction = if reservoir > initial { 1.0 } else { -1.0 };
+            let newton = trial
+                + direction
+                    * ((exposure - value) / self.on_segment(index, trial))
+                    * (reservoir - trial).abs();
+            // At least every other iteration bisects, bounding work even when
+            // the affine capacity changes strongly or Newton overflows.
+            trial = if iteration % 2 == 0 && inside(newton, lower, upper) {
+                newton
+            } else {
+                midpoint
+            };
+        }
+        Err(invalid(
+            "heat-exchange inverse exceeded its bounded iteration budget",
+        ))
+    }
+
     /// Bounded segment traversal followed by a scaled quadratic inverse.
     /// No iteration, absolute-primitive subtraction, allocation or extrapolation.
     pub(super) fn temperature_after_energy_change(
@@ -410,6 +585,10 @@ impl<'a, K: CapacityKnot> CapacityCurve<'a, K> {
 // cancellation in 1 - ln(1+r)/r when the temperatures are close together.
 fn entropy_weights(low: f64, high: f64) -> [f64; 2] {
     let width = high - low;
+    entropy_weights_with_width(low, high, width)
+}
+
+fn entropy_weights_with_width(low: f64, high: f64, width: f64) -> [f64; 2] {
     let ratio = width / low;
     let logarithm = if ratio.is_finite() {
         ratio.ln_1p()
@@ -428,6 +607,14 @@ fn entropy_weights(low: f64, high: f64) -> [f64; 2] {
         1.0 - (low / width) * logarithm
     };
     [logarithm - hot, hot]
+}
+
+fn exponential_exchange(initial: f64, reservoir: f64, exposure_over_capacity: f64) -> f64 {
+    if exposure_over_capacity < 0.5 {
+        initial + (reservoir - initial) * -(-exposure_over_capacity).exp_m1()
+    } else {
+        reservoir + (initial - reservoir) * (-exposure_over_capacity).exp()
+    }
 }
 
 fn invalid(reason: &'static str) -> ThermalTransportError {
@@ -452,6 +639,248 @@ mod tests {
         fn capacity(&self) -> f64 {
             self.queries.set(self.queries.get() + 1);
             self.values[1]
+        }
+    }
+
+    fn affine_exchange(
+        initial: f64,
+        final_t: f64,
+        reservoir: f64,
+        intercept: f64,
+        slope: f64,
+    ) -> f64 {
+        // Independent primitive for C(T)=intercept+slope*T, used at ordinary
+        // temperature separations where its subtractive form is well resolved.
+        (intercept + slope * reservoir) * ((reservoir - initial) / (reservoir - final_t)).ln()
+            - slope * (final_t - initial)
+    }
+
+    #[test]
+    fn g1_constant_capacity_exchange_matches_newton_cooling_and_keeps_small_steps() {
+        let knots = [[200.0, 1000.0], [1000.0, 1000.0]];
+        let curve = CapacityCurve::new(&knots);
+        for (initial, reservoir) in [(300.0, 800.0), (800.0, 300.0)] {
+            for exposure in [1e-6_f64, 10.0, 500.0, 2000.0, 1e6] {
+                let expected = reservoir + (initial - reservoir) * (-exposure / 1000.0).exp();
+                let actual = curve
+                    .temperature_after_linear_exchange(initial, reservoir, exposure)
+                    .unwrap();
+                assert!((actual - expected).abs() <= 2.0 * f64::EPSILON * expected);
+                assert!(actual >= initial.min(reservoir) && actual <= initial.max(reservoir));
+                assert_eq!(
+                    actual,
+                    curve
+                        .temperature_after_linear_exchange(initial, reservoir, exposure)
+                        .unwrap()
+                );
+            }
+        }
+        let initial: f64 = 300.0;
+        let target = initial.next_up();
+        let exposure = 1000.0 * ((target - initial) / (800.0 - target)).ln_1p();
+        assert_eq!(
+            curve
+                .temperature_after_linear_exchange(initial, 800.0, exposure)
+                .unwrap(),
+            target
+        );
+        assert!(
+            curve
+                .temperature_after_linear_exchange(initial, 800.0, f64::from_bits(1))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn g1_affine_capacity_exchange_matches_exact_heating_cooling_and_composition() {
+        for (intercept, slope) in [(800.0, 2.0), (2200.0, -2.0)] {
+            let knots = [
+                [200.0, intercept + 200.0 * slope],
+                [600.0, intercept + 600.0 * slope],
+            ];
+            let curve = CapacityCurve::new(&knots);
+            for (initial, target, reservoir) in [(300.0, 500.0, 700.0), (550.0, 280.0, 180.0)] {
+                let exposure = affine_exchange(initial, target, reservoir, intercept, slope);
+                let actual = curve
+                    .temperature_after_linear_exchange(initial, reservoir, exposure)
+                    .unwrap();
+                assert!(
+                    (actual - target).abs() <= 4.0 * f64::EPSILON * target,
+                    "{actual} != {target}"
+                );
+                let halfway = curve
+                    .temperature_after_linear_exchange(initial, reservoir, 0.5 * exposure)
+                    .unwrap();
+                let composed = curve
+                    .temperature_after_linear_exchange(halfway, reservoir, 0.5 * exposure)
+                    .unwrap();
+                assert!((composed - actual).abs() <= 4.0 * f64::EPSILON * target);
+                let heat = curve.energy_change(initial, actual).unwrap();
+                let exact_heat =
+                    (intercept + 0.5 * slope * (target + initial)) * (target - initial);
+                assert!((heat - exact_heat).abs() <= 16.0 * f64::EPSILON * exact_heat.abs());
+            }
+        }
+    }
+
+    #[test]
+    fn g1_exchange_crosses_original_capacity_knots_in_both_directions() {
+        let knots = [
+            [200.0, 1200.0],
+            [300.0, 1400.0],
+            [400.0, 1800.0],
+            [600.0, 1000.0],
+        ];
+        let curve = CapacityCurve::new(&knots);
+        for (initial, target, reservoir) in [(250.0, 550.0, 700.0), (550.0, 250.0, 150.0)] {
+            let cuts = if initial < target {
+                [initial, 300.0, 400.0, target]
+            } else {
+                [initial, 400.0, 300.0, target]
+            };
+            let exposure: f64 = cuts
+                .windows(2)
+                .map(|pair| {
+                    let middle = 0.5 * (pair[0] + pair[1]);
+                    let (intercept, slope) = if middle < 300.0 {
+                        (800.0, 2.0)
+                    } else if middle < 400.0 {
+                        (200.0, 4.0)
+                    } else {
+                        (3400.0, -4.0)
+                    };
+                    affine_exchange(pair[0], pair[1], reservoir, intercept, slope)
+                })
+                .sum();
+            let actual = curve
+                .temperature_after_linear_exchange(initial, reservoir, exposure)
+                .unwrap();
+            assert!(
+                (actual - target).abs() <= 8.0 * f64::EPSILON * target,
+                "{actual} != {target}"
+            );
+        }
+        // Exact source knots select the correct outgoing interval when cooling.
+        let exposure = affine_exchange(400.0, 350.0, 200.0, 200.0, 4.0);
+        assert!(
+            (curve
+                .temperature_after_linear_exchange(400.0, 200.0, exposure)
+                .unwrap()
+                - 350.0)
+                .abs()
+                < 1e-12
+        );
+    }
+
+    #[test]
+    fn g0_exchange_preserves_equilibrium_and_refuses_unsupported_paths() {
+        let knots = [[300.0, 1000.0], [400.0, 1000.0]];
+        let curve = CapacityCurve::new(&knots);
+        for (initial, end, reservoir) in [(300.0, 400.0, 500.0), (400.0, 300.0, 200.0)] {
+            let available = curve.exchange_integral(0, initial, end, reservoir).unwrap();
+            assert_eq!(
+                curve
+                    .temperature_after_linear_exchange(initial, reservoir, available)
+                    .unwrap(),
+                end
+            );
+            assert!(
+                curve
+                    .temperature_after_linear_exchange(initial, reservoir, available.next_up())
+                    .is_err()
+            );
+            assert!(
+                curve
+                    .temperature_after_linear_exchange(end, reservoir, 1.0)
+                    .is_err()
+            );
+            assert_eq!(
+                curve
+                    .temperature_after_linear_exchange(initial, reservoir, 0.0)
+                    .unwrap(),
+                initial
+            );
+        }
+        assert_eq!(
+            curve
+                .temperature_after_linear_exchange(350.0, 350.0, 1000.0)
+                .unwrap(),
+            350.0
+        );
+        for exposure in [-1.0, f64::NAN, f64::INFINITY] {
+            assert!(
+                curve
+                    .temperature_after_linear_exchange(350.0, 360.0, exposure)
+                    .is_err()
+            );
+        }
+        for reservoir in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            assert!(
+                curve
+                    .temperature_after_linear_exchange(350.0, reservoir, 1.0)
+                    .is_err()
+            );
+        }
+        for initial in [299.0, 401.0, f64::NAN, f64::INFINITY] {
+            assert!(
+                curve
+                    .temperature_after_linear_exchange(initial, 350.0, 0.0)
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn g1_exchange_retains_small_heat_far_from_reservoir_and_stops_at_equilibrium() {
+        let knots = [[200.0, 1200.0], [600.0, 2000.0]];
+        let curve = CapacityCurve::new(&knots);
+        let (initial, target, reservoir) = (300.0_f64, 300.0_f64.next_up(), 1e12_f64);
+        assert_eq!(reservoir - initial, reservoir - target);
+        let width = target - initial;
+        // Simpson quadrature of Cp/(reservoir-T) across a one-ulp interval;
+        // truncation is far below f64 resolution and uses no logarithmic weights.
+        let value = |t: f64| (800.0 + 2.0 * t) / (reservoir - t);
+        let exposure =
+            width / 6.0 * (value(initial) + 4.0 * value(initial + 0.5 * width) + value(target));
+        assert_eq!(
+            curve
+                .temperature_after_linear_exchange(initial, reservoir, exposure)
+                .unwrap(),
+            target
+        );
+        for reservoir in [250.0, 500.0] {
+            let result = curve
+                .temperature_after_linear_exchange(initial, reservoir, 1e12)
+                .unwrap();
+            assert!((result - reservoir).abs() <= f64::EPSILON * reservoir);
+            assert!(result >= initial.min(reservoir) && result <= initial.max(reservoir));
+        }
+    }
+
+    #[test]
+    fn g1_exchange_does_not_walk_unvisited_capacity_intervals() {
+        for count in [64, 4096] {
+            let queries = Cell::new(0);
+            let knots: Vec<_> = (0..count)
+                .map(|i| CountedKnot {
+                    values: [250.0 + f64::from(i), 1000.0 + 0.5 * f64::from(i)],
+                    queries: &queries,
+                })
+                .collect();
+            let curve = CapacityCurve::new(&knots);
+            let initial = 250.25 + f64::from(count / 2);
+            let target = initial + 0.125;
+            let reservoir = initial + 0.5;
+            let exposure = affine_exchange(initial, target, reservoir, 875.0, 0.5);
+            let actual = curve
+                .temperature_after_linear_exchange(initial, reservoir, exposure)
+                .unwrap();
+            assert!((actual - target).abs() <= 4.0 * f64::EPSILON * target);
+            assert!(
+                queries.get() <= 1024,
+                "local exchange read {} capacities",
+                queries.get()
+            );
         }
     }
 

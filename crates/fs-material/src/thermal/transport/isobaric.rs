@@ -304,6 +304,40 @@ impl IsobaricHeatCapacityLaw {
     ) -> Result<f64, ThermalTransportError> {
         CapacityCurve::new(&self.knots).temperature_after_energy_change(initial_k, heat_j_kg)
     }
+
+    /// Exact source-Cp law for passive exchange with a fixed-temperature reservoir.
+    /// Solves `integral(initial..final) Cp(T)/(reservoir_k-T) dT = exposure`,
+    /// where `exposure = conductance_time_over_mass_j_kg_k` is nonnegative.
+    /// For a lumped body it is `G*dt/m`; for a steady plug-flow heat exchanger
+    /// it is `UA/m_dot`. G and UA have units W/K. The caller owns the validity
+    /// of that transfer model and the fixed-pressure, fixed-composition path.
+    ///
+    /// Source breakpoints and affine Cp laws are integrated without resampling
+    /// or freezing capacity. Constant-Cp intervals use the analytic exponential;
+    /// the last varying-Cp interval uses a bounded solve to adjacent floating-
+    /// point temperatures. Zero exposure or equal temperatures preserve the
+    /// initial temperature. The reservoir may lie outside source support, but
+    /// the entire material temperature path must remain inside it.
+    ///
+    /// Heat transferred is the original `specific_enthalpy_change_j_kg`, not
+    /// endpoint Cp times temperature change. There is no source-uncertainty or
+    /// heat-transfer-model error bound implied by this numerical inversion.
+    ///
+    /// # Errors
+    /// Refuses invalid temperatures/exposure, a path beyond the original source
+    /// interval, unrepresentable nonzero motion or exhausted inversion work.
+    pub fn temperature_after_linear_exchange(
+        &self,
+        initial_k: f64,
+        reservoir_k: f64,
+        conductance_time_over_mass_j_kg_k: f64,
+    ) -> Result<f64, ThermalTransportError> {
+        CapacityCurve::new(&self.knots).temperature_after_linear_exchange(
+            initial_k,
+            reservoir_k,
+            conductance_time_over_mass_j_kg_k,
+        )
+    }
 }
 
 impl ThermalLaw for IsobaricHeatCapacityLaw {
