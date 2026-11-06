@@ -39,6 +39,9 @@ use fs_phs::acoustic_outlet::AcousticWallRelaxation;
 use fs_phs::{RelaxationBranch, WallPin};
 use std::collections::BTreeSet;
 
+/// Complete-field exponential evolution with the original causal wall states.
+pub mod exact;
+
 /// Original surface-specific mechanical law on a complete boundary patch.
 #[derive(Clone, Debug)]
 pub struct MechanicalBoundary {
