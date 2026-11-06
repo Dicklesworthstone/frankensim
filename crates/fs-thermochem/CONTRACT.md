@@ -3172,6 +3172,14 @@ declared EOS, not the physical persistence of metastable liquid in a vacuum.
 
 ### Pressure-consistent real-gas departures
 
+Complete caloric/mechanical admission requires `Cp >= Cv > 0` and negative
+`(dp/dv)_T`. The original identity `Cp-Cv = -T (dp/dT)_v²/(dp/dv)_T`
+permits equality at zero thermal expansion; equality may also result when a
+positive correction rounds away beside Cv. Both cases retain the original
+isentropic sound-speed response and all mechanical/caloric stability checks.
+G1 regressions compare a zero-expansion PR state with independent U, H and
+pressure derivatives and admit a positive correction below Cv resolution.
+
 Operation version 4 preserves the original cubic root inventory and evaluates
 fugacity, internal energy, enthalpy, entropy and Cv from common immutable
 residual geometry. Deterministic log1p arithmetic forms the covolume offsets

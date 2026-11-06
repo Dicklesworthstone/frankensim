@@ -927,7 +927,8 @@ impl PengRobinsonPhaseRootV1 {
 
     /// Complete Cp and isentropic sound speed after adding an ideal-reference
     /// molar Cv from the SAME composition and T. Returns None for a mechanically
-    /// unstable root or nonpositive complete caloric response.
+    /// unstable root or nonpositive complete caloric response. Cp = Cv is valid
+    /// at zero thermal expansion, or when the positive correction rounds away.
     #[must_use]
     pub fn caloric_mechanics(
         &self,
@@ -1014,7 +1015,10 @@ impl CaloricState {
         let cp = cv - t * dp_dt_v * dp_dt_v / dp_dv_t;
         let sound_speed_squared = v * v / molar_mass_kg_mol
             * (-dp_dv_t + t * dp_dt_v * dp_dt_v / cv);
-        if !cp.is_finite() || cp <= cv
+        // Cp - Cv = -T (dp/dT)_v^2 / (dp/dv)_T is nonnegative on this
+        // mechanically stable branch. Zero thermal expansion gives equality;
+        // a positive correction may also be smaller than one Cv rounding unit.
+        if !cp.is_finite() || cp < cv
             || !sound_speed_squared.is_finite() || sound_speed_squared <= 0.0
         {
             return None;
@@ -1470,6 +1474,83 @@ mod tests {
         let lb = rb.log_fugacity_coefficients();
         assert!((la[0] - lb[1]).abs() < 1e-14);
         assert!((la[1] - lb[0]).abs() < 1e-14);
+    }
+
+    #[test]
+    fn g1_zero_thermal_expansion_admits_equal_positive_heat_capacities() {
+        // Manufactured original PR law, not a fit to a real substance. At
+        // v = 3b its zero-expansion condition is a'(T) = 7 R b. These nearby
+        // representable coordinates give exactly zero in the original EOS
+        // derivative, with positive pressure and negative (dp/dv)_T.
+        let model = pure(PengRobinsonComponentV1 {
+            critical_temperature: Temperature::new(100.0),
+            critical_pressure: Pressure::new(1.0e6),
+            acentric_factor: 1.0,
+            molar_mass: MolarMass::new(0.02),
+        });
+        let t = 821.000_366_031_151_4;
+        let density = Density::new(103.061_143_995_482);
+        let full = model.evaluate_density_temperature(Temperature::new(t), density).unwrap();
+        let scalar = model.evaluate_density_caloric(Temperature::new(t), density).unwrap();
+        let root = full.root();
+        let ideal_cv = 20.0;
+        let mechanics = root.caloric_mechanics(ideal_cv, model.molar_mass().value()).unwrap();
+        assert_eq!(mechanics.dp_dt_v_pa_k, 0.0);
+        assert!(mechanics.dp_dv_t_pa_mol_m3 < 0.0);
+        assert!(mechanics.molar_cv_j_mol_k > 0.0);
+        assert_eq!(mechanics.molar_cp_j_mol_k, mechanics.molar_cv_j_mol_k);
+        assert_eq!(scalar.caloric_mechanics(ideal_cv), Some(mechanics));
+
+        // Independent finite differences of the original U(T,v) and H(T,p)
+        // agree with the equal capacities; no ideal-gas Cp-Cv=R is imposed.
+        let dt = 0.01;
+        let u = |temperature| model.evaluate_density_temperature(
+            Temperature::new(temperature), density,
+        ).unwrap().root().residual_internal_energy_j_mol();
+        let h = |temperature| model.evaluate_pt(
+            Temperature::new(temperature), full.pressure(),
+        ).unwrap().select(PengRobinsonPhaseV1::Stable).residual_enthalpy_j_mol();
+        let cv_numeric = ideal_cv + (u(t + dt) - u(t - dt)) / (2.0 * dt);
+        let cp_numeric = ideal_cv + UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K
+            + (h(t + dt) - h(t - dt)) / (2.0 * dt);
+        assert!((mechanics.molar_cv_j_mol_k / cv_numeric - 1.0).abs() < 2e-8);
+        assert!((mechanics.molar_cp_j_mol_k / cp_numeric - 1.0).abs() < 2e-8);
+
+        // Zero expansion makes the isentropic and isothermal acoustic slopes
+        // coincide. Check sound speed against a separate pressure difference.
+        let v = root.molar_volume_m3_per_mol();
+        let dv = v * 1e-6;
+        let pressure = |volume| model.evaluate_density_temperature(
+            Temperature::new(t), Density::new(model.molar_mass().value() / volume),
+        ).unwrap().pressure().value();
+        let dp_dv = (pressure(v + dv) - pressure(v - dv)) / (2.0 * dv);
+        let speed_squared = -v * v * dp_dv / model.molar_mass().value();
+        assert!((mechanics.sound_speed_m_s.powi(2) / speed_squared - 1.0).abs() < 2e-9);
+    }
+
+    #[test]
+    fn g1_positive_cp_correction_below_cv_resolution_remains_admissible() {
+        let model = pure(methane());
+        let state = model.evaluate_pt(Temperature::new(300.0), Pressure::new(5e6)).unwrap();
+        let root = state.select(PengRobinsonPhaseV1::Stable);
+        // An arithmetic-scale regression, not an empirical methane Cv claim.
+        let ideal_cv = 2.0_f64.powi(60);
+        let mechanics = root.caloric_mechanics(ideal_cv, model.molar_mass().value()).unwrap();
+        let (dp_dt, dp_dv) = root.pressure_derivatives();
+        let correction = -300.0 * dp_dt * dp_dt / dp_dv;
+        let cv = mechanics.molar_cv_j_mol_k;
+        assert!(correction > 0.0 && correction < 0.5 * (cv.next_up() - cv));
+        assert_eq!(mechanics.molar_cp_j_mol_k, cv);
+        assert!(mechanics.sound_speed_m_s.is_finite() && mechanics.sound_speed_m_s > 0.0);
+        let scalar = model.evaluate_density_caloric(
+            Temperature::new(300.0), Density::new(root.mass_density_kg_per_m3()),
+        ).unwrap().caloric_mechanics(ideal_cv).unwrap();
+        assert_eq!(scalar.molar_cp_j_mol_k, scalar.molar_cv_j_mol_k);
+        assert!((scalar.sound_speed_m_s / mechanics.sound_speed_m_s - 1.0).abs() < 1e-14);
+        // Equality does not admit zero or negative COMPLETE Cv.
+        for invalid_cv in [-root.residual_cv_j_mol_k(), -1e20, f64::NAN, f64::INFINITY] {
+            assert!(root.caloric_mechanics(invalid_cv, model.molar_mass().value()).is_none());
+        }
     }
 
     #[test]
