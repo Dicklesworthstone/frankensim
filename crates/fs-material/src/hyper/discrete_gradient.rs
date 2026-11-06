@@ -25,6 +25,7 @@
 //! doi:10.1016/S0045-7825(00)00189-4, equations (10)–(12).
 
 use fs_ad::{Dual, Dual64, Real};
+use fs_math::dd::Dd;
 
 use super::mixed::{MixedFiniteStrainPotential, cofactor};
 use super::{Hyperelastic, det3};
@@ -81,6 +82,8 @@ impl DiscreteGradientSettings {
 pub struct DiscreteGradientState {
     pub energy_before_pa: f64,
     pub energy_after_pa: f64,
+    /// Original finite-pair change, retained independently of absolute storage.
+    pub energy_change_pa: f64,
     /// Algorithmic force for this pair of states, not endpoint elastic stress.
     pub first_piola_pa: [f64; 9],
     pub work_pa: f64,
@@ -152,6 +155,32 @@ fn mandel_c(f: &[f64; 9]) -> [f64; 6] {
     ]
 }
 
+// C1-C0 = Fm^T dF + dF^T Fm. Preserve small diagonal squares next
+// to unit/finite stretches, and the tails of rounded endpoint midpoints.
+// Subtracting separately rounded C tensors can invent compressional work
+// under a large bulk stress even when both endpoint volumes are identical.
+fn mandel_c_increment(before: &[f64; 9], after: &[f64; 9]) -> [f64; 6] {
+    let midpoint: [Dd; 9] = core::array::from_fn(|i| {
+        Dd::from_f64(0.5) * (Dd::from_f64(before[i]) + Dd::from_f64(after[i]))
+    });
+    let change: [Dd; 9] =
+        core::array::from_fn(|i| Dd::from_f64(after[i]) - Dd::from_f64(before[i]));
+    let component = |a: usize, b: usize| {
+        (0..3).fold(Dd::ZERO, |sum, i| {
+            sum + midpoint[3 * i + a] * change[3 * i + b] + change[3 * i + a] * midpoint[3 * i + b]
+        })
+    };
+    [
+        component(0, 0),
+        component(1, 1),
+        component(2, 2),
+        Dd::from_f64(SQRT_2) * component(0, 1),
+        Dd::from_f64(SQRT_2) * component(0, 2),
+        Dd::from_f64(SQRT_2) * component(1, 2),
+    ]
+    .map(Dd::to_f64)
+}
+
 // Upper Cholesky R satisfies R^T R=C. No inverse of F_mid is used: that
 // midpoint may be singular even when both endpoint deformations are valid.
 fn representative<T: Real>(c: &[T; 6]) -> [T; 9] {
@@ -182,6 +211,15 @@ impl Potential<'_> {
             Self::Material(law, EnergyPart::Full) => law.energy(&f),
             Self::Material(law, EnergyPart::Remainder) => law.isochoric_energy(&f),
             Self::Volume => det3(&f),
+        }
+    }
+
+    fn increment(self, before: &[f64; 9], after: &[f64; 9]) -> f64 {
+        match self {
+            Self::Material(law, part) => {
+                super::increment::energy_change(law, before, after, part == EnergyPart::Full)
+            }
+            Self::Volume => super::increment::determinant_change(before, after),
         }
     }
 
@@ -242,6 +280,7 @@ fn c_direction(f: &[f64; 9], column: usize) -> [f64; 6] {
 
 struct PairResponse {
     value_after: f64,
+    increment: f64,
     gradient: [f64; 9],
     tangent: [[f64; 9]; 9],
     work: f64,
@@ -326,6 +365,7 @@ impl<'a> DiscreteGradientPoint<'a> {
         DiscreteGradientState {
             energy_before_pa: self.energy_before_pa(),
             energy_after_pa: pair.value_after,
+            energy_change_pa: pair.increment,
             first_piola_pa: pair.gradient,
             work_pa: pair.work,
             work_defect_pa: pair.defect,
@@ -395,12 +435,12 @@ impl<'a> DiscreteGradientPoint<'a> {
         self.law.check_state(next_f)?;
         let next_c = mandel_c(next_f);
         let midpoint_c = core::array::from_fn(|i| 0.5 * self.accepted_c[i] + 0.5 * next_c[i]);
-        let delta: [f64; 6] = core::array::from_fn(|i| next_c[i] - self.accepted_c[i]);
+        let delta = mandel_c_increment(&self.accepted_f, next_f);
         let norm = |x: &[f64; 6]| x.iter().fold(0.0_f64, |s, x| s.hypot(*x));
         let dn = norm(&delta);
         let scale = norm(&self.accepted_c).max(norm(&next_c));
         let after = potential.value(&next_c);
-        let increment = after - before;
+        let increment = potential.increment(&self.accepted_f, next_f);
         if !dn.is_finite() || !scale.is_finite() || !after.is_finite() || !increment.is_finite() {
             return Err(error(
                 "endpoint strain, potential or increment is unrepresentable",
@@ -431,12 +471,16 @@ impl<'a> DiscreteGradientPoint<'a> {
                 }
             }
         }
-        let fm: [f64; 9] = core::array::from_fn(|i| 0.5 * self.accepted_f[i] + 0.5 * next_f[i]);
+        let fm: [Dd; 9] = core::array::from_fn(|i| {
+            Dd::from_f64(0.5) * (Dd::from_f64(self.accepted_f[i]) + Dd::from_f64(next_f[i]))
+        });
         let s = second_piola(&g);
         let gradient: [f64; 9] = core::array::from_fn(|ij| {
-            (0..3).fold(0.0, |sum, a| {
-                fm[3 * (ij / 3) + a].mul_add(s[a][ij % 3], sum)
-            })
+            (0..3)
+                .fold(Dd::ZERO, |sum, a| {
+                    sum + fm[3 * (ij / 3) + a] * Dd::from_f64(s[a][ij % 3])
+                })
+                .to_f64()
         });
         let mut tangent = [[0.0; 9]; 9];
         if with_tangent {
@@ -452,13 +496,19 @@ impl<'a> DiscreteGradientPoint<'a> {
                     } else {
                         0.0
                     }) + (0..3)
-                        .fold(0.0, |sum, a| fm[3 * i + a].mul_add(ds[a][j], sum));
+                        .fold(Dd::ZERO, |sum, a| {
+                            sum + fm[3 * i + a] * Dd::from_f64(ds[a][j])
+                        })
+                        .to_f64();
                 }
             }
         }
-        let work = (0..9).fold(0.0, |sum, i| {
-            gradient[i].mul_add(next_f[i] - self.accepted_f[i], sum)
-        });
+        let work = (0..9)
+            .fold(Dd::ZERO, |sum, i| {
+                sum + Dd::from_f64(gradient[i])
+                    * (Dd::from_f64(next_f[i]) - Dd::from_f64(self.accepted_f[i]))
+            })
+            .to_f64();
         let defect = work - increment;
         let allowance = absolute_tolerance
             + self.settings.relative_work_tolerance * before.abs().max(after.abs()).max(work.abs());
@@ -483,6 +533,7 @@ impl<'a> DiscreteGradientPoint<'a> {
         }
         Ok(PairResponse {
             value_after: after,
+            increment,
             gradient,
             tangent,
             work,

@@ -11,6 +11,94 @@ const I: [f64; 9] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
 const G: [f64; 9] = [1.12, 0.17, -0.04, 0.0, 0.93, 0.08, 0.0, 0.0, 1.07];
 const FE: [f64; 9] = [1.06, 0.09, -0.03, 0.02, 0.97, 0.06, -0.01, 0.03, 1.04];
 
+#[test]
+fn reference_energy_changes_preserve_original_volume_and_weak_work() {
+    let law = Hyperelastic::new(
+        HyperelasticModel::MooneyRivlin {
+            c10: 900.0,
+            c01: 600.0,
+            kappa: 1e24,
+        },
+        4.0,
+    )
+    .unwrap();
+    let reference = ReferenceDeformation::try_new(I.map(|x| 2.0 * x)).unwrap();
+    let material = ReferencedHyperelastic::new(&law, reference);
+    let before = I.map(|x| 4.0 * x);
+    let mut after = before;
+    after[1] = 8e-7;
+    assert_eq!(
+        material.energy_density(&after) - material.energy_density(&before),
+        0.0
+    );
+    let increment = material.energy_density_increment(&before, &after);
+    let expected = 8.0 * 1500.0 * (2e-7_f64).powi(2);
+    near(increment, expected, expected, 3e-12);
+    near(
+        material.energy_density_increment(&after, &before),
+        -expected,
+        expected,
+        3e-12,
+    );
+    let unchanged = ReferencedHyperelastic::new(&law, ReferenceDeformation::identity());
+    assert_eq!(
+        unchanged.energy_density_increment(&I, &FE),
+        law.energy_increment(&I, &FE)
+    );
+    let invalid = I.map(|x| 0.1 * x);
+    assert!(
+        material
+            .energy_density_increment(&invalid, &invalid)
+            .is_nan()
+    );
+}
+
+#[test]
+fn default_energy_change_keeps_an_adapters_own_potential() {
+    struct AffineEnergy<'a>(&'a Hyperelastic);
+    impl HyperelasticMaterial for AffineEnergy<'_> {
+        fn hyperelastic(&self) -> &Hyperelastic {
+            self.0
+        }
+        fn energy_density(&self, f: &[f64; 9]) -> f64 {
+            11.0 + 2.0 * self.0.energy(f) + 7.0 * f[1]
+        }
+        fn first_piola(&self, f: &[f64; 9]) -> Result<[f64; 9], fs_material::MaterialError> {
+            let mut p = self.0.piola(f)?.map(|x| 2.0 * x);
+            p[1] += 7.0;
+            Ok(p)
+        }
+        fn consistent_tangent(
+            &self,
+            f: &[f64; 9],
+        ) -> Result<[[f64; 9]; 9], fs_material::MaterialError> {
+            Ok(self.0.tangent(f)?.map(|row| row.map(|x| 2.0 * x)))
+        }
+    }
+    let law = law();
+    let material = AffineEnergy(&law);
+    let expected = material.energy_density(&FE) - material.energy_density(&I);
+    assert_eq!(material.energy_density_increment(&I, &FE), expected);
+    assert_eq!(
+        fs_material::hyper::cards::FiniteStrainPotential::energy_density_increment(
+            &material, &I, &FE
+        ),
+        expected
+    );
+    assert!((expected - law.energy_increment(&I, &FE)).abs() > 1.0);
+    let reference = ReferenceDeformation::try_new(G).unwrap();
+    let held = ReferencedHyperelastic::new(&material, reference);
+    let before = multiply(&I, &G);
+    let after = multiply(&FE, &G);
+    let original = held.energy_density(&after) - held.energy_density(&before);
+    near(
+        held.energy_density_increment(&before, &after),
+        original,
+        original.abs(),
+        2e-13,
+    );
+}
+
 fn multiply(a: &[f64; 9], b: &[f64; 9]) -> [f64; 9] {
     core::array::from_fn(|ij| {
         (0..3)

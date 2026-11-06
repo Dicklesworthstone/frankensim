@@ -19,6 +19,7 @@ pub mod cards;
 pub mod discrete_gradient;
 /// Exact incompressibility with traction-free thickness and transverse shears.
 pub mod incompressible_plane_stress;
+mod increment;
 /// Original decoupled energies in a mixed displacement/pressure potential.
 pub mod mixed;
 /// Traction-free finite-strain thickness and transverse-shear relaxation.
@@ -562,6 +563,32 @@ impl Hyperelastic {
                 self.isochoric_energy(f) + self.volumetric_energy(det3(f))
             }
         }
+    }
+
+    /// Original stored-energy change per reference volume, `W(after)-W(before)`.
+    ///
+    /// The finite-pair evaluation retains small elastic work independently of
+    /// large unchanged storage. It uses the same native potential, including
+    /// active fibres and original bulk terms; it is not a stress quadrature or
+    /// a tangent approximation. Both endpoint domains are checked, including
+    /// coincident endpoints. Invalid states or unrepresentable storage return
+    /// NaN, which energy-only consumers must refuse.
+    pub fn energy_increment(&self, before: &[f64; 9], after: &[f64; 9]) -> f64 {
+        if self.check_state(before).is_err() || self.check_state(after).is_err() {
+            return f64::NAN;
+        }
+        increment::energy_change(self, before, after, true)
+    }
+
+    /// Change of the same matrix/fibre remainder returned by
+    /// [`Self::isochoric_energy`], without evaluating an unused bulk penalty.
+    /// Full-invariant fibres retain their actual volume dependence. The
+    /// endpoint-domain and nonfinite conventions match [`Self::energy_increment`].
+    pub fn isochoric_energy_increment(&self, before: &[f64; 9], after: &[f64; 9]) -> f64 {
+        if self.check_state(before).is_err() || self.check_state(after).is_err() {
+            return f64::NAN;
+        }
+        increment::energy_change(self, before, after, false)
     }
 
     /// Distortional/matrix-plus-fibre energy for a mixed displacement/pressure

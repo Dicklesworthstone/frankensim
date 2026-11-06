@@ -373,6 +373,14 @@ impl<L: HyperelasticMaterial + ?Sized> HyperelasticMaterial for ReferencedHypere
                 .energy_density(&self.reference.elastic_deformation(total))
     }
 
+    fn energy_density_increment(&self, before: &[f64; 9], after: &[f64; 9]) -> f64 {
+        self.reference.volume_ratio()
+            * self.material.energy_density_increment(
+                &self.reference.elastic_deformation(before),
+                &self.reference.elastic_deformation(after),
+            )
+    }
+
     fn first_piola(&self, total: &[f64; 9]) -> Result<[f64; 9], MaterialError> {
         let elastic = self
             .material

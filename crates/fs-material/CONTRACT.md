@@ -6639,6 +6639,38 @@ and `consistent_tangent` with defaults delegating to the original native law.
 A reference-deformation adapter must transform all three consistently and
 retain the underlying elastic-domain owner. Spatial consumers can preserve the
 complete material binding instead of stripping it to bare coefficients.
+Both `HyperelasticMaterial` and `FiniteStrainPotential` also expose
+`energy_density_increment(before, after)` for the same fixed-source,
+fixed-history potential. The default uses the adapter's own endpoint energies;
+it never bypasses an overridden potential through bare material coefficients.
+Native and source-card hyperelastic owners use `Hyperelastic::energy_increment`;
+the source-bound Cauchy tensile-limit wrapper retains that same elastic owner.
+A held-reference adapter transforms both endpoints with its retained `G` and
+scales the change by `det(G)`, preserving original-reference work units.
+
+Native finite-pair arithmetic carries small changes separately from absolute
+storage, using symmetric product/quotient identities, log1p/expm1 identities and
+the shared double-double invariant arithmetic. It retains the original
+Neo-Hookean, Mooney-Rivlin, Gent, Ogden and HGO laws, all three declared bulk
+energies, and each endpoint's actual fibre activation. The original bounded
+small-strain expressions are used only when both endpoints satisfy their
+bounds. General Ogden powers use the exact two-eigensystem divided-difference
+trace identity, including coalescing roots; the second-order AD spectral lift
+is not misused as a finite increment. Both finite and derivative spectral
+secants scale from the larger endpoint power, avoiding an overflowing power
+ratio when the original endpoint energy, stress and tangent remain finite.
+This is not stress quadrature or a
+replacement potential. Both endpoint deformation domains are checked even for
+coincident states; invalid or unrepresentable native storage returns NaN for
+the consuming energy gate to refuse. `isochoric_energy_increment` retains the
+native remainder without evaluating an unused bulk penalty. These are
+floating-point identities, not interval certificates or new stability claims.
+
+Focused tests retain small shear work beneath a `1e24 Pa` unchanged bulk
+baseline for all five models, check noninteger/negative Ogden powers at finite
+repeated stretches, cross fibre/chain/bulk expression boundaries, and preserve
+adapter and held-reference semantics. Changing material parameters, history,
+or prescribed `G` across the pair still requires its own external-work account.
 The public `state_point::is_fixed_external_coordinate` classifies one coordinate;
 it does not replace typed-query, source-axis, validity or path admission.
 
@@ -15332,6 +15364,14 @@ when paired with centered reference inertia. The endpoint derivative is the
 true, generally nonsymmetric Jacobian of this two-state stress; it is not a
 symmetric elastic Hessian or an endpoint potential. The full C-chain derivative
 also applies when equal endpoint strains are related by a finite rotation.
+
+`DiscreteGradientState::energy_change_pa` retains the original finite-pair
+change independently of the two absolute storage values. The correction and
+work-defect gates use that change, including the original-volume reference
+pullback. Symmetric endpoint products form `Delta C` without subtracting rounded
+absolute strain tensors; compensated midpoint and work contractions retain
+the corresponding weak-work identity under large bulk stress. The actual
+reported f64 stress must still pass the caller's work allowance.
 
 `DiscreteGradientSettings` explicitly supplies the small-increment switch,
 absolute work tolerance in Pa, and relative work tolerance. The midpoint limit

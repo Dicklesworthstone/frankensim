@@ -37,6 +37,16 @@ pub trait HyperelasticMaterial {
         self.hyperelastic().energy(deformation)
     }
 
+    /// Change of this owner's potential per original reference volume.
+    ///
+    /// Native sources evaluate the change separately from absolute storage.
+    /// The default deliberately calls this adapter's own endpoint potential;
+    /// an adapter that changes storage or reference must retain that meaning
+    /// when overriding the cancellation-resistant native operation.
+    fn energy_density_increment(&self, before: &[f64; 9], after: &[f64; 9]) -> f64 {
+        self.energy_density(after) - self.energy_density(before)
+    }
+
     /// First Piola stress conjugate to the caller's deformation gradient.
     fn first_piola(&self, deformation: &[f64; 9]) -> Result<[f64; 9], MaterialError> {
         self.hyperelastic().piola(deformation)
@@ -52,6 +62,10 @@ impl HyperelasticMaterial for Hyperelastic {
     fn hyperelastic(&self) -> &Hyperelastic {
         self
     }
+
+    fn energy_density_increment(&self, before: &[f64; 9], after: &[f64; 9]) -> f64 {
+        self.energy_increment(before, after)
+    }
 }
 
 /// Work-conjugate finite-strain potential at fixed material history.
@@ -65,6 +79,14 @@ impl HyperelasticMaterial for Hyperelastic {
 pub trait FiniteStrainPotential {
     /// Potential per original reference volume; nonfinite values refuse a trial.
     fn energy_density(&self, deformation: &[f64; 9]) -> f64;
+
+    /// Change of the same fixed-history potential per original reference volume.
+    /// Owners may override endpoint subtraction to preserve weak work against
+    /// large storage. For inelastic laws this remains incremental potential,
+    /// not physical stored energy or heat.
+    fn energy_density_increment(&self, before: &[f64; 9], after: &[f64; 9]) -> f64 {
+        self.energy_density(after) - self.energy_density(before)
+    }
 
     /// First Piola stress conjugate to the total deformation gradient.
     fn first_piola(&self, deformation: &[f64; 9]) -> Result<[f64; 9], MaterialError>;
@@ -90,6 +112,10 @@ pub trait FiniteStrainPotential {
 impl<T: HyperelasticMaterial + ?Sized> FiniteStrainPotential for T {
     fn energy_density(&self, deformation: &[f64; 9]) -> f64 {
         HyperelasticMaterial::energy_density(self, deformation)
+    }
+
+    fn energy_density_increment(&self, before: &[f64; 9], after: &[f64; 9]) -> f64 {
+        HyperelasticMaterial::energy_density_increment(self, before, after)
     }
 
     fn first_piola(&self, deformation: &[f64; 9]) -> Result<[f64; 9], MaterialError> {
@@ -180,6 +206,10 @@ impl ResolvedHyperelastic {
 impl HyperelasticMaterial for ResolvedHyperelastic {
     fn hyperelastic(&self) -> &Hyperelastic {
         &self.law
+    }
+
+    fn energy_density_increment(&self, before: &[f64; 9], after: &[f64; 9]) -> f64 {
+        self.law.energy_increment(before, after)
     }
 }
 

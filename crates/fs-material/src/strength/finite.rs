@@ -122,6 +122,10 @@ impl HyperelasticMaterial for ResolvedTensileHyperelastic {
         HyperelasticMaterial::energy_density(&self.elastic, deformation)
     }
 
+    fn energy_density_increment(&self, before: &[f64; 9], after: &[f64; 9]) -> f64 {
+        HyperelasticMaterial::energy_density_increment(&self.elastic, before, after)
+    }
+
     fn first_piola(&self, deformation: &[f64; 9]) -> Result<[f64; 9], MaterialError> {
         HyperelasticMaterial::first_piola(&self.elastic, deformation)
     }

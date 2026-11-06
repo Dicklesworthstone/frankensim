@@ -45,11 +45,23 @@ fn log1p(t: f64) -> f64 {
 fn derivative_difference(a: f64, b: f64, r: f64) -> f64 {
     let (a, b) = (a.max(b), a.min(b));
     let t = (a - b) / b;
+    let exponent_gap = (r - 1.0) * log1p(t);
+    if exponent_gap.abs() > 0.125 {
+        // Both endpoint powers may be finite while their ratio overflows.
+        // Anchor at the larger derivative power and exponentiate only the
+        // nonpositive gap. This is the SAME divided difference, including
+        // negative exponents, not a secant of a replacement energy.
+        return if r > 1.0 {
+            -r * (det::exp((r - 1.0) * det::ln(a)) / (a - b)) * det::expm1(-exponent_gap)
+        } else {
+            r * (det::exp((r - 1.0) * det::ln(b)) / (a - b)) * det::expm1(exponent_gap)
+        };
+    }
     let base = r * det::exp((r - 2.0) * det::ln(b));
     if t == 0.0 {
         base * (r - 1.0)
     } else {
-        base * det::expm1((r - 1.0) * log1p(t)) / t
+        base * det::expm1(exponent_gap) / t
     }
 }
 

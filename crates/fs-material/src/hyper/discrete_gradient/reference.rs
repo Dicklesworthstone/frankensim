@@ -109,6 +109,7 @@ impl<'a> DiscreteGradientPoint<'a> {
         )?;
         let before = jg * before;
         let after = jg * elastic.value_after;
+        let increment = jg * elastic.increment;
         let gradient = reference.pullback_piola(&elastic.gradient);
         let tangent = if with_tangent {
             reference.pullback_tangent(&elastic.tangent)
@@ -120,7 +121,7 @@ impl<'a> DiscreteGradientPoint<'a> {
         let work = (0..9).fold(0.0, |sum, i| {
             gradient[i].mul_add(next_f[i] - binding.accepted_total_f[i], sum)
         });
-        let defect = work - (after - before);
+        let defect = work - increment;
         let allowance = absolute_tolerance
             + self.settings.relative_work_tolerance * before.abs().max(after.abs()).max(work.abs());
         if ![before, after, work, defect, allowance]
@@ -143,6 +144,7 @@ impl<'a> DiscreteGradientPoint<'a> {
         }
         Ok(PairResponse {
             value_after: after,
+            increment,
             gradient,
             tangent,
             work,

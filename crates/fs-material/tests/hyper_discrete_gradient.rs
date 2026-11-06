@@ -1,5 +1,6 @@
 //! G0/G3: objective finite-step work, true endpoint derivatives and roundoff admission.
 
+use fs_material::hyper::cards::{FiniteStrainPotential, HyperelasticMaterial};
 use fs_material::hyper::discrete_gradient::{
     DiscreteGradientPoint, DiscreteGradientSettings, EnergyPart,
 };
@@ -8,6 +9,300 @@ use fs_material::hyper::{FibreInvariants, Hyperelastic, HyperelasticModel, Ogden
 const ID: [f64; 9] = [1., 0., 0., 0., 1., 0., 0., 0., 1.];
 const F0: [f64; 9] = [1.17, 0.08, -0.02, 0.03, 0.91, 0.04, -0.01, 0.02, 1.06];
 const F1: [f64; 9] = [1.36, 0.17, 0.05, -0.04, 0.83, 0.09, 0.03, -0.02, 1.14];
+
+#[test]
+fn original_finite_changes_retain_elastic_work_below_large_bulk_storage() {
+    let kappa = 1e24;
+    let gamma: f64 = 2e-7;
+    let square = gamma * gamma;
+    let before = ID.map(|x| 2.0 * x);
+    let mut after = before;
+    after[1] = 2.0 * gamma;
+    let terms = vec![
+        OgdenTerm {
+            mu_pa: 2e5,
+            alpha: 1.3,
+        },
+        OgdenTerm {
+            mu_pa: -1e4,
+            alpha: -2.0,
+        },
+    ];
+    // Exact simple-shear principal stretches are exp(+-asinh(gamma/2)).
+    let ogden_work: f64 = terms
+        .iter()
+        .map(|term| {
+            4.0 * term.mu_pa / term.alpha
+                * (0.5 * term.alpha * (0.5 * gamma).asinh()).sinh().powi(2)
+        })
+        .sum();
+    let fibre_change = 4.0 * square;
+    let cases = [
+        (
+            HyperelasticModel::NeoHookean {
+                mu: 5e3,
+                lambda: kappa,
+            },
+            1e4 * square,
+        ),
+        (
+            HyperelasticModel::MooneyRivlin {
+                c10: 900.0,
+                c01: 600.0,
+                kappa,
+            },
+            1500.0 * square,
+        ),
+        (
+            HyperelasticModel::Gent {
+                mu: 5e3,
+                locking_invariant: 0.4,
+                volumetric: Volumetric::LogSquared { kappa },
+            },
+            -1e3 * (-square / 0.4).ln_1p(),
+        ),
+        (
+            HyperelasticModel::Ogden {
+                terms,
+                volumetric: Volumetric::SimoTaylor { kappa },
+            },
+            ogden_work,
+        ),
+        (
+            HyperelasticModel::HolzapfelGasserOgden {
+                c10: 900.0,
+                k1: 600.0,
+                k2: 0.7,
+                dispersion: 0.0,
+                fibres: vec![[0.0, 1.0, 0.0]],
+                invariants: FibreInvariants::Full,
+                volumetric: Volumetric::Quadratic { kappa },
+            },
+            900.0 * square
+                + 600.0 / 1.4
+                    * 6.3_f64.exp()
+                    * (0.7 * fibre_change * (6.0 + fibre_change)).exp_m1(),
+        ),
+    ];
+    for (model, expected) in cases {
+        let law = Hyperelastic::new(model, 4.0).unwrap();
+        assert_eq!(
+            law.energy(&after) - law.energy(&before),
+            0.0,
+            "large baseline control"
+        );
+        let increment = law.energy_increment(&before, &after);
+        close(increment, expected, expected.abs(), 3e-12);
+        close(
+            law.energy_increment(&after, &before),
+            -expected,
+            expected.abs(),
+            3e-12,
+        );
+        close(
+            HyperelasticMaterial::energy_density_increment(&law, &before, &after),
+            expected,
+            expected.abs(),
+            3e-12,
+        );
+        close(
+            FiniteStrainPotential::energy_density_increment(&law, &before, &after),
+            expected,
+            expected.abs(),
+            3e-12,
+        );
+        assert_eq!(law.energy_increment(&before, &before), 0.0);
+    }
+}
+
+#[test]
+fn finite_changes_cross_original_fibre_chain_and_bulk_expression_boundaries() {
+    let mut models = laws();
+    models.push(
+        Hyperelastic::new(
+            HyperelasticModel::Gent {
+                mu: 2e5,
+                locking_invariant: 0.6,
+                volumetric: Volumetric::SimoTaylor { kappa: 7e5 },
+            },
+            4.0,
+        )
+        .unwrap(),
+    );
+    models.push(
+        Hyperelastic::new(
+            HyperelasticModel::HolzapfelGasserOgden {
+                c10: 5e4,
+                k1: 3e4,
+                k2: 3.0,
+                dispersion: 0.0,
+                fibres: vec![[1.0, 0.0, 0.0]],
+                invariants: FibreInvariants::Full,
+                volumetric: Volumetric::SimoTaylor { kappa: 7e5 },
+            },
+            4.0,
+        )
+        .unwrap(),
+    );
+    for law in models {
+        for (before, after) in [
+            (ID, F0),
+            (
+                [0.9, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+                [1.2, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+            ),
+            (F0, F1),
+        ] {
+            let expected = law.energy(&after) - law.energy(&before);
+            let delta = law.energy_increment(&before, &after);
+            close(delta, expected, expected.abs().max(1.0), 2e-12);
+            close(
+                law.energy_increment(&after, &before),
+                -delta,
+                delta.abs().max(1.0),
+                2e-12,
+            );
+        }
+        let mut invalid = ID;
+        invalid[0] = -1.0;
+        assert!(law.energy_increment(&invalid, &invalid).is_nan());
+        let mut outside = ID;
+        outside[0] = 5.0;
+        assert!(law.energy_increment(&outside, &outside).is_nan());
+    }
+}
+
+#[test]
+fn ogden_finite_changes_retain_weak_shear_at_repeated_finite_stretches() {
+    let terms = vec![
+        OgdenTerm {
+            mu_pa: 2e5,
+            alpha: 1.3,
+        },
+        OgdenTerm {
+            mu_pa: -1e4,
+            alpha: -2.0,
+        },
+    ];
+    let law = Hyperelastic::new(
+        HyperelasticModel::Ogden {
+            terms: terms.clone(),
+            volumetric: Volumetric::LogSquared { kappa: 1e24 },
+        },
+        4.0,
+    )
+    .unwrap();
+    let before = [1.35, 0.0, 0.0, 0.0, 1.35, 0.0, 0.0, 0.0, 0.8];
+    let normalized = 1.35 / determinant(&before).cbrt();
+    for gamma in [1e-3_f64, 1e-6_f64] {
+        let mut after = before;
+        after[1] = 1.35 * gamma;
+        let expected: f64 = terms
+            .iter()
+            .map(|term| {
+                4.0 * term.mu_pa / term.alpha
+                    * normalized.powf(term.alpha)
+                    * (0.5 * term.alpha * (0.5 * gamma).asinh()).sinh().powi(2)
+            })
+            .sum();
+        let change = law.energy_increment(&before, &after);
+        close(change, expected, expected, 2e-8);
+        close(
+            law.energy_increment(&after, &before),
+            -expected,
+            expected,
+            2e-8,
+        );
+    }
+
+    // Finite endpoint powers can have an unrepresentable ratio. The finite
+    // spectral secant must not exponentiate that positive ratio first.
+    let wide = Hyperelastic::new(
+        HyperelasticModel::Ogden {
+            terms: vec![OgdenTerm {
+                mu_pa: 1e-270,
+                alpha: 150.0,
+            }],
+            volumetric: Volumetric::Quadratic { kappa: 1.0 },
+        },
+        1e4,
+    )
+    .unwrap();
+    let before = [
+        1e-3_f64.sqrt() / 100.0,
+        0.0,
+        0.0,
+        0.0,
+        1e7_f64.powf(0.25),
+        0.0,
+        0.0,
+        0.0,
+        1e7_f64.powf(0.25),
+    ];
+    let expected = wide.energy(&ID) - wide.energy(&before);
+    assert!(expected.is_finite() && expected < 0.0);
+    assert!(
+        wide.piola(&before)
+            .unwrap()
+            .iter()
+            .all(|value| value.is_finite())
+    );
+    assert!(
+        wide.tangent(&before)
+            .unwrap()
+            .iter()
+            .flatten()
+            .all(|value| value.is_finite())
+    );
+    close(
+        wide.energy_increment(&before, &ID),
+        expected,
+        expected.abs(),
+        3e-12,
+    );
+    close(
+        wide.energy_increment(&ID, &before),
+        -expected,
+        expected.abs(),
+        3e-12,
+    );
+}
+
+#[test]
+fn discrete_gradient_receipts_retain_original_change_below_storage_resolution() {
+    let law = Hyperelastic::new(
+        HyperelasticModel::MooneyRivlin {
+            c10: 900.0,
+            c01: 600.0,
+            kappa: 1e12,
+        },
+        4.0,
+    )
+    .unwrap();
+    let before = ID.map(|x| 2.0 * x);
+    let mut after = before;
+    after[1] = 4e-7;
+    let point = DiscreteGradientPoint::try_new(
+        &law,
+        EnergyPart::Full,
+        before,
+        DiscreteGradientSettings {
+            minimum_relative_strain_increment: 0.0,
+            absolute_work_tolerance_pa: 1e-15,
+            relative_work_tolerance: 0.0,
+        },
+    )
+    .unwrap();
+    let state = point.state(&after).unwrap();
+    close(state.energy_change_pa, 6e-11, 6e-11, 3e-12);
+    close(
+        state.work_pa - state.work_defect_pa,
+        state.energy_change_pa,
+        6e-11,
+        3e-12,
+    );
+    assert_eq!(state.energy_after_pa - state.energy_before_pa, 0.0);
+}
 
 fn settings() -> DiscreteGradientSettings {
     DiscreteGradientSettings {
