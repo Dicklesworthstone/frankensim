@@ -64,6 +64,18 @@ pub struct ShearChannelReport {
     pub volume_flow_m3_s: f64,
     /// Signed wall-driven entrainment in the same orientation [m^3/s].
     pub entrained_flow_m3_s: f64,
+    /// Lower-wall resisting traction along the channel orientation [Pa].
+    ///
+    /// Includes pressure-driven shear as well as relative-wall drag. The
+    /// physical fluid-on-wall traction has the opposite sign. With Barus
+    /// viscosity this is the exact average along the channel, not its peak.
+    pub lower_wall_traction_pa: f64,
+    /// Upper-wall resisting traction along the channel orientation [Pa].
+    /// Uses the same sign and length-average convention as the lower wall.
+    pub upper_wall_traction_pa: f64,
+    /// Signed input from both walls, including pressure-pumping work [W].
+    /// This may be negative when the pressure supply drives the walls.
+    pub wall_power_w: f64,
     /// Nonnegative pressure-driven Qp*delta_p [W].
     pub pressure_dissipated_power_w: f64,
     /// Nonnegative S*(Uupper-Ulower)^2 [W].
@@ -71,6 +83,24 @@ pub struct ShearChannelReport {
 }
 
 impl ShearChannelReport {
+    /// Signed fluid shear stress at a normalized cross-gap position [Pa].
+    ///
+    /// Zero is the lower wall and one is the upper wall. Momentum balance
+    /// makes this profile affine even when viscosity jumps between layers;
+    /// strain rate, unlike stress, then jumps. Under Barus viscosity the
+    /// result is averaged along the original channel, as are the wall fields.
+    pub fn shear_stress_pa(&self, gap_fraction: f64) -> Result<f64, FilmError> {
+        if !gap_fraction.is_finite() || !(0.0..=1.0).contains(&gap_fraction) {
+            return fail("film shear observation must lie inside the gap");
+        }
+        let stress = gap_fraction * self.upper_wall_traction_pa
+            - (1.0 - gap_fraction) * self.lower_wall_traction_pa;
+        if !stress.is_finite() {
+            return fail("film shear observation is not representable");
+        }
+        Ok(stress)
+    }
+
     /// Total physical viscous power in this passage [W], counted once.
     ///
     /// In a stratified passage the pressure/Couette shear-stress cross terms
@@ -87,6 +117,8 @@ impl ShearChannelReport {
 struct Coefficients {
     mean_velocity: Vec<f64>,
     relative_velocity: Vec<f64>,
+    lower_fraction: f64,
+    upper_fraction: f64,
     shear_scale: f64,
     moving: bool,
 }
@@ -269,6 +301,8 @@ impl ShearedFilm {
             coefficients.push(Coefficients {
                 mean_velocity,
                 relative_velocity,
+                lower_fraction,
+                upper_fraction,
                 shear_scale,
                 moving,
             });
@@ -451,12 +485,32 @@ impl ShearedFilm {
                 pressure_drops[k] = dp;
             }
             if REPORT_CHANNELS || REPORT_LAYERS {
+                // The pressure gradient contributes even at stationary walls.
+                // The retained fluidity centroid, rather than one half, places
+                // its neutral plane for a stratified viscosity profile.
+                let pressure_stress = (local.gap.max(0.0) / edge.length_m) * dp;
+                let couette_stress = (shear_force / edge.width_m) / edge.length_m;
                 channel_candidate[k] = ShearChannelReport {
                     volume_flow_m3_s: flow,
                     entrained_flow_m3_s: local.entrainment,
+                    lower_wall_traction_pa: -coefficient.lower_fraction * pressure_stress
+                        - couette_stress,
+                    upper_wall_traction_pa: -coefficient.upper_fraction * pressure_stress
+                        + couette_stress,
+                    wall_power_w: shear_loss - local.entrainment * dp,
                     pressure_dissipated_power_w: pressure_loss,
                     shear_dissipated_power_w: shear_loss,
                 };
+                if [
+                    channel_candidate[k].lower_wall_traction_pa,
+                    channel_candidate[k].upper_wall_traction_pa,
+                    channel_candidate[k].wall_power_w,
+                ]
+                .iter()
+                .any(|x| !x.is_finite())
+                {
+                    return fail("sliding film wall traction or work is not representable");
+                }
             }
         }
         let work = dot(velocity, &candidate[..self.film.ports]);

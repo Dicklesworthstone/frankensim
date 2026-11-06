@@ -11,6 +11,7 @@ const MU: f64 = 0.01;
 mod barus;
 mod pressure;
 mod pressure_extended;
+mod stress;
 mod viscosity;
 
 fn near(a: f64, b: f64, tolerance: f64) {
@@ -444,6 +445,9 @@ fn invalid_rows_collapsed_sliding_and_late_refusals_leave_outputs_untouched() {
     let sentinel = ShearChannelReport {
         volume_flow_m3_s: 42.0,
         entrained_flow_m3_s: 43.0,
+        lower_wall_traction_pa: 46.0,
+        upper_wall_traction_pa: 47.0,
+        wall_power_w: 48.0,
         pressure_dissipated_power_w: 44.0,
         shear_dissipated_power_w: 45.0,
     };
@@ -898,6 +902,9 @@ fn layer_reporting_refusals_leave_all_outputs_unchanged() {
     let sentinel = ShearChannelReport {
         volume_flow_m3_s: 42.0,
         entrained_flow_m3_s: 43.0,
+        lower_wall_traction_pa: 46.0,
+        upper_wall_traction_pa: 47.0,
+        wall_power_w: 48.0,
         pressure_dissipated_power_w: 44.0,
         shear_dissipated_power_w: 45.0,
     };

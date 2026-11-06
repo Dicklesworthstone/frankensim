@@ -115,8 +115,17 @@ pressure wall tractions and inverse-gap shear drag, reusing the native
 pressure factorization. Bounded stack scratch, atomic outputs and original
 pressure/gap limits remain. Zero wall rows recover the native pressure
 operator and exact passage closure; channels with nonzero wall rows require
-positive aperture. Per-channel
-reports retain total flow, entrainment, pressure work and shear work.
+positive aperture. Per-channel reports retain total flow, entrainment,
+pressure work, shear work, both signed resisting wall tractions and signed
+wall input power. Stationary walls retain pressure-driven shear; layered
+viscosity shifts the pressure-shear neutral plane through its fluidity
+centroid. `ShearChannelReport::shear_stress_pa` observes the affine physical
+fluid stress anywhere inside the gap, continuous across viscosity jumps.
+It refuses extrapolation outside the gap. Closed passages report zero shear.
+Traction times original wall area and velocity reproduces wall input power,
+including negative input when pressure drives the walls; this is distinct
+from nonnegative irreversible heat. Reports reuse the accepted coupled solve
+without another factorization or heap allocation.
 
 A common Barus law `mu(z,p)=mu_0(z)*exp(alpha*p)` retains the same pressure
 factorization and entrainment weights. The exact length-average multiplier
@@ -127,6 +136,8 @@ tangent differentiates potential, physical pressure and this wall drag; it is
 generally nonsymmetric. Zero alpha preserves the original arithmetic. Layer
 work uses the same pressure and shear amplitudes, so its cross terms and sum
 remain consistent with the mechanical power without another flow solve.
+Reported Barus wall traction and cross-gap stress are exact channel-length
+averages, not pointwise streamwise maxima.
 
 Four focused G1/G3/G4 groups check independent local Stokes-work quadrature
 along and across a layered passage, positive and suction pressure with unequal

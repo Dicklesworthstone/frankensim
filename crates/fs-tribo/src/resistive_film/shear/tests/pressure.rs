@@ -1,7 +1,7 @@
 use super::*;
 use super::super::pressure::PressureDrivenShearedFilm;
 
-fn supplied(alpha: f64, layered: bool) -> PressureDrivenShearedFilm {
+pub(super) fn supplied(alpha: f64, layered: bool) -> PressureDrivenShearedFilm {
     let native = film(&[H, H]).with_barus_viscosity(alpha).unwrap();
     let wall_rows = vec![walls(-1.0), walls(1.0)];
     let moving = if layered {
@@ -16,7 +16,7 @@ fn supplied(alpha: f64, layered: bool) -> PressureDrivenShearedFilm {
     PressureDrivenShearedFilm::new(moving, &[Some(1500.0), Some(-500.0)]).unwrap()
 }
 
-fn response(
+pub(super) fn response(
     model: &PressureDrivenShearedFilm,
     q: [f64; 3],
     velocity: [f64; 3],

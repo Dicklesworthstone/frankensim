@@ -53,6 +53,34 @@ fn pressure_dependent_wall_force_and_layer_heat_match_local_stokes_work() {
             near(channels[0].volume_flow_m3_s, AREA * normal, 1e-22);
             near(channels[0].entrained_flow_m3_s, entrainment, 1e-23);
             near(dot(&force, &velocity), report.dissipated_power_w, 1e-17);
+            // Independently integrate the local signed fluid stress along
+            // the Barus pressure profile; a mean endpoint viscosity would
+            // give the wrong wall traction at a nonzero pressure drop.
+            for z in [0.0, 0.25, 0.5, 0.75, 1.0] {
+                let mut stress = 0.0;
+                let nx = 256;
+                for ix in 0..=nx {
+                    let x = ix as f64 / nx as f64;
+                    let multiplier = 1.0 / (1.0 - alpha * psi * (1.0 - x));
+                    let weight = if ix == 0 || ix == nx {
+                        1.0
+                    } else if ix % 2 == 0 {
+                        2.0
+                    } else {
+                        4.0
+                    };
+                    stress += weight * multiplier
+                        * (relative / (H * fluidity) - psi * H * (z - z0) / L);
+                }
+                stress /= 3.0 * nx as f64;
+                near(channels[0].shear_stress_pa(z).unwrap(), stress, 2e-10 * stress.abs());
+            }
+            near(
+                channels[0].wall_power_w,
+                W * L * (channels[0].lower_wall_traction_pa * lower
+                    + channels[0].upper_wall_traction_pa * upper),
+                1e-17,
+            );
             for (layer, (lo, hi, mu)) in bounds.into_iter().enumerate() {
                 // Composite Simpson rule is exact in z (quadratic), and
                 // independently resolves the rational streamwise viscosity.
