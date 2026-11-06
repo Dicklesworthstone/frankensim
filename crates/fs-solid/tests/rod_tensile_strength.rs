@@ -1,6 +1,9 @@
 //! G1/G3/G4: sourced tensile limits on native rods, thermal layers and bundles.
 //! Synthetic materials verify equations and integration, not measured strengths.
 
+#[path = "rod_tensile_strength/combined.rs"]
+mod combined;
+
 use fs_evidence::ValidityDomain;
 use fs_exec::CancelGate;
 use fs_ga::So3;

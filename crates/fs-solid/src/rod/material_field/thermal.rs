@@ -37,6 +37,16 @@ impl ThermalField {
             &self.sections[segment], strain, bending_moment_n_m, self.limit,
         )?)
     }
+
+    pub(super) fn assess_tensile_with_torsion(
+        &self, segment: usize, strain: f64, bending_moment_n_m: [f64; 2], torque_n_m: f64,
+        shear: &fs_material::section::ConcentricShearSection,
+        capacity: &fs_material::section::strength::AxialTensileCapacity,
+    ) -> Result<fs_material::section::strength::combined::ConcentricPrincipalTensileAssessment, SpatialRodError> {
+        Ok(capacity.assess_thermoelastic_axial_bending_torsion(
+            &self.sections[segment], shear, strain, bending_moment_n_m, torque_n_m, self.limit,
+        )?)
+    }
 }
 
 impl SpatialMaterialRod {

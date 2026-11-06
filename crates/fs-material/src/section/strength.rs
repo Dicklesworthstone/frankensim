@@ -24,6 +24,9 @@ use super::thermal::ConcentricThermoelasticSection;
 use crate::state_point::ResolvedScalarProperty;
 use fs_qty::{Pressure, QuantitySpec};
 
+/// Maximum principal tension under combined axial, bending and circular torsion.
+pub mod combined;
+
 /// Sourced limits of every layer of one bonded section under axial force.
 #[derive(Clone, Debug, PartialEq)]
 pub struct AxialTensileCapacity {

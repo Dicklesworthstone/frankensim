@@ -11,6 +11,11 @@
 //! small-strain sections. Transverse shear, torsional principal tension,
 //! interface stresses, yield redistribution, buckling and rupture evolution are
 //! not assessed. A limit observation does not sever a segment or a link.
+//! [`combined`] adds a separate opt-in principal-tension criterion including
+//! sourced circular torsion; it does not redefine this axial-only observation.
+
+/// Opt-in principal tension from native axial force, bending and circular torsion.
+pub mod combined;
 
 use fs_exec::CancelGate;
 use fs_material::section::strength::{AxialTensileCapacity, ConcentricTensileAssessment};
