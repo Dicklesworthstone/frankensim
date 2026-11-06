@@ -19,7 +19,7 @@ pub use crate::hyper3::visco::dynamics::FiniteViscoMotionControls;
 pub use crate::inertia::InertialEnergy;
 
 /// Accepted material memory, motion and the selected original reference mass.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct FiniteViscoMembraneMotion<'a> {
     membrane: FiniteViscoMembrane<'a>,
     velocity_mps: Vec<[f64; 3]>,
@@ -34,6 +34,9 @@ pub struct FiniteViscoMembraneMotionStep<'a> {
     pub equilibrium: MembraneSolution,
     /// Physical branch loss is independent of numerical kinetic damping.
     pub material_energy: FiniteViscoMembraneEnergy,
+    /// Physical Maxwell loss per original triangle for this interval [J].
+    /// The original increments are retained independently of cumulative history.
+    pub element_dissipated_j: Vec<f64>,
     pub inertia: InertialEnergy,
     /// Momentum work residual plus the independent kinetic-work identity error.
     pub balance_error_j: f64,
@@ -190,6 +193,7 @@ impl<'a> FiniteViscoMembraneMotion<'a> {
             },
             equilibrium: step.equilibrium,
             material_energy: step.energy,
+            element_dissipated_j: step.element_dissipated_j,
             inertia,
             balance_error_j,
         })

@@ -1,5 +1,32 @@
 # fs-solid CONTRACT
 
+## Prescribed natural-strain events on installed viscoelastic membranes
+
+`membrane::visco::FiniteViscoMembrane::change_reference` and the matching
+motion method apply prescribed natural-strain or kinetic-time changes to the
+original accepted Maxwell states. Original coordinates/connectivity, material
+axes, per-corner reference inventory, source bundle/model, thickness and
+full/exact-volume choice survive. Native reference transactions retain every
+viscous metric, accumulated loss, displacement and clock. Motion additionally
+retains velocity and the complete selected consistent/lumped mass image, with
+zero impulse, kinetic change and heat.
+
+Fixed-full-deformation reference work, exact-volume pressure actuation,
+transverse loading and endpoint splitting defect have distinct accounts. The
+absolute sum of point defects is gated before publication. Transverse plane
+stress is restored locally; a subsequent native advance resolves changed global
+forces. This is a prescribed zero-duration split event, not a continuous growth
+law or automatic thermal coefficient evolution. The native step and motion-step
+receipts also retain physical interval loss per original triangle before
+cumulative-ledger rounding, permitting conservative thermal handoff without
+turning integration defects into heat.
+
+`tests/visco_membrane_reference.rs` covers native agreement after relaxation,
+natural-shape release, regional changes, retained graded-inventory momentum and
+atomic refusals. These spatial integration tests require the full workspace;
+the underlying material reference transactions have focused native numerical
+coverage in `fs-material/tests/visco_membrane_reference.rs`.
+
 ## Shared-face constraints in brittle crack-contact modes
 
 Adjacent crack faces can repeat the same paired-node displacement constraint.

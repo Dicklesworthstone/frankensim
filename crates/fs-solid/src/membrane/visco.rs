@@ -17,15 +17,22 @@
 /// Native inertial intervals with physical relaxation and separate numerical loss.
 pub mod dynamics;
 
+/// Prescribed natural-strain events with retained material memory and inventory.
+pub mod reference_change;
+pub use reference_change::{
+    FiniteViscoMembraneMotionReferenceChange, FiniteViscoMembraneReferenceChange,
+    FiniteViscoMembraneReferenceEnergy,
+};
+
 use std::cell::RefCell;
 use std::sync::Arc;
 
 use fs_material::sheet::hyperelastic::HyperelasticMembrane;
 use fs_material::sheet::{MembraneLaw, SheetError, SheetLaw, SheetResponse};
-use fs_material::visco_hyper::MAX_FINITE_STRAIN_BRANCHES;
 use fs_material::visco_hyper::membrane::{
     FrozenViscoMembrane, ViscoMembraneState, ViscoMembraneStepResponse,
 };
+use fs_material::visco_hyper::{MAX_FINITE_STRAIN_BRANCHES, ViscoHyperelastic};
 
 pub use crate::hyper3::visco::{FiniteViscoStepControls, ViscoelasticLawField};
 
@@ -65,7 +72,7 @@ pub struct FiniteViscoMembraneEnergy {
 }
 
 /// Original patch, explicit branch laws and complete immutable accepted state.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct FiniteViscoMembrane<'a> {
     patch: &'a MembranePatch,
     material: ViscoelasticLawField<'a>,
@@ -86,6 +93,10 @@ pub struct FiniteViscoMembraneStep<'a> {
     /// Physical storage and relaxation loss belong to `energy`.
     pub equilibrium: MembraneSolution,
     pub energy: FiniteViscoMembraneEnergy,
+    /// Physical loss in each original triangle during this interval [J].
+    /// Retained before cumulative-ledger rounding, for conservative heat transfer.
+    /// Neither endpoint-work defects nor numerical kinetic loss enter this array.
+    pub element_dissipated_j: Vec<f64>,
 }
 
 /// Original material/geometry/solver refusal or an explicit interval-work gate.
@@ -136,6 +147,36 @@ fn material_error(element: usize, source: SheetError) -> FiniteViscoMembraneErro
     MembraneError::Material { element, source }.into()
 }
 
+// Both virgin initialization and retained-reference changes bind the same
+// source equilibrium and fixed material frame. No constitutive state is reset
+// merely to recheck that immutable binding.
+fn admit_sheet_binding<'p>(
+    patch: &'p MembranePatch,
+    index: usize,
+    law: &ViscoHyperelastic,
+) -> Result<&'p HyperelasticMembrane, FiniteViscoMembraneError> {
+    let MembraneLaw::Hyperelastic(sheet) = &patch.elements[index].law else {
+        return Err(invalid(
+            "native viscoelastic memory requires the original hyperelastic sheet",
+        ));
+    };
+    if law.branches.len() > MAX_FINITE_STRAIN_BRANCHES {
+        return Err(invalid(
+            "membrane branch count exceeds the native material cap",
+        ));
+    }
+    let g = sheet.reference_stretches();
+    let reference = [g[0], 0.0, 0.0, 0.0, g[1], 0.0, 0.0, 0.0, g[2]];
+    if law.equilibrium != *sheet.model().law()
+        || *law.reference_deformation().deformation_gradient() != reference
+    {
+        return Err(invalid(
+            "viscoelastic equilibrium and natural reference must match the original sheet",
+        ));
+    }
+    Ok(sheet.as_ref())
+}
+
 fn energy_gate(
     quantity: &'static str,
     value_j: f64,
@@ -157,6 +198,7 @@ struct Endpoint {
     first_piola_pa: Vec<[f64; 9]>,
     pressure_pa: Vec<Option<f64>>,
     responses: Vec<SheetResponse>,
+    element_dissipated_j: Vec<f64>,
     energy: FiniteViscoMembraneEnergy,
 }
 
@@ -167,6 +209,7 @@ impl Endpoint {
             first_piola_pa: Vec::with_capacity(count),
             pressure_pa: Vec::with_capacity(count),
             responses: Vec::with_capacity(count),
+            element_dissipated_j: Vec::with_capacity(count),
             energy: FiniteViscoMembraneEnergy {
                 stored_before_j,
                 ..Default::default()
@@ -177,6 +220,8 @@ impl Endpoint {
     fn push(&mut self, area_m2: f64, step: ViscoMembraneStepResponse) {
         self.energy.stored_after_j += area_m2 * step.stored_energy_j_m2;
         self.energy.dissipated_j += area_m2 * step.dissipated_j_m2;
+        self.element_dissipated_j
+            .push(area_m2 * step.dissipated_j_m2);
         self.energy.native_loading_work_j += area_m2 * step.loading_work_j_m2;
         self.energy.incremental_potential_j += area_m2 * step.sheet.energy_j_m2;
         self.states.push(step.state);
@@ -227,26 +272,8 @@ impl<'a> FiniteViscoMembrane<'a> {
         let mut endpoint = Endpoint::new(patch.elements.len(), 0.0);
         for (index, element) in patch.elements.iter().enumerate() {
             poll(&mut cancelled)?;
-            let MembraneLaw::Hyperelastic(sheet) = &element.law else {
-                return Err(invalid(
-                    "native viscoelastic memory requires the original hyperelastic sheet",
-                ));
-            };
             let law = material.at(index);
-            if law.branches.len() > MAX_FINITE_STRAIN_BRANCHES {
-                return Err(invalid(
-                    "membrane branch count exceeds the native material cap",
-                ));
-            }
-            let g = sheet.reference_stretches();
-            let reference = [g[0], 0.0, 0.0, 0.0, g[1], 0.0, 0.0, 0.0, g[2]];
-            if law.equilibrium != *sheet.model().law()
-                || *law.reference_deformation().deformation_gradient() != reference
-            {
-                return Err(invalid(
-                    "viscoelastic equilibrium and natural reference must match the original sheet",
-                ));
-            }
+            let sheet = admit_sheet_binding(patch, index, law)?;
             let strain =
                 patch.admit_kinematics(index, patch.kinematics(element, displacement_m))?;
             let virgin = ViscoMembraneState::initial(law, sheet.volumetric_treatment());
@@ -581,6 +608,7 @@ impl<'a> FiniteViscoMembrane<'a> {
             membrane,
             equilibrium,
             energy,
+            element_dissipated_j: endpoint.element_dissipated_j,
         })
     }
 }
