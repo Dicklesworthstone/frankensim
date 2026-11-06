@@ -181,3 +181,59 @@ fn staple_recovery_row_works_on_the_inviscid_law_of_a_card_without_slit_length()
     let slit_text = staple_source(Some("staple_recovery 0.8 4e-6"));
     assert!(ReedPerformance::from_bytes(slit_text.as_bytes(), 37).unwrap().viscous_slit().is_some());
 }
+
+#[test]
+fn contraction_row_selects_a_narrower_jet_changes_the_sound_and_one_changes_nothing() {
+    let plain = pressure(&inviscid_staple_source(None), 37);
+    let text = inviscid_staple_source(Some("contraction 0.611"));
+    let loaded = ReedPerformance::from_bytes(text.as_bytes(), 37).unwrap();
+    assert_eq!(loaded.jet_contraction(), Some(0.611));
+    assert!(loaded.staple_recovery().is_none() && loaded.viscous_slit().is_none());
+    let narrow = pressure(&text, 37);
+    assert_eq!(narrow, pressure(&text, 113), "callback partition");
+    let energy: f64 = plain.iter().map(|p| p * p).sum();
+    let changed: f64 = plain.iter().zip(&narrow).map(|(a, b)| (a - b).powi(2)).sum();
+    assert!(energy > 0.0 && changed > 1e-8 * energy, "the contraction must change the sound");
+    // C_c = 1 is the original law: nothing installed, the same bits.
+    let one_text = inviscid_staple_source(Some("contraction 1"));
+    assert!(ReedPerformance::from_bytes(one_text.as_bytes(), 37).unwrap().jet_contraction().is_none());
+    assert_eq!(plain.iter().map(|p| p.to_bits()).collect::<Vec<_>>(),
+        pressure(&one_text, 37).iter().map(|p| p.to_bits()).collect::<Vec<_>>());
+    // After the staple row: both load, and the sound differs from either alone.
+    let both_text = inviscid_staple_source(Some("staple_recovery 0.8 4e-6\ncontraction 0.611"));
+    let both = ReedPerformance::from_bytes(both_text.as_bytes(), 37).unwrap();
+    assert_eq!((both.jet_contraction(), both.staple_recovery().map(|r| r.c_p())), (Some(0.611), Some(0.8)));
+    let staple = pressure(&inviscid_staple_source(Some("staple_recovery 0.8 4e-6")), 37);
+    let together = pressure(&both_text, 37);
+    for other in [&narrow, &staple] {
+        let moved: f64 = together.iter().zip(other.iter()).map(|(a, b)| (a - b).powi(2)).sum();
+        assert!(moved > 1e-8 * energy, "the two rows together must differ from either alone");
+    }
+}
+
+#[test]
+fn contraction_row_is_refused_for_a_massless_reed_a_slit_a_malformed_row_or_a_staple_outside_its_domain() {
+    use crate::acoustic_realize::AcousticRealizeError;
+    use crate::bernoulli_aperture::viscous::STAPLE_RECOVERY_DOMAIN;
+    let refusal = |text: &str| match ReedPerformance::from_bytes(text.as_bytes(), 37) {
+        Err(ReedPerformanceError::Input { what, .. }) => what.to_string(),
+        Err(ReedPerformanceError::Model(AcousticRealizeError::Reed { what })) => what.to_string(),
+        other => panic!("expected a refusal, got {:?}", other.err()),
+    };
+    let row = Some("contraction 0.611");
+    assert!(refusal(&inviscid_staple_source(row).replace("reed 0.000357 0.0056 17720 2.2e-5 3464 0.114",
+        "reed 0.000357 0.0056 17720 0 0 0.114")).contains("massive reed"));
+    // The viscous channel and a contraction exclude each other.
+    assert!(refusal(&staple_source(row)).contains("inviscid reed law only"));
+    for bad in ["contraction", "contraction 0", "contraction -0.5", "contraction 1.0000001", "contraction 2",
+        "contraction NaN", "contraction 0.6 extra", "contraction 0.6\ncontraction 0.6"] {
+        assert!(ReedPerformance::from_bytes(inviscid_staple_source(Some(bad)).as_bytes(), 37).is_err(), "{bad}");
+    }
+    // The staple's domain is taken on the jet area: the fixture's 5.2 mm^2 opening is refused by name at C_c = 1, loads at
+    // 0.8 (4.16 mm^2 < 4.47 mm^2) and is refused again at 0.9 (4.68 mm^2).
+    let wide = |tail: &str| INPUT.replace("reed 0.0004 0.013 6000 0 0 0.35",
+        &format!("reed 0.0004 0.013 6000 0.00001 100 0.35\nstaple_recovery 0.8 4e-6{tail}"));
+    assert_eq!(refusal(&wide("")), STAPLE_RECOVERY_DOMAIN);
+    assert!(ReedPerformance::from_bytes(wide("\ncontraction 0.8").as_bytes(), 37).is_ok());
+    assert_eq!(refusal(&wide("\ncontraction 0.9")), STAPLE_RECOVERY_DOMAIN);
+}

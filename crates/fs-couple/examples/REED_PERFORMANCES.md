@@ -106,6 +106,20 @@ refuses there and at a rest opening that is already there. `C_P` 0 is the origin
 law and changes nothing. It acts on the jet flow of a quasistatic measurement; it
 is not a model of the moving reed's swept flow through the staple.
 
+An optional `contraction C_C` record, immediately after `staple_recovery` (or after
+`reed`), gives the reed jet a vena contracta on the inviscid law: the jet leaves the
+opening with the area `C_c w h`, so the flow is `q = C_c w h sqrt(2 (dp)_c / rho)`
+(the `rho U|U| / (2 (C_c w h)^2)` of `fs_phs::GapFlowLaw`, without its channel terms)
+and the staple law takes `C_P (S/S_c)^2` on that jet area. The blade's swept flow is
+geometric and keeps the full width. `C_C` is in (0, 1]; `1` is the original law and
+changes nothing. The record needs a massive reed and a card without `slit_length`.
+There is no default. **No printed value for a double reed is held**: the clarinet's
+0.6 (Hirschberg) and the two-dimensional free-streamline bound pi/(pi+2) = 0.611 are
+borrowed numbers, and a measured oboe area that was fitted without a contraction
+(as Almeida, Vergez and Caussé's was) already holds whatever contraction there is.
+The channel's unsteady inertance (`GapFlowLaw::inertance`) is not part of this record:
+no printed effective length of a double reed's channel is held.
+
 `reed-viscous-slit.performance` is a complete runnable demonstration with a
 massive reed, the 1 mm illustrative channel and the same pressure phrase as
 `reed-duct.performance`:

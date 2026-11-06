@@ -25,6 +25,12 @@
 //! mouth-to-bore drop, and the bore input is raised by `C_P (1/2) rho (q/S_c)^2`. The only printed numbers are one
 //! oboe reed's (`C_P` 0.8, `S_c` 4e-6 m^2), borrowed for any other reed; the law refuses where `C_P (S/S_c)^2` reaches 1.
 //! `C_P` 0 is the original law and changes nothing. See `ReedBoreVoice::set_staple_recovery`.
+//! Optional `contraction C_C` right after `staple_recovery` (or after `slit_length`, or the reed row), on a card without
+//! `slit_length` and with a massive reed, gives the reed jet a vena contracta: the flow area is `C_c w h`, as `fs_phs::GapFlowLaw`
+//! writes it, and the staple law (if any) takes `C_P (S/S_c)^2` on that jet area. There is no default, and no printed value
+//! for a double reed: a caller names `C_c` and the page says where it came from (the clarinet's 0.6 or the 2-D free-streamline
+//! bound pi/(pi+2) = 0.611 are not double-reed values). `C_c` 1 is the original law and changes nothing. The channel's
+//! unsteady inertance is not part of this row. See `ReedBoreVoice::set_jet_contraction`.
 //! Optional `open_hole_interaction tmmi EPSILON` before `compile_limits`, on a
 //! `gas_field continuous` binding, couples the radiation of the open holes and the
 //! bell through the TMMI mutual impedance (EPSILON 2 as the paper prints it).
@@ -710,6 +716,25 @@ impl ReedPerformance {
             Some(crate::bernoulli_aperture::viscous::StapleRecovery::new(c_p, constriction_area_m2)
                 .map_err(|_| bad(line, "staple_recovery needs C_P in [0, 1] and a positive constriction area in m^2"))?)
         } else { None };
+        // `contraction C_C`, right after `staple_recovery` (or `slit_length`, or the reed row): the reed jet's vena contracta,
+        // on the inviscid law only. No default; the caller names the value and its source.
+        let jet_contraction = if r.lines.clone().next()
+            .and_then(|line| line.split_ascii_whitespace().next()) == Some("contraction") {
+            let mut row = r.row("contraction")?;
+            let line = row.line;
+            let contraction = row.scalar()?;
+            row.finish()?;
+            if reed.mass_kg <= 0.0 {
+                return Err(bad(line, "contraction requires a massive reed"));
+            }
+            if slit_length_m.is_some() {
+                return Err(bad(line, "contraction is defined on the inviscid reed law only, not with slit_length"));
+            }
+            if !(contraction > 0.0 && contraction <= 1.0) {
+                return Err(bad(line, "contraction needs a coefficient C_c in (0, 1]"));
+            }
+            Some(contraction)
+        } else { None };
         let tongue_contact = if r.lines.clone().next()
             .and_then(|line| line.split_ascii_whitespace().next()) == Some("tongue_contact") {
             let mut row = r.row("tongue_contact")?;
@@ -1175,6 +1200,10 @@ impl ReedPerformance {
         if let Some(length_m) = slit_length_m {
             voice.set_viscous_slit_length(length_m).map_err(ReedPerformanceError::Model)?;
         }
+        // The contraction first: the staple law's domain is taken on the jet area.
+        if let Some(contraction) = jet_contraction {
+            voice.set_jet_contraction(contraction).map_err(ReedPerformanceError::Model)?;
+        }
         if let Some(recovery) = staple_recovery {
             voice.set_staple_recovery(recovery).map_err(ReedPerformanceError::Model)?;
         }
@@ -1298,6 +1327,10 @@ impl ReedPerformance {
     /// The selected staple pressure recovery, if the card has a `staple_recovery` row with `C_P` above zero.
     pub fn staple_recovery(&self) -> Option<&crate::bernoulli_aperture::viscous::StapleRecovery> {
         self.renderer.context().reed_voice(0).and_then(ReedBoreVoice::staple_recovery)
+    }
+    /// The selected reed jet contraction coefficient, if the card has a `contraction` row with `C_c` below one.
+    pub fn jet_contraction(&self) -> Option<f64> {
+        self.renderer.context().reed_voice(0).and_then(ReedBoreVoice::jet_contraction)
     }
     /// Original molecular gas, wall and geometry owner used for both bore
     /// feedback and physical outlet pressure. None preserves the existing

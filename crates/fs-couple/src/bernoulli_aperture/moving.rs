@@ -102,25 +102,33 @@ pub(crate) fn characteristic_pressure(
 /// Returns the outgoing wave and the pieces the blade and the energy account need, like
 /// `ViscousSlit::characteristic_junction_with_recovery`, to which it reduces when that slit's viscous term is negligible.
 ///
+/// `contraction` is the jet's vena contracta coefficient `C_c` in `(0, 1]`: the jet leaves the opening with the area
+/// `C_c w h`, so the flow law is this one with the width `C_c w` (`q = C_c w h sqrt(2 (dp)_c / rho)`, the `A` of
+/// `fs_phs::GapFlowLaw`'s `rho U|U| / (2 (C_c w h)^2)`), and the staple's `C_P (S/S_c)^2` is taken on the jet area `C_c w h`.
+/// The moving blade's own swept flow `moving_flow` is geometric and keeps the full width. `1.0` is the original junction,
+/// bit for bit (`1.0 * w` is exactly `w`).
+///
 /// # Errors
-/// As [`characteristic_pressure`], and [`STAPLE_RECOVERY_DOMAIN`](super::viscous::STAPLE_RECOVERY_DOMAIN) where forward
-/// flow meets `C_P (S/S_c)^2 >= 1`.
+/// As [`characteristic_pressure`], a `contraction` outside `(0, 1]`, and
+/// [`STAPLE_RECOVERY_DOMAIN`](super::viscous::STAPLE_RECOVERY_DOMAIN) where forward flow meets `C_P (S_jet/S_c)^2 >= 1`.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn characteristic_junction_with_recovery(
-    recovery: StapleRecovery, width: f64, opening: f64, rho: f64, zc: f64,
+    recovery: StapleRecovery, contraction: f64, width: f64, opening: f64, rho: f64, zc: f64,
     p_minus: f64, p_m: f64, moving_flow: f64,
 ) -> Result<RecoveredJunction, AcousticRealizeError> {
     let bad = invalid;
     if ![width, opening, rho, zc, p_minus, p_m, moving_flow]
         .iter().all(|v| v.is_finite())
         || width <= 0.0 || opening < 0.0 || rho <= 0.0 || zc <= 0.0
+        || !(contraction > 0.0 && contraction <= 1.0)
     {
         return Err(bad());
     }
+    let jet_width = contraction * width;
     let no_jet = p_minus + zc * moving_flow;
     let no_drop = p_m - p_minus;
     let drive = no_drop - no_jet;
-    let unit_flow = fs_phs::bernoulli_volume_flow(width, opening, 1.0, rho);
+    let unit_flow = fs_phs::bernoulli_volume_flow(jet_width, opening, 1.0, rho);
     let a = zc * unit_flow;
     if ![no_jet, no_drop, drive, a].iter().all(|v| v.is_finite()) {
         return Err(bad());
@@ -132,7 +140,7 @@ pub(crate) fn characteristic_junction_with_recovery(
             outgoing_pa: no_jet, flow_m3_s: 0.0, constriction_drop_pa: drive, recovered_pa: 0.0,
         });
     }
-    let factor = if drive > 0.0 { recovery.forward_factor(width * opening)? } else { 1.0 };
+    let factor = if drive > 0.0 { recovery.forward_factor(jet_width * opening)? } else { 1.0 };
     // sqrt(|(dp)_c|) = s solves f s^2 + a s = |d|: s = 2|d| / (a + sqrt(a^2 + 4 f |d|)), scaled as `pressure_partition` does.
     let b = 2.0 * det::sqrt(factor * drive.abs());
     let scale = a.max(b);
@@ -228,7 +236,7 @@ mod tests {
                     for mouth in [-4000.0, -50.0, 50.0, 800.0, 7400.0, 30000.0] {
                         for moving in [-8e-5, 0.0, 6e-5] {
                             let a = characteristic_junction_with_recovery(
-                                recovery, width, opening, rho, zc, incoming, mouth, moving).unwrap();
+                                recovery, 1.0, width, opening, rho, zc, incoming, mouth, moving).unwrap();
                             let b = slit.characteristic_junction_with_recovery(
                                 recovery, width, opening, rho, zc, incoming, mouth, moving).unwrap();
                             assert!(close(a.outgoing_pa, b.outgoing_pa)
@@ -255,13 +263,13 @@ mod tests {
                 for (incoming, zc, moving) in [(75.0, 5.9e7, 1e-7), (-30.0, 3e5, -2e-8), (0.0, 6e7, 0.0)] {
                     let plain = characteristic_pressure(0.0056, opening, 1.2, zc, incoming, mouth, moving).unwrap();
                     let zero = characteristic_junction_with_recovery(
-                        none, 0.0056, opening, 1.2, zc, incoming, mouth, moving).unwrap();
+                        none, 1.0, 0.0056, opening, 1.2, zc, incoming, mouth, moving).unwrap();
                     assert_eq!(zero.outgoing_pa.to_bits(), plain.to_bits());
                     // Reversed flow (a negative drive) has no recovery whatever C_P, and no area limit either: the
                     // opening 8e-4 is above S_c / sqrt(C_P) = 4.47 mm^2 and is only admitted there.
                     if mouth - incoming - (incoming + zc * moving) < 0.0 {
                         let reversed = characteristic_junction_with_recovery(
-                            some, 0.0056, opening, 1.2, zc, incoming, mouth, moving).unwrap();
+                            some, 1.0, 0.0056, opening, 1.2, zc, incoming, mouth, moving).unwrap();
                         assert_eq!(reversed.outgoing_pa.to_bits(), plain.to_bits());
                         assert_eq!(reversed.recovered_pa, 0.0);
                     }
@@ -284,7 +292,7 @@ mod tests {
                 let expected = incoming + zc * (q + moving);
                 let mouth = (constriction - recovered) + expected + incoming;
                 let j = characteristic_junction_with_recovery(
-                    recovery, width, opening, rho, zc, incoming, mouth, moving).unwrap();
+                    recovery, 1.0, width, opening, rho, zc, incoming, mouth, moving).unwrap();
                 assert!((j.outgoing_pa - expected).abs() <= 1e-10 * (1.0 + expected.abs()), "{j:?} vs {expected}");
                 assert!((j.flow_m3_s - q).abs() <= 1e-9 * q.abs(), "{j:?} vs {q}");
                 assert!((j.constriction_drop_pa - constriction).abs() <= 1e-9 * constriction.abs(), "{j:?}");
@@ -299,7 +307,7 @@ mod tests {
         let width = 0.0056;
         let limit_opening = S_C / 0.8_f64.sqrt() / width; // C_P (S/S_c)^2 = 1
         let junction = |opening: f64, mouth: f64| characteristic_junction_with_recovery(
-            recovery, width, opening, 1.2, 1e7, 0.0, mouth, 0.0);
+            recovery, 1.0, width, opening, 1.2, 1e7, 0.0, mouth, 0.0);
         assert!(junction(limit_opening * (1.0 - 1e-9), 500.0).is_ok());
         for opening in [limit_opening * (1.0 + 1e-9), 1.5 * limit_opening] {
             match junction(opening, 500.0) {
@@ -312,12 +320,93 @@ mod tests {
         let original = characteristic_pressure(width, 1.5 * limit_opening, 1.2, 1e7, 0.0, -500.0, 0.0).unwrap();
         assert_eq!(reversed.outgoing_pa.to_bits(), original.to_bits());
         // A shut channel: no flow, no recovery, and the blade feels the whole mouth-to-bore difference.
-        let shut = characteristic_junction_with_recovery(recovery, width, 0.0, 1.2, 6e7, 75.0, 7400.0, 1e-7).unwrap();
+        let shut = characteristic_junction_with_recovery(recovery, 1.0, width, 0.0, 1.2, 6e7, 75.0, 7400.0, 1e-7).unwrap();
         assert_eq!(shut.outgoing_pa, 75.0 + 6e7 * 1e-7);
         assert_eq!((shut.flow_m3_s, shut.recovered_pa), (0.0, 0.0));
         assert_eq!(shut.constriction_drop_pa, (7400.0 - 75.0) - (75.0 + 6e7 * 1e-7));
         for bad in [f64::NAN, f64::INFINITY] {
             assert!(junction(3e-4, bad).is_err());
+        }
+    }
+
+    #[test]
+    fn contracted_junction_returns_the_manufactured_flows_and_matches_fs_phs_gap_flow() {
+        // The jet area is C_c w h: q = C_c w h sqrt(2 (dp)_c / rho), and fs-phs's GapFlowLaw with the same contraction and no
+        // channel term is that law.
+        let none = StapleRecovery::new(0.0, S_C).unwrap();
+        let (width, rho, zc, incoming, moving): (f64, f64, f64, f64, f64) = (0.0056, 1.2, 5.9e7, 75.0, 1e-7);
+        for contraction in [0.611, 0.8, 1.0] {
+            let law = fs_phs::GapFlowLaw {
+                contraction, channel_length_m: 0.0, effective_length_m: 0.0, dynamic_viscosity_pa_s: 0.0,
+            };
+            for opening in [5e-5, 1.5e-4, 3.57e-4] {
+                let area = contraction * width * opening;
+                for s in [-60.0_f64, -3.0, 3.0, 30.0, 70.0] {
+                    let q = area * (2.0 / rho).sqrt() * s;
+                    let constriction = s.signum() * s * s;
+                    let expected = incoming + zc * (q + moving);
+                    let mouth = constriction + expected + incoming;
+                    let j = characteristic_junction_with_recovery(
+                        none, contraction, width, opening, rho, zc, incoming, mouth, moving).unwrap();
+                    assert!((j.outgoing_pa - expected).abs() <= 1e-10 * (1.0 + expected.abs()), "{j:?} vs {expected}");
+                    assert!((j.flow_m3_s - q).abs() <= 1e-9 * q.abs(), "c={contraction} {j:?} vs {q}");
+                    assert_eq!(j.recovered_pa, 0.0);
+                    let phs = law.volume_flow(width, opening, j.constriction_drop_pa, rho);
+                    assert!((phs - j.flow_m3_s).abs() <= 1e-9 * j.flow_m3_s.abs(), "c={contraction}: fs-phs {phs} vs {j:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn contraction_scales_only_the_jet_width_and_one_is_the_original_junction() {
+        let some = StapleRecovery::new(0.8, S_C).unwrap();
+        let (width, rho, zc, incoming) = (0.0056, 1.2, 5.9e7, 75.0);
+        for contraction in [0.4, 0.611, 0.9] {
+            for opening in [0.0, 1e-4, 3.57e-4] {
+                for mouth in [-3000.0, 800.0, 7400.0] {
+                    for moving in [-2e-8, 0.0, 1e-7] {
+                        // The same junction as the full width `C_c w` with no contraction (the swept flow is an argument
+                        // and is not scaled).
+                        let a = characteristic_junction_with_recovery(
+                            some, contraction, width, opening, rho, zc, incoming, mouth, moving);
+                        let b = characteristic_junction_with_recovery(
+                            some, 1.0, contraction * width, opening, rho, zc, incoming, mouth, moving);
+                        match (a, b) {
+                            (Ok(a), Ok(b)) => {
+                                assert_eq!(a.outgoing_pa.to_bits(), b.outgoing_pa.to_bits());
+                                assert_eq!(a.flow_m3_s.to_bits(), b.flow_m3_s.to_bits());
+                                assert_eq!(a.constriction_drop_pa.to_bits(), b.constriction_drop_pa.to_bits());
+                            }
+                            (a, b) => assert_eq!(a.is_ok(), b.is_ok(), "{a:?} vs {b:?}"),
+                        }
+                    }
+                }
+            }
+        }
+        // A narrower jet passes less flow at the same drive (forward flow, same everything else).
+        let wide = characteristic_junction_with_recovery(some, 1.0, width, 3.57e-4, rho, zc, incoming, 7400.0, 0.0).unwrap();
+        let narrow = characteristic_junction_with_recovery(some, 0.611, width, 3.57e-4, rho, zc, incoming, 7400.0, 0.0).unwrap();
+        assert!(narrow.flow_m3_s > 0.0 && narrow.flow_m3_s < wide.flow_m3_s, "{narrow:?} vs {wide:?}");
+    }
+
+    #[test]
+    fn contraction_moves_the_staple_domain_to_the_jet_area_and_refuses_outside_zero_one() {
+        let recovery = StapleRecovery::new(0.8, S_C).unwrap();
+        let width = 0.0056;
+        let limit_opening = S_C / 0.8_f64.sqrt() / width; // C_P (S/S_c)^2 = 1 at the full width
+        let junction = |contraction: f64, opening: f64| characteristic_junction_with_recovery(
+            recovery, contraction, width, opening, 1.2, 1e7, 0.0, 500.0, 0.0);
+        // 1.5 limit: refused at C_c = 1 and at 0.7 (jet area 1.05 limit), admitted at 0.6 (0.9 limit).
+        for contraction in [1.0, 0.7] {
+            match junction(contraction, 1.5 * limit_opening) {
+                Err(AcousticRealizeError::Reed { what }) => assert_eq!(what, STAPLE_RECOVERY_DOMAIN),
+                other => panic!("c={contraction}: expected the staple domain refusal, got {other:?}"),
+            }
+        }
+        assert!(junction(0.6, 1.5 * limit_opening).is_ok());
+        for bad in [0.0, -0.5, 1.0 + 1e-9, 2.0, f64::NAN, f64::INFINITY] {
+            assert!(junction(bad, 3e-4).is_err(), "c={bad}");
         }
     }
 }

@@ -80,9 +80,16 @@ impl ReedBoreVoice {
                 self.fast_stats.fallback_samples += 1;
             }
             result
-        } else if let Some(recovery) = self.staple_recovery {
+        } else if self.staple_recovery.is_some() || self.jet_contraction.is_some() {
             // The same staple law on the inviscid Bernoulli junction, for the cards without `slit_length`: Almeida's own
             // model neglects the viscous loss along the reed. Same midpoint step, lay and tongue force as the branches below.
+            // A jet contraction `C_c` (alone, or with the staple) narrows the jet to `C_c w h`; without a staple the recovery
+            // is the `C_P = 0` one, whose junction is the plain Bernoulli one and whose blade drop is the whole mouth-to-bore drop.
+            let recovery = match self.staple_recovery {
+                Some(recovery) => recovery,
+                None => crate::bernoulli_aperture::viscous::StapleRecovery::new(0.0, 1.0)?,
+            };
+            let contraction = self.jet_contraction.unwrap_or(1.0);
             let lay = self.lay.as_ref().expect("massive voices retain their physical lay");
             let result = crate::reed_bore::OpeningPropagator::Midpoint.step_with_junction(
                 self.reed, self.rho, impedance, incoming, mouth_pressure_pa,
@@ -90,7 +97,7 @@ impl ReedBoreVoice {
                 |opening| Ok(opening.max(0.0)), material_force,
                 |opening, moving| {
                     let junction = crate::bernoulli_aperture::moving::characteristic_junction_with_recovery(
-                        recovery, self.reed.width_m, opening, self.rho, impedance,
+                        recovery, contraction, self.reed.width_m, opening, self.rho, impedance,
                         incoming, mouth_pressure_pa, moving,
                     )?;
                     Ok(crate::reed_bore::JunctionPressure {
@@ -363,6 +370,113 @@ mod tests {
         slit.step_block(&mut viscous).unwrap();
         let drift = viscous.iter().zip(&staple[..600]).fold(0.0_f64, |m, (a, b)| m.max((a - b).abs()));
         assert!(drift <= 1e-5 * peak, "negligible slit {drift:e} of {peak:e}");
+    }
+
+    // ---- jet contraction (the vena contracta coefficient C_c on the inviscid reed law) -------------------------------
+    // Opt-in; absent, or with C_c = 1, the voice is bit for bit the original; the jet leaves with the area C_c w h.
+
+    fn contracted_voice(contraction: f64, staple: Option<(f64, f64)>) -> ReedBoreVoice {
+        use crate::bernoulli_aperture::viscous::StapleRecovery;
+        let mut reed = oboe_reed();
+        reed.attack_s = 0.0;
+        let mut v = voice_with(-0.2, reed);
+        if let Some((c_p, s_c)) = staple {
+            v.set_staple_recovery(StapleRecovery::new(c_p, s_c).unwrap()).unwrap();
+        }
+        v.set_jet_contraction(contraction).unwrap();
+        v
+    }
+
+    #[test]
+    fn g0_unit_or_absent_jet_contraction_is_the_original_voice_bit_for_bit() {
+        let run = |contraction: Option<f64>, staple: Option<(f64, f64)>| {
+            let mut v = inviscid_voice(staple);
+            if let Some(c) = contraction { v.set_jet_contraction(c).unwrap(); }
+            let mut out = vec![0.0; 1200];
+            v.step_block(&mut out).unwrap();
+            assert!(out.iter().all(|x| x.is_finite()));
+            out.iter().map(|x| x.to_bits()).collect::<Vec<_>>()
+        };
+        for staple in [None, Some((0.8, 4e-6))] {
+            assert_eq!(run(None, staple), run(Some(1.0), staple), "staple {staple:?}");
+        }
+        let mut v = inviscid_voice(None);
+        v.set_jet_contraction(1.0).unwrap();
+        assert_eq!(v.jet_contraction(), None, "C_c = 1 installs nothing");
+        v.set_jet_contraction(0.611).unwrap();
+        assert_eq!(v.jet_contraction(), Some(0.611));
+    }
+
+    #[test]
+    fn g1_jet_contraction_closes_the_same_sample_flow_on_the_contracted_area_and_reaches_the_sample() {
+        for contraction in [0.611, 0.85] {
+            let mut v = contracted_voice(contraction, None);
+            for _ in 0..400 {
+                let (old_y, old_v) = (v.reed_y, v.reed_v);
+                v.step_block(&mut [0.0]).unwrap();
+                let incoming = v.line.incoming();
+                let pressure = v.p_plus_prev + incoming;
+                let flow = (v.p_plus_prev - incoming) / v.zc;
+                let dp = v.reed.blowing_pressure_pa - pressure;
+                let opening = f64::midpoint(old_y, v.reed_y).max(0.0);
+                let swept = crate::reed_bore::reed_swept_flow(
+                    crate::reed_bore::reed_pressure_face(v.reed), f64::midpoint(old_v, v.reed_v));
+                // The jet passes the contracted area; the blade's swept flow is geometric.
+                let jet = contraction * crate::bernoulli_aperture::moving::volume_flow(v.reed.width_m, opening, dp, v.rho);
+                let scale = jet.abs() + swept.abs() + flow.abs();
+                assert!((jet + swept - flow).abs() < 1e-10 * scale + 1e-18,
+                    "C_c={contraction}: flow residual {:e}", jet + swept - flow);
+            }
+        }
+        // It reaches the sample, with or without the staple, and the callback partition cannot matter.
+        for staple in [None, Some((0.8, 4e-6))] {
+            let mut plain = contracted_voice(1.0, staple);
+            let mut narrow = contracted_voice(0.611, staple);
+            let (mut a, mut b) = (vec![0.0; 2400], vec![0.0; 2400]);
+            plain.step_block(&mut a).unwrap();
+            narrow.step_block(&mut b).unwrap();
+            assert!(b.iter().all(|x| x.is_finite()));
+            let peak = a.iter().fold(0.0_f64, |m, x| m.max(x.abs()));
+            let difference = a.iter().zip(&b).fold(0.0_f64, |m, (x, y)| m.max((x - y).abs()));
+            assert!(difference > 1e-3 * peak, "staple {staple:?}: {difference:e} of {peak:e}");
+            let (mut c, mut d) = (contracted_voice(0.611, staple), contracted_voice(0.611, staple));
+            let (mut x, mut y) = ([0.0; 600], [0.0; 600]);
+            c.step_block(&mut x).unwrap();
+            for chunk in y.chunks_mut(37) { d.step_block(chunk).unwrap(); }
+            assert_eq!(x, y);
+            assert_eq!((c.reed_y, c.reed_v), (d.reed_y, d.reed_v));
+        }
+    }
+
+    #[test]
+    fn g0_jet_contraction_is_refused_outside_its_domain_and_moves_the_staple_domain_to_the_jet_area() {
+        use crate::bernoulli_aperture::viscous::{StapleRecovery, STAPLE_RECOVERY_DOMAIN};
+        for bad in [0.0, -0.5, 1.0 + 1e-9, 2.0, f64::NAN, f64::INFINITY] {
+            assert!(voice_with(-0.2, oboe_reed()).set_jet_contraction(bad).is_err(), "C_c={bad}");
+        }
+        assert!(voice(-0.2, false).set_jet_contraction(0.6).is_err(), "massless reed");
+        let mut advanced = voice_with(-0.2, oboe_reed());
+        advanced.step_block(&mut [0.0]).unwrap();
+        assert!(advanced.set_jet_contraction(0.6).is_err(), "advanced voice");
+        // Defined on the inviscid law only, in either order with the viscous channel.
+        let mut slit = voice_with(-0.2, oboe_reed());
+        slit.set_viscous_slit_length(2.5e-2).unwrap();
+        assert!(slit.set_jet_contraction(0.6).is_err());
+        let mut late = voice_with(-0.2, oboe_reed());
+        late.set_jet_contraction(0.6).unwrap();
+        assert!(late.set_viscous_slit_length(2.5e-2).is_err());
+        // Rest area 0.4 mm x 13 mm = 5.2 mm^2: the staple law refuses it at C_c = 1; the jet area 0.8 x 5.2 = 4.16 mm^2 is
+        // inside S_c / sqrt(C_P) = 4.47 mm^2, and 0.9 x 5.2 = 4.68 mm^2 is not.
+        let recovery = StapleRecovery::new(0.8, 4e-6).unwrap();
+        let mut ok = voice(-0.2, true);
+        ok.set_jet_contraction(0.8).unwrap();
+        assert!(ok.set_staple_recovery(recovery).is_ok());
+        let mut wide = voice(-0.2, true);
+        wide.set_jet_contraction(0.9).unwrap();
+        match wide.set_staple_recovery(recovery) {
+            Err(AcousticRealizeError::Reed { what }) => assert_eq!(what, STAPLE_RECOVERY_DOMAIN),
+            other => panic!("expected the staple domain refusal, got {other:?}"),
+        }
     }
 
     // G5: the physical source, its history and receiver are independent of the

@@ -284,6 +284,9 @@ pub struct ReedBoreVoice {
     /// driven by the constriction drop and the bore input pressure raised by the recovered head. `None` is the original
     /// voice, bit for bit.
     staple_recovery: Option<crate::bernoulli_aperture::viscous::StapleRecovery>,
+    /// Opt-in vena contracta of the reed jet (`set_jet_contraction`): the coefficient `C_c` in `(0, 1]` on the flow area of the
+    /// inviscid Bernoulli junction. `None` is the original voice, bit for bit (`C_c = 1` installs nothing).
+    jet_contraction: Option<f64>,
     /// Opt-in duct-constriction noise on the reed channel (`set_constriction_noise`): a series pressure source on the
     /// mouth side, the brass lip's law carried to the reed slit. `None` is the original voice, bit for bit.
     constriction_noise: Option<crate::turbulence_noise::ConstrictionNoise>,
@@ -708,6 +711,7 @@ impl ReedBoreVoice {
             inlet_gas: *gas,
             viscous_slit: None,
             staple_recovery: None,
+            jet_contraction: None,
             constriction_noise: None,
             rho: gas.density,
             jet_observer,
@@ -780,6 +784,11 @@ impl ReedBoreVoice {
                 what: "viscous reed channel selection requires an unadvanced voice",
             });
         }
+        if self.jet_contraction.is_some() {
+            return Err(AcousticRealizeError::InvalidDescription {
+                what: "a jet contraction is defined on the inviscid reed law only, not with a viscous reed channel",
+            });
+        }
         let slit = crate::bernoulli_aperture::viscous::ViscousSlit::from_gas(&self.inlet_gas, length_m)?;
         self.viscous_slit = Some(slit);
         Ok(())
@@ -806,10 +815,48 @@ impl ReedBoreVoice {
                 what: "staple pressure recovery needs a massive reed and a voice that has not advanced",
             });
         }
-        // The reed starts at its rest opening, so the law must be defined there.
-        recovery.forward_factor(self.reed.width_m * self.reed.rest_opening_m)?;
+        // The reed starts at its rest opening, so the law must be defined there, on the jet area if a contraction is set.
+        recovery.forward_factor(self.jet_contraction.unwrap_or(1.0) * self.reed.width_m * self.reed.rest_opening_m)?;
         self.staple_recovery = if recovery.c_p() == 0.0 { None } else { Some(recovery) };
         Ok(())
+    }
+
+    /// Select the reed jet's vena contracta: the jet leaves the opening with the area `C_c w h`, so the flow through the
+    /// opening is `q = C_c w h sqrt(2 (dp)_c / rho)` (the `rho U|U| / (2 (C_c w h)^2)` of `fs_phs::GapFlowLaw` without its channel
+    /// terms), and the staple recovery, if selected, takes `C_P (S/S_c)^2` on that jet area. The moving blade's swept flow is
+    /// geometric and keeps the full width. It is defined on the inviscid Bernoulli law the oboe cards use and refused with
+    /// `set_viscous_slit_length`. It needs a massive reed and a voice that has not advanced. `C_c = 1` is the original law
+    /// and installs nothing, so the voice stays bit for bit what it was. The unsteady inertance of the channel
+    /// (`fs_phs::GapFlowLaw::inertance`) is NOT part of this selection: no printed value of the channel's effective length is
+    /// held for any double reed.
+    ///
+    /// # Errors
+    /// A coefficient outside `(0, 1]`, a massless reed, an advanced voice, a viscous reed channel, or (with a staple recovery
+    /// set) nothing further: a smaller jet area cannot leave the staple law's domain.
+    pub fn set_jet_contraction(&mut self, contraction: f64) -> Result<(), AcousticRealizeError> {
+        if !(contraction > 0.0 && contraction <= 1.0) {
+            return Err(AcousticRealizeError::InvalidDescription {
+                what: "jet contraction needs a coefficient in (0, 1]",
+            });
+        }
+        if self.reed.mass_kg <= 0.0 || self.sample_index != 0 {
+            return Err(AcousticRealizeError::InvalidDescription {
+                what: "jet contraction needs a massive reed and a voice that has not advanced",
+            });
+        }
+        if self.viscous_slit.is_some() {
+            return Err(AcousticRealizeError::InvalidDescription {
+                what: "a jet contraction is defined on the inviscid reed law only, not with a viscous reed channel",
+            });
+        }
+        self.jet_contraction = if contraction == 1.0 { None } else { Some(contraction) };
+        Ok(())
+    }
+
+    /// The selected jet contraction coefficient, if any (`C_c = 1` selects none).
+    #[must_use]
+    pub const fn jet_contraction(&self) -> Option<f64> {
+        self.jet_contraction
     }
 
     /// The selected staple pressure recovery, if any (`C_P = 0` selects none).
