@@ -10,6 +10,10 @@
 #[path = "relaxation/trajectory.rs"]
 pub mod trajectory;
 
+/// Ordered dry-interface cards resolved into physical joint friction capacities.
+#[path = "relaxation/interface.rs"]
+pub mod interface;
+
 use super::{
     ArticulatedJoint, Dd, DistanceGraphControls, DistanceGraphError, DistanceStepError,
     JointFrictionControls, JointFrictionError, JointFrictionPort, JointReactionImpulse,

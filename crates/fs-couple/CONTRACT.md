@@ -118,3 +118,23 @@ source-domain or footprint refusal, excessive cumulative removal or parameter
 work, nonconvergence and cancellation publish no partial physical history.
 The report retains both native mechanical operations, source callback evidence,
 friction heat, normal/plastic/parameter accounts and cumulative removed volumes.
+
+## Static breakaway and kinetic sliding through joint heat and motion
+
+Existing joint-friction thermal source callbacks now accept explicitly authored
+static/kinetic native port variants. Every nonlinear temperature trial resolves
+the selected native Coulomb/stiction law and supplies its continuous friction
+work to the original finite thermal network. Holding generates no artificial
+friction heat; released and already sliding joints use kinetic capacity. Static
+capacity, kinetic capacity and conductivity may be resolved at the same
+candidate interface temperature. Ambiguous mechanical continuation remains a
+refusal, and accepted inputs remain borrowed until a complete candidate passes.
+
+Three cross-module tests distinguish hold from slide under identical load,
+solve temperature-dependent sliding friction against a finite two-cell thermal
+response and an independent closed-form balance, and evolve an authored motion
+grid through hold, breakaway and continued sliding below the static limit.
+The last case checks actual poses, endpoint rates, drive work, kinetic change,
+integrated friction loss and thermal storage together. No new capture speed,
+implicit presliding history, inferred heat fraction or imposed thermostat is
+introduced.

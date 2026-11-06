@@ -307,6 +307,31 @@ fn incomparable_static_continuations_refuse_in_both_port_orders() {
         assert_eq!(velocity, [0.0, 0.0]);
         assert_eq!(w, [1.0, 0.5, 0.5, 1.0]);
     }
+
+    // Cardinality is not the continuation law either. Here {0,2} can hold
+    // with f=[-3/4,1/2,-1/4], while the incomparable smaller set {1}
+    // can hold with f=[-1/2,7/8,-1/8]. Selecting the larger count would
+    // silently discard a valid maximal sticking set.
+    let unequal_sizes = CoupledStictionFlowInput {
+        velocity_before_m_s: &[0.0, 0.0, 0.0],
+        mobility_per_kg: &[1.0, 0.5, 0.5, 0.5, 1.0, 0.0, 0.5, 0.0, 1.0],
+        static_capacity_n: &[1.0, 1.0, 0.3125],
+        kinetic_capacity_n: &[0.5, 0.5, 0.125],
+        drive_n: &[1.25, -1.25, 0.0],
+        duration_s: 1.0,
+    };
+    match advance_coupled_stiction(&unequal_sizes, controls(), || false).unwrap_err() {
+        CoupledStictionFlowError::Ambiguous {
+            resting_mask: 7,
+            maximal_modes: 2,
+            first_holding_mask,
+            second_holding_mask,
+        } => {
+            assert_eq!(first_holding_mask, 5);
+            assert_eq!(second_holding_mask, 2);
+        }
+        other => panic!("expected ambiguity between different-sized sets, got {other:?}"),
+    }
 }
 
 #[test]

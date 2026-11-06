@@ -49,7 +49,7 @@ pub struct JointFrictionHeatRoute<'a> {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct JointFrictionHeatInterfaceSource {
     pub link_id: u64,
-    /// Held physical effort and common static/kinetic bound for this phase.
+    /// Held physical effort and explicit common or distinct static/kinetic capacities.
     pub friction: JointFrictionFlowPort,
     /// Original materials in the route's A/B order.
     pub conductivity_w_m_k: [f64; 2],
@@ -167,10 +167,12 @@ struct Staged<P> {
 /// Propose one native joint-friction phase with simultaneous thermal feedback.
 ///
 /// Poses, bilateral geometry and source efforts are held during each trial.
-/// The common static/kinetic Coulomb law retains its exact arrest/reversal
+/// The explicitly selected Coulomb or stiction law resolves arrest/reversal
 /// segments; material/thermal continuation uses backward-Euler endpoint data.
 /// Time and spatial refinement remain necessary. No bearing preload, pressure,
-/// distinct static coefficient, elastic joint storage or pose advance is inferred.
+/// elastic joint storage or pose advance is inferred. Distinct static and kinetic
+/// capacities must be authored explicitly; unresolved coupled stiction refuses.
+/// Exact rest admits holding, while small nonzero native rates remain sliding.
 /// The surrounding native integrator owns geometry updates between phases.
 ///
 /// `accepted_time_s` must match the original thermal timeline. Both owners use

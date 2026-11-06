@@ -7541,3 +7541,30 @@ thresholds across nonbinary hinge scales, recapture and reversal, coupled rotor
 reactions above the kinetic limit, source permutation, full-inertia eccentric
 recoil and frame/boost covariance, exact legacy equivalence, existing adaptive
 motion and segment-budget refinement, invalid sources, budgets and cancellation.
+
+## Ordered dry-interface cards on native joint flow
+
+The continuous flow's `interface` child binds original `DryInterfaceSystemCard`
+objects to ordered native joint bodies and explicit physical load geometry.
+Uniform axial sliding derives capacities as mu*N. A fully sliding cylindrical
+sleeve derives torque as mu*N*r and surface speed as r*abs(omega), using an
+authored physical radius independent of the hinge's numerical angular length.
+Normal force, nominal area, temperature and radius are held source data;
+pressure is explicitly nominal N/A, not an inferred distribution or bilateral
+reaction magnitude.
+
+The constant Coulomb rung supplies distinct static and kinetic coefficients.
+Other constitutive laws refuse rather than being replaced by zero-speed values.
+The exact borrowed ordered card, surface history, provenance and authority are
+retained in the receipt; this does not promote caller data to fs-matdb admission
+or empirical validation. Original temperature and pressure applicability is
+checked, then complete path speed extrema and direct native endpoints are
+validated before returning the candidate. Both lower and upper speed bounds
+apply, including arrests and intermediate peaks. Late domain refusal or
+cancellation publishes no partial body state.
+
+Six tests cover rest versus slide, physical radius and conditioning invariance,
+pressure/temperature/lower-speed refusals, an internal speed peak with safe
+outer endpoints, binding permutation and ordered card identity, and unsupported
+laws/geometry/cancellation. The shared kernel ambiguity test additionally checks
+incomparable maximal sticking sets of different cardinalities.
