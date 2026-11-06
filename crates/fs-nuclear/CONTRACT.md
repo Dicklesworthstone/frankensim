@@ -624,6 +624,34 @@ Whole/split observation and cloned restart retain the same accepted history.
 The existing thermal cohort adapter clips at these same rate boundaries and
 keeps all nuclear heat at the compartment of the actual decay event.
 
+`NuclideTransfer::from_volumetric_flow` and
+`NuclideOutflow::from_volumetric_flow` admit typed `VolumetricFlowRate` and
+original `Volume` values into that same transport description. For a
+nonselective, well-mixed tracer the per-nucleus hazard is `k = Q / V_donor`;
+the recipient volume does not replace the donor volume. Opposite paths through
+unequal compartments therefore retain distinct residence times even at equal
+volumetric flow. These constructors are shared by deterministic burnup and
+discrete transport, with no separate flow model or duplicate rate owner.
+
+Referenced volumes must be positive and finite, paths must have valid distinct
+endpoints, and the original nuclide count must fit the existing nuclear bound.
+Zero flow closes a retained path exactly. A positive flow whose rate overflows
+or rounds to zero refuses instead of becoming infinite flow or a silent closure;
+representable positive subnormal hazards remain positive. These are fixed
+control-volume tracer coefficients, without implicit carrier continuity, bulk
+mass evolution or transported sensible/latent heat. Changed geometry requires
+an explicitly rebuilt rate frame.
+
+The manufactured `stochastic_scheduled_transport` example combines a finite
+Poisson feed pulse, unequal compartment volumes, valve opening/closure/reopening,
+downstream extraction and two radioactive half-lives. It checks integer
+`supplied = retained + outflow` at each observation, no births after source
+shutdown, every movement change once, and identical whole/partitioned/restarted
+history. Thermal integration regressions separately exercise pure valve and
+movement boundaries without heating, recipient-local decay and radiation,
+source shutdown, arbitrary observation partitions, reversed cell mappings,
+and atomic work/cancellation/material refusal.
+
 ## Stochastic decay events on the shared thermal timeline
 
 With the existing `thermal` feature, `thermal::StochasticDecayHeating` binds

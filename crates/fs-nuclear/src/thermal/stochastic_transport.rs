@@ -384,3 +384,6 @@ mod tests;
 
 #[cfg(test)]
 mod production_tests;
+
+#[cfg(test)]
+mod schedule_tests;
