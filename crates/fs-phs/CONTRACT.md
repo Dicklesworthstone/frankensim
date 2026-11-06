@@ -2621,5 +2621,35 @@ blocks, composed analytic actions beside a held energy bias, a loaded ideal
 transformer with saturating magnetizing storage, constant-law parity and source
 refusals. The actual scalar kernel passed seven independent native tests,
 including 2,000 work/derivative cases and exact piecewise-exponential transients.
-The enclosing integration tests are authored but were not executed because
-the available dependency environment could not link fs-la.
+The full native fs-phs library subsequently compiled against actual production
+dependencies, and all 42 targeted circuit integration regressions passed.
+This focused validation is not the complete workspace/DSR gate.
+
+### Biased continuous response of nonlinear circuit storage
+
+The shared original scalar storage now implements `ContinuousStorageTangent`.
+Its complete, allocation-free action supplies dI/d(lambda) and dV/dq at the
+admitted bias while preserving every untouched reciprocal L/C block and zero
+algebraic storage row. Existing stationary and equilibrium harmonic owners
+consume this action without finite-difference fits or replacing the nonlinear
+transient law. Their local energy remains the second variation of the original
+potential, separate from total biased stored energy.
+
+Only genuine two-sided derivatives are admitted. Interior collinear source
+knots are valid; unequal-slope kinks and finite-support endpoints refuse, even
+for a zero requested direction. Discrete time stepping retains its original
+piecewise integral and one-sided Newton representative at these same knots.
+Refused continuous actions do not silently fall back to numerical derivatives.
+
+Focused tests compare biased saturating RL admittance at both polarities and
+henry/microhenry scales with 1/(R-i*omega*L_diff), including local stored energy
+and independent resistor power. Mixed nonlinear L/C with reciprocal blocks,
+shared storage clones, algebraic zero rows and source/shape/kink refusals are
+also checked. Continuous equilibrium fixtures use physical algebraic efforts,
+the native initializer's seed/endpoint midpoint, while retaining original
+conserved flux coordinates.
+
+The actual complete fs-phs library compiled with this continuous action; all
+four new tangent tests, six existing harmonic-equilibrium tests and seven
+nonlinear-inductor regressions passed. Together with the earlier circuit run,
+these cover 52 distinct targeted integration tests.

@@ -22,7 +22,10 @@ use super::{
     inductance::InductorCurve,
     scalar::{CurveError, ScalarCurve},
 };
-use crate::{ConstitutiveDiscreteGradient, QuadraticStorage, Storage, linear_exact::QuadraticPart};
+use crate::{
+    ConstitutiveDiscreteGradient, ContinuousStorageTangent, QuadraticStorage, Storage,
+    linear_exact::QuadraticPart,
+};
 
 /// Prepared reciprocal multi-terminal storage on the original charge states.
 pub mod block;
@@ -177,6 +180,10 @@ struct CurveStorage {
 }
 
 impl Storage for CurveStorage {
+    fn continuous_tangent(&self) -> Option<&dyn ContinuousStorageTangent> {
+        Some(self)
+    }
+
     fn discrete_gradient_rule(&self) -> Option<&dyn ConstitutiveDiscreteGradient> {
         Some(self)
     }
@@ -225,6 +232,24 @@ impl Storage for CurveStorage {
                 .unwrap_or(f64::NAN);
         }
         Some(remainder)
+    }
+}
+
+// The same original law owns both time stepping and local AC/stationary
+// response. This action preserves every untouched reciprocal block and zero
+// algebraic row, and allocates no scratch. Nonsmooth/source-edge points refuse.
+impl ContinuousStorageTangent for CurveStorage {
+    fn apply(&self, state: &[f64], direction: &[f64], out: &mut [f64]) -> bool {
+        if !ContinuousStorageTangent::apply(&self.linear, state, direction, out) {
+            return false;
+        }
+        for (i, curve) in &self.curves {
+            let Some(slope) = curve.continuous_slope(state[*i]) else {
+                return false;
+            };
+            out[*i] = slope * direction[*i];
+        }
+        out.iter().all(|value| value.is_finite())
     }
 }
 

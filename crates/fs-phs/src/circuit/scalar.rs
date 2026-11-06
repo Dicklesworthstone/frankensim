@@ -155,6 +155,21 @@ impl ScalarCurve {
         Ok(self.slopes[self.segment(coordinate)?].recip())
     }
 
+    /// Genuine two-sided derivative of the original effort, for stationary
+    /// and small-signal owners. A Newton representative at a kink is not a
+    /// continuous tangent. Finite support endpoints have no admitted exterior.
+    pub(crate) fn continuous_slope(&self, coordinate: f64) -> Option<f64> {
+        let i = self.segment(coordinate).ok()?;
+        let (lo, hi) = self.range();
+        if coordinate <= lo || coordinate >= hi {
+            return None;
+        }
+        if i > 0 && coordinate == self.knots[i].0 && self.slopes[i - 1] != self.slopes[i] {
+            return None;
+        }
+        Some(self.slopes[i])
+    }
+
     pub(crate) fn energy(&self, coordinate: f64) -> Result<f64, CurveError> {
         let i = self.segment(coordinate)?;
         // Anchor nearer zero so a tiny negative-coordinate energy is not the
