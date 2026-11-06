@@ -28,6 +28,9 @@
 //! Sections 2 and 3. The source-interval divided energy above is derived here
 //! for the admitted temperature-dependent, piecewise caloric model.
 
+mod boundary;
+pub(in crate::multicomponent) use boundary::ExteriorEntropyEffort;
+
 use super::{
     Cell, Error, Face, FaceFlux, MAX_COMPONENTS, MixtureGas, Primitive, physical, poll, positive,
 };

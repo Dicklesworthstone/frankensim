@@ -56,6 +56,8 @@ pub use crate::dynamics::{
 pub use eos::MixtureGas;
 pub use evolve::{MixtureEuler1d, StepReport, Totals};
 pub use flux::{EntropyFaceReport, FaceFlux};
+/// Actual source entropy and boundary supply of prescribed exterior gas states.
+pub use dissipation::entropy::ExteriorMixtureEntropyReport;
 /// Original ideal-mixture state entropy controls shared by flow and molecular transport.
 pub use dissipation::{
     MolecularEntropyControl as MixtureEntropyControl,

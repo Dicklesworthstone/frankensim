@@ -698,6 +698,22 @@ fn reservoir_fluxes<'a>(
     storage: &'a mut [[f64; MAX_COMPONENTS]; 2],
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<[Option<EndpointFlux<'a>>; 2], Error> {
+    reservoir_fluxes_with_scheme::<false>(
+        gas, states, primitive, reservoirs, storage, cancelled,
+    )
+}
+
+// Prescribed exterior traces share the ORIGINAL interface flux and source axis.
+// Only the opt-in entropy lane uses this exterior Riemann flux; the existing
+// stationary compact-reservoir characteristic closure retains its semantics.
+fn reservoir_fluxes_with_scheme<'a, const ENTROPY_FLUX: bool>(
+    gas: &MixtureGas,
+    states: &[f64],
+    primitive: &[Primitive],
+    reservoirs: ReservoirEnds<'_>,
+    storage: &'a mut [[f64; MAX_COMPONENTS]; 2],
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<[Option<EndpointFlux<'a>>; 2], Error> {
     let n = gas.species_count();
     let m = n + 2;
     let mut result = [None; 2];
@@ -707,15 +723,34 @@ fn reservoir_fluxes<'a>(
             let inside = cell(&states[i * m..(i + 1) * m], n);
             let inside_primitive =
                 gas.decode_cell(inside, Some(primitive[i].temperature), cancelled)?;
-            let data = gas.plenum_flux(
-                inside,
-                inside_primitive,
-                outside,
-                outside_primitive,
-                if end == 0 { -1.0 } else { 1.0 },
-                &mut values[..m],
-                cancelled,
-            )?;
+            let data = if ENTROPY_FLUX {
+                let mut exterior = [0.0; MAX_COMPONENTS];
+                exterior[..n].copy_from_slice(outside.partial_densities);
+                exterior[n] = outside.momentum;
+                exterior[n + 1] = outside.energy;
+                let interior = &states[i * m..(i + 1) * m];
+                if end == 0 {
+                    gas.interface_entropy(
+                        &exterior[..m], outside_primitive, interior,
+                        inside_primitive, &mut values[..m], cancelled,
+                    )?
+                } else {
+                    gas.interface_entropy(
+                        interior, inside_primitive, &exterior[..m],
+                        outside_primitive, &mut values[..m], cancelled,
+                    )?
+                }
+            } else {
+                gas.plenum_flux(
+                    inside,
+                    inside_primitive,
+                    outside,
+                    outside_primitive,
+                    if end == 0 { -1.0 } else { 1.0 },
+                    &mut values[..m],
+                    cancelled,
+                )?
+            };
             result[end] = Some(EndpointFlux {
                 values: &values[..m],
                 data,
@@ -800,7 +835,7 @@ fn attempt_with_scheme<const ENTROPY_FLUX: bool>(
     let n = gas.species_count();
     let m = n + 2;
     let mut endpoint_storage = [[0.0; MAX_COMPONENTS]; 2];
-    let ends = reservoir_fluxes(
+    let ends = reservoir_fluxes_with_scheme::<ENTROPY_FLUX>(
         gas,
         states,
         &work.primitive,
@@ -858,7 +893,7 @@ fn attempt_with_scheme<const ENTROPY_FLUX: bool>(
             ));
         }
     }
-    let ends = reservoir_fluxes(
+    let ends = reservoir_fluxes_with_scheme::<ENTROPY_FLUX>(
         gas,
         &work.stage,
         &work.primitive,
@@ -937,7 +972,11 @@ fn attempt_with_scheme<const ENTROPY_FLUX: bool>(
         }
     }
     if let Some(account) = &mut entropy {
-        account.admit_single_step(gas, cancelled)?;
+        account.admit_transport_step(
+            gas, &a, &b, dt,
+            [mesh.face_areas()[0], mesh.face_areas()[mesh.cell_count()]],
+            cancelled,
+        )?;
     }
     Ok((a, b))
 }

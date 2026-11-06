@@ -6124,3 +6124,43 @@ mass/charge accounts, photon-limited thick columns, thin exponential depletion,
 tiny surviving populations, exact interval composition, conserved-reference
 invariance, source refusal and cancellation. The scalar kernel includes
 independent high-precision optical-depth reference values.
+
+## Prescribed exterior states with inviscid entropy admission
+
+`MixtureEuler1d::step_entropy_consistent_with_exterior_states` extends the
+original first-order, fixed constant-area SSP-RK2 owner to prescribed
+species-bearing exterior gas at either physical end. Exterior velocity may be
+nonzero. These are fixed Riemann traces using the original variable-caloric
+entropy-stable interface flux; the existing stationary compact-reservoir
+characteristic closure retains its separate semantics. An absent exterior
+requires a stationary reflecting end. Two absent exteriors execute the original
+closed entropy entry exactly. Raw cells retain the caller's responsibility for
+canonical source-species order and energy references.
+
+For mathematical entropy `eta=-S`, each end supplies
+`-v_b dot Q_b + sign*dt*A*psi_b`, where `Q_b` is the actual inward SSP-integrated
+species/momentum/referenced-energy transfer and
+`psi_b=u_b*sum_i(R*rho_bi/M_i)`. The effort includes momentum, kinetic energy and
+the advective entropy potential. It is cached from ORIGINAL caloric interval
+operations in the same immutable reference basis as the existing endpoint
+entropy reducer; source formation or entropy datums are not subtracted as large
+independent energy/entropy densities.
+
+Before the native accepted-field/clock swap, the actual original-to-final state
+change minus exterior supply must satisfy one absolute entropy allowance.
+Each species separately balances its actual boundary transfer, scaled by
+original inventory plus absolute throughput at both stages and both ends.
+Only the explicitly bounded numerical continuity reference defect is removed.
+The report retains source-state change, signed source entropy supplied at each
+end, admitted generation and the reference defect. Rejected attempts contribute
+no accepted transfer. Final cancellation and all refusal paths retain accepted
+state/time.
+
+Common positive species support, or common absence, is required at every face.
+Unsupported reconstruction, moving/variable-area geometry and unowned open
+ends refuse. This does not establish a general positivity/invariant-domain
+theorem, finite-reservoir feedback, source-composition admission, exact moving
+contact equilibrium or experimental flow validity. Focused regressions include
+independent variable-Cp SSP state/transfer references, moving exterior entropy,
+source-datum invariance, a reflecting end, common absence, closed-path identity
+and atomic cancellation.

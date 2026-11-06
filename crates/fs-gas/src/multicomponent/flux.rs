@@ -5,6 +5,7 @@ use super::{
 
 mod entropy;
 pub use entropy::EntropyFaceReport;
+pub(in crate::multicomponent) use entropy::ExteriorEntropyEffort;
 
 /// Wave-speed receipt accompanying an allocation-free species/energy face flux.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]

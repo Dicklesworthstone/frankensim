@@ -29,7 +29,9 @@ use fs_math::dd::Dd;
 use fs_qty::{Temperature, Time};
 use fs_thermochem::UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K as R;
 
+mod advection;
 mod reservoir;
+pub use advection::ExteriorMixtureEntropyReport;
 pub(in crate::multicomponent) mod reactive;
 mod stabilized;
 use reservoir::ReservoirEntropyAccount;
@@ -314,6 +316,10 @@ pub(in crate::multicomponent) struct EntropyTracker {
     report: MolecularEntropyReport,
     boundary: Option<ReservoirEntropyAccount>,
     completed_reservoir_report: Option<ReservoirMolecularEntropyReport>,
+    // At most one account. Keep cached exterior efforts off the closed-lane
+    // stack and allocate this bounded storage only for open transport.
+    exterior: Vec<advection::ExteriorEntropyAccount>,
+    completed_exterior_report: Option<ExteriorMixtureEntropyReport>,
 }
 
 impl EntropyTracker {
@@ -402,6 +408,8 @@ impl EntropyTracker {
             report: MolecularEntropyReport::default(),
             boundary: None,
             completed_reservoir_report: None,
+            exterior: Vec::new(),
+            completed_exterior_report: None,
         })
     }
 
