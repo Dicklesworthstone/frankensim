@@ -75,6 +75,67 @@ impl RecordedQuadrupoleSpectrum {
         observer_m: [f64; 3],
         bin: usize,
         limits: FullWaveQuadrupoleSourceLimits,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<PreparedFullWaveQuadrupoleObserver, AeroacError> {
+        self.prepare_interface_observer(
+            interface,
+            observer_m,
+            bin,
+            limits,
+            FullWaveQuadrupoleField::Transmitted,
+            cancelled,
+        )
+    }
+
+    /// Prepare the returned field of the original recorded cells. Every source
+    /// and the receiver lie in the incident fluid; a reflected self-field is
+    /// finite. No direct source term or replacement source clock is introduced.
+    pub fn prepare_reflected_observer(
+        &self,
+        interface: PlanarFluidInterface,
+        observer_m: [f64; 3],
+        bin: usize,
+        limits: FullWaveQuadrupoleSourceLimits,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<PreparedFullWaveQuadrupoleObserver, AeroacError> {
+        self.prepare_interface_observer(
+            interface,
+            observer_m,
+            bin,
+            limits,
+            FullWaveQuadrupoleField::Reflected,
+            cancelled,
+        )
+    }
+
+    /// Prepare coherent direct-plus-reflected propagation of the same recorded
+    /// stress factors. All paths and cells interfere within each original Welch
+    /// factor before bin power is formed. Singular total self-fields refuse.
+    pub fn prepare_total_observer(
+        &self,
+        interface: PlanarFluidInterface,
+        observer_m: [f64; 3],
+        bin: usize,
+        limits: FullWaveQuadrupoleSourceLimits,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<PreparedFullWaveQuadrupoleObserver, AeroacError> {
+        self.prepare_interface_observer(
+            interface,
+            observer_m,
+            bin,
+            limits,
+            FullWaveQuadrupoleField::IncidentTotal,
+            cancelled,
+        )
+    }
+
+    fn prepare_interface_observer(
+        &self,
+        interface: PlanarFluidInterface,
+        observer_m: [f64; 3],
+        bin: usize,
+        limits: FullWaveQuadrupoleSourceLimits,
+        field_kind: FullWaveQuadrupoleField,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<PreparedFullWaveQuadrupoleObserver, AeroacError> {
         poll(&mut cancelled)?;
@@ -85,17 +146,19 @@ impl RecordedQuadrupoleSpectrum {
         self.spectrum()
             .peak_bin_hz(bin, frequency_hz)
             .map_err(AeroacError::Welch)?;
-        PreparedFullWaveQuadrupoleObserver::new(
+        PreparedFullWaveQuadrupoleObserver::prepare(
             interface,
             frequency_hz,
             observer_m,
             self.source_positions_m(),
             limits,
+            field_kind,
             &mut cancelled,
         )
     }
 
-    /// Propagate the same recorded factors only through their original geometry.
+    /// Propagate the same recorded factors only through their original geometry,
+    /// for transmitted, reflected-only or coherent incident-total observations.
     /// Same-sized but reordered or relocated cells refuse before any reduction.
     pub fn evaluate_refracted_bin(
         &self,

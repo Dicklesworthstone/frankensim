@@ -2690,3 +2690,39 @@ error norms and domain/work/cancellation refusals. One unit regression checks
 the cubic tail by an independent integration-by-parts recurrence. Pinned Rust
 formatting/parser checks passed; the native regressions were authored but not
 executed in the shared editing environment.
+
+
+## Incident-side stress arrays and their original joint recordings
+
+`PreparedFullWaveQuadrupoleObserver::new_reflected` and `new_total` extend the
+existing array and recorded-spectrum path to the original incident fluid.
+`FullWaveQuadrupoleField` identifies transmitted, returned-only or coherent
+incident-total transfers explicitly. Every cell reuses the native reflected
+quadrupole owner. Preparation caches its complete physical 4-by-6 transfer;
+all original shear, image orientation, near-field and evanescent conventions
+remain with that owner. Warm coherent, independent-cell, low-rank and Welch
+observations use the same allocation-free fixed-order DD reductions.
+
+Direct and returning pressure/velocity interfere before intensity or statistics
+are formed, including within each original recorded factor. The recording adds
+`prepare_reflected_observer` and `prepare_total_observer`; the existing
+`evaluate_refracted_bin` consumes any admitted field kind while retaining
+original source positions/order, clock, six-channel stress normalization and
+one-sided bin factors. No extra density, cell volume, phase delay, FFT or dense
+source covariance is introduced.
+
+Incident-side receivers are validated even for empty arrays. Returned-only
+observations admit finite reflected self-fields; total observations refuse
+coincident prescribed sources. One aggregate quadrature budget covers all cells,
+with original per-source diagnostics and transactional cancellation. For total
+fields, reflected-transfer absolute errors carry through the exact direct sum;
+relative accuracy at interference nulls is not asserted. The existing stationary,
+lossless, infinite-plane, prescribed-source limitations remain in force.
+
+Three focused G1/G3/G4 regression groups specify native returned tensors and
+coherent direct/return intensity, an independent direct-plus-image four-cell
+recording against original two-cell total observation, matched-fluid silence,
+geometry/frequency preservation, finite self-fields, strict fluid sides and
+aggregate-work/cancellation refusals. Pinned Rust formatting/parser and bounded
+source/API review passed; native Rust test execution remains unperformed in the
+shared editing environment.

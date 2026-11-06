@@ -1,17 +1,19 @@
 //! G1/G3/G4: physical volume cells and their original joint recorded spectra.
 
 use fs_aeroac::AeroacError;
+use fs_aeroac::curle3d::quadrupole::PreparedQuadrupoleObserver;
 use fs_aeroac::curle3d::quadrupole::recorded::{
     QuadrupoleRecordingBudget, QuadrupoleSampleClock, QuadrupoleWelchStream,
 };
 use fs_aeroac::curle3d::quadrupole::{QuadrupolePhasor, resolved_reynolds_moment_n_m};
 use fs_aeroac::curle3d::refraction::PlanarFluidInterface;
 use fs_aeroac::curle3d::refraction::full_wave::quadrupole::array::{
-    FullWaveQuadrupoleSourceLimits, PreparedFullWaveQuadrupoleObserver,
+    FullWaveQuadrupoleField, FullWaveQuadrupoleSourceLimits, PreparedFullWaveQuadrupoleObserver,
 };
 use fs_aeroac::curle3d::refraction::full_wave::quadrupole::{
     FullWaveQuadrupoleLimits, PreparedFullWaveQuadrupole,
 };
+use fs_aeroac::curle3d::refraction::full_wave::reflection::PreparedReflectedFullWaveQuadrupole;
 use fs_aeroac::curle3d::{CoherenceBudget, CompactFieldStatistics};
 use fs_fft::welch::{WelchBudget, WelchConfig, WelchDetrend, WelchWindow};
 use fs_material::fluid_acoustics::FluidAcousticState;
@@ -415,4 +417,326 @@ fn aggregate_work_empty_geometry_and_late_cancellation_do_not_publish_partial_ar
         one.evaluate(&[moment(0)]).unwrap().pressure_pa,
         before.pressure_pa
     );
+}
+
+#[test]
+fn incident_arrays_keep_native_tensor_returns_and_direct_reflected_interference() {
+    let receiver = [0.03, 0.02, -0.13];
+    let sources = [moment(0), moment(1)];
+    for c2 in [340.0, 510.0] {
+        let boundary = interface(2.4, c2);
+        let reflected = PreparedFullWaveQuadrupoleObserver::new_reflected(
+            boundary,
+            700.0,
+            receiver,
+            &POSITIONS,
+            limits(),
+            &mut || false,
+        )
+        .unwrap();
+        let total = PreparedFullWaveQuadrupoleObserver::new_total(
+            boundary,
+            700.0,
+            receiver,
+            &POSITIONS,
+            limits(),
+            &mut || false,
+        )
+        .unwrap();
+        assert_eq!(reflected.field_kind(), FullWaveQuadrupoleField::Reflected);
+        assert_eq!(total.field_kind(), FullWaveQuadrupoleField::IncidentTotal);
+        assert_ne!(reflected.scope(), total.scope());
+        let direct = PreparedQuadrupoleObserver::new(
+            boundary.incident_state(),
+            700.0,
+            receiver,
+            &POSITIONS,
+            2,
+        )
+        .unwrap()
+        .evaluate(&sources)
+        .unwrap();
+        let mut expected_return = [C64::ZERO; 4];
+        let mut evaluations = 0;
+        for (&position, &source) in POSITIONS.iter().zip(&sources) {
+            let native = PreparedReflectedFullWaveQuadrupole::new(
+                boundary,
+                700.0,
+                position,
+                receiver,
+                limits().quadrupole,
+                &mut || false,
+            )
+            .unwrap();
+            evaluations += native.diagnostics().evaluations;
+            let field = native.evaluate_reflected(source).unwrap();
+            expected_return[0] = expected_return[0] + field.pressure_pa;
+            for axis in 0..3 {
+                expected_return[axis + 1] =
+                    expected_return[axis + 1] + field.particle_velocity_m_s[axis];
+            }
+        }
+        assert_eq!(reflected.evaluations(), evaluations);
+        assert_eq!(total.evaluations(), evaluations);
+        let returned = reflected.evaluate(&sources).unwrap();
+        let combined = total.evaluate(&sources).unwrap();
+        near(returned.pressure_pa, expected_return[0]);
+        near(
+            combined.pressure_pa,
+            direct.pressure_pa + expected_return[0],
+        );
+        let statistics = total
+            .evaluate_coherence_modes(&[&sources], coherence(), || false)
+            .unwrap();
+        near(
+            C64::from_re(statistics.mean_square_pressure_pa2),
+            C64::from_re(0.5 * combined.pressure_pa.abs().powi(2)),
+        );
+        let mut interference = 0.0_f64;
+        for axis in 0..3 {
+            let velocity = direct.particle_velocity_m_s[axis] + expected_return[axis + 1];
+            near(
+                returned.particle_velocity_m_s[axis],
+                expected_return[axis + 1],
+            );
+            near(combined.particle_velocity_m_s[axis], velocity);
+            let flux = (direct.pressure_pa + expected_return[0]).scale(0.5) * velocity.conj();
+            near(
+                C64::new(
+                    combined.active_intensity_w_m2[axis],
+                    combined.reactive_intensity_w_m2[axis],
+                ),
+                flux,
+            );
+            near(
+                C64::new(
+                    statistics.active_intensity_w_m2[axis],
+                    statistics.reactive_intensity_w_m2[axis],
+                ),
+                flux,
+            );
+            interference = interference.max(
+                (combined.active_intensity_w_m2[axis]
+                    - direct.active_intensity_w_m2[axis]
+                    - returned.active_intensity_w_m2[axis])
+                    .abs(),
+            );
+        }
+        assert!(interference > 1e-12);
+        let line = total.evaluate_harmonic_line(&sources).unwrap();
+        assert_eq!(line.frequency_hz, 700.0);
+        assert_eq!(line.pressure_pa, combined.pressure_pa);
+    }
+}
+
+#[test]
+fn recorded_total_stresses_match_an_independent_direct_and_mirrored_cell_recording() {
+    let receiver = [0.03, 0.02, -0.13];
+    let image_positions = POSITIONS.map(|p| [p[0], p[1], -p[2]]);
+    let all_positions = [
+        POSITIONS[0],
+        POSITIONS[1],
+        image_positions[0],
+        image_positions[1],
+    ];
+    let clock = QuadrupoleSampleClock::new(0.125, 1.0 / 8192.0, 0.0).unwrap();
+    let config = WelchConfig {
+        segment_samples: 64,
+        hop_samples: 32,
+        window: WelchWindow::PeriodicHann,
+        detrend: WelchDetrend::SegmentMean,
+    };
+    let budget = QuadrupoleRecordingBudget {
+        maximum_sources: 4,
+        welch: WelchBudget {
+            maximum_channels: 24,
+            maximum_samples_per_channel: 96,
+            maximum_transforms: 128,
+            maximum_workspace_bytes: 1_000_000,
+        },
+    };
+    let mut original =
+        QuadrupoleWelchStream::new(&POSITIONS, clock, 96, config, budget, || false).unwrap();
+    let mut image_reference =
+        QuadrupoleWelchStream::new(&all_positions, clock, 96, config, budget, || false).unwrap();
+    for sample in 0..96 {
+        let phase = core::f64::consts::TAU * sample as f64 / 64.0;
+        let moments: [[f64; 6]; 2] = core::array::from_fn(|cell| {
+            core::array::from_fn(|entry| {
+                1e-4 * ((entry + 1) as f64 * phase + cell as f64 * 0.23).cos()
+            })
+        });
+        // Independent equal-speed plane image: S M S, S=diag(1,1,-1),
+        // and R=(2.4-1.2)/(2.4+1.2)=1/3. Density and dV are already in M.
+        let images = moments.map(|m| {
+            core::array::from_fn(|entry| m[entry] * if entry >= 4 { -1.0 / 3.0 } else { 1.0 / 3.0 })
+        });
+        let all_moments = [moments[0], moments[1], images[0], images[1]];
+        let time = clock.time_at(sample).unwrap();
+        original
+            .push_sample(&POSITIONS, time, &moments, || false)
+            .unwrap();
+        image_reference
+            .push_sample(&all_positions, time, &all_moments, || false)
+            .unwrap();
+    }
+    let original = original.finish().unwrap();
+    let image_reference = image_reference.finish().unwrap();
+    let boundary = interface(2.4, 340.0);
+    let total = original
+        .prepare_total_observer(boundary, receiver, 3, limits(), || false)
+        .unwrap();
+    assert_eq!(total.field_kind(), FullWaveQuadrupoleField::IncidentTotal);
+    assert_eq!(total.evaluations(), 0);
+    let expected_observer = image_reference
+        .prepare_observer(boundary.incident_state(), receiver, 3, || false)
+        .unwrap();
+    let expected = image_reference
+        .evaluate_bin(&expected_observer, 3, coherence(), || false)
+        .unwrap();
+    let measured = original
+        .evaluate_refracted_bin(&total, 3, coherence(), || false)
+        .unwrap();
+    assert!(expected.mean_square_pressure_pa2 > 0.0);
+    stats_scale(&measured, &expected, 1.0, 1.0);
+    let absent = original
+        .prepare_reflected_observer(interface(1.2, 340.0), receiver, 3, limits(), || false)
+        .unwrap();
+    let silent = original
+        .evaluate_refracted_bin(&absent, 3, coherence(), || false)
+        .unwrap();
+    assert_eq!(silent.mean_square_pressure_pa2, 0.0);
+    assert_eq!(silent.velocity_covariance_m2_s2, [[C64::ZERO; 3]; 3]);
+    let reordered = PreparedFullWaveQuadrupoleObserver::new_total(
+        boundary,
+        total.frequency_hz(),
+        receiver,
+        &[POSITIONS[1], POSITIONS[0]],
+        limits(),
+        &mut || false,
+    )
+    .unwrap();
+    assert!(
+        original
+            .evaluate_refracted_bin(&reordered, 3, coherence(), || false)
+            .is_err()
+    );
+    assert!(
+        original
+            .evaluate_refracted_bin(&total, 4, coherence(), || false)
+            .is_err()
+    );
+    assert!(matches!(
+        original.evaluate_refracted_bin(&total, 3, coherence(), || true),
+        Err(AeroacError::Cancelled { .. })
+    ));
+}
+
+#[test]
+fn incident_arrays_admit_finite_return_self_fields_and_enforce_original_work_and_sides() {
+    let boundary = interface(2.4, 510.0);
+    let receiver = POSITIONS[0];
+    let reflected = PreparedFullWaveQuadrupoleObserver::new_reflected(
+        boundary,
+        700.0,
+        receiver,
+        &[receiver],
+        limits(),
+        &mut || false,
+    )
+    .unwrap();
+    assert!(
+        reflected
+            .evaluate(&[moment(0)])
+            .unwrap()
+            .pressure_pa
+            .abs()
+            .is_finite()
+    );
+    assert!(
+        PreparedFullWaveQuadrupoleObserver::new_total(
+            boundary,
+            700.0,
+            receiver,
+            &[receiver],
+            limits(),
+            &mut || false,
+        )
+        .is_err()
+    );
+    let mut capped = limits();
+    capped.maximum_total_evaluations = 2 * reflected.evaluations() - 1;
+    assert!(
+        PreparedFullWaveQuadrupoleObserver::new_reflected(
+            boundary,
+            700.0,
+            receiver,
+            &[receiver; 2],
+            capped,
+            &mut || false,
+        )
+        .is_err()
+    );
+    for total in [false, true] {
+        let prepare = |observer, positions: &[[f64; 3]]| {
+            if total {
+                PreparedFullWaveQuadrupoleObserver::new_total(
+                    boundary,
+                    700.0,
+                    observer,
+                    positions,
+                    limits(),
+                    &mut || false,
+                )
+            } else {
+                PreparedFullWaveQuadrupoleObserver::new_reflected(
+                    boundary,
+                    700.0,
+                    observer,
+                    positions,
+                    limits(),
+                    &mut || false,
+                )
+            }
+        };
+        let empty = prepare(receiver, &[]).unwrap();
+        assert_eq!(empty.evaluate(&[]).unwrap().pressure_pa, C64::ZERO);
+        assert!(prepare(RECEIVER, &[]).is_err());
+        assert!(prepare([0.0; 3], &[]).is_err());
+        assert!(prepare(receiver, &[RECEIVER]).is_err());
+        assert!(prepare(receiver, &[[f64::NAN, 0.0, -1.0]]).is_err());
+    }
+    let opposite = QuadrupolePhasor {
+        stress_moment_n_m: moment(0).stress_moment_n_m.map(|m| m.scale(-1.0)),
+    };
+    let pair = PreparedFullWaveQuadrupoleObserver::new_reflected(
+        boundary,
+        700.0,
+        receiver,
+        &[receiver; 2],
+        limits(),
+        &mut || false,
+    )
+    .unwrap();
+    assert_eq!(
+        pair.evaluate(&[moment(0), opposite]).unwrap().pressure_pa,
+        C64::ZERO
+    );
+    assert!(
+        pair.evaluate_independent(&[moment(0), opposite], || false)
+            .unwrap()
+            .mean_square_pressure_pa2
+            > 0.0
+    );
+    assert!(matches!(
+        PreparedFullWaveQuadrupoleObserver::new_total(
+            boundary,
+            700.0,
+            receiver,
+            &POSITIONS[1..],
+            limits(),
+            &mut || true,
+        ),
+        Err(AeroacError::Cancelled { .. })
+    ));
 }

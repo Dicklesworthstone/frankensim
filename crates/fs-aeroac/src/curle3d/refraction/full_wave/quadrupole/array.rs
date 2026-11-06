@@ -4,7 +4,7 @@
 //! The native single-source owner prepares each transfer; observations sum
 //! complex fields before forming intensity or statistically specified moments.
 
-use super::super::reflection::{field, line};
+use super::super::reflection::{PreparedReflectedFullWaveQuadrupole, field, line, singular_total};
 use super::super::{PlanarFluidInterface, QuadratureLimits, poll, positive};
 use super::{FullWaveQuadrupoleDiagnostics, FullWaveQuadrupoleLimits, PreparedFullWaveQuadrupole};
 use crate::AeroacError;
@@ -25,6 +25,35 @@ critical and evanescent fields. Source statistics are explicitly supplied; per-s
 quadrature estimates and spectral-tail bounds give no relative guarantee at array \
 nulls. No source-size or SGS validation, absorption, mean flow, finite boundaries, \
 source loading, interval certificate or measured-SPL qualification.";
+
+/// Boundary returns retain every cell's physical tensor and mutual coherence.
+pub const FULL_WAVE_REFLECTED_QUADRUPOLE_ARRAY_SCOPE: &str = "Prescribed stationary \
+symmetric Lighthill stress moments [N m] at their original positions and clock; \
+coherent reflected-only pressure and vector velocity in the original incident \
+fluid at one infinite planar lossless fluid interface. Finite reflected self-fields \
+are admitted. Source statistics are explicitly supplied; per-source quadrature \
+estimates and analytic tails give no relative guarantee at array nulls. No direct \
+self-field, source loading, source-size or SGS validation, absorption, mean flow, \
+finite boundaries, interval certificate or measured-SPL qualification.";
+
+/// Direct and returning fields interfere before any energy or statistics query.
+pub const FULL_WAVE_TOTAL_QUADRUPOLE_ARRAY_SCOPE: &str = "Prescribed stationary \
+symmetric Lighthill stress moments [N m] at their original positions and clock; \
+coherent direct-plus-reflected pressure and vector velocity in the original incident \
+fluid at one infinite planar lossless fluid interface. Source statistics are \
+explicitly supplied. Numerical relative control applies to reflected transfers; \
+their absolute estimates carry to total fields, without a relative guarantee at \
+interference nulls. No singular total self-field, source loading, source-size or \
+SGS validation, absorption, mean flow, finite boundaries, interval certificate or \
+measured-SPL qualification.";
+
+/// Physical field cached at the original receiver, including its direct-path policy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FullWaveQuadrupoleField {
+    Transmitted,
+    Reflected,
+    IncidentTotal,
+}
 
 /// One source-count and quadrature budget for the complete physical array.
 #[derive(Clone, Copy, Debug)]
@@ -53,6 +82,7 @@ pub struct PreparedFullWaveQuadrupoleObserver {
     interface: PlanarFluidInterface,
     frequency_hz: f64,
     observer_m: [f64; 3],
+    field_kind: FullWaveQuadrupoleField,
     transfers: Vec<Transfer>,
     evaluations: usize,
 }
@@ -71,17 +101,88 @@ impl PreparedFullWaveQuadrupoleObserver {
         limits: FullWaveQuadrupoleSourceLimits,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Self, AeroacError> {
+        Self::prepare(
+            interface,
+            frequency_hz,
+            observer_m,
+            source_positions_m,
+            limits,
+            FullWaveQuadrupoleField::Transmitted,
+            cancelled,
+        )
+    }
+
+    /// Observe only the boundary returns in the original incident fluid.
+    /// A cell may coincide with the receiver: its reflected self-field is finite.
+    pub fn new_reflected(
+        interface: PlanarFluidInterface,
+        frequency_hz: f64,
+        observer_m: [f64; 3],
+        source_positions_m: &[[f64; 3]],
+        limits: FullWaveQuadrupoleSourceLimits,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self, AeroacError> {
+        Self::prepare(
+            interface,
+            frequency_hz,
+            observer_m,
+            source_positions_m,
+            limits,
+            FullWaveQuadrupoleField::Reflected,
+            cancelled,
+        )
+    }
+
+    /// Observe coherent direct-plus-reflected fields in the original incident
+    /// fluid. Every source must be distinct from the receiver. The original
+    /// single-source owner adds both paths before this array's coherent or
+    /// statistical reduction; their interference is never discarded.
+    pub fn new_total(
+        interface: PlanarFluidInterface,
+        frequency_hz: f64,
+        observer_m: [f64; 3],
+        source_positions_m: &[[f64; 3]],
+        limits: FullWaveQuadrupoleSourceLimits,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self, AeroacError> {
+        Self::prepare(
+            interface,
+            frequency_hz,
+            observer_m,
+            source_positions_m,
+            limits,
+            FullWaveQuadrupoleField::IncidentTotal,
+            cancelled,
+        )
+    }
+
+    fn prepare(
+        interface: PlanarFluidInterface,
+        frequency_hz: f64,
+        observer_m: [f64; 3],
+        source_positions_m: &[[f64; 3]],
+        limits: FullWaveQuadrupoleSourceLimits,
+        field_kind: FullWaveQuadrupoleField,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self, AeroacError> {
         poll(cancelled)?;
         QuadratureLimits::from(limits.quadrupole).admit()?;
         if source_positions_m.len() > limits.max_sources || limits.maximum_total_evaluations == 0 {
             return Err(invalid("full-wave stress array source or work budget"));
         }
+        let distance = interface.distance(observer_m).to_f64();
+        let clearance = match field_kind {
+            FullWaveQuadrupoleField::Transmitted => distance,
+            FullWaveQuadrupoleField::Reflected | FullWaveQuadrupoleField::IncidentTotal => {
+                -distance
+            }
+        };
         if !positive(core::f64::consts::TAU * frequency_hz)
             || observer_m.iter().any(|v| !v.is_finite())
-            || !positive(interface.distance(observer_m).to_f64())
+            || !positive(clearance)
         {
             return Err(invalid(
-                "full-wave stress array frequency or receiving observer",
+                "full-wave stress array frequency or observer fluid side",
             ));
         }
         let needs_quadrature =
@@ -93,6 +194,9 @@ impl PreparedFullWaveQuadrupoleObserver {
         let mut evaluations = 0usize;
         for &source_m in source_positions_m {
             poll(cancelled)?;
+            if field_kind == FullWaveQuadrupoleField::IncidentTotal && source_m == observer_m {
+                return Err(singular_total());
+            }
             let remaining = limits.maximum_total_evaluations - evaluations;
             if needs_quadrature && remaining == 0 {
                 return Err(invalid(
@@ -104,15 +208,47 @@ impl PreparedFullWaveQuadrupoleObserver {
                 source_limits.maximum_evaluations =
                     source_limits.maximum_evaluations.min(remaining);
             }
-            let prepared = PreparedFullWaveQuadrupole::new(
-                interface,
-                frequency_hz,
-                source_m,
-                observer_m,
-                source_limits,
-                cancelled,
-            )?;
-            let diagnostics = *prepared.diagnostics();
+            let (field, diagnostics) = match field_kind {
+                FullWaveQuadrupoleField::Transmitted => {
+                    let prepared = PreparedFullWaveQuadrupole::new(
+                        interface,
+                        frequency_hz,
+                        source_m,
+                        observer_m,
+                        source_limits,
+                        cancelled,
+                    )?;
+                    (prepared.transfer, *prepared.diagnostics())
+                }
+                FullWaveQuadrupoleField::Reflected | FullWaveQuadrupoleField::IncidentTotal => {
+                    let prepared = PreparedReflectedFullWaveQuadrupole::new(
+                        interface,
+                        frequency_hz,
+                        source_m,
+                        observer_m,
+                        source_limits,
+                        cancelled,
+                    )?;
+                    // Extract the native cached map through six physical unit
+                    // moments. This performs no extra quadrature or derivatives
+                    // and keeps all direct/image tensor conventions with its owner.
+                    let mut field = [[C64::ZERO; 6]; 4];
+                    for column in 0..6 {
+                        let mut unit = QuadrupolePhasor::default();
+                        unit.stress_moment_n_m[column] = C64::ONE;
+                        let line = if field_kind == FullWaveQuadrupoleField::Reflected {
+                            prepared.evaluate_reflected_harmonic_line(unit)?
+                        } else {
+                            prepared.evaluate_total_harmonic_line(unit)?
+                        };
+                        field[0][column] = line.pressure_pa;
+                        for axis in 0..3 {
+                            field[axis + 1][column] = line.particle_velocity_m_s[axis];
+                        }
+                    }
+                    (field, *prepared.diagnostics())
+                }
+            };
             evaluations = evaluations
                 .checked_add(diagnostics.evaluations)
                 .filter(|n| *n <= limits.maximum_total_evaluations)
@@ -121,7 +257,7 @@ impl PreparedFullWaveQuadrupoleObserver {
                 })?;
             transfers.push(Transfer {
                 source_m,
-                field: prepared.transfer,
+                field,
                 diagnostics,
             });
         }
@@ -130,6 +266,7 @@ impl PreparedFullWaveQuadrupoleObserver {
             interface,
             frequency_hz,
             observer_m,
+            field_kind,
             transfers,
             evaluations,
         })
@@ -144,6 +281,9 @@ impl PreparedFullWaveQuadrupoleObserver {
     pub const fn observer_position_m(&self) -> [f64; 3] {
         self.observer_m
     }
+    pub const fn field_kind(&self) -> FullWaveQuadrupoleField {
+        self.field_kind
+    }
     pub fn source_count(&self) -> usize {
         self.transfers.len()
     }
@@ -151,11 +291,18 @@ impl PreparedFullWaveQuadrupoleObserver {
         self.evaluations
     }
     pub const fn scope(&self) -> &'static str {
-        FULL_WAVE_QUADRUPOLE_ARRAY_SCOPE
+        match self.field_kind {
+            FullWaveQuadrupoleField::Transmitted => FULL_WAVE_QUADRUPOLE_ARRAY_SCOPE,
+            FullWaveQuadrupoleField::Reflected => FULL_WAVE_REFLECTED_QUADRUPOLE_ARRAY_SCOPE,
+            FullWaveQuadrupoleField::IncidentTotal => FULL_WAVE_TOTAL_QUADRUPOLE_ARRAY_SCOPE,
+        }
     }
     pub fn source_position_m(&self, index: usize) -> Option<[f64; 3]> {
         self.transfers.get(index).map(|source| source.source_m)
     }
+    /// Transmission diagnostics for transmitted arrays; reflected-transfer
+    /// diagnostics for both incident-side views. The native direct contribution
+    /// adds no quadrature error, but a total-field null has no relative guarantee.
     pub fn source_diagnostics(&self, index: usize) -> Option<&FullWaveQuadrupoleDiagnostics> {
         self.transfers.get(index).map(|source| &source.diagnostics)
     }
