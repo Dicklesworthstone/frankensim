@@ -10,6 +10,7 @@ use fs_sparse::{Coo, Csr};
 
 mod impulse;
 mod motion;
+mod plane;
 pub(crate) mod point;
 pub(crate) use impulse::admit_impulses as admit_reference_impulses;
 pub(crate) use impulse::moments as impulse_moments;
@@ -685,14 +686,29 @@ impl<'a> BackwardEulerInertia<'a> {
     }
 
     pub(crate) fn add_tangent(&self, matrix: &mut Coo, cx: &Cx<'_>) -> Result<(), InertiaError> {
+        self.add_tangent_where(matrix, |_| true, cx)
+    }
+
+    /// Add the original consistent inertia only on admitted rows and columns.
+    /// The caller owns essential-boundary elimination; no temporary matrix or
+    /// duplicate mass assembly is needed.
+    pub(crate) fn add_tangent_where(
+        &self,
+        matrix: &mut Coo,
+        include_dof: impl Fn(usize) -> bool,
+        cx: &Cx<'_>,
+    ) -> Result<(), InertiaError> {
         let coefficient = self.inverse_dt * self.inverse_dt;
         for row in 0..self.mass.matrix.nrows() {
             if row % 256 == 0 {
                 checkpoint(cx)?;
             }
+            if !include_dof(row) {
+                continue;
+            }
             let (columns, values) = self.mass.matrix.row(row);
             for (&column, &value) in columns.iter().zip(values) {
-                if value == 0.0 {
+                if value == 0.0 || !include_dof(column) {
                     continue;
                 }
                 let scaled = finite(coefficient * value)?;
@@ -724,11 +740,30 @@ impl<'a> BackwardEulerInertia<'a> {
         Ok(potential)
     }
 
+    /// Preserve the original three-component result for existing solid owners.
     pub(crate) fn motion(
         &self,
         u: &[f64],
         cx: &Cx<'_>,
     ) -> Result<(Vec<[f64; 3]>, InertialEnergy), InertiaError> {
+        self.check_length(u)?;
+        if !u.len().is_multiple_of(3) {
+            return Err(invalid(
+                "three-component motion requires complete nodal triples",
+            ));
+        }
+        let (velocity, energy) = self.motion_flat(u, cx)?;
+        Ok((velocity.as_chunks::<3>().0.to_vec(), energy))
+    }
+
+    /// Dimension-independent endpoint velocities and the original kinetic-work
+    /// identity. Every mass row remains represented; callers group components
+    /// only after checking their own spatial dimension.
+    pub(crate) fn motion_flat(
+        &self,
+        u: &[f64],
+        cx: &Cx<'_>,
+    ) -> Result<(Vec<f64>, InertialEnergy), InertiaError> {
         self.check_length(u)?;
         let du: Vec<_> = u
             .iter()
@@ -774,7 +809,7 @@ impl<'a> BackwardEulerInertia<'a> {
             ));
         }
         Ok((
-            velocity.as_chunks::<3>().0.to_vec(),
+            velocity,
             InertialEnergy {
                 reference_mass_kg: self.mass.reference_mass_kg,
                 kinetic_before_j,

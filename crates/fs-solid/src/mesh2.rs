@@ -169,6 +169,43 @@ impl Mesh2 {
     }
 }
 
+/// Admit one original P1/Q1 element and return its centered coordinates.
+/// Shared by plane mechanics and consistent reference inertia. Centering and
+/// corner cross-product order match the native plane-stress geometry owner;
+/// positive corners exclude a bilinear quad fold hidden from Gauss points.
+/// Unused coordinates in the fourth triangle slot remain zero.
+pub(crate) fn checked_reference_element(
+    nodes: &[[f64; 2]],
+    conn: &[usize],
+) -> Option<[[f64; 2]; 4]> {
+    let arity = conn.len();
+    if !(arity == 3 || arity == 4)
+        || conn.iter().any(|&node| node >= nodes.len())
+        || (0..arity).any(|a| conn[..a].contains(&conn[a]))
+    {
+        return None;
+    }
+    let mut reference = [[0.0; 2]; 4];
+    for (a, &node) in conn.iter().enumerate() {
+        for i in 0..2 {
+            reference[a][i] = nodes[node][i] - nodes[conn[0]][i];
+        }
+    }
+    if reference.iter().flatten().any(|v| !v.is_finite()) {
+        return None;
+    }
+    for a in 0..arity {
+        let b = (a + 1) % arity;
+        let c = (a + arity - 1) % arity;
+        let edge = |v: usize, i: usize| reference[v][i] - reference[a][i];
+        let cross = edge(b, 0) * edge(c, 1) - edge(b, 1) * edge(c, 0);
+        if !cross.is_finite() || cross <= 0.0 {
+            return None;
+        }
+    }
+    Some(reference)
+}
+
 /// Shape values and reference-gradients for one element at a
 /// quadrature point; returns (N, dN/dx, jacobian-weight).
 #[must_use]
