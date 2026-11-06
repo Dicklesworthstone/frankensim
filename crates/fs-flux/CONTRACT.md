@@ -2122,6 +2122,37 @@ Garcke and Nurnberg (2015), equations 2.12--2.14,
 doi:10.1051/m2an/2014039. The finite-area force and its tangent are derived from
 those energies through the original discrete-gradient surface operator.
 
+`surfactant::diffusion::diffuse_surface_surfactant` evolves these SAME face
+amounts on fixed stage areas and a common isothermal law. Each symmetric edge
+supplies a nonnegative conductance [m²/s] for the concentration-driven molar
+flux. An exact two-face exponential propagator is an area-weighted convex
+averaging map: it preserves concentration bounds and moles and decreases the
+same convex free energy. Palindromic edge sweeps provide second-order temporal
+splitting; a maximum substep and explicit face/edge/work limits bound accuracy
+and cost. Propagators are prepared once, with no allocation or exponential in
+a sweep. There is no diffusion CFL restriction or global solve. Actual amount
+defects and free-energy increments are checked before publication, and signed
+admitted roundoff is reported without hiding it behind clipping.
+
+`advance_surfactant_diffusive` composes half diffusion on the initial areas,
+the original mechanical trial, and half diffusion on its solved final areas.
+It publishes trajectory and inventory together only after all stages pass.
+The complete account is `delta K + delta E_surface + surface_viscous_loss +
+diffusion_free_energy_loss = external_work`. The trial reuses the original
+mechanical candidate and never clones accumulated trajectory history. The
+returned report separates substage accounts from complete initial/final
+storage, amount defect and energy residual. The graph and its conductances
+remain held physical inputs throughout the macro step; a changing transport
+metric requires its actual owner. No arbitrary-mesh two-point consistency or
+bulk-species exchange is inferred. Spatial and temporal refinement remain
+necessary. Surfactant inertia is neglected; reference nodal masses remain fixed while
+the transported coating contributes interfacial free energy and stress.
+Six direct transport tests cover the exact unequal-area mode,
+stiff Langmuir bounds, an independent three-face spectral convergence oracle,
+stationary/vacuum limits, invariance and rollback. Native composed regressions
+exercise moving/viscous surface storage, diffusion loss, momentum, total
+amount, empty-graph trajectory recovery and late cancellation of both states.
+
 
 ## Damped Newton BDF1 for stiff rheology
 

@@ -18,6 +18,7 @@
 //! fixed topology. No bending, bulk viscosity, contact, remeshing, surface entropy or
 //! inferred thermal heat is supplied. Time/mesh refinement is still required.
 
+use super::surfactant::diffusion::SurfaceDiffusionError;
 use super::surfactant::{
     SurfactantError, SurfactantField, assemble_surfactant_step, triangle_surfactant_step,
     triangle_surfactant_step_tangent,
@@ -32,6 +33,9 @@ use fs_time::galpha::{
     SecondOrderOperatorWeights, SecondOrderProblem, SecondOrderState, TimeSolveError,
 };
 use std::cell::{Cell, RefCell};
+
+/// Atomic moving-surface composition of surfactant diffusion and mechanics.
+pub mod surfactant_transport;
 
 /// Nonlinear controls and independently checked physical acceptance bounds.
 #[derive(Clone, Copy, Debug)]
@@ -83,6 +87,10 @@ pub enum SurfaceDynamicsError {
     Surface(CapillarySurfaceError),
     /// Invalid insoluble-surfactant law, amount or thermodynamic state.
     Surfactant(SurfactantError),
+    /// Conservative surface-species diffusion refusal.
+    Diffusion(SurfaceDiffusionError),
+    /// A bounded trial could not reserve its staged arrays.
+    Allocation,
     /// Original structural/Newton--Krylov refusal.
     Time(TimeSolveError),
     /// Cancellation at a bounded callback or face boundary.
@@ -111,6 +119,11 @@ impl From<CapillarySurfaceError> for SurfaceDynamicsError {
 impl From<SurfactantError> for SurfaceDynamicsError {
     fn from(value: SurfactantError) -> Self {
         Self::Surfactant(value)
+    }
+}
+impl From<SurfaceDiffusionError> for SurfaceDynamicsError {
+    fn from(value: SurfaceDiffusionError) -> Self {
+        Self::Diffusion(value)
     }
 }
 
@@ -387,8 +400,32 @@ impl<'a> CapillarySurfaceDynamics<'a> {
         external_forces_n: &[[f64; 3]],
         dt_s: f64,
         controls: SurfaceDynamicsControls,
-        mut cancelled: impl FnMut() -> bool,
+        cancelled: impl FnMut() -> bool,
     ) -> Result<SurfaceDynamicsReport, SurfaceDynamicsError> {
+        let (candidate, report) = self.surface_trial(
+            state,
+            surface_law,
+            viscosity,
+            external_forces_n,
+            dt_s,
+            controls,
+            cancelled,
+        )?;
+        publish_state(state, candidate);
+        Ok(report)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn surface_trial(
+        &self,
+        state: &SecondOrderState,
+        surface_law: SurfaceForces<'_>,
+        viscosity: SurfaceViscosityField<'_>,
+        external_forces_n: &[[f64; 3]],
+        dt_s: f64,
+        controls: SurfaceDynamicsControls,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<(SecondOrderState, SurfaceDynamicsReport), SurfaceDynamicsError> {
         if cancelled() {
             return Err(SurfaceDynamicsError::Cancelled);
         }
@@ -548,14 +585,17 @@ impl<'a> CapillarySurfaceDynamics<'a> {
         if adapter.cancel() {
             return Err(SurfaceDynamicsError::Cancelled);
         }
-        state.q = candidate.q;
-        state.v = candidate.v;
-        state.a = candidate.a;
-        state.t = candidate.t;
-        state.steps = candidate.steps;
-        state.history.extend(candidate.history);
-        Ok(report)
+        Ok((candidate, report))
     }
+}
+
+fn publish_state(state: &mut SecondOrderState, candidate: SecondOrderState) {
+    state.q = candidate.q;
+    state.v = candidate.v;
+    state.a = candidate.a;
+    state.t = candidate.t;
+    state.steps = candidate.steps;
+    state.history.extend(candidate.history);
 }
 
 fn vectors(v: &[[f64; 3]], n: usize) -> bool {

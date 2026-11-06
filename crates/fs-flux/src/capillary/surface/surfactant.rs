@@ -24,6 +24,9 @@ use super::{
 };
 use fs_math::det;
 
+/// Conservative, dissipative exchange on an explicitly authored surface graph.
+pub mod diffusion;
+
 /// Explicit isothermal, nonionic insoluble-monolayer equation of state.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum SurfactantLaw {

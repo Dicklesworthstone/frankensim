@@ -235,6 +235,225 @@ fn nonuniform_conserved_coating_preserves_momentum_and_closes_viscous_surface_en
 }
 
 #[test]
+fn moving_coating_diffusion_closes_the_complete_energy_and_amount_account() {
+    use super::super::surfactant::{
+        SurfactantLaw,
+        diffusion::{SurfaceDiffusionControls, SurfaceDiffusionEdge},
+    };
+    use super::surfactant_transport::SurfaceSurfactantTransport;
+    let (q, faces, masses, v) = tetrahedron();
+    let model = CapillarySurfaceDynamics::try_new(&masses, &faces, 4, 4).unwrap();
+    let law = SurfactantLaw::Langmuir {
+        clean_tension_n_m: 0.3,
+        thermal_energy_j_mol: 0.5,
+        saturation_concentration_mol_m2: 0.8,
+    };
+    let mut amounts = [0.02, 0.07, 0.03, 0.05];
+    let initial_amount = amounts.iter().sum::<f64>();
+    let coating = SurfactantField::Uniform {
+        law,
+        amounts_mol: &amounts,
+    };
+    let viscosity = SurfaceViscosityField::Uniform(SurfaceViscosity {
+        shear_n_s_m: 0.1,
+        dilatational_n_s_m: 0.15,
+    });
+    let external = [[0.0; 3]; 4];
+    let mut state = model
+        .initial_state_surfactant(0.0, &q, &v, coating, viscosity, &external)
+        .unwrap();
+    let initial_energy = kinetic(&masses, &state.v).unwrap()
+        + assemble_surfactant_step(&q, &q, &faces, coating)
+            .unwrap()
+            .energy
+            .energy_before_j;
+    let (linear, angular) = momentum(&state, &masses);
+    let edges = [
+        SurfaceDiffusionEdge {
+            faces: [0, 1],
+            conductance_m2_s: 0.4,
+        },
+        SurfaceDiffusionEdge {
+            faces: [1, 2],
+            conductance_m2_s: 0.2,
+        },
+        SurfaceDiffusionEdge {
+            faces: [2, 3],
+            conductance_m2_s: 0.3,
+        },
+    ];
+    let transport = SurfaceSurfactantTransport {
+        law,
+        edges: &edges,
+        controls: SurfaceDiffusionControls {
+            maximum_step_s: 0.002,
+            maximum_substeps: 8,
+            maximum_faces: 4,
+            maximum_edges: 3,
+            amount_tolerance_mol: 1e-13,
+            energy_increase_tolerance_j: 1e-13,
+        },
+    };
+    let mut losses = 0.0;
+    for _ in 0..12 {
+        let report = model
+            .advance_surfactant_diffusive(
+                &mut state,
+                &mut amounts,
+                transport,
+                viscosity,
+                &external,
+                0.005,
+                controls(),
+                || false,
+            )
+            .unwrap();
+        assert!(report.diffusion_free_energy_dissipation_j > 0.0);
+        assert!(report.mechanics.surface_viscous_dissipation_j > 0.0);
+        assert_eq!(report.mechanics.surface.coefficient_supply_j, 0.0);
+        losses += report.diffusion_free_energy_dissipation_j
+            + report.mechanics.surface_viscous_dissipation_j;
+        close(
+            report.mechanics.kinetic_after_j + report.surface_free_energy_after_j + losses,
+            initial_energy,
+            8e-11,
+        );
+        close(amounts.iter().sum(), initial_amount, 1e-13);
+        close(report.energy_residual_j, 0.0, 1e-11);
+        let positions = positions(&state);
+        let stored = assemble_surfactant_step(
+            &positions,
+            &positions,
+            &faces,
+            SurfactantField::Uniform {
+                law,
+                amounts_mol: &amounts,
+            },
+        )
+        .unwrap();
+        close(
+            stored.energy.energy_after_j,
+            report.surface_free_energy_after_j,
+            1e-13,
+        );
+        let (p, l) = momentum(&state, &masses);
+        for d in 0..3 {
+            close(p[d], linear[d], 3e-11);
+            close(l[d], angular[d], 3e-11);
+        }
+    }
+
+    // Observe the final callback of a successful deterministic trial, then
+    // cancel that same trial immediately before it would publish either state.
+    let original = state.clone();
+    let original_amounts = amounts;
+    let mut calls = 0;
+    model
+        .advance_surfactant_diffusive(
+            &mut state,
+            &mut amounts,
+            transport,
+            viscosity,
+            &external,
+            0.005,
+            controls(),
+            || {
+                calls += 1;
+                false
+            },
+        )
+        .unwrap();
+    let mut retry = original.clone();
+    let mut retry_amounts = original_amounts;
+    let mut current = 0;
+    let result = model.advance_surfactant_diffusive(
+        &mut retry,
+        &mut retry_amounts,
+        transport,
+        viscosity,
+        &external,
+        0.005,
+        controls(),
+        || {
+            current += 1;
+            current == calls
+        },
+    );
+    assert!(matches!(result, Err(SurfaceDynamicsError::Cancelled)));
+    assert_eq!(retry_amounts, original_amounts);
+    assert_eq!(retry.q, original.q);
+    assert_eq!(retry.v, original.v);
+    assert_eq!(retry.a, original.a);
+    assert_eq!(retry.t, original.t);
+    assert_eq!(retry.steps, original.steps);
+    assert_eq!(retry.history.len(), original.history.len());
+}
+
+#[test]
+fn empty_diffusion_graph_recovers_the_original_coated_mechanical_trajectory() {
+    use super::super::surfactant::{SurfactantLaw, diffusion::SurfaceDiffusionControls};
+    use super::surfactant_transport::SurfaceSurfactantTransport;
+    let (q, faces, masses, v) = tetrahedron();
+    let model = CapillarySurfaceDynamics::try_new(&masses, &faces, 4, 4).unwrap();
+    let law = SurfactantLaw::IdealDilute {
+        clean_tension_n_m: 0.3,
+        thermal_energy_j_mol: 0.5,
+        reference_concentration_mol_m2: 0.1,
+    };
+    let mut amounts = [0.02, 0.07, 0.03, 0.05];
+    let inviscid = SurfaceViscosityField::Uniform(SurfaceViscosity::ZERO);
+    let external = [[0.0; 3]; 4];
+    let coating = SurfactantField::Uniform {
+        law,
+        amounts_mol: &amounts,
+    };
+    let mut reference = model
+        .initial_state_surfactant(0.0, &q, &v, coating, inviscid, &external)
+        .unwrap();
+    let mut composed = reference.clone();
+    model
+        .advance_surfactant(
+            &mut reference,
+            coating,
+            inviscid,
+            &external,
+            0.005,
+            controls(),
+            || false,
+        )
+        .unwrap();
+    let report = model
+        .advance_surfactant_diffusive(
+            &mut composed,
+            &mut amounts,
+            SurfaceSurfactantTransport {
+                law,
+                edges: &[],
+                controls: SurfaceDiffusionControls {
+                    maximum_step_s: 0.002,
+                    maximum_substeps: 8,
+                    maximum_faces: 4,
+                    maximum_edges: 0,
+                    amount_tolerance_mol: 0.0,
+                    energy_increase_tolerance_j: 0.0,
+                },
+            },
+            inviscid,
+            &external,
+            0.005,
+            controls(),
+            || false,
+        )
+        .unwrap();
+    assert_eq!(reference.q, composed.q);
+    assert_eq!(reference.v, composed.v);
+    assert_eq!(reference.a, composed.a);
+    assert_eq!(amounts, [0.02, 0.07, 0.03, 0.05]);
+    assert_eq!(report.diffusion_free_energy_dissipation_j, 0.0);
+    assert_eq!(report.amount_defect_mol, 0.0);
+}
+
+#[test]
 fn interfacial_dilatational_viscosity_matches_the_analytical_damped_breathing_mode() {
     let q = [
         [1.0, 0.0, 0.0],
