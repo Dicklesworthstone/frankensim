@@ -17,14 +17,14 @@
 //! on a smooth fixed active set. Pinning/saturation crossings need timestep
 //! refinement, not an exact-trajectory claim. Thermal coupling is first order.
 
-/// Distinct core and winding heat on the original finite enthalpy timeline.
-pub mod thermal;
 /// Multiple terminal windings sharing one original core history and loss account.
 pub mod shared;
+/// Distinct core and winding heat on the original finite enthalpy timeline.
+pub mod thermal;
 
 use super::{
     MaterialCircuit, MaterialCircuitError, MaterialCircuitSolve, MaterialCircuitStep,
-    MaterialResistor, account_step, bind, extended,
+    MaterialResistor, account_step_with_storage_change, bind, extended,
 };
 use fs_material::field_storage::{
     FieldStorageError,
@@ -89,6 +89,11 @@ pub enum HystereticCircuitError {
         reference_linkage_change_wb: f64,
         drive_rate_start_mid_end_a_s: [f64; 3],
     },
+    /// Split at the electric charge/displacement turning point and retry.
+    ElectricReversal {
+        charge_change_c: f64,
+        current_start_mid_end_a: [f64; 3],
+    },
     Balance(&'static str),
     Cancelled,
 }
@@ -122,17 +127,19 @@ impl From<NewtonError> for HystereticCircuitError {
     }
 }
 type Result<T> = core::result::Result<T, HystereticCircuitError>;
-fn invalid(s: &'static str) -> HystereticCircuitError {
+pub(super) fn invalid(s: &'static str) -> HystereticCircuitError {
     HystereticCircuitError::Invalid(s)
 }
-fn finite(v: f64) -> Result<f64> {
+pub(super) fn finite(v: f64) -> Result<f64> {
     if v.is_finite() {
         Ok(v)
     } else {
         Err(invalid("unrepresentable hysteretic circuit arithmetic"))
     }
 }
-fn numerical(e: FiniteDifferenceError<HystereticCircuitError>) -> HystereticCircuitError {
+pub(super) fn numerical(
+    e: FiniteDifferenceError<HystereticCircuitError>,
+) -> HystereticCircuitError {
     match e {
         FiniteDifferenceError::Source(e) => e,
         FiniteDifferenceError::Invalid(s) => invalid(s),
@@ -458,19 +465,21 @@ impl HystereticCircuit {
             });
         }
         let circuit_after = finite(dae.system.hamiltonian(&native.x))?;
-        let (resistor_heat, contacts, graph_heat, graph_residual) = account_step(
-            &graph,
-            &resistors,
-            &[],
-            &dae.node_potential_index,
-            &x0,
-            &native,
-            circuit_before,
-            circuit_after,
-            dt,
-            controls.circuit,
-            &mut || (*cancel.borrow_mut())(),
-        )?;
+        let (resistor_heat, contacts, graph_heat, graph_residual) =
+            account_step_with_storage_change(
+                &graph,
+                &resistors,
+                &[],
+                &dae.node_potential_index,
+                &x0,
+                &native,
+                circuit_before,
+                circuit_after,
+                native.delta_h,
+                dt,
+                controls.circuit,
+                &mut || (*cancel.borrow_mut())(),
+            )?;
         let supplied = finite(
             dt * external_inputs
                 .iter()

@@ -158,6 +158,76 @@ fn linear_shared_limit_matches_full_native_mutual_storage_with_unrelated_rlc() {
     }
 }
 
+#[test]
+fn unrelated_storage_bias_preserves_shared_core_native_transfer() {
+    let make = |biased: bool| {
+        let core = shared_core(2.0, false);
+        let mut graph = graph(false);
+        let mut sources = resistors();
+        graph.node_count += 1;
+        graph.branches.extend([
+            (1, 5, Branch::Resistor { ohms: 4.0 }),
+            (5, 0, Branch::Capacitor { farads: 0.3 }),
+        ]);
+        sources.push(resistor(6, &material(4.0, 0.0).0));
+        let mut start = initial(&core);
+        start.charges_c = vec![0.0];
+        if biased {
+            graph.node_count += 1;
+            graph
+                .branches
+                .push((6, 0, Branch::Capacitor { farads: 1e16 }));
+            start.charges_c.push(1e16);
+        }
+        (
+            SharedHystereticCircuit::new(graph, vec![2, 5], core, sources.clone(), start).unwrap(),
+            sources,
+        )
+    };
+    let (reference, sources) = make(false);
+    let expected = reference
+        .step_candidate(0.1, sources, &PORTS, controls(), || false)
+        .unwrap();
+    let (biased, sources) = make(true);
+    let actual = biased
+        .step_candidate(0.1, sources, &PORTS, controls(), || false)
+        .unwrap();
+    let record = actual.step();
+    assert_eq!(
+        record.circuit.stored_before_j,
+        record.circuit.stored_after_j
+    );
+    assert!(record.circuit.native.delta_h > 1e-6);
+    assert!(record.magnetic.core.core_heat_j > 0.0);
+    near(
+        record.circuit.native.delta_h,
+        expected.step().circuit.native.delta_h,
+        1e-9,
+    );
+    near(
+        record.stored_change_j,
+        expected.step().stored_change_j,
+        1e-9,
+    );
+    near(record.heat_j, expected.step().heat_j, 1e-9);
+    near(
+        record.supplied_work_j,
+        expected.step().supplied_work_j,
+        1e-9,
+    );
+    near(record.energy_residual_j, 0.0, 1e-9);
+    for (&actual, &expected) in actual
+        .circuit()
+        .magnetic_state()
+        .flux_linkages_wb()
+        .iter()
+        .zip(expected.circuit().magnetic_state().flux_linkages_wb())
+    {
+        near(actual, expected, 1e-9);
+    }
+    assert_eq!(actual.circuit().native_circuit().charges_c()[1], 1e16);
+}
+
 // Independent first-monotone-segment play formula and analytic elimination of
 // each native RL branch. Only a scalar bracketed root remains in this oracle.
 fn first_step(pinning: f64, dt: f64) -> ([f64; 2], [f64; 2], f64, f64, f64) {

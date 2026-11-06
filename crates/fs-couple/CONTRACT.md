@@ -1334,3 +1334,28 @@ validation. Focused synthetic regressions compare insulating minor-loop
 heating and conducting temperature feedback with independent scalar play and
 P1 balances, distinguish numerical loss from heat, and exercise missing
 receivers, source-temperature support, volume, cancellation and work budgets.
+
+### Retained dielectric switching in native circuits
+
+The separate opt-in `experimental-dielectric-hysteresis` feature exposes
+`material_circuit::dielectric_hysteretic::DielectricHystereticCircuit`.
+One original capacitor is replaced by a private native voltage port. Every
+charge trial retains the same accepted source-bound polarization memory;
+the exact monotone-segment mean voltage closes `delta q = dt I` through the
+original Kirchhoff DAE. Native R/L/C coordinates, source ports and material
+resistor bindings retain their owners. Private work cancels internally, while
+resistor heat and dielectric switching heat remain distinct and enter the
+combined energy audit once. Failed trials never publish charge or polarization.
+
+Three instantaneous-current probes refuse detected charge reversals. They do
+not certify that an arbitrarily large interval contains no hidden turn; the
+caller supplies waveform/reversal cuts and refines threshold crossings. The
+zero-branch limit is the native midpoint circuit; fixed active-set RC charging
+has an independent analytic refinement regression. Geometry and coefficients
+remain fixed. Reported switching heat is not automatically deposited into a
+thermal cell, and this owner supplies no leakage, electromechanical strain,
+spatial electric solution or empirical calibration. Six native integration
+regressions cover linear RC/RLC limits, exact loop work, charging refinement,
+atomic refusal, detected LC turning points and small transfers beneath large
+unrelated energy biases. Both native and combined audits use the original
+solver's stable energy increment.

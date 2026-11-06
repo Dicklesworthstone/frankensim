@@ -24,6 +24,9 @@ pub mod magnetostrictive;
 pub mod hysteretic;
 /// Source-backed dielectric polarization memory on the native circuit solver.
 pub mod dielectric;
+/// Opt-in retained dielectric switching through native charge/current ports.
+#[cfg(feature = "experimental-dielectric-hysteresis")]
+pub mod dielectric_hysteretic;
 /// Retained nonlinear capacitor laws and explicit work on their reconfiguration.
 pub mod capacitance;
 /// Source-bound saturating core/gap/leakage laws on the native circuit.

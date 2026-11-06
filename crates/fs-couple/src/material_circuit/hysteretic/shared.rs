@@ -26,7 +26,8 @@ pub mod thermal;
 use super::{HystereticCircuitError, HystereticCircuitSolve, finite, invalid, numerical};
 use crate::material_circuit::{
     MAX_MATERIAL_CIRCUIT_BRANCHES, MAX_MATERIAL_CIRCUIT_NODES, MAX_PORTS, MAX_TRANSFORMERS,
-    MaterialCircuit, MaterialCircuitStep, MaterialResistor, account_step, bind, extended,
+    MaterialCircuit, MaterialCircuitStep, MaterialResistor, account_step_with_storage_change, bind,
+    extended,
 };
 use fs_matdb::QueryPoint;
 use fs_material::field_storage::hysteresis::shared::{
@@ -516,7 +517,7 @@ impl NativeWindingPorts {
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<(MaterialCircuit, MaterialCircuitStep)> {
         let stored_after_j = finite(self.dae.system.hamiltonian(&native.x))?;
-        let (resistors, contacts, heat_j, energy_residual_j) = account_step(
+        let (resistors, contacts, heat_j, energy_residual_j) = account_step_with_storage_change(
             &self.graph,
             &self.resistors,
             &[],
@@ -525,6 +526,7 @@ impl NativeWindingPorts {
             &native,
             self.stored_before_j,
             stored_after_j,
+            native.delta_h,
             dt,
             controls,
             cancelled,

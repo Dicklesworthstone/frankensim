@@ -91,6 +91,8 @@ fs-evidence = { path = "../fs-evidence" }
 workspace = true
 
 [features]
+# Retained dielectric switching on the original Kirchhoff circuit owner.
+experimental-dielectric-hysteresis = ["fs-material/experimental-dielectric-hysteresis"]
 # Physical eddy-current and retained pinning losses share finite heat cells.
 hysteretic-eddy-heating = ["fs-em/magnetic-hysteresis"]
 # Original spatial magnetic memory and physical losses on the finite heat timeline.

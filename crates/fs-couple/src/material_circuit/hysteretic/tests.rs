@@ -252,6 +252,66 @@ fn zero_pinning_linear_core_recovers_original_native_rlc_storage_and_work() {
 }
 
 #[test]
+fn unrelated_storage_bias_preserves_single_core_native_transfer() {
+    let (card, _) = material(0.8, 0.0);
+    let sources = vec![resistor(1, &card)];
+    let make = |biased: bool| {
+        let core = core(true);
+        let mut graph = rl_graph();
+        graph
+            .branches
+            .push((2, 0, Branch::Capacitor { farads: 0.2 }));
+        let mut charges = vec![0.0];
+        if biased {
+            graph.node_count += 1;
+            graph
+                .branches
+                .push((3, 0, Branch::Capacitor { farads: 1e16 }));
+            charges.push(1e16);
+        }
+        let start = initial(&core, 0.0, vec![0.0], charges);
+        HystereticCircuit::new(graph, 2, core, sources.clone(), start).unwrap()
+    };
+    let expected = make(false)
+        .step_candidate(0.005, sources.clone(), &[1.0], controls(), || false)
+        .unwrap();
+    let actual = make(true)
+        .step_candidate(0.005, sources, &[1.0], controls(), || false)
+        .unwrap();
+    let record = actual.step();
+    // The isolated 1-V capacitor's unchanged 5e15 J hides the real transfer
+    // in rounded endpoint totals. Only the native increment retains it.
+    assert_eq!(
+        record.circuit.stored_before_j,
+        record.circuit.stored_after_j
+    );
+    assert!(record.circuit.native.delta_h > 1e-6);
+    near(
+        record.circuit.native.delta_h,
+        expected.step().circuit.native.delta_h,
+        1e-10,
+    );
+    near(
+        record.stored_change_j,
+        expected.step().stored_change_j,
+        1e-10,
+    );
+    near(record.heat_j, expected.step().heat_j, 1e-10);
+    near(
+        record.supplied_work_j,
+        expected.step().supplied_work_j,
+        1e-10,
+    );
+    near(record.energy_residual_j, 0.0, 1e-9);
+    near(
+        actual.circuit().flux_linkage_wb(),
+        expected.circuit().flux_linkage_wb(),
+        1e-10,
+    );
+    assert_eq!(actual.circuit().native_circuit().charges_c()[1], 1e16);
+}
+
+#[test]
 fn voltage_driven_major_loop_returns_memory_and_deposits_analytic_pinning_area() {
     let core = core(true);
     let start = initial(&core, 10.0, vec![0.0], vec![]);
