@@ -26,6 +26,8 @@ pub mod plane_stress;
 /// Prescribed stress-free reference deformation and original-volume pullbacks.
 pub mod reference;
 mod spectral;
+/// Exact natural-strain thermodynamics and finite isentropic acoustic tangents.
+pub mod thermoelastic;
 
 /// Maximum number of independently supplied Ogden terms.
 pub const MAX_OGDEN_TERMS: usize = 8;

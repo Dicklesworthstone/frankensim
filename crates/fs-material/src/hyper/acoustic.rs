@@ -15,11 +15,13 @@
 //! Positive modes also carry their spatial energy velocity, evaluated from
 //! that SAME Hessian and deformation. This is the group velocity on a smooth
 //! separated branch; a repeated root retains its chosen polarization's flux.
-//! This uses the unconstrained three-dimensional compressible law, not a
+//! The held-material entry uses the unconstrained three-dimensional compressible law, not a
 //! plane-stress/incompressibility projection or a Maxwell algorithmic tangent.
 //! It is a frozen constitutive prediction, not attenuation,
 //! dispersion, a propagation solver, a reduced membrane wave law or measured
 //! adiabatic/ultrasonic validation of isothermal material parameters.
+//! The finite thermoelastic owner can prepare a locally isentropic Hessian
+//! through the same checked snapshot and directional eigensolver.
 
 use super::cards::HyperelasticMaterial;
 use super::{Hyperelastic, det3};
@@ -112,13 +114,45 @@ impl HyperelasticAcousticState {
         deformation_gradient: &[f64; 9],
         reference_density_kg_m3: f64,
     ) -> Result<Self, MaterialError> {
+        let kinematics = Self::admit_kinematics(deformation_gradient, reference_density_kg_m3)?;
+        let law = material.hyperelastic();
+        Hyperelastic::new(law.model.clone(), law.stretch_limit)?;
+        let tangent = material.consistent_tangent(deformation_gradient)?;
+        Self::from_admitted_tangent(
+            deformation_gradient,
+            reference_density_kg_m3,
+            kinematics,
+            tangent,
+        )
+    }
+
+    /// Internal entry for a physical tangent prepared by the finite
+    /// thermoelastic owner. It shares all geometric, density and arithmetic
+    /// admission with the original material route, without re-evaluating the
+    /// held-temperature tangent or adding a second constitutive adapter.
+    pub(crate) fn from_tangent(
+        deformation_gradient: &[f64; 9],
+        reference_density_kg_m3: f64,
+        tangent: [[f64; 9]; 9],
+    ) -> Result<Self, MaterialError> {
+        let kinematics = Self::admit_kinematics(deformation_gradient, reference_density_kg_m3)?;
+        Self::from_admitted_tangent(
+            deformation_gradient,
+            reference_density_kg_m3,
+            kinematics,
+            tangent,
+        )
+    }
+
+    fn admit_kinematics(
+        deformation_gradient: &[f64; 9],
+        reference_density_kg_m3: f64,
+    ) -> Result<(f64, f64), MaterialError> {
         if !(reference_density_kg_m3.is_finite() && reference_density_kg_m3 > 0.0) {
             return Err(MaterialError::Parameters {
                 what: "hyperelastic acoustic reference density must be finite and positive".into(),
             });
         }
-        let law = material.hyperelastic();
-        Hyperelastic::new(law.model.clone(), law.stretch_limit)?;
         if deformation_gradient.iter().any(|value| !value.is_finite()) {
             return Err(state_error("total deformation gradient must be finite"));
         }
@@ -132,7 +166,15 @@ impl HyperelasticAcousticState {
         if !(current_density_kg_m3.is_finite() && current_density_kg_m3 > 0.0) {
             return Err(state_error("current density is unrepresentable"));
         }
-        let tangent = material.consistent_tangent(deformation_gradient)?;
+        Ok((jacobian, current_density_kg_m3))
+    }
+
+    fn from_admitted_tangent(
+        deformation_gradient: &[f64; 9],
+        reference_density_kg_m3: f64,
+        (jacobian, current_density_kg_m3): (f64, f64),
+        tangent: [[f64; 9]; 9],
+    ) -> Result<Self, MaterialError> {
         if tangent.iter().flatten().any(|value| !value.is_finite()) {
             return Err(state_error(
                 "material consistent tangent is unrepresentable",
@@ -150,6 +192,15 @@ impl HyperelasticAcousticState {
     #[must_use]
     pub const fn deformation_gradient(&self) -> &[f64; 9] {
         &self.deformation_gradient
+    }
+
+    /// Physical derivative with respect to TOTAL F in the original material
+    /// reference [Pa]. Its thermal constraint is that of the preparing owner:
+    /// held temperature for `from_material`, fixed local total entropy for the
+    /// finite thermoelastic entry. This is not a time-step algorithmic tangent.
+    #[must_use]
+    pub const fn tangent_pa(&self) -> &[[f64; 9]; 9] {
+        &self.tangent
     }
 
     /// Conserved mass per reference volume, in kg/m³.
