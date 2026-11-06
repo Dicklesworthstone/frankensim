@@ -58,6 +58,13 @@ pub mod radioactive {
         PreparedDecayEmission, UnreportedDecayEmission,
     };
     pub use fs_nuclear::endf::decay::spectra::DecayRadiation;
+    pub use fs_nuclear::radiation::decay::{
+        BurnupDecayRadiation, DecayRadiationClosure, DecayRadiationStep, PreparedDecayRadiation,
+    };
+    pub use fs_nuclear::radiation::grouped::{
+        GroupedRadiationResponse, GroupedRadiationResponseLimits,
+        GroupedRadiationSourceResponse, RadiationGroupResponse,
+    };
     pub use fs_nuclear::decay::{
         DecayBranch, DecayBudget, DecayError, DecayInventory, DecayModel,
         DecayNuclide, DecayStep, PreparedDecay,
@@ -74,6 +81,7 @@ pub mod radioactive {
     pub use fs_nuclear::thermal::{
         CaptureActivationCellSource, CaptureActivationHeating,
         DecayProductionCellSource, DecayProductionHeating,
+        DecayRadiationEmitter, DecayRadiationHeatSource,
         FissionHeatingAudit, FissionThermalError, NuclearHeating, RadiationReceiver,
     };
 }

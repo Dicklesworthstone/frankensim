@@ -2404,3 +2404,46 @@ routing, explicit spectral reconciliation, missing-energy refusal, reordered
 burnup with competing capture, bounded work and cancellation, and stochastic
 trajectory/replay/count consistency. Spectral reconciliation records data
 agreement; it does not propagate evaluated covariance or establish data accuracy.
+
+## Composition-dependent radioactive heating
+
+`NuclearHeating::with_grouped_decay_radiation` attaches original evaluated
+partitions and a `GroupedRadiationResponse` to the shared thermal transaction.
+Source identities, original model identity, radiation kind and group edges must
+agree exactly. Receiver binding retains original material, caloric law, mass and
+geometry. Direct deposition and received radiation are combined once per cell
+before conversion to thermal power. Receiver-only cells and self-return are
+supported.
+
+The source owner evolves each trial once. The projection reads its integrated
+event report, and the existing thermal owner commits inventories, heat, clocks
+and audits together. Failure or cancellation publishes none of those trial
+histories. Immutable bindings are shared across trial clones. An aggregate or
+grouped response can replace the previous response only at an accepted boundary.
+
+Adapters cover deterministic decay and continuous production, capture
+activation, burnup and production, migrating burnup compartments, diffusion
+burnup, fusion-neutron activation, compatible kinetic source wrappers, and
+stochastic decay, production, compartment transport and supplied transport. They reuse the respective original report and state
+owners rather than replaying inventory evolution. Prompt capture/fission or
+other outward energy without the selected radioactive response remains escape
+and is identified by `radiation_ungrouped_j`. This is a subset of escaped energy.
+`radiation_reconciled_spectral_j` records the evaluated mean/spectrum adjustment
+separately from heat and arithmetic error. Actual group/account closure defects
+remain subject to the existing advance-wide numerical energy budget.
+
+Eight integration regressions cover independent parent/daughter calorimetry,
+whole versus split histories, continuously born daughters, exact rollback and
+cancellation, binding refusal, stochastic replay and thermal credit, competing
+capture with separate prompt escape, and moving-parent/daughter residence with
+nonlocal heating. Together with the pure partition and grouped-response tests,
+all 438 tests passed in a native build of the actual nuclear library with
+`thermal` enabled and the original applicable dependency implementations.
+The pinned constellation siblings are absent, so this is not a completed
+workspace Cargo, distributed-runner or full dependency-suite gate.
+
+Energy-group response fractions remain independently supplied absorbed-energy
+responses for their declared geometry, material and within-group spectrum.
+Composition can change the mixture across those groups; changing material or
+geometry still requires an applicable response. This does not infer attenuation,
+solve radiation transport, compute dose or automatically update response data.

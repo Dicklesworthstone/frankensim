@@ -7,7 +7,7 @@
 //! No thermal emissivity is substituted for ionizing-radiation absorption.
 
 use super::*;
-use crate::radiation::{RadiationError, RadiationResponse};
+use crate::radiation::{RadiationDeposition, RadiationError, RadiationResponse};
 
 /// Expected original material at a physical radiation receiver. A receiver can
 /// also be a nuclear source; local deposition and radiation return add once.
@@ -63,27 +63,8 @@ impl<S: NuclearHeatSource> NuclearHeating<S> {
                 "radiation response must cover the original source cohort exactly",
             ));
         }
-        if receivers.len() > thermal.cells().len() {
-            return Err(FissionThermalError::Invalid(
-                "radiation receivers need distinct active cells",
-            ));
-        }
-        let mut bindings = BTreeMap::new();
-        for receiver in receivers {
-            let binding = ThermalBinding::new(thermal, receiver.cell_id, receiver.material_id)?;
-            thermal.temperature_k(receiver.cell_id)?;
-            if bindings.insert(receiver.cell_id, binding).is_some() {
-                return Err(FissionThermalError::Invalid("duplicate radiation receiver"));
-            }
-        }
-        if !response
-            .receiver_ids()
-            .eq(bindings.keys().map(|cell| cell.0))
-        {
-            return Err(FissionThermalError::Invalid(
-                "radiation receivers must cover every response destination exactly",
-            ));
-        }
+        let bindings = bind_receivers(thermal, receivers, response.receiver_ids(), &mut || Ok(()))?;
+        self.spectral_radiation = None;
         self.radiation = Some(Arc::new(BoundRadiation {
             response,
             receivers: bindings,
@@ -132,14 +113,50 @@ impl BoundRadiation {
         if let Some(error) = checkpoint_error {
             return Err(error.into());
         }
-        let deposition = deposition?;
-        for (id, energy_j) in deposition.receiver_energy_j {
-            checkpoint()?;
-            heat_j.entry(CellId(id)).or_default().add(energy_j)?;
-        }
-        account.radiation_deposited.add(deposition.deposited_j)?;
-        account.radiation_escaped.add(deposition.escaped_j)?;
-        account.radiation_roundoff.add(deposition.roundoff_j)?;
-        Ok(())
+        credit_deposition(deposition?, heat_j, account, checkpoint)
     }
+}
+
+pub(super) fn bind_receivers(
+    thermal: &DepositionSimulation<'_>,
+    receivers: Vec<RadiationReceiver>,
+    expected: impl Iterator<Item = u64>,
+    checkpoint: &mut dyn FnMut() -> Result<(), FissionThermalError>,
+) -> Result<BTreeMap<CellId, ThermalBinding>, FissionThermalError> {
+    if receivers.len() > thermal.cells().len() {
+        return Err(FissionThermalError::Invalid(
+            "radiation receivers need distinct active cells",
+        ));
+    }
+    let mut bindings = BTreeMap::new();
+    for receiver in receivers {
+        checkpoint()?;
+        let binding = ThermalBinding::new(thermal, receiver.cell_id, receiver.material_id)?;
+        thermal.temperature_k(receiver.cell_id)?;
+        if bindings.insert(receiver.cell_id, binding).is_some() {
+            return Err(FissionThermalError::Invalid("duplicate radiation receiver"));
+        }
+    }
+    if !expected.eq(bindings.keys().map(|cell| cell.0)) {
+        return Err(FissionThermalError::Invalid(
+            "radiation receivers must cover every response destination exactly",
+        ));
+    }
+    Ok(bindings)
+}
+
+pub(super) fn credit_deposition(
+    deposition: RadiationDeposition,
+    heat_j: &mut BTreeMap<CellId, Sum>,
+    account: &mut Account,
+    checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+) -> Result<(), FissionThermalError> {
+    for (id, energy_j) in deposition.receiver_energy_j {
+        checkpoint()?;
+        heat_j.entry(CellId(id)).or_default().add(energy_j)?;
+    }
+    account.radiation_deposited.add(deposition.deposited_j)?;
+    account.radiation_escaped.add(deposition.escaped_j)?;
+    account.radiation_roundoff.add(deposition.roundoff_j)?;
+    Ok(())
 }

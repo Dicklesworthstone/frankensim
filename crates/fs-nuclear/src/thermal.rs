@@ -34,6 +34,9 @@ pub use source::{FluxDrivenHeatSource, NuclearHeatSource};
 mod radiation;
 pub use radiation::RadiationReceiver;
 use radiation::BoundRadiation;
+mod spectral;
+pub use spectral::{DecayRadiationEmitter, DecayRadiationHeatSource};
+use spectral::BoundSpectralRadiation;
 mod irradiation;
 pub use irradiation::{
     IrradiationCellSource, IrradiationCellStep, IrradiationHeating, IrradiationHeatingBudget,
@@ -206,6 +209,12 @@ pub struct FissionHeatingAudit {
     pub radiation_escaped_j: f64,
     /// Noncancelling response coefficient, product and reduction defects [J].
     pub radiation_roundoff_j: f64,
+    /// Outward energy without a radioactive group response, such as prompt
+    /// capture/fission radiation. Included in radiation_escaped_j, not extra loss.
+    pub radiation_ungrouped_j: f64,
+    /// Absolute evaluated spectral/mean-energy reconciliation over actual decays.
+    /// This data-consistency observation is not generated heat or numerical error.
+    pub radiation_reconciled_spectral_j: f64,
     /// Actual `average_source_w * accepted_dt_s` delivered to the thermal owner.
     pub thermal_credit_j: f64,
     /// Absolute cell-energy aggregation and actual heat-credit defects [J].
@@ -249,6 +258,8 @@ pub enum FissionThermalError {
     FusionActivation(crate::fusion_neutrons::activation::FusionNeutronActivationError),
     /// Original radiation response, coverage, work or energy-account refusal.
     Radiation(RadiationError),
+    /// Evaluated decay spectrum, model binding or energy-partition refusal.
+    EvaluatedDecay(crate::endf::EndfError),
     /// Malformed schedule, duplicate owner or inconsistent hook sequence.
     Invalid(&'static str),
     /// A source names a cell that has not been activated.
@@ -309,6 +320,11 @@ impl From<RadiationError> for FissionThermalError {
         Self::Radiation(error)
     }
 }
+impl From<crate::endf::EndfError> for FissionThermalError {
+    fn from(error: crate::endf::EndfError) -> Self {
+        Self::EvaluatedDecay(error)
+    }
+}
 impl From<DecayError> for FissionThermalError {
     fn from(error: DecayError) -> Self {
         Self::Decay(error)
@@ -363,6 +379,7 @@ impl std::error::Error for FissionThermalError {
             Self::NeutronKinetic(error) => Some(error),
             Self::FusionActivation(error) => Some(error),
             Self::Radiation(error) => Some(error),
+            Self::EvaluatedDecay(error) => Some(error),
             _ => None,
         }
     }
@@ -461,6 +478,7 @@ pub struct NuclearHeating<S: NuclearHeatSource> {
     time_s: f64,
     sources: BTreeMap<CellId, BoundSource<S>>,
     radiation: Option<Arc<BoundRadiation>>,
+    spectral_radiation: Option<Arc<BoundSpectralRadiation<S>>>,
     budget: S::Budget,
     pending: Option<PendingStep<S>>,
     account: Account,
@@ -512,6 +530,7 @@ impl<S: NuclearHeatSource> NuclearHeating<S> {
             time_s: thermal.time_s(),
             sources: bound,
             radiation: None,
+            spectral_radiation: None,
             budget,
             pending: None,
             account: Account::default(),
@@ -631,6 +650,9 @@ impl<S: NuclearHeatSource> NuclearHeating<S> {
         if let Some(radiation) = &self.radiation {
             radiation.validate(thermal, checkpoint)?;
         }
+        if let Some(radiation) = &self.spectral_radiation {
+            radiation.validate(thermal, checkpoint)?;
+        }
         Ok(())
     }
 }
@@ -730,6 +752,11 @@ impl<S: NuclearHeatSource> DepositionObserver for NuclearHeating<S> {
         } else {
             Vec::new()
         };
+        let mut emitted_groups = if self.spectral_radiation.is_some() {
+            Vec::with_capacity(self.sources.len())
+        } else {
+            Vec::new()
+        };
         let mut account = self.account.clone();
         for ((&id, bound), (state, report)) in self.sources.iter().zip(trials) {
             checkpoint()?;
@@ -740,7 +767,11 @@ impl<S: NuclearHeatSource> DepositionObserver for NuclearHeating<S> {
             }
             let released = S::released(&report);
             account.record::<S>(&report)?;
-            if self.radiation.is_some() {
+            if let Some(radiation) = &self.spectral_radiation {
+                heat_j.entry(id).or_default().add(released.deposited_j)?;
+                let groups = radiation.project(id, &state, &report, &mut account, checkpoint)?;
+                emitted_groups.push((id.0, groups));
+            } else if self.radiation.is_some() {
                 heat_j.entry(id).or_default().add(released.deposited_j)?;
                 emitted_radiation.push((id.0, released.radiation_j));
             } else {
@@ -754,6 +785,15 @@ impl<S: NuclearHeatSource> DepositionObserver for NuclearHeating<S> {
         if let Some(radiation) = &self.radiation {
             radiation.deposit(
                 &emitted_radiation,
+                S::energy_tolerance_j(self.budget),
+                &mut heat_j,
+                &mut account,
+                checkpoint,
+            )?;
+        }
+        if let Some(radiation) = &self.spectral_radiation {
+            radiation.deposit(
+                &emitted_groups,
                 S::energy_tolerance_j(self.budget),
                 &mut heat_j,
                 &mut account,
@@ -871,6 +911,8 @@ struct Account {
     radiation_deposited: Sum,
     radiation_escaped: Sum,
     radiation_roundoff: Sum,
+    radiation_ungrouped: Sum,
+    radiation_reconciled: Sum,
     credit: Sum,
     coupling_roundoff: Sum,
     nuclear_defect: Sum,
@@ -939,6 +981,8 @@ impl Account {
             radiation_deposited_j: self.radiation_deposited.value()?,
             radiation_escaped_j: self.radiation_escaped.value()?,
             radiation_roundoff_j: radiation_roundoff.nonnegative_upper_bound()?,
+            radiation_ungrouped_j: self.radiation_ungrouped.value()?,
+            radiation_reconciled_spectral_j: self.radiation_reconciled.value()?,
             thermal_credit_j: self.credit.value()?,
             coupling_roundoff_j: coupling_roundoff.nonnegative_upper_bound()?,
             nuclear_energy_defect_j: self.nuclear_defect.value()?,
