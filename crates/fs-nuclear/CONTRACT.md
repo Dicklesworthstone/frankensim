@@ -1076,3 +1076,37 @@ nuclear run with thermal enabled passed all 160 tests, including the eight new
 physical production tests. The separate numerical decay/reaction gate passed
 44 tests. These manufactured checks do not substitute for the unavailable full
 workspace Cargo gate or empirical evaluated-data validation.
+
+## Spectrum-weighted processed-data collapse
+
+`endf::spectrum::FluxSpectrum` admits an explicit identified incident flux
+density in neutrons/m²/s/J on its own energy knots, with histogram or linear
+interpolation and paired discontinuities. `collapse_with_spectrum` returns
+both the original `GroupFlux` and microscopic coefficients satisfying
+`sigma_g = integral_g sigma(E) phi(E) dE / integral_g phi(E) dE`.
+This preserves the source reaction integral for the supplied within-group
+spectrum, following the scalar-flux weighting in
+[OpenMC's MGXS introduction](https://docs.openmc.org/en/v0.12.1/examples/mgxs-part-i.html).
+It does not infer a spectrum or a scattering/fission-emission distribution.
+
+Integration traverses both knot meshes, retains thresholds/discontinuities,
+and integrates the product of each admitted pair of segment laws analytically.
+The four linear-basis product weights are nonnegative. Exponents remain separate
+through compensated accumulation, so a representable narrow-interval integral
+need not overflow merely because its raw endpoint product does. Final fluxes,
+integrals, coefficients and coefficient/flux products undergo representability
+checks. Every group requires positive integrated flux and complete source-domain
+coverage; no coefficient is invented for a group with zero incident flux.
+
+The spectrum is integrated on its own mesh once. Temperature-table assembly
+uses that same group flux and the same supplied spectrum at every processed
+temperature, even when the cross-section meshes differ. All rows share explicit
+work limits and cancellation. The original flat-in-energy operation remains
+available for callers that explicitly choose that assumption.
+
+Seven focused regressions passed in the actual-owner nuclear build: analytic
+nonuniform weighting, mixed/mismatched meshes and jumps, flux-scale invariance,
+representable extreme-scale products, domain/zero-flux/work/cancellation
+refusals, and processed ENDF temperature rows driving original burnup counts,
+products and prompt heat. These are manufactured verification fixtures; the
+supplied spectrum and processed evaluation remain caller-owned physical data.

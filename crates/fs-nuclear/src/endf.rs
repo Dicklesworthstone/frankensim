@@ -17,6 +17,9 @@
 
 use std::sync::Arc;
 
+/// Explicit incident spectra and reaction-rate-preserving group collapse.
+pub mod spectrum;
+
 use crate::cross_sections::{
     CrossSectionData, CrossSectionLimits, CrossSectionTable, NeutronReaction,
 };
