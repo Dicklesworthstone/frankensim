@@ -14331,3 +14331,25 @@ execution remain outstanding because DSR/RCH are unavailable and the shared
 filesystem is full. These are reaction ports for fixed, fully flooded voxel
 geometry, not complete MR69 moving-boundary coupling, partial-wetting geometry,
 body inertia, finite-speed piston work or a fluid kinetic/thermal energy certificate.
+
+## Isothermal initialization of material thermal flow
+
+Both material thermal-slab constructors also admit equal positive wall
+temperatures. They initialize every thermal population and both walls at
+`theta = 0`, retaining `T = T_initial + theta * 1 K` and
+`g_beta = g beta (1 K) dt^2/dx`. The one-kelvin coordinate scale supplies only
+unit conversion; it imposes no wall contrast or initial thermal load. Nonzero
+initial contrasts retain their original signed normalization. Source-owned
+constructors normalize the actual material reference temperature in this same
+coordinate.
+
+The retained original wall coordinates travel with all material snapshots and
+remain the admission authority for source, wall, local-transport, tensor and
+electrothermal steps. Conservative material refresh checks physical cell and
+wall temperatures without treating the coordinate scale as a boundary
+difference. Existing heat-source, wall-flux and film conversions therefore
+remain valid from an isothermal start. Nusselt remains singular at zero wall
+contrast; Rayleigh initially vanishes for equal prescribed temperatures. The
+`material_buoyancy` regressions cover isothermal 2-D/3-D startup, adiabatic source
+energy and physical temperature rise, and tight-budget conservative material
+refresh.

@@ -65,12 +65,8 @@ impl<F: FluidTransport + ?Sized> MaterialScaling<'_, F> {
             ));
         }
 
-        let bottom_temperature_k = slab.top_temperature_k + slab.temperature_difference_k;
-        let (_, gbeta) = self.slab_boundary(
-            bottom_temperature_k,
-            slab.top_temperature_k,
-            gravity_m_s2,
-            expansion_per_k,
+        let gbeta = self.slab_buoyancy(
+            gravity_m_s2, expansion_per_k, slab.temperature_difference_k,
         )?;
 
         slab.lattice.grid.tau.fill(self.flow.tau);
@@ -121,9 +117,8 @@ impl<F: FluidTransport + ?Sized> MaterialScaling<'_, F> {
                 "runtime material rebind refuses independently modified relaxation fields",
             ));
         }
-        let bottom_temperature_k = slab.top_temperature_k + slab.temperature_difference_k;
-        let (_, gbeta) = self.slab_boundary(
-            bottom_temperature_k, slab.top_temperature_k, gravity_m_s2, expansion_per_k,
+        let gbeta = self.slab_buoyancy(
+            gravity_m_s2, expansion_per_k, slab.temperature_difference_k,
         )?;
         let tau_g = self.thermal_relaxation_time3()?;
         slab.lattice.grid.tau.fill(self.flow.tau);

@@ -258,7 +258,8 @@ fn advance<S: MovingSlab<D, Q>, F: FluidTransport, I, E, const D: usize, const Q
                 old, power, force, depth_m, input.limits.thermal, &applied.bulk, gate,
             )?;
             Ok((MaterialSlab { lattice, top_temperature_k: old.top_temperature_k,
-                temperature_difference_k: old.temperature_difference_k, force_units: old.force_units }, heat))
+                temperature_difference_k: old.temperature_difference_k,
+                wall_coordinates: old.wall_coordinates, force_units: old.force_units }, heat))
         },
         |used, checked| {
             let t = transport_residual(&used.bulk, &checked.bulk, gate)?;

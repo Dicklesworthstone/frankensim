@@ -172,14 +172,17 @@ impl<F: FluidTransport + ?Sized> MaterialScaling<'_, F> {
 
     /// Build the actual D2Q9/D2Q5 conducting slab and its temperature mapping.
     ///
-    /// The existing solver uses theta=(T-T_top)/(T_bottom-T_top), with walls
-    /// at 1 and 0. Hence its force coefficient is g beta DeltaT dt²/dx. Signed
-    /// DeltaT and expansion are retained: heating from above or a negative
-    /// expansion coefficient reverses buoyancy instead of taking an absolute.
+    /// For distinct wall temperatures, theta=(T-T_top)/(T_bottom-T_top),
+    /// with walls at 1 and 0. Equal wall temperatures instead initialize the
+    /// entire fluid at theta=0 using a one-kelvin coordinate scale, so wall or
+    /// volumetric heating can initiate convection from an isothermal state.
+    /// In both cases the force coefficient is g beta scale dt²/dx. Signed
+    /// nonzero contrasts and expansion are retained: heating from above or a
+    /// negative expansion coefficient reverses buoyancy.
     /// The caller must establish the small-density-variation Boussinesq regime.
     ///
     /// # Errors
-    /// Refuses invalid wall temperatures, zero contrast, gravity, expansion,
+    /// Refuses invalid wall temperatures, gravity, expansion,
     /// numerical conversions and allocation requests before creating the grid.
     pub fn thermal_slab(&self, input: MaterialThermalSlab) -> Result<MaterialSlab, MaterialLbmError> {
         if input.ny < 2 || !input.gravity_m_s2.is_finite() || input.gravity_m_s2 < 0.0
@@ -193,8 +196,16 @@ impl<F: FluidTransport + ?Sized> MaterialScaling<'_, F> {
         )?;
         let rows = input.ny.checked_add(2).ok_or(MaterialLbmError::Invalid("slab row count overflows"))?;
         admit_cells(input.nx, rows, input.max_cells)?;
+        let mut lattice = ThermalLbm::slab(input.nx, input.ny, self.flow.tau, self.thermal_relaxation_time, gbeta);
+        if input.bottom_temperature_k == input.top_temperature_k {
+            lattice.gpop.fill([0.0; 5]);
+            lattice.t_bottom = 0.0;
+            lattice.t_top = 0.0;
+            lattice.t_ref = 0.0;
+        }
         Ok(MaterialSlab {
-            lattice: ThermalLbm::slab(input.nx, input.ny, self.flow.tau, self.thermal_relaxation_time, gbeta),
+            lattice,
+            wall_coordinates: if input.bottom_temperature_k == input.top_temperature_k { (0.0, 0.0) } else { (1.0, 0.0) },
             top_temperature_k: input.top_temperature_k,
             temperature_difference_k: difference,
             force_units: forcing::ForceUnits::from_scale(self),
@@ -216,11 +227,26 @@ impl<F: FluidTransport + ?Sized> MaterialScaling<'_, F> {
             return Err(MaterialLbmError::Invalid("slab needs finite expansion and nonnegative finite gravity"));
         }
         let difference = bottom_temperature_k - top_temperature_k;
-        if !difference.is_finite() || difference == 0.0 {
-            return Err(MaterialLbmError::Invalid("normalized slab requires a finite nonzero wall temperature contrast"));
+        // Temperature coordinates must remain nonsingular even before a heater
+        // establishes a gradient. This scale is a unit conversion, not an
+        // imposed one-kelvin wall difference or a physical buoyancy load.
+        let scale = if difference == 0.0 { 1.0 } else { difference };
+        let gbeta = self.slab_buoyancy(gravity_m_s2, expansion_per_k, scale)?;
+        Ok((scale, gbeta))
+    }
+
+    fn slab_buoyancy(
+        &self,
+        gravity_m_s2: f64,
+        expansion_per_k: f64,
+        temperature_scale_k: f64,
+    ) -> Result<f64, MaterialLbmError> {
+        if !gravity_m_s2.is_finite() || gravity_m_s2 < 0.0 || !expansion_per_k.is_finite()
+            || !temperature_scale_k.is_finite() || temperature_scale_k == 0.0
+        {
+            return Err(MaterialLbmError::Invalid("slab needs finite expansion, nonnegative finite gravity and a nonzero temperature scale"));
         }
-        let gbeta = self.acceleration_lattice(gravity_m_s2 * expansion_per_k * difference)?;
-        Ok((difference, gbeta))
+        self.acceleration_lattice(gravity_m_s2 * expansion_per_k * temperature_scale_k)
     }
 
     /// Numerical reference-one density to physical density [kg/m³].
@@ -320,6 +346,7 @@ pub struct MaterialSlab<L = ThermalLbm> {
     pub lattice: L,
     top_temperature_k: f64,
     temperature_difference_k: f64,
+    wall_coordinates: (f64, f64),
     force_units: forcing::ForceUnits,
 }
 impl<L> MaterialSlab<L> {
@@ -330,7 +357,9 @@ impl<L> MaterialSlab<L> {
         positive(self.top_temperature_k + normalized *self.temperature_difference_k,
             "physical temperature must remain finite and positive")
     }
-    /// Physical temperature scale used by both wall mapping and buoyancy.
+    /// Physical temperature coordinate scale used by wall mapping and buoyancy.
+    /// This is the signed initial wall contrast when nonzero, or one kelvin
+    /// for an initially isothermal slab; it is not the evolving wall contrast.
     #[must_use]
     pub const fn temperature_difference_k(&self) -> f64 { self.temperature_difference_k }
 }

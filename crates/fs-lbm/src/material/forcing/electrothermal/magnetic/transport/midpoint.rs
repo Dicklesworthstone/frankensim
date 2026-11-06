@@ -165,6 +165,7 @@ fn advance<S: MovingSlab<D, Q>, F: FluidTransport, const D: usize, const Q: usiz
             Ok((MaterialSlab {
                 lattice, top_temperature_k: old.top_temperature_k,
                 temperature_difference_k: old.temperature_difference_k,
+                wall_coordinates: old.wall_coordinates,
                 force_units: old.force_units,
             }, heat))
         },

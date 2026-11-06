@@ -141,6 +141,7 @@ fn advance<S: MovingSlab<D, Q>, F: FluidTransport, const D: usize, const Q: usiz
     let next = MaterialSlab {
         lattice: trial, top_temperature_k: slab.top_temperature_k,
         temperature_difference_k: slab.temperature_difference_k,
+        wall_coordinates: slab.wall_coordinates,
         force_units: slab.force_units,
     };
     velocities::<S, D, Q>(&next, cells, plane, gate)?;

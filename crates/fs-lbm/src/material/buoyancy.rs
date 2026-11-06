@@ -45,7 +45,13 @@ impl<F: ThermalFluidTransport + ?Sized> MaterialScaling<'_, F> {
         max_cells: usize,
     ) -> Result<MaterialSlab, MaterialLbmError> {
         let (thermal, beta) = self.admit_material_buoyancy(boundary)?;
-        let reference = normalized_reference(boundary, thermal.temperature_k())?;
+        let (temperature_scale, _) = self.slab_boundary(
+            boundary.bottom_temperature_k, boundary.top_temperature_k,
+            boundary.gravity_m_s2, beta,
+        )?;
+        let reference = normalized_reference(
+            boundary.top_temperature_k, temperature_scale, thermal.temperature_k(),
+        )?;
         let mut slab = self.thermal_slab(MaterialThermalSlab {
             nx: fluid_cells[0],
             ny: fluid_cells[1],
@@ -69,7 +75,13 @@ impl<F: ThermalFluidTransport + ?Sized> MaterialScaling<'_, F> {
         max_cells: usize,
     ) -> Result<MaterialSlab3, MaterialLbmError> {
         let (thermal, beta) = self.admit_material_buoyancy(boundary)?;
-        let reference = normalized_reference(boundary, thermal.temperature_k())?;
+        let (temperature_scale, _) = self.slab_boundary(
+            boundary.bottom_temperature_k, boundary.top_temperature_k,
+            boundary.gravity_m_s2, beta,
+        )?;
+        let reference = normalized_reference(
+            boundary.top_temperature_k, temperature_scale, thermal.temperature_k(),
+        )?;
         let mut slab = self.thermal_slab3(MaterialThermalSlab3 {
             nx: fluid_cells[0],
             ny: fluid_cells[1],
@@ -98,13 +110,15 @@ impl<F: ThermalFluidTransport + ?Sized> MaterialScaling<'_, F> {
         max_relative_density_change: f64,
     ) -> Result<(), MaterialLbmError> {
         let boundary = MaterialBuoyancyBoundary {
-            bottom_temperature_k: slab.top_temperature_k + slab.temperature_difference_k,
-            top_temperature_k: slab.top_temperature_k,
+            bottom_temperature_k: slab.temperature_si(slab.lattice.t_bottom)?,
+            top_temperature_k: slab.temperature_si(slab.lattice.t_top)?,
             gravity_m_s2,
             max_relative_density_change,
         };
         let (thermal, beta) = self.admit_material_buoyancy(boundary)?;
-        let reference = normalized_reference(boundary, thermal.temperature_k())?;
+        let reference = normalized_reference(
+            slab.top_temperature_k, slab.temperature_difference_k, thermal.temperature_k(),
+        )?;
         for population in &slab.lattice.gpop {
             admit_temperature(
                 slab.temperature_si(population.iter().sum())?,
@@ -127,13 +141,15 @@ impl<F: ThermalFluidTransport + ?Sized> MaterialScaling<'_, F> {
         max_relative_density_change: f64,
     ) -> Result<(), MaterialLbmError> {
         let boundary = MaterialBuoyancyBoundary {
-            bottom_temperature_k: slab.top_temperature_k + slab.temperature_difference_k,
-            top_temperature_k: slab.top_temperature_k,
+            bottom_temperature_k: slab.temperature_si(slab.lattice.t_bottom)?,
+            top_temperature_k: slab.temperature_si(slab.lattice.t_top)?,
             gravity_m_s2,
             max_relative_density_change,
         };
         let (thermal, beta) = self.admit_material_buoyancy(boundary)?;
-        let reference = normalized_reference(boundary, thermal.temperature_k())?;
+        let reference = normalized_reference(
+            slab.top_temperature_k, slab.temperature_difference_k, thermal.temperature_k(),
+        )?;
         for population in &slab.lattice.gpop {
             admit_temperature(
                 slab.temperature_si(population.iter().sum())?,
@@ -185,11 +201,11 @@ impl<F: ThermalFluidTransport + ?Sized> MaterialScaling<'_, F> {
 }
 
 fn normalized_reference(
-    boundary: MaterialBuoyancyBoundary,
+    top_temperature_k: f64,
+    difference: f64,
     temperature_k: f64,
 ) -> Result<f64, MaterialLbmError> {
-    let difference = boundary.bottom_temperature_k - boundary.top_temperature_k;
-    let reference = (temperature_k - boundary.top_temperature_k) / difference;
+    let reference = (temperature_k - top_temperature_k) / difference;
     if !difference.is_finite() || difference == 0.0 || !reference.is_finite() {
         return Err(MaterialLbmError::Invalid(
             "material reference temperature must be representable in the slab's temperature mapping",

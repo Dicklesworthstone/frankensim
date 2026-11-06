@@ -441,3 +441,81 @@ fn unknown_expansion_stale_transport_and_out_of_regime_states_refuse() {
             .is_err()
     );
 }
+
+#[test]
+fn initially_isothermal_slabs_heat_without_an_artificial_wall_gradient() {
+    use fs_lbm::material::MaterialThermalWall;
+    use fs_lbm::thermal::sources::HeatSourceLimits;
+
+    let source = liquid(Some(0.001), 0.6, 0.001);
+    let scale = plan_scaling_from_material(&source, 0.0001, 0.001, 0.001).unwrap();
+    let boundary = MaterialBuoyancyBoundary {
+        bottom_temperature_k: 300.0,
+        top_temperature_k: 300.0,
+        ..boundary()
+    };
+    let mut two = scale.thermal_slab_from_material([4, 8], boundary, 40).unwrap();
+    let mut three = scale.thermal_slab3_from_material([4, 2, 8], boundary, 80).unwrap();
+    assert_eq!(two.temperature_difference_k(), 1.0);
+    assert_eq!(three.temperature_difference_k(), 1.0);
+    assert_eq!(two.lattice.t_ref, 0.0);
+    assert_eq!(three.lattice.t_ref, 0.0);
+    close(two.lattice.gbeta, 9.81 * 0.001 * 0.001_f64.powi(2) / 0.0001);
+    assert_eq!(two.lattice.gbeta, three.lattice.gbeta);
+    for _ in 0..8 { two.lattice.step(); three.lattice.step(); }
+    assert!(two.lattice.gpop.iter().flatten().all(|&g| g == 0.0));
+    assert!(three.lattice.gpop.iter().flatten().all(|&g| g == 0.0));
+    close(two.temperature_si(two.lattice.temperature(1, 4)).unwrap(), 300.0);
+    close(three.temperature_si(three.lattice.temperature(1, 1, 4)).unwrap(), 300.0);
+
+    // A source starts from a genuinely uniform state. Insulation makes the
+    // exact first-law answer delta T = q dt/(rho Cp) in both dimensions.
+    two.set_thermal_walls([MaterialThermalWall::Adiabatic; 2]).unwrap();
+    three.set_thermal_walls([MaterialThermalWall::Adiabatic; 2]).unwrap();
+    let limits = HeatSourceLimits {
+        max_cells: 80,
+        temperature_range_k: [299.0, 301.0],
+        balance_tolerance_j: 1e-12,
+    };
+    let mut power2 = vec![0.0; 40];
+    power2[4..36].fill(4e7);
+    let mut power3 = vec![0.0; 80];
+    power3[8..72].fill(4e7);
+    let balance2 = two.step_with_power_density(&power2, &[[0.0; 2]; 40], 0.0001, limits).unwrap();
+    let balance3 = three.step_with_power_density(&power3, &[[0.0; 3]; 80], limits).unwrap();
+    close(two.temperature_si(two.lattice.temperature(1, 4)).unwrap(), 300.01);
+    close(three.temperature_si(three.lattice.temperature(1, 1, 4)).unwrap(), 300.01);
+    close(balance2.source_j, 32.0 * 4e7 * 0.001 * 0.0001_f64.powi(3));
+    close(balance3.source_j, 2.0 * balance2.source_j);
+    close(balance2.stored_change_j, balance2.source_j);
+    close(balance3.stored_change_j, balance3.source_j);
+    assert_eq!(balance2.bottom_wall_j, 0.0);
+    assert_eq!(balance2.top_wall_j, 0.0);
+    assert_eq!(balance3.bottom_wall_j, 0.0);
+    assert_eq!(balance3.top_wall_j, 0.0);
+}
+
+#[test]
+fn isothermal_rebind_checks_physical_temperatures_and_preserves_the_coordinate() {
+    let source = liquid(Some(0.001), 0.6, 0.001);
+    let next_source = liquid(Some(0.002), 0.8, 0.002);
+    let previous = plan_scaling_from_material(&source, 0.0001, 0.001, 0.001).unwrap();
+    let next = plan_scaling_from_material(&next_source, 0.0001, 0.001, 0.001).unwrap();
+    let boundary = MaterialBuoyancyBoundary {
+        bottom_temperature_k: 300.0,
+        top_temperature_k: 300.0,
+        max_relative_density_change: 1e-6,
+        ..boundary()
+    };
+    let mut two = previous.thermal_slab_from_material([4, 8], boundary, 40).unwrap();
+    let mut three = previous.thermal_slab3_from_material([4, 2, 8], boundary, 80).unwrap();
+    let old_coefficient = two.lattice.gbeta;
+    next.rebind_thermal_slab_from_material(&mut two, &previous, 9.81, 1e-6).unwrap();
+    next.rebind_thermal_slab3_from_material(&mut three, &previous, 9.81, 1e-6).unwrap();
+    close(two.lattice.gbeta, 2.0 * old_coefficient);
+    close(three.lattice.gbeta, 2.0 * old_coefficient);
+    assert_eq!(two.lattice.t_ref, 0.0);
+    assert_eq!(three.lattice.t_ref, 0.0);
+    assert!(two.lattice.gpop.iter().flatten().all(|&g| g == 0.0));
+    assert!(three.lattice.gpop.iter().flatten().all(|&g| g == 0.0));
+}

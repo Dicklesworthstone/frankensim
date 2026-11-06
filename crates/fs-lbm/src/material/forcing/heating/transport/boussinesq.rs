@@ -218,7 +218,7 @@ pub(super) fn advance_with_candidate<
     config.validate()?;
     let (cells, plane) = slab.lattice.layout()?;
     let input = slab.heat_inputs(power, forces, cells, depth_m, limits)?;
-    if slab.lattice.walls() != (1.0, 0.0) || !slab.lattice.flow_valid() {
+    if slab.lattice.walls() != slab.wall_coordinates || !slab.lattice.flow_valid() {
         return Err(MaterialTransportError::Invalid(
             "invalid material slab or independently changed normalized walls",
         ));

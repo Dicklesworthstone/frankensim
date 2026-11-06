@@ -94,10 +94,18 @@ impl<F: FluidTransport + ?Sized> MaterialScaling<'_, F> {
             input.expansion_per_k,
         )?;
         let tau_g = self.thermal_relaxation_time3()?;
+        let mut lattice = ThermalLbm3::slab(
+            input.nx, input.ny, input.nz, self.flow.tau, tau_g, gbeta,
+        );
+        if input.bottom_temperature_k == input.top_temperature_k {
+            lattice.gpop.fill([0.0; 7]);
+            lattice.t_bottom = 0.0;
+            lattice.t_top = 0.0;
+            lattice.t_ref = 0.0;
+        }
         Ok(MaterialSlab {
-            lattice: ThermalLbm3::slab(
-                input.nx, input.ny, input.nz, self.flow.tau, tau_g, gbeta,
-            ),
+            lattice,
+            wall_coordinates: if input.bottom_temperature_k == input.top_temperature_k { (0.0, 0.0) } else { (1.0, 0.0) },
             top_temperature_k: input.top_temperature_k,
             temperature_difference_k: difference,
             force_units: super::forcing::ForceUnits::from_scale(self),

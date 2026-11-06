@@ -358,7 +358,7 @@ fn advance_with_sampler_sources_and_candidate<
     poll(gate)?;
     let (cells, plane) = slab.lattice.layout()?;
     let input = slab.heat_inputs(power, forces, cells, depth_m, limits)?;
-    if slab.lattice.walls() != (1.0, 0.0) || !slab.lattice.flow_valid() {
+    if slab.lattice.walls() != slab.wall_coordinates || !slab.lattice.flow_valid() {
         return Err(MaterialTransportError::Invalid(
             "invalid material slab or independently changed normalized walls",
         ));
@@ -439,7 +439,7 @@ fn candidate_with_transport<S: Slab<D, Q>, F, const D: usize, const Q: usize>(
     let (cells, plane) = slab.lattice.layout()?;
     if applied.len() != cells - 2 * plane
         || applied.iter().enumerate().any(|(i, s)| s.cell != plane + i)
-        || slab.lattice.walls() != (1.0, 0.0) || !slab.lattice.flow_valid()
+        || slab.lattice.walls() != slab.wall_coordinates || !slab.lattice.flow_valid()
     {
         return Err(MaterialTransportError::Invalid("invalid material samples or slab"));
     }

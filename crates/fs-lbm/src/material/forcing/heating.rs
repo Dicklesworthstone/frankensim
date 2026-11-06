@@ -115,7 +115,7 @@ impl MaterialSlab<ThermalLbm> {
         &mut self, power_w_m3: &[f64], force_n_m3: &[[f64; 2]],
         depth_m: f64, limits: HeatSourceLimits,
     ) -> Result<HeatBalance, ThermalSourceError> {
-        if self.lattice.t_bottom != 1.0 || self.lattice.t_top != 0.0 {
+        if (self.lattice.t_bottom, self.lattice.t_top) != self.wall_coordinates {
             return Err(invalid("material heating refuses independently changed normalized wall temperatures"));
         }
         let input = self.heat_inputs(power_w_m3, force_n_m3, self.lattice.gpop.len(), depth_m, limits)?;
@@ -132,7 +132,7 @@ impl MaterialSlab<ThermalLbm3> {
     pub fn step_with_power_density(
         &mut self, power_w_m3: &[f64], force_n_m3: &[[f64; 3]], limits: HeatSourceLimits,
     ) -> Result<HeatBalance, ThermalSourceError> {
-        if self.lattice.t_bottom != 1.0 || self.lattice.t_top != 0.0 {
+        if (self.lattice.t_bottom, self.lattice.t_top) != self.wall_coordinates {
             return Err(invalid("material heating refuses independently changed normalized wall temperatures"));
         }
         let input = self.heat_inputs(power_w_m3, force_n_m3, self.lattice.gpop.len(), self.force_units.cell_size_m, limits)?;

@@ -160,7 +160,7 @@ fn admit<S: Slab<D, Q>, const D: usize, const Q: usize>(
     {
         return Err(invalid("invalid force field, temperature/energy limits or cell budget"));
     }
-    if slab.lattice.walls() != (1.0, 0.0) || !slab.lattice.flow_valid() {
+    if slab.lattice.walls() != slab.wall_coordinates || !slab.lattice.flow_valid() {
         return Err(invalid("invalid material slab or independently changed normalized walls"));
     }
     // Fixed-temperature wall cells have no evolved storage in this solver.
@@ -255,6 +255,7 @@ fn candidate<S: Slab<D, Q>, const D: usize, const Q: usize>(slab: &MaterialSlab<
         lattice: slab.lattice.snapshot().0,
         top_temperature_k: slab.top_temperature_k,
         temperature_difference_k: slab.temperature_difference_k,
+        wall_coordinates: slab.wall_coordinates,
         force_units: slab.force_units,
     }
 }

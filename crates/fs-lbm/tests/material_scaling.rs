@@ -149,7 +149,6 @@ fn invalid_domains_and_allocations_refuse_before_solver_construction() {
     assert!(plan.flow_grid(0, 4, 16).is_err());
     assert!(plan.thermal_slab(MaterialThermalSlab { ny: usize::MAX, ..slab_input() }).is_err());
     assert!(plan.thermal_slab(MaterialThermalSlab { max_cells: 39, ..slab_input() }).is_err());
-    assert!(plan.thermal_slab(MaterialThermalSlab { bottom_temperature_k: 300.0, ..slab_input() }).is_err());
     assert!(plan.thermal_slab(MaterialThermalSlab { bottom_temperature_k: 0.0, ..slab_input() }).is_err());
     assert!(plan.thermal_slab(MaterialThermalSlab { expansion_per_k: f64::NAN, ..slab_input() }).is_err());
 }

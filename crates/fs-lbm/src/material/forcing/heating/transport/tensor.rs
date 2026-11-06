@@ -252,7 +252,7 @@ fn advance<'a, S: Slab<D, Q>, const D: usize, const Q: usize>(
 ) -> Result<MaterialThermalTensorStep<'a, D>, MaterialThermalTensorError> {
     poll(gate)?;
     let (cells, plane) = slab.lattice.layout()?;
-    if cells > limits.max_cells || slab.lattice.walls() != (1.0, 0.0) || !slab.lattice.flow_valid()
+    if cells > limits.max_cells || slab.lattice.walls() != slab.wall_coordinates || !slab.lattice.flow_valid()
     {
         return Err(MaterialThermalTensorError::Invalid(
             "invalid physical slab, wall mapping or cell budget",
@@ -265,6 +265,7 @@ fn advance<'a, S: Slab<D, Q>, const D: usize, const Q: usize>(
         lattice: (),
         top_temperature_k: slab.top_temperature_k,
         temperature_difference_k: slab.temperature_difference_k,
+        wall_coordinates: slab.wall_coordinates,
         force_units: slab.force_units,
     };
     admit_storage(&mapping, field, cells, plane, gate)?;

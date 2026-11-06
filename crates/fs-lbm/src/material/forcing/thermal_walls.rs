@@ -200,7 +200,7 @@ impl MaterialSlab<ThermalLbm> {
         &mut self,
         walls: [MaterialThermalWall; 2],
     ) -> Result<(), MaterialLbmError> {
-        if self.lattice.t_bottom != 1.0 || self.lattice.t_top != 0.0 {
+        if (self.lattice.t_bottom, self.lattice.t_top) != self.wall_coordinates {
             return Err(invalid(
                 "material thermal walls refuse independently changed normalized wall temperatures",
             ));
@@ -216,7 +216,7 @@ impl MaterialSlab<ThermalLbm> {
     pub fn set_spatial_thermal_walls(
         &mut self, walls: [Vec<MaterialThermalWall>; 2],
     ) -> Result<(), MaterialLbmError> {
-        if self.lattice.t_bottom != 1.0 || self.lattice.t_top != 0.0 {
+        if (self.lattice.t_bottom, self.lattice.t_top) != self.wall_coordinates {
             return Err(invalid(
                 "material thermal walls refuse independently changed normalized wall temperatures",
             ));
@@ -245,7 +245,7 @@ impl MaterialSlab<ThermalLbm3> {
         &mut self,
         walls: [MaterialThermalWall; 2],
     ) -> Result<(), MaterialLbmError> {
-        if self.lattice.t_bottom != 1.0 || self.lattice.t_top != 0.0 {
+        if (self.lattice.t_bottom, self.lattice.t_top) != self.wall_coordinates {
             return Err(invalid(
                 "material thermal walls refuse independently changed normalized wall temperatures",
             ));
@@ -261,7 +261,7 @@ impl MaterialSlab<ThermalLbm3> {
     pub fn set_spatial_thermal_walls(
         &mut self, walls: [Vec<MaterialThermalWall>; 2],
     ) -> Result<(), MaterialLbmError> {
-        if self.lattice.t_bottom != 1.0 || self.lattice.t_top != 0.0 {
+        if (self.lattice.t_bottom, self.lattice.t_top) != self.wall_coordinates {
             return Err(invalid(
                 "material thermal walls refuse independently changed normalized wall temperatures",
             ));

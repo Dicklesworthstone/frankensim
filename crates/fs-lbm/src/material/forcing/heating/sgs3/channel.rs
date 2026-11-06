@@ -36,7 +36,7 @@ impl MaterialSlab<ThermalLbm3> {
         if gate.is_requested() {
             return Err(ThermalSgsError::Cancelled);
         }
-        if self.lattice.t_bottom != 1.0 || self.lattice.t_top != 0.0 {
+        if (self.lattice.t_bottom, self.lattice.t_top) != self.wall_coordinates {
             return Err(invalid(
                 "material heating refuses independently changed normalized wall temperatures",
             )
