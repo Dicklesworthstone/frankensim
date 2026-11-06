@@ -162,14 +162,14 @@ pub fn rebind_velocity_faces3<F: FluidTransport + ?Sized>(
     Ok(prepared.samples)
 }
 
-struct PreparedVelocityFaces3 {
-    targets: BoundarySpec3,
-    samples: [Option<VelocitySample3>; 6],
+pub(crate) struct PreparedVelocityFaces3 {
+    pub(crate) targets: BoundarySpec3,
+    pub(crate) samples: [Option<VelocitySample3>; 6],
 }
 
 /// Both native owners share this preparation; only profile ownership and final
 /// native admission differ. Nothing is published by this fixed-size operation.
-fn prepare_velocity_faces3<F: FluidTransport + ?Sized>(
+pub(crate) fn prepare_velocity_faces3<F: FluidTransport + ?Sized>(
     before: BoundarySpec3,
     boundaries: [Option<&BoundaryCondition>; 6],
     frames: &FrameTree,

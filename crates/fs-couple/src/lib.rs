@@ -179,6 +179,8 @@ pub mod render;
 pub mod rocket_blowdown;
 /// Typed SI pressure histories on the original open-boundary owners.
 pub mod scenario_pressure;
+/// Atomic mixed velocity-inlet and pressure-outlet control updates.
+pub mod scenario_open_boundary;
 pub mod scenario_velocity;
 pub mod scenario_wall_velocity;
 pub mod selector;

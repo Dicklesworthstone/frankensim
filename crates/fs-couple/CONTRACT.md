@@ -213,3 +213,23 @@ unloaded-only contact refresh and one-way acoustic observation keep their
 original limitations. Construction retains inputs without advancing or admitting
 a physical step. The focused regressions compare direct/network-observed states
 and audits, conduction-driven viscosity and pressure, and late-observer refusal.
+
+
+## One scenario control transaction for fluid inlets and outlets
+
+`scenario_open_boundary::rebind_open_faces3` composes the existing velocity and
+pressure preparations, then calls the native boundary owner once. Its six-slot
+`ScenarioBoundary3` selection admits one control family per face; all selected
+histories share one physical time and material scaling. Unselected faces keep
+their complete existing controls. Selected spatial profiles retain each
+original adapter's explicit refusal rule.
+
+A late pressure failure, velocity-speed refusal, native kind/collision refusal
+or cancellation cannot advance only one side of the flow. Both specialized
+D3Q19 and generic D3Q19/D3Q27 owners retain their own collision, reconstruction,
+force correction and step accounting. The transaction changes held targets;
+it does not step the fluid, infer a geometry mapping, enforce total mass-flow
+balance or claim a pressure-work certificate. Fixed six-slot preparation
+copies no histories or population fields. G0/G3 regressions in
+`tests/scenario_open_boundary.rs` exercise mixed native velocity/density
+response and all-or-none refusal, including the original collision Mach bound.
