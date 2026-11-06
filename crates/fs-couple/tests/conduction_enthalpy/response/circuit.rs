@@ -11,6 +11,90 @@ mod contacts;
 const C: f64 = 0.5;
 const L: f64 = 0.05;
 
+#[test]
+fn stiff_original_source_relaxation_survives_circuit_binding_and_every_continuation() {
+    // A strictly passive source with unique I>0: V=I*(3+2000*I).
+    // Unrelaxed Picard alternates high/low current even at fixed temperature.
+    // Each circuit interval must retain the source-coordinate policy that
+    // admitted the initial field; rebuilding a default response loses it.
+    let coordinate = ConductorMagnitude::CurrentDensity;
+    let (a, _) = material(1.0, CP[0], ALPHA[0], 1000.0, coordinate, false);
+    let (b, _) = material(2.0, CP[1], ALPHA[1], 1000.0, coordinate, false);
+    let cards = [a, b];
+    let build = |weight| {
+        ConductionResponseCircuit::new(
+            problem(&cards, coordinate).with_relaxation(weight).unwrap(),
+            CircuitGraph {
+                node_count: 2,
+                branches: vec![
+                    (1, 0, Branch::Resistor { ohms: 999.0 }),
+                    (1, 0, Branch::Capacitor { farads: C }),
+                ],
+                transformers: vec![],
+            },
+            ConductionCircuitTerminal {
+                branch: 0,
+                positive: vec![2, 5],
+                negative: vec![0, 3],
+            },
+            0.0,
+            vec![],
+            vec![3.0],
+            &[],
+            limits(),
+            field_controls(),
+            controls(),
+            || false,
+        )
+    };
+    assert!(matches!(
+        build(1.0),
+        Err(CircuitEnthalpyError::Source(
+            ConductionThermalError::Response(
+                fs_em::conduction::response::ConductionResponseError::NotConverged { .. }
+            )
+        ))
+    ));
+    let mut circuit = build(0.5).unwrap();
+    assert_eq!(circuit.relaxation(), 0.5);
+    let mut charge = 3.0;
+    for interval in 1..=3 {
+        let voltage = charge / C;
+        let linear = 3.0 + 0.1 / (2.0 * C);
+        // Stable positive quadratic root, independent of all native owners.
+        let current = 2.0 * voltage / (linear + (linear * linear + 8000.0 * voltage).sqrt());
+        let next = circuit
+            .step_candidate(
+                interval as f64 * 0.1,
+                &[],
+                limits(),
+                field_controls(),
+                controls(),
+                config().circuit,
+                || false,
+            )
+            .unwrap();
+        let proposed_charge = charge - 0.1 * current;
+        near(next.circuit().charges_c()[0], proposed_charge);
+        near(
+            next.step().circuit.heat_j,
+            0.1 * current * current * (3.0 + 2000.0 * current),
+        );
+        near(
+            next.step().circuit.heat_j,
+            (charge * charge - proposed_charge * proposed_charge) / (2.0 * C),
+        );
+        assert_eq!(next.circuit().relaxation(), 0.5);
+        near(
+            next.step().evaluated[0].conductor.material().query().axes()["operating"],
+            current,
+        );
+        assert!(next.step().field_solves > 1);
+        (circuit, _) = next.into_parts();
+        charge = proposed_charge;
+    }
+}
+
 fn circuit(
     cards: &[MaterialCard; 2],
     coordinate: ConductorMagnitude,

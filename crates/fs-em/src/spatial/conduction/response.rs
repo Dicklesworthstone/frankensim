@@ -8,7 +8,12 @@
 //! Positive source values do not guarantee convergence or uniqueness.
 
 use super::*;
+use crate::conduction::response::contact::{
+    self, ContactResponseControls, ContactResponseError, ContactResponseSample,
+    ContactResponseSources,
+};
 use fs_material::conductor::{ConductorError, response::ScalarConductorResponse};
+use fs_material::electrical_interface::response::ScalarElectricalInterfaceResponse;
 
 /// Constitutive and total native-solve limits, separate from field tolerances.
 #[derive(Clone, Copy, Debug)]
@@ -25,6 +30,7 @@ pub struct SpatialConductionResponseControls {
 pub enum SpatialConductionResponseError {
     Field(SpatialConductionError),
     Material(ConductorError),
+    Contact(ContactResponseError),
     Invalid(&'static str),
     Cancelled,
     FieldSolveBudget {
@@ -37,6 +43,8 @@ pub enum SpatialConductionResponseError {
         maximum_conductivity_defect_s_m: f64,
         maximum_current_density_defect_a_m2: f64,
         absolute_power_defect_w: f64,
+        maximum_contact_resistance_defect_ohm_m2: f64,
+        maximum_contact_voltage_defect_v: f64,
     },
 }
 impl From<SpatialConductionError> for SpatialConductionResponseError {
@@ -50,6 +58,11 @@ impl From<SpatialConductionError> for SpatialConductionResponseError {
 impl From<ConductorError> for SpatialConductionResponseError {
     fn from(error: ConductorError) -> Self {
         Self::Material(error)
+    }
+}
+impl From<ContactResponseError> for SpatialConductionResponseError {
+    fn from(error: ContactResponseError) -> Self {
+        Self::Contact(error)
     }
 }
 impl core::fmt::Display for SpatialConductionResponseError {
@@ -90,6 +103,7 @@ pub struct SpatialConductionResponse {
     native: SpatialConduction,
     sources: Arc<[ScalarConductorResponse]>,
     relaxation: f64,
+    contact_sources: Option<ContactResponseSources>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -109,6 +123,7 @@ pub struct SpatialConductionResponseReport {
     /// Original native field, including separately retained contact Joule heat.
     pub field: SpatialConductionField,
     pub evaluated: Vec<SpatialConductionResponseSample>,
+    pub evaluated_contacts: Vec<ContactResponseSample>,
     pub iterations: usize,
     /// Includes every basis solve in discarded constitutive iterations.
     pub field_solves: usize,
@@ -163,6 +178,69 @@ impl SpatialConductionResponse {
         limits: WeightedAssemblyLimits,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Self> {
+        Self::from_bindings(
+            positions_m,
+            tetrahedra,
+            sources,
+            contacts,
+            None,
+            limits,
+            cancelled,
+        )
+    }
+
+    /// Original local R'' laws on matched triangular interfaces. Electrically
+    /// varying contacts require uniform solved voltage jump/current density; varying traces
+    /// refuse instead of acquiring an averaged or fitted constitutive law.
+    /// Source bindings follow INPUT contacts and are canonicalized with them.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_contact_response(
+        positions_m: Vec<[f64; 3]>,
+        tetrahedra: Vec<[u32; 4]>,
+        sources: Vec<ScalarConductorResponse>,
+        contacts: Vec<SpatialConductionContact>,
+        contact_laws: Vec<ScalarElectricalInterfaceResponse>,
+        contact_controls: ContactResponseControls,
+        limits: WeightedAssemblyLimits,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self> {
+        check(cancelled)?;
+        if contacts.len() != contact_laws.len() || contacts.len() > limits.max_triplets / 36 {
+            return Err(SpatialConductionResponseError::Invalid(
+                "complete bounded 3D contact source coverage required",
+            ));
+        }
+        let mut ordered: Vec<_> = contacts.into_iter().zip(contact_laws).collect();
+        ordered.sort_by_key(|(c, _)| {
+            let mut a = c.first_vertices;
+            let mut b = c.second_vertices;
+            a.sort_unstable();
+            b.sort_unstable();
+            (a, b)
+        });
+        let (contacts, laws): (Vec<_>, Vec<_>) = ordered.into_iter().unzip();
+        let bindings = ContactResponseSources::new(laws, contact_controls)?;
+        Self::from_bindings(
+            positions_m,
+            tetrahedra,
+            sources,
+            contacts,
+            Some(bindings),
+            limits,
+            cancelled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn from_bindings(
+        positions_m: Vec<[f64; 3]>,
+        tetrahedra: Vec<[u32; 4]>,
+        sources: Vec<ScalarConductorResponse>,
+        contacts: Vec<SpatialConductionContact>,
+        contact_sources: Option<ContactResponseSources>,
+        limits: WeightedAssemblyLimits,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self> {
         check(cancelled)?;
         if sources.len() != tetrahedra.len()
             || sources.len() > limits.max_cells
@@ -184,16 +262,38 @@ impl SpatialConductionResponse {
         );
         // The original laws above own EVERY E/J coordinate. This private
         // assembly seam never relaxes admission for ordinary Ohmic snapshots.
-        let contact_axes = vec![[None, None]; contacts.len()];
+        let contact_axes = contact_sources.as_ref().map_or_else(
+            || vec![[None, None]; contacts.len()],
+            |bindings| {
+                bindings
+                    .laws()
+                    .iter()
+                    .map(|law| law.liquid_mass_fraction_axes().clone())
+                    .collect()
+            },
+        );
         let native =
             SpatialConduction::assemble_admitted(geometry, conductors, limits, cancelled, |_| {
                 true
             })?
-            .bind_contacts(contacts, contact_axes, limits, cancelled)?;
+            .bind_admitted_contacts(
+                contacts,
+                contact_axes,
+                limits,
+                cancelled,
+                |i, s, a| {
+                    contact::admit_source(i, s, a, contact_sources.as_ref()).map_err(|_| {
+                        SpatialConductionError::Invalid(
+                            "3D contact response source admission refused",
+                        )
+                    })
+                },
+            )?;
         Ok(Self {
             native,
             sources: sources.into(),
             relaxation: 1.0,
+            contact_sources,
         })
     }
 
@@ -236,6 +336,18 @@ impl SpatialConductionResponse {
     pub fn contacts(&self) -> &[SpatialConductionContact] {
         self.native.contacts()
     }
+    pub fn contact_response_sources(&self) -> Option<&ContactResponseSources> {
+        self.contact_sources.as_ref()
+    }
+    pub fn contact_liquid_mass_fraction_axes(&self) -> &[[Option<String>; 2]] {
+        self.native.contact_liquid_mass_fraction_axes()
+    }
+    pub fn contact_cells(&self) -> &[[usize; 2]] {
+        self.native.contact_cells()
+    }
+    pub fn cell_volume_m3(&self, cell: usize) -> Option<f64> {
+        self.native.cell_volume_m3(cell)
+    }
 
     /// Close the original sources against actual E/J at the authored drive.
     /// Native current, Hodge and supplied-work gates remain active. Separate
@@ -246,10 +358,36 @@ impl SpatialConductionResponse {
     /// assembly and terminal response, charging all N-1 basis solves before work.
     /// Source bounds, nonconvergence and cancellation publish no candidate.
     /// This is a bounded Picard closure, not a claim of global convergence,
-    /// uniqueness, field-dependent contact physics or a transient thermal solve.
+    /// uniqueness, nonuniform nonlinear contact quadrature or a transient thermal solve.
     #[allow(clippy::too_many_arguments)]
     pub fn solve_candidate<'d>(
         &self,
+        drive: impl Into<SpatialConductionResponseDrive<'d>>,
+        assembly: WeightedAssemblyLimits,
+        field_controls: ConductionControls,
+        controls: SpatialConductionResponseControls,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<SpatialConductionResponseCandidate> {
+        self.solve_with_materials_and_contacts_candidate(
+            self.conductors().to_vec(),
+            self.contacts().to_vec(),
+            drive,
+            assembly,
+            field_controls,
+            controls,
+            cancelled,
+        )
+    }
+
+    /// Close the same original sources on explicitly refreshed external context,
+    /// e.g. a finite-enthalpy thermal trial. Geometry, contact pairing, original
+    /// source pins and numerical policy are retained; only accepted candidates
+    /// may replace an enclosing physical owner's state.
+    #[allow(clippy::too_many_arguments)]
+    pub fn solve_with_materials_and_contacts_candidate<'d>(
+        &self,
+        seeds: Vec<ResolvedConductorState>,
+        contacts: Vec<SpatialConductionContact>,
         drive: impl Into<SpatialConductionResponseDrive<'d>>,
         assembly: WeightedAssemblyLimits,
         field_controls: ConductionControls,
@@ -283,10 +421,50 @@ impl SpatialConductionResponse {
                 )?
             }
         };
-        let seeds = self.native.conductors();
-        let mut applied = seeds.to_vec();
+        if seeds.len() != self.sources.len()
+            || seeds.len() > assembly.max_cells
+            || contacts.len() != self.contacts().len()
+        {
+            return Err(SpatialConductionResponseError::Invalid(
+                "complete original bulk/contact coverage required",
+            ));
+        }
+        for (law, seed) in self.sources.iter().zip(&seeds) {
+            check(cancelled)?;
+            law.admit(seed)?;
+        }
+        for (original, next) in self.contacts().iter().zip(&contacts) {
+            check(cancelled)?;
+            let old = original.source.resolved();
+            let new = next.source.resolved();
+            if original.first_vertices != next.first_vertices
+                || original.second_vertices != next.second_vertices
+                || original.source.surfaces() != next.source.surfaces()
+                || old.card_identity() != new.card_identity()
+                || old.axis_quantities() != new.axis_quantities()
+                || old
+                    .query_point()
+                    .iter()
+                    .map(|(n, _)| n)
+                    .ne(new.query_point().iter().map(|(n, _)| n))
+                || old.properties().len() != new.properties().len()
+                || old.properties().iter().zip(new.properties()).any(|(a, b)| {
+                    a.requirement() != b.requirement()
+                        || a.source_axes() != b.source_axes()
+                        || a.answer().receipt.selected != b.answer().receipt.selected
+                })
+            {
+                return Err(SpatialConductionResponseError::Invalid(
+                    "contact refresh must preserve original geometry and complete source roles",
+                ));
+            }
+        }
+        let mut applied = seeds.clone();
+        let mut applied_contacts = contacts.clone();
         let mut field_solves = 0usize;
         let mut relaxation_queries = 0usize;
+        let mut contact_queries = 0usize;
+        let (mut maximum_contact_resistance, mut maximum_contact_voltage) = (0.0_f64, 0.0_f64);
         let (mut maximum_sigma, mut maximum_current, mut absolute_power) =
             (0.0_f64, 0.0_f64, 0.0_f64);
         for iteration in 1..=controls.maximum_iterations {
@@ -308,11 +486,18 @@ impl SpatialConductionResponse {
                 cancelled,
                 |_| true,
             )?
-            .bind_contacts(
-                self.native.contacts.clone(),
+            .bind_admitted_contacts(
+                applied_contacts,
                 self.native.contact_liquid_mass_fraction_axes.clone(),
                 assembly,
                 cancelled,
+                |i, s, a| {
+                    contact::admit_source(i, s, a, self.contact_sources.as_ref()).map_err(|_| {
+                        SpatialConductionError::Invalid(
+                            "3D contact response source admission refused",
+                        )
+                    })
+                },
             )?;
             let field = match drive {
                 SpatialConductionResponseDrive::Boundary(boundary) => {
@@ -346,12 +531,16 @@ impl SpatialConductionResponse {
             field_solves += solves_per_iteration;
             let mut evaluated = Vec::with_capacity(seeds.len());
             let mut next = Vec::with_capacity(seeds.len());
+            let mut next_contacts = native.contacts().to_vec();
+            let mut evaluated_contacts = Vec::new();
             let mut converged = true;
             maximum_sigma = 0.0;
             maximum_current = 0.0;
             absolute_power = 0.0;
+            maximum_contact_resistance = 0.0;
+            maximum_contact_voltage = 0.0;
             let mut power_correction = 0.0;
-            for (tetrahedron, (source, seed)) in self.sources.iter().zip(seeds).enumerate() {
+            for (tetrahedron, (source, seed)) in self.sources.iter().zip(&seeds).enumerate() {
                 check(cancelled)?;
                 let e = field.electric_field_v_m[tetrahedron];
                 let j = field.current_density_a_m2[tetrahedron];
@@ -390,16 +579,52 @@ impl SpatialConductionResponse {
                     power_defect_w,
                 });
             }
+            if let Some(bindings) = &self.contact_sources {
+                for (index, law) in bindings.laws().iter().enumerate() {
+                    check(cancelled)?;
+                    let heat = &field.contacts[index];
+                    let (sample, contact_converged) = contact::evaluate(
+                        index,
+                        law,
+                        &contacts[index].source,
+                        &native.contacts()[index].source,
+                        heat.voltage_jump_v,
+                        heat.current_density_a_m2,
+                        heat.power_w,
+                        bindings.controls(),
+                    )?;
+                    contact_queries = contact_queries.checked_add(3).ok_or(
+                        SpatialConductionResponseError::Invalid(
+                            "contact source query count overflows",
+                        ),
+                    )?;
+                    maximum_contact_resistance =
+                        maximum_contact_resistance.max(sample.maximum_resistance_defect_ohm_m2);
+                    maximum_contact_voltage =
+                        maximum_contact_voltage.max(sample.maximum_voltage_defect_v);
+                    maximum_current =
+                        maximum_current.max(sample.maximum_current_density_defect_a_m2);
+                    let adjusted = finite(sample.absolute_power_defect_w - power_correction)?;
+                    let sum = finite(absolute_power + adjusted)?;
+                    power_correction = finite((sum - absolute_power) - adjusted)?;
+                    absolute_power = sum;
+                    converged &= contact_converged;
+                    next_contacts[index].source = sample.evaluated[0].clone();
+                    evaluated_contacts.push(sample);
+                }
+            }
             check(cancelled)?;
             if converged && absolute_power <= field_controls.power_tolerance_w {
                 let report = SpatialConductionResponseReport {
                     field,
                     evaluated,
+                    evaluated_contacts,
                     iterations: iteration,
                     field_solves,
                     source_evaluations: iteration
                         .checked_mul(seeds.len())
                         .and_then(|count| count.checked_add(relaxation_queries))
+                        .and_then(|count| count.checked_add(contact_queries))
                         .ok_or(SpatialConductionResponseError::Invalid(
                             "source evaluation count overflows",
                         ))?,
@@ -409,6 +634,7 @@ impl SpatialConductionResponse {
                         native,
                         sources: self.sources.clone(),
                         relaxation: self.relaxation,
+                        contact_sources: self.contact_sources.clone(),
                     },
                     report,
                 });
@@ -428,14 +654,36 @@ impl SpatialConductionResponse {
                         )?;
                     }
                 }
+                if let Some(bindings) = &self.contact_sources {
+                    for (index, law) in bindings.laws().iter().enumerate() {
+                        check(cancelled)?;
+                        if !law.axes().is_empty() {
+                            next_contacts[index].source = law
+                                .relax_operating_point(
+                                    &native.contacts()[index].source,
+                                    &next_contacts[index].source,
+                                    self.relaxation,
+                                )
+                                .map_err(ContactResponseError::from)?;
+                            relaxation_queries = relaxation_queries.checked_add(1).ok_or(
+                                SpatialConductionResponseError::Invalid(
+                                    "source query count overflows",
+                                ),
+                            )?;
+                        }
+                    }
+                }
             }
             applied = next;
+            applied_contacts = next_contacts;
         }
         Err(SpatialConductionResponseError::NotConverged {
             iterations: controls.maximum_iterations,
             maximum_conductivity_defect_s_m: maximum_sigma,
             maximum_current_density_defect_a_m2: maximum_current,
             absolute_power_defect_w: absolute_power,
+            maximum_contact_resistance_defect_ohm_m2: maximum_contact_resistance,
+            maximum_contact_voltage_defect_v: maximum_contact_voltage,
         })
     }
 }

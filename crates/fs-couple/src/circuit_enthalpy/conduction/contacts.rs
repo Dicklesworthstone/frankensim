@@ -8,6 +8,7 @@ use fs_material::electrical_interface::{
 };
 use fs_material::state_point::ResolvedInterfaceStatePoint;
 use fs_material::thermal::interface::ThermalInterfacePoint;
+use fs_qty::QuantitySpec;
 
 /// Explicit thermal ownership of one original surface contact. Contact indices
 /// refer to the original conduction owner's `contacts()` in canonical trace
@@ -48,6 +49,27 @@ pub(super) struct PreparedContacts<'a, 'm> {
     bindings: Vec<&'a ConductionContactThermal<'m>>,
     cells: Vec<[CellId; 2]>,
     pressure_axes: BTreeMap<usize, String>,
+    // Explicit native nonlinear trace owners, in original contact order. The
+    // thermal owner retains accepted electrical coordinates as seeds; only the
+    // native contact response may close them against actual solved traces.
+    operating_axes: Vec<Vec<(String, QuantitySpec)>>,
+}
+
+pub(super) fn response_axes(
+    sources: Option<&fs_em::conduction::response::contact::ContactResponseSources>,
+) -> Vec<Vec<(String, QuantitySpec)>> {
+    sources.map_or_else(Vec::new, |sources| {
+        sources
+            .laws()
+            .iter()
+            .map(|law| {
+                law.axes()
+                    .iter()
+                    .map(|(name, coordinate)| (name.clone(), coordinate.quantity()))
+                    .collect()
+            })
+            .collect()
+    })
 }
 
 // A refresh pins the selected claim, changing the selection receipt even at
@@ -105,8 +127,36 @@ impl<'a, 'm> PreparedContacts<'a, 'm> {
         accepted: &MaterialNetworkSample,
         cancel: &RefCell<impl FnMut() -> bool>,
     ) -> Result<Self, Error> {
+        Self::new_for_response_contacts(
+            network,
+            mesh,
+            originals,
+            liquid_mass_fraction_axes,
+            bindings,
+            routes,
+            accepted,
+            &[],
+            cancel,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn new_for_response_contacts(
+        network: &ConductionThermalNetwork<'_>,
+        mesh: &fs_rep_mesh::TriComplex2,
+        originals: &[ConductionContact],
+        liquid_mass_fraction_axes: &[[Option<String>; 2]],
+        bindings: &'a [ConductionContactThermal<'m>],
+        routes: &[CellId],
+        accepted: &MaterialNetworkSample,
+        operating_axes: &[Vec<(String, QuantitySpec)>],
+        cancel: &RefCell<impl FnMut() -> bool>,
+    ) -> Result<Self, Error> {
         check(cancel)?;
-        if bindings.len() != originals.len() || liquid_mass_fraction_axes.len() != originals.len() {
+        if bindings.len() != originals.len()
+            || liquid_mass_fraction_axes.len() != originals.len()
+            || (!operating_axes.is_empty() && operating_axes.len() != originals.len())
+        {
             return Err(invalid(
                 "every spatial electrical contact requires its source and heat partition",
             ));
@@ -116,6 +166,7 @@ impl<'a, 'm> PreparedContacts<'a, 'm> {
                 bindings: Vec::new(),
                 cells: Vec::new(),
                 pressure_axes: BTreeMap::new(),
+                operating_axes: Vec::new(),
             });
         }
         let trace = mesh
@@ -151,7 +202,7 @@ impl<'a, 'm> PreparedContacts<'a, 'm> {
             .iter()
             .map(|contact| &contact.source)
             .collect::<Vec<_>>();
-        Self::new_for_sources(
+        Self::new_for_response_sources(
             network,
             &sources,
             &adjacent,
@@ -160,6 +211,7 @@ impl<'a, 'm> PreparedContacts<'a, 'm> {
             routes,
             accepted,
             &[],
+            operating_axes,
             cancel,
         )
     }
@@ -178,10 +230,38 @@ impl<'a, 'm> PreparedContacts<'a, 'm> {
         pressures: &[SolvedContactPressure<'_>],
         cancel: &RefCell<impl FnMut() -> bool>,
     ) -> Result<Self, Error> {
+        Self::new_for_response_sources(
+            network,
+            originals,
+            adjacent_volumes,
+            liquid_mass_fraction_axes,
+            bindings,
+            routes,
+            accepted,
+            pressures,
+            &[],
+            cancel,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn new_for_response_sources(
+        network: &ConductionThermalNetwork<'_>,
+        originals: &[&ResolvedElectricalInterface],
+        adjacent_volumes: &[[usize; 2]],
+        liquid_mass_fraction_axes: &[[Option<String>; 2]],
+        bindings: &'a [ConductionContactThermal<'m>],
+        routes: &[CellId],
+        accepted: &MaterialNetworkSample,
+        pressures: &[SolvedContactPressure<'_>],
+        operating_axes: &[Vec<(String, QuantitySpec)>],
+        cancel: &RefCell<impl FnMut() -> bool>,
+    ) -> Result<Self, Error> {
         check(cancel)?;
         if bindings.len() != originals.len()
             || adjacent_volumes.len() != originals.len()
             || liquid_mass_fraction_axes.len() != originals.len()
+            || (!operating_axes.is_empty() && operating_axes.len() != originals.len())
         {
             return Err(invalid(
                 "every spatial electrical contact requires its source, adjacent volumes and heat partition",
@@ -248,9 +328,13 @@ impl<'a, 'm> PreparedContacts<'a, 'm> {
                 invalid("solved pressure requires an original electrical contact")
             })?;
             let axis = pressure.axis;
-            binding.point.admit_pressure_axis(axis)
+            binding
+                .point
+                .admit_pressure_axis(axis)
                 .map_err(|error| material(MaterialNetworkError::Material(error)))?;
-            if pressure_axes.insert(pressure.contact, axis.to_owned()).is_some()
+            if pressure_axes
+                .insert(pressure.contact, axis.to_owned())
+                .is_some()
             {
                 return Err(invalid(
                     "solved contact pressure requires one original coordinate per contact",
@@ -261,7 +345,29 @@ impl<'a, 'm> PreparedContacts<'a, 'm> {
             bindings,
             cells,
             pressure_axes,
+            operating_axes: if operating_axes.is_empty() {
+                vec![Vec::new(); originals.len()]
+            } else {
+                operating_axes.to_vec()
+            },
         };
+        for (contact, axes) in prepared.operating_axes.iter().enumerate() {
+            let mut names = std::collections::BTreeSet::new();
+            for (axis, quantity) in axes {
+                check(cancel)?;
+                if !names.insert(axis)
+                    || prepared.bindings[contact]
+                        .point
+                        .is_thermal_axis(axis, quantity.dims())
+                    || prepared.pressure_axes.get(&contact) == Some(axis)
+                    || originals[contact].resolved().axis_quantities().get(axis) != Some(quantity)
+                {
+                    return Err(invalid(
+                        "nonlinear contact coordinates require distinct original typed electrical owners",
+                    ));
+                }
+            }
+        }
         let refreshed =
             prepared.refresh_sources_with_pressures(originals, accepted, pressures, cancel)?;
         if refreshed
@@ -368,12 +474,32 @@ impl<'a, 'm> PreparedContacts<'a, 'm> {
             let [Some(first), Some(second)] = phases else {
                 return Err(invalid("spatial contact lost a receiving material state"));
             };
-            let point = if let Some(pressure_pa) = pressure_values[binding.contact] {
+            let mut point = if let Some(pressure_pa) = pressure_values[binding.contact] {
                 let axis = &self.pressure_axes[&binding.contact];
-                binding.point.at_pressure([first, second], axis, pressure_pa)
+                binding
+                    .point
+                    .at_pressure([first, second], axis, pressure_pa)
             } else {
                 binding.point.at([first, second])
-            }.map_err(|error| material(MaterialNetworkError::Material(error)))?;
+            }
+            .map_err(|error| material(MaterialNetworkError::Material(error)))?;
+            for (axis, quantity) in &self.operating_axes[binding.contact] {
+                check(cancel)?;
+                let value = original
+                    .resolved()
+                    .query_point()
+                    .iter()
+                    .find_map(|(name, value)| (name == axis).then_some(*value))
+                    .ok_or_else(|| invalid("accepted contact operating coordinate is absent"))?;
+                if point.axis_quantities().get(axis) != Some(quantity) {
+                    return Err(invalid(
+                        "contact thermal context changed an electrical coordinate",
+                    ));
+                }
+                point = point.with(axis, value).map_err(|_| {
+                    invalid("accepted contact operating coordinate cannot be retained")
+                })?;
+            }
             let source = original
                 .at_query_point(binding.point.interface, &point)
                 .map_err(|error| {
@@ -385,11 +511,12 @@ impl<'a, 'm> PreparedContacts<'a, 'm> {
                 .resolved()
                 .property(ELECTRICAL_CONTACT_RESISTANCE_PROPERTY)
                 .ok_or_else(|| invalid("spatial electrical contact lost its source property"))?;
-            if !property
-                .source_axes()
-                .iter()
-                .all(|(axis, dims)| binding.point.is_response_axis(axis, *dims))
-            {
+            if !property.source_axes().iter().all(|(axis, dims)| {
+                binding.point.is_response_axis(axis, *dims)
+                    || self.operating_axes[binding.contact]
+                        .iter()
+                        .any(|(name, quantity)| name == axis && quantity.dims() == *dims)
+            }) {
                 return Err(invalid(
                     "contact response requires owned thermal/phase or typed fixed external coordinates",
                 ));

@@ -1,4 +1,6 @@
 //! Actual 3D source response against independent one-dimensional field algebra.
+#[path = "response/contact_response.rs"]
+mod contact_response;
 use super::contacts::{contacts as contact_faces, interface};
 use super::*;
 use fs_em::spatial::conduction::response::*;

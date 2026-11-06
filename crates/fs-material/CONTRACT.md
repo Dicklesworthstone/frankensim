@@ -9389,6 +9389,20 @@ source without operating coordinates requires no additional query. This helper
 does not accept a physical state: the field owner must still evaluate the source
 at actual E/J and satisfy its original current, conductivity and work gates.
 
+`electrical_interface::response::ScalarElectricalInterfaceResponse` applies the
+same original-source discipline to local interface voltage jump [V] and normal
+current density [A/m2], oriented from the card's first surface to its second.
+Signed and magnitude coordinates are distinct; neither bulk electric field nor
+total face current is silently substituted. The complete ordered surface card,
+property roles, selected claims and quantity conventions survive every refresh.
+Temperature and explicitly declared side liquid-mass fractions remain owned by
+their physical consumers. Positive finite R'' is required for this response
+rung; perfect contact still requires an appropriate continuity constraint.
+Optional relaxation requeries only the electrical coordinates and refuses
+non-electrical context blending or unsupported source points. Uniformity,
+spatial quadrature, current conservation, Joule heat and final constitutive
+acceptance remain responsibilities of the native field owner.
+
 The shared multiple-owned-coordinate predicate preserves the existing static
 external-coordinate rules; it provides no evolution law itself. The electrical
 response adapter is an isotropic, passive, memoryless rung, with no tensor, Hall,

@@ -346,6 +346,7 @@ impl PreparedHeatNetwork<'_, '_> {
         let invalid = HeatNetworkError::Invalid;
         let field_dimension = |dims| [ConductorMagnitude::ElectricField.quantity().dims(),
             ConductorMagnitude::CurrentDensity.quantity().dims(),
+            fs_material::electrical_interface::response::ElectricalInterfaceCoordinate::VoltageJump.quantity().dims(),
             fs_material::field_storage::permanent::FLUX_DENSITY_DIMS,
             fs_material::field_storage::permanent::FIELD_STRENGTH_DIMS].contains(&dims);
         let admit = |claim: &fs_matdb::PropertyClaim, context: &fs_matdb::QueryPoint,

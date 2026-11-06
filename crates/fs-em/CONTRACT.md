@@ -1112,13 +1112,47 @@ current/Hodge/work balance. Every N-1 terminal basis solve is charged across
 discarded iterations before the work begins. The immutable candidate retains
 applied and evaluated complete sources. Unsupported states, budget exhaustion,
 nonconvergence and cancellation leave the original owner unchanged. This is a
-stationary scalar, memoryless closure with prescribed temperature/phase context
-and fixed contact sources; positive conductivity establishes neither global
-convergence nor uniqueness. No nonlinear tensor/contact or thermal solver is
-inferred. Manufactured 3D regressions use independent quadratic series/contact
+stationary scalar, memoryless closure with prescribed temperature/phase context.
+Contacts remain frozen unless the explicit local contact-response entry point
+below owns their electrical coordinates. Positive conductivity establishes
+neither global convergence nor uniqueness. No nonlinear tensor or nonuniform
+contact-quadrature law is inferred. Manufactured 3D regressions use independent quadratic series/contact
 and current-dependent bar solutions, including third-component fields, floating
 and injecting electrodes, polarity, common bias, local heat and source-work
 closure, constitutive refusal and accumulated basis-solve budgets.
+
+## Source-dependent resistance on uniform electrical contact traces
+
+Both `PlanarConductionResponse::new_with_contact_response` and
+`SpatialConductionResponse::new_with_contact_response` bind the complete
+original `ScalarElectricalInterfaceResponse` to each matched native trace.
+Every iteration queries each interface at its actual A-to-B voltage jump and
+normal current density, rebuilding the same positive P1 contact mass matrix
+beside the same native bulk operator. Actual source values are queried at every
+trace vertex. Resistance, voltage and current-density defects have separate
+dimensional gates; contact constitutive work defects join the absolute bulk
+work-defect gate. Surface Joule heat is still the original exact quadratic
+trace integral, credited once, without a constitutive-iteration heat source.
+
+Electrically varying contacts are restricted to traces whose voltage jump and
+normal density are uniform within the declared contact tolerances. A varying
+trace returns `NonuniformTrace`; no face average or surrogate resistor stands
+in for nonlinear quadrature. Fixed contact laws retain their original exact
+nonuniform P1 response, including in a mixed specimen. General spatially varying
+nonlinear contact laws, opening, arcing, surface storage and measured-material
+qualification remain outside this rung. Signed and magnitude coordinates retain
+their distinct A/B conventions. Temperature and explicitly declared side phase
+coordinates may be refreshed by an enclosing owner; electrical relaxation
+changes neither of them.
+
+`solve_with_materials_and_contacts_candidate` on the spatial owner retains
+geometry, pins, coordinate roles and contact pairing while closing explicitly
+refreshed thermal contexts. Planar `ConductionResponseSources` transfers bulk
+laws, contact laws, their controls and relaxation together through a frozen
+operator handoff. Missing contact bindings cannot turn an electrical response
+axis into a static source. Analytical layered-joint regressions check both
+voltage/current drives and signs, temperature refresh, current continuity,
+bulk/surface work, policy retention, nonuniform refusal and cancellation/retry.
 
 ## Ionized-gas current and Joule heating
 
@@ -2736,8 +2770,9 @@ undamped arithmetic and query count. Smaller weights can close strongly
 alternating positive-resistance laws; they do not establish global convergence.
 The existing iteration budget bounds trials and `source_evaluations` counts
 both actual-field and damped-coordinate queries. Accepted candidates retain the
-selected weight. `into_frozen_parts` transfers physical source/operator state
-only; a coupled owner retains and reapplies numerical relaxation separately.
+selected weight. `into_frozen_parts` transfers the physical operator together
+with a complete `ConductionResponseSources` bundle, retaining numerical
+relaxation and any original interface response bindings on rejoin.
 Independent regressions demonstrate unique passive resistance/conductivity
 roots that fail the undamped budget but converge with weight one-half, and
 preserve signed drive, local heat, source-domain refusal and cancellation/retry.

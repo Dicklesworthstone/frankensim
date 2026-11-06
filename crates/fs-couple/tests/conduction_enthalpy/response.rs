@@ -701,7 +701,7 @@ fn sourced_caloric_response_and_applicability_survive_plain_curve_handoff_and_re
                     ),
                     Err(CircuitEnthalpyError::Source(
                         ConductionThermalError::Invalid(
-                            "caloric source response and applicability must be independent of E/J"
+                            "caloric source response and applicability must be independent of electrical fields"
                         )
                     ))
                 ));
@@ -885,7 +885,7 @@ fn original_melting_receipts_prevent_frozen_field_dependent_fusion_energy() {
                     result,
                     Err(CircuitEnthalpyError::Source(
                         ConductionThermalError::Invalid(
-                            "caloric source response and applicability must be independent of E/J"
+                            "caloric source response and applicability must be independent of electrical fields"
                         )
                     ))
                 ));

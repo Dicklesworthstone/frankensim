@@ -155,6 +155,35 @@ impl<C: PlanarConductorMaterial> PlanarConduction<C> {
         cancelled: &mut impl FnMut() -> bool,
         admit: impl Fn(&C) -> bool,
     ) -> Result<Self, ConductionError> {
+        Self::assemble_with_admitted_contacts(
+            mesh,
+            conductors,
+            contacts,
+            liquid_mass_fraction_axes,
+            limits,
+            cancelled,
+            admit,
+            |_, source, axes| admit_contact_source(source, axes),
+        )
+    }
+
+    // The response owner may admit its explicitly owned local electrical axes.
+    // All geometry, passivity, assembly and heat remain in this SAME owner.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn assemble_with_admitted_contacts(
+        mesh: TriComplex2,
+        conductors: Vec<C>,
+        contacts: Vec<ConductionContact>,
+        liquid_mass_fraction_axes: Vec<[Option<String>; 2]>,
+        limits: WeightedAssemblyLimits,
+        cancelled: &mut impl FnMut() -> bool,
+        admit: impl Fn(&C) -> bool,
+        admit_contact: impl Fn(
+            usize,
+            &ResolvedElectricalInterface,
+            &[Option<String>; 2],
+        ) -> Result<f64, ConductionError>,
+    ) -> Result<Self, ConductionError> {
         poll(cancelled)?;
         if liquid_mass_fraction_axes.len() != contacts.len() {
             return Err(ConductionError::Invalid(
@@ -204,7 +233,9 @@ impl<C: PlanarConductorMaterial> PlanarConduction<C> {
                 matrix.push(row, column, value);
             }
         }
-        for (contact, axes) in contacts.iter().zip(&liquid_mass_fraction_axes) {
+        for (contact_index, (contact, axes)) in
+            contacts.iter().zip(&liquid_mass_fraction_axes).enumerate()
+        {
             poll(cancelled)?;
             let first = edge_key(contact.first_vertices);
             let second = edge_key(contact.second_vertices);
@@ -275,7 +306,7 @@ impl<C: PlanarConductorMaterial> PlanarConduction<C> {
                         "contact source must match both ordered adjacent material states",
                     )
                 })?;
-            let resistance = admit_contact_source(&contact.source, axes)?;
+            let resistance = admit_contact(contact_index, &contact.source, axes)?;
             let area = problem.mesh.edge_measure(first_edge.global_edge).ok_or(
                 ConductionError::Invalid("contact trace lacks physical area"),
             )?;

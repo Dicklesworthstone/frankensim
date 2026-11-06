@@ -34,7 +34,7 @@ fn specimen(
     .unwrap();
     PlanarConductionResponse::new_with_phase_contacts(
         contact_mesh(),
-        sources.to_vec(),
+        sources.bulk().to_vec(),
         vec![ConductionContact {
             first_vertices: [1, 2],
             second_vertices: [4, 7],

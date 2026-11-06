@@ -9,7 +9,7 @@ use fs_em::conduction::response::{
     ConductionResponseControls, ConductionResponseError, ConductionResponseReport,
     MAX_RESPONSE_ITERATIONS, PlanarConductionResponse,
 };
-use fs_material::conductor::response::ConductorMagnitude;
+use fs_material::conductor::response::{ConductorMagnitude, ScalarConductorResponse};
 use fs_qty::{Dims, QuantitySpec};
 
 fn response_error(error: ConductionResponseError) -> Error {
@@ -239,7 +239,8 @@ impl ConductionThermalNetwork<'_> {
             Ok::<_, Error>(coefficients)
         };
         let accepted = resolve(thermal)?;
-        let contacts = contacts::PreparedContacts::new_for_contacts(
+        let contact_axes = contacts::response_axes(problem.contact_response_sources());
+        let contacts = contacts::PreparedContacts::new_for_response_contacts(
             self,
             problem.mesh(),
             problem.contacts(),
@@ -247,6 +248,7 @@ impl ConductionThermalNetwork<'_> {
             contact_bindings,
             &routes,
             sample(&accepted.source),
+            &contact_axes,
             cancel,
         )?;
         let initial =
@@ -387,13 +389,38 @@ impl ConductionThermalNetwork<'_> {
         routes: &[CellId],
         cancel: &RefCell<impl FnMut() -> bool>,
     ) -> Result<Vec<ResolvedConductorState>, Error> {
-        self.materials_at_with(
+        self.response_materials_from(
             problem.conductors(),
+            problem.sources(),
+            sample,
+            routes,
+            cancel,
+        )
+    }
+
+    // Geometry-independent source refresh shared by triangle and tetrahedron
+    // owners. Electrical coordinates remain with the original native response;
+    // only the same caloric endpoint changes temperature and phase here.
+    pub(super) fn response_materials_from(
+        &self,
+        conductors: &[ResolvedConductorState],
+        sources: &[ScalarConductorResponse],
+        sample: &MaterialNetworkSample,
+        routes: &[CellId],
+        cancel: &RefCell<impl FnMut() -> bool>,
+    ) -> Result<Vec<ResolvedConductorState>, Error> {
+        if conductors.len() != sources.len() {
+            return Err(invalid(
+                "every nonlinear conductor needs its original source",
+            ));
+        }
+        self.materials_at_with(
+            conductors,
             sample,
             routes,
             cancel,
             |triangle, binding, original, mut point| {
-                let source = &problem.sources()[triangle];
+                let source = &sources[triangle];
                 if source.card().content_hash() != binding.point.material.content_hash() {
                     return Err(invalid(
                         "electrical and caloric bindings must use the same card",
@@ -460,10 +487,20 @@ impl ConductionThermalNetwork<'_> {
         problem: &PlanarConductionResponse,
         cancel: &RefCell<impl FnMut() -> bool>,
     ) -> Result<(), Error> {
+        self.admit_response_caloric_sources(problem.sources(), cancel)
+    }
+
+    pub(super) fn admit_response_caloric_sources(
+        &self,
+        sources: &[ScalarConductorResponse],
+        cancel: &RefCell<impl FnMut() -> bool>,
+    ) -> Result<(), Error> {
         let electrical = |dims| {
             [
                 ConductorMagnitude::ElectricField.quantity().dims(),
                 ConductorMagnitude::CurrentDensity.quantity().dims(),
+                fs_material::electrical_interface::response::ElectricalInterfaceCoordinate::VoltageJump
+                    .quantity().dims(),
             ]
             .contains(&dims)
         };
@@ -480,7 +517,7 @@ impl ConductionThermalNetwork<'_> {
                     self.regions
                         .iter()
                         .filter(|region| region.cell == binding.cell)
-                        .filter_map(|region| problem.sources().get(region.triangle))
+                        .filter_map(|region| sources.get(region.triangle))
                         .any(|source| source.axes().iter().any(|(name, _)| name == axis))
                         || [
                             claim.validity.axis_quantities().get(axis),
@@ -501,7 +538,7 @@ impl ConductionThermalNetwork<'_> {
                     || claim.validity.bounds().keys().any(|axis| field_axis(axis))
                 {
                     return Err(invalid(
-                        "caloric source response and applicability must be independent of E/J",
+                        "caloric source response and applicability must be independent of electrical fields",
                     ));
                 }
             }

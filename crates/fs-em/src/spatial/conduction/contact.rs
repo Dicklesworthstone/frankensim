@@ -124,11 +124,27 @@ impl<C: SpatialConductorMaterial> SpatialConduction<C> {
     }
 
     pub(super) fn bind_contacts(
+        self,
+        contacts: Vec<SpatialConductionContact>,
+        axes: Vec<[Option<String>; 2]>,
+        limits: WeightedAssemblyLimits,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self> {
+        self.bind_admitted_contacts(contacts, axes, limits, cancelled, |_, source, axes| {
+            admit_contact_source(source, axes).map_err(|error| match error {
+                ConductionError::Invalid(message) => SpatialConductionError::Invalid(message),
+                _ => SpatialConductionError::Invalid("3D contact source admission refused"),
+            })
+        })
+    }
+
+    pub(super) fn bind_admitted_contacts(
         mut self,
         contacts: Vec<SpatialConductionContact>,
         axes: Vec<[Option<String>; 2]>,
         limits: WeightedAssemblyLimits,
         cancelled: &mut impl FnMut() -> bool,
+        admit: impl Fn(usize, &ResolvedElectricalInterface, &[Option<String>; 2]) -> Result<f64>,
     ) -> Result<Self> {
         check(cancelled)?;
         let triplets = self
@@ -175,7 +191,7 @@ impl<C: SpatialConductorMaterial> SpatialConduction<C> {
             }
         }
         let mut parent = self.components.clone();
-        for (contact, axes) in contacts.iter().zip(&axes) {
+        for (contact_index, (contact, axes)) in contacts.iter().zip(&axes).enumerate() {
             check(cancelled)?;
             let first = key(contact.first_vertices);
             let second = key(contact.second_vertices);
@@ -219,11 +235,7 @@ impl<C: SpatialConductorMaterial> SpatialConduction<C> {
                         "3D contact source must match the ordered adjacent materials",
                     )
                 })?;
-            let resistance =
-                admit_contact_source(&contact.source, axes).map_err(|error| match error {
-                    ConductionError::Invalid(message) => SpatialConductionError::Invalid(message),
-                    _ => SpatialConductionError::Invalid("3D contact source admission refused"),
-                })?;
+            let resistance = admit(contact_index, &contact.source, axes)?;
             let conductance = finite(g.faces[a].area_m2 / resistance)?;
             let twelfth = conductance / 12.0;
             if !twelfth.is_finite() || twelfth <= 0.0 {

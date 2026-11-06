@@ -10,10 +10,10 @@ pub mod thermal;
 use super::*;
 use fs_em::conduction::response::{
     ConductionResponseControls, ConductionResponseError, ConductionResponseReport,
-    ConductionResponseSample, MAX_RESPONSE_ITERATIONS, PlanarConductionResponse,
+    ConductionResponseSample, ConductionResponseSources, MAX_RESPONSE_ITERATIONS,
+    PlanarConductionResponse,
 };
 use fs_material::conductor::response::ScalarConductorResponse;
-use std::sync::Arc;
 
 /// One continuing circuit with an original nonlinear spatial material law.
 /// The retained native operator is private: ordinary linear circuit steps must
@@ -22,7 +22,7 @@ use std::sync::Arc;
 /// field/circuit/enthalpy entry point, including reversible field entropy.
 pub struct ConductionResponseCircuit {
     circuit: ConductionCircuit,
-    sources: Arc<[ScalarConductorResponse]>,
+    sources: ConductionResponseSources,
 }
 
 /// Actual circuit/field work plus separately reported constitutive defects.
@@ -34,6 +34,8 @@ pub struct ConductionResponseCircuitStep {
     pub circuit: ConductionCircuitStep,
     /// Original source evaluations and defects at the actual midpoint E/J.
     pub evaluated: Vec<ConductionResponseSample>,
+    /// Original nonlinear interface laws at the actual midpoint trace fields.
+    pub evaluated_contacts: Vec<fs_em::conduction::response::contact::ContactResponseSample>,
     /// Complete native circuit/field trials in this constitutive solve.
     pub field_solves: usize,
     /// Original material evaluations across all constitutive trials.
@@ -171,7 +173,11 @@ impl ConductionResponseCircuit {
     /// Original complete bulk laws; changing circuit amplitude never replaces
     /// their selected source claims or their explicitly owned E/J coordinates.
     pub fn sources(&self) -> &[ScalarConductorResponse] {
-        &self.sources
+        self.sources.bulk()
+    }
+    /// Continuing source-coordinate policy, retained through each circuit step.
+    pub fn relaxation(&self) -> f64 {
+        self.sources.relaxation()
     }
     /// Original source-bound contacts in canonical native trace order.
     pub fn contacts(&self) -> &[fs_em::conduction::ConductionContact] {
@@ -293,6 +299,7 @@ impl ConductionResponseCircuit {
         let native = trial.finish(driver, problem);
         let ConductionResponseReport {
             evaluated,
+            evaluated_contacts,
             field_solves,
             source_evaluations,
             ..
@@ -305,6 +312,7 @@ impl ConductionResponseCircuit {
             step: ConductionResponseCircuitStep {
                 circuit: native.step,
                 evaluated,
+                evaluated_contacts,
                 field_solves,
                 source_evaluations,
             },
@@ -638,7 +646,8 @@ impl ConductionThermalNetwork<'_> {
                 )));
             }
         }
-        let contacts = contacts::PreparedContacts::new_for_contacts(
+        let contact_axes = contacts::response_axes(problem.contact_response_sources());
+        let contacts = contacts::PreparedContacts::new_for_response_contacts(
             self,
             problem.mesh(),
             problem.contacts(),
@@ -646,6 +655,7 @@ impl ConductionThermalNetwork<'_> {
             contact_bindings,
             &routes,
             sample(&accepted.source),
+            &contact_axes,
             cancel,
         )
         .map_err(map_conduction_error)?;

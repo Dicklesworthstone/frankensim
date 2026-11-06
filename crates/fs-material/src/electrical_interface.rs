@@ -5,6 +5,9 @@
 //! resolver; it neither fits a contact law nor chooses a default metal, coating,
 //! pressure, temperature, surface finish, or heat-partition model.
 
+/// Original interface sources at explicitly owned electrical operating points.
+pub mod response;
+
 use fs_matdb::{InterfaceSystemCard, MaterialStateId, QueryPoint, SurfaceSpec};
 use fs_qty::{Dims, QuantitySpec};
 use crate::state_point::{

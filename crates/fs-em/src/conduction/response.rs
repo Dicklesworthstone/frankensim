@@ -10,7 +10,14 @@
 
 use super::*;
 use fs_material::conductor::{ConductorError, response::ScalarConductorResponse};
+use fs_material::electrical_interface::response::ScalarElectricalInterfaceResponse;
 use std::sync::Arc;
+
+/// Original local contact source laws and uniform-trace response gates.
+pub mod contact;
+use contact::{
+    ContactResponseControls, ContactResponseError, ContactResponseSample, ContactResponseSources,
+};
 
 pub const MAX_RESPONSE_ITERATIONS: usize = 128;
 
@@ -45,12 +52,15 @@ impl ConductionResponseControls {
 pub enum ConductionResponseError {
     Field(ConductionError),
     Material(ConductorError),
+    Contact(ContactResponseError),
     Invalid(&'static str),
     NotConverged {
         iterations: usize,
         maximum_conductivity_defect_s_m: f64,
         maximum_current_density_defect_a_m2: f64,
         absolute_power_defect_w: f64,
+        maximum_contact_resistance_defect_ohm_m2: f64,
+        maximum_contact_voltage_defect_v: f64,
     },
     Cancelled,
 }
@@ -73,6 +83,50 @@ impl From<ConductorError> for ConductionResponseError {
         Self::Material(error)
     }
 }
+impl From<ContactResponseError> for ConductionResponseError {
+    fn from(error: ContactResponseError) -> Self {
+        Self::Contact(error)
+    }
+}
+
+/// Complete continuing source and numerical policy for a frozen field handoff.
+/// Bulk laws, contact laws and relaxation travel together, so a coupled owner
+/// cannot silently freeze a nonlinear interface or lose its selected solver policy.
+#[derive(Clone, Debug)]
+pub struct ConductionResponseSources {
+    bulk: Arc<[ScalarConductorResponse]>,
+    relaxation: f64,
+    contacts: Option<ContactResponseSources>,
+}
+impl ConductionResponseSources {
+    pub fn bulk(&self) -> &[ScalarConductorResponse] {
+        &self.bulk
+    }
+    pub fn relaxation(&self) -> f64 {
+        self.relaxation
+    }
+    pub fn contacts(&self) -> Option<&ContactResponseSources> {
+        self.contacts.as_ref()
+    }
+}
+impl From<Vec<ScalarConductorResponse>> for ConductionResponseSources {
+    fn from(bulk: Vec<ScalarConductorResponse>) -> Self {
+        Self {
+            bulk: bulk.into(),
+            relaxation: 1.0,
+            contacts: None,
+        }
+    }
+}
+impl From<Arc<[ScalarConductorResponse]>> for ConductionResponseSources {
+    fn from(bulk: Arc<[ScalarConductorResponse]>) -> Self {
+        Self {
+            bulk,
+            relaxation: 1.0,
+            contacts: None,
+        }
+    }
+}
 
 /// Same geometry and original sources; no independent circuit or thermal state.
 /// A frozen linearization is private outside an explicit coupled-solve callback.
@@ -84,6 +138,7 @@ pub struct PlanarConductionResponse {
     native: PlanarConduction,
     sources: Arc<[ScalarConductorResponse]>,
     relaxation: f64,
+    contact_sources: Option<ContactResponseSources>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -122,6 +177,8 @@ pub struct ConductionResponseReport {
     pub power_balance_residual_w: f64,
     pub linear: Option<SolveReport>,
     pub evaluated: Vec<ConductionResponseSample>,
+    /// Actual source queries and constitutive residuals for uniform contacts.
+    pub evaluated_contacts: Vec<ContactResponseSample>,
     /// Every native spatial solve, including discarded constitutive trials.
     pub field_solves: usize,
     /// Complete actual-field AND relaxed-coordinate source queries, excluding
@@ -183,6 +240,76 @@ impl PlanarConductionResponse {
         limits: WeightedAssemblyLimits,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Self, ConductionResponseError> {
+        Self::from_bindings(
+            mesh,
+            sources,
+            contacts,
+            liquid_mass_fraction_axes,
+            None,
+            limits,
+            cancelled,
+        )
+    }
+
+    /// Close each contact's original R'' at its actual A-to-B voltage jump and
+    /// normal current density. The source and trace vectors correspond in INPUT
+    /// order and are canonicalized together. Both bulk and contact response use
+    /// the existing native field iteration, current balance and Joule accounting.
+    ///
+    /// Electrically varying contacts require uniform jump/current along each trace.
+    /// Fixed contacts retain the original nonuniform P1 response.
+    /// A nonuniform trace refuses; it is never replaced by a face-average law.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_contact_response(
+        mesh: TriComplex2,
+        sources: Vec<ScalarConductorResponse>,
+        contacts: Vec<ConductionContact>,
+        contact_laws: Vec<ScalarElectricalInterfaceResponse>,
+        contact_controls: ContactResponseControls,
+        limits: WeightedAssemblyLimits,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self, ConductionResponseError> {
+        poll(cancelled)?;
+        if contacts.len() != contact_laws.len() || contacts.len() > limits.max_triplets / 16 {
+            return Err(ConductionResponseError::Invalid(
+                "complete bounded interface response coverage required",
+            ));
+        }
+        let mut ordered: Vec<_> = contacts.into_iter().zip(contact_laws).collect();
+        ordered.sort_by_key(|(c, _)| {
+            let mut a = c.first_vertices;
+            let mut b = c.second_vertices;
+            a.sort_unstable();
+            b.sort_unstable();
+            (a, b)
+        });
+        let (contacts, laws): (Vec<_>, Vec<_>) = ordered.into_iter().unzip();
+        let axes = laws
+            .iter()
+            .map(|law| law.liquid_mass_fraction_axes().clone())
+            .collect();
+        let bindings = ContactResponseSources::new(laws, contact_controls)?;
+        Self::from_bindings(
+            mesh,
+            sources,
+            contacts,
+            axes,
+            Some(bindings),
+            limits,
+            cancelled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn from_bindings(
+        mesh: TriComplex2,
+        sources: Vec<ScalarConductorResponse>,
+        contacts: Vec<ConductionContact>,
+        liquid_mass_fraction_axes: Vec<[Option<String>; 2]>,
+        contact_sources: Option<ContactResponseSources>,
+        limits: WeightedAssemblyLimits,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self, ConductionResponseError> {
         poll(cancelled)?;
         if sources.len() != mesh.faces().len() || sources.len() > limits.max_cells {
             return Err(ConductionResponseError::Invalid(
@@ -195,7 +322,7 @@ impl PlanarConductionResponse {
             source.admit(source.original())?;
             conductors.push(source.original().clone());
         }
-        let native = PlanarConduction::assemble_with_phase_contacts(
+        let native = PlanarConduction::assemble_with_admitted_contacts(
             mesh,
             conductors,
             contacts,
@@ -203,11 +330,15 @@ impl PlanarConductionResponse {
             limits,
             cancelled,
             |_| true,
+            |index, source, axes| {
+                contact::admit_source(index, source, axes, contact_sources.as_ref())
+            },
         )?;
         Ok(Self {
             native,
             sources: sources.into(),
             relaxation: 1.0,
+            contact_sources,
         })
     }
 
@@ -248,6 +379,10 @@ impl PlanarConductionResponse {
     }
     pub fn contact_liquid_mass_fraction_axes(&self) -> &[[Option<String>; 2]] {
         self.native.contact_liquid_mass_fraction_axes()
+    }
+
+    pub fn contact_response_sources(&self) -> Option<&ContactResponseSources> {
+        self.contact_sources.as_ref()
     }
 
     fn admit_contacts(
@@ -298,10 +433,16 @@ impl PlanarConductionResponse {
     /// coupled owner. The operator alone is only a frozen linearization and
     /// cannot be advanced as a nonlinear material. Rejoin the same parts with
     /// [`Self::from_frozen_parts`] before every source-response solve.
-    /// These physical parts omit numerical relaxation; retain [`Self::relaxation`]
-    /// separately and reapply it after rebinding when that policy is desired.
-    pub fn into_frozen_parts(self) -> (PlanarConduction, Arc<[ScalarConductorResponse]>) {
-        (self.native, self.sources)
+    /// The source bundle retains contact closure and numerical relaxation too.
+    pub fn into_frozen_parts(self) -> (PlanarConduction, ConductionResponseSources) {
+        (
+            self.native,
+            ConductionResponseSources {
+                bulk: self.sources,
+                relaxation: self.relaxation,
+                contacts: self.contact_sources,
+            },
+        )
     }
 
     /// Rejoin an external owner's retained spatial operator and original laws
@@ -310,23 +451,38 @@ impl PlanarConductionResponse {
     /// native surface contacts and their phase-coordinate ownership are retained.
     pub fn from_frozen_parts(
         native: PlanarConduction,
-        sources: Arc<[ScalarConductorResponse]>,
+        sources: ConductionResponseSources,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Self, ConductionResponseError> {
         poll(cancelled)?;
-        if sources.len() != native.conductors().len() {
+        if sources.bulk.len() != native.conductors().len()
+            || sources
+                .contacts
+                .as_ref()
+                .is_some_and(|c| c.laws().len() != native.contacts().len())
+        {
             return Err(ConductionResponseError::Invalid(
                 "complete bulk response laws required for the retained operator",
             ));
         }
-        for (source, conductor) in sources.iter().zip(native.conductors()) {
+        for (source, conductor) in sources.bulk.iter().zip(native.conductors()) {
             poll(cancelled)?;
             source.admit(conductor)?;
         }
+        for (index, (contact, axes)) in native
+            .contacts()
+            .iter()
+            .zip(native.contact_liquid_mass_fraction_axes())
+            .enumerate()
+        {
+            poll(cancelled)?;
+            contact::admit_source(index, &contact.source, axes, sources.contacts.as_ref())?;
+        }
         Ok(Self {
             native,
-            sources,
-            relaxation: 1.0,
+            sources: sources.bulk,
+            relaxation: sources.relaxation,
+            contact_sources: sources.contacts,
         })
     }
 
@@ -617,19 +773,25 @@ impl PlanarConductionResponse {
             source.admit(seed).map_err(ConductionResponseError::from)?;
         }
         let mut applied = seeds.clone();
+        let mut applied_contacts = contacts.clone();
         let mut relaxation_queries = 0usize;
+        let mut contact_queries = 0usize;
+        let (mut maximum_contact_resistance, mut maximum_contact_voltage) = (0.0_f64, 0.0_f64);
         let (mut maximum_sigma, mut maximum_current, mut absolute_power) =
             (0.0_f64, 0.0_f64, 0.0_f64);
         for iteration in 1..=controls.maximum_iterations {
             poll(cancelled).map_err(ConductionResponseError::from)?;
-            let native = PlanarConduction::assemble_with_phase_contacts(
+            let native = PlanarConduction::assemble_with_admitted_contacts(
                 self.mesh().clone(),
                 applied,
-                contacts.clone(),
+                applied_contacts,
                 self.contact_liquid_mass_fraction_axes().to_vec(),
                 assembly,
                 cancelled,
                 |_| true,
+                |index, source, axes| {
+                    contact::admit_source(index, source, axes, self.contact_sources.as_ref())
+                },
             )
             .map_err(ConductionResponseError::from)?;
             let (field, driver) = solve(&native, cancelled)?;
@@ -652,10 +814,14 @@ impl PlanarConductionResponse {
             }
             let mut evaluated = Vec::with_capacity(seeds.len());
             let mut next = Vec::with_capacity(seeds.len());
+            let mut evaluated_contacts = Vec::new();
+            let mut next_contacts = native.contacts().to_vec();
             let mut converged = true;
             maximum_sigma = 0.0;
             maximum_current = 0.0;
             absolute_power = 0.0;
+            maximum_contact_resistance = 0.0;
+            maximum_contact_voltage = 0.0;
             for (triangle, (source, seed)) in self.sources.iter().zip(&seeds).enumerate() {
                 poll(cancelled).map_err(ConductionResponseError::from)?;
                 let e = field.electric_field_v_m()[triangle];
@@ -703,6 +869,40 @@ impl PlanarConductionResponse {
                     power_defect_w,
                 });
             }
+            if let Some(bindings) = &self.contact_sources {
+                for (index, law) in bindings.laws().iter().enumerate() {
+                    poll(cancelled).map_err(ConductionResponseError::from)?;
+                    let heat = &field.contact_response()[index];
+                    let (sample, contact_converged) = contact::evaluate(
+                        index,
+                        law,
+                        &contacts[index].source,
+                        &native.contacts()[index].source,
+                        heat.voltage_jump_v,
+                        heat.current_density_a_m2,
+                        heat.power_w,
+                        bindings.controls(),
+                    )
+                    .map_err(ConductionResponseError::from)?;
+                    contact_queries =
+                        contact_queries
+                            .checked_add(2)
+                            .ok_or(ConductionResponseError::Invalid(
+                                "contact source query count overflows",
+                            ))?;
+                    maximum_contact_resistance =
+                        maximum_contact_resistance.max(sample.maximum_resistance_defect_ohm_m2);
+                    maximum_contact_voltage =
+                        maximum_contact_voltage.max(sample.maximum_voltage_defect_v);
+                    maximum_current =
+                        maximum_current.max(sample.maximum_current_density_defect_a_m2);
+                    absolute_power = finite(absolute_power + sample.absolute_power_defect_w)
+                        .map_err(ConductionResponseError::from)?;
+                    converged &= contact_converged;
+                    next_contacts[index].source = sample.evaluated[0].clone();
+                    evaluated_contacts.push(sample);
+                }
+            }
             poll(cancelled).map_err(ConductionResponseError::from)?;
             if converged && absolute_power <= field_controls.power_tolerance_w {
                 let report = ConductionResponseReport {
@@ -721,10 +921,12 @@ impl PlanarConductionResponse {
                     power_balance_residual_w: field.power_balance_residual_w(),
                     linear: field.report().cloned(),
                     evaluated,
+                    evaluated_contacts,
                     field_solves: iteration,
                     source_evaluations: iteration
                         .checked_mul(seeds.len())
                         .and_then(|count| count.checked_add(relaxation_queries))
+                        .and_then(|count| count.checked_add(contact_queries))
                         .ok_or(ConductionResponseError::Invalid(
                             "source evaluation count overflows",
                         ))?,
@@ -735,6 +937,7 @@ impl PlanarConductionResponse {
                             native,
                             sources: self.sources.clone(),
                             relaxation: self.relaxation,
+                            contact_sources: self.contact_sources.clone(),
                         },
                         report,
                     },
@@ -755,14 +958,37 @@ impl PlanarConductionResponse {
                         )?;
                     }
                 }
+                if let Some(bindings) = &self.contact_sources {
+                    for (index, law) in bindings.laws().iter().enumerate() {
+                        poll(cancelled).map_err(ConductionResponseError::from)?;
+                        if !law.axes().is_empty() {
+                            next_contacts[index].source = law
+                                .relax_operating_point(
+                                    &native.contacts()[index].source,
+                                    &next_contacts[index].source,
+                                    self.relaxation,
+                                )
+                                .map_err(ContactResponseError::from)
+                                .map_err(ConductionResponseError::from)?;
+                            relaxation_queries = relaxation_queries.checked_add(1).ok_or(
+                                ConductionResponseError::Invalid(
+                                    "source evaluation count overflows",
+                                ),
+                            )?;
+                        }
+                    }
+                }
             }
             applied = next;
+            applied_contacts = next_contacts;
         }
         Err(ConductionResponseError::NotConverged {
             iterations: controls.maximum_iterations,
             maximum_conductivity_defect_s_m: maximum_sigma,
             maximum_current_density_defect_a_m2: maximum_current,
             absolute_power_defect_w: absolute_power,
+            maximum_contact_resistance_defect_ohm_m2: maximum_contact_resistance,
+            maximum_contact_voltage_defect_v: maximum_contact_voltage,
         }
         .into())
     }
