@@ -9366,6 +9366,48 @@ energy/damage/budget/cancelled proposals, and initial-force/support/scale
 admission. Measured material validation and performance benchmarking remain
 outside these manufactured implementation checks.
 
+## Quasistatic normal recontact after tensile fracture
+
+`brittle::solid::fracture::contact` continues supported, explicitly separated
+P1 specimens through native quasistatic normal recontact. Existing
+Newton–FGMRES solves native displacement equilibrium and `fs-contact`'s
+unregularized Signorini natural map simultaneously, with one normal multiplier
+per distinct full physical contact covector. It does not require an inverse
+of an isolated softened fragment's stiffness. SI scales condition equations
+without introducing physical contact compliance, stored energy or fracture loss.
+Prepared P1 geometry, cached original tangents and reusable Krylov scratch
+preserve the existing material/history owner; tangent products visit free rows.
+
+Exact positively equivalent full rows at shared crack edges share an aggregate
+force. Every original face/vertex/node/normal witness and the strictest original
+opening allowance are retained, and incoming rows are budgeted before reduction.
+Seeds are supplied per original non-tied pair and combined for each aggregate.
+Opposite unilateral half-spaces, near duplicates and aliases that exist only
+after eliminating supports are not merged. Aggregate force does not determine
+individual face pressure, and no pressure allocation is inferred.
+
+Publication replays force equilibrium directly in newtons and the original
+constitutive, irreversible-history and work gates. Nonnegative normal force,
+original opening allowances, physical complementarity, absolute pair work,
+force/jump work consistency and contact couples must pass independently.
+Separate external-work accounting removes internal contact work. Original
+state and histories remain unchanged after refusal or cancellation. Explicit
+budgets cover input rows, native assemblies, mixed workspaces and FGMRES history
+across all configured restart cycles.
+
+Loaded pairs must touch and remain tangentially matched at both endpoints;
+open unloaded pairs carry zero force. Arbitrary closure from finite opening
+requires a resolved preceding endpoint. Impact, unconstrained rigid modes,
+finite sliding, collision discovery and equilibrium branch stability are
+outside this fixed-trace small-strain endpoint. No position, force or history
+projection is used.
+
+`brittle_tet_fragment_contact/quasistatic.rs` specifies native analytical cases
+for pressure transmission through fully softened tensile volumes, restored
+compressive response, SI conditioning, common support translation and external
+work, exact shared-edge aggregation, open unloaded interfaces and transactional
+budget/cancellation/refusal. Native test execution is a separate obligation.
+
 ## Native pressure-sensitive porous compression
 
 The existing generic `SmallStrainLaw` assembly and plastic-increment solver

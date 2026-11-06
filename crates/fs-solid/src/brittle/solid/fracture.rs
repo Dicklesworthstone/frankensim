@@ -19,6 +19,9 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
+/// Native mixed equilibrium and normal recontact of supported fragments.
+pub mod contact;
+
 use fs_exec::Cx;
 use fs_material::brittle::{BrittleCrackBand, BrittleState};
 
