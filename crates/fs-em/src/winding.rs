@@ -21,6 +21,9 @@
 pub mod circuit;
 /// Passive self/mutual storage for explicitly unresolved end-winding flux.
 pub mod end;
+/// Circuit-driven vector magnetic history with distinct pinning and Joule heat.
+#[cfg(feature = "magnetic-hysteresis")]
+pub mod hysteretic;
 /// Differential self/mutual inductance at a solved nonlinear operating point.
 pub mod incremental;
 /// Circuit-driven reversible nonlinear fields with spatial conductor losses.

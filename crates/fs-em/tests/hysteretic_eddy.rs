@@ -3,6 +3,9 @@
 
 #![cfg(feature = "magnetic-hysteresis")]
 
+#[path = "hysteretic_eddy/winding.rs"]
+mod winding;
+
 use fs_em::planar::{
     eddy::{
         EddyConductor,

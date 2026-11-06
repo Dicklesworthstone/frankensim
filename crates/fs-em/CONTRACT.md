@@ -1,5 +1,47 @@
 # fs-em contract
 
+## Native winding circuits with spatial vector hysteresis
+
+The default-off `magnetic-hysteresis` feature exposes
+`winding::hysteretic::HystereticWindingCircuit`. It connects the original
+`PlanarHystereticEddy` history to native Kirchhoff circuits through the shared
+nonlinear terminal solver. Every trial retains the SAME accepted potential and
+all original vector branch polarizations. Remanence, saturation and minor loops
+are solved from that history; no effective inductance or scalar memory replaces
+the spatial constitutive state.
+
+The original signed winding profiles impose `J = F I` and receive the reciprocal
+voltage `V = F^T delta(A)/dt + L_end delta(I)/dt + R I`. Native current-input and
+voltage-input private ports support voltage and ideal-current excitation without
+adding physical impedance. Existing end-winding self/mutual modes retain their
+separate storage and endpoint numerical loss. Original source-bound stranded
+resistance and graph-resistor reassembly reuse their existing owners; reassembly
+preserves native fluxes, charges, field history, current and accepted time.
+Stranded copper and resolved core eddy cells must remain disjoint.
+
+Private circuit-port work cancels actual field/winding work once. The complete
+receipt includes core Joule heat, vector pinning heat on every magnetic cell,
+stranded copper heat and graph heat, each exactly once. Physical heat excludes
+backward-Euler numerical dissipation. The combined storage increment uses the
+field's stable per-cell magnetic increment, native circuit increment and original
+end-mode increment. Independent voltage/current, work, heat and storage gates
+must all close before one immutable candidate can publish circuit and vector
+history together. Failed trials, exhausted budgets and cancellation leave the
+accepted state intact.
+
+Geometry and fitted magnetic coefficients remain fixed. Temperature-dependent
+conductivity may refresh only through the original material sources and the
+magnetic fit's admitted constant-coefficient interval. Motion, solid terminal
+current injection, changing magnetic fits, anisotropic hysteresis and empirical
+qualification remain outside this estimated first-order planar MQS composition.
+A finite thermal receiver must accept the corresponding complete heat candidate
+atomically.
+
+The focused cases in `tests/hysteretic_eddy/winding.rs` compare independent
+scalar-play voltage-driven minor loops with both winding polarities, ideal-current
+drive with core eddy diffusion and end storage, the branchless backward-Euler RL
+limit, and source/reassembly, budget and cancellation rollback.
+
 ## Shared end flux in nonlinear differential and harmonic winding response
 
 The planar and spatial incremental bases accept the same original passive

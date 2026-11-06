@@ -191,6 +191,7 @@ impl<'m> NonlinearWindingCircuit<'m> {
                 let account = FieldAccount {
                     stored_before_j: step.stored_before_j,
                     stored_after_j: step.stored_after_j,
+                    stored_change_j: step.stored_after_j - step.stored_before_j,
                     heat_j: step.heat_j,
                     supplied_work_j: step.supplied_work_j,
                     uniform_drive_work_j: step.uniform_drive_work_j,

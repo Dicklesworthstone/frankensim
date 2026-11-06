@@ -213,14 +213,14 @@ impl From<EndWindingError> for NonlinearWindingError {
         Self::End(error)
     }
 }
-type Result<T> = core::result::Result<T, NonlinearWindingError>;
+pub(super) type Result<T> = core::result::Result<T, NonlinearWindingError>;
 
-struct Layout {
-    graph: CircuitGraph,
-    dae: CircuitDae,
-    windings: NonlinearWindings,
-    terminal_ports: Vec<NonlinearWindingPort>,
-    external_ports: usize,
+pub(super) struct Layout {
+    pub(super) graph: CircuitGraph,
+    pub(super) dae: CircuitDae,
+    pub(super) windings: NonlinearWindings,
+    pub(super) terminal_ports: Vec<NonlinearWindingPort>,
+    pub(super) external_ports: usize,
 }
 
 /// Accepted original field plus the original circuit's remaining fluxes,
@@ -308,7 +308,7 @@ impl<'m, F> NonlinearWindingCandidate<'m, F> {
     }
 }
 
-fn finite(v: f64) -> Result<f64> {
+pub(super) fn finite(v: f64) -> Result<f64> {
     if v.is_finite() {
         Ok(v)
     } else {
@@ -317,10 +317,10 @@ fn finite(v: f64) -> Result<f64> {
         ))
     }
 }
-fn positive(v: f64) -> bool {
+pub(super) fn positive(v: f64) -> bool {
     v.is_finite() && v > 0.0
 }
-fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<()> {
+pub(super) fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<()> {
     if cancelled() {
         Err(NonlinearWindingError::Cancelled)
     } else {
@@ -334,7 +334,7 @@ fn numerical(e: FiniteDifferenceError<NonlinearWindingError>) -> NonlinearWindin
     }
 }
 
-fn impressed(
+pub(super) fn impressed(
     profiles: &[Vec<f64>],
     currents: &[f64],
     cancelled: &mut impl FnMut() -> bool,
@@ -354,8 +354,26 @@ fn impressed(
     Ok(j)
 }
 
-fn linkages(
-    field: &PlanarNonlinearEddy<'_>,
+pub(super) trait PlanarInductionHistory {
+    fn mesh(&self) -> &fs_rep_mesh::TriComplex2;
+    fn potential_wb_m(&self) -> &[f64];
+    fn time_s(&self) -> f64;
+}
+
+impl PlanarInductionHistory for PlanarNonlinearEddy<'_> {
+    fn mesh(&self) -> &fs_rep_mesh::TriComplex2 {
+        self.problem().mesh()
+    }
+    fn potential_wb_m(&self) -> &[f64] {
+        self.potential_wb_m()
+    }
+    fn time_s(&self) -> f64 {
+        self.time_s()
+    }
+}
+
+pub(super) fn linkages(
+    field: &impl PlanarInductionHistory,
     profiles: &[Vec<f64>],
     end: &EndWindingInductance,
     currents: &[f64],
@@ -366,12 +384,7 @@ fn linkages(
         .iter()
         .enumerate()
         .map(|(i, profile)| {
-            let active = pairing_on_mesh(
-                field.problem().mesh(),
-                field.potential_wb_m(),
-                profile,
-                cancelled,
-            )?;
+            let active = pairing_on_mesh(field.mesh(), field.potential_wb_m(), profile, cancelled)?;
             finite(end_linkage[i] + active)
         })
         .collect()
@@ -515,6 +528,148 @@ pub(crate) fn native_seed(dae: &CircuitDae, accepted: &[f64], input: &[f64]) -> 
         ));
     }
     Ok(initialized)
+}
+
+impl Layout {
+    /// Lower the original winding branches into reciprocal native ports while
+    /// retaining every unbound storage coordinate and algebraic constraint.
+    pub(super) fn new(
+        graph: CircuitGraph,
+        windings: NonlinearWindings,
+        terminal_ports: Vec<NonlinearWindingPort>,
+        initial: &NonlinearWindingInitial,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(Rc<Self>, Vec<f64>)> {
+        use NonlinearWindingError::Invalid;
+        poll(cancelled)?;
+        let count = windings.profiles_per_m2.len();
+        if count == 0
+            || count > MAX_WINDINGS
+            || windings.branch_indices.len() != count
+            || terminal_ports.len() != count
+            || initial.currents_a.len() != count
+            || initial.currents_a.iter().any(|v| !v.is_finite())
+            || terminal_ports.iter().any(|port| {
+                matches!(port, NonlinearWindingPort::VoltageInput {
+                    initial_voltage_v, residual_scale_ohm, current_tolerance_a
+                } if !initial_voltage_v.is_finite()
+                    || !positive(*residual_scale_ohm)
+                    || !positive(*current_tolerance_a))
+            })
+            || graph.node_count > 32
+            || graph.branches.len() > 64
+            || graph.transformers.len() > 16
+            || graph.branches.iter().any(|&(a, b, _)| a == b)
+        {
+            return Err(Invalid(
+                "invalid native winding graph, ports or initial currents",
+            ));
+        }
+        let mut external_ports = 0;
+        for &(_, _, branch) in &graph.branches {
+            if let Branch::VoltageSource { port } | Branch::CurrentSource { port } = branch {
+                if port >= 32 {
+                    return Err(Invalid("external circuit port exceeds capacity"));
+                }
+                external_ports = external_ports.max(port + 1);
+            }
+        }
+        if external_ports + count > 32 {
+            return Err(Invalid(
+                "combined external and winding port capacity exceeded",
+            ));
+        }
+        let mut lowered = graph.clone();
+        let mut bound = vec![false; graph.branches.len()];
+        for (winding, &branch) in windings.branch_indices.iter().enumerate() {
+            poll(cancelled)?;
+            if branch >= graph.branches.len()
+                || bound[branch]
+                || !matches!(graph.branches[branch].2, Branch::Inductor { .. })
+            {
+                return Err(Invalid(
+                    "each winding needs a distinct original inductor branch",
+                ));
+            }
+            bound[branch] = true;
+            lowered.branches[branch].2 = terminal_ports[winding].branch(external_ports + winding);
+        }
+        let dae = assemble_circuit(&lowered)?;
+        if dae.system.state_dim() > 128 {
+            return Err(Invalid("extended circuit state exceeds capacity"));
+        }
+        if initial.remaining_fluxes_wb.len() != dae.flux_index.len()
+            || initial.charges_c.len() != dae.charge_index.len()
+            || initial
+                .remaining_fluxes_wb
+                .iter()
+                .chain(&initial.charges_c)
+                .any(|v| !v.is_finite())
+        {
+            return Err(Invalid(
+                "complete finite remaining inductor fluxes and capacitor charges required",
+            ));
+        }
+        let layout = Rc::new(Self {
+            graph,
+            dae,
+            windings,
+            terminal_ports,
+            external_ports,
+        });
+        let initial_voltage: Vec<_> = layout
+            .terminal_ports
+            .iter()
+            .map(|port| match port {
+                NonlinearWindingPort::CurrentInput => 0.0,
+                NonlinearWindingPort::VoltageInput {
+                    initial_voltage_v, ..
+                } => *initial_voltage_v,
+            })
+            .collect();
+        let input = ports(
+            &layout,
+            &initial.external_inputs,
+            &initial.currents_a,
+            &initial_voltage,
+        )?;
+        let mut seed = vec![0.0; layout.dae.system.state_dim()];
+        for (&index, &value) in layout
+            .dae
+            .flux_index
+            .iter()
+            .zip(&initial.remaining_fluxes_wb)
+        {
+            seed[index] = value;
+        }
+        for (&index, &value) in layout.dae.charge_index.iter().zip(&initial.charges_c) {
+            seed[index] = value;
+        }
+        let state = native_seed(&layout.dae, &seed, &input)?;
+        // The initializer's admitted effort is midpoint(0, state). Read its
+        // original receipt without another solve choosing a different split.
+        let (_, _, g) = layout.dae.system.structure();
+        for (winding, port) in layout.terminal_ports.iter().enumerate() {
+            if let NonlinearWindingPort::VoltageInput {
+                current_tolerance_a,
+                ..
+            } = port
+            {
+                let p = layout.external_ports + winding;
+                let output = (layout.dae.system.differential_dim()..state.len())
+                    .try_fold(0.0, |sum, row| {
+                        finite(g[row * layout.dae.ports + p].mul_add(0.5 * state[row], sum))
+                    })?;
+                if finite(-output - initial.currents_a[winding])?.abs() > *current_tolerance_a {
+                    return Err(Invalid(
+                        "native initial winding current disagrees with accepted field history",
+                    ));
+                }
+            }
+        }
+        poll(cancelled)?;
+        Ok((layout, state))
+    }
 }
 
 impl<'m> NonlinearWindingCircuit<'m> {
@@ -705,51 +860,6 @@ impl<'m> NonlinearWindingCircuit<'m> {
                 "initial winding currents disagree with accepted impressed field current",
             ));
         }
-        let mut external_ports = 0;
-        for &(_, _, branch) in &graph.branches {
-            if let Branch::VoltageSource { port } | Branch::CurrentSource { port } = branch {
-                if port >= 32 {
-                    return Err(Invalid("external circuit port exceeds capacity"));
-                }
-                external_ports = external_ports.max(port + 1);
-            }
-        }
-        if external_ports + count > 32 {
-            return Err(Invalid(
-                "combined external and winding port capacity exceeded",
-            ));
-        }
-        let mut lowered = graph.clone();
-        let mut bound = vec![false; graph.branches.len()];
-        for (winding, &branch) in windings.branch_indices.iter().enumerate() {
-            poll(cancelled)?;
-            if branch >= graph.branches.len()
-                || bound[branch]
-                || !matches!(graph.branches[branch].2, Branch::Inductor { .. })
-            {
-                return Err(Invalid(
-                    "each winding needs a distinct original inductor branch",
-                ));
-            }
-            bound[branch] = true;
-            lowered.branches[branch].2 = terminal_ports[winding].branch(external_ports + winding);
-        }
-        let dae = assemble_circuit(&lowered)?;
-        if dae.system.state_dim() > 128 {
-            return Err(Invalid("extended circuit state exceeds capacity"));
-        }
-        if initial.remaining_fluxes_wb.len() != dae.flux_index.len()
-            || initial.charges_c.len() != dae.charge_index.len()
-            || initial
-                .remaining_fluxes_wb
-                .iter()
-                .chain(&initial.charges_c)
-                .any(|v| !v.is_finite())
-        {
-            return Err(Invalid(
-                "complete finite remaining inductor fluxes and capacitor charges required",
-            ));
-        }
         let (conductors, conductor_windings, mut resistance_ohm) = bind(
             &field,
             None,
@@ -770,67 +880,7 @@ impl<'m> NonlinearWindingCircuit<'m> {
             ));
         }
         let flux_linkages_wb = linkages(&field, profiles, &end, &initial.currents_a, cancelled)?;
-        let layout = Rc::new(Layout {
-            graph,
-            dae,
-            windings,
-            terminal_ports,
-            external_ports,
-        });
-        let initial_voltage: Vec<_> = layout
-            .terminal_ports
-            .iter()
-            .map(|port| match port {
-                NonlinearWindingPort::CurrentInput => 0.0,
-                NonlinearWindingPort::VoltageInput {
-                    initial_voltage_v, ..
-                } => *initial_voltage_v,
-            })
-            .collect();
-        let input = ports(
-            &layout,
-            &initial.external_inputs,
-            &initial.currents_a,
-            &initial_voltage,
-        )?;
-        let mut seed = vec![0.0; layout.dae.system.state_dim()];
-        for (&index, &value) in layout
-            .dae
-            .flux_index
-            .iter()
-            .zip(&initial.remaining_fluxes_wb)
-        {
-            seed[index] = value;
-        }
-        for (&index, &value) in layout.dae.charge_index.iter().zip(&initial.charges_c) {
-            seed[index] = value;
-        }
-        let state = native_seed(&layout.dae, &seed, &input)?;
-        // The native initializer starts from zero algebraic multipliers. Its
-        // admitted effort is midpoint(0, state), not the returned endpoint.
-        // Native circuit-source columns have support only on that algebraic
-        // block; G^T*effort is the original conjugate output, including -I for
-        // voltage-source ports. Read this receipt without a second dt=0 solve
-        // that could choose another split of redundant initial constraints.
-        let (_, _, g) = layout.dae.system.structure();
-        for (winding, port) in layout.terminal_ports.iter().enumerate() {
-            if let NonlinearWindingPort::VoltageInput {
-                current_tolerance_a,
-                ..
-            } = port
-            {
-                let p = layout.external_ports + winding;
-                let output = (layout.dae.system.differential_dim()..state.len())
-                    .try_fold(0.0, |sum, row| {
-                        finite(g[row * layout.dae.ports + p].mul_add(0.5 * state[row], sum))
-                    })?;
-                if finite(-output - initial.currents_a[winding])?.abs() > *current_tolerance_a {
-                    return Err(Invalid(
-                        "native initial winding current disagrees with accepted field history",
-                    ));
-                }
-            }
-        }
+        let (layout, state) = Layout::new(graph, windings, terminal_ports, &initial, cancelled)?;
         let total = finite(
             field.energy_j()
                 + layout.dae.system.hamiltonian(&state)
@@ -1072,27 +1122,15 @@ impl<'m> NonlinearWindingCircuit<'m> {
         winding_conductors: Vec<WindingConductor>,
         external_inputs: &[f64],
         controls: NonlinearWindingControls<C>,
-        evaluate_field: impl Fn(&[f64], &[f64], &mut dyn FnMut() -> bool) -> Result<FieldTrial<'m, F>>,
+        evaluate_field: impl Fn(
+            &[f64],
+            &[f64],
+            &mut dyn FnMut() -> bool,
+        ) -> Result<FieldTrial<PlanarNonlinearEddy<'m>, F>>,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<NonlinearWindingCandidate<'m, F>> {
-        use NonlinearWindingError::{Balance, Invalid};
+        use NonlinearWindingError::Invalid;
         poll(cancelled)?;
-        controls.newton.validate()?;
-        let dt = target_s - self.time_s();
-        if !target_s.is_finite()
-            || !positive(dt)
-            || controls.maximum_field_trials == 0
-            || controls.maximum_newton_iterations == 0
-            || !positive(controls.difference_step_a)
-            || !positive(controls.terminal_voltage_tolerance_v)
-            || !positive(controls.power_tolerance_w)
-            || !positive(controls.energy_tolerance_j)
-        {
-            return Err(Invalid(
-                "positive interval, work budgets and physical tolerances required",
-            ));
-        }
-        admit_external_inputs(&self.layout, external_inputs)?;
         let profiles = refreshed_profiles
             .as_deref()
             .map(Vec::as_slice)
@@ -1123,23 +1161,126 @@ impl<'m> NonlinearWindingCircuit<'m> {
                 "every winding requires represented positive DC resistance",
             ));
         }
+        let accepted = TerminalContext {
+            field: &self.field,
+            layout: &self.layout,
+            end: &self.end,
+            graph_materials: &self.graph_materials,
+            state: &self.state,
+            currents_a: &self.currents_a,
+            flux_linkages_wb: &self.flux_linkages_wb,
+        }
+        .step(
+            target_s,
+            profiles,
+            &conductors,
+            &conductor_windings,
+            &stranded_resistance_ohm,
+            &resistance_ohm,
+            external_inputs,
+            controls,
+            evaluate_field,
+            cancelled,
+        )?;
+        let circuit = Self {
+            layout: self.layout.clone(),
+            end: Rc::clone(&self.end),
+            graph_materials: self.graph_materials.clone(),
+            field: accepted.field,
+            conductors,
+            conductor_windings,
+            resistance_ohm,
+            state: accepted.state,
+            currents_a: accepted.currents_a,
+            flux_linkages_wb: accepted.flux_linkages_wb,
+            solid_regions: self.solid_regions.clone(),
+            solid_profiles_per_m2: refreshed_profiles
+                .clone()
+                .or_else(|| self.solid_profiles_per_m2.clone()),
+            profile_balance_tolerance_turns: self.profile_balance_tolerance_turns,
+        };
+        Ok(NonlinearWindingCandidate {
+            circuit,
+            step: accepted.step,
+        })
+    }
+}
+
+/// Borrow the accepted physical histories for one shared native terminal solve.
+/// The field callback owns its constitutive memory; no trial publishes it.
+pub(super) struct TerminalContext<'a, S> {
+    pub(super) field: &'a S,
+    pub(super) layout: &'a Layout,
+    pub(super) end: &'a EndWindingInductance,
+    pub(super) graph_materials: &'a [GraphResistorMaterial],
+    pub(super) state: &'a [f64],
+    pub(super) currents_a: &'a [f64],
+    pub(super) flux_linkages_wb: &'a [f64],
+}
+
+pub(super) struct TerminalCandidate<S, F> {
+    pub(super) field: S,
+    pub(super) state: Vec<f64>,
+    pub(super) currents_a: Vec<f64>,
+    pub(super) flux_linkages_wb: Vec<f64>,
+    pub(super) step: NonlinearWindingStep<F>,
+}
+
+impl<S: PlanarInductionHistory> TerminalContext<'_, S> {
+    fn terminal_ports(&self) -> &[NonlinearWindingPort] {
+        &self.layout.terminal_ports
+    }
+    fn graph(&self) -> &CircuitGraph {
+        &self.layout.graph
+    }
+    fn branch_indices(&self) -> &[usize] {
+        &self.layout.windings.branch_indices
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn step<F, C>(
+        &self,
+        target_s: f64,
+        profiles: &[Vec<f64>],
+        conductors: &[WindingConductor],
+        conductor_windings: &[usize],
+        stranded_resistance_ohm: &[f64],
+        resistance_ohm: &[f64],
+        external_inputs: &[f64],
+        controls: NonlinearWindingControls<C>,
+        evaluate_field: impl Fn(&[f64], &[f64], &mut dyn FnMut() -> bool) -> Result<FieldTrial<S, F>>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<TerminalCandidate<S, F>> {
+        use NonlinearWindingError::{Balance, Invalid};
+        poll(cancelled)?;
+        controls.newton.validate()?;
+        let dt = target_s - self.field.time_s();
+        if !target_s.is_finite()
+            || !positive(dt)
+            || controls.maximum_field_trials == 0
+            || controls.maximum_newton_iterations == 0
+            || !positive(controls.difference_step_a)
+            || !positive(controls.terminal_voltage_tolerance_v)
+            || !positive(controls.power_tolerance_w)
+            || !positive(controls.energy_tolerance_j)
+        {
+            return Err(Invalid(
+                "positive interval, work budgets and physical tolerances required",
+            ));
+        }
+        admit_external_inputs(self.layout, external_inputs)?;
         // The trial source weighting is fixed throughout this terminal solve.
         // Pair its accepted-field reference once, avoiding a second complete
         // mesh/profile traversal in every finite-difference field trial.
-        let reference_linkages = linkages(
-            &self.field,
-            profiles,
-            &self.end,
-            &self.currents_a,
-            cancelled,
-        )?;
+        let reference_linkages =
+            linkages(self.field, profiles, self.end, self.currents_a, cancelled)?;
         let cancel = RefCell::new(cancelled);
         let trials = Cell::new(0);
         let voltage_input = self
             .terminal_ports()
             .iter()
             .any(|port| matches!(port, NonlinearWindingPort::VoltageInput { .. }));
-        let evaluate = |currents: &[f64]| -> Result<Trial<'m, F>> {
+        let evaluate = |currents: &[f64]| -> Result<Trial<S, F>> {
             let mut check = || (*cancel.borrow_mut())();
             poll(&mut check)?;
             if trials.get() >= controls.maximum_field_trials {
@@ -1169,16 +1310,11 @@ impl<'m> NonlinearWindingCircuit<'m> {
             let field_linkage_increments_wb = profiles
                 .iter()
                 .map(|profile| {
-                    pairing_on_mesh(
-                        self.field.problem().mesh(),
-                        &potential_increment,
-                        profile,
-                        &mut check,
-                    )
-                    .map_err(NonlinearWindingError::from)
+                    pairing_on_mesh(self.field.mesh(), &potential_increment, profile, &mut check)
+                        .map_err(NonlinearWindingError::from)
                 })
                 .collect::<Result<Vec<_>>>()?;
-            let end = self.end.step(&self.currents_a, currents)?;
+            let end = self.end.step(self.currents_a, currents)?;
             let linkage = field_linkage_increments_wb
                 .iter()
                 .enumerate()
@@ -1198,20 +1334,20 @@ impl<'m> NonlinearWindingCircuit<'m> {
                 .iter()
                 .zip(&motional_voltage_v)
                 .zip(currents)
-                .zip(&resistance_ohm)
+                .zip(resistance_ohm)
                 .map(|(((&inductive, &motional), &current), &r)| {
                     finite(r.mul_add(current, finite(inductive + motional)?))
                 })
                 .collect::<Result<Vec<_>>>()?;
-            let input = ports(&self.layout, external_inputs, currents, &required_voltage)?;
+            let input = ports(self.layout, external_inputs, currents, &required_voltage)?;
             // A voltage trial is a finite-step effort, not an initial voltage
             // clamp. Reinitializing against it could falsely reject a capacitor
             // or project its accepted charge. Keep the entire accepted native
             // state and let the original descriptor step solve its multipliers.
             let x0 = if voltage_input {
-                self.state.clone()
+                self.state.to_vec()
             } else {
-                native_seed(&self.layout.dae, &self.state, &input)?
+                native_seed(&self.layout.dae, self.state, &input)?
             };
             poll(&mut check)?;
             let (native, _) = self.layout.dae.step_audited(&x0, &input, dt)?;
@@ -1277,7 +1413,7 @@ impl<'m> NonlinearWindingCircuit<'m> {
         )
         .map_err(numerical)?;
         let construction =
-            NewtonKrylovState::new(&problem, self.currents_a.clone(), controls.newton);
+            NewtonKrylovState::new(&problem, self.currents_a.to_vec(), controls.newton);
         if let Some(e) = problem.take_failure() {
             return Err(numerical(e));
         }
@@ -1331,11 +1467,11 @@ impl<'m> NonlinearWindingCircuit<'m> {
             .map(|(&a, &b)| f64::midpoint(a, b))
             .collect();
         let (cells, winding_heat) = ohmic::spatial_heat(
-            self.field.problem().mesh(),
+            self.field.mesh(),
             profiles,
-            &conductors,
-            &conductor_windings,
-            &stranded_resistance_ohm,
+            conductors,
+            conductor_windings,
+            stranded_resistance_ohm,
             &solver.x,
             dt,
             controls.power_tolerance_w,
@@ -1390,7 +1526,7 @@ impl<'m> NonlinearWindingCircuit<'m> {
         let circuit_after = finite(dae.system.hamiltonian(&trial.native.x))?;
         let stored_before_j = finite(circuit_before + field_step.stored_before_j + end_before)?;
         let stored_after_j = finite(circuit_after + field_step.stored_after_j + end_after)?;
-        let field_change = finite(field_step.stored_after_j - field_step.stored_before_j)?;
+        let field_change = field_step.stored_change_j;
         let stored_change_j = finite(trial.native.delta_h + field_change + end_change)?;
         let heat_j = finite(winding_heat + graph_heat + field_step.heat_j)?;
         let numerical_dissipation_j = finite(field_step.numerical_dissipation_j + end_numerical)?;
@@ -1446,10 +1582,10 @@ impl<'m> NonlinearWindingCircuit<'m> {
             field: field_step,
             cells,
             graph_resistors,
-            graph_materials: self.graph_materials.clone(),
+            graph_materials: self.graph_materials.to_vec(),
             currents_a: solver.x.clone(),
             terminal_voltage_v: trial.voltage,
-            flux_linkages_wb: [self.flux_linkages_wb.clone(), trial.linkage.clone()],
+            flux_linkages_wb: [self.flux_linkages_wb.to_vec(), trial.linkage.clone()],
             inductive_voltage_v: trial.inductive_voltage_v,
             motional_voltage_v: trial.motional_voltage_v,
             terminal_residual_v: trial.voltage_residual,
@@ -1466,31 +1602,21 @@ impl<'m> NonlinearWindingCircuit<'m> {
             field_trials: trials.get(),
             report: result.report,
         };
-        let circuit = Self {
-            layout: self.layout.clone(),
-            end: Rc::clone(&self.end),
-            graph_materials: self.graph_materials.clone(),
+        let accepted = TerminalCandidate {
             field,
-            conductors,
-            conductor_windings,
-            resistance_ohm,
             state: trial.native.x,
             currents_a: solver.x,
             flux_linkages_wb: trial.linkage,
-            solid_regions: self.solid_regions.clone(),
-            solid_profiles_per_m2: refreshed_profiles
-                .clone()
-                .or_else(|| self.solid_profiles_per_m2.clone()),
-            profile_balance_tolerance_turns: self.profile_balance_tolerance_turns,
+            step,
         };
         poll(&mut check)?;
-        Ok(NonlinearWindingCandidate { circuit, step })
+        Ok(accepted)
     }
 }
 
-struct Trial<'m, F> {
+struct Trial<S, F> {
     native: StepRecord,
-    field: FieldTrial<'m, F>,
+    field: FieldTrial<S, F>,
     end: EndWindingStep,
     x0: Vec<f64>,
     linkage: Vec<f64>,
@@ -1503,30 +1629,32 @@ struct Trial<'m, F> {
     residual: Vec<f64>,
 }
 
-struct FieldAccount {
-    stored_before_j: f64,
-    stored_after_j: f64,
-    heat_j: f64,
-    supplied_work_j: f64,
-    uniform_drive_work_j: f64,
-    motional_drive_work_j: f64,
-    numerical_dissipation_j: f64,
-    parameter_work_j: f64,
-    mechanical_work_j: f64,
+pub(super) struct FieldAccount {
+    pub(super) stored_before_j: f64,
+    pub(super) stored_after_j: f64,
+    pub(super) stored_change_j: f64,
+    pub(super) heat_j: f64,
+    pub(super) supplied_work_j: f64,
+    pub(super) uniform_drive_work_j: f64,
+    pub(super) motional_drive_work_j: f64,
+    pub(super) numerical_dissipation_j: f64,
+    pub(super) parameter_work_j: f64,
+    pub(super) mechanical_work_j: f64,
 }
 
-struct FieldTrial<'m, F> {
-    state: PlanarNonlinearEddy<'m>,
-    step: F,
-    account: FieldAccount,
-    motional_voltage_v: Option<Vec<f64>>,
+pub(super) struct FieldTrial<S, F> {
+    pub(super) state: S,
+    pub(super) step: F,
+    pub(super) account: FieldAccount,
+    pub(super) motional_voltage_v: Option<Vec<f64>>,
 }
-impl<'m> FieldTrial<'m, NonlinearEddyStep> {
+impl<'m> FieldTrial<PlanarNonlinearEddy<'m>, NonlinearEddyStep> {
     fn stationary(candidate: PlanarNonlinearEddyCandidate<'m>) -> Self {
         let (state, step) = candidate.into_parts();
         let account = FieldAccount {
             stored_before_j: step.stored_before_j,
             stored_after_j: step.stored_after_j,
+            stored_change_j: step.stored_after_j - step.stored_before_j,
             heat_j: step.heat_j,
             supplied_work_j: step.supplied_work_j,
             uniform_drive_work_j: step.uniform_drive_work_j,

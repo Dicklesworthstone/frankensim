@@ -39,77 +39,87 @@ impl NonlinearWindingCircuit<'_> {
     /// these sources beside its existing graph-local heat records.
     pub fn with_graph_resistors(
         &self,
-        mut sources: Vec<GraphResistorMaterial>,
+        sources: Vec<GraphResistorMaterial>,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Self> {
-        poll(cancelled)?;
-        let count = self
-            .graph()
-            .branches
-            .iter()
-            .filter(|(_, _, branch)| matches!(branch, Branch::Resistor { .. }))
-            .count();
-        if sources.len() != count || sources.len() > 64 {
-            return Err(NonlinearWindingError::Invalid(
-                "every ordinary graph resistor needs one bounded material source",
-            ));
-        }
-        sources.sort_by_key(|source| source.branch);
-        let mut graph = self.graph().clone();
-        for (index, source) in sources.iter().enumerate() {
-            poll(cancelled)?;
-            if index > 0 && sources[index - 1].branch == source.branch
-                || !source
-                    .conductor
-                    .source_property()
-                    .is_static_at_fixed_external_conditions()
-                || !positive(source.conductor.resistance_ohm())
-                || !positive(source.conductor.resistance_ohm().recip())
-            {
-                return Err(NonlinearWindingError::Invalid(
-                    "unique representable static Ohmic graph sources required",
-                ));
-            }
-            let Some((_, _, branch @ Branch::Resistor { .. })) =
-                graph.branches.get_mut(source.branch)
-            else {
-                return Err(NonlinearWindingError::Invalid(
-                    "material source does not name an original graph resistor",
-                ));
-            };
-            *branch = Branch::Resistor {
-                ohms: source.conductor.resistance_ohm(),
-            };
-        }
-        // Retain the exact original winding ordering and private-port numbers.
-        let mut lowered = graph.clone();
-        for (winding, &branch) in self.branch_indices().iter().enumerate() {
-            lowered.branches[branch].2 =
-                self.terminal_ports()[winding].branch(self.layout.external_ports + winding);
-        }
-        let dae = assemble_circuit(&lowered)?;
-        if dae.flux_index != self.dae().flux_index
-            || dae.charge_index != self.dae().charge_index
-            || dae.node_potential_index != self.dae().node_potential_index
-            || dae.ports != self.dae().ports
-            || dae.system.state_dim() != self.dae().system.state_dim()
-            || dae.system.hamiltonian(&self.state).to_bits()
-                != self.dae().system.hamiltonian(&self.state).to_bits()
-        {
-            return Err(NonlinearWindingError::Invalid(
-                "resistance-only reassembly changed original circuit storage or ports",
-            ));
-        }
+        let (layout, sources) = rebind(&self.layout, &self.state, sources, cancelled)?;
         let mut candidate = self.clone();
-        candidate.layout = Rc::new(Layout {
-            graph,
-            dae,
-            windings: self.layout.windings.clone(),
-            terminal_ports: self.layout.terminal_ports.clone(),
-            external_ports: self.layout.external_ports,
-        });
+        candidate.layout = layout;
         candidate.graph_materials = sources;
-        poll(cancelled)?;
         Ok(candidate)
     }
+}
+
+/// Resistance-only reassembly shared by reversible and hysteretic field owners.
+pub(in crate::winding) fn rebind(
+    layout: &Layout,
+    state: &[f64],
+    mut sources: Vec<GraphResistorMaterial>,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(Rc<Layout>, Vec<GraphResistorMaterial>)> {
+    poll(cancelled)?;
+    let count = layout
+        .graph
+        .branches
+        .iter()
+        .filter(|(_, _, branch)| matches!(branch, Branch::Resistor { .. }))
+        .count();
+    if sources.len() != count || sources.len() > 64 {
+        return Err(NonlinearWindingError::Invalid(
+            "every ordinary graph resistor needs one bounded material source",
+        ));
+    }
+    sources.sort_by_key(|source| source.branch);
+    let mut graph = layout.graph.clone();
+    for (index, source) in sources.iter().enumerate() {
+        poll(cancelled)?;
+        if index > 0 && sources[index - 1].branch == source.branch
+            || !source
+                .conductor
+                .source_property()
+                .is_static_at_fixed_external_conditions()
+            || !positive(source.conductor.resistance_ohm())
+            || !positive(source.conductor.resistance_ohm().recip())
+        {
+            return Err(NonlinearWindingError::Invalid(
+                "unique representable static Ohmic graph sources required",
+            ));
+        }
+        let Some((_, _, branch @ Branch::Resistor { .. })) = graph.branches.get_mut(source.branch)
+        else {
+            return Err(NonlinearWindingError::Invalid(
+                "material source does not name an original graph resistor",
+            ));
+        };
+        *branch = Branch::Resistor {
+            ohms: source.conductor.resistance_ohm(),
+        };
+    }
+    // Retain the exact original winding ordering and private-port numbers.
+    let mut lowered = graph.clone();
+    for (winding, &branch) in layout.windings.branch_indices.iter().enumerate() {
+        lowered.branches[branch].2 =
+            layout.terminal_ports[winding].branch(layout.external_ports + winding);
+    }
+    let dae = assemble_circuit(&lowered)?;
+    if dae.flux_index != layout.dae.flux_index
+        || dae.charge_index != layout.dae.charge_index
+        || dae.node_potential_index != layout.dae.node_potential_index
+        || dae.ports != layout.dae.ports
+        || dae.system.state_dim() != layout.dae.system.state_dim()
+        || dae.system.hamiltonian(state).to_bits() != layout.dae.system.hamiltonian(state).to_bits()
+    {
+        return Err(NonlinearWindingError::Invalid(
+            "resistance-only reassembly changed original circuit storage or ports",
+        ));
+    }
+    let refreshed = Rc::new(Layout {
+        graph,
+        dae,
+        windings: layout.windings.clone(),
+        terminal_ports: layout.terminal_ports.clone(),
+        external_ports: layout.external_ports,
+    });
+    poll(cancelled)?;
+    Ok((refreshed, sources))
 }
