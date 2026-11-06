@@ -18435,3 +18435,40 @@ finite-strain stress conversion or experimental calibration.
 The thermal section integrates physical creep work as a subaccount of total physical heat. Native reciprocal expansion heat, free-energy change, mechanical entropy and numerical loss retain their separate meanings. One prepared interval resolves native laws per physical layer; each audited point replays the same old history and exact physical duration. Small-strain/rotation, fixed-reference geometry, thermal-domain and transverse-equilibrium limits remain in force. No tertiary damage, rupture, empirical calibration or finite-shell-forming claim is added.
 
 Two new section regressions and native shell/coupled consumers exercise independent primary/secondary axial returns, distinct creep/plastic storage, sustained loads, relaxation and thermal history. These tests were added but not executed in the implementation environment; formatting and source checks are not compilation or numerical execution.
+
+## Primary creep with independent static resistance recovery
+
+`creep::recovery::RecoveringNortonCreep` keeps permanent `CreepState` and
+nonnegative `resistance_strain` in separate history fields. The explicitly
+selected rate is `alpha_dot = rate_Norton(q,T) h(r)`, with the existing primary
+multiplier `h(r) = f + (1-f)(1+r/a)^(-m)` and
+`r_dot = alpha_dot - k(T) r`. Independently supplied Arrhenius recovery
+coefficients determine `k(T)`; they are never inferred from the flow activation
+energy, yield behavior or melting point. This phenomenological resistance
+model requires its own calibration and carries no stored energy in `r`.
+
+For `c = delta_alpha` and `g = 1 + k(T) dt`, backward Euler gives
+`r1 = (r0+c)/g`. The existing monotone scalar return and analytic tangent are
+reused with private prepared scale `a*g` and kinetic memory `r0`. Permanent
+strain validation, nondecreasing accumulated path and native stress/work
+checks remain unchanged. The actual solved increment is retained even when
+adding it to accumulated alpha rounds away. Unloaded recovery changes only
+resistance, without erasing permanent deformation or generating heat. Physical
+creep heat remains `q*c`. With zero recovery and `r=alpha`, stress, tangent,
+history and energy reduce exactly to the original primary law.
+
+`RecoveringNortonSource` selects and pins all thirteen original claims: the ten
+primary Norton coefficients and three independent recovery coefficients. Every
+thermal knot must retain the same reference coefficients and fixed external
+conditions. Endpoint resolution refreshes the complete receipt bundle once;
+constitutive trials perform no source queries or additional nonlinear solve.
+The complete associated history passes through `CreepLaw`, sourced expansion,
+native tetrahedra, `CaloricCreepSource` and thermal layered shells. Explicit
+isothermal section adapters also retain its original duration and native work.
+
+Analytical quadratic returns, unloaded exponential refinement, renewed creep
+after a dwell, nonproportional tangents, heat closure, source admission and
+native section history are covered by authored regressions. Compilation and
+native execution remain pending the prescribed build runner. This increment
+does not add recovery to joint plasticity, finite-deformation laws or frame
+fiber dispatch, nor does it establish tertiary damage, rupture or service life.

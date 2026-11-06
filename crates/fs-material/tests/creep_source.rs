@@ -5,8 +5,12 @@ use fs_matdb::{
     PropertyValue, Provenance, QueryPoint, UncertaintyModel,
 };
 use fs_material::SmallStrainLaw;
+use fs_material::creep::recovery::RecoveringCreepState;
+use fs_material::creep::recovery::source::*;
 use fs_material::creep::source::*;
-use fs_material::creep::{CreepTolerances, NortonCreep, StrainHardeningCreep};
+use fs_material::creep::{
+    CreepLaw, CreepState, CreepTolerances, NortonCreep, StrainHardeningCreep,
+};
 use fs_material::state_point::{
     MaterialPropertySelection, POISSON_RATIO_PROPERTY, YOUNG_MODULUS_PROPERTY,
 };
@@ -56,6 +60,23 @@ fn primary_coefficients() -> Vec<PropertyClaim> {
         ),
         scalar(CREEP_HARDENING_EXPONENT_PROPERTY, Dims([0; 6]), 1.0),
         scalar(CREEP_RESIDUAL_RATE_FRACTION_PROPERTY, Dims([0; 6]), 0.2),
+    ]);
+    properties
+}
+fn recovery_coefficients() -> Vec<PropertyClaim> {
+    let mut properties = primary_coefficients();
+    properties.extend([
+        scalar(CREEP_RECOVERY_REFERENCE_RATE_PROPERTY, CREEP_RATE_DIMS, 0.1),
+        scalar(
+            CREEP_RECOVERY_ACTIVATION_ENERGY_PROPERTY,
+            CREEP_ACTIVATION_ENERGY_DIMS,
+            45_000.0,
+        ),
+        scalar(
+            CREEP_RECOVERY_REFERENCE_TEMPERATURE_PROPERTY,
+            Temperature::DIMS,
+            350.0,
+        ),
     ]);
     properties
 }
@@ -137,6 +158,19 @@ fn source(card: &MaterialCard) -> Result<NortonCreepSource<'_>, CreepSourceError
 }
 fn primary_source(card: &MaterialCard) -> Result<NortonCreepSource<'_>, CreepSourceError> {
     NortonCreepSource::new_with_strain_hardening(
+        card,
+        NortonSourceQuery {
+            lower: &point(300.0),
+            upper: &point(500.0),
+            temperature_axis: "T",
+            selection: MaterialPropertySelection::SingleClaimOnly,
+            strain_limit: 0.02,
+        },
+        || false,
+    )
+}
+fn recovery_source(card: &MaterialCard) -> Result<RecoveringNortonSource<'_>, CreepSourceError> {
+    RecoveringNortonSource::new(
         card,
         NortonSourceQuery {
             lower: &point(300.0),
@@ -602,4 +636,155 @@ fn g0_primary_source_checks_every_thermal_knot_and_pins_every_selected_claim() {
         original.strain_hardening()
     );
     assert_eq!(refreshed.material().state_coordinate("T"), Some(425.0));
+}
+
+#[test]
+fn g1_recovery_source_preserves_all_claims_and_its_independent_thermal_clock() {
+    let card = card(recovery_coefficients());
+    let source = recovery_source(&card).unwrap();
+    assert_eq!(recovering_norton_requirements().unwrap().len(), 13);
+    assert_eq!(source.reference().properties().len(), 13);
+    let cold = source.at_temperature(350.0, 0.25).unwrap();
+    let hot = source.at_temperature(450.0, 0.25).unwrap();
+    for resolved in [&cold, &hot] {
+        assert_eq!(resolved.material().card_identity(), card.content_hash());
+        assert_eq!(resolved.material().properties().len(), 13);
+        assert_eq!(resolved.kinetics().duration_s(), 0.25);
+        for property in resolved.material().properties() {
+            assert_eq!(
+                property.answer().receipt.selected,
+                source
+                    .reference()
+                    .property(property.requirement().name())
+                    .unwrap()
+                    .answer()
+                    .receipt
+                    .selected,
+            );
+        }
+    }
+    close(cold.law().recovery_rate_s(), 0.1);
+    close(
+        hot.law().recovery_rate_s() / cold.law().recovery_rate_s(),
+        (45_000.0_f64 / 8.31446261815324 * (1.0 / 350.0 - 1.0 / 450.0)).exp(),
+    );
+    // The same already-crept, stress-free specimen retains its permanent
+    // deformation at both endpoints. Only the independently sourced resistance
+    // changes in this dwell; there is no invented recovery heat.
+    let strain = [0.002, -0.001, -0.001, 0.0, 0.0, 0.0];
+    let old = RecoveringCreepState {
+        native: CreepState {
+            creep_strain: strain,
+            equivalent_creep_strain: 0.002,
+        },
+        resistance_strain: 0.001,
+    };
+    let gates = CreepTolerances {
+        stress_pa: 1e-5,
+        energy_j_m3: 1e-7,
+    };
+    let cold_dwell = cold.creep_increment(&strain, &old, &strain, gates).unwrap();
+    let hot_dwell = hot.creep_increment(&strain, &old, &strain, gates).unwrap();
+    for (law, step) in [(&cold, &cold_dwell), (&hot, &hot_dwell)] {
+        assert_eq!(step.state.native, old.native);
+        assert_eq!(step.stress_pa, [0.0; 6]);
+        assert_eq!(step.energy.caloric_heat_j_m3(), 0.0);
+        assert_eq!(step.energy.mechanical_work_j_m3, 0.0);
+        close(
+            step.state.resistance_strain,
+            old.resistance_strain / (1.0 + law.law().recovery_rate_s() * 0.25),
+        );
+    }
+    assert!(hot_dwell.state.resistance_strain < cold_dwell.state.resistance_strain);
+    assert_eq!(old.resistance_strain, 0.001);
+    assert!(source.at_temperature(501.0, 0.25).is_err());
+}
+
+#[test]
+fn g0_recovery_source_requires_independent_correctly_dimensioned_claims() {
+    for absent in 10..13 {
+        let incomplete = recovery_coefficients()
+            .into_iter()
+            .enumerate()
+            .filter(|(index, _)| *index != absent)
+            .map(|(_, property)| property)
+            .collect();
+        assert!(recovery_source(&card(incomplete)).is_err());
+    }
+    for (index, dims) in [
+        (10, Pressure::DIMS),
+        (11, Dims([2, 0, -2, 0, 0, 0])),
+        (12, Dims([0; 6])),
+    ] {
+        let mut wrong = recovery_coefficients();
+        wrong[index] = scalar(wrong[index].key.name(), dims, 1.0);
+        assert!(recovery_source(&card(wrong)).is_err());
+    }
+    let mut disabled = recovery_coefficients();
+    disabled[10] = scalar(CREEP_RECOVERY_REFERENCE_RATE_PROPERTY, CREEP_RATE_DIMS, 0.0);
+    assert_eq!(
+        recovery_source(&card(disabled))
+            .unwrap()
+            .at_temperature(450.0, 0.25)
+            .unwrap()
+            .law()
+            .recovery_rate_s(),
+        0.0,
+    );
+}
+
+#[test]
+fn g0_recovery_source_checks_interior_coefficients_and_cancellation() {
+    for index in 10..13 {
+        let mut changed = recovery_coefficients();
+        let (value, dims) = match changed[index].value {
+            PropertyValue::Scalar { value, dims } => (value, dims),
+            _ => unreachable!(),
+        };
+        changed[index].value = PropertyValue::Curve {
+            abscissa: "T".into(),
+            abscissa_dims: Temperature::DIMS,
+            knots: vec![(300.0, value), (400.0, value * 1.1), (500.0, value)],
+            dims,
+        };
+        changed[index].interpolation = InterpolationPolicy::LinearInside;
+        for property in &mut changed {
+            property.validity = property.validity.clone().with_quantity(
+                "T",
+                QuantitySpec::dimensional(Temperature::DIMS),
+                300.0,
+                500.0,
+            );
+        }
+        let card = card(changed);
+        assert!(matches!(
+            RecoveringNortonSource::new(
+                &card,
+                NortonSourceQuery {
+                    lower: &typed_point(300.0),
+                    upper: &typed_point(500.0),
+                    temperature_axis: "T",
+                    selection: MaterialPropertySelection::SingleClaimOnly,
+                    strain_limit: 0.02,
+                },
+                || false,
+            ),
+            Err(CreepSourceError::Invalid(_))
+        ));
+    }
+    let card = card(recovery_coefficients());
+    assert!(matches!(
+        RecoveringNortonSource::new(
+            &card,
+            NortonSourceQuery {
+                lower: &point(300.0),
+                upper: &point(500.0),
+                temperature_axis: "T",
+                selection: MaterialPropertySelection::SingleClaimOnly,
+                strain_limit: 0.02,
+            },
+            || true,
+        ),
+        Err(CreepSourceError::Cancelled)
+    ));
 }

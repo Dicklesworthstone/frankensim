@@ -1,5 +1,6 @@
 use super::*;
 use fs_material::creep::plastic::NortonJ2;
+use fs_material::creep::recovery::{CreepRecoveryParameters, RecoveringNortonCreep};
 use fs_material::creep::{NortonCreep, NortonCreepParameters, StrainHardeningCreep};
 use fs_material::plastic::energy::EnergyTolerances;
 use fs_material::plastic::section::energy::NativeSectionEnergyLaw;
@@ -185,4 +186,70 @@ fn combined_creep_sections_preserve_the_native_elastic_hardening_and_heat_partit
             old = next.state;
         }
     }
+}
+
+#[test]
+fn recovering_sections_keep_resistance_separate_from_permanent_strain_and_heat() {
+    let recovery_rate = 2.0;
+    let law = RecoveringNortonCreep::new(
+        norton(true),
+        CreepRecoveryParameters {
+            reference_rate_s: recovery_rate,
+            activation_energy_j_mol: 0.0,
+            reference_temperature_k: 300.0,
+        },
+    )
+    .unwrap();
+    assert_eq!(law.physical_duration_s(), Some(DT));
+    let section = section(law, 2);
+    let mut old = section.initial_state();
+    let mut alpha = 0.0;
+    let mut resistance = 0.0;
+    let g = 1.0 + recovery_rate * DT;
+    for _ in 0..5 {
+        // At constant axial stress: dc*(a*g + r_old + dc) = dt*rate*a*g.
+        // This independent quadratic checks both resistance and permanent path.
+        let b: f64 = PRIMARY_STRAIN * g + resistance;
+        let c = DT * RATE * PRIMARY_STRAIN * g;
+        let dc = 2.0 * c / (b + (b * b + 4.0 * c).sqrt());
+        alpha += dc;
+        resistance = (resistance + dc) / g;
+        let strain = [
+            STRESS / 1200.0 + alpha,
+            -0.2 * STRESS / 1200.0 - 0.5 * alpha,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+        ];
+        let next = section.evaluate(strain, &old).unwrap();
+        let energy = section
+            .audit_energy(&old, &next.state, gates(), 1e-10)
+            .unwrap();
+        for point in &next.state.points {
+            near(point.history.native.equivalent_creep_strain, alpha, 2e-14);
+            near(point.history.native.creep_strain[0], alpha, 2e-14);
+            near(point.history.resistance_strain, resistance, 2e-14);
+            assert!(point.history.resistance_strain < point.history.native.equivalent_creep_strain);
+        }
+        near(next.resultants[0], 0.2 * STRESS, 2e-11);
+        near(energy.physical_dissipation_j_m2, 0.2 * STRESS * dc, 1e-12);
+        assert_eq!(energy.final_state.hardening_j_m2, 0.0);
+        near(energy.balance_residual_j_m2, 0.0, 1e-10);
+        old = next.state;
+    }
+    let unloaded = section
+        .evaluate([alpha, -0.5 * alpha, 0.0, 0.0, 0.0, 0.0], &old)
+        .unwrap();
+    let energy = section
+        .audit_energy(&old, &unloaded.state, gates(), 1e-10)
+        .unwrap();
+    for point in &unloaded.state.points {
+        near(point.history.native.equivalent_creep_strain, alpha, 2e-14);
+        near(point.history.native.creep_strain[0], alpha, 2e-14);
+        near(point.history.resistance_strain, resistance / g, 2e-14);
+    }
+    near(energy.physical_dissipation_j_m2, 0.0, 1e-12);
+    assert!(energy.numerical_dissipation_j_m2 > 0.0);
+    near(energy.balance_residual_j_m2, 0.0, 1e-10);
 }

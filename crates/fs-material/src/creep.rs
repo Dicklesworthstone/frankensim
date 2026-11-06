@@ -23,6 +23,8 @@ pub use hardening::StrainHardeningCreep;
 
 /// Simultaneous secondary creep and energetic isotropic J2 plasticity.
 pub mod plastic;
+/// Primary creep with independent, thermally recovering resistance memory.
+pub mod recovery;
 /// Immutable material-card binding for the same permanent creep law.
 pub mod source;
 /// Source-bound uniform physical-heat feedback with explicit zero expansion.
@@ -548,6 +550,18 @@ impl NortonCreep {
     }
 
     fn update(&self, strain: &Voigt, old: &CreepState) -> Result<Update> {
+        self.update_with_memory(strain, old, old.equivalent_creep_strain)
+    }
+
+    // Resistance recovery may use a different kinetic memory from the physical
+    // accumulated path. Keep native state validation and its actual increment
+    // here: the memory must never replace irreversible alpha in CreepState.
+    fn update_with_memory(
+        &self,
+        strain: &Voigt,
+        old: &CreepState,
+        kinetic_memory: f64,
+    ) -> Result<Update> {
         self.validate_history(strain, old)?;
         let trial = self.predictor(&difference(strain, &old.creep_strain))?;
         let q_trial = trial.q;
@@ -560,7 +574,7 @@ impl NortonCreep {
             q_trial,
             self.log_step_scale,
             det::ln(3.0 * self.shear_pa),
-            old.equivalent_creep_strain,
+            kinetic_memory,
         )?;
         let mut state = old.clone();
         if delta_alpha > 0.0 {
@@ -606,12 +620,32 @@ impl NortonCreep {
         strain: &Voigt,
         tolerances: CreepTolerances,
     ) -> Result<CreepIncrement> {
+        self.advance_with_memory(
+            old_strain,
+            old_state,
+            strain,
+            tolerances,
+            old_state.equivalent_creep_strain,
+        )
+        .map(|(increment, _)| increment)
+    }
+
+    // One solve and the original work account, with the solved increment also
+    // retained when adding it to a large accumulated path rounds away.
+    fn advance_with_memory(
+        &self,
+        old_strain: &Voigt,
+        old_state: &CreepState,
+        strain: &Voigt,
+        tolerances: CreepTolerances,
+        kinetic_memory: f64,
+    ) -> Result<(CreepIncrement, f64)> {
         require(
             positive(tolerances.stress_pa) && positive(tolerances.energy_j_m3),
             "stress and energy tolerances must be positive and finite",
         )?;
         self.validate_history(old_strain, old_state)?;
-        let next = self.update(strain, old_state)?;
+        let next = self.update_with_memory(strain, old_state, kinetic_memory)?;
         let old_e = difference(old_strain, &old_state.creep_strain);
         let new_e = difference(strain, &next.state.creep_strain);
         let stored_stress = self.elastic.stress(&new_e, &());
@@ -654,13 +688,16 @@ impl NortonCreep {
                 tolerance_j_m3: tolerances.energy_j_m3,
             });
         }
-        Ok(CreepIncrement {
-            strain: *strain,
-            stress_pa: next.stress,
-            tangent_pa: next.tangent,
-            state: next.state,
-            energy,
-        })
+        Ok((
+            CreepIncrement {
+                strain: *strain,
+                stress_pa: next.stress,
+                tangent_pa: next.tangent,
+                state: next.state,
+                energy,
+            },
+            next.delta_alpha,
+        ))
     }
 }
 

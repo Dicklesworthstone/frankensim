@@ -1917,3 +1917,23 @@ mechanics, malformed-coordinate refusals and the hereditary boundary.
 Every mechanical witness maps once to the original exposed layer and a distinct rigid-obstacle thermal cell. Reference skin/face positions, inward force normal, prism thickness, area and original inventory must agree; fixed footprints must remain closed along the admitted affine gap path. Pressure is native solved normal force divided by explicit area, never inferred from the shell's plane-stress normal stress. The whole-system gate closes material/caloric/kinetic storage, actual support/dead-load/obstacle work and outside heat. Material, drilling, inertial and normal-approach numerical losses remain separate from physical heat. Thermal roots stage all histories and receipts, retain the exact final mechanical response, and publish only a complete balanced candidate. One bounded cache reuses exact repeated layer enthalpies and Coulomb coefficients while source/transport receipts always refresh.
 
 This bounded path supports fixed reference skin patches and prescribed obstacle motion; opening/changing footprints, evolving contact resistance, general impact events, wear and flash temperatures are outside it. Scheduled thermal events require interval splitting. Three authored native regressions cover independent finite-cell heat partition with temperature-dependent friction and bulk yielding, consistent-mass dynamics with numerical loss excluded from heat, and late source refusal preserving accepted states. Formatting and source/API/energy review passed; native execution remains pending the already observed shared dependency build resource blocker.
+
+## Recovering primary resistance in solid and shell heat feedback
+
+The existing generic `CreepSolid` and `ThermoplasticShell` owners accept
+`RecoveringNortonSource`, including sourced expansion through
+`ExpandingCreepSource` and `CaloricCreepSource`. Each material point retains
+permanent signed creep, its nondecreasing accumulated path and a separate
+recovering resistance. Temperature resolves both original Arrhenius laws over
+the same physical interval. All thermal proposals restart from the complete
+accepted histories; a source resolution or inspection cannot recover resistance
+or advance creep by itself.
+
+Physical creep work enters caloric storage once. Unloaded resistance recovery
+alone supplies no heat; reciprocal thermoelastic heat and material/inertial
+numerical losses retain their original partitions. Two manufactured native
+load/hold/unload/dwell/reload regressions use independent scalar references to
+check deformation, both histories, endpoint temperature, complete source
+receipts and atomic refusal. The shell case includes nonzero sourced expansion.
+These regression definitions have not yet run on a prescribed build runner;
+their independently checked scalar trajectories are not production test results.

@@ -5,6 +5,11 @@
 use super::*;
 use fs_material::SmallStrainLaw;
 use fs_material::creep::GAS_CONSTANT_J_MOL_K;
+use fs_material::creep::recovery::CreepRecoveryParameters;
+use fs_material::creep::recovery::source::{
+    CREEP_RECOVERY_ACTIVATION_ENERGY_PROPERTY, CREEP_RECOVERY_REFERENCE_RATE_PROPERTY,
+    CREEP_RECOVERY_REFERENCE_TEMPERATURE_PROPERTY, RecoveringNortonSource,
+};
 use fs_material::creep::source::*;
 use fs_material::creep::thermal::FeedbackError as CreepFeedbackError;
 use fs_material::creep::thermal::expansion::{ExpandingCreepSource, ThermalCreepState};
@@ -41,6 +46,10 @@ fn temperature_point(temperature_k: f64) -> QueryPoint {
 }
 
 fn fixture() -> Fixture {
+    fixture_with_recovery(None)
+}
+
+fn fixture_with_recovery(recovery: Option<CreepRecoveryParameters>) -> Fixture {
     let mut claims = ClaimSet::new();
     for (name, dims, value) in [
         (YOUNG_MODULUS_PROPERTY, Pressure::DIMS, E),
@@ -78,6 +87,35 @@ fn fixture() -> Fixture {
         claim.validity =
             ValidityDomain::unconstrained().with_quantity("T", temperature_spec(), 300.0, 320.0);
         claims.insert_claim(claim).unwrap();
+    }
+    if let Some(parameters) = recovery {
+        for (name, dims, value) in [
+            (
+                CREEP_RECOVERY_REFERENCE_RATE_PROPERTY,
+                CREEP_RATE_DIMS,
+                parameters.reference_rate_s,
+            ),
+            (
+                CREEP_RECOVERY_ACTIVATION_ENERGY_PROPERTY,
+                CREEP_ACTIVATION_ENERGY_DIMS,
+                parameters.activation_energy_j_mol,
+            ),
+            (
+                CREEP_RECOVERY_REFERENCE_TEMPERATURE_PROPERTY,
+                Temperature::DIMS,
+                parameters.reference_temperature_k,
+            ),
+        ] {
+            let mut claim = scalar(name, dims, value);
+            claim.provenance.source = "manufactured primary-creep recovery shell".into();
+            claim.validity = ValidityDomain::unconstrained().with_quantity(
+                "T",
+                temperature_spec(),
+                300.0,
+                320.0,
+            );
+            claims.insert_claim(claim).unwrap();
+        }
     }
     // This pure-creep card deliberately supplies no yield or plastic-hardening
     // property. Preparing a caloric section must not fabricate a J2 material.
@@ -127,7 +165,17 @@ fn expanding_source(fixture: &Fixture) -> ExpandingCreepSource<NortonCreepSource
         || false,
     )
     .unwrap();
-    let reference = resolve_material_state_point(
+    ExpandingCreepSource::new(
+        &fixture.card,
+        mechanical,
+        &expansion_reference(fixture),
+        || false,
+    )
+    .unwrap()
+}
+
+fn expansion_reference(fixture: &Fixture) -> fs_material::state_point::ResolvedMaterialStatePoint {
+    resolve_material_state_point(
         &fixture.card,
         &temperature_point(300.0),
         &[ScalarPropertyRequirement::try_new(
@@ -138,8 +186,7 @@ fn expanding_source(fixture: &Fixture) -> ExpandingCreepSource<NortonCreepSource
         .unwrap()],
         MaterialPropertySelection::SingleClaimOnly,
     )
-    .unwrap();
-    ExpandingCreepSource::new(&fixture.card, mechanical, &reference, || false).unwrap()
+    .unwrap()
 }
 
 // At fixed uniaxial stress and endpoint T the primary law is exactly
@@ -382,5 +429,198 @@ fn g1_primary_creep_shell_self_heats_and_retains_history_through_hold_unload_rel
         );
         assert_eq!(shell.solution(), &old_solution);
         assert_eq!(thermal.cells(), &old_cells);
+    });
+}
+
+#[test]
+fn g1_shell_recovers_primary_resistance_through_an_unloaded_thermal_dwell_without_healing_creep() {
+    let recovery = CreepRecoveryParameters {
+        reference_rate_s: 100.0,
+        activation_energy_j_mol: 3000.0 * GAS_CONSTANT_J_MOL_K,
+        reference_temperature_k: 300.0,
+    };
+    let fixture = fixture_with_recovery(Some(recovery));
+    context(|cx| {
+        let mesh = mesh();
+        let mut thermal = thermal(&fixture, &[0.0], 0.0);
+        let mechanical = RecoveringNortonSource::new(
+            &fixture.card,
+            NortonSourceQuery {
+                lower: &temperature_point(300.0),
+                upper: &temperature_point(320.0),
+                temperature_axis: "T",
+                selection: MaterialPropertySelection::SingleClaimOnly,
+                strain_limit: 0.04,
+            },
+            || false,
+        )
+        .unwrap();
+        let source = CaloricCreepSource::new(
+            &fixture.card,
+            ExpandingCreepSource::new(
+                &fixture.card,
+                mechanical,
+                &expansion_reference(&fixture),
+                || false,
+            )
+            .unwrap(),
+            &fixture.caloric,
+            || false,
+        )
+        .unwrap();
+        let layers = vec![vec![ShellThermoplasticLayer {
+            cell: CellId(100),
+            layer: PlaneStressLayer {
+                bottom_z_m: -THICKNESS / 2.0,
+                top_z_m: THICKNESS / 2.0,
+                subdivisions: 2,
+                law: source,
+            },
+        }]];
+        let mut shell =
+            ThermoplasticShell::try_new(&thermal, &mesh, layers, discretization(), cx).unwrap();
+        let supports = membrane_supports();
+        let (mut alpha, mut resistance, mut temperature, mut old_stress, mut time) =
+            (0.0, 0.0, 300.0, 0.0, 0.0);
+        for (stress, dt) in [
+            (STRESS, DT),
+            (STRESS, DT),
+            (0.0, 4.0 * DT),
+            (0.0, 2.0 * DT),
+            (STRESS, DT),
+        ] {
+            let recovery_at = |t: f64| {
+                recovery.reference_rate_s
+                    * (recovery.activation_energy_j_mol / GAS_CONSTANT_J_MOL_K
+                        * (1.0 / recovery.reference_temperature_k - 1.0 / t))
+                        .exp()
+            };
+            let increment_at = |t: f64| {
+                // Eliminating r1=(r0+dc)/(1+k dt) gives this independent
+                // quadratic at prescribed stress and endpoint temperature.
+                let scaled_strain = PRIMARY_STRAIN * (1.0 + dt * recovery_at(t));
+                let rate = RATE
+                    * (stress / STRESS).powi(2)
+                    * (ACTIVATION_K * (1.0 / 300.0 - 1.0 / t)).exp();
+                let rhs = scaled_strain * dt * rate;
+                let shifted = scaled_strain + resistance;
+                2.0 * rhs / (shifted + (shifted * shifted + 4.0 * rhs).sqrt())
+            };
+            let reversible = -EXPANSION * temperature * (stress - old_stress);
+            let residual =
+                |t| RHO * CREEP_CP * (t - temperature) - stress * increment_at(t) - reversible;
+            let (mut lower, mut upper) = (temperature - 2.0, temperature + 4.0);
+            assert!(residual(lower) < 0.0 && residual(upper) > 0.0);
+            for _ in 0..80 {
+                let mid = 0.5 * (lower + upper);
+                if residual(mid) > 0.0 {
+                    upper = mid;
+                } else {
+                    lower = mid;
+                }
+            }
+            let next_temperature = 0.5 * (lower + upper);
+            let dc = increment_at(next_temperature);
+            let next_resistance = (resistance + dc) / (1.0 + dt * recovery_at(next_temperature));
+            let old_solution = shell.solution().clone();
+            let old_cells = thermal.cells().clone();
+            let step = shell
+                .advance(
+                    &thermal,
+                    &(),
+                    time + dt,
+                    &supports,
+                    &[(6, stress * VOLUME / L)],
+                    IncrementSettings::default(),
+                    thermal_config(),
+                    config(),
+                    cx,
+                )
+                .unwrap();
+            close(
+                step.thermal().temperature_k(CellId(100)).unwrap(),
+                next_temperature,
+                5e-8,
+            );
+            let free = EXPANSION * (next_temperature - 300.0);
+            close(
+                step.shell().solution().coordinates[1][0],
+                L * (stress / E + alpha + dc + free),
+                3e-11,
+            );
+            close(
+                step.shell().solution().coordinates[2][1],
+                L * (-0.2 * stress / E - 0.5 * (alpha + dc) + free),
+                3e-11,
+            );
+            for section in &step.shell().solution().section_states {
+                for point in &section.points {
+                    let history = &point.history.mechanical;
+                    close(history.native.equivalent_creep_strain, alpha + dc, 3e-9);
+                    close(history.native.creep_strain[0], alpha + dc, 3e-9);
+                    close(history.resistance_strain, next_resistance, 3e-9);
+                    close(point.history.temperature_k(), next_temperature, 5e-8);
+                    assert!(history.resistance_strain < history.native.equivalent_creep_strain);
+                }
+            }
+            let energy = &step.report().mechanical;
+            close(energy.creep_heat_j, VOLUME * stress * dc, 3e-10);
+            close(energy.physical_heat_j, energy.creep_heat_j, 1e-12);
+            close(energy.reversible_heat_j, VOLUME * reversible, 3e-10);
+            close(
+                RHO * VOLUME * CREEP_CP * (next_temperature - temperature),
+                step.report().cell_heat_j[&CellId(100)].total_j(),
+                3e-10,
+            );
+            close(
+                step.report().combined_residual_j,
+                0.0,
+                config().energy_tolerance_j,
+            );
+            if stress == 0.0 {
+                assert!(next_resistance < resistance);
+                close(energy.physical_heat_j, 0.0, 1e-12);
+                // Unloading has reciprocal thermoelastic heat; the next dwell
+                // recovers kinetic resistance without any extra caloric source.
+                if old_stress == 0.0 {
+                    close(energy.reversible_heat_j, 0.0, 1e-12);
+                    close(next_temperature, temperature, 1e-12);
+                } else {
+                    assert!(energy.material_numerical_loss_j > 0.0);
+                }
+            }
+            assert_eq!(shell.solution(), &old_solution);
+            assert_eq!(thermal.cells(), &old_cells);
+            assert_eq!(shell.time_s(), time);
+            let (next_shell, next_thermal, _, _, _) = step.into_parts();
+            shell = next_shell;
+            thermal = next_thermal;
+            alpha += dc;
+            resistance = next_resistance;
+            temperature = next_temperature;
+            old_stress = stress;
+            time += dt;
+        }
+        let old_solution = shell.solution().clone();
+        let old_cells = thermal.cells().clone();
+        assert!(
+            shell
+                .advance(
+                    &thermal,
+                    &RefuseAfterHeat,
+                    time + DT,
+                    &supports,
+                    &[(6, STRESS * VOLUME / L)],
+                    IncrementSettings::default(),
+                    thermal_config(),
+                    config(),
+                    cx,
+                )
+                .is_err()
+        );
+        assert_eq!(shell.solution(), &old_solution);
+        assert_eq!(thermal.cells(), &old_cells);
+        assert_eq!(shell.time_s(), time);
+        assert_eq!(thermal.time_s(), time);
     });
 }
