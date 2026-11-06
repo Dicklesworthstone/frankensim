@@ -9,7 +9,9 @@
 //! Quadratic bulk energy has its exact quadratic conjugate. Log-squared bulk
 //! energy uses ONLY the locally convex branch `ln(J)<1`: its positive-pressure
 //! inverse is multivalued outside that branch, and a global finite Legendre
-//! transform is not claimed. No bulk modulus is replaced. Exact incompressibility
+//! transform is not claimed. Simo--Taylor bulk is globally convex on J>0 and
+//! has an analytic, compression-safe pressure inverse. No bulk modulus is
+//! replaced. Exact incompressibility
 //! is an explicit alternative, with zero pressure compliance and no bulk energy.
 //! A spatial mixed discretization must separately establish inf-sup stability.
 
@@ -242,6 +244,45 @@ pub fn pressure_potential(
             let mut compliance = (j * j) / (kappa * distance);
             if !(compliance.is_finite() && compliance > 0.0) {
                 compliance = det::exp(2.0 * x - det::ln(kappa) - det::ln(distance));
+            }
+            PressurePotential {
+                complementary_pa: pressure_pa * increment - stored,
+                bulk_stored_pa: stored,
+                volume_ratio: j,
+                volume_increment: increment,
+                compliance_per_pa: compliance,
+            }
+        }
+        Volumetric::SimoTaylor { .. } => {
+            // p = kappa/2 (J - 1/J). Scale the quadratic root before
+            // squaring, and rationalize its compressive branch: neither
+            // large |p|/kappa nor cancellation of equal roots is required.
+            let scale = pressure_pa.abs().max(kappa);
+            let p = pressure_pa / scale;
+            let k = kappa / scale;
+            let root = det::sqrt(p * p + k * k);
+            let mut j = if p < 0.0 {
+                k / (root - p)
+            } else {
+                (root + p) / k
+            };
+            let increment = if pressure_pa.abs() <= 0.0625 * kappa {
+                let ratio = pressure_pa / kappa;
+                let h = det::sqrt(1.0 + ratio * ratio);
+                let increment = ratio + ratio * (ratio / (h + 1.0));
+                j = 1.0 + increment;
+                increment
+            } else {
+                j - 1.0
+            };
+            let stored = if increment.abs() <= 0.125 {
+                super::simo_taylor_small_energy(kappa, increment)
+            } else {
+                volume.energy(j)
+            };
+            let mut compliance = (j / root) / scale;
+            if !(compliance.is_finite() && compliance > 0.0) && j > 0.0 {
+                compliance = det::exp(det::ln(j) - det::ln(root) - det::ln(scale));
             }
             PressurePotential {
                 complementary_pa: pressure_pa * increment - stored,

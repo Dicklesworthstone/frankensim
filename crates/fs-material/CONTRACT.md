@@ -1,5 +1,30 @@
 # fs-material — CONTRACT
 
+## Globally convex finite-compression bulk storage
+
+`hyper::Volumetric::SimoTaylor` explicitly selects
+`U(J)=kappa/4*(J^2-1-2*ln(J))`. Its positive curvature
+`kappa/2*(1+1/J^2)` holds for every positive volume, and its energy diverges
+under volume collapse. It shares the existing Gent, Ogden and HGO energy,
+Piola, tangent, plane-stress, reference-deformation and mixed consumers.
+Material cards select it with `volumetric_kind=2`; existing selectors retain
+their original meanings. No experimental calibration or default replacement
+is implied. Reference: Hartmann & Neff (2003), Table 4,
+doi:10.1016/S0020-7683(03)00086-6.
+
+The original-material pressure dual uses an analytic scaled, rationalized
+inverse under compression. Its signed volume increment and stored energy are
+resolved near the reference even when the volume rounds to one. The scalar
+discrete-gradient owner uses the same original bulk energy, a cancellation-safe
+secant and its exact endpoint derivative on the caller's positive bracket;
+it has no log-squared `J<e` restriction. Interval work pressure remains distinct
+from endpoint pressure. Existing stretch, work and iteration limits still apply.
+G0/G1/G3 tests in `hyper_simo_taylor`, `hyper_mixed`, `hyper_discrete_bulk`,
+`hyper_discrete_bulk_reference` and `hyperelastic_gent` check analytical
+stress/curvature, pressure inversion, mixed condensation, reversible finite
+compression work, held references, source-card selection and rotated tangents.
+
+
 ## Local shear stress in layered circular torsion
 
 `ConcentricShearSection::torsional_stress_at_twist` and

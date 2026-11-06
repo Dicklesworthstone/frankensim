@@ -94,6 +94,7 @@ fn pressure(law: &Hyperelastic, j: f64) -> f64 {
         | HyperelasticModel::HolzapfelGasserOgden { volumetric, .. } => match volumetric {
             Volumetric::Quadratic { kappa } => kappa * (j - 1.0),
             Volumetric::LogSquared { kappa } => kappa * j.ln() / j,
+            Volumetric::SimoTaylor { kappa } => 0.5 * kappa * (j - 1.0) * (1.0 + 1.0 / j),
         },
         HyperelasticModel::NeoHookean { .. } => panic!("coupled fixture not admitted"),
     }
@@ -105,6 +106,7 @@ fn g0_original_pressure_duals_recover_volume_storage_and_independent_derivatives
     for volume in [
         Volumetric::Quadratic { kappa },
         Volumetric::LogSquared { kappa },
+        Volumetric::SimoTaylor { kappa },
     ] {
         for j in [1e-6_f64, 0.2, 0.8, 1.0, 1.000000001, 1.2, 2.5] {
             let (p, u, curvature) = match volume {
@@ -115,6 +117,11 @@ fn g0_original_pressure_duals_recover_volume_storage_and_independent_derivatives
                     kappa * j.ln() / j,
                     0.5 * kappa * j.ln().powi(2),
                     kappa * (1.0 - j.ln()) / (j * j),
+                ),
+                Volumetric::SimoTaylor { .. } => (
+                    0.5 * kappa * (j - 1.0) * (1.0 + 1.0 / j),
+                    0.25 * kappa * ((j - 1.0) * (j + 1.0) - 2.0 * j.ln()),
+                    0.5 * kappa * (1.0 + 1.0 / (j * j)),
                 ),
             };
             let result = pressure_potential(volume, p).unwrap();

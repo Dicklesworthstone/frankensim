@@ -220,9 +220,10 @@ impl Parameters<'_> {
 
     fn volumetric(&mut self) -> Result<Volumetric, MaterialError> {
         let kappa = self.get("kappa", PA)?;
-        Ok(match self.count("volumetric_kind", 1)? {
+        Ok(match self.count("volumetric_kind", 2)? {
             0 => Volumetric::Quadratic { kappa },
-            _ => Volumetric::LogSquared { kappa },
+            1 => Volumetric::LogSquared { kappa },
+            _ => Volumetric::SimoTaylor { kappa },
         })
     }
 }
@@ -235,6 +236,7 @@ impl Hyperelastic {
     /// Neither model accepts an unused `volumetric_kind` selector.
     /// `gent-decoupled` requires `mu`, `kappa` in Pa, dimensionless positive
     /// `locking_invariant` (Jm), and an explicit `volumetric_kind` selector.
+    /// Bulk selectors are 0=quadratic, 1=log-squared, 2=Simo--Taylor.
     /// Ogden/HGO retain explicit bulk selectors, dimensionless counts,
     /// exponents and directions, and Pa moduli. Ogden uses `mu_0, alpha_0,
     /// ...`; HGO uses `fibre_0_x/y/z, ...`.

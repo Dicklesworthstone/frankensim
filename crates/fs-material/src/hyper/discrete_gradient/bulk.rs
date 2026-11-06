@@ -4,7 +4,8 @@
 //! discrete derivative `p = (U(b)-U(a))/(b-a)`. Its derivative with respect to
 //! `b` is `integral_0^1 t U''(a+t*(b-a)) dt`, so the inverse is unique on a
 //! strictly convex volume bracket. Quadratic bulk is inverted analytically;
-//! log-squared bulk retains its original energy on `0 < Je < exp(1)`.
+//! log-squared bulk retains its original energy on `0 < Je < exp(1)`;
+//! Simo--Taylor bulk remains strictly convex throughout `Je > 0`.
 //!
 //! A held reference deformation with Jg = det(G) retains TOTAL volume J and
 //! original-volume storage Jg U(J/Jg). Interval and endpoint pressures remain
@@ -163,6 +164,34 @@ fn log_secant(a: f64, b: f64) -> (f64, f64, f64) {
     }
 }
 
+// U/kappa = (J^2-1-2 ln J)/4. The close-pair polynomial supplies
+// log1p(r)/r - 1 and its derivative without cancellation, r=(b-a)/a.
+// Its equality derivative is U''(a)/(2 kappa), not endpoint U''(a)/kappa.
+fn simo_taylor_secant(a: f64, b: f64) -> (f64, f64, f64) {
+    let delta = b - a;
+    let r = delta / a;
+    let (value, derivative) = if r.abs() <= 0.125 {
+        let mut tail = 1.0 / 21.0;
+        let mut slope = 0.0_f64;
+        for n in (1..20).rev() {
+            slope = slope.mul_add(r, tail);
+            let sign = if n % 2 == 0 { 1.0 } else { -1.0 };
+            tail = tail.mul_add(r, sign / (n + 1) as f64);
+        }
+        (
+            0.25 * (a - 1.0) + 0.25 * (b - 1.0) + 0.5 * ((a - 1.0) - r * tail) / a,
+            0.25 - 0.5 * (tail + r * slope) / a / a,
+        )
+    } else {
+        let log_ratio = det::ln(b) - det::ln(a);
+        (
+            0.25 * a + 0.25 * b - 0.5 * log_ratio / delta,
+            0.25 + 0.5 * (log_ratio - delta / b) / delta / delta,
+        )
+    };
+    (value, derivative, value * delta)
+}
+
 impl DiscreteBulkPoint {
     /// Initialize a compatible mixed bulk state from ORIGINAL endpoint pressure.
     /// The spatial owner still admits its weak geometric-volume constraint.
@@ -300,6 +329,7 @@ impl DiscreteBulkPoint {
             * match self.volume {
                 Volumetric::Quadratic { .. } => j - 1.0,
                 Volumetric::LogSquared { .. } => det::ln(j) / j,
+                Volumetric::SimoTaylor { .. } => 0.5 * (j - 1.0) * (1.0 + 1.0 / j),
             }
     }
 
@@ -314,6 +344,7 @@ impl DiscreteBulkPoint {
                 (secant, 0.5, secant * (b - a))
             }
             Volumetric::LogSquared { .. } => log_secant(a, b),
+            Volumetric::SimoTaylor { .. } => simo_taylor_secant(a, b),
         }
     }
 

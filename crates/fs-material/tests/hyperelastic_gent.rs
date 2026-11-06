@@ -139,7 +139,7 @@ fn g1_exactly_incompressible_uniaxial_and_large_chain_limit() {
 }
 
 #[test]
-fn g3_objectivity_and_consistent_tangent_for_both_bulk_laws() {
+fn g3_objectivity_and_consistent_tangent_for_all_bulk_laws() {
     let axis = [
         1.0 / 14.0_f64.sqrt(),
         2.0 / 14.0_f64.sqrt(),
@@ -154,6 +154,7 @@ fn g3_objectivity_and_consistent_tangent_for_both_bulk_laws() {
     for volume in [
         Volumetric::Quadratic { kappa: KAPPA },
         Volumetric::LogSquared { kappa: KAPPA },
+        Volumetric::SimoTaylor { kappa: KAPPA },
     ] {
         let law = gent(JM, volume);
         close(law.energy(&rotated), law.energy(&f), MU, 2e-12);
@@ -224,6 +225,7 @@ fn g1_native_mixed_condensation_and_compressible_plane_stress() {
         let pressure = match volume {
             Volumetric::Quadratic { .. } => KAPPA * (j - 1.0),
             Volumetric::LogSquared { .. } => KAPPA * j.ln() / j,
+            Volumetric::SimoTaylor { .. } => 0.5 * KAPPA * (j - 1.0) * (1.0 + 1.0 / j),
         };
         law.validate_mixed().unwrap();
         let response = law
@@ -294,6 +296,22 @@ fn model_card() -> ConstitutiveModelCard {
         sources: vec![],
         provenance: provenance(),
     }
+}
+
+#[test]
+fn g0_simo_taylor_card_retains_the_explicit_compression_choice() {
+    let mut card = model_card();
+    card.parameters.get_mut("volumetric_kind").unwrap().value = 2.0;
+    let law = Hyperelastic::from_model_card(&card).unwrap();
+    assert!(matches!(
+        law.model,
+        HyperelasticModel::Gent {
+            volumetric: Volumetric::SimoTaylor { kappa: KAPPA },
+            ..
+        }
+    ));
+    card.parameters.get_mut("volumetric_kind").unwrap().value = 3.0;
+    assert!(Hyperelastic::from_model_card(&card).is_err());
 }
 
 #[test]

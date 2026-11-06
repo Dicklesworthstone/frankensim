@@ -50,6 +50,13 @@ pub enum Volumetric {
     Quadratic { kappa: f64 },
     /// `U(J) = kappa/2 (ln J)^2`.
     LogSquared { kappa: f64 },
+    /// `U(J) = kappa/4 (J^2 - 1 - 2 ln J)` (Simo--Taylor).
+    /// Its curvature is positive for every `J > 0`, and compression energy
+    /// diverges as `J` tends to zero. The pressure inverse is single-valued.
+    /// See Hartmann & Neff (2003), doi:10.1016/S0020-7683(03)00086-6,
+    /// Table 4. This is an explicit material choice, not a replacement for
+    /// either existing bulk law or an experimental calibration.
+    SimoTaylor { kappa: f64 },
 }
 
 impl Volumetric {
@@ -57,18 +64,43 @@ impl Volumetric {
     #[must_use]
     pub fn kappa(self) -> f64 {
         match self {
-            Self::Quadratic { kappa } | Self::LogSquared { kappa } => kappa,
+            Self::Quadratic { kappa } | Self::LogSquared { kappa } | Self::SimoTaylor { kappa } => {
+                kappa
+            }
         }
     }
 
     /// Stored energy, with `J > 0` required by the caller.
     pub fn energy<T: Real>(self, j: T) -> T {
+        if let Self::SimoTaylor { kappa } = self {
+            let increment = j - T::one();
+            return if increment.value().abs() <= 0.125 {
+                simo_taylor_small_energy(kappa, increment)
+            } else {
+                T::from_f64(kappa)
+                    * (T::from_f64(0.25) * increment * (j + T::one()) - T::from_f64(0.5) * j.ln())
+            };
+        }
         let strain = match self {
             Self::Quadratic { .. } => j - T::one(),
             Self::LogSquared { .. } => j.ln(),
+            Self::SimoTaylor { .. } => unreachable!(),
         };
         T::from_f64(0.5 * self.kappa()) * strain * strain
     }
+}
+
+// U/kappa = x^2/2 [1 - x/3 + x^2/4 - ...], x=J-1.
+// Retain weak compression without subtracting O(x) terms. On |x|<=1/8
+// the omitted second derivative is below roundoff; nested duals differentiate
+// this same expression, including the exact reference stress and bulk modulus.
+fn simo_taylor_small_energy<T: Real>(kappa: f64, x: T) -> T {
+    let mut tail = T::from_f64(1.0 / 22.0);
+    for n in (1..20).rev() {
+        let sign = if n % 2 == 0 { 1.0 } else { -1.0 };
+        tail = tail * x + T::from_f64(sign / (n + 2) as f64);
+    }
+    T::from_f64(0.5 * kappa) * x * x * (T::one() + x * tail)
 }
 
 /// Structural invariants used by the fibre contribution. The matrix always
@@ -817,7 +849,7 @@ impl Hyperelastic {
 
     fn convex_bulk(&self, volumetric: Volumetric) -> bool {
         match volumetric {
-            Volumetric::Quadratic { .. } => true,
+            Volumetric::Quadratic { .. } | Volumetric::SimoTaylor { .. } => true,
             // U'' = kappa (1-ln J)/J². On the declared stretch box,
             // J <= limit³, so this is a sufficient domain-local condition.
             Volumetric::LogSquared { .. } => 3.0 * fs_math::det::ln(self.stretch_limit) <= 1.0,

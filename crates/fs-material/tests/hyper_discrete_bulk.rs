@@ -24,7 +24,7 @@ fn law(volume: Volumetric) -> Hyperelastic {
             c01: 2.0,
             kappa,
         },
-        Volumetric::LogSquared { .. } => HyperelasticModel::Ogden {
+        Volumetric::LogSquared { .. } | Volumetric::SimoTaylor { .. } => HyperelasticModel::Ogden {
             terms: vec![OgdenTerm {
                 mu_pa: 6.0,
                 alpha: 4.0,
@@ -44,9 +44,13 @@ fn close(actual: f64, expected: f64, allowance: f64) {
 
 // Independent scalar oracle uses platform logarithms and direct original U.
 fn energy(volume: Volumetric, j: f64) -> f64 {
+    if matches!(volume, Volumetric::SimoTaylor { .. }) {
+        return 0.25 * volume.kappa() * ((j - 1.0) * (j + 1.0) - 2.0 * j.ln());
+    }
     let strain = match volume {
         Volumetric::Quadratic { .. } => j - 1.0,
         Volumetric::LogSquared { .. } => j.ln(),
+        Volumetric::SimoTaylor { .. } => unreachable!(),
     };
     0.5 * volume.kappa() * strain * strain
 }
@@ -56,6 +60,7 @@ fn endpoint_pressure(volume: Volumetric, j: f64) -> f64 {
         * match volume {
             Volumetric::Quadratic { .. } => j - 1.0,
             Volumetric::LogSquared { .. } => j.ln() / j,
+            Volumetric::SimoTaylor { .. } => 0.5 * (j - 1.0) * (1.0 + 1.0 / j),
         }
 }
 
@@ -172,6 +177,7 @@ fn g0_consistent_compliance_matches_pressure_finite_differences_and_small_pair_l
     for volume in [
         Volumetric::Quadratic { kappa: 63.0 },
         Volumetric::LogSquared { kappa: 8e5 },
+        Volumetric::SimoTaylor { kappa: 8e5 },
     ] {
         let kappa = volume.kappa();
         let material = law(volume);
@@ -196,6 +202,7 @@ fn g0_consistent_compliance_matches_pressure_finite_differences_and_small_pair_l
             let compliance = match volume {
                 Volumetric::Quadratic { .. } => 2.0 / kappa,
                 Volumetric::LogSquared { .. } => 2.0 * a * a / (kappa * (1.0 - a.ln())),
+                Volumetric::SimoTaylor { .. } => 4.0 / (kappa * (1.0 + 1.0 / (a * a))),
             };
             close(equal.volume_ratio_after, a, 5e-16);
             close(equal.compliance_per_pa, compliance, 8e-15 * compliance);
@@ -211,6 +218,9 @@ fn g0_consistent_compliance_matches_pressure_finite_differences_and_small_pair_l
                         let dl = ((b - a) / a).ln_1p();
                         kappa * (a.ln() + 0.5 * dl) * dl
                     }
+                    Volumetric::SimoTaylor { .. } => {
+                        0.25 * kappa * ((b - a) * (b + a) - 2.0 * ((b - a) / a).ln_1p())
+                    }
                 };
                 close(response.energy_change_pa, stable_change, 3e-13 * kappa);
             }
@@ -225,6 +235,7 @@ fn g0_original_endpoint_pressure_initializes_compatible_bulk_and_zero_pressure_r
     for volume in [
         Volumetric::Quadratic { kappa: 60.0 },
         Volumetric::LogSquared { kappa: 700.0 },
+        Volumetric::SimoTaylor { kappa: 700.0 },
     ] {
         let material = law(volume);
         for j in [0.25, 0.8, 1.0, 1.37, 2.5] {

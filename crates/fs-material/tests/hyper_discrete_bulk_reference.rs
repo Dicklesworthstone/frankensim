@@ -24,13 +24,15 @@ fn law(volume: Volumetric) -> Hyperelastic {
                 c01: 2.0,
                 kappa,
             },
-            Volumetric::LogSquared { .. } => HyperelasticModel::Ogden {
-                terms: vec![OgdenTerm {
-                    mu_pa: 6.0,
-                    alpha: 4.0,
-                }],
-                volumetric: volume,
-            },
+            Volumetric::LogSquared { .. } | Volumetric::SimoTaylor { .. } => {
+                HyperelasticModel::Ogden {
+                    terms: vec![OgdenTerm {
+                        mu_pa: 6.0,
+                        alpha: 4.0,
+                    }],
+                    volumetric: volume,
+                }
+            }
         },
         4.0,
     )
@@ -46,9 +48,13 @@ fn close(a: f64, b: f64, allowance: f64) {
 
 // Independent endpoint oracle: platform logarithms, not the production secant.
 fn energy(volume: Volumetric, je: f64) -> f64 {
+    if matches!(volume, Volumetric::SimoTaylor { .. }) {
+        return 0.25 * volume.kappa() * ((je - 1.0) * (je + 1.0) - 2.0 * je.ln());
+    }
     let strain = match volume {
         Volumetric::Quadratic { .. } => je - 1.0,
         Volumetric::LogSquared { .. } => je.ln(),
+        Volumetric::SimoTaylor { .. } => unreachable!(),
     };
     0.5 * volume.kappa() * strain * strain
 }
@@ -58,6 +64,7 @@ fn pressure(volume: Volumetric, je: f64) -> f64 {
         * match volume {
             Volumetric::Quadratic { .. } => je - 1.0,
             Volumetric::LogSquared { .. } => je.ln() / je,
+            Volumetric::SimoTaylor { .. } => 0.5 * (je - 1.0) * (1.0 + 1.0 / je),
         }
 }
 
@@ -69,6 +76,7 @@ fn reference_bulk_secant_stores_total_j_and_original_energy_with_physical_pressu
     for volume in [
         Volumetric::Quadratic { kappa: 8e5 },
         Volumetric::LogSquared { kappa: 8e5 },
+        Volumetric::SimoTaylor { kappa: 8e5 },
     ] {
         let material = law(volume);
         for (a, b) in [(0.41, 1.79), (1.63, 0.77), (0.93, 1.21)] {
