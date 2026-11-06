@@ -54,6 +54,7 @@ use fs_qty::{Amount, Temperature, Volume};
 use std::sync::Arc;
 
 mod evaluate;
+pub mod test_particle;
 
 const ELEMENTARY_CHARGE_C: f64 = 1.602_176_634e-19;
 // CODATA 2022; these are model constants, not an uncertainty enclosure.
