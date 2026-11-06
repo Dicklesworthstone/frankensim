@@ -33,8 +33,8 @@ pub struct LiquidExteriorConvectionSettings {
     pub surface_temperature_bounds_k: [f64; 2],
     pub characteristic_length: Length,
     pub property_temperature: ConvectionPropertyTemperature,
-    /// Forced, forced-sphere, vertical-plate or natural-geometry law.
-    /// Finite plate strips and mixed aiding flow are not admitted here.
+    /// Forced, forced-sphere, natural-geometry or laminar aiding mixed law.
+    /// Finite plate strips are not admitted here.
     pub law: SourceCellConvectionLaw,
     /// Constant total hemispherical gray emissivity on the same exterior.
     pub emissivity: f64,
@@ -127,12 +127,18 @@ pub struct LiquidExteriorConvectionResponse {
 /// instead retain bulk Re/Pr/k and differentiate only the same fluid's wall
 /// viscosity. Natural convection uses signed sourced beta, the full Ts-Tbath
 /// contrast and the existing geometry selector.
+/// Aiding mixed convection retains the same source-owned expansion and the
+/// caller's signed flow and density-departure bound. Its forced/natural
+/// components and analytic partials remain with the original correlation.
 ///
 /// A genuine source kink or unavailable active correlation partial refuses.
 /// Source interval endpoints use their inward derivative. At equal sphere/bath
 /// temperatures the native flux interface retains the original Nu=2 limit and
 /// finite heat tangent, while the coefficient-only interface refuses singular
-/// dh/dTs. Other natural cards retain their positive minimum Rayleigh numbers.
+/// dh/dTs. Mixed-flow equilibrium similarly retains the pure-forced heat
+/// tangent; at rest the heat and its tangent vanish without a correlation
+/// evaluation or a conduction floor. Other natural cards retain their positive
+/// minimum Rayleigh numbers.
 /// No extrapolated equilibrium floor, regime blend, finite-difference Jacobian,
 /// surface storage or second heat solve is introduced.
 pub struct ImplicitLiquidConvection<'a, 'm> {
@@ -181,11 +187,13 @@ impl<'a, 'm> ImplicitLiquidConvection<'a, 'm> {
         if matches!(
             settings.law,
             SourceCellConvectionLaw::ForcedPlateSection { .. }
-                | SourceCellConvectionLaw::AidingVerticalPlate { .. }
         ) {
             return Err(Invalid(
-                "implicit liquid exterior currently supports forced, sphere and natural geometry laws",
+                "implicit liquid exterior does not support finite plate strips",
             ));
+        }
+        if let SourceCellConvectionLaw::AidingVerticalPlate { settings } = settings.law {
+            settings.validate()?;
         }
         settings
             .law
@@ -230,7 +238,9 @@ impl<'a, 'm> ImplicitLiquidConvection<'a, 'm> {
         };
         if matches!(
             settings.law,
-            SourceCellConvectionLaw::VerticalPlate { .. } | SourceCellConvectionLaw::Natural { .. }
+            SourceCellConvectionLaw::VerticalPlate { .. }
+                | SourceCellConvectionLaw::Natural { .. }
+                | SourceCellConvectionLaw::AidingVerticalPlate { .. }
         ) && matches!(expansion, Expansion::Absent)
         {
             return Err(Invalid(
@@ -366,6 +376,48 @@ impl<'a, 'm> ImplicitLiquidConvection<'a, 'm> {
                     partial(&nu, "mu_bulk_over_surface", finite(-ratio * dwall / wall)?)?;
                 (nu, derivative)
             }
+            SourceCellConvectionLaw::AidingVerticalPlate { settings } => {
+                let (beta, dbeta_dt) =
+                    self.expansion(property_temperature_k, &sample, film_factor != 0.0)?;
+                let delta = surface_temperature_k - bath_temperature_k;
+                let groups = settings.groups(
+                    state,
+                    beta,
+                    Temperature::new(surface_temperature_k),
+                    Temperature::new(bath_temperature_k),
+                    length,
+                )?;
+                let constant_zero_drive = settings.gravity_m_s2 == 0.0
+                    || (beta == 0.0 && dbeta_dt == 0.0);
+                if groups.rayleigh == 0.0 && !constant_zero_drive {
+                    return Err(Invalid(
+                        "zero-Rayleigh mixed convection needs the native heat-tangent interface",
+                    ));
+                }
+                let dre = finite(groups.reynolds * (drho / rho - dmu / mu))?;
+                let factor = finite(
+                    settings.gravity_m_s2 * length.value().powi(3)
+                        / (state.kinematic_viscosity_m2_s() * state.thermal_diffusivity_m2_s()),
+                )?;
+                // Differentiate the signed drive before taking its magnitude;
+                // neither beta nor Delta T is used as a divisor.
+                let dra = finite(
+                    factor
+                        * (beta
+                            + delta
+                                * (film_factor * dbeta_dt
+                                    + beta * (2.0 * drho / rho + dcp / cp - dmu / mu - dk / k)))
+                        * beta.signum()
+                        * delta.signum(),
+                )?;
+                let nu = CorrelationInputs::mixed(groups.reynolds, groups.rayleigh, groups.prandtl)
+                    .evaluate_with_sensitivities(CorrelationId::ManningQureshiAidingVerticalPlate)?;
+                require_partial(&nu, "Ra", groups.rayleigh != 0.0)?;
+                let derivative = partial(&nu, "Re", dre)?
+                    + partial(&nu, "Ra", dra)?
+                    + partial(&nu, "Pr", dpr)?;
+                (nu, finite(derivative)?)
+            }
             SourceCellConvectionLaw::VerticalPlate { gravity_m_s2 }
             | SourceCellConvectionLaw::Natural { gravity_m_s2, .. } => {
                 let geometry = match self.settings.law {
@@ -411,7 +463,11 @@ impl<'a, 'm> ImplicitLiquidConvection<'a, 'm> {
         // missing empirical partial at a regime boundary.
         if varying_transport {
             for axis in ["Re", "Pr"] {
-                require_partial(&nusselt, axis, nusselt.groups().contains_key(axis))?;
+                // A stopped external stream stays at Re=0 regardless of the
+                // fluid-property response; it needs no Reynolds derivative.
+                let varies = nusselt.groups().get(axis)
+                    .is_some_and(|&value| axis != "Re" || value != 0.0);
+                require_partial(&nusselt, axis, varies)?;
             }
         }
         require_partial(&nusselt, "mu_bulk_over_surface", varying_wall_viscosity)?;
@@ -504,16 +560,16 @@ impl ImplicitGrayExteriorLaw for ImplicitLiquidConvection<'_, '_> {
         surface: f64,
         bath: f64,
     ) -> Result<ImplicitGrayExteriorFluxState, DepositionError> {
-        // At exact sphere equilibrium Nu-2 = O(|Delta T|^(1/4)).
-        // Its contribution to signed heat is therefore o(Delta T), even
-        // though dh/dTs can diverge. Return the heat tangent, not a fictitious
-        // finite coefficient derivative. Plate/cylinder cards retain their
-        // original strictly positive Rayleigh minima.
+        // At exact sphere equilibrium Nu-2 = O(|Delta T|^(1/4)); mixed flow
+        // similarly approaches its pure-forced coefficient (zero at rest).
+        // The buoyant contribution to signed heat is o(Delta T), even when
+        // dh/dTs diverges. Return the heat tangent, not a fictitious finite
+        // coefficient derivative. Plate/cylinder cards retain their minima.
         if surface == bath
-            && let SourceCellConvectionLaw::Natural {
-                geometry: NaturalConvectionGeometry::Sphere,
-                gravity_m_s2,
-            } = self.settings.law
+            && matches!(self.settings.law,
+                SourceCellConvectionLaw::Natural {
+                    geometry: NaturalConvectionGeometry::Sphere, ..
+                } | SourceCellConvectionLaw::AidingVerticalPlate { .. })
         {
             if !energy.is_finite()
                 || !(self.energy_bounds_j_kg[0]..=self.energy_bounds_j_kg[1]).contains(&energy)
@@ -529,10 +585,31 @@ impl ImplicitGrayExteriorLaw for ImplicitLiquidConvection<'_, '_> {
                 let sample = self.sample_transport(surface, false)?;
                 let (beta, _) = self.expansion(surface, &sample, false)?;
                 let length = self.settings.characteristic_length;
-                let ra = sample
-                    .state
-                    .rayleigh(gravity_m_s2, beta, 0.0, length.value())?;
-                let nu = NaturalConvectionGeometry::Sphere.evaluate(ra, sample.state.prandtl())?;
+                let nu = match self.settings.law {
+                    SourceCellConvectionLaw::Natural { gravity_m_s2, .. } => {
+                        let ra = sample.state.rayleigh(gravity_m_s2, beta, 0.0, length.value())?;
+                        NaturalConvectionGeometry::Sphere.evaluate(ra, sample.state.prandtl())?
+                    }
+                    SourceCellConvectionLaw::AidingVerticalPlate { settings } => {
+                        let groups = settings.groups(sample.state, beta,
+                            Temperature::new(surface), Temperature::new(bath), length)?;
+                        match fs_convection::evaluate(
+                            CorrelationId::ManningQureshiAidingVerticalPlate,
+                            CorrelationInputs::mixed(groups.reynolds, groups.rayleigh, groups.prandtl),
+                        ) {
+                            Ok(nu) => nu,
+                            // The original card validates all groups, including
+                            // Pr, before its dedicated zero-driver refusal.
+                            // Only at EXACT thermal equilibrium do heat and its
+                            // tangent have the zero resting-flow limit. There
+                            // is still no Nusselt evidence for this state.
+                            Err(CorrelationError::InvalidGroup { axis: "max(Re,Ra)", .. })
+                                if groups.reynolds == 0.0 && groups.rayleigh == 0.0 => return Ok(0.0),
+                            Err(error) => return Err(error.into()),
+                        }
+                    }
+                    _ => unreachable!("equilibrium branch only admits sphere and mixed plate"),
+                };
                 Ok(nu
                     .heat_transfer_coefficient(
                         ThermalConductivity::new(sample.state.thermal_conductivity_w_m_k()),

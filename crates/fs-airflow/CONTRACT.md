@@ -691,18 +691,28 @@ rho(T)*nu(T) derivative. Natural geometries retain signed original expansion
 contrast and the original stable/unstable selector. Moving-input partials,
 source kinks and empirical regime endpoints are not guessed. Dittus-Boelter
 also checks its declared heating/cooling convention against the actual drive.
-Finite plate strips and mixed aiding laws are not exposed by this adapter.
+Laminar aiding mixed convection uses the original Manning–Qureshi card and
+analytic Re/Ra/Pr partials on the same prepared film source. Signed expansion,
+signed stream speed and the explicit density-departure bound pass through the
+shared material admission; opposing flow and unsupported source/regime states
+refuse. Pure natural flow keeps Re identically zero and requires no Reynolds
+derivative. Finite plate strips are not exposed by this adapter.
 
 The native flux-state override admits the natural sphere's original Ra=0,
 Nu=2 equal-temperature limit with total heat tangent 2k/D, without claiming a
 finite derivative of the singular coefficient. Identically zero driving from
 zero gravity or locally constant zero expansion retains the same sphere
 conduction branch. Other natural geometries retain their positive card minima.
+At exact mixed-flow thermal equilibrium the native heat tangent is the original
+pure-forced coefficient, even when the buoyant coefficient derivative is
+singular. At exact resting equilibrium both heat and its tangent vanish as the
+original laminar natural component's limiting heat response; no Nusselt evidence
+or conductive floor is invented. Original Pr/source admission still applies.
 Fluid and exterior support intervals remain distinct; actual bulk/film and wall-viscosity
 property coordinates are admitted on each trial. The targeted
 `material_cell_convection::film_source::implicit` regressions cover analytic
-film and wall-viscosity chains, signed natural geometry, source refusals,
-sphere equilibrium, integrated half-cell heat and the native backward-Euler
+film and wall-viscosity chains, signed natural/mixed geometry, pure-flow limits,
+source refusals, sphere/mixed equilibrium, integrated half-cell heat and native backward-Euler
 energy and separate-bath entropy accounts.
 
 `source::observer::SourceConvectionObserver` supplies these heat rates to the

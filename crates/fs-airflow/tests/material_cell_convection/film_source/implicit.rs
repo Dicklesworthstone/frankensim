@@ -1,7 +1,8 @@
 //! G1/G3: original liquid curves -> actual nonlinear surface -> native heat history.
 use super::*;
 use fs_airflow::graph::thermal::medium::convection::{
-    HorizontalPlateFacing, NaturalConvectionGeometry, evaluate_natural_from_material,
+    AidingVerticalPlateSettings, HorizontalPlateFacing, NaturalConvectionGeometry,
+    evaluate_aiding_vertical_plate_from_material, evaluate_natural_from_material,
     implicit::{ImplicitLiquidConvection, LiquidExteriorConvectionSettings},
 };
 use fs_matdb::{ClaimSelection, SelectionPolicy};
@@ -52,6 +53,82 @@ fn check_derivative(law: &ImplicitLiquidConvection<'_, '_>, surface: f64, bath: 
         difference,
         2e-7 * difference.abs().max(1.0),
     );
+}
+
+fn mixed_settings(speed: f64, gravity: f64) -> AidingVerticalPlateSettings {
+    AidingVerticalPlateSettings {
+        speed_up_m_s: speed,
+        gravity_m_s2: gravity,
+        maximum_relative_density_departure: 0.02,
+    }
+}
+
+#[test]
+fn g1_mixed_film_chain_retains_signed_sources_and_pure_flow_limits() {
+    let body = curve();
+    for density_slope in [0.3, -0.3] {
+        let card = liquid_card(density_slope, 0.01, 320.0);
+        let liquid = liquid_law(&card)
+            .with_density_expansion(Temperature::new(280.0), Temperature::new(320.0))
+            .unwrap();
+        for surface in [290.0, 310.0] {
+            let speed = 0.1 * (density_slope * (surface - 300.0)).signum();
+            for (speed, gravity) in [(speed, 9.81), (0.0, 9.81), (speed, 0.0)] {
+                let driving = mixed_settings(speed, gravity);
+                let convection = ImplicitLiquidConvection::try_new(
+                    &body, [-20000.0, 20000.0], &liquid,
+                    settings(SourceCellConvectionLaw::AidingVerticalPlate { settings: driving }),
+                ).unwrap();
+                let actual = convection.evaluate(surface, 300.0).unwrap();
+                let original = liquid.at_temperature(Temperature::new(0.5 * (surface + 300.0)))
+                    .unwrap();
+                let expected = evaluate_aiding_vertical_plate_from_material(
+                    &original, driving, original.volumetric_expansion_per_k().unwrap(),
+                    Temperature::new(surface), Temperature::new(300.0), Length::new(0.1),
+                ).unwrap();
+                near(actual.coefficient.value.value(), expected.coefficient().value.value(), 1e-9);
+                assert_eq!(actual.nusselt.groups(), expected.nusselt().groups());
+                assert_eq!(actual.property_temperature_k, 0.5 * (surface + 300.0));
+                check_derivative(&convection, surface, 300.0);
+                let flux = convection.flux_state_at_surface(0.0, surface, 300.0).unwrap();
+                near(flux.convection_temperature_tangent_w_m2_k,
+                    actual.coefficient.value.value()
+                        + (surface - 300.0) * actual.coefficient_surface_derivative_w_m2_k2, 1e-9);
+            }
+        }
+    }
+}
+
+#[test]
+fn g0_mixed_surface_refuses_opposing_flow_and_unadmitted_material_or_density() {
+    let body = curve();
+    let card = liquid_card(0.3, 0.01, 320.0);
+    let unexpanded = liquid_law(&card);
+    let liquid = liquid_law(&card)
+        .with_density_expansion(Temperature::new(280.0), Temperature::new(320.0))
+        .unwrap();
+    let mut config = settings(SourceCellConvectionLaw::AidingVerticalPlate {
+        settings: mixed_settings(0.1, 9.81),
+    });
+    assert!(ImplicitLiquidConvection::try_new(
+        &body, [-20000.0, 20000.0], &unexpanded, config).is_err());
+    let convection = ImplicitLiquidConvection::try_new(
+        &body, [-20000.0, 20000.0], &liquid, config).unwrap();
+    assert!(convection.evaluate(290.0, 300.0).is_err()); // downward buoyancy, upward stream
+    assert!(convection.evaluate(319.0, 330.0).is_err()); // film leaves original source
+    config.property_temperature = ConvectionPropertyTemperature::Reservoir;
+    assert!(ImplicitLiquidConvection::try_new(
+        &body, [-20000.0, 20000.0], &liquid, config).is_err());
+    config.property_temperature = ConvectionPropertyTemperature::FilmMean;
+    config.law = SourceCellConvectionLaw::AidingVerticalPlate {
+        settings: AidingVerticalPlateSettings {
+            maximum_relative_density_departure: 0.001,
+            ..mixed_settings(0.1, 9.81)
+        },
+    };
+    let bounded = ImplicitLiquidConvection::try_new(
+        &body, [-20000.0, 20000.0], &liquid, config).unwrap();
+    assert!(bounded.evaluate(310.0, 300.0).is_err());
 }
 
 #[test]
@@ -375,9 +452,66 @@ fn g1_sphere_equilibrium_has_finite_heat_tangent_without_fabricated_coefficient_
     assert!(plate.flux_state_at_surface(0.0, 300.0, 300.0).is_err());
 }
 
+#[test]
+fn g1_mixed_equilibrium_uses_heat_limits_without_inventing_coefficient_partials() {
+    // Pr=0.72 makes the buoyant mixed-coefficient response singular at Ra=0.
+    // Its contribution to signed heat still has zero first derivative there.
+    let card = viscosity_card(vec![(280.0, 9e-5), (320.0, 9e-5)], false);
+    let liquid = liquid_law(&card)
+        .with_density_expansion(Temperature::new(280.0), Temperature::new(320.0))
+        .unwrap();
+    let body = curve();
+    for speed in [0.01, 0.0] {
+        let convection = ImplicitLiquidConvection::try_new(
+            &body, [-20000.0, 20000.0], &liquid,
+            settings(SourceCellConvectionLaw::AidingVerticalPlate {
+                settings: mixed_settings(speed, 9.81),
+            }),
+        ).unwrap();
+        assert!(convection.state_at_surface(0.0, 300.0, 300.0).is_err());
+        let flux = convection.flux_state_at_surface(0.0, 300.0, 300.0).unwrap();
+        let re: f64 = 1000.0 * speed * 0.1 / 9e-5;
+        let pr: f64 = 9e-5 * 4000.0 / 0.5;
+        let expected = 2.0 * 0.339 * re.sqrt() * pr.cbrt()
+            / (1.0 + 0.1 * pr.powf(-0.75)).powf(2.0 / 9.0) * 0.5 / 0.1;
+        near(flux.coefficients.convection_w_m2_k, expected, 1e-10);
+        near(flux.convection_temperature_tangent_w_m2_k, expected, 1e-10);
+        let mut previous = f64::INFINITY;
+        for delta in [1e-2, 1e-4, 1e-6] {
+            // q(delta)/delta = h(delta); the derivative is one-sided because
+            // negative Delta T would oppose the positive stream.
+            let quotient = convection.evaluate(300.0 + delta, 300.0).unwrap()
+                .coefficient.value.value();
+            let error = (quotient - expected).abs();
+            assert!(error < previous);
+            if speed == 0.0 && previous.is_finite() {
+                near(error / previous, 0.01_f64.powf(0.25), 1e-4);
+            }
+            previous = error;
+        }
+        if speed != 0.0 {
+            assert!(previous < 1e-5 * expected);
+        }
+        assert!(convection.flux_state_at_surface(30000.0, 300.0, 300.0).is_err());
+        assert!(convection.flux_state_at_surface(0.0, 330.0, 330.0).is_err());
+    }
+    // The resting limit must still pass the ORIGINAL card's Pr admission.
+    let outside = viscosity_card(vec![(280.0, 0.02), (320.0, 0.02)], false);
+    let outside = liquid_law(&outside)
+        .with_density_expansion(Temperature::new(280.0), Temperature::new(320.0))
+        .unwrap();
+    let convection = ImplicitLiquidConvection::try_new(
+        &body, [-20000.0, 20000.0], &outside,
+        settings(SourceCellConvectionLaw::AidingVerticalPlate {
+            settings: mixed_settings(0.0, 9.81),
+        }),
+    ).unwrap();
+    assert!(convection.flux_state_at_surface(0.0, 300.0, 300.0).is_err());
+}
+
 // Independent source algebra and absolute-temperature bisection. No production
 // source derivative, material integral, surface root or Jacobian is used.
-fn reference(body_temperature: f64) -> (f64, [f64; 2]) {
+fn reference(body_temperature: f64, mixed: bool) -> (f64, [f64; 2]) {
     let powers = |surface: f64| {
         let t = 0.5 * (surface + 300.0) - 300.0;
         let (rho, cp, k, mu) = (
@@ -388,7 +522,19 @@ fn reference(body_temperature: f64) -> (f64, [f64; 2]) {
         );
         let re: f64 = rho * 0.1 * 0.1 / mu;
         let pr: f64 = mu * cp / k;
-        let htc = 0.664 * re.sqrt() * pr.cbrt() * k / 0.1;
+        let nusselt = if mixed {
+            let ra = (9.81 * (0.3 / rho) * (surface - 300.0) * 0.1_f64.powi(3)
+                / ((mu / rho) * (k / (rho * cp)))).abs();
+            let forced = 2.0 * 0.339 * re.sqrt() * pr.cbrt()
+                / (1.0 + 0.100 * pr.powf(-0.75)).powf(2.0 / 9.0);
+            let natural = 4.0 * 0.503 / 3.0 * ra.powf(0.25)
+                / (1.0 + 0.670 * pr.powf(-9.0 / 16.0)).powf(4.0 / 9.0);
+            let exponent = 3.5 * pr.powf(0.075);
+            (forced.powf(exponent) + natural.powf(exponent)).powf(1.0 / exponent)
+        } else {
+            0.664 * re.sqrt() * pr.cbrt()
+        };
+        let htc = nusselt * k / 0.1;
         [
             AREA * htc * (surface - 300.0),
             AREA * 0.7 * 5.670_374_419e-8 * (surface.powi(4) - 305.0_f64.powi(4)),
@@ -413,8 +559,19 @@ fn reference(body_temperature: f64) -> (f64, [f64; 2]) {
 
 #[test]
 fn g3_source_surface_closes_integrated_half_cell_and_native_backward_euler_energy() {
+    source_surface_energy(false);
+}
+
+#[test]
+fn g3_mixed_surface_closes_integrated_half_cell_and_native_backward_euler_energy() {
+    source_surface_energy(true);
+}
+
+fn source_surface_energy(mixed: bool) {
     let card = liquid_card(0.3, 0.01, 320.0);
-    let liquid = liquid_law(&card);
+    let liquid = liquid_law(&card)
+        .with_density_expansion(Temperature::new(280.0), Temperature::new(320.0))
+        .unwrap();
     let point = |t| {
         liquid
             .reference_point()
@@ -452,10 +609,14 @@ fn g3_source_surface_closes_integrated_half_cell_and_native_backward_euler_energ
         layer.caloric_law(),
         layer.energy_bounds_j_kg(),
         &liquid,
-        settings(SourceCellConvectionLaw::Forced {
-            correlation: CorrelationId::FlatPlateLaminarAverage,
-            speed_m_s: 0.1,
-            settings: ForcedConvectionSettings::default(),
+        settings(if mixed {
+            SourceCellConvectionLaw::AidingVerticalPlate { settings: mixed_settings(0.1, 9.81) }
+        } else {
+            SourceCellConvectionLaw::Forced {
+                correlation: CorrelationId::FlatPlateLaminarAverage,
+                speed_m_s: 0.1,
+                settings: ForcedConvectionSettings::default(),
+            }
         }),
     )
     .unwrap();
@@ -487,14 +648,14 @@ fn g3_source_surface_closes_integrated_half_cell_and_native_backward_euler_energ
     let result = boundary
         .evaluate(energy(body_temperature), 300.0, &mut || Ok(()))
         .unwrap();
-    let (surface, powers) = reference(body_temperature);
+    let (surface, powers) = reference(body_temperature, mixed);
     near(result.surface_temperature_k, surface, 2e-9);
     near(result.convection_power_w, powers[0], 1e-8);
     near(result.radiation_power_w, powers[1], 1e-8);
     near(result.surface_residual_w, 0.0, 1e-8);
     let temperature_delta = 1e-3;
-    let a = reference(body_temperature + temperature_delta).1;
-    let b = reference(body_temperature - temperature_delta).1;
+    let a = reference(body_temperature + temperature_delta, mixed).1;
+    let b = reference(body_temperature - temperature_delta, mixed).1;
     let derivative = ((a[0] + a[1]) - (b[0] + b[1]))
         / (energy(body_temperature + temperature_delta)
             - energy(body_temperature - temperature_delta));
@@ -592,7 +753,7 @@ fn g3_source_surface_closes_integrated_half_cell_and_native_backward_euler_energ
         )
         .unwrap();
     let temperature = next.temperature_k(cell).unwrap();
-    let (_, p) = reference(temperature);
+    let (_, p) = reference(temperature, mixed);
     near(
         MASS * (energy(temperature) - energy(body_temperature)) + dt * (p[0] + p[1]),
         0.0,
