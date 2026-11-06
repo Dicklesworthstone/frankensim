@@ -7,7 +7,9 @@ use fs_dcontact::ContactStorage;
 use fs_phs::Storage;
 
 mod supported;
+mod isostatic;
 pub(super) use supported::initialize as initialize_supported;
+pub(super) use isostatic::initialize as initialize_isostatic;
 
 struct ZeroStorage;
 impl Storage for ZeroStorage {
@@ -126,8 +128,8 @@ pub(super) fn initialize(
     Ok((energy, reactions))
 }
 
-// Shared final admission for the compliance solve and the one-direction free
-// support solve. Only this owner publishes settled contact/network histories.
+// Shared final admission for the compliance and free-support solves.
+// Only this owner publishes settled contact/network histories.
 fn publish(network: &mut CoupledModalSystem, external: &[f64], points: &[Point],
     condensed: Option<&Condensed<'_>>, reactions: &[f64], mut energy: f64,
     sweeps: usize, gate: &CancelGate) -> Result<f64, ModalCouplingError>

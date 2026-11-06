@@ -82,9 +82,9 @@ impl CoupledModalSystem {
     /// to continue their dynamics, and retain the held forces until release.
     /// Every contact-loaded free coordinate requires independent bilateral
     /// support; unloaded position gauges may remain at zero. A mass supported
-    /// ONLY by unilateral contacts remains outside this solve; a single contact
-    /// restraining one declared null direction can use
-    /// [`Self::initialize_contact_equilibrium_with_gauge`].
+    /// ONLY by unilateral contacts uses
+    /// [`Self::initialize_contact_equilibrium_with_gauge`] for one direction or
+    /// [`Self::initialize_contact_equilibrium_with_gauges`] for an isostatic set.
     pub fn initialize_contact_equilibrium(
         &mut self,
         external: &[f64],
@@ -113,8 +113,9 @@ impl CoupledModalSystem {
     /// and total stored energy must pass the shared preload publication gates.
     /// No support spring or force projection is introduced; cancellation-sized
     /// load residuals are bounded against the original force terms. Cancellation
-    /// or refusal preserves all accepted state. Multiple null directions,
-    /// multiple contacts and condensed omitted-mode contacts need other solves.
+    /// or refusal preserves all accepted state. An isostatic contact set can use
+    /// [`Self::initialize_contact_equilibrium_with_gauges`]; condensed omitted-mode
+    /// contacts need a different solve.
     /// As with [`Self::initialize_contact_equilibrium`], attach the same contact
     /// to the dynamic owner and retain the held forces until physical release.
     pub fn initialize_contact_equilibrium_with_gauge(
@@ -122,6 +123,42 @@ impl CoupledModalSystem {
         config: contact::ModalContactConfig, null_direction: &[f64], gate: &CancelGate,
     ) -> Result<f64, ModalCouplingError> {
         preload::initialize_supported(self, external, contact, config, null_direction, gate)
+    }
+
+    /// Equilibrate an isostatic set of compliant normal contacts restraining
+    /// the complete free subspace of the bilateral network. Supply exactly one
+    /// contact per orthonormal physical null direction in full modal order.
+    /// The square map N^T B must be nonsingular at the admitted numerical scale.
+    /// Redundant supports require a separate load-sharing solve and refuse here.
+    ///
+    /// Original free-direction force balance determines every reaction; any
+    /// required tension refuses, including unresolved signs at a zero-reaction
+    /// boundary. The existing gauged Schur solve retains all elastic deformation
+    /// and spring rest lengths. Its nullspace translation then satisfies each
+    /// original contact law. For zero reactions it preserves initially open
+    /// closures and moves interference to touching; the unloaded pose need not
+    /// be unique. No support spring, force projection or dynamic warm-up is used.
+    ///
+    /// At most 32 contacts are admitted by this stationary solve. The contact-set
+    /// setup cap also admits the small equilibrated support
+    /// factor. max_sweeps bounds rounded-pose refinements; individual scalar
+    /// roots retain each contact's original iteration/force/penetration caps.
+    /// Original rounded forces, stored energy and relaxed material histories
+    /// must pass the shared publication gates. Failed or cancelled initialization
+    /// preserves every accepted state. The one-contact case uses the existing
+    /// single-direction owner. Attach these same contacts to MultiContactModalSystem
+    /// and retain held loads until release to continue their physical dynamics.
+    /// Fixed contact maps exclude large rigid rotations and contact discovery;
+    /// condensed omitted-mode contacts are not admitted by this entry point.
+    pub fn initialize_contact_equilibrium_with_gauges(
+        &mut self,
+        external: &[f64],
+        contacts: &[(contact::ModalContact, contact::ModalContactConfig)],
+        nullspace: &[Vec<f64>],
+        config: contact::multiple::MultiContactConfig,
+        gate: &CancelGate,
+    ) -> Result<f64, ModalCouplingError> {
+        preload::initialize_isostatic(self, external, contacts, nullspace, config, gate)
     }
 
     // The same equilibrium for contacts condensed over omitted modes (see

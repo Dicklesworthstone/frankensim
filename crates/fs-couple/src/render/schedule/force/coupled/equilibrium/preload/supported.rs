@@ -71,7 +71,7 @@ pub(in super::super) fn initialize(
     publish(network, external, std::slice::from_ref(&point), None, &[reaction], energy, iterations, gate)
 }
 
-fn projection(a: &[f64], b: &[f64]) -> Result<(f64, f64), ModalCouplingError> {
+pub(super) fn projection(a: &[f64], b: &[f64]) -> Result<(f64, f64), ModalCouplingError> {
     let mut sum = 0.0;
     let mut scale = 0.0;
     for (&a, &b) in a.iter().zip(b) {
@@ -94,7 +94,7 @@ fn translate(q: &mut [f64], direction: &[f64], distance: f64) -> Result<(), Moda
 // Contact closure is monotone; both the bracket and scalar work are bounded by
 // the original penetration/iteration caps. Positive reactions never select the
 // zero-force endpoint merely because an absolute tolerance is larger.
-fn closure_for_reaction(point: &Point, reaction: f64, gate: &CancelGate)
+pub(super) fn closure_for_reaction(point: &Point, reaction: f64, gate: &CancelGate)
     -> Result<(f64, usize), ModalCouplingError>
 {
     let mut lo = point.gap;
