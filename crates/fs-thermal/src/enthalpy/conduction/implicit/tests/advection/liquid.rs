@@ -369,7 +369,7 @@ fn implicit_liquid_refusals_and_cancellation_preserve_original_histories() {
     let history = flow.clone().with_entropy_audit();
     assert!(matches!(history.endpoint_transport_with_entropy(&thermal, || Ok(())),
         Err(DepositionError::InvalidInput(
-            "implicit enthalpy excludes selective streams and flow entropy histories"
+            "implicit enthalpy excludes flow entropy histories"
         ))));
     let system = solver(&thermal, &conduction, &law, &flow, false)
         .with_implicit_advection_entropy(&thermal, || Ok(()))

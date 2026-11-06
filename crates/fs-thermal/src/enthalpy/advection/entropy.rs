@@ -6,12 +6,14 @@
 //! cancels because the existing owner balances mass. Stationary mixtures retain
 //! original mixing/pressure entropy through their supplied species-reduced
 //! anchors; caloric enthalpy alone never supplies chemical entropy.
+//! Explicit selected streams use their own source laws and retain signed
+//! separation/removal contributions without inventing heat or separator work.
 //! With a stationary solid skeleton, only the moving liquid's enthalpy and
 //! entropy cross faces; original mixture entropy remains in cell storage.
 
 use super::liquid::LiquidEnthalpyCarrier;
 use super::species::StationarySpecies;
-use super::{Advected, MassBoundary, MassFlow, finite, invalid};
+use super::{Advected, MassBoundary, MassFlow, SelectiveOutlet, finite, invalid};
 use crate::enthalpy::{CellId, DepositionError, DepositionObserver, DepositionSimulation,
     EnergyAudit, MaterialId, StepConfig};
 use crate::enthalpy::backward_euler::TransportStepCoefficients;
@@ -34,12 +36,16 @@ pub struct AdvectionEntropyAudit {
     /// Liquid-only carriage uses the pure-liquid side at coexistence, even
     /// when a cell retains stationary solid and its bulk entropy is smaller.
     pub advective_boundary_entropy_input_j_k: f64,
-    /// Sum dm*[(h_donor-h_receiver)/T_receiver - (s_donor-s_receiver)].
+    /// Incoming sum dm*[(h_donor-h_receiver)/T_receiver - (s_donor-s_receiver)]
+    /// plus selected outlets' dm*[(h_cell-h_selected)/T_cell+s_selected-s_cell].
     /// This is spatial upwind/control-volume mixing, not constitutive fluid
-    /// dissipation. For one immutable law it is nonnegative for monotone T(h)
-    /// in exact arithmetic. Unlike compositions/pressures retain their original
+    /// dissipation. Ordinary bulk mixing with one immutable law is nonnegative
+    /// for monotone T(h) in exact arithmetic. Selected streams and unlike
+    /// compositions/pressures retain their original
     /// signed entropy contribution; no per-face nonnegativity or complete
     /// pressure/chemical-work model follows from the caloric transport alone.
+    /// A prescribed separator can have an entropy deficit; its required work
+    /// or reservoir exchange is not silently supplied by this account.
     /// Small signed roundoff remains visible and is never clamped into heat.
     /// Donor and receiver h/s are those of the actual carrier. An isothermal
     /// liquid loop has zero mixing regardless of stationary solid fractions.
@@ -105,8 +111,8 @@ impl Advected<()> {
     ///
     /// This stateless query does not advance an observer or impose an explicit
     /// flow CFL. Stationary species require compatible original-source entropy
-    /// anchors on every cell and inlet law. Selective outlets
-    /// and attached flow histories also refuse. Reconstructed faces require their
+    /// anchors on every cell, inlet and explicitly bound selective-outlet law.
+    /// Attached flow histories refuse. Reconstructed faces require their
     /// own entropy closure and are not substituted here.
     pub fn endpoint_transport_with_entropy(
         &self,
@@ -133,7 +139,8 @@ impl Advected<()> {
             temperatures.insert(id, thermal.temperature_k(id)?);
         }
         let stationary = self.stationary_species.as_ref().map(|species| {
-            StationaryEntropy::new(thermal, species, &self.boundaries, &enthalpies, &mut checkpoint)
+            StationaryEntropy::new(thermal, species, &self.boundaries,
+                &self.selective_outlets, &self.selective_outlet_laws, &enthalpies, &mut checkpoint)
         }).transpose()?;
         let (boundary, mixing) = flux_entropy_rates(
             thermal, &self.flows, &self.boundaries, &self.reference_cells,
@@ -170,6 +177,7 @@ impl<O> Advected<O> {
         Advected {
             inner: map(self.inner), flows: self.flows, boundaries: self.boundaries,
             reference_cells: self.reference_cells, selective_outlets: self.selective_outlets,
+            selective_outlet_laws: self.selective_outlet_laws,
             stationary_species: self.stationary_species, liquid_carrier: self.liquid_carrier,
             boundary_pending: self.boundary_pending, pending: self.pending,
             audit: self.audit, entropy: self.entropy,
@@ -182,6 +190,8 @@ impl<O> Advected<O> {
     /// is not enough. Admitted stationary composition mixing instead requires
     /// each law's explicit source entropy anchor in one common species-reduced
     /// convention, retaining signed pressure and composition contributions.
+    /// Every selected outlet needs its own registered source law, retaining
+    /// its actual outgoing h/s and signed separation/removal contribution.
     ///
     /// For an admitted liquid carrier, fluxes use `h_liquid=max(h,h_liquidus)`
     /// and the original law's entropy at that liquid state. Cell storage still
@@ -227,7 +237,9 @@ impl DepositionSimulation<'_> {
     /// unchanged on failure, including missing entropy or late cancellation.
     /// Same-law balanced bulk flow, the existing liquid carrier and stationary
     /// mixtures with original-source entropy anchors are supported. Selective
-    /// phase outlets still require their own stream entropy/work closure.
+    /// outlets require their own bound stream laws in that same convention.
+    /// Their signed contribution does not infer phase equilibrium or supply
+    /// the work/reservoir closure of a separator.
     pub fn advance_advected_with_entropy<O: DepositionObserver>(
         &self, observer: &Advected<O>, target_s: f64, config: StepConfig,
         checkpoint: impl FnMut() -> Result<(), DepositionError>,
@@ -282,7 +294,7 @@ pub(super) struct EntropyState {
 }
 
 // Keep the original reduced anchor separate from the integrated thermal change
-// until subtracting coordinates. One source query per participating cell/inlet
+// until subtracting coordinates. One source query per participating cell/stream
 // is reused by every connected face; unlike-law transport never inverts a
 // donor's enthalpy through the receiver's caloric chart.
 #[derive(Clone, Copy)]
@@ -304,13 +316,18 @@ impl EntropyCoordinate {
 struct StationaryEntropy {
     cells: BTreeMap<CellId, EntropyCoordinate>,
     inlets: BTreeMap<u64, EntropyCoordinate>,
+    outlets: BTreeMap<u64, (f64, EntropyCoordinate)>,
 }
 impl StationaryEntropy {
     fn new(
         thermal: &DepositionSimulation<'_>, species: &StationarySpecies,
-        boundaries: &[MassBoundary], enthalpies: &BTreeMap<CellId, f64>,
+        boundaries: &[MassBoundary], selective_outlets: &BTreeMap<u64, SelectiveOutlet>,
+        selective_outlet_laws: &BTreeMap<u64, MaterialId>, enthalpies: &BTreeMap<CellId, f64>,
         check: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<Self, DepositionError> {
+        if selective_outlets.len() != selective_outlet_laws.len() {
+            return Err(invalid("selective outlet entropy requires every original stream law"));
+        }
         let mut anchors = BTreeMap::<MaterialId, (f64, f64)>::new();
         let mut reference: Option<String> = None;
         let mut coordinate = |material, h| -> Result<EntropyCoordinate, DepositionError> {
@@ -352,7 +369,15 @@ impl StationaryEntropy {
                 inlets.insert(id, coordinate(material_id, specific_h_j_kg)?);
             }
         }
-        Ok(Self { cells, inlets })
+        let mut outlets = BTreeMap::new();
+        for (&id, outlet) in selective_outlets {
+            check()?;
+            let material = *selective_outlet_laws.get(&id)
+                .ok_or(invalid("selective outlet entropy requires every original stream law"))?;
+            outlets.insert(id, (outlet.specific_h_j_kg,
+                coordinate(material, outlet.specific_h_j_kg)?));
+        }
+        Ok(Self { cells, inlets, outlets })
     }
 
     fn cell(&self, id: CellId) -> Result<EntropyCoordinate, DepositionError> {
@@ -464,10 +489,22 @@ fn flux_entropy_rates(
                 (incoming_s, donor_h, 1.0)
             }
             MassBoundary::Outlet { .. } => {
-                let entropy = if let Some(stationary) = stationary {
-                    stationary.cell(id)?.difference(stationary.cell(entropy_reference)?)?
-                } else { difference(thermal, cell.material_id, reference, h)? };
-                (entropy, h, -1.0)
+                let (entropy, outgoing_h) = if let Some(stationary) = stationary {
+                    let local = stationary.cell(id)?;
+                    let reference = stationary.cell(entropy_reference)?;
+                    if let Some(&(selected_h, selected_s)) = stationary.outlets.get(&boundary_id) {
+                        // At fixed inventory the selected stream replaces an
+                        // ordinary local outflow. Its signed contribution is
+                        // m[(h_cell-h_selected)/T_cell+s_selected-s_cell].
+                        // Cancel formation terms with incoming watts BEFORE
+                        // dividing by T; separation is not passive mixing.
+                        stationary_heat.entry(id).or_default()
+                            .add(finite(rate * finite(h - selected_h)?)?)?;
+                        stationary_entropy.add(finite(rate * local.difference(selected_s)?)?)?;
+                        (selected_s.difference(reference)?, selected_h)
+                    } else { (local.difference(reference)?, h) }
+                } else { (difference(thermal, cell.material_id, reference, h)?, h) };
+                (entropy, outgoing_h, -1.0)
             }
         };
         boundary.add(sign * finite(rate * boundary_s)?)?;
@@ -521,6 +558,8 @@ impl EntropyState {
         thermal: &DepositionSimulation<'_>,
         species: Option<&StationarySpecies>,
         boundaries: &[MassBoundary],
+        selective_outlets: &BTreeMap<u64, SelectiveOutlet>,
+        selective_outlet_laws: &BTreeMap<u64, MaterialId>,
         check: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<(), DepositionError> {
         self.initial_h.clear();
@@ -531,7 +570,8 @@ impl EntropyState {
             self.initial_h.insert(id, cell.specific_h_j_kg);
         }
         self.stationary = species.map(|species| {
-            StationaryEntropy::new(thermal, species, boundaries, &self.initial_h, check)
+            StationaryEntropy::new(thermal, species, boundaries, selective_outlets,
+                selective_outlet_laws, &self.initial_h, check)
         }).transpose()?;
         Ok(())
     }

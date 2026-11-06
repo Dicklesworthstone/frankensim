@@ -17,11 +17,14 @@ pub struct AdvectiveEntropyContribution {
     /// Net inlet entropy minus outlet entropy. A common relative entropy datum
     /// cancels under the original per-cell mass-continuity admission.
     pub boundary_entropy_input_j_k: f64,
-    /// Sum dm*[(h_donor-h_receiver)/T_receiver - (s_donor-s_receiver)].
+    /// Incoming sum dm*[(h_donor-h_receiver)/T_receiver - (s_donor-s_receiver)]
+    /// plus selected outlets' dm*[(h_cell-h_selected)/T_cell+s_selected-s_cell].
     /// This is upwind/control-volume mixing, not constitutive fluid dissipation.
-    /// It is nonnegative for one immutable monotone T(h) in exact arithmetic.
+    /// Ordinary bulk mixing is nonnegative for one immutable monotone T(h)
+    /// in exact arithmetic; selected outlets retain their signed removal term.
     /// Source-anchored stationary mixtures retain signed composition/pressure
-    /// terms; per-face nonnegativity requires additional physical assumptions.
+    /// and separation/removal terms; per-face nonnegativity requires additional
+    /// physical assumptions. No separator work or reservoir heat is invented.
     /// Signed roundoff is retained, and same-law latent energy at one
     /// temperature produces no mixing.
     pub upwind_mixing_j_k: f64,

@@ -41,16 +41,22 @@ struct MixtureLaw {
     entropy_reference: Option<&'static str>,
     formation: [f64; 2],
     pressure_ratio: f64,
+    phase_enthalpy_j_kg: f64,
+    phase_entropy_j_kg_k: f64,
 }
 impl MixtureLaw {
     fn new(fractions: Vec<f64>) -> Self {
         Self { names: vec!["A".into(), "B".into()], fractions,
             reference: "analytic-species-reference",
             entropy_reference: Some("equal-molar-mass-ideal-mixture-T300-p0"),
-            formation: [1000.0, -400.0], pressure_ratio: 1.0 }
+            formation: [1000.0, -400.0], pressure_ratio: 1.0,
+            phase_enthalpy_j_kg: 0.0, phase_entropy_j_kg_k: 0.0 }
     }
     fn cp(&self) -> f64 { 2.0 * self.fractions[0] + 6.0 * self.fractions[1] }
-    fn offset(&self) -> f64 { self.formation[0] * self.fractions[0] + self.formation[1] * self.fractions[1] }
+    fn offset(&self) -> f64 {
+        self.formation[0] * self.fractions[0] + self.formation[1] * self.fractions[1]
+            + self.phase_enthalpy_j_kg
+    }
     fn h(&self, t: f64) -> f64 { self.cp() * t + self.offset() }
     fn mixing_entropy(&self) -> f64 {
         // Equal molar masses and R_specific=1 J/(kg K): mass and mole
@@ -74,7 +80,8 @@ impl ThermalLaw for MixtureLaw {
     }
     fn advected_entropy_anchor(&self) -> Option<CaloricEntropyAnchor<'_>> {
         Some(CaloricEntropyAnchor { specific_h_j_kg: self.h(300.0),
-            reduced_specific_entropy_j_kg_k: self.mixing_entropy() - self.pressure_ratio.ln(),
+            reduced_specific_entropy_j_kg_k: self.mixing_entropy() - self.pressure_ratio.ln()
+                + self.phase_entropy_j_kg_k,
             entropy_reference: self.entropy_reference? })
     }
 }
@@ -611,3 +618,6 @@ fn g1_recirculating_mixtures_advance_original_enthalpy_and_external_work_once() 
     assert!(balance.net_power_w[&CellId(1)].abs() < 1e-10);
     assert!(balance.external_power_w.abs() < 1e-10);
 }
+
+#[path = "selective_entropy_tests.rs"]
+mod selective_entropy;

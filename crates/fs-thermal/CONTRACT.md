@@ -505,16 +505,37 @@ same caloric reference as the registered cell and inlet laws. Its carried phase
 enthalpy is not inverted through the remaining gas law. The existing thermal
 source, continuity, CFL and external-enthalpy accounts include that outlet once;
 no separate latent-heat source is invented. Replacing boundary or selective
-data invalidates the previous stationary species solution.
+data invalidates the previous stationary species solution and outlet-law bindings.
+
+`with_selective_outlet_laws` optionally binds every selected outlet to its
+original registered `ThermalLaw`, without changing the existing
+`SelectiveOutlet` descriptor. Bound laws must have the exact selected
+composition/species order, a common enthalpy reference, enthalpy storage and
+support for the actual selected h. Entropy additionally requires compatible
+source `CaloricEntropyAnchor` values. Energy-only consumers can retain the
+original explicit-h descriptors without adding law bindings.
+
+The explicit and implicit entropy owners debit the selected stream's original
+entropy at the boundary. Their existing signed control-volume account includes
+`mdot*((h_cell-h_selected)/T_cell+s_selected-s_cell)` together with incoming
+mixing. Formation-energy terms cancel in each cell's compensated watts before
+division by temperature; the native power account remains independently checked.
+The selected stream can have a different phase/temperature and lie outside the
+remaining mixture's caloric domain. Its own source law supplies h/s, never an
+inferred phase reference or a duplicated latent heat. An isothermal separator
+can show negative total production: this exposes the missing work/reservoir
+closure rather than turning a prescribed selection into a passive mixing law.
 
 The constitutive caller owns selection rates, phase equilibrium and source
 alignment. No condensation kinetics or new thermodynamic data are inferred by
 this transport primitive. Negative remaining species flux, absent remaining
 mixed flow, an unknown/duplicate boundary, a mismatched caloric reference,
-selective recirculation and the optional entropy audit refuse. Focused G0/G1
+selective recirculation and unbound selective entropy refuse. Focused G0/G1
 regressions cover component conservation, downstream propagation, phase
 enthalpy outside the gas inversion domain, the original thermal energy account,
-and these unsupported conditions. This does not add transient species storage.
+signed isothermal separation, phase-reference offsets, preserved large
+formation references, atomic source/cancellation refusal and these unsupported
+conditions. This does not add transient species storage.
 
 ### Liquid enthalpy through a stationary solid skeleton
 
@@ -1047,7 +1068,8 @@ CFL/event grid and original source/history hooks. The returned observer retains
 its inner history and enabled flow entropy account, with the usual per-advance
 `begin()` reset semantics. Balanced same-law bulk, admitted liquid-carrier flow,
 and stationary mixtures with original source entropy anchors are covered.
-Selective streams still require an outgoing-stream entropy and work closure.
+Selective streams require their own original outgoing-law bindings; their
+signed entropy contribution does not supply separator work or phase equilibrium.
 G1/G3/G4 regressions cover actual bath temperatures,
 datum shifts, latent storage, unchanged heat trajectories, retained histories,
 events, unavailable entropy and cancellation without publication.
@@ -1534,9 +1556,11 @@ never frozen at the initial state or first stage. The native stage heat vector
 retains equal opposite internal-transfer rates, and the external energy account
 integrates inlet-minus-outlet enthalpy with the same two positive weights as
 authored power and bath heat. Internal circulation is not external heat.
-Signed transport Q/T stays unclassified at-cell entropy with those same weights;
-neither stream entropy nor mixing production is inferred. Existing unsupported
-carrier, flow-entropy, species and selective-stream refusals remain authoritative.
+Signed transport Q/T stays unclassified at-cell entropy with those same weights
+unless the original flow entropy opt-in is selected. Bulk/liquid carriage and
+source-anchored stationary mixtures, including bound selective streams, use
+their own supported entropy closures. Reconstructed faces and attached explicit
+flow histories retain their separate endpoint restrictions.
 No explicit flow CFL is imposed; finite-volume spatial error still requires
 independent refinement and the supplied flow observer's history is not advanced.
 
@@ -2442,11 +2466,17 @@ species, invent reaction heat, or change density. Chemical mixing entropy is
 available only through original source anchors in the explicit shared reduced
 convention described above; caloric data alone never supplies it.
 
-Selective streams and flow-entropy histories still refuse until their own
-endpoint closures exist. Thermal entropy leaves mass-carried
+Selected outlets are supported by the same original fixed-h endpoint owner.
+Their exact tangent differentiates the component reference but never the
+prescribed stream enthalpy. Analytic BE/SDIRK tests exercise this distinction
+beyond the explicit flow CFL, including a downstream outlet whose reference
+cell differs from its own cell and canonical reversal of connection orientation.
+Flow-entropy histories still refuse as an implicit endpoint binding.
+Thermal entropy leaves mass-carried
 transfers unclassified unless the caller selects
 `with_implicit_advection_entropy` after binding an admitted bulk or liquid
-upwind flow or a source-anchored stationary mixture.
+upwind flow or a source-anchored stationary mixture, including source-bound
+selective outlets.
 No phase mobility, moving inventory, pressure work or momentum feedback is
 inferred. The selected method's time error and upwind spatial diffusion still
 require independent refinement.
@@ -2460,8 +2490,9 @@ mixtures use each stream's original law and compatible source entropy anchors.
 A common relative entropy datum cancels under mass continuity; common linear
 species reference constants cancel under the stationary species balance.
 Upwind mixing is a spatial discretization/control-volume contribution, not
-constitutive fluid dissipation, and is nonnegative for a same-law monotone T(h)
-in exact arithmetic. Unlike-law pressure/composition contributions remain signed.
+constitutive fluid dissipation. Ordinary bulk mixing is nonnegative for a
+same-law monotone T(h) in exact arithmetic. Selected-stream removal and
+unlike-law pressure/composition contributions remain signed.
 Isothermal latent transport carries entropy without inventing mixing production.
 Native backward-Euler and SDIRK2 quadrature integrates the same endpoint kernel;
 analytic mixture tests check both beyond the explicit flow CFL while retaining

@@ -1,6 +1,7 @@
 //! Frozen mixture compositions share the original native heat/flow solve.
 use super::*;
 use crate::enthalpy::advection::species::{CaloricComposition, CaloricEntropyAnchor, InletSpecies};
+use crate::enthalpy::advection::{SelectiveOutlet, SelectiveOutletLaw};
 
 struct MixtureLaw {
     names: Vec<String>,
@@ -562,6 +563,124 @@ fn stationary_mixture_entropy_uses_actual_be_and_sdirk_stage_quadrature() {
     }
     assert_eq!(thermal.time_s(), 0.0);
     assert_eq!(flow.audit().substeps, 0);
+}
+
+#[test]
+fn selective_outlet_uses_fixed_source_enthalpy_and_actual_be_sdirk_entropy() {
+    let mut laws = vec![MixtureLaw::new(vec![0.75, 0.25], 0.0),
+        MixtureLaw::new(vec![0.375, 0.625], 0.0), MixtureLaw::new(vec![0.0, 1.0], 0.0)];
+    for law in &mut laws { law.entropy_anchor = true; }
+    let raw = Advected::new((), vec![], 0).unwrap().with_boundaries(vec![
+        MassBoundary::Inlet { id: 10, cell: CellId(0), kg_s: 1.0,
+            material_id: MaterialId(1), specific_h_j_kg: laws[1].h(400.0) },
+        MassBoundary::Outlet { id: 11, cell: CellId(0), kg_s: 0.5 },
+        MassBoundary::Outlet { id: 12, cell: CellId(0), kg_s: 0.5 },
+    ], 3).unwrap().with_selective_outlets(vec![SelectiveOutlet {
+        boundary_id: 12, mass_fractions: vec![0.0, 1.0], specific_h_j_kg: laws[2].h(200.0),
+        enthalpy_reference: laws[2].reference.into(),
+    }], 2).unwrap().with_stationary_species(vec!["A".into(), "B".into()], vec![
+        InletSpecies { boundary_id: 10, mass_fractions: vec![0.375, 0.625] },
+    ], 1, 2).unwrap();
+    let flow = raw.clone().with_selective_outlet_laws(vec![SelectiveOutletLaw {
+        boundary_id: 12, material_id: MaterialId(2),
+    }]).unwrap();
+    let (thermal, conduction) = prepare_mixtures(&laws, &[300.0], &[2.0], false);
+    assert!(laws[0].temperature_k(laws[2].h(200.0)).is_err());
+    assert!(raw.endpoint_transport_with_entropy(&thermal, || Ok(())).is_err());
+    // The preexisting explicit-h API remains enough for energy-only transport.
+    let original = ImplicitConductionChain::new(&thermal, &conduction, &bindings(&laws), || Ok(()))
+        .unwrap().with_implicit_advection(&thermal, &raw, || Ok(())).unwrap();
+    let audited = ImplicitConductionChain::new(&thermal, &conduction, &bindings(&laws), || Ok(()))
+        .unwrap().with_implicit_advection(&thermal, &flow, || Ok(())).unwrap()
+        .with_implicit_advection_entropy(&thermal, || Ok(())).unwrap();
+    let dt = 8.0; // Total outgoing Courant = 4; selected h has zero cell slope.
+    let gamma = 1.0 - core::f64::consts::FRAC_1_SQRT_2;
+    let first = (300.0 + gamma * dt * 200.0) / (1.0 + gamma * dt * 0.25);
+    let mixing = |fractions: &[f64]| -fractions.iter().filter(|&&x| x > 0.0)
+        .map(|x| x * x.ln()).sum::<f64>();
+    let inlet_s = mixing(&laws[1].fractions) + 4.5 * (400.0_f64 / 300.0).ln();
+    let selected_s = 6.0 * (200.0_f64 / 300.0).ln();
+    let mut workspace = ImplicitConductionWorkspace::new(1).unwrap();
+    for second_order in [false, true] {
+        let (next, report) = if second_order {
+            audited.advance_sdirk2_to(&thermal, dt, controls(dt), &mut workspace, || Ok(()))
+        } else { audited.advance_to(&thermal, dt, controls(dt), &mut workspace, || Ok(())) }.unwrap();
+        let (plain, plain_report) = if second_order {
+            original.advance_sdirk2_to(&thermal, dt, controls(dt), &mut workspace, || Ok(()))
+        } else { original.advance_to(&thermal, dt, controls(dt), &mut workspace, || Ok(())) }.unwrap();
+        assert_eq!(next.cells(), plain.cells());
+        assert_eq!(report.energy, plain_report.energy);
+        let final_t = if second_order {
+            (300.0 + (1.0 - gamma) * dt * (200.0 - 0.25 * first) + gamma * dt * 200.0)
+                / (1.0 + gamma * dt * 0.25)
+        } else { (300.0 + dt * 200.0) / (1.0 + dt * 0.25) };
+        near(next.temperature_k(CellId(0)).unwrap(), final_t, 1e-10);
+        let samples = if second_order { [((1.0 - gamma) * dt, first), (gamma * dt, final_t)] }
+            else { [(dt, final_t), (0.0, final_t)] };
+        let mut boundary = 0.0;
+        let mut production = 0.0;
+        let mut heat_at_cell = 0.0;
+        for (weight, t) in samples {
+            let entropy_in = inlet_s - 0.5 * (mixing(&laws[0].fractions) + 3.0 * (t / 300.0).ln())
+                - 0.5 * selected_s;
+            let heat_over_t = (1200.0 - 1.5 * t) / t;
+            boundary += weight * entropy_in;
+            production += weight * (heat_over_t - entropy_in);
+            heat_at_cell += weight * heat_over_t;
+        }
+        let carried = report.entropy.advection.unwrap();
+        near(carried.boundary_entropy_input_j_k, boundary, 1e-12);
+        near(carried.upwind_mixing_j_k, production, 1e-12);
+        near(carried.balance_residual_j_k, 0.0, 1e-12);
+        let storage = 6.0 * (final_t / 300.0).ln();
+        near(report.entropy.thermal_storage_change_j_k, storage, 1e-12);
+        near(report.entropy.temporal_defect_j_k, storage - heat_at_cell, 1e-12);
+        near(report.energy.external_heat_j, 6.0 * (final_t - 300.0), 1e-9);
+        assert_eq!(report.energy.substeps, 1);
+        assert!(!report.entropy.has_unclassified_sources);
+        assert_eq!(report.entropy.unclassified_source_at_cell_j_k, 0.0);
+    }
+    assert_eq!(flow.audit().substeps, 0);
+    assert_eq!(thermal.time_s(), 0.0);
+}
+
+#[test]
+fn selective_downstream_outlet_retains_component_reference_derivative() {
+    let mut laws = vec![MixtureLaw::new(vec![0.375, 0.625], 0.0),
+        MixtureLaw::new(vec![0.75, 0.25], 0.0), MixtureLaw::new(vec![0.0, 1.0], 0.0)];
+    for law in &mut laws { law.entropy_anchor = true; }
+    let (thermal, conduction) = prepare_mixtures(&laws, &[300.0, 300.0], &[1.0, 2.0], false);
+    for reversed in [false, true] {
+        let flow = Advected::new((), vec![MassFlow {
+            id: 0, a: CellId(u64::from(reversed)), b: CellId(u64::from(!reversed)),
+            kg_s: if reversed { -1.0 } else { 1.0 },
+        }], 1).unwrap().with_boundaries(vec![
+            MassBoundary::Inlet { id: 10, cell: CellId(0), kg_s: 1.0,
+                material_id: MaterialId(0), specific_h_j_kg: laws[0].h(400.0) },
+            MassBoundary::Outlet { id: 11, cell: CellId(1), kg_s: 0.5 },
+            MassBoundary::Outlet { id: 12, cell: CellId(1), kg_s: 0.5 },
+        ], 4).unwrap().with_selective_outlets(vec![SelectiveOutlet {
+            boundary_id: 12, mass_fractions: vec![0.0, 1.0], specific_h_j_kg: laws[2].h(200.0),
+            enthalpy_reference: laws[2].reference.into(),
+        }], 2).unwrap().with_stationary_species(vec!["A".into(), "B".into()], vec![
+            InletSpecies { boundary_id: 10, mass_fractions: vec![0.375, 0.625] },
+        ], 2, 2).unwrap().with_selective_outlet_laws(vec![SelectiveOutletLaw {
+            boundary_id: 12, material_id: MaterialId(2),
+        }]).unwrap();
+        let system = ImplicitConductionGraph::new(&thermal, &conduction, &bindings(&laws),
+            Default::default(), || Ok(()))
+            .unwrap().with_implicit_advection(&thermal, &flow, || Ok(())).unwrap()
+            .with_implicit_advection_entropy(&thermal, || Ok(())).unwrap();
+        let (next, report) = system.advance_to(&thermal, 2.0, controls(2.0),
+            &mut ImplicitConductionWorkspace::new(2).unwrap(), || Ok(())).unwrap();
+        near(next.temperature_k(CellId(0)).unwrap(), 1100.0 / 3.0, 1e-10);
+        near(next.temperature_k(CellId(1)).unwrap(), 1300.0 / 3.0, 1e-10);
+        near(report.energy.external_heat_j, 1100.0, 1e-9);
+        near(report.energy.residual_j, 0.0, 1e-9);
+        near(report.entropy.advection.unwrap().balance_residual_j_k, 0.0, 1e-12);
+        assert!(!report.entropy.has_unclassified_sources);
+        assert_eq!(report.energy.substeps, 1);
+    }
 }
 
 #[test]

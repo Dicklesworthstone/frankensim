@@ -311,6 +311,7 @@ impl StationarySpecies {
     pub(super) fn validate_laws(
         &self, thermal: &DepositionSimulation<'_>, boundaries: &[MassBoundary],
         selective_outlets: &BTreeMap<u64, SelectiveOutlet>,
+        selective_outlet_laws: &BTreeMap<u64, crate::enthalpy::MaterialId>,
     ) -> Result<(), DepositionError> {
         let mut reference: Option<String> = None;
         let mut admit = |law: &dyn crate::enthalpy::ThermalLaw, fractions: &[f64]| {
@@ -340,6 +341,18 @@ impl StationarySpecies {
                     .ok_or(invalid("unregistered stationary inlet caloric law"))?;
                 admit(*law, &self.inlets[id])?;
             }
+        }
+        for (&id, material) in selective_outlet_laws {
+            let outlet = selective_outlets.get(&id)
+                .ok_or(invalid("selective outlet law lost its stream descriptor"))?;
+            let law = thermal.materials.get(material)
+                .ok_or(invalid("unregistered selective outlet caloric law"))?;
+            admit(*law, &outlet.mass_fractions)?;
+            if law.storage_basis() != crate::enthalpy::ThermalStorageBasis::Enthalpy {
+                return Err(invalid("selective outlet requires an enthalpy caloric law"));
+            }
+            let t = law.temperature_k(outlet.specific_h_j_kg)?;
+            if !t.is_finite() || t <= 0.0 { return Err(DepositionError::MaterialDomain); }
         }
         for outlet in selective_outlets.values() {
             if reference.as_deref() != Some(outlet.enthalpy_reference.as_str()) {

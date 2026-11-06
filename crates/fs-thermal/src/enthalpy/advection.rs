@@ -104,6 +104,8 @@ impl MassBoundary {
 /// inlet laws. A condensed phase need not share their temperature/enthalpy
 /// inversion, so this value is not interpreted through the remaining gas law.
 /// This descriptor supplies no saturation, reaction or phase-change closure.
+/// Entropy additionally requires the original stream law through
+/// [`Advected::with_selective_outlet_laws`].
 #[derive(Clone, Debug, PartialEq)]
 pub struct SelectiveOutlet {
     /// Identity of an already-declared outlet, never an inlet or interior edge.
@@ -114,6 +116,18 @@ pub struct SelectiveOutlet {
     pub specific_h_j_kg: f64,
     /// Source-aligned caloric reference, checked against every participating law.
     pub enthalpy_reference: String,
+}
+
+/// Original caloric/entropy law for one explicitly selected outlet stream.
+///
+/// Its state remains the enthalpy and composition in [`SelectiveOutlet`]. The
+/// registered law must support that state in the same source conventions as
+/// the stationary graph. It need not share the remaining mixture's phase or
+/// temperature. Binding a law does not supply separation work or phase kinetics.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SelectiveOutletLaw {
+    pub boundary_id: u64,
+    pub material_id: MaterialId,
 }
 
 /// Numerical observations for the last successful advance. Boundary energy
@@ -186,6 +200,7 @@ pub struct Advected<O> {
     // Boundary-only cells use themselves and need no topology entry.
     reference_cells: BTreeMap<CellId, CellId>,
     selective_outlets: BTreeMap<u64, SelectiveOutlet>,
+    selective_outlet_laws: BTreeMap<u64, MaterialId>,
     stationary_species: Option<species::StationarySpecies>,
     liquid_carrier: Option<liquid::LiquidEnthalpyCarrier>,
     boundary_pending: Option<BoundaryPending>,
@@ -240,14 +255,14 @@ impl<O> Advected<O> {
         flows.sort_by_key(|f| f.id);
         let reference_cells = component_references(&flows);
         Ok(Self { inner, flows, boundaries: Vec::new(), reference_cells,
-            selective_outlets: BTreeMap::new(),
+            selective_outlets: BTreeMap::new(), selective_outlet_laws: BTreeMap::new(),
             stationary_species: None, liquid_carrier: None, boundary_pending: None,
             pending: None, audit: AdvectionAudit::default(), entropy: None })
     }
     /// Replace the complete inlet/outlet data at an accepted endpoint. The
     /// declared ceiling covers interior AND boundary connections. Cell-level
     /// fixed-mass balance and inlet material support are checked on each step.
-    /// This clears previous species and selective-outlet bindings. It does not
+    /// This clears previous species, selective outlets and their law bindings. It does not
     /// infer reservoir pressure, velocity, mixing or momentum.
     pub fn with_boundaries(mut self, mut boundaries: Vec<MassBoundary>, max_connections: usize)
         -> Result<Self, DepositionError> {
@@ -268,6 +283,7 @@ impl<O> Advected<O> {
         boundaries.sort_by_key(|boundary| boundary.identity().0);
         self.boundaries = boundaries;
         self.selective_outlets.clear();
+        self.selective_outlet_laws.clear();
         self.stationary_species = None;
         self.boundary_pending = None;
         self.pending = None;
@@ -277,8 +293,8 @@ impl<O> Advected<O> {
     /// Every selected ID must name an existing outlet. Replacing these data
     /// invalidates the previous species solution; rates and continuity are
     /// unchanged. Acyclic flow and a positive remaining mixed outflow are
-    /// required. Recirculation and an entropy claim with selective streams
-    /// remain unsupported rather than inheriting the ordinary outlet model.
+    /// required. Selective recirculation remains unsupported. Entropy additionally
+    /// requires each selected stream's original [`SelectiveOutletLaw`].
     pub fn with_selective_outlets(
         mut self, outlets: Vec<SelectiveOutlet>, max_species: usize,
     ) -> Result<Self, DepositionError> {
@@ -306,7 +322,36 @@ impl<O> Advected<O> {
             }
         }
         self.selective_outlets = selected;
+        self.selective_outlet_laws.clear();
         self.stationary_species = None;
+        self.boundary_pending = None;
+        self.pending = None;
+        Ok(self)
+    }
+    /// Bind exactly one registered original law to every selected outlet.
+    ///
+    /// Energy-only transport can retain its existing explicit-h descriptors
+    /// without this binding. Entropy requires the complete mapping, exact
+    /// selected composition, supported stream h and compatible source anchors.
+    /// These law checks run on the actual thermal state, never by interpreting
+    /// selected h through the remaining mixture's law. Replacing boundaries or
+    /// selective descriptors clears the mapping; this method preserves the
+    /// already admitted stationary composition and original mass rates.
+    pub fn with_selective_outlet_laws(
+        mut self, laws: Vec<SelectiveOutletLaw>,
+    ) -> Result<Self, DepositionError> {
+        if laws.len() != self.selective_outlets.len() {
+            return Err(invalid("selective outlet laws must cover every selected stream"));
+        }
+        let mut selected = BTreeMap::new();
+        for law in laws {
+            if !self.selective_outlets.contains_key(&law.boundary_id)
+                || selected.insert(law.boundary_id, law.material_id).is_some()
+            {
+                return Err(invalid("invalid or duplicate selective outlet law binding"));
+            }
+        }
+        self.selective_outlet_laws = selected;
         self.boundary_pending = None;
         self.pending = None;
         Ok(self)
@@ -340,11 +385,8 @@ impl<O> Advected<O> {
 
 impl Advected<()> {
     fn admit_implicit_transport(&self) -> Result<(), DepositionError> {
-        if !self.selective_outlets.is_empty() || self.entropy.is_some()
-        {
-            return Err(invalid(
-                "implicit enthalpy excludes selective streams and flow entropy histories",
-            ));
+        if self.entropy.is_some() {
+            return Err(invalid("implicit enthalpy excludes flow entropy histories"));
         }
         Ok(())
     }
@@ -356,7 +398,9 @@ impl Advected<()> {
     /// Frozen stationary species carry the stored mixture h on this same
     /// tangent: composition and cell mass are constant during the solve. The
     /// original endpoint rechecks each mixture law and common enthalpy datum.
-    /// Selective streams and flow entropy histories need separate closures.
+    /// Selected outlets carry prescribed h, so their stream derivative is zero;
+    /// the original component-reference derivative still remains. An attached
+    /// explicit flow entropy history is not an implicit endpoint closure.
     pub(super) fn implicit_enthalpy_tangent(
         &self,
         mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
@@ -387,10 +431,13 @@ impl Advected<()> {
         }
         for boundary in &self.boundaries {
             checkpoint()?;
-            let (_, cell, rate) = boundary.identity();
+            let (id, cell, rate) = boundary.identity();
             let reference = *self.reference_cells.get(&cell).unwrap_or(&cell);
             match boundary {
                 MassBoundary::Inlet { .. } => add(cell, reference, -rate)?,
+                MassBoundary::Outlet { .. } if self.selective_outlets.contains_key(&id) => {
+                    add(cell, reference, rate)?;
+                }
                 MassBoundary::Outlet { .. } if cell != reference => {
                     add(cell, cell, -rate)?;
                     add(cell, reference, rate)?;
@@ -463,13 +510,12 @@ impl<O: DepositionObserver> DepositionObserver for Advected<O> {
             return Err(invalid("selective outlets require stationary species admission").into());
         }
         if let Some(species) = &self.stationary_species {
-            species.validate_laws(thermal, &self.boundaries, &self.selective_outlets)?;
+            species.validate_laws(thermal, &self.boundaries, &self.selective_outlets,
+                &self.selective_outlet_laws)?;
         }
         if let Some(entropy) = &mut self.entropy {
-            if !self.selective_outlets.is_empty() {
-                return Err(invalid("selective outlets require original stream entropy and work closure").into());
-            }
-            entropy.capture(thermal, self.stationary_species.as_ref(), &self.boundaries, check)?;
+            entropy.capture(thermal, self.stationary_species.as_ref(), &self.boundaries,
+                &self.selective_outlets, &self.selective_outlet_laws, check)?;
         }
         let mut sources = self.inner.sources(thermal, check)?;
         let mut pending = BoundaryPending { time_s: thermal.time_s(), ..BoundaryPending::default() };

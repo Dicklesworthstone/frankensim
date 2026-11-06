@@ -110,7 +110,8 @@ impl AdvectionSchedule {
         // during pump-off intervals. Never solve an underdetermined zero-flow
         // species graph or reinterpret inlet h in a receiving mixture's law.
         if let Some(species) = &flow.stationary_species {
-            species.validate_laws(thermal, &flow.boundaries, &flow.selective_outlets)?;
+            species.validate_laws(thermal, &flow.boundaries, &flow.selective_outlets,
+                &flow.selective_outlet_laws)?;
         }
         for knot in &self.knots {
             checkpoint()?;

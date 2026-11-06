@@ -179,9 +179,12 @@ impl ImplicitConductionChain<'_> {
     /// common enthalpy reference remain authoritative at every endpoint. The
     /// compiled tangent transports stored mixture h, so unlike heat capacities
     /// are never averaged into a temperature flux. Species do not evolve here.
-    /// Selective outlets and an attached flow entropy history still refuse.
-    /// Stationary mixing requires its own chemical entropy closure and cannot
-    /// select the entropy opt-in. The native thermal entropy account otherwise
+    /// Selected outlets retain their prescribed h and composition. Their exact
+    /// tangent has zero outgoing-state slope while retaining the component
+    /// reference derivative; they are not ordinary local-enthalpy outlets.
+    /// Source law bindings are optional for energy and required for entropy.
+    /// An attached explicit flow entropy history still refuses.
+    /// The native thermal entropy account otherwise
     /// leaves mass-carried transfers unclassified unless
     /// [`Self::with_implicit_advection_entropy`] is selected. The supplied
     /// observer's history is unchanged, including on success.
@@ -325,7 +328,10 @@ impl ImplicitConductionChain<'_> {
     ///
     /// Every flowing material must supply its original caloric entropy.
     /// Stationary mixtures additionally require source entropy anchors in one
-    /// shared species-reduced convention. Their mixing/pressure contributions
+    /// shared species-reduced convention. Selective outlets additionally bind
+    /// their original outgoing law, composition and caloric reference. Their
+    /// signed removal term includes the source h/s once, with no extra latent
+    /// heat, phase equilibrium or separator work. Mixing/pressure contributions
     /// retain their sign; no pressure-work or full fluid dissipation law is
     /// inferred. A stationary-skeleton liquid carrier uses its original liquid
     /// h/s at every stage while storage uses mixture entropy; no additional
