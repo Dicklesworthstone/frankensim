@@ -16,6 +16,10 @@
 //! combined heat capacity and the admitted affine storage paths are explicit;
 //! there is no assumed isothermal reservoir or unaccounted ideal-source impulse.
 
+/// Retained spatial polarization and physical switching heat in finite cells.
+#[cfg(feature = "experimental-dielectric-hysteresis")]
+pub mod hysteretic;
+
 use std::{cell::RefCell, collections::BTreeMap};
 
 use fs_material::field_storage::{

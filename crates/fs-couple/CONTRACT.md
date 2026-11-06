@@ -1808,6 +1808,55 @@ evolution, breakdown or empirical accuracy is inferred.
 leakage/switching/R(T) balances through the native heat assembly, major-loop
 finite heating, source/history continuation and atomic refusal regressions.
 
+### Spatial dielectric hysteresis on the finite enthalpy timeline
+
+The default-off `experimental-dielectric-hysteresis` feature also enables the
+native field lane and exposes
+`circuit_enthalpy::dielectric::hysteretic::ThermalHystereticElectrostatics`.
+It composes the original planar Gauss/electrode history owner, source-bound
+material network and finite-cell enthalpy driver; no constitutive, field or
+thermal solver is duplicated. `DielectricFieldSolve` accepts the native single
+endpoint controls or the existing adaptive affine-path controls through the
+same thermal entrypoints. The complete original HeatAssembly may supply
+conduction, thermal contacts, layers, closed radiation and finite coolant.
+
+Every original triangle has an explicit `DielectricRegion::Cell` or `Fixed`
+correspondence. Mapped triangle volumes, actual receiver volume and mass/density
+must agree within the declared absolute geometry allowance; multiple triangles
+may partition one whole receiver. Its source must be the same original caloric
+card and complete accepted query. Fixed geometry requires a wholly solid,
+constant-density caloric chart, and every selected constant switching
+coefficient must explicitly support that chart's entire temperature interval.
+Any nonzero physical switching heat in an unmapped Fixed region refuses.
+
+Fixed fits and prescribed loading make the electrical endpoint/path independent
+of temperature. It is evaluated once before the thermal residual, with the
+native field/path work budgets retained. Each thermal trial rechecks source
+queries and transport while borrowing the SAME immutable electrical account;
+it neither reruns Gauss nor copies or advances polarization memory. Per-cell
+physical switching heat is accumulated once into receiving-cell powers.
+Numerical electrical dissipation is retained separately and is never heat.
+The original field/source-work, finite thermal, total-energy and closed-radiation
+gates precede publication of both histories, final source queries and clock.
+Cancellation, work budgets and source-domain refusals preserve accepted inputs.
+
+The optional path summary retains every coarse/half/rejected field solve and
+operator application, plus accepted-only empirical refinement estimates. Both
+the candidate getter and consuming parts preserve it. Accumulated electrical
+path heat Q is deposited as Q/dt over ONE backward-Euler thermal interval;
+electrical refinement does not resolve heat-release chronology or increase
+thermal time order. Supply waveform/event cuts and refine the thermal interval.
+There is no changing switching fit, electrocaloric transfer, field-dependent
+thermal boundary law, leakage or geometry evolution in this lane.
+
+`tests/hysteretic_dielectric_enthalpy.rs` supplies six focused G1/G3/G4 fixtures:
+independent scalar-play heating in a rotated multi-triangle receiver; independent
+two-cell temperature-dependent conduction through HeatAssembly; Fixed-region
+zero-loss/refusal behavior; original source and whole-volume admission; late
+cancellation, budgets, caloric support and replay; and cumulative refined-path
+heat with separate numerical loss and retained global-work receipts.
+
+
 ## Accelerating stress histories through the original PCM renderer
 
 `MovingQuadrupoleSourceWindow<M>` and `MovingQuadrupoleRenderer<F,M>` now
