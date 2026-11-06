@@ -30,6 +30,12 @@
 //! nonnegative exposure. A bounded exponential-midpoint march approximates the
 //! physical clock to second order. Decay without production uses the exact
 //! physical-time solution. There are no allocations or nonlinear iterations.
+//!
+//! An optional authored counterflow offset is available through
+//! [`VinenTangle::with_counterflow_onset_m_s`]. It suppresses production below
+//! the offset while retaining remanent-line decay and mutual friction.
+
+mod onset;
 
 use super::{
     TwoFluidState, TwoFluidVelocity, finite_vector, invalid, nonnegative, positive, speed,
@@ -69,6 +75,7 @@ pub struct VinenTangle {
     parameters: VinenParameters,
     controls: VinenStepControls,
     drag_per_line_m2_s: f64,
+    production_onset_m_s: f64,
 }
 
 /// One private proposed source endpoint. The heat includes line decay and
@@ -141,6 +148,7 @@ impl VinenTangle {
             parameters,
             controls,
             drag_per_line_m2_s: c,
+            production_onset_m_s: 0.0,
         })
     }
 
@@ -203,8 +211,14 @@ impl VinenTangle {
         }
         let w = speed(relative);
         let root = line_density_per_m2.sqrt();
-        let (exposure, substeps) = self.exposure(w, root, dt_s)?;
-        let (next_root, root_change) = self.root_at_exposure(w, root, exposure)?;
+        let (exposure, substeps, next_root, root_change) = if self.production_onset_m_s == 0.0 {
+            // Preserve the original exact phase curve and clock arithmetic.
+            let (exposure, substeps) = self.exposure(w, root, dt_s)?;
+            let (next_root, root_change) = self.root_at_exposure(w, root, exposure)?;
+            (exposure, substeps, next_root, root_change)
+        } else {
+            self.exposure_with_onset(w, root, dt_s)?
+        };
         let next_density = next_root * next_root;
         let after = self.line_energy_density_j_m3(next_density)?;
         if next_density == 0.0 {
