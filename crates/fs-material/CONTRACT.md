@@ -17855,3 +17855,10 @@ power and Voce overstress and borrowed-law adapters retain their actual native
 duration. The audited dynamic shell consumer refuses a different inertia
 interval rather than advancing plastic history on an inconsistent physical
 clock. This metadata performs no material retiming or temperature evolution.
+
+
+## Source-bound thermoplastic plane-stress sections
+
+`plastic::section::thermal::ThermoplasticSectionStep` freezes each original physical layer's source, old/new caloric enthalpy and actual duration, then resolves its native law once per layer. The original plane-stress reduction supplies total tensor strains, complete J2/Voce/Perzyna/Chaboche histories and consistent tangents. The exact native thermal increment is audited at every retained point; coefficient-dependent free energy and the change in mechanical entropy times temperature remain separate from physical/reversible heat and numerical loss. Original thickness weights produce per-layer and total reference-area accounts. Generalized work plus signed transverse constraint-residual work must close the first law, and full returned histories must match the accepted section. Consumers compare the reported resultants against their equilibrium endpoint.
+
+Temperature is uniform within each physical layer; original geometry/density remain fixed and the source family's fully-solid and small-strain bounds apply. Thermal transport and atomic coupled publication stay with their existing owners. No melting, finite forming, evolving thickness or layer separation is inferred. Four focused synthetic regressions cover analytical thermal moments and reversal, yielded thermal histories with coefficient/entropy accounting, timed multi-branch relaxation and invalid bindings. These checks do not establish experimental material calibration or quadrature/time accuracy.

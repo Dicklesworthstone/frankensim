@@ -28,6 +28,8 @@ use core::fmt;
 
 /// Native mechanical storage and physical/numerical loss of accepted sections.
 pub mod energy;
+/// Source-bound thermal softening, expansion and native caloric work by layer.
+pub mod thermal;
 
 /// One ordered physical layer and its original native material law.
 #[derive(Clone, Debug, PartialEq)]
