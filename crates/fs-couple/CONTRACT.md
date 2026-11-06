@@ -401,3 +401,28 @@ The existing DG supply startup/reversal/passive-release battery includes the
 annular geometry. `tests/annular_channel.rs` exercises momentum-preserving
 gas changes through the common channel API alongside the original analytic
 Poiseuille, logarithmic Couette and narrow-gap checks.
+
+## Second-order spatial moisture diffusion
+
+`MoistureCartesian::advance_sdirk2` applies the existing Alexander two-stage
+SDIRK tableau to the original three-dimensional finite-volume diffusion owner.
+Both implicit stages resolve the pinned principal diffusivity laws and reuse
+the native seven-point operator, checked CG, nonlinear controls and source
+admission. Kirchhoff mode retains the original integrated D(M) face law,
+including a degenerate dry state.
+
+The first-stage contribution is evaluated from equal-and-opposite actual face
+rates. The endpoint account contains (1-gamma)*dt times those rates plus
+gamma*dt times the final rates through each of the six exterior faces.
+The intermediate report is diagnostic and must not be added again. Dormant
+surface transfer and impermeable directions cannot enlarge the admitted
+second-stage moisture range. A nonphysical stage returns `StageRange` before
+material evaluation; it never clips water or publishes a partial field.
+
+G1 regressions specify anisotropic discrete-mode convergence, six distinct
+boundary accounts, original nonlinear source refresh and analytic Kirchhoff
+wetting. G0/G4 cases cover exact equilibrium, deterministic replay, dormant
+reservoirs and cancellation. These are numerical checks with authored material
+data, not experimental validation. Temperature and external faces are constant
+within an interval. Ordinary `advance` remains backward Euler; no second-order
+finite-atmosphere/solution coupling or global error bound is implied.

@@ -11,8 +11,9 @@
 //! A moisture-independent source may explicitly assign zero to a principal
 //! diffusivity: that direction is impermeable, including its external faces.
 //!
-//! Backward Euler resolves local source diffusivities at its accepted endpoint
-//! using bounded Picard iteration and the native checked-CG solver. The compact
+//! Backward Euler and optional second-order SDIRK resolve local source
+//! diffusivities at their implicit stages using bounded Picard iteration and
+//! the native checked-CG solver. The compact
 //! seven-point operator stores O(N) coefficients and has O(N) application cost.
 //! This is isothermal, fixed-reference dilute bound moisture. Unlike-material
 //! partitioning, rotated tensors, sorption heat and stress-assisted diffusion
@@ -20,6 +21,9 @@
 //! `solution` controllers couple these same cells to finite external inventories.
 
 use super::*;
+
+mod sdirk;
+pub use sdirk::MoistureCartesianSdirk2Report;
 
 /// Actual box geometry and an authored frame for its x/y/z principal directions.
 #[derive(Clone, Copy, Debug)]
@@ -375,10 +379,25 @@ impl MoistureCartesian {
         nonlinear: MoistureNonlinearConfig,
         cx: &Cx<'_>,
     ) -> Result<(Self, MoistureCartesianReport), MoistureError> {
+        self.advance_stage(dt_s, dt_s, boundaries, config, nonlinear, None, cx)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn advance_stage(
+        &self,
+        dt_s: f64,
+        implicit_dt_s: f64,
+        boundaries: [ResolvedMoistureFace; 6],
+        config: MoistureStepConfig,
+        nonlinear: MoistureNonlinearConfig,
+        known: Option<&super::sdirk::StageLoad<6>>,
+        cx: &Cx<'_>,
+    ) -> Result<(Self, MoistureCartesianReport), MoistureError> {
         poll(cx)?;
         nonlinear.validate()?;
         let end = self.time_s + dt_s;
         if !positive(dt_s)
+            || !positive(implicit_dt_s)
             || !end.is_finite()
             || end <= self.time_s
             || !positive(config.water_balance_tolerance_kg)
@@ -405,7 +424,10 @@ impl MoistureCartesian {
         };
         let reference = diffusion_reference(&self.moisture, &boundaries);
         let start = self.transport_states(&self.moisture, cx)?;
-        let mut system = self.system(dt_s, &boundaries, &start, profiles.as_ref(), cx)?;
+        let mut system = self.system(implicit_dt_s, &boundaries, &start, profiles.as_ref(), cx)?;
+        if let Some(known) = known {
+            known.add_to(&mut system.rhs, cx)?;
+        }
         let mut iterate = self.moisture.clone();
         let mut linear_iterations = 0usize;
         for iteration in 1..=nonlinear.maximum_iterations {
@@ -428,11 +450,25 @@ impl MoistureCartesian {
                 MoistureError::Invalid("Cartesian solver work count overflow"),
             )?;
             let candidate: Vec<_> = solution.x.iter().map(|m| m + reference).collect();
+            // Higher-order stages may violate the physical range despite
+            // linear stability. Classify this before querying material support
+            // so adaptive callers can shorten the interval transactionally.
+            if let Some(known) = known {
+                known.check_range(&candidate, self.geometry.maximum_moisture, cx)?;
+            }
             let endpoint = self.transport_states(&candidate, cx)?;
-            let endpoint_system =
-                self.system(dt_s, &boundaries, &endpoint, profiles.as_ref(), cx)?;
+            let mut endpoint_system =
+                self.system(implicit_dt_s, &boundaries, &endpoint, profiles.as_ref(), cx)?;
+            if let Some(known) = known {
+                known.add_to(&mut endpoint_system.rhs, cx)?;
+            }
             let relative = endpoint_system.relative_residual(&solution.x, cx)?;
-            let transfer = self.transfers(&candidate, &boundaries, &endpoint_system);
+            let mut transfer = self.transfers(&candidate, &boundaries, &endpoint_system);
+            if let Some(known) = known {
+                for (total, prior) in transfer.iter_mut().zip(known.boundary_water_kg) {
+                    *total += prior;
+                }
+            }
             let water_after = candidate
                 .iter()
                 .map(|m| m * self.dry_mass_per_cell_kg)
@@ -530,7 +566,10 @@ impl MoistureCartesian {
                     *old = nonlinear.relaxation.mul_add(candidate - *old, *old);
                 }
                 let states = self.transport_states(&iterate, cx)?;
-                system = self.system(dt_s, &boundaries, &states, profiles.as_ref(), cx)?;
+                system = self.system(implicit_dt_s, &boundaries, &states, profiles.as_ref(), cx)?;
+                if let Some(known) = known {
+                    known.add_to(&mut system.rhs, cx)?;
+                }
             }
         }
         unreachable!("validated positive spatial iteration budget")

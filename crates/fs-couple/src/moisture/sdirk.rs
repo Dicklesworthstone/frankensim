@@ -15,7 +15,7 @@
 
 use super::*;
 
-const GAMMA: f64 = 1.0 - core::f64::consts::FRAC_1_SQRT_2;
+pub(super) const GAMMA: f64 = 1.0 - core::f64::consts::FRAC_1_SQRT_2;
 
 /// One second-order physical interval with both original implicit stage receipts.
 #[derive(Clone, Debug)]
@@ -31,12 +31,24 @@ pub struct MoistureSdirk2Report {
 }
 
 /// Already-integrated first-stage rate, separate from the physical old field.
-pub(super) struct StageLoad {
+pub(super) struct StageLoad<const FACES: usize = 2> {
     increment: Vec<f64>,
-    pub(super) boundary_water_kg: [f64; 2],
+    pub(super) boundary_water_kg: [f64; FACES],
     bounds: [f64; 2],
 }
-impl StageLoad {
+impl<const FACES: usize> StageLoad<FACES> {
+    pub(super) fn new(
+        increment: Vec<f64>,
+        boundary_water_kg: [f64; FACES],
+        bounds: [f64; 2],
+    ) -> Self {
+        Self {
+            increment,
+            boundary_water_kg,
+            bounds,
+        }
+    }
+
     pub(super) fn add_to(&self, rhs: &mut [f64], cx: &Cx<'_>) -> Result<(), MoistureError> {
         debug_assert_eq!(rhs.len(), self.increment.len());
         for (i, (value, &increment)) in rhs.iter_mut().zip(&self.increment).enumerate() {
