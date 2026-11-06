@@ -291,7 +291,7 @@ fn variable_carreau_viscosity_closes_independent_body_response_and_streamed_mome
 }
 
 #[test]
-fn source_rate_includes_every_symmetric_component_and_removes_rigid_rotation() {
+fn source_rate_retains_deviatoric_strain_under_rotation_and_dilation() {
     let gate = CancelGate::new_clock_free();
     let reference = transport(1.0);
     let scaling = plan_scaling_from_material(&reference, DX, DT, 0.05).unwrap();
@@ -302,8 +302,11 @@ fn source_rate_includes_every_symmetric_component_and_removes_rigid_rotation() {
         [-0.0009, 0.0008, -0.0003],
     ];
     for strain in [false, true] {
-        for spin in [0.0, 0.003] {
+        for (dilation, spin) in [(0.0, 0.0), (0.0, 0.003), (-0.002, 0.003), (0.0015, -0.004)] {
             let mut g = if strain { symmetric } else { [[0.0; 3]; 3] };
+            for axis in 0..3 {
+                g[axis][axis] += dilation;
+            }
             g[0][1] -= spin;
             g[1][0] += spin;
             let expected_rate = if strain {

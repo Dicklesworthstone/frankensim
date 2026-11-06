@@ -188,6 +188,66 @@ fn constant_material_recovers_native_sgs_and_wall_loads_for_all_collision_famili
 }
 
 #[test]
+fn resolved_molecular_shear_ignores_dilation_with_active_sgs() {
+    let reference = fluid(1.0);
+    let scaling = plan_scaling_from_material(&reference, DX, DT, 0.05).unwrap();
+    let gate = CancelGate::new_clock_free();
+    for shear in [0.0, 0.004] {
+        for dilation in [-0.002, 0.0, 0.002] {
+            let original = model(1.37, 2);
+            let mut grid = BoundaryGrid3::with_collision_model(
+                4,
+                4,
+                4,
+                original,
+                [2e-6, -1e-6, 5e-7],
+                BoundarySpec3::periodic(),
+            );
+            let spin = 0.003;
+            seed(&mut grid, |cell| {
+                let [x, y, z] = cell.map(|c| c as f64 - 1.5);
+                [
+                    dilation * x + (shear - spin) * y,
+                    spin * x + dilation * y,
+                    dilation * z,
+                ]
+            });
+            let mut work = scaling
+                .boundary_rheology_sgs_workspace(&grid, 64, &gate)
+                .unwrap();
+            scaling
+                .step_boundary_with_material_rheology_and_sgs(
+                    &mut grid,
+                    &gate,
+                    settings(SgsModel::Smagorinsky { cs: 0.18 }),
+                    &mut work,
+                    None,
+                    |point| Ok(fluid(0.4 + 0.2 * point.shear_rate_per_s)),
+                )
+                .unwrap();
+            for sample in work.applied() {
+                if sample.point.cell.into_iter().all(|c| (1..3).contains(&c)) {
+                    let expected_rate = shear / DT;
+                    let expected_mu = 0.4 + 0.2 * expected_rate;
+                    close(sample.point.shear_rate_per_s, expected_rate, 2e-13);
+                    close(
+                        sample.transport.dynamic_viscosity_pa_s(),
+                        expected_mu,
+                        2e-13,
+                    );
+                    close(
+                        sample.shear_relaxation_time,
+                        0.5 + 3.0 * expected_mu / 1000.0 * DT / (DX * DX),
+                        2e-13,
+                    );
+                }
+            }
+            assert_eq!(grid.collision_model(), original);
+        }
+    }
+}
+
+#[test]
 fn local_molecular_and_eddy_viscosities_drive_the_actual_collision_and_periodic_transport() {
     let reference = fluid(1.0);
     let scaling = plan_scaling_from_material(&reference, DX, DT, 0.05).unwrap();

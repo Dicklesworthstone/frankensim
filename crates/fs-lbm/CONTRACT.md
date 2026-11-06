@@ -12781,8 +12781,9 @@ accuracy, performance or arbitrary constitutive convergence claim is made.
 `step_moving_bodies_with_material_rheology` bind original
 `FluidTransport` sources to the native moving partial-saturation owner.
 The existing physical half-force velocity and wall/open/periodic gradient
-supply the full symmetric strain rate, `sqrt(2 D:D) / dt`. Rigid rotation
-contributes no strain. Each non-solid cell resolves one original source and
+use the shared material deformation-rate kernel to supply
+`sqrt(2 dev(D):dev(D)) / dt`. Rigid rotation and isotropic dilation contribute
+no material shear. Each non-solid cell resolves one original source and
 reads its transport once, independently of body count. A mixed solid/fluid
 cell is sampled through this velocity gradient; its blended nonequilibrium
 stress is not treated as a pure-fluid constitutive estimator.
@@ -12814,7 +12815,8 @@ lubrication law. Native lattice units, low-Mach restrictions and additional
 body inertia over retained interior fluid remain unchanged.
 
 Focused regressions cover all-family constant-source/native identity,
-independent Carreau collision/body response, full strain and rigid rotation,
+independent Carreau collision/body response, all deviatoric strain components,
+rigid rotation and dilation invariance of source viscosity and coupling weights,
 source and geometry refusal, late cancellation with exact retry, shared-cell
 simultaneous momentum exchange and one-body-array identity. These sources
 passed Rust parsing and scoped whitespace checks; native compilation and
@@ -13359,7 +13361,9 @@ worker parity, and post-stream cancellation/refusal with exact retry.
 `material::boundary::sgs` adds a prepared `BoundaryRheologySgsWorkspace3` and
 serial/pooled `MaterialScaling` steps on the original `BoundaryGrid3`. One incoming
 force-centered velocity gradient supplies both the physical resolved material
-shear `sqrt(2 D:D)/dt` and the selected existing SGS closure. Each original material
+shear `sqrt(2 dev(D):dev(D))/dt` and the selected existing SGS closure. Isotropic
+dilation does not change the molecular shear query; the original SGS gradient
+and eddy-viscosity law retain their own constitutive convention. Each original material
 response is queried once and its transport state read once. The original scaling
 converts that local molecular viscosity to collision relaxation; its reference
 density must remain unchanged. Eddy/molecular ratio admission and resolved
@@ -13392,9 +13396,10 @@ model, stochastic SGS force or turbulent calibration is supplied. Retained
 fictitious interior fluid makes immersed-body LES a separate unresolved physical
 question; this capability is restricted to the original dense wall/open domain.
 
-Five material integration regressions cover all four collision families and
+Material integration regressions cover all four collision families and
 wall/open boundaries, independent heterogeneous collision/transport with zero
-and nonzero SGS, analytic forced Couette shear and local dissipation, retained
+and nonzero SGS, dilation-invariant molecular shear with active SGS,
+analytic forced Couette shear and local dissipation, retained
 source epochs on refusal, and serial/pooled replay. Three spatial-load groups
 cover all-axis momentum and aggregate agreement, zero-SGS parity, memory and
 partition refusal, and late cancellation. Full native fs-lbm production/unit

@@ -130,8 +130,9 @@ impl<R: FluidTransport + ?Sized> MaterialScaling<'_, R> {
     /// Advance the original wall/open-boundary owner with a fresh material
     /// response at each fluid cell's resolved shear and the selected SGS law.
     ///
-    /// One force-centered gradient supplies BOTH `sqrt(2 D:D)/dt` [1/s] and
-    /// eddy viscosity. The physical velocity and distance scales cancel dx.
+    /// One force-centered gradient supplies material `sqrt(2 dev(D):dev(D))/dt`
+    /// [1/s] and the original eddy-viscosity closure. The physical velocity and
+    /// distance scales cancel dx; isotropic dilation does not change molecular rheology.
     /// Native moving halfway-wall and on-site open-face derivatives are used;
     /// no second gradient, pressure boundary or wall model is introduced.
     /// Each source is queried once and its transport snapshot read once.
@@ -256,7 +257,7 @@ impl<R: FluidTransport + ?Sized> MaterialScaling<'_, R> {
     ) -> Result<(CollisionModel3, MaterialImmersedSample3<M>), MaterialBoundarySgsError3> {
         checkpoint(gate)?;
         let error = |source| MaterialBoundarySgsError3::Source { cell, source };
-        let lattice_rate = strain_rate(gradient);
+        let lattice_rate = strain_rate(gradient).map_err(|source| error(source.into()))?;
         let rate = lattice_rate / self.timestep_s();
         if !rate.is_finite() || (lattice_rate != 0.0 && rate == 0.0) {
             return Err(error(MaterialLbmError::Invalid(

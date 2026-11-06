@@ -8,7 +8,7 @@ impl<R: FluidTransport + ?Sized> MaterialScaling<'_, R> {
     ///
     /// The existing incoming physical velocity gradient is evaluated once for
     /// the whole grid, independent of body count. Each non-solid cell supplies
-    /// one original source response at `sqrt(2 D:D) / dt`. Its local viscosity
+    /// one original source response at `sqrt(2 dev(D):dev(D)) / dt`. Its local viscosity
     /// controls fluid collision, every body's partial-saturation weight, and
     /// the simultaneous implicit rigid response. Bodies occupying disjoint
     /// subvolumes of one cell share its same total-occupancy denominator.

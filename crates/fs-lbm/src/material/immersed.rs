@@ -17,14 +17,14 @@ use crate::kinematics::{KinematicsError, KinematicsWorkspace3};
 use fs_exec::CancelGate;
 use fs_material::{
     MaterialError,
-    fluid_transport::{FluidTransport, FluidTransportState},
+    fluid_transport::{FluidTransport, FluidTransportState, viscous::DeformationRate},
 };
 
 /// Conditions at the accepted incoming fluid time level.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MaterialImmersedPoint3 {
     pub cell: [usize; 3],
-    /// sqrt(2 D:D) [1/s], including every diagonal and symmetric shear term.
+    /// sqrt(2 dev(D):dev(D)) [1/s], including all deviatoric normal and shear terms.
     pub shear_rate_per_s: f64,
 }
 
@@ -83,9 +83,10 @@ impl<R: FluidTransport + ?Sized> MaterialScaling<'_, R> {
     /// Advance one actual rigid body and the fluid with sourced local viscosity.
     ///
     /// The native physical half-force velocity supplies the existing centered
-    /// interior/periodic and wall-aware/open-face gradient. Its full symmetric
-    /// strain determines the source query, including in retained interior fluid.
-    /// Rigid rotation alone has zero strain. No turbulence closure is enabled.
+    /// interior/periodic and wall-aware/open-face gradient. Its deviatoric
+    /// symmetric strain determines the query, including in retained interior fluid.
+    /// Rigid rotation and isotropic dilation contribute no material shear.
+    /// No turbulence closure is enabled.
     /// Sampling the mixed-cell velocity gradient avoids treating its blended
     /// nonequilibrium stress as though it came from pure-fluid collision.
     ///
@@ -178,7 +179,8 @@ impl<R: FluidTransport + ?Sized> MaterialScaling<'_, R> {
             };
             let cell = [index % nx, index / nx % ny, index / (nx * ny)];
             let state_error = |source| MaterialImmersedError3::State { cell, source };
-            let lattice_rate = strain_rate(kinematics.gradient());
+            let lattice_rate = strain_rate(kinematics.gradient())
+                .map_err(|source| state_error(source.into()))?;
             let rate = lattice_rate / self.timestep_s;
             if !rate.is_finite() || (lattice_rate != 0.0 && rate == 0.0) {
                 return Err(state_error(MaterialLbmError::Invalid(
@@ -225,22 +227,10 @@ impl<R: FluidTransport + ?Sized> MaterialScaling<'_, R> {
     }
 }
 
-// Six independent components of sqrt(2 D:D), scaled before squaring.
-// The antisymmetric (rigid rotation) part cancels before the norm.
-pub(crate) fn strain_rate(g: [[f64; 3]; 3]) -> f64 {
-    let components = [
-        core::f64::consts::SQRT_2 * g[0][0],
-        core::f64::consts::SQRT_2 * g[1][1],
-        core::f64::consts::SQRT_2 * g[2][2],
-        g[0][1] + g[1][0],
-        g[0][2] + g[2][0],
-        g[1][2] + g[2][1],
-    ];
-    let scale = components.iter().fold(0.0_f64, |m, x| m.max(x.abs()));
-    if scale == 0.0 {
-        return 0.0;
-    }
-    scale * fs_math::det::sqrt(components.iter().map(|x| (x / scale) * (x / scale)).sum())
+// Share the material law's objective shear/volume split, then let the owning
+// physical adapter convert this lattice rate by its retained timestep.
+pub(crate) fn strain_rate(g: [[f64; 3]; 3]) -> Result<f64, MaterialError> {
+    DeformationRate::from_velocity_gradient(g).map(|rate| rate.shear_rate_per_s())
 }
 
 fn poll(gate: &CancelGate) -> Result<(), MaterialImmersedError3> {

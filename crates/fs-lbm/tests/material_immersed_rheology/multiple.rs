@@ -79,6 +79,82 @@ fn constant_material_matches_one_native_assembly_for_all_collision_families() {
 }
 
 #[test]
+fn dilation_preserves_material_shear_and_simultaneous_body_coupling_weights() {
+    let reference = transport(1.0);
+    let scaling = plan_scaling_from_material(&reference, DX, DT, 0.05).unwrap();
+    let shape = BodyFrameEllipsoid3::sphere(0.8).unwrap();
+    let gate = CancelGate::new_clock_free();
+    for shear in [0.0, 0.003] {
+        let expected_rate = shear / DT;
+        let mut expected_weights: Option<[f64; 2]> = None;
+        for (dilation, spin) in [(0.0, 0.002), (-0.001, 0.004), (0.0015, -0.003)] {
+            let original = model(1.37, 1);
+            let mut fluid = grid(original, [2e-6, -1e-6, 5e-7]);
+            seed_velocity(&mut fluid, |cell| {
+                let [x, y, z] = cell.map(|c| c as f64 + 0.5 - 4.0);
+                [
+                    dilation * x + (shear - spin) * y,
+                    spin * x + dilation * y,
+                    dilation * z,
+                ]
+            });
+            let mut bodies = separated_bodies();
+            for body in &mut bodies {
+                body.velocity = [0.0; 3];
+            }
+            let mut samplers = core::array::from_fn(|_| BodyFrameSampler3::new(&fluid, 3).unwrap());
+            let report = scaling
+                .step_moving_bodies_with_material_rheology(
+                    &mut fluid,
+                    &mut samplers,
+                    [&shape as &dyn BodyFrameShape3; 2],
+                    &mut bodies,
+                    [[0.0; 6]; 2],
+                    [0.0; 3],
+                    &mut workspace(),
+                    CELLS,
+                    None,
+                    &gate,
+                    |point| Ok(transport(0.4 + 0.2 * point.shear_rate_per_s)),
+                )
+                .unwrap();
+            for sample in &report.applied {
+                if sample
+                    .point
+                    .cell
+                    .into_iter()
+                    .all(|c| (1..N - 1).contains(&c))
+                {
+                    close(sample.point.shear_rate_per_s, expected_rate, 6e-13);
+                    close(
+                        sample.transport.dynamic_viscosity_pa_s(),
+                        0.4 + 0.2 * expected_rate,
+                        2e-13,
+                    );
+                }
+            }
+            // Every occupied cell lies inside the affine-gradient stencil.
+            // Source viscosity controls the actual reciprocal resistance;
+            // first-half geometry is identical because both bodies start at rest.
+            let weights = core::array::from_fn(|a| {
+                report.momentum.coupling.bodies[a]
+                    .hydrodynamic
+                    .coupling_weight_sum
+            });
+            if let Some(expected) = expected_weights {
+                for a in 0..2 {
+                    close(weights[a], expected[a], 3e-12);
+                }
+            } else {
+                assert!(weights.iter().all(|w| *w > 0.0));
+                expected_weights = Some(weights);
+            }
+            assert_eq!(fluid.collision_model(), original);
+        }
+    }
+}
+
+#[test]
 fn shared_cell_material_weight_closes_two_independent_body_responses_and_fluid_momentum() {
     let reference = transport(1.0);
     let scaling = plan_scaling_from_material(&reference, DX, DT, 0.05).unwrap();
