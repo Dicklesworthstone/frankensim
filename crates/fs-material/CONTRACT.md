@@ -11724,6 +11724,31 @@ requires physical timestep refinement: start events must already be processed,
 interior events refuse and endpoint events remain pending. It adds no boiling,
 dry-film onset, moving interface, liquid displacement work or bulk melting model.
 
+The opt-in `implicit::adaptive::advance_deposition_with_gas_adaptive` advances
+an event-free window with physical step-doubling control. The original
+first-order controller compares a full interval with two actual half intervals
+and accepts only the conservative fine trajectory. It measures every native
+cell's enthalpy and temperature, each selected liquid's mass, gas temperature,
+and every gas species inventory. Relative tolerances scale changes from the
+accepted interval start, preserving small latent/inventory changes beside large
+reference enthalpies or stationary inventories. The estimate controls local
+time error and requires independent validation near constitutive corners.
+
+Only accepted fine intervals enter per-cell mass, both gross phase directions,
+latent heat, complete native-datum vapor energy, vapor-enthalpy correction,
+sensible heat and recession totals. One whole-window energy budget bounds
+absolute thermal and gas defects; the thermal contribution also bounds the sum
+of absolute selected-surface defects. Actual final total/species/carrier mass
+and cumulative absolute mass defects are independently gated. Source-relative
+accounts preserve caloric-reference cancellation without subtracting absolute
+formation energies. Coarse and accuracy-rejected trajectories spend the same
+Newton, residual-evaluation and gas-iteration budgets as accepted work. Final
+payloads come only from the last accepted fine interval, and late refusal or
+cancellation discards the entire candidate. Source-domain/numerical failures
+propagate; only an admitted physical time-error estimate requests reduction.
+Events inside the requested window refuse upfront; exact-target events remain
+pending for the original timeline owner.
+
 ### Condensate onset and complete dry-out at a prescribed wall
 
 `evaporation::gas::wall_film` admits an explicitly fully wetting, locally planar

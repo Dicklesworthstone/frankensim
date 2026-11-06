@@ -1,4 +1,6 @@
 //! Dry-species admission, independent continuous limits, and event boundaries.
+#[path = "adaptive_tests.rs"]
+mod adaptive;
 
 use super::*;
 

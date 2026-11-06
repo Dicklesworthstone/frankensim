@@ -14,11 +14,13 @@
 //! gas-energy reconstruction only after convergence. A fresh physical recheck
 //! uses that reconstructed gas before either endpoint can be published.
 //!
-//! This is an event-free, first-order interval with fixed reference geometry,
+//! These are event-free, first-order intervals with fixed reference geometry,
 //! positive pure-liquid inventories, one volatile identity and caller-supplied
-//! film coefficients. It supplies no time-error estimate, boiling, moving
-//! interface, dry-film onset or solid/liquid mixture advection. Process initial
-//! events first; interior events refuse and endpoint events remain pending.
+//! film coefficients. The endpoint solve supplies algebraic acceptance; the
+//! adaptive window also controls local physical time error. Neither supplies
+//! boiling, moving interfaces, dry-film onset or solid/liquid mixture advection.
+//! Process initial events first; interior events refuse and endpoint events
+//! remain pending.
 
 use std::collections::BTreeMap;
 
@@ -39,6 +41,9 @@ use super::{
 mod endpoint;
 mod solve;
 pub use solve::solve_deposition_with_gas;
+
+/// Physical time accuracy on a shared finite-gas/thermal event-free window.
+pub mod adaptive;
 
 /// One active native liquid cell, with explicit original sources and film data.
 /// All selected cells share one volatile identity; caloric offsets may differ.

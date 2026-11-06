@@ -7,13 +7,17 @@
 //! sources. An admitted source mismatch is retained in the energy transfer,
 //! rather than silently losing mass times that mismatch.
 //!
-//! This is a first-order, frozen-rate interval. The film uses the initial gas
+//! The original free-surface entry points use first-order, frozen-rate intervals.
+//! Their film uses the initial gas
 //! temperature, pressure and composition and a caller-supplied mass-transfer
 //! coefficient. Incoming vapor carries its upstream gas enthalpy; outgoing
 //! vapor carries its surface enthalpy. The optional [`heat`] path first solves
 //! reciprocal sensible film heat on the same original calorics. A step that
 //! overshoots equilibrium, consumes too much inventory or
 //! changes temperature too far refuses with a smaller duration to retry.
+//! The opt-in [`implicit`] owner solves the original thermal network and finite
+//! gas at one endpoint, including latent, vapor-carried and sensible-film energy;
+//! its adaptive window controls physical time error on the same coupled states.
 //!
 //! Gas volume and thermal reference geometry are fixed. The conserved thermal
 //! account is liquid enthalpy plus gas internal energy; this is not a moving
