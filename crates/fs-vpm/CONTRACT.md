@@ -1832,3 +1832,21 @@ near-wall transfer, analytically decaying image-vortex translation, compact
 bulk and zero-viscosity parity, work caps and transactional boundary/poll
 refusals. These are resolved model checks, not a no-slip boundary layer,
 interface-reaction or measured-fluid validation claim.
+
+`PreparedPse::diffuse_at_wall_with_cx` accelerates this same fixed-site compact
+wall law on the prepared physical neighbor graph. Squared image distance is
+squared real distance plus `4 h_i h_j`, so every supported image pair is
+already a real neighbor. Self-image losses remain active even when E=0.
+Each run caches N self-loss maps and E pair maps for its current wall and
+viscosity, preserving the dense forward/reverse ordering and particle bits.
+Decay exponents are retained alongside exponentials for exceptional-range
+recovery. No step allocates, searches for neighbors or reevaluates kernels.
+
+Active S-step runs charge `N+(N+E)+S(2N+4E+1)` logical units and
+`S(2N+4E)` map visits, with `40N+40E` bytes of owned numerical payload;
+borrowed graph storage is separate. Dense clusters can still have quadratic
+E, governed by the original preparation caps. Zero steps, time or viscosity
+retain identity without coefficient allocation. The focused tests in
+`tests/prepared_wall_diffusion.rs` cover dense parity, rotated walls,
+viscosity rebinding, analytic edgeless decay, stiff and underflow cases,
+resource limits and transactional refusals.

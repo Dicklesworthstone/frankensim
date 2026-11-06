@@ -14,11 +14,12 @@
 //! rebuilding the graph; moved/remeshed sites or a changed kernel/support need
 //! another preparation.
 //!
-//! Each run evaluates the E half-step relaxation fractions once and reuses
-//! them across all steps. There are no per-step allocations or repeated
-//! pair-kernel evaluations. Shared exceptional-range circulation arithmetic
-//! retains its original deterministic fallback. Finite-cloud, quadrature and
-//! splitting-error limitations remain those of the declared PSE law.
+//! Bulk runs evaluate the E half-step relaxation fractions once and reuse
+//! them across all steps. [PreparedPse::diffuse_at_wall_with_cx] reuses the same
+//! graph for the exact stress-free-wall law, caching image losses as well.
+//! Neither path allocates or reevaluates pair kernels per step. Shared
+//! exceptional-range circulation arithmetic retains its deterministic fallback.
+//! Finite-cloud, quadrature and splitting limits remain those of the PSE law.
 
 use super::{
     PairKernel, PseDiffusion, PseKernel, exchange_fraction, scaled_distance2, validate_area,
@@ -29,6 +30,8 @@ use crate::{
     reserved_vec, validate_particle,
 };
 use fs_exec::{AdmittedBudget, BudgetConsumption, Cx};
+
+mod wall;
 
 /// Explicit admission limits for constructing one reusable spatial graph.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

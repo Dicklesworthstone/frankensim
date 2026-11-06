@@ -85,12 +85,12 @@ pub(super) fn symmetric_sweep(
 }
 
 #[derive(Clone, Copy)]
-struct Rates {
-    exchange: f64,
-    loss: [f64; 2],
+pub(super) struct Rates {
+    pub(super) exchange: f64,
+    pub(super) loss: [f64; 2],
 }
 
-fn pair_rates(
+pub(super) fn pair_rates(
     kernel: &PairKernel,
     wall: PlanarWall2,
     a: VortexParticle,
@@ -198,24 +198,51 @@ fn rates(
     }
 }
 
+// Fixed geometry reuses the exponential across steps. Keep its exponent too:
+// an underflowed factor can still leave representable large circulation.
+#[derive(Clone, Copy)]
+pub(super) struct CachedLoss {
+    exponent: f64,
+    factor: f64,
+}
+
+impl CachedLoss {
+    pub(super) fn new(exponent: f64, particle: usize) -> Result<Self, VpmError> {
+        if exponent.is_nan() || exponent < 0.0 {
+            return Err(VpmError::NonFiniteResult {
+                phase: "fs-vpm.wall-diffusion-loss",
+                particle,
+            });
+        }
+        Ok(Self {
+            exponent,
+            factor: det::exp(-exponent),
+        })
+    }
+
+    pub(super) fn apply(self, value: f64, particle: usize) -> Result<f64, VpmError> {
+        if self.exponent == 0.0 || value == 0.0 {
+            return Ok(value);
+        }
+        let next = if self.factor.is_normal() {
+            value * self.factor
+        } else {
+            det::exp(det::ln(value.abs()) - self.exponent).copysign(value)
+        };
+        if next.is_finite() {
+            Ok(next)
+        } else {
+            Err(VpmError::NonFiniteResult {
+                phase: "fs-vpm.wall-diffusion-loss",
+                particle,
+            })
+        }
+    }
+}
+
 fn decay(value: f64, exponent: f64, particle: usize) -> Result<f64, VpmError> {
     if exponent == 0.0 || value == 0.0 {
         return Ok(value);
     }
-    let factor = det::exp(-exponent);
-    let next = if factor.is_normal() {
-        value * factor
-    } else {
-        // A vanishing exponential can still leave representable circulation
-        // when the original circulation is large.
-        det::exp(det::ln(value.abs()) - exponent).copysign(value)
-    };
-    if next.is_finite() {
-        Ok(next)
-    } else {
-        Err(VpmError::NonFiniteResult {
-            phase: "fs-vpm.wall-diffusion-loss",
-            particle,
-        })
-    }
+    CachedLoss::new(exponent, particle)?.apply(value, particle)
 }
