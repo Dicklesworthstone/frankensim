@@ -10,9 +10,12 @@ use fs_blake3::ContentHash;
 use fs_exec::Cx;
 
 use super::{
-    FiniteGapPlasticAdvance, FiniteGapPlasticError, FiniteGapPlasticModel,
-    FiniteGapPlasticState, box_residual, checkpoint,
+    FiniteGapPlasticAdvance, FiniteGapPlasticError, FiniteGapPlasticModel, FiniteGapPlasticState,
+    box_residual, checkpoint,
 };
+
+mod control;
+pub use control::*;
 
 /// Explicit active-set separation and directional-equation accuracy.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -81,6 +84,20 @@ pub enum FiniteGapPlasticSensitivityError {
         residual_m: f64,
         /// Requested maximum defect.
         maximum_m: f64,
+    },
+    /// The prescribed force does not resolve a unique local approach.
+    UnresolvedLoadStiffness {
+        /// Computed contact force per unit approach [N/m].
+        stiffness_n_per_m: f64,
+        /// Required strict positive lower bound [N/m].
+        minimum_n_per_m: f64,
+    },
+    /// The differentiated physical loading boundary failed its force budget.
+    BoundaryResidual {
+        /// Absolute force-balance defect [N per dimensionless parameter].
+        residual_n: f64,
+        /// Requested maximum defect.
+        maximum_n: f64,
     },
 }
 
@@ -293,6 +310,19 @@ impl FiniteGapPlasticLinearization<'_> {
         direction: FiniteGapPlasticDirection<'_>,
         cx: &Cx<'_>,
     ) -> Result<FiniteGapPlasticSensitivity, FiniteGapPlasticSensitivityError> {
+        let pressure_pa = self.solve_direction(direction, 0.0, cx)?;
+        self.finish_direction(direction, pressure_pa, cx)
+    }
+
+    // The finite loading spring uses the same principal operator with a
+    // positive rank-one compliance; its resolved approach is recovered before
+    // evaluating the physical opening, storage and plastic-work derivatives.
+    fn solve_direction(
+        &self,
+        direction: FiniteGapPlasticDirection<'_>,
+        rank_one: f64,
+        cx: &Cx<'_>,
+    ) -> Result<Vec<f64>, FiniteGapPlasticSensitivityError> {
         checkpoint(cx)?;
         let count = self.opening_m.len();
         if !direction.approach_m.is_finite()
@@ -315,10 +345,8 @@ impl FiniteGapPlasticLinearization<'_> {
             if i % 64 == 0 {
                 checkpoint(cx)?;
             }
-            let value = modulus_fraction.mul_add(
-                opening,
-                direction.approach_m - direction.recession_m[i],
-            );
+            let value =
+                modulus_fraction.mul_add(opening, direction.approach_m - direction.recession_m[i]);
             if !value.is_finite() {
                 return Err(FiniteGapPlasticSensitivityError::Invalid(
                     "representable directional equilibrium",
@@ -339,7 +367,7 @@ impl FiniteGapPlasticLinearization<'_> {
                 &self.upper,
                 &pressure_pa,
                 &target,
-                0.0,
+                rank_one,
                 self.controls.maximum_linear_residual_m,
                 cx,
             )?;
@@ -350,6 +378,17 @@ impl FiniteGapPlasticLinearization<'_> {
                 pressure_pa[i] = value;
             }
         }
+        Ok(pressure_pa)
+    }
+
+    fn finish_direction(
+        &self,
+        direction: FiniteGapPlasticDirection<'_>,
+        pressure_pa: Vec<f64>,
+        cx: &Cx<'_>,
+    ) -> Result<FiniteGapPlasticSensitivity, FiniteGapPlasticSensitivityError> {
+        let count = self.opening_m.len();
+        let modulus_fraction = direction.reduced_modulus_pa / self.model.config.reduced_modulus_pa;
         let mut elastic_opening_m = self.model.apply_compliance(&pressure_pa, cx)?;
         let mut plastic_depth_m = vec![0.0; count];
         for i in 0..count {
@@ -364,8 +403,7 @@ impl FiniteGapPlasticLinearization<'_> {
             if slot % 64 == 0 {
                 checkpoint(cx)?;
             }
-            let defect = elastic_opening_m[i]
-                - (direction.approach_m - direction.recession_m[i]);
+            let defect = elastic_opening_m[i] - (direction.approach_m - direction.recession_m[i]);
             if !defect.is_finite() {
                 return Err(FiniteGapPlasticSensitivityError::Invalid(
                     "finite directional residual",

@@ -3405,7 +3405,7 @@ directional equation residual. No perturbed contact solves or dense Jacobian
 are needed; no measured speedup is claimed.
 
 Material/source selection, equality of the two body hardnesses in a minimum,
-load/drive control, finite changes and active-set switches require their own
+finite changes and active-set switches require their own
 chain rules or event treatment. The derivative residual is an absolute
 displacement-per-parameter budget, not a forward-error enclosure. Plastic-work
 derivatives can have either sign and are not heat or negative dissipation.
@@ -3414,3 +3414,30 @@ unloading memory, all three solver lanes against actual perturbed native
 equilibria, signed hardness/modulus/recession effects, work derivatives, source
 ownership, switch refusals and cancellation. These are numerical-model checks;
 the pressure-saturation law is not promoted to full bulk plasticity.
+
+### Sensitivities under prescribed force and finite loading springs
+
+`linearize_load_advance` and `linearize_drive_advance` retain the exact ordinary
+controlled advance and accepted predecessor. They apply the same strict contact
+admission and recompute the original physical loading balance from the opaque
+candidate. Continuation receipts cannot replace the original plastic increment.
+Directions cover prescribed force, drive endpoint and stiffness, reduced
+modulus, individual pressure caps and recession while preserving accepted history.
+
+The force tangent caches one unit-approach response and resolves approach with
+the resulting scalar contact stiffness. An explicit positive stiffness floor
+refuses a nonunique plastic plateau or separated zero-force state. The finite
+spring instead reuses the original rank-one augmented free operator, so it can
+resolve fully plastic flow and strictly separated spring motion. Each direction
+requires at most one native free solve; no perturbed contact histories or dense
+Jacobian are stored. The returned approach, native contact derivatives and
+signed spring-storage derivative retain their physical units. Spring-storage and
+plastic-work derivatives are neither heat nor an inferred actuator work history.
+
+Every direction independently checks the final original-kernel displacement
+residual and differentiated loading-force residual under explicit budgets.
+Neither residual establishes a forward-error enclosure or finite admissible
+step. Independent one-cell force/spring balances, preserved unloading history,
+mixed elastic/plastic finite differences in all three native solver lanes,
+opening/unloading refusals, receipt mismatch and cancellation specify the
+G0/G1/G3 numerical-model coverage.
