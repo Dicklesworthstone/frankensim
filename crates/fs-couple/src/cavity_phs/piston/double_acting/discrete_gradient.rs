@@ -246,7 +246,7 @@ impl<G: PistonGas> DoubleActingGasPiston<G> {
             momentum_residual_n_s: momentum,
             mechanical_energy_residual_j: mechanical,
             total_energy_residual_j: total,
-            volume_exchange_residual_m3,
+            volume_exchange_residual_m3: volume_residual_m3,
             iterations: solved.iterations,
             material_trials: 2 * solved.proposals,
         };

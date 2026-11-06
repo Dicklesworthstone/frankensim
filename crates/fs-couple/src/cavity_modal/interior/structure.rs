@@ -451,8 +451,8 @@ impl PreparedStructuralInterior<'_, '_, '_, '_> {
             poll(cx)?;
             for s in 0..ns {
                 let b = self.model.coupling[a * ns + s];
-                fluid_force[s] += pressure[a].scale(b);
-                flow[a] += response.velocity[s].scale(b);
+                fluid_force[s] = fluid_force[s] + pressure[a].scale(b);
+                flow[a] = flow[a] + response.velocity[s].scale(b);
             }
         }
         let structural_power = work(structural_force, &response.velocity);
