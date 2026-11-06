@@ -41,6 +41,9 @@ use crate::{
 /// Continuous nuclide supply into the original product-resolved reaction owner.
 pub mod production;
 
+/// Conservative finite-inventory exchange between material compartments.
+pub mod transport;
+
 /// A physical identity and its admitted total spontaneous-decay law.
 #[derive(Clone, Debug, PartialEq)]
 pub struct BurnupNuclide {
@@ -157,6 +160,17 @@ struct ReactionChannels {
     removal_rates: Vec<f64>,
     fractions: Vec<f64>,
     edges: Vec<ReactionEdge>,
+}
+
+// Joint compartment propagation supplies physical reaction counts from each
+// node's integrated residence. Imports/exports are movement, never reactions or
+// externally produced nuclei. The same original physical ledger admits them.
+#[derive(Clone, Copy)]
+struct TransportAccounts<'a> {
+    reaction_counts: &'a [f64],
+    reaction_roundoff: &'a [f64],
+    imported: &'a [f64],
+    exported: &'a [f64],
 }
 
 impl BurnupModel {
@@ -722,6 +736,34 @@ impl BurnupInventory {
         budget: BurnupBudget,
         checkpoint: &mut impl FnMut() -> Result<(), FissionError>,
     ) -> Result<(Self, BurnupStep), BurnupError> {
+        self.account_events(
+            evolved.populations,
+            evolved.removals,
+            duration_s,
+            fractions,
+            None,
+            produced,
+            production_roundoff_nuclei,
+            budget,
+            checkpoint,
+        )
+    }
+
+    // All physical reaction products, energy and lifetime histories have one
+    // owner. A joint transport solve changes only how event counts and external
+    // movement are supplied to this ledger, not their physical interpretation.
+    fn account_events(
+        &self,
+        populations: Vec<f64>,
+        parent_removals: Vec<f64>,
+        duration_s: f64,
+        fractions: &[f64],
+        transport: Option<TransportAccounts<'_>>,
+        produced: Option<&[f64]>,
+        input_roundoff_nuclei: f64,
+        budget: BurnupBudget,
+        checkpoint: &mut impl FnMut() -> Result<(), FissionError>,
+    ) -> Result<(Self, BurnupStep), BurnupError> {
         let mut next = self.clone();
         let n = self.populations.len();
         let mut incoming = vec![Accumulator::new(0.0); n];
@@ -729,15 +771,22 @@ impl BurnupInventory {
         let mut counts = [Accumulator::new(0.0); 3];
         let mut generated = [Accumulator::new(0.0); 3];
         let mut channels = [Accumulator::new(0.0); 3];
-        let mut nuclei_error = Accumulator::new(production_roundoff_nuclei);
+        let mut nuclei_error = Accumulator::new(input_roundoff_nuclei);
         let mut energy_error = Accumulator::new(0.0);
         let mut reaction_counts = Vec::with_capacity(self.model.reactions().len());
         for (index, reaction) in self.model.reactions().iter().enumerate() {
             checkpoint()?;
-            let removal = evolved.removals[reaction.parent];
-            let fraction = fractions[index];
-            let count = product(removal, fraction)?;
-            let count_error = removal.mul_add(fraction, -count).abs();
+            let (count, count_error) = if let Some(accounts) = transport {
+                (
+                    accounts.reaction_counts[index],
+                    accounts.reaction_roundoff[index],
+                )
+            } else {
+                let removal = parent_removals[reaction.parent];
+                let fraction = fractions[index];
+                let count = product(removal, fraction)?;
+                (count, removal.mul_add(fraction, -count).abs())
+            };
             add(&mut nuclei_error, count_error)?;
             let error = add(&mut outgoing[reaction.parent], count)?.abs();
             add(&mut nuclei_error, error)?;
@@ -781,21 +830,20 @@ impl BurnupInventory {
         for i in 0..n {
             checkpoint()?;
             let residual = checked(sum(&[
-                evolved.populations[i],
+                populations[i],
                 -self.populations[i],
                 outgoing[i].hi,
                 outgoing[i].lo,
                 -incoming[i].hi,
                 -incoming[i].lo,
                 -produced.map_or(0.0, |counts| counts[i]),
+                -transport.map_or(0.0, |accounts| accounts.imported[i]),
+                transport.map_or(0.0, |accounts| accounts.exported[i]),
             ]))?;
             population_balance_residuals.push(residual);
             add(&mut nuclei_error, residual.abs())?;
-            let attribution_residual = checked(sum(&[
-                evolved.removals[i],
-                -outgoing[i].hi,
-                -outgoing[i].lo,
-            ]))?;
+            let attribution_residual =
+                checked(sum(&[parent_removals[i], -outgoing[i].hi, -outgoing[i].lo]))?;
             add(&mut nuclei_error, attribution_residual.abs())?;
             if let Some(produced) = produced {
                 let error = add(&mut next.produced[i], produced[i])?.abs();
@@ -833,14 +881,14 @@ impl BurnupInventory {
         if energy_roundoff_j > budget.energy_tolerance_j {
             return Err(BurnupError::Budget("event energy accounting roundoff"));
         }
-        next.populations = evolved.populations;
+        next.populations = populations;
         checkpoint()?;
         Ok((
             next,
             BurnupStep {
                 duration_s,
                 reaction_counts,
-                parent_removals: evolved.removals,
+                parent_removals,
                 fissions: counts[0].value(),
                 captures: counts[1].value(),
                 decays: counts[2].value(),

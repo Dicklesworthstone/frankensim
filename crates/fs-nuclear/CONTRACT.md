@@ -1406,3 +1406,69 @@ native integration gate passed all 228 tests, compiling the production nuclear
 crate with thermal support against the actual numerical owners and the
 selected original thermal runtime. Full workspace Cargo and empirical reactor validation remain
 separate gates.
+
+## Finite radioactive inventories across material compartments
+
+`burnup::transport::BurnupTransportState` binds complete existing
+`BurnupInventory` histories to explicit positive control volumes. All
+compartments share the same admitted `BurnupModel` and original nuclide order.
+Directed per-nuclide first-order rates transfer nuclei from finite donors;
+separate exterior outflows remove tracked nuclei without subsequent local
+decay or heat. An authored well-mixed volumetric flow Q uses Q/V_donor.
+Selective extraction is expressed by different per-nuclide coefficients.
+No carrier-flow solution, bulk material-mass change or transported sensible/
+latent enthalpy is inferred.
+
+Local decay, capture, fission, movement and nonnegative continuous external
+production enter one block operator on (compartment, nuclide). The existing
+`ReactionPlan`/`ReactionSourcePlan` supplies positive populations, removals
+and integrated residence. Nuclei born or transferred during an interval can
+react and move again during that same interval. The physical formulation
+follows the coupled depletion/transfer equations described in the original
+[OpenMC depletion methods](https://docs.openmc.org/en/stable/methods/depletion.html#transfer-rates);
+this implementation uses FrankenSim's existing numerical owners.
+
+Nuclear-event and movement counts are attributed directly from their rates
+times integrated donor residence. This keeps a small decay channel separate
+from a much larger transport count. The original shared inventory ledger
+continues to own reaction products, per-event energy and compensated lifetime
+accounts. `BurnupStep::parent_removals` remains nuclear-event removals;
+transfers and exterior outflows have their own per-path/per-nuclide accounts.
+Only true external supply enters production counters. Earlier emitted heat
+and reaction histories stay in the compartment where those events occurred.
+
+One immutable preparation is shared across cohort clones and reused for
+matching complete channel/transport rates, duration and work limits. Initial
+populations and supply magnitudes may change without rebuilding a compatible
+map. Closed intervals use the existing homogeneous residence path; a retained
+source-capable map also admits zero supply. Current temperature, flux, data
+and work domains remain checked before cache reuse.
+
+Per-cell balances include imports and exports. An independent whole-cohort
+balance cancels internal transfers and retains exterior outflow, nuclear
+products and supply separately. Numerical removal attribution, event products,
+scalar exports, lifetime counters and collective residuals contribute to
+noncancelling extensive allowances. Whole-cohort defect totals reduce the
+per-cell reports, so thermal consumers charge each contribution once.
+Every refusal or checkpoint failure publishes neither a partial compartment
+state nor proposed movement rates.
+
+Path counts, rate coefficients, joint graph shape and numerical work are
+bounded. The original dense numerical owner still limits the flattened joint
+population graph to 64 nodes. Rates are frozen within an admitted interval;
+changing conditions require explicit splitting or the coupled adaptive driver.
+Extreme cyclic stiffness or unrepresentable contributions retain the original
+numerical refusal. These are local accounting/admission guarantees, not a
+certified floating-point forward-error bound or a carrier-flow model.
+
+Eight focused regressions cover finite donor depletion and retained old heat,
+unequal-volume circulation and selective outflow, continuously supplied
+particle ages, fission-product transport and competing capture, preparation
+reuse and invalidation, partition/restart, slow decay amid much faster
+circulation, and atomic resource/domain/callback refusal. The
+`evaluated_decay_transport` example imports the original ENDF/B-VIII.0 H3/He3
+records and checks all populations and local emitted heat against an
+independent two-volume analytic solution over two physical half-lives.
+
+The default-feature production-source integration gate passed all 174 nuclear
+tests; the evaluated circulation example compiled and executed successfully.
