@@ -9,6 +9,8 @@ use fs_solid::linear3::TetAssemblyBudget;
 
 #[path = "hyper3_pressure/free_surface.rs"]
 mod free_surface;
+#[path = "hyper3_pressure/stratified.rs"]
+mod stratified;
 #[path = "hyper3_pressure/vibration.rs"]
 mod vibration;
 

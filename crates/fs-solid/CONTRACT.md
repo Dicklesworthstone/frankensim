@@ -8718,3 +8718,59 @@ The native total-load midpoint receipt remains available beside an external-load
 The thermal model keeps its existing coefficient-first, then jointly solved total/eigenstrain increment. A supplied source endpoint does not establish exact unresolved temperature evolution, second-order thermal coupling, caloric heat or automatic path subdivision. Fixed matching traces, small strain, frictionless normal contact and original source domains remain the admitted scope.
 
 Focused regression definitions check retained-reference-mass compression compliance and storage after tensile failure; thermally generated contact force with changing source ownership and signed eigenstrain work; unloading separation and transactional public-opening/contact-budget/cancellation refusal. Rustfmt parsing and bounded native API/physical review completed. Native compilation and runtime tests remain unperformed in the full-filesystem environment.
+
+## Stratified hydrostatic loading on deformable tetrahedral solids
+
+`StratifiedHydrostaticPressure` prepares a bounded sequence of positive
+piecewise-constant fluid densities below one prescribed free surface.
+`HydrostaticDensityLayer::top_depth_m` increases along gravity; the first
+layer starts at zero and the final layer extends indefinitely. Increasing and
+decreasing density profiles are admitted as prescribed data; no stability or
+fluid-evolution claim is attached to a density inversion.
+
+The physical pressure is continuous across the interfaces. With
+`q = gravity dot (x - surface)`, each density jump contributes
+`(rho_j-rho_previous) * max(q - |gravity| depth_j, 0)`.
+Signed density increments multiply the clipped moment AFTER clipping; a
+density decrease never reverses the wet half-space. Equal neighboring
+densities are compressed at preparation. The explicit nonnegative
+`TetPressure::Stratified::load_factor` scales pressure without moving any
+interface.
+
+The existing current-area surface owner integrates those moments against the
+original P1 basis, including pressure-induced compression as well as buoyancy.
+Its follower tangent uses the same density-weighted basis moments and the
+shared gravity vector. No displaced material density or separate buoyancy
+body force is substituted. Force, torque and deformation therefore derive
+from the same closed-surface potential `integral_body p(x) dV`.
+
+Endpoint work uses exact clipped-volume moments, including crossings of
+multiple interfaces. Geometry and nodal depth fields are admitted once per
+evaluation; each tetrahedral volume is formed once before its layer sum.
+Fully wet terms cancel the layer datum through displacement increments.
+Compensated sums retain signed profile contributions. The ordinary static
+continuation and conservative-work globalization include the new field.
+
+The native prepared energy-momentum owner combines the original clipped
+means, discrete-gradient weights and their endpoint derivatives across all
+layers before evaluating material stress once per element. The resulting
+force and algorithmic tangent share the same endpoint potential. Existing
+conservative-pressure vibration, continuation and finite-solid dynamic
+consumers retain their original solvers and admission boundaries.
+
+Preparation rejects missing/over-budget layers, nonpositive densities,
+unordered depths, invalid coordinates and unrepresentable arithmetic.
+Layer traversals poll cancellation in addition to the original geometry
+checkpoints. Zero gravity and zero loading retain the unloaded path.
+This remains a prescribed hydrostatic reservoir: no evolving fluid inventory,
+wave pressure, drag, added mass, wetting or surface tension is inferred.
+
+Six G0/G3 regression definitions in
+`tests/hyper3_pressure/stratified.rs` cover independent displaced-volume
+force/torque and frame covariance, independent volume-potential derivatives,
+interface-crossing work, native static equilibrium and reactions, analytic
+and algorithmic tangents, discrete-gradient work, density-decrease and
+single-layer limits, budgets and cancellation. Native rustfmt parsed the
+changed implementation and new regression source. Independent numerical
+reference arithmetic was checked, but Cargo/DSR execution was unavailable;
+no passing native regression or benchmark result is claimed here.

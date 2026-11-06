@@ -1309,6 +1309,13 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
             }
             let applied_pressure = pressure.map(|(surface, values)| {
                 let values = match values {
+                    pressure::TetPressure::Stratified {
+                        profile,
+                        load_factor,
+                    } => pressure::TetPressure::Stratified {
+                        profile,
+                        load_factor: load * load_factor,
+                    },
                     pressure::TetPressure::Uniform(value) => {
                         pressure::TetPressure::Uniform(load * value)
                     }
@@ -1591,7 +1598,8 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
                                 Some((
                                     surface,
                                     value @ (pressure::TetPressure::Affine { .. }
-                                    | pressure::TetPressure::FreeSurface { .. }),
+                                    | pressure::TetPressure::FreeSurface { .. }
+                                    | pressure::TetPressure::Stratified { .. }),
                                 )) => match surface.work_j(&u, &trial, value, cx) {
                                     Ok(work) => -work,
                                     Err(HyperTetError::Cancelled) => {

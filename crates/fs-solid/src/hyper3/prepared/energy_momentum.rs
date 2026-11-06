@@ -1,6 +1,8 @@
 //! Energy/momentum-compatible forces on the original prepared P1 mesh.
 
-use crate::hyper3::pressure::{ClosedTetPressureSurface, TetPressure, algorithmic};
+use crate::hyper3::pressure::{
+    ClosedTetPressureSurface, StratifiedHydrostaticPressure, TetPressure, algorithmic,
+};
 use fs_exec::Cx;
 use fs_material::hyper::cards::HyperelasticMaterial;
 use fs_sparse::{Coo, Csr};
@@ -9,11 +11,31 @@ use super::{HyperTetError, HyperTetProblem, PreparedHyperTetProblem, checkpoint}
 
 mod stress;
 
-struct SpatialPressure {
+struct SpatialPressure<'p> {
+    // For a stratified field these store q=g dot (x-surface), and the shared
+    // gradient is gravity; the exact mean inserts the physical density.
     before_pa: Vec<f64>,
     after_pa: Vec<f64>,
     gradient_pa_m: [f64; 3],
     clipped: bool,
+    stratified: Option<(&'p StratifiedHydrostaticPressure, f64)>,
+}
+
+impl SpatialPressure<'_> {
+    fn mean(
+        &self,
+        nodes: [usize; 4],
+        tangent: bool,
+        cx: &Cx<'_>,
+    ) -> Result<algorithmic::PressureMean, HyperTetError> {
+        let before = nodes.map(|node| self.before_pa[node]);
+        let after = nodes.map(|node| self.after_pa[node]);
+        if let Some((profile, load_factor)) = self.stratified {
+            profile.algorithmic_mean(before, after, load_factor, tangent, cx)
+        } else {
+            algorithmic::evaluate(before, after, self.clipped, tangent)
+        }
+    }
 }
 
 impl<L: HyperelasticMaterial> PreparedHyperTetProblem<'_, L> {
@@ -105,7 +127,9 @@ impl<L: HyperelasticMaterial> PreparedHyperTetProblem<'_, L> {
     }
 
     /// Material force minus conservative closed-surface pressure, including
-    /// affine Eulerian fields and prescribed planar free surfaces.
+    /// affine Eulerian fields, prescribed planar free surfaces and stratified
+    /// hydrostatic reservoirs. Each density layer uses the same exact clipped
+    /// mean; material stress is evaluated once from their combined potential.
     ///
     /// Each tetrahedron uses its exact native potential V*m(p_nodes), with
     /// discrete gradient m_bar*DG(V)+V_bar*DG(m). The volume term retains the
@@ -179,24 +203,94 @@ impl<L: HyperelasticMaterial> PreparedHyperTetProblem<'_, L> {
             }
             surface.validate_pressure(value, cx)?;
             match value {
+                TetPressure::Stratified {
+                    profile,
+                    load_factor,
+                } => {
+                    if load_factor == 0.0 || profile.gravity_m_s2() == [0.0; 3] {
+                        0.0
+                    } else {
+                        let gradient_pa_m = profile.gravity_m_s2();
+                        let origin_m = profile.surface_point_m();
+                        let mut before_pa = Vec::with_capacity(self.problem.nodes_m.len());
+                        let mut after_pa = Vec::with_capacity(self.problem.nodes_m.len());
+                        for node in 0..self.problem.nodes_m.len() {
+                            checkpoint(cx)?;
+                            before_pa.push(surface.spatial_pressure_at(
+                                before_m,
+                                node,
+                                origin_m,
+                                0.0,
+                                gradient_pa_m,
+                            )?);
+                            after_pa.push(surface.spatial_pressure_at(
+                                after_m,
+                                node,
+                                origin_m,
+                                0.0,
+                                gradient_pa_m,
+                            )?);
+                        }
+                        spatial = Some(SpatialPressure {
+                            before_pa,
+                            after_pa,
+                            gradient_pa_m,
+                            clipped: true,
+                            stratified: Some((profile, load_factor)),
+                        });
+                        0.0
+                    }
+                }
                 TetPressure::Uniform(p) => p,
                 TetPressure::PerFace(_) => return Err(HyperTetError::InvalidInput {
-                    what: "energy-momentum pressure requires a conservative uniform, affine or free-surface field".into(),
+                    what:
+                        "energy-momentum pressure requires a conservative spatial or uniform field"
+                            .into(),
                 }),
-                TetPressure::Affine { origin_m, pressure_pa, gradient_pa_m }
-                | TetPressure::FreeSurface { origin_m, pressure_pa, gradient_pa_m } => {
+                TetPressure::Affine {
+                    origin_m,
+                    pressure_pa,
+                    gradient_pa_m,
+                }
+                | TetPressure::FreeSurface {
+                    origin_m,
+                    pressure_pa,
+                    gradient_pa_m,
+                } => {
                     let clipped = matches!(value, TetPressure::FreeSurface { .. });
                     if gradient_pa_m == [0.0; 3] {
-                        if clipped { pressure_pa.max(0.0) } else { pressure_pa }
+                        if clipped {
+                            pressure_pa.max(0.0)
+                        } else {
+                            pressure_pa
+                        }
                     } else {
                         let mut before_pa = Vec::with_capacity(self.problem.nodes_m.len());
                         let mut after_pa = Vec::with_capacity(self.problem.nodes_m.len());
                         for node in 0..self.problem.nodes_m.len() {
                             checkpoint(cx)?;
-                            before_pa.push(surface.spatial_pressure_at(before_m, node, origin_m, pressure_pa, gradient_pa_m)?);
-                            after_pa.push(surface.spatial_pressure_at(after_m, node, origin_m, pressure_pa, gradient_pa_m)?);
+                            before_pa.push(surface.spatial_pressure_at(
+                                before_m,
+                                node,
+                                origin_m,
+                                pressure_pa,
+                                gradient_pa_m,
+                            )?);
+                            after_pa.push(surface.spatial_pressure_at(
+                                after_m,
+                                node,
+                                origin_m,
+                                pressure_pa,
+                                gradient_pa_m,
+                            )?);
                         }
-                        spatial = Some(SpatialPressure { before_pa, after_pa, gradient_pa_m, clipped });
+                        spatial = Some(SpatialPressure {
+                            before_pa,
+                            after_pa,
+                            gradient_pa_m,
+                            clipped,
+                            stratified: None,
+                        });
                         0.0
                     }
                 }
@@ -222,14 +316,7 @@ impl<L: HyperelasticMaterial> PreparedHyperTetProblem<'_, L> {
             }
             let mean = spatial
                 .as_ref()
-                .map(|field| {
-                    algorithmic::evaluate(
-                        element.nodes.map(|node| field.before_pa[node]),
-                        element.nodes.map(|node| field.after_pa[node]),
-                        field.clipped,
-                        tangent,
-                    )
-                })
+                .map(|field| field.mean(element.nodes, tangent, cx))
                 .transpose()?;
             let held_mean = mean.as_ref().map_or(pressure_pa, |mean| {
                 0.5 * mean.before_pa + 0.5 * mean.after_pa

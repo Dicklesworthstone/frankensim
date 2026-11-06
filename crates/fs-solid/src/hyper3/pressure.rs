@@ -19,7 +19,9 @@
 //! `integral_volume p(x) dV`; the pressure gradient therefore supplies buoyancy
 //! without replacing the physical surface traction by a separate body force.
 //! A prescribed planar free surface clips this field at zero gauge pressure,
-//! integrating wet-face traction and clipped-volume work exactly.
+//! integrating wet-face traction and clipped-volume work exactly. Prepared
+//! stratified reservoirs extend this same potential to depth-dependent density,
+//! retaining every layer interface in forces, tangents and endpoint work.
 //! There is no global injectivity certificate, fluid equation of state, or
 //! time integrator in this module.
 
@@ -36,6 +38,9 @@ pub(super) mod algorithmic;
 /// Enclosed void volume and work-conjugate pressure geometry for gas cavities.
 pub mod cavity;
 mod free_surface;
+mod stratified;
+
+pub use stratified::{HydrostaticDensityLayer, StratifiedHydrostaticPressure};
 
 use free_surface::FaceMoments;
 
@@ -77,6 +82,15 @@ pub enum TetPressure<'a> {
         /// World hydrostatic pressure gradient [Pa/m].
         gradient_pa_m: [f64; 3],
     },
+    /// Prescribed stratified reservoir, with continuous hydrostatic gauge
+    /// pressure and explicit density interfaces. Nonnegative load scaling
+    /// multiplies pressure AFTER clipping and never moves those interfaces.
+    Stratified {
+        /// Prepared physical density profile and world-frame gravity.
+        profile: &'a StratifiedHydrostaticPressure,
+        /// Finite nonnegative load multiplier; physical loading uses one.
+        load_factor: f64,
+    },
 }
 
 impl From<f64> for TetPressure<'_> {
@@ -100,7 +114,11 @@ impl TetPressure<'_> {
                 gradient_pa_m,
                 ..
             } if gradient_pa_m == [0.0; 3] => Some(pressure_pa.max(0.0)),
-            Self::Affine { .. } | Self::FreeSurface { .. } => None,
+            Self::Stratified {
+                profile,
+                load_factor,
+            } if load_factor == 0.0 || profile.is_zero() => Some(0.0),
+            Self::Affine { .. } | Self::FreeSurface { .. } | Self::Stratified { .. } => None,
         }
     }
 }
@@ -218,6 +236,18 @@ impl ClosedTetPressureSurface {
     ) -> Result<bool, HyperTetError> {
         checkpoint(cx)?;
         let unloaded = match pressure {
+            TetPressure::Stratified {
+                profile,
+                load_factor,
+            } => {
+                finite(load_factor)?;
+                if load_factor < 0.0 {
+                    return Err(invalid(
+                        "stratified pressure load factor must be nonnegative",
+                    ));
+                }
+                load_factor == 0.0 || profile.is_zero()
+            }
             TetPressure::Uniform(value) => {
                 finite(value)?;
                 value == 0.0
@@ -316,7 +346,7 @@ impl ClosedTetPressureSurface {
         for (index, face) in self.faces.iter().enumerate() {
             checkpoint(cx)?;
             let weights = self
-                .face_pressure_moments::<false>(displacement_m, index, pressure)?
+                .face_pressure_moments::<false>(displacement_m, index, pressure, cx)?
                 .weights_pa;
             let [a, b, c] = face.map(|node| positions[node]);
             let area = area_vector(a, b, c)?;
@@ -358,11 +388,16 @@ impl ClosedTetPressureSurface {
         let mut entries = Coo::new(displacement_m.len(), displacement_m.len());
         for (index, face) in self.faces.iter().enumerate() {
             checkpoint(cx)?;
-            let moments = self.face_pressure_moments::<true>(displacement_m, index, pressure)?;
+            let moments =
+                self.face_pressure_moments::<true>(displacement_m, index, pressure, cx)?;
             let constant_factor = pressure.constant_at(index).map(|value| -value / 6.0);
             let gradient = match pressure {
                 TetPressure::Affine { gradient_pa_m, .. }
                 | TetPressure::FreeSurface { gradient_pa_m, .. } => gradient_pa_m,
+                TetPressure::Stratified {
+                    profile,
+                    load_factor,
+                } if load_factor != 0.0 => profile.gravity_m_s2(),
                 _ => [0.0; 3],
             };
             let [a, b, c] = face.map(|node| positions[node]);
@@ -427,6 +462,10 @@ impl ClosedTetPressureSurface {
         let pressure = pressure_pa.into();
         self.validate_pressure(pressure, cx)?;
         let uniform = match pressure {
+            TetPressure::Stratified {
+                profile,
+                load_factor,
+            } if load_factor == 0.0 || profile.is_zero() => Some(0.0),
             TetPressure::Uniform(value) => Some(value),
             TetPressure::Affine {
                 pressure_pa,
@@ -444,6 +483,13 @@ impl ClosedTetPressureSurface {
             let before = self.volume_m3(before_m, cx)?;
             let after = self.volume_m3(after_m, cx)?;
             return finite(-value * finite(after - before)?);
+        }
+        if let TetPressure::Stratified {
+            profile,
+            load_factor,
+        } = pressure
+        {
+            return profile.work_j(self, before_m, after_m, load_factor, cx);
         }
         if let TetPressure::FreeSurface {
             origin_m,
@@ -499,9 +545,23 @@ impl ClosedTetPressureSurface {
         displacement_m: &[f64],
         face_index: usize,
         pressure: TetPressure<'_>,
+        cx: &Cx<'_>,
     ) -> Result<FaceMoments, HyperTetError> {
         if let Some(value) = pressure.constant_at(face_index) {
             return Ok(FaceMoments::constant(value));
+        }
+        if let TetPressure::Stratified {
+            profile,
+            load_factor,
+        } = pressure
+        {
+            return profile.face_moments::<TANGENT>(
+                self,
+                displacement_m,
+                face_index,
+                load_factor,
+                cx,
+            );
         }
         let (origin_m, pressure_pa, gradient_pa_m) = match pressure {
             TetPressure::Affine {
