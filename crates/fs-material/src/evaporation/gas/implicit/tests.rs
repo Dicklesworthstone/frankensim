@@ -1,4 +1,7 @@
 //! G0 atomic bounded work and G1 independent original-NASA9 endpoint balances.
+#[path = "time_tests.rs"]
+mod time;
+
 use super::*;
 use crate::evaporation::gas::tests::{
     Phase, binding, catalog, controls as phase_controls, gas, liquid, temperature,
