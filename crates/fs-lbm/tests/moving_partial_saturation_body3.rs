@@ -9,6 +9,9 @@ use fs_lbm::d3q19::{
 };
 use fs_time::lie::gyrostat::InertiaTensor3;
 
+#[path = "moving_partial_saturation_body3/kinetic.rs"]
+mod kinetic;
+
 const N: usize = 8;
 
 fn close(a: f64, b: f64, tolerance: f64) {

@@ -620,11 +620,13 @@ fn finish_carrier(
         .ok_or_else(|| invalid("missing finite surface response"))?;
     // Use the original directly accumulated COM spin impulse, avoiding
     // subtraction of close endpoint angular velocities.
-    let impulse = core::array::from_fn(|i| response.spin_impulse[i] + load[i + 3]);
     let mut kicked = midpoint;
     kicked.velocity = response.body_after.velocity;
-    kicked.angular_momentum_body = midpoint.angular_momentum_body
-        + native(midpoint.orientation.inverse().rotate(vector(impulse)))?;
+    kicked.angular_momentum_body = native(kick_spin(
+        midpoint.orientation,
+        midpoint.angular_momentum_body,
+        &[load[3..].try_into().unwrap(), response.spin_impulse],
+    ))?;
     let accepted = drift(kicked, 0.5)?;
     let external = at_origin(
         load,
@@ -648,17 +650,18 @@ fn finish_carrier(
                 film.angular_impulse[i - 3]
             }
     });
-    let e0 = rotational_energy(initial.inertia, initial.angular_momentum_body)?;
-    let em = rotational_energy(midpoint.inertia, midpoint.angular_momentum_body)?;
-    let ek = rotational_energy(kicked.inertia, kicked.angular_momentum_body)?;
-    let e1 = rotational_energy(accepted.inertia, accepted.angular_momentum_body)?;
-    let free = (em - e0) + (e1 - ek);
-    let kinetic = 0.5
-        * initial.mass
-        * (dot(accepted.velocity, accepted.velocity) - dot(initial.velocity, initial.velocity))
-        + e1
-        - e0;
-    let work = kinetic - response.external_work - film.work - free;
+    let (stored, drift) = trajectory_energy(
+        initial,
+        midpoint.angular_momentum_body,
+        kicked.angular_momentum_body,
+        accepted,
+    );
+    let free = drift.total().to_f64();
+    let kinetic = stored.total().to_f64();
+    let work = (stored.difference(drift)
+        - Dd::from_f64(response.external_work)
+        - Dd::from_f64(film.work))
+    .to_f64();
     if !external
         .into_iter()
         .chain(change)

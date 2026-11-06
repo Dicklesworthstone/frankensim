@@ -427,7 +427,6 @@ impl BoundaryGrid3 {
             admit_plane_positions(planes, initial.map(|b| b.center), radii, 0.0, gate)?;
             admit_plane_positions(planes, midpoint.map(|b| b.center), radii, 0.5, gate)?;
         }
-        let frozen_before = frozen;
         let fields = core::array::from_fn(|a| samplers[a].fractions.as_slice());
         let response = self.partial_saturation_resistance_transition_with_relaxation(
             fields,
@@ -447,12 +446,15 @@ impl BoundaryGrid3 {
                     let body = initial[a];
                     let mid = midpoint[a];
                     let response = coupling.bodies[a];
-                    let dw = core::array::from_fn(|i| {
-                        exchanged[a].angular_velocity[i] - frozen_before[a].angular_velocity[i]
-                    });
-                    let spin_impulse = frozen_before[a].inertia_world.map(|row| dot(row, dw));
-                    let after_exchange_momentum = mid.angular_momentum_body
-                        + native(mid.orientation.inverse().rotate(vector(spin_impulse)))?;
+                    let after_exchange_momentum = native(kick_spin(
+                        mid.orientation,
+                        mid.angular_momentum_body,
+                        &[
+                            external[a][3..].try_into().unwrap(),
+                            response.hydrodynamic.body_angular_impulse_about_center,
+                            coupling.lubrication.body_spin_impulses[a],
+                        ],
+                    ))?;
                     let (orientation, angular_momentum_body) = native(body.inertia.momentum_step(
                         mid.orientation,
                         after_exchange_momentum,
@@ -499,23 +501,19 @@ impl BoundaryGrid3 {
                                 - coupling.lubrication.body_angular_impulses[a][i - 3]
                         }
                     });
-                    let spin_before = rotational_energy(body.inertia, body.angular_momentum_body)?;
-                    let spin_midpoint = rotational_energy(body.inertia, mid.angular_momentum_body)?;
-                    let spin_exchanged = rotational_energy(body.inertia, after_exchange_momentum)?;
-                    let spin_after = rotational_energy(body.inertia, angular_momentum_body)?;
-                    let kinetic_energy_change = 0.5
-                        * body.mass
-                        * (dot(accepted[a].velocity, accepted[a].velocity)
-                            - dot(body.velocity, body.velocity))
-                        + spin_after
-                        - spin_before;
-                    let free_rotation_energy_change =
-                        (spin_midpoint - spin_before) + (spin_after - spin_exchanged);
-                    let work_residual = kinetic_energy_change
-                        - response.external_work
-                        - response.hydrodynamic.body_work
-                        - coupling.lubrication.body_work[a]
-                        - free_rotation_energy_change;
+                    let (kinetic, free) = trajectory_energy(
+                        body,
+                        mid.angular_momentum_body,
+                        after_exchange_momentum,
+                        accepted[a],
+                    );
+                    let kinetic_energy_change = kinetic.total().to_f64();
+                    let free_rotation_energy_change = free.total().to_f64();
+                    let work_residual = (kinetic.difference(free)
+                        - Dd::from_f64(response.external_work)
+                        - Dd::from_f64(response.hydrodynamic.body_work)
+                        - Dd::from_f64(coupling.lubrication.body_work[a]))
+                    .to_f64();
                     if !volumes[a]
                         .into_iter()
                         .chain(external_angular_impulse)

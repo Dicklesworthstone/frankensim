@@ -1,5 +1,32 @@
 # CONTRACT: fs-lbm
 
+## Original spin impulses and retained immersed-body kinetic storage
+
+The D3Q19 moving single-body, assembly and finite/shared film-carrier paths
+transport the original authored, fluid and film COM spin impulses directly
+into the body's momentum. They do not reconstruct those impulses from a
+subtraction of rounded angular rates followed by a second inertia product.
+The resulting spin drives the original final native free rotation and pose;
+fluid collision and the independent film resistance/work laws remain their
+existing owners. Source impulses are reduced before their one frame transform.
+
+All three trajectory paths evaluate actual endpoint kinetic increments from
+the fixed material/body principal-inertia form and represented velocity and
+angular-momentum changes. Compensated products retain small changes beside
+unchanged translation/spin. Both free-half-step increments are measured
+separately; their numerical rotational defect is removed from the independent
+work residual before rounding. No energy residual defines drag, film loss or
+heat, and native settling observations consume these same motion receipts.
+
+Four executed actual-production-leaf regressions cover direct small-couple
+transport, hidden transverse storage, a rotated full inertia and separate
+free-rotation work. Native single/assembly flow regressions additionally cover
+accepted spin and fluid acceleration with transverse kinetic storage hidden
+by a large common translating inventory; these full integration tests remain
+unexecuted because the real dependency build is memory limited. This extends
+the existing retained-fluid/dry-correction models, not their physical scope or
+finite-step free-rotation energy accuracy claim.
+
 ## Variable-Cp phase-volume mixing and bath stability
 
 Source sensible intervals with affine rho(T) and nonconstant Cp(T) retain their

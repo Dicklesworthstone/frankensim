@@ -6,6 +6,7 @@
 //! the pose. All endpoint admission and diagnostics precede fluid publication.
 
 use fs_ga::{So3, Vec3};
+use fs_math::dd::Dd;
 use fs_time::lie::{LieStepError, gyrostat::InertiaTensor3};
 
 use super::partial_saturation::{checkpoint, cross, dot, invalid, low_mach, point_velocity};
@@ -16,6 +17,8 @@ use super::{
 
 type Result<T> = core::result::Result<T, PartialSaturationError3>;
 
+mod kinetic;
+use kinetic::{KineticChange, kick_spin};
 mod multiple;
 mod quadrature;
 mod surfaces;
@@ -472,12 +475,14 @@ impl BoundaryGrid3 {
             endpoint_force_scale,
             local_relaxation,
             |grid, exchanged, coupling| {
-                let dw = core::array::from_fn(|i| {
-                    exchanged.angular_velocity[i] - omega_before_exchange[i]
-                });
-                let spin_impulse = inertia_world.map(|row| dot(row, dw));
-                let after_exchange_momentum = midpoint_momentum
-                    + native(midpoint_orientation.inverse().rotate(vector(spin_impulse)))?;
+                let after_exchange_momentum = native(kick_spin(
+                    midpoint_orientation,
+                    midpoint_momentum,
+                    &[
+                        external_impulse[3..].try_into().unwrap(),
+                        coupling.hydrodynamic.body_angular_impulse_about_center,
+                    ],
+                ))?;
                 let (orientation, angular_momentum_body) = native(initial.inertia.momentum_step(
                     midpoint_orientation,
                     after_exchange_momentum,
@@ -523,23 +528,18 @@ impl BoundaryGrid3 {
                             - coupling.hydrodynamic.body_angular_impulse[i - 3]
                     }
                 });
-                let spin_before =
-                    rotational_energy(initial.inertia, initial.angular_momentum_body)?;
-                let spin_midpoint = rotational_energy(initial.inertia, midpoint_momentum)?;
-                let spin_exchanged = rotational_energy(initial.inertia, after_exchange_momentum)?;
-                let spin_after = rotational_energy(initial.inertia, angular_momentum_body)?;
-                let kinetic_energy_change = 0.5
-                    * initial.mass
-                    * (dot(accepted.velocity, accepted.velocity)
-                        - dot(initial.velocity, initial.velocity))
-                    + spin_after
-                    - spin_before;
-                let free_rotation_energy_change =
-                    (spin_midpoint - spin_before) + (spin_after - spin_exchanged);
-                let work_residual = kinetic_energy_change
-                    - coupling.external_work
-                    - coupling.hydrodynamic.body_work
-                    - free_rotation_energy_change;
+                let (kinetic, free) = trajectory_energy(
+                    initial,
+                    midpoint_momentum,
+                    after_exchange_momentum,
+                    accepted,
+                );
+                let kinetic_energy_change = kinetic.total().to_f64();
+                let free_rotation_energy_change = free.total().to_f64();
+                let work_residual = (kinetic.difference(free)
+                    - Dd::from_f64(coupling.external_work)
+                    - Dd::from_f64(coupling.hydrodynamic.body_work))
+                .to_f64();
                 if ![
                     volume_before,
                     volume_midpoint,
@@ -600,12 +600,27 @@ fn shape_radius(shape: &(impl BodyFrameShape3 + ?Sized)) -> Result<f64> {
     Ok(radius)
 }
 
-fn rotational_energy(inertia: InertiaTensor3, momentum: Vec3) -> Result<f64> {
-    let energy = 0.5 * dot(array(momentum), array(native(inertia.velocity(momentum))?));
-    if !energy.is_finite() {
-        return Err(invalid("body rotational energy overflowed"));
-    }
-    Ok(energy)
+// Native endpoints use one fixed material/body inertia even as their world
+// orientations differ. Free drift changes that body-frame momentum and remains
+// independently visible; only the coupling interval owns fluid/film work.
+fn trajectory_energy(
+    initial: MovingPartialSaturationBody3,
+    midpoint_momentum: Vec3,
+    after_exchange_momentum: Vec3,
+    accepted: MovingPartialSaturationBody3,
+) -> (KineticChange, KineticChange) {
+    let moments = array(initial.inertia.principal_moments());
+    let q = initial.inertia.principal_to_body().as_quat();
+    let frame = [q.w, q.x, q.y, q.z];
+    let before = array(initial.angular_momentum_body);
+    let after = array(accepted.angular_momentum_body);
+    let mut kinetic = KineticChange::default();
+    kinetic.add_translation(initial.mass, initial.velocity, accepted.velocity);
+    kinetic.add_spin(moments, frame, before, after);
+    let mut free = KineticChange::default();
+    free.add_spin(moments, frame, before, array(midpoint_momentum));
+    free.add_spin(moments, frame, array(after_exchange_momentum), after);
+    (kinetic, free)
 }
 
 fn total_angular_momentum(
