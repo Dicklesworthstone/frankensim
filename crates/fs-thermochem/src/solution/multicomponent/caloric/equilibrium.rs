@@ -15,6 +15,9 @@
 //! No phase insertion, latent-heat smearing,
 //! concentration floor or regularized physical heat capacity is introduced.
 
+/// Conserved relaxation and mixing of actual homogeneous or separated inputs.
+pub mod transactions;
+
 use super::{
     MulticomponentCaloricErrorV1, MulticomponentCaloricSolveV1, MulticomponentLiquidCaloricModelV1,
     Owner, R, Sum, checked, log_ratio, nonnegative, positive, scaled,
@@ -295,24 +298,7 @@ impl MulticomponentLiquidCaloricModelV1 {
         poll(&mut cancelled)?;
         self.admit_equilibrium_caloric(initial)?;
         let thermal = controls.thermal;
-        let [lo, hi] = thermal.temperature_bracket.map(|t| t.value());
-        if !heat_input_j.is_finite()
-            || !lo.is_finite()
-            || !hi.is_finite()
-            || lo >= hi
-            || lo < self.temperature_domain()[0].value()
-            || hi > self.temperature_domain()[1].value()
-            || !positive(thermal.temperature_tolerance_k)
-            || !nonnegative(thermal.energy_tolerance_j)
-            || !nonnegative(thermal.entropy_tolerance_j_per_k)
-            || !(1..=256).contains(&thermal.maximum_iterations)
-            || !positive(controls.maximum_temperature_step_k)
-            || !(1..=65_536).contains(&controls.maximum_phase_solves)
-        {
-            return Err(MulticomponentEquilibriumCaloricErrorV1::Invalid(
-                "equilibrium thermal controls or finite signed heat input",
-            ));
-        }
+        let [lo, hi] = self.admit_equilibrium_solve(heat_input_j, controls)?;
         // Re-admit the physical response under this call's exact controls; no
         // new equilibrium solve or numerical promotion of the candidate occurs.
         let admitted = self.equilibrium_caloric_state(
@@ -333,39 +319,13 @@ impl MulticomponentLiquidCaloricModelV1 {
                 completed_phase_solves: 0,
             });
         }
-        let mut continuation = Some(admitted);
-        let mut completed_phase_solves = 0;
-        let root = temperature::solve(
-            TemperatureControl {
-                bracket: [lo, hi],
-                temperature_tolerance_k: thermal.temperature_tolerance_k,
-                energy_tolerance_j: thermal.energy_tolerance_j,
-                maximum_iterations: thermal.maximum_iterations,
-            },
-            |value| -> Result<_> {
-                poll(&mut cancelled)?;
-                let state = self.continue_equilibrium_temperature(
-                    continuation
-                        .take()
-                        .expect("last complete continuation state"),
-                    Temperature::new(value),
-                    controls,
-                    &mut completed_phase_solves,
-                    &mut cancelled,
-                )?;
-                let change_j =
-                    self.equilibrium_caloric_change(initial, &state, false, &mut cancelled)?;
+        let (root, completed_phase_solves) =
+            self.solve_equilibrium_heat(admitted, controls, &mut cancelled, |state, cancelled| {
+                let change_j = self.equilibrium_caloric_change(initial, state, false, cancelled)?;
                 let residual_j =
                     checked(change_j - heat_input_j, "local equilibrium heat residual")?;
-                continuation = Some(state.clone());
-                Ok(TemperatureSample {
-                    state,
-                    change_j,
-                    residual_j,
-                })
-            },
-            |state| Some(state.isobaric_heat_capacity_j_per_k()),
-        )?;
+                Ok((change_j, residual_j))
+            })?;
         let entropy_change_j_per_k =
             self.equilibrium_caloric_change(initial, &root.sample.state, true, &mut cancelled)?;
         let delta_t = root.sample.state.temperature().value() - initial.temperature().value();
@@ -461,6 +421,80 @@ impl MulticomponentLiquidCaloricModelV1 {
             ));
         }
         Ok(())
+    }
+
+    fn admit_equilibrium_solve(
+        &self,
+        heat_input_j: f64,
+        controls: MulticomponentEquilibriumCaloricSolveV1,
+    ) -> Result<[f64; 2]> {
+        let thermal = controls.thermal;
+        let [lo, hi] = thermal.temperature_bracket.map(|t| t.value());
+        if !heat_input_j.is_finite()
+            || !lo.is_finite()
+            || !hi.is_finite()
+            || lo >= hi
+            || lo < self.temperature_domain()[0].value()
+            || hi > self.temperature_domain()[1].value()
+            || !positive(thermal.temperature_tolerance_k)
+            || !nonnegative(thermal.energy_tolerance_j)
+            || !nonnegative(thermal.entropy_tolerance_j_per_k)
+            || !(1..=256).contains(&thermal.maximum_iterations)
+            || !positive(controls.maximum_temperature_step_k)
+            || !(1..=65_536).contains(&controls.maximum_phase_solves)
+        {
+            return Err(MulticomponentEquilibriumCaloricErrorV1::Invalid(
+                "equilibrium thermal controls or finite signed heat input",
+            ));
+        }
+        Ok([lo, hi])
+    }
+
+    // ONE continuation and thermal inverse for heating, relaxation and mixing.
+    // Callers retain their own physical input account. In particular a small Q
+    // need not be rounded into a large artificial heat offset before inversion.
+    fn solve_equilibrium_heat<C: FnMut() -> bool>(
+        &self,
+        admitted: MulticomponentEquilibriumCaloricStateV1,
+        controls: MulticomponentEquilibriumCaloricSolveV1,
+        cancelled: &mut C,
+        mut account: impl FnMut(&MulticomponentEquilibriumCaloricStateV1, &mut C) -> Result<(f64, f64)>,
+    ) -> Result<(
+        temperature::TemperatureRoot<MulticomponentEquilibriumCaloricStateV1>,
+        usize,
+    )> {
+        let thermal = controls.thermal;
+        let mut continuation = Some(admitted);
+        let mut completed_phase_solves = 0;
+        let root = temperature::solve(
+            TemperatureControl {
+                bracket: thermal.temperature_bracket.map(|t| t.value()),
+                temperature_tolerance_k: thermal.temperature_tolerance_k,
+                energy_tolerance_j: thermal.energy_tolerance_j,
+                maximum_iterations: thermal.maximum_iterations,
+            },
+            |value| -> Result<_> {
+                poll(cancelled)?;
+                let state = self.continue_equilibrium_temperature(
+                    continuation
+                        .take()
+                        .expect("last complete continuation state"),
+                    Temperature::new(value),
+                    controls,
+                    &mut completed_phase_solves,
+                    cancelled,
+                )?;
+                let (change_j, residual_j) = account(&state, cancelled)?;
+                continuation = Some(state.clone());
+                Ok(TemperatureSample {
+                    state,
+                    change_j,
+                    residual_j,
+                })
+            },
+            |state| Some(state.isobaric_heat_capacity_j_per_k()),
+        )?;
+        Ok((root, completed_phase_solves))
     }
 
     fn equilibrium_caloric_change(

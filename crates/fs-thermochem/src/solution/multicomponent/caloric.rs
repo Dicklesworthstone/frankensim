@@ -12,7 +12,7 @@
 //! nonzero prescribed heat, the reported system entropy change requires the
 //! actual reservoir entropy before a second-law conclusion can be drawn.
 
-/// Finite signed heat on an explicitly accepted local fixed-phase-count branch.
+/// Conserved heating, mixing and demixing on admitted seeded local phase branches.
 pub mod equilibrium;
 
 use super::{
@@ -73,6 +73,23 @@ struct Owner {
     thermodynamics: MulticomponentRegularSolutionV1,
     heat_capacity: Box<[PureLiquidHeatCapacityV1]>,
     temperature_domain: [Temperature; 2],
+}
+
+/// Borrow one actual homogeneous phase without copying its species inventory.
+#[derive(Clone, Copy)]
+struct MixingInventory<'a> {
+    mixing: &'a MulticomponentSolutionStateV1,
+    component_moles: &'a [f64],
+    total_moles: f64,
+}
+impl<'a> From<&'a MulticomponentCaloricStateV1> for MixingInventory<'a> {
+    fn from(state: &'a MulticomponentCaloricStateV1) -> Self {
+        Self {
+            mixing: &state.mixing,
+            component_moles: &state.component_moles,
+            total_moles: state.total_moles,
+        }
+    }
 }
 
 /// One immutable nonideal potential and explicitly qualified pure-liquid Cp.
@@ -232,36 +249,13 @@ impl MulticomponentLiquidCaloricModelV1 {
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<MulticomponentCaloricBalanceV1> {
         poll(&mut cancelled)?;
-        let [lo, hi] = controls.temperature_bracket.map(|t| t.value());
-        if !heat_input_j.is_finite()
-            || !lo.is_finite()
-            || !hi.is_finite()
-            || lo >= hi
-            || lo < self.temperature_domain()[0].value()
-            || hi > self.temperature_domain()[1].value()
-            || !positive(controls.temperature_tolerance_k)
-            || !nonnegative(controls.energy_tolerance_j)
-            || !nonnegative(controls.entropy_tolerance_j_per_k)
-            || !(1..=256).contains(&controls.maximum_iterations)
-        {
-            return Err(MulticomponentCaloricErrorV1::Invalid(
-                "thermal solve controls or heat input",
-            ));
-        }
-        let n = self.heat_capacities().len();
-        let mut amounts = [0.0; MAX_REGULAR_SOLUTION_SPECIES_V1];
+        let [lo, hi] = self.admit_solve(heat_input_j, controls)?;
         for input in inputs {
             self.admit(input)?;
-            for (amount, &added) in amounts.iter_mut().zip(input.component_moles()) {
-                let next = checked(*amount + added, "combined component amount")?;
-                if *amount > 0.0 && added > 0.0 && (next == *amount || next == added) {
-                    return Err(MulticomponentCaloricErrorV1::Arithmetic(
-                        "positive incoming component lost in addition",
-                    ));
-                }
-                *amount = next;
-            }
         }
+        let n = self.heat_capacities().len();
+        let amounts =
+            self.combine_component_moles(inputs.iter().map(|input| input.component_moles()))?;
         let (_, fractions) = self.inventory(&amounts[..n])?;
         // Retain exactly the original owner's common normalization. Its H and S
         // are temperature-independent on this homogeneous composition path.
@@ -270,8 +264,11 @@ impl MulticomponentLiquidCaloricModelV1 {
             &fractions[..n],
             &mut cancelled,
         )?;
-        let mixing_changes =
-            self.mixing_changes(inputs, composition.mole_fractions(), &mut cancelled)?;
+        let mixing_changes = self.mixing_changes(
+            inputs.iter().copied().map(MixingInventory::from),
+            composition.mole_fractions(),
+            &mut cancelled,
+        )?;
         let root = temperature::solve(
             TemperatureControl {
                 bracket: [lo, hi],
@@ -324,14 +321,58 @@ impl MulticomponentLiquidCaloricModelV1 {
         })
     }
 
-    // Mixing changes are evaluated once per transaction, not per thermal trial.
+    fn admit_solve(
+        &self,
+        heat_input_j: f64,
+        controls: MulticomponentCaloricSolveV1,
+    ) -> Result<[f64; 2]> {
+        let [lo, hi] = controls.temperature_bracket.map(|t| t.value());
+        if !heat_input_j.is_finite()
+            || !lo.is_finite()
+            || !hi.is_finite()
+            || lo >= hi
+            || lo < self.temperature_domain()[0].value()
+            || hi > self.temperature_domain()[1].value()
+            || !positive(controls.temperature_tolerance_k)
+            || !nonnegative(controls.energy_tolerance_j)
+            || !nonnegative(controls.entropy_tolerance_j_per_k)
+            || !(1..=256).contains(&controls.maximum_iterations)
+        {
+            return Err(MulticomponentCaloricErrorV1::Invalid(
+                "thermal solve controls or heat input",
+            ));
+        }
+        Ok([lo, hi])
+    }
+
+    fn combine_component_moles<'a>(
+        &self,
+        inputs: impl IntoIterator<Item = &'a [f64]>,
+    ) -> Result<[f64; MAX_REGULAR_SOLUTION_SPECIES_V1]> {
+        let mut amounts = [0.0; MAX_REGULAR_SOLUTION_SPECIES_V1];
+        for input in inputs {
+            for (amount, &added) in amounts.iter_mut().zip(input) {
+                let next = checked(*amount + added, "combined component amount")?;
+                if *amount > 0.0 && added > 0.0 && (next == *amount || next == added) {
+                    return Err(MulticomponentCaloricErrorV1::Arithmetic(
+                        "positive incoming component lost in addition",
+                    ));
+                }
+                *amount = next;
+            }
+        }
+        Ok(amounts)
+    }
+
+    // Homogeneous mixing changes are evaluated once per transaction. A changing
+    // phase distribution reuses this same primitive against its conserved feed.
     // Difference-of-products retains the original pair coefficients. The ideal
     // term is a weighted relative entropy; its linear completion cancels for
     // normalized inventories and retains dominant-species contributions when
     // their mole fraction rounds to one. Pure entropy datums cancel first.
-    fn mixing_changes(
+    fn mixing_changes<'a>(
         &self,
-        inputs: &[&MulticomponentCaloricStateV1],
+        inputs: impl IntoIterator<Item = MixingInventory<'a>>,
         final_fractions: &[f64],
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<[f64; 2]> {
@@ -394,15 +435,32 @@ impl MulticomponentLiquidCaloricModelV1 {
         entropy: bool,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<f64> {
+        self.sensible_inventory_change(
+            inputs
+                .iter()
+                .map(|input| (input.temperature(), input.component_moles())),
+            final_temperature,
+            entropy,
+            cancelled,
+        )
+    }
+
+    fn sensible_inventory_change<'a>(
+        &self,
+        inputs: impl IntoIterator<Item = (Temperature, &'a [f64])>,
+        final_temperature: Temperature,
+        entropy: bool,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<f64> {
         let mut sum = Sum::default();
-        for input in inputs {
-            for (&n, source) in input.component_moles().iter().zip(self.heat_capacities()) {
+        for (initial_temperature, component_moles) in inputs {
+            for (&n, source) in component_moles.iter().zip(self.heat_capacities()) {
                 poll(cancelled)?;
                 if n != 0.0 {
                     let change = if entropy {
-                        source.entropy_change_j_per_mol_k(input.temperature(), final_temperature)?
+                        source.entropy_change_j_per_mol_k(initial_temperature, final_temperature)?
                     } else {
-                        source.enthalpy_change_j_per_mol(input.temperature(), final_temperature)?
+                        source.enthalpy_change_j_per_mol(initial_temperature, final_temperature)?
                     };
                     sum.add(scaled(n, change, "pure-liquid caloric increment")?);
                 }

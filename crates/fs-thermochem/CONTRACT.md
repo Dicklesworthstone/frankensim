@@ -657,6 +657,41 @@ Finite entropy must satisfy the endpoint Clausius bounds within the declared
 entropy, energy and roundoff allowance; external reservoir entropy remains a
 separate account. Source/branch/work failure and cancellation publish no endpoint.
 
+### Conserved mixing and relaxation into local liquid phase branches
+
+`solution::multicomponent::caloric::equilibrium::transactions` extends the SAME
+finite-heat owner to actual homogeneous or separated input parcels.
+`relax_homogeneous` conserves a homogeneous parcel's full stored enthalpy while
+it enters an explicitly admitted phase branch; at zero supplied heat, demixing
+can therefore warm or cool the parcel. `mix_equilibrium` combines two actual
+input inventories at possibly different temperatures, retaining each original
+phase's amounts, composition and mixing storage. A caller-supplied branch
+anchor must belong to the same complete caloric owner and contain exactly the
+combined species inventory. It supplies numerical continuation evidence, never
+additional matter, heat or a global phase-selection claim.
+
+The original analytic predictor/corrector, fixed phase count, whole-call work
+limits, unregularized physical Cp and safeguarded temperature inverse remain
+the only solve path. Actual input-to-final Cp integrals enter the heat residual
+directly; requested heat is not first rounded into a large artificial branch
+heat offset. Original pair-product differences and relative ideal mixing
+entropy are evaluated through the same conserved homogeneous feed, which
+cancels between input and final phase inventories. Every actual phase amount
+weights its original excess H/S once. Pure standard-state datums cancel before
+arithmetic, and no apparent heat capacity or latent-heat source is added.
+
+The accepted balance reports total input-to-final enthalpy and system entropy.
+An isolated transaction with decreasing entropy beyond the caller's allowance
+refuses, including an attempt to force a higher-Gibbs local branch. For nonzero
+heat, the actual reservoir entropy remains external. Source/owner or inventory
+mismatch, unsupported phase continuation, exhausted work and cancellation
+publish no partial result. These are bulk, fixed-pressure local branch
+transactions; phase onset/disappearance, interfacial energy and kinetics remain
+separate. Focused regressions cover the binary adiabatic-demixing oracle,
+arbitrary reference shifts, unequal-temperature ternary mixing with homogeneous
+and separated inputs, distinct enthalpies and unequal weights of asymmetric
+solvent phases, the isolated entropy guard and transactional refusals.
+
 ### Closed isobaric liquid calorics
 
 `solution::caloric` combines that SAME pair law with explicitly ordered

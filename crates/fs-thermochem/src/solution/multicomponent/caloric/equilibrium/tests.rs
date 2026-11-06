@@ -5,6 +5,9 @@ use crate::solution::multicomponent::equilibrium::MulticomponentEquilibriumContr
 use crate::solution::{BinaryCoexistenceOptionsV1, BinaryRegularSolutionV1};
 use crate::{MolarThermalQuantityV1, SpeciesId};
 
+#[path = "transactions/tests.rs"]
+mod transactions;
+
 fn potential(n: usize, a: f64, b: f64) -> MulticomponentRegularSolutionV1 {
     let matrix = |coefficient| {
         (0..n)
