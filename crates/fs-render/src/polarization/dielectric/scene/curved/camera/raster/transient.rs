@@ -25,6 +25,7 @@ use crate::spectral::detector::QuantumEfficiencySensor;
 use fs_exec::Cx;
 use fs_math::dd::Dd;
 
+pub mod exposure;
 #[cfg(feature = "volumes")]
 pub mod participating;
 

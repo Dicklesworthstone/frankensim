@@ -8325,3 +8325,28 @@ path replay, different delayed windows at two emitting encounters, invalid
 shutters/knots/domains, unsupported interval integration and late failures.
 Pinned Rust formatting/parser and source review passed. Native Rust execution
 was not performed in the shared editing environment.
+
+
+## Original CIE and QE detector observations over finite shutters
+
+`CurvedCameraRaster::sample_pixel_during_exposure` observes mean source radiance
+through the original four wavelength paths and CIE integration.
+`sample_pixel_sensor_during_exposure` shares those paths and source means across
+all QE channels, then applies the explicit DD duration to the native spectral
+energy and electron rates. Results expose mean detector samples, QE-weighted
+energy in J/(m² sr), and expected photoelectrons per m² sr. Original pupil,
+diffraction, wavelength proposal, QE and photon-energy weights remain unchanged.
+
+This is an aperture-average observation before pixel etendue, gain, saturation,
+read noise or lens transit. No additional temporal samples, random draws, source
+interpolation or path integrations are introduced. Each wavelength uses every
+emitter's own delayed shutter interval. A failed source integral or wavelength
+lane refuses the complete observation without retrying or renormalizing the
+remaining detector channels.
+
+Three regression groups specify exact constant-source CIE/QE parity, four shared
+paths independent of channel count, explicit integrated units, independent
+chromatic triangular-pulse area and Beer/QE/photon references at ordinary and
+large DD epochs, and transactional failure of a later spectral lane. Pinned Rust
+formatting/parser checks passed; the authored native tests were not executed in
+the shared editing environment.

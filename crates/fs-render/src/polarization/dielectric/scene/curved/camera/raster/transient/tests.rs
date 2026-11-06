@@ -1,5 +1,7 @@
 //! G1/G3: actual chromatic source times through native pixel and QE integrals.
 
+mod exposure;
+
 use super::super::tests::{bindings, camera, geometry, settings, with_cx};
 use super::*;
 use crate::dielectric::{BeerLambertAbsorption, CauchyIor, DielectricGlass, GlassProvenance};
