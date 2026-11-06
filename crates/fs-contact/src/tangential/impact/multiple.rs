@@ -12,6 +12,10 @@
 //! owner supplies no normal load, coefficient, timestep, static/kinetic phase
 //! selection, elastic history, prescribed-source work or heat allocation.
 
+/// Finite-time coupled Coulomb motion through exact arrest and release events.
+#[path = "multiple/relaxation.rs"]
+pub mod relaxation;
+
 use fs_math::dd::Dd;
 
 /// Hard bound on the number of simultaneous scalar friction ports.

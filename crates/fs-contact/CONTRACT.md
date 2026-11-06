@@ -1242,6 +1242,36 @@ unequal static/kinetic coefficients, general anisotropic or multicontact
 friction, calibrated material authority, or certified nonintersection is
 claimed by these two primitives.
 
+## Continuous coupled dry-friction motion
+
+`tangential::impact::multiple::relaxation::advance_coupled_friction`
+advances `dv/dt = W*(drive + friction)` with the complete original SPD response,
+held physical drives, and held symmetric force capacities. The declared model
+has equal static and kinetic bounds. Moving coordinates retain opposing
+Coulomb force; all exactly resting coordinates resolve their coupled reactions
+through the original bounded solver. A resting coordinate leaves when the
+coupled force balance cannot hold it. Each affine segment ends at its first
+isolated zero-velocity event, so arrest and reversal require no speed-capture
+band or timestep-dependent friction regularization.
+
+Signed travel, absolute travel, drive/friction impulses and continuous per-port
+work are integrated over the actual segments. Per-port friction work is
+nonpositive along this path. Pairing one integrated impulse with only the two
+outer endpoint velocities does not replace that work when modes interact or
+reverse. The original-matrix impulse endpoint is retained separately from the
+analytical stopped/held endpoint. Original inverse-mobility reconstruction,
+kinetic change, work closure, capacity roundoff and actual force/impulse bounds
+are independently checked before return; no impulse or residual is clipped.
+
+The original 32-port bound, fixed stack banks, DD time/work accumulation,
+bounded segment/active-set work and cancellation remain explicit. Zero duration
+is an admitted identity after input/mobility admission. Singular/dependent,
+unrepresentable, unresolved or over-budget paths refuse without a partial
+candidate. Geometry and normal-load inference belong to the consuming physical
+owner; changing held loading can be represented by successive declared
+segments. Unequal static/kinetic history, wear and heat allocation are outside
+this operation.
+
 ## Coupled scalar friction impulses
 
 `tangential::impact::multiple::solve_coupled_friction_impulses` resolves up to
