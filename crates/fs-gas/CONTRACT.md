@@ -5590,3 +5590,52 @@ reference shifts; reciprocal thermal diffusion and viscous work; common
 absence; and transactional domain/cancellation refusal. The independent
 two-cell initial entropy rate changes from -0.0397353103431 to
 +0.0675891418055 W/K without reversing mixing or injecting energy.
+
+
+### Source-conjugate stationary molecular baths
+
+`advance_entropy_consistent_with_reservoirs_for` evolves the original axial
+SSP-RK2 field with conjugate faces at BOTH interior interfaces and stationary
+source-bearing reservoirs. The same divided original caloric enthalpies,
+logarithmic chemical forces, barycentric Maxwell-Stefan solve, Fourier flux
+and authored reciprocal Soret/Dufour terms supply one conservative energy
+flux. Each bath layer has the original physical half-cell distance and actual
+end area. Arithmetic velocity in stress work gives the paired viscous
+production, including a nonzero evolving cell velocity next to a stationary
+bath. Bath traces are fixed sources, not extra evolving cells.
+
+The entropy input of each bath is evaluated from the ACTUAL conservative
+transfer as E_ref/T_b - sum_i(mu_i,ref/T_b * dm_i/M_i), on the existing fixed
+source-reference basis. Relative to bath partial enthalpies, its heat is
+E_ref - sum_i(h_i,ref(T_b) * dm_i/M_i). That heat contains the divided-enthalpy
+layer correction and the bath share of viscous conversion. The interior
+Fourier/Dufour reduced heat alone is not the bath heat; substituting it would
+omit part of the actual energy transfer. No additional heat or traction work
+is deposited. A stationary bath does no external mechanical work.
+
+Native candidate positivity, per-species continuity, substep entropy and the
+single original-to-final entropy allowance all remain in force. The complete
+field and final entropy report publish only after those checks. Both closed
+and legacy reservoir entry points retain their original face choices through
+compile-time selection in the same owner and SSP-RK2 loop. Constitutive
+sampling, reusable diffusion workspace and bounded stack arrays are shared;
+accounting introduces no second face/source evaluation or per-face allocation.
+
+Every species has common support at each admitted interior AND bath face:
+positive on both traces or absent on both. One-sided zero activities refuse,
+without clipping, invented trace mass or a switch to the engineering flux.
+The legacy reservoir method remains available for its own separately admitted
+domain. Moving baths, advective/reactive entropy, nonideal mixtures and
+network/spatial owners remain outside this entry point. The semidiscrete pair
+identity and measured finite-step gate do not imply an unconditional timestep,
+invariant-domain theorem or experimental validation.
+
+Three focused native regression definitions cover a bath-enthalpy
+negative-entropy counterexample and its repaired full SSP-RK2 step; both end
+orientations; variable heat capacity, unequal molar masses, reciprocal thermal
+diffusion, Fourier heat and viscous conversion; formation-reference shifts;
+one-sided-zero refusal, late cancellation and workspace reuse.
+For the declared hot-bath/cold-cell fixture, the initial entropy rate changes
+from -0.1758153103431 to +0.0675891418055 W/K. At dt=1e-4 s the body entropy
+decreases while the source-aware total generation is positive, so a closed-body
+entropy test would be the wrong admission criterion.

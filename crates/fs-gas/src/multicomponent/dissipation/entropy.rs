@@ -1,4 +1,4 @@
-//! Entropy admission of the existing closed molecular SSP-RK2 evolution.
+//! Entropy admission of the existing axial molecular SSP-RK2 evolution.
 //!
 //! This measures the actual ideal-mixture state increment, including conversion
 //! of kinetic energy through the original total-energy inversion. It does not
@@ -150,6 +150,48 @@ impl<L: TransportLaw> DissipationOperator<L> {
         Ok((report, account.report))
     }
 
+    /// Advance source-conjugate molecular transport against stationary baths.
+    ///
+    /// Both interior and bath faces use the original divided caloric enthalpies,
+    /// logarithmic chemical efforts, Fourier heat and authored Soret/Dufour
+    /// pair. The cell-to-bath layer has the physical half-cell distance and
+    /// arithmetic velocity in stress work. This gives the same paired
+    /// semidiscrete entropy production as an interior face, with the bath
+    /// entropy removed from the gas's accounting boundary.
+    ///
+    /// Bath entropy uses the ACTUAL conservative energy and species transfers:
+    /// E_ref/T_b - sum_i(mu_i,ref/T_b * dm_i/M_i). Equivalently, bath heat is
+    /// E_ref minus the bath partial-enthalpy transfer. It includes the divided-
+    /// enthalpy correction and the bath share of viscous conversion; substituting
+    /// the interior Fourier/Dufour heat here would omit those contributions.
+    /// The stationary bath has no external traction-work input.
+    ///
+    /// Every actual SSP-RK2 substep and the complete original-to-final interval
+    /// must pass the native positivity, species-continuity and state-minus-bath
+    /// entropy checks before publication. One-sided zero species activities
+    /// refuse at interior AND bath faces, without a composition floor or an
+    /// engineering-flux fallback. Common absence is admitted. The flow clock
+    /// is unchanged, and two absent baths retain the closed conjugate faces.
+    ///
+    /// This is an ideal-mixture, axial molecular closure on fixed geometry,
+    /// not a fully discrete stability theorem or advective/reactive boundary
+    /// condition. Bath cells carry the original species ordering and energy
+    /// references, as required by `advance_with_reservoirs_for`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_entropy_consistent_with_reservoirs_for(
+        &mut self,
+        flow: &mut MixtureEuler1d,
+        duration: Time,
+        controls: DissipationControl,
+        entropy: MolecularEntropyControl,
+        reservoirs: [Option<super::super::Cell<'_>>; 2],
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<(DissipationReport, ReservoirMolecularEntropyReport), DissipationError> {
+        self.advance_reservoir_entropy::<true>(
+            flow, duration, controls, entropy, reservoirs, cancelled,
+        )
+    }
+
     /// Admit the original SSP-RK2 interval with stationary molecular reservoirs.
     ///
     /// Entropy entering each end is q_reduced/T_b + sum_i(s_i,b * j_i/M_i),
@@ -173,6 +215,21 @@ impl<L: TransportLaw> DissipationOperator<L> {
         controls: DissipationControl,
         entropy: MolecularEntropyControl,
         reservoirs: [Option<super::super::Cell<'_>>; 2],
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<(DissipationReport, ReservoirMolecularEntropyReport), DissipationError> {
+        self.advance_reservoir_entropy::<false>(
+            flow, duration, controls, entropy, reservoirs, cancelled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn advance_reservoir_entropy<const ENTROPY_FACES: bool>(
+        &mut self,
+        flow: &mut MixtureEuler1d,
+        duration: Time,
+        controls: DissipationControl,
+        entropy: MolecularEntropyControl,
+        reservoirs: [Option<super::super::Cell<'_>>; 2],
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<(DissipationReport, ReservoirMolecularEntropyReport), DissipationError> {
         controls.validate()?;
@@ -187,7 +244,7 @@ impl<L: TransportLaw> DissipationOperator<L> {
             &self.gas, account.reference_temperature, &account.reference_density,
             &account.reference_entropy, reservoirs, &mut cancelled,
         )?);
-        let report = super::evolve::advance_with_reservoirs_and_entropy(
+        let report = super::evolve::advance_with_reservoirs_and_entropy::<ENTROPY_FACES, L>(
             self, flow, duration, controls, reservoirs, &mut account, &mut cancelled,
         )?;
         Ok((report, account.completed_reservoir_report

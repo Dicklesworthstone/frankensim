@@ -345,6 +345,47 @@ pub(in crate::multicomponent::dissipation) fn interior<L: TransportLaw>(
     Ok(report)
 }
 
+/// Conjugate cell-to-bath layer over the original physical half-cell distance.
+///
+/// The bath is an infinite stationary source of energy and species. Use its
+/// actual entropy effort on the SAME conservative flux: E_ref/T_b minus
+/// sum(mu_i,ref/T_b * j_i/M_i). Relative to bath partial enthalpies its heat is
+/// E_ref-sum(h_i,ref(T_b)*j_i/M_i), including the enthalpy-layer correction and
+/// bath share of viscous conversion. The returned reduced_heat_flux retains
+/// the interior Fourier/Dufour convention; it is NOT that bath heat.
+///
+/// Symmetric source sampling and arithmetic stress work give the original
+/// two-trace entropy pairing while neither bath state nor source is advanced.
+/// Reusing the kernel also preserves common-support refusal before source
+/// evaluation and avoids another constitutive or caloric query for accounting.
+#[allow(clippy::too_many_arguments)]
+pub(in crate::multicomponent::dissipation) fn reservoir<L: TransportLaw>(
+    gas: &MixtureGas,
+    law: &mut L,
+    diffusion: &MaxwellStefanV1,
+    workspace: &mut MaxwellStefanWorkspaceV1,
+    left: Trace<'_>,
+    right: Trace<'_>,
+    distance: f64,
+    boundary_on_left: bool,
+    mass_ratio: f64,
+    binary: &mut [f64],
+    out: &mut [f64],
+    controls: MaxwellStefanSolveV1,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<TransportFaceReport, DissipationError> {
+    let bath = if boundary_on_left { &left } else { &right };
+    if bath.primitive.velocity != 0.0 {
+        return Err(DissipationError::Invalid(
+            "entropy-conjugate molecular reservoir is not stationary",
+        ));
+    }
+    interior(
+        gas, law, diffusion, workspace, left, right, distance, distance,
+        mass_ratio, binary, out, controls, cancelled,
+    )
+}
+
 fn reciprocal_difference(left: f64, right: f64) -> Result<f64, DissipationError> {
     if left == right {
         return Ok(0.0);

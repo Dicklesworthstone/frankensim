@@ -59,7 +59,7 @@ pub(super) fn advance_entropy_consistent<L: TransportLaw>(
     )
 }
 
-pub(super) fn advance_with_reservoirs_and_entropy<L: TransportLaw>(
+pub(super) fn advance_with_reservoirs_and_entropy<const ENTROPY_FACES: bool, L: TransportLaw>(
     owner: &mut DissipationOperator<L>,
     flow: &mut MixtureEuler1d,
     duration: Time,
@@ -68,7 +68,7 @@ pub(super) fn advance_with_reservoirs_and_entropy<L: TransportLaw>(
     entropy: &mut super::entropy::EntropyTracker,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<DissipationReport, DissipationError> {
-    advance_inner::<false, L>(owner, flow, duration, controls, reservoirs, None, Some(entropy), cancelled)
+    advance_inner::<ENTROPY_FACES, L>(owner, flow, duration, controls, reservoirs, None, Some(entropy), cancelled)
 }
 
 pub(super) fn advance_moving<L: TransportLaw>(
@@ -492,7 +492,7 @@ pub(in crate::multicomponent) fn spatial<L: TransportLaw>(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn spatial_with_wall_motion<const ENTROPY_FACES: bool, L: TransportLaw>(
+pub(super) fn spatial_with_wall_motion<const ENTROPY_FACES: bool, L: TransportLaw>(
     gas: &MixtureGas,
     mesh: &Mesh1d,
     boundaries: Boundaries,
@@ -589,7 +589,7 @@ fn spatial_with_wall_motion<const ENTROPY_FACES: bool, L: TransportLaw>(
                 ));
             }
             if let Some(reservoir) = reservoirs[0] {
-                face_rates[0] = reservoir_face(
+                face_rates[0] = reservoir_face::<ENTROPY_FACES, L>(
                     gas,
                     law,
                     diffusion,
@@ -622,7 +622,7 @@ fn spatial_with_wall_motion<const ENTROPY_FACES: bool, L: TransportLaw>(
                 )?;
             }
             if let Some(reservoir) = reservoirs[1] {
-                face_rates[count] = reservoir_face(
+                face_rates[count] = reservoir_face::<ENTROPY_FACES, L>(
                     gas,
                     law,
                     diffusion,
@@ -675,7 +675,7 @@ fn spatial_with_wall_motion<const ENTROPY_FACES: bool, L: TransportLaw>(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn reservoir_face<L: TransportLaw>(
+fn reservoir_face<const ENTROPY_FACES: bool, L: TransportLaw>(
     gas: &MixtureGas,
     law: &mut L,
     diffusion: &MaxwellStefanV1,
@@ -710,21 +710,17 @@ fn reservoir_face<L: TransportLaw>(
     } else {
         (cell, bath)
     };
-    let evaluated = super::face::reservoir(
-        gas,
-        law,
-        diffusion,
-        workspace,
-        left,
-        right,
-        distance,
-        boundary_on_left,
-        mass_ratio,
-        binary,
-        out,
-        controls,
-        cancelled,
-    )?;
+    let evaluated = if ENTROPY_FACES {
+        super::face::entropy::reservoir(
+            gas, law, diffusion, workspace, left, right, distance,
+            boundary_on_left, mass_ratio, binary, out, controls, cancelled,
+        )
+    } else {
+        super::face::reservoir(
+            gas, law, diffusion, workspace, left, right, distance,
+            boundary_on_left, mass_ratio, binary, out, controls, cancelled,
+        )
+    }?;
     stage.gradient_residual = stage
         .gradient_residual
         .max(evaluated.maximum_gradient_residual_per_m);
