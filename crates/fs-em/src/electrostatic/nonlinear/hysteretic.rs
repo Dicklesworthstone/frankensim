@@ -12,6 +12,9 @@
 //! physical heat or switching strain. No rate, leakage, temperature evolution,
 //! breakdown, continuum error bound or measured ferroelectric accuracy is implied.
 
+/// Bounded loading-path refinement through the original field/history owner.
+pub mod path;
+
 use super::*;
 use fs_matdb::QueryPoint;
 use fs_material::field_storage::dielectric::hysteresis::vector::{

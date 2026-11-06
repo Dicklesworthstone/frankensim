@@ -5664,3 +5664,27 @@ receiving volumes and parameter-work admission; these methods do not infer a
 temperature-dependent switching law. Two additional spatial regressions retain
 poled memory through source refresh and reversal, and exercise refused partial
 batches with deterministic retry.
+
+`hysteretic::path` adds bounded continuation along one explicitly authored
+affine electrode/volume-charge segment. Every comparison uses the native field
+owner: one full increment versus two sequential halves, with only the latter
+eligible for accepted history. Dyadic rejection retains a bounded interval
+stack and reuses the left coarse trial. One global field-solve/operator budget
+counts all attempts, including discarded trials. Separate indicators monitor
+branch polarization, the compensated sum of absolute per-cell heat defects
+(opposing spatial heating errors cannot cancel), and the larger of the
+source-work defect and retained numerical loss. Absolute allowances scale with
+interval fraction; accepted indicators and native physical cell accounts sum
+over the whole path. Numerical loss remains separate from physical heating.
+
+Relative voltages retain common-bias invariance. Conversion to the original
+electrostatic candidate moves cumulative accounts and a compact path summary
+to the finite-enthalpy consumer without another solve or history reset. These
+indicators are empirical refinement estimates, not certified global errors,
+time kinetics or automatic discovery of waveform turns. Supply explicit cuts
+at turns and source/control events. The native nonlinear solver may also
+accept an Armijo-rejected trial when its actual Gauss residual already meets
+the ORIGINAL target; final independent charge and energy checks remain active.
+`tests/hysteretic_electrostatic_path.rs` exercises linear work convergence,
+charge/bias invariance, exact major-loop heating, changing-direction memory
+against an independently subdivided path, and atomic global-budget refusals.
