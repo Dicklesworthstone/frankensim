@@ -4,9 +4,10 @@
 use fs_exec::CancelGate;
 use fs_lbm::conjugate::{ChtError, FlowFace, FlowField, FluidProperties, ThermalFace, ThermalSetup, Voxel, VoxelDomain};
 use fs_lbm::material::conjugate::MaterialChtFluid;
-use fs_matdb::{ClaimSelection, PropertyKey, SelectionPolicy};
+use fs_matdb::{ClaimSelection, PropertyKey, PropertyValue, SelectionPolicy};
 use fs_material::fluid_transport::FluidTransportState;
 use fs_material::liquid::{DYNAMIC_VISCOSITY_DIMS, DYNAMIC_VISCOSITY_PROPERTY};
+use fs_material::phase::{HeatCapacitySourceQuery, ResolvedHeatCapacityCurve, SolidLiquidPhase};
 use fs_material::state_point::{
     DENSITY_PROPERTY, MaterialPropertySelection, ResolvedMaterialStatePoint,
     SPECIFIC_HEAT_CAPACITY_DIMS, SPECIFIC_HEAT_CAPACITY_PROPERTY,
@@ -16,7 +17,7 @@ use fs_qty::Density;
 use super::{Source, invalid, poll};
 use super::super::{J, array, fields, integer, number, positive, quote, required, values};
 
-pub(crate) const NO_CLAIM: &str = "steady fixed-geometry scalar ohmic and isotropic or grid-aligned orthotropic solid thermal conduction with prescribed volume-conservative isotropic fluid transport; density, heat capacity and viscosity frozen at an explicit sourced reference state, local conductivity and resistivity re-resolved; no momentum/pressure solve, variable-density enthalpy transport, phase change, electrochemistry, Lorentz force, AC effects, propagated uncertainty or experimental qualification";
+pub(crate) const NO_CLAIM: &str = "steady fixed-geometry scalar ohmic and isotropic or grid-aligned orthotropic solid thermal conduction with prescribed volume-conservative isotropic fluid transport; density verified constant over the shared original Cp/density source interval, source-integrated Cp/enthalpy in first-order upwind face transport, viscosity frozen at the explicit sourced reference, local conductivity and resistivity re-resolved; no momentum/pressure solve, variable-density enthalpy transport, phase change, electrochemistry, Lorentz force, AC effects, propagated uncertainty or experimental qualification";
 
 pub(super) const TRANSIENT_NO_CLAIM: &str = "fixed-geometry backward-Euler electrothermal evolution with prescribed volume-conservative fluid velocity; fluid density verified constant over the complete source interval, one sourced Cp/enthalpy chart for storage and first-order upwind face transport, viscosity frozen at the sourced reference, local conductivity and resistivity re-resolved; single-phase fixed cell masses, sourced fluid and solid Cp and exterior gray radiation; no momentum/pressure solve, variable-density fluid transport, phase change, deformation, electrochemistry, Lorentz force, AC effects, propagated uncertainty or experimental qualification; temporal accuracy requires time-step refinement";
 
@@ -121,17 +122,95 @@ pub(crate) fn load_fluid(
 }
 
 impl Fluid {
+    /// Prepare the steady caloric law on the common original Cp/density
+    /// temperature support. No numerical span, startup Cp or extrapolation
+    /// replaces the source. The same reference claims must cover that entire
+    /// interval, including every interior source breakpoint.
+    pub(super) fn steady_caloric(
+        &self,
+        source: &Source,
+        thermal: &ThermalSetup,
+        gate: &CancelGate,
+    ) -> Result<ResolvedHeatCapacityCurve, ChtError> {
+        poll(gate)?;
+        let mut span = [f64::NEG_INFINITY, f64::INFINITY];
+        for name in [SPECIFIC_HEAT_CAPACITY_PROPERTY, DENSITY_PROPERTY] {
+            let reference = self
+                .reference
+                .property(name)
+                .expect("fluid reference required rho and Cp");
+            let claim = source
+                .pack
+                .card()
+                .claims()
+                .claim(reference.answer().receipt.selected)
+                .ok_or_else(|| {
+                    invalid("fluid.caloric", "original fluid reference claim is missing")
+                })?;
+            let (mut lower, mut upper) = claim
+                .validity
+                .bound(&source.temperature_axis)
+                .ok_or_else(|| {
+                    invalid(
+                        "fluid.caloric",
+                        format!("{name} must explicitly bound the source temperature coordinate",),
+                    )
+                })?;
+            if let PropertyValue::Curve {
+                abscissa, knots, ..
+            } = &claim.value
+                && abscissa == &source.temperature_axis
+            {
+                lower = lower.max(knots[0].0);
+                upper = upper.min(knots[knots.len() - 1].0);
+            }
+            span[0] = span[0].max(lower);
+            span[1] = span[1].min(upper);
+        }
+        if !span.iter().all(|t| t.is_finite() && *t > 0.0)
+            || span[0] >= span[1]
+            || !(span[0]..=span[1]).contains(&self.reference_temperature_k)
+        {
+            return Err(invalid(
+                "fluid.caloric",
+                "Cp and density need a positive common source temperature interval containing the reference",
+            ));
+        }
+        self.admit_caloric(source, span[0], span[1], thermal, gate)?;
+        let lower = source.point_at(span[0])?;
+        let upper = source.point_at(span[1])?;
+        let curve = ResolvedHeatCapacityCurve::try_new_exact(
+            source.pack.card(),
+            HeatCapacitySourceQuery {
+                heat_capacity: &PropertyKey::new(
+                    SPECIFIC_HEAT_CAPACITY_PROPERTY,
+                    SPECIFIC_HEAT_CAPACITY_DIMS,
+                ),
+                density: &PropertyKey::new(DENSITY_PROPERTY, Density::DIMS),
+                temperature_axis: &source.temperature_axis,
+                lower: &lower,
+                upper: &upper,
+                selection: SelectionPolicy::SingleClaimOnly,
+            },
+            SolidLiquidPhase::Liquid,
+            0.0,
+        )
+        .map_err(|error| invalid("fluid.caloric", error))?;
+        poll(gate)?;
+        Ok(curve)
+    }
+
     /// Constant density preserves reference control-volume mass. Cp may vary:
-    /// the transient owner builds ONE sourced caloric chart for both storage
-    /// and conservative face enthalpy. Full source-line queries retain every
+    /// the owner builds ONE sourced caloric chart for conservative face
+    /// enthalpy and, when transient, storage. Full source-line queries retain every
     /// crossed breakpoint and refuse holes, switching or ambiguous claims.
-    pub(super) fn admit_transient(
+    pub(super) fn admit_caloric(
         &self, source: &Source, lower_k: f64, upper_k: f64,
         thermal: &ThermalSetup, gate: &CancelGate,
     ) -> Result<(), ChtError> {
         poll(gate)?;
         if self.reference.card_identity() != source.pack.card().content_hash() {
-            return Err(invalid("fluid.transient", "transport and storage must use the same material card"));
+            return Err(invalid("fluid.caloric", "transport and calorics must use the same material card"));
         }
         let lower = source.point_at(lower_k)?;
         let upper = source.point_at(upper_k)?;
@@ -144,20 +223,20 @@ impl Fluid {
             let line = source.pack.card().claims().query_line_typed(
                 &PropertyKey::new(name, dims), &source.temperature_axis,
                 &lower, &upper, ClaimSelection::Policy(SelectionPolicy::SingleClaimOnly),
-            ).map_err(|e| invalid("fluid.transient", format!("{name} requires continuous source support: {e:?}")))?;
+            ).map_err(|e| invalid("fluid.caloric", format!("{name} requires continuous source support: {e:?}")))?;
             for (_, answer) in &line.knots {
                 poll(gate)?;
                 if answer.receipt.selected != reference.answer().receipt.selected {
-                    return Err(invalid("fluid.transient", format!(
+                    return Err(invalid("fluid.caloric", format!(
                         "{name} must retain its original reference source claim throughout the interval",
                     )));
                 }
                 let value = answer.evidence.value.value;
                 if !value.is_finite() || value <= 0.0 {
-                    return Err(invalid("fluid.transient", format!("{name} must remain finite and positive")));
+                    return Err(invalid("fluid.caloric", format!("{name} must remain finite and positive")));
                 }
                 if name == DENSITY_PROPERTY && value != reference.value_si() {
-                    return Err(invalid("fluid.transient", "density must remain constant throughout the complete source interval"));
+                    return Err(invalid("fluid.caloric", "density must remain constant throughout the complete source interval"));
                 }
             }
         }
@@ -168,13 +247,13 @@ impl Fluid {
                 _ => continue,
             };
             if !temperature.is_finite() || temperature < lower_k || temperature > upper_k {
-                return Err(invalid("fluid.transient", "inflow and backflow temperatures must lie inside the sourced storage interval"));
+                return Err(invalid("fluid.caloric", "inflow and backflow temperatures must lie inside the sourced caloric interval"));
             }
         }
         poll(gate)
     }
 
-    /// This is reference-state evidence; transient calorics retain their own chart.
+    /// Reference-state evidence; source calorics retain their original chart.
     pub fn render(&self) -> String {
         format!(concat!(
             "{{\"material_index\":{},\"temperature_k\":{},\"material_state\":{},",

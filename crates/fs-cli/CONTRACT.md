@@ -3744,8 +3744,8 @@ conduction, physical sinks/radiation and accepted endpoint Joule heat.
 
 All fluid transients explicitly use first-order upwind enthalpy, reported as
 fluid_advection="source-enthalpy-first-order-upwind" (null for all-solid scenes).
-The steady command retains its reference-Cp scheme. Source interpolation error,
-numerical closure and source uncertainty remain distinct. This adds neither
+Source interpolation error, numerical closure and source uncertainty remain
+distinct. This adds neither
 variable-density mass transport, momentum/pressure evolution, phase change nor
 thermal deformation. Prescribed-flow and stable-single-phase assumptions remain
 explicit; mesh/time refinement is still required.
@@ -3758,6 +3758,28 @@ but unrun under the environment's existing memory/build constraint. Read-only
 syntax/whitespace checks, independent API/sign review and reference arithmetic
 passed; the additional backflow regression and documentation were finalized in
 memory when the local disk filled, then published through GitHub.
+
+### Steady source-caloric electrothermal cooling
+
+Steady conducting-fluid scenes now use the same original Cp/enthalpy law in the
+existing first-order upwind heat operator. One compact exact chart is prepared
+over the common explicitly bounded temperature support of the original Cp and
+density claims, clipped to their actual source-curve knots. Missing support,
+interior holes or claim switching refuse; density must remain constant over the
+whole interval and every inlet/backflow state must be admitted. No numerical
+temperature span or reference-Cp replacement is inferred.
+Sampled Surface2D laws must continuously cover that whole fixed-context
+interval through their declared source cells; no smaller supported component
+is inferred.
+
+The existing bounded material iteration refreshes the caloric tangents. Before
+acceptance, the native unchanged-state evaluator uses actual source enthalpy,
+endpoint conductivity and contact coefficients; the existing radiation owner
+refreshes and audits its surface exchange. Original local heat residuals and
+boundary accounting therefore describe the same accepted state. The prescribed
+flow, reference viscosity and single-phase restrictions remain unchanged.
+Focused `steady_source_cp` regressions compare an independent three-cell heat
+balance for sources sharing one reference Cp and exercise support/density refusal.
 
 ## Source-defined orthotropic electrothermal transport
 

@@ -25,6 +25,119 @@ fn variable_cp_problem(beta: f64) -> Problem {
     p
 }
 
+#[test]
+fn g1_g3_steady_source_cp_uses_actual_enthalpy_flux_and_preserves_reference_flow() {
+    let mut peaks = Vec::new();
+    for beta in [0.0, 0.08] {
+        let mut p = variable_cp_problem(beta);
+        p.thermal.power_w = vec![0.0, 55.5, 0.0]; // Plus 4.5 W actual Joule heat.
+        let bytes = p.materials[0].pack.to_bytes();
+        let reference = p.fluid.as_ref().unwrap().reference.clone();
+        let flow = p.fluid.as_ref().unwrap().flow.clone();
+        assert_eq!(
+            p.fluid.as_ref().unwrap().properties.specific_heat_j_kg_k,
+            1.0
+        );
+        let result = p.solve(&CancelGate::new()).unwrap();
+        // Independent steady balances with theta=T-300 and h=theta+beta/2*theta^2:
+        // b=c=3*a+h(a), and total heat 2*a+h(b)=60 W. This scalar
+        // relation uses neither source-chart inversion nor native assembly.
+        let h = |theta: f64| theta + 0.5 * beta * theta * theta;
+        let (mut lo, mut hi) = (0.0, 30.0);
+        for _ in 0..64 {
+            let a = 0.5 * lo + 0.5 * hi;
+            if 2.0 * a + h(3.0 * a + h(a)) < 60.0 {
+                lo = a;
+            } else {
+                hi = a;
+            }
+        }
+        let a = 0.5 * lo + 0.5 * hi;
+        let b = 3.0 * a + h(a);
+        let expected = [300.0 + a, 300.0 + b, 300.0 + b];
+        let energy = &result.coupled.thermal;
+        for (actual, expected) in energy.temperature.iter().zip(expected) {
+            assert!((actual - expected).abs() < 2e-8, "{actual} != {expected}");
+        }
+        assert_eq!(energy.report.scheme, ConvectionScheme::Upwind);
+        assert!((result.coupled.electric.total_joule_w - 4.5).abs() < 1e-10);
+        assert!((energy.report.balance.source_w - 60.0).abs() < 1e-10);
+        assert!((energy.report.balance.advective_outflow_w - h(b)).abs() < 2e-8);
+        assert!((energy.report.balance.boundary_outflow_w - 60.0).abs() < 2e-8);
+        assert!(energy.report.balance.residual_w.abs() < 2e-8);
+        assert_eq!(p.materials[0].pack.to_bytes(), bytes);
+        assert_eq!(p.fluid.as_ref().unwrap().reference, reference);
+        assert_eq!(p.fluid.as_ref().unwrap().flow, flow);
+        assert_eq!(p.initial_temperature, vec![300.0; 3]);
+        assert_eq!(p.solve(&CancelGate::new()).unwrap().coupled, result.coupled);
+        peaks.push(energy.temperature[1]);
+    }
+    // Both sources have the SAME startup Cp; only the original Cp(T) differs.
+    assert!(peaks[1] < peaks[0] - 10.0);
+}
+
+#[test]
+fn g0_steady_source_cp_requires_complete_support_and_constant_density() {
+    for refusal in ["unbounded", "discrete", "density", "narrow"] {
+        let mut p = variable_cp_problem(0.08);
+        p.materials[0] = material_source(1.0, 2.0, 1.0, true, "liquid", |claim| {
+            if claim.key.name() == SPECIFIC_HEAT_CAPACITY_PROPERTY {
+                match refusal {
+                    "unbounded" => claim.validity = ValidityDomain::unconstrained(),
+                    "discrete" => {
+                        claim.value = PropertyValue::Curve {
+                            abscissa: "T".into(),
+                            abscissa_dims: fs_qty::Temperature::DIMS,
+                            knots: vec![(290.0, 0.5), (300.0, 1.0), (350.0, 5.0)],
+                            dims: SPECIFIC_HEAT_CAPACITY_DIMS,
+                        };
+                        claim.interpolation = InterpolationPolicy::TabulatedOnly;
+                    }
+                    "narrow" => {
+                        claim.validity = ValidityDomain::unconstrained().with("T", 299.0, 301.0)
+                    }
+                    _ => {}
+                }
+            }
+            if refusal == "density" && claim.key.name() == DENSITY_PROPERTY {
+                claim.value = PropertyValue::Curve {
+                    abscissa: "T".into(),
+                    abscissa_dims: fs_qty::Temperature::DIMS,
+                    knots: vec![(290.0, 1.0), (300.0, 1.0), (320.0, 0.9), (350.0, 1.0)],
+                    dims: Density::DIMS,
+                };
+                claim.interpolation = InterpolationPolicy::LinearInside;
+            }
+        });
+        p.fluid = load_fluid(
+            &input(1.0),
+            &mut p.domain,
+            &p.material_indices,
+            &p.materials,
+        )
+        .unwrap();
+        let original = p.materials[0].pack.to_bytes();
+        assert!(
+            p.solve(&CancelGate::new()).is_err(),
+            "{refusal} must refuse"
+        );
+        assert_eq!(p.materials[0].pack.to_bytes(), original);
+        assert_eq!(p.initial_temperature, vec![300.0; 3]);
+    }
+    let mut p = variable_cp_problem(0.08);
+    p.thermal.faces[1] = ThermalFace::Outflow {
+        backflow_temperature: 351.0,
+    };
+    assert!(p.solve(&CancelGate::new()).is_err());
+    p.thermal.faces[1] = ThermalFace::Outflow {
+        backflow_temperature: 300.0,
+    };
+    let gate = CancelGate::new();
+    gate.request();
+    assert!(matches!(p.solve(&gate), Err(ChtError::Cancelled)));
+    assert!(p.solve(&CancelGate::new()).is_ok());
+}
+
 // Independent nonlinear three-control-volume equations with analytic
 // h(theta) = theta + beta/2 * theta^2. This does not call the native chart,
 // finite-volume assembly, material resolver, or nonlinear iteration.

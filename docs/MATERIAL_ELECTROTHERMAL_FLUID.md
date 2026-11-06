@@ -28,7 +28,7 @@ y+, z-, z+ order. For the positive x velocity above, use:
 ```
 
 The inlet supplies the entering fluid temperature to the original flux
-assembly. The outlet advects the adjacent fluid cell's temperature with zero
+assembly. The outlet advects the adjacent fluid cell's enthalpy with zero
 diffusive outflow; if flow reverses, its positive `backflow_temperature_k`
 supplies entering enthalpy. Native open-face rules treat solid portions of
 these boundaries as adiabatic. A temperature, heat-flux, convective or adiabatic
@@ -63,10 +63,24 @@ thermal temperature. The CLI's existing nonlinear heat iteration also resolves
 conductivity at local temperature. It refuses unsupported states rather than
 clamping or extending a material table.
 
-The existing energy solver advects heat with the prescribed face volume flux
-and the reference `density * specific_heat_capacity`. Changing either source
-property therefore changes advective heat transport without changing code or
-the prescribed velocity. Electrical and thermal conductivity swaps propagate
+The existing energy solver transports `rho * Q * h(T_upstream)` using the
+prescribed face volume flux and the original source-integrated heat capacity.
+Both steady and transient scenes use first-order upwind enthalpy transport.
+Steady scenes prepare one exact chart over the common explicitly bounded
+temperature support of the original Cp and density claims, clipped to actual
+curve support. Density must remain constant throughout that interval; Cp may
+vary. Missing support, interior holes, changing claims, or inlet/backflow and
+cell temperatures outside support refuse. No temperature span is invented.
+Sampled Surface2D laws must continuously cover that whole fixed-context
+interval through their declared source cells; no smaller supported component
+is inferred.
+
+Changing source Cp therefore changes advective heat transport without changing
+code or the prescribed velocity. The steady material iteration accepts only
+after the original native operator checks local physical heat at the unchanged
+candidate, with actual source enthalpy, endpoint conductivity and contact
+coefficients. Radiation retains its original refreshed surface audit.
+Electrical and thermal conductivity swaps propagate
 through current, Joule heating and the temperature field. The result contains a
 `fluid_reference` object with its source-state identity, temperature, density,
 heat capacity, kinematic viscosity, velocity and measured volume divergence;
@@ -83,12 +97,10 @@ point roundoff refuses, so incompatible obstacles or closed ends cannot silently
 create/destroy transported fluid. Use a compatible straight passage, or zero
 velocity with six walls for a quiescent conductor.
 
-There is one fluid material because the current heat owner has one reference
-fluid heat-capacity flux. In a steady run, density, heat capacity and viscosity
-remain frozen at the explicitly requested reference state. That approximation
-does not establish the validity of constant properties across arbitrary
-temperature changes. Transient admission checks the full density source interval
-and uses the original heat-capacity chart for both storage and transport.
+There is one fluid material and one source caloric law. Steady and transient
+admission check constant density over their complete source interval and use
+the original heat-capacity chart for transport. Transients additionally use
+that same chart for storage. Viscosity remains at the explicit reference state.
 Viscosity does not alter a prescribed velocity. Local conductivity and electrical
 resistivity do update. There is no variable-density enthalpy advection, melting,
 phase-front movement, ion/species transport, electrochemistry, motional EMF,
@@ -123,8 +135,7 @@ offset. They therefore exchange equal and opposite energy even when local Cp
 differs. Incoming and backflow enthalpy are evaluated directly on that same
 chart at the boundary temperature; outgoing enthalpy follows the fluid cell.
 
-Fluid transients use **first-order upwind enthalpy transport**. The steady
-command retains its existing reference-Cp Patankar scheme. A transient result
+Both commands use **first-order upwind enthalpy transport**. A transient result
 identifies its scheme as `"fluid_advection":"source-enthalpy-first-order-upwind"`
 (`null` for all-solid scenes). The native field API refuses a power-law scheme
 for nonlinear enthalpy because its reference-Cp blend is a different numerical
@@ -174,7 +185,10 @@ unsupported inlet states, late storage escape and cancellation. Additional nativ
 field regressions check donor-face conservation, reversed flow and enthalpy-datum
 invariance. A source-varying-Cp trajectory is compared with independent analytic
 three-cell balances through drive switch-off, including exact chart admission
-and unchanged-input retry. The file-driven
+and unchanged-input retry. Steady source-Cp cases sharing the same reference
+Cp are compared with an independent nonlinear three-cell balance and actual
+boundary enthalpy; missing support and interior density variation refuse.
+The file-driven
 regression reaches both steady and transient paths. These are authored synthetic
 fixtures, not measured liquid-metal or electrolyte calibration; the new Rust
 regressions have not been executed in this implementation environment.

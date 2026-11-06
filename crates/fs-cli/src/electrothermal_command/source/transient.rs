@@ -1,7 +1,7 @@
 //! Time evolution through the same material/electrical/heat owners as the
 //! steady command. Cell mass is fixed; storage uses the sourced Cp chart.
 
-mod advection;
+pub(super) mod advection;
 
 use std::path::Path;
 
@@ -142,7 +142,7 @@ pub(crate) struct Trajectory {
 pub(crate) fn march(problem: &Problem, request: &Request, gate: &CancelGate) -> Result<Trajectory, ChtError> {
     poll(gate)?;
     if let Some(fluid) = &problem.fluid {
-        fluid.admit_transient(&problem.materials[fluid.material_index], request.lower_k,
+        fluid.admit_caloric(&problem.materials[fluid.material_index], request.lower_k,
             request.upper_k, &problem.thermal, gate)?;
     }
     let density_key = PropertyKey::new(DENSITY_PROPERTY, Density::DIMS);

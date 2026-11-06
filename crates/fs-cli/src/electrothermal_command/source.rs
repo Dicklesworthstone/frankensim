@@ -20,6 +20,7 @@ use fs_lbm::conjugate::{
 };
 use fs_matdb::{NormalizedMaterialCardPack, QueryPoint};
 use fs_material::conductor::{ResolvedConductorState, resolve_conductor_state};
+use fs_material::phase::ResolvedHeatCapacityCurve;
 use fs_material::state_point::{
     MaterialPropertySelection, ResolvedMaterialStatePoint, THERMAL_CONDUCTIVITY_PROPERTY,
     resolve_material_state_point,
@@ -31,6 +32,7 @@ use super::interfaces::{self, InterfaceSource, ThermalInterfaceState};
 use super::radiation::{FaceReport, Radiation};
 use fs_lbm::conjugate::boundary_exchange::PreparedBoundaryExchange;
 use conductivity::Conductivity;
+use transient::advection::Advection;
 
 pub(super) struct Source {
     pub pack: NormalizedMaterialCardPack,
@@ -160,8 +162,12 @@ impl Problem {
     }
 
     fn solve_at(
-        &self, start: &[f64], electric: &ElectricSetup, thermal: &ThermalSetup,
-        storage: Option<&transient::Storage<'_>>, gate: &CancelGate,
+        &self,
+        start: &[f64],
+        electric: &ElectricSetup,
+        thermal: &ThermalSetup,
+        storage: Option<&transient::Storage<'_>>,
+        gate: &CancelGate,
     ) -> Result<ResultField, ChtError> {
         poll(gate)?;
         let initial = self.states(start, gate)?;
@@ -183,6 +189,18 @@ impl Problem {
             Some(binding) => (&binding.properties, &binding.flow),
             None => (&unused_fluid, quiescent.as_ref().expect("all-solid quiescent field")),
         };
+        // Prepare once for the whole coupled solve. Transient storage already
+        // owns its original shared storage/advection chart and explicit span.
+        let steady_caloric = if storage.is_none() {
+            self.fluid
+                .as_ref()
+                .map(|binding| {
+                    binding.steady_caloric(&self.materials[binding.material_index], thermal, gate)
+                })
+                .transpose()?
+        } else {
+            None
+        };
         let mut thermal_solves = 0usize;
         let mut thermal_interfaces = Vec::new();
         let mut thermal_contact_relative_defect = 0.0;
@@ -201,7 +219,7 @@ impl Problem {
             |temperature| interfaces::resolve(&self.electrical_interfaces, temperature, gate),
             |heated, temperature| {
                 let (energy, joints, defect, surfaces) = self.solve_heat(
-                    heated, temperature, &solids, fluid, flow, storage, &mut thermal_solves,
+                    heated, temperature, &solids, fluid, flow, storage, steady_caloric.as_ref(), &mut thermal_solves,
                     &mut surface_temperatures, gate,
                 )?;
                 thermal_interfaces = joints;
@@ -225,15 +243,37 @@ impl Problem {
 
     #[allow(clippy::too_many_arguments)] // existing physical owners and the accumulated work count
     fn solve_heat(
-        &self, setup: &ThermalSetup, start: &[f64], solids: &[SolidMaterial],
-        fluid: &FluidProperties, flow: &FlowField, storage: Option<&transient::Storage<'_>>,
-        solves: &mut usize, surface_temperatures: &mut [f64], gate: &CancelGate,
-    ) -> Result<(EnergySolution, Vec<ThermalInterfaceState>, f64, Vec<FaceReport>), ChtError> {
+        &self,
+        setup: &ThermalSetup,
+        start: &[f64],
+        solids: &[SolidMaterial],
+        fluid: &FluidProperties,
+        flow: &FlowField,
+        storage: Option<&transient::Storage<'_>>,
+        steady_caloric: Option<&ResolvedHeatCapacityCurve>,
+        solves: &mut usize,
+        surface_temperatures: &mut [f64],
+        gate: &CancelGate,
+    ) -> Result<
+        (
+            EnergySolution,
+            Vec<ThermalInterfaceState>,
+            f64,
+            Vec<FaceReport>,
+        ),
+        ChtError,
+    > {
         let mut previous = start.to_vec();
         let mut states = self.states(&previous, gate)?;
         let mut configured = setup.clone();
         let mut defect = f64::INFINITY;
         let mut radiation_defect = 0.0;
+        let enthalpy_energy = EnergyConfig {
+            scheme: fs_lbm::conjugate::ConvectionScheme::Upwind,
+            ..self.energy
+        };
+        let mut linear_enthalpy_energy = enthalpy_energy;
+        let mut caloric_endpoint_error = None;
         let passes = self.radiation.as_ref().map_or(self.max_thermal_passes,
             |r| self.max_thermal_passes.min(r.config.max_iterations));
         for _ in 0..passes {
@@ -246,14 +286,17 @@ impl Problem {
                 r.prepare(self, &configured, &field, surface_temperatures, gate)).transpose()?;
             let with_boundary = boundary.as_ref().map_or(&configured, PreparedBoundaryExchange::setup);
             let capacity = storage.map(|s| s.capacities(&previous, gate)).transpose()?;
-            let advection = storage.map(|s| s.advection(self, &previous, with_boundary, gate))
-                .transpose()?.flatten();
-            let solution = match (storage, &capacity, &advection) {
+            let advection = if let Some(storage) = storage {
+                storage.advection(self, &previous, with_boundary, gate)?
+            } else {
+                steady_caloric.map(|curve|
+                    Advection::resolve(curve, self, &previous, with_boundary, gate)).transpose()?
+            };
+            let mut solution = match (storage, &capacity, &advection) {
                 (Some(s), Some(capacity), Some(advection)) => {
                     // Variable-Cp transport is conservative upwind enthalpy;
                     // the reference-Cp Patankar blend is not its constitutive law.
-                    let energy = EnergyConfig { scheme: fs_lbm::conjugate::ConvectionScheme::Upwind, ..self.energy };
-                    energy.step_with_enthalpy(
+                    enthalpy_energy.step_with_enthalpy(
                         &self.domain, fluid, solids, flow, with_boundary, &field,
                         advection.field(), capacity, s.previous, s.dt, gate,
                     )?.0
@@ -262,12 +305,16 @@ impl Problem {
                     &self.domain, fluid, solids, flow, with_boundary, &field,
                     capacity, s.previous, s.dt, gate,
                 )?.0,
+                (None, None, Some(advection)) => linear_enthalpy_energy.solve_with_enthalpy(
+                    &self.domain, fluid, solids, flow, with_boundary, &field,
+                    advection.field(), gate,
+                )?,
                 _ => self.energy.solve_with_conductivity(
                     &self.domain, fluid, solids, flow, with_boundary, &field, gate,
                 )?,
             };
             *solves += 1;
-            let (radiation, surface_defect) = match (&self.radiation, &boundary) {
+            let (mut radiation, surface_defect) = match (&self.radiation, &boundary) {
                 (Some(r), Some(b)) => r.audit(self, b, &solution, surface_temperatures, gate)?,
                 _ => (Vec::new(), 0.0),
             };
@@ -276,7 +323,7 @@ impl Problem {
             // temperature change cannot mask a large change in joint resistance.
             let next = self.states(&solution.temperature, gate)?;
             let next_joints = interfaces::resolve_thermal(&self.thermal_interfaces, &solution.temperature, gate)?;
-            let contact_defect = interfaces::thermal_defect(&next_joints, &solution)?;
+            let mut contact_defect = interfaces::thermal_defect(&next_joints, &solution)?;
             let storage_consistent = match (storage, &capacity) {
                 (Some(s), Some(capacity)) => s.consistent(&solution.temperature, capacity, gate)?,
                 _ => true,
@@ -294,10 +341,51 @@ impl Problem {
                 && change <= self.coupling.temperature_tolerance_k && storage_consistent
                 && advection_consistent && radiation_defect <= 1.0
             {
-                for (temperature, face) in surface_temperatures.iter_mut().zip(&radiation) {
-                    *temperature = face.surface_temperature_k;
+                let mut accepted = true;
+                if let Some(curve) = steady_caloric {
+                    let endpoint_field: Vec<[f64; 3]> = next.iter().map(|state| state.k).collect();
+                    let mut endpoint_setup = setup.clone();
+                    endpoint_setup.face_contacts.extend(next_joints.iter().map(ThermalInterfaceState::face));
+                    let endpoint_surfaces: Vec<f64> = radiation.iter().map(|face| face.surface_temperature_k).collect();
+                    let endpoint_boundary = self.radiation.as_ref().map(|r|
+                        r.prepare(self, &endpoint_setup, &endpoint_field, &endpoint_surfaces, gate)).transpose()?;
+                    let endpoint_setup = endpoint_boundary.as_ref().map_or(&endpoint_setup, PreparedBoundaryExchange::setup);
+                    let actual = Advection::resolve(curve, self, &solution.temperature, endpoint_setup, gate)?;
+                    // The original heat owner reassembles at this unchanged
+                    // endpoint with source enthalpy, conductivity and contacts.
+                    // Small iterate changes cannot hide a local physical heat
+                    // defect; radiation retains its original surface audit.
+                    match enthalpy_energy.evaluate_with_enthalpy(
+                        &self.domain, fluid, solids, flow, endpoint_setup, &endpoint_field,
+                        actual.field(), &solution.temperature, gate,
+                    ) {
+                        Ok(mut evaluated) => {
+                            caloric_endpoint_error = None;
+                            if let (Some(r), Some(b)) = (&self.radiation, &endpoint_boundary) {
+                                (radiation, radiation_defect) = r.audit(self, b, &evaluated, &endpoint_surfaces, gate)?;
+                                accepted = radiation_defect <= 1.0;
+                            }
+                            contact_defect = interfaces::thermal_defect(&next_joints, &evaluated)?;
+                            evaluated.report.iterations = solution.report.iterations;
+                            solution = evaluated;
+                        }
+                        Err(error @ ChtError::SolverNotConverged {
+                            system: "energy conductivity endpoint" | "energy conductivity heat", ..
+                        }) => {
+                            accepted = false;
+                            caloric_endpoint_error = Some(error);
+                            let tighter = 0.1 * linear_enthalpy_energy.tolerance;
+                            if tighter > 0.0 { linear_enthalpy_energy.tolerance = tighter; }
+                        }
+                        Err(error) => return Err(error),
+                    }
                 }
-                return Ok((solution, next_joints, contact_defect, radiation));
+                if accepted {
+                    for (temperature, face) in surface_temperatures.iter_mut().zip(&radiation) {
+                        *temperature = face.surface_temperature_k;
+                    }
+                    return Ok((solution, next_joints, contact_defect, radiation));
+                }
             }
             if let Some(r) = &self.radiation {
                 for (temperature, face) in surface_temperatures.iter_mut().zip(&radiation) {
@@ -312,6 +400,9 @@ impl Problem {
                 system: "source-resolved surface radiation", iterations: passes,
                 relative_residual: radiation_defect, tolerance: 1.0,
             });
+        }
+        if let Some(error) = caloric_endpoint_error {
+            return Err(error);
         }
         Err(ChtError::SolverNotConverged {
             system: "source-resolved thermal conductivity/contact/storage/advection", iterations: passes,

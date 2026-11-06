@@ -5,6 +5,7 @@ use fs_lbm::conjugate::{
     AdvectiveEnthalpyField, AffineSpecificEnthalpy, ChtError, EnergySolution, ThermalFace,
     ThermalSetup,
 };
+use fs_material::phase::ResolvedHeatCapacityCurve;
 
 use super::{
     super::{Problem, invalid, poll},
@@ -23,25 +24,19 @@ impl Advection {
             boundary_j_kg: self.boundary,
         }
     }
-}
 
-impl Storage<'_> {
-    /// Linearize the actual storage chart at each fluid cell. Solids do not
-    /// receive a fake fluid Cp, and boundary calorics never use cell tangents.
-    pub(crate) fn advection(
-        &self,
+    /// The steady and transient owners share one original caloric field.
+    /// Solids receive no fluid Cp, and reservoirs use their exact enthalpy.
+    pub(crate) fn resolve(
+        curve: &ResolvedHeatCapacityCurve,
         problem: &Problem,
         temperature: &[f64],
         setup: &ThermalSetup,
         gate: &CancelGate,
-    ) -> Result<Option<Advection>, ChtError> {
-        let Some(fluid) = &problem.fluid else {
-            return Ok(None);
-        };
+    ) -> Result<Self, ChtError> {
         if temperature.len() != problem.domain.cell_count() {
             return Err(invalid("material.advection", "temperature shape mismatch"));
         }
-        let curve = &self.curves[fluid.material_index];
         let datum_k = curve.curve().knots()[0].temperature_k;
         let mut cells = Vec::with_capacity(temperature.len());
         for (cell, &t) in temperature.iter().enumerate() {
@@ -78,7 +73,31 @@ impl Storage<'_> {
             );
         }
         poll(gate)?;
-        Ok(Some(Advection { cells, boundary }))
+        Ok(Self { cells, boundary })
+    }
+}
+
+impl Storage<'_> {
+    pub(crate) fn advection(
+        &self,
+        problem: &Problem,
+        temperature: &[f64],
+        setup: &ThermalSetup,
+        gate: &CancelGate,
+    ) -> Result<Option<Advection>, ChtError> {
+        problem
+            .fluid
+            .as_ref()
+            .map(|fluid| {
+                Advection::resolve(
+                    &self.curves[fluid.material_index],
+                    problem,
+                    temperature,
+                    setup,
+                    gate,
+                )
+            })
+            .transpose()
     }
 
     /// Sum absolute *face-local* linearization errors, in joules, on both
