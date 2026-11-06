@@ -1655,7 +1655,8 @@ carries no bow geometry. The g0 reachability scan still guards
 (2000), J. Mech. Phys. Solids 48:1633-1681. Equation numbers are the paper's.
 - Friction (Eq. 21): `mu N = A k_y(T) sgn v`, set-valued in sticking, with `A = pi a^2` proportional to `N`.
 - Temperature: the heat balance of Eq. (6) per unit area. Conduction into the stationary and the moving solids uses the discrete half-space Green's function of Eqs. (10)-(14). The moving solid sees only the history within slip `8a/(3 pi)` (Eq. 16 at constant speed), with the cut pulse weighted exactly.
-- `k_y(T)` is calibrated from the steady-sliding fit (Eq. 2) through Eq. (20) (section 5.3). `SmithWoodhouse::new` certifies with an interval bound that the calibration temperature increases with speed, and refuses otherwise.
+- `k_y(T)` is calibrated from a steady-sliding curve through Eq. (20) (section 5.3): the paper's Eq. (2) fit, or the shifted power law of a `FrictionLaw` (`SteadySlidingCurve::from_friction_law` takes `ShiftedPower`, and `Hyperbolic` as exponent 1; it refuses the other laws by name). `SmithWoodhouse::new` certifies with an interval bound that the calibration temperature increases with speed, and refuses otherwise.
+- `RosinCalibration::woodhouse_galluzzo_2025_eq13(rig_solid)` names Woodhouse & Galluzzo (2025) eq. (13) with its rig. Their Fig. 1 data are this paper's steady-sliding data, so the rig is this paper's: 500 um at 3 N and a 10 um layer (section 5.3; Galluzzo, Woodhouse & Mansour 2017, Table 2). Its solids are the caller's `rig_solid`; the rig's rod and wedge were perspex (Table 1). WG2025's eq. (5) puts the rosin's `K_r`, `D_r` in that conduction term instead, which is not the measured rig.
 - Time stepping: backward Euler in the losses, with friction from the step-start temperature, over a declared uniform step. The paper uses a forward difference.
 - Refusals: a different step length, zero load, a temperature above the calibrated range, a history beyond the declared capacity (at most `MAX_HISTORY_STEPS`), and non-positive parameters.
 
@@ -1702,6 +1703,8 @@ source-card/patch replay mutation, and a no-target-field source scan.
 - **G1 Smith & Woodhouse sinusoidal sliding (Fig. 18):** clockwise loops confined to low speed, which close at the reversal as `O(h)`. The three-rung step ladder has order in [0.8, 1.2]. The temperature levels are printed and not gated: they do not reproduce Fig. 18(a) or the 75-115 K stated for a 0.25 mm radius.
 - **G0 Smith & Woodhouse:** caps, refusals and the set-valued stick/slip branch.
 - **G0 reachability scan.**
+
+`tests/sw_calibration_law.rs` (no feature) covers the calibration curves: the eq. (13) curve equals `FrictionLaw::ShiftedPower` bit for bit, `Hyperbolic` maps to rounding, the eq. (13) calibration reproduces eq. (13) through Eq. (20) at relative 1e-12 and its steady sliding approaches eq. (13), an over-fast decay and the other laws refuse by name.
 
 ## No-claim boundaries
 

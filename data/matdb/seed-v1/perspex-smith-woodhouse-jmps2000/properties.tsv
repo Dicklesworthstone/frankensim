@@ -1,0 +1,11 @@
+frankensim.matdb-source.v1
+observation	sw2000-table-1	Perspex (polymethyl methacrylate), grade not stated: the rosin-coated rod and the wedge of the paper's steady-sliding rig (Section 3.1), and the bounding solids of its steady-sliding heat balance, Eq. (20) (Section 5.1: a rosin-coated perspex rod sliding over a perspex wedge at a normal force of 3 N, with the thermal properties of perspex and rosin from Table 1); Table 1 is headed "Material properties used in simulations"	Source of the perspex column not stated in the paper	Temperature not stated for Table 1 (a simulation input at ambient)
+scalar	density	sw2000-table-1	density	1200	kg/m^3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	temperature_known	0	0	1
+scalar	thermal-conductivity	sw2000-table-1	thermal_conductivity	0.2	W/m/K	constant
+uncertainty	thermal-conductivity	unstated	-	-	-	-
+validity	thermal-conductivity	temperature_known	0	0	1
+scalar	specific-heat-capacity	sw2000-table-1	specific_heat_capacity	1460	J/kg/K	constant
+uncertainty	specific-heat-capacity	unstated	-	-	-	-
+validity	specific-heat-capacity	temperature_known	0	0	1

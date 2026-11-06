@@ -13,6 +13,7 @@ use fs_tribo::benchmark::{
     Evolution, LuGre, LuGreState, MAX_HISTORY_STEPS, RateState, RateStateState, RosinContact,
     SmithWoodhouse, SmithWoodhouseParams, SteadySlidingFit, ThermalSolid, half_space_unit_weight,
 };
+use fs_tribo::rosin_thermal::SteadySlidingCurve;
 use fs_tribo::{
     FrictionRegime, TangentialLaw, TangentialSolveConfig, TangentialStepInput, TriboError,
 };
@@ -468,7 +469,7 @@ fn sw_law(radius_m: f64, layer_m: f64, step_s: f64, history_capacity: usize) -> 
     SmithWoodhouse::new(SmithWoodhouseParams {
         rosin_density_kg_per_m3: SW_ROSIN_DENSITY,
         rosin_specific_heat_j_per_kg_k: SW_ROSIN_SPECIFIC_HEAT,
-        steady_fit: SW_FIT,
+        steady_fit: SteadySlidingCurve::Exponential(SW_FIT),
         calibration: contact,
         calibration_speed_max_mps: SW_FIT_MAX_SPEED,
         contact,
@@ -784,18 +785,25 @@ fn sw_fig18_temperature_disclosure(
     );
 }
 
+/// The paper's Eq. (2) fit with one edit, as a calibration curve.
+fn sw_fit_with(edit: impl FnOnce(&mut SteadySlidingFit)) -> SteadySlidingCurve {
+    let mut fit = SW_FIT;
+    edit(&mut fit);
+    SteadySlidingCurve::Exponential(fit)
+}
+
 #[test]
 fn g0_smith_woodhouse_cap_and_cap_plus_one() {
     let base = *sw_law(0.5e-3, 10e-6, 1e-4, 4).params();
     let ok = |p: SmithWoodhouseParams| SmithWoodhouse::new(p).is_ok();
     // Fit amplitudes are non-negative; the asymptote is positive.
     let mut p = base;
-    p.steady_fit.amplitudes[0] = 0.0;
+    p.steady_fit = sw_fit_with(|fit| fit.amplitudes[0] = 0.0);
     assert!(ok(p));
-    p.steady_fit.amplitudes[0] = 0.0_f64.next_down();
+    p.steady_fit = sw_fit_with(|fit| fit.amplitudes[0] = 0.0_f64.next_down());
     assert!(!ok(p));
     p = base;
-    p.steady_fit.asymptote = 0.0;
+    p.steady_fit = sw_fit_with(|fit| fit.asymptote = 0.0);
     assert!(!ok(p));
     p = base;
     p.contact.layer_thickness_m = 0.0;
@@ -818,11 +826,11 @@ fn g0_smith_woodhouse_cap_and_cap_plus_one() {
     assert!(!ok(p));
     // A calibration whose T_ss(v) is not certified increasing refuses.
     p = base;
-    p.steady_fit = SteadySlidingFit {
+    p.steady_fit = SteadySlidingCurve::Exponential(SteadySlidingFit {
         amplitudes: [10.0, 0.0],
         decay_speeds_mps: [0.01, 0.1],
         asymptote: 0.01,
-    };
+    });
     assert!(matches!(
         SmithWoodhouse::new(p),
         Err(TriboError::InvalidInput { .. })

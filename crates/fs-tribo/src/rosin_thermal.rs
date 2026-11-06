@@ -33,8 +33,10 @@
 //! **Calibration.** Section 5.3: `k_y(T)` is not measured. In steady sliding
 //! the heat balance reduces to Eq. (20),
 //! `mu N v = v a delta rho_r c_r T + T A K_2 sqrt(3v/(8 a D_2))`.
-//! - With the steady-sliding fit `mu(v)` of Eq. (2), Eq. (20) gives `T(v)`,
-//!   and Eq. (21) gives `k_y(v) = N mu(v)/A`.
+//! - With a steady-sliding curve `mu(v)`, Eq. (20) gives `T(v)`, and Eq. (21)
+//!   gives `k_y(v) = N mu(v)/A`. The curve is the paper's Eq. (2) fit or the
+//!   shifted power law of [`FrictionLaw::ShiftedPower`], the form of Woodhouse
+//!   & Galluzzo (2025) eq. (13); [`RosinCalibration`] names that one with its rig.
 //! - Together they define `k_y(T)` parametrically.
 //! - That inversion needs `T(v)` to be increasing. Construction certifies
 //!   this with an interval bound over the declared calibration range, and
@@ -61,7 +63,7 @@
 
 use crate::tangential::{TangentialLaw, TangentialStep, TangentialStepInput};
 use crate::{
-    FrictionRegime, TriboError, checked_add, checked_mul, finite, nonnegative_finite,
+    FrictionLaw, FrictionRegime, TriboError, checked_add, checked_mul, finite, nonnegative_finite,
     positive_finite,
 };
 use core::f64::consts::PI;
@@ -236,6 +238,197 @@ impl SteadySlidingFit {
     }
 }
 
+/// Steady-sliding curve `mu(V)` that the calibration inverts through Eq. (20).
+/// Both forms are non-increasing in speed, so `mu(w)` at the right end of an
+/// interval bounds `mu` below on it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum SteadySlidingCurve {
+    /// The paper's Eq. (2).
+    Exponential(SteadySlidingFit),
+    /// `mu(V) = kinetic_mu + (static_mu - kinetic_mu) (1 + V/v0)^(-exponent)`,
+    /// the curve of [`FrictionLaw::ShiftedPower`] with the same operations,
+    /// so it equals that law bit for bit. Woodhouse & Galluzzo (2025)
+    /// eq. (13) is this form.
+    ShiftedPower {
+        /// Coefficient at zero speed, positive.
+        static_mu: f64,
+        /// High-speed asymptote, `0 <= kinetic_mu <= static_mu`.
+        kinetic_mu: f64,
+        /// `v0` [m/s], positive.
+        characteristic_speed_mps: f64,
+        /// `n`, positive.
+        exponent: f64,
+    },
+}
+
+impl SteadySlidingCurve {
+    /// The steady-sliding curve of a memoryless [`FrictionLaw`]:
+    /// `ShiftedPower` as itself and `Hyperbolic` as `exponent = 1` (equal to
+    /// rounding, since that law has its own quotient form).
+    ///
+    /// # Errors
+    /// An invalid law, or any other law, refused by name: `Coulomb` would make
+    /// `k_y` constant, `VelocityDependent` and viscous `Stribeck` curves can
+    /// rise with speed, and `Stribeck`'s Gaussian decay is not bounded here.
+    pub fn from_friction_law(law: &FrictionLaw) -> Result<Self, TriboError> {
+        law.validate()?;
+        let curve = match *law {
+            FrictionLaw::ShiftedPower {
+                static_mu,
+                kinetic_mu,
+                characteristic_speed,
+                exponent,
+            } => Self::ShiftedPower {
+                static_mu,
+                kinetic_mu,
+                characteristic_speed_mps: characteristic_speed,
+                exponent,
+            },
+            FrictionLaw::Hyperbolic {
+                static_mu,
+                kinetic_mu,
+                characteristic_speed,
+            } => Self::ShiftedPower {
+                static_mu,
+                kinetic_mu,
+                characteristic_speed_mps: characteristic_speed,
+                exponent: 1.0,
+            },
+            FrictionLaw::Coulomb { .. }
+            | FrictionLaw::VelocityDependent { .. }
+            | FrictionLaw::Stribeck { .. } => {
+                return Err(TriboError::InvalidInput {
+                    field: "smith_woodhouse_calibration_curve_unsupported_law",
+                });
+            }
+        };
+        curve.validate()?;
+        Ok(curve)
+    }
+
+    fn validate(&self) -> Result<(), TriboError> {
+        match *self {
+            Self::Exponential(fit) => fit.validate(),
+            Self::ShiftedPower {
+                static_mu,
+                kinetic_mu,
+                characteristic_speed_mps,
+                exponent,
+            } => {
+                positive_finite(static_mu, "smith_woodhouse_curve_static_mu")?;
+                nonnegative_finite(kinetic_mu, "smith_woodhouse_curve_kinetic_mu")?;
+                if kinetic_mu > static_mu {
+                    return Err(TriboError::InvalidInput {
+                        field: "smith_woodhouse_curve_kinetic_mu_above_static",
+                    });
+                }
+                positive_finite(characteristic_speed_mps, "smith_woodhouse_curve_speed")?;
+                positive_finite(exponent, "smith_woodhouse_curve_exponent")
+            }
+        }
+    }
+
+    /// Steady-sliding coefficient at speed `|v|` [m/s].
+    #[must_use]
+    pub fn coefficient(&self, v: f64) -> f64 {
+        match *self {
+            Self::Exponential(fit) => fit.coefficient(v),
+            Self::ShiftedPower {
+                static_mu,
+                kinetic_mu,
+                characteristic_speed_mps,
+                exponent,
+            } => {
+                let decay = det::pow(1.0 + v.abs() / characteristic_speed_mps, -exponent);
+                kinetic_mu + (static_mu - kinetic_mu) * decay
+            }
+        }
+    }
+
+    /// An upper bound of `-w mu'(w)` on `[lo, hi]`. Each term is `c g(w/V)`
+    /// with `g` unimodal (`x e^{-x}`, peak at 1; `x (1+x)^{-n-1}`, peak at
+    /// `1/n`), bounded by its value at the peak or at the nearer end.
+    fn weakening_bound(&self, lo: f64, hi: f64) -> f64 {
+        let unimodal_max = |g: &dyn Fn(f64) -> f64, a: f64, b: f64, peak: f64| -> f64 {
+            if a <= peak && peak <= b {
+                g(peak)
+            } else if b < peak {
+                g(b)
+            } else {
+                g(a)
+            }
+        };
+        match *self {
+            Self::Exponential(fit) => fit
+                .amplitudes
+                .iter()
+                .zip(fit.decay_speeds_mps)
+                .map(|(c, v)| c * unimodal_max(&|x| x * det::exp(-x), lo / v, hi / v, 1.0))
+                .sum(),
+            Self::ShiftedPower {
+                static_mu,
+                kinetic_mu,
+                characteristic_speed_mps: v0,
+                exponent: n,
+            } => {
+                let g = |x: f64| x * det::pow(1.0 + x, -n - 1.0);
+                n * (static_mu - kinetic_mu) * unimodal_max(&g, lo / v0, hi / v0, 1.0 / n)
+            }
+        }
+    }
+}
+
+/// A named steady-sliding calibration: the curve, the rig it was measured on,
+/// and the measured speed range.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RosinCalibration {
+    /// Steady-sliding curve.
+    pub curve: SteadySlidingCurve,
+    /// The rig; its `reference_normal_n` is the rig load.
+    pub rig: RosinContact,
+    /// Upper end [m/s] of the measured speed range.
+    pub speed_max_mps: f64,
+}
+
+impl RosinCalibration {
+    /// Woodhouse & Galluzzo (2025) eq. (13), `mu = 0.2 (|v| + 0.011)^-0.4`
+    /// ([`FrictionLaw::rosin_woodhouse_galluzzo_2025_eq13`]): their revised fit
+    /// to the steady-sliding measurements of their Fig. 1, which span about
+    /// 0.3 m/s. Those are this paper's steady-sliding data: WG2025's eq. (1),
+    /// static 1.2 and asymptote 0.35, is this paper's Eq. (2) fit to them.
+    ///
+    /// So the rig is this paper's steady-sliding rig: contact radius 500 um
+    /// at 3 N and layer thickness 10 um (section 5.3; the "steady sliding"
+    /// column of Table 2 of Galluzzo, Woodhouse & Mansour 2017, Acta Acustica
+    /// 103:1080-1099). Both bounding solids are the caller's `rig_solid`. That
+    /// rig's rod and wedge were perspex (Table 1), and Eq. (20) conducts into
+    /// them. WG2025's eq. (5) writes the rosin's own `K_r` and `D_r` there
+    /// instead; that is not the rig the data were measured on.
+    ///
+    /// # Errors
+    /// Non-positive `rig_solid` properties.
+    pub fn woodhouse_galluzzo_2025_eq13(rig_solid: ThermalSolid) -> Result<Self, TriboError> {
+        const RIG_RADIUS_M: f64 = 500e-6;
+        const RIG_LOAD_N: f64 = 3.0;
+        const RIG_LAYER_M: f64 = 10e-6;
+        const MEASURED_SPEED_MAX_MPS: f64 = 0.3;
+        rig_solid.validate()?;
+        Ok(Self {
+            curve: SteadySlidingCurve::from_friction_law(
+                &FrictionLaw::rosin_woodhouse_galluzzo_2025_eq13(),
+            )?,
+            rig: RosinContact {
+                radius_m: RIG_RADIUS_M,
+                reference_normal_n: RIG_LOAD_N,
+                layer_thickness_m: RIG_LAYER_M,
+                stationary: rig_solid,
+                moving: rig_solid,
+            },
+            speed_max_mps: MEASURED_SPEED_MAX_MPS,
+        })
+    }
+}
+
 /// Every input of [`SmithWoodhouse`]. Nothing is defaulted.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SmithWoodhouseParams {
@@ -243,8 +436,9 @@ pub struct SmithWoodhouseParams {
     pub rosin_density_kg_per_m3: f64,
     /// Rosin effective specific heat `c_r` [J/kg/K], positive.
     pub rosin_specific_heat_j_per_kg_k: f64,
-    /// Steady-sliding curve used for calibration (Eq. 2).
-    pub steady_fit: SteadySlidingFit,
+    /// Steady-sliding curve used for calibration: Eq. (2), or a
+    /// [`FrictionLaw`] curve such as Woodhouse & Galluzzo (2025) eq. (13).
+    pub steady_fit: SteadySlidingCurve,
     /// Steady-sliding rig; its `reference_normal_n` is the rig load.
     pub calibration: RosinContact,
     /// Upper end [m/s] of the calibration speed range. `k_y(T)` is defined
@@ -374,33 +568,20 @@ impl SmithWoodhouse {
 
     /// `d T_ss/dw > 0` on `(0, w_max]` is equivalent to
     /// `2 (-w mu')(1 + (alpha/gamma) sqrt(w)) < mu`. On each piece of a
-    /// uniform partition the left side is bounded above (each `x e^{-x}` by
-    /// its interval maximum) and `mu` below (by its value at the right end).
+    /// uniform partition the left side is bounded above (each unimodal
+    /// weakening term by its interval maximum) and `mu` below (by its value at
+    /// the right end).
     fn certify_calibration(&self) -> Result<(), TriboError> {
-        let fit = &self.params.steady_fit;
+        let curve = &self.params.steady_fit;
         let max = self.params.calibration_speed_max_mps;
-        let x_exp_max = |lo: f64, hi: f64| -> f64 {
-            if lo <= 1.0 && 1.0 <= hi {
-                det::exp(-1.0)
-            } else if hi < 1.0 {
-                hi * det::exp(-hi)
-            } else {
-                lo * det::exp(-lo)
-            }
-        };
         #[allow(clippy::cast_precision_loss)]
         let pieces = CERTIFICATE_PIECES as f64;
         for i in 0..CERTIFICATE_PIECES {
             #[allow(clippy::cast_precision_loss)]
             let (lo, hi) = (max * i as f64 / pieces, max * (i + 1) as f64 / pieces);
-            let slope: f64 = fit
-                .amplitudes
-                .iter()
-                .zip(fit.decay_speeds_mps)
-                .map(|(c, v)| c * x_exp_max(lo / v, hi / v))
-                .sum();
+            let slope = curve.weakening_bound(lo, hi);
             let bound = 2.0 * slope * (1.0 + self.alpha / self.gamma * det::sqrt(hi));
-            if !(bound < fit.coefficient(hi)) {
+            if !(bound < curve.coefficient(hi)) {
                 return Err(TriboError::InvalidInput {
                     field: "smith_woodhouse_calibration_temperature_not_certified_increasing",
                 });
