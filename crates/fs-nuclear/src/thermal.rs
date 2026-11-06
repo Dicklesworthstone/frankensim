@@ -52,8 +52,14 @@ pub use diffusion::{
 
 mod fusion_neutrons;
 pub use fusion_neutrons::{
-    FusionNeutronPulse, NeutronKineticCellSource, NeutronKineticCellStep,
+    FusionNeutronForcing, FusionNeutronPulse, NeutronKineticCellSource, NeutronKineticCellStep,
     NeutronKineticHeating,
+};
+
+mod fusion_activation;
+pub use fusion_activation::{
+    FusionNeutronActivationCellSource, FusionNeutronActivationCellStep,
+    FusionNeutronActivationHeating,
 };
 
 mod transport;
@@ -237,6 +243,8 @@ pub enum FissionThermalError {
     Diffusion(DiffusionBurnupError),
     /// Original neutron kinetic-energy source, transport or accounting refusal.
     NeutronKinetic(crate::fusion_neutrons::NeutronKineticError),
+    /// Finite fusion-neutron activation or combined energy-account refusal.
+    FusionActivation(crate::fusion_neutrons::activation::FusionNeutronActivationError),
     /// Original radiation response, coverage, work or energy-account refusal.
     Radiation(RadiationError),
     /// Malformed schedule, duplicate owner or inconsistent hook sequence.
@@ -351,6 +359,7 @@ impl std::error::Error for FissionThermalError {
             Self::Activation(error) => Some(error),
             Self::Diffusion(error) => Some(error),
             Self::NeutronKinetic(error) => Some(error),
+            Self::FusionActivation(error) => Some(error),
             Self::Radiation(error) => Some(error),
             _ => None,
         }

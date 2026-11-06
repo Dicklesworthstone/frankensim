@@ -30,6 +30,9 @@ mod diffusion_tests;
 #[path = "fusion_neutrons/tests.rs"]
 mod fusion_neutrons_tests;
 
+#[path = "fusion_activation/tests.rs"]
+mod fusion_activation_tests;
+
 #[path = "transport/tests.rs"]
 mod transport_tests;
 

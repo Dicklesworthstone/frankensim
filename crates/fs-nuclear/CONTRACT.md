@@ -21,6 +21,12 @@ the last emission. Per-cell heat, radiation, leakage, source moments and global
 storage are accumulated independently. A late cancellation or exhausted work
 or account budget publishes no intermediate physical state.
 
+The material adapter's `bind_with_history` uses the same forcing through the
+existing `NuclearHeating` cohort transaction. Pulse and accepted-history forcing
+remain explicit variants; `pulse()` and `history()` return optional references
+to the retained original data. Original thermal material and geometry admission,
+source transitions and shared-clock checks remain mandatory.
+
 Accepted intervals resolve the evolving burn only to the supplied temporal
 resolution. Uniform emission within each retained interval and projection of
 each channel to its mean energy remain declared approximations. Refining burn
@@ -30,6 +36,8 @@ analytic solution, distinguish equal-yield sources with different timing,
 and check concurrent cells, restart, source-off evolution and atomic refusal.
 `fusion_neutron_history` runs two actual D-T histories through spatial neutron
 transport and a source-off tail using explicitly illustrative coefficients.
+`fusion_neutron_water` now drives the original IF97 receiver from accepted burn
+intervals rather than a whole-burn constant source.
 
 ## Fusion-neutron transport and material heat
 
@@ -67,9 +75,9 @@ reference volumes, cancellation and atomic material/source publication remain
 mandatory. Only the local deposited channel becomes material heat.
 
 `NeutronKineticState` alone is a bounded nonmultiplying kinetic-energy model
-with fixed authored group data. It supplies no nuclear capture Q, activation/depletion, changes
-of material mass/composition, temperature feedback to cross sections,
-upscatter, fission, delayed-neutron production or photon transport. Effective
+with fixed authored group data. It supplies no nuclear capture Q,
+activation/depletion, changes of material mass/composition, temperature feedback
+to cross sections, upscatter, fission, delayed-neutron production or photon transport. Effective
 speeds/cross sections and representative energies must have compatible physical
 averaging. The original diffusion approximation does not resolve angular or
 near-void streaming; see the primary
@@ -116,6 +124,32 @@ solution, source-free radioactive cooling, evolving capture data and spatial
 energy accounts. Interval-mean flux and target populations remain the original
 owner's approximations; convergence of reaction counts is not a temporal-error
 bound, and physical timestep refinement remains necessary.
+
+## Fusion activation on the shared material clock
+
+With `thermal`, `FusionNeutronActivationHeating` uses the existing
+`NuclearHeating` transaction and original material calorics. A complete cohort
+binds one accepted activation checkpoint and one immutable `FusionNeutronForcing`
+to distinct original thermal cells. Pulse and accepted-history transitions clip
+the native interval; restarting does not replay earlier emissions. Cell
+temperatures are reordered into the original spatial order before the single
+coupled trial, so authored capture tables see the correct material environment.
+
+Only the combined deposited channel becomes heat. The accepted cell report
+retains separate kinetic and nuclear reports; the original burnup counters
+report finite captures, decays and supplied nuclei. Fixed-background captures
+remain in the neutron report. Shared numerical energy and neutron-source
+defects are charged once per cohort, independent of thermal cell ordering.
+Radiation remains separate unless the existing explicit radiation-response
+owner is attached. Source-off product decay continues on the same clock.
+
+Complete coverage, original volume/material/mass binding, temperature domain,
+accepted clock and atomic cancellation rules remain those of the existing
+owners. The native thermal step limit also bounds frozen-temperature and
+mean-flux intervals; source transitions alone do not establish temporal accuracy
+or guarantee a representable stiff propagator. G1/G3/G4 thermal regressions
+cover material heating against direct native activation, delayed heat with no
+remaining neutrons, restart and whole-cohort refusal/cancellation.
 
 ## Prescribed fission, finite inventory and delayed energy
 

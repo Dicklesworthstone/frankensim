@@ -172,6 +172,163 @@ fn bound(
     .unwrap()
 }
 
+fn accepted_history(
+    state: &NeutronKineticState,
+) -> Arc<crate::fusion_neutrons::history::FusionNeutronHistory> {
+    use crate::fusion_neutrons::history::{
+        FusionNeutronHistory, FusionNeutronHistoryEntry, FusionNeutronHistoryLimits,
+    };
+    use fs_thermochem::fusion::neutrons::FusionNeutronIntervalV1;
+    let intervals = [
+        (0, 0.0, 0.25, 4.0, 4.0),
+        (0, 0.25, 0.75, 8.0, 2.0),
+        (1, 0.125, 0.625, 2.0, 4.0),
+    ];
+    let entries = intervals
+        .into_iter()
+        .map(|(cell, start, end, count, mean)| {
+            let amount = Amount::new(count / 6.022_140_76e23);
+            let emission = FusionNeutronEmissionV1::new(
+                Time::new(end - start),
+                [amount, Amount::new(0.0)],
+                [
+                    Energy::new((amount.value() * 6.022_140_76e23) * mean),
+                    Energy::new(0.0),
+                ],
+            )
+            .unwrap();
+            FusionNeutronHistoryEntry {
+                cell,
+                interval: FusionNeutronIntervalV1::new(Time::new(start), Time::new(end), emission)
+                    .unwrap(),
+            }
+        })
+        .collect();
+    Arc::new(
+        FusionNeutronHistory::project(
+            Arc::clone(state.model()),
+            entries,
+            FusionNeutronHistoryLimits::default(),
+        )
+        .unwrap(),
+    )
+}
+
+#[test]
+fn accepted_multicell_history_heats_original_materials_from_the_same_neutron_steps() {
+    use crate::fusion_neutrons::history::NeutronKineticHistoryBudget;
+    let initial = two_cells();
+    let state = spatial_state();
+    let history = accepted_history(&state);
+    let sources = NeutronKineticCellSource::bind_with_history(
+        Arc::clone(&state),
+        Time::new(0.0),
+        vec![(CellId(20), MaterialId(1)), (CellId(10), MaterialId(2))],
+        Arc::clone(&history),
+    )
+    .unwrap();
+    let heating = NeutronKineticHeating::new(&initial, sources, neutron_budget()).unwrap();
+    let (hot, accepted, _) = heating
+        .advance_to(&initial, 1.0, controls(1.0), || Ok(()))
+        .unwrap();
+    let (direct, report) = state
+        .trial_with_history(
+            Time::new(0.0),
+            Time::new(1.0),
+            &history,
+            NeutronKineticHistoryBudget {
+                transport: neutron_budget(),
+                maximum_step_s: 1.0,
+                maximum_substeps: 100,
+            },
+            || Ok(()),
+        )
+        .unwrap();
+    let left = accepted.source(CellId(20)).unwrap();
+    let right = accepted.source(CellId(10)).unwrap();
+    assert!(Arc::ptr_eq(left.state(), right.state()));
+    assert!(Arc::ptr_eq(left.history().unwrap(), &history));
+    assert!(left.pulse().is_none());
+    for (a, b) in left
+        .state()
+        .neutrons()
+        .neutron_counts()
+        .iter()
+        .zip(direct.neutrons().neutron_counts())
+    {
+        close(*a, *b, 1e-9);
+    }
+    close(
+        hot.energy_j() - initial.energy_j(),
+        report.released.deposited_j,
+        1e-8,
+    );
+    close(
+        accepted.audit().thermal_credit_j,
+        report.released.deposited_j,
+        1e-8,
+    );
+    close(
+        accepted.cumulative_released().unwrap().radiation_j,
+        report.released.radiation_j,
+        1e-8,
+    );
+    assert_eq!(accepted.audit().substeps, report.substeps);
+    assert_eq!(
+        accepted
+            .last_step(CellId(20))
+            .unwrap()
+            .spatial()
+            .diffusion
+            .injected_neutrons,
+        0.0
+    );
+    assert_eq!(initial.time_s(), 0.0);
+}
+
+#[test]
+fn accepted_history_restart_preserves_material_heat_and_rejects_mixed_cohorts() {
+    let initial = two_cells();
+    let state = spatial_state();
+    let history = accepted_history(&state);
+    let bindings = vec![(CellId(20), MaterialId(1)), (CellId(10), MaterialId(2))];
+    let sources = NeutronKineticCellSource::bind_with_history(
+        Arc::clone(&state),
+        Time::new(0.0),
+        bindings.clone(),
+        Arc::clone(&history),
+    )
+    .unwrap();
+    let heating = NeutronKineticHeating::new(&initial, sources.clone(), neutron_budget()).unwrap();
+    let (whole, end, _) = heating
+        .advance_to(&initial, 1.0, controls(1.0), || Ok(()))
+        .unwrap();
+    let (middle, running, _) = heating
+        .advance_to(&initial, 0.4, controls(1.0), || Ok(()))
+        .unwrap();
+    let (split, continued, _) = running
+        .advance_to(&middle, 1.0, controls(1.0), || Ok(()))
+        .unwrap();
+    close(whole.energy_j(), split.energy_j(), 1e-8);
+    close(
+        end.cumulative_released().unwrap().deposited_j,
+        continued.cumulative_released().unwrap().deposited_j,
+        1e-8,
+    );
+    let another = accepted_history(&state);
+    let other =
+        NeutronKineticCellSource::bind_with_history(state, Time::new(0.0), bindings, another)
+            .unwrap();
+    assert!(
+        NeutronKineticHeating::new(
+            &initial,
+            vec![sources[0].clone(), other[1].clone()],
+            neutron_budget()
+        )
+        .is_err()
+    );
+}
+
 #[test]
 fn g1_finite_fusion_pulse_heats_original_material_only_after_capture() {
     let initial = one_cell(3.0);
@@ -220,7 +377,7 @@ fn g1_finite_fusion_pulse_heats_original_material_only_after_capture() {
     assert_eq!(last.spatial().diffusion.injected_neutrons, 0.0);
     assert_eq!(last.source_number_residual(), 0.0);
     assert_eq!(last.source_energy_residual_j(), 0.0);
-    assert!(Arc::ptr_eq(last.pulse(), &pulse));
+    assert!(Arc::ptr_eq(last.pulse().unwrap(), &pulse));
     close(
         pulse.source().emission().total_kinetic_energy().value(),
         32.0,
@@ -242,7 +399,7 @@ fn g1_spatial_slowing_capture_radiation_leakage_and_heat_share_one_advance() {
     let left = accepted.source(CellId(20)).unwrap();
     let right = accepted.source(CellId(10)).unwrap();
     assert!(Arc::ptr_eq(left.state(), right.state()));
-    assert!(Arc::ptr_eq(left.pulse(), right.pulse()));
+    assert!(Arc::ptr_eq(left.pulse().unwrap(), right.pulse().unwrap()));
     assert!(core::ptr::eq(
         accepted.last_step(CellId(20)).unwrap().spatial(),
         accepted.last_step(CellId(10)).unwrap().spatial(),

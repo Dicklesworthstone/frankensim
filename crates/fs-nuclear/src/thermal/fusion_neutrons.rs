@@ -3,8 +3,9 @@
 //! One complete spatial cohort advances the original neutron owner once per
 //! accepted thermal interval. Its local heat reaches the bound material cells;
 //! neutron storage, outgoing radiation and leakage retain their own accounts.
-//! The retained fusion pulse explicitly uses its original interval-uniform,
-//! channel-mean projection. This adapter supplies no new nuclear data or
+//! A single pulse or accepted-interval history retains its original channel
+//! moments. Each source interval uses an explicit uniform/mean-energy projection.
+//! This adapter supplies no new nuclear data or
 //! temperature feedback to the authored neutron cross sections.
 
 use std::{collections::BTreeSet, sync::Arc};
@@ -12,8 +13,10 @@ use std::{collections::BTreeSet, sync::Arc};
 use super::source::{NuclearHeatSource, sealed};
 use super::{FissionThermalError, NuclearHeating, finite, nonnegative};
 use crate::diffusion::DiffusionReactionKind;
+use crate::fusion_neutrons::history::FusionNeutronHistory;
 use crate::fusion_neutrons::{
-    FusionNeutronSource, NeutronKineticBudget, NeutronKineticState, NeutronKineticStep,
+    FusionNeutronSource, NeutronKineticBudget, NeutronKineticModel, NeutronKineticState,
+    NeutronKineticStep,
 };
 use crate::{EnergyChannels, FissionError};
 use fs_qty::Time;
@@ -92,6 +95,81 @@ impl FusionNeutronPulse {
     }
 }
 
+/// Original immutable forcing retained by a complete neutron/thermal cohort.
+/// Histories retain changing emission in every emitting cell, while Pulse is
+/// the explicitly uniform single-interval source supported by the original API.
+#[derive(Clone, Debug)]
+pub enum FusionNeutronForcing {
+    Pulse(Arc<FusionNeutronPulse>),
+    History(Arc<FusionNeutronHistory>),
+}
+
+impl FusionNeutronForcing {
+    pub(super) fn model(&self) -> &Arc<NeutronKineticModel> {
+        match self {
+            Self::Pulse(pulse) => pulse.source().model(),
+            Self::History(history) => history.model(),
+        }
+    }
+    pub(super) fn rates_at(&self, time_s: f64) -> Result<&[f64], FissionThermalError> {
+        match self {
+            Self::Pulse(pulse) => pulse.rates_at(Time::new(time_s)),
+            Self::History(history) => Ok(history.rates_at(Time::new(time_s))?),
+        }
+    }
+    pub(super) fn next_after(&self, time_s: f64) -> Option<f64> {
+        match self {
+            Self::Pulse(pulse) => pulse.next_after(time_s),
+            Self::History(history) => history
+                .next_after(Time::new(time_s))
+                .map(|time| time.value()),
+        }
+    }
+    pub(super) fn interval_moments(
+        &self,
+        time_s: f64,
+        duration_s: f64,
+    ) -> Result<(f64, f64), FissionThermalError> {
+        match self {
+            Self::Pulse(pulse) => {
+                let fraction = if pulse.active_at(time_s) {
+                    duration_s / pulse.source.emission().duration().value()
+                } else {
+                    0.0
+                };
+                Ok((
+                    finite(pulse.source.emission().total_particle_count() * fraction)?,
+                    finite(pulse.source.emission().total_kinetic_energy().value() * fraction)?,
+                ))
+            }
+            Self::History(history) => {
+                Ok(history.interval_moments(Time::new(time_s), Time::new(duration_s))?)
+            }
+        }
+    }
+    pub(super) fn same_history(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Pulse(a), Self::Pulse(b)) => Arc::ptr_eq(a, b),
+            (Self::History(a), Self::History(b)) => Arc::ptr_eq(a, b),
+            _ => false,
+        }
+    }
+    pub fn pulse(&self) -> Option<&Arc<FusionNeutronPulse>> {
+        if let Self::Pulse(pulse) = self {
+            Some(pulse)
+        } else {
+            None
+        }
+    }
+    pub fn history(&self) -> Option<&Arc<FusionNeutronHistory>> {
+        if let Self::History(history) = self {
+            Some(history)
+        } else {
+            None
+        }
+    }
+}
+
 /// A handle to one cell of a complete immutable neutron/thermal cohort.
 #[derive(Clone, Debug)]
 pub struct NeutronKineticCellSource {
@@ -99,7 +177,7 @@ pub struct NeutronKineticCellSource {
     material_id: MaterialId,
     cell_index: usize,
     state: Arc<NeutronKineticState>,
-    pulse: Arc<FusionNeutronPulse>,
+    forcing: FusionNeutronForcing,
     // Preserve the native start/duration pair. The thermal owner either adds
     // that duration or snaps to the authored endpoint from which it subtracted
     // the duration; those two floating-point paths need not agree bitwise.
@@ -115,7 +193,7 @@ pub type NeutronKineticHeating = NuclearHeating<NeutronKineticCellSource>;
 pub struct NeutronKineticCellStep {
     cell_index: usize,
     spatial: Arc<NeutronKineticStep>,
-    pulse: Arc<FusionNeutronPulse>,
+    forcing: FusionNeutronForcing,
     start_s: f64,
     captures: f64,
     capture_roundoff: f64,
@@ -130,8 +208,14 @@ impl NeutronKineticCellStep {
     pub fn spatial(&self) -> &NeutronKineticStep {
         &self.spatial
     }
-    pub const fn pulse(&self) -> &Arc<FusionNeutronPulse> {
-        &self.pulse
+    pub const fn forcing(&self) -> &FusionNeutronForcing {
+        &self.forcing
+    }
+    pub fn pulse(&self) -> Option<&Arc<FusionNeutronPulse>> {
+        self.forcing.pulse()
+    }
+    pub fn history(&self) -> Option<&Arc<FusionNeutronHistory>> {
+        self.forcing.history()
     }
     pub const fn start(&self) -> Time {
         Time::new(self.start_s)
@@ -157,9 +241,38 @@ impl NeutronKineticCellSource {
         cells: Vec<(CellId, MaterialId)>,
         pulse: Arc<FusionNeutronPulse>,
     ) -> Result<Vec<Self>, FissionThermalError> {
+        Self::bind_forcing(
+            state,
+            accepted_time,
+            cells,
+            FusionNeutronForcing::Pulse(pulse),
+        )
+    }
+    /// Bind time-resolved, possibly concurrent emission in multiple cells.
+    /// The original thermal clock clips every retained source transition; no
+    /// earlier source history is replayed when binding an accepted checkpoint.
+    pub fn bind_with_history(
+        state: Arc<NeutronKineticState>,
+        accepted_time: Time,
+        cells: Vec<(CellId, MaterialId)>,
+        history: Arc<FusionNeutronHistory>,
+    ) -> Result<Vec<Self>, FissionThermalError> {
+        Self::bind_forcing(
+            state,
+            accepted_time,
+            cells,
+            FusionNeutronForcing::History(history),
+        )
+    }
+    fn bind_forcing(
+        state: Arc<NeutronKineticState>,
+        accepted_time: Time,
+        cells: Vec<(CellId, MaterialId)>,
+        forcing: FusionNeutronForcing,
+    ) -> Result<Vec<Self>, FissionThermalError> {
         if !nonnegative(accepted_time.value())
             || cells.len() != state.model().diffusion().cell_count()
-            || **state.model() != **pulse.source().model()
+            || **state.model() != **forcing.model()
         {
             return Err(FissionThermalError::Invalid(
                 "matching neutron source model, complete thermal cell map and finite accepted time required",
@@ -178,7 +291,7 @@ impl NeutronKineticCellSource {
                 material_id,
                 cell_index,
                 state: Arc::clone(&state),
-                pulse: Arc::clone(&pulse),
+                forcing: forcing.clone(),
                 accepted_start_s: accepted_time.value(),
                 accepted_duration_s: 0.0,
             });
@@ -188,8 +301,14 @@ impl NeutronKineticCellSource {
     pub const fn state(&self) -> &Arc<NeutronKineticState> {
         &self.state
     }
-    pub const fn pulse(&self) -> &Arc<FusionNeutronPulse> {
-        &self.pulse
+    pub const fn forcing(&self) -> &FusionNeutronForcing {
+        &self.forcing
+    }
+    pub fn pulse(&self) -> Option<&Arc<FusionNeutronPulse>> {
+        self.forcing.pulse()
+    }
+    pub fn history(&self) -> Option<&Arc<FusionNeutronHistory>> {
+        self.forcing.history()
     }
     pub const fn cell_index(&self) -> usize {
         self.cell_index
@@ -229,7 +348,7 @@ impl NuclearHeatSource for NeutronKineticCellSource {
         Some(budget.diffusion.population_tolerance)
     }
     fn next_transition(&self, time_s: f64) -> Option<f64> {
-        self.pulse.next_after(time_s)
+        self.forcing.next_after(time_s)
     }
     fn admit(
         &self,
@@ -240,12 +359,8 @@ impl NuclearHeatSource for NeutronKineticCellSource {
         self.admit_time(time_s)?;
         self.validate_temperature(temperature_k)?;
         if self.cell_index == 0 {
-            self.state.trial_with_rates(
-                0.0,
-                self.pulse.rates_at(Time::new(time_s))?,
-                budget,
-                || Ok(()),
-            )?;
+            self.state
+                .trial_with_rates(0.0, self.forcing.rates_at(time_s)?, budget, || Ok(()))?;
         }
         Ok(())
     }
@@ -278,7 +393,7 @@ impl NuclearHeatSource for NeutronKineticCellSource {
         for source in std::iter::once(first).chain(sources) {
             checkpoint()?;
             if !Arc::ptr_eq(&first.state, &source.state)
-                || !Arc::ptr_eq(&first.pulse, &source.pulse)
+                || !first.forcing.same_history(&source.forcing)
                 || first.accepted_start_s != source.accepted_start_s
                 || first.accepted_duration_s != source.accepted_duration_s
                 || source.cell_index >= count
@@ -327,7 +442,7 @@ impl NuclearHeatSource for NeutronKineticCellSource {
             ));
         }
         if first
-            .pulse
+            .forcing
             .next_after(time_s)
             .is_some_and(|next| duration_s > next - time_s)
         {
@@ -341,23 +456,14 @@ impl NuclearHeatSource for NeutronKineticCellSource {
         }
         let (state, report) = first.state.trial_with_rates(
             duration_s,
-            first.pulse.rates_at(Time::new(time_s))?,
+            first.forcing.rates_at(time_s)?,
             budget,
             &mut *checkpoint,
         )?;
-        let fraction = if first.pulse.active_at(time_s) {
-            duration_s / first.pulse.source.emission().duration().value()
-        } else {
-            0.0
-        };
-        let source_number_residual = finite(
-            report.diffusion.injected_neutrons
-                - first.pulse.source.emission().total_particle_count() * fraction,
-        )?;
-        let source_energy_residual_j = finite(
-            report.injected_kinetic_energy_j
-                - first.pulse.source.emission().total_kinetic_energy().value() * fraction,
-        )?;
+        let (expected_number, expected_energy) =
+            first.forcing.interval_moments(time_s, duration_s)?;
+        let source_number_residual = finite(report.diffusion.injected_neutrons - expected_number)?;
+        let source_energy_residual_j = finite(report.injected_kinetic_energy_j - expected_energy)?;
         if finite(report.energy_roundoff_j + source_energy_residual_j.abs())?
             > budget.energy_tolerance_j
             || finite(report.diffusion.population_roundoff + source_number_residual.abs())?
@@ -406,7 +512,7 @@ impl NuclearHeatSource for NeutronKineticCellSource {
                 NeutronKineticCellStep {
                     cell_index: source.cell_index,
                     spatial: Arc::clone(&spatial),
-                    pulse: Arc::clone(&source.pulse),
+                    forcing: source.forcing.clone(),
                     start_s: time_s,
                     captures: captures[source.cell_index].value()?,
                     capture_roundoff: captures[source.cell_index].export_roundoff()?,

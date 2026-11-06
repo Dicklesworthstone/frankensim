@@ -17,11 +17,12 @@ use fs_nuclear::diffusion::{
     DiffusionBudget, DiffusionData, DiffusionLimits, DiffusionModel, DiffusionReaction,
     DiffusionReactionKind, LeakageBoundary,
 };
-use fs_nuclear::fusion_neutrons::{
-    FusionNeutronSource, NeutronKineticBudget, NeutronKineticModel, NeutronKineticState,
+use fs_nuclear::fusion_neutrons::history::{
+    FusionNeutronHistory, FusionNeutronHistoryEntry, FusionNeutronHistoryLimits,
 };
+use fs_nuclear::fusion_neutrons::{NeutronKineticBudget, NeutronKineticModel, NeutronKineticState};
 use fs_nuclear::irradiation::NeutronGroups;
-use fs_nuclear::thermal::{FusionNeutronPulse, NeutronKineticCellSource, NeutronKineticHeating};
+use fs_nuclear::thermal::{NeutronKineticCellSource, NeutronKineticHeating};
 use fs_qty::{Power, Pressure, Temperature, Time};
 use fs_thermal::enthalpy::{
     Boundary, CellGeometry, CellId, DepositedCell, DepositionBudget, DepositionSimulation, Event,
@@ -48,6 +49,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         },
     );
     controls.relative_tolerance = 1e-8;
+    controls.record_neutron_history = true;
     let burn = advance_dt_fusion(
         &initial,
         &plasma,
@@ -176,14 +178,21 @@ fn main() -> Result<(), Box<dyn Error>> {
         energies.to_vec(),
         fractions,
     )?);
-    let source = FusionNeutronSource::project_interval_mean(Arc::clone(&model), emission, 0)?;
-    let pulse = Arc::new(FusionNeutronPulse::new(Time::new(0.0), source)?);
+    let history = Arc::new(FusionNeutronHistory::project(
+        Arc::clone(&model),
+        burn.neutron_history()
+            .expect("requested accepted history")
+            .iter()
+            .map(|&interval| FusionNeutronHistoryEntry { cell: 0, interval })
+            .collect(),
+        FusionNeutronHistoryLimits::default(),
+    )?);
     let neutrons = Arc::new(NeutronKineticState::new(model, vec![0.0; 3])?);
-    let sources = NeutronKineticCellSource::bind(
+    let sources = NeutronKineticCellSource::bind_with_history(
         neutrons,
         Time::new(0.0),
         vec![(CellId(1), MaterialId(1))],
-        pulse,
+        Arc::clone(&history),
     )?;
     let mut heating = NeutronKineticHeating::new(
         &thermal,
@@ -197,7 +206,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         },
     )?;
 
-    println!("Constructed D-T burn with interval-uniform mean-energy neutron projection.");
+    println!(
+        "Constructed D-T burn with {} accepted neutron source intervals.",
+        history.entries().len()
+    );
     println!("Authored multigroup diffusion coefficients; no evaluated blanket/activation claim.");
     println!(
         "time_s,water_k,stored_neutron_j,deposited_j,outgoing_reaction_radiation_j,leaked_neutron_j,total_energy_residual_j"
@@ -210,7 +222,16 @@ fn main() -> Result<(), Box<dyn Error>> {
         let retained = heating.source(CellId(1)).expect("bound neutron source");
         let storage = retained.state().kinetic_energy_j()?;
         let exports = heating.cumulative_released()?;
-        let emitted = emission.total_kinetic_energy().value() * (target / duration_s).min(1.0);
+        let emitted: f64 = history
+            .entries()
+            .iter()
+            .map(|entry| {
+                let interval = &entry.interval;
+                let duration = interval.emission().duration().value();
+                let elapsed = (target - interval.start().value()).clamp(0.0, duration);
+                interval.emission().total_kinetic_energy().value() * (elapsed / duration)
+            })
+            .sum();
         let residual = storage + exports.total_j() - emitted;
         println!(
             "{target:.6e},{:.9},{storage:.9e},{:.9},{:.9},{:.9},{residual:.6e}",
