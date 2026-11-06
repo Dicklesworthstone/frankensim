@@ -7,17 +7,18 @@
 //! Occluders clip radiance, never this proposal density.
 
 use super::{
-    AbsorbingGrid, CellPalette, ThermalEmissionModel, VolumeGrid, VolumeTransportError, cells,
-    checkpoint, planck_radiance_w_m2_sr_nm,
+    AbsorbingGrid, CellPalette, MassAbsorptionSpectrum, ThermalEmissionModel, VolumeGrid,
+    VolumeTransportError, cells, checkpoint, planck_radiance_w_m2_sr_nm,
 };
 use fs_exec::Cx;
 use fs_geom::{Point3, Vec3};
 use fs_math::det;
 
 /// Source-domain weighting, support mixture and point-to-direction map.
-/// Version 2 retains the declared wavelength bounds; visible models keep their
+/// Version 3 includes cell-resolved absorption in temperature-field weights
+/// and excludes transparent cells. Non-indexed uniform-opacity models retain their
 /// original proposal arithmetic and sampling distribution.
-pub const EMISSION_PROPOSAL_SEMANTICS_VERSION: u32 = 2;
+pub const EMISSION_PROPOSAL_SEMANTICS_VERSION: u32 = 3;
 
 const UNIFORM_FRACTION: f64 = 1.0 / 16.0;
 // The wavelength maximum of spectral radiance per wavelength, in nm K.
@@ -38,7 +39,47 @@ impl EmissionDistribution {
         grid: &VolumeGrid<'_>,
         temperatures: &[f64],
         wavelength_bounds_nm: (f64, f64),
+        absorption_palette: Option<&CellPalette<MassAbsorptionSpectrum>>,
     ) -> Result<Self, VolumeTransportError> {
+        checkpoint(cx)?;
+        let mut log_absorption = Vec::new();
+        if let Some(palette) = absorption_palette {
+            if palette.cell_indices().len() != grid.data.len() {
+                return Err(VolumeTransportError::Palette);
+            }
+            log_absorption
+                .try_reserve_exact(palette.values().len())
+                .map_err(|_| VolumeTransportError::Budget)?;
+            for (index, spectrum) in palette.values().iter().enumerate() {
+                if index % 1024 == 0 {
+                    checkpoint(cx)?;
+                }
+                if spectrum.wavelength_bounds_nm() != wavelength_bounds_nm {
+                    return Err(VolumeTransportError::AbsorptionSpectrum);
+                }
+                // Piecewise-linear absorption reaches its maximum at a source
+                // knot. Cache it once per model, without evaluating/extrapolating
+                // the law or retaining a second per-cell optical field.
+                let maximum = spectrum.knots[..spectrum.count]
+                    .iter()
+                    .fold(0.0_f64, |value, &(_, kappa)| value.max(kappa));
+                log_absorption.push(if maximum > 0.0 {
+                    det::ln(maximum)
+                } else {
+                    f64::NEG_INFINITY
+                });
+            }
+        }
+        let log_absorption_at_cell = |cell: usize| {
+            // A uniform absorption scale cancels from the normalized proposal.
+            // Keeping zero here also preserves its original sampling arithmetic.
+            absorption_palette.map_or(0.0, |palette| {
+                log_absorption[palette.cell_indices()[cell] as usize]
+            })
+        };
+        let active = |cell: usize, density: f64| {
+            density > 0.0 && log_absorption_at_cell(cell) != f64::NEG_INFINITY
+        };
         let mut cache = SourceCache::default();
         let mut count = 0usize;
         let mut maximum = f64::NEG_INFINITY;
@@ -46,10 +87,13 @@ impl EmissionDistribution {
             if index % 1024 == 0 {
                 checkpoint(cx)?;
             }
-            if density > 0.0 {
+            if active(index, density) {
                 count += 1;
-                maximum = maximum
-                    .max(det::ln(density) + cache.log_source(temperature, wavelength_bounds_nm)?);
+                maximum = maximum.max(
+                    det::ln(density)
+                        + log_absorption_at_cell(index)
+                        + cache.log_source(temperature, wavelength_bounds_nm)?,
+                );
             }
         }
         checkpoint(cx)?;
@@ -72,9 +116,11 @@ impl EmissionDistribution {
             if index % 1024 == 0 {
                 checkpoint(cx)?;
             }
-            let weight = if density > 0.0 {
+            let weight = if active(index, density) {
                 det::exp(
-                    det::ln(density) + cache.log_source(temperature, wavelength_bounds_nm)?
+                    det::ln(density)
+                        + log_absorption_at_cell(index)
+                        + cache.log_source(temperature, wavelength_bounds_nm)?
                         - maximum,
                 )
             } else {
@@ -89,13 +135,13 @@ impl EmissionDistribution {
             if index % 1024 == 0 {
                 checkpoint(cx)?;
             }
-            let probability = if density > 0.0 {
+            let probability = if active(index, density) {
                 uniform + (1.0 - UNIFORM_FRACTION) * (cdf[index + 1] / total)
             } else {
                 0.0
             };
             let next = sum + probability;
-            if density > 0.0 && next <= sum {
+            if active(index, density) && next <= sum {
                 return Err(VolumeTransportError::Unrepresentable);
             }
             sum = next;
@@ -108,7 +154,7 @@ impl EmissionDistribution {
                 checkpoint(cx)?;
             }
             cdf[index + 1] /= sum;
-            if density > 0.0 && cdf[index + 1] <= cdf[index] {
+            if active(index, density) && cdf[index + 1] <= cdf[index] {
                 return Err(VolumeTransportError::Unrepresentable);
             }
         }

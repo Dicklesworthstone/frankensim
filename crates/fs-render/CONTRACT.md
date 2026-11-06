@@ -2101,6 +2101,27 @@ Controls run original conduction solves through analytic infrared dispersion,
 thermal refraction and native bundle focusing, with independent path/footprint,
 phase/group, Beer attenuation, mixed-Hessian, contact and domain references.
 
+## Absorption-aware thermal source sampling
+
+Temperature-field volume emission proposals include each cell's density,
+maximum mass absorption over its original spectral knots, and in-band Planck
+source proxy. Fully transparent cells receive zero probability before Planck
+evaluation and do not dilute the uniform support mixture. The absorption
+maximum is cached once per palette model; the existing 1/16 uniform mixture
+over active absorbing cells retains support for cold and weak sources.
+
+Sampling and density evaluation use the same normalized CDF and complete
+radial-to-angular marginal. Physical LTE emission, Beer attenuation, occlusion,
+and multiple-importance weights retain their original owners. A spatially
+uniform non-indexed absorption scale cancels, preserving that path's previous
+sampling arithmetic. Proposal semantics version 3 records the change.
+The maximum-product weight is a bounded-cost proposal proxy, not an exact
+spectral integral or a variance-optimal, visibility-aware distribution.
+
+Controls cover transparent-cell exclusion, original interior spectral knots,
+probability/PDF normalization, infrared and extreme-ratio support, unchanged
+LTE transport, and the uniform-opacity compatibility path.
+
 ## High-index transparent dielectric transport
 
 Explicit finite-band Sellmeier and tabulated phase laws admit ordinary real

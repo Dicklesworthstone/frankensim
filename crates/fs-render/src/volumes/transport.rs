@@ -455,6 +455,7 @@ impl<'a> AbsorbingGrid<'a> {
                 &grid,
                 temperatures,
                 absorption.wavelength_bounds_nm(),
+                absorption_palette.as_ref(),
             )?
         } else {
             emission::EmissionDistribution::default()
