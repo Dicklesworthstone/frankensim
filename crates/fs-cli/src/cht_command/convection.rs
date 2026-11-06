@@ -5,7 +5,7 @@ use std::fmt::Write as _;
 
 use super::{J, Result, bad, quote};
 
-pub(super) const HELP: &str = "\nConvection: solver.energy_convection selects \"power-law\", \"upwind\",\n\"exponential\" or \"enthalpy-minmod\". Source fluid_enthalpy requires\n\"upwind\" (its default) or \"enthalpy-minmod\"; other energy paths default\nto \"power-law\" and cannot use enthalpy-minmod. solver.momentum_convection\nselects \"power-law\" (default), \"upwind\", \"exponential\" or \"minmod\".\nMomentum minmod uses native limited face velocities with an implicit\nupwind operator. Exponential fitting resolves constant-coefficient 1-D\nconvection-diffusion between neighboring cells; it is not a general\nhigher-order multidimensional method. Limited reconstruction retains\nfirst-order treatment where the native boundary stencil is incomplete.\nSpatial choices do not change the selected time integrator or its order.\n";
+pub(super) const HELP: &str = "\nConvection: solver.energy_convection selects \"power-law\", \"upwind\",\n\"exponential\" or \"enthalpy-minmod\". Source fluid_enthalpy requires\n\"upwind\" (its default) or \"enthalpy-minmod\"; other energy paths default\nto \"power-law\" and also accept \"enthalpy-minmod\" under their declared\nconstant Cp, with a converged native temperature reconstruction. solver.momentum_convection\nselects \"power-law\" (default), \"upwind\", \"exponential\" or \"minmod\".\nMomentum minmod uses native limited face velocities with an implicit\nupwind operator. Exponential fitting resolves constant-coefficient 1-D\nconvection-diffusion between neighboring cells; it is not a general\nhigher-order multidimensional method. Limited reconstruction retains\nfirst-order treatment where the native boundary stencil is incomplete.\nSpatial choices do not change the selected time integrator or its order.\n";
 
 #[derive(Clone, Copy)]
 pub(super) struct Selection {
@@ -51,11 +51,8 @@ impl Selection {
                 "fluid_enthalpy requires solver.energy_convection upwind or enthalpy-minmod",
             ));
         }
-        if !source_enthalpy && energy == ConvectionScheme::EnthalpyMinmod {
-            return Err(bad(
-                "solver.energy_convection enthalpy-minmod requires fluid_enthalpy",
-            ));
-        }
+        // Without a source caloric field, the native owner converges the same
+        // limited transport under the declared reference Cp.
         let (momentum, momentum_reconstruction) = match choice("momentum_convection")? {
             None | Some("power-law") => (
                 ConvectionScheme::PowerLaw,
@@ -150,7 +147,7 @@ fn scope(scheme: ConvectionScheme) -> &'static str {
             "constant-coefficient 1-D exponential fitting; no general higher-order multidimensional claim"
         }
         ConvectionScheme::EnthalpyMinmod => {
-            "conservative limited source-enthalpy reconstruction; incomplete boundary stencils retain donor transport; no general multidimensional maximum-principle claim"
+            "conservative limited enthalpy reconstruction; native temperature paths use declared constant Cp and converged face corrections; incomplete boundary stencils retain donor transport; no general multidimensional maximum-principle claim"
         }
     }
 }

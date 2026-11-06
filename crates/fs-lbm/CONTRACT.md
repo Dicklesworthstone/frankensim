@@ -11154,8 +11154,11 @@ were unavailable in the delivery environment.
 `ConvectionScheme::EnthalpyMinmod` opts an original source-caloric energy solve
 into conservative limited linear reconstruction. It is available on
 `solve_with_enthalpy`, `step_with_enthalpy`, and the existing steady and
-transient material-convection entrypoints. Temperature-only energy and momentum
-owners refuse this selection; no caloric chart is inferred from reference Cp.
+transient material-convection entrypoints. Native constant-Cp temperature solves
+also accept it, including steady, transient, buoyant and resolved-conductivity
+entrypoints. In that lane Cp factors out of minmod, so the existing temperature
+operator transports the limited donor temperature with rho Cp Q. It does not
+infer a nonlinear caloric chart. Momentum owners still refuse this selection.
 
 For each fluid cell and coordinate axis, minmod limits the two specific-enthalpy
 gradients using actual adjacent cell-centre distances. A donor half-width gives
@@ -11167,7 +11170,14 @@ upwind Cp matrix, molecular/contact diffusion, source terms, reservoir laws,
 reference mass and native caloric storage remain authoritative.
 
 Three offsets per cell are cached once for each frozen energy operator, outside
-its matrix and Krylov work. The original material iteration refreshes source h,
+its matrix and Krylov work. One graded-grid sampler serves native temperature
+and source-enthalpy reconstruction. Native temperature transport starts from
+the admitted upwind solution, refreshes its face correction for at most 200
+bounded solves, and accepts only when the unchanged endpoint passes the original
+algebraic and independent local heat residuals. Every trial retains the same
+old-time storage, sources, reservoirs, contacts and compact junctions; internal
+transfer remains paired. A small iterate change alone cannot publish a result.
+The original material iteration refreshes source h,
 Cp and the limiter. Independent acceptance re-evaluates the full reconstructed
 endpoint heat on every active face and net cell row, including the mismatch
 from a stale limiter when the caloric tangent itself is exact. Internal errors
@@ -11191,11 +11201,15 @@ certified-error claim for multidimensional coupled sources. First-order
 boundary treatment and caller-selected mesh/time refinement remain explicit.
 Four regression sources cover an independent graded-mesh linear-enthalpy
 balance with signed flow, rest and common-datum shifts; a native nonlinear
-caloric march and independent stored-energy accounting; explicit refusal by
-noncaloric energy and momentum paths; and stale-limiter rejection even with an
-exact affine caloric law. Rust parsing, compilation and native numerical
-execution were unavailable in the delivery environment; source/API review
-does not establish those executed results.
+caloric march and independent stored-energy accounting; native constant-Cp
+admission with momentum refusal; and stale-limiter rejection even with an
+exact affine caloric law. The native temperature regression source additionally
+specifies oblique manufactured-solution refinement, reversed flow, insulated
+circulation energy, uniform equilibrium and cancellation. The cooling-cht CLI
+accepts energy_convection=enthalpy-minmod without fluid_enthalpy and reports
+the constant-Cp scope. Rust parsing, compilation and native numerical execution
+were unavailable in the delivery environment; source/API review and separate
+numerical stencil calculations do not establish executed Rust results.
 
 ## Thermal density change with authoritative material momentum
 

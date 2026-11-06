@@ -14,12 +14,15 @@ pub enum ConvectionScheme {
     Upwind,
     /// Conservative limited linear reconstruction of source specific enthalpy.
     ///
-    /// Available only with an `AdvectiveEnthalpyField`. The positive upwind
-    /// tangent matrix retains molecular diffusion; a frozen minmod face
-    /// correction is refreshed by the original nonlinear material owner.
+    /// With an `AdvectiveEnthalpyField`, the original material owner refreshes
+    /// the source-enthalpy correction. Native temperature solves instead limit
+    /// T under their declared constant Cp and converge the correction internally,
+    /// including the accepted endpoint's local heat residual. Both retain the
+    /// positive upwind matrix and molecular diffusion. Native reconstruction
+    /// permits at most 200 correction solves in addition to the upwind seed.
     /// Graded cell-centre distances define the slopes. Open boundaries and
     /// cells without two fluid neighbours along an axis retain donor transport.
-    /// This is an energy scheme, not a momentum or temperature-only scheme.
+    /// This is an energy scheme; momentum owners refuse this selection.
     /// It does not establish a multidimensional discrete maximum principle.
     EnthalpyMinmod,
     /// Exponential fitting: `A(P) = |P| / expm1(|P|)`.

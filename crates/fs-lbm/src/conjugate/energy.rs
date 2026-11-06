@@ -31,6 +31,7 @@ use crate::d3q19::Face3;
 
 mod material_field;
 mod enthalpy_field;
+mod constant_cp;
 pub use enthalpy_field::{AdvectiveEnthalpyField, AffineSpecificEnthalpy};
 mod face_contact;
 pub use face_contact::FaceContactResistance;
@@ -287,8 +288,9 @@ impl ThermalSetup {
 pub struct EnergyConfig {
     /// Convection scheme.
     pub scheme: ConvectionScheme,
-    /// Relative residual of the Jacobi-row-scaled system. Authored k(T) also
-    /// checks every free cell and compact junction's physical heat residual at
+    /// Relative residual of the Jacobi-row-scaled system. Authored k(T) and
+    /// native limited convection also check every free cell and compact
+    /// junction's physical heat residual at
     /// the unchanged endpoint, relative to its own heat throughput, with an
     /// explicit floating-point roundoff allowance.
     pub tolerance: f64,
@@ -493,8 +495,9 @@ struct Context<'a> {
     /// Remove it before affine assembly and heat audits, not after multiplying
     /// and summing potentially much larger formation-energy fluxes.
     enthalpy_reference_j_kg: f64,
-    /// Frozen donor half-cell offsets, present only for limited enthalpy.
-    enthalpy_offsets: Option<Vec<[f64; 3]>>,
+    /// Frozen donor half-cell offsets: h for an explicit caloric field,
+    /// otherwise T for native constant-Cp transport.
+    convection_offsets: Option<Vec<[f64; 3]>>,
     scheme: ConvectionScheme,
 }
 
@@ -639,7 +642,7 @@ impl Context<'_> {
                     let mut h = self.centered_enthalpy(
                         field.cells[upstream].expect("admitted fluid donor"),
                     );
-                    if let Some(offsets) = &self.enthalpy_offsets {
+                    if let Some(offsets) = &self.convection_offsets {
                         let donor_face = if mass > 0.0 { f } else { f ^ 1 };
                         let sign = if donor_face % 2 == 0 { -1.0 } else { 1.0 };
                         h.enthalpy_j_kg += sign * offsets[upstream][axis];
@@ -654,10 +657,19 @@ impl Context<'_> {
                 }
             }
             let (diagonal, a) = self.scheme.face_coefficients(d, flux);
+            // The native constant-Cp path transports the same donor trace in
+            // both rows. Only the explicit correction changes; its implicit
+            // upwind matrix and molecular diffusion remain nonnegative.
+            let correction = self.convection_offsets.as_ref().map_or(0.0, |offsets| {
+                let upstream = if flux >= 0.0 { c } else { n };
+                let donor_face = if flux >= 0.0 { f } else { f ^ 1 };
+                let sign = if donor_face % 2 == 0 { -1.0 } else { 1.0 };
+                -flux * sign * offsets[upstream][axis]
+            });
             return FaceTerm {
                 diag: diagonal,
                 off: Some((n, a)),
-                rhs: 0.0,
+                rhs: correction,
                 advective: Advective::None,
             };
         }
@@ -976,13 +988,35 @@ fn solve_energy_field(
     evaluate_only: bool,
     gate: &CancelGate,
 ) -> Result<EnergySolution, ChtError> {
-    fluid.validate()?;
     if config.scheme == ConvectionScheme::EnthalpyMinmod && enthalpy.is_none() {
-        return Err(ChtError::InvalidInput {
-            field: "energy.scheme",
-            reason: "limited enthalpy reconstruction requires its original caloric field".into(),
-        });
+        return constant_cp::solve(
+            domain, fluid, solids, flow, setup, config, step, nonlinear,
+            molecular_conductivity, evaluate_only, gate,
+        );
     }
+    solve_energy_field_once(
+        domain, fluid, solids, flow, setup, config, step, nonlinear,
+        molecular_conductivity, enthalpy, evaluate_only, gate,
+    )
+}
+
+/// One frozen reconstruction, with the original assembly and heat accounting.
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
+fn solve_energy_field_once(
+    domain: &VoxelDomain,
+    fluid: &FluidProperties,
+    solids: &[SolidMaterial],
+    flow: &FlowField,
+    setup: &ThermalSetup,
+    config: &EnergyConfig,
+    step: Option<&PseudoStep<'_>>,
+    nonlinear: Option<(&[f64], Option<&[f64]>)>,
+    molecular_conductivity: Option<&[[f64; 3]]>,
+    enthalpy: Option<AdvectiveEnthalpyField<'_>>,
+    evaluate_only: bool,
+    gate: &CancelGate,
+) -> Result<EnergySolution, ChtError> {
+    fluid.validate()?;
     if let Some(field) = enthalpy { field.validate(domain, flow, setup, config, gate)?; }
     for solid in solids {
         finite_positive("solid.conductivity_w_m_k", solid.conductivity_w_m_k)?;
@@ -1153,13 +1187,39 @@ fn solve_energy_field(
         }
         contacts.push(((a.min(b), a.max(b)), contact.resistance_m2_k_w));
     }
-    let conductivity_temperature = nonlinear.and_then(|(_, temperature)| temperature);
+    let warm_temperature = nonlinear.and_then(|(_, temperature)| temperature);
+    // A reconstruction/Krylov iterate must not replace an explicitly resolved
+    // molecular field by the solid table's reference conductivity at walls.
+    let conductivity_temperature = if molecular_conductivity.is_some() {
+        None
+    } else {
+        warm_temperature
+    };
     let face_contacts = face_contact::prepare(domain, flow, setup, &compact_owner, gate)?;
     let compact_k = if wall_k.is_empty() { &k } else { &wall_k };
     let compact = Compact::new(domain, solids, compact_k, setup, conductivity_temperature,
         compact_owner, &face_contacts, gate)?;
-    let enthalpy_offsets = if config.scheme == ConvectionScheme::EnthalpyMinmod {
-        Some(enthalpy.expect("admitted caloric field").limited_offsets(domain, gate)?)
+    let convection_offsets = if config.scheme == ConvectionScheme::EnthalpyMinmod {
+        Some(match enthalpy {
+            Some(field) => field.limited_offsets(domain, gate)?,
+            None => {
+                let temperature = warm_temperature.ok_or_else(|| {
+                    ChtError::InvalidInput {
+                        field: "energy.convection_reconstruction",
+                        reason: "native limited transport needs a complete temperature iterate".into(),
+                    }
+                })?;
+                if temperature.len() != domain.cell_count() {
+                    return Err(ChtError::InvalidInput {
+                        field: "energy.convection_reconstruction",
+                        reason: "temperature iterate must match the domain".into(),
+                    });
+                }
+                enthalpy_field::limited_offsets_from(domain, gate, |cell| {
+                    domain.is_fluid(cell).then_some(temperature[cell])
+                })?
+            }
+        })
     } else {
         None
     };
@@ -1188,7 +1248,7 @@ fn solve_energy_field(
         density: fluid.density_kg_m3,
         enthalpy,
         enthalpy_reference_j_kg,
-        enthalpy_offsets,
+        convection_offsets,
         scheme: config.scheme,
     };
     // Validate the actual native or frozen face law, not a different

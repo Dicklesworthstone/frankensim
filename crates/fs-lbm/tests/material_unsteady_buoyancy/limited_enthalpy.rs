@@ -191,16 +191,18 @@ fn g1_g3_nonlinear_material_march_closes_native_storage_and_limited_endpoint_hea
 }
 
 #[test]
-fn g0_limited_enthalpy_cannot_silently_select_plain_heat_or_momentum_transport() {
+fn g0_limited_heat_admits_native_constant_cp_but_refuses_momentum_transport() {
     let domain = VoxelDomain::new(3, 1, 1, 1.0).unwrap();
     let flow = FlowField::from_face_velocity(
         &domain, [FlowFace::Wall; 6], |_, _| 0.0,
     ).unwrap();
     let thermal = ThermalSetup::new([ThermalFace::Temperature(300.0); 6]);
-    assert!(matches!(solve_energy(
+    let temperature = solve_energy(
         &domain, &properties(), &[], &flow, &thermal,
         &energy(ConvectionScheme::EnthalpyMinmod), &CancelGate::new(),
-    ), Err(ChtError::InvalidInput { field: "energy.scheme", .. })));
+    ).unwrap();
+    assert!(temperature.temperature.iter().all(|t| (t - 300.0).abs() < 1e-8));
+    assert_eq!(temperature.report.scheme, ConvectionScheme::EnthalpyMinmod);
     let mut momentum = SimpleConfig::new([FvBoundary::wall(); 6]);
     momentum.scheme = ConvectionScheme::EnthalpyMinmod;
     assert!(matches!(simple_flow(

@@ -119,9 +119,23 @@ fn convection_exponential_resolves_the_graded_boundary_layer_in_both_directions(
 }
 
 #[test]
+fn native_convection_admits_limited_heat_without_a_source_caloric_field() {
+    let input = DUCT.replace(
+        "\"solver\": {", r#""solver": {"energy_convection":"enthalpy-minmod","#,
+    );
+    let (code, result, error) = run(&scratch("convection-native-minmod.json", &input));
+    assert_eq!(code, 0, "{error}");
+    assert_eq!(
+        result.path(&["convection", "energy"]).and_then(J::as_str),
+        Some("enthalpy-minmod"),
+    );
+    assert!(f(&result, &["energy", "balance_relative_residual"]) < 1e-7);
+    assert!(f(&result, &["max_solid_temperature_k"]) > 300.0);
+}
+
+#[test]
 fn convection_admission_refuses_malformed_or_cross_owner_choices() {
     for (i, fields) in [
-        r#""energy_convection":"enthalpy-minmod""#,
         r#""energy_convection":"minmod""#,
         r#""energy_convection":"automatic""#,
         r#""energy_convection":null"#,
