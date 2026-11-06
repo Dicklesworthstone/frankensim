@@ -26,6 +26,8 @@ pub mod hysteretic;
 pub mod dielectric;
 /// Retained nonlinear capacitor laws and explicit work on their reconfiguration.
 pub mod capacitance;
+/// Source-bound saturating core/gap/leakage laws on the native circuit.
+pub mod inductance;
 use contacts::{SeriesElectricalContact, ContactHeat};
 mod resistors;
 pub(crate) use resistors::{account_resistor_heat, lower_resistors};

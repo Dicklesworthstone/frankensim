@@ -675,3 +675,44 @@ incoming-sound sensing with shunt heat, rotated pressure traces, rigid reflectio
 and refusal. Rust syntax/format and source/equation review passed; independent
 scalar work calculations agreed. Native compile/tests remain unverified under
 the editing environment's disk and memory limits.
+
+## Source-bound saturating core, gap and leakage inductors
+
+`material_circuit::inductance::MaterialReversibleInductor` maps an admitted
+reversible H(B) source into the native circuit's bounded I(lambda) storage.
+The declared uniform-flux reduction is Phi=A*B,
+N*I=l*H(B)+R_gap*Phi, lambda=N*Phi+L_leak*I. Original source breakpoints are
+transformed exactly, with both polarities of the isotropic zero-remanence law.
+No sampled fit, constant apparent inductance or second time integrator replaces
+that relation. Source snapshot, query context and fixed geometry stay inspectable.
+
+Its stored energy is the same potential in both descriptions:
+A*l*integral H dB + R_gap*Phi^2/2 + L_leak*I^2/2.
+Operating points expose core B/H, current, differential inductance and separate
+core/gap/leakage energies. These partition the native storage; they are never
+additional energy debits. B is recovered from the retained transformed segments,
+avoiding cancellation of lambda-L_leak*I when leakage dominates linkage.
+The native right-linkage derivative owns source kinks, except at the final
+endpoint where the left derivative applies.
+
+`ReversibleInductorCircuit` binds these sources to original inductor branches,
+sets their zero-field differential coefficients, and delegates complete
+Kirchhoff assembly, initial consistency, analytic actions and audited stepping
+to the existing `CircuitDae`. Nonlinear capacitors, reciprocal capacitance
+blocks, other authored scalar inductors and disjoint linear mutual links keep
+their native owners. No extra accepted history or time integrator is introduced.
+
+The source must be a field-only reversible potential. Explicit thermal scaling
+or additional response axes refuse, because freezing a thermal free-energy
+snapshot cannot supply its magnetic entropy account. Source-domain exits,
+duplicate ownership, scalar nonlinear/mutual overlap and unrepresentable
+geometry refuse. Gap reluctance and leakage are explicit fixed inputs; this
+reduction does not infer fringing, distributed field resolution, hysteresis,
+eddy loss or temperature evolution. Graph resistance retains physical heat.
+
+Focused regressions cover every source knot and polarity, independent
+core/gap/leakage work, turns scaling, leakage-dominated observations, a native
+saturating RL trajectory and physical/source refusals. Independent arithmetic
+checks over 10,000 varied geometries agree with the source potential within
+1.5e-15 relative error. Rustfmt parsed the implementation and tests; complete
+source-to-native circuit tests remain unexecuted in the dependency environment.
