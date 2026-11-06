@@ -6,7 +6,7 @@
 //! update and its independent work account. Gravity does not heat the gas.
 //! Guo population rebinding follows https://doi.org/10.1103/PhysRevE.65.046308.
 
-use super::{NsfError, NsfGrid3, NsfLaw, check_state, raw_moments, rebase_force};
+use super::{NsfError, NsfGrid3, NsfLaw};
 use crate::lattice3::Lattice3;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -93,61 +93,11 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         }
         let old = self.gravity.map_or([0.0; 3], |g| g.acceleration_lattice);
         let new = gravity.map_or([0.0; 3], |g| g.acceleration_lattice);
-        let (rho, momentum) = self.macro_fields(&self.f);
-        let velocity = self.velocity_field(&rho, &momentum, &self.force);
-        let rest = L::E.iter().position(|direction| *direction == [0; 3])
-            .ok_or(NsfError::Input("gravity rebinding requires a rest population"))?;
-        let mut force = self.force.clone();
-        let mut f = self.f.clone();
-        for i in 0..self.n {
-            if self.solid[i] {
-                continue;
-            }
-            for a in 0..3 {
-                force[i][a] += rho[i] * (new[a] - old[a]);
-            }
-            let difference = core::array::from_fn(|a| self.force[i][a] - force[i][a]);
-            if !force[i].iter().chain(&difference).all(|v| v.is_finite()) {
-                return Err(NsfError::NonFinite { cell: i });
-            }
-            rebase_force::<L>(&mut f[i], velocity[i], difference);
-            if f[i].iter().any(|v| !v.is_finite()) {
-                return Err(NsfError::NonFinite { cell: i });
-            }
-            // The analytic source has zero mass. Keep its summation roundoff
-            // in the rest population, which carries neither momentum nor stress.
-            let mass_correction = rho[i] - f[i].iter().sum::<f64>();
-            f[i][rest] += mass_correction;
-            let (r, m) = raw_moments::<L>(&f[i]);
-            let u = super::half_force_velocity(r, m, force[i]);
-            let gamma = self.material.get(i).and_then(Option::as_ref)
-                .map_or(self.law.gamma, |material| material.state.gamma);
-            check_state(&self.spec, gamma, i, r, u, self.theta[i])?;
-            if (r - rho[i]).abs() > 128.0 * f64::EPSILON * rho[i]
-                || u.iter().zip(velocity[i]).any(|(&actual, expected)| {
-                    (actual - expected).abs()
-                        > 128.0 * f64::EPSILON * expected.abs().max(1.0)
-                })
-            {
-                return Err(NsfError::Input("gravity force chart cannot retain the physical state"));
-            }
-        }
-        let stress = self.stress_field(
-            &f, &force, &rho, &self.theta, &self.material, &self.sgs_transport,
-        );
-        let (div, wall, open) = self.flux_divergence(
-            &self.e, &rho, &velocity, &self.theta, &stress,
-            &self.sgs_transport, self.open_faces.as_ref(),
+        self.rebind_held_acceleration(
+            |_, _| core::array::from_fn(|a| new[a] - old[a]),
+            &mut || false,
         )?;
-        if !wall.is_finite() || div.iter().any(|value| !value.is_finite()) {
-            return Err(NsfError::Input("gravity force-chart flux history overflowed"));
-        }
         self.gravity = gravity;
-        self.f = f;
-        self.force = force;
-        self.div = div;
-        self.wall_out = wall;
-        self.open_out = open;
         Ok(())
     }
 }

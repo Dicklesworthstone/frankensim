@@ -109,6 +109,7 @@ pub use open_boundary::{
 };
 mod characteristic_trial;
 mod gravity;
+mod body_force;
 mod hydrostatic;
 /// Unpublished original NSF interval for reciprocal characteristic coupling.
 pub use characteristic_trial::NsfCharacteristicTrial;
@@ -401,7 +402,11 @@ pub struct EnergyLedger {
     /// endpoint trapezoid of rho*g.u used by the total-energy equation.
     /// This mechanical supply is neither heat nor manufactured source energy.
     pub gravity_work_j: f64,
-    /// `|change of total energy - wall heat - wall work - open energy - source energy - gravity work| / total energy`.
+    /// Work supplied by the held spatial body acceleration during this step [J].
+    /// The same endpoint trapezoid of rho*a.u used by total energy; excludes
+    /// gravity, manufactured sources and heat.
+    pub body_force_work_j: f64,
+    /// `|change of total energy - wall heat - wall work - open energy - source energy - gravity work - body-force work| / total energy`.
     pub residual_rel: f64,
 }
 
@@ -681,6 +686,8 @@ pub struct NsfGrid3<L: Lattice3<27>> {
     moving_walls: bool,
     sources: Option<SourceFn>,
     gravity: Option<gravity::Gravity>,
+    /// Held cell-centered drive; empty when disabled. Solid entries are zero.
+    body_acceleration: Vec<body_force::BodyAcceleration>,
     /// Sources at the current time level (empty without sources).
     src_now: Vec<(f64, [f64; 3], f64)>,
     marker: core::marker::PhantomData<L>,
@@ -888,6 +895,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             moving_walls: false,
             sources,
             gravity: None,
+            body_acceleration: Vec::new(),
             src_now: Vec::new(),
             marker: core::marker::PhantomData,
         };
@@ -1207,6 +1215,11 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             if let Some(gravity) = self.gravity {
                 for a in 0..3 {
                     force[a] += rho[i] * gravity.acceleration_lattice[a];
+                }
+            }
+            if let Some(body) = self.body_acceleration.get(i) {
+                for a in 0..3 {
+                    force[a] += rho[i] * body.acceleration_lattice[a];
                 }
             }
             force
@@ -1696,6 +1709,9 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                 if let Some(gravity) = self.gravity {
                     e1[i] += gravity.work(rho0[i], u0[i], rho1[i], u1[i]);
                 }
+                if let Some(body) = self.body_acceleration.get(i) {
+                    e1[i] += body.work(rho0[i], u0[i], rho1[i], u1[i]);
+                }
                 let ke = 0.5
                     * rho1[i]
                     * (u1[i][0] * u1[i][0] + u1[i][1] * u1[i][1] + u1[i][2] * u1[i][2]);
@@ -1788,6 +1804,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         let unit = self.law.energy_unit_j();
         let (mut ke0, mut ke1, mut e_old, mut e_new, mut pw) = (0.0, 0.0, 0.0, 0.0, 0.0);
         let mut gravity_work = 0.0;
+        let mut body_force_work = 0.0;
         for i in 0..n {
             if self.solid[i] {
                 continue;
@@ -1801,6 +1818,14 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             if let Some(gravity) = self.gravity {
                 gravity_work += gravity.work(rho0[i], u0[i], rho1[i], u1[i]);
             }
+            if let Some(body) = self.body_acceleration.get(i) {
+                body_force_work += body.work(rho0[i], u0[i], rho1[i], u1[i]);
+            }
+        }
+        if !self.body_acceleration.is_empty()
+            && (!body_force_work.is_finite() || !(unit * body_force_work).is_finite())
+        {
+            return Err(NsfError::Input("body-force work overflowed"));
         }
         if self.gravity.is_some()
             && (!gravity_work.is_finite() || !(unit * gravity_work).is_finite())
@@ -1840,9 +1865,9 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         let d_total = e_new - e_old;
         let d_kin = ke1 - ke0;
         let d_int = d_total - d_kin;
-        // Gravity supplies mechanical energy. Its work has already cancelled
-        // its contribution to d_kin; subtracting it again from d_int would
-        // manufacture negative viscous heating in uniformly accelerating gas.
+        // Gravity and held body acceleration supply mechanical energy. Their
+        // work already cancels the kinetic change in d_int; subtracting it
+        // again would manufacture heat in uniformly accelerating gas.
         let pressure_work = -pw;
         let viscous = if self.open.is_some() {
             d_int - wall_heat_in - open_internal_in - pressure_work
@@ -1894,6 +1919,11 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         } else {
             balance
         };
+        let balance = if self.body_acceleration.is_empty() {
+            balance
+        } else {
+            balance - body_force_work
+        };
         let ledger = EnergyLedger {
             internal_j: unit * (e_new - ke1),
             kinetic_j: unit * ke1,
@@ -1906,6 +1936,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             open_energy_j: unit * prescribed_in,
             source_energy_j: unit * source_in,
             gravity_work_j: if self.gravity.is_some() { unit * gravity_work } else { 0.0 },
+            body_force_work_j: if self.body_acceleration.is_empty() { 0.0 } else { unit * body_force_work },
             residual_rel: balance.abs() / e_new.abs().max(f64::MIN_POSITIVE),
         };
         let boundary_exchange = self.finish_boundary_exchange(
@@ -1950,6 +1981,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         self.cumulative.unresolved_internal_exchange_j += ledger.unresolved_internal_exchange_j;
         self.cumulative.source_energy_j += ledger.source_energy_j;
         self.cumulative.gravity_work_j += ledger.gravity_work_j;
+        self.cumulative.body_force_work_j += ledger.body_force_work_j;
         self.cumulative.pressure_work_j += ledger.pressure_work_j;
         self.cumulative.wall_heat_j += ledger.wall_heat_j;
         self.cumulative.wall_work_j += ledger.wall_work_j;
@@ -2124,7 +2156,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
     /// An attached characteristic patch also contributes its shape, side and accepted drive.
     /// An attached reservoir contributes its mutable accepted ghost state.
     /// Explicit incoming thermal controls contribute their location and values.
-    /// Nonzero physical gravity contributes its accepted SI components.
+    /// Nonzero physical gravity and held body acceleration contribute their SI components.
     #[must_use]
     pub fn state_hash(&self) -> u64 {
         let mut h: u64 = 0xcbf2_9ce4_8422_2325;
@@ -2203,6 +2235,12 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             feed(7.0);
             for value in gravity.acceleration_m_s2 {
                 feed(value);
+            }
+        }
+        if !self.body_acceleration.is_empty() {
+            feed(8.0);
+            for body in &self.body_acceleration {
+                for value in body.acceleration_m_s2 { feed(value); }
             }
         }
         h

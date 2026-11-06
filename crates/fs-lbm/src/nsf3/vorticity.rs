@@ -65,6 +65,59 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         )
     }
 
+    /// Vorticity production curl(a) of the held spatial body acceleration,
+    /// in physical s^-2. Uses the original accepted SI field and lattice dx.
+    ///
+    /// This is the acceleration curl, not curl(rho*a)/rho: a constant
+    /// acceleration creates no vorticity merely because density varies.
+    /// Uniform gravity has zero curl and is already separate. Manufactured
+    /// mass/momentum sources and viscous stress are not part of this value.
+    ///
+    /// Uses the same centered fluid-neighbor topology as the inviscid query.
+    /// A one-cell periodic axis is a homogeneous extrusion. A two-cell axis,
+    /// solid neighbor or missing nonperiodic neighbor refuses rather than
+    /// reporting an unresolved derivative as zero.
+    pub fn body_acceleration_curl_si(
+        &self,
+        cell: [usize; 3],
+    ) -> Result<[f64; 3], KinematicsError> {
+        if cell.iter().zip(self.spec.dims).any(|(&i, n)| i >= n) {
+            return Err(KinematicsError::Input("vorticity cell outside the grid"));
+        }
+        if self.solid[self.index(cell)] {
+            return Err(KinematicsError::Input("solid cell has no fluid vorticity"));
+        }
+        let mut gradient = [[0.0; 3]; 3];
+        for axis in 0..3 {
+            if self.spec.dims[axis] == 2 {
+                return Err(KinematicsError::Input("two-cell body-acceleration derivative is unresolved"));
+            }
+            let low = self.fluid_at(cell, axis, -1).ok_or(KinematicsError::Input(
+                "body-acceleration curl requires two fluid neighbours per axis",
+            ))?;
+            let high = self.fluid_at(cell, axis, 1).ok_or(KinematicsError::Input(
+                "body-acceleration curl requires two fluid neighbours per axis",
+            ))?;
+            let a_low = self.body_acceleration.get(low)
+                .map_or([0.0; 3], |a| a.acceleration_m_s2);
+            let a_high = self.body_acceleration.get(high)
+                .map_or([0.0; 3], |a| a.acceleration_m_s2);
+            for component in 0..3 {
+                gradient[component][axis] =
+                    (0.5 * (a_high[component] - a_low[component])) / self.law.dx_m;
+            }
+        }
+        let curl = [
+            gradient[2][1] - gradient[1][2],
+            gradient[0][2] - gradient[2][0],
+            gradient[1][0] - gradient[0][1],
+        ];
+        if gradient.iter().flatten().chain(&curl).any(|v| !v.is_finite()) {
+            return Err(KinematicsError::NonFiniteGradient);
+        }
+        Ok(curl)
+    }
+
     fn vorticity_sample(&self, i: usize) -> Result<(f64, [f64; 3], f64), KinematicsError> {
         let (rho, momentum) = raw_moments::<L>(&self.f[i]);
         let velocity = half_force_velocity(rho, momentum, self.force[i]);

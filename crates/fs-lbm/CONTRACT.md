@@ -13941,3 +13941,46 @@ independent discrete algebra checks were run; full crate execution remains
 outstanding. This initialization is not a general well-balanced perturbation
 scheme for arbitrary gravity directions or nonuniform temperature, and it
 adds no fluid-plus-gravitational-potential energy conservation claim.
+
+### Held spatial body acceleration and vorticity production
+
+`NsfGrid3::with_body_acceleration_si` and `set_body_acceleration_si`
+hold one prescribed SI acceleration at each native cell center. The original
+compressible density supplies `rho*a` at every thermal/characteristic/SGS
+force epoch; the original energy corrector adds the same endpoint trapezoid
+of `rho*a.u` reported by `EnergyLedger::body_force_work_j`. Gravity and
+manufactured sources remain separate supplies. Mechanical work cancels its
+kinetic contribution before the internal-energy remainder; it is not added
+as heat or subtracted from internal energy a second time. Characteristic
+trials retain the field and its work through copy, reduction, refusal and
+acceptance.
+
+The held field is x-fastest, bounded by the original grid's cell cap, and
+requires 48 numerical bytes per cell when enabled. Solid entries are ignored.
+An empty slice or all-zero fluid field disables it; no field storage or
+additional floating-point force/energy arithmetic is used on the disabled
+route. Per-step evaluation performs no field allocation or callback. The
+setter shares the gravity owner's full Guo half-source rebinding at fixed
+accepted velocity, density and physical stress, then refreshes the original
+energy-flux history. SI conversion, field-length, finite-state and cancellation
+refusals precede publication. The setter polls every 64 input/rebinding cells,
+around native history reconstruction and immediately before publication; that
+existing reconstruction is not internally interruptible. The accepted SI
+field participates in the state hash.
+
+`body_acceleration_curl_si` returns the held field's resolved `curl(a)`
+in s^-2 using the native fluid-neighbor topology and physical spacing.
+It does not use `curl(rho*a)/rho`, which would invent a density-gradient
+source for uniform acceleration. Missing fluid neighbors and two-cell
+derivative axes refuse; a one-cell periodic axis denotes a homogeneous
+extrusion. The existing inviscid budget stays separate. Manufactured
+mass/momentum source curls, viscous/SGS stress curls and a full discrete
+vorticity balance are outside this point query.
+
+This is an externally prescribed acceleration held during each native step,
+not a velocity-dependent Coriolis/drag integrator, a potential-energy
+conservation method or a new turbulence closure. The body-force regressions
+exercise uniform equivalence to native gravity, separate source-work
+composition, evolving density under mass injection, actual vortical onset
+and spatial refinement, stress-preserving rebinding, cancellation/invalid
+inputs, stencil refusals, and characteristic trial/drop/accept behavior.

@@ -290,6 +290,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             ledger.open_energy_j += step.open_energy_j;
             ledger.source_energy_j += step.source_energy_j;
             ledger.gravity_work_j += step.gravity_work_j;
+            ledger.body_force_work_j += step.body_force_work_j;
             for (total, step) in exchange.iter_mut().zip(
                 candidate.last_boundary_exchange().expect("admitted characteristic step"))
             {
@@ -354,7 +355,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         ledger.residual_rel = (energy - energy_before_j - ledger.wall_heat_j
             - ledger.wall_work_j
             - ledger.open_boundary_energy_j - ledger.open_energy_j - ledger.source_energy_j
-            - ledger.gravity_work_j).abs()
+            - ledger.gravity_work_j - ledger.body_force_work_j).abs()
             / energy_before_j.abs().max(energy.abs()).max(1e-300);
         if exchange.iter().chain(patch_exchange.iter().flatten()).any(|face| ![
             face.mass_out_kg, face.gross_mass_out_kg, face.gross_mass_in_kg,
@@ -369,7 +370,8 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                 ledger.internal_j, ledger.kinetic_j, ledger.viscous_heating_j,
                 ledger.unresolved_internal_exchange_j, ledger.pressure_work_j,
                 ledger.wall_heat_j, ledger.wall_work_j, ledger.open_boundary_energy_j,
-                ledger.open_energy_j, ledger.source_energy_j, ledger.gravity_work_j, ledger.residual_rel,
+                ledger.open_energy_j, ledger.source_energy_j, ledger.gravity_work_j,
+                ledger.body_force_work_j, ledger.residual_rel,
                 reservoir_mass_out_kg]
                 .iter().all(|x| x.is_finite())
         {
@@ -411,6 +413,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             cumulative: self.cumulative, edge_velocity: self.edge_velocity,
             moving_walls: self.moving_walls, sources: None, src_now: self.src_now.clone(),
             gravity: self.gravity,
+            body_acceleration: self.body_acceleration.clone(),
             marker: core::marker::PhantomData,
         }
     }
