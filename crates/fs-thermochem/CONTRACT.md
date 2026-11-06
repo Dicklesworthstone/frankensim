@@ -392,7 +392,7 @@ transport, evolving surface geometry and nucleation physics remain separate.
 ## Binary liquid miscibility and source-owned thermodynamic forces
 
 `solution::BinaryRegularSolutionV1` retains two explicit ordered species and a
-caller-declared temperature domain for `chi(T)=A+B/T`. Its single symmetric
+caller-declared temperature domain for the default `chi(T)=A+B/T`. Its single symmetric
 molar free energy supplies activity coefficients, chemical potentials relative
 to pure-liquid standards, mixing Gibbs energy/enthalpy/entropy and the
 thermodynamic factor `Gamma=1-2 chi x(1-x)`. Pure states have zero mixing energy;
@@ -434,6 +434,16 @@ dependence, electrolyte or unequal-size corrections, interfacial tension,
 nucleation kinetics or a spatial phase-field evolution. Its free-energy form
 is the molar equivalent of the INL MOOSE regular-solution implementation:
 <https://mooseframework.inl.gov/docs/doxygen/modules/classRegularSolutionFreeEnergy.html>.
+
+`with_excess_heat_capacity(C,T0)` adds an explicitly authored, signed constant
+molar excess-Cp coefficient. With `q=x_A*x_B`, the same interaction supplies
+`H_ex=q*[R*B+C*(T-T0)]`, `S_ex=q*[-R*A+C*ln(T/T0)]` and `G_ex=H_ex-T*S_ex`.
+Thus homogeneous excess Cp is `C*q`; activity, phase equilibrium and spatial
+composition heat/entropy all follow that same free energy. The temperature
+remainder and local entropy increments retain nearby temperatures without
+subtracting large reference values. Zero C preserves the original law and
+its owner identity. Signed C may produce closed/reentrant miscibility windows;
+no phase solver assumes a single upper critical temperature.
 
 ### Multicomponent homogeneous liquid miscibility and diffusion
 
@@ -558,7 +568,7 @@ intersection of the source temperature domains.
 homogeneous parcels, mixes two parcels at possibly different temperatures,
 and adds/removes prescribed heat. Each bounded temperature trial recomputes
 the original common-tangent phase equilibrium. Pure sensible enthalpy plus
-the pair's `R B x_A x_B` excess closes the isobaric energy balance, including
+the pair's original temperature-dependent excess closes the isobaric energy balance, including
 the heat capacity contributed by changing coexistence compositions. A
 homogeneous unstable feed can demix adiabatically and change temperature;
 heating/cooling can remove/create the miscibility gap without changing either
@@ -568,14 +578,23 @@ internal-energy closure.
 
 `BinaryCaloricStateV1::isobaric_heat_capacity_j_per_k` differentiates that same
 enthalpy at fixed component inventory. A homogeneous state sums the original
-species Cp(T); an equilibrated two-liquid state also includes
-`n R (B/T)^2 (1-2x)^2 x(1-x) / [1-2 chi x(1-x)]` from changing coexistence
+species Cp(T) and `n*C*x_A*x_B`; an equilibrated two-liquid state also includes
+`n [H_interaction(T)/T]^2/R * (1-2x)^2 x(1-x) / [1-2 chi x(1-x)]` from changing coexistence
 compositions. The retained positive log-odds root supplies a cancellation-free
 response near criticality, including its finite split-side limit. No new
 phase solve, temperature differencing, fitted total Cp or allocation occurs.
 An explicitly homogeneous nonequilibrium parcel retains its fixed-composition
 constraint. Temperature-independent interactions have zero redistribution
-capacity, including at critical/binodal compositions.
+capacity, including at critical/binodal compositions. The redistribution
+term also vanishes wherever the interaction enthalpy coefficient is zero.
+
+A negative excess Cp is admitted only when total fixed-composition Cp stays
+positive for every composition throughout the common source domain. Checking
+`-C < (sqrt(Cp_A)+sqrt(Cp_B))^2` at both endpoints and all original source
+knots proves this without temperature/composition sampling. A shared total-Cp
+lower bound includes negative mixing capacity at the feed composition and
+the nonnegative redistribution response; it supports conservative thermal
+storage bounds. Cropped endpoints use outward-rounded source interpolation.
 
 The strict heat-capacity query refuses distinct one-sided critical/binodal
 limits and feeds unresolved by the retained numerical coexistence bracket.

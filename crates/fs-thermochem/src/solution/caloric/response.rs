@@ -52,8 +52,9 @@ impl BinaryCaloricStateV1 {
     /// With temperature-dependent interactions, equilibrium phase-onset and
     /// critical points have different one-sided derivatives. Those points,
     /// and feeds whose branch is unresolved by the retained numerical binodal
-    /// bracket, refuse instead of choosing a side. A temperature-independent
-    /// interaction (B=0) has no redistribution enthalpy and needs no such refusal.
+    /// bracket, refuse instead of choosing a side. When the interaction's
+    /// enthalpy coefficient vanishes at this temperature, its local phase
+    /// redistribution contributes no heat capacity and needs no such refusal.
     /// The inherited phase-root accuracy limits the response; no new phase
     /// solve, numerical temperature differencing or allocation is performed.
     pub fn isobaric_heat_capacity_j_per_k(&self) -> Result<f64, BinaryCaloricErrorV1> {
@@ -103,8 +104,36 @@ impl BinaryCaloricStateV1 {
                 capacity.add(contribution)?;
             }
         }
-        let (excess, qualification) = self.equilibrium_excess_heat_capacity_j_per_k()?;
-        capacity.add(excess)?;
+        let (redistribution, qualification) = self.equilibrium_excess_heat_capacity_j_per_k()?;
+        let coefficient = self
+            .owner
+            .thermodynamics
+            .excess_heat_capacity_coefficient_j_per_mol_k();
+        if coefficient != 0.0 {
+            let fractions = match qualification {
+                BinaryCaloricHeatCapacityQualificationV1::HomogeneousPhaseBoundaryTangent
+                | BinaryCaloricHeatCapacityQualificationV1::HomogeneousBinodalBracketTangent => {
+                    self.equilibrium
+                        .as_ref()
+                        .ok_or(BinaryCaloricErrorV1::Invalid(
+                            "qualified heat-capacity boundary requires an equilibrium state",
+                        ))?
+                        .feed()
+                        .mole_fractions()
+                }
+                _ => self.mixing.mole_fractions(),
+            };
+            // Retain the actual phase composition (or the explicitly selected
+            // homogeneous-side tangent). This term may have either sign;
+            // model admission proves positive total fixed-composition Cp.
+            let excess = checked(
+                (coefficient * fractions[0].max(fractions[1]))
+                    * (self.total_moles * fractions[0].min(fractions[1])),
+                "fixed-composition excess heat capacity",
+            )?;
+            capacity.add(excess)?;
+        }
+        capacity.add(redistribution)?;
         let value = capacity.value()?;
         if !positive(value) {
             return Err(BinaryCaloricErrorV1::Arithmetic(
@@ -121,12 +150,25 @@ impl BinaryCaloricStateV1 {
         &self,
     ) -> Result<(f64, BinaryCaloricHeatCapacityQualificationV1), BinaryCaloricErrorV1> {
         use BinaryCaloricHeatCapacityQualificationV1 as Q;
-        let b = self.owner.thermodynamics.chi_inverse_temperature_k;
         let Some(equilibrium) = self.equilibrium.as_ref() else {
             return Ok((0.0, Q::Homogeneous));
         };
+        if equilibrium.coexistence().is_none()
+            && equilibrium.feed_stability() != BinaryMixingStabilityV1::Critical
+        {
+            return Ok((0.0, Q::Homogeneous));
+        }
+        let pair = &self.owner.thermodynamics;
+        let legacy = pair.excess_heat_capacity_coefficient_j_per_mol_k() == 0.0;
+        // -T² dchi/dT = H_interaction(T)/R. Keep the original B path for
+        // zero excess Cp, including its established scaling/roundoff behavior.
+        let interaction = if legacy {
+            pair.chi_inverse_temperature_k
+        } else {
+            pair.interaction_enthalpy_j_per_mol(self.temperature)?
+        };
         let split = equilibrium.phases().len() == 2;
-        if b == 0.0 {
+        if interaction == 0.0 {
             return Ok((0.0, if split { Q::Coexisting } else { Q::Homogeneous }));
         }
         if matches!(
@@ -162,16 +204,17 @@ impl BinaryCaloricStateV1 {
 
         // The original binodal satisfies ln(x/(1-x))+chi(1-2x)=0.
         // Differentiating it at fixed total inventory gives
-        // Cp_excess = n R (B/T)^2 (1-2x)^2 x(1-x) / Gamma,
+        // Cp_redistribution = n (H_interaction/T)^2/R *
+        //                    (1-2x)^2 x(1-x) / Gamma,
         // Gamma=1-2 chi x(1-x)>0. Both numerator and Gamma vanish at the
         // critical point; evaluate their finite ratio from the same accepted
         // log-odds root rather than dividing rounded, cancelling curvatures.
         let root = 0.5 * low + 0.5 * high;
         let geometry = coexistence_heat_capacity_factor(root);
-        // Scale before squaring: (B/T)^2 can underflow even when the total
+        // Scale before squaring: the intensive factor can underflow when total
         // capacity of the supplied inventory remains representable.
-        let amplitude =
-            (sqrt(self.total_moles) * (b.abs() / self.temperature.value())) * sqrt(R * geometry);
+        let amplitude = (sqrt(self.total_moles) * (interaction.abs() / self.temperature.value()))
+            * sqrt(if legacy { R * geometry } else { geometry / R });
         let excess = checked(amplitude * amplitude, "equilibrium excess heat capacity")?;
         if !positive(excess) {
             return Err(BinaryCaloricErrorV1::Arithmetic(

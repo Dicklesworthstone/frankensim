@@ -151,9 +151,10 @@ impl BinarySquareGradientV1 {
     }
 
     /// Direct homogeneous mixing-enthalpy increment [J/mol] from the original
-    /// `chi = A + B/T` law: `R B delta(x_A x_B)`. This is independent of
-    /// temperature and excludes pure sensible heat and spatial gradient energy.
-    /// Both fractions are retained; no bulk equilibrium split occurs.
+    /// interaction law at this owner's fixed temperature:
+    /// `[R B + C (T-T0)] delta(x_A x_B)`. Pure sensible heat and spatial
+    /// gradient energy remain excluded. Both fractions are retained; no bulk
+    /// equilibrium split occurs.
     ///
     /// The product increment keeps its quadratic term at x_A=1/2 and real
     /// trace changes when the majority rounds to one. B is scaled by that
@@ -168,16 +169,21 @@ impl BinarySquareGradientV1 {
             return Ok(0.0);
         }
         let difference = (b[0] - a[0]) * (0.5 * (a[1] - a[0]) + 0.5 * (b[1] - b[0]));
-        finite(
-            sign * (self.thermodynamics.chi_inverse_temperature_k * difference) * R,
-            "mixing enthalpy increment",
-        )
+        let change = if self.thermodynamics.excess_heat_capacity_j_per_mol_k == 0.0 {
+            sign * (self.thermodynamics.chi_inverse_temperature_k * difference) * R
+        } else {
+            sign * self
+                .thermodynamics
+                .interaction_enthalpy_j_per_mol(self.temperature)?
+                * difference
+        };
+        finite(change, "mixing enthalpy increment")
     }
 
     /// Direct homogeneous mixing-entropy increment [J/(mol K)] from the
-    /// original ideal entropy and excess-entropy coefficient A. Temperature
-    /// does not enter this composition increment. Pure Cp/T and any spatial
-    /// entropy contribution belong to their respective caloric/gradient owners.
+    /// original ideal entropy and excess-entropy coefficient at this owner's
+    /// fixed temperature. The retained C source contributes `C ln(T/T0)`;
+    /// pure Cp/T and spatial entropy belong to their respective owners.
     ///
     /// The same local expansion as the free-energy increment retains traces
     /// and the fourth-order entropy change when A=2 near x_A=1/2. Reversing
@@ -187,7 +193,15 @@ impl BinarySquareGradientV1 {
         old: [f64; 2],
         new: [f64; 2],
     ) -> Result<f64, BinarySolutionErrorV1> {
-        let (sign, change) = reduced_mixing_change(old, new, self.thermodynamics.chi_constant)?;
+        let entropy_interaction = if self.thermodynamics.excess_heat_capacity_j_per_mol_k == 0.0 {
+            self.thermodynamics.chi_constant
+        } else {
+            -self
+                .thermodynamics
+                .interaction_entropy_j_per_mol_k(self.temperature)?
+                / R
+        };
+        let (sign, change) = reduced_mixing_change(old, new, entropy_interaction)?;
         finite(-sign * R * change, "mixing entropy increment")
     }
 }
@@ -214,8 +228,9 @@ fn ordered_compositions(
 }
 
 // Keep sign separate so the original free-energy multiplier retains its exact
-// evaluation order. Entropy uses the identical kernel with A instead of chi(T).
-fn reduced_mixing_change(
+// evaluation order. Entropy uses the identical kernel with -S_ex/(R*x_A*x_B)
+// instead of chi(T), including the same source's excess heat capacity.
+pub(super) fn reduced_mixing_change(
     old: [f64; 2],
     new: [f64; 2],
     chi: f64,

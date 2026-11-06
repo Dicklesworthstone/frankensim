@@ -40,11 +40,10 @@ pub struct BinaryLiquidThermalStorage {
 impl BinaryLiquidCaloricLaw<'_, '_> {
     /// Prepare one immutable thermal domain and prove a reusable global CFL
     /// bound. Both endpoint phases must admit the original material sources.
-    /// Pure Cp minima bound sensible dH/dT from below. For this symmetric pair,
-    /// chi=A+B/T and equilibrium excess Cp is nonnegative (proportional to B²
-    /// divided by stable-phase free-energy curvature); therefore
-    /// dT/dh <= mass / sum(n_i * min(Cp_i)). Source-knot minima bound every
-    /// linear segment, including between the supplied thermal endpoints.
+    /// The original caloric owner bounds dH/dT from its source knots, including
+    /// a signed heat capacity of mixing. Equilibrium redistribution adds a
+    /// nonnegative response, so dT/dh <= mass / minimum_capacity. The bound
+    /// covers every source segment and both supplied thermal endpoints.
     pub fn thermal_storage(
         &self,
         component_moles: [f64; 2],
@@ -75,26 +74,13 @@ impl BinaryLiquidCaloricLaw<'_, '_> {
             .model
             .enthalpy_change_j(cold.caloric_state(), hot.caloric_state())?;
         let upper_specific_h_j_kg = span / mass_kg;
-        let mut minimum_capacity = 0.0;
-        for (i, &moles) in component_moles.iter().enumerate() {
-            let minimum_molar_cp = self.owner.sources[i]
-                .source_line()
-                .knots
-                .iter()
-                .map(|(_, answer)| {
-                    answer.evidence.value.value * self.owner.liquid.molar_masses[i].value()
-                })
-                .fold(f64::INFINITY, f64::min);
-            let capacity = moles * minimum_molar_cp;
-            if !capacity.is_finite() {
-                return Err(BinaryLiquidCaloricError::Invalid(
-                    "unrepresentable heat-capacity bound",
-                ));
-            }
-            minimum_capacity = (minimum_capacity + capacity.next_down().max(0.0))
-                .next_down()
-                .max(0.0);
-        }
+        let minimum_capacity = self
+            .owner
+            .model
+            .isobaric_heat_capacity_lower_bound_j_per_k(
+                component_moles,
+                controls.temperature_bracket,
+            )?;
         // Products and sum round downward; the reciprocal rounds upward. This
         // also handles subnormal inventories without a relative-epsilon guess.
         let maximum_slope = (mass_kg / minimum_capacity).next_up();

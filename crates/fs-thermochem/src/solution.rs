@@ -1,9 +1,12 @@
 //! Symmetric binary liquid miscibility from one molar mixing free energy.
 //!
 //! `g_mix/(RT) = x ln x + (1-x) ln(1-x) + chi(T) x(1-x)`, with
-//! `chi(T) = A + B/T`. This is an equal-size, non-electrolyte regular-solution
-//! model with an optional excess-entropy term, not a prediction from densities
-//! or material labels. The caller owns the species-pair fit and its validity.
+//! `chi(T) = A + B/T` by default. An explicitly supplied excess heat-capacity
+//! coefficient C adds `C[(T-T0)-T ln(T/T0)] x(1-x)` to the molar Gibbs energy.
+//! The same source then supplies excess enthalpy, entropy and heat capacity;
+//! no independent mixture-Cp correction is added to the phase free energy.
+//! This is an equal-size, non-electrolyte regular-solution model, not a prediction
+//! from densities or material labels. The caller owns the pair fit and validity.
 //! Pure-component reference chemical potentials cancel between liquid phases.
 //! Pressure dependence, unequal molecular sizes, interfacial energy, nucleation
 //! and spatial evolution are outside this constitutive model.
@@ -11,6 +14,9 @@
 //! The molar form follows the regular-solution free-energy implementation in
 //! INL MOOSE (its `omega*c*(1-c)` interaction term):
 //! <https://mooseframework.inl.gov/docs/doxygen/modules/classRegularSolutionFreeEnergy.html>.
+//! Temperature integration uses the constant-Cp enthalpy/entropy primitives
+//! documented by Cantera, applied here to the authored excess coefficient:
+//! <https://www.cantera.org/stable/reference/thermo/species-thermo.html#constant-heat-capacity>.
 //! The binodal is the common tangent; for this symmetric model it is horizontal.
 //! A negative thermodynamic factor is a spinodal instability, never a negative
 //! molecular diffusivity to feed an ordinary Fick evolution step.
@@ -109,6 +115,8 @@ pub struct BinaryRegularSolutionV1 {
     species: [SpeciesId; 2],
     chi_constant: f64,
     chi_inverse_temperature_k: f64,
+    excess_heat_capacity_j_per_mol_k: f64,
+    excess_heat_capacity_reference_temperature: Temperature,
     minimum_temperature: Temperature,
     maximum_temperature: Temperature,
 }
@@ -139,9 +147,50 @@ impl BinaryRegularSolutionV1 {
             species,
             chi_constant,
             chi_inverse_temperature_k,
+            excess_heat_capacity_j_per_mol_k: 0.0,
+            excess_heat_capacity_reference_temperature: minimum_temperature,
             minimum_temperature,
             maximum_temperature,
         })
+    }
+
+    /// Retain a signed constant coefficient C [J/(mol K)] for the homogeneous
+    /// excess heat capacity `C x_A x_B`, with an explicit source datum T0.
+    /// At T0 the original A/B interaction enthalpy and entropy are unchanged.
+    /// Away from it, `H_ex/[x_A x_B] = R B + C (T-T0)` and
+    /// `S_ex/[x_A x_B] = -R A + C ln(T/T0)` define the SAME Gibbs interaction.
+    ///
+    /// C may be negative: excess heat capacity need not be positive. A caloric
+    /// consumer must separately admit positive total Cp with its original pure
+    /// sources. The finite positive datum must lie inside this source domain.
+    /// Supplying zero restores the original A+B/T law exactly.
+    pub fn with_excess_heat_capacity(
+        mut self,
+        coefficient_j_per_mol_k: f64,
+        reference_temperature: Temperature,
+    ) -> Result<Self, BinarySolutionErrorV1> {
+        if !coefficient_j_per_mol_k.is_finite() {
+            return Err(BinarySolutionErrorV1::Invalid(
+                "finite excess heat-capacity coefficient",
+            ));
+        }
+        self.admitted_temperature_value(reference_temperature)?;
+        self.excess_heat_capacity_j_per_mol_k = if coefficient_j_per_mol_k == 0.0 {
+            0.0
+        } else {
+            coefficient_j_per_mol_k
+        };
+        self.excess_heat_capacity_reference_temperature = if coefficient_j_per_mol_k == 0.0 {
+            self.minimum_temperature
+        } else {
+            reference_temperature
+        };
+        Ok(self)
+    }
+
+    /// Authored coefficient C of the homogeneous molar excess Cp `C x_A x_B`.
+    pub const fn excess_heat_capacity_coefficient_j_per_mol_k(&self) -> f64 {
+        self.excess_heat_capacity_j_per_mol_k
     }
 
     /// Original component identities in the declared, never silently sorted order.
@@ -156,6 +205,89 @@ impl BinaryRegularSolutionV1 {
 
     /// Dimensionless interaction parameter at the actual admitted temperature.
     pub fn chi(&self, temperature: Temperature) -> Result<f64, BinarySolutionErrorV1> {
+        let t = self.admitted_temperature_value(temperature)?;
+        let original = self.chi_constant + self.chi_inverse_temperature_k / t;
+        if self.excess_heat_capacity_j_per_mol_k == 0.0 {
+            return finite(original, "chi(T)");
+        }
+        let reference = self.excess_heat_capacity_reference_temperature.value();
+        // This is (H_ex-T*S_ex)/(R*T), rearranged before evaluation. Near
+        // the datum its C contribution starts at order (T-T0)^2; subtracting
+        // separately rounded H and T*S would erase that entire response.
+        let relative = (t - reference) / reference;
+        let thermal = if relative.abs() < 0.125 {
+            let mut remainder = 0.0;
+            // r/(1+r)-ln(1+r) = sum_{n>=2} (-1)^(n-1)(n-1)r^n/n.
+            // At |r|<=1/8 the omitted terms are below double roundoff.
+            for n in (2..=20).rev() {
+                let coefficient =
+                    (f64::from(n - 1) / f64::from(n)) * if n % 2 == 0 { -1.0 } else { 1.0 };
+                remainder = coefficient + relative * remainder;
+            }
+            relative * relative * remainder
+        } else {
+            (t - reference) / t - crate::entropy::log_ratio(t, reference)
+        };
+        finite(
+            original + (self.excess_heat_capacity_j_per_mol_k / R) * thermal,
+            "chi(T)",
+        )
+    }
+
+    /// Coefficient of x_A*x_B in the original molar excess enthalpy [J/mol].
+    pub(crate) fn interaction_enthalpy_j_per_mol(
+        &self,
+        temperature: Temperature,
+    ) -> Result<f64, BinarySolutionErrorV1> {
+        let t = self.admitted_temperature_value(temperature)?;
+        finite(
+            R * self.chi_inverse_temperature_k
+                + self.excess_heat_capacity_j_per_mol_k
+                    * (t - self.excess_heat_capacity_reference_temperature.value()),
+            "interaction enthalpy coefficient",
+        )
+    }
+
+    /// Coefficient of x_A*x_B in the original molar excess entropy [J/(mol K)].
+    pub(crate) fn interaction_entropy_j_per_mol_k(
+        &self,
+        temperature: Temperature,
+    ) -> Result<f64, BinarySolutionErrorV1> {
+        let t = self.admitted_temperature_value(temperature)?;
+        let thermal = if self.excess_heat_capacity_j_per_mol_k == 0.0 {
+            0.0
+        } else {
+            self.excess_heat_capacity_j_per_mol_k
+                * crate::entropy::log_ratio(
+                    t,
+                    self.excess_heat_capacity_reference_temperature.value(),
+                )
+        };
+        finite(
+            -R * self.chi_constant + thermal,
+            "interaction entropy coefficient",
+        )
+    }
+
+    /// Direct change of the excess-entropy coefficient, retaining nearby
+    /// temperatures and exactly reversing without subtracting reference values.
+    pub(crate) fn interaction_entropy_change_j_per_mol_k(
+        &self,
+        from: Temperature,
+        to: Temperature,
+    ) -> Result<f64, BinarySolutionErrorV1> {
+        let from = self.admitted_temperature_value(from)?;
+        let to = self.admitted_temperature_value(to)?;
+        finite(
+            self.excess_heat_capacity_j_per_mol_k * crate::entropy::log_ratio(to, from),
+            "interaction entropy coefficient increment",
+        )
+    }
+
+    fn admitted_temperature_value(
+        &self,
+        temperature: Temperature,
+    ) -> Result<f64, BinarySolutionErrorV1> {
         let t = temperature.value();
         if !t.is_finite()
             || t < self.minimum_temperature.value()
@@ -163,10 +295,7 @@ impl BinaryRegularSolutionV1 {
         {
             return Err(BinarySolutionErrorV1::OutsideTemperatureDomain);
         }
-        finite(
-            self.chi_constant + self.chi_inverse_temperature_k / t,
-            "chi(T)",
-        )
+        Ok(t)
     }
 
     /// Evaluate the homogeneous free energy, even on a metastable/unstable branch.
@@ -235,11 +364,19 @@ impl BinaryRegularSolutionV1 {
                 "mixing Gibbs energy",
             )?,
             mixing_enthalpy_j_per_mol: finite(
-                (self.chi_inverse_temperature_k * xy) * R,
+                if self.excess_heat_capacity_j_per_mol_k == 0.0 {
+                    (self.chi_inverse_temperature_k * xy) * R
+                } else {
+                    self.interaction_enthalpy_j_per_mol(temperature)? * xy
+                },
                 "mixing enthalpy",
             )?,
             mixing_entropy_j_per_mol_k: finite(
-                -R * (ideal + self.chi_constant * xy),
+                if self.excess_heat_capacity_j_per_mol_k == 0.0 {
+                    -R * (ideal + self.chi_constant * xy)
+                } else {
+                    -R * ideal + self.interaction_entropy_j_per_mol_k(temperature)? * xy
+                },
                 "mixing entropy",
             )?,
             log_activity_coefficients: activity,
@@ -665,3 +802,6 @@ fn log_odds_curvature(u: f64) -> f64 {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod excess_heat_capacity_tests;

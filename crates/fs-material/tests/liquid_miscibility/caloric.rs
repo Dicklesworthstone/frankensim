@@ -24,6 +24,14 @@ fn card(basis: CompositionBasis, upper_x: f64) -> MaterialCard {
 }
 
 fn liquid(card: &MaterialCard, interaction_k: f64) -> BinaryLiquidSolutionLaw<'_> {
+    liquid_with_excess_cp(card, interaction_k, 0.0)
+}
+
+fn liquid_with_excess_cp(
+    card: &MaterialCard,
+    interaction_k: f64,
+    excess_cp_j_mol_k: f64,
+) -> BinaryLiquidSolutionLaw<'_> {
     let point = QueryPoint::new()
         .with_quantity("T", quantity(QuantityKind::AbsoluteTemperature), 500.0)
         .unwrap()
@@ -39,6 +47,8 @@ fn liquid(card: &MaterialCard, interaction_k: f64) -> BinaryLiquidSolutionLaw<'_
             Temperature::new(290.0),
             Temperature::new(600.0),
         )
+        .unwrap()
+        .with_excess_heat_capacity(excess_cp_j_mol_k, Temperature::new(400.0))
         .unwrap(),
         [MolarMass::new(0.018), MolarMass::new(0.10)],
         card,

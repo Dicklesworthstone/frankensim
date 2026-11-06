@@ -131,12 +131,36 @@ impl BinaryLiquidCaloricModelV1 {
             // Use the same actual accepted phase as the enthalpy owner, not
             // the unequilibrated feed composition or a transport Cp. This also
             // avoids lever-rule roundoff between identical phase entropies.
-            // Weight the final-minus-original molar entropy by each incoming
-            // parcel's conserved amount, rather than subtracting large totals.
+            // Use the shared local composition kernel and exact interaction
+            // Cp/T integral. Subtracting reference mixing entropies would lose
+            // a small heat increment when the interaction entropy is large.
+            let pair = &self.owner.thermodynamics;
+            let old = input.mixing.mole_fractions();
+            let new = final_state.mixing.mole_fractions();
+            let coefficient = if pair.excess_heat_capacity_coefficient_j_per_mol_k() == 0.0 {
+                pair.chi_constant
+            } else {
+                -(0.5 * pair.interaction_entropy_j_per_mol_k(input.temperature)?
+                    + 0.5 * pair.interaction_entropy_j_per_mol_k(final_state.temperature)?)
+                    / super::R
+            };
+            let (sign, composition) =
+                crate::solution::gradient::reduced_mixing_change(old, new, coefficient)?;
+            let mut mixing = Sum::default();
+            mixing.add(checked(
+                -sign * super::R * composition,
+                "mixing composition entropy increment",
+            )?)?;
+            mixing.add(checked(
+                pair.interaction_entropy_change_j_per_mol_k(
+                    input.temperature,
+                    final_state.temperature,
+                )? * (0.5 * (old[0] * old[1]) + 0.5 * (new[0] * new[1])),
+                "mixing heat-capacity entropy increment",
+            )?)?;
             entropy.add(scaled_entropy(
                 input.total_moles,
-                final_state.mixing.mixing_entropy_j_per_mol_k()
-                    - input.mixing.mixing_entropy_j_per_mol_k(),
+                mixing.value()?,
                 "parcel mixing entropy increment",
             )?)?;
         }

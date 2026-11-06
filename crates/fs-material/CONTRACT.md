@@ -15696,8 +15696,10 @@ integration execution remains required to validate those cases.
 equilibrium available to the existing `fs-thermal` enthalpy timeline. Zero
 specific enthalpy is the cold equilibrium endpoint; heat increments and the
 inverse temperature use the original caloric owner. Its conservative slope
-bound uses the minimum pure sensible capacity: changing equilibrium
-compositions adds nonnegative heat capacity for the symmetric pair law.
+bound comes from the original caloric owner's source knots and includes a
+signed heat capacity of mixing. Changing equilibrium compositions adds
+nonnegative heat capacity for the symmetric pair law; negative fixed-phase
+excess Cp must reduce the lower bound instead of retaining a pure-only CFL.
 No second integrator or approximate latent-heat chart is introduced. This is
 bulk, fixed-composition isobaric storage; phase-resolved transport must still
 be refreshed through the original material adapter. The entropy capability

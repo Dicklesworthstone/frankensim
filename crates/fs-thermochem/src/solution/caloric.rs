@@ -22,6 +22,7 @@ use crate::{MolarThermalQuantityV1, SpeciesId, UNIVERSAL_GAS_CONSTANT_J_PER_MOL_
 use fs_qty::Temperature;
 use std::sync::Arc;
 
+mod bounds;
 mod entropy;
 mod heat_capacity;
 mod response;
@@ -157,6 +158,7 @@ impl BinaryLiquidCaloricModelV1 {
                 "empty common temperature domain",
             ));
         }
+        bounds::admit_positive_capacity(&thermodynamics, &heat_capacity, domain)?;
         Ok(Self {
             owner: Arc::new(CaloricOwner {
                 thermodynamics,
@@ -475,7 +477,33 @@ impl BinaryLiquidCaloricModelV1 {
             }
             let difference = (new[0] - old[0]) * (0.5 * new[1] + 0.5 * old[1])
                 + (new[1] - old[1]) * (0.5 * new[0] + 0.5 * old[0]);
-            let excess = (self.owner.thermodynamics.chi_inverse_temperature_k * difference) * R;
+            let pair = &self.owner.thermodynamics;
+            let coefficient = pair.excess_heat_capacity_coefficient_j_per_mol_k();
+            let excess = if coefficient == 0.0 {
+                // Preserve the original scaling, including representable
+                // increments whose unscaled R*B coefficient would overflow.
+                (pair.chi_inverse_temperature_k * difference) * R
+            } else {
+                // Exact product increment for a linear interaction enthalpy.
+                // Local ΔT retains heat too small to survive subtracting two
+                // large reference enthalpies. Symmetric endpoint averages
+                // make cooling use the same arithmetic with opposite sign.
+                let average_enthalpy = 0.5
+                    * pair.interaction_enthalpy_j_per_mol(input.temperature)?
+                    + 0.5 * pair.interaction_enthalpy_j_per_mol(final_state.temperature)?;
+                let average_product = 0.5 * (old[0] * old[1]) + 0.5 * (new[0] * new[1]);
+                let mut increment = Sum::default();
+                increment.add(checked(
+                    average_enthalpy * difference,
+                    "mixing composition increment",
+                )?)?;
+                increment.add(checked(
+                    (coefficient * (final_state.temperature.value() - input.temperature.value()))
+                        * average_product,
+                    "mixing heat-capacity increment",
+                )?)?;
+                increment.value()?
+            };
             sum.add(checked(
                 input.total_moles * excess,
                 "parcel mixing increment",
