@@ -49,6 +49,8 @@ pub mod interference;
 pub mod adjoint;
 /// Discrete entropy and optional admission on the native thermal operator.
 pub mod entropy;
+/// Conserved-inventory stationary thermal equilibrium, including latent families.
+pub mod equilibrium;
 /// Error-controlled time integration of the same nonlinear enthalpy transport.
 pub mod adaptive;
 /// Second-order SDIRK stages on the same nonlinear enthalpy residual.

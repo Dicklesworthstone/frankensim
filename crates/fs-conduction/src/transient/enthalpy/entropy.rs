@@ -222,7 +222,7 @@ impl EnthalpyBackwardEuler<'_, '_> {
         total.total()
     }
 
-    fn nodal_entropy_change_j_k(
+    pub(super) fn nodal_entropy_change_j_k(
         &self, vertex: usize, old_h: f64, new_h: f64, temperature: f64,
     ) -> Result<f64, EnthalpyError> {
         if !temperature.is_finite() || temperature <= 0.0 {

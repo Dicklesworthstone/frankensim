@@ -851,6 +851,21 @@ impl<'m, 'c> HeterogeneousEnthalpyBackwardEuler<'m, 'c> {
         self.material_count
     }
 
+    /// Stationary isolated equilibrium with each original chart, reference mass
+    /// and sensible film retained. Connected inventories come from the native
+    /// physical heat operator; latent phase allocations remain explicit.
+    pub fn isolated_equilibrium<'s>(
+        &'s self,
+        cx: &Cx<'_>,
+        problem: ConductionProblem<'s>,
+        interfaces: Option<&'s ThermalInterfaces>,
+        old_h: &'s [f64],
+        config: super::equilibrium::IsolatedEquilibriumConfig,
+    ) -> Result<super::equilibrium::IsolatedEnthalpyEquilibrium<'s, 'm, 'c>,
+        super::equilibrium::IsolatedEquilibriumError> {
+        self.inner.isolated_equilibrium(cx, problem, interfaces, old_h, config)
+    }
+
     /// Advance using the shared nonlinear transport, contact and energy gates.
     /// History is immutable; phase fields use each vertex's assigned chart.
     #[allow(clippy::too_many_arguments)]

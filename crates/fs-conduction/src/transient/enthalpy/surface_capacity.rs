@@ -148,6 +148,11 @@ impl EnthalpyBackwardEuler<'_, '_> {
         })
     }
 
+    pub(super) fn film_temperature_span(&self, vertex: usize) -> TemperatureSpan {
+        self.surface_capacity.as_ref().map_or(TemperatureSpan::Unbounded,
+            |film| film.temperature_spans[vertex])
+    }
+
     pub(super) fn check_film_temperature(
         &self,
         vertex: usize,
