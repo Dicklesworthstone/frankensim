@@ -456,10 +456,11 @@ identities, binary reduction, ternary cross diffusion and cosolvent effects,
 both transport frames and friction entropy, pure/trace/maximum-size limits,
 canonical permutations, source refusals and atomic cancellation.
 
-This is a homogeneous symmetric-pair regular-solution closure. It does not
-perform an N-component phase flash, provide polymer/electrolyte entropy,
-infer measured interaction parameters, add pressure/Soret forces, or advance
-an N-component spatial phase field. Pure sensible enthalpies must accompany
+The homogeneous response does not perform a phase search; the separate
+`equilibrium` module supplies the seeded local candidates described below.
+Neither path infers equilibrium phase count, polymer/electrolyte entropy,
+measured interaction parameters, pressure/Soret forces or an N-component
+spatial phase field. Pure sensible enthalpies must accompany
 the partial excess enthalpies in a full diffusive-energy account. The model is
 the symmetric-pair specialization of the multicomponent Margules formulation:
 <https://cantera.org/stable/cxx/d7/dfe/classCantera_1_1MargulesVPSSTP.html>.
@@ -493,6 +494,42 @@ ternary witness, all 128 components with a subnormal trace, pure/absent supports
 relative-entropy tangent planes, species relabeling and atomic budget/cancellation
 refusal. The thermodynamic tangent-plane criterion follows Michelsen (1982):
 <https://doi.org/10.1016/0378-3812(82)85001-2>.
+
+### Finite-inventory multicomponent liquid phase candidates
+
+`solution::multicomponent::equilibrium` searches an explicitly supplied phase
+count and positive seed on the feed's exact species support. Species-column
+allocations are normalized to the original finite inventory; each largest
+allocation is reconstructed so dilute allocations are retained independently.
+A reusable, entropy-scaled analytic extensive-Gibbs Hessian drives damped
+Newton steps with positive-definite regularization, positivity-limited steps
+and bounded energy-decreasing backtracking. With d=(phases-1)*present_species,
+dense work is O(d³) and numerical scratch is admitted before allocation.
+Iteration, regularization, line-search, phase-count and memory limits are explicit.
+
+An accepted candidate retains the original finite feed, complete model, common
+temperature, every phase's actual component moles and thermodynamic state, and
+its controls and numerical report. Final independent checks require relative
+per-species balance, agreement of every present-species chemical potential,
+distinct compositions, positive phase amounts, and locally stable phase
+curvature. The total Gibbs energy cannot exceed either the homogeneous feed
+or feasible initial seed beyond ONE original final allowance. The report
+records actual residuals, extensive feed/seed/final mixing energies and work.
+Cancellation or any failed check returns no partially optimized inventory.
+
+This is a seeded local candidate, not automatic phase-count discovery or a
+global Gibbs-minimum certificate. Coincident, disappearing, unstable and
+numerically unresolved phases refuse; none are silently merged, removed or
+assigned a concentration floor. No interfacial energy, nucleation kinetics,
+spatial evolution, volume law or averaged transport property is inferred.
+Pure-liquid standard terms cancel because each species is conserved at the
+same temperature and caller-qualified pressure.
+
+G0/G1 tests include the existing independent binary coexistence oracle,
+symmetric three-phase outer roots and asymmetric lever fractions, a metastable
+ternary feed with positive local curvature but lower three-phase free energy,
+unequal pair interactions, finite traces, exact absent species, pure feeds,
+spurious stationary/coincident roots, bounded work and atomic cancellation.
 
 ### Closed isobaric liquid calorics
 

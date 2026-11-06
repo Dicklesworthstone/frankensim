@@ -8,9 +8,10 @@
 //! <https://cantera.org/stable/cxx/d7/dfe/classCantera_1_1MargulesVPSSTP.html>.
 //!
 //! The caller qualifies pair fits, pure-liquid references and common pressure.
-//! This is a homogeneous constitutive law, including unstable states; it does
-//! not perform a multicomponent equilibrium flash or infer a pair interaction
-//! from material names. It excludes electrolytes, unequal-size/polymer entropy,
+//! This is a homogeneous constitutive law, including unstable states. The
+//! separate equilibrium module searches explicitly seeded phase candidates;
+//! it does not infer phase count or a pair interaction from material names.
+//! The law excludes electrolytes, unequal-size/polymer entropy,
 //! pressure/thermal diffusion, interfacial energy and evolution. Negative
 //! curvature is a demixing direction, never a negative molecular diffusivity.
 
@@ -25,6 +26,8 @@ use fs_math::det::{ln, sqrt};
 use fs_qty::{AmountConcentration, Temperature};
 use std::sync::Arc;
 
+/// Conserved finite-inventory phase splits at an explicit phase count and seed.
+pub mod equilibrium;
 /// Full-simplex local stability and finite tangent-plane comparisons.
 pub mod stability;
 
