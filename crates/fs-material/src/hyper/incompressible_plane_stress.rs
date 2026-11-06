@@ -20,7 +20,13 @@
 //! This explicit constitutive choice is a local stable membrane branch, not
 //! a 3-D mixed formulation, shell, wrinkling or global-uniqueness certificate.
 
-use super::{Hyperelastic, plane_stress::PlaneStressSettings};
+use super::{
+    Hyperelastic,
+    cards::{HyperelasticMaterial, ResolvedHyperelastic},
+    mixed::RemainderResponse,
+    plane_stress::PlaneStressSettings,
+    reference::ReferencedHyperelastic,
+};
 use crate::MaterialError;
 use fs_ad::{Dual, Dual64, Real};
 
@@ -30,9 +36,12 @@ const SHEAR: [usize; 2] = [2, 5];
 /// Converged exactly incompressible plane-stress energy and stress.
 #[derive(Clone, Copy, Debug)]
 pub struct IncompressiblePlaneStressState {
-    /// Full row-major deformation gradient, with `F22=1/det(F_in_plane)`.
+    /// Full row-major deformation gradient, with
+    /// `F22=J_reference/det(F_in_plane)`.
     pub deformation_gradient: [f64; 9],
-    /// Original remainder energy per reference volume (Pa = J/m³).
+    /// Reduced remainder potential per original reference volume (Pa = J/m³).
+    /// This is stored energy for elasticity. For a frozen inelastic owner it
+    /// is an incremental potential, not physical storage or heat.
     pub energy_density_pa: f64,
     /// In-plane first Piola stress `[P00,P01,P10,P11]`, in Pa.
     pub piola: [f64; 4],
@@ -50,9 +59,11 @@ pub struct IncompressiblePlaneStressState {
 /// Exactly incompressible response with its consistently reduced tangent.
 #[derive(Clone, Copy, Debug)]
 pub struct IncompressiblePlaneStressResponse {
-    /// Full row-major deformation gradient, with `F22=1/det(F_in_plane)`.
+    /// Full row-major deformation gradient, with
+    /// `F22=J_reference/det(F_in_plane)`.
     pub deformation_gradient: [f64; 9],
-    /// Original remainder energy per reference volume (Pa = J/m³).
+    /// Reduced remainder potential per original reference volume (Pa = J/m³).
+    /// Frozen inelastic potentials are not physical stored energy or heat.
     pub energy_density_pa: f64,
     /// In-plane first Piola stress `[P00,P01,P10,P11]`, in Pa.
     pub piola: [f64; 4],
@@ -76,8 +87,8 @@ fn state_error(what: &str) -> MaterialError {
 
 // Six independent coordinates. The determinant constraint is differentiated
 // through this map, not imposed after differentiating a compressible tangent.
-fn constrained_gradient<T: Real>(x: &[T; 6]) -> [T; 9] {
-    let thickness = T::one() / (x[0] * x[3] - x[1] * x[2]);
+fn constrained_gradient<T: Real>(x: &[T; 6], reference_volume: f64) -> [T; 9] {
+    let thickness = T::from_f64(reference_volume) / (x[0] * x[3] - x[1] * x[2]);
     [
         x[0],
         x[1],
@@ -91,11 +102,230 @@ fn constrained_gradient<T: Real>(x: &[T; 6]) -> [T; 9] {
     ]
 }
 
+/// A fixed-history, bulk-free potential with explicit elastic incompressibility.
+///
+/// This capability is separate from a finite-pressure Legendre transform.
+/// Coupled Neo-Hookean has an admitted exact plane-stress remainder even though
+/// the finite-compliance mixed formulation deliberately refuses that split.
+/// Implementations retain their reference mapping and all accepted material
+/// history. They must not evaluate a bulk penalty inside the remainder.
+pub trait IncompressiblePlaneStressPotential {
+    /// Required total volume ratio for incompressible elastic deformation.
+    /// A native law returns one; a prescribed relaxed reference returns its
+    /// determinant in the caller's original reference configuration.
+    fn incompressible_reference_volume_ratio(&self) -> f64;
+
+    /// Original-volume remainder stress and potential at fixed history.
+    fn incompressible_remainder_stress_and_potential(
+        &self,
+        deformation: &[f64; 9],
+    ) -> Result<([f64; 9], f64), MaterialError>;
+
+    /// The same remainder and its consistent Hessian, including every
+    /// reference-map chain rule and any frozen inelastic return map.
+    fn incompressible_remainder_response(
+        &self,
+        deformation: &[f64; 9],
+    ) -> Result<RemainderResponse, MaterialError>;
+}
+
+impl IncompressiblePlaneStressPotential for Hyperelastic {
+    fn incompressible_reference_volume_ratio(&self) -> f64 {
+        1.0
+    }
+
+    fn incompressible_remainder_stress_and_potential(
+        &self,
+        f: &[f64; 9],
+    ) -> Result<([f64; 9], f64), MaterialError> {
+        self.check_state(f)?;
+        let (energy, stress) = fs_ad::gradient::<9>(*f, |x| self.isochoric_energy(&x));
+        super::mixed::checked_stress(energy, stress)
+    }
+
+    fn incompressible_remainder_response(
+        &self,
+        f: &[f64; 9],
+    ) -> Result<RemainderResponse, MaterialError> {
+        self.check_state(f)?;
+        super::mixed::response_from_energy(f, |x| self.isochoric_energy(x))
+    }
+}
+
+impl IncompressiblePlaneStressPotential for ResolvedHyperelastic {
+    fn incompressible_reference_volume_ratio(&self) -> f64 {
+        self.law().incompressible_reference_volume_ratio()
+    }
+
+    fn incompressible_remainder_stress_and_potential(
+        &self,
+        f: &[f64; 9],
+    ) -> Result<([f64; 9], f64), MaterialError> {
+        self.law().incompressible_remainder_stress_and_potential(f)
+    }
+
+    fn incompressible_remainder_response(
+        &self,
+        f: &[f64; 9],
+    ) -> Result<RemainderResponse, MaterialError> {
+        self.law().incompressible_remainder_response(f)
+    }
+}
+
+impl<L: HyperelasticMaterial + IncompressiblePlaneStressPotential + ?Sized>
+    IncompressiblePlaneStressPotential for ReferencedHyperelastic<'_, L>
+{
+    fn incompressible_reference_volume_ratio(&self) -> f64 {
+        self.reference_deformation().volume_ratio()
+            * self.material().incompressible_reference_volume_ratio()
+    }
+
+    fn incompressible_remainder_stress_and_potential(
+        &self,
+        f: &[f64; 9],
+    ) -> Result<([f64; 9], f64), MaterialError> {
+        let reference = self.reference_deformation();
+        let (stress, energy) = self
+            .material()
+            .incompressible_remainder_stress_and_potential(&reference.elastic_deformation(f))?;
+        super::mixed::checked_stress(
+            reference.volume_ratio() * energy,
+            reference.pullback_piola(&stress),
+        )
+    }
+
+    fn incompressible_remainder_response(
+        &self,
+        f: &[f64; 9],
+    ) -> Result<RemainderResponse, MaterialError> {
+        let reference = self.reference_deformation();
+        let elastic = self
+            .material()
+            .incompressible_remainder_response(&reference.elastic_deformation(f))?;
+        let (first_piola_pa, potential_pa) = super::mixed::checked_stress(
+            reference.volume_ratio() * elastic.potential_pa,
+            reference.pullback_piola(&elastic.first_piola_pa),
+        )?;
+        let tangent_pa = reference.pullback_tangent(&elastic.tangent_pa);
+        if tangent_pa.iter().flatten().any(|x| !x.is_finite()) {
+            return Err(state_error(
+                "unrepresentable reference-pulled remainder tangent",
+            ));
+        }
+        Ok(RemainderResponse {
+            potential_pa,
+            first_piola_pa,
+            tangent_pa,
+        })
+    }
+}
+
+/// Relax transverse shear with `det(F)=J_reference`, preserving the supplied
+/// potential's original reference map, constitutive domain and frozen history.
+/// No bulk penalty is evaluated. Inelastic callers must separately commit
+/// the accepted history and account for physical storage and dissipation.
+pub fn incompressible_plane_stress_state<L: IncompressiblePlaneStressPotential + ?Sized>(
+    material: &L,
+    in_plane: &[f64; 4],
+    settings: PlaneStressSettings,
+) -> Result<IncompressiblePlaneStressState, MaterialError> {
+    generic_state(material, in_plane, settings).map(|(state, _)| state)
+}
+
+/// Exact-volume plane stress with the consistent constrained-energy tangent.
+/// The chain rule includes both derivatives of `F22=J_reference/det(a)` before
+/// eliminating the two stationary transverse shears. This avoids subtracting
+/// a large bulk penalty from a compressible tangent.
+pub fn incompressible_plane_stress<L: IncompressiblePlaneStressPotential + ?Sized>(
+    material: &L,
+    in_plane: &[f64; 4],
+    settings: PlaneStressSettings,
+) -> Result<IncompressiblePlaneStressResponse, MaterialError> {
+    let (state, remainder) = generic_state(material, in_plane, settings)?;
+    let remainder = remainder.ok_or_else(|| state_error("missing accepted remainder tangent"))?;
+    let determinant = in_plane[0] * in_plane[3] - in_plane[1] * in_plane[2];
+    let thickness = state.deformation_gradient[8];
+    let determinant_gradient = [in_plane[3], -in_plane[2], -in_plane[1], in_plane[0]];
+    let thickness_gradient = determinant_gradient.map(|v| -(thickness / determinant) * v);
+    let determinant_hessian = [
+        [0.0, 0.0, 0.0, 1.0],
+        [0.0, 0.0, -1.0, 0.0],
+        [0.0, -1.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0, 0.0],
+    ];
+    let independent = [0, 1, 3, 4, 2, 5];
+    let mut hessian = [[0.0; 6]; 6];
+    for row in 0..6 {
+        let dt_row = if row < 4 {
+            thickness_gradient[row]
+        } else {
+            0.0
+        };
+        for col in 0..6 {
+            let dt_col = if col < 4 {
+                thickness_gradient[col]
+            } else {
+                0.0
+            };
+            let d2t = if row < 4 && col < 4 {
+                -(dt_row * determinant_gradient[col]
+                    + dt_col * determinant_gradient[row]
+                    + thickness * determinant_hessian[row][col])
+                    / determinant
+            } else {
+                0.0
+            };
+            let (i, j) = (independent[row], independent[col]);
+            hessian[row][col] = remainder.tangent_pa[i][j]
+                + remainder.tangent_pa[i][8] * dt_col
+                + remainder.tangent_pa[8][j] * dt_row
+                + remainder.tangent_pa[8][8] * dt_row * dt_col
+                + remainder.first_piola_pa[8] * d2t;
+        }
+    }
+    incompressible_response_from(state, hessian)
+}
+
+fn generic_state<L: IncompressiblePlaneStressPotential + ?Sized>(
+    material: &L,
+    in_plane: &[f64; 4],
+    settings: PlaneStressSettings,
+) -> Result<(IncompressiblePlaneStressState, Option<RemainderResponse>), MaterialError> {
+    incompressible_state_with(
+        in_plane,
+        settings,
+        material.incompressible_reference_volume_ratio(),
+        |f| {
+            let response = material.incompressible_remainder_response(f)?;
+            if !response.potential_pa.is_finite()
+                || response.first_piola_pa.iter().any(|v| !v.is_finite())
+            {
+                return Err(state_error("nonfinite remainder potential or stress"));
+            }
+            Ok(ShearEvaluation {
+                stress: SHEAR.map(|i| response.first_piola_pa[i]),
+                block: PositiveShear::new(SHEAR.map(|i| SHEAR.map(|j| response.tangent_pa[i][j])))?,
+                response: Some(response),
+            })
+        },
+        |f| material.incompressible_remainder_stress_and_potential(f),
+    )
+}
+
 // Scalar-normalized Cholesky of the two eliminated shear coordinates.
 // An unstable block refuses; no regularization or stiffness floor is used.
 struct PositiveShear {
     lower: [[f64; 2]; 2],
     scale: f64,
+}
+
+// Generic inelastic owners retain the prepared point through acceptance so
+// condensation does not repeat their local history solve. The native elastic
+// fast path forms only a two-direction shear block during local Newton.
+struct ShearEvaluation {
+    stress: [f64; 2],
+    block: PositiveShear,
+    response: Option<RemainderResponse>,
 }
 
 impl PositiveShear {
@@ -194,67 +424,99 @@ impl Hyperelastic {
         in_plane: &[f64; 4],
         settings: PlaneStressSettings,
     ) -> Result<IncompressiblePlaneStressState, MaterialError> {
-        if !(settings.relative_tolerance.is_finite()
-            && settings.relative_tolerance > 0.0
-            && settings.relative_tolerance < 1.0)
-            || settings.max_iterations == 0
-            || settings.max_backtracks == 0
-        {
-            return Err(MaterialError::Parameters {
+        incompressible_state_with(
+            in_plane,
+            settings,
+            1.0,
+            |f| {
+                let (stress, block) = self.incompressible_shear_data(f)?;
+                Ok(ShearEvaluation {
+                    stress,
+                    block,
+                    response: None,
+                })
+            },
+            |f| self.incompressible_remainder_stress_and_potential(f),
+        )
+        .map(|(state, _)| state)
+    }
+}
+
+fn incompressible_state_with(
+    in_plane: &[f64; 4],
+    settings: PlaneStressSettings,
+    reference_volume: f64,
+    shear: impl Fn(&[f64; 9]) -> Result<ShearEvaluation, MaterialError>,
+    point: impl Fn(&[f64; 9]) -> Result<([f64; 9], f64), MaterialError>,
+) -> Result<(IncompressiblePlaneStressState, Option<RemainderResponse>), MaterialError> {
+    if !(settings.relative_tolerance.is_finite()
+        && settings.relative_tolerance > 0.0
+        && settings.relative_tolerance < 1.0)
+        || settings.max_iterations == 0
+        || settings.max_backtracks == 0
+    {
+        return Err(MaterialError::Parameters {
                 what: "incompressible plane stress needs 0 < relative_tolerance < 1 and positive iteration/backtracking budgets".into(),
             });
-        }
-        let determinant = in_plane[0] * in_plane[3] - in_plane[1] * in_plane[2];
-        if in_plane.iter().any(|v| !v.is_finite())
-            || !(determinant.is_finite() && determinant > 0.0)
-        {
-            return Err(state_error(
-                "finite orientation-preserving in-plane gradient required",
-            ));
-        }
-        let mut f =
-            constrained_gradient(&[in_plane[0], in_plane[1], in_plane[2], in_plane[3], 0.0, 0.0]);
-        let (mut stress, mut block) = self.incompressible_shear_data(&f)?;
-        let gradient_norm = in_plane[0]
-            .hypot(in_plane[1])
-            .hypot(in_plane[2])
-            .hypot(in_plane[3]);
-        let scale = block.traction_scale()? * gradient_norm.max(1.0);
-        if !(scale.is_finite() && scale > 0.0) {
-            return Err(state_error("unrepresentable traction normalization"));
-        }
-        for iteration in 0..=settings.max_iterations {
-            let residual = (stress[0] / scale).hypot(stress[1] / scale);
-            if residual <= settings.relative_tolerance {
-                let (energy, remainder_piola) =
-                    fs_ad::gradient::<9>(f, |x| self.isochoric_energy(&x));
-                let pressure = remainder_piola[8] / determinant;
-                let cofactor = [
-                    f[4] * f[8],
-                    -f[3] * f[8],
-                    0.0,
-                    -f[1] * f[8],
-                    f[0] * f[8],
-                    0.0,
-                    f[1] * f[5] - f[2] * f[4],
-                    f[2] * f[3] - f[0] * f[5],
-                    determinant,
-                ];
-                let full_piola =
-                    core::array::from_fn(|i| remainder_piola[i] - pressure * cofactor[i]);
-                let final_residual = (full_piola[2] / scale)
-                    .hypot(full_piola[5] / scale)
-                    .hypot(full_piola[8] / scale);
-                if !energy.is_finite()
-                    || !pressure.is_finite()
-                    || full_piola.iter().any(|v| !v.is_finite())
-                    || !(final_residual <= settings.relative_tolerance)
-                {
-                    return Err(state_error(
-                        "unrepresentable or unresolved physical plane stress",
-                    ));
-                }
-                return Ok(IncompressiblePlaneStressState {
+    }
+    if !(reference_volume.is_finite() && reference_volume > 0.0) {
+        return Err(state_error(
+            "finite positive incompressible reference volume required",
+        ));
+    }
+    let determinant = in_plane[0] * in_plane[3] - in_plane[1] * in_plane[2];
+    if in_plane.iter().any(|v| !v.is_finite()) || !(determinant.is_finite() && determinant > 0.0) {
+        return Err(state_error(
+            "finite orientation-preserving in-plane gradient required",
+        ));
+    }
+    let mut f = constrained_gradient(
+        &[in_plane[0], in_plane[1], in_plane[2], in_plane[3], 0.0, 0.0],
+        reference_volume,
+    );
+    let mut data = shear(&f)?;
+    let gradient_norm = in_plane[0]
+        .hypot(in_plane[1])
+        .hypot(in_plane[2])
+        .hypot(in_plane[3]);
+    let scale = data.block.traction_scale()? * gradient_norm.max(1.0);
+    if !(scale.is_finite() && scale > 0.0) {
+        return Err(state_error("unrepresentable traction normalization"));
+    }
+    for iteration in 0..=settings.max_iterations {
+        let residual = (data.stress[0] / scale).hypot(data.stress[1] / scale);
+        if residual <= settings.relative_tolerance {
+            let (remainder_piola, energy) = match data.response {
+                Some(response) => (response.first_piola_pa, response.potential_pa),
+                None => point(&f)?,
+            };
+            let pressure = remainder_piola[8] / determinant;
+            let cofactor = [
+                f[4] * f[8],
+                -f[3] * f[8],
+                0.0,
+                -f[1] * f[8],
+                f[0] * f[8],
+                0.0,
+                f[1] * f[5] - f[2] * f[4],
+                f[2] * f[3] - f[0] * f[5],
+                determinant,
+            ];
+            let full_piola = core::array::from_fn(|i| remainder_piola[i] - pressure * cofactor[i]);
+            let final_residual = (full_piola[2] / scale)
+                .hypot(full_piola[5] / scale)
+                .hypot(full_piola[8] / scale);
+            if !energy.is_finite()
+                || !pressure.is_finite()
+                || full_piola.iter().any(|v| !v.is_finite())
+                || !(final_residual <= settings.relative_tolerance)
+            {
+                return Err(state_error(
+                    "unrepresentable or unresolved physical plane stress",
+                ));
+            }
+            return Ok((
+                IncompressiblePlaneStressState {
                     deformation_gradient: f,
                     energy_density_pa: energy,
                     piola: IN_PLANE.map(|i| full_piola[i]),
@@ -262,46 +524,48 @@ impl Hyperelastic {
                     pressure_pa: pressure,
                     relative_transverse_residual: final_residual,
                     iterations: iteration,
-                });
-            }
-            if iteration == settings.max_iterations || !residual.is_finite() {
-                break;
-            }
-            let direction = block.solve(stress.map(|v| -v))?;
-            let mut alpha = 1.0;
-            let mut accepted = None;
-            for _ in 0..settings.max_backtracks {
-                let mut trial = f;
-                for i in 0..2 {
-                    trial[SHEAR[i]] += alpha * direction[i];
-                }
-                match self.incompressible_shear_data(&trial) {
-                    Ok((next_stress, next_block)) => {
-                        let next_residual = (next_stress[0] / scale).hypot(next_stress[1] / scale);
-                        if next_residual <= (1.0 - 1e-4 * alpha) * residual {
-                            accepted = Some((trial, next_stress, next_block));
-                            break;
-                        }
-                    }
-                    Err(MaterialError::State { .. }) => (),
-                    Err(error) => return Err(error),
-                }
-                alpha *= 0.5;
-            }
-            let Some((next_f, next_stress, next_block)) = accepted else {
-                return Err(state_error(
-                    "transverse shear line search exhausted its budget or material domain",
-                ));
-            };
-            f = next_f;
-            stress = next_stress;
-            block = next_block;
+                },
+                data.response,
+            ));
         }
-        Err(state_error(
-            "transverse shear Newton solve exhausted its iteration budget",
-        ))
+        if iteration == settings.max_iterations || !residual.is_finite() {
+            break;
+        }
+        let direction = data.block.solve(data.stress.map(|v| -v))?;
+        let mut alpha = 1.0;
+        let mut accepted = None;
+        for _ in 0..settings.max_backtracks {
+            let mut trial = f;
+            for i in 0..2 {
+                trial[SHEAR[i]] += alpha * direction[i];
+            }
+            match shear(&trial) {
+                Ok(next) => {
+                    let next_residual = (next.stress[0] / scale).hypot(next.stress[1] / scale);
+                    if next_residual <= (1.0 - 1e-4 * alpha) * residual {
+                        accepted = Some((trial, next));
+                        break;
+                    }
+                }
+                Err(MaterialError::State { .. }) => (),
+                Err(error) => return Err(error),
+            }
+            alpha *= 0.5;
+        }
+        let Some((next_f, next)) = accepted else {
+            return Err(state_error(
+                "transverse shear line search exhausted its budget or material domain",
+            ));
+        };
+        f = next_f;
+        data = next;
     }
+    Err(state_error(
+        "transverse shear Newton solve exhausted its iteration budget",
+    ))
+}
 
+impl Hyperelastic {
     /// Exact-incompressibility state plus the constrained-energy tangent,
     /// including consistent elimination of both transverse shear coordinates.
     /// A six-direction AD Hessian is formed only after local equilibrium.
@@ -326,39 +590,45 @@ impl Hyperelastic {
                 re: Dual64::<6>::variable(x[row], row),
                 eps: [Dual64::constant(if row == col { 1.0 } else { 0.0 })],
             });
-            let w = self.isochoric_energy(&constrained_gradient(&vars));
+            let w = self.isochoric_energy(&constrained_gradient(&vars, 1.0));
             for row in 0..6 {
                 hessian[row][col] = w.eps[0].eps[row];
             }
         }
-        if hessian.iter().flatten().any(|v| !v.is_finite()) {
-            return Err(state_error("nonfinite constrained-energy Hessian"));
-        }
-        let block = PositiveShear::new([
-            [hessian[4][4], hessian[4][5]],
-            [hessian[5][4], hessian[5][5]],
-        ])?;
-        let mut tangent = [[0.0; 4]; 4];
-        for col in 0..4 {
-            let extension = block.solve([hessian[4][col], hessian[5][col]])?;
-            for row in 0..4 {
-                tangent[row][col] = hessian[row][col]
-                    - hessian[row][4] * extension[0]
-                    - hessian[row][5] * extension[1];
-            }
-        }
-        if tangent.iter().flatten().any(|v| !v.is_finite()) {
-            return Err(state_error("unrepresentable condensed tangent"));
-        }
-        Ok(IncompressiblePlaneStressResponse {
-            deformation_gradient: f,
-            energy_density_pa: state.energy_density_pa,
-            piola: state.piola,
-            full_piola: state.full_piola,
-            pressure_pa: state.pressure_pa,
-            tangent,
-            relative_transverse_residual: state.relative_transverse_residual,
-            iterations: state.iterations,
-        })
+        incompressible_response_from(state, hessian)
     }
+}
+
+fn incompressible_response_from(
+    state: IncompressiblePlaneStressState,
+    hessian: [[f64; 6]; 6],
+) -> Result<IncompressiblePlaneStressResponse, MaterialError> {
+    if hessian.iter().flatten().any(|v| !v.is_finite()) {
+        return Err(state_error("nonfinite constrained-energy Hessian"));
+    }
+    let block = PositiveShear::new([
+        [hessian[4][4], hessian[4][5]],
+        [hessian[5][4], hessian[5][5]],
+    ])?;
+    let mut tangent = [[0.0; 4]; 4];
+    for col in 0..4 {
+        let extension = block.solve([hessian[4][col], hessian[5][col]])?;
+        for row in 0..4 {
+            tangent[row][col] =
+                hessian[row][col] - hessian[row][4] * extension[0] - hessian[row][5] * extension[1];
+        }
+    }
+    if tangent.iter().flatten().any(|v| !v.is_finite()) {
+        return Err(state_error("unrepresentable condensed tangent"));
+    }
+    Ok(IncompressiblePlaneStressResponse {
+        deformation_gradient: state.deformation_gradient,
+        energy_density_pa: state.energy_density_pa,
+        piola: state.piola,
+        full_piola: state.full_piola,
+        pressure_pa: state.pressure_pa,
+        tangent,
+        relative_transverse_residual: state.relative_transverse_residual,
+        iterations: state.iterations,
+    })
 }

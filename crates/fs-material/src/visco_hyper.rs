@@ -390,6 +390,66 @@ impl crate::hyper::mixed::MixedFiniteStrainPotential for FrozenViscoRemainder<'_
     }
 }
 
+impl crate::hyper::incompressible_plane_stress::IncompressiblePlaneStressPotential
+    for FrozenViscoHyperelastic<'_>
+{
+    fn incompressible_reference_volume_ratio(&self) -> f64 {
+        self.law.reference_deformation.volume_ratio()
+    }
+
+    fn incompressible_remainder_stress_and_potential(
+        &self,
+        f: &[f64; 9],
+    ) -> Result<([f64; 9], f64), MaterialError> {
+        self.law
+            .equilibrium
+            .check_state(&self.law.reference_deformation.elastic_deformation(f))?;
+        let prepared = self.law.prepare(self.accepted, f, self.dt_s)?;
+        self.law.remainder_stress_and_potential_from(&prepared)
+    }
+
+    fn incompressible_remainder_response(
+        &self,
+        f: &[f64; 9],
+    ) -> Result<crate::hyper::mixed::RemainderResponse, MaterialError> {
+        self.law
+            .equilibrium
+            .check_state(&self.law.reference_deformation.elastic_deformation(f))?;
+        let prepared = self.law.prepare(self.accepted, f, self.dt_s)?;
+        self.law.remainder_response_from(&prepared)
+    }
+}
+
+impl crate::hyper::incompressible_plane_stress::IncompressiblePlaneStressPotential
+    for FrozenViscoRemainder<'_>
+{
+    fn incompressible_reference_volume_ratio(&self) -> f64 {
+        self.law.reference_deformation.volume_ratio()
+    }
+
+    fn incompressible_remainder_stress_and_potential(
+        &self,
+        f: &[f64; 9],
+    ) -> Result<([f64; 9], f64), MaterialError> {
+        self.law
+            .equilibrium
+            .check_state(&self.law.reference_deformation.elastic_deformation(f))?;
+        let prepared = self.law.prepare(self.accepted, f, self.dt_s)?;
+        self.law.remainder_stress_and_potential_from(&prepared)
+    }
+
+    fn incompressible_remainder_response(
+        &self,
+        f: &[f64; 9],
+    ) -> Result<crate::hyper::mixed::RemainderResponse, MaterialError> {
+        self.law
+            .equilibrium
+            .check_state(&self.law.reference_deformation.elastic_deformation(f))?;
+        let prepared = self.law.prepare(self.accepted, f, self.dt_s)?;
+        self.law.remainder_response_from(&prepared)
+    }
+}
+
 fn parameters(what: String) -> MaterialError {
     MaterialError::Parameters { what }
 }
