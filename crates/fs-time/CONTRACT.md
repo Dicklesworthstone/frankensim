@@ -992,3 +992,27 @@ per-relation and aggregate reset-target caps.
   ride fs-couple's port-Hamiltonian interconnection when both land.
 - Parallel-in-time coarse propagators (the BDDC-pattern extension) are
   explicitly deferred.
+
+## Accepted dense paths for physical applicability and work observers
+
+The original competing-event RK45 owner now offers
+`rk45_until_any_event_observed`. It exposes each accepted dense step together
+with the end of its accepted prefix before committing that step. On an event,
+the discarded continuation is excluded. Observer refusal or subsequent
+cancellation preserves the last accepted state; observers stage their own
+candidate data until successful completion. The original entry point delegates
+with an empty observer and retains the same trajectory and RHS work.
+
+`DenseStep::component_range` queries a component over the accepted prefix using
+the quartic's Bernstein coefficient hull, accumulated with double-double
+arithmetic and including actual accepted endpoints. This includes internal
+extrema without sampling, another ODE evaluation, or a new root solver. It is
+a floating numerical hull, potentially wider than the interpolant's actual
+range, and is not an interval certificate for arithmetic or exact physical
+trajectories. It enables speed-domain checks for nonlinear friction while the
+original integrator remains the numerical owner.
+
+Four focused tests cover an internal extremum, prefix restriction and invalid
+queries, exact constant ranges, identical original/observed trajectories and RHS
+counts, late observer refusal, and cancellation after observation without
+committing the in-flight step.

@@ -8,12 +8,13 @@
 //! continuity and finite-scan limitations still apply.
 
 /// Resumable ODE/event/reset trajectories.
+#[path = "multiple/run.rs"]
 pub mod run;
 
 use super::{
     AdaptiveError, AdaptiveReport, AdaptiveState, AdaptiveStatus, EventDirection,
     EventError, EventOccurrence, EventOptions, InitialEvent, PiController, Scan,
-    Workspace, commit, guard_value, prepare, report, scan, validate,
+    DenseStep, Workspace, commit, guard_value, prepare, report, scan, validate,
 };
 
 /// One guard's stable identity and crossing convention.
@@ -184,6 +185,41 @@ where
     G: Fn(u64, f64, &[f64]) -> f64,
     Cancel: FnMut() -> bool,
 {
+    rk45_until_any_event_observed(
+        state, rhs, guard, specs, t_end, rtol, atol, pi, max_steps, options,
+        cancelled, &mut |_, _| Ok(()),
+    )
+}
+
+/// The same competing-event integration with an accepted-path observer.
+///
+/// The observer receives each original dense step and the end of its accepted
+/// prefix. On an event, the discarded continuation beyond the event is excluded.
+/// It runs before that step is committed; an error or subsequent cancellation
+/// leaves the last accepted state intact. It must stage its own output until
+/// this function succeeds. Earlier accepted steps retain the original semantics.
+/// Sampling or range queries do not rerun the RHS or change adaptive decisions.
+#[allow(clippy::too_many_arguments)]
+pub fn rk45_until_any_event_observed<F, G, Cancel, Observe>(
+    state: &mut AdaptiveState,
+    rhs: &F,
+    guard: &G,
+    specs: &[EventSpec],
+    t_end: f64,
+    rtol: f64,
+    atol: f64,
+    pi: &PiController,
+    max_steps: usize,
+    options: &EventSetOptions,
+    cancelled: &mut Cancel,
+    observe: &mut Observe,
+) -> Result<EventSetAdvance, EventSetError>
+where
+    F: Fn(f64, &[f64], &mut [f64]),
+    G: Fn(u64, f64, &[f64]) -> f64,
+    Cancel: FnMut() -> bool,
+    Observe: FnMut(&DenseStep, f64) -> Result<(), EventError>,
+{
     validate(state, t_end, rtol, atol, pi)?;
     options.validate()?;
     let specs = ordered_specs(specs)?;
@@ -238,6 +274,7 @@ where
         if let Some(mut hit) = select(candidates, options.order, &progress)? {
             let u = dense.evaluate(hit.selected.occurrence.time)?;
             let accepted = state.accepted.checked_add(1).ok_or(AdaptiveError::CounterOverflow)?;
+            observe(&dense, hit.selected.occurrence.time)?;
             if cancelled() { return Ok(stopped(progress, AdaptiveStatus::Cancelled)); }
             state.t = hit.selected.occurrence.time;
             state.u = u;
@@ -247,6 +284,8 @@ where
             hit.accepted += 1;
             return Ok(EventSetAdvance::Event(hit));
         }
+        observe(&dense, dense.interval()[1])?;
+        if cancelled() { return Ok(stopped(progress, AdaptiveStatus::Cancelled)); }
         commit(state, &mut work, trial)?;
         progress.accepted += 1;
     }

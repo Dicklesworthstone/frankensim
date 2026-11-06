@@ -8,7 +8,12 @@
 //! between adjacent samples. Set `max_step` and `scan_substeps` for the model.
 
 /// Competing guards with explicit numerical event-order policy.
+#[path = "events/multiple.rs"]
 pub mod multiple;
+
+// Range queries belong to this original dense polynomial, not its consumers.
+#[path = "events/range.rs"]
+mod range;
 
 use super::{AdaptiveError, AdaptiveReport, AdaptiveState, AdaptiveStatus, PiController,
             Trial, Workspace, commit, validate};
