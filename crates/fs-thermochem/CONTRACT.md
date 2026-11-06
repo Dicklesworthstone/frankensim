@@ -624,6 +624,39 @@ enthalpy/entropy and changing phase inventories, extensive scaling, species
 permutations, exact absences and positive traces. Source, budget, cancellation
 and genuinely unresolved near-critical joint-response cases refuse explicitly.
 
+### Finite multicomponent equilibrium heat exchange
+
+`solution::multicomponent::caloric::equilibrium` binds the SAME accepted phase
+candidate to the existing `MulticomponentLiquidCaloricModelV1` and original
+pure Cp sources. `add_heat_equilibrium` applies signed heat at fixed pressure
+and conserved species inventory while phase amounts and compositions adjust.
+The existing safeguarded temperature inverse uses analytic equilibrium Cp as
+its Newton tangent and accepts the actual source-relative enthalpy residual.
+Both the temperature-width and energy budgets remain explicit.
+
+Each bounded temperature continuation step predicts the original phase
+component amounts from their analytic derivatives, reconstructs the largest
+species allocation for conservation, and corrects with the original equilibrium
+solver. Every corrected state must retain the phase count/support, remain in
+the local predictor neighborhood, and admit the unregularized physical Cp.
+The caller bounds temperature steps and total phase solves; each phase solve
+retains the original candidate's inner controls. Disappearing, coincident or
+unresolved phases refuse rather than changing the physical model implicitly.
+For nonzero heat, the complete offered thermal bracket must be reachable;
+zero heat within the bracket re-admits the original state without phase solves.
+This is seeded
+numerical continuation, not a mathematical branch-identity proof, global Gibbs
+envelope or a phase-appearance/latent-transition solver.
+
+Direct H/S increments integrate original pure Cp and Cp/T and difference the
+actual phase amounts and pair-composition products locally before extensive
+scaling. Large pure-reference totals are never subtracted to recover heat.
+The result retains the exact final candidate, total/frozen/redistribution Cp,
+signed heat, entropy change, caloric residual, bracket and phase-solve work.
+Finite entropy must satisfy the endpoint Clausius bounds within the declared
+entropy, energy and roundoff allowance; external reservoir entropy remains a
+separate account. Source/branch/work failure and cancellation publish no endpoint.
+
 ### Closed isobaric liquid calorics
 
 `solution::caloric` combines that SAME pair law with explicitly ordered

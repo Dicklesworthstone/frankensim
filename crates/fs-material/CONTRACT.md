@@ -18141,6 +18141,33 @@ check complete source retention and ordered mass conversion, an independent
 three-phase enthalpy derivative, extensive scaling, complete foreign-owner
 refusal and cancellation.
 
+### Source-bound finite multicomponent equilibrium heating
+
+The existing `MulticomponentLiquidCaloricLaw::equilibrium_caloric_state` binds
+an already resolved equilibrium to its complete original material and caloric
+owner. The original phases are retained without another source query or phase
+search. `add_heat_equilibrium` delegates signed heat and bounded fixed-phase
+continuation to that SAME thermochemical owner, including temperature-dependent
+pure Cp and thermal redistribution of phase inventories.
+
+Only the accepted final candidate refreshes each phase's original density,
+viscosity, conductivity, mass and volume. The returned caloric/material state
+retains that exact candidate, source receipts, source-normalized specific heat
+and finite heat/entropy balance. A foreign owner, unsupported final phase,
+exhausted continuation budget or cancellation returns no partial endpoint and
+leaves the original state unchanged. Numeric thermal trials perform no
+material-source queries. Phase transport Cp remains its independently selected
+property rather than an inferred effective equilibrium transport coefficient.
+
+This operation preserves the accepted phase count and support. It supplies
+seeded local numerical continuation with explicit branch/domain refusal, not
+automatic phase appearance/disappearance or global-equilibrium certification.
+Native integration tests heat and cool three phases across an original Cp
+knot against independent scalar common-tangent and analytic H/S integrals,
+check actual composition-dependent material refresh and conserved mass, and
+reject a final phase leaving its original source chart, foreign caloric
+references and last-poll cancellation atomically.
+
 ### Full three-dimensional piezoelectric thermal storage
 
 `piezoelectric::thermal::ThermalTensorPiezoelectric` binds complete affine original stress-charge stiffness, signed coupling and clamped-permittivity source tensors over a positive absolute-temperature interval with constant reference density. It preserves full source selections, nonthermal context and the fixed frame transformation. At fixed full Mandel strain and Cartesian electric displacement, the native tensor/factor owner supplies Helmholtz energy, exact entropy, internal energy and nonpositive field heat capacity, without scalar projection or fresh response-time factorization. Complete endpoint tensor admission establishes affine-source stability. A rotation-invariant norm bound supplies a conservative whole-interval capacity floor under explicit strain/displacement envelopes; consuming caloric owners must add their actual capacity and enforce those bounds. Reversible thermal exchange is separate from material loss. No pyroelectric offset, expansion, hysteresis, phase transition, depoling or measured-material validation is implied. Focused synthetic G0/G1/G3 regression sources cover independent diagonal/dense potentials, co-rotation and domain refusal; native execution remains a separate verification obligation.

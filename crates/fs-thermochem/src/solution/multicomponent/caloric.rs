@@ -12,6 +12,9 @@
 //! nonzero prescribed heat, the reported system entropy change requires the
 //! actual reservoir entropy before a second-law conclusion can be drawn.
 
+/// Finite signed heat on an explicitly accepted local fixed-phase-count branch.
+pub mod equilibrium;
+
 use super::{
     MAX_REGULAR_SOLUTION_SPECIES_V1, MulticomponentRegularSolutionV1,
     MulticomponentSolutionErrorV1, MulticomponentSolutionStateV1, R, Sum,

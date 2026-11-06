@@ -1,5 +1,8 @@
 //! Original pure-liquid receipts feed the accepted finite phase response.
 
+#[path = "caloric/heating.rs"]
+mod heating;
+
 use super::*;
 use fs_material::liquid::solution::multicomponent::caloric::{
     MulticomponentLiquidCaloricError, MulticomponentLiquidCaloricLaw,

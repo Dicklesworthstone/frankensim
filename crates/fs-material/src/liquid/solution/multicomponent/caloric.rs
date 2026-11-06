@@ -8,6 +8,12 @@
 
 mod response;
 pub use response::ResolvedMulticomponentLiquidCaloricResponse;
+/// Finite heat exchange along an accepted local equilibrium phase branch.
+pub mod equilibrium;
+pub use equilibrium::{
+    MulticomponentLiquidEquilibriumCaloricBalance,
+    ResolvedMulticomponentLiquidEquilibriumCaloricState,
+};
 
 use super::{
     MulticomponentLiquidError, MulticomponentLiquidSolutionLaw, ResolvedMulticomponentLiquidCell,
@@ -17,6 +23,7 @@ use crate::thermal::transport::isobaric::IsobaricHeatCapacityLaw;
 use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
 use fs_qty::{Pressure, QuantitySpec, Temperature};
 use fs_thermochem::solution::caloric::PureLiquidHeatCapacityV1;
+use fs_thermochem::solution::multicomponent::caloric::equilibrium::MulticomponentEquilibriumCaloricErrorV1;
 use fs_thermochem::solution::multicomponent::caloric::{
     MulticomponentCaloricBalanceV1, MulticomponentCaloricErrorV1, MulticomponentCaloricSolveV1,
     MulticomponentCaloricStateV1, MulticomponentLiquidCaloricModelV1,
@@ -31,6 +38,7 @@ pub enum MulticomponentLiquidCaloricError {
     Invalid(&'static str),
     Caloric(MulticomponentCaloricErrorV1),
     CoreResponse(MulticomponentCaloricResponseErrorV1),
+    EquilibriumCaloric(MulticomponentEquilibriumCaloricErrorV1),
     Material(MulticomponentLiquidError),
     Cancelled,
 }
@@ -53,6 +61,11 @@ impl From<MulticomponentLiquidError> for MulticomponentLiquidCaloricError {
 impl From<MulticomponentCaloricResponseErrorV1> for MulticomponentLiquidCaloricError {
     fn from(error: MulticomponentCaloricResponseErrorV1) -> Self {
         Self::CoreResponse(error)
+    }
+}
+impl From<MulticomponentEquilibriumCaloricErrorV1> for MulticomponentLiquidCaloricError {
+    fn from(error: MulticomponentEquilibriumCaloricErrorV1) -> Self {
+        Self::EquilibriumCaloric(error)
     }
 }
 type Result<T> = core::result::Result<T, MulticomponentLiquidCaloricError>;
