@@ -9,6 +9,14 @@ stored-energy and boundary-reaction accounts remain unchanged. Classical
 adjoint admission compares the actual one-sided caloric slopes; a continuous
 Cp source is not a kink merely because adjacent h/T chords differ.
 
+`ExactMaterialEnthalpySource` and the `from_isotropic_card_exact` /
+`from_orthotropic_card_exact` constructors prepare this same native solver
+from the original Cp/density knot union, without an artificial subdivision
+allowance. Reference mass, source context, directional frames and receipts
+share the existing admission. The material-enthalpy regressions compare two
+original boundaries with thousands of bounded chords, exercise nonlinear
+heating and directional equilibration, and check the physical energy balance.
+
 `MaterialPhaseTransport` retains the original sensible Cp endpoints beside
 each prepared scalar or principal conductivity interval. P1 specific enthalpy
 still defines the conductivity sampling field. For affine source Cp(T), h(T)

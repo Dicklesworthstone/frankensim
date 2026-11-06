@@ -45,8 +45,46 @@ pub struct MaterialEnthalpySource<'a, Conductivity = &'a PropertyKey> {
     pub phase: SolidLiquidPhase,
     /// Declared specific enthalpy at the lower temperature endpoint, J/kg.
     pub lower_specific_enthalpy_j_kg: f64,
-    /// Maximum caloric-chart interpolation error, J/kg; not source uncertainty.
+    /// Maximum error of the public enthalpy/temperature boundary chords, J/kg.
+    /// Evaluation still integrates the original Cp analytically. This allowance
+    /// controls retained boundary subdivisions, not source uncertainty.
     pub maximum_interpolation_error_j_kg: f64,
+}
+
+/// Original sensible sources without artificial caloric boundary subdivisions.
+///
+/// The caloric owner retains the union of the original Cp and density knots,
+/// integrates their affine Cp(T), and inverts that same law analytically.
+/// No interpolation allowance or dense boundary chart is needed. Explicitly
+/// authored phase transitions, source uncertainty and physical discretization
+/// error remain separate from this source-exact representation.
+#[derive(Clone, Copy, Debug)]
+pub struct ExactMaterialEnthalpySource<'a, Conductivity = &'a PropertyKey> {
+    /// Density/Cp keys and complete lower/upper queries; all external axes stay fixed.
+    pub caloric: HeatCapacitySourceQuery<'a>,
+    /// Scalar or three principal conductivity sources from the SAME material card.
+    pub conductivity: Conductivity,
+    /// Frozen reference density state; only temperature may differ from the endpoints.
+    pub reference: &'a QueryPoint,
+    /// Explicit single phase; no phase boundary is inferred from heat capacity.
+    pub phase: SolidLiquidPhase,
+    /// Declared specific enthalpy at the lower temperature endpoint, J/kg.
+    pub lower_specific_enthalpy_j_kg: f64,
+}
+
+impl<'a, Conductivity> MaterialEnthalpySource<'a, Conductivity> {
+    fn into_parts(self) -> (ExactMaterialEnthalpySource<'a, Conductivity>, f64) {
+        (
+            ExactMaterialEnthalpySource {
+                caloric: self.caloric,
+                conductivity: self.conductivity,
+                reference: self.reference,
+                phase: self.phase,
+                lower_specific_enthalpy_j_kg: self.lower_specific_enthalpy_j_kg,
+            },
+            self.maximum_interpolation_error_j_kg,
+        )
+    }
 }
 
 /// A source refusal produces no paired thermal material.
@@ -103,8 +141,36 @@ impl MaterialEnthalpyTransport {
         card: &MaterialCard,
         source: MaterialEnthalpySource<'_>,
     ) -> Result<Self, MaterialEnthalpyError> {
+        let (source, maximum_error) = source.into_parts();
+        Self::from_isotropic_source(card, source, Some(maximum_error))
+    }
+
+    /// Resolve isotropic storage and conduction using only original source knots.
+    ///
+    /// This selects the same analytical Cp(T), density, conductivity and frozen
+    /// reference-mass conventions as [`Self::from_isotropic_card`], without
+    /// constructing its tolerance-driven public boundary subdivisions. Source
+    /// support, typed context and original receipt admission are identical.
+    pub fn from_isotropic_card_exact(
+        card: &MaterialCard,
+        source: ExactMaterialEnthalpySource<'_>,
+    ) -> Result<Self, MaterialEnthalpyError> {
+        Self::from_isotropic_source(card, source, None)
+    }
+
+    fn from_isotropic_source(
+        card: &MaterialCard,
+        source: ExactMaterialEnthalpySource<'_>,
+        maximum_error: Option<f64>,
+    ) -> Result<Self, MaterialEnthalpyError> {
         let table = Self::conductivity_table(card, source.caloric, source.conductivity)?;
-        Self::from_conductivity(card, source, ConductivityModel::isotropic(table), None)
+        Self::from_conductivity(
+            card,
+            source,
+            ConductivityModel::isotropic(table),
+            None,
+            maximum_error,
+        )
     }
 
     /// Resolve three principal conductivity sources with the SAME caloric
@@ -126,6 +192,30 @@ impl MaterialEnthalpyTransport {
         source: MaterialEnthalpySource<'_, [&PropertyKey; 3]>,
         principal_axes: [[f64; 3]; 3],
     ) -> Result<Self, MaterialEnthalpyError> {
+        let (source, maximum_error) = source.into_parts();
+        Self::from_orthotropic_source(card, source, principal_axes, Some(maximum_error))
+    }
+
+    /// Resolve three principal conductivities with compact analytical storage.
+    ///
+    /// Only the original Cp/density union is retained as caloric boundaries.
+    /// The frame, full source context and all three conductivity intervals obey
+    /// the same admission as [`Self::from_orthotropic_card`]. The resulting
+    /// material uses the original uniform or heterogeneous enthalpy solver.
+    pub fn from_orthotropic_card_exact(
+        card: &MaterialCard,
+        source: ExactMaterialEnthalpySource<'_, [&PropertyKey; 3]>,
+        principal_axes: [[f64; 3]; 3],
+    ) -> Result<Self, MaterialEnthalpyError> {
+        Self::from_orthotropic_source(card, source, principal_axes, None)
+    }
+
+    fn from_orthotropic_source(
+        card: &MaterialCard,
+        source: ExactMaterialEnthalpySource<'_, [&PropertyKey; 3]>,
+        principal_axes: [[f64; 3]; 3],
+        maximum_error: Option<f64>,
+    ) -> Result<Self, MaterialEnthalpyError> {
         let table = |key| Self::conductivity_table(card, source.caloric, key);
         let conductivity = ConductivityModel::orthotropic(
             principal_axes,
@@ -136,7 +226,13 @@ impl MaterialEnthalpyTransport {
             ],
         )
         .map_err(MaterialEnthalpyError::Conductivity)?;
-        Self::from_conductivity(card, source, conductivity, Some(principal_axes))
+        Self::from_conductivity(
+            card,
+            source,
+            conductivity,
+            Some(principal_axes),
+            maximum_error,
+        )
     }
 
     fn conductivity_table(
@@ -156,9 +252,10 @@ impl MaterialEnthalpyTransport {
 
     fn from_conductivity<K>(
         card: &MaterialCard,
-        source: MaterialEnthalpySource<'_, K>,
+        source: ExactMaterialEnthalpySource<'_, K>,
         conductivity: ConductivityModel,
         principal_axes: Option<[[f64; 3]; 3]>,
+        maximum_error: Option<f64>,
     ) -> Result<Self, MaterialEnthalpyError> {
         let axis = source.caloric.temperature_axis;
         let reference_k =
@@ -193,13 +290,21 @@ impl MaterialEnthalpyTransport {
                 "reference temperature must be supported and all other typed conditions unchanged",
             ));
         }
-        let caloric = ResolvedHeatCapacityCurve::try_new(
-            card,
-            source.caloric,
-            source.phase,
-            source.lower_specific_enthalpy_j_kg,
-            source.maximum_interpolation_error_j_kg,
-        )
+        let caloric = match maximum_error {
+            Some(maximum_error) => ResolvedHeatCapacityCurve::try_new(
+                card,
+                source.caloric,
+                source.phase,
+                source.lower_specific_enthalpy_j_kg,
+                maximum_error,
+            ),
+            None => ResolvedHeatCapacityCurve::try_new_exact(
+                card,
+                source.caloric,
+                source.phase,
+                source.lower_specific_enthalpy_j_kg,
+            ),
+        }
         .map_err(MaterialEnthalpyError::Caloric)?;
         for receipt in caloric.receipts().iter().chain(conductivity.receipts()) {
             if !card
