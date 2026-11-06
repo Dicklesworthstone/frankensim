@@ -19,6 +19,8 @@
 //! history. The winding child adds native circuit terminals to this same field
 //! history. No ALE, hysteresis or coupled mechanical trajectory is inferred.
 
+/// Physical voltage and total-current electrodes on the original A–phi solve.
+pub mod terminals;
 /// Native circuit terminals on this original three-dimensional field history.
 pub mod winding;
 
@@ -32,6 +34,7 @@ use super::{
     SpatialInductionCell, SpatialInductionControls, SpatialInductionField, SpatialInductionLimits,
     coupling::{Coupling, Geometry, admit_step},
     kernel::{Kernel, Magnetic, Physical},
+    terminals::{SpatialInductionTerminalTransfer, TerminalDrive},
 };
 use fs_feec::weighted::CellWeight;
 use fs_material::{
@@ -107,6 +110,9 @@ pub struct SpatialNonlinearInductionStep {
     pub mechanical_work_j: f64,
     pub numerical_dissipation_j: f64,
     pub impressed_work_j: f64,
+    /// Endpoint electrode supply, independently recovered from charge reactions.
+    pub terminal_work_j: f64,
+    pub terminals: Vec<SpatialInductionTerminalTransfer>,
     pub energy_residual_j: f64,
     pub maximum_ampere_residual_a: f64,
     pub maximum_charge_residual_a: f64,
@@ -368,13 +374,10 @@ impl<'m, C: SpatialConductorMaterial> SpatialNonlinearInduction<'m, C> {
         settings: SpatialNonlinearInductionControls,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<SpatialNonlinearInductionCandidate<'m, C>> {
-        let coupling = self.coupling_at(&self.problem, conductors, cancelled)?;
+        let prepared = self.prepare_conductors(conductors, cancelled)?;
         self.step_prepared_candidate(
             self.problem.clone(),
-            Arc::new(Prepared {
-                coupling,
-                permeability_bound: self.prepared.permeability_bound.clone(),
-            }),
+            prepared,
             endpoint_current_a_m2,
             velocity_m_s,
             duration_s,
@@ -415,6 +418,21 @@ impl<'m, C: SpatialConductorMaterial> SpatialNonlinearInduction<'m, C> {
     // A coupled circuit holds endpoint sources fixed over all terminal-current
     // trials. Prepare their native operators once, keeping the accepted A and
     // source history untouched; the winding child reuses this same preparation.
+    fn prepare_conductors(
+        &self,
+        conductors: Vec<Option<C>>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Arc<Prepared<C>>> {
+        poll(cancelled)?;
+        if conductors == self.conductors() {
+            return Ok(Arc::clone(&self.prepared));
+        }
+        Ok(Arc::new(Prepared {
+            coupling: self.coupling_at(&self.problem, conductors, cancelled)?,
+            permeability_bound: self.prepared.permeability_bound.clone(),
+        }))
+    }
+
     fn prepare_materials(
         &self,
         materials: Vec<SpatialNonlinearMaterial>,
@@ -517,6 +535,30 @@ impl<'m, C: SpatialConductorMaterial> SpatialNonlinearInduction<'m, C> {
         settings: SpatialNonlinearInductionControls,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<SpatialNonlinearInductionCandidate<'m, C>> {
+        self.step_driven_candidate(
+            problem,
+            prepared,
+            endpoint_current_a_m2,
+            velocity_m_s,
+            duration_s,
+            settings,
+            None,
+            cancelled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn step_driven_candidate(
+        &self,
+        problem: MagneticOwner<'m>,
+        prepared: Arc<Prepared<C>>,
+        endpoint_current_a_m2: &[[f64; 3]],
+        velocity_m_s: &[[f64; 3]],
+        duration_s: f64,
+        settings: SpatialNonlinearInductionControls,
+        terminal_drive: Option<&TerminalDrive<'_>>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<SpatialNonlinearInductionCandidate<'m, C>> {
         poll(cancelled)?;
         let controls = settings.induction;
         let c = &prepared.coupling;
@@ -542,7 +584,7 @@ impl<'m, C: SpatialConductorMaterial> SpatialNonlinearInduction<'m, C> {
         } else {
             Some(magnetic(&problem, &self.potential_wb, cancelled)?)
         };
-        let (motion, drive, maximum_cell_magnetic_peclet) = c.motion(
+        let (motion, mut drive, maximum_cell_magnetic_peclet) = c.motion(
             g,
             velocity_m_s,
             &before.field.flux_density_t,
@@ -550,6 +592,9 @@ impl<'m, C: SpatialConductorMaterial> SpatialNonlinearInduction<'m, C> {
             controls.maximum_cell_magnetic_peclet,
             cancelled,
         )?;
+        if let Some(terminal) = terminal_drive {
+            terminal.add_rhs(c, &mut drive, cancelled)?;
+        }
         let kernel = Kernel {
             geometry: g,
             coupling: c,
@@ -581,7 +626,10 @@ impl<'m, C: SpatialConductorMaterial> SpatialNonlinearInduction<'m, C> {
             delta,
             current,
             maximum_ampere_residual_a,
-        } = kernel.recover(&value, velocity_m_s, cancelled)?;
+            maximum_charge_residual_a,
+            terminals,
+            terminal_work_j,
+        } = kernel.recover(&value, velocity_m_s, terminal_drive, cancelled)?;
         let mut magnetic_cells = Vec::with_capacity(g.cells.len());
         let mut stored_change_j = 0.0;
         let mut parameter_work_j = 0.0;
@@ -632,11 +680,12 @@ impl<'m, C: SpatialConductorMaterial> SpatialNonlinearInduction<'m, C> {
         let energy_residual_j = finite(
             stored_change_j + current.heat_j + current.mechanical_work_j + numerical_dissipation_j
                 - impressed_work_j
+                - terminal_work_j
                 - parameter_work_j,
         )?;
         if energy_residual_j.abs() > controls.energy_tolerance_j {
             return Err(invalid(
-                "nonlinear magnetic, Ohmic, Lorentz and numerical work do not close",
+                "nonlinear magnetic, Ohmic, Lorentz, terminal and numerical work do not close",
             )
             .into());
         }
@@ -662,9 +711,11 @@ impl<'m, C: SpatialConductorMaterial> SpatialNonlinearInduction<'m, C> {
                 mechanical_work_j: current.mechanical_work_j,
                 numerical_dissipation_j,
                 impressed_work_j,
+                terminal_work_j,
+                terminals,
                 energy_residual_j,
                 maximum_ampere_residual_a,
-                maximum_charge_residual_a: current.maximum_charge_residual_a,
+                maximum_charge_residual_a,
                 maximum_cell_magnetic_peclet,
                 report: value.report,
             },

@@ -22,7 +22,7 @@ use fs_material::field_storage::nonlinear::{
 };
 use fs_qty::QuantitySpec;
 
-fn saturation(sigma: f64) -> (SpatialNonlinearMaterial, ResolvedConductorState) {
+pub(super) fn saturation(sigma: f64) -> (SpatialNonlinearMaterial, ResolvedConductorState) {
     let mut claims = ClaimSet::new();
     for (name, dims, value, interpolation, validity) in [
         (
@@ -116,7 +116,10 @@ fn saturation(sigma: f64) -> (SpatialNonlinearMaterial, ResolvedConductorState) 
         ResolvedConductorState::try_from_material(material).unwrap(),
     )
 }
-fn model(n: usize, material: SpatialNonlinearMaterial) -> SpatialNonlinearVectorMagnetostatics {
+pub(super) fn model(
+    n: usize,
+    material: SpatialNonlinearMaterial,
+) -> SpatialNonlinearVectorMagnetostatics {
     let (positions, tets) = grid(n);
     let count = tets.len();
     SpatialNonlinearVectorMagnetostatics::new(
@@ -128,7 +131,7 @@ fn model(n: usize, material: SpatialNonlinearMaterial) -> SpatialNonlinearVector
     )
     .unwrap()
 }
-fn nonlinear_controls() -> SpatialNonlinearInductionControls {
+pub(super) fn nonlinear_controls() -> SpatialNonlinearInductionControls {
     SpatialNonlinearInductionControls {
         induction: controls(),
         maximum_newton_iterations: 40,
@@ -166,7 +169,7 @@ fn solve<'m>(
     )
     .unwrap()
 }
-fn mode(
+pub(super) fn mode(
     p: &SpatialNonlinearVectorMagnetostatics,
     amplitude: f64,
     current: f64,
@@ -175,7 +178,7 @@ fn mode(
     a[p.mesh().edges.binary_search(&[0, 7]).unwrap()] = amplitude;
     solve(p, &a, &vec![[current; 3]; 6])
 }
-fn history<'m>(
+pub(super) fn history<'m>(
     field: &SpatialNonlinearVectorField<'m>,
     conductor: &ResolvedConductorState,
 ) -> SpatialNonlinearInduction<'m> {
@@ -188,7 +191,7 @@ fn history<'m>(
     )
     .unwrap()
 }
-fn energy(a: f64) -> f64 {
+pub(super) fn energy(a: f64) -> f64 {
     let b = 2.0 * a;
     if b <= 1.0 {
         0.25 * b * b

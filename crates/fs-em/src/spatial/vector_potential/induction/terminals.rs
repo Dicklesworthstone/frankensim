@@ -48,11 +48,242 @@ pub struct SpatialInductionTerminalTransfer {
 }
 
 #[derive(Clone)]
-struct TerminalLayout {
+pub(super) struct TerminalLayout {
     faces: Vec<Vec<usize>>,
     component: Vec<usize>,
     reference: Vec<usize>,
     charge_terminal: Vec<Option<usize>>,
+}
+
+impl TerminalLayout {
+    /// Admit physical electrodes against the original geometry and conductor
+    /// support, then build the native prescribed-potential charge space once.
+    pub fn prepare<C: SpatialConductorMaterial>(
+        g: Geometry<'_>,
+        coupling: &Coupling<C>,
+        electrode_faces: &[Vec<usize>],
+        magnetic_entries: usize,
+        limits: SpatialInductionLimits,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(Arc<Self>, Coupling<C>)> {
+        poll(cancelled)?;
+        Self::admit_assembly(coupling, magnetic_entries, limits)?;
+        if electrode_faces.is_empty()
+            || electrode_faces.iter().any(Vec::is_empty)
+            || electrode_faces
+                .iter()
+                .try_fold(0usize, |n, f| n.checked_add(f.len()))
+                .is_none_or(|n| n > g.geometry.faces.len())
+        {
+            return Err(invalid(
+                "nonempty bounded physical induction electrodes required",
+            ));
+        }
+        let mut faces = Vec::with_capacity(electrode_faces.len());
+        let mut component = Vec::with_capacity(electrode_faces.len());
+        let mut charge_terminal = vec![None; coupling.charge_vertices.len()];
+        let mut used_faces = BTreeSet::new();
+        let trace_components =
+            super::coupling::fixed_trace_components(g.mesh(), &coupling.fixed_edges, cancelled)?;
+        let topology = super::super::VectorTopology {
+            geometry: g.geometry,
+            cells: g.cells,
+        };
+        let mut conductor_trace = BTreeMap::new();
+        for (terminal, supplied) in electrode_faces.iter().enumerate() {
+            let mut selected = supplied.clone();
+            selected.sort_unstable();
+            let mut region = None;
+            for &face in &selected {
+                poll(cancelled)?;
+                let info = g
+                    .geometry
+                    .faces
+                    .get(face)
+                    .ok_or_else(|| invalid("induction electrode face is outside the mesh"))?;
+                if info.cells.len() != 1
+                    || !used_faces.insert(face)
+                    || !topology
+                        .face_edges(face)
+                        .is_some_and(|edges| edges.iter().all(|&e| coupling.fixed_edges[e]))
+                {
+                    return Err(invalid(
+                        "distinct exterior electrode faces with fixed tangential A required",
+                    ));
+                }
+                let cell = info.cells[0];
+                let index = coupling
+                    .cells
+                    .binary_search_by_key(&cell, |c| c.cell)
+                    .map_err(|_| invalid("induction electrode must touch a conducting cell"))?;
+                let conductor = coupling.cells[index].component;
+                if region.is_some_and(|r| r != conductor) {
+                    return Err(invalid(
+                        "one electrode cannot join disconnected conductor components",
+                    ));
+                }
+                region = Some(conductor);
+                for &v in &g.mesh().faces[face] {
+                    let trace = trace_components[v as usize];
+                    let reference = *conductor_trace.entry(conductor).or_insert(trace);
+                    if trace != reference {
+                        return Err(invalid(
+                            "conductor electrodes need a connected fixed-A voltage reference path",
+                        ));
+                    }
+                    let charge = coupling
+                        .charge_vertices
+                        .binary_search(&(conductor, v as usize))
+                        .map_err(|_| {
+                            invalid("electrode lost its original conductor charge node")
+                        })?;
+                    if charge_terminal[charge].is_some_and(|t| t != terminal) {
+                        return Err(invalid(
+                            "distinct electrodes cannot meet at a conductor vertex",
+                        ));
+                    }
+                    charge_terminal[charge] = Some(terminal);
+                }
+            }
+            faces.push(selected);
+            component.push(region.expect("nonempty electrode admitted"));
+        }
+        let mut references = BTreeMap::new();
+        let reference = component
+            .iter()
+            .enumerate()
+            .map(|(t, &c)| *references.entry(c).or_insert(t))
+            .collect();
+        let layout = Arc::new(Self {
+            faces,
+            component,
+            reference,
+            charge_terminal,
+        });
+        let coupling = layout.voltage_coupling(g, coupling, magnetic_entries, limits, cancelled)?;
+        poll(cancelled)?;
+        Ok((layout, coupling))
+    }
+
+    fn admit_assembly<C: SpatialConductorMaterial>(
+        coupling: &Coupling<C>,
+        magnetic_entries: usize,
+        limits: SpatialInductionLimits,
+    ) -> Result<()> {
+        if coupling
+            .cells
+            .len()
+            .checked_mul(100)
+            .and_then(|n| n.checked_add(magnetic_entries))
+            .is_none_or(|n| n > limits.maximum_assembly_terms)
+        {
+            return Err(invalid("physical electrode assembly budget exceeded"));
+        }
+        Ok(())
+    }
+
+    pub fn voltage_coupling<C: SpatialConductorMaterial>(
+        &self,
+        g: Geometry<'_>,
+        coupling: &Coupling<C>,
+        magnetic_entries: usize,
+        limits: SpatialInductionLimits,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Coupling<C>> {
+        poll(cancelled)?;
+        Self::admit_assembly(coupling, magnetic_entries, limits)?;
+        let prescribed = self
+            .charge_terminal
+            .iter()
+            .map(Option::is_some)
+            .collect::<Vec<_>>();
+        coupling.with_prescribed_charges(g, &prescribed, limits, cancelled)
+    }
+
+    pub fn current_coupling<C: SpatialConductorMaterial>(
+        &self,
+        g: Geometry<'_>,
+        coupling: &Coupling<C>,
+        magnetic_entries: usize,
+        limits: SpatialInductionLimits,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(Coupling<C>, Vec<Option<usize>>)> {
+        poll(cancelled)?;
+        Self::admit_assembly(coupling, magnetic_entries, limits)?;
+        coupling.with_current_charges(g, &self.charge_terminal, &self.reference, limits, cancelled)
+    }
+
+    pub fn faces(&self) -> &[Vec<usize>] {
+        &self.faces
+    }
+
+    pub fn voltage_drive(
+        &self,
+        voltage_v: &[f64],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<TerminalDrive<'_>> {
+        poll(cancelled)?;
+        if voltage_v.len() != self.faces.len() || voltage_v.iter().any(|v| !v.is_finite()) {
+            return Err(invalid(
+                "one finite stage voltage per original induction electrode required",
+            ));
+        }
+        let relative_voltage_v = voltage_v
+            .iter()
+            .zip(&self.reference)
+            .map(|(&v, &reference)| finite(v - voltage_v[reference]))
+            .collect::<Result<Vec<_>>>()?;
+        let potential_v = self
+            .charge_terminal
+            .iter()
+            .map(|t| t.map_or(0.0, |t| relative_voltage_v[t]))
+            .collect();
+        Ok(TerminalDrive {
+            layout: self,
+            potential_v,
+            relative_voltage_v,
+            current: None,
+        })
+    }
+
+    pub fn current_drive<'a>(
+        &'a self,
+        incoming_a: &'a [f64],
+        unknowns: &'a [Option<usize>],
+        current_tolerance_a: f64,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<TerminalDrive<'a>> {
+        poll(cancelled)?;
+        if incoming_a.len() != self.faces.len()
+            || unknowns.len() != self.faces.len()
+            || incoming_a.iter().any(|i| !i.is_finite())
+            || !positive(current_tolerance_a)
+        {
+            return Err(invalid(
+                "one finite total incoming current per electrode required",
+            ));
+        }
+        let mut balance = BTreeMap::new();
+        for (&component, &incoming) in self.component.iter().zip(incoming_a) {
+            poll(cancelled)?;
+            let sum = balance.entry(component).or_insert(0.0);
+            *sum = finite(*sum + incoming)?;
+        }
+        if balance.into_values().any(|i| i.abs() > current_tolerance_a) {
+            return Err(invalid(
+                "total electrode current must balance on every conductor",
+            ));
+        }
+        Ok(TerminalDrive {
+            layout: self,
+            potential_v: vec![],
+            relative_voltage_v: vec![],
+            current: Some(CurrentDrive {
+                incoming_a,
+                unknowns,
+            }),
+        })
+    }
 }
 
 /// An accepted magnetic history with fixed physical electrode locations.
@@ -118,97 +349,11 @@ impl<'m, C: SpatialConductorMaterial> SpatialTerminalInduction<'m, C> {
         poll(cancelled)?;
         let p = &field.prepared;
         let problem = &*p.problem;
-        if electrode_faces.is_empty()
-            || electrode_faces.iter().any(Vec::is_empty)
-            || electrode_faces
-                .iter()
-                .try_fold(0usize, |n, f| n.checked_add(f.len()))
-                .is_none_or(|n| n > problem.geometry.faces.len())
-            || p.cells
-                .len()
-                .checked_mul(100)
-                .and_then(|n| n.checked_add(problem.stiffness.nnz()))
-                .is_none_or(|n| n > limits.maximum_assembly_terms)
-        {
-            return Err(invalid(
-                "nonempty bounded physical induction electrodes required",
-            ));
-        }
-        let mut faces = Vec::with_capacity(electrode_faces.len());
-        let mut component = Vec::with_capacity(electrode_faces.len());
-        let mut charge_terminal = vec![None; p.charge_vertices.len()];
-        let mut used_faces = BTreeSet::new();
-        let trace_components =
-            super::coupling::fixed_trace_components(problem.mesh(), &p.fixed_edges, cancelled)?;
-        let mut conductor_trace = BTreeMap::new();
-        for (terminal, supplied) in electrode_faces.iter().enumerate() {
-            let mut selected = supplied.clone();
-            selected.sort_unstable();
-            let mut region = None;
-            for &face in &selected {
-                poll(cancelled)?;
-                let info = problem
-                    .geometry
-                    .faces
-                    .get(face)
-                    .ok_or_else(|| invalid("induction electrode face is outside the mesh"))?;
-                if info.cells.len() != 1
-                    || !used_faces.insert(face)
-                    || !problem
-                        .face_edges(face)
-                        .is_some_and(|edges| edges.iter().all(|&e| p.fixed_edges[e]))
-                {
-                    return Err(invalid(
-                        "distinct exterior electrode faces with fixed tangential A required",
-                    ));
-                }
-                let cell = info.cells[0];
-                let index = p
-                    .cells
-                    .binary_search_by_key(&cell, |c| c.cell)
-                    .map_err(|_| invalid("induction electrode must touch a conducting cell"))?;
-                let conductor = p.cells[index].component;
-                if region.is_some_and(|r| r != conductor) {
-                    return Err(invalid(
-                        "one electrode cannot join disconnected conductor components",
-                    ));
-                }
-                region = Some(conductor);
-                for &v in &problem.mesh().faces[face] {
-                    let trace = trace_components[v as usize];
-                    let reference = *conductor_trace.entry(conductor).or_insert(trace);
-                    if trace != reference {
-                        return Err(invalid(
-                            "conductor electrodes need a connected fixed-A voltage reference path",
-                        ));
-                    }
-                    let charge = p
-                        .charge_vertices
-                        .binary_search(&(conductor, v as usize))
-                        .map_err(|_| {
-                            invalid("electrode lost its original conductor charge node")
-                        })?;
-                    if charge_terminal[charge].is_some_and(|t| t != terminal) {
-                        return Err(invalid(
-                            "distinct electrodes cannot meet at a conductor vertex",
-                        ));
-                    }
-                    charge_terminal[charge] = Some(terminal);
-                }
-            }
-            faces.push(selected);
-            component.push(region.expect("nonempty electrode admitted"));
-        }
-        let mut references = BTreeMap::new();
-        let reference = component
-            .iter()
-            .enumerate()
-            .map(|(t, &c)| *references.entry(c).or_insert(t))
-            .collect();
-        let prescribed: Vec<_> = charge_terminal.iter().map(Option::is_some).collect();
-        let coupling = p.coupling.with_prescribed_charges(
+        let (terminals, coupling) = TerminalLayout::prepare(
             geometry(problem),
-            &prescribed,
+            &p.coupling,
+            electrode_faces,
+            problem.stiffness.nnz(),
             limits,
             cancelled,
         )?;
@@ -221,12 +366,7 @@ impl<'m, C: SpatialConductorMaterial> SpatialTerminalInduction<'m, C> {
         poll(cancelled)?;
         Ok(Self {
             field: SpatialInduction { prepared, ..field },
-            terminals: Arc::new(TerminalLayout {
-                faces,
-                component,
-                reference,
-                charge_terminal,
-            }),
+            terminals,
         })
     }
 
@@ -274,31 +414,9 @@ impl<'m, C: SpatialConductorMaterial> SpatialTerminalInduction<'m, C> {
         controls: SpatialInductionControls,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<SpatialTerminalInductionCandidate<'m, C>> {
-        poll(cancelled)?;
-        if midpoint_voltage_v.len() != self.terminals.faces.len()
-            || midpoint_voltage_v.iter().any(|v| !v.is_finite())
-        {
-            return Err(invalid(
-                "one finite midpoint voltage per original induction electrode required",
-            ));
-        }
-        let relative_voltage_v = midpoint_voltage_v
-            .iter()
-            .zip(&self.terminals.reference)
-            .map(|(&v, &reference)| finite(v - midpoint_voltage_v[reference]))
-            .collect::<Result<Vec<_>>>()?;
-        let potential_v = self
+        let drive = self
             .terminals
-            .charge_terminal
-            .iter()
-            .map(|t| t.map_or(0.0, |t| relative_voltage_v[t]))
-            .collect();
-        let drive = TerminalDrive {
-            layout: &self.terminals,
-            potential_v,
-            relative_voltage_v,
-            current: None,
-        };
+            .voltage_drive(midpoint_voltage_v, cancelled)?;
         let native = self.field.step_driven_candidate(
             Arc::clone(&self.field.prepared),
             endpoint_impressed_current_a_m2,
@@ -334,6 +452,31 @@ impl TerminalDrive<'_> {
         self.current
             .is_none()
             .then_some(self.potential_v.as_slice())
+    }
+
+    /// Add only physical electrode forcing to the original coupled charge and
+    /// edge equations. Both prescribed-potential and grouped-current spaces use
+    /// this same RHS path; the conductivity law remains owned by Coupling.
+    pub fn add_rhs<C: SpatialConductorMaterial>(
+        &self,
+        coupling: &Coupling<C>,
+        rhs: &mut [f64],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<()> {
+        if rhs.len() != coupling.mass.nrows() {
+            return Err(invalid(
+                "terminal forcing requires the original coupled space",
+            ));
+        }
+        if let Some(potential) = self.prescribed_potentials() {
+            for (rhs, known) in rhs
+                .iter_mut()
+                .zip(coupling.potential_drive(potential, cancelled)?)
+            {
+                *rhs = finite(*rhs + known)?;
+            }
+        }
+        self.add_current_rhs(rhs, cancelled)
     }
 
     pub fn add_current_rhs(

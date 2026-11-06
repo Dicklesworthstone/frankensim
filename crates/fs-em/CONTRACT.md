@@ -1,5 +1,40 @@
 # fs-em contract
 
+## Physical 3D electrodes with nonlinear and hysteretic induction
+
+`spatial::vector_potential::induction::nonlinear::terminals` supplies voltage and
+total-current electrodes on the original reversible A–phi field. With
+`magnetic-hysteresis`, the parallel `hysteretic::terminals` owners retain the
+original vector play memories as well. These are solid-conductor boundary
+conditions: distributed current, skin/proximity response and local Ohmic loss
+are determined by the same tetrahedral field and charge equations.
+
+Voltage drive prescribes endpoint equipotentials and recovers incoming current
+from charge reactions. Current drive prescribes signed incoming totals, groups
+each electrode's charge unknowns and solves the equipotential voltage in the
+same bounded Newton/FGMRES system. Totals must balance separately on every
+connected conductor. Both forms reuse the original exterior-face, conductor,
+disjoint-vertex and connected fixed-A-trace admission. Relative voltage
+normalization makes the result invariant under common-mode shifts. Conversion
+between controls preserves accepted edge potential, impressed load, physical
+time and every hysteretic cell memory.
+
+The linear, nonlinear and hysteretic owners share electrode layout, charge
+regrouping, source RHS and transfer recovery. Source-bound conductor refresh
+retains the electrode maps; reversible material refresh retains its original
+parameter-work account. Each receipt exposes signed incoming currents, voltage
+relative to its conductor reference and endpoint terminal work. Physical charge
+checks include free nodes, imposed totals and whole-conductor balance. Field,
+source, work and cancellation gates precede immutable candidate publication.
+There is no isolated-field stepping accessor on an electrode owner.
+
+The reversible work balance adds actual terminal work to impressed supply and
+retains magnetic parameter work and mechanical export. The stationary hysteretic
+balance is `delta W + Q_Joule + Q_pinning + D_numerical = W_impressed + W_terminal`.
+Numerical endpoint dissipation remains separate from physical heat. Electrode
+coupling preserves the underlying first-order MQS, fixed-geometry scope and does
+not add moving hysteretic memory or temperature-dependent magnetic fits.
+
 ## Native three-dimensional hysteretic winding circuits
 
 With the default-off `magnetic-hysteresis` feature,

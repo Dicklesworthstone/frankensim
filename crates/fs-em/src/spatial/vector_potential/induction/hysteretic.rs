@@ -14,6 +14,8 @@
 //! This owner supplies no motion/transport law, anisotropic hysteresis fit,
 //! empirical excess-loss correction or experimental material qualification.
 
+/// Physical voltage and total-current electrodes with retained vector memory.
+pub mod terminals;
 /// Native graph terminals, stranded copper and retained vector magnetic memory.
 pub mod winding;
 
@@ -26,6 +28,7 @@ use super::{
     coupling::{Coupling, Geometry, admit_step},
     kernel::{Kernel, Magnetic, Physical},
     nonlinear::{SpatialNonlinearInductionControls, SpatialNonlinearInductionReport},
+    terminals::{SpatialInductionTerminalTransfer, TerminalDrive},
 };
 use fs_feec::{
     assembly::incidence_to_csr,
@@ -233,6 +236,9 @@ pub struct SpatialHystereticInductionStep {
     /// Endpoint numerical loss, excluded from heat_j.
     pub numerical_dissipation_j: f64,
     pub impressed_work_j: f64,
+    /// Endpoint electrode work, distinct from the imposed closed-current load.
+    pub terminal_work_j: f64,
+    pub terminals: Vec<SpatialInductionTerminalTransfer>,
     pub energy_residual_j: f64,
     pub maximum_ampere_residual_a: f64,
     pub maximum_charge_residual_a: f64,
@@ -527,6 +533,26 @@ impl<'m, C: SpatialConductorMaterial> SpatialHystereticInduction<'m, C> {
         settings: SpatialHystereticInductionControls,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<SpatialHystereticInductionCandidate<'m, C>> {
+        self.step_driven_candidate(
+            prepared,
+            endpoint_current_a_m2,
+            duration_s,
+            settings,
+            None,
+            cancelled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn step_driven_candidate(
+        &self,
+        prepared: Arc<Prepared<C>>,
+        endpoint_current_a_m2: &[[f64; 3]],
+        duration_s: f64,
+        settings: SpatialHystereticInductionControls,
+        terminal_drive: Option<&TerminalDrive<'_>>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<SpatialHystereticInductionCandidate<'m, C>> {
         poll(cancelled)?;
         let g = self.problem.geometry();
         let c = &prepared.coupling;
@@ -548,13 +574,20 @@ impl<'m, C: SpatialConductorMaterial> SpatialHystereticInduction<'m, C> {
             controls.current_tolerance_a,
             cancelled,
         )?;
+        let drive = if let Some(terminal) = terminal_drive {
+            let mut drive = stationary.drive.clone();
+            terminal.add_rhs(c, &mut drive, cancelled)?;
+            std::borrow::Cow::Owned(drive)
+        } else {
+            std::borrow::Cow::Borrowed(stationary.drive.as_slice())
+        };
         let kernel = Kernel {
             geometry: g,
             coupling: c,
             accepted_potential: &self.potential_wb,
             duration_s,
             motion: &stationary.motion,
-            drive: &stationary.drive,
+            drive: &drive,
             load: &load,
             assembly: self.problem.limits,
             controls: settings.induction,
@@ -580,7 +613,10 @@ impl<'m, C: SpatialConductorMaterial> SpatialHystereticInduction<'m, C> {
             delta,
             current,
             maximum_ampere_residual_a,
-        } = kernel.recover(&value, &stationary.velocity, cancelled)?;
+            maximum_charge_residual_a,
+            terminals,
+            terminal_work_j,
+        } = kernel.recover(&value, &stationary.velocity, terminal_drive, cancelled)?;
         let mut magnetic_cells = Vec::with_capacity(g.cells.len());
         let mut stored_change_j = 0.0;
         let mut hysteresis_heat_j = 0.0;
@@ -624,13 +660,14 @@ impl<'m, C: SpatialConductorMaterial> SpatialHystereticInduction<'m, C> {
         }
         let heat_j = finite(current.heat_j + hysteresis_heat_j)?;
         let impressed_work_j = finite(load.iter().zip(&delta).map(|(j, a)| j * a).sum())?;
-        let energy_residual_j =
-            finite(stored_change_j + heat_j + numerical_dissipation_j - impressed_work_j)?;
+        let energy_residual_j = finite(
+            stored_change_j + heat_j + numerical_dissipation_j - impressed_work_j - terminal_work_j,
+        )?;
         if constitutive_work_defect_j > controls.energy_tolerance_j
             || energy_residual_j.abs() > controls.energy_tolerance_j
         {
             return Err(invalid(
-                "hysteretic magnetic, Joule, pinning and numerical work do not close",
+                "hysteretic magnetic, Joule, pinning, terminal and numerical work do not close",
             )
             .into());
         }
@@ -662,9 +699,11 @@ impl<'m, C: SpatialConductorMaterial> SpatialHystereticInduction<'m, C> {
                 heat_j,
                 numerical_dissipation_j,
                 impressed_work_j,
+                terminal_work_j,
+                terminals,
                 energy_residual_j,
                 maximum_ampere_residual_a,
-                maximum_charge_residual_a: current.maximum_charge_residual_a,
+                maximum_charge_residual_a,
                 maximum_constitutive_residual_a_m,
                 maximum_flux_inverse_residual_t,
                 report: value.report,

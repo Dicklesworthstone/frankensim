@@ -4,6 +4,11 @@ use super::*;
 mod circuit;
 #[path = "terminals/current.rs"]
 mod current;
+#[cfg(feature = "magnetic-hysteresis")]
+#[path = "terminals/hysteretic.rs"]
+mod hysteretic;
+#[path = "terminals/nonlinear.rs"]
+mod nonlinear;
 use fs_em::spatial::vector_potential::induction::{
     mechanical::SpatialLorentzLoadLimits, terminals::SpatialTerminalInduction,
 };

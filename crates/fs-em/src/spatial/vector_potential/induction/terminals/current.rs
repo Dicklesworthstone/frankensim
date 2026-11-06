@@ -41,18 +41,10 @@ impl<'m, C: SpatialConductorMaterial> SpatialCurrentInduction<'m, C> {
         poll(cancelled)?;
         let p = &state.field.prepared;
         let problem = &*p.problem;
-        if p.cells
-            .len()
-            .checked_mul(100)
-            .and_then(|n| n.checked_add(problem.stiffness.nnz()))
-            .is_none_or(|n| n > limits.maximum_assembly_terms)
-        {
-            return Err(invalid("current electrode assembly budget exceeded"));
-        }
-        let (coupling, terminal_unknown) = p.coupling.with_current_charges(
+        let (coupling, terminal_unknown) = state.terminals.current_coupling(
             geometry(problem),
-            &state.terminals.charge_terminal,
-            &state.terminals.reference,
+            &p.coupling,
+            problem.stiffness.nnz(),
             limits,
             cancelled,
         )?;
@@ -115,43 +107,12 @@ impl<'m, C: SpatialConductorMaterial> SpatialCurrentInduction<'m, C> {
         controls: SpatialInductionControls,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<SpatialCurrentInductionCandidate<'m, C>> {
-        poll(cancelled)?;
-        if midpoint_incoming_current_a.len() != self.terminals.faces.len()
-            || midpoint_incoming_current_a.iter().any(|i| !i.is_finite())
-            || !positive(controls.current_tolerance_a)
-        {
-            return Err(invalid(
-                "one finite total incoming current per electrode required",
-            ));
-        }
-        let mut balance = BTreeMap::new();
-        for (&component, &incoming) in self
-            .terminals
-            .component
-            .iter()
-            .zip(midpoint_incoming_current_a)
-        {
-            poll(cancelled)?;
-            let sum = balance.entry(component).or_insert(0.0);
-            *sum = finite(*sum + incoming)?;
-        }
-        if balance
-            .into_values()
-            .any(|i| i.abs() > controls.current_tolerance_a)
-        {
-            return Err(invalid(
-                "total electrode current must balance on every conductor",
-            ));
-        }
-        let drive = TerminalDrive {
-            layout: &self.terminals,
-            potential_v: vec![],
-            relative_voltage_v: vec![],
-            current: Some(CurrentDrive {
-                incoming_a: midpoint_incoming_current_a,
-                unknowns: &self.terminal_unknown,
-            }),
-        };
+        let drive = self.terminals.current_drive(
+            midpoint_incoming_current_a,
+            &self.terminal_unknown,
+            controls.current_tolerance_a,
+            cancelled,
+        )?;
         let candidate = self.field.step_driven_candidate(
             Arc::clone(&self.field.prepared),
             endpoint_impressed_current_a_m2,

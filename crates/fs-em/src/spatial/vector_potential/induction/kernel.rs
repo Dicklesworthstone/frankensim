@@ -11,6 +11,7 @@ use super::{
     coupling::{Coupling, Current, Geometry},
     diagonal,
     nonlinear::{SpatialNonlinearInductionControls, SpatialNonlinearInductionReport},
+    terminals::{SpatialInductionTerminalTransfer, TerminalDrive},
 };
 use fs_feec::{
     assembly::stiffness,
@@ -50,6 +51,9 @@ pub(super) struct Physical {
     pub delta: Vec<f64>,
     pub current: Current,
     pub maximum_ampere_residual_a: f64,
+    pub maximum_charge_residual_a: f64,
+    pub terminals: Vec<SpatialInductionTerminalTransfer>,
+    pub terminal_work_j: f64,
 }
 
 pub(super) struct Kernel<'a, C: SpatialConductorMaterial> {
@@ -250,6 +254,7 @@ impl<C: SpatialConductorMaterial> Kernel<'_, C> {
         &self,
         solution: &Solution<S>,
         velocity_m_s: &[[f64; 3]],
+        terminal_drive: Option<&TerminalDrive<'_>>,
         cancelled: &mut impl FnMut() -> bool,
     ) -> super::Result<Physical> {
         let c = self.coupling;
@@ -260,15 +265,39 @@ impl<C: SpatialConductorMaterial> Kernel<'_, C> {
             .zip(self.accepted_potential)
             .map(|(a, b)| finite(a - b))
             .collect::<super::Result<Vec<_>>>()?;
-        let current = c.recover(
-            self.geometry,
-            &delta,
-            &solution.unknowns,
-            &solution.magnetic.field.flux_density_t,
-            velocity_m_s,
-            self.duration_s,
-            cancelled,
-        )?;
+        let current = if let Some(drive) = terminal_drive {
+            c.recover_with_potentials(
+                self.geometry,
+                &delta,
+                &solution.unknowns,
+                &solution.magnetic.field.flux_density_t,
+                velocity_m_s,
+                self.duration_s,
+                drive.prescribed_potentials(),
+                cancelled,
+            )?
+        } else {
+            c.recover(
+                self.geometry,
+                &delta,
+                &solution.unknowns,
+                &solution.magnetic.field.flux_density_t,
+                velocity_m_s,
+                self.duration_s,
+                cancelled,
+            )?
+        };
+        let (terminals, terminal_work_j, maximum_charge_residual_a) =
+            if let Some(drive) = terminal_drive {
+                drive.transfers(
+                    &current.charge_current_a,
+                    self.duration_s,
+                    &solution.unknowns,
+                    cancelled,
+                )?
+            } else {
+                (vec![], 0.0, current.maximum_charge_residual_a)
+            };
         let mut maximum_ampere_residual_a = 0.0_f64;
         for edge in 0..delta.len() {
             poll(cancelled)?;
@@ -282,10 +311,10 @@ impl<C: SpatialConductorMaterial> Kernel<'_, C> {
             }
         }
         if maximum_ampere_residual_a > controls.current_tolerance_a
-            || current.maximum_charge_residual_a > controls.current_tolerance_a
+            || maximum_charge_residual_a > controls.current_tolerance_a
         {
             return Err(invalid(
-                "full nonlinear Ampere or floating-component charge equation failed",
+                "full nonlinear Ampere or physical conductor charge equation failed",
             ));
         }
         let face_flux = apply(self.geometry.curl, &solution.potential, cancelled)?;
@@ -302,6 +331,9 @@ impl<C: SpatialConductorMaterial> Kernel<'_, C> {
             delta,
             current,
             maximum_ampere_residual_a,
+            maximum_charge_residual_a,
+            terminals,
+            terminal_work_j,
         })
     }
 }
