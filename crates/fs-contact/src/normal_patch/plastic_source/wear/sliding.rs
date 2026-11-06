@@ -16,10 +16,13 @@
 //! remain separate. No thermal partition, heat evolution, or debris law is
 //! inferred, and no combined mechanical-energy theorem is claimed.
 
+pub mod temperature;
+
 use std::collections::BTreeMap;
 
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_exec::Cx;
+use fs_matdb::QueryPoint;
 use fs_material::state_point::ResolvedInterfaceStatePoint;
 use fs_math::det;
 use fs_tribo::{
@@ -171,6 +174,27 @@ impl SourcePlasticSlidingWear {
         wear: SourcePlasticArchardWear,
         friction: SourceThermalCoulomb,
     ) -> Result<Self, SourcePlasticSlidingError> {
+        let query = friction.initial_source().query();
+        Self::admit_query(&wear, &friction, &query)?;
+        let temperature_k = query.axes()[&friction.axes().temperature];
+        let (_, initial_law) = friction
+            .coefficients_at_query(&query)
+            .map_err(SourcePlasticSlidingError::Source)?;
+        let identity = Self::source_identity(&wear, &friction);
+        Ok(Self {
+            wear,
+            friction,
+            initial_law,
+            temperature_k,
+            identity,
+        })
+    }
+
+    fn admit_query(
+        wear: &SourcePlasticArchardWear,
+        friction: &SourceThermalCoulomb,
+        query: &QueryPoint,
+    ) -> Result<(), SourcePlasticSlidingError> {
         let normal = wear.contact().normal_source();
         if friction.interface() != normal.elastic().interface() || !friction.query_axes().is_empty()
         {
@@ -179,7 +203,6 @@ impl SourcePlasticSlidingWear {
             ));
         }
         let fixed = normal.interface_state().query();
-        let query = friction.initial_source().query();
         let pressure = friction.axes().nominal_pressure.as_deref();
         if !query
             .axes()
@@ -196,21 +219,55 @@ impl SourcePlasticSlidingWear {
                 "sliding must retain every original fixed query coordinate and quantity",
             ));
         }
-        let temperature_k = query.axes()[&friction.axes().temperature];
-        let (_, initial_law) = friction
-            .coefficients_at_query(&query)
-            .map_err(SourcePlasticSlidingError::Source)?;
+        Ok(())
+    }
+
+    fn source_identity(
+        wear: &SourcePlasticArchardWear,
+        friction: &SourceThermalCoulomb,
+    ) -> ContentHash {
         let mut hash =
             DomainHasher::new("org.frankensim.fs-contact.source-plastic-sliding-wear.v1");
         hash.update(wear.identity().as_bytes());
         hash.update(friction.identity().as_bytes());
-        Ok(Self {
-            wear,
-            friction,
-            initial_law,
-            temperature_k,
-            identity: hash.finalize(),
-        })
+        hash.finalize()
+    }
+
+    fn query_at_temperature(
+        &self,
+        temperature_k: f64,
+    ) -> Result<QueryPoint, SourceThermalCoulombError> {
+        if !temperature_k.is_finite() || temperature_k <= 0.0 {
+            return Err(SourceThermalCoulombError::Invalid(
+                "sliding requires a positive absolute interface temperature",
+            ));
+        }
+        Ok(self
+            .friction
+            .initial_source()
+            .query()
+            .with(&self.friction.axes().temperature, temperature_k)?)
+    }
+
+    fn coefficients_at_pressure(
+        &self,
+        pressure_pa: f64,
+    ) -> Result<(ResolvedInterfaceStatePoint, FrictionLaw), SourceThermalCoulombError> {
+        let mut query = self.query_at_temperature(self.temperature_k)?;
+        if let Some(axis) = &self.friction.axes().nominal_pressure {
+            query = query.with(axis, pressure_pa)?;
+        }
+        self.friction.coefficients_at_query(&query)
+    }
+
+    fn cell_normal_force(pressure_pa: f64, area_m2: f64) -> Result<f64, SourceThermalCoulombError> {
+        let normal_n = pressure_pa * area_m2;
+        if !normal_n.is_finite() || (pressure_pa > 0.0 && normal_n == 0.0) {
+            return Err(SourceThermalCoulombError::Invalid(
+                "a positive cell pressure must produce a representable positive normal force",
+            ));
+        }
+        Ok(normal_n)
     }
 
     /// Original pressure, indentation-hardness and per-body removal owner.
@@ -220,6 +277,11 @@ impl SourcePlasticSlidingWear {
     /// Exact original coefficient selection and pressure/temperature semantics.
     pub const fn friction_source(&self) -> &SourceThermalCoulomb {
         &self.friction
+    }
+    /// Current held interface temperature [K], including a temperature-only continuation.
+    /// Native tangential states separately retain the temperature of their last shear step.
+    pub const fn interface_temperature_k(&self) -> f64 {
+        self.temperature_k
     }
     pub const fn identity(&self) -> ContentHash {
         self.identity
@@ -419,12 +481,7 @@ impl SourcePlasticSlidingWear {
         for (index, (&p, &input)) in pressure.iter().zip(motion).enumerate() {
             checkpoint(cx)?;
             let error = |error| SourcePlasticSlidingError::Cell { index, error };
-            let normal_n = p * area;
-            if !normal_n.is_finite() || (p > 0.0 && normal_n == 0.0) {
-                return Err(error(SourceThermalCoulombError::Invalid(
-                    "a positive cell pressure must produce a representable positive normal force",
-                )));
-            }
+            let normal_n = Self::cell_normal_force(p, area).map_err(error)?;
             // A detached cell needs no coefficient at an unsupported zero
             // pressure. The native unloaded branch has zero effort and work;
             // its receipt deliberately carries no source sample.
@@ -439,12 +496,7 @@ impl SourcePlasticSlidingWear {
                 let slot = if let Some(&slot) = sample_indices.get(&key) {
                     slot
                 } else {
-                    let mut query = self.friction.initial_source().query();
-                    if let Some(axis) = &self.friction.axes().nominal_pressure {
-                        query = query.with(axis, p).map_err(|e| error(e.into()))?;
-                    }
-                    let (source, law) =
-                        self.friction.coefficients_at_query(&query).map_err(error)?;
+                    let (source, law) = self.coefficients_at_pressure(p).map_err(error)?;
                     let slot = sources.len();
                     sources.push(source);
                     laws.push(law);

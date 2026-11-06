@@ -3285,3 +3285,43 @@ Six synthetic regressions specify sticking/no wear, hardness-dependent traction
 and actual slip, neighboring indentation caused by removal, all three normal
 boundaries, load changes with retained shear history, reversal-path removal,
 pressure-dependent original sources and transactional refusal.
+
+## Combined sliding/wear continuation at independent source temperatures
+
+`normal_patch::plastic_source::wear::sliding::temperature` continues the complete
+`SourcePlasticSlidingWear` owner under held approach, maintained normal force,
+or a held finite-stiffness device. Each original body's elastic response and
+indentation/wear hardness follow its own prescribed temperature. The original
+interface friction and Archard coefficients follow a separately supplied
+interface temperature. The existing normal/wear thermal factory performs the
+direct selected-boundary solve; no intermediate held-approach return map is
+introduced for load or device continuation.
+
+The same immutable ordered cards, hardness tests, source claim selections,
+non-temperature coordinates and quantities, solver selection, geometry and
+physical envelopes remain bound. Every native per-cell signed tangential state,
+both removed-volume inventories and both recession fields transfer unchanged.
+Temperature continuation itself takes no tangential step and removes no
+material. Falling hardness can still create additional permanent indentation
+through the native normal equilibrium.
+
+Loaded successor cells must admit the original pinned friction claims at the
+actual new interface temperature and local pressure before any successor
+owner/history is returned. Identical pressure queries share one sample;
+pressure-independent friction resolves once. Detached cells record no
+coefficient sample and make no claim of source coverage at zero pressure.
+A later loaded step resolves its actual current temperature/pressure query.
+The original initial friction query remains provenance; it no longer supplies
+a stale temperature to subsequent sliding. The current held temperature is
+available separately from the temperature retained by each native state at its
+last genuine tangential advance.
+
+The sealed refresh returns its successor source and complete state together
+with native normal continuation, optional load/device diagnostics, original
+friction samples and per-cell sample indices. Any late source-domain,
+normal-equilibrium, ownership, material-envelope or cancellation failure leaves
+the accepted indentation, recession and tangential histories unchanged.
+Normal work, plastic work and signed material-parameter work remain explicit
+separate accounts. This API supplies prescribed-temperature continuation, not
+caloric evolution, a heat partition, or a thermodynamic closure for those work
+ports.

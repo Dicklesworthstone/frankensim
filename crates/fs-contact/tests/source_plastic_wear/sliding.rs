@@ -1,5 +1,8 @@
 //! Native actual slip, capped pressure and original per-body wear stay coupled.
 
+#[path = "sliding/temperature.rs"]
+mod temperature;
+
 use super::*;
 use fs_contact::interface_binding::thermal_friction::{
     SourceThermalCoulomb, SourceThermalCoulombError, ThermalFrictionAxes,
