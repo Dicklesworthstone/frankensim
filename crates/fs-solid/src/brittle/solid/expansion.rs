@@ -12,11 +12,16 @@
 //! Coefficient work, physical fracture loss and endpoint quadrature error have
 //! distinct accounts. No partial state is published on refusal.
 //!
-//! This is small-strain, fixed-plane, quasistatic fracture with a resolved
-//! temperature path. It does not supply heat capacity, entropy, finite thermal
-//! expansion, automatic thermal substeps, new crack planes or fragment contact.
+//! The equilibrium owner is small-strain, fixed-plane, quasistatic fracture
+//! with a resolved temperature path. The [`dynamics`] child retains the same
+//! material preparation and work recovery during physical motion. Neither owner
+//! supplies heat capacity, entropy, finite thermal expansion, automatic thermal
+//! substeps, new crack planes or fragment contact.
 //! Large thermal jumps can cross a softening branch before Newton equilibrates;
 //! callers must resolve them with physical temperature/load endpoints.
+
+/// Retained source-bound motion with joint displacement and thermal eigenstrain.
+pub mod dynamics;
 
 use std::sync::Arc;
 
@@ -112,6 +117,33 @@ impl From<BrittleTetError> for ThermalBrittleTetError {
     fn from(error: BrittleTetError) -> Self {
         Self::Solid(error)
     }
+}
+
+/// Checked coefficient-only state awaiting a complete native mechanical solve.
+/// No public result exposes this potentially unequilibrated preparation.
+#[derive(Debug)]
+struct PreparedThermalBrittleTet<'a> {
+    states: Vec<BrittleState<'a>>,
+    element_transfer: Vec<BrittleTetTemperatureElementEnergy>,
+    energy: ThermalBrittleTetEnergy,
+}
+
+/// Native solver stress semantics, distinct from retained physical endpoint stress.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ThermalBrittleResponse {
+    Endpoint,
+    Mean,
+}
+
+/// Original constitutive work recovered once for equilibrium and inertial schemes.
+/// Applied/support work, inertia and the complete balance belong to the caller.
+#[derive(Debug)]
+struct ThermalBrittleTetRecovery {
+    energy: ThermalBrittleTetEnergy,
+    element_energy: Vec<BrittleEnergy>,
+    cumulative_loss_j: f64,
+    /// Actual solver response stress contracted with the TOTAL strain change.
+    response_internal_work_j: f64,
 }
 
 impl<'a> ThermalBrittleTetSolid<'a> {
@@ -277,8 +309,114 @@ impl<'a> ThermalBrittleTetSolid<'a> {
             )
             .into());
         }
-        let mut states = Vec::with_capacity(next_materials.len());
+        let prepared =
+            self.prepare_materials(next_materials, controls.material_energy_tolerance_j, cx)?;
         let mut laws = Vec::with_capacity(next_materials.len());
+        for material in next_materials {
+            checkpoint(cx)?;
+            laws.push(material.small_strain_law());
+        }
+        let problem = SmallStrainTetProblem {
+            nodes_m: self.geometry.nodes_m(),
+            tetrahedra: self.geometry.tetrahedra(),
+            laws: SmallStrainLawField::PerElement(&laws),
+            prescribed_m,
+            nodal_forces_n,
+            load_path: &[1.0],
+            budget: self.budget,
+            settings,
+        };
+        let mut solution = problem
+            .solve_from(old_u, &prepared.states, cx)
+            .map_err(BrittleTetError::from)?;
+        let ThermalBrittleTetRecovery {
+            mut energy,
+            element_energy,
+            cumulative_loss_j,
+            ..
+        } = self.recover_material(
+            next_materials,
+            &prepared,
+            &mut solution,
+            ThermalBrittleResponse::Endpoint,
+            controls.material_energy_tolerance_j,
+            cx,
+        )?;
+        let new_u = solution.displacement_m.as_flattened();
+        for &(dof, force) in nodal_forces_n {
+            checkpoint(cx)?;
+            energy.dead_load_endpoint_work_j =
+                force.mul_add(new_u[dof] - old_u[dof], energy.dead_load_endpoint_work_j);
+        }
+        for (&(dof, _), &reaction) in prescribed_m.iter().zip(&solution.increments[0].reactions_n) {
+            checkpoint(cx)?;
+            energy.support_endpoint_work_j =
+                reaction.mul_add(new_u[dof] - old_u[dof], energy.support_endpoint_work_j);
+        }
+        let external_work = energy.dead_load_endpoint_work_j + energy.support_endpoint_work_j;
+        energy.equilibrium_work_residual_j = external_work - energy.internal_endpoint_work_j;
+        energy.total_balance_error_j =
+            (((external_work + energy.parameter_work_j + energy.eigenstrain_work_j)
+                - (energy.stored_after_j - energy.stored_before_j))
+                - energy.fracture_dissipation_j)
+                - energy.endpoint_work_defect_j;
+        energy_gate(
+            "thermal complete work balance",
+            energy.total_balance_error_j,
+            controls.material_energy_tolerance_j,
+        )?;
+        energy_gate(
+            "thermal equilibrium work",
+            energy.equilibrium_work_residual_j,
+            controls.equilibrium_work_tolerance_j,
+        )?;
+        energy_gate(
+            "thermal mechanical endpoint integration defect",
+            energy.endpoint_work_defect_j,
+            controls.maximum_endpoint_work_defect_j,
+        )?;
+        checkpoint(cx)?;
+        Ok(ThermalBrittleTetStep {
+            solid: ThermalBrittleTetSolid {
+                geometry: self.geometry,
+                materials: next_materials,
+                bands: Arc::clone(&self.bands),
+                budget: self.budget,
+                solution,
+                stored_energy_j: energy.stored_after_j,
+                fracture_dissipation_j: cumulative_loss_j,
+            },
+            element_energy,
+            element_transfer: prepared.element_transfer,
+            energy,
+        })
+    }
+
+    /// Prepare original source coefficients while holding MECHANICAL history.
+    /// The caller must complete its joint displacement/eigenstrain solve and
+    /// work gates before exposing any successor. Preparation never applies the
+    /// new thermal strain to a fictitiously restrained displacement state.
+    fn prepare_materials<'next>(
+        &self,
+        next_materials: &'next [ResolvedThermalBrittle],
+        material_tolerance_j: f64,
+        cx: &Cx<'_>,
+    ) -> Result<PreparedThermalBrittleTet<'next>, ThermalBrittleTetError> {
+        checkpoint(cx)?;
+        if next_materials.len() != self.materials.len() {
+            return Err(BrittleTetError::MaterialCount {
+                expected: self.materials.len(),
+                got: next_materials.len(),
+            }
+            .into());
+        }
+        if !material_tolerance_j.is_finite() || material_tolerance_j < 0.0 {
+            return Err(BrittleTetError::Invalid(
+                "finite nonnegative material work tolerance required",
+            )
+            .into());
+        }
+        let mut states = Vec::with_capacity(next_materials.len());
         let mut element_transfer = Vec::with_capacity(next_materials.len());
         let mut energy = ThermalBrittleTetEnergy {
             stored_before_j: self.stored_energy_j,
@@ -326,35 +464,64 @@ impl<'a> ThermalBrittleTetSolid<'a> {
                 defect_j_m3: step.defect_j_m3,
             });
             states.push(step.state);
-            laws.push(next_source.small_strain_law());
         }
         energy_gate(
             "thermal coefficient work/storage/fracture",
             (energy.parameter_work_j - (prepared_storage_j - self.stored_energy_j))
                 - energy.parameter_fracture_dissipation_j,
-            controls.material_energy_tolerance_j,
+            material_tolerance_j,
         )?;
         energy_gate(
             "thermal coefficient cumulative fracture",
             (prepared_loss_j - self.fracture_dissipation_j)
                 - energy.parameter_fracture_dissipation_j,
-            controls.material_energy_tolerance_j,
+            material_tolerance_j,
         )?;
-        let problem = SmallStrainTetProblem {
-            nodes_m: self.geometry.nodes_m(),
-            tetrahedra: self.geometry.tetrahedra(),
-            laws: SmallStrainLawField::PerElement(&laws),
-            prescribed_m,
-            nodal_forces_n,
-            load_path: &[1.0],
-            budget: self.budget,
-            settings,
-        };
-        let solution = problem
-            .solve_from(old_u, &states, cx)
-            .map_err(BrittleTetError::from)?;
+        if [
+            prepared_storage_j,
+            prepared_loss_j,
+            energy.parameter_fracture_dissipation_j,
+        ]
+        .iter()
+        .any(|x| !x.is_finite() || *x < 0.0)
+        {
+            return Err(
+                BrittleTetError::Invalid("finite nonnegative physical energy required").into(),
+            );
+        }
+        checkpoint(cx)?;
+        Ok(PreparedThermalBrittleTet {
+            states,
+            element_transfer,
+            energy,
+        })
+    }
+
+    /// Recover native endpoint history and exact constitutive work from either
+    /// endpoint-force or path-mean-force assembly. Endpoint stress is restored
+    /// in the returned native solution; its reactions retain the solver's
+    /// original force semantics. No alternate history or fracture law is used.
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    fn recover_material<'next>(
+        &self,
+        next_materials: &'next [ResolvedThermalBrittle],
+        prepared: &PreparedThermalBrittleTet<'next>,
+        solution: &mut SmallStrainTetSolution<BrittleState<'next>>,
+        response: ThermalBrittleResponse,
+        material_tolerance_j: f64,
+        cx: &Cx<'_>,
+    ) -> Result<ThermalBrittleTetRecovery, ThermalBrittleTetError> {
+        checkpoint(cx)?;
+        if !material_tolerance_j.is_finite() || material_tolerance_j < 0.0 {
+            return Err(BrittleTetError::Invalid(
+                "finite nonnegative material work tolerance required",
+            )
+            .into());
+        }
+        let mut energy = prepared.energy;
         let mut element_energy = Vec::with_capacity(next_materials.len());
-        let mut cumulative_loss = 0.0;
+        let mut cumulative_loss_j = 0.0;
+        let mut response_internal_work_j = 0.0;
         energy.fracture_dissipation_j = energy.parameter_fracture_dissipation_j;
         for (element, material) in next_materials.iter().enumerate() {
             checkpoint(cx)?;
@@ -364,13 +531,17 @@ impl<'a> ThermalBrittleTetSolid<'a> {
             let path = material
                 .band()
                 .law()
-                .trial_with_mean_stress(&mechanical, &states[element])
+                .trial_with_mean_stress(&mechanical, &prepared.states[element])
                 .map_err(|source| BrittleTetError::Material { element, source })?;
             let step = path.endpoint;
+            let expected_response = match response {
+                ThermalBrittleResponse::Endpoint => step.stress_pa,
+                ThermalBrittleResponse::Mean => path.mean_stress_pa,
+            };
             if step.state != solution.element_states[element]
-                || step.stress_pa != solution.element_stress[element]
-                || step.state.damage() < states[element].damage()
-                || step.state.dissipated_j_m3() < states[element].dissipated_j_m3()
+                || expected_response != solution.element_stress[element]
+                || step.state.damage() < prepared.states[element].damage()
+                || step.state.dissipated_j_m3() < prepared.states[element].dissipated_j_m3()
                 || step.energy.dissipated < 0.0
             {
                 return Err(BrittleTetError::Invalid(
@@ -386,6 +557,11 @@ impl<'a> ThermalBrittleTetSolid<'a> {
             let mechanical_work = contract(&path.mean_stress_pa, &change);
             let eigenstrain_work = -thermal_change
                 * (path.mean_stress_pa[0] + path.mean_stress_pa[1] + path.mean_stress_pa[2]);
+            let response_density = contract(&solution.element_stress[element], &change);
+            let endpoint_density = match response {
+                ThermalBrittleResponse::Endpoint => response_density,
+                ThermalBrittleResponse::Mean => contract(&step.stress_pa, &change),
+            };
             let volume = self.bands[element].reference_volume_m3();
             energy.stored_after_j =
                 volume.mul_add(step.state.stored_energy_j_m3(), energy.stored_after_j);
@@ -393,25 +569,14 @@ impl<'a> ThermalBrittleTetSolid<'a> {
                 volume.mul_add(step.energy.work, energy.constitutive_strain_work_j);
             energy.mechanical_work_j = volume.mul_add(mechanical_work, energy.mechanical_work_j);
             energy.eigenstrain_work_j = volume.mul_add(eigenstrain_work, energy.eigenstrain_work_j);
-            energy.internal_endpoint_work_j = volume.mul_add(
-                contract(&step.stress_pa, &change),
-                energy.internal_endpoint_work_j,
-            );
+            energy.internal_endpoint_work_j =
+                volume.mul_add(endpoint_density, energy.internal_endpoint_work_j);
+            response_internal_work_j = volume.mul_add(response_density, response_internal_work_j);
             energy.fracture_dissipation_j =
                 volume.mul_add(step.energy.dissipated, energy.fracture_dissipation_j);
-            cumulative_loss = volume.mul_add(step.state.dissipated_j_m3(), cumulative_loss);
+            cumulative_loss_j = volume.mul_add(step.state.dissipated_j_m3(), cumulative_loss_j);
             element_energy.push(step.energy);
-        }
-        let new_u = solution.displacement_m.as_flattened();
-        for &(dof, force) in nodal_forces_n {
-            checkpoint(cx)?;
-            energy.dead_load_endpoint_work_j =
-                force.mul_add(new_u[dof] - old_u[dof], energy.dead_load_endpoint_work_j);
-        }
-        for (&(dof, _), &reaction) in prescribed_m.iter().zip(&solution.increments[0].reactions_n) {
-            checkpoint(cx)?;
-            energy.support_endpoint_work_j =
-                reaction.mul_add(new_u[dof] - old_u[dof], energy.support_endpoint_work_j);
+            solution.element_stress[element] = step.stress_pa;
         }
         energy.strain_split_error_j = energy.constitutive_strain_work_j
             - (energy.mechanical_work_j + energy.eigenstrain_work_j);
@@ -419,14 +584,7 @@ impl<'a> ThermalBrittleTetSolid<'a> {
             + energy.constitutive_strain_work_j)
             - (energy.stored_after_j - energy.stored_before_j))
             - energy.fracture_dissipation_j;
-        let external_work = energy.dead_load_endpoint_work_j + energy.support_endpoint_work_j;
-        energy.equilibrium_work_residual_j = external_work - energy.internal_endpoint_work_j;
         energy.endpoint_work_defect_j = energy.internal_endpoint_work_j - energy.mechanical_work_j;
-        energy.total_balance_error_j =
-            (((external_work + energy.parameter_work_j + energy.eigenstrain_work_j)
-                - (energy.stored_after_j - energy.stored_before_j))
-                - energy.fracture_dissipation_j)
-                - energy.endpoint_work_defect_j;
         for (account, defect) in [
             (
                 "thermal mechanical/eigenstrain work split",
@@ -438,32 +596,15 @@ impl<'a> ThermalBrittleTetSolid<'a> {
             ),
             (
                 "thermal cumulative fracture loss",
-                (cumulative_loss - self.fracture_dissipation_j) - energy.fracture_dissipation_j,
-            ),
-            (
-                "thermal complete work balance",
-                energy.total_balance_error_j,
+                (cumulative_loss_j - self.fracture_dissipation_j) - energy.fracture_dissipation_j,
             ),
         ] {
-            energy_gate(account, defect, controls.material_energy_tolerance_j)?;
+            energy_gate(account, defect, material_tolerance_j)?;
         }
-        energy_gate(
-            "thermal equilibrium work",
-            energy.equilibrium_work_residual_j,
-            controls.equilibrium_work_tolerance_j,
-        )?;
-        energy_gate(
-            "thermal mechanical endpoint integration defect",
-            energy.endpoint_work_defect_j,
-            controls.maximum_endpoint_work_defect_j,
-        )?;
         if [
-            prepared_storage_j,
-            prepared_loss_j,
             energy.stored_after_j,
-            energy.parameter_fracture_dissipation_j,
             energy.fracture_dissipation_j,
-            cumulative_loss,
+            cumulative_loss_j,
         ]
         .iter()
         .any(|x| !x.is_finite() || *x < 0.0)
@@ -472,20 +613,20 @@ impl<'a> ThermalBrittleTetSolid<'a> {
                 BrittleTetError::Invalid("finite nonnegative physical energy required").into(),
             );
         }
+        if !response_internal_work_j.is_finite()
+            || !energy.internal_endpoint_work_j.is_finite()
+            || !energy.endpoint_work_defect_j.is_finite()
+        {
+            return Err(
+                BrittleTetError::Invalid("finite thermal solver response work required").into(),
+            );
+        }
         checkpoint(cx)?;
-        Ok(ThermalBrittleTetStep {
-            solid: ThermalBrittleTetSolid {
-                geometry: self.geometry,
-                materials: next_materials,
-                bands: Arc::clone(&self.bands),
-                budget: self.budget,
-                solution,
-                stored_energy_j: energy.stored_after_j,
-                fracture_dissipation_j: cumulative_loss,
-            },
-            element_energy,
-            element_transfer,
+        Ok(ThermalBrittleTetRecovery {
             energy,
+            element_energy,
+            cumulative_loss_j,
+            response_internal_work_j,
         })
     }
 }
