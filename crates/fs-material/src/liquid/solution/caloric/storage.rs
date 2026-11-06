@@ -22,6 +22,10 @@ use fs_qty::Temperature;
 use fs_thermal::enthalpy::{DepositionError, ThermalLaw};
 use std::sync::Arc;
 
+/// Equilibrium storage and explicitly declared bulk conductivity on the native
+/// implicit thermal solver, including phase-redistribution heat capacity.
+pub mod conduction;
+
 /// Immutable fixed-composition caloric law, retaining both original Cp sources.
 #[derive(Clone, Debug, PartialEq)]
 pub struct BinaryLiquidThermalStorage {
@@ -124,6 +128,46 @@ impl BinaryLiquidThermalStorage {
     }
     pub fn sources(&self) -> &[IsobaricHeatCapacityLaw; 2] {
         &self.owner.sources
+    }
+
+    /// Equilibrium specific heat at the original fixed pressure and overall
+    /// composition [J/(kg K)]. The phase amounts and compositions may change
+    /// with temperature; this includes their enthalpy response as well as the
+    /// two original pure-component Cp sources. It is independent of the amount
+    /// of material chosen to normalize this storage law.
+    ///
+    /// A phase-onset corner has no unique two-sided Cp and refuses explicitly.
+    /// The implicit conduction adapter separately selects a documented
+    /// one-sided Newton tangent at those corners.
+    pub fn specific_heat_cp_j_kg_k(
+        &self,
+        temperature: Temperature,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<f64, BinaryLiquidCaloricError> {
+        poll(&mut cancelled)?;
+        let [lower, upper] = self.temperature_domain();
+        if !temperature.value().is_finite()
+            || temperature.value() < lower.value()
+            || temperature.value() > upper.value()
+        {
+            return Err(BinaryLiquidCaloricError::Invalid(
+                "temperature outside thermal-storage domain",
+            ));
+        }
+        let state = self.owner.model.equilibrate(
+            temperature,
+            self.endpoints[0].component_moles(),
+            self.controls.coexistence,
+            &mut cancelled,
+        )?;
+        let cp = state.isobaric_heat_capacity_j_per_k()? / self.mass_kg;
+        if !positive(cp) {
+            return Err(BinaryLiquidCaloricError::Invalid(
+                "unrepresentable equilibrium specific heat",
+            ));
+        }
+        poll(&mut cancelled)?;
+        Ok(cp)
     }
 
     /// Query the original equilibrium calorics; never extrapolate the prepared

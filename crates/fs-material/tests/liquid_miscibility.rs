@@ -37,6 +37,14 @@ fn card(basis: CompositionBasis, upper_x: f64) -> MaterialCard {
     card_with_density(basis, upper_x, [1000.0, 1100.0, 800.0])
 }
 fn card_with_density(basis: CompositionBasis, upper_x: f64, density: [f64; 3]) -> MaterialCard {
+    card_with_density_and_pressure(basis, upper_x, density, None)
+}
+fn card_with_density_and_pressure(
+    basis: CompositionBasis,
+    upper_x: f64,
+    density: [f64; 3],
+    pressure_quantity: Option<QuantitySpec>,
+) -> MaterialCard {
     let mut claims = ClaimSet::new();
     for (name, spec, values) in [
         (
@@ -69,15 +77,20 @@ fn card_with_density(basis: CompositionBasis, upper_x: f64, density: [f64; 3]) -
                     knots: vec![(0.0, values[0]), (0.5, values[1]), (1.0, values[2])],
                     dims: spec.dims(),
                 },
-                validity: ValidityDomain::unconstrained()
-                    .with_quantity("x_a", composition(basis), 0.0, upper_x)
-                    .with_quantity(
-                        "T",
-                        quantity(QuantityKind::AbsoluteTemperature),
-                        290.0,
-                        600.0,
-                    )
-                    .with("pressure", 100_000.0, 100_000.0),
+                validity: {
+                    let domain = ValidityDomain::unconstrained()
+                        .with_quantity("x_a", composition(basis), 0.0, upper_x)
+                        .with_quantity(
+                            "T",
+                            quantity(QuantityKind::AbsoluteTemperature),
+                            290.0,
+                            600.0,
+                        );
+                    match pressure_quantity {
+                        Some(spec) => domain.with_quantity("pressure", spec, 100_000.0, 100_000.0),
+                        None => domain.with("pressure", 100_000.0, 100_000.0),
+                    }
+                },
                 uncertainty: UncertaintyModel::Unstated,
                 interpolation: InterpolationPolicy::LinearInside,
                 observations: vec![],

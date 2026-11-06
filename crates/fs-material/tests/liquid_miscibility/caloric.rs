@@ -11,6 +11,18 @@ use fs_material::thermal::transport::isobaric::{
 use fs_thermochem::UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K as R;
 use fs_thermochem::solution::caloric::BinaryCaloricSolveV1;
 
+// Caloric sources and their mixture query retain the same explicit pressure
+// meaning. The isothermal fixture also has an intentionally untyped variant
+// for the original source-refusal checks.
+fn card(basis: CompositionBasis, upper_x: f64) -> MaterialCard {
+    super::card_with_density_and_pressure(
+        basis,
+        upper_x,
+        [1000.0, 1100.0, 800.0],
+        Some(quantity(QuantityKind::Pressure)),
+    )
+}
+
 fn liquid(card: &MaterialCard, interaction_k: f64) -> BinaryLiquidSolutionLaw<'_> {
     let point = QueryPoint::new()
         .with_quantity("T", quantity(QuantityKind::AbsoluteTemperature), 500.0)
@@ -92,7 +104,9 @@ fn cp_source(
             chemistry: species.into(),
             phase: "liquid".into(),
             process: "synthetic caloric fixture".into(),
-            revision,
+            // Each fixture is a new card. The argument selects independent
+            // source provenance above, not a nonexistent material history.
+            revision: 0,
         },
         claims,
         vec![],
@@ -313,7 +327,7 @@ fn source_identity_species_pressure_and_datum_cannot_be_substituted() {
             .mix(&left, &right, 0.0, controls(), || false)
             .is_ok()
     );
-    let changed_card = super::card(CompositionBasis::MoleFraction, 0.8);
+    let changed_card = self::card(CompositionBasis::MoleFraction, 0.8);
     let changed_liquid = self::liquid(&changed_card, 0.0);
     let changed_material =
         BinaryLiquidCaloricLaw::try_new(&changed_liquid, original.clone(), "pressure").unwrap();
@@ -338,7 +352,8 @@ fn source_identity_species_pressure_and_datum_cannot_be_substituted() {
     let mut wrong_datum = original.clone();
     wrong_datum[1].1 = cp_source("B", 0.10, [100.0; 3], 100_000.0, 350.0, 0);
     assert!(BinaryLiquidCaloricLaw::try_new(&liquid, wrong_datum, "pressure").is_err());
-    let untyped = law(&card);
+    let untyped_card = super::card(CompositionBasis::MoleFraction, 1.0);
+    let untyped = super::law(&untyped_card);
     assert!(BinaryLiquidCaloricLaw::try_new(&untyped, original, "pressure").is_err());
 }
 

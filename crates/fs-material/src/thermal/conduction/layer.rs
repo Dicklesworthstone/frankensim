@@ -85,6 +85,21 @@ impl ConductivityCurve {
         self.on_segment(self.segment(t)?, t)
     }
 
+    /// Conductivity and its temperature derivative on the same original
+    /// segment, in W/(m K) and W/(m K²). Interior knots select the right
+    /// derivative; the upper endpoint selects the left derivative. The
+    /// residual still uses the continuous original conductivity chart.
+    pub fn conductivity_and_temperature_derivative(
+        &self,
+        t: f64,
+    ) -> Result<(f64, f64), DepositionError> {
+        let i = self.segment(t)?;
+        let [a, ka] = self.knots[i];
+        let [b, kb] = self.knots[i + 1];
+        let derivative = finite((kb - ka) / (b - a))?;
+        Ok((self.on_segment(i, t)?, derivative))
+    }
+
     /// Signed Kirchhoff difference integral k(T) dT, in W/m. Integrate crossed
     /// segments directly rather than subtracting large absolute primitives.
     /// The trapezoid is exact for this linear k chart, not a quadrature claim

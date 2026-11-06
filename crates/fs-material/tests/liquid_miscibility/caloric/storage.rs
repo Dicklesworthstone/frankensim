@@ -6,6 +6,9 @@ use fs_thermal::enthalpy::{
     DepositionSimulation, Event, MaterialId, StepConfig, ThermalLaw, ThermalLink, TimedEvent,
 };
 
+#[path = "storage/conduction.rs"]
+mod conduction;
+
 fn boundary(source_w: f64) -> Boundary {
     Boundary {
         ambient_k: 300.0,

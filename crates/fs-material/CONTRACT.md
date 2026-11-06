@@ -15582,6 +15582,28 @@ entropy-aware thermal advances can therefore audit changing liquid phases.
 External source watts still do not define a reservoir entropy. Advection and
 identity-dependent thermal capabilities remain unavailable.
 
+The same storage exposes equilibrium specific heat in J/(kg K), including
+phase redistribution from the original regular-solution owner and both pure
+Cp sources. It remains independent of the normalization inventory. A strict
+Cp query refuses a phase-onset corner or unresolved phase branch instead of
+claiming a unique derivative there.
+
+`caloric::storage::conduction::BinaryLiquidConductionLaw` binds that exact
+storage object to the existing implicit thermal chain/graph. One original
+enthalpy inversion supplies T and the analytic inverse slope `mass/(dH/dT)`;
+conductivity and its enthalpy derivative use the same temperature. At phase
+corners the original caloric owner explicitly selects a homogeneous one-sided
+Newton tangent; inside an unresolved numerical binodal bracket it selects that
+same approximate tangent. Acceptance still uses complete equilibrium energy.
+The bulk conductivity curve is caller-declared for the fixed composition,
+pressure and geometry, with complete support over the storage domain. It is
+not inferred from phase conductivities or treated as a resolved two-phase
+fluid. No interphase kinetics, morphology law, advection binding or phase
+fraction error observable is supplied. Synthetic regressions compare Cp
+against independent high-precision values and enthalpy differences, and check
+native implicit heat exchange across miscibility against an independent
+energy balance with unequal cell masses and an interval beyond explicit CFL.
+
 Focused source tests cover ordered molar conversion, original source retention,
 unequal-temperature mixing with variable Cp, closed heating/cooling, exact
 accepted phase identity, pressure/datum/source mismatches and atomic refusal.
