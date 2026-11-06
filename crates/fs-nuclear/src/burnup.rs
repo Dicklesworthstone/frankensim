@@ -21,12 +21,14 @@
 //! it. A flux is absolute, not a normalized spectrum. This module does not infer
 //! nuclear data, neutron multiplication, self-shielding, radiation deposition,
 //! emitted-particle mass/charge accounts or composition-dependent calorics.
+//! [`production`] adds explicitly prescribed nuclide supply throughout the same
+//! frozen interval, retaining the subsequent reaction ages of supplied nuclei.
 
 use std::{collections::BTreeSet, sync::Arc};
 
 use fs_la::decay::{
     DecayLimits,
-    reaction::{ReactionEdge, ReactionPlan},
+    reaction::{ReactionAdvance, ReactionEdge, ReactionPlan},
 };
 use fs_thermochem::decay::DecayLawV1;
 
@@ -35,6 +37,9 @@ use crate::irradiation::{GroupFlux, NeutronGroups, NuclideId};
 use crate::{
     Accumulator, EnergyChannels, FissionError, channel_values, nonnegative, positive, sum,
 };
+
+/// Continuous nuclide supply into the original product-resolved reaction owner.
+pub mod production;
 
 /// A physical identity and its admitted total spontaneous-decay law.
 #[derive(Clone, Debug, PartialEq)]
@@ -145,6 +150,13 @@ impl BurnupBudget {
 pub struct BurnupModel {
     data: BurnupData,
     products: usize,
+}
+
+// Both homogeneous and production maps retain the same physical channel split.
+struct ReactionChannels {
+    removal_rates: Vec<f64>,
+    fractions: Vec<f64>,
+    edges: Vec<ReactionEdge>,
 }
 
 impl BurnupModel {
@@ -400,26 +412,22 @@ impl BurnupModel {
         self.prepare_rates(duration_s, flux, temperature_k, limits, rates, checkpoint)
     }
 
-    // Both public preparation and automatic cache misses arrive with already
-    // admitted, collapsed rates. Do not repeat table interpolation or group work.
-    fn prepare_rates(
-        self: &Arc<Self>,
-        duration_s: f64,
-        flux: &GroupFlux,
-        temperature_k: f64,
-        limits: BurnupLimits,
-        rates: Vec<f64>,
+    // One channel compiler serves both numerical map families. Rates have
+    // already been admitted and collapsed at the actual flux and temperature.
+    fn prepare_channels(
+        &self,
+        rates: &[f64],
         mut checkpoint: impl FnMut() -> Result<(), FissionError>,
-    ) -> Result<PreparedBurnup, BurnupError> {
+    ) -> Result<ReactionChannels, BurnupError> {
         let mut removals = vec![Accumulator::new(0.0); self.data.nuclides.len()];
-        for (reaction, &rate) in self.data.reactions.iter().zip(&rates) {
+        for (reaction, &rate) in self.data.reactions.iter().zip(rates) {
             checkpoint()?;
             add(&mut removals[reaction.parent], rate)?;
         }
         let removal_rates: Vec<_> = removals.iter().map(|rate| rate.value()).collect();
         let mut fractions = Vec::with_capacity(rates.len());
         let mut edges = Vec::with_capacity(self.products);
-        for (reaction, &rate) in self.data.reactions.iter().zip(&rates) {
+        for (reaction, &rate) in self.data.reactions.iter().zip(rates) {
             checkpoint()?;
             let fraction = if rate == 0.0 {
                 0.0
@@ -444,10 +452,29 @@ impl BurnupModel {
                 }
             }
         }
+        Ok(ReactionChannels {
+            removal_rates,
+            fractions,
+            edges,
+        })
+    }
+
+    // Public preparation and automatic cache misses use the already collapsed
+    // channel rates, without repeating table interpolation or neutron-group work.
+    fn prepare_rates(
+        self: &Arc<Self>,
+        duration_s: f64,
+        flux: &GroupFlux,
+        temperature_k: f64,
+        limits: BurnupLimits,
+        rates: Vec<f64>,
+        mut checkpoint: impl FnMut() -> Result<(), FissionError>,
+    ) -> Result<PreparedBurnup, BurnupError> {
+        let channels = self.prepare_channels(&rates, &mut checkpoint)?;
         let mut checkpoint_error = None;
         let plan = ReactionPlan::prepare(
-            &removal_rates,
-            &edges,
+            &channels.removal_rates,
+            &channels.edges,
             duration_s,
             limits.propagation,
             || match checkpoint() {
@@ -468,7 +495,7 @@ impl BurnupModel {
             temperature_k,
             limits,
             rates,
-            fractions,
+            fractions: channels.fractions,
         })
     }
 }
@@ -521,10 +548,12 @@ pub struct BurnupInventory {
     model: Arc<BurnupModel>,
     populations: Vec<f64>,
     reactions: Vec<Accumulator>,
+    produced: Vec<Accumulator>,
     released: [Accumulator; 3],
     // One immutable map is enough for the common repeated-step case. This is
     // an optimization, not physical history, and is excluded from equality.
     prepared: Option<Arc<PreparedBurnup>>,
+    production_prepared: Option<Arc<production::PreparedBurnupProduction>>,
 }
 
 impl PartialEq for BurnupInventory {
@@ -532,6 +561,7 @@ impl PartialEq for BurnupInventory {
         self.model == other.model
             && self.populations == other.populations
             && self.reactions == other.reactions
+            && self.produced == other.produced
             && self.released == other.released
     }
 }
@@ -549,12 +579,15 @@ impl BurnupInventory {
             ));
         }
         let reactions = vec![Accumulator::new(0.0); model.reactions().len()];
+        let produced = vec![Accumulator::new(0.0); populations.len()];
         Ok(Self {
             model,
             populations,
             reactions,
+            produced,
             released: [Accumulator::new(0.0); 3],
             prepared: None,
+            production_prepared: None,
         })
     }
 
@@ -565,6 +598,11 @@ impl BurnupInventory {
     #[must_use]
     pub fn populations(&self) -> &[f64] {
         &self.populations
+    }
+    /// Lifetime external production, separate from reaction-created products.
+    #[must_use]
+    pub fn cumulative_produced_nuclei(&self) -> Vec<f64> {
+        self.produced.iter().map(|count| count.value()).collect()
     }
     #[must_use]
     pub fn cumulative_reaction_counts(&self) -> Vec<f64> {
@@ -659,6 +697,31 @@ impl BurnupInventory {
             return Err(error.into());
         }
         let evolved = evolved?;
+        let (mut next, report) = self.account_evolution(
+            evolved,
+            prepared.duration_s(),
+            &prepared.fractions,
+            None,
+            0.0,
+            budget,
+            &mut checkpoint,
+        )?;
+        next.production_prepared = None;
+        Ok((next, report))
+    }
+
+    // Both map families share the physical channel/product/energy ledger. A
+    // supplied nucleus enters this account once, separately from reaction yields.
+    fn account_evolution(
+        &self,
+        evolved: ReactionAdvance,
+        duration_s: f64,
+        fractions: &[f64],
+        produced: Option<&[f64]>,
+        production_roundoff_nuclei: f64,
+        budget: BurnupBudget,
+        checkpoint: &mut impl FnMut() -> Result<(), FissionError>,
+    ) -> Result<(Self, BurnupStep), BurnupError> {
         let mut next = self.clone();
         let n = self.populations.len();
         let mut incoming = vec![Accumulator::new(0.0); n];
@@ -666,13 +729,13 @@ impl BurnupInventory {
         let mut counts = [Accumulator::new(0.0); 3];
         let mut generated = [Accumulator::new(0.0); 3];
         let mut channels = [Accumulator::new(0.0); 3];
-        let mut nuclei_error = Accumulator::new(0.0);
+        let mut nuclei_error = Accumulator::new(production_roundoff_nuclei);
         let mut energy_error = Accumulator::new(0.0);
         let mut reaction_counts = Vec::with_capacity(self.model.reactions().len());
         for (index, reaction) in self.model.reactions().iter().enumerate() {
             checkpoint()?;
             let removal = evolved.removals[reaction.parent];
-            let fraction = prepared.fractions[index];
+            let fraction = fractions[index];
             let count = product(removal, fraction)?;
             let count_error = removal.mul_add(fraction, -count).abs();
             add(&mut nuclei_error, count_error)?;
@@ -724,6 +787,7 @@ impl BurnupInventory {
                 outgoing[i].lo,
                 -incoming[i].hi,
                 -incoming[i].lo,
+                -produced.map_or(0.0, |counts| counts[i]),
             ]))?;
             population_balance_residuals.push(residual);
             add(&mut nuclei_error, residual.abs())?;
@@ -733,6 +797,10 @@ impl BurnupInventory {
                 -outgoing[i].lo,
             ]))?;
             add(&mut nuclei_error, attribution_residual.abs())?;
+            if let Some(produced) = produced {
+                let error = add(&mut next.produced[i], produced[i])?.abs();
+                add(&mut nuclei_error, error)?;
+            }
         }
         for &value in &counts {
             add(&mut nuclei_error, projection_error(value)?)?;
@@ -755,8 +823,8 @@ impl BurnupInventory {
             -released.escaped_j,
         ]))?;
         add(&mut energy_error, energy_residual_j.abs())?;
-        let population_roundoff_nuclei = checked(nuclei_error.value())?;
-        let energy_roundoff_j = checked(energy_error.value())?;
+        let population_roundoff_nuclei = nonnegative_bound(nuclei_error)?;
+        let energy_roundoff_j = nonnegative_bound(energy_error)?;
         if population_roundoff_nuclei > budget.nuclei_tolerance {
             return Err(BurnupError::Budget(
                 "population and reaction accounting roundoff",
@@ -770,7 +838,7 @@ impl BurnupInventory {
         Ok((
             next,
             BurnupStep {
-                duration_s: prepared.duration_s(),
+                duration_s,
                 reaction_counts,
                 parent_removals: evolved.removals,
                 fissions: counts[0].value(),
@@ -890,6 +958,17 @@ fn add(target: &mut Accumulator, value: f64) -> Result<f64, BurnupError> {
 }
 fn projection_error(value: Accumulator) -> Result<f64, BurnupError> {
     Ok(checked(sum(&[value.value(), -value.hi, -value.lo]))?.abs())
+}
+
+// Preserve a positive low part at the exact allowance boundary instead of
+// rounding a noncancelling defect sum downward into an apparently valid step.
+fn nonnegative_bound(value: Accumulator) -> Result<f64, BurnupError> {
+    let rounded = checked(value.value())?;
+    if checked(sum(&[value.hi, value.lo, -rounded]))? > 0.0 {
+        checked(rounded.next_up())
+    } else {
+        Ok(rounded)
+    }
 }
 
 #[cfg(test)]

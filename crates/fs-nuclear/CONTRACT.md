@@ -985,3 +985,51 @@ new module exports. All 147 nuclear tests passed, including the concurrent
 capture-activation and thermal additions. These manufactured fixtures establish
 implementation behavior; full workspace Cargo and empirical validation against
 processed evaluated nuclear data remain separate gates.
+
+## External nuclide production during full burnup
+
+`burnup::production` adds `PreparedBurnupProduction`,
+`BurnupProductionStep`, `BurnupProductionSchedule` and
+`BurnupProductionChange` to the original physical burnup owner.
+`BurnupInventory::trial_with_production` and its atomic advance/prepared
+variants evolve an explicit expected-nuclei-per-second vector under the current
+admitted flux and temperature. Supplied fuel and products can decay, capture,
+fission and revisit cycles during the same interval. Half-lives, reaction
+multiplicity and integrated event energies retain their original definitions.
+
+The shared `ReactionSourcePlan` integrates actual source ages; supplied counts
+are not inserted as one end- or beginning-of-step dose. One private channel
+compiler and one physical event/product/energy ledger serve both homogeneous
+and supplied evolution. Neutron-group collapse and temperature-table evaluation
+occur once on a preparation miss. No dense homogeneous maps are duplicated to
+obtain event attribution.
+
+Prepared source maps compare exact interval, model identity, work limits and
+the complete current channel-rate vector. Changing the feed vector alone reuses
+the map; changing the fission/capture split invalidates it even when total
+removal is unchanged. Equivalent spectra/temperatures may share the same
+operator after their current data domains and rates are admitted. Accepted
+mode changes retain one cache family, and failed trials preserve all accepted
+physical counters and caches.
+
+`cumulative_produced_nuclei()` retains compensated external-supply accounts
+separately from reaction-created products. Node balances include supplied
+counts explicitly; production products, source-counter errors and existing
+reaction attribution consume the absolute nuclei allowance. Positive defect
+totals retain low parts conservatively at representable tolerance boundaries.
+No total-nucleus conservation is imposed on fission or other multiplying
+channels. Production introduces no inferred incoming enthalpy, emitted-particle
+account or bulk material-mass change; these remain separate physical inputs.
+
+Schedules are bounded, exact-model-bound and right-continuous, with binary
+search for rates and the next transition. Consumers must split at production
+changes. All rates are constant within an admitted interval, including the
+existing frozen flux/temperature operator; this extension does not remove the
+coupled changing-rate timestep requirement.
+
+The default-feature actual-root native gate passed all 112 nuclear tests,
+including eight source regressions for saturation/shutdown, newborn fission
+products and decay heat, cyclic/self-return counts, partition/restart/cache
+reuse, temperature-dependent channel changes, model/schedule/work binding,
+atomic budget/grid/cancellation refusal and finite integrated supplies despite
+unrepresentable sums of instantaneous rates.
