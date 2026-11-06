@@ -16,6 +16,9 @@ use crate::diffusion::{
 use fs_qty::Frequency;
 use fs_thermochem::decay::DecayLawV1;
 
+#[path = "forcing_tests.rs"]
+mod forcing_tests;
+
 fn spatial_budget() -> DiffusionBurnupBudget {
     DiffusionBurnupBudget {
         diffusion: DiffusionBudget {

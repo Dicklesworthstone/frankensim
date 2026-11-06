@@ -39,7 +39,10 @@ mod burnup_production;
 pub use burnup_production::{BurnupProductionCellSource, BurnupProductionHeating};
 
 mod diffusion;
-pub use diffusion::{DiffusionCellSource, DiffusionCellStep, DiffusionHeating};
+pub use diffusion::{
+    DiffusionCellSource, DiffusionCellStep, DiffusionHeating, DiffusionSourceChange,
+    DiffusionSourceSchedule,
+};
 
 mod production;
 pub use production::{DecayProductionCellSource, DecayProductionHeating};

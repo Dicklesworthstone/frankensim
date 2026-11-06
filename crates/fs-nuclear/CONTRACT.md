@@ -1333,3 +1333,16 @@ well mixed per cell and has no angular neutron transport, fluid-flow solution,
 resonance reconstruction or self-shielding. Manufactured analytic,
 conservation and timestep-refinement checks establish the implemented discrete
 equations; they do not qualify a particular reactor or evaluated data library.
+
+## Scheduled spatial sources on the native thermal clock
+
+`DiffusionCellSource::bind_with_sources` attaches one immutable
+`DiffusionSourceSchedule` to the complete shared spatial cohort. Its absolute
+right-continuous transitions clip native thermal intervals, including separate
+source startup and shutdown. Each accepted step evolves the spatial cohort
+once, then credits only its original per-cell deposited reaction energy.
+External nuclide production has a separate thermal audit account; source
+neutron/precursor injection and outflow remain in the spatial particle report.
+Incoming particle energy, carrier mass and feed enthalpy are not silently
+credited as heat or added to the original bulk thermal material.
+

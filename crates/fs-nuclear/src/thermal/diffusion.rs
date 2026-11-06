@@ -13,6 +13,9 @@ use crate::diffusion::burnup::{DiffusionBurnupBudget, DiffusionBurnupState, Diff
 use crate::{EnergyChannels, FissionError};
 use fs_thermal::enthalpy::{CellId, MaterialId};
 
+mod forcing;
+pub use forcing::{DiffusionSourceChange, DiffusionSourceSchedule};
+
 /// A spatial cell handle. Use `bind` to create the complete shared collection.
 #[derive(Clone, Debug)]
 pub struct DiffusionCellSource {
@@ -20,6 +23,7 @@ pub struct DiffusionCellSource {
     material_id: MaterialId,
     cell_index: usize,
     state: Arc<DiffusionBurnupState>,
+    sources: Option<Arc<DiffusionSourceSchedule>>,
 }
 
 /// Spatial neutron diffusion, finite burnup and heat on the native clock.
@@ -52,6 +56,27 @@ impl DiffusionCellSource {
         state: Arc<DiffusionBurnupState>,
         cells: Vec<(CellId, MaterialId)>,
     ) -> Result<Vec<Self>, FissionThermalError> {
+        Self::bind_impl(state, cells, None)
+    }
+
+    /// Bind continuous external neutron, precursor and nuclide supply to the
+    /// original shared thermal clock. Authored changes clip the native step.
+    /// Only subsequent reaction energy becomes heat; incoming enthalpy and
+    /// changes of bulk material mass require their own physical owner.
+    pub fn bind_with_sources(
+        state: Arc<DiffusionBurnupState>,
+        cells: Vec<(CellId, MaterialId)>,
+        sources: Arc<DiffusionSourceSchedule>,
+    ) -> Result<Vec<Self>, FissionThermalError> {
+        sources.validate_binding(&state)?;
+        Self::bind_impl(state, cells, Some(sources))
+    }
+
+    fn bind_impl(
+        state: Arc<DiffusionBurnupState>,
+        cells: Vec<(CellId, MaterialId)>,
+        schedule: Option<Arc<DiffusionSourceSchedule>>,
+    ) -> Result<Vec<Self>, FissionThermalError> {
         if cells.len() != state.inventories().len() {
             return Err(FissionThermalError::Invalid(
                 "complete spatial-to-thermal cell correspondence required",
@@ -70,6 +95,7 @@ impl DiffusionCellSource {
                 material_id,
                 cell_index,
                 state: Arc::clone(&state),
+                sources: schedule.clone(),
             });
         }
         Ok(sources)
@@ -81,6 +107,10 @@ impl DiffusionCellSource {
     #[must_use]
     pub fn cell_index(&self) -> usize {
         self.cell_index
+    }
+    #[must_use]
+    pub fn source_schedule(&self) -> Option<&Arc<DiffusionSourceSchedule>> {
+        self.sources.as_ref()
     }
 }
 
@@ -104,33 +134,57 @@ impl NuclearHeatSource for DiffusionCellSource {
     fn nuclei_tolerance(budget: Self::Budget) -> Option<f64> {
         Some(budget.burnup.nuclei_tolerance + budget.reaction_tolerance)
     }
-    fn next_transition(&self, _: f64) -> Option<f64> {
-        None
+    fn next_transition(&self, time_s: f64) -> Option<f64> {
+        self.sources
+            .as_ref()
+            .and_then(|sources| sources.next_after(time_s))
     }
     fn admit(
         &self,
-        _: f64,
+        time_s: f64,
         temperature_k: f64,
         budget: Self::Budget,
     ) -> Result<(), FissionThermalError> {
         budget.validate()?;
+        let rates = self
+            .sources
+            .as_ref()
+            .map(|schedule| schedule.sources_at(time_s))
+            .transpose()?;
         if self.cell_index == 0 {
-            self.state
-                .neutrons()
-                .trial(0.0, budget.diffusion, || Ok(()))
-                .map_err(crate::diffusion::burnup::DiffusionBurnupError::from)?;
+            if let Some(rates) = rates {
+                self.state.neutrons().trial_with_sources(
+                    0.0,
+                    &rates.neutron_rates_s,
+                    &rates.precursor_rates_s,
+                    budget.diffusion,
+                    || Ok(()),
+                )
+            } else {
+                self.state
+                    .neutrons()
+                    .trial(0.0, budget.diffusion, || Ok(()))
+            }
+            .map_err(crate::diffusion::burnup::DiffusionBurnupError::from)?;
         }
-        self.state.inventories()[self.cell_index].trial(
-            0.0,
-            &self
-                .state
-                .neutrons()
-                .group_flux(self.cell_index)
-                .map_err(crate::diffusion::burnup::DiffusionBurnupError::from)?,
-            temperature_k,
-            budget.burnup,
-            || Ok(()),
-        )?;
+        let flux = self
+            .state
+            .neutrons()
+            .group_flux(self.cell_index)
+            .map_err(crate::diffusion::burnup::DiffusionBurnupError::from)?;
+        let inventory = &self.state.inventories()[self.cell_index];
+        if let Some(rates) = rates {
+            inventory.trial_with_production(
+                0.0,
+                &flux,
+                temperature_k,
+                &rates.nuclide_rates_s[self.cell_index],
+                budget.burnup,
+                || Ok(()),
+            )?;
+        } else {
+            inventory.trial(0.0, &flux, temperature_k, budget.burnup, || Ok(()))?;
+        }
         Ok(())
     }
     fn validate_temperature(&self, temperature_k: f64) -> Result<(), FissionThermalError> {
@@ -153,7 +207,7 @@ impl NuclearHeatSource for DiffusionCellSource {
     }
     fn trial_sources(
         sources: &[&Self],
-        _: f64,
+        time_s: f64,
         duration_s: f64,
         temperatures_k: &[f64],
         budget: Self::Budget,
@@ -174,6 +228,11 @@ impl NuclearHeatSource for DiffusionCellSource {
         for (source, &temperature) in sources.iter().zip(temperatures_k) {
             checkpoint()?;
             if !Arc::ptr_eq(&first.state, &source.state)
+                || !match (&first.sources, &source.sources) {
+                    (None, None) => true,
+                    (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+                    _ => false,
+                }
                 || source.cell_index >= seen.len()
                 || seen[source.cell_index]
             {
@@ -184,10 +243,28 @@ impl NuclearHeatSource for DiffusionCellSource {
             seen[source.cell_index] = true;
             temperatures[source.cell_index] = temperature;
         }
-        let (state, report) =
+        let (state, report) = if let Some(schedule) = &first.sources {
+            let rates = schedule.sources_at(time_s)?;
+            if schedule
+                .next_after(time_s)
+                .is_some_and(|next| duration_s > next - time_s)
+            {
+                return Err(FissionThermalError::Invalid(
+                    "spatial source trial crosses a scheduled rate change",
+                ));
+            }
+            first.state.trial_with_sources(
+                duration_s,
+                &temperatures,
+                rates,
+                budget,
+                &mut *checkpoint,
+            )?
+        } else {
             first
                 .state
-                .trial(duration_s, &temperatures, budget, &mut *checkpoint)?;
+                .trial(duration_s, &temperatures, budget, &mut *checkpoint)?
+        };
         let state = Arc::new(state);
         let report = Arc::new(report);
         let mut candidates = Vec::with_capacity(sources.len());
@@ -217,6 +294,9 @@ impl NuclearHeatSource for DiffusionCellSource {
     }
     fn decays(step: &Self::Step) -> f64 {
         step.burnup().decays
+    }
+    fn produced_nuclei(step: &Self::Step) -> f64 {
+        step.spatial.produced_nuclei_by_cell[step.cell_index]
     }
     fn fissions(step: &Self::Step) -> f64 {
         step.burnup().fissions
