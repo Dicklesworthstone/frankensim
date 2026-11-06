@@ -34,6 +34,10 @@ pub use crate::hyper3::visco::{
     FiniteViscoStepControls, FiniteViscoTetEnergy as FiniteViscoPlaneEnergy, ViscoelasticLawField,
 };
 
+/// Prescribed reference-strain changes with retained quadrature histories.
+pub mod reference_change;
+pub use reference_change::{FiniteViscoPlaneReferenceChange, FiniteViscoPlaneReferenceEnergy};
+
 /// The transverse constraint used throughout initialization and every interval.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FiniteViscoPlaneMode {
@@ -309,8 +313,8 @@ pub struct FiniteViscoPlaneSolid<'a> {
     mode: FiniteViscoPlaneMode,
     reference_thickness_m: f64,
     local: PlaneStressSettings,
-    displacement_m: Vec<[f64; 2]>,
-    points: Vec<PlaneMaterialPoint>,
+    displacement_m: Arc<[[f64; 2]]>,
+    points: Arc<[PlaneMaterialPoint]>,
     offsets: Arc<[usize]>,
     histories: Histories,
     first_piola_pa: Vec<[f64; 9]>,
@@ -496,8 +500,8 @@ impl<'a> FiniteViscoPlaneSolid<'a> {
             mode,
             reference_thickness_m,
             local,
-            displacement_m: initial_displacement_m.to_vec(),
-            points,
+            displacement_m: initial_displacement_m.into(),
+            points: points.into(),
             offsets: offsets.into(),
             histories: endpoint.histories,
             first_piola_pa: endpoint.first_piola_pa,
@@ -652,7 +656,7 @@ impl<'a> FiniteViscoPlaneSolid<'a> {
             return Err(invalid("accepted integration-point layout changed"));
         }
         let mut endpoint = Endpoint::new(self.mode, points.len(), self.stored_energy_j);
-        for (index, (point, previous)) in points.iter().zip(&self.points).enumerate() {
+        for (index, (point, previous)) in points.iter().zip(self.points.iter()).enumerate() {
             checkpoint(cx)?;
             if point.element != previous.element
                 || point.local_point != previous.local_point
@@ -748,8 +752,8 @@ impl<'a> FiniteViscoPlaneSolid<'a> {
                 mode: self.mode,
                 reference_thickness_m: self.reference_thickness_m,
                 local: self.local,
-                displacement_m,
-                points,
+                displacement_m: displacement_m.into(),
+                points: points.into(),
                 offsets: Arc::clone(&self.offsets),
                 histories: endpoint.histories,
                 first_piola_pa: endpoint.first_piola_pa,
