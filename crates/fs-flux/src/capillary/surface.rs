@@ -12,8 +12,9 @@
 //!
 //! A prescribed coefficient change supplies free energy A_mean * delta_sigma.
 //! It is not heat: a temperature-dependent tension needs a separate surface
-//! entropy/internal-energy model. No surfactant transport, bending elasticity,
-//! topology changes or intermediate-path validity is implied. The optional
+//! entropy/internal-energy model. The optional `surfactant` law instead owns
+//! conserved surface amount and the corresponding isothermal free energy.
+//! No bending elasticity, topology changes or intermediate-path validity is implied. The optional
 //! `dynamics` adapter applies these forces through the original structural
 //! midpoint integrator, with independently admitted momentum and energy balances.
 //! Optional [`viscosity`] supplies objective Boussinesq--Scriven interfacial
@@ -25,6 +26,10 @@ type Vector = [f64; 3];
 
 /// Objective interfacial shear and dilatational viscous stresses.
 pub mod viscosity;
+
+/// Conserved insoluble surface species and thermodynamic interface stresses.
+#[cfg(feature = "surface-surfactant")]
+pub mod surfactant;
 
 /// Conservative material-surface motion through the existing structural owner.
 #[cfg(feature = "continuum")]
@@ -65,9 +70,9 @@ pub struct SurfaceEnergyChange {
     pub area_before_m2: f64,
     /// Accepted geometric area [m²].
     pub area_after_m2: f64,
-    /// Initial prescribed-coefficient free energy [J].
+    /// Initial free energy of the selected surface constitutive law [J].
     pub energy_before_j: f64,
-    /// Accepted prescribed-coefficient free energy [J].
+    /// Accepted free energy of the selected surface constitutive law [J].
     pub energy_after_j: f64,
     /// Free-energy change, evaluated without subtracting aggregate energies [J].
     pub energy_change_j: f64,

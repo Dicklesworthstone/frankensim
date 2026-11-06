@@ -12,7 +12,9 @@ layer = "L3"
 
 [features]
 default = ["continuum", "quarter-wave"]
-continuum = ["cavitation", "dep:fs-exec", "dep:fs-la", "dep:fs-material", "dep:fs-math", "dep:fs-mesh", "dep:fs-qty", "dep:fs-solid", "dep:fs-solver", "dep:fs-sparse", "dep:fs-time"]
+continuum = ["cavitation", "surface-surfactant", "dep:fs-exec", "dep:fs-la", "dep:fs-material", "dep:fs-math", "dep:fs-mesh", "dep:fs-qty", "dep:fs-solid", "dep:fs-solver", "dep:fs-sparse", "dep:fs-time"]
+# Thermodynamic interface forces without the bulk continuum dependency graph.
+surface-surfactant = ["dep:fs-math"]
 cavitation = ["dep:fs-material", "dep:fs-la"]
 quarter-wave = []
 experimental-compressible = ["dep:fs-gas", "dep:fs-qty", "dep:fs-solver"]

@@ -7,6 +7,9 @@
 //! M*delta v=dt*(F_surface+F_viscous+F_external). Their contraction closes
 //! kinetic plus surface free energy and optional Boussinesq--Scriven surface
 //! viscous loss, with prescribed coefficient supply accounted separately.
+//! Insoluble surfactant instead carries fixed moles on each material face;
+//! dilution changes its thermodynamic tension and storage through the same
+//! area discrete gradient, without an external coefficient-energy supply.
 //!
 //! This is an inertial capillary material surface, not bulk incompressible
 //! liquid or an elastic-solid constitutive replacement. Mass never follows
@@ -15,6 +18,10 @@
 //! fixed topology. No bending, bulk viscosity, contact, remeshing, surface entropy or
 //! inferred thermal heat is supplied. Time/mesh refinement is still required.
 
+use super::surfactant::{
+    SurfactantError, SurfactantField, assemble_surfactant_step, triangle_surfactant_step,
+    triangle_surfactant_step_tangent,
+};
 use super::viscosity::{
     SurfaceViscosity, SurfaceViscosityField, SurfaceViscosityResponse, assemble_surface_viscosity,
     triangle_surface_viscosity, triangle_surface_viscosity_tangent,
@@ -46,7 +53,7 @@ pub struct SurfaceDynamicsControls {
 pub struct SurfaceDynamicsReport {
     /// The native accepted time/step/Newton telemetry.
     pub native: ImplicitStepTelemetry,
-    /// Original geometric energy, work and prescribed-sigma supply.
+    /// Constitutive surface free energy, mechanical work and any prescribed-sigma supply.
     pub surface: SurfaceEnergyChange,
     /// Initial kinetic storage [J].
     pub kinetic_before_j: f64,
@@ -74,6 +81,8 @@ pub enum SurfaceDynamicsError {
     Invalid(&'static str),
     /// Original geometric surface-force refusal.
     Surface(CapillarySurfaceError),
+    /// Invalid insoluble-surfactant law, amount or thermodynamic state.
+    Surfactant(SurfactantError),
     /// Original structural/Newton--Krylov refusal.
     Time(TimeSolveError),
     /// Cancellation at a bounded callback or face boundary.
@@ -97,6 +106,11 @@ impl std::error::Error for SurfaceDynamicsError {}
 impl From<CapillarySurfaceError> for SurfaceDynamicsError {
     fn from(value: CapillarySurfaceError) -> Self {
         Self::Surface(value)
+    }
+}
+impl From<SurfactantError> for SurfaceDynamicsError {
+    fn from(value: SurfactantError) -> Self {
+        Self::Surfactant(value)
     }
 }
 
@@ -178,6 +192,53 @@ impl<'a> CapillarySurfaceDynamics<'a> {
         viscosity: SurfaceViscosityField<'_>,
         external_forces_n: &[[f64; 3]],
     ) -> Result<SecondOrderState, SurfaceDynamicsError> {
+        self.initial_state_with_surface(
+            time_s,
+            positions_m,
+            velocities_m_s,
+            SurfaceForces::Prescribed {
+                before: tension,
+                after: tension,
+            },
+            viscosity,
+            external_forces_n,
+        )
+    }
+
+    /// Initialize an isothermal insoluble coating on the SAME material mesh.
+    /// Each face carries conserved moles; its instantaneous tension is the
+    /// area derivative of its free energy at fixed amount, not that energy
+    /// divided by area. The supplied surface-viscosity field may be zero.
+    #[allow(clippy::too_many_arguments)]
+    pub fn initial_state_surfactant(
+        &self,
+        time_s: f64,
+        positions_m: &[[f64; 3]],
+        velocities_m_s: &[[f64; 3]],
+        surfactant: SurfactantField<'_>,
+        viscosity: SurfaceViscosityField<'_>,
+        external_forces_n: &[[f64; 3]],
+    ) -> Result<SecondOrderState, SurfaceDynamicsError> {
+        self.initial_state_with_surface(
+            time_s,
+            positions_m,
+            velocities_m_s,
+            SurfaceForces::Insoluble(surfactant),
+            viscosity,
+            external_forces_n,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn initial_state_with_surface(
+        &self,
+        time_s: f64,
+        positions_m: &[[f64; 3]],
+        velocities_m_s: &[[f64; 3]],
+        surface_law: SurfaceForces<'_>,
+        viscosity: SurfaceViscosityField<'_>,
+        external_forces_n: &[[f64; 3]],
+    ) -> Result<SecondOrderState, SurfaceDynamicsError> {
         if !time_s.is_finite()
             || !vectors(positions_m, self.masses_kg.len())
             || !vectors(velocities_m_s, self.masses_kg.len())
@@ -187,9 +248,9 @@ impl<'a> CapillarySurfaceDynamics<'a> {
                 "finite per-node initial positions, velocities, forces and time required",
             ));
         }
+        surface_law.validate(self.faces.len())?;
         viscosity.validate(self.faces.len())?;
-        let mut surface =
-            assemble_surface_tension_step(positions_m, positions_m, self.faces, tension, tension)?;
+        let mut surface = surface_law.assemble(positions_m, positions_m, self.faces)?;
         if !viscosity.is_zero() {
             let viscous =
                 assemble_surface_viscosity(positions_m, velocities_m_s, self.faces, viscosity)?;
@@ -268,6 +329,64 @@ impl<'a> CapillarySurfaceDynamics<'a> {
         external_forces_n: &[[f64; 3]],
         dt_s: f64,
         controls: SurfaceDynamicsControls,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<SurfaceDynamicsReport, SurfaceDynamicsError> {
+        self.advance_with_surface(
+            state,
+            SurfaceForces::Prescribed {
+                before: tension_before,
+                after: tension_after,
+            },
+            viscosity,
+            external_forces_n,
+            dt_s,
+            controls,
+            cancelled,
+        )
+    }
+
+    /// Evolve a conserved insoluble coating with the original midpoint solver.
+    /// The mesh moves with the material: each borrowed face amount stays fixed
+    /// while concentration is amount/current area. Finite-step stresses and
+    /// exact tangents come from the same surface free energy, so dilution and
+    /// concentration gradients exchange work with inertia without an external
+    /// coefficient supply. Optional surface viscosity dissipates separately.
+    ///
+    /// This step supplies Lagrangian advection, not diffusion, adsorption,
+    /// desorption, remeshing or changing temperature. Fixed topology and
+    /// admissible endpoint coverage remain caller requirements. Any refusal
+    /// leaves the original mechanical trajectory and borrowed amounts intact.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_surfactant(
+        &self,
+        state: &mut SecondOrderState,
+        surfactant: SurfactantField<'_>,
+        viscosity: SurfaceViscosityField<'_>,
+        external_forces_n: &[[f64; 3]],
+        dt_s: f64,
+        controls: SurfaceDynamicsControls,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<SurfaceDynamicsReport, SurfaceDynamicsError> {
+        self.advance_with_surface(
+            state,
+            SurfaceForces::Insoluble(surfactant),
+            viscosity,
+            external_forces_n,
+            dt_s,
+            controls,
+            cancelled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn advance_with_surface(
+        &self,
+        state: &mut SecondOrderState,
+        surface_law: SurfaceForces<'_>,
+        viscosity: SurfaceViscosityField<'_>,
+        external_forces_n: &[[f64; 3]],
+        dt_s: f64,
+        controls: SurfaceDynamicsControls,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<SurfaceDynamicsReport, SurfaceDynamicsError> {
         if cancelled() {
@@ -307,8 +426,7 @@ impl<'a> CapillarySurfaceDynamics<'a> {
             .newton
             .validate()
             .map_err(|e| SurfaceDynamicsError::Time(TimeSolveError::NewtonSetup(e)))?;
-        tension_before.validate(self.faces.len())?;
-        tension_after.validate(self.faces.len())?;
+        surface_law.validate(self.faces.len())?;
         viscosity.validate(self.faces.len())?;
         let before: Vec<_> = state
             .q
@@ -318,8 +436,7 @@ impl<'a> CapillarySurfaceDynamics<'a> {
         let adapter = MidpointSurface {
             model: self,
             initial: &state.q,
-            tension_before,
-            tension_after,
+            surface_law,
             viscosity,
             active_viscosity: !viscosity.is_zero(),
             cancelled: RefCell::new(&mut cancelled),
@@ -460,11 +577,83 @@ fn kinetic(mass: &[f64], velocity: &[f64]) -> Result<f64, SurfaceDynamicsError> 
     Ok(value)
 }
 
+// One constitutive dispatch keeps both surface models on the same clock,
+// conservation gates, cancellation path and analytic solver callbacks.
+#[derive(Clone, Copy)]
+enum SurfaceForces<'a> {
+    Prescribed {
+        before: SurfaceTensionField<'a>,
+        after: SurfaceTensionField<'a>,
+    },
+    Insoluble(SurfactantField<'a>),
+}
+
+impl SurfaceForces<'_> {
+    fn validate(self, faces: usize) -> Result<(), SurfaceDynamicsError> {
+        match self {
+            Self::Prescribed { before, after } => {
+                before.validate(faces)?;
+                after.validate(faces)?;
+            }
+            Self::Insoluble(field) => field.validate(faces)?,
+        }
+        Ok(())
+    }
+
+    fn assemble(
+        self,
+        before_m: &[Vector],
+        after_m: &[Vector],
+        faces: &[[usize; 3]],
+    ) -> Result<CapillaryPatchResponse, SurfaceDynamicsError> {
+        Ok(match self {
+            Self::Prescribed { before, after } => {
+                assemble_surface_tension_step(before_m, after_m, faces, before, after)?
+            }
+            Self::Insoluble(field) => assemble_surfactant_step(before_m, after_m, faces, field)?,
+        })
+    }
+
+    fn triangle(
+        self,
+        face: usize,
+        before_m: [Vector; 3],
+        after_m: [Vector; 3],
+    ) -> Result<TriangleCapillaryResponse, SurfaceDynamicsError> {
+        Ok(match self {
+            Self::Prescribed { before, after } => {
+                triangle_surface_tension_step(before_m, after_m, before.at(face), after.at(face))?
+            }
+            Self::Insoluble(field) => triangle_surfactant_step(before_m, after_m, field.at(face))?,
+        })
+    }
+
+    fn tangent(
+        self,
+        face: usize,
+        before_m: [Vector; 3],
+        after_m: [Vector; 3],
+        direction_m: [Vector; 3],
+    ) -> Result<[Vector; 3], SurfaceDynamicsError> {
+        Ok(match self {
+            Self::Prescribed { before, after } => triangle_surface_tension_step_tangent(
+                before_m,
+                after_m,
+                before.at(face),
+                after.at(face),
+                direction_m,
+            )?,
+            Self::Insoluble(field) => {
+                triangle_surfactant_step_tangent(before_m, after_m, field.at(face), direction_m)?
+            }
+        })
+    }
+}
+
 struct MidpointSurface<'a, 'm, C> {
     model: &'a CapillarySurfaceDynamics<'m>,
     initial: &'a [f64],
-    tension_before: SurfaceTensionField<'a>,
-    tension_after: SurfaceTensionField<'a>,
+    surface_law: SurfaceForces<'a>,
     viscosity: SurfaceViscosityField<'a>,
     active_viscosity: bool,
     cancelled: RefCell<&'a mut C>,
@@ -497,11 +686,10 @@ impl<C: FnMut() -> bool> MidpointSurface<'_, '_, C> {
             if face % 64 == 0 && self.cancel() {
                 return Err(SurfaceDynamicsError::Cancelled);
             }
-            let response = triangle_surface_tension_step(
+            let response = self.surface_law.triangle(
+                face,
                 indices.map(|i| before[i]),
                 indices.map(|i| after[i]),
-                self.tension_before.at(face),
-                self.tension_after.at(face),
             )?;
             for (node, force) in indices.into_iter().zip(response.forces_n) {
                 for d in 0..3 {
@@ -591,12 +779,7 @@ impl<C: FnMut() -> bool> SecondOrderProblem for MidpointSurface<'_, '_, C> {
                 return;
             }
             let (before, after) = self.face(indices, q);
-            let Ok(response) = triangle_surface_tension_step(
-                before,
-                after,
-                self.tension_before.at(face),
-                self.tension_after.at(face),
-            ) else {
+            let Ok(response) = self.surface_law.triangle(face, before, after) else {
                 output.fill(f64::NAN);
                 return;
             };
@@ -645,13 +828,7 @@ impl<C: FnMut() -> bool> SecondOrderProblem for MidpointSurface<'_, '_, C> {
             }
             let (before, after) = self.face(indices, q);
             let direction = indices.map(|i| core::array::from_fn(|d| 2.0 * direction[3 * i + d]));
-            let Ok(tangent) = triangle_surface_tension_step_tangent(
-                before,
-                after,
-                self.tension_before.at(face),
-                self.tension_after.at(face),
-                direction,
-            ) else {
+            let Ok(tangent) = self.surface_law.tangent(face, before, after, direction) else {
                 output.fill(f64::NAN);
                 return;
             };

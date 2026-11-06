@@ -69,6 +69,172 @@ fn tetrahedron() -> ([Vector; 4], [[usize; 3]; 4], [f64; 4], [Vector; 4]) {
 }
 
 #[test]
+fn insoluble_coating_breathes_with_its_thermodynamic_tension_and_no_external_supply() {
+    use super::super::surfactant::SurfactantLaw;
+    let q = [
+        [1.0, 0.0, 0.0],
+        [-0.5, 3.0_f64.sqrt() / 2.0, 0.0],
+        [-0.5, -3.0_f64.sqrt() / 2.0, 0.0],
+    ];
+    let masses = [0.8; 3];
+    let faces = [[0, 1, 2]];
+    let model = CapillarySurfaceDynamics::try_new(&masses, &faces, 3, 1).unwrap();
+    let amounts = [0.1];
+    let coating = SurfactantField::Uniform {
+        law: SurfactantLaw::IdealDilute {
+            clean_tension_n_m: 0.6,
+            thermal_energy_j_mol: 1.0,
+            reference_concentration_mol_m2: 0.1,
+        },
+        amounts_mol: &amounts,
+    };
+    let inviscid = SurfaceViscosityField::Uniform(SurfaceViscosity::ZERO);
+    let force = [[0.0; 3]; 3];
+    let speed = 0.2;
+    let velocity = q.map(|p| p.map(|x| speed * x));
+    let mut state = model
+        .initial_state_surfactant(0.0, &q, &velocity, coating, inviscid, &force)
+        .unwrap();
+    let dt = 0.08;
+    let area = 3.0 * 3.0_f64.sqrt() / 4.0;
+    // Independently reduce E(r)=sigma0*c*r² + RT*N*(ln(N/(Gamma_ref*c*r²))-1)
+    // to its scalar midpoint momentum equation. The area secant, rather than
+    // the mean endpoint tension, is required for this finite-step identity.
+    let balance = |radius: f64| {
+        let ratio = radius * radius;
+        let secant = if ratio == 1.0 {
+            0.6 - amounts[0] / area
+        } else {
+            0.6 - amounts[0] * ratio.ln() / (area * (ratio - 1.0))
+        };
+        2.0 * masses[0] * (radius - 1.0 - dt * speed) / (dt * dt)
+            + secant * 3.0_f64.sqrt() * (1.0 + radius) / 4.0
+    };
+    let (mut lo, mut hi) = (0.95, 1.05);
+    assert!(balance(lo) < 0.0 && balance(hi) > 0.0);
+    for _ in 0..60 {
+        let middle = 0.5 * lo + 0.5 * hi;
+        if balance(middle) > 0.0 {
+            hi = middle;
+        } else {
+            lo = middle;
+        }
+    }
+    let radius = 0.5 * lo + 0.5 * hi;
+    let final_speed = 2.0 * (radius - 1.0) / dt - speed;
+    let report = model
+        .advance_surfactant(
+            &mut state,
+            coating,
+            inviscid,
+            &force,
+            dt,
+            controls(),
+            || false,
+        )
+        .unwrap();
+    for i in 0..3 {
+        for d in 0..3 {
+            close(state.q[3 * i + d], radius * q[i][d], 4e-12);
+            close(state.v[3 * i + d], final_speed * q[i][d], 4e-12);
+        }
+    }
+    assert_eq!(report.surface.coefficient_supply_j, 0.0);
+    assert_eq!(amounts, [0.1]);
+    close(
+        report.kinetic_change_j + report.surface.energy_change_j,
+        0.0,
+        5e-13,
+    );
+}
+
+#[test]
+fn nonuniform_conserved_coating_preserves_momentum_and_closes_viscous_surface_energy() {
+    use super::super::surfactant::SurfactantLaw;
+    let (q, faces, masses, v) = tetrahedron();
+    let model = CapillarySurfaceDynamics::try_new(&masses, &faces, 4, 4).unwrap();
+    let amounts = [0.02, 0.07, 0.03, 0.05];
+    let coating = SurfactantField::Uniform {
+        law: SurfactantLaw::Langmuir {
+            clean_tension_n_m: 0.3,
+            thermal_energy_j_mol: 0.5,
+            saturation_concentration_mol_m2: 0.8,
+        },
+        amounts_mol: &amounts,
+    };
+    let viscosity = SurfaceViscosityField::Uniform(SurfaceViscosity {
+        shear_n_s_m: 0.1,
+        dilatational_n_s_m: 0.15,
+    });
+    let force = [[0.0; 3]; 4];
+    let mut state = model
+        .initial_state_surfactant(0.0, &q, &v, coating, viscosity, &force)
+        .unwrap();
+    let initial = kinetic(&masses, &state.v).unwrap()
+        + assemble_surfactant_step(&q, &q, &faces, coating)
+            .unwrap()
+            .energy
+            .energy_before_j;
+    let (linear, angular) = momentum(&state, &masses);
+    let mut losses = 0.0;
+    for _ in 0..12 {
+        let report = model
+            .advance_surfactant(
+                &mut state,
+                coating,
+                viscosity,
+                &force,
+                0.005,
+                controls(),
+                || false,
+            )
+            .unwrap();
+        assert_eq!(report.surface.coefficient_supply_j, 0.0);
+        losses += report.surface_viscous_dissipation_j;
+        close(
+            report.kinetic_after_j + report.surface.energy_after_j + losses,
+            initial,
+            5e-11,
+        );
+        let (p, l) = momentum(&state, &masses);
+        for d in 0..3 {
+            close(p[d], linear[d], 3e-11);
+            close(l[d], angular[d], 3e-11);
+        }
+    }
+    assert!(losses > 0.0);
+    assert_eq!(amounts, [0.02, 0.07, 0.03, 0.05]);
+    let before = state.clone();
+    let overfilled = [100.0; 4];
+    let invalid = SurfactantField::Uniform {
+        law: SurfactantLaw::Langmuir {
+            clean_tension_n_m: 0.3,
+            thermal_energy_j_mol: 0.5,
+            saturation_concentration_mol_m2: 0.8,
+        },
+        amounts_mol: &overfilled,
+    };
+    assert!(matches!(
+        model.advance_surfactant(
+            &mut state,
+            invalid,
+            viscosity,
+            &force,
+            0.005,
+            controls(),
+            || false
+        ),
+        Err(SurfaceDynamicsError::Surfactant(_))
+    ));
+    assert_eq!(state.q, before.q);
+    assert_eq!(state.v, before.v);
+    assert_eq!(state.a, before.a);
+    assert_eq!(state.t, before.t);
+    assert_eq!(state.steps, before.steps);
+    assert_eq!(state.history.len(), before.history.len());
+}
+
+#[test]
 fn interfacial_dilatational_viscosity_matches_the_analytical_damped_breathing_mode() {
     let q = [
         [1.0, 0.0, 0.0],

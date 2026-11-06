@@ -2079,6 +2079,49 @@ analytically accelerated zero-tension limit; finite
 rotation/translation objectivity and checkpoint replay; and transactional
 invalid-data, cancellation, nonlinear-budget and independent-balance refusals.
 
+## Conserved insoluble surfactant on material surfaces
+
+With `surface-surfactant` (also enabled by `continuum`),
+`capillary::surface::surfactant` binds a fixed amount in moles to each material
+triangle. Its concentration is `Gamma = N/A`; material motion supplies exact
+Lagrangian dilution without creating or discarding surfactant. The isothermal
+ideal-dilute and finite-packing Langmuir laws own a surface Helmholtz density
+`f(Gamma)`, and tension is `sigma = f - Gamma * df/dGamma`. The supplied thermal
+energy is `R*T` in J/mol. Clean tension, concentration reference or saturation
+coverage, and the actual interface environment remain explicit physical inputs.
+The domain rejects nonfinite/negative amounts, saturation packing and negative
+tension; it does not continue an unstable compressed film by clipping its law.
+
+Each triangle stores `E(A,N) = A*f(N/A)`. At fixed amount, its finite-step force
+uses the area secant of this SAME energy with the existing Gram area discrete
+gradient. The analytic endpoint tangent includes the area dependence of that
+secant and its coincident-endpoint limit. Triangle leaves allocate nothing;
+uniform-law/per-face-law assembly retains boundary tractions, variable-tension
+surface stress, zero resultant and midpoint torque, and exact mechanical work
+to roundoff. Zero coating delegates directly to the original clean-tension
+force and tangent. Deterministic logarithms and cancellation-resistant energy
+increments keep the constitutive evaluation on the existing numerical path.
+
+`initial_state_surfactant` and `advance_surfactant` use the original
+`CapillarySurfaceDynamics` midpoint clock, exact Newton--Krylov callbacks and
+physical acceptance gates. Fixed borrowed amounts cannot change during a
+mechanical trial. The accepted account is `delta K + delta E_surface +
+surface_viscous_loss = external_work`; dilution has no prescribed-coefficient
+energy supply. Surface viscosity remains optional and uses the original
+Boussinesq--Scriven implementation. Invalid coverage, cancelled trials and
+failed solves publish no trajectory state. Native regressions compare an
+ideal coated breathing triangle against an independently reduced scalar
+nonlinear midpoint equation and check repeated rotating nonuniform Langmuir
+motion, viscous loss, momentum, energy and invalid-state rollback.
+
+This is an isothermal, fixed-topology insoluble coating model. It supplies no
+adsorption/desorption, bulk solute exchange, micelles, surface phase transition,
+temperature evolution, thermal heat deposition or remeshing transport.
+The constitutive relation and ideal/Langmuir free energies follow Barrett,
+Garcke and Nurnberg (2015), equations 2.12--2.14,
+doi:10.1051/m2an/2014039. The finite-area force and its tangent are derived from
+those energies through the original discrete-gradient surface operator.
+
 
 ## Damped Newton BDF1 for stiff rheology
 
