@@ -239,6 +239,7 @@ pub fn advance_supported_surface<L: SublimationLaw + ?Sized>(
             h: deposit_h,
             ..endpoint
         },
+        0.0,
     )?;
     let substrate_energy_change_j =
         finite(state.substrate_mass_kg * (endpoint.h - state.substrate_specific_enthalpy_j_kg))?;

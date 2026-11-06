@@ -170,6 +170,9 @@ pub struct SurfaceStep {
     /// Signed bath energy in the solid's caloric datum. The thermostated bath
     /// owns subsequent gas sensible-heat equilibration.
     pub vapor_energy_j: f64,
+    /// Signed externally supplied heat, positive into the solid, counted once.
+    pub supplied_heat_j: f64,
+    /// Total storage change plus carried vapor energy minus supplied heat.
     pub energy_residual_j: f64,
     /// Positive thickness loss, negative frost growth, at endpoint density.
     pub recession_m: f64,
@@ -416,10 +419,44 @@ pub fn advance_surface<L: SublimationLaw + ?Sized>(
     duration_s: f64,
     config: SolverConfig,
     temperature: impl Fn(f64) -> Result<f64, SublimationError>,
+    checkpoint: impl FnMut() -> Result<(), SublimationError>,
+) -> Result<SurfaceStep, SublimationError> {
+    advance_surface_with_heat(
+        law, kinetics, solid, reservoir, duration_s, 0.0, config, temperature, checkpoint,
+    )
+}
+
+/// Simultaneous solid/vapor exchange and prescribed signed heat input.
+///
+/// Positive `supplied_heat_j` heats the solid; negative values remove heat.
+/// The endpoint solves `m0*(h1-h0) + dm*L(T1) = supplied_heat_j` against the
+/// original `T(h)` chart. Vapor carries `h1+L(T1)`, including latent energy.
+/// Heat can feed sublimation, or cooling can sustain deposition, without an
+/// intermediate sensible-only temperature outside the solid chart.
+///
+/// The caller owns this total energy over the interval and its external
+/// reservoir account. It is not power or an automatically evaluated boundary
+/// law; the same heat must not be applied again through another thermal source.
+/// Zero duration permits a caloric heat impulse with no phase transfer.
+/// All phase, inventory, work-budget and domain limits of `advance_surface`
+/// still apply. Gas temperature and exposed area retain their original owners.
+#[allow(clippy::too_many_arguments)]
+pub fn advance_surface_with_heat<L: SublimationLaw + ?Sized>(
+    law: &L,
+    kinetics: SurfaceKinetics,
+    solid: SolidSurfaceState,
+    reservoir: VaporReservoir,
+    duration_s: f64,
+    supplied_heat_j: f64,
+    config: SolverConfig,
+    temperature: impl Fn(f64) -> Result<f64, SublimationError>,
     mut checkpoint: impl FnMut() -> Result<(), SublimationError>,
 ) -> Result<SurfaceStep, SublimationError> {
     validate_surface(solid, duration_s)?;
     validate_solver(config)?;
+    if !supplied_heat_j.is_finite() {
+        return Err(SublimationError::Invalid("nonfinite supplied heat"));
+    }
     let mut evaluations = 0;
     let mut evaluate = |h: f64| -> Result<Endpoint, SublimationError> {
         checkpoint()?;
@@ -431,19 +468,19 @@ pub fn advance_surface<L: SublimationLaw + ?Sized>(
         let t = temperature(h)?;
         let p = properties(law, t)?;
         let dm = transfer(p, t, kinetics, solid, reservoir, duration_s)?;
-        let residual =
-            finite(solid.mass_kg * (h - solid.specific_enthalpy_j_kg) + dm * p.latent_heat_j_kg)?;
-        Ok(Endpoint {
-            h,
-            t,
-            p,
-            dm,
-            residual,
-        })
+        let residual = finite(
+            solid.mass_kg * (h - solid.specific_enthalpy_j_kg) + dm * p.latent_heat_j_kg
+                - supplied_heat_j,
+        )?;
+        Ok(Endpoint { h, t, p, dm, residual })
     };
     let initial = evaluate(solid.specific_enthalpy_j_kg)?;
-    let endpoint = solve_endpoint(initial, solid.mass_kg, config, &mut evaluate)?;
-    finish_surface_step(solid, reservoir, endpoint)
+    let endpoint = solve_endpoint_with_scale(
+        initial, solid.mass_kg, supplied_heat_j.abs(), config, &mut evaluate,
+    )?;
+    let step = finish_surface_step(solid, reservoir, endpoint, supplied_heat_j)?;
+    checkpoint()?;
+    Ok(step)
 }
 
 // Both a free solid and a supported deposit use the same bracketed endpoint
@@ -455,8 +492,21 @@ fn solve_endpoint(
     config: SolverConfig,
     evaluate: &mut impl FnMut(f64) -> Result<Endpoint, SublimationError>,
 ) -> Result<Endpoint, SublimationError> {
+    solve_endpoint_with_scale(initial, thermal_mass, 0.0, config, evaluate)
+}
+
+// Supplied heat can nearly cancel latent transfer. Retain the physical energy
+// scale in the relative tolerance instead of scaling only by that cancellation.
+fn solve_endpoint_with_scale(
+    initial: Endpoint,
+    thermal_mass: f64,
+    energy_scale_j: f64,
+    config: SolverConfig,
+    evaluate: &mut impl FnMut(f64) -> Result<Endpoint, SublimationError>,
+) -> Result<Endpoint, SublimationError> {
     let tolerance = finite(
-        config.absolute_energy_tolerance_j + config.relative_tolerance * initial.residual.abs(),
+        config.absolute_energy_tolerance_j
+            + config.relative_tolerance * initial.residual.abs().max(energy_scale_j),
     )?;
     let endpoint = if initial.residual.abs() <= tolerance {
         initial
@@ -522,6 +572,7 @@ fn finish_surface_step(
     solid: SolidSurfaceState,
     reservoir: VaporReservoir,
     endpoint: Endpoint,
+    supplied_heat_j: f64,
 ) -> Result<SurfaceStep, SublimationError> {
     let remaining = finite(solid.mass_kg - endpoint.dm)?;
     let new_reservoir = match reservoir {
@@ -553,6 +604,7 @@ fn finish_surface_step(
         transferred_mass_kg: endpoint.dm,
         latent_energy_j: latent,
         vapor_energy_j: vapor_energy,
+        supplied_heat_j,
         energy_residual_j: endpoint.residual,
         recession_m: recession,
         surface_temperature_k: endpoint.t,

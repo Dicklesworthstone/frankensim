@@ -666,6 +666,25 @@ The default budget permits 96 evaluations; callers may select 1 through 4096.
 Each evaluation polls the supplied checkpoint. Functions return candidate
 values and mutate no caller state on failure.
 
+`sublimation::advance_surface_with_heat` solves the same original chart and
+mass-transfer law with explicit signed supplied energy:
+`m_initial*(h_end-h_initial) + transferred_mass*L(T_end) = supplied_heat_j`.
+Heat can sustain sublimation and cooling can sustain deposition without a
+sensible-only intermediate state outside the admitted solid domain. The
+receipt includes supplied heat, full vapor enthalpy and their common residual;
+the caller debits that heat once. Relative solve tolerance retains the physical
+supplied-energy scale when heat nearly cancels the latent transfer.
+Zero-duration impulses change only caloric storage, and the original
+`advance_surface` remains the zero-heat entry point. Coating/chamber callers
+retain their existing zero supplied-heat convention.
+
+Five focused regressions cover independently calculated isothermal
+Hertz-Knudsen exchange under heating/cooling, shifted caloric references,
+sealed/zero-area/zero-duration limits, heat-driven flux reversal with changing
+latent heat, finite-reservoir closure, and invalid/cancelled/exhausted solves.
+These are numerical model checks, not new material calibration or a spatial
+moving-interface claim.
+
 ### Deposition on an initially bare thermal substrate
 
 `sublimation::coating::advance_supported_surface` separately conserves the

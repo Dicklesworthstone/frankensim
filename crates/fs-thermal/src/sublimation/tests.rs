@@ -359,3 +359,234 @@ fn bad_inputs_cancellation_and_nonlinear_budget_refuse() {
         Err(SublimationError::NonConverged)
     );
 }
+
+#[test]
+fn supplied_heat_sustains_sublimation_and_cooling_sustains_deposition() {
+    let duration = 30.0;
+    for pressure in [0.0, 20.0] {
+        // Independent isothermal Hertz-Knudsen balance at 230 K.
+        let dm = (0.018 / (2.0 * core::f64::consts::PI * MOLAR_GAS_CONSTANT * 230.0))
+            .sqrt()
+            * (10.0 - pressure)
+            * solid().area_m2
+            * duration;
+        let heat = dm * 2.8e6;
+        let sensible_only_t = 230.0 + heat / (solid().mass_kg * 2000.0);
+        assert!(!(50.0..=273.16).contains(&sensible_only_t));
+        for datum in [0.0, 1e7, -1e7] {
+            let initial = SolidSurfaceState {
+                specific_enthalpy_j_kg: solid().specific_enthalpy_j_kg + datum,
+                ..solid()
+            };
+            let step = advance_surface_with_heat(
+                &Law,
+                kinetics(),
+                initial,
+                bath(pressure),
+                duration,
+                heat,
+                SolverConfig::default(),
+                |h| Ok((h - datum) / 2000.0),
+                || Ok(()),
+            )
+            .unwrap();
+            assert_eq!(step.surface_temperature_k, 230.0);
+            assert_eq!(step.solid.specific_enthalpy_j_kg, initial.specific_enthalpy_j_kg);
+            assert_eq!(step.supplied_heat_j, heat);
+            near(step.transferred_mass_kg, dm, 1e-17, 1e-13);
+            near(step.latent_energy_j, heat, 1e-7, 0.0);
+            near(
+                step.solid.mass_kg * step.solid.specific_enthalpy_j_kg
+                    - initial.mass_kg * initial.specific_enthalpy_j_kg
+                    + step.vapor_energy_j,
+                heat,
+                1e-7,
+                0.0,
+            );
+            assert_eq!(step.transferred_mass_kg > 0.0, pressure == 0.0);
+        }
+    }
+}
+
+#[test]
+fn zero_heat_preserves_exchange_and_sealed_heat_impulses_are_caloric() {
+    for pressure in [0.0, 20.0] {
+        let explicit_zero = advance_surface_with_heat(
+            &Law,
+            kinetics(),
+            solid(),
+            bath(pressure),
+            2.0,
+            0.0,
+            SolverConfig::default(),
+            |h| Ok(h / 2000.0),
+            || Ok(()),
+        )
+        .unwrap();
+        assert_eq!(explicit_zero, run(solid(), bath(pressure), 2.0));
+    }
+    let sealed = SurfaceKinetics {
+        accommodation_coefficient: 0.0,
+        ..kinetics()
+    };
+    for (state, surface_kinetics, duration) in [
+        (solid(), sealed, 30.0),
+        (solid(), kinetics(), 0.0),
+        (SolidSurfaceState { area_m2: 0.0, ..solid() }, kinetics(), 30.0),
+    ] {
+        for heat in [-200.0, 200.0] {
+            let step = advance_surface_with_heat(
+                &Law,
+                surface_kinetics,
+                state,
+                bath(0.0),
+                duration,
+                heat,
+                SolverConfig::default(),
+                |h| Ok(h / 2000.0),
+                || Ok(()),
+            )
+            .unwrap();
+            near(step.surface_temperature_k, 230.0 + heat / 20.0, 1e-12, 0.0);
+            assert_eq!(step.solid.mass_kg, state.mass_kg);
+            assert_eq!(step.reservoir, bath(0.0));
+            assert_eq!(step.transferred_mass_kg, 0.0);
+            assert_eq!(step.latent_energy_j, 0.0);
+            assert_eq!(step.vapor_energy_j, 0.0);
+            assert_eq!(step.supplied_heat_j, heat);
+            near(
+                state.mass_kg
+                    * (step.solid.specific_enthalpy_j_kg - state.specific_enthalpy_j_kg),
+                heat,
+                1e-10,
+                0.0,
+            );
+        }
+    }
+}
+
+#[test]
+fn supplied_heat_reverses_flux_and_uses_endpoint_latent_heat() {
+    struct VariableLatent;
+    impl SublimationLaw for VariableLatent {
+        fn temperature_range_k(&self) -> [f64; 2] {
+            Law.temperature_range_k()
+        }
+        fn properties(&self, t: f64) -> Result<SublimationProperties, SublimationError> {
+            let mut p = Law.properties(t)?;
+            p.latent_heat_j_kg = 2.8e6 - 1000.0 * (t - 230.0);
+            p.latent_heat_derivative_j_kg_k = -1000.0;
+            Ok(p)
+        }
+    }
+    let coefficient = (0.018 / (2.0 * core::f64::consts::PI * MOLAR_GAS_CONSTANT)).sqrt();
+    for (pressure, target) in [(12.0, 240.0_f64), (8.0, 220.0_f64)] {
+        let duration = 2.0;
+        let saturation = 10.0 * (0.06 * (target - 230.0)).exp();
+        let dm = coefficient * (saturation / target.sqrt() - pressure / 230.0_f64.sqrt())
+            * solid().area_m2 * duration;
+        let latent = 2.8e6 - 1000.0 * (target - 230.0);
+        let heat = solid().mass_kg * 2000.0 * (target - 230.0) + dm * latent;
+        assert!((10.0 - pressure) * dm < 0.0);
+        let step = advance_surface_with_heat(
+            &VariableLatent,
+            kinetics(),
+            solid(),
+            bath(pressure),
+            duration,
+            heat,
+            SolverConfig::default(),
+            |h| Ok(h / 2000.0),
+            || Ok(()),
+        )
+        .unwrap();
+        near(step.surface_temperature_k, target, 2e-8, 0.0);
+        near(step.transferred_mass_kg, dm, 1e-12, 0.0);
+        near(step.latent_energy_j, dm * latent, 3e-6, 0.0);
+        near(
+            step.solid.mass_kg * step.solid.specific_enthalpy_j_kg
+                - solid().mass_kg * solid().specific_enthalpy_j_kg
+                + step.vapor_energy_j,
+            heat,
+            1e-6,
+            0.0,
+        );
+    }
+}
+
+#[test]
+fn finite_reservoir_heat_balances_one_accepted_mass_transfer() {
+    let duration = 0.1;
+    let volume = 0.1;
+    let vapor_mass = 0.0;
+    let beta = MOLAR_GAS_CONSTANT * 230.0 / (0.018 * volume);
+    let conductance =
+        (0.018 / (2.0 * core::f64::consts::PI * MOLAR_GAS_CONSTANT * 230.0)).sqrt();
+    let expected_dm = (10.0 / beta - vapor_mass)
+        * (1.0 - (-solid().area_m2 * conductance * beta * duration).exp());
+    let heat = expected_dm * 2.8e6;
+    let reservoir = VaporReservoir::Finite {
+        vapor_mass_kg: vapor_mass,
+        volume_m3: volume,
+        temperature_k: 230.0,
+    };
+    let step = advance_surface_with_heat(
+        &Law,
+        kinetics(),
+        solid(),
+        reservoir,
+        duration,
+        heat,
+        SolverConfig::default(),
+        |h| Ok(h / 2000.0),
+        || Ok(()),
+    )
+    .unwrap();
+    let VaporReservoir::Finite { vapor_mass_kg, .. } = step.reservoir else {
+        panic!("finite reservoir must remain finite");
+    };
+    assert_eq!(step.surface_temperature_k, 230.0);
+    near(step.transferred_mass_kg, expected_dm, 1e-16, 1e-12);
+    near(vapor_mass_kg - vapor_mass, step.transferred_mass_kg, 1e-18, 0.0);
+    near(step.solid.mass_kg + vapor_mass_kg, solid().mass_kg + vapor_mass, 1e-17, 0.0);
+    near(step.latent_energy_j, heat, 1e-9, 0.0);
+    near(
+        step.solid.mass_kg * step.solid.specific_enthalpy_j_kg
+            - solid().mass_kg * solid().specific_enthalpy_j_kg
+            + step.vapor_energy_j,
+        heat,
+        1e-8,
+        0.0,
+    );
+}
+
+#[test]
+fn invalid_heat_cancellation_and_exhausted_work_publish_no_candidate() {
+    let run = |heat, config, cancel| {
+        advance_surface_with_heat(
+            &Law,
+            kinetics(),
+            solid(),
+            bath(0.0),
+            2.0,
+            heat,
+            config,
+            |h| Ok(h / 2000.0),
+            || if cancel { Err(SublimationError::Cancelled) } else { Ok(()) },
+        )
+    };
+    for heat in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        assert!(matches!(
+            run(heat, SolverConfig::default(), false),
+            Err(SublimationError::Invalid(_))
+        ));
+    }
+    assert_eq!(
+        run(200.0, SolverConfig::default(), true),
+        Err(SublimationError::Cancelled)
+    );
+    assert_eq!(
+        run(200.0, SolverConfig { max_iterations: 1, ..SolverConfig::default() }, false),
+        Err(SublimationError::NonConverged),
+    );
+}
