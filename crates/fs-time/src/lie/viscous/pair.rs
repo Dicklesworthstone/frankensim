@@ -14,7 +14,7 @@
 
 use super::{
     Dd, HeldTorque, InertiaTensor3, LieStepError, Mat3, So3, Vec3, Vector, add, admit_damping,
-    apply, cholesky, compensated, components, dd, dot, drive_at, energy, held, invalid, rounded,
+    apply, cholesky, compensated, components, dd, dot, drive_at, energy_change, held, invalid, rounded,
     scalar, subtract, to_space, velocity,
 };
 
@@ -57,6 +57,8 @@ pub struct ViscousPairBodyStep {
     /// Signed mechanical work transferred to this body by the coupler [J].
     /// The two transfer works sum to minus the pair's relative-slip heat.
     pub coupling_work_j: f64,
+    /// Actual accepted momentum increment paired with the midpoint spin [J].
+    /// Does not subtract two total kinetic energies.
     pub kinetic_energy_change_j: f64,
     /// Native torque-free drift energy change alone, never counted as heat.
     pub drift_energy_defect_j: f64,
@@ -183,10 +185,8 @@ impl ViscousPairStepper {
                 velocity(self.inertia[body], accepted)?,
                 "viscous pair output angular velocity",
             )?;
-            let kinetic =
-                energy(self.inertia[body], accepted)? - energy(self.inertia[body], initial[body])?;
-            let drift = energy(self.inertia[body], drifted[body])?
-                - energy(self.inertia[body], first.momentum[body])?;
+            let kinetic = energy_change(self.inertia[body], initial[body], accepted)?;
+            let drift = energy_change(self.inertia[body], first.momentum[body], drifted[body])?;
             let work = first.drive_work[body] + second.drive_work[body];
             let transfer = first.coupling_work[body] + second.coupling_work[body];
             let drive_impulse = add(

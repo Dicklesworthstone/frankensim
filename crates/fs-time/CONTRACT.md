@@ -339,7 +339,11 @@ where claimed below.
   at both actual endpoint attitudes. Impulse tails remain in DD until public
   momentum rounding. Physical heat is the positive midpoint quadratic form;
   drive work, viscous reaction impulse, native free-flow energy defect and
-  final-state numerical balance are separate outputs. The method is second
+  final-state numerical balance are separate outputs. Actual accepted kinetic
+  increments and free-drift defects use the polarized fixed-inertia quadratic
+  form with the cached inverse-inertia action, retaining transverse work beside
+  a dominant unchanged spin without subtracting total energies. This also
+  applies to the rotating-bath and finite-pair entries below. The method is second
   order for the held linear law. The numerical trace bound
   `tr(I^-1 D)` admits only half-stage relaxation numbers at most two, avoiding
   unresolved midpoint sign reversals; it is not an interval certificate or a

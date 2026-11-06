@@ -69,6 +69,7 @@ pub struct ViscousRigidBodyStep {
     /// thermal destination. Numerical and free-flow errors are never heat.
     pub dissipated_energy_j: f64,
     /// Actual kinetic change between the supplied and returned momentum [J].
+    /// Polarized from their increments without subtracting total spin energies.
     pub kinetic_energy_change_j: f64,
     /// Kinetic change during the native torque-free drift alone [J].
     pub drift_energy_defect_j: f64,
@@ -271,8 +272,8 @@ impl ViscousRigidBodyStepper {
             velocity(self.inertia, accepted)?,
             "viscous output angular velocity",
         )?;
-        let kinetic_change = energy(self.inertia, accepted)? - energy(self.inertia, initial)?;
-        let drift_defect = energy(self.inertia, drifted)? - energy(self.inertia, first.momentum)?;
+        let kinetic_change = energy_change(self.inertia, initial, accepted)?;
+        let drift_defect = energy_change(self.inertia, first.momentum, drifted)?;
         let drive_work = first.drive_work + second.drive_work;
         let bath_work = first.bath_work + second.bath_work;
         let source_work = if bath_space.is_some() {
@@ -530,10 +531,19 @@ fn apply(matrix: Mat3, value: Vector) -> Result<Vector, LieStepError> {
     Ok(result)
 }
 
-fn energy(inertia: InertiaTensor3, momentum: Vector) -> Result<Dd, LieStepError> {
+// For fixed symmetric I, K1-K0 = (L1-L0)^T I^-1 (L1+L0)/2.
+// Form the actual increment before the quadratic pairing: even DD endpoint
+// energies can lose a damped component beside a dominant unchanged spin.
+// The same cached inverse-inertia action supplies the midpoint velocity.
+fn energy_change(
+    inertia: InertiaTensor3,
+    before: Vector,
+    after: Vector,
+) -> Result<Dd, LieStepError> {
+    let mean = core::array::from_fn(|i| dd(0.5) * before[i] + dd(0.5) * after[i]);
     compensated::checked(
-        dd(0.5) * dot(momentum, velocity(inertia, momentum)?),
-        "viscous rotational kinetic energy",
+        dot(subtract(after, before), velocity(inertia, mean)?),
+        "viscous rotational kinetic change",
     )
 }
 

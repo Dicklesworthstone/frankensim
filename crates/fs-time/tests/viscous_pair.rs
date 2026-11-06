@@ -52,6 +52,38 @@ fn check_balances(step: &fs_time::lie::viscous::pair::ViscousPairStep, tolerance
 }
 
 #[test]
+fn reciprocal_transverse_work_survives_dominant_common_spin_energy() {
+    let stepper = ViscousPairStepper::new(
+        [sphere(2.0); 2],
+        diagonal(2e40, 0.0, 0.0),
+        1e-40,
+    )
+    .unwrap();
+    let initial = [Vec3::new(2.0, 0.0, 1e20), Vec3::new(0.0, 0.0, 1e20)];
+    let step = stepper
+        .step(
+            [So3::identity(); 2],
+            initial,
+            [HeldTorque::Body(Vec3::default()); 2],
+        )
+        .unwrap();
+    // Resolved half-stage relaxation is one. The relative transverse rate
+    // is multiplied by 1/3 twice, with equal-inertia recoil about its mean.
+    // The free angular travel is below 1e-20, so its geometric effect on
+    // these scalar reference values is far below the stated tolerance.
+    close(step.bodies[0].momentum_after_body.x, 10.0 / 9.0, 2e-14);
+    close(step.bodies[1].momentum_after_body.x, 8.0 / 9.0, 2e-14);
+    for body in 0..2 {
+        assert_eq!(step.bodies[body].momentum_after_body.z, initial[body].z);
+        assert_eq!(step.bodies[body].drift_energy_defect_j, 0.0);
+    }
+    close(step.bodies[0].kinetic_energy_change_j, -56.0 / 81.0, 2e-14);
+    close(step.bodies[1].kinetic_energy_change_j, 16.0 / 81.0, 2e-14);
+    close(step.dissipated_energy_j, 40.0 / 81.0, 2e-14);
+    check_balances(&step, 3e-14);
+}
+
+#[test]
 fn driven_finite_pair_refines_to_analytic_recoil_phase_work_and_heat() {
     let inertias = [sphere(2.0), sphere(5.0)];
     let duration: f64 = 1.2;

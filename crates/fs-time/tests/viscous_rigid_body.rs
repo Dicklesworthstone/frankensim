@@ -118,6 +118,29 @@ fn passive_spin_decay_has_no_numerical_heat_from_gyroscopic_precession() {
 }
 
 #[test]
+fn transverse_viscous_heat_survives_a_dominant_unchanged_spin() {
+    let inertia =
+        InertiaTensor3::from_principal(Vec3::new(2.0, 2.0, 2.0), So3::identity()).unwrap();
+    // The total axial energy has a nonzero DD product tail large enough to
+    // absorb the transverse energy. A short interval still resolves rotation
+    // and viscous relaxation: h omega_z = 0.5 and h D_x / I_x = 2.
+    let initial = Vec3::new(2.0, 0.0, 1e20);
+    let stepper = inertia
+        .viscous_stepper(diagonal(4e20, 0.0, 0.0), 1e-20)
+        .unwrap();
+    let step = stepper
+        .step(So3::identity(), initial, HeldTorque::Body(Vec3::default()))
+        .unwrap();
+    // Each implicit half-stage multiplies the transverse spin by 1/3.
+    close(step.momentum_after_body.x, 2.0 / 9.0, 2e-15);
+    assert_eq!(step.momentum_after_body.z, initial.z);
+    close(step.kinetic_energy_change_j, -80.0 / 81.0, 2e-14);
+    close(step.dissipated_energy_j, 80.0 / 81.0, 2e-14);
+    assert_eq!(step.drift_energy_defect_j, 0.0);
+    close(step.work_energy_residual_j, 0.0, 2e-14);
+}
+
+#[test]
 fn full_inertia_and_cross_axis_drag_are_covariant_under_material_relabeling() {
     let inertia =
         InertiaTensor3::from_principal(Vec3::new(2.0, 3.0, 4.0), So3::identity()).unwrap();
