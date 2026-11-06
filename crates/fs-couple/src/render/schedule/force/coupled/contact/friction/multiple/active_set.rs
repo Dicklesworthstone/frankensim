@@ -131,7 +131,9 @@ enum Line<'a> {
     Fixed { a: &'a [f64], f: &'a [f64], normal: &'a [f64] },
     /// With `by_speed`, a partition that [`solve_condensed`] refuses is solved
     /// again by [`solve_condensed_by_speed`] before the walk treats it as unsolved.
-    Condensed { line: &'a dyn CondensedLine, by_speed: bool },
+    /// With `warm` as well, a partition that the speed solve's own start misses is
+    /// solved once more, seeded from the last partition this walk solved.
+    Condensed { line: &'a dyn CondensedLine, by_speed: bool, warm: bool },
 }
 
 impl Line<'_> {
@@ -144,12 +146,20 @@ impl Line<'_> {
     }
     /// The tractions of partition `cells`, or the name of why it did not resolve
     /// and by how much (unbounded when nothing measures the miss). When the speed
-    /// solve also fails, the refusal is the plain solve's own.
-    fn solve(&self, law: &[&FrictionLaw], dt: f64, cells: &[Branch]) -> Result<Vec<f64>, (&'static str, f64)> {
+    /// solve also fails, the refusal is the plain solve's own. `last` is the cells
+    /// and slips of the last partition this walk solved; only a warm line reads it.
+    fn solve(&self, law: &[&FrictionLaw], dt: f64, cells: &[Branch], last: Option<(&[Branch], &[f64])>)
+        -> Result<Vec<f64>, (&'static str, f64)>
+    {
         match self {
             Line::Fixed { a, f, normal } => solve_partition(a, f, normal, law, dt, cells, 100).ok_or(DIVERGED),
-            Line::Condensed { line, by_speed } => match solve_condensed(*line, law, dt, cells, 100) {
-                Err(refused) if *by_speed => solve_condensed_by_speed(*line, law, dt, cells, 100).ok_or(refused),
+            Line::Condensed { line, by_speed, warm } => match solve_condensed(*line, law, dt, cells, 100) {
+                Err(refused) if *by_speed => solve_condensed_by_speed(*line, law, dt, cells, 100, None)
+                    .or_else(|| {
+                        let seed = last.filter(|_| *warm)?;
+                        solve_condensed_by_speed(*line, law, dt, cells, 100, Some(seed))
+                    })
+                    .ok_or(refused),
                 plain => plain,
             },
         }
@@ -476,7 +486,10 @@ fn solve_condensed(
 /// Starts: every traction at 0; then each sliding speed at the larger of
 /// `|slip_i(0)| / dt` and [`critical_speed`] on the line's own diagonal
 /// compliance at rest, `-d slip_i / d t_i`, with its traction on the law at that
-/// speed. No step takes a speed below a tenth of its current value, so a row
+/// speed. With `seed`, the cells and slips of another partition of the same
+/// step, a port that slides on the same branch there, with its slip on that
+/// branch's side, starts at that slip's speed instead; every other start is as
+/// above. No step takes a speed below a tenth of its current value, so a row
 /// stays on its branch. Iteration stops when no unknown moves, or after
 /// `max_newton` steps. The result then faces [`solve_condensed`]'s own gate: the
 /// residual on the actual slip within 1e-12 on every row.
@@ -502,13 +515,19 @@ fn solve_condensed(
 /// Captured on the B6 and B5 violin hair-ribbon steps of 11-06 (eq. 13 law, three
 /// cells on a coupled stop bank). There the plain Newton cycles on the port that
 /// has just left its cone, one iterate on each side of zero slip, both with the
-/// same sign of residual; this solve lands the partition's root.
+/// same sign of residual; this solve lands the partition's root. On the
+/// seven-cell B6 step of 11-06, six ports slide and the start above misses: the
+/// rest slips put five speeds at 80 to 110 mm/s against roots of 10 to 60, and
+/// the first joint step takes the speed of the port that has just left its cone
+/// below zero, where the tenth floor holds it. Seeded from the partition the
+/// walk had just left, it lands the root.
 fn solve_condensed_by_speed(
     line: &dyn CondensedLine,
     law: &[&FrictionLaw],
     dt: f64,
     cells: &[Branch],
     max_newton: usize,
+    seed: Option<(&[Branch], &[f64])>,
 ) -> Option<Vec<f64>> {
     let p = cells.len();
     // Column of each sliding port's speed among the unknowns, after the p tractions.
@@ -525,7 +544,11 @@ fn solve_condensed_by_speed(
     for i in 0..p {
         if let Some(c) = column[i] {
             let a_ii = -rest.dslip[i * p + i];
-            let speed = (rest.slip[i] / dt).abs().max(critical_speed(law[i], rest.normal[i], a_ii, dt).ok()?);
+            let cold = (rest.slip[i] / dt).abs().max(critical_speed(law[i], rest.normal[i], a_ii, dt).ok()?);
+            let speed = match seed {
+                Some((was, slip)) if was[i] == cells[i] && branch_sign(cells[i]) * slip[i] > 0.0 => (slip[i] / dt).abs(),
+                _ => cold,
+            };
             z[c] = speed;
             z[i] = branch_sign(cells[i]) * kinetic_mu(law[i], speed).ok()? * rest.normal[i];
         }
@@ -693,9 +716,13 @@ pub(super) fn solve_active_set(
 ///
 /// A step the walk resolves returns its tractions bit for bit. Only when it
 /// exhausts does the walk run again, with every partition its plain Newton
-/// refuses solved once more by [`solve_condensed_by_speed`]. Its Solved result
-/// faces the same gate and the same KKT test. When the second walk also
-/// exhausts, the first walk's exhaustion is returned, payload and all.
+/// refuses solved once more by [`solve_condensed_by_speed`] from that solve's
+/// own start. Only when the second walk also exhausts does a third run: the
+/// second again, except that a partition the speed solve's own start misses is
+/// solved once more from the speeds of the last partition the walk solved. A
+/// step that the first or second walk resolves is unchanged by the third. Each
+/// Solved result faces the same gate and the same KKT test. When the third walk
+/// also exhausts, the first walk's exhaustion is returned, payload and all.
 pub(super) fn solve_active_set_condensed(
     line: &dyn CondensedLine,
     ports: usize,
@@ -703,14 +730,17 @@ pub(super) fn solve_active_set_condensed(
     dt: f64,
     budget: usize,
 ) -> Result<Resolution, ModalFrictionError> {
-    let walked = walk_line(&Line::Condensed { line, by_speed: false }, ports, law, dt, budget)?;
+    let walked = walk_line(&Line::Condensed { line, by_speed: false, warm: false }, ports, law, dt, budget)?;
     if matches!(walked, Resolution::Solved(..)) {
         return Ok(walked);
     }
-    Ok(match walk_line(&Line::Condensed { line, by_speed: true }, ports, law, dt, budget)? {
-        solved @ Resolution::Solved(..) => solved,
-        Resolution::Exhausted { .. } => walked,
-    })
+    for warm in [false, true] {
+        let again = walk_line(&Line::Condensed { line, by_speed: true, warm }, ports, law, dt, budget)?;
+        if matches!(again, Resolution::Solved(..)) {
+            return Ok(again);
+        }
+    }
+    Ok(walked)
 }
 
 /// Largest port count the last-resort enumeration runs on: 3^5 = 243 partitions.
@@ -1108,6 +1138,8 @@ fn walk_line(line: &Line<'_>, p: usize, law: &[&FrictionLaw], dt: f64, budget: u
     // The worst KKT violation seen on the most recent partition, carried into an
     // exhaustion so the refusal can name port, condition and size.
     let mut worst = KktViolation { port: 0, condition: "none", size: 0.0 };
+    // The cells and slips of the last partition this walk solved: a warm line's seed.
+    let mut last: Option<(Vec<Branch>, Vec<f64>)> = None;
     for _ in 0..budget {
         pivots += 1;
         if seen.contains(&cells) {
@@ -1115,7 +1147,7 @@ fn walk_line(line: &Line<'_>, p: usize, law: &[&FrictionLaw], dt: f64, budget: u
             return Ok(Resolution::Exhausted { pivots, last_set: encode(&cells), worst });
         }
         seen.push(cells.clone());
-        let t = match line.solve(law, dt, &cells) {
+        let t = match line.solve(law, dt, &cells, last.as_ref().map(|(c, s)| (c.as_slice(), s.as_slice()))) {
             Ok(t) => t,
             Err((condition, size)) => {
                 // This partition did not resolve; perturb by flipping the port
@@ -1162,6 +1194,7 @@ fn walk_line(line: &Line<'_>, p: usize, law: &[&FrictionLaw], dt: f64, budget: u
                 .map(|(&b, &n)| if n == 0.0 { ModalFrictionRegime::Released } else { regime_of(b) }).collect();
             return Ok(Resolution::Solved(t, regimes));
         }
+        last = Some((cells.clone(), slip.clone()));
         // Flip the single worst KKT violator, recording port/condition/size.
         let mut flip = None;
         let mut wsize = 0.0f64;
@@ -2160,40 +2193,51 @@ mod tests {
         let laws = [&law; 3];
         let line = LinearLine { a, f, normal: &HAIR_NORMAL };
         // Before: the render's own refusal.
-        match walk_line(&Line::Condensed { line: &line, by_speed: false }, 3, &laws, HAIR_DT, 28).unwrap() {
+        match walk_line(&Line::Condensed { line: &line, by_speed: false, warm: false }, 3, &laws, HAIR_DT, 28).unwrap() {
             Resolution::Exhausted { pivots, last_set, worst } => assert_eq!(
                 (pivots, last_set.as_str(), worst.port, worst.condition, worst.size), refusal),
             Resolution::Solved(t, _) => panic!("the plain walk is the captured refusal, got tractions {t:?}"),
         }
         assert_eq!(solve_condensed(&line, &laws, HAIR_DT, &cells, 100), Err(DIVERGED),
             "the plain Newton cycles on {}", encode(&cells));
-        let by_speed = solve_condensed_by_speed(&line, &laws, HAIR_DT, &cells, 100)
+        let by_speed = solve_condensed_by_speed(&line, &laws, HAIR_DT, &cells, 100, None)
             .expect("the speed solve lands the partition's root");
         // After: the rescue lands it, past the unchanged gate and KKT test.
         match solve_active_set_condensed(&line, 3, &laws, HAIR_DT, 28).unwrap() {
             Resolution::Solved(t, regimes) => {
                 assert_eq!(t, by_speed);
-                assert_eq!(regimes, cells.map(regime_of));
-                assert!(is_consistent(a, f, &HAIR_NORMAL, &laws, HAIR_DT, &cells, &t).unwrap());
-                let slip = slips(a, f, &t);
-                for i in 0..3 {
-                    let cap = law.static_coefficient().unwrap() * HAIR_NORMAL[i];
-                    assert!(t[i].abs() <= cap, "port {i}: traction {} outside its cone {cap}", t[i]);
-                    if cells[i] == Branch::Stuck {
-                        assert!(slip[i].abs() <= 1e-12, "port {i} stays stuck: slip {}", slip[i]);
-                    } else {
-                        assert!(branch_sign(cells[i]) * slip[i] > 0.0,
-                            "port {i} slips {} off its assigned side {}", slip[i], encode(&cells));
-                        let kt = kinetic_traction(&law, HAIR_NORMAL[i], branch_sign(cells[i]), slip[i], HAIR_DT).unwrap();
-                        assert!((t[i] - kt).abs() <= 1e-12, "port {i}: traction {} against kinetic {kt}", t[i]);
-                    }
-                }
-                for (i, (&got, &want)) in t.iter().zip(root).enumerate() {
-                    assert!((got - want).abs() <= 1e-12, "port {i}: {got} against the bisection root {want}");
-                }
+                hair_state_is_the_root(a, f, &HAIR_NORMAL, &cells, &t, &regimes, root);
             }
             Resolution::Exhausted { pivots, last_set, worst } => panic!(
                 "the consistent state must be rescued: {pivots} pivots, last set {last_set}, worst {worst:?}"),
+        }
+    }
+
+    /// A rescued hair state on the line `slip = f - A t`: the regimes of `cells`,
+    /// the KKT test, every traction inside its cone, every stuck port held and every
+    /// sliding port slipping on its side at its kinetic traction, and the root.
+    fn hair_state_is_the_root(a: &[f64], f: &[f64], normal: &[f64], cells: &[Branch], t: &[f64],
+        regimes: &[ModalFrictionRegime], root: &[f64])
+    {
+        let law = hair_law();
+        let laws = vec![&law; cells.len()];
+        assert_eq!(regimes, cells.iter().map(|&b| regime_of(b)).collect::<Vec<_>>());
+        assert!(is_consistent(a, f, normal, &laws, HAIR_DT, cells, t).unwrap());
+        let slip = slips(a, f, t);
+        for i in 0..cells.len() {
+            let cap = law.static_coefficient().unwrap() * normal[i];
+            assert!(t[i].abs() <= cap, "port {i}: traction {} outside its cone {cap}", t[i]);
+            if cells[i] == Branch::Stuck {
+                assert!(slip[i].abs() <= 1e-12, "port {i} stays stuck: slip {}", slip[i]);
+            } else {
+                assert!(branch_sign(cells[i]) * slip[i] > 0.0,
+                    "port {i} slips {} off its assigned side {}", slip[i], encode(cells));
+                let kt = kinetic_traction(&law, normal[i], branch_sign(cells[i]), slip[i], HAIR_DT).unwrap();
+                assert!((t[i] - kt).abs() <= 1e-12, "port {i}: traction {} against kinetic {kt}", t[i]);
+            }
+        }
+        for (i, (&got, &want)) in t.iter().zip(root).enumerate() {
+            assert!((got - want).abs() <= 1e-12, "port {i}: {got} against the independent root {want}");
         }
     }
 
@@ -2217,5 +2261,81 @@ mod tests {
         hair_step_is_rescued(&B5_HAIR_LINE, &B5_HAIR_SLIP_AT_REST,
             (4, "+-+", 0, "newton-nonconvergence", f64::INFINITY),
             [Stuck, SlideNeg, SlidePos], &B5_HAIR_S_MINUS_PLUS);
+    }
+
+    // The seven-cell B6 hair step that both walks above still refused
+    // (cells28m4/B6-m28c7 at sample 11148, 11-06; the same law and rate, seven
+    // cells at N = 0.02267 N), rebuilt from its rescue dump as above: f is the
+    // dumped slip at t = 0, and A is fitted to the eleven partitions the walk
+    // solved (each row misfits by at most 7.7e-20 m).
+    const B6C7_HAIR_LINE: [f64; 49] = [
+        9.443184072457466e-06, 4.0721116490125324e-06, 4.419160852273411e-06, 4.626791410000102e-06,
+        4.585311595164454e-06, 4.340773995270733e-06, 3.965402719079288e-06,
+        4.072111649018472e-06, 9.69060062977557e-06, 4.807326650784043e-06, 4.514243256143437e-06,
+        3.5116463555423646e-06, 2.8707806915925182e-06, 2.1915598655040413e-06,
+        4.419160852278028e-06, 4.8073266507822294e-06, 9.605482630717416e-06, 4.712364007469234e-06,
+        3.986861315670527e-06, 3.4453070841043915e-06, 2.830533861812585e-06,
+        4.626791409999308e-06, 4.514243256133857e-06, 4.712364007461556e-06, 9.510258913090714e-06,
+        4.352281430182563e-06, 3.945824767900403e-06, 3.434537863727996e-06,
+        4.585311595167604e-06, 3.511646355544633e-06, 3.98686131567326e-06, 4.352281430187327e-06,
+        9.431412808164623e-06, 4.604298447186101e-06, 4.388120056219039e-06,
+        4.340773995273423e-06, 2.8707806915971426e-06, 3.445307084108806e-06, 3.9458247679041045e-06,
+        4.6042984471875205e-06, 9.478414790380882e-06, 4.673587617799203e-06,
+        3.965402719085609e-06, 2.1915598655179415e-06, 2.830533861825321e-06, 3.434537863736343e-06,
+        4.388120056223978e-06, 4.6735876178005595e-06, 9.561144127259852e-06,
+    ];
+    const B6C7_HAIR_SLIP_AT_REST: [f64; 7] = [
+        5.562309693628086e-07, 4.234311210430322e-08, 2.441614930114411e-07, 4.222120848940291e-07,
+        6.54435351930829e-07, 7.248323161724881e-07, 7.664621842129671e-07,
+    ];
+    const B6C7_HAIR_NORMAL: [f64; 7] = [0.02267142857142857; 7];
+    // The root of +-S++++: Newton in the six sliding speeds alone, the stuck row
+    // eliminated exactly, so not the joint form above. A search of all 3^7
+    // partitions in that form, from 33 starts each, finds no other consistent state.
+    const B6C7_HAIR_PLUS_MINUS_S: [f64; 7] = [
+        0.016386213999499712, -0.024598001987350855, 0.004946697827468184, 0.021253826612936216,
+        0.0146245142249302, 0.013645405963206032, 0.013074952795859192,
+    ];
+
+    #[test]
+    fn the_seven_cell_b6_hair_step_misses_its_root_from_the_speed_start_and_lands_it_seeded() {
+        use Branch::{SlideNeg, SlidePos, Stuck};
+        let law = hair_law();
+        let laws = [&law; 7];
+        let (a, f) = (&B6C7_HAIR_LINE, &B6C7_HAIR_SLIP_AT_REST);
+        let line = LinearLine { a, f, normal: &B6C7_HAIR_NORMAL };
+        let cells = [SlidePos, SlideNeg, Stuck, SlidePos, SlidePos, SlidePos, SlidePos];
+        // Before: the plain walk and the speed walk both give the render's refusal.
+        for by_speed in [false, true] {
+            match walk_line(&Line::Condensed { line: &line, by_speed, warm: false }, 7, &laws, HAIR_DT, 44).unwrap() {
+                Resolution::Exhausted { pivots, last_set, worst } => {
+                    assert_eq!((pivots, last_set.as_str(), worst.port, worst.condition),
+                        (13, "+-S++++", 3, "stuck-exceeds-static-cone"));
+                    assert!((worst.size - 1.6649793087252056e-3).abs() <= 1e-13,
+                        "size {} against the render's 1.6649793087252056e-3", worst.size);
+                }
+                Resolution::Solved(t, _) => panic!("walk (by_speed {by_speed}) is the captured refusal, got {t:?}"),
+            }
+        }
+        // The one partition both refuse: the plain Newton misses it, and so does the
+        // speed solve from its own start (port 1's speed falls to the floor).
+        assert_eq!(solve_condensed(&line, &laws, HAIR_DT, &cells, 100), Err(DIVERGED));
+        assert_eq!(solve_condensed_by_speed(&line, &laws, HAIR_DT, &cells, 100, None), None);
+        // Seeded from +SS++++, the partition the walk had just left, the speed solve
+        // lands it: five speeds carried over, port 1's start as before.
+        let previous = [SlidePos, Stuck, Stuck, SlidePos, SlidePos, SlidePos, SlidePos];
+        let held = solve_condensed(&line, &laws, HAIR_DT, &previous, 100).expect("+SS++++ resolves");
+        let slip = slips(a, f, &held);
+        let seeded = solve_condensed_by_speed(&line, &laws, HAIR_DT, &cells, 100, Some((&previous[..], &slip[..])))
+            .expect("the seeded speed solve lands +-S++++");
+        // After: the rescue's third walk lands it, past the unchanged gate and KKT test.
+        match solve_active_set_condensed(&line, 7, &laws, HAIR_DT, 44).unwrap() {
+            Resolution::Solved(t, regimes) => {
+                assert_eq!(t, seeded);
+                hair_state_is_the_root(a, f, &B6C7_HAIR_NORMAL, &cells, &t, &regimes, &B6C7_HAIR_PLUS_MINUS_S);
+            }
+            Resolution::Exhausted { pivots, last_set, worst } => panic!(
+                "the consistent state must be rescued: {pivots} pivots, last set {last_set}, worst {worst:?}"),
+        }
     }
 }
