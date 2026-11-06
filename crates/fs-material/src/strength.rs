@@ -21,6 +21,8 @@
 
 mod finite;
 pub use finite::ResolvedTensileHyperelastic;
+mod orthotropic;
+pub use orthotropic::{OrthotropicTensileAssessment, OrthotropicTensileLimit};
 
 use crate::Voigt;
 use crate::state_point::{
