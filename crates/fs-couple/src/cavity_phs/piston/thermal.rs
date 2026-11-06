@@ -2,16 +2,19 @@
 //!
 //! The solid/liquid material owns h -> (T, phase); the gas owns u, EOS and
 //! acoustic/transport response; `GasPiston::step` owns motion and pressure work.
-//! One signed Q goes into the gas and OUT of the thermal body. Source laws are
-//! evaluated on their actual energy midpoints, never averaged temperatures.
+//! One signed Q goes into the gas and OUT of the thermal body. The original
+//! midpoint entry points evaluate sources at energy midpoints, never averaged
+//! temperatures. `discrete_gradient` adds entropy-conjugate thermal contact.
 //! The thermal body uses the existing negligible-pV-work enthalpy storage model.
 //! Its volume is fixed during this proposal; expansion/deformation is not inferred.
-//! Ideal and nonideal source parcels share this exact thermal/mechanical solve.
+//! The midpoint solve supports ideal and nonideal source parcels.
 //! Gas calorics, density, pressure and transport remain on the supplied owner;
 //! no ideal-reference state is substituted for a dense-fluid midpoint.
 
 /// One finite enthalpy/phase body feeding both faces of the shared gas piston.
 pub mod double_acting;
+/// Finite-body heat contact with discrete-gradient energy and entropy accounting.
+pub mod discrete_gradient;
 /// Source-bound gas/body conductivity without copied material coefficients.
 pub mod layers;
 /// State-dependent power on the same material, phase and mechanical step.
