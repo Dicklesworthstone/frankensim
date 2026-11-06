@@ -1,5 +1,42 @@
 # fs-solid CONTRACT
 
+## Sourced static friction and thermal fracture load transfer
+
+The sustained-friction source child binds each retained face vertex to an
+explicit original ordered interface and accepted history. It requires the
+Static coefficient role and actual incident material identities, sharing the
+impact adapter's identity and coefficient-sampling helpers. Only initially
+active, matched, static rows sample their own actual initial relative speed.
+The original source owner retains selected claims, source authority, complete
+query/domain checks, accepted distance, slip and texture.
+
+This is a source-held interval law: sampled coefficients and caller-supplied
+external contact conditions are fixed for the accepted sticking interval.
+Returned samples are the prepared coefficient/source candidates, not a new
+finite-step thermal/friction-history integration. Accepted travel/slip and the
+last finite-step contact temperature remain unchanged. Parameter changes,
+reversals, finite sliding and thermal destinations require explicitly resolved
+additional physical paths. Source preparation and every native force response
+remain private until the whole native body interval passes; refusals publish
+neither source nor body state.
+
+The thermal `contact::friction::sustained` adapter provides current-source and
+explicit `at_materials` transitions, each with explicit or sourced friction.
+Both use the same generic contact result and original thermal midpoint.
+Every trial replays the same accepted mechanical history and the same resolved
+thermal successor. Native total/mechanical strain, thermal expansion reference,
+reference density/mass, storage, fracture and kinetic accounts retain their
+original owners. Signed parameter and eigenstrain work remain independent of
+external/support work and bounded static contact work. No heat or additional
+fracture debit is inferred from the constraint.
+
+Focused native journeys exercise static capacity above the source's kinetic
+coefficient, original source/path/history retention, unsupported-role and
+insufficient-capacity refusal, deterministic retry, and a bulk thermal
+transition under normal/shear load. The thermal reference independently checks
+force, signed eigenstrain work, support/dead-load work, frozen original mass,
+native history and transactional source transfer.
+
 ## Sustained static friction between released brittle fragments
 
 The `contact::friction::sustained` owner advances the original nonlinear

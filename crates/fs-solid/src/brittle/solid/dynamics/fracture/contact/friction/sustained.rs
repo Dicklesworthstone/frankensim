@@ -6,6 +6,9 @@
 //! may carry load for this interval; finite sliding needs spatial contact
 //! geometry and is refused instead of creating a spurious internal couple.
 
+/// Explicit original interface sources held through static contact intervals.
+pub mod source;
+
 use fs_contact::sustained::elliptic::EllipticForceCoordinates;
 use fs_contact::sustained::solve::{MAX_CONTACTS, SolveReport};
 use fs_contact::sustained::{ContactLawError, ContactPoint, NaturalMapScales, linearize};

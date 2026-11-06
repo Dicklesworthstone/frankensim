@@ -1,5 +1,8 @@
 //! Actual incoming slip, original interface identity and atomic source history.
 
+#[path = "source/sustained.rs"]
+mod sustained;
+
 use super::*;
 use fs_contact::interface_binding::bind_dry_interface_system_card;
 use fs_contact::interface_binding::thermal_friction::elliptic::impulse::{

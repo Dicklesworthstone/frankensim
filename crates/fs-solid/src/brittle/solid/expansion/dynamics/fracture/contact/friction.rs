@@ -5,6 +5,9 @@
 //! This adapter retains the complete accepted thermal/constitutive state and
 //! reference matter while publishing only the admitted velocity successor.
 
+/// Native thermal midpoint motion with sustained static friction forces.
+pub mod sustained;
+
 use std::sync::Arc;
 
 use fs_contact::frictional_multicontact::elliptic::{

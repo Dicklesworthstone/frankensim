@@ -142,17 +142,48 @@ pub(crate) fn released_face_sourced_frictional_impact<'m>(
     (ReleasedFaceFrictionResponse, Vec<BrittleFaceFrictionSample>),
     BrittleFaceSourcedFrictionError,
 > {
+    let directions = source_directions(body.released_faces, material, sources, cx)?;
+    let mut samples = Vec::new();
+    let response = released_face_frictional_impact_with(
+        body,
+        restitution,
+        &directions,
+        held_velocity_dofs,
+        origin_m,
+        controls,
+        cx,
+        |face_index, row, _frame, velocity| {
+            let sample =
+                sample_source(sources[face_index].vertices[row.vertex], *row, velocity, cx)?;
+            let friction = EllipticFriction {
+                coefficients_mu: sample.sample.coefficients_mu,
+                principal_axis: sample.sample.state.constitutive_state().principal_axis(),
+            };
+            samples.push(sample);
+            Ok::<_, BrittleFaceSourcedFrictionError>(friction)
+        },
+    )?;
+    Ok((response, samples))
+}
+
+/// Shared original interface/face ownership, independent of force or impulse.
+pub(super) fn source_directions<'m>(
+    faces: &[crate::brittle::solid::fracture::ReleasedBrittleFace],
+    material: impl Fn(usize) -> Option<&'m MaterialStateId>,
+    sources: &[BrittleFaceFrictionSource<'_>],
+    cx: &Cx<'_>,
+) -> Result<Vec<[f64; 3]>, BrittleFaceSourcedFrictionError> {
     let poll = || {
         cx.checkpoint()
             .map_err(|_| BrittleFaceSourcedFrictionError::Cancelled)
     };
     poll()?;
-    if sources.len() != body.released_faces.len() {
+    if sources.len() != faces.len() {
         return Err(BrittleFaceSourcedFrictionError::Invalid(
             "one explicit source binding per retained face required",
         ));
     }
-    for (face, binding) in body.released_faces.iter().zip(sources) {
+    for (face, binding) in faces.iter().zip(sources) {
         poll()?;
         if face.id != binding.face_id {
             return Err(BrittleFaceSourcedFrictionError::Binding {
@@ -172,38 +203,28 @@ pub(crate) fn released_face_sourced_frictional_impact<'m>(
             }
         }
     }
-    let directions: Vec<_> = sources
+    Ok(sources
         .iter()
         .map(|source| source.tangent_direction)
-        .collect();
-    let mut samples = Vec::new();
-    let response = released_face_frictional_impact_with(
-        body,
-        restitution,
-        &directions,
-        held_velocity_dofs,
-        origin_m,
-        controls,
-        cx,
-        |face_index, row, _frame, velocity| {
-            let binding = sources[face_index].vertices[row.vertex];
-            let sample = binding
-                .law
-                .sample_preimpact_coefficients(
-                    binding.state,
-                    [velocity[1], velocity[2]],
-                    binding.conditions,
-                    binding.coefficient_role,
-                    &mut || cx.checkpoint().is_err(),
-                )
-                .map_err(|source| BrittleFaceSourcedFrictionError::Source { row: *row, source })?;
-            let friction = EllipticFriction {
-                coefficients_mu: sample.coefficients_mu,
-                principal_axis: sample.state.constitutive_state().principal_axis(),
-            };
-            samples.push(BrittleFaceFrictionSample { row: *row, sample });
-            Ok::<_, BrittleFaceSourcedFrictionError>(friction)
-        },
-    )?;
-    Ok((response, samples))
+        .collect())
+}
+
+/// Prepare coefficients only; publication belongs to the complete body event.
+pub(super) fn sample_source(
+    binding: BrittleVertexFrictionSource<'_>,
+    row: BrittleFaceImpactRow,
+    velocity: [f64; 3],
+    cx: &Cx<'_>,
+) -> Result<BrittleFaceFrictionSample, BrittleFaceSourcedFrictionError> {
+    let sample = binding
+        .law
+        .sample_preimpact_coefficients(
+            binding.state,
+            [velocity[1], velocity[2]],
+            binding.conditions,
+            binding.coefficient_role,
+            &mut || cx.checkpoint().is_err(),
+        )
+        .map_err(|source| BrittleFaceSourcedFrictionError::Source { row, source })?;
+    Ok(BrittleFaceFrictionSample { row, sample })
 }

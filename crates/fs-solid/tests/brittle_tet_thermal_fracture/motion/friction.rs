@@ -1,6 +1,9 @@
 //! Directional contact after thermal fracture keeps the original matter and
 //! eigenstrain. Manufactured friction parameters confer no material authority.
 
+#[path = "friction/sustained.rs"]
+mod sustained;
+
 use super::*;
 use fs_contact::frictional_multicontact::{FrictionalContactConfig, FrictionalContactDeterminacy};
 use fs_solid::brittle::solid::expansion::dynamics::fracture::contact::friction::{

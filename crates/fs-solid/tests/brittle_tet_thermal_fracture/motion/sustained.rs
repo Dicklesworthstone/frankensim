@@ -8,7 +8,7 @@ use fs_solid::brittle::solid::dynamics::fracture::contact::sustained::{
 };
 use fs_solver::NewtonKrylovConfig;
 
-fn sustained_controls() -> BrittleFaceSustainedControls {
+pub(super) fn sustained_controls() -> BrittleFaceSustainedControls {
     BrittleFaceSustainedControls {
         solve: SolveControls {
             newton: NewtonKrylovConfig {
@@ -37,7 +37,7 @@ fn sustained_controls() -> BrittleFaceSustainedControls {
 /// Bind matter at 400 K, cool to failure, optionally unload the normal strain,
 /// and stop the accepted motion before cutting. All three steps are native;
 /// no post-cooling initializer can replace rho=6 with the current query's rho=3.
-fn with_closed_thermal_motion(
+pub(super) fn with_closed_thermal_motion(
     unload_normal: bool,
     maximum_steps: usize,
     run: impl FnOnce(&ThermalBrittleTetMotion<'_>, &[ResolvedThermalBrittle], &Cx<'_>),
