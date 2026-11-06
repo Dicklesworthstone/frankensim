@@ -5,6 +5,9 @@ use fs_contact::interface_binding::thermal_friction::elliptic::impulse::SourceIm
 use fs_couple::friction_heat::directional::sphere_plane::*;
 use fs_tribo::tangential::elliptic::impulse::EllipticImpulseControls;
 
+#[path = "impacts/torque.rs"]
+mod torque;
+
 fn conditions(query: &QueryPoint) -> SourceFrictionConditions {
     SourceFrictionConditions {
         query: query.clone(),

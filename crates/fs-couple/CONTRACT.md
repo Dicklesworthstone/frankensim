@@ -793,3 +793,31 @@ density and inertia; independent refined mass/momentum/memory ODE plus
 work/heat; actual mechanical-transformer power and total energy; native
 admission and tiny density perturbations. Exact-source tests used genuine
 material and pHS owners; no full workspace Cargo/DSR pass is claimed.
+
+## Motor torque in source-derived directional sphere contact
+
+`friction_heat::directional::sphere_plane::advance_source_sphere_plane_with_torque`
+threads a prescribed constant world couple through the original native sphere
+trajectory and its original source-resolved support and impact laws. Actual
+torque-driven spin reaches preimpact speed queries; supported motor rolling,
+breakaway and sliding reach the motion-consistent speed/path source closure.
+The full static and kinetic material claims, original selection receipts and
+plane-owned directional frame remain authoritative. The existing entry
+delegates zero couple.
+
+The returned native motion receipt separates signed motor work and angular
+impulse from centre-force work, moving-plane work, sustained slip heat and
+unallocated impact loss. Query callbacks see the latest accepted private
+mechanics/history. A late source refusal or cancellation discards the entire
+candidate, including earlier motor motion and collision source updates.
+
+Four G1/G4 regressions in
+`tests/rigid_directional_heat/sphere_plane/impacts/torque.rs` cover sourced
+static rolling with zero path/heat, motor breakaway with actual accumulated
+slip, torque-dependent preimpact source coefficients and bounce work, and late
+source/cancellation rollback. The fixture ledgers were independently derived
+and all changed Rust sources parse with native rustfmt. These tests have not
+been executed against the current fs-mbd/fs-couple dependency closure; no
+Cargo/DSR gate is claimed. This remains an isotropic rigid point-contact model
+with a held world couple, explicit temperature/pressure owners, and no inferred
+contact area or impact-to-heat allocation.

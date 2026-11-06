@@ -14,12 +14,11 @@ use fs_contact::interface_binding::thermal_friction::elliptic::motion::MotionQue
 use fs_contact::interface_binding::thermal_friction::elliptic::{
     SourceFrictionConditions, SourceThermalEllipticCoulomb, SourceThermalEllipticState,
 };
-use fs_mbd::sphere_plane::directional::impact::{
-    SpherePlaneDirectionalImpactPhase, advance_sphere_plane_directional_with_impacts,
-};
+use fs_mbd::Vec3;
+use fs_mbd::sphere_plane::directional::impact::SpherePlaneDirectionalImpactPhase;
 use fs_mbd::sphere_plane::directional::{
     SpherePlaneDirectionalAdvance, SpherePlaneDirectionalControls, SpherePlaneDirectionalError,
-    SpherePlaneDirectionalPhase,
+    SpherePlaneDirectionalPhase, advance_sphere_plane_directional_with_torque,
 };
 use fs_mbd::sphere_plane::{SpherePlane, SpherePlaneError, SpherePlaneState};
 use fs_tribo::partial_slip::TangentFrame;
@@ -107,6 +106,51 @@ pub fn advance_source_sphere_plane<E>(
     frame: TangentFrame,
     duration_s: f64,
     controls: SourceSpherePlaneControls,
+    support_conditions: impl FnMut(
+        &SourceThermalEllipticState,
+        &SpherePlaneDirectionalPhase,
+    ) -> Result<SourceSpherePlaneSupportConditions, E>,
+    impact_conditions: impl FnMut(
+        &SourceThermalEllipticState,
+        &SpherePlaneDirectionalImpactPhase,
+    ) -> Result<SourceFrictionConditions, E>,
+    cancelled: impl FnMut() -> bool,
+) -> Result<SourceSpherePlaneAdvance, SpherePlaneDirectionalError<SourceSpherePlaneError<E>>> {
+    advance_source_sphere_plane_with_torque(
+        scene,
+        state,
+        Vec3::ZERO,
+        law,
+        history,
+        frame,
+        duration_s,
+        controls,
+        support_conditions,
+        impact_conditions,
+        cancelled,
+    )
+}
+
+/// Advance sourced directional contact under a constant world-frame motor couple.
+///
+/// The torque acts in flight, through impact spin, and throughout supported
+/// rolling or sliding. Both source callbacks observe that actual driven motion;
+/// material speed and accumulated path remain closed against native travel.
+/// The original trajectory reports motor work and angular impulse separately
+/// from sustained friction heat, prescribed-plane work, and collision loss.
+///
+/// This is the torque-driven form of [`advance_source_sphere_plane`], with the
+/// same source provenance, callback, refinement, and atomic history contract.
+#[allow(clippy::too_many_arguments)]
+pub fn advance_source_sphere_plane_with_torque<E>(
+    scene: &SpherePlane,
+    state: SpherePlaneState,
+    torque_world_nm: Vec3,
+    law: &SourceThermalEllipticCoulomb,
+    history: &mut SourceThermalEllipticState,
+    frame: TangentFrame,
+    duration_s: f64,
+    controls: SourceSpherePlaneControls,
     mut support_conditions: impl FnMut(
         &SourceThermalEllipticState,
         &SpherePlaneDirectionalPhase,
@@ -120,9 +164,10 @@ pub fn advance_source_sphere_plane<E>(
     let mut candidate = history.clone();
     let mut impacts = Vec::new();
     let mut support_source_evaluations = 0usize;
-    let trajectory = advance_sphere_plane_directional_with_impacts(
+    let trajectory = advance_sphere_plane_directional_with_torque(
         scene,
         state,
+        torque_world_nm,
         &mut candidate,
         frame,
         duration_s,
@@ -175,7 +220,7 @@ pub fn advance_source_sphere_plane<E>(
                 phase: *phase,
                 response: report,
             });
-            Ok((impulse, next))
+            Ok(Some((impulse, next)))
         },
         &mut cancelled,
     )?;
