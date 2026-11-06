@@ -5,6 +5,9 @@
 #[path = "plastic_sliding_heat/area.rs"]
 mod area;
 
+#[path = "plastic_sliding_heat/removal.rs"]
+mod wear_export;
+
 #[path = "../../fs-contact/tests/source_point/common.rs"]
 mod source_common;
 

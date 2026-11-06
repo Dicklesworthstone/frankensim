@@ -232,7 +232,9 @@ This is an explicit fixed-footprint, fixed-thermal-inventory approximation.
 Cumulative removed volume is bounded against each ORIGINAL receiving cell
 volume, never a renewed per-step denominator; zero permitted removal is valid.
 The fraction bounds an omitted effect, not its thermal error or experimental
-validity. Removed material has no modeled mass, enthalpy or debris export.
+validity. The default heat step does not export material; the optional endpoint
+operation below removes actual mass and carried enthalpy. Debris evolution
+remains outside this model.
 Reciprocal thermoelastic free energy, a resolved subsurface plastic heat field,
 moving contact coverage and storage in caller-supplied tangential body response
 are not closed by this owner. Its local contact identities and fixed-inventory
@@ -1236,3 +1238,44 @@ specify axial-plus-bending demand, per-layer load sharing, transverse-frame
 invariance, source refusals, unchanged admitted mechanics and native rollback,
 including supported conversion. Native execution is a separate verification
 obligation.
+
+
+## Actual worn material leaving hardness-coupled thermal receivers
+
+`PlasticSlidingHeatContact::export_wear_candidate` transfers newly accumulated
+original A/B Archard volumes to the existing
+`DepositionSimulation::remove_material_before_pending_events` owner. Each
+receiver supplies its original sourced caloric density at unchanged current
+specific enthalpy. Native inventory checks require that density to agree with
+stored mass and volume; temperature-dependent density is not silently replaced
+with m/V and no thermal-expansion law is inferred. The exact caloric objects,
+original material/body IDs, pressure/indentation/shear/wear histories, and clock
+survive. Removed mass carries its current signed enthalpy, including negative
+datums; remaining specific enthalpy and temperature do not change.
+
+The caller authors complete remaining prism geometry, every incident contact
+patch, and current original conductivities. Admission retains the same contact
+link, ordered cells, actual loaded area, original prismatic face areas and axis
+registration. Only normal shortening/translation is supported; rotation,
+tangential translation and a silently enlarged receiver face refuse. The next
+coupled heat interval uses actual reduced masses and new half-cell distances.
+Original cumulative wear-fraction and homogeneous-depth envelopes are retained.
+
+A per-body checkpoint records the cumulative requested wear already represented
+by the supplied thermal binding or an accepted export. Pre-binding wear is never
+removed retroactively; repeated export requests zero additional material, and
+later sliding exports only its new wear. The native report separately retains
+requested versus represented volume and mass discrepancies, outward enthalpy,
+and stable inventory/energy balances. The contact and thermal successors must
+be adopted together. Any source, geometry, density, patch, representability or
+cancellation refusal leaves the inputs untouched; pending endpoint events stay
+pending.
+
+This is an explicit heat-then-export composition requiring time refinement,
+with caller-supplied uniform thermal control volumes. It does not reconstruct
+a spatial thermal mesh from local wear, model debris evolution or surface
+creation energy, or account for mechanical work needed to move those volumes.
+G0/G1/G3 regression definitions cover separate material inventories and
+enthalpy, an independent two-capacity heat oracle after export, unchanged
+mechanical history, no duplicate or retroactive removal, original cumulative
+bounds, and transactional patch/registration/cancellation refusals.

@@ -15,9 +15,12 @@
 //! while friction/wear still use the native refreshed beginning pressure. This
 //! first-order split requires time and grid refinement; discontinuous cell
 //! activation can prevent nonlinear convergence. Complete detachment refuses.
-//! The thermal masses and geometry stay fixed. A cumulative removal fraction bounds
-//! this small-removal approximation; removed material carries no modeled mass,
-//! enthalpy, or debris transport. Zero permitted removal gives a no-wear rung.
+//! Thermal masses and geometry stay fixed during each heat solve. The optional
+//! `export_wear_candidate` endpoint then removes actual mass and carried enthalpy
+//! through the original thermal inventory owner and admits explicitly supplied
+//! shortened geometry. Without export, removal remains a bounded omitted effect.
+//! The cumulative small-removal envelope is never renewed by export. Zero
+//! permitted removal gives a no-wear rung; debris evolution remains unmodeled.
 //!
 //! Native friction dissipation heats the interface. An optional explicit
 //! plastic-work partition deposits heat directly into the two original bodies;
@@ -29,6 +32,9 @@
 //! Caller-owned tangent compliance supplies no body storage here: local contact
 //! identities and the fixed-inventory thermal balance do not establish a full
 //! body-energy, entropy, or passivity theorem.
+
+/// Conservative export of actual worn mass and its original enthalpy.
+pub mod removal;
 
 use core::convert::Infallible;
 use std::cell::Cell;
@@ -62,7 +68,7 @@ use super::{
     FrictionHeatTolerances,
 };
 
-/// Physical limits of the fixed-inventory caloric approximation.
+/// Physical limits of the reduced uniform-cell caloric approximation.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PlasticSlidingHeatLimits {
     /// Cumulative removed volume divided by each ORIGINAL receiving cell volume.
@@ -271,6 +277,8 @@ pub struct PlasticSlidingHeatContact<'a> {
     route: FrictionHeatRoute,
     original_body_ids: [u64; 2],
     original_volume_m3: [f64; 2],
+    // Wear present at binding or already exported from the thermal inventory.
+    thermal_wear_checkpoint_m3: [f64; 2],
     active_cells: Vec<bool>,
     footprint: PlasticSlidingHeatFootprint,
     limits: PlasticSlidingHeatLimits,
@@ -312,7 +320,8 @@ pub struct PlasticSlidingHeatReport<P> {
     pub other_heat_j: f64,
     /// Normal boundary work into contact, including both native operations [J].
     pub normal_work_j: f64,
-    /// Cumulative original A/B removed volumes, with no thermal mass export [m^3].
+    /// Cumulative original A/B removed volumes [m^3]. Material export is a
+    /// separate endpoint operation; this heat report precedes that transport.
     pub removed_volume_m3: [f64; 2],
     /// The same cumulative volumes divided by the ORIGINAL receiving cell volumes.
     pub removed_volume_fraction: [f64; 2],
@@ -561,6 +570,7 @@ impl<'a> PlasticSlidingHeatContact<'a> {
                 "actual loaded grid cells must exactly cover the original thermal face area",
             ));
         }
+        let thermal_wear_checkpoint_m3 = state.wear_state().volumes_m3();
         let bound = Self {
             source,
             state,
@@ -569,6 +579,7 @@ impl<'a> PlasticSlidingHeatContact<'a> {
             route: route.clone(),
             original_body_ids: cells.map(|id| thermal.cells()[&id].body_id),
             original_volume_m3: cells.map(|id| thermal.cells()[&id].geometry.volume_m3),
+            thermal_wear_checkpoint_m3,
             active_cells,
             footprint,
             limits,
@@ -875,6 +886,7 @@ impl<'a> PlasticSlidingHeatContact<'a> {
             route: successor_route.unwrap_or_else(|| self.route.clone()),
             original_body_ids: self.original_body_ids,
             original_volume_m3: self.original_volume_m3,
+            thermal_wear_checkpoint_m3: self.thermal_wear_checkpoint_m3,
             active_cells,
             footprint: self.footprint,
             limits: self.limits,
@@ -1146,7 +1158,7 @@ impl<'a> PlasticSlidingHeatContact<'a> {
                 || fractions[i] > self.limits.maximum_removed_volume_fraction[i]
             {
                 return Err(PlasticSlidingHeatError::Invalid(
-                    "cumulative removal exceeds original fixed-inventory thermal envelope",
+                    "cumulative removal exceeds original thermal wear envelope",
                 ));
             }
         }
