@@ -9,6 +9,9 @@ use fs_solid::hyper2d::{HyperelasticMaterials, NewtonReport};
 use fs_solid::{HyperProblem, Mesh2, NewtonSettings, Patch, SolidError};
 use fs_sparse::Csr;
 
+#[path = "hyper_material_field/points.rs"]
+mod points;
+
 fn with_cx(f: impl FnOnce(&Cx<'_>)) {
     let gate = CancelGate::new();
     ArenaPool::new(ArenaConfig::default()).scope(|arena| {

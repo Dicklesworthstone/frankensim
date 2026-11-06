@@ -42,6 +42,44 @@ pub mod plane_stress;
 /// Retained finite-plastic P1/Q1 sheet forming with solved transverse thickness.
 pub mod plastic;
 
+/// One reference-area-weighted material point of the native P1/Q1 continuum.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PlaneMaterialPoint {
+    /// Element index in the original mesh connectivity.
+    pub element: usize,
+    /// Stable local quadrature index: centroid zero for P1, original Gauss
+    /// order for Q1. History owners must retain this ordering.
+    pub local_point: usize,
+    /// Positive quadrature area in square metres; the physical mesh coordinates
+    /// must be in metres. Multiply by original thickness to integrate an
+    /// original-volume material density.
+    pub reference_area_m2: f64,
+    /// Compatible total in-plane deformation in `[F00,F01,F10,F11]` order.
+    pub in_plane: [f64; 4],
+}
+
+/// Recover native material-point kinematics without evaluating a constitutive
+/// law. Geometry, orientation admission, shape gradients and material-point
+/// ordering are shared with the plane-stress assembly. The borrowed mesh and
+/// displacement remain unchanged on refusal or cancellation.
+pub fn material_point_kinematics(
+    mesh: &Mesh2,
+    displacement: &[[f64; 2]],
+    cx: &Cx<'_>,
+) -> Result<Vec<PlaneMaterialPoint>, SolidError> {
+    plane_stress::material_point_kinematics(mesh, displacement, cx)
+}
+
+fn material_quadrature(arity: usize) -> Vec<(f64, f64, f64)> {
+    if arity == 3 {
+        // A P1 displacement has constant F. Its single retained material point
+        // is shared by plane strain and both plane-stress reductions.
+        vec![(1.0 / 3.0, 1.0 / 3.0, 0.5)]
+    } else {
+        quad_points(4)
+    }
+}
+
 #[derive(Clone, Copy)]
 enum Reduction<'a, 'cx> {
     MeanDilatation(&'a mean_dilatation::Prepared, &'a Cx<'cx>),
@@ -162,11 +200,35 @@ impl PlaneMaterial for FrozenViscoHyperelastic<'_> {}
 ///
 /// Implementations must keep the mapping fixed while a problem is borrowed.
 /// `None` from `material_count` declares the same uniform law at every index.
+/// A point field declares an exact element count and exact point counts, and
+/// returns each immutable owner from `material_at_point`. Its element-only
+/// access may return `None`; consumers never replace it with the first point.
 pub trait HyperelasticMaterials {
     /// Exact number of element laws, or `None` for a uniform law.
     fn material_count(&self) -> Option<usize>;
     /// Original law at this element, or `None` for missing coverage.
     fn material_at(&self, element: usize) -> Option<&dyn PlaneMaterial>;
+
+    /// Exact number of independent material points in this element. `None`
+    /// means the element's one law is shared by all its quadrature points.
+    /// Point fields require one centroid for P1 or four Gauss points for Q1.
+    fn material_point_count(&self, _element: usize) -> Option<usize> {
+        None
+    }
+
+    /// Original owner at this element and local quadrature point. A point
+    /// field overrides this and `material_point_count` together; neither law
+    /// coefficients nor accepted internal histories are averaged.
+    fn material_at_point(&self, element: usize, _local_point: usize) -> Option<&dyn PlaneMaterial> {
+        self.material_at(element)
+    }
+
+    /// Optional accepted transverse `[F02,F12,F22]` used only to initialize
+    /// local plane-stress relaxation. Exact elastic volume still determines
+    /// its own new thickness; the seed never imposes a transverse constraint.
+    fn transverse_seed_at(&self, _element: usize, _local_point: usize) -> Option<[f64; 3]> {
+        None
+    }
 }
 
 impl<L: PlaneMaterial> HyperelasticMaterials for L {
@@ -237,7 +299,28 @@ impl HyperProblem<'_> {
             })
     }
 
+    fn point_material(
+        &self,
+        element: usize,
+        local_point: usize,
+    ) -> Result<&dyn PlaneMaterial, SolidError> {
+        self.material
+            .material_at_point(element, local_point)
+            .ok_or_else(|| SolidError::InvalidInput {
+                what: format!(
+                    "finite-strain material missing at element {element}, point {local_point}"
+                ),
+            })
+    }
+
     fn mean_dilatation_material(&self, element: usize) -> Result<&Hyperelastic, SolidError> {
+        if self.material.material_point_count(element).is_some() {
+            return Err(SolidError::InvalidInput {
+                what: format!(
+                    "mean dilatation has no admitted condensation for independent point materials at element {element}"
+                ),
+            });
+        }
         self.element_material(element)?
             .native_hyperelastic()
             .ok_or_else(|| SolidError::InvalidInput {
@@ -267,17 +350,43 @@ impl HyperProblem<'_> {
                 ),
             });
         }
-        // Validate each original owner's public parameters once on entry,
-        // including laws beyond the first element. Its actual-state admission
-        // must retain any prescribed reference and accepted material history.
-        for element in 0..count.unwrap_or(1) {
+        // Exact point coverage is admitted before any assembly. Uniform and
+        // per-element owners still validate parameters only once per owner;
+        // independent point histories each retain their own admission.
+        for (element, conn) in self.mesh.elems.iter().enumerate() {
             checkpoint()?;
-            let material = self.element_material(element)?;
-            material
-                .validate_plane_material()
-                .map_err(|error| SolidError::MaterialRefused {
-                    what: format!("hyperelastic element {element}: {error}"),
-                })?;
+            let expected = match conn.len() {
+                3 => 1,
+                4 => 4,
+                _ => {
+                    return Err(SolidError::InvalidInput {
+                        what: format!("finite-strain element {element} must be P1 or Q1"),
+                    });
+                }
+            };
+            let points = self.material.material_point_count(element);
+            if let Some(points) = points
+                && (count.is_none() || points != expected)
+            {
+                return Err(SolidError::InvalidInput {
+                    what: format!(
+                        "finite-strain element {element} needs {expected} material points and an explicit element count; got {points} points"
+                    ),
+                });
+            }
+            if count.is_none() && element != 0 {
+                continue;
+            }
+            for local_point in 0..points.unwrap_or(1) {
+                checkpoint()?;
+                self.point_material(element, local_point)?
+                    .validate_plane_material()
+                    .map_err(|error| SolidError::MaterialRefused {
+                        what: format!(
+                            "finite-strain element {element}, point {local_point}: {error}"
+                        ),
+                    })?;
+            }
         }
         Ok(())
     }
@@ -536,12 +645,15 @@ impl HyperProblem<'_> {
         fixed: &BTreeMap<usize, f64>,
         projection: Projection<'_, '_>,
     ) -> Result<Vec<f64>, SolidError> {
-        if projection.is_some() {
-            return self
-                .assemble_with_projection(u, load, fixed, projection)
-                .map(|(residual, _)| residual);
-        }
-        let mut residual = self.force_residual(u, load)?;
+        let mut residual = match projection {
+            Some(Reduction::PlaneStress(prepared, cx)) => {
+                prepared.force_residual(self, u, load, cx)?
+            }
+            Some(Reduction::MeanDilatation(_, _)) => {
+                self.assemble_with_projection(u, load, fixed, projection)?.0
+            }
+            None => self.force_residual(u, load)?,
+        };
         for &dof in fixed.keys() {
             residual[dof] = 0.0;
         }
@@ -634,8 +746,8 @@ impl HyperProblem<'_> {
     fn force_residual(&self, u: &[f64], load: f64) -> Result<Vec<f64>, SolidError> {
         let mut resid = vec![0.0; u.len()];
         for (element, conn) in self.mesh.elems.iter().enumerate() {
-            let material = self.element_material(element)?;
-            for &(xi, eta, w) in &quad_points(conn.len()) {
+            for (point, &(xi, eta, w)) in material_quadrature(conn.len()).iter().enumerate() {
+                let material = self.point_material(element, point)?;
                 let (_, grads, det) = shapes_at(&self.mesh.nodes, conn, xi, eta);
                 let wq = w * det;
                 let f = Self::def_grad(&grads, conn, u);
@@ -719,9 +831,9 @@ impl HyperProblem<'_> {
         let mut resid = vec![0.0f64; ndof];
         let mut coo = Coo::new(ndof, ndof);
         for (element, conn) in self.mesh.elems.iter().enumerate() {
-            let material = self.element_material(element)?;
             let nn = conn.len();
-            for &(xi, eta, w) in &quad_points(nn) {
+            for (point, &(xi, eta, w)) in material_quadrature(nn).iter().enumerate() {
+                let material = self.point_material(element, point)?;
                 let (_, grads, det) = shapes_at(&self.mesh.nodes, conn, xi, eta);
                 let wq = w * det;
                 let f = Self::def_grad(&grads, conn, u);
@@ -806,8 +918,8 @@ impl HyperProblem<'_> {
     fn try_energy(&self, u: &[f64], load: f64) -> Option<f64> {
         let mut internal = 0.0f64;
         for (element, conn) in self.mesh.elems.iter().enumerate() {
-            let material = self.element_material(element).ok()?;
-            for &(xi, eta, w) in &quad_points(conn.len()) {
+            for (point, &(xi, eta, w)) in material_quadrature(conn.len()).iter().enumerate() {
+                let material = self.point_material(element, point).ok()?;
                 let (_, grads, det) = shapes_at(&self.mesh.nodes, conn, xi, eta);
                 let f = Self::def_grad(&grads, conn, u);
                 let j = f[0] * f[4] - f[1] * f[3];

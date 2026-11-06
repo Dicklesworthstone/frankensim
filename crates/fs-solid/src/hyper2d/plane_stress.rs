@@ -7,9 +7,11 @@
 //! forces and energies use unit original thickness, not current thickness.
 //! This is an in-plane continuum, with no shell bending or wrinkling model.
 
-use super::{HyperProblem, NewtonReport, PlaneMaterial, Reduction};
+use super::{
+    HyperProblem, NewtonReport, PlaneMaterial, PlaneMaterialPoint, Reduction, material_quadrature,
+};
 use crate::SolidError;
-use crate::mesh2::{quad_points, shapes_at};
+use crate::mesh2::{Mesh2, shapes_at};
 use fs_exec::Cx;
 use fs_material::hyper::incompressible_plane_stress::{
     self, IncompressiblePlaneStressResponse, IncompressiblePlaneStressState,
@@ -50,7 +52,11 @@ fn finite_state(
     material: &dyn PlaneMaterial,
     f: &[f64; 4],
     settings: PlaneStressSettings,
+    seed: Option<[f64; 3]>,
 ) -> Result<PlaneStressState, fs_material::MaterialError> {
+    if let Some(seed) = seed {
+        return plane_stress::plane_stress_state_with_seed(material, f, seed, settings);
+    }
     if let Some(native) = material.native_hyperelastic() {
         native.plane_stress_state(f, settings)
     } else {
@@ -67,7 +73,11 @@ fn finite_response(
     material: &dyn PlaneMaterial,
     f: &[f64; 4],
     settings: PlaneStressSettings,
+    seed: Option<[f64; 3]>,
 ) -> Result<PlaneStressResponse, fs_material::MaterialError> {
+    if let Some(seed) = seed {
+        return plane_stress::plane_stress_with_seed(material, f, seed, settings);
+    }
     if let Some(native) = material.native_hyperelastic() {
         native.plane_stress(f, settings)
     } else {
@@ -79,7 +89,16 @@ fn exact_state(
     material: &dyn PlaneMaterial,
     f: &[f64; 4],
     settings: PlaneStressSettings,
+    seed: Option<[f64; 3]>,
 ) -> Result<IncompressiblePlaneStressState, fs_material::MaterialError> {
+    if let Some(seed) = seed {
+        return incompressible_plane_stress::incompressible_plane_stress_state_with_seed(
+            material,
+            f,
+            [seed[0], seed[1]],
+            settings,
+        );
+    }
     if let Some(native) = material.native_hyperelastic() {
         native.incompressible_plane_stress_state(f, settings)
     } else {
@@ -91,7 +110,16 @@ fn exact_response(
     material: &dyn PlaneMaterial,
     f: &[f64; 4],
     settings: PlaneStressSettings,
+    seed: Option<[f64; 3]>,
 ) -> Result<IncompressiblePlaneStressResponse, fs_material::MaterialError> {
+    if let Some(seed) = seed {
+        return incompressible_plane_stress::incompressible_plane_stress_with_seed(
+            material,
+            f,
+            [seed[0], seed[1]],
+            settings,
+        );
+    }
     if let Some(native) = material.native_hyperelastic() {
         native.incompressible_plane_stress(f, settings)
     } else {
@@ -136,22 +164,20 @@ impl Element {
     }
 }
 
-pub(super) struct Prepared {
+struct Geometry {
     ndof: usize,
     elements: Vec<Element>,
+}
+
+pub(super) struct Prepared {
+    geometry: Geometry,
     local: PlaneStressSettings,
     constraint: Constraint,
 }
 
-impl Prepared {
-    fn new(
-        problem: &HyperProblem<'_>,
-        local: PlaneStressSettings,
-        constraint: Constraint,
-        cx: &Cx<'_>,
-    ) -> Result<Self, SolidError> {
+impl Geometry {
+    fn new(mesh: &Mesh2, cx: &Cx<'_>) -> Result<Self, SolidError> {
         checkpoint(cx)?;
-        let mesh = problem.mesh;
         if mesh.nodes.is_empty()
             || mesh.elems.is_empty()
             || mesh.nodes.iter().flatten().any(|v| !v.is_finite())
@@ -163,11 +189,6 @@ impl Prepared {
             .len()
             .checked_mul(2)
             .ok_or_else(|| invalid("plane-stress displacement count overflows"))?;
-        // Admit each original owner's parameters, then admit transverse
-        // equilibrium at the actual quadrature deformation. Identity can lie
-        // outside a prescribed-reference or accepted-history domain even when
-        // the requested deformed state is admissible.
-        problem.validate_materials_with(|| checkpoint(cx))?;
         for (_, edges) in &mesh.patches {
             if edges
                 .iter()
@@ -205,15 +226,7 @@ impl Prepared {
                     "plane-stress element {index} is folded or reversed"
                 )));
             }
-            // P1 has constant F and one homogeneous law per element, so one
-            // centroid evaluation integrates its reduced energy and tangent
-            // exactly. Q1 retains all four Gauss points.
-            let rule = if arity == 3 {
-                vec![(1.0 / 3.0, 1.0 / 3.0, 0.5)]
-            } else {
-                quad_points(4)
-            };
-            for (xi, eta, w) in rule {
+            for (xi, eta, w) in material_quadrature(arity) {
                 let (_, gradients, det) =
                     shapes_at(&element.reference, &[0, 1, 2, 3][..arity], xi, eta);
                 let weight = w * det;
@@ -235,9 +248,103 @@ impl Prepared {
             elements.push(element);
         }
         checkpoint(cx)?;
+        Ok(Self { ndof, elements })
+    }
+
+    fn for_points(
+        &self,
+        u: &[f64],
+        load: f64,
+        cx: &Cx<'_>,
+        mut visit: impl FnMut(usize, usize, &Element, &Point, [f64; 4]) -> Result<(), SolidError>,
+    ) -> Result<(), SolidError> {
+        checkpoint(cx)?;
+        if u.len() != self.ndof || !load.is_finite() || u.iter().any(|v| !v.is_finite()) {
+            return Err(invalid(
+                "plane-stress displacement coverage and load must be finite and exact",
+            ));
+        }
+        for (index, element) in self.elements.iter().enumerate() {
+            if !element.positive_orientation(Some(u)) {
+                return Err(SolidError::MaterialRefused {
+                    what: format!("plane-stress element {index} is inverted or folded"),
+                });
+            }
+            for (local_point, point) in element.points.iter().enumerate() {
+                checkpoint(cx)?;
+                let f = HyperProblem::def_grad(
+                    &point.gradients[..element.arity],
+                    &element.nodes[..element.arity],
+                    u,
+                );
+                let in_plane = [f[0], f[1], f[3], f[4]];
+                if in_plane.iter().any(|value| !value.is_finite()) {
+                    return Err(SolidError::MaterialRefused {
+                        what: format!(
+                            "element {index}, point {local_point} deformation is nonfinite"
+                        ),
+                    });
+                }
+                visit(index, local_point, element, point, in_plane)?;
+            }
+        }
+        checkpoint(cx)
+    }
+}
+
+pub(super) fn material_point_kinematics(
+    mesh: &Mesh2,
+    displacement: &[[f64; 2]],
+    cx: &Cx<'_>,
+) -> Result<Vec<PlaneMaterialPoint>, SolidError> {
+    checkpoint(cx)?;
+    if displacement.len() != mesh.nodes.len() {
+        return Err(invalid(
+            "material-point displacement must cover every mesh node",
+        ));
+    }
+    let mut flat = Vec::with_capacity(2 * displacement.len());
+    for (index, value) in displacement.iter().enumerate() {
+        if index % 256 == 0 {
+            checkpoint(cx)?;
+        }
+        if value.iter().any(|value| !value.is_finite()) {
+            return Err(invalid("material-point displacement must be finite"));
+        }
+        flat.extend_from_slice(value);
+    }
+    let geometry = Geometry::new(mesh, cx)?;
+    let mut points = Vec::new();
+    geometry.for_points(
+        &flat,
+        0.0,
+        cx,
+        |element, local_point, _, point, in_plane| {
+            points.push(PlaneMaterialPoint {
+                element,
+                local_point,
+                reference_area_m2: point.weight,
+                in_plane,
+            });
+            Ok(())
+        },
+    )?;
+    Ok(points)
+}
+
+impl Prepared {
+    fn new(
+        problem: &HyperProblem<'_>,
+        local: PlaneStressSettings,
+        constraint: Constraint,
+        cx: &Cx<'_>,
+    ) -> Result<Self, SolidError> {
+        checkpoint(cx)?;
+        // Identity may be outside a prescribed-reference/history domain.
+        // Admit parameters here and actual states at their own quadrature points.
+        problem.validate_materials_with(|| checkpoint(cx))?;
         Ok(Self {
-            ndof,
-            elements,
+            geometry: Geometry::new(problem.mesh, cx)?,
             local,
             constraint,
         })
@@ -255,32 +362,21 @@ impl Prepared {
             &Point,
             &dyn PlaneMaterial,
             [f64; 4],
+            Option<[f64; 3]>,
         ) -> Result<(), SolidError>,
     ) -> Result<(), SolidError> {
-        checkpoint(cx)?;
-        if u.len() != self.ndof || !load.is_finite() || u.iter().any(|v| !v.is_finite()) {
-            return Err(invalid(
-                "plane-stress displacement coverage and load must be finite and exact",
-            ));
-        }
-        for (index, element) in self.elements.iter().enumerate() {
-            let material = problem.element_material(index)?;
-            if !element.positive_orientation(Some(u)) {
-                return Err(SolidError::MaterialRefused {
-                    what: format!("plane-stress element {index} is inverted or folded"),
-                });
+        self.geometry.for_points(u, load, cx, |index, local_point, element, point, f| {
+            let material = problem.point_material(index, local_point)?;
+            let seed = problem.material.transverse_seed_at(index, local_point);
+            if let Some(seed) = seed
+                && (seed.iter().any(|value| !value.is_finite()) || seed[2] <= 0.0)
+            {
+                return Err(invalid(format!(
+                    "element {index}, point {local_point} needs a finite positive-thickness transverse seed"
+                )));
             }
-            for point in &element.points {
-                checkpoint(cx)?;
-                let f = HyperProblem::def_grad(
-                    &point.gradients[..element.arity],
-                    &element.nodes[..element.arity],
-                    u,
-                );
-                visit(index, element, point, material, [f[0], f[1], f[3], f[4]])?;
-            }
-        }
-        checkpoint(cx)
+            visit(index, element, point, material, f, seed)
+        })
     }
 
     pub(super) fn assemble(
@@ -291,18 +387,18 @@ impl Prepared {
         fixed: &BTreeMap<usize, f64>,
         cx: &Cx<'_>,
     ) -> Result<(Vec<f64>, Csr), SolidError> {
-        let mut residual = vec![0.0; self.ndof];
-        let mut coo = Coo::new(self.ndof, self.ndof);
+        let mut residual = vec![0.0; self.geometry.ndof];
+        let mut coo = Coo::new(self.geometry.ndof, self.geometry.ndof);
         self.for_points(
             problem,
             u,
             load,
             cx,
-            |index, element, point, material, f| {
+            |index, element, point, material, f, seed| {
                 let (piola, tangent) = match self.constraint {
-                    Constraint::FiniteBulk => finite_response(material, &f, self.local)
+                    Constraint::FiniteBulk => finite_response(material, &f, self.local, seed)
                         .map(|response| (response.piola, response.tangent)),
-                    Constraint::Incompressible => exact_response(material, &f, self.local)
+                    Constraint::Incompressible => exact_response(material, &f, self.local, seed)
                         .map(|response| (response.piola, response.tangent)),
                 }
                 .map_err(|error| material_error(index, error))?;
@@ -347,12 +443,53 @@ impl Prepared {
         }
         let tangent = coo.assemble();
         if residual.iter().any(|v| !v.is_finite())
-            || (0..self.ndof).any(|row| tangent.row(row).1.iter().any(|v| !v.is_finite()))
+            || (0..self.geometry.ndof).any(|row| tangent.row(row).1.iter().any(|v| !v.is_finite()))
         {
             return Err(invalid("unrepresentable plane-stress force or tangent"));
         }
         checkpoint(cx)?;
         Ok((residual, tangent))
+    }
+
+    pub(super) fn force_residual(
+        &self,
+        problem: &HyperProblem<'_>,
+        u: &[f64],
+        load: f64,
+        cx: &Cx<'_>,
+    ) -> Result<Vec<f64>, SolidError> {
+        let mut residual = vec![0.0; self.geometry.ndof];
+        self.for_points(
+            problem,
+            u,
+            load,
+            cx,
+            |index, element, point, material, f, seed| {
+                let piola = match self.constraint {
+                    Constraint::FiniteBulk => {
+                        finite_state(material, &f, self.local, seed).map(|state| state.piola)
+                    }
+                    Constraint::Incompressible => {
+                        exact_state(material, &f, self.local, seed).map(|state| state.piola)
+                    }
+                }
+                .map_err(|error| material_error(index, error))?;
+                for (a, &node) in element.nodes[..element.arity].iter().enumerate() {
+                    for i in 0..2 {
+                        residual[2 * node + i] += point.weight
+                            * (piola[2 * i] * point.gradients[a][0]
+                                + piola[2 * i + 1] * point.gradients[a][1]);
+                    }
+                }
+                Ok(())
+            },
+        )?;
+        problem.for_traction(load, |dof, force| residual[dof] -= force)?;
+        if residual.iter().any(|value| !value.is_finite()) {
+            return Err(invalid("plane-stress assembled force is nonfinite"));
+        }
+        checkpoint(cx)?;
+        Ok(residual)
     }
 
     pub(super) fn potential_energy(
@@ -363,19 +500,23 @@ impl Prepared {
         cx: &Cx<'_>,
     ) -> Result<f64, SolidError> {
         let mut potential = 0.0;
-        self.for_points(problem, u, load, cx, |index, _, point, material, f| {
-            let energy_density = match self.constraint {
-                Constraint::FiniteBulk => {
-                    finite_state(material, &f, self.local).map(|state| state.energy_density_pa)
+        self.for_points(
+            problem,
+            u,
+            load,
+            cx,
+            |index, _, point, material, f, seed| {
+                let energy_density = match self.constraint {
+                    Constraint::FiniteBulk => finite_state(material, &f, self.local, seed)
+                        .map(|state| state.energy_density_pa),
+                    Constraint::Incompressible => exact_state(material, &f, self.local, seed)
+                        .map(|state| state.energy_density_pa),
                 }
-                Constraint::Incompressible => {
-                    exact_state(material, &f, self.local).map(|state| state.energy_density_pa)
-                }
-            }
-            .map_err(|error| material_error(index, error))?;
-            potential += point.weight * energy_density;
-            Ok(())
-        })?;
+                .map_err(|error| material_error(index, error))?;
+                potential += point.weight * energy_density;
+                Ok(())
+            },
+        )?;
         problem.for_traction(load, |dof, value| potential -= value * u[dof])?;
         if !potential.is_finite() {
             return Err(invalid("unrepresentable plane-stress potential energy"));
@@ -498,6 +639,19 @@ impl HyperProblem<'_> {
         )
     }
 
+    /// Unconstrained plane-stress forces, including support reactions and dead
+    /// tractions. No global tangent is formed; local transverse relaxation
+    /// retains its original constitutive derivatives and acceptance gates.
+    pub fn plane_stress_unconstrained_residual(
+        &self,
+        u: &[f64],
+        load: f64,
+        local: PlaneStressSettings,
+        cx: &Cx<'_>,
+    ) -> Result<Vec<f64>, SolidError> {
+        Prepared::new(self, local, Constraint::FiniteBulk, cx)?.force_residual(self, u, load, cx)
+    }
+
     /// Reduced total potential, including work of the original dead tractions.
     /// Uses the stress/energy-only local path without full material Hessians.
     pub fn plane_stress_potential_energy(
@@ -520,9 +674,10 @@ impl HyperProblem<'_> {
     ) -> Result<Vec<PlaneStressState>, SolidError> {
         let prepared = Prepared::new(self, local, Constraint::FiniteBulk, cx)?;
         let mut states = Vec::new();
-        prepared.for_points(self, u, 0.0, cx, |index, _, _, material, f| {
+        prepared.for_points(self, u, 0.0, cx, |index, _, _, material, f, seed| {
             states.push(
-                finite_state(material, &f, local).map_err(|error| material_error(index, error))?,
+                finite_state(material, &f, local, seed)
+                    .map_err(|error| material_error(index, error))?,
             );
             Ok(())
         })?;
@@ -546,6 +701,19 @@ impl HyperProblem<'_> {
             &BTreeMap::new(),
             cx,
         )
+    }
+
+    /// Unconstrained exact elastic-volume forces without a global tangent.
+    /// Each point retains its original remainder, volume and transverse seed.
+    pub fn incompressible_plane_stress_unconstrained_residual(
+        &self,
+        u: &[f64],
+        load: f64,
+        local: PlaneStressSettings,
+        cx: &Cx<'_>,
+    ) -> Result<Vec<f64>, SolidError> {
+        Prepared::new(self, local, Constraint::Incompressible, cx)?
+            .force_residual(self, u, load, cx)
     }
 
     /// Exactly incompressible reduced energy minus original dead-load work.
@@ -572,9 +740,10 @@ impl HyperProblem<'_> {
     ) -> Result<Vec<IncompressiblePlaneStressState>, SolidError> {
         let prepared = Prepared::new(self, local, Constraint::Incompressible, cx)?;
         let mut states = Vec::new();
-        prepared.for_points(self, u, 0.0, cx, |index, _, _, material, f| {
+        prepared.for_points(self, u, 0.0, cx, |index, _, _, material, f, seed| {
             states.push(
-                exact_state(material, &f, local).map_err(|error| material_error(index, error))?,
+                exact_state(material, &f, local, seed)
+                    .map_err(|error| material_error(index, error))?,
             );
             Ok(())
         })?;
