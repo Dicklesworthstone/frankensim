@@ -607,15 +607,41 @@ fn source_and_output_remain_immutable_on_cancelled_or_exhausted_tabulation() {
         assert_eq!(result, Err(EndfError::Physics(FissionError::Cancelled)));
         assert_eq!(operator.source(), &curve);
     }
-    // This allowance covers each ordinary point independently but cannot be
-    // reset for every knot: the complete output shares one work counter.
+    // Determine the actual per-point allowance through the public API. A
+    // guessed panel count can reject a valid single query before this test
+    // reaches its intended invariant: all output knots share one work counter.
+    let mut per_point_limit = 0;
+    for &energy in &grid {
+        let mut lower = 0;
+        let mut upper = DopplerLimits::default().max_kernel_evaluations;
+        while lower < upper {
+            let middle = lower + (upper - lower) / 2;
+            match operator.at_energy(
+                energy,
+                tight(),
+                DopplerLimits {
+                    max_kernel_evaluations: middle,
+                    ..DopplerLimits::default()
+                },
+                || Ok(()),
+            ) {
+                Ok(_) => upper = middle,
+                Err(EndfError::Physics(FissionError::Budget("Doppler kernel evaluations"))) => {
+                    lower = middle + 1;
+                }
+                other => panic!("unexpected point-budget probe: {other:?}"),
+            }
+        }
+        per_point_limit = per_point_limit.max(upper);
+    }
+    assert!(per_point_limit > 0);
     for &energy in &grid {
         let one = operator
             .at_energy(
                 energy,
                 tight(),
                 DopplerLimits {
-                    max_kernel_evaluations: 1000,
+                    max_kernel_evaluations: per_point_limit,
                     ..DopplerLimits::default()
                 },
                 || Ok(()),
@@ -629,7 +655,7 @@ fn source_and_output_remain_immutable_on_cancelled_or_exhausted_tabulation() {
             grid.clone(),
             tight(),
             DopplerLimits {
-                max_kernel_evaluations: 1000,
+                max_kernel_evaluations: per_point_limit,
                 ..DopplerLimits::default()
             },
             || Ok(())

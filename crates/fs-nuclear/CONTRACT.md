@@ -1154,9 +1154,11 @@ the excluded relative speeds require a target thermal speed above L. This
 separate analytic kernel-tail bound does not bound errors in the exterior laws.
 
 Integration partitions at every original histogram/linear segment and jump,
-then into panels at most one thermal width long. Deterministic Gauss 8/16
-comparison controls adaptive refinement; its reported error is a numerical
-estimate, not an interval certificate. The estimate plus omitted-kernel bound
+then into panels at most one thermal width long. Each visited linear interval
+prepares its endpoint roots, thermal coordinates and interpolation law once;
+Gauss nodes borrow that data without repeating endpoint roots or source-array
+lookups. Deterministic Gauss 8/16 comparison controls adaptive refinement; its
+reported error is a numerical estimate, not an interval certificate. The estimate plus omitted-kernel bound
 must fit the caller's absolute/relative point tolerance. Original zero segments
 need no quadrature. Source scanning, output allocation, segment visits, kernel
 evaluations and refinement depth are bounded; output knots share one work

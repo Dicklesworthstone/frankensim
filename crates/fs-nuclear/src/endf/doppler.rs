@@ -353,7 +353,7 @@ impl PreparedDopplerBroadening {
             parameters.integrate_piece(
                 left,
                 right,
-                Law::ConstantRate(rate),
+                &Law::ConstantRate(rate),
                 work,
                 checkpoint,
                 &mut integral,
@@ -372,11 +372,11 @@ impl PreparedDopplerBroadening {
             work.visit(checkpoint)?;
             let right = parameters.coordinate(energies[segment + 1]).min(end);
             if right > left {
-                let law = Law::Segment { segment, region };
+                let law = parameters.segment_law(segment, region);
                 parameters.integrate_piece(
                     left,
                     right,
-                    law,
+                    &law,
                     work,
                     checkpoint,
                     &mut integral,
@@ -396,7 +396,7 @@ impl PreparedDopplerBroadening {
             parameters.integrate_piece(
                 left,
                 end,
-                Law::ConstantRate(rate),
+                &Law::ConstantRate(rate),
                 work,
                 checkpoint,
                 &mut integral,
@@ -443,10 +443,18 @@ impl PreparedDopplerBroadening {
     }
 }
 
-#[derive(Clone, Copy)]
 enum Law {
     ConstantRate(f64),
-    Segment { segment: usize, region: usize },
+    ConstantCrossSection(f64),
+    Linear {
+        sigma_low: f64,
+        sigma_high: f64,
+        root_low: f64,
+        root_high: f64,
+        coordinate_low: f64,
+        coordinate_high: f64,
+        width: f64,
+    },
 }
 
 struct Kernel<'a> {
@@ -461,53 +469,81 @@ struct Kernel<'a> {
 
 impl Kernel<'_> {
     fn coordinate(&self, energy: f64) -> f64 {
-        // Rationalized sqrt difference retains tiny thermal windows at high E.
-        ((energy - self.energy) / (det::sqrt(energy) + self.sqrt_energy)) / self.owner.sqrt_theta_j
+        self.coordinate_with_root(energy, det::sqrt(energy))
     }
 
-    fn value(&self, t: f64, law: Law) -> Result<f64, EndfError> {
+    fn coordinate_with_root(&self, energy: f64, root: f64) -> f64 {
+        // Rationalized sqrt difference retains tiny thermal windows at high E.
+        ((energy - self.energy) / (root + self.sqrt_energy)) / self.owner.sqrt_theta_j
+    }
+
+    fn segment_law(&self, segment: usize, region: usize) -> Law {
+        let source = &self.owner.source;
+        let sigma_low = source.cross_sections_m2[segment];
+        let sigma_high = source.cross_sections_m2[segment + 1];
+        if source.interpolation_regions[region].interpolation == EndfInterpolation::Histogram
+            || sigma_low == sigma_high
+        {
+            return Law::ConstantCrossSection(sigma_low);
+        }
+        // Cache each source interval once per incident energy. Gauss nodes
+        // then need no source/region lookups or repeated endpoint square roots.
+        let low = source.energies_j[segment];
+        let high = source.energies_j[segment + 1];
+        let root_low = det::sqrt(low);
+        let root_high = det::sqrt(high);
+        Law::Linear {
+            sigma_low,
+            sigma_high,
+            root_low,
+            root_high,
+            coordinate_low: self.coordinate_with_root(low, root_low),
+            coordinate_high: self.coordinate_with_root(high, root_high),
+            width: high - low,
+        }
+    }
+
+    fn value(&self, t: f64, law: &Law) -> Result<f64, EndfError> {
         let x = self.y + t;
         if x <= 0.0 {
             return Ok(0.0);
         }
         let rate = match law {
-            Law::ConstantRate(rate) => rate,
-            Law::Segment { segment, region } => {
-                let source = &self.owner.source;
-                let sigma = if source.interpolation_regions[region].interpolation
-                    == EndfInterpolation::Histogram
-                    || source.cross_sections_m2[segment] == source.cross_sections_m2[segment + 1]
+            Law::ConstantRate(rate) => *rate,
+            Law::ConstantCrossSection(sigma) => {
+                ((self.sqrt_energy + self.owner.sqrt_theta_j * t) * *sigma)
+                    / self.owner.rate_bound_m2_sqrt_j
+            }
+            Law::Linear {
+                sigma_low,
+                sigma_high,
+                root_low,
+                root_high,
+                coordinate_low,
+                coordinate_high,
+                width,
+            } => {
+                let root = self.sqrt_energy + self.owner.sqrt_theta_j * t;
+                let lower_weight =
+                    self.owner.sqrt_theta_j * (*coordinate_high - t) * (*root_high + root) / *width;
+                let upper_weight =
+                    self.owner.sqrt_theta_j * (t - *coordinate_low) * (root + *root_low) / *width;
+                let roundoff = 64.0 * f64::EPSILON;
+                if !lower_weight.is_finite()
+                    || !upper_weight.is_finite()
+                    || lower_weight < -roundoff
+                    || upper_weight < -roundoff
+                    || lower_weight > 1.0 + roundoff
+                    || upper_weight > 1.0 + roundoff
                 {
-                    source.cross_sections_m2[segment]
-                } else {
-                    let low = source.energies_j[segment];
-                    let high = source.energies_j[segment + 1];
-                    let root = self.sqrt_energy + self.owner.sqrt_theta_j * t;
-                    let lower_weight = self.owner.sqrt_theta_j
-                        * (self.coordinate(high) - t)
-                        * (det::sqrt(high) + root)
-                        / (high - low);
-                    let upper_weight = self.owner.sqrt_theta_j
-                        * (t - self.coordinate(low))
-                        * (root + det::sqrt(low))
-                        / (high - low);
-                    let roundoff = 64.0 * f64::EPSILON;
-                    if !lower_weight.is_finite()
-                        || !upper_weight.is_finite()
-                        || lower_weight < -roundoff
-                        || upper_weight < -roundoff
-                        || lower_weight > 1.0 + roundoff
-                        || upper_weight > 1.0 + roundoff
-                    {
-                        return Err(FissionError::Arithmetic.into());
-                    }
-                    super::convex(
-                        source.cross_sections_m2[segment],
-                        source.cross_sections_m2[segment + 1],
-                        lower_weight.clamp(0.0, 1.0),
-                        upper_weight.clamp(0.0, 1.0),
-                    )?
-                };
+                    return Err(FissionError::Arithmetic.into());
+                }
+                let sigma = super::convex(
+                    *sigma_low,
+                    *sigma_high,
+                    lower_weight.clamp(0.0, 1.0),
+                    upper_weight.clamp(0.0, 1.0),
+                )?;
                 ((self.sqrt_energy + self.owner.sqrt_theta_j * t) * sigma)
                     / self.owner.rate_bound_m2_sqrt_j
             }
@@ -533,24 +569,14 @@ impl Kernel<'_> {
         &self,
         mut left: f64,
         right: f64,
-        law: Law,
+        law: &Law,
         work: &mut Work,
         checkpoint: &mut impl FnMut() -> Result<(), FissionError>,
         integral: &mut Accumulator,
         error: &mut Accumulator,
     ) -> Result<(), EndfError> {
-        if matches!(law, Law::ConstantRate(0.0)) {
+        if matches!(law, Law::ConstantRate(0.0) | Law::ConstantCrossSection(0.0)) {
             return Ok(());
-        }
-        if let Law::Segment { segment, region } = law {
-            let source = &self.owner.source;
-            if source.cross_sections_m2[segment] == 0.0
-                && (source.interpolation_regions[region].interpolation
-                    == EndfInterpolation::Histogram
-                    || source.cross_sections_m2[segment + 1] == 0.0)
-            {
-                return Ok(());
-            }
         }
         // At most one thermal width per initial panel: a narrow Gaussian can
         // never hide between all the nodes on a very wide source segment.
@@ -569,7 +595,7 @@ impl Kernel<'_> {
         &self,
         left: f64,
         right: f64,
-        law: Law,
+        law: &Law,
         depth: u8,
         work: &mut Work,
         checkpoint: &mut impl FnMut() -> Result<(), FissionError>,
@@ -597,7 +623,7 @@ impl Kernel<'_> {
         &self,
         left: f64,
         right: f64,
-        law: Law,
+        law: &Law,
         nodes: &[(f64, f64)],
         work: &mut Work,
         checkpoint: &mut impl FnMut() -> Result<(), FissionError>,
