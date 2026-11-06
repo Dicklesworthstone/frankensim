@@ -16,10 +16,15 @@
 //! topology changes or intermediate-path validity is implied. The optional
 //! `dynamics` adapter applies these forces through the original structural
 //! midpoint integrator, with independently admitted momentum and energy balances.
+//! Optional [`viscosity`] supplies objective Boussinesq--Scriven interfacial
+//! shear/dilatational stress and separately accounted mechanical dissipation.
 //! The triangle leaves allocate nothing. Patch assembly is synchronous and
 //! linear in the supplied vertices/faces; callers own tiling and cancellation.
 
 type Vector = [f64; 3];
+
+/// Objective interfacial shear and dilatational viscous stresses.
+pub mod viscosity;
 
 /// Conservative material-surface motion through the existing structural owner.
 #[cfg(feature = "continuum")]
@@ -32,10 +37,14 @@ pub enum CapillarySurfaceError {
     NonFinitePosition,
     /// A supplied endpoint tangent direction contains NaN or infinity.
     NonFiniteDirection,
+    /// A supplied surface velocity contains NaN or infinity.
+    NonFiniteVelocity,
     /// A triangle has zero representable area.
     DegenerateTriangle,
     /// Tension must be finite and nonnegative.
     InvalidSurfaceTension,
+    /// Surface shear and dilatational viscosities must be finite and nonnegative.
+    InvalidSurfaceViscosity,
     /// Endpoint vertex counts or per-face coefficient counts disagree.
     LengthMismatch,
     /// A triangle names a vertex outside the supplied coordinate arrays.

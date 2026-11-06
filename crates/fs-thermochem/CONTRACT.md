@@ -2443,6 +2443,25 @@ Tests cover every published reference-table row at its stated precision,
 independent pressure differentiation, Clapeyron/Gibbs/pressure-work identities,
 critical coalescence, inversion, domain limits, work bounds, and cancellation.
 
+### Ordinary-water/pure-vapor surface tension
+
+`water::surface::WaterSurfaceTensionState` evaluates the unchanged IAPWS
+R1-76(2014) ITS-90 correlation, attributed to IAPWS:
+<https://iapws.org/technical-guidance/release/Surf-H2O.download>.
+It returns typed N/m surface tension and its analytic N/(m K) derivative along
+saturation for 273.16--647.096 K. One deterministic fractional power supplies
+both values without allocation. The critical value and limiting derivative
+are exactly zero; this does not establish a distinct interface there.
+`SaturatedWaterState` and `If97SaturationPair` expose the same source at their
+existing temperature, without changing saturation pressure or caloric datums.
+IF97's sub-triple extension does not widen this interfacial source domain.
+The source is ordinary water in equilibrium with pure water vapor; arbitrary
+carrier gases, solutes, surfactants, wetting, curvature corrections and surface
+heat/storage closures remain separate. G0/G1 tests compare literal Table 1
+values, independent temperature differences, exact domain boundaries and
+adjacent-to-critical temperatures. Table-rounding tolerances do not describe
+the source's experimental uncertainty.
+
 ## Maxwell-Stefan molecular diffusion with explicit reference frames
 
 `transport::maxwell_stefan` supplies a bounded L1 constitutive friction solve,

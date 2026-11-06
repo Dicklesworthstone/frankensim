@@ -4,16 +4,21 @@
 //! inertia; the original Gram area discrete gradient supplies surface stress.
 //! `fs-time` owns Newmark kinematics and its matrix-free Newton--Krylov solve.
 //! With rho_inf=1 its stage is the midpoint: delta x=dt*v_mean and
-//! M*delta v=dt*(F_surface+F_external). Their contraction closes kinetic plus
-//! surface free energy, with prescribed coefficient supply accounted separately.
+//! M*delta v=dt*(F_surface+F_viscous+F_external). Their contraction closes
+//! kinetic plus surface free energy and optional Boussinesq--Scriven surface
+//! viscous loss, with prescribed coefficient supply accounted separately.
 //!
-//! This is an inertial tension-only material surface, not bulk incompressible
+//! This is an inertial capillary material surface, not bulk incompressible
 //! liquid or an elastic-solid constitutive replacement. Mass never follows
 //! current area. The caller owns which physical interfaces each face represents
 //! (a two-sided film needs both tensions), supports, and the validity of the
-//! fixed topology. No bending, viscosity, contact, remeshing, surface entropy or
+//! fixed topology. No bending, bulk viscosity, contact, remeshing, surface entropy or
 //! inferred thermal heat is supplied. Time/mesh refinement is still required.
 
+use super::viscosity::{
+    SurfaceViscosity, SurfaceViscosityField, SurfaceViscosityResponse, assemble_surface_viscosity,
+    triangle_surface_viscosity, triangle_surface_viscosity_tangent,
+};
 use super::*;
 use fs_time::galpha::{
     ImplicitSolveConfig, ImplicitStepTelemetry, OperatorGeneralizedAlpha,
@@ -32,7 +37,7 @@ pub struct SurfaceDynamicsControls {
     pub impulse_tolerance_n_s: f64,
     /// Euclidean norm of midpoint displacement defects [m].
     pub kinematic_tolerance_m: f64,
-    /// Absolute kinetic+surface-minus-supply residual [J].
+    /// Absolute kinetic+surface+viscous-loss-minus-supply residual [J].
     pub energy_tolerance_j: f64,
 }
 
@@ -51,11 +56,14 @@ pub struct SurfaceDynamicsReport {
     pub kinetic_change_j: f64,
     /// Held external nodal forces times actual displacement [J].
     pub external_work_j: f64,
+    /// Integrated nonnegative interfacial viscous mechanical loss [J]. This
+    /// is zero for the inviscid `advance` method; thermal deposition is external.
+    pub surface_viscous_dissipation_j: f64,
     /// Fresh momentum balance norm, independent of the Newton report [N s].
     pub impulse_residual_n_s: f64,
     /// Fresh midpoint kinematic balance norm [m].
     pub kinematic_residual_m: f64,
-    /// Delta kinetic + delta surface - external work - sigma supply [J].
+    /// Delta kinetic + delta surface + viscous loss - external work - sigma supply [J].
     pub energy_residual_j: f64,
 }
 
@@ -147,6 +155,29 @@ impl<'a> CapillarySurfaceDynamics<'a> {
         tension: SurfaceTensionField<'_>,
         external_forces_n: &[[f64; 3]],
     ) -> Result<SecondOrderState, SurfaceDynamicsError> {
+        self.initial_state_viscous(
+            time_s,
+            positions_m,
+            velocities_m_s,
+            tension,
+            SurfaceViscosityField::Uniform(SurfaceViscosity::ZERO),
+            external_forces_n,
+        )
+    }
+
+    /// Initialize physical acceleration including objective interfacial viscous
+    /// stress. Coefficients are surface transport properties in N s/m; bulk
+    /// liquid viscosity alone does not determine them.
+    #[allow(clippy::too_many_arguments)]
+    pub fn initial_state_viscous(
+        &self,
+        time_s: f64,
+        positions_m: &[[f64; 3]],
+        velocities_m_s: &[[f64; 3]],
+        tension: SurfaceTensionField<'_>,
+        viscosity: SurfaceViscosityField<'_>,
+        external_forces_n: &[[f64; 3]],
+    ) -> Result<SecondOrderState, SurfaceDynamicsError> {
         if !time_s.is_finite()
             || !vectors(positions_m, self.masses_kg.len())
             || !vectors(velocities_m_s, self.masses_kg.len())
@@ -156,8 +187,18 @@ impl<'a> CapillarySurfaceDynamics<'a> {
                 "finite per-node initial positions, velocities, forces and time required",
             ));
         }
-        let surface =
+        viscosity.validate(self.faces.len())?;
+        let mut surface =
             assemble_surface_tension_step(positions_m, positions_m, self.faces, tension, tension)?;
+        if !viscosity.is_zero() {
+            let viscous =
+                assemble_surface_viscosity(positions_m, velocities_m_s, self.faces, viscosity)?;
+            for (force, viscous) in surface.forces_n.iter_mut().zip(viscous.forces_n) {
+                for d in 0..3 {
+                    force[d] += viscous[d];
+                }
+            }
+        }
         let acceleration: Vec<_> = surface
             .forces_n
             .iter()
@@ -193,6 +234,37 @@ impl<'a> CapillarySurfaceDynamics<'a> {
         state: &mut SecondOrderState,
         tension_before: SurfaceTensionField<'_>,
         tension_after: SurfaceTensionField<'_>,
+        external_forces_n: &[[f64; 3]],
+        dt_s: f64,
+        controls: SurfaceDynamicsControls,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<SurfaceDynamicsReport, SurfaceDynamicsError> {
+        self.advance_viscous(
+            state,
+            tension_before,
+            tension_after,
+            SurfaceViscosityField::Uniform(SurfaceViscosity::ZERO),
+            external_forces_n,
+            dt_s,
+            controls,
+            cancelled,
+        )
+    }
+
+    /// Advance the original trajectory with Boussinesq--Scriven surface
+    /// viscosity evaluated on midpoint geometry and velocity. The force's exact
+    /// geometry and velocity derivatives participate in the native Krylov solve.
+    /// The accepted account is `delta K + delta E_surface + dt*D_surface =
+    /// W_external + sigma_supply`, with linear and midpoint angular momentum
+    /// conserved by the internal stresses. Surface viscous loss is reported
+    /// separately; no bulk viscosity or heat conversion is inferred.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_viscous(
+        &self,
+        state: &mut SecondOrderState,
+        tension_before: SurfaceTensionField<'_>,
+        tension_after: SurfaceTensionField<'_>,
+        viscosity: SurfaceViscosityField<'_>,
         external_forces_n: &[[f64; 3]],
         dt_s: f64,
         controls: SurfaceDynamicsControls,
@@ -237,6 +309,7 @@ impl<'a> CapillarySurfaceDynamics<'a> {
             .map_err(|e| SurfaceDynamicsError::Time(TimeSolveError::NewtonSetup(e)))?;
         tension_before.validate(self.faces.len())?;
         tension_after.validate(self.faces.len())?;
+        viscosity.validate(self.faces.len())?;
         let before: Vec<_> = state
             .q
             .chunks_exact(3)
@@ -247,6 +320,8 @@ impl<'a> CapillarySurfaceDynamics<'a> {
             initial: &state.q,
             tension_before,
             tension_after,
+            viscosity,
+            active_viscosity: !viscosity.is_zero(),
             cancelled: RefCell::new(&mut cancelled),
             stopped: Cell::new(false),
         };
@@ -275,6 +350,23 @@ impl<'a> CapillarySurfaceDynamics<'a> {
             .map(|v| [v[0], v[1], v[2]])
             .collect();
         let surface = adapter.surface(&before, &after)?;
+        let viscous = if adapter.active_viscosity {
+            let midpoint: Vec<_> = before
+                .iter()
+                .zip(&after)
+                .map(|(a, b)| core::array::from_fn(|d| 0.5 * a[d] + 0.5 * b[d]))
+                .collect();
+            let midpoint_velocity: Vec<_> = state
+                .v
+                .chunks_exact(3)
+                .zip(candidate.v.chunks_exact(3))
+                .map(|(a, b)| core::array::from_fn(|d| 0.5 * a[d] + 0.5 * b[d]))
+                .collect();
+            Some(adapter.viscous(&midpoint, &midpoint_velocity)?)
+        } else {
+            None
+        };
+        let viscous_loss = viscous.as_ref().map_or(0.0, |v| dt_s * v.dissipation_w);
         let mut impulse = 0.0_f64;
         let mut kinematic = 0.0_f64;
         let mut change = Sum::default();
@@ -287,8 +379,13 @@ impl<'a> CapillarySurfaceDynamics<'a> {
             let dv = candidate.v[i] - state.v[i];
             let velocity = 0.5 * state.v[i] + 0.5 * candidate.v[i];
             let momentum = self.masses_kg[i / 3] * dv;
-            impulse =
-                impulse.hypot(momentum - dt_s * (surface.forces_n[i / 3][i % 3] + forcing[i]));
+            impulse = impulse.hypot(
+                momentum
+                    - dt_s
+                        * (surface.forces_n[i / 3][i % 3]
+                            + viscous.as_ref().map_or(0.0, |v| v.forces_n[i / 3][i % 3])
+                            + forcing[i]),
+            );
             kinematic = kinematic.hypot(dx - dt_s * velocity);
             change.add(velocity * momentum);
             external.add(forcing[i] * dx);
@@ -299,6 +396,7 @@ impl<'a> CapillarySurfaceDynamics<'a> {
         for v in [
             change,
             surface.energy.energy_change_j,
+            viscous_loss,
             -external,
             -surface.energy.coefficient_supply_j,
         ] {
@@ -325,6 +423,7 @@ impl<'a> CapillarySurfaceDynamics<'a> {
             kinetic_after_j: kinetic(self.masses_kg, &candidate.v)?,
             kinetic_change_j: change,
             external_work_j: external,
+            surface_viscous_dissipation_j: viscous_loss,
             impulse_residual_n_s: impulse,
             kinematic_residual_m: kinematic,
             energy_residual_j: energy,
@@ -366,6 +465,8 @@ struct MidpointSurface<'a, 'm, C> {
     initial: &'a [f64],
     tension_before: SurfaceTensionField<'a>,
     tension_after: SurfaceTensionField<'a>,
+    viscosity: SurfaceViscosityField<'a>,
+    active_viscosity: bool,
     cancelled: RefCell<&'a mut C>,
     stopped: Cell<bool>,
 }
@@ -425,6 +526,43 @@ impl<C: FnMut() -> bool> MidpointSurface<'_, '_, C> {
             energy: SurfaceEnergyChange::from_values(energy),
         })
     }
+
+    fn viscous(
+        &self,
+        positions: &[Vector],
+        velocities: &[Vector],
+    ) -> Result<SurfaceViscosityResponse, SurfaceDynamicsError> {
+        let mut forces = vec![[0.0; 3]; positions.len()];
+        let mut dissipation = Sum::default();
+        for (face, &indices) in self.model.faces.iter().enumerate() {
+            if face % 64 == 0 && self.cancel() {
+                return Err(SurfaceDynamicsError::Cancelled);
+            }
+            let viscosity = self.viscosity.at(face);
+            if viscosity == SurfaceViscosity::ZERO {
+                continue;
+            }
+            let response = triangle_surface_viscosity(
+                indices.map(|i| positions[i]),
+                indices.map(|i| velocities[i]),
+                viscosity,
+            )?;
+            for (node, force) in indices.into_iter().zip(response.forces_n) {
+                for d in 0..3 {
+                    forces[node][d] += force[d];
+                }
+            }
+            dissipation.add(response.dissipation_w);
+        }
+        let dissipation = dissipation.value();
+        if forces.iter().flatten().any(|x| !x.is_finite()) || !dissipation.is_finite() {
+            return Err(CapillarySurfaceError::Unrepresentable.into());
+        }
+        Ok(SurfaceViscosityResponse {
+            forces_n: forces,
+            dissipation_w: dissipation,
+        })
+    }
 }
 impl<C: FnMut() -> bool> SecondOrderProblem for MidpointSurface<'_, '_, C> {
     fn dimension(&self) -> usize {
@@ -469,8 +607,34 @@ impl<C: FnMut() -> bool> SecondOrderProblem for MidpointSurface<'_, '_, C> {
             }
         }
     }
-    fn resistance(&self, q: &[f64], _: &[f64], output: &mut [f64]) {
+    fn resistance(&self, q: &[f64], v: &[f64], output: &mut [f64]) {
         self.internal_force(q, output);
+        if !self.active_viscosity {
+            return;
+        }
+        for (face, &indices) in self.model.faces.iter().enumerate() {
+            if face % 64 == 0 && self.cancel() {
+                output.fill(f64::NAN);
+                return;
+            }
+            let viscosity = self.viscosity.at(face);
+            if viscosity == SurfaceViscosity::ZERO {
+                continue;
+            }
+            let Ok(response) = triangle_surface_viscosity(
+                indices.map(|i| core::array::from_fn(|d| q[3 * i + d])),
+                indices.map(|i| core::array::from_fn(|d| v[3 * i + d])),
+                viscosity,
+            ) else {
+                output.fill(f64::NAN);
+                return;
+            };
+            for (node, force) in indices.into_iter().zip(response.forces_n) {
+                for d in 0..3 {
+                    output[3 * node + d] -= force[d];
+                }
+            }
+        }
     }
     fn tangent_apply(&self, q: &[f64], direction: &[f64], output: &mut [f64]) {
         output.fill(0.0);
@@ -492,6 +656,82 @@ impl<C: FnMut() -> bool> SecondOrderProblem for MidpointSurface<'_, '_, C> {
                 return;
             };
             for (node, force) in indices.into_iter().zip(tangent) {
+                for d in 0..3 {
+                    output[3 * node + d] -= force[d];
+                }
+            }
+        }
+    }
+
+    fn resistance_displacement_apply(
+        &self,
+        q: &[f64],
+        v: &[f64],
+        direction: &[f64],
+        output: &mut [f64],
+    ) {
+        self.tangent_apply(q, direction, output);
+        if !self.active_viscosity {
+            return;
+        }
+        for (face, &indices) in self.model.faces.iter().enumerate() {
+            if face % 64 == 0 && self.cancel() {
+                output.fill(f64::NAN);
+                return;
+            }
+            let viscosity = self.viscosity.at(face);
+            if viscosity == SurfaceViscosity::ZERO {
+                continue;
+            }
+            let Ok(tangent) = triangle_surface_viscosity_tangent(
+                indices.map(|i| core::array::from_fn(|d| q[3 * i + d])),
+                indices.map(|i| core::array::from_fn(|d| v[3 * i + d])),
+                viscosity,
+                indices.map(|i| core::array::from_fn(|d| direction[3 * i + d])),
+                [[0.0; 3]; 3],
+            ) else {
+                output.fill(f64::NAN);
+                return;
+            };
+            for (node, force) in indices.into_iter().zip(tangent) {
+                for d in 0..3 {
+                    output[3 * node + d] -= force[d];
+                }
+            }
+        }
+    }
+
+    fn resistance_velocity_apply(
+        &self,
+        q: &[f64],
+        _: &[f64],
+        direction: &[f64],
+        output: &mut [f64],
+    ) {
+        output.fill(0.0);
+        if !self.active_viscosity {
+            return;
+        }
+        // The Newtonian law is linear in velocity: applying it to the velocity
+        // direction is the exact velocity partial, without a geometry tangent.
+        for (face, &indices) in self.model.faces.iter().enumerate() {
+            if face % 64 == 0 && self.cancel() {
+                output.fill(f64::NAN);
+                return;
+            }
+            let viscosity = self.viscosity.at(face);
+            if viscosity == SurfaceViscosity::ZERO {
+                continue;
+            }
+            let Ok(response) = triangle_surface_viscosity(
+                indices.map(|i| core::array::from_fn(|d| q[3 * i + d])),
+                indices.map(|i| core::array::from_fn(|d| direction[3 * i + d])),
+                viscosity,
+            ) else {
+                output.fill(f64::NAN);
+                return;
+            };
+            for (node, force) in indices.into_iter().zip(response.forces_n) {
                 for d in 0..3 {
                     output[3 * node + d] -= force[d];
                 }

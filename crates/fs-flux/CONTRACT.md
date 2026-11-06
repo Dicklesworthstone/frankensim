@@ -1996,7 +1996,32 @@ work, invalid geometry/data and analytic endpoint tangents under nonuniform
 deformation and finite rotation. The discrete-gradient principle follows
 Gonzalez (1996), doi:10.1007/BF02440162; the Gram formulas are derived locally.
 
-## Conservative inertial capillary material surfaces
+## Viscous interfacial surface stress
+
+`capillary::surface::viscosity` supplies the isotropic Newtonian
+Boussinesq--Scriven law on the same material triangles. Surface shear viscosity
+`mu_s` and dilatational viscosity `kappa_s` are independently prescribed,
+nonnegative coefficients in N s/m. They are interfacial transport properties;
+neither is inferred from bulk viscosity or numerical mesh thickness. With
+tangential projector `P` and projected symmetric velocity gradient `D`,
+`tau = 2 mu_s (D - tr(D) P/2) + kappa_s tr(D) P`. The weak nodal force is
+`-A tau grad_s(N_i)`, including boundary tractions on open patches. Its power
+is minus `A (2 mu_s D_dev:D_dev + kappa_s tr(D)^2)`, a separately reported
+nonnegative mechanical loss, never stored surface energy or inferred heat.
+
+Triangle force and simultaneous position/velocity directional-derivative
+kernels allocate nothing. The derivative includes changing area, tangential
+projector and shape gradients. Uniform and per-face assembly is linear in
+mesh size, uses deterministic scalar loss accumulation, and rejects invalid
+coefficients, geometry, kinematics and connectivity. The force balances linear
+and angular momentum, is independent of winding, and dissipates no rigid
+translation or rotation. Five tests check independent analytical shear and
+dilation, superposed rigid spin, force tangents, nonuniform patch power balance,
+winding and invalid input. No surfactant transport, nonlinear interface
+rheology, surface elasticity, bending viscosity or bulk-fluid law is claimed.
+Reference: Scriven (1960), doi:10.1016/0009-2509(60)87003-0.
+
+## Inertial capillary material surfaces
 
 With `continuum`, `capillary::surface::dynamics::CapillarySurfaceDynamics`
 binds fixed triangle connectivity and strictly positive reference nodal masses
@@ -2006,7 +2031,7 @@ generalized-alpha owner at `rho_inf=1`. No other time integrator or liquid
 solver is introduced. Initial acceleration is physical force divided by mass;
 subsequent acceleration retains the native Newmark auxiliary-state semantics.
 
-The midpoint resistance is the negative original endpoint capillary force.
+The inviscid midpoint resistance is the negative original endpoint capillary force.
 Its analytic tangent differentiates the Gram formula and its symmetric
 skinny-face work correction, then composes the endpoint/midpoint chain rule.
 The original Newton--Krylov driver owns globalization and linear iteration;
@@ -2025,13 +2050,24 @@ of large aggregate energies. Rejection leaves positions, velocities,
 accelerations, physical time, accepted-step count and history unchanged.
 The trial does not clone the accumulated trajectory history.
 
+Optional `initial_state_viscous` and `advance_viscous` apply the same
+Boussinesq--Scriven surface stress at midpoint geometry and velocity. Its exact
+position and velocity partials enter the original matrix-free Newton--Krylov
+solve. Acceptance includes the viscous force in momentum and adds
+`dt * D_surface` to the energy balance; the report exposes this mechanical loss
+as `surface_viscous_dissipation_j`. The existing inviscid entry points retain a
+zero-viscosity fast path without new per-face kernels or geometry allocations.
+An analytical damped equilateral breathing mode checks the actual midpoint
+trajectory and viscous work; a nonuniform rotating surface checks accumulated
+loss plus storage and conserved linear/angular momentum over repeated steps.
+
 Prescribed per-face tension change supplies external free energy, never
-inferred heat. This rung represents a tension-only material surface with fixed
+inferred heat. This rung represents a capillary material surface with fixed
 reference mass, including explicitly authored ideal inertial films. It does
 not replace an elastic-solid material law, solve bulk incompressibility or
 assign physical mass from current area. The caller identifies every interface
 (including both sides of a film) and owns fixed-topology applicability.
-No contact/support constraints, bending, viscosity, intermediate-path
+No contact/support constraints, bending, bulk-fluid viscosity, intermediate-path
 nonintersection, remeshing, surface entropy, thermal coupling or dynamics
 adjoint is claimed. Temporal and spatial refinement remain necessary.
 

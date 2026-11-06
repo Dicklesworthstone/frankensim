@@ -11816,6 +11816,14 @@ droplet transport or native free-surface mass/topology evolution. Tests cover
 source reuse, independent Stefan fluxes, signed heat/mass balance, analytic
 temperature tangents and unsupported-regime refusal.
 
+`WaterEvaporation::pure_water_vapor_surface_tension` exposes the original
+IAPWS R1-76(2014) coefficient and analytic temperature tangent at an admitted
+interface temperature. This explicitly pure-water-vapor reference query
+neither qualifies an arbitrary carrier-gas pairing nor changes the original
+evaporation rate, saturation pressure, calorics or heat account. No Kelvin or
+Poynting correction is introduced. Literal source values and the original
+adapter's narrower temperature interval are checked through this entry point.
+
 ### Finite atmosphere and shared thermal history
 
 `evaporation::gas::advance_surface_with_gas` couples the signed Stefan-film

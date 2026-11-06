@@ -69,6 +69,131 @@ fn tetrahedron() -> ([Vector; 4], [[usize; 3]; 4], [f64; 4], [Vector; 4]) {
 }
 
 #[test]
+fn interfacial_dilatational_viscosity_matches_the_analytical_damped_breathing_mode() {
+    let q = [
+        [1.0, 0.0, 0.0],
+        [-0.5, 3.0_f64.sqrt() / 2.0, 0.0],
+        [-0.5, -3.0_f64.sqrt() / 2.0, 0.0],
+    ];
+    let masses = [0.8; 3];
+    let faces = [[0, 1, 2]];
+    let surface = CapillarySurfaceDynamics::try_new(&masses, &faces, 3, 1).unwrap();
+    let sigma = 0.6;
+    let kappa = 0.9;
+    let tension = SurfaceTensionField::Uniform(sigma);
+    // A uniform dilation has zero deviatoric strain; the shear coefficient
+    // cannot affect this mode. The area strain produces c=sqrt(3)*kappa/m.
+    let viscosity = SurfaceViscosityField::Uniform(SurfaceViscosity {
+        shear_n_s_m: 3.7,
+        dilatational_n_s_m: kappa,
+    });
+    let velocity = q.map(|p| p.map(|x| 0.2 * x));
+    let force = [[0.0; 3]; 3];
+    let mut state = surface
+        .initial_state_viscous(0.0, &q, &velocity, tension, viscosity, &force)
+        .unwrap();
+    let h = 0.08;
+    let k = 3.0_f64.sqrt() * sigma / (2.0 * masses[0]);
+    let c = 3.0_f64.sqrt() * kappa / masses[0];
+    let denominator = 1.0 + 0.5 * h * c + 0.25 * h * h * k;
+    let radius = (1.0 + 0.5 * h * c - 0.25 * h * h * k + h * 0.2) / denominator;
+    let speed = ((1.0 - 0.5 * h * c - 0.25 * h * h * k) * 0.2 - h * k) / denominator;
+    let report = surface
+        .advance_viscous(
+            &mut state,
+            tension,
+            tension,
+            viscosity,
+            &force,
+            h,
+            controls(),
+            || false,
+        )
+        .unwrap();
+    for i in 0..3 {
+        for d in 0..3 {
+            close(state.q[3 * i + d], radius * q[i][d], 3e-12);
+            close(state.v[3 * i + d], speed * q[i][d], 3e-12);
+        }
+    }
+    let midpoint_speed = 0.5 * (0.2 + speed);
+    close(
+        report.surface_viscous_dissipation_j,
+        3.0 * 3.0_f64.sqrt() * kappa * midpoint_speed * midpoint_speed * h,
+        3e-13,
+    );
+    close(
+        report.kinetic_change_j
+            + report.surface.energy_change_j
+            + report.surface_viscous_dissipation_j,
+        0.0,
+        3e-13,
+    );
+    assert!(report.surface_viscous_dissipation_j > 0.0);
+}
+
+#[test]
+fn viscous_surface_dissipates_energy_while_preserving_linear_and_angular_momentum() {
+    let (q, faces, masses, v) = tetrahedron();
+    let surface = CapillarySurfaceDynamics::try_new(&masses, &faces, 4, 4).unwrap();
+    let tension = SurfaceTensionField::Uniform(0.3);
+    let coefficients = [
+        SurfaceViscosity {
+            shear_n_s_m: 0.2,
+            dilatational_n_s_m: 0.4,
+        },
+        SurfaceViscosity {
+            shear_n_s_m: 0.5,
+            dilatational_n_s_m: 0.1,
+        },
+        SurfaceViscosity::ZERO,
+        SurfaceViscosity {
+            shear_n_s_m: 0.3,
+            dilatational_n_s_m: 0.2,
+        },
+    ];
+    let viscosity = SurfaceViscosityField::PerFace(&coefficients);
+    let force = [[0.0; 3]; 4];
+    let mut state = surface
+        .initial_state_viscous(0.0, &q, &v, tension, viscosity, &force)
+        .unwrap();
+    let (linear, angular) = momentum(&state, &masses);
+    let initial = kinetic(&masses, &state.v).unwrap()
+        + assemble_surface_tension_step(&q, &q, &faces, tension, tension)
+            .unwrap()
+            .energy
+            .energy_before_j;
+    let mut losses = 0.0;
+    for _ in 0..20 {
+        let report = surface
+            .advance_viscous(
+                &mut state,
+                tension,
+                tension,
+                viscosity,
+                &force,
+                0.005,
+                controls(),
+                || false,
+            )
+            .unwrap();
+        assert!(report.surface_viscous_dissipation_j > 0.0);
+        losses += report.surface_viscous_dissipation_j;
+        close(
+            report.kinetic_after_j + report.surface.energy_after_j + losses,
+            initial,
+            5e-11,
+        );
+        let (p, l) = momentum(&state, &masses);
+        for d in 0..3 {
+            close(p[d], linear[d], 3e-11);
+            close(l[d], angular[d], 3e-11);
+        }
+    }
+    assert!(losses > 1e-4);
+}
+
+#[test]
 fn g1_equilateral_breathing_matches_midpoint_solution_and_second_order_time_refinement() {
     let q = [
         [1.0, 0.0, 0.0],
