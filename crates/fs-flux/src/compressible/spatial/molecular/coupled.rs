@@ -236,6 +236,63 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
             .and_then(sgs::SubgridTransport::lagrangian_report)
     }
 
+    /// Additional numerical payload for paired Lagrangian momentum/heat:
+    /// 320 bytes/cell, excluding original flow and molecular workspaces.
+    #[cfg(feature = "experimental-sgs")]
+    pub fn required_lagrangian_dynamic_thermal_sgs_workspace_bytes(
+        flow: &Euler3d,
+    ) -> Result<usize, MolecularError> {
+        sgs::SubgridTransport::required_lagrangian_thermal_bytes(flow)
+    }
+
+    /// Fit independent stress and temperature-flux memories at physical step
+    /// starts. Both histories publish together only after complete acceptance.
+    ///
+    /// This shares the fixed-Prandtl path's split/retry/stabilization transaction.
+    /// Conservative faces evaluate current density, strain and source Cp; no
+    /// turbulent Prandtl number, extra heating source or stage-time memory is
+    /// introduced. Step and vorticity queries reuse prepared numerical storage.
+    /// The held coefficient/pathline update remains first order in time, and
+    /// requires a fully periodic Cartesian domain with resolved smooth fields.
+    #[cfg(feature = "experimental-sgs")]
+    pub fn with_lagrangian_dynamic_thermal_sgs(
+        flow: Euler3d,
+        law: L,
+        config: sgs::LagrangianThermalSubgridConfig,
+        maximum_subgrid_workspace_bytes: usize,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, MolecularError> {
+        poll(&mut cancelled)?;
+        let sgs = sgs::SubgridTransport::new_lagrangian_thermal(
+            &flow,
+            config,
+            maximum_subgrid_workspace_bytes,
+        )?;
+        poll(&mut cancelled)?;
+        let mut result = Self::new(flow, law, &mut cancelled)?;
+        result.molecular.sgs = Some(sgs);
+        poll(&mut cancelled)?;
+        Ok(result)
+    }
+
+    #[cfg(feature = "experimental-sgs")]
+    pub fn lagrangian_thermal_subgrid_config(&self) -> Option<sgs::LagrangianThermalSubgridConfig> {
+        self.molecular
+            .sgs
+            .as_ref()
+            .and_then(sgs::SubgridTransport::lagrangian_thermal_config)
+    }
+
+    /// Last committed scalar fit at lagrangian_subgrid_sample_time().
+    /// None before acceptance or when independent heat memory is not selected.
+    #[cfg(feature = "experimental-sgs")]
+    pub fn lagrangian_subgrid_heat_report(&self) -> Option<sgs::DynamicScalarReport> {
+        self.molecular
+            .sgs
+            .as_ref()
+            .and_then(sgs::SubgridTransport::lagrangian_heat_report)
+    }
+
     /// Fit momentum and temperature transport independently through both
     /// molecular halves of the existing atomic conservative composition.
     /// The byte budget covers additional SGS arrays, excluding original flow
@@ -861,7 +918,7 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
                     .as_mut()
                     .expect("the Lagrangian SGS owner was just selected")
                     .prepare_lagrangian(&mut filter, &self.accepted, &mut cancelled)?;
-                let fit = trial.report();
+                let fit = trial.reports();
                 let report = self.step_prepared(
                     maximum_duration,
                     controls,

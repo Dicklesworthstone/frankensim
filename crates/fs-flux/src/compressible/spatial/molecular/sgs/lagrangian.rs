@@ -1,31 +1,31 @@
-//! Pathline-averaged Favre--Germano stress on the physical gas trajectory.
+//! Pathline-averaged Favre--Germano transport on the physical gas trajectory.
 //!
-//! The shared history owner transports the signed Germano numerator and
-//! nonnegative denominator separately, with caller-authored relaxation time
-//! in seconds. One fit samples the ACCEPTED state at the START of each complete
-//! molecular/Euler/molecular interval. Its nonnegative C_s squared is held
+//! One fit samples the ACCEPTED state at the START of each complete
+//! molecular/Euler/molecular interval. Fitted nonnegative coefficients are held
 //! through both molecular halves, all SSP/RKL stages and all coupling retries.
-//! Each conservative face still evaluates its actual stage density and strain.
+//! Conservative faces still use their actual stage density and velocity gradient.
 //!
-//! Only acceptance of the complete physical interval commits that start-time
-//! sample. A failed or cancelled interval leaves both the accepted flow and
-//! history unchanged. Thus the next fit's elapsed memory time is the previous
-//! ACTUAL accepted duration, including an Euler/CFL-shortened interval; neither
-//! a requested duration nor a molecular pseudo-time advances the history.
+//! Only acceptance of the complete interval commits its start-time sample.
+//! Failed/cancelled steps and diagnostic observations preserve accepted history.
+//! Thus memory uses the previous ACTUAL accepted duration, including shortening,
+//! never molecular pseudo-time or the requested next duration.
 //!
-//! This is first-order pathline/source integration with a coefficient held
-//! over each physical step. A second-order flow integrator does not raise that
-//! temporal order. The explicit departure-distance admission still applies;
-//! the caller must resolve the memory time and trajectories with physical
-//! timesteps. The initial sample uses the shared local 27-cell fit.
+//! This is first-order pathline/source integration with coefficients held over
+//! a physical step. The explicit departure-distance admission remains active.
+//! Initial history uses the shared local 27-cell fit. Memory times are in seconds.
 //!
-//! Only fully periodic Cartesian grids with at least three cells per axis are
-//! admitted. Heat uses the authored fixed turbulent Prandtl number, not an
-//! independently fitted scalar memory. Wall/inflow memory, backscatter energy,
-//! isotropic SGS energy and shock/turbulence modeling are not implemented.
+//! Fully periodic Cartesian grids with at least three cells per axis are
+//! required. Heat may use fixed turbulent Prandtl or an independent scalar
+//! history. No wall/inflow memory, backscatter energy, isotropic SGS energy,
+//! pressure-dilatation, shock closure or DNS qualification is supplied.
 
 use super::*;
+use fs_lbm::sgs3::dynamic::lagrangian::scalar::{LagrangianDynamicScalar, LagrangianScalarTrial};
 use fs_lbm::sgs3::dynamic::lagrangian::{LagrangianDynamicSgs, LagrangianSgsTrial};
+use fs_lbm::sgs3::dynamic::scalar::DynamicScalarReport;
+
+mod thermal;
+pub use thermal::LagrangianThermalSubgridConfig;
 
 /// Physical-time Lagrangian stress controls and fixed gradient-diffusion heat.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -48,15 +48,109 @@ impl LagrangianSubgridConfig {
     }
 }
 
+#[derive(Clone, Copy)]
+enum LagrangianConfig {
+    FixedPrandtl(LagrangianSubgridConfig),
+    Thermal(LagrangianThermalSubgridConfig),
+}
+
+// Moving this enum detaches the complete trajectory, including both histories
+// for a scalar fit. No second outer stepping implementation is needed.
+pub(in crate::compressible::spatial::molecular) enum LagrangianFilter {
+    Momentum(LagrangianDynamicSgs),
+    Thermal(LagrangianDynamicScalar),
+}
+
+impl LagrangianFilter {
+    fn accepted_time(&self) -> Option<f64> {
+        match self {
+            Self::Momentum(filter) => filter.accepted_time(),
+            Self::Thermal(filter) => filter.accepted_time(),
+        }
+    }
+
+    pub(in crate::compressible::spatial::molecular) fn filter_width(&self) -> f64 {
+        match self {
+            Self::Momentum(filter) => filter.filter_width(),
+            Self::Thermal(filter) => filter.filter_width(),
+        }
+    }
+
+    fn workspace_bytes(&self) -> usize {
+        match self {
+            Self::Momentum(filter) => filter.workspace_bytes(),
+            Self::Thermal(filter) => filter.workspace_bytes(),
+        }
+    }
+}
+
+/// The lifetime belongs exclusively to the detached owner, not to face scratch.
+pub(in crate::compressible::spatial::molecular) enum LagrangianTrial<'a> {
+    Momentum(LagrangianSgsTrial<'a>),
+    Thermal(LagrangianScalarTrial<'a>),
+}
+
+impl LagrangianTrial<'_> {
+    pub(in crate::compressible::spatial::molecular) fn report(&self) -> DynamicSgsReport {
+        match self {
+            Self::Momentum(trial) => trial.report(),
+            Self::Thermal(trial) => trial.momentum_report(),
+        }
+    }
+
+    pub(in crate::compressible::spatial::molecular) fn reports(
+        &self,
+    ) -> (DynamicSgsReport, Option<DynamicScalarReport>) {
+        let heat = match self {
+            Self::Momentum(_) => None,
+            Self::Thermal(trial) => Some(trial.scalar_report()),
+        };
+        (self.report(), heat)
+    }
+
+    pub(in crate::compressible::spatial::molecular) fn coefficients_squared(
+        &self,
+    ) -> impl ExactSizeIterator<Item = f64> + '_ {
+        let n = match self {
+            Self::Momentum(trial) => trial.viscosities().len(),
+            Self::Thermal(trial) => trial.viscosities().len(),
+        };
+        (0..n).map(|cell| {
+            match self {
+                Self::Momentum(trial) => trial.coefficient_squared(cell),
+                Self::Thermal(trial) => trial.coefficient_squared(cell),
+            }
+            .expect("an admitted trial retains its coefficient shape")
+        })
+    }
+
+    fn scalar_coefficient(&self, cell: usize) -> Option<f64> {
+        match self {
+            Self::Momentum(_) => None,
+            Self::Thermal(trial) => trial.scalar_coefficient(cell),
+        }
+    }
+
+    pub(in crate::compressible::spatial::molecular) fn commit(self) {
+        match self {
+            Self::Momentum(trial) => trial.commit(),
+            Self::Thermal(trial) => trial.commit(),
+        }
+    }
+}
+
 pub(super) struct LagrangianTransport {
-    pub(super) config: LagrangianSubgridConfig,
-    // The coupled owner takes the filter while a borrowed history trial is
-    // alive. This also marks the only interval in which held faces may run.
-    filter: Option<LagrangianDynamicSgs>,
+    config: LagrangianConfig,
+    // None only while the coupled step or observation holds an admitted trial.
+    filter: Option<LagrangianFilter>,
     filter_width: f64,
     density: Vec<f64>,
     velocity: Vec<[f64; 3]>,
+    // Empty on the fixed-Prandtl path; no extra fields are allocated there.
+    temperature: Vec<f64>,
+    heat_coefficient: Vec<f64>,
     last_report: Option<DynamicSgsReport>,
+    last_heat_report: Option<DynamicScalarReport>,
 }
 
 impl LagrangianTransport {
@@ -64,10 +158,17 @@ impl LagrangianTransport {
         self.filter_width
     }
 
+    pub(super) fn fixed_prandtl_config(&self) -> Option<LagrangianSubgridConfig> {
+        match self.config {
+            LagrangianConfig::FixedPrandtl(config) => Some(config),
+            LagrangianConfig::Thermal(_) => None,
+        }
+    }
+
     pub(super) fn admit_prepared_step(&self) -> Result<(), MolecularError> {
         if self.filter.is_some() {
             return Err(MolecularError::Invalid(
-                "Lagrangian SGS requires a prepared coupled physical step",
+                "Lagrangian SGS requires a prepared coupled trajectory sample",
             ));
         }
         Ok(())
@@ -78,15 +179,7 @@ impl SubgridTransport {
     pub(in crate::compressible::spatial::molecular) fn required_lagrangian_bytes(
         flow: &Euler3d,
     ) -> Result<usize, MolecularError> {
-        let cells = flow.states.len();
-        // Shared filter and two history banks: 168 bytes/cell. Density,
-        // physical velocity and held face coefficient add 40 bytes/cell.
-        let fields = cells
-            .checked_mul(5 * core::mem::size_of::<f64>())
-            .ok_or(MolecularError::Invalid("Lagrangian SGS workspace overflow"))?;
-        LagrangianDynamicSgs::required_bytes(cells)?
-            .checked_add(fields)
-            .ok_or(MolecularError::Invalid("Lagrangian SGS workspace overflow"))
+        lagrangian_bytes(flow.states.len(), false)
     }
 
     pub(in crate::compressible::spatial::molecular) fn new_lagrangian(
@@ -95,18 +188,52 @@ impl SubgridTransport {
         maximum_bytes: usize,
     ) -> Result<Self, MolecularError> {
         config.validate()?;
+        Self::new_lagrangian_owner(flow, LagrangianConfig::FixedPrandtl(config), maximum_bytes)
+    }
+
+    fn new_lagrangian_owner(
+        flow: &Euler3d,
+        config: LagrangianConfig,
+        maximum_bytes: usize,
+    ) -> Result<Self, MolecularError> {
         dynamic::admit_domain(flow)?;
-        dynamic::admit_bytes(Self::required_lagrangian_bytes(flow)?, maximum_bytes)?;
         let n = flow.states.len();
-        let filter = LagrangianDynamicSgs::new(flow.grid.shape, flow.grid.spacing, maximum_bytes)?;
+        let thermal = matches!(config, LagrangianConfig::Thermal(_));
+        dynamic::admit_bytes(lagrangian_bytes(n, thermal)?, maximum_bytes)?;
+        let filter = if thermal {
+            LagrangianFilter::Thermal(LagrangianDynamicScalar::new(
+                flow.grid.shape,
+                flow.grid.spacing,
+                maximum_bytes,
+            )?)
+        } else {
+            LagrangianFilter::Momentum(LagrangianDynamicSgs::new(
+                flow.grid.shape,
+                flow.grid.spacing,
+                maximum_bytes,
+            )?)
+        };
         let filter_width = filter.filter_width();
         let density = allocated(n, 0.0)?;
         let velocity = allocated(n, [0.0; 3])?;
         let dynamic_coefficient_squared = allocated(n, 0.0)?;
+        let temperature = if thermal {
+            allocated(n, 0.0)?
+        } else {
+            Vec::new()
+        };
+        let heat_coefficient = if thermal {
+            allocated(n, 0.0)?
+        } else {
+            Vec::new()
+        };
         let bytes = filter.workspace_bytes()
-            + density.capacity() * core::mem::size_of::<f64>()
-            + velocity.capacity() * core::mem::size_of::<[f64; 3]>()
-            + dynamic_coefficient_squared.capacity() * core::mem::size_of::<f64>();
+            + (density.capacity()
+                + dynamic_coefficient_squared.capacity()
+                + temperature.capacity()
+                + heat_coefficient.capacity())
+                * core::mem::size_of::<f64>()
+            + velocity.capacity() * core::mem::size_of::<[f64; 3]>();
         dynamic::admit_bytes(bytes, maximum_bytes)?;
         Ok(Self {
             closure: SubgridClosure::Lagrangian(LagrangianTransport {
@@ -115,7 +242,10 @@ impl SubgridTransport {
                 filter_width,
                 density,
                 velocity,
+                temperature,
+                heat_coefficient,
                 last_report: None,
+                last_heat_report: None,
             }),
             wall_models: [None; 6],
             dynamic_coefficient_squared,
@@ -126,7 +256,7 @@ impl SubgridTransport {
         &self,
     ) -> Option<LagrangianSubgridConfig> {
         match &self.closure {
-            SubgridClosure::Lagrangian(dynamic) => Some(dynamic.config),
+            SubgridClosure::Lagrangian(dynamic) => dynamic.fixed_prandtl_config(),
             _ => None,
         }
     }
@@ -138,7 +268,7 @@ impl SubgridTransport {
             SubgridClosure::Lagrangian(dynamic) => dynamic
                 .filter
                 .as_ref()
-                .and_then(LagrangianDynamicSgs::accepted_time)
+                .and_then(LagrangianFilter::accepted_time)
                 .map(Time::new),
             _ => None,
         }
@@ -155,21 +285,20 @@ impl SubgridTransport {
 
     pub(in crate::compressible::spatial::molecular) fn take_lagrangian_filter(
         &mut self,
-    ) -> Option<LagrangianDynamicSgs> {
+    ) -> Option<LagrangianFilter> {
         match &mut self.closure {
             SubgridClosure::Lagrangian(dynamic) => dynamic.filter.take(),
             _ => None,
         }
     }
 
-    // The returned borrow belongs only to the detached history filter. The
-    // face cache and complete coupled solver remain available during its trial.
+    // The returned borrow belongs only to the detached history filter.
     pub(in crate::compressible::spatial::molecular) fn prepare_lagrangian<'a>(
         &mut self,
-        filter: &'a mut LagrangianDynamicSgs,
+        filter: &'a mut LagrangianFilter,
         flow: &Euler3d,
         cancelled: &mut impl FnMut() -> bool,
-    ) -> Result<LagrangianSgsTrial<'a>, MolecularError> {
+    ) -> Result<LagrangianTrial<'a>, MolecularError> {
         let SubgridClosure::Lagrangian(dynamic) = &mut self.closure else {
             return Err(MolecularError::Invalid("missing Lagrangian SGS owner"));
         };
@@ -181,14 +310,37 @@ impl SubgridTransport {
             let primitive = state.primitive(&flow.gas, &mut *cancelled)?;
             dynamic.density[cell] = primitive.density;
             dynamic.velocity[cell] = primitive.velocity;
+            if let Some(temperature) = dynamic.temperature.get_mut(cell) {
+                *temperature = primitive.temperature;
+            }
         }
-        let trial = filter.prepare(
-            dynamic.config.model,
-            flow.time,
-            &dynamic.density,
-            &dynamic.velocity,
-            &mut *cancelled,
-        )?;
+        let trial = match (dynamic.config, filter) {
+            (LagrangianConfig::FixedPrandtl(config), LagrangianFilter::Momentum(filter)) => {
+                LagrangianTrial::Momentum(filter.prepare(
+                    config.model,
+                    flow.time,
+                    &dynamic.density,
+                    &dynamic.velocity,
+                    &mut *cancelled,
+                )?)
+            }
+            (LagrangianConfig::Thermal(config), LagrangianFilter::Thermal(filter)) => {
+                LagrangianTrial::Thermal(filter.prepare(
+                    config.momentum,
+                    config.heat,
+                    flow.time,
+                    &dynamic.density,
+                    &dynamic.velocity,
+                    &dynamic.temperature,
+                    &mut *cancelled,
+                )?)
+            }
+            _ => {
+                return Err(MolecularError::Invalid(
+                    "Lagrangian history and controls differ",
+                ));
+            }
+        };
         for (cell, (coefficient, fitted)) in self
             .dynamic_coefficient_squared
             .iter_mut()
@@ -200,24 +352,48 @@ impl SubgridTransport {
             }
             *coefficient = fitted;
         }
+        for (cell, coefficient) in dynamic.heat_coefficient.iter_mut().enumerate() {
+            if cell % 64 == 0 {
+                poll(cancelled)?;
+            }
+            *coefficient = trial
+                .scalar_coefficient(cell)
+                .ok_or(MolecularError::Invalid(
+                    "Lagrangian scalar coefficient shape differs",
+                ))?;
+        }
         poll(cancelled)?;
         Ok(trial)
     }
 
-    /// Restore the detached filter on BOTH success and error. Only a committed
-    /// complete interval supplies a new public report.
+    /// Restore on success and error; only whole-step acceptance publishes reports.
     pub(in crate::compressible::spatial::molecular) fn restore_lagrangian_filter(
         &mut self,
-        filter: LagrangianDynamicSgs,
-        committed_report: Option<DynamicSgsReport>,
+        filter: LagrangianFilter,
+        committed_reports: Option<(DynamicSgsReport, Option<DynamicScalarReport>)>,
     ) {
         let SubgridClosure::Lagrangian(dynamic) = &mut self.closure else {
-            unreachable!("the coupled step retains its original SGS owner");
+            unreachable!("the coupled owner retains its original SGS choice");
         };
         debug_assert!(dynamic.filter.is_none());
         dynamic.filter = Some(filter);
-        if let Some(report) = committed_report {
-            dynamic.last_report = Some(report);
+        if let Some((momentum, heat)) = committed_reports {
+            dynamic.last_report = Some(momentum);
+            dynamic.last_heat_report = heat;
         }
     }
+}
+
+fn lagrangian_bytes(cells: usize, thermal: bool) -> Result<usize, MolecularError> {
+    let fields = cells
+        .checked_mul(if thermal { 56 } else { 40 })
+        .ok_or(MolecularError::Invalid("Lagrangian SGS workspace overflow"))?;
+    let filter = if thermal {
+        LagrangianDynamicScalar::required_bytes(cells)?
+    } else {
+        LagrangianDynamicSgs::required_bytes(cells)?
+    };
+    filter
+        .checked_add(fields)
+        .ok_or(MolecularError::Invalid("Lagrangian SGS workspace overflow"))
 }

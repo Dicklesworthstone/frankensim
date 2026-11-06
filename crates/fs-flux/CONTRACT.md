@@ -7293,3 +7293,32 @@ Five focused regression groups cover conservative stress/species/heat/enthalpy,
 physical histories and formation-energy gauge, forced retries and cancellation,
 multistage RKL replay, and budget/admission/molecular-limit behavior. Rustfmt and
 bounded source review completed; Rust tests were not compiled or executed here.
+
+### Independent Lagrangian temperature-flux history
+
+The experimental periodic gas composition also accepts
+LagrangianThermalSubgridConfig through
+MolecularEuler3d::with_lagrangian_dynamic_thermal_sgs. Momentum and temperature
+use independent shared Germano histories and authored memory times, with one
+accepted start-state sample and one atomic history commit for the whole physical
+split. The original step and vorticity transaction is shared with the fixed-Prandtl
+path. Internal SSP/RKL stages, retries, failed steps and observations cannot
+independently age either history or publish a partial pair of fit reports.
+
+Faces reconstruct their full current gradient once and evaluate both held
+coefficients against current face density and strain. Heat uses the independent
+C_phi coefficient and original source Cp(T_face); it remains active when modeled
+momentum viscosity is zero. Both actual stress/molecular and heat/molecular
+ratios are admitted, with the original conservative total-energy flux and
+stability estimate and no second heating source. The paired history/filter and
+all physical staging/held fields cost 320 numerical bytes/cell. The fixed-Prandtl
+path retains its 208-byte/cell payload, and neither path allocates history during
+stepping. Both remain first-order in the pathline/coefficient time update.
+
+Four focused regression groups cover shared-history agreement, independent
+nonzero heat with zero modeled stress, actual conservative face fluxes,
+observation and late-RKL cancellation/replay, budgets, thermal refusal and the
+exact uniform molecular limit. Rustfmt and independent bounded source review
+completed; these gas integration tests were not compiled or executed here.
+Periodic-domain, smooth-field, exploration-only and unqualified turbulence/model
+boundaries remain; no wall/inflow memory or compressible SGS-energy model is added.

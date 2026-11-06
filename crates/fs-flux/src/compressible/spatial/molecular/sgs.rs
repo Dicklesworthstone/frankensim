@@ -43,9 +43,10 @@ mod dynamic;
 pub use dynamic::DynamicSubgridConfig;
 mod lagrangian;
 pub use fs_lbm::sgs3::dynamic::lagrangian::LagrangianSgsConfig;
-pub use fs_lbm::sgs3::dynamic::scalar::DynamicScalarConfig;
+pub use fs_lbm::sgs3::dynamic::lagrangian::scalar::LagrangianScalarConfig;
+pub use fs_lbm::sgs3::dynamic::scalar::{DynamicScalarConfig, DynamicScalarReport};
 pub use fs_lbm::sgs3::dynamic::{DynamicAveraging, DynamicSgsConfig, DynamicSgsReport};
-pub use lagrangian::LagrangianSubgridConfig;
+pub use lagrangian::{LagrangianSubgridConfig, LagrangianThermalSubgridConfig};
 mod thermal;
 pub use thermal::DynamicThermalSubgridConfig;
 mod channel;
@@ -220,6 +221,26 @@ impl SubgridTransport {
         molecular_mu: f64,
         molecular_conductivity: f64,
     ) -> Result<(f64, f64), MolecularError> {
+        if let SubgridClosure::Lagrangian(dynamic) = &self.closure {
+            if let Some(config) = dynamic.thermal_config() {
+                return dynamic.thermal_face_coefficients(
+                    config,
+                    gas,
+                    left,
+                    right,
+                    axis,
+                    face,
+                    distance,
+                    &self.dynamic_coefficient_squared,
+                    primitive,
+                    gradient,
+                    temperature,
+                    pressure,
+                    molecular_mu,
+                    molecular_conductivity,
+                );
+            }
+        }
         let mu_t = if let SubgridClosure::Local {
             config,
             widths,
@@ -283,10 +304,15 @@ impl SubgridTransport {
                 dynamic.config.turbulent_prandtl,
                 dynamic.config.model.maximum_eddy_to_molecular,
             ),
-            SubgridClosure::Lagrangian(dynamic) => (
-                dynamic.config.turbulent_prandtl,
-                dynamic.config.model.maximum_eddy_to_molecular,
-            ),
+            SubgridClosure::Lagrangian(dynamic) => {
+                let config = dynamic
+                    .fixed_prandtl_config()
+                    .expect("independent Lagrangian heat was evaluated above");
+                (
+                    config.turbulent_prandtl,
+                    config.model.maximum_eddy_to_molecular,
+                )
+            }
             SubgridClosure::DynamicThermal(dynamic) => {
                 return dynamic.face_coefficients(
                     gas,

@@ -5,6 +5,9 @@ use crate::compressible::spatial::molecular::sgs::{
 use crate::compressible::spatial::{BodyForce3d, ForceControl3d};
 use fs_lbm::sgs3::dynamic::lagrangian::LagrangianDynamicSgs;
 
+#[path = "lagrangian/thermal_tests.rs"]
+mod thermal;
+
 fn memory_config() -> LagrangianSubgridConfig {
     LagrangianSubgridConfig {
         model: LagrangianSgsConfig {
