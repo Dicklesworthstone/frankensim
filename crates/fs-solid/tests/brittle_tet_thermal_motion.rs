@@ -671,3 +671,6 @@ fn source_reference_work_solver_and_budget_refusals_preserve_damaged_motion() {
 
 #[path = "brittle_tet_thermal_motion/midpoint.rs"]
 mod midpoint;
+
+#[path = "brittle_tet_thermal_motion/modes.rs"]
+mod modes;

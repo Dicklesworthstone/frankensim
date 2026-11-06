@@ -1,5 +1,43 @@
 # fs-solid CONTRACT
 
+## Frozen-history brittle vibration operators
+
+`BrittleTetMotion::frozen_vibration_pencil` and
+`ThermalBrittleTetMotion::frozen_vibration_pencil` expose sparse `K, M`
+operators from the original accepted histories. Native cohesive integrity
+supplies conservative unloading storage: complete tensile/shear failure
+retains physical zero stiffness, compression retains its original penalty,
+and integrity is never reconstructed as `1 - damage`. The existing P1 tangent
+assembler supplies work-conjugate stiffness, while the exact retained
+consistent reference mass supplies inertia. Temperature-dependent current
+density does not replace reference mass. The thermal owner uses accepted
+mechanical strain to choose opening/compression, holding thermal eigenstrain
+and current coefficients fixed.
+
+Explicit incremental supports select ascending free coordinates of both
+operators. Count bounds, owner/shape checks and cancellation propagate before
+returning a complete immutable observation. Extraction does not advance
+damage, temperature or time, consume motion steps, or add artificial residual
+stiffness, modal loss or fracture heat. Strictly open released-face pairs may
+be observed; touching, closed or tolerance-ambiguous independent traces need
+a contact tangent and refuse. Tied crack-front nodes remain tied. A damaged
+material exactly on its opening/compression switch also refuses.
+
+This is a conditional frozen-history linearization. The caller establishes
+equilibrium when equilibrium frequencies are required. A state on a damage
+envelope can evolve under arbitrarily small outward loading; this observation
+does not establish a finite vibration amplitude, evolving-fracture stability,
+geometric prestress stiffness, thermoelastic damping, contact-free trajectories,
+new collision pairs or acoustic radiation. Existing `fs-modal` pencil
+consumers remain the eigensolver boundary.
+
+The focused `brittle_tet_modes` and thermal-motion `modes` regressions specify
+analytic frequency loss, exact failed null modes, retained compression,
+tensor-work symmetry, consistent mass/support projection, current thermal
+stiffness with original inertia, immutable history and refusal behavior.
+Native mechanical and thermal fragment-motion fixtures also specify separate
+open-fragment operators and rejection at touching arrival.
+
 ## Native rod torsional stress observations
 
 `MaterialRod::segment_torsional_stress` and the same method on

@@ -7,6 +7,7 @@ use fs_solid::brittle::solid::dynamics::fracture::contact::{
 use fs_solid::brittle::solid::dynamics::midpoint::BrittleTetMidpointControls;
 use fs_solid::brittle::solid::dynamics::{BrittleTetDynamicControls, BrittleTetDynamicError};
 use fs_solid::brittle::solid::expansion::dynamics::ThermalBrittleTetMotion;
+use fs_solid::brittle::solid::expansion::dynamics::modes::FrozenBrittleModesControls;
 use fs_solver::CheckedCgConfig;
 
 #[path = "motion/approach.rs"]
@@ -360,6 +361,15 @@ fn thermally_fractured_body_impacts_with_retained_reference_mass_and_resumes_nat
             )
             .unwrap()
             .motion;
+        let mode_controls = FrozenBrittleModesControls {
+            maximum_dofs: 24,
+            maximum_staged_entries: 288,
+        };
+        let open_modes = moving_out
+            .frozen_vibration_pencil(&[], mode_controls, cx)
+            .unwrap();
+        close(open_modes.reference_mass_kg(), 2.0, 1e-15);
+        assert_eq!(open_modes.element_damage(), &[1.0, 1.0]);
         let mut reversed = opened.clone();
         for u in &mut reversed {
             for c in 0..2 {
@@ -394,6 +404,10 @@ fn thermally_fractured_body_impacts_with_retained_reference_mass_and_resumes_nat
             )
             .unwrap()
             .motion;
+        assert!(matches!(
+            arrived.frozen_vibration_pencil(&[], mode_controls, cx),
+            Err(BrittleTetError::Invalid(_))
+        ));
         assert_eq!(arrived.accepted_steps(), 4);
         assert_eq!(arrived.remaining_steps(), 2);
         assert_eq!(arrived.reference_density_kg_m3(), &[DENSITY; 2]);

@@ -24,6 +24,8 @@
 pub mod fracture;
 /// Work-conjugate thermal fracture with centered native momentum.
 pub mod midpoint;
+/// Frozen native damage and current thermal stiffness with original reference inertia.
+pub mod modes;
 
 use std::sync::Arc;
 

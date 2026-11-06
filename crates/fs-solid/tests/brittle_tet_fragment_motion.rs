@@ -320,6 +320,21 @@ fn failed_original_body_splits_and_continues_with_native_mass_and_midpoint_momen
         let handoff = old
             .split_fracture(&cuts, &target, fracture_controls(), 1e-12, cx)
             .unwrap();
+        // A frozen BULK pencil cannot silently omit newly released contact
+        // constraints, even though complete bulk damage has a valid tangent.
+        assert!(matches!(
+            handoff.motion.frozen_vibration_pencil(
+                &[],
+                fs_solid::brittle::solid::dynamics::modes::FrozenBrittleModesControls {
+                    maximum_dofs: 24,
+                    maximum_staged_entries: 288,
+                },
+                cx,
+            ),
+            Err(BrittleTetError::Invalid(
+                "released brittle faces require an explicit contact linearization"
+            ))
+        ));
         assert_eq!(handoff.inventory_before, handoff.inventory_after);
         assert_eq!(handoff.fragments.len(), 2);
         assert_eq!(
@@ -419,6 +434,36 @@ fn failed_original_body_splits_and_continues_with_native_mass_and_midpoint_momen
             );
             motion = step.motion;
         }
+        assert_eq!(motion.accepted_steps(), 5);
+        assert_eq!(motion.remaining_steps(), 0);
+        // The resolved outward rigid motion has now opened every paired face
+        // beyond its original tolerance. Frozen fragment vibration may use the
+        // unchanged native bulk and consistent mass without a contact tangent.
+        let history = motion.solid().solution().clone();
+        let fracture_loss = motion.solid().fracture_dissipation_j();
+        let operator = motion.frozen_vibration_pencil(
+            &[],
+            fs_solid::brittle::solid::dynamics::modes::FrozenBrittleModesControls {
+                maximum_dofs: 24,
+                maximum_staged_entries: 288,
+            },
+            cx,
+        ).unwrap();
+        assert_eq!(operator.free_dofs(), &(0..24).collect::<Vec<_>>());
+        close(operator.reference_mass_kg(), 2.0, 1e-15);
+        assert_eq!(operator.element_damage(), &[1.0, 1.0]);
+        for &a in &target.tetrahedra()[0] {
+            for &b in &target.tetrahedra()[1] {
+                for component_a in 0..3 {
+                    for component_b in 0..3 {
+                        assert_eq!(operator.stiffness_n_m().get(3*a+component_a, 3*b+component_b), 0.0);
+                        assert_eq!(operator.mass_kg().get(3*a+component_a, 3*b+component_b), 0.0);
+                    }
+                }
+            }
+        }
+        assert_eq!(motion.solid().solution(), &history);
+        assert_eq!(motion.solid().fracture_dissipation_j(), fracture_loss);
         assert_eq!(motion.accepted_steps(), 5);
         assert_eq!(motion.remaining_steps(), 0);
         assert!(matches!(

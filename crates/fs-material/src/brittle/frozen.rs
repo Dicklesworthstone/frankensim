@@ -37,11 +37,11 @@ impl BrittleCrackBand {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Voigt;
     use crate::brittle::{BrittleCrackBandParameters, BrittleCrackBandSettings};
     use crate::cohesive::CohesiveError;
     use crate::elastic::IsotropicElastic;
     use crate::tensor::{contract, rotate, rotation};
-    use crate::{SmallStrainLaw, Voigt};
 
     fn law(normal: [f64; 3]) -> BrittleCrackBand {
         BrittleCrackBand::new(
@@ -156,7 +156,8 @@ mod tests {
     #[test]
     fn g3_rotated_frozen_stiffness_preserves_tensor_work_symmetry_and_psd() {
         let original = law([1.0, 0.0, 0.0]);
-        let q = rotation([0.3, -0.5, 0.8], 0.73);
+        let axis = [0.3, -0.5, 0.8].map(|v| v / fs_math::det::sqrt(0.98));
+        let q = rotation(axis, 0.73);
         let rotated = law([q[0][0], q[1][0], q[2][0]]);
         let e = [0.012, 0.0, 0.0, 0.0, 0.0, 0.0];
         let a = original.trial(&e, &original.initial_state()).unwrap().state;

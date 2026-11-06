@@ -28,6 +28,9 @@ pub mod time;
 /// Conservative continuation after complete traction-free fracture cuts.
 pub mod fracture;
 
+/// Conditional vibration operators with the original accepted damage held fixed.
+pub mod modes;
+
 use std::sync::Arc;
 
 use fs_exec::Cx;
