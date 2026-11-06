@@ -18,6 +18,9 @@ use fs_aeroac::observation::HarmonicSampleClock;
 use fs_bem::near_field::FirstOrder;
 use fs_math::dd::Dd;
 
+/// Doppler-correct pressure from uniformly translating volume-stress histories.
+pub mod moving;
+
 /// Physical pressure, particle motion, intensity and ideal microphone output.
 pub type QuadrupoleFieldSample = super::moving::field::CompactFieldSample;
 

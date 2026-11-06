@@ -2833,3 +2833,23 @@ Hessian for accelerating approach/recession/transverse motion at three
 refinement steps, rotation covariance and admission refusals. This remains
 prescribed linear compact-source acoustics in a homogeneous lossless medium,
 without finite-source, viscous, scattering, feedback or measured-SPL claims.
+
+## Uniformly moving transient quadrupole pressure
+
+`MovingCompactObserver::prepare_uniform_quadrupole` evaluates the complete
+spatial Hessian of `Q_ij(tau)/(4*pi*R*kappa)`, `kappa = 1-n.v_source/c`,
+using the original analytic retarded clock and Mach/clearance/residual limits.
+Eighteen fixed coefficients retain near, induction and radiation pressure,
+the physical stress trace and doubled symmetric shear entries. Q retains
+physical N m units; Qdot/Qddot are its source-clock derivatives. All use fixed
+medium-frame axes; translation adds no rotation or density factor. Preparation and DD contraction
+allocate nothing. The optional moving-receiver clock ratio is
+`(1-n.v_receiver/c)/(1-n.v_source/c)`, without a receiver pressure multiplier.
+
+Scope remains uniform subsonic compact-source translation in a homogeneous
+quiescent lossless medium. Source history and derivative consistency are
+caller-owned. Pressure does not require the stress integral; moving quadrupole
+particle velocity, acceleration, reflected paths and finite-cell quadrature
+are not inferred. `tests/moving_quadrupole.rs` specifies stationary radial
+orders, independent retarded Green-Hessian refinement, physical clock ratios,
+rotation covariance and domain refusal.

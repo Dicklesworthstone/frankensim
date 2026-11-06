@@ -1148,3 +1148,24 @@ The original spatial midpoint solve accepts real incident/outgoing guide waves t
 ### Finite-temperature full-tensor spatial piezoelectric dynamics
 
 `spatial::transient::load::thermal::tensor::ThermalTensorPiezoelectricBody` couples the full native 3-D spatial fields and consistent-mass motion to one uniform finite ceramic temperature, with original per-cell tensor orientation and complete source-bound caloric inventory. Temperature proposals refresh the complete affine stress-charge C/e/epsilon source tensors and reassemble the same native operators under original budgets. The model may own refreshed tensors while borrowing unchanged geometry; identical-temperature trials reuse accepted operators. Each changed-temperature trial first solves electrostatics at fixed original displacement/free charge, restores physical momentum/history, and then runs the original shunt/current/support-motion midpoint solve. Signed reversible field/caloric transfer is derived from the full Helmholtz and entropy endpoints; actual resistor Joule heat is deposited only through its original receiver. Independent acceptance checks total field internal energy, kinetic energy, all finite caloric energy and actual external work/heat. Complete source/context/density/inventory checks, declared strain/electric-displacement bounds and a whole-interval caloric-plus-field capacity floor precede coupled Newton publication. This is fixed-reference geometry with one uniform ceramic temperature, fixed zero-voltage grounds and charge/current electrodes; intrinsic memory, nonzero ideal-voltage constraints, expansion, pyroelectric offsets, phase transitions and independent cell temperatures require additional accounted models. Endpoint-temperature coefficients make the thermal feedback generally first order in time. Four focused synthetic regression definitions cover moving/rotated supports, reversible caloric changes, heating-dependent capacitance at conserved charge across mesh refinements, separate finite shunt heating and transactional refusals; native execution remains a separate verification obligation.
+
+## Moving stress histories on the pressure/PCM path
+
+`pcm_wav::observation::quadrupole::moving::MovingQuadrupoleRenderer` reads
+original medium-frame Q/Qdot/Qddot at each source's retarded time and sums
+native moving quadrupole pressure before audio conversion. Its existing
+`PressureRenderer` interface feeds the original decimator and WAV writer.
+Complete-window admission covers source support, continuous closest approach,
+maximum Doppler clock rate, finite work and scratch budgets. Received
+bandwidth must cover Doppler and geometric amplitude modulation below Nyquist;
+a declaration does not establish source interpolation or spectral accuracy.
+
+Callbacks allocate nothing, preserve global integer sample clocks, use DD
+source summation and publish output/cursor only after complete success.
+Out-of-support queries, failed reads and cancellation preserve accepted state.
+Scope is uniform source translation, a fixed omnidirectional receiver and
+homogeneous quiescent lossless propagation on the original moving operator's
+f64 clock domain. No source evolution, interpolation, particle velocity or
+directional/reflected moving field is inferred.
+`tests/moving_quadrupole_pcm.rs` covers history/bandwidth/clearance refusal,
+coherent cancellation, block invariance, atomic failure and native WAV parity.

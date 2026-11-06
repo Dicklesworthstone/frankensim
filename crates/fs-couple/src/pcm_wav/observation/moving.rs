@@ -737,7 +737,7 @@ fn finite_strength(s: CompactSourceStrength) -> bool {
     let (values, slopes) = components(s);
     values.iter().chain(&slopes).all(|v| v.is_finite())
 }
-fn clock_time(config: MovingPressureConfig, sample: u64) -> Result<f64, RenderError> {
+pub(super) fn clock_time(config: MovingPressureConfig, sample: u64) -> Result<f64, RenderError> {
     let time = (Dd::from_f64(config.first_receiver_time_s)
         + Dd::from_f64(sample as f64) / Dd::from_f64(f64::from(config.sample_rate_hz)))
     .to_f64();
