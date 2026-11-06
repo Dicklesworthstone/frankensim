@@ -618,20 +618,64 @@ impl PistonRadiation {
         let held = self.impedance * self.memory(stage.stage);
         let gain = self.rho_c * (1.0 - self.weights[0]);
         // G(p) = p - p_room - gain u(p) + held is strictly increasing in p.
+        // A previous step's pressure is only a seed: a changed interior trace
+        // may put that seed outside the source's caloric path. The unchanged
+        // interior state always supplies an admissible starting point.
         let mut pressure = self.guess;
-        let mut wave = gas.end_wave(interior, 1.0, pressure, || false)?;
+        let mut wave = match gas.end_wave(interior, 1.0, pressure, || false) {
+            Ok(wave) => wave,
+            Err(GasError::CaloricPath(_)) => {
+                pressure = interior.pressure;
+                gas.end_wave(interior, 1.0, pressure, || false)?
+            }
+            Err(error) => return Err(error),
+        };
         for _ in 0..64 {
             let residual = pressure - self.room.pressure - gain * wave.primitive.velocity + held;
-            let slope = 1.0 - gain * wave.velocity_per_pressure;
-            let next = pressure - residual / slope;
-            if !positive(next) {
-                return Err(GasError::Invalid(
-                    "radiating end pressure left the gas domain",
-                ));
+            if residual.abs() <= 1e-12 * self.room.pressure {
+                break;
             }
+            let slope = 1.0 - gain * wave.velocity_per_pressure;
+            let mut increment = -residual / slope;
+            let mut accepted = None;
+            let mut source_refusal = None;
+            // Keep the normal Newton path to one source evaluation. Large
+            // pressure changes can otherwise propose negative absolute pressure,
+            // or a wave beyond the source interval despite an admissible root.
+            // Backtracking changes the numerical iterate, never the physical
+            // pressure law or the declared source temperature bounds.
+            for _ in 0..32 {
+                let next = pressure + increment;
+                if next == pressure {
+                    break;
+                }
+                if positive(next) {
+                    match gas.end_wave(interior, 1.0, next, || false) {
+                        Ok(candidate) => {
+                            let next_residual =
+                                next - self.room.pressure - gain * candidate.primitive.velocity
+                                    + held;
+                            if next_residual.abs() < residual.abs() {
+                                accepted = Some((next, candidate));
+                                break;
+                            }
+                        }
+                        Err(error @ GasError::CaloricPath(_)) => source_refusal = Some(error),
+                        Err(error) => return Err(error),
+                    }
+                }
+                increment *= 0.5;
+            }
+            let Some((next, candidate)) = accepted else {
+                // Retain the original source refusal when the physical root
+                // cannot be reached inside its supported caloric path.
+                return Err(source_refusal.unwrap_or(GasError::Invalid(
+                    "radiating end characteristic did not converge",
+                )));
+            };
             let converged = (next - pressure).abs() <= 1e-13 * pressure;
             pressure = next;
-            wave = gas.end_wave(interior, 1.0, pressure, || false)?;
+            wave = candidate;
             if converged {
                 break;
             }

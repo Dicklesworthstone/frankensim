@@ -597,6 +597,151 @@ fn piston_weights_sum_to_one_and_reproduce_the_struve_impedance() {
     }
 }
 
+// Independent constant-Cp shock/fan characteristic (Toro's pressure function).
+// The production path evaluates the original NASA-9 source instead.
+fn constant_cp_end_velocity(interior: Primitive, gamma: f64, pressure: f64) -> f64 {
+    let jump = if pressure > interior.pressure {
+        let beta = (gamma - 1.0) / (gamma + 1.0);
+        (pressure - interior.pressure)
+            * det::sqrt(
+                2.0 / ((gamma + 1.0) * interior.density) / (pressure + beta * interior.pressure),
+            )
+    } else {
+        2.0 * interior.sound_speed / (gamma - 1.0)
+            * ((pressure / interior.pressure).powf((gamma - 1.0) / (2.0 * gamma)) - 1.0)
+    };
+    interior.velocity - jump
+}
+
+#[test]
+fn radiation_pressure_solve_matches_shock_and_fan_roots_after_large_trace_changes() {
+    let state = air();
+    let gas = air_source(&state);
+    let room_q = gas.conserved(state.density, 0.0, state.pressure).unwrap();
+    let room = gas.primitive(room_q, || false).unwrap();
+    // Pressure relative to room, interior Mach number, previous pressure seed,
+    // and a steady past end velocity initializing the radiation memory.
+    for (pressure_ratio, mach, seed_ratio, past_mach) in [
+        (0.1, -0.5, 1.0, 0.0),
+        (0.1, -0.5, 100.0, 0.0),
+        (5.0, 0.5, 0.1, 0.0),
+        (1.0, -0.1, 1.0, 0.05),
+    ] {
+        let mut radiation = PistonRadiation::new(0.006, room, STEP_S).unwrap();
+        radiation.guess = seed_ratio * room.pressure;
+        radiation
+            .history
+            .fill(radiation.area * past_mach * room.sound_speed);
+        let pressure = pressure_ratio * room.pressure;
+        let q = gas
+            .conserved(
+                pressure / (gas.gas_constant() * room.temperature),
+                mach * room.sound_speed,
+                pressure,
+            )
+            .unwrap();
+        let interior = gas.primitive(q, || false).unwrap();
+        let stage = PortStage {
+            stage: 0,
+            time: 0.0,
+            dt: STEP_S,
+            left: (q, interior),
+            right: (q, interior),
+        };
+        let held = radiation.impedance * radiation.memory(0);
+        let gain = radiation.rho_c * (1.0 - radiation.weights[0]);
+        if pressure_ratio == 0.1 && seed_ratio == 1.0 {
+            // This admitted initial source wave used to abort immediately:
+            // its unguarded Newton iterate has negative absolute pressure.
+            let seed = gas
+                .end_wave(interior, 1.0, radiation.guess, || false)
+                .unwrap();
+            let residual = radiation.guess - room.pressure - gain * seed.primitive.velocity + held;
+            assert!(radiation.guess - residual / (1.0 - gain * seed.velocity_per_pressure) < 0.0);
+        } else if seed_ratio != 1.0 {
+            // A previous trace's valid pressure can be outside this trace's
+            // caloric wave path; it must not become a physical admission rule.
+            assert!(
+                gas.end_wave(interior, 1.0, radiation.guess, || false)
+                    .is_err()
+            );
+        }
+        let residual = |p: f64| {
+            p - room.pressure - gain * constant_cp_end_velocity(interior, state.gamma, p) + held
+        };
+        let (mut lower, mut upper) = (room.pressure * 0.001, room.pressure * 10.0);
+        assert!(residual(lower) < 0.0 && residual(upper) > 0.0);
+        for _ in 0..96 {
+            let midpoint = lower.midpoint(upper);
+            if residual(midpoint) < 0.0 {
+                lower = midpoint;
+            } else {
+                upper = midpoint;
+            }
+        }
+        let reference_pressure = lower.midpoint(upper);
+        let reference_velocity =
+            constant_cp_end_velocity(interior, state.gamma, reference_pressure);
+        let history = radiation.history.clone();
+        let flux = radiation.flux(&gas, &stage).unwrap();
+        let (flow, solved_pressure) = radiation.pending.unwrap();
+        assert!((solved_pressure / reference_pressure - 1.0).abs() < 2e-10);
+        assert!((flow / radiation.area - reference_velocity).abs() < 2e-8);
+        assert!(residual(solved_pressure).abs() < 2e-7 * room.pressure);
+        assert_eq!(
+            radiation.history, history,
+            "trial flow must remain uncommitted"
+        );
+        // The actual Euler flux retains the correct entropy donor on each
+        // side of zero flow, including the pressure contribution to traction.
+        let donor = if reference_velocity >= 0.0 {
+            interior
+        } else {
+            room
+        };
+        let face = gas
+            .end_wave(donor, 1.0, reference_pressure, || false)
+            .unwrap()
+            .primitive;
+        let mass_flux = face.density * reference_velocity;
+        let momentum_flux = mass_flux * reference_velocity + reference_pressure;
+        assert!((flux.mass / mass_flux - 1.0).abs() < 2e-10);
+        assert!((flux.momentum / momentum_flux - 1.0).abs() < 2e-10);
+    }
+}
+
+#[test]
+fn radiation_pressure_refuses_a_root_outside_the_original_caloric_path_without_committing() {
+    let state = air();
+    let gas = air_source(&state);
+    let room_q = gas.conserved(state.density, 0.0, state.pressure).unwrap();
+    let room = gas.primitive(room_q, || false).unwrap();
+    let mut radiation = PistonRadiation::new(0.006, room, STEP_S).unwrap();
+    // The outgoing characteristic requires compression above a trace that is
+    // already at the source's maximum temperature. No supported root exists.
+    let pressure = 0.5 * room.pressure;
+    let q = gas
+        .conserved(pressure / (gas.gas_constant() * 1000.0), 0.0, pressure)
+        .unwrap();
+    let interior = gas.primitive(q, || false).unwrap();
+    let stage = PortStage {
+        stage: 0,
+        time: 0.0,
+        dt: STEP_S,
+        left: (q, interior),
+        right: (q, interior),
+    };
+    let history = radiation.history.clone();
+    let guess = radiation.guess;
+    assert!(matches!(
+        radiation.flux(&gas, &stage),
+        Err(GasError::CaloricPath(_))
+    ));
+    assert_eq!(radiation.history, history);
+    assert!(radiation.pending.is_none());
+    assert_eq!(radiation.guess, guess);
+}
+
 #[test]
 fn step_mesh_keeps_exact_volume_and_moves_faces_off_the_step() {
     let state = air();
