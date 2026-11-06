@@ -55,7 +55,7 @@ impl IsotropicMagneticMaterial {
             Self::Recoil(law) => law.material().material(),
         }
     }
-    fn response(&self, b: f64) -> Result<ReversibleMagneticResponse, MagneticError> {
+    pub(crate) fn response(&self, b: f64) -> Result<ReversibleMagneticResponse, MagneticError> {
         match self {
             Self::Reversible(law) => law.evaluate(b).map_err(MagneticError::Material),
             Self::Linear(_) | Self::Recoil(_) => {

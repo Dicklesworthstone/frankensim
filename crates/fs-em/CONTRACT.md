@@ -68,6 +68,62 @@ that physics and is intentionally absent. The fit's original source evidence
 is retained without claiming measured rotational validity, anisotropic
 hysteresis, temperature-dependent magnetic entropy or continuum error bounds.
 
+## Axisymmetric reversible saturation and permanent-magnet recoil
+
+`planar::axisymmetric::nonlinear::AxisymmetricNonlinearMagnetostatics`
+reuses the original regular `u=A_phi/r` geometry, exact azimuthal-current
+moments and positive-swept-area exterior trace admission. Each triangle retains
+an original `IsotropicMagneticMaterial`: source-bound linear permeability,
+reversible H(B), or bounded oriented recoil. Recoil directions are meridional
+[r,z]; radial remanence on an axis-touching cell refuses because it cannot have
+a regular azimuthally invariant direction there. No material fit or source
+amplitude continuation is synthesized.
+
+Positive native Gauss quadrature through a Duffy triangle map defines one
+consistent discrete material potential, residual and differential tangent.
+The caller selects order 3 through 16, with an explicit total sample budget;
+order three integrates the original linear and fixed-recoil pairings exactly.
+Reversible H(B) supplies the original differential and transverse secant
+reluctivities, assembled as a positive directional Gram form. The native
+Newton--Krylov owner supplies bounded line search and FGMRES; sparse tangents
+and positive Jacobi diagonals are cached per Newton point. Explicit cell,
+coordinate, triplet, quadrature, Krylov-basis and iteration limits bound work.
+Cancellation or failed final physical residual admission publishes no field.
+
+Every trial checks all three vertices of the affine B field against the
+original reversible source range. Recoil checks the affine H field's parallel
+interval and transverse-norm bounds at those same vertices. Convexity then
+covers the entire triangle, including extrema missed by interior quadrature.
+Inadmissible source trials contract through native line search, without
+clamping, extrapolating or advancing material state. Initial fields must be
+admissible and must match the original prescribed traces.
+
+The accepted field exposes actual A_phi/B/H samples, per-cell original recoil
+operating margins, and quadrature-integrated storage W and coenergy W*.
+Storage is zero at B=0 for induced cells and at B=Br for fixed recoil cells;
+recoil coenergy includes Br.H and can be negative. The static diagnostic is
+`W + W* = integral J_phi*A_phi dV + prescribed-boundary reaction pairing`.
+It does not substitute B.H/2 for nonlinear storage or claim a transient source
+work history. H is evaluated from the original law at the sample position,
+without interpolation across material interfaces.
+
+`tests/axisymmetric_nonlinear.rs` specifies exact saturated-current fields
+and source energy for both current signs and sweep angles, agreement with the
+original linear owner in both B components, shifted recoil storage and release,
+whole-cell source admission, permeable saturated-solenoid refinement against an
+independent Ampere integral, and bounded-work/cancellation refusals.
+Native compilation remains unverified: the available environment killed the
+existing asupersync dependency before reaching project code. Independent
+quadrature, energy-gradient and tangent checks support the formulation without
+claiming execution of those Rust tests.
+
+This is a fixed-geometry, fixed-state isotropic magnetostatic estimate.
+Nonlinear quadrature and the physical mesh require refinement near constitutive
+segment changes; original source margins are not continuum error bounds.
+Anisotropy, hysteresis, irreversible demagnetization, temperature evolution,
+eddy currents, force qualification and automatic infinite-domain treatment
+remain outside this owner.
+
 ## Axisymmetric magnetic fields from azimuthal currents
 
 `planar::axisymmetric::AxisymmetricMagnetostatics` retains the original

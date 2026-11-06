@@ -148,7 +148,9 @@ fn source_free_quadrupole_recovers_both_cylindrical_components() {
     }
     let energy = angle / (2.0 * mu)
         * (beta * beta * radius.powi(4) * height / 4.0
-            + 2.0 * radius * radius
+            + 2.0
+                * radius
+                * radius
                 * (c * c * height
                     + c * beta * height * height
                     + beta * beta * height.powi(3) / 3.0));
@@ -305,7 +307,9 @@ fn thick_solenoid_with_permeable_core_converges_to_independent_ampere_solution()
                     let sample = f.sample(cell, barycentric).unwrap();
                     let radial_error = sample.flux_density_t[0];
                     let axial_error = sample.flux_density_t[1] - permeability * expected_h;
-                    field_error_energy += weight * volume * (r / mean_radius)
+                    field_error_energy += weight
+                        * volume
+                        * (r / mean_radius)
                         * (radial_error * radial_error + axial_error * axial_error)
                         / (2.0 * permeability);
                 }
