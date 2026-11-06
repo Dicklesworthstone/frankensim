@@ -46,8 +46,10 @@
 //! for a viscous slit (they span 40 dB here), and the row takes the Bernoulli speed of the total drop as the brass row does.
 //! Optional `open_hole_orifice N` (N = 1..=3) after those rows, before `compile_limits`, solves the quasi-steady
 //! sharp-edged orifice law of the first N open tone holes TOGETHER, coupled through the bore, instead of the first hole
-//! alone. N = 1, or no row, is the unchanged first-hole shunt; the row needs a constant-medium bore (no `gas_field`,
-//! no molecular bore).
+//! alone. N = 1, or no row, is the unchanged first-hole shunt. N above 1 needs a constant-medium bore or a
+//! `gas_field continuous` binding; a molecular bore and a midpoint (segment-gas) `gas_field` refuse. On a field each
+//! hole's orifice reads its own local gas; under `open_hole_interaction` each orifice sees its own UNCOUPLED radiation
+//! load while the radiated sound uses the coupled flows (the first-hole shunt already works that way).
 //! Legacy `listener_m` selects bore pressure plus the compact-jet proxy.
 //! `baffled_outlet` selects Rayleigh observation of the admitted openings.
 //! Neither is measured calibration; the underlying reed mechanics are shared.
@@ -987,9 +989,10 @@ impl ReedPerformance {
             if ports == 0 {
                 return Err(bad(line, "open_hole_orifice takes 1..=3 holes"));
             }
-            if ports > 1 && (gas_field.is_some() || molecular.is_some()) {
+            if ports > 1 && (molecular.is_some()
+                || matches!(&gas_field, Some((_, GasFieldResolution::Midpoint(_))))) {
                 return Err(bad(line,
-                    "open_hole_orifice above 1 needs a constant-medium bore: no gas_field and no molecular bore"));
+                    "open_hole_orifice above 1 needs a constant-medium bore or `gas_field continuous`: a molecular bore and a midpoint gas_field refuse"));
             }
             ports
         } else { 1 };
@@ -1155,6 +1158,8 @@ impl ReedPerformance {
             } else {
                 regional
             };
+            let regional = regional.with_open_hole_orifice_ports(open_hole_orifice)
+                .map_err(|source| ReedPerformanceError::Model(AcousticRealizeError::Duct(source)))?;
             segment_gases = regional.segment_gases().to_vec();
             let medium = observer_medium(baffled, &air, regional.outlet_gas());
             let observer =

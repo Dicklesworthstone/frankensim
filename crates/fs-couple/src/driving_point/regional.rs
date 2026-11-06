@@ -232,9 +232,14 @@ impl RegionalDuct {
     /// [`Self::response_with_wall_and_holes`] plus the row-major `ports x ports` admittance of the first
     /// `ports` open holes' orifice terminals (`U = u_0 - Y delta_p`).
     ///
+    /// A continuous gas field answers from its own Magnus chain (`GasFieldDuct::response_with_wall_holes_and_ports`):
+    /// each hole's terminal reference and orifice coefficient come from that hole's local gas. Under
+    /// `open_hole_interaction` each orifice sees its own UNCOUPLED radiation load, while the radiated sound uses the
+    /// coupled flows (the first-hole shunt already works that way).
+    ///
     /// # Errors
-    /// A multi-region or continuous-field binding refuses: the coupled orifice ports need the one
-    /// constant-medium run that holds every open hole and its terminal.
+    /// A segment-gas (multi-region) binding refuses: the ports need the one constant-medium run, or the one
+    /// continuous field, that holds every open hole and its terminal.
     pub fn response_with_wall_holes_and_ports(
         &self,
         omega: f64,
@@ -247,8 +252,13 @@ impl RegionalDuct {
         if !omega.is_finite() || omega <= 0.0 {
             return Err(invalid("frequency must be positive and finite"));
         }
-        if self.continuous.is_some() || self.regions.len() != 1 {
-            return Err(invalid("coupled orifice ports need one constant-medium run without a continuous field"));
+        if let Some(field) = &self.continuous {
+            return field.response_with_wall_holes_and_ports(
+                omega, loss, termination, Some(self.exterior_gas()), wall, ports,
+            );
+        }
+        if self.regions.len() != 1 {
+            return Err(invalid("coupled orifice ports need one constant-medium run or one continuous field: a segment-gas binding with several regions refuses"));
         }
         let terminal = &self.regions[0];
         self.terminal_response_with_holes_and_ports(terminal, omega, loss, termination,

@@ -412,6 +412,17 @@ field is selected. A separate warm-prefix/uniform-cluster cascade checks both
 chimney entrance and mouth transfers; closed holes never radiate. Existing
 frozen-field, mutual-hole and infinite-baffle observation limits still apply.
 
+`GasFieldDuct::response_with_wall_holes_and_ports(omega, loss, termination, exterior, wall, ports)` is
+`response_with_wall_and_holes` plus, for the first `ports` (<= `MAX_ORIFICE_PORTS`) open holes, the same row-major
+orifice-terminal admittance `Y` as `exterior::input_impedance_holes_and_ports`, on a continuous field: each hole's chimney,
+junction and orifice read the hole's own local gas (one `PreparedChain` and `PreparedOpenHole` per hole, as for the flows),
+and the segments between them are the field's Riccati-integrated ones. A uniform field returns the homogeneous result bit
+for bit; one port is the inverse of the one-port network impedance; `Y` is reciprocal and passive and does not depend on
+how many further holes are ports (tested on a graded two-gas field). One approximation, stated: with
+`open_hole_interaction` the mouth and chimney flows (and so the radiated sound) are the coupled solution, but `Y` is the
+UNCOUPLED chain's, so each orifice sees its own uncoupled radiation load while the radiated sound uses the coupled flows.
+The fully coupled orifice network is not built. `response` and `response_with_wall_and_holes` are unchanged.
+
 ## Public types and semantics
 
 ### Smooth plane-wave profiles (IRP M2.1-W3a)

@@ -9,7 +9,7 @@
 use super::{MAX_RICCATI_STEPS, RiccatiSteps, bad, local_generator, magnus_step, positive};
 use crate::compose::{
     ComposeOptions, CompositionMode, InputReflection, PreparedChain, PreparedOpenHole, TwoPort,
-    compose_chain, compose_chain_reflection, open_hole_flows, prepare_open_hole,
+    compose_chain, compose_chain_reflection, open_hole_flows, open_hole_port_admittance, prepare_open_hole,
 };
 use crate::hole_lengths::HoleLengths;
 use crate::interaction::{CoupledPort, CoupledSolution, OpenHoleInteraction};
@@ -723,8 +723,8 @@ impl GasFieldDuct {
         &self, omega: f64, loss: LossModel, termination: Termination,
         exterior: Option<&GasState>, wall: WallModel<'_>,
     ) -> Result<DuctResponse, DuctError> {
-        self.response_with_holes(omega, loss, termination, exterior, wall, false)
-            .map(|(response, _)| response)
+        self.response_with_holes(omega, loss, termination, exterior, wall, false, 0)
+            .map(|(response, _, _)| response)
     }
 
     /// The same feedback response plus physical open/vented chimney flows.
@@ -735,13 +735,34 @@ impl GasFieldDuct {
         &self, omega: f64, loss: LossModel, termination: Termination,
         exterior: Option<&GasState>, wall: WallModel<'_>,
     ) -> Result<(DuctResponse, Vec<OpenHoleFlow>), DuctError> {
-        self.response_with_holes(omega, loss, termination, exterior, wall, true)
+        self.response_with_holes(omega, loss, termination, exterior, wall, true, 0)
+            .map(|(response, flows, _)| (response, flows))
     }
 
+    /// [`Self::response_with_wall_and_holes`] plus the row-major `ports x ports` admittance `Y` of the
+    /// LINEAR network seen at the orifice terminals of the first `ports` open holes (`U = u_0 - Y dp`,
+    /// see `compose::open_hole_port_admittance`). It is built on the same Magnus chain, so each hole's
+    /// terminal reference and orifice coefficient come from that hole's own local gas.
+    ///
+    /// Under `open_hole_interaction` the mouth and chimney flows in the returned holes are the coupled
+    /// ones, but `Y` is the independent-chimney network's: each orifice sees its own UNCOUPLED radiation
+    /// load while the radiated sound uses the coupled flows. The first-hole shunt already works that way;
+    /// the fully coupled orifice network is not built.
+    ///
+    /// # Errors
+    /// `ports` above [`crate::exterior::MAX_ORIFICE_PORTS`], or the usual composition refusals.
+    pub fn response_with_wall_holes_and_ports(
+        &self, omega: f64, loss: LossModel, termination: Termination,
+        exterior: Option<&GasState>, wall: WallModel<'_>, ports: usize,
+    ) -> Result<(DuctResponse, Vec<OpenHoleFlow>, Vec<C64>), DuctError> {
+        self.response_with_holes(omega, loss, termination, exterior, wall, true, ports)
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn response_with_holes(
         &self, omega: f64, loss: LossModel, termination: Termination,
-        exterior: Option<&GasState>, wall: WallModel<'_>, observe_holes: bool,
-    ) -> Result<(DuctResponse, Vec<OpenHoleFlow>), DuctError> {
+        exterior: Option<&GasState>, wall: WallModel<'_>, observe_holes: bool, ports: usize,
+    ) -> Result<(DuctResponse, Vec<OpenHoleFlow>, Vec<C64>), DuctError> {
         let radiation = self.exterior(exterior)?;
         let radius = self
             .duct
@@ -765,6 +786,13 @@ impl GasFieldDuct {
                 flow.u_hole_over_u_in = *mouth;
                 flow.u_chimney_in_over_u_in = *inflow;
             }
+            // The orifice terminals keep the independent-chimney network (`chain`, `holes`, `load` above):
+            // the same approximation the first-hole shunt makes; the coupled mouth coupling is not inside `Y`.
+            let admittance = if ports > 0 {
+                open_hole_port_admittance(&chain, &holes, ports, load, ComposeOptions::default())?
+            } else {
+                Vec::new()
+            };
             return Ok((DuctResponse {
                 omega,
                 impedance: solved.input_impedance,
@@ -774,7 +802,7 @@ impl GasFieldDuct {
                 p_mouth_over_u_in: if load.is_none() { C64::ZERO } else { solved.bell_pressure },
                 condition_estimate: solved.condition,
                 composition: CompositionMode::Scattering,
-            }, flows));
+            }, flows, admittance));
         }
         // The uniform shortcut is the original smooth-duct owner, whose holes carry the engine's lengths;
         // with the printed set declared the same chain is built here with the declared lengths. A bore
@@ -783,11 +811,16 @@ impl GasFieldDuct {
         let holed = self.duct.segments.iter().any(|segment| matches!(segment, Segment::ToneHole { .. }));
         if self.field.uniform_state().is_some() && (self.hole_lengths == HoleLengths::Engine || !holed) {
             if observe_holes {
+                if ports > 0 {
+                    return crate::exterior::input_impedance_holes_and_ports(&self.duct, &self.inlet,
+                        radiation, omega, loss, termination, wall, ports);
+                }
                 return crate::exterior::input_impedance_and_holes(&self.duct, &self.inlet,
-                    radiation, omega, loss, termination, wall);
+                    radiation, omega, loss, termination, wall)
+                    .map(|(response, flows)| (response, flows, Vec::new()));
             }
             return crate::exterior::input_impedance(&self.duct, &self.inlet, radiation,
-                omega, loss, termination, wall).map(|response| (response, Vec::new()));
+                omega, loss, termination, wall).map(|response| (response, Vec::new(), Vec::new()));
         }
         let (chain, holes) = self.chain_with_holes_controlled(
             omega, loss, exterior, wall, observe_holes, &mut || false,
@@ -796,6 +829,11 @@ impl GasFieldDuct {
             termination, &self.outlet, radiation, radius, omega)?;
         let solved = compose_chain(&chain.blocks, load, ComposeOptions::default())?;
         let flows = open_hole_flows(&chain, &holes, load, ComposeOptions::default())?;
+        let admittance = if ports > 0 {
+            open_hole_port_admittance(&chain, &holes, ports, load, ComposeOptions::default())?
+        } else {
+            Vec::new()
+        };
         Ok((DuctResponse {
             omega,
             impedance: solved.z_in,
@@ -809,7 +847,7 @@ impl GasFieldDuct {
             },
             condition_estimate: solved.condition_estimate,
             composition: CompositionMode::ImpedanceRecursion,
-        }, flows))
+        }, flows, admittance))
     }
 
     /// Direct input reflection for characteristic-line construction. The
@@ -876,3 +914,6 @@ impl GasFieldDuct {
 
 #[cfg(test)]
 pub(crate) mod tests;
+
+#[cfg(test)]
+mod ports_tests;

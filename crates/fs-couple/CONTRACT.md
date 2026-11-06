@@ -1106,9 +1106,13 @@ bisection, 2^-14 resolution) for which `max_w || D + lambda T(w) ||` stays at mo
 first-hole line's own rule, `|D| + max_w |T(w)| <= 0.999`, ignores the phase between `D` and `T`: it costs 0.1 % of the
 tail for one port but 0.4 % for two and 3.3 % for three on the test bore; with it the coupled flows departed from the TMM
 chain by up to 15 % at 100 Hz on a 4096 grid, with the bisected rule by at most 3.4 %. That legacy rule is kept (`PassivityRule::Triangle`) only so the N = 1 equivalence
-test is exact; N = 1 in the card never reaches it. The row needs one constant-medium run: a `gas_field` or molecular
-bore refuses by name at parse (N > 1) and a multi-region duct refuses at build. Cost: `N^2 + 2N` kernels of the grid
-length instead of 3, and one more frequency sweep at build.
+test is exact; N = 1 in the card never reaches it. The row takes a constant-medium run or a `gas_field continuous`
+binding (`GasFieldDuct::response_with_wall_holes_and_ports`: each orifice reads its own local gas, K and numerical
+reference included). A molecular bore, a midpoint `gas_field` (N > 1) and a segment-gas duct with several regions
+refuse by name. On a continuous field with `open_hole_interaction` there is ONE approximation, stated on the page too:
+each orifice sees its own UNCOUPLED radiation load (`Y` is the uncoupled chain's) while the radiated sound uses the
+coupled flows; the fully coupled orifice network is not built. Cost: `N^2 + 2N` kernels of the grid length instead of 3,
+and one more frequency sweep at build.
 
 Evidence (G0/G1): `fs-duct` `compose::port_tests` (the ladder's admittance is the inverse of the one-port network
 impedance to 1e-9, reciprocal, passive, independent of the port count, and the sign of its off-diagonal term fixed by a
@@ -1117,7 +1121,12 @@ the realized matrix is passive and is the admittance scattering, not its transpo
 linear drops equals the network built from the realized kernels to 1e-14 and the TMM chain to a few percent at a 4096
 grid; the general solver run as one port follows the first-hole line through a strongly nonlinear drive to 1e-6);
 card level `reed::orifice_tests` (an absent row and `open_hole_orifice 1` are bit-identical in audio and reed state, a
-one-hole duct ignores the count, 2 and 3 differ from 1 and from each other, bad counts refuse).
+one-hole duct ignores the count, 2 and 3 differ from 1 and from each other, bad counts refuse); on a continuous field
+`reed::orifice_tests::on_a_field` (an absent row and `open_hole_orifice 1` are bit-identical, 2 and 3 act and differ,
+3 composes with `open_hole_interaction tmmi` and the printed lengths, a midpoint `gas_field` refuses by name) and
+`fs-duct` `profile::gas_field::ports_tests` (uniform field = homogeneous ports bit for bit, one port = inverse of the
+network impedance on a graded field, three ports reciprocal, passive and independent of the port count, the interaction
+leaves `Y` alone and changes the radiated flows).
 
 ## Second-order diffusion coupled to finite solution activity
 

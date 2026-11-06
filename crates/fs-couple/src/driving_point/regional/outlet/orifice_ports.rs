@@ -538,7 +538,7 @@ impl RegionalDuct {
     /// `single` is what [`Self::register_hole_shunt_line`] (or the baffled observer build) already produced.
     ///
     /// # Errors
-    /// The multiport realization refuses (multi-region or continuous-field duct, vented hole without an
+    /// The multiport realization refuses (a segment-gas duct with several regions, vented hole without an
     /// orifice law, nonconvergent passivity treatment, grid budget).
     pub fn select_register_hole_shunt(
         &self,
