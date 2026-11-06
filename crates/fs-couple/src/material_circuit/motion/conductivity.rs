@@ -6,7 +6,7 @@
 
 use super::{FieldMotionCandidate, FieldMotionInput, FieldMotionStep, MaterialFieldMotion};
 use crate::material_circuit::conductivity::{ConductivityDriver, ConductivitySample,
-    ConductivitySolve, ConductorResponse, solve_native};
+    ConductivityIteration, ConductorResponse, solve_native};
 use crate::material_circuit::conductivity::contact::{ContactConductivitySample, ContactResponse};
 use crate::material_circuit::contacts::{ContactHeat, SeriesElectricalContact};
 use crate::material_circuit::{MaterialCircuitError, MaterialCircuitSolve, MaterialResistor,
@@ -56,6 +56,8 @@ impl MaterialFieldMotion {
     /// Both resistance and constitutive power residuals must meet their gates.
     /// Native Joule work is authoritative and counted once; iteration defects
     /// never become heat or an independently applied force.
+    /// Plain solve controls retain the original iteration; explicit
+    /// `solve.with_relaxation(weight)?` relaxes only source-query coordinates.
     ///
     /// Electrical axes are explicit existing SI source coordinates. All other
     /// material coordinates stay fixed here. Conductor geometry is stationary;
@@ -66,7 +68,7 @@ impl MaterialFieldMotion {
     /// law, breakdown, hysteresis, field entropy or convergence guarantee is added.
     pub fn conductivity_candidate(
         &self, sources: &[ConductorResponse<'_>], input: FieldMotionInput<'_>,
-        controls: MaterialCircuitSolve, solve: ConductivitySolve,
+        controls: MaterialCircuitSolve, solve: impl Into<ConductivityIteration>,
         cancelled: impl FnMut() -> bool,
     ) -> Result<FieldConductivityCandidate, MaterialCircuitError> {
         self.conductivity_with_materials_candidate(self.circuit().resistors().to_vec(),
@@ -82,7 +84,7 @@ impl MaterialFieldMotion {
     pub fn conductivity_with_materials_candidate(
         &self, seeds: Vec<MaterialResistor>, sources: &[ConductorResponse<'_>],
         input: FieldMotionInput<'_>, controls: MaterialCircuitSolve,
-        solve: ConductivitySolve, cancelled: impl FnMut() -> bool,
+        solve: impl Into<ConductivityIteration>, cancelled: impl FnMut() -> bool,
     ) -> Result<FieldConductivityCandidate, MaterialCircuitError> {
         self.conductivity_with_contact_response_candidate(seeds, Vec::new(), sources,
             None, input, controls, solve, cancelled)
@@ -97,7 +99,7 @@ impl MaterialFieldMotion {
     pub fn conductivity_with_contacts_candidate(
         &self, seeds: Vec<MaterialResistor>, contacts: Vec<SeriesElectricalContact>,
         sources: &[ConductorResponse<'_>], input: FieldMotionInput<'_>,
-        controls: MaterialCircuitSolve, solve: ConductivitySolve,
+        controls: MaterialCircuitSolve, solve: impl Into<ConductivityIteration>,
         cancelled: impl FnMut() -> bool,
     ) -> Result<FieldConductivityCandidate, MaterialCircuitError> {
         self.conductivity_with_contact_response_candidate(seeds, contacts, sources,
@@ -127,7 +129,7 @@ impl MaterialFieldMotion {
         &self, seeds: Vec<MaterialResistor>, contacts: Vec<SeriesElectricalContact>,
         sources: &[ConductorResponse<'_>], contact_sources: Option<&[ContactResponse<'_>]>,
         input: FieldMotionInput<'_>, controls: MaterialCircuitSolve,
-        solve: ConductivitySolve, cancelled: impl FnMut() -> bool,
+        solve: impl Into<ConductivityIteration>, cancelled: impl FnMut() -> bool,
     ) -> Result<FieldConductivityCandidate, MaterialCircuitError> {
         let trial = solve_native(self.circuit(), seeds, sources, contacts, contact_sources,
             controls, solve, |applied, interfaces, check| {

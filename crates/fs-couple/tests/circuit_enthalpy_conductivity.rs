@@ -60,6 +60,104 @@ fn conductivity_controls() -> ConductivitySolve {
     }
 }
 
+#[test]
+fn relaxed_electrical_source_closes_native_heat_with_original_variable_heat_capacity() {
+    use fs_thermal::enthalpy::{
+        CellGeometry, DepositedCell, DepositionBudget, Event, StepConfig, ThermalLaw, TimedEvent,
+    };
+    let (base, _) = common::material(1.0, 1.0, 0.0);
+    let mut claims = ClaimSet::new();
+    for (_, old) in base.claims().claims_ordered() {
+        let mut claim = old.clone();
+        if claim.key.name() == ELECTRICAL_RESISTIVITY_PROPERTY {
+            claim.value = PropertyValue::Curve {
+                abscissa: "J".into(), abscissa_dims: CURRENT_DENSITY,
+                knots: vec![(0.0, 0.1), (16.0, 16000.1)], dims: claim.key.quantity().dims(),
+            };
+            claim.validity = claim.validity.with_quantity(
+                "J", QuantitySpec::dimensional(CURRENT_DENSITY), 0.0, 16.0,
+            );
+        } else if claim.key.name() == "specific_heat_capacity" {
+            // Cp(T)=2+0.01(T-300), integrated by the original source owner.
+            claim.value = PropertyValue::Curve {
+                abscissa: "T".into(), abscissa_dims: Temperature::DIMS,
+                knots: vec![(200.0, 1.0), (300.0, 2.0), (2000.0, 19.0)],
+                dims: SPECIFIC_HEAT_CAPACITY_DIMS,
+            };
+        }
+        claims.insert_claim(claim).unwrap();
+    }
+    let a = MaterialCard::assemble(base.id().clone(), claims, vec![]).unwrap();
+    let ca = ResolvedHeatCapacityCurve::try_new(&a, HeatCapacitySourceQuery {
+        heat_capacity: &PropertyKey::new("specific_heat_capacity", SPECIFIC_HEAT_CAPACITY_DIMS),
+        density: &PropertyKey::new("density", Density::DIMS), temperature_axis: "T",
+        lower: &point(298.0), upper: &point(302.0), selection: SelectionPolicy::SingleClaimOnly,
+    }, SolidLiquidPhase::Solid, 0.0, 1e-6).unwrap();
+    let (b, cb) = common::material(3.0, 2.0, 0.0);
+    let cards = [a, b];
+    let curves = [ca, cb];
+    let events = DESTINATIONS.iter().enumerate().map(|(i, destination)| TimedEvent {
+        time_s: 0.0, event: Event::Birth(DepositedCell {
+            id: destination.cell, segment_id: i as u64, body_id: i as u64,
+            material_id: MaterialId(i as u64), mass_kg: 1.0,
+            specific_h_j_kg: if i == 0 { 3.98 } else { 200.0 },
+            geometry: CellGeometry { start_m: [i as f64, 0.0, 0.0],
+                end_m: [i as f64 + 1.0, 0.0, 0.0], volume_m3: 1.0, surface_area_m2: 6.0 },
+            boundary: common::boundary(),
+        }),
+    }).collect();
+    let thermal = DepositionSimulation::new(events, &[
+        (MaterialId(0), curves[0].curve() as &dyn ThermalLaw),
+        (MaterialId(1), curves[1].curve() as &dyn ThermalLaw),
+    ], DepositionBudget { max_cells: 8, max_links: 8, max_events: 16, max_substeps: 1000 })
+        .unwrap().advance_to(0.0, StepConfig { max_dt_s: 0.1, energy_tolerance_j: 1e-7 },
+            || Ok(())).unwrap().0;
+    let resistors = cards.iter().enumerate().map(|(i, card)| {
+        let query = if i == 0 {
+            point(300.0).with_quantity("J", QuantitySpec::dimensional(CURRENT_DENSITY), 0.0).unwrap()
+        } else { point(300.0) };
+        MaterialResistor { branch: DESTINATIONS[i].branch,
+            conductor: resolve_conductor_state(card, &query, MaterialPropertySelection::SingleClaimOnly)
+                .unwrap().into_uniform_conductor(1.0, 1.0).unwrap() }
+    }).collect();
+    let electrical = MaterialCircuit::new(CircuitGraph {
+        node_count: 3, branches: vec![(1, 0, Branch::Capacitor { farads: 1.0 }),
+            (1, 2, Branch::Resistor { ohms: 999.0 }), (2, 0, Branch::Resistor { ohms: 999.0 })],
+        transformers: vec![],
+    }, resistors, vec![], vec![10.0], &[]).unwrap();
+    let axes = [CURRENT_AXIS];
+    let response = [ConductorResponse { branch: 1, card: &cards[0], axes: &axes },
+        ConductorResponse { branch: 2, card: &cards[1], axes: &[] }];
+    let run = |controls, iteration| step_candidate(&thermal, 0.2, common::input(&electrical),
+        &response, controls, iteration, &[0.0; 2],
+        |state| coefficients(state, &electrical, &cards, &curves), || false);
+    assert!(matches!(run(config(), conductivity_controls().with_relaxation(1.0).unwrap()),
+        Err(CircuitEnthalpyError::Circuit(MaterialCircuitError::ConductivityConvergence { .. }))));
+    let iteration = conductivity_controls().with_relaxation(0.5).unwrap();
+    let result = run(config(), iteration).unwrap();
+    // V0=I*(Ra(I)+Rb+dt/(2C)), Ra=0.1+1000*I, Rb=3.
+    let current = 20.0 / (3.2 + (3.2_f64.powi(2) + 4.0 * 1000.0 * 10.0).sqrt());
+    let qa = 0.2 * current * current * (0.1 + 1000.0 * current);
+    let qb = 0.2 * current * current * 3.0;
+    near(result.circuit().charges_c()[0], 10.0 - 0.2 * current);
+    near(result.thermal().temperature_k(DESTINATIONS[0].cell).unwrap(),
+        300.0 + 2.0 * qa / (2.0 + (4.0 + 0.02 * qa).sqrt()));
+    near(result.thermal().temperature_k(DESTINATIONS[1].cell).unwrap(), 300.0 + qb / 2.0);
+    near(result.report().deposited_joule_j, qa + qb);
+    near(result.thermal().energy_j() - thermal.energy_j(), qa + qb);
+    near(result.report().electrical.electrical.stored_after_j + result.thermal().energy_j(),
+        50.0 + thermal.energy_j());
+    for (i, sample) in result.report().electrical.evaluated.iter().enumerate() {
+        near(sample.conductor.material().query().axes()["T"],
+            result.thermal().temperature_k(DESTINATIONS[i].cell).unwrap());
+    }
+    let mut exhausted = config();
+    exhausted.maximum_circuit_trials = 1;
+    assert!(matches!(run(exhausted, iteration), Err(CircuitEnthalpyError::CircuitBudget)));
+    assert_eq!(electrical.charges_c(), &[10.0]);
+    assert_eq!(thermal.time_s(), 0.0);
+}
+
 fn field_material(
     slope: f64,
     maximum_temperature: f64,

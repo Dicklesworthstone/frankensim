@@ -196,3 +196,24 @@ pub(super) fn evaluate(
     }
     Ok(ContactConductivitySample { point, contact, resistance_defect_ohm, voltage_defect_v, power_defect_w })
 }
+
+/// Query the original interface at relaxed owned coordinates, never at a
+/// fabricated resistance or a blended thermal/material context.
+pub(super) fn relax(
+    original: &SeriesElectricalContact,
+    binding: &ContactResponse<'_>,
+    applied: &SeriesElectricalContact,
+    evaluated: &SeriesElectricalContact,
+    weight: f64,
+) -> Result<SeriesElectricalContact, MaterialCircuitError> {
+    let before = applied.source().resolved().query();
+    let after = evaluated.source().resolved().query();
+    let mut query = original.source().resolved().query();
+    for axis in binding.axes {
+        let value = super::relaxed_coordinate(before.axes()[axis.name], after.axes()[axis.name], weight);
+        query = query.with(axis.name, value)
+            .map_err(|_| invalid("relaxed contact coordinate is unrepresentable"))?;
+    }
+    SeriesElectricalContact::new(original.id(), original.branch(),
+        original.source().at_query_point(binding.card, &query)?, original.area_m2())
+}

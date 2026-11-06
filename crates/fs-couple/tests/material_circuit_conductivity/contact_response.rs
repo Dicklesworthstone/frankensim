@@ -7,6 +7,71 @@ use fs_couple::material_circuit::conductivity::contact::{
 const VOLTAGE: Dims = Dims([2, 1, -3, 0, -1, 0]);
 const CURRENT: Dims = Dims([0, 0, 0, 0, 1, 0]);
 
+#[test]
+fn relaxed_current_density_contact_closes_its_original_source_and_conserves_native_heat() {
+    use fs_material::electrical_interface::{
+        ELECTRICAL_CONTACT_RESISTANCE_DIMS, ELECTRICAL_CONTACT_RESISTANCE_PROPERTY,
+    };
+    let source = card(0.0, false, 8.0, 16.0);
+    let template = contact_source::card(&source, &source, 0.1, 0.0);
+    let mut claims = ClaimSet::new();
+    claims.insert_claim(PropertyClaim {
+        key: PropertyKey::new(ELECTRICAL_CONTACT_RESISTANCE_PROPERTY, ELECTRICAL_CONTACT_RESISTANCE_DIMS),
+        value: PropertyValue::Curve {
+            abscissa: "drive".into(), abscissa_dims: J,
+            knots: vec![(0.0, 0.1), (16.0, 16000.1)],
+            dims: ELECTRICAL_CONTACT_RESISTANCE_DIMS,
+        },
+        validity: ValidityDomain::unconstrained().with("Ta", 200.0, 500.0)
+            .with("Tb", 200.0, 500.0).with("pressure", 100000.0, 100000.0)
+            .with_quantity("drive", QuantitySpec::dimensional(J), 0.0, 16.0),
+        uncertainty: UncertaintyModel::Unstated, interpolation: InterpolationPolicy::LinearInside,
+        observations: vec![], provenance: Provenance {
+            source: "synthetic strictly passive current-dependent interface".into(),
+            license: "test-only".into(), artifact: None,
+        },
+    }).unwrap();
+    let interface = fs_matdb::InterfaceSystemCard::assemble(template.surface_a().clone(),
+        template.surface_b().clone(), template.context().clone(), claims, vec![]).unwrap();
+    let area = 0.5;
+    let axes = [ContactAxis { name: "drive", coordinate: ContactCoordinate::CurrentDensityMagnitude }];
+    let responses = [ContactResponse { id: 7, card: &interface,
+        direction: ContactDirection::AgainstBranch, axes: &axes }];
+    // Rc=R''/A=0.2+4000|I|, with bulk R=1 and dt/(2C)=0.1.
+    // This strictly monotone terminal law has one current of each polarity.
+    let current = 4.0 / (1.3 + (1.3_f64.powi(2) + 4.0 * 4000.0 * 2.0).sqrt());
+    for sign in [-1.0, 1.0] {
+        let original = circuit(&source, sign * 2.0).rebind_contacts_candidate(vec![
+            contact_source::response_contact(7, 1, &interface, area, "drive", J),
+        ], &[]).unwrap();
+        let saved = original.clone();
+        assert!(matches!(original.conductivity_with_contact_response_candidate(
+            original.resistors().to_vec(), original.contacts().to_vec(), &bindings(&source),
+            Some(&responses), &[], DT, controls(), solve(), || false),
+            Err(MaterialCircuitError::ConductivityConvergence { .. })));
+        let result = original.conductivity_with_contact_response_candidate(
+            original.resistors().to_vec(), original.contacts().to_vec(), &bindings(&source),
+            Some(&responses), &[], DT, controls(), solve().with_relaxation(0.5).unwrap(), || false,
+        ).unwrap();
+        let report = result.step();
+        let sample = &report.evaluated_contacts[0];
+        let native = &report.electrical.contacts[0];
+        near(native.current_a, sign * current, 2e-11);
+        near(sample.point.current_density_a_m2, -sign * current / area, 2e-11);
+        near(sample.contact.resistance_ohm(), 0.2 + 4000.0 * current, 2e-9);
+        near(sample.contact.source().resolved().query().axes()["drive"], current / area, 2e-11);
+        assert_eq!(sample.contact.source().resolved().query().axes()["Ta"], 300.0);
+        assert_eq!(sample.contact.source().resolved().card_identity(), interface.content_hash());
+        assert_eq!(sample.contact.area_m2(), area);
+        assert!(sample.power_defect_w.abs() <= controls().power_tolerance_w);
+        near(native.heat_j, DT * current * current * (0.2 + 4000.0 * current), 2e-11);
+        near(report.electrical.heat_j, native.heat_j + report.electrical.resistors[0].heat_j, 2e-11);
+        near(report.electrical.stored_after_j + report.electrical.heat_j, 1.0, 2e-11);
+        assert_eq!(report.source_evaluations, 4 * report.iterations - 2);
+        assert_eq!(original, saved);
+    }
+}
+
 fn root(voltage: f64, bulk_slope: f64, contacts: impl Fn(f64) -> f64) -> f64 {
     let (mut lo, mut hi) = (0.0, 4.0);
     for _ in 0..80 {

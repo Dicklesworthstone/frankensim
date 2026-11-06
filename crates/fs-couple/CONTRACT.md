@@ -38,6 +38,27 @@ magnetic entropy, phase-changing geometry and measured device validation are
 not implied. The focused `hysteretic_eddy_enthalpy` tests use manufactured
 scalar-play/P1 balances, physical heat separation and transactional refusals.
 
+## Relaxed nonlinear electrical source closure
+
+`ConductivitySolve::with_relaxation(weight)` explicitly selects a finite weight
+in `(0,1]` for the original circuit and reciprocal field/motion conductivity
+iteration. Finite-enthalpy coupling retains that selection through each thermal
+trial, its remaining electrical-work budget and final joint admission.
+Only bound electrical query coordinates are relaxed. Every next
+bulk/interface resistance comes from the same pinned source at that query;
+temperature, pressure, source identity, geometry and accepted state stay fixed.
+Plain controls and weight one preserve the original arithmetic. Constant laws
+still finish in one native trial. Intermediate queries count in
+`source_evaluations`, and no query is performed after the native-trial budget
+is exhausted. Original actual-field resistance and constitutive-power gates
+remain mandatory; native Joule heat is counted once. Source-domain failures,
+nonconvergence and cancellation remain transactional. This can resolve passive
+laws with oscillating Picard iterates but supplies no general convergence
+guarantee or automatic relaxation choice. Focused circuit regressions use
+strictly monotone terminal laws with independent quadratic midpoint solutions;
+the coupled regression deposits their original Joule heat once in a finite
+body with source-dependent heat capacity and checks the original enthalpy.
+
 ## Nonlinear membrane damping and source-bound finite heat storage
 
 `membrane_thermal::advance_candidate` composes the existing nonlinear

@@ -18,7 +18,7 @@ use super::{
 pub mod contact;
 use contact::{ContactConductivitySample, ContactResponse};
 
-/// Work cap on complete circuit/source evaluations in one proposed time step.
+/// Work cap on complete native circuit trials in one proposed time step.
 pub const MAX_CONDUCTIVITY_ITERATIONS: usize = 128;
 
 /// Physical coordinate to update in the original material query.
@@ -83,6 +83,21 @@ pub struct ConductivitySolve {
     pub relative_resistance_tolerance: f64,
 }
 impl ConductivitySolve {
+    /// Relax only the owned electrical source coordinates between trials.
+    ///
+    /// The next pinned material/interface query is evaluated at
+    /// `(1-weight) * applied + weight * solved` for each bound coordinate.
+    /// Resistances, native states and final physical residuals are never
+    /// interpolated. `weight = 1` retains the original iteration exactly.
+    pub fn with_relaxation(
+        self,
+        weight: f64,
+    ) -> Result<ConductivityIteration, MaterialCircuitError> {
+        let iteration = ConductivityIteration { solve: self, weight };
+        iteration.validate()?;
+        Ok(iteration)
+    }
+
     pub(crate) fn validate(self) -> Result<(), MaterialCircuitError> {
         if !(1..=MAX_CONDUCTIVITY_ITERATIONS).contains(&self.maximum_iterations)
             || !self.absolute_resistance_tolerance_ohm.is_finite()
@@ -93,6 +108,42 @@ impl ConductivitySolve {
                 && self.relative_resistance_tolerance == 0.0)
         {
             return Err(invalid("invalid bounded conductivity solve controls"));
+        }
+        Ok(())
+    }
+}
+
+/// Existing native-trial budget with explicit source-coordinate relaxation.
+///
+/// Passing a plain [`ConductivitySolve`] selects weight one. A smaller weight
+/// can resolve an oscillating constitutive iteration, but is not a convergence
+/// guarantee. Every intermediate point must remain in the original source's
+/// domain, including its complete non-electrical context. Relaxation adds at
+/// most one source query per electrically varying bundle between native trials;
+/// those queries are included in the returned `source_evaluations`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ConductivityIteration {
+    solve: ConductivitySolve,
+    weight: f64,
+}
+
+impl From<ConductivitySolve> for ConductivityIteration {
+    fn from(solve: ConductivitySolve) -> Self {
+        Self { solve, weight: 1.0 }
+    }
+}
+
+impl ConductivityIteration {
+    /// Original native-trial budget and physical resistance tolerances.
+    pub const fn controls(self) -> ConductivitySolve { self.solve }
+
+    /// Fraction of the solved operating-coordinate update used for the next query.
+    pub const fn relaxation(self) -> f64 { self.weight }
+
+    pub(crate) fn validate(self) -> Result<(), MaterialCircuitError> {
+        self.solve.validate()?;
+        if !self.weight.is_finite() || self.weight <= 0.0 || self.weight > 1.0 {
+            return Err(invalid("conductivity relaxation must be finite in (0,1]"));
         }
         Ok(())
     }
@@ -141,8 +192,8 @@ pub struct MaterialConductivityStep {
     pub evaluated_contacts: Vec<ContactConductivitySample>,
     /// All circuit trials, including discarded constitutive iterates.
     pub iterations: usize,
-    /// Operating-field bundle refreshes; excludes the one seed-admission replay
-    /// per branch before the first circuit trial.
+    /// Operating-field bundle refreshes, including intermediate relaxed queries;
+    /// excludes the one seed-admission replay per branch before the first trial.
     pub source_evaluations: usize,
 }
 
@@ -342,6 +393,37 @@ fn refresh(
     Ok(original.with_material(material)?)
 }
 
+// A convex source coordinate remains distinct from an interpolated material
+// property. Avoid overflowing the subtraction for opposite signed coordinates.
+pub(super) fn relaxed_coordinate(applied: f64, solved: f64, weight: f64) -> f64 {
+    let difference = solved - applied;
+    if difference.is_finite() {
+        applied + weight * difference
+    } else {
+        (1.0 - weight) * applied + weight * solved
+    }
+}
+
+fn relax(
+    original: &ResolvedConductor,
+    binding: &ConductorResponse<'_>,
+    applied: &ResolvedConductor,
+    evaluated: &ResolvedConductor,
+    weight: f64,
+) -> Result<ResolvedConductor, MaterialCircuitError> {
+    let before = applied.material().query();
+    let after = evaluated.material().query();
+    let mut query = original.material().query();
+    for axis in binding.axes {
+        let value = relaxed_coordinate(before.axes()[axis.name], after.axes()[axis.name], weight);
+        query = query.with(axis.name, value)
+            .map_err(|_| invalid("relaxed electrical coordinate is unrepresentable"))?;
+    }
+    let material = original.material().at_query_point(binding.card, &query)
+        .map_err(ConductorError::MaterialState)?;
+    Ok(original.with_material(material)?)
+}
+
 // The constitutive iteration is shared by the original fixed and moving-field
 // descriptors. Each driver returns its OWN native candidate and loss account;
 // this seam cannot manufacture a circuit, force, heat or accepted history.
@@ -369,13 +451,15 @@ pub(super) fn solve_native<D: ConductivityDriver, C: FnMut() -> bool>(
     mut contacts: Vec<SeriesElectricalContact>,
     contact_sources: Option<&[ContactResponse<'_>]>,
     controls: MaterialCircuitSolve,
-    solve: ConductivitySolve,
+    solve: impl Into<ConductivityIteration>,
     mut native: impl FnMut(Vec<MaterialResistor>, Vec<SeriesElectricalContact>, &mut C)
         -> Result<D, MaterialCircuitError>,
     mut cancelled: C,
 ) -> Result<ConductivityTrial<D>, MaterialCircuitError> {
     poll(&mut cancelled)?;
-    solve.validate()?;
+    let iteration = solve.into();
+    iteration.validate()?;
+    let solve = iteration.solve;
     if seeds.len() != circuit.resistors().len() {
         return Err(invalid(
             "every original resistor needs one refreshed material seed",
@@ -390,6 +474,7 @@ pub(super) fn solve_native<D: ConductivityDriver, C: FnMut() -> bool>(
     let mut applied_contacts = contacts.clone();
     let mut maximum_resistance_defect = 0.0_f64;
     let mut maximum_power_defect = 0.0_f64;
+    let mut source_evaluations = 0;
     for iterations in 1..=solve.maximum_iterations {
         poll(&mut cancelled)?;
         let candidate = native(applied, applied_contacts, &mut cancelled)?;
@@ -423,6 +508,7 @@ pub(super) fn solve_native<D: ConductivityDriver, C: FnMut() -> bool>(
                 ));
             }
             let conductor = refresh(&original.conductor, binding, point)?;
+            source_evaluations += 1;
             let used = heat.material.conductor.resistance_ohm();
             let actual = conductor.resistance_ohm();
             let resistance_defect_ohm = actual - used;
@@ -451,6 +537,7 @@ pub(super) fn solve_native<D: ConductivityDriver, C: FnMut() -> bool>(
             .zip(&contacts).zip(&contact_bindings) {
             poll(&mut cancelled)?;
             let sample = contact::evaluate(original, binding, heat)?;
+            source_evaluations += 1;
             let actual = sample.contact.resistance_ohm();
             let used = heat.contact.resistance_ohm();
             let tolerance = solve.absolute_resistance_tolerance_ohm
@@ -468,7 +555,30 @@ pub(super) fn solve_native<D: ConductivityDriver, C: FnMut() -> bool>(
         poll(&mut cancelled)?;
         if converged {
             return Ok(ConductivityTrial { candidate, evaluated, evaluated_contacts, iterations,
-                source_evaluations: iterations * (bindings.len() + contact_bindings.len()) });
+                source_evaluations });
+        }
+        // No unused source queries after the final allowed native trial. The
+        // accepted endpoint above always passed actual-field residual gates.
+        if iterations == solve.maximum_iterations { break; }
+        if iteration.weight < 1.0 {
+            for ((((next, original), heat), sample), binding) in next.iter_mut().zip(&seeds)
+                .zip(candidate.resistor_heats()).zip(&evaluated).zip(&bindings) {
+                if !binding.axes.is_empty() {
+                    poll(&mut cancelled)?;
+                    next.conductor = relax(&original.conductor, binding,
+                        &heat.material.conductor, &sample.conductor, iteration.weight)?;
+                    source_evaluations += 1;
+                }
+            }
+            for ((((next, original), heat), sample), binding) in next_contacts.iter_mut().zip(&contacts)
+                .zip(candidate.contact_heats()).zip(&evaluated_contacts).zip(&contact_bindings) {
+                if !binding.axes.is_empty() {
+                    poll(&mut cancelled)?;
+                    *next = contact::relax(original, binding, &heat.contact,
+                        &sample.contact, iteration.weight)?;
+                    source_evaluations += 1;
+                }
+            }
         }
         applied = next;
         applied_contacts = next_contacts;
@@ -489,8 +599,10 @@ impl MaterialCircuit {
     ///
     /// Each trial uses the SAME original charge/flux and native Kirchhoff step.
     /// At its algebraic midpoint, `E=V/L` and `J=I/A` refresh the original pinned
-    /// claims. Only those material responses supply the next resistance; there
-    /// is no fit, damping, clipping, artificial resistor or source fallback.
+    /// claims. Only original material responses supply resistance. Passing
+    /// `solve.with_relaxation(weight)?` queries intermediate electrical source
+    /// coordinates between trials; it never blends resistances or native states.
+    /// Plain controls retain the original unrelaxed iteration.
     ///
     /// Acceptance requires every resistance residual to meet `solve` AND every
     /// constitutive power residual to meet `controls.power_tolerance_w`. Native
@@ -509,7 +621,7 @@ impl MaterialCircuit {
         inputs: &[f64],
         dt: f64,
         controls: MaterialCircuitSolve,
-        solve: ConductivitySolve,
+        solve: impl Into<ConductivityIteration>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<MaterialConductivityCandidate, MaterialCircuitError> {
         poll(&mut cancelled)?;
@@ -540,7 +652,7 @@ impl MaterialCircuit {
         inputs: &[f64],
         dt: f64,
         controls: MaterialCircuitSolve,
-        solve: ConductivitySolve,
+        solve: impl Into<ConductivityIteration>,
         cancelled: impl FnMut() -> bool,
     ) -> Result<MaterialConductivityCandidate, MaterialCircuitError> {
         let trial = solve_native(self, seeds, sources, Vec::new(), None, controls, solve,
@@ -574,7 +686,7 @@ impl MaterialCircuit {
         inputs: &[f64],
         dt: f64,
         controls: MaterialCircuitSolve,
-        solve: ConductivitySolve,
+        solve: impl Into<ConductivityIteration>,
         cancelled: impl FnMut() -> bool,
     ) -> Result<MaterialConductivityCandidate, MaterialCircuitError> {
         self.conductivity_with_contact_response_candidate(seeds, contacts, sources,
@@ -604,7 +716,7 @@ impl MaterialCircuit {
         inputs: &[f64],
         dt: f64,
         controls: MaterialCircuitSolve,
-        solve: ConductivitySolve,
+        solve: impl Into<ConductivityIteration>,
         cancelled: impl FnMut() -> bool,
     ) -> Result<MaterialConductivityCandidate, MaterialCircuitError> {
         let trial = solve_native(self, seeds, sources, contacts, contact_sources, controls, solve,

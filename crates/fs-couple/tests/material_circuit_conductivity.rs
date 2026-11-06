@@ -61,6 +61,16 @@ fn card(
     maximum_field: f64,
     maximum_density: f64,
 ) -> MaterialCard {
+    let upper = if current_dependent { maximum_density } else { maximum_field };
+    card_with_conductivity(vec![(0.0, 1.0), (upper, 1.0 + slope * upper)],
+        current_dependent, maximum_field, maximum_density)
+}
+fn card_with_conductivity(
+    conductivity: Vec<(f64, f64)>,
+    current_dependent: bool,
+    maximum_field: f64,
+    maximum_density: f64,
+) -> MaterialCard {
     let validity = ValidityDomain::unconstrained()
         .with_quantity(
             "T",
@@ -76,10 +86,10 @@ fn card(
             maximum_density,
         );
     let mut claims = ClaimSet::new();
-    let (axis, axis_dims, upper) = if current_dependent {
-        ("current_density", J, maximum_density)
+    let (axis, axis_dims) = if current_dependent {
+        ("current_density", J)
     } else {
-        ("gradient", E, maximum_field)
+        ("gradient", E)
     };
     for (name, dims, abscissa, abscissa_dims, knots) in [
         (
@@ -87,7 +97,7 @@ fn card(
             ELECTRICAL_CONDUCTIVITY_DIMS,
             axis,
             axis_dims,
-            vec![(0.0, 1.0), (upper, 1.0 + slope * upper)],
+            conductivity,
         ),
         (
             "density",
@@ -332,6 +342,79 @@ fn current_density_feedback_and_magnitude_axes_preserve_polarity() {
             sign.is_sign_positive()
         );
         assert!(proposal.step().electrical.heat_j > 0.0);
+    }
+}
+
+#[test]
+fn source_coordinate_relaxation_closes_a_passive_law_that_picard_cannot_resolve() {
+    // sigma(J) is positive and nonincreasing, so E=J/sigma(J) is strictly
+    // increasing. The RC midpoint has one physical solution. Undamped Picard
+    // nevertheless cycles between the high- and low-conductivity segments.
+    let source = card_with_conductivity(
+        vec![(0.0, 10.0), (1.0, 0.1), (16.0, 0.1)], true, 8.0, 16.0,
+    );
+    let bounded = ConductivitySolve { maximum_iterations: 128, ..solve() };
+    // J=(10-9.9J)(2-0.1J); stable smaller quadratic root, independent of Picard.
+    let current = 40.0 / (21.8 + (21.8_f64.powi(2) - 4.0 * 0.99 * 20.0).sqrt());
+    for sign in [-1.0, 1.0] {
+        let circuit = circuit(&source, sign * 2.0);
+        let original = circuit.clone();
+        assert!(matches!(circuit.conductivity_candidate(&bindings(&source), &[], DT,
+            controls(), bounded, || false),
+            Err(MaterialCircuitError::ConductivityConvergence { iterations: 128, .. })));
+        let mut polls = 0;
+        let candidate = circuit.conductivity_candidate(&bindings(&source), &[], DT,
+            controls(), bounded.with_relaxation(0.05).unwrap(), || { polls += 1; false }).unwrap();
+        let report = candidate.step();
+        near(report.evaluated[0].point.current_a, sign * current, 2e-11);
+        near(report.evaluated[0].point.voltage_v, sign * (2.0 - 0.1 * current), 2e-11);
+        near(candidate.circuit().charges_c()[0], sign * (1.0 - DT * current), 2e-11);
+        near(report.electrical.heat_j, DT * current * (2.0 - 0.1 * current), 2e-11);
+        near(report.electrical.stored_after_j + report.electrical.heat_j, 1.0, 2e-11);
+        assert!(report.iterations < bounded.maximum_iterations);
+        assert_eq!(report.source_evaluations, 2 * report.iterations - 1);
+        assert!(report.evaluated[0].power_defect_w.abs() <= controls().power_tolerance_w);
+        let evaluated = report.evaluated[0].conductor.material();
+        assert_eq!(evaluated.query().axes()["T"], 300.0);
+        assert_eq!(evaluated.card_identity(), source.content_hash());
+        for (before, after) in original.resistors()[0].conductor.material().properties()
+            .iter().zip(evaluated.properties()) {
+            assert_eq!(before.answer().receipt.selected, after.answer().receipt.selected);
+        }
+        // Late cancellation after the relaxed source queries cannot publish the
+        // native state or spend any original electrical storage.
+        let mut count = 0;
+        assert!(matches!(circuit.conductivity_candidate(&bindings(&source), &[], DT,
+            controls(), bounded.with_relaxation(0.05).unwrap(), || { count += 1; count == polls }),
+            Err(MaterialCircuitError::Cancelled)));
+        assert_eq!(circuit, original);
+    }
+}
+
+#[test]
+fn explicit_relaxation_preserves_unit_weight_and_constant_law_arithmetic() {
+    for weight in [0.0, -0.5, 1.01, f64::NAN, f64::INFINITY] {
+        assert!(solve().with_relaxation(weight).is_err());
+    }
+    for slope in [0.0, 0.2] {
+        let source = card(slope, false, 8.0, 16.0);
+        let circuit = circuit(&source, 2.0);
+        let native = circuit.conductivity_candidate(&bindings(&source), &[], DT,
+            controls(), solve(), || false).unwrap();
+        let explicit = circuit.conductivity_candidate(&bindings(&source), &[], DT,
+            controls(), solve().with_relaxation(1.0).unwrap(), || false).unwrap();
+        assert_eq!(explicit.circuit(), native.circuit());
+        assert_eq!(explicit.step().evaluated, native.step().evaluated);
+        assert_eq!(explicit.step().iterations, native.step().iterations);
+        assert_eq!(explicit.step().source_evaluations, native.step().source_evaluations);
+        if slope == 0.0 {
+            let relaxed = circuit.conductivity_candidate(&bindings(&source), &[], DT,
+                controls(), solve().with_relaxation(0.1).unwrap(), || false).unwrap();
+            assert_eq!(relaxed.circuit(), native.circuit());
+            assert_eq!(relaxed.step().electrical.heat_j, native.step().electrical.heat_j);
+            assert_eq!(relaxed.step().iterations, 1);
+            assert_eq!(relaxed.step().source_evaluations, 1);
+        }
     }
 }
 

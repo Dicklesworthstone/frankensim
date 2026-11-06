@@ -7,7 +7,8 @@
 
 use super::*;
 use crate::material_circuit::conductivity::{
-    ConductivitySolve, ConductorResponse, MaterialConductivityCandidate, MaterialConductivityStep,
+    ConductivityIteration, ConductivitySolve, ConductorResponse, MaterialConductivityCandidate,
+    MaterialConductivityStep,
 };
 use crate::material_circuit::conductivity::contact::ContactResponse;
 use super::contacts::{ContactHeatCells, ContactThermalCoefficients, ContactThermalSample};
@@ -85,6 +86,9 @@ impl ThermalDriver for MaterialConductivityCandidate {
 /// finite-difference stencils and fresh final admission. Native branch loss is
 /// the heat transfer; constitutive iteration error is never deposited as heat.
 /// The returned report retains both the applied and actual-field material data.
+/// Explicit `conductivity.with_relaxation(weight)?` is retained through every
+/// thermal trial and its narrowed electrical-work budget; final resistance,
+/// constitutive-power and actual enthalpy balance gates stay unchanged.
 ///
 /// This stationary bulk-conductor path holds topology, geometry, C/L, caloric
 /// laws and source ports fixed during the interval. Series electrical contacts
@@ -99,7 +103,7 @@ pub fn step_candidate<'m, S, E>(
     input: CircuitEnthalpyInput<'_>,
     responses: &[ConductorResponse<'_>],
     controls: CircuitEnthalpySolve,
-    conductivity: ConductivitySolve,
+    conductivity: impl Into<ConductivityIteration>,
     initial_energy_increments_j: &[f64],
     resolve: impl Fn(&DepositionSimulation<'m>) -> Result<CircuitThermalCoefficients<S>, E>,
     cancelled: impl FnMut() -> bool,
@@ -139,7 +143,7 @@ pub fn step_candidate_with_transport<'m, S, E>(
     input: CircuitEnthalpyInput<'_>,
     responses: &[ConductorResponse<'_>],
     controls: CircuitEnthalpySolve,
-    conductivity: ConductivitySolve,
+    conductivity: impl Into<ConductivityIteration>,
     initial_energy_increments_j: &[f64],
     resolve: impl Fn(&DepositionSimulation<'m>) -> Result<CircuitThermalCoefficients<S>, E>,
     transport: impl Fn(
@@ -177,7 +181,7 @@ pub fn step_with_contacts_candidate<'m, S, E>(
     responses: &[ConductorResponse<'_>],
     contact_cells: &[ContactHeatCells],
     controls: CircuitEnthalpySolve,
-    conductivity: ConductivitySolve,
+    conductivity: impl Into<ConductivityIteration>,
     initial_energy_increments_j: &[f64],
     resolve: impl Fn(&DepositionSimulation<'m>) -> Result<ContactThermalCoefficients<S>, E>,
     cancelled: impl FnMut() -> bool,
@@ -201,7 +205,7 @@ pub fn step_with_contacts_candidate_with_transport<'m, S, E>(
     responses: &[ConductorResponse<'_>],
     contact_cells: &[ContactHeatCells],
     controls: CircuitEnthalpySolve,
-    conductivity: ConductivitySolve,
+    conductivity: impl Into<ConductivityIteration>,
     initial_energy_increments_j: &[f64],
     resolve: impl Fn(&DepositionSimulation<'m>) -> Result<ContactThermalCoefficients<S>, E>,
     transport: impl Fn(
@@ -243,7 +247,7 @@ pub fn step_with_contact_response_candidate<'m, S, E>(
     contact_responses: Option<&[ContactResponse<'_>]>,
     contact_cells: &[ContactHeatCells],
     controls: CircuitEnthalpySolve,
-    conductivity: ConductivitySolve,
+    conductivity: impl Into<ConductivityIteration>,
     initial_energy_increments_j: &[f64],
     resolve: impl Fn(&DepositionSimulation<'m>) -> Result<ContactThermalCoefficients<S>, E>,
     transport: impl Fn(
@@ -296,7 +300,7 @@ fn coupled_with_contacts_candidate<'m, S, E>(
     contact_responses: Option<&[ContactResponse<'_>]>,
     contact_cells: &[ContactHeatCells],
     controls: CircuitEnthalpySolve,
-    conductivity: ConductivitySolve,
+    conductivity: impl Into<ConductivityIteration>,
     initial_energy_increments_j: &[f64],
     resolve: impl Fn(&DepositionSimulation<'m>) -> Result<ContactThermalCoefficients<S>, E>,
     transport: impl Fn(
@@ -307,7 +311,9 @@ fn coupled_with_contacts_candidate<'m, S, E>(
     cancelled: impl FnMut() -> bool,
 ) -> Result<ConductivityEnthalpyCandidate<'m, S>, CircuitEnthalpyError<E>> {
     // Validate the authored policy before the outer work budget narrows it.
-    conductivity.validate()?;
+    let iteration = conductivity.into();
+    iteration.validate()?;
+    let conductivity = iteration.controls();
     let cancel = RefCell::new(cancelled);
     let (thermal, circuit, report) = coupled_driver_candidate(
         thermal,
@@ -333,7 +339,7 @@ fn coupled_with_contacts_candidate<'m, S, E>(
                     input.ports,
                     target_s - thermal.time_s(),
                     controls.circuit,
-                    bounded,
+                    bounded.with_relaxation(iteration.relaxation())?,
                     || (*cancel.borrow_mut())(),
                 )
                 .map_err(|error| match error {
