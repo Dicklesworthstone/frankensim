@@ -55,6 +55,12 @@ pub use kinetics::{
     KineticsControlChange, KineticsControlSchedule,
 };
 
+mod adaptive;
+pub use adaptive::{
+    AdaptiveNuclearHeatSource, NuclearAdaptiveControls, NuclearAdaptiveError,
+    NuclearAdaptiveReport, NuclearTimeError, NuclearTimeTolerances,
+};
+
 /// An absolute-time change to a cell's total prescribed fission rate.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FissionRateChange {

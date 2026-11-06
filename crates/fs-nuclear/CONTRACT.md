@@ -1346,3 +1346,63 @@ neutron/precursor injection and outflow remain in the spatial particle report.
 Incoming particle energy, carrier mass and feed enthalpy are not silently
 credited as heat or added to the original bulk thermal material.
 
+## Adaptive time refinement of coupled nuclear heat
+
+`NuclearHeating::advance_adaptive_to` compares one original native interval
+with two native half intervals and publishes only the fine trajectory. The
+original decay, reaction, burnup, neutron, material and thermal owners perform
+every trial. This estimates first-order frozen-temperature, mean-flux and
+explicit heat-transport time error; it neither extrapolates a new state nor
+certifies a global error bound.
+
+`AdaptiveNuclearHeatSource` covers the existing decay, production, burnup,
+irradiation, capture-activation, point-kinetic and spatial-diffusion sources.
+The original `decay::thermal::DecayCellSource` also implements
+`NuclearHeatSource`, admitting plain radioactive decay through this shared
+owner without requiring a production schedule. Its original `DecayHeating`
+API remains available.
+
+`NuclearTimeTolerances` scales every isotope/fuel population, delayed-energy
+reservoir, released-energy channel, thermal stored-energy coordinate and
+temperature independently. Point-neutron amplitudes and spatial actual
+particle counts have separate scales. Interval comparisons retain individual
+reaction and production counts rather than subtracting lifetime totals.
+Spatial reports include group reaction, directional exchange, leakage,
+delayed decay, injection, precursor transfer and outflow counts, compared once
+per complete shared cohort. Each cell's supplied-nuclide vector is also
+compared. Relative scales use changes from the accepted state, so an arbitrary
+caloric datum or constant temperature on a latent-storage plateau cannot
+conceal stored-energy error.
+
+Native CFL, source and deposition-event cuts are discovered before nuclear
+evolution; a clipped comparison is retried on the actual native span.
+Identical hidden subdivisions therefore cannot masquerade as refinement.
+Unequal representable halves use their corresponding first-order fine-error
+factor. The deterministic controller halves rejected spans and may double
+well-resolved accepted spans; the report exposes counts, accepted error and
+the suggested next span.
+
+The original continuing-observer transaction keeps one compensated nuclear
+account over all accepted intervals. Thermal accounting uses original and
+actual birth storage coordinates and retains both signed and noncancelling
+defects. The caller's whole-call thermal numerical allowance is apportioned
+over duration and the bounded accepted-step count; retries do not renew it.
+Explicit trial/substep ceilings and the original thermal substep budget bound
+work. A smaller final/event/CFL interval may be attempted below the requested
+comparison floor, but its accuracy gate is never waived.
+
+Only excessive estimated temporal error requests a smaller interval.
+Physical, material-domain, numerical-budget and checkpoint failures preserve
+their original refusal and publish neither a partial accepted prefix nor
+trial histories. Nuclear and thermal numerical tolerances remain separate
+from the local temporal estimate.
+
+Seven new regressions cover analytic delayed-heat cooling and CFL cuts,
+independently scheduled supply and neutron flux with restart, temperature
+feedback against an independent invariant, latent storage and caloric datum
+invariance, work/floor/numerical-budget/late-callback rollback, plain decay
+through the shared owner, and one shared two-cell spatial cohort. The final
+native integration gate passed all 228 tests, compiling the production nuclear
+crate with thermal support against the actual numerical owners and the
+selected original thermal runtime. Full workspace Cargo and empirical reactor validation remain
+separate gates.

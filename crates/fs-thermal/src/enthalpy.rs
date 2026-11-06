@@ -453,6 +453,12 @@ impl<'a> DepositionSimulation<'a> {
     pub fn time_s(&self) -> f64 {
         self.time_s
     }
+    /// Original allocation and per-advance work ceilings. Coupled drivers use
+    /// these same limits across their accepted refinements.
+    #[must_use]
+    pub fn budget(&self) -> DepositionBudget {
+        self.budget
+    }
     /// Current material state, located geometry and source correspondence.
     #[must_use]
     pub fn cells(&self) -> &BTreeMap<CellId, DepositedCell> {

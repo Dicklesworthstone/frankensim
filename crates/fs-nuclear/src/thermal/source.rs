@@ -1,6 +1,7 @@
 //! The shared transactional heat-owner seam for admitted nuclear source laws.
 
-use super::{FissionCellSource, FissionThermalError};
+use super::{FissionCellSource, FissionThermalError, Sum};
+use crate::decay::{DecayBudget, DecayError, DecayStep, thermal::DecayCellSource};
 use crate::irradiation::GroupFlux;
 use crate::{EnergyChannels, FissionBudget, FissionError, FissionStep};
 use fs_thermal::enthalpy::{CellId, MaterialId};
@@ -215,5 +216,100 @@ impl NuclearHeatSource for FissionCellSource {
     }
     fn cumulative_released(&self) -> Result<EnergyChannels, FissionThermalError> {
         Ok(self.state.cumulative_released())
+    }
+}
+
+// The existing pure-decay cell can use the shared owner (and its adaptive
+// method) directly. Its original decay::thermal::DecayHeating API remains valid;
+// no artificial production schedule or second inventory is required.
+impl sealed::Sealed for DecayCellSource {}
+impl NuclearHeatSource for DecayCellSource {
+    type Budget = DecayBudget;
+    type Step = DecayStep;
+
+    fn cell_id(&self) -> CellId {
+        self.cell_id
+    }
+    fn material_id(&self) -> MaterialId {
+        self.material_id
+    }
+    fn energy_tolerance_j(budget: Self::Budget) -> f64 {
+        budget.energy_tolerance_j
+    }
+    fn nuclei_tolerance(budget: Self::Budget) -> Option<f64> {
+        Some(budget.nuclei_tolerance)
+    }
+    fn next_transition(&self, _: f64) -> Option<f64> {
+        None
+    }
+    fn admit(&self, _: f64, _: f64, budget: Self::Budget) -> Result<(), FissionThermalError> {
+        self.inventory.trial(0.0, budget, || Ok(()))?;
+        Ok(())
+    }
+    fn validate_temperature(&self, _: f64) -> Result<(), FissionThermalError> {
+        Ok(())
+    }
+    fn trial_source(
+        &self,
+        _: f64,
+        duration_s: f64,
+        _: f64,
+        budget: Self::Budget,
+        checkpoint: &mut dyn FnMut() -> Result<(), FissionError>,
+    ) -> Result<(Self, Self::Step), FissionThermalError> {
+        let mut checkpoint_error = None;
+        let trial = self.inventory.trial(duration_s, budget, || {
+            checkpoint().map_err(|error| {
+                checkpoint_error = Some(error);
+                DecayError::Cancelled
+            })
+        });
+        if let Some(error) = checkpoint_error {
+            return Err(error.into());
+        }
+        let (inventory, mut step) = trial?;
+        let mut total = Sum::default();
+        for &count in &step.decays {
+            total.add(count)?;
+        }
+        let mut defects = Sum::default();
+        defects.add(step.population_roundoff_nuclei)?;
+        defects.add(total.export_roundoff()?)?;
+        step.population_roundoff_nuclei = defects.nonnegative_upper_bound()?;
+        if step.population_roundoff_nuclei > budget.nuclei_tolerance {
+            return Err(FissionThermalError::NucleiBudget {
+                defect_nuclei: step.population_roundoff_nuclei,
+                tolerance_nuclei: budget.nuclei_tolerance,
+            });
+        }
+        Ok((
+            Self {
+                cell_id: self.cell_id,
+                material_id: self.material_id,
+                inventory,
+            },
+            step,
+        ))
+    }
+    fn released(step: &Self::Step) -> EnergyChannels {
+        step.released
+    }
+    fn energy_roundoff_j(step: &Self::Step) -> f64 {
+        step.energy_roundoff_j
+    }
+    fn population_roundoff_nuclei(step: &Self::Step) -> f64 {
+        step.population_roundoff_nuclei
+    }
+    fn decays(step: &Self::Step) -> f64 {
+        crate::sum(&step.decays)
+    }
+    fn fissions(_: &Self::Step) -> f64 {
+        0.0
+    }
+    fn captures(_: &Self::Step) -> f64 {
+        0.0
+    }
+    fn cumulative_released(&self) -> Result<EnergyChannels, FissionThermalError> {
+        Ok(self.inventory.cumulative_released())
     }
 }

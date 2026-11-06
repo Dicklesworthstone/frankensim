@@ -280,3 +280,69 @@ fn g0_geometry_and_complete_shared_cell_correspondence_are_required() {
     ));
     assert!(DiffusionCellSource::bind(state, vec![(CellId(20), MaterialId(1))]).is_err());
 }
+
+#[test]
+fn g3_adaptive_spatial_cohort_refines_once_and_retains_actual_neutron_counts() {
+    let initial = two_cells(1.0);
+    let heating = bound(&initial, 900.0, spatial_budget());
+    let (reference_heat, reference, _) = heating
+        .advance_to(&initial, 1.0, controls(1.0 / 1024.0), || Ok(()))
+        .unwrap();
+    let control = NuclearAdaptiveControls {
+        step: StepConfig {
+            max_dt_s: 1.0,
+            energy_tolerance_j: 1e-6,
+        },
+        initial_dt_s: 1.0,
+        minimum_dt_s: 1e-8,
+        maximum_trials: 4096,
+        maximum_substeps: 4096,
+        tolerances: NuclearTimeTolerances {
+            specific_energy_j_kg: 1e-4,
+            temperature_k: 1e-4,
+            nuclei: 1e-5,
+            nuclear_energy_j: 1e-4,
+            neutron_count: 1e-5,
+            relative: 0.0,
+            ..NuclearTimeTolerances::default()
+        },
+    };
+    let (heated, accepted, report) = heating
+        .advance_adaptive_to(&initial, 1.0, control, || Ok(()))
+        .unwrap();
+    let left = accepted.source(CellId(20)).unwrap();
+    let right = accepted.source(CellId(10)).unwrap();
+    assert!(
+        Arc::ptr_eq(left.state(), right.state()),
+        "all cells retain one accepted neutron/burnup checkpoint"
+    );
+    let state = right.state();
+    let captures = 100.0 - state.inventories()[1].populations()[0];
+    close(accepted.audit().captures, captures, 1e-8);
+    close(
+        20.0 - state.neutrons().neutron_counts().iter().sum::<f64>(),
+        captures,
+        1e-8,
+    );
+    close(accepted.audit().released.deposited_j, 8.0 * captures, 1e-8);
+    close(report.thermal.external_heat_j, 1.0 + 8.0 * captures, 1e-8);
+    close(
+        heated.temperature_k(CellId(10)).unwrap(),
+        reference_heat.temperature_k(CellId(10)).unwrap(),
+        2e-3,
+    );
+    for (&actual, &expected) in state.neutrons().neutron_counts().iter().zip(
+        reference
+            .source(CellId(10))
+            .unwrap()
+            .state()
+            .neutrons()
+            .neutron_counts(),
+    ) {
+        close(actual, expected, 2e-4);
+    }
+    assert!(report.comparisons > 1);
+    assert_eq!(report.thermal.substeps, 2 * report.accepted_comparisons);
+    assert_eq!(accepted.audit().substeps, report.thermal.substeps);
+    assert_eq!(left.state().inventories()[0].populations(), &[0.0, 0.0]);
+}
