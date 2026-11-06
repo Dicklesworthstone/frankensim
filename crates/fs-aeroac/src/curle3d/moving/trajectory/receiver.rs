@@ -18,6 +18,7 @@ use crate::curle3d::moving::MovingCompactLimits;
 use fs_ivl::Interval;
 use fs_math::dd::Dd;
 
+mod causal;
 mod doppler;
 
 /// The finite observation window and its physical error limits.
@@ -34,7 +35,10 @@ pub struct MovingReceiverConfig {
 /// Finite work limits for pair preparation and every retarded query.
 #[derive(Clone, Copy, Debug)]
 pub struct MovingReceiverBudget {
-    /// Original source/receiver span pairs visited during clearance admission.
+    /// Causally possible source/receiver span pairs visited during clearance.
+    /// Two monotone endpoint searches precede each receiver span, with at most
+    /// 2 * ceil(log2(source_spans + 1)) outward knot probes. Each probe polls
+    /// cancellation; excluded span ranges consume no pair or bound-node work.
     pub maximum_segment_pairs: usize,
     /// Total causal Bernstein pair-bound nodes across those span pairs.
     pub maximum_bound_nodes: usize,
@@ -69,6 +73,10 @@ pub struct PreparedMovingReceiverSample {
 /// Endpoint roots prove continuous history coverage because both paths are
 /// strictly subsonic. Clearance is admitted with conservative interval bounds
 /// over source/receiver span pairs, pruning events outside the sound cone.
+/// Monotone interval endpoint searches exclude impossible source-span ranges
+/// before pair enumeration. Dense histories therefore need work proportional
+/// to possible causal pairs plus receiver_spans * log(source_spans), rather
+/// than the full Cartesian product. Inconclusive signs retain extra spans.
 /// Inconclusive bounds refuse under explicit work caps; no knot is changed.
 /// Queries allocate nothing and never advance either mechanical trajectory.
 #[derive(Clone, Copy, Debug)]
@@ -658,7 +666,8 @@ fn admit_clearance(
         let receiver_velocity = owner.image.map_or(receiver.velocity_mach_bounds, |image| {
             image.vector_bounds(receiver.velocity_mach_bounds)
         });
-        for source in &owner.source.segments {
+        let source_spans = causal::source_spans(owner, receiver, cancelled)?;
+        for source in &owner.source.segments[source_spans] {
             poll(cancelled)?;
             if work.pairs >= budget.maximum_segment_pairs {
                 return Err(invalid(

@@ -254,3 +254,105 @@ fn unused_future_source_spans_do_not_impose_their_approach_bandwidth() {
     close(owner.maximum_source_time_rate(), 300.0 / 420.0);
     check_window(&owner);
 }
+
+#[test]
+fn dense_histories_admit_only_causally_possible_span_pairs() {
+    let trajectory_budget = TrajectoryBudget {
+        maximum_segments: 512,
+        maximum_payload_bytes: 2_000_000,
+        ..budget()
+    };
+    let source_knots: Vec<_> = (0..=384)
+        .map(|i| TimedSourceKinematics {
+            source_time_s: -0.5 + f64::from(i) / 256.0,
+            kinematics: straight(0.0, [0.0; 3], [0.0; 3]),
+        })
+        .collect();
+    let receiver_knots: Vec<_> = (0..=256)
+        .map(|i| TimedSourceKinematics {
+            source_time_s: f64::from(i) / 256.0,
+            kinematics: straight(0.0, [9.375, 0.0, 0.0], [0.0; 3]),
+        })
+        .collect();
+    let source = PreparedKinematicTrajectory::new(
+        medium(), &source_knots, 0.8, trajectory_budget, &mut || false,
+    ).unwrap();
+    let receiver = PreparedKinematicTrajectory::new(
+        medium(), &receiver_knots, 0.8, trajectory_budget, &mut || false,
+    ).unwrap();
+    let mut polls = 0;
+    let owner = PreparedMovingReceiverSource::new(
+        &source,
+        &receiver,
+        MovingReceiverConfig {
+            receiver_time_interval_s: [0.0, 1.0],
+            minimum_distance_m: 0.01,
+            maximum_time_residual_s: 1e-12,
+        },
+        MovingReceiverBudget {
+            // 384 * 256 = 98,304 combinations would fail. At most three
+            // original source spans touch each receiver span's sound cone.
+            maximum_segment_pairs: 1024,
+            maximum_bound_nodes: 4096,
+            maximum_subdivision_depth: 24,
+            maximum_root_iterations: 96,
+        },
+        &mut || { polls += 1; false },
+    ).unwrap();
+    assert!(polls < 12_000, "noncausal history scan: {polls} polls");
+    assert_eq!(owner.maximum_source_time_rate(), 1.0);
+    for i in 0..=256 {
+        let t = f64::from(i) / 256.0;
+        let sample = owner.prepare_receiver(t, &mut || false).unwrap();
+        close(sample.pressure.source_time_s(), t - 1.0 / 32.0);
+        close(sample.observed_source_time_rate, 1.0);
+    }
+}
+
+#[test]
+fn causal_brackets_evaluate_clipped_receiver_windows_inside_original_spans() {
+    let trajectory_budget = TrajectoryBudget {
+        maximum_segments: 512,
+        maximum_payload_bytes: 2_000_000,
+        ..budget()
+    };
+    let source_knots: Vec<_> = (0..=256)
+        .map(|i| {
+            let t = -0.5 + f64::from(i) / 256.0;
+            TimedSourceKinematics {
+                source_time_s: t,
+                kinematics: straight(t, [0.0; 3], [-120.0, 0.0, 0.0]),
+            }
+        })
+        .collect();
+    let source = PreparedKinematicTrajectory::new(
+        medium(), &source_knots, 0.8, trajectory_budget, &mut || false,
+    ).unwrap();
+    let receiver = path(
+        &knots([-1.0, 2.0], |t| straight(t, [100.0, 0.0, 0.0], [60.0, 0.0, 0.0])),
+        0.8,
+    );
+    let owner = PreparedMovingReceiverSource::new(
+        &source,
+        &receiver,
+        MovingReceiverConfig {
+            receiver_time_interval_s: [0.03125, 0.0625],
+            minimum_distance_m: 0.01,
+            maximum_time_residual_s: 1e-12,
+        },
+        MovingReceiverBudget {
+            maximum_segment_pairs: 16,
+            maximum_bound_nodes: 256,
+            maximum_subdivision_depth: 24,
+            maximum_root_iterations: 96,
+        },
+        &mut || false,
+    ).unwrap();
+    close(owner.maximum_source_time_rate(), 240.0 / 420.0);
+    for i in 0..=32 {
+        let t = 0.03125 + f64::from(i) / 1024.0;
+        let sample = owner.prepare_receiver(t, &mut || false).unwrap();
+        close(sample.pressure.source_time_s(), (240.0 * t - 100.0) / 420.0);
+        assert!(sample.observed_source_time_rate <= owner.maximum_source_time_rate());
+    }
+}
