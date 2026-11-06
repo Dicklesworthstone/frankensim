@@ -137,6 +137,10 @@ fn upper_reference(lambda: [f64; 4]) -> [f64; 9] {
 // Independent upper-triangular inverse and Mooney-Rivlin invariants. Neither
 // the native reference pullback nor either discrete-gradient owner is used.
 fn reference_energy(f: [f64; 9], g: [f64; 9]) -> f64 {
+    reference_energy_with_bulk(f, g, 40.0)
+}
+
+fn reference_energy_with_bulk(f: [f64; 9], g: [f64; 9], kappa: f64) -> f64 {
     let (a, b, c, s, t, u) = (g[0], g[4], g[8], g[1], g[5], g[2]);
     let jg = a * b * c;
     let h = [
@@ -170,10 +174,19 @@ fn reference_energy(f: [f64; 9], g: [f64; 9]) -> f64 {
     let i1: f64 = fe.iter().map(|x| x * x).sum();
     let i2: f64 = cof.iter().map(|x| x * x).sum();
     let iso = je.powf(-2.0 / 3.0);
-    jg * (4.0 * (iso * i1 - 3.0) + 2.0 * (iso * iso * i2 - 3.0) + 20.0 * (je - 1.0).powi(2))
+    jg * (4.0 * (iso * i1 - 3.0) + 2.0 * (iso * iso * i2 - 3.0) + 0.5 * kappa * (je - 1.0).powi(2))
 }
 
 fn reference_field_energy(element: &[usize; 10], u: &[[f64; 3]]) -> f64 {
+    reference_field_storage(element, u, upper_reference, 40.0)
+}
+
+fn reference_field_storage(
+    element: &[usize; 10],
+    u: &[[f64; 3]],
+    reference: impl Fn([f64; 4]) -> [f64; 9],
+    kappa: f64,
+) -> f64 {
     duffy_quadrature(4)
         .into_iter()
         .map(|(lambda, weight)| {
@@ -194,9 +207,472 @@ fn reference_field_energy(element: &[usize; 10], u: &[[f64; 3]]) -> f64 {
                     sum + u[element[a]][i] * gradients[a][j]
                 })
             });
-            weight * reference_energy(f, upper_reference(lambda))
+            weight * reference_energy_with_bulk(f, reference(lambda), kappa)
         })
         .sum()
+}
+
+#[test]
+fn g1_nonuniform_reference_event_keeps_motion_and_the_original_energy_ledger() {
+    with_cx(|cx| {
+        let (nodes, elements) = mesh(cx);
+        let (material, target_material) = (law(40.0), law(80.0));
+        let densities = [DENSITY];
+        let identity = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+        let f0 = [1.04, 0.02, 0.0, 0.0, 0.98, 0.01, 0.0, 0.0, 1.03];
+        let f1 = [1.05, 0.018, 0.003, 0.0, 0.985, 0.012, 0.0, 0.0, 1.025];
+        let u0 = affine_displacement(&nodes, f0);
+        let u1 = affine_displacement(&nodes, f1);
+        let v0 = vec![[0.0; 3]; nodes.len()];
+        let definition = ConservativeTetDefinition {
+            formulation: ConservativeFormulation::FullMaterial,
+            ..definition(&nodes, &elements, &material, &densities)
+        };
+        let initial = definition.prepare(&u0, &v0, cx).unwrap();
+        let initial_energy = VOLUME * reference_energy(f0, identity);
+        near(initial.total_energy_j(), initial_energy, 2e-13);
+        // Begin with nonzero support work so a reset baseline cannot pass the
+        // later accumulated-energy check accidentally.
+        let prescribed: Vec<_> = u1.iter().flatten().copied().enumerate().collect();
+        let loaded = initial
+            .advance(
+                0.04,
+                &prescribed,
+                &[],
+                [0.0; 3],
+                settings(),
+                WORK_ALLOWANCE,
+                cx,
+            )
+            .unwrap();
+        assert!(loaded.energy.support_work_j.abs() > 1e-5);
+        let accepted = loaded.solid;
+        let before = state_bits(&accepted);
+        let references: Vec<_> = duffy_quadrature(4)
+            .iter()
+            .map(|(lambda, _)| ReferenceDeformation::try_new(upper_reference(*lambda)).unwrap())
+            .collect();
+        let expected_before = VOLUME * reference_energy(f1, identity);
+        let expected_after = reference_field_storage(&elements[0], &u1, upper_reference, 80.0);
+        let changed = accepted
+            .change_reference(
+                MixedLawField::Uniform(&target_material),
+                ConservativeReferenceField::PerQuadrature(&references),
+                &[],
+                WORK_ALLOWANCE,
+                cx,
+            )
+            .unwrap();
+        assert_eq!(state_bits(&accepted), before);
+        assert_eq!(changed.solid.displacement_m(), accepted.displacement_m());
+        assert_eq!(changed.solid.velocity_mps(), accepted.velocity_mps());
+        assert_eq!(changed.solid.time_s(), accepted.time_s());
+        assert_eq!(
+            changed.solid.kinetic_energy_j(),
+            accepted.kinetic_energy_j()
+        );
+        near(changed.energy.stored_before_j, expected_before, 2e-13);
+        near(changed.energy.stored_after_j, expected_after, 2e-13);
+        near(
+            changed.energy.reference_work_j,
+            expected_after - expected_before,
+            2e-13,
+        );
+        near(changed.energy.bulk_reference_work_j, 0.0, 0.0);
+        near(changed.energy.balance_error_j, 0.0, WORK_ALLOWANCE);
+        near(
+            changed.energy.cumulative_balance_error_j,
+            0.0,
+            WORK_ALLOWANCE,
+        );
+        near(changed.solid.reference_mass_kg(), DENSITY * VOLUME, 2e-14);
+        let acceleration = vec![[0.2, -0.1, 0.4]; nodes.len()];
+        assert_eq!(
+            changed
+                .solid
+                .reference_acceleration_load_n(&acceleration, cx)
+                .unwrap(),
+            accepted
+                .reference_acceleration_load_n(&acceleration, cx)
+                .unwrap()
+        );
+
+        let continued = changed
+            .solid
+            .advance(0.005, &[], &[], [0.0; 3], settings(), WORK_ALLOWANCE, cx)
+            .unwrap();
+        let stored = reference_field_storage(
+            &elements[0],
+            continued.solid.displacement_m(),
+            upper_reference,
+            80.0,
+        );
+        let (kinetic, _, _) = independent_motion(
+            &nodes,
+            &elements[0],
+            continued.solid.displacement_m(),
+            continued.solid.velocity_mps(),
+        );
+        near(continued.solid.stored_energy_j(), stored, 2e-13);
+        near(continued.solid.kinetic_energy_j(), kinetic, 2e-13);
+        near(
+            stored + kinetic,
+            initial_energy + loaded.energy.support_work_j + changed.energy.reference_work_j,
+            WORK_ALLOWANCE,
+        );
+        near(continued.energy.constraint_reference_work_j, 0.0, 0.0);
+        near(
+            continued.energy.cumulative_balance_error_j,
+            0.0,
+            WORK_ALLOWANCE,
+        );
+    });
+}
+
+#[test]
+fn g1_bulk_reference_event_preserves_retained_total_volumes_and_their_physical_storage() {
+    with_cx(|cx| {
+        let (nodes, elements) = mesh(cx);
+        let (material, target_material) = (law(40.0), law(80.0));
+        let densities = [DENSITY];
+        let (a, b) = (0.03, -0.02);
+        let u: Vec<_> = nodes
+            .iter()
+            .map(|x| [a * x[0] * x[0], b * x[1] * x[1], 0.0])
+            .collect();
+        let velocity = vec![[0.1, -0.05, 0.02]; nodes.len()];
+        // det(F)=1+2ax+2by+4abxy. Its exact L2 projection onto P1
+        // uses xy -> (-1/30,2/15,2/15,-1/30) at the four vertices.
+        // Retained q therefore differs from geometric det(F) pointwise.
+        let projection = [-1.0 / 30.0, 2.0 / 15.0, 2.0 / 15.0, -1.0 / 30.0];
+        let q_nodes: [f64; 4] = core::array::from_fn(|i| {
+            1.0 + if i == 1 { 2.0 * a } else { 0.0 }
+                + if i == 2 { 2.0 * b } else { 0.0 }
+                + 4.0 * a * b * projection[i]
+        });
+        let pressure0 = q_nodes.map(|q| 40.0 * (q - 1.0));
+        let definition = ConservativeTetDefinition {
+            formulation: bulk_formulation(),
+            ..definition(&nodes, &elements, &material, &densities)
+        };
+        let accepted = definition
+            .prepare_with_pressure(&u, &velocity, &pressure0, cx)
+            .unwrap();
+        let before = state_bits(&accepted);
+        let volumes = accepted.bulk_volume_ratios().to_vec();
+        let quadrature = duffy_quadrature(4);
+        let mut separation = 0.0_f64;
+        for ((lambda, _), q) in quadrature.iter().zip(&volumes) {
+            let analytic_q: f64 = (0..4).map(|i| lambda[i] * q_nodes[i]).sum();
+            near(*q, analytic_q, 2e-14);
+            let geometric = (1.0 + 2.0 * a * lambda[1]) * (1.0 + 2.0 * b * lambda[2]);
+            separation = separation.max((q - geometric).abs());
+        }
+        assert!(separation > 1e-5);
+        let g = [1.02, 0.01, 0.0, 0.0, 0.99, -0.02, 0.0, 0.0, 1.01];
+        let reference = ReferenceDeformation::try_new(g).unwrap();
+        let jg = g[0] * g[4] * g[8];
+        let target_pressure = q_nodes.map(|q| 80.0 * (q / jg - 1.0));
+        let bulk_energy = |values: &[f64], natural_volume: f64, kappa: f64| {
+            quadrature
+                .iter()
+                .zip(values)
+                .map(|((_, weight), q)| {
+                    weight * natural_volume * 0.5 * kappa * (q / natural_volume - 1.0).powi(2)
+                })
+                .sum::<f64>()
+        };
+        let bulk_before = bulk_energy(&volumes, 1.0, 40.0);
+        let bulk_after = bulk_energy(&volumes, jg, 80.0);
+        let remainder_after = reference_field_storage(&elements[0], &u, |_| g, 0.0);
+        let changed = accepted
+            .change_reference(
+                MixedLawField::Uniform(&target_material),
+                ConservativeReferenceField::Uniform(&reference),
+                &target_pressure,
+                WORK_ALLOWANCE,
+                cx,
+            )
+            .unwrap();
+        assert_eq!(state_bits(&accepted), before);
+        assert_eq!(changed.solid.bulk_volume_ratios(), &volumes);
+        assert_eq!(changed.solid.displacement_m(), accepted.displacement_m());
+        assert_eq!(changed.solid.velocity_mps(), accepted.velocity_mps());
+        assert_eq!(changed.solid.algorithmic_pressure_pa(), target_pressure);
+        near(changed.solid.reference_mass_kg(), DENSITY * VOLUME, 2e-14);
+        near(changed.energy.bulk_stored_before_j, bulk_before, 2e-13);
+        near(changed.energy.bulk_stored_after_j, bulk_after, 2e-13);
+        near(
+            changed.energy.bulk_reference_work_j,
+            bulk_after - bulk_before,
+            2e-13,
+        );
+        near(
+            changed.energy.stored_after_j,
+            remainder_after + bulk_after,
+            2e-13,
+        );
+        near(
+            changed.energy.reference_work_j,
+            remainder_after + bulk_after - accepted.stored_energy_j(),
+            2e-13,
+        );
+        let continued = changed
+            .solid
+            .advance(0.005, &[], &[], [0.0; 3], settings(), WORK_ALLOWANCE, cx)
+            .unwrap();
+        let remainder =
+            reference_field_storage(&elements[0], continued.solid.displacement_m(), |_| g, 0.0);
+        let bulk = bulk_energy(continued.solid.bulk_volume_ratios(), jg, 80.0);
+        let (kinetic, _, _) = independent_motion(
+            &nodes,
+            &elements[0],
+            continued.solid.displacement_m(),
+            continued.solid.velocity_mps(),
+        );
+        near(continued.solid.stored_energy_j(), remainder + bulk, 2e-13);
+        near(
+            remainder + bulk + kinetic,
+            accepted.total_energy_j() + changed.energy.reference_work_j,
+            WORK_ALLOWANCE,
+        );
+        near(continued.energy.constraint_reference_work_j, 0.0, 0.0);
+        near(
+            continued.energy.cumulative_balance_error_j,
+            0.0,
+            WORK_ALLOWANCE,
+        );
+    });
+}
+
+#[test]
+fn g1_exact_natural_volume_change_supplies_signed_constraint_work_and_preserves_momenta() {
+    with_cx(|cx| {
+        let (nodes, elements) = mesh(cx);
+        let material = law(40.0);
+        let densities = [DENSITY];
+        let zero = vec![[0.0; 3]; nodes.len()];
+        let accepted = definition(&nodes, &elements, &material, &densities)
+            .prepare(&zero, &zero, cx)
+            .unwrap();
+        let before = state_bits(&accepted);
+        for stretch in [1.01, 0.99] {
+            let g = [stretch, 0.0, 0.0, 0.0, stretch, 0.0, 0.0, 0.0, stretch];
+            let reference = ReferenceDeformation::try_new(g).unwrap();
+            let jg = stretch * stretch * stretch;
+            // A zero-duration event cannot change the constrained total
+            // volume at fixed F. The coupled interval must solve that motion.
+            assert!(
+                accepted
+                    .change_reference(
+                        MixedLawField::Uniform(&material),
+                        ConservativeReferenceField::Uniform(&reference),
+                        &[],
+                        WORK_ALLOWANCE,
+                        cx,
+                    )
+                    .is_err()
+            );
+            let changed = accepted
+                .change_reference_and_advance(
+                    MixedLawField::Uniform(&material),
+                    ConservativeReferenceField::Uniform(&reference),
+                    &[],
+                    0.05,
+                    &[],
+                    &[],
+                    [0.0; 3],
+                    settings(),
+                    WORK_ALLOWANCE,
+                    cx,
+                )
+                .unwrap();
+            let step = changed.step;
+            let target_moment = VOLUME * (jg - 1.0) / 4.0;
+            let actuation =
+                -target_moment * step.solid.algorithmic_pressure_pa().iter().sum::<f64>();
+            let (iso_storage, volume) =
+                independent_fields(&elements[0], step.solid.displacement_m());
+            let (kinetic, linear, angular) = independent_motion(
+                &nodes,
+                &elements[0],
+                step.solid.displacement_m(),
+                step.solid.velocity_mps(),
+            );
+            assert!(step.newton.is_some());
+            assert!(kinetic > 1e-5);
+            assert!(actuation > 1e-5);
+            near(changed.reference.reference_work_j, 0.0, 2e-13);
+            near(step.energy.constraint_reference_work_j, actuation, 2e-13);
+            near(step.energy.pressure_work_j, -actuation, WORK_ALLOWANCE);
+            near(step.solid.stored_energy_j(), jg * iso_storage, 2e-13);
+            near(jg * iso_storage + kinetic, actuation, WORK_ALLOWANCE);
+            near(step.inertia.numerical_loss_j, 0.0, 0.0);
+            near(step.energy.balance_error_j, 0.0, WORK_ALLOWANCE);
+            near(step.energy.cumulative_balance_error_j, 0.0, WORK_ALLOWANCE);
+            near(step.solid.reference_mass_kg(), DENSITY * VOLUME, 2e-14);
+            for moment in volume {
+                near(moment, target_moment, 2e-11);
+            }
+            for c in 0..3 {
+                near(linear[c], 0.0, 2e-11);
+                near(angular[c], 0.0, 2e-11);
+            }
+            let continued = step
+                .solid
+                .advance(0.01, &[], &[], [0.0; 3], settings(), WORK_ALLOWANCE, cx)
+                .unwrap();
+            near(continued.energy.constraint_reference_work_j, 0.0, 0.0);
+            near(continued.solid.total_energy_j(), actuation, WORK_ALLOWANCE);
+            near(
+                continued.energy.cumulative_balance_error_j,
+                0.0,
+                WORK_ALLOWANCE,
+            );
+            assert_eq!(state_bits(&accepted), before);
+        }
+    });
+}
+
+#[test]
+fn g0_reference_event_admission_is_atomic_and_compatible_exact_changes_keep_inventory() {
+    with_cx(|cx| {
+        let (nodes, elements) = mesh(cx);
+        let material = law(40.0);
+        let densities = [DENSITY];
+        let zero = vec![[0.0; 3]; nodes.len()];
+        let velocity = vec![[0.1, -0.2, 0.3]; nodes.len()];
+        let corners = [[2.0, 4.0, 6.0, 12.0]];
+        let accepted = definition(&nodes, &elements, &material, &densities)
+            .prepare_with_reference_density(&corners, &zero, &velocity, &[], cx)
+            .unwrap();
+        let before = state_bits(&accepted);
+        let g = [1.1, 0.03, 0.0, 0.0, 1.0 / 1.1, -0.02, 0.0, 0.0, 1.0];
+        let reference = ReferenceDeformation::try_new(g).unwrap();
+        let changed = accepted
+            .change_reference(
+                MixedLawField::Uniform(&material),
+                ConservativeReferenceField::Uniform(&reference),
+                &[],
+                WORK_ALLOWANCE,
+                cx,
+            )
+            .unwrap();
+        let identity = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+        near(
+            changed.energy.reference_work_j,
+            VOLUME * reference_energy_with_bulk(identity, g, 0.0),
+            2e-13,
+        );
+        assert_eq!(
+            changed.solid.reference_corner_density_kg_m3(),
+            Some(corners.as_slice())
+        );
+        assert_eq!(
+            changed.solid.reference_density_kg_m3(),
+            accepted.reference_density_kg_m3()
+        );
+        assert_eq!(
+            changed.solid.reference_mass_kg(),
+            accepted.reference_mass_kg()
+        );
+        assert_eq!(
+            changed.solid.kinetic_energy_j(),
+            accepted.kinetic_energy_j()
+        );
+        assert_eq!(changed.solid.displacement_m(), accepted.displacement_m());
+        assert_eq!(changed.solid.velocity_mps(), accepted.velocity_mps());
+        assert_eq!(changed.solid.time_s(), accepted.time_s());
+        let acceleration: Vec<_> = nodes
+            .iter()
+            .map(|x| [x[1], x[2] - x[0], 1.0 + x[0]])
+            .collect();
+        assert_eq!(
+            changed
+                .solid
+                .reference_acceleration_load_n(&acceleration, cx)
+                .unwrap(),
+            accepted
+                .reference_acceleration_load_n(&acceleration, cx)
+                .unwrap()
+        );
+        assert!(
+            accepted
+                .change_reference(
+                    MixedLawField::PerElement(&[]),
+                    ConservativeReferenceField::Uniform(&reference),
+                    &[],
+                    WORK_ALLOWANCE,
+                    cx,
+                )
+                .is_err()
+        );
+        assert!(
+            accepted
+                .change_reference(
+                    MixedLawField::Uniform(&material),
+                    ConservativeReferenceField::PerQuadrature(&[]),
+                    &[],
+                    WORK_ALLOWANCE,
+                    cx,
+                )
+                .is_err()
+        );
+        for predictor in [&[0.0][..], &[0.0, 0.0, f64::NAN, 0.0][..]] {
+            assert!(
+                accepted
+                    .change_reference(
+                        MixedLawField::Uniform(&material),
+                        ConservativeReferenceField::Uniform(&reference),
+                        predictor,
+                        WORK_ALLOWANCE,
+                        cx,
+                    )
+                    .is_err()
+            );
+        }
+        assert!(
+            accepted
+                .change_reference(
+                    MixedLawField::Uniform(&material),
+                    ConservativeReferenceField::Uniform(&reference),
+                    &[],
+                    f64::NAN,
+                    cx,
+                )
+                .is_err()
+        );
+        let extreme =
+            ReferenceDeformation::try_new([10.0, 0.0, 0.0, 0.0, 0.1, 0.0, 0.0, 0.0, 1.0]).unwrap();
+        assert!(
+            accepted
+                .change_reference(
+                    MixedLawField::Uniform(&material),
+                    ConservativeReferenceField::Uniform(&extreme),
+                    &[],
+                    WORK_ALLOWANCE,
+                    cx,
+                )
+                .is_err()
+        );
+        assert!(
+            accepted
+                .change_reference_and_advance(
+                    MixedLawField::Uniform(&material),
+                    ConservativeReferenceField::Uniform(&reference),
+                    &[],
+                    0.0,
+                    &[],
+                    &[],
+                    [0.0; 3],
+                    settings(),
+                    WORK_ALLOWANCE,
+                    cx,
+                )
+                .is_err()
+        );
+        assert_eq!(state_bits(&accepted), before);
+    });
 }
 
 #[test]

@@ -17,6 +17,9 @@
 //! Loads are held dead forces and supports are absolute endpoint displacements.
 //! Contact, follower forces, heat and irreversible material history have their
 //! separate owners. Sampled geometric admission does not certify injectivity.
+//! Prescribed reference/law events retain original mass and motion, and account
+//! for their signed storage change. A combined reference event and interval also
+//! accounts for exact-volume actuation; no continuous temperature path is inferred.
 
 use std::cell::RefCell;
 use std::sync::Arc;
@@ -45,7 +48,11 @@ pub use crate::inertia::{
 
 mod assembly;
 mod impulse;
+mod reference_change;
 pub use impulse::{ConservativePointImpulseResponse, ConservativeTetImpulse};
+pub use reference_change::{
+    ConservativeReferenceEnergy, ConservativeTetReferenceChange, ConservativeTetReferenceStep,
+};
 
 /// Explicit material/spatial formulation; no inferred bulk penalty or defaults.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -914,13 +921,21 @@ pub struct ConservativeTetEnergy {
     pub pressure_work_j: f64,
     pub dead_load_work_j: f64,
     pub support_work_j: f64,
+    /// Signed source work -p_alg dot integral N_p Delta(det(G)) dV for an
+    /// exact-volume reference change over this interval. Zero for held G and
+    /// both finite-compliance formulations. Fixed-F reference storage work is
+    /// reported separately by `ConservativeTetReferenceStep::reference`.
+    pub constraint_reference_work_j: f64,
     pub constitutive_work_error_j: f64,
-    /// Actual pressure work minus bulk work and p dotted with the weak-volume change.
+    /// Pressure work plus constraint-reference input, minus bulk work and p
+    /// dotted with the weak-volume change between the two accepted references.
     pub constraint_work_error_j: f64,
     pub equilibrium_work_error_j: f64,
-    /// External/support work minus physical stored and kinetic changes.
+    /// External/support and constraint-reference work minus physical stored
+    /// and kinetic changes, measured after any fixed-F reference event.
     pub balance_error_j: f64,
-    /// Accumulated external/support work minus physical total-energy change.
+    /// All accumulated work, including reference events, minus physical total
+    /// energy change from the original prepared state.
     pub cumulative_balance_error_j: f64,
 }
 
@@ -948,6 +963,14 @@ struct Evaluation {
     pressure_work_j: f64,
     pressure_residual_m3: Vec<f64>,
     min_det_f: f64,
+}
+
+/// Private input: an incompatible exact-volume rebound never leaves its atomic
+/// reference-change-and-advance call. The original accepted residual and the
+/// directly integrated natural-volume change have independent roles in work.
+struct ConstraintReferenceChange<'a> {
+    pressure_residual_before_m3: &'a [f64],
+    natural_volume_change_m3: &'a [f64],
 }
 
 impl<'a> ConservativeTetSolid<'a> {
@@ -981,7 +1004,8 @@ impl<'a> ConservativeTetSolid<'a> {
             &self.mesh.pressure_nodes
         }
     }
-    /// Algebraic multipliers for the last accepted interval. At time zero this
+    /// Algebraic multipliers for the last accepted interval, or the explicit
+    /// predictor supplied by a fixed-F reference event. At preparation this
     /// returns the supplied initial pressure (zero with `prepare`).
     /// These are not endpoint Cauchy pressures and carry no inertia or storage.
     pub fn algorithmic_pressure_pa(&self) -> &[f64] {
@@ -1080,6 +1104,30 @@ impl<'a> ConservativeTetSolid<'a> {
         body_force_n_m3: [f64; 3],
         settings: MixedUpSettings,
         maximum_work_error_j: f64,
+        cx: &Cx<'_>,
+    ) -> Result<ConservativeTetStep<'a>, ConservativeTetError> {
+        self.advance_with_reference_change(
+            dt_s,
+            prescribed_m,
+            nodal_forces_n,
+            body_force_n_m3,
+            settings,
+            maximum_work_error_j,
+            None,
+            cx,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    fn advance_with_reference_change(
+        &self,
+        dt_s: f64,
+        prescribed_m: &[(usize, f64)],
+        nodal_forces_n: &[(usize, f64)],
+        body_force_n_m3: [f64; 3],
+        settings: MixedUpSettings,
+        maximum_work_error_j: f64,
+        reference_change: Option<ConstraintReferenceChange<'_>>,
         cx: &Cx<'_>,
     ) -> Result<ConservativeTetStep<'a>, ConservativeTetError> {
         checkpoint(cx)?;
@@ -1289,15 +1337,30 @@ impl<'a> ConservativeTetSolid<'a> {
             .iter()
             .fold(0.0, |s, (d, f)| f.mul_add(du[*d], s));
         let work_j = dead_load_work_j + support_work_j;
+        // P = P_remainder + p_alg Gd uses a tensile-positive multiplier.
+        // Changing the weak target supplies -p_alg Delta(J_ref), so pressure
+        // work still closes against physical storage rather than creating energy.
+        let constraint_reference_work_j = reference_change.as_ref().map_or(0.0, |change| {
+            pressure_pa
+                .iter()
+                .zip(change.natural_volume_change_m3)
+                .fold(0.0, |s, (p, volume)| (-p).mul_add(*volume, s))
+        });
         let stored_change_j = evaluation.stored_j - self.stored_energy_j;
         let bulk_change_j = evaluation.bulk_stored_j - self.bulk_stored_energy_j;
-        let increment = work_j - self.work_correction_j;
+        let increment = (work_j + constraint_reference_work_j) - self.work_correction_j;
         let cumulative_work_j = self.cumulative_work_j + increment;
         let work_correction_j = (cumulative_work_j - self.cumulative_work_j) - increment;
         let algebraic_pressure_work_j = pressure_pa
             .iter()
             .zip(&evaluation.pressure_residual_m3)
-            .zip(&self.pressure_residual_m3)
+            .zip(
+                reference_change
+                    .as_ref()
+                    .map_or(self.pressure_residual_m3.as_slice(), |change| {
+                        change.pressure_residual_before_m3
+                    }),
+            )
             .fold(0.0, |s, ((p, after), before)| p.mul_add(after - before, s));
         let energy = ConservativeTetEnergy {
             stored_before_j: self.stored_energy_j,
@@ -1310,16 +1373,19 @@ impl<'a> ConservativeTetSolid<'a> {
             pressure_work_j: evaluation.pressure_work_j,
             dead_load_work_j,
             support_work_j,
+            constraint_reference_work_j,
             constitutive_work_error_j: evaluation.material_work_j
                 - (stored_change_j - bulk_change_j),
-            constraint_work_error_j: evaluation.pressure_work_j
+            constraint_work_error_j: evaluation.pressure_work_j + constraint_reference_work_j
                 - evaluation.bulk_work_j
                 - algebraic_pressure_work_j,
             equilibrium_work_error_j: work_j
                 - evaluation.material_work_j
                 - evaluation.pressure_work_j
                 - inertia_energy.inertial_work_j,
-            balance_error_j: work_j - stored_change_j - inertia_energy.kinetic_change_j,
+            balance_error_j: work_j + constraint_reference_work_j
+                - stored_change_j
+                - inertia_energy.kinetic_change_j,
             cumulative_balance_error_j: cumulative_work_j
                 - (evaluation.stored_j + inertia_energy.kinetic_after_j
                     - self.initial_total_energy_j),
@@ -1330,7 +1396,7 @@ impl<'a> ConservativeTetSolid<'a> {
             ("constraint work identity", energy.constraint_work_error_j),
             (
                 "pressure storage work",
-                energy.pressure_work_j - bulk_change_j,
+                energy.pressure_work_j + constraint_reference_work_j - bulk_change_j,
             ),
             ("momentum work", energy.equilibrium_work_error_j),
             ("kinetic work", inertia_energy.balance_error_j),
