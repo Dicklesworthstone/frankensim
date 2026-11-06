@@ -26,6 +26,9 @@
 //! Brennen, Cavitation and Bubble Dynamics, section 6.3,
 //! <https://media.library.caltech.edu/CaltechBOOK:1995.001/chap6.htm>.
 
+/// Acoustic views of accepted regional heating and boiling states.
+pub mod thermal;
+
 use crate::MaterialError;
 use crate::fluid_acoustics::{FluidAcousticState, FluidAcoustics};
 use fs_thermochem::water::if97::regions::{If97FluidSaturationPair, If97FluidState};

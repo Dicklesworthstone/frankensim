@@ -16747,3 +16747,23 @@ Independent source-equation calculations checked the three IAPWS Table 33
 reference states and nine high-pressure coexistence states at 630, 640 and
 646 K. Native Rust compilation and execution of the new regression definitions
 remain unperformed because the execution environment became unavailable.
+
+### Acoustic views of solved regional heating and boiling states
+
+`phase::water::acoustics::thermal` retains an original `RegionalWaterState`
+and an explicit frozen-phase-mass or homogeneous-equilibrium closure for
+coexistence. Single-phase states use their original IF97 response; exact
+saturation endpoints admit the explicitly frozen response and refuse an
+ambiguous equilibrium tangent. The adapter preserves the thermal state's
+density exactly and the selected closure's bulk modulus, retaining the
+underlying response and original thermal/source diagnostics. It implements
+the existing `FluidAcoustics` interface without another source query,
+pressure solve, interpolation, phase-kinetic model or implicit closure choice.
+
+Preparing another acoustic view from the next accepted thermal state updates
+density and compressibility together. The view does not modify the thermal
+state, phase inventory or conservation account. The added regression
+definitions exercise heated-state density, source retention, distinct
+coexistence responses, high-pressure and single-phase dispatch, exact phase
+limits, and use through the shared acoustic-consumer interface. These Rust
+regressions remain unexecuted in the unavailable execution environment.
