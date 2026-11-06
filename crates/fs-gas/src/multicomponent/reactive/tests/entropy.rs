@@ -359,3 +359,5 @@ fn g4_reacting_entropy_refuses_unowned_reconstruction_and_advective_boundary_ent
         assert_eq!(simulation.flow().time().value(), 0.0);
     }
 }
+
+mod exterior;

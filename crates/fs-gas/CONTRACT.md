@@ -6164,3 +6164,40 @@ contact equilibrium or experimental flow validity. Focused regressions include
 independent variable-Cp SSP state/transfer references, moving exterior entropy,
 source-datum invariance, a reflecting end, common absence, closed-path identity
 and atomic cancellation.
+
+### Complete reacting entropy with prescribed exterior states
+
+`ReactingEuler1d::step_entropy_consistent_with_exterior_states` composes the
+original C(dt/2)-A(dt)-C(dt/2) owner with the prescribed-exterior entropy flow
+entry. It retains the original reactor, chemistry method, accepted/trial
+workspaces and bounded whole-composition restart loop. If A shortens the common
+duration, both chemical halves restart from the original accepted state; only
+the accepted middle transport's physical boundary inventory can enter the
+complete account. Both absent exteriors delegate to the closed entropy entry.
+
+The native SSP owner retains opaque actual per-end conservative transfers,
+signed time-area measures and absolute per-species stage/end throughput.
+The complete reacting account contracts those transfers again in its ORIGINAL
+pre-chemistry entropy basis. It does not sum component entropy reports. With
+`S=F+sum(alpha_i*m_i/M_i)`, actual chemical changes `Q_i` and exterior transfers
+`B_i`, admission is
+`Delta F + sum(alpha_i*Q_i/M_i) - I_boundary_normalized >= -tolerance`.
+Every species independently balances `Delta m_i-Q_i-B_i`, with absolute
+chemical and boundary throughput included in its continuity scale. Real
+chemical source entropy is retained; boundary and reaction transfers are
+removed at the species-residual level before applying the entropy reference.
+
+All original source-state inversions, temperature restrictions, chemical
+element/charge/energy checks, final conservative reporting and cancellation
+precede the original accepted-field/clock swap. Refusal exposes no accepted
+prefix. Cached exterior efforts and one reusable optional receipt slot allocate
+only on open calls; retries reuse them. Existing closed molecular/RKL interval
+paths retain their original arithmetic and scope.
+
+This entry is one accepted inviscid reacting step with fixed prescribed
+exteriors, first-order space and constant area. It does not enable molecular
+half steps, finite exterior depletion, moving geometry, complete open reacting
+intervals or a general positivity/order/combustion-validity theorem. Focused
+regressions cover variable Cp and nonzero species entropy constants, independent
+complete state-minus-boundary reconstruction, accepted-duration retry replay,
+chemical-plus-boundary continuity, closed dispatch and late cancellation.

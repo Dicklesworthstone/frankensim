@@ -32,6 +32,7 @@ use fs_thermochem::UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K as R;
 mod advection;
 mod reservoir;
 pub use advection::ExteriorMixtureEntropyReport;
+pub(in crate::multicomponent) use advection::ExteriorTransportInventory;
 pub(in crate::multicomponent) mod reactive;
 mod stabilized;
 use reservoir::ReservoirEntropyAccount;
@@ -694,6 +695,19 @@ impl EntropyTracker {
         reaction: Option<&[Dd; MAX_SPECIES]>,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<(Dd, Dd, Dd), FlowError> {
+        self.reference_changes_with_transfer(gas, reaction, None, cancelled)
+    }
+
+    /// The same original source basis with an additional actual boundary
+    /// transfer. Subtract transfers at the species level before applying alpha;
+    /// genuine chemical source entropy remains a separate retained quantity.
+    fn reference_changes_with_transfer(
+        &self,
+        gas: &MixtureGas,
+        reaction: Option<&[Dd; MAX_SPECIES]>,
+        boundary_transfer: Option<&[Dd; MAX_SPECIES]>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(Dd, Dd, Dd), FlowError> {
         let mut reference = Dd::ZERO;
         let mut reference_residual = Dd::ZERO;
         let mut reaction_reference = Dd::ZERO;
@@ -704,6 +718,9 @@ impl EntropyTracker {
                     * Dd::from_f64(self.reference_entropy[k]);
             let transfer = self.boundary.as_ref().map_or(Dd::ZERO, |b| b.total.species[k]);
             let mut residual = self.trial_mass[k] - transfer;
+            if let Some(boundary) = boundary_transfer {
+                residual = residual - boundary[k];
+            }
             if let Some(change) = reaction {
                 residual = residual - change[k];
                 reaction_reference = reaction_reference

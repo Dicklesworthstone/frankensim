@@ -1,9 +1,12 @@
-//! Closed original-source entropy admission for the native reacting composition.
+//! Original-source entropy admission for the native reacting composition.
 //!
 //! Every stage remains with its original owner. The whole-step account observes
 //! actual chemical species changes and measures the original-to-final source
 //! entropy before publication. Genuine chemical entropy is retained; only the
 //! arbitrary-reference effect of numerical species-source drift is separated.
+
+mod exterior;
+pub use exterior::{ReactiveExteriorEntropyReport, ReactiveExteriorEntropyStepReport};
 
 use super::*;
 use crate::multicomponent::dissipation::entropy::reactive::ReactiveEntropyAccount;
@@ -143,6 +146,9 @@ pub(super) struct CoupledEntropy {
         MixtureEntropyReport,
         Option<SplitMolecularEntropyReport>,
     )>,
+    // Empty on the original closed path, one fallibly reserved slot for open
+    // transport. Fixed-capacity SSP arrays do not enlarge every closed stack.
+    exterior: Vec<exterior::ExteriorCoupling>,
 }
 
 impl CoupledEntropy {
@@ -182,6 +188,7 @@ impl CoupledEntropy {
             controls,
             account: ReactiveEntropyAccount::new(flow, controls, cancelled)?,
             completed: None,
+            exterior: Vec::new(),
         })
     }
 
@@ -192,6 +199,9 @@ impl CoupledEntropy {
     pub(super) fn begin_attempt(&mut self) {
         self.account.begin_attempt();
         self.completed = None;
+        if let Some(exterior) = self.exterior.first_mut() {
+            exterior.reset();
+        }
     }
 
     pub(super) fn observe_chemistry_row(

@@ -107,7 +107,7 @@ impl MixtureEuler1d {
         controls: StepControl,
         entropy: MixtureEntropyControl,
         exterior_states: [Option<Cell<'_>>; 2],
-        mut cancelled: impl FnMut() -> bool,
+        cancelled: impl FnMut() -> bool,
     ) -> Result<(StepReport, ExteriorMixtureEntropyReport), Error> {
         if exterior_states.iter().all(Option::is_none) {
             let (step, closed) =
@@ -122,6 +122,30 @@ impl MixtureEuler1d {
                 maximum_relative_species_residual: closed.maximum_relative_species_residual,
                 rejected_entropy_steps: closed.rejected_entropy_steps,
             }));
+        }
+        let (report, measured, _) = self.step_entropy_consistent_with_exterior_inventory(
+            maximum_duration, controls, entropy, exterior_states, cancelled,
+        )?;
+        Ok((report, measured))
+    }
+
+    /// The native accepted transfers accompany the public entropy receipt so
+    /// source compositions can use their ORIGINAL immutable entropy basis.
+    /// At least one exterior is required; closed calls retain their old path.
+    pub(in crate::multicomponent) fn step_entropy_consistent_with_exterior_inventory(
+        &mut self,
+        maximum_duration: Time,
+        controls: StepControl,
+        entropy: MixtureEntropyControl,
+        exterior_states: [Option<Cell<'_>>; 2],
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<(
+        StepReport,
+        ExteriorMixtureEntropyReport,
+        crate::multicomponent::dissipation::entropy::ExteriorTransportInventory,
+    ), Error> {
+        if exterior_states.iter().all(Option::is_none) {
+            return Err(Error::EntropyDomain("exterior transfer inventory requires a prescribed end"));
         }
         poll(&mut cancelled)?;
         if controls.reconstruction != Reconstruction::FirstOrder {
@@ -161,7 +185,7 @@ impl MixtureEuler1d {
             maximum_duration, controls, admitted, None, None,
             Some(&mut account), &mut cancelled,
         )?;
-        Ok((report, account.exterior_report()))
+        Ok((report, account.exterior_report(), account.exterior_transport_inventory()))
     }
 
 }

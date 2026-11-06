@@ -6,6 +6,10 @@
 //! only dm_i - dm_i,chem is a numerical continuity defect. The admitted change
 //! is therefore dF + sum_i(alpha_i * dm_i,chem / M_i), not dF alone.
 
+mod exterior;
+pub use exterior::ReactiveExteriorEntropyReport;
+
+use super::advection::ExteriorEntropyAccount;
 use super::{
     Dd, EntropyTracker, FlowError, MAX_SPECIES, MixtureEuler1d, MolecularEntropyControl,
     poll, positive, scalar,
@@ -58,6 +62,9 @@ pub(in crate::multicomponent) struct ReactiveEntropyAccount {
     chemical_change: [Dd; MAX_SPECIES],
     chemical_throughput: [Dd; MAX_SPECIES],
     rejected_entropy_steps: usize,
+    // Optional fixed exterior efforts in the ORIGINAL pre-chemistry basis.
+    // Length is zero or one; closed accounts incur no additional allocation.
+    exterior: Vec<ExteriorEntropyAccount>,
 }
 
 impl ReactiveEntropyAccount {
@@ -72,6 +79,7 @@ impl ReactiveEntropyAccount {
             chemical_change: [Dd::ZERO; MAX_SPECIES],
             chemical_throughput: [Dd::ZERO; MAX_SPECIES],
             rejected_entropy_steps: 0,
+            exterior: Vec::new(),
         })
     }
 
@@ -215,13 +223,15 @@ impl ReactiveEntropyAccount {
         check
     }
 
-    fn check_candidate_inner(
+    /// Shared original-to-final state reduction. The closed and open accounts
+    /// use the identical native source inversion and temperature-domain check.
+    fn collect_candidate_rows(
         &mut self,
         initial: &[f64],
         candidate: &MixtureEuler1d,
         temperature_bounds: Option<[f64; 2]>,
         cancelled: &mut impl FnMut() -> bool,
-    ) -> Result<ReactiveEntropyReport, FlowError> {
+    ) -> Result<(), FlowError> {
         let gas = candidate.gas();
         let n = self.species_count;
         let width = n + 2;
@@ -250,6 +260,19 @@ impl ReactiveEntropyAccount {
                 gas, i, old, new, primitive.temperature, candidate.mesh.volumes()[i], cancelled,
             )?;
         }
+        Ok(())
+    }
+
+    fn check_candidate_inner(
+        &mut self,
+        initial: &[f64],
+        candidate: &MixtureEuler1d,
+        temperature_bounds: Option<[f64; 2]>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<ReactiveEntropyReport, FlowError> {
+        self.collect_candidate_rows(initial, candidate, temperature_bounds, cancelled)?;
+        let gas = candidate.gas();
+        let n = self.species_count;
         let relative = self.state.inventory_with_reaction(
             n, true, Some((&self.chemical_change, &self.chemical_throughput)),
         )?;

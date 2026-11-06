@@ -23,7 +23,10 @@ pub use fs_thermochem::kinetics::IdealGasKineticsV1;
 mod cell;
 pub use cell::CellChemistry;
 mod entropy;
-pub use entropy::{ReactiveEntropyReport, ReactiveEntropyStepReport, SplitMolecularEntropyReport};
+pub use entropy::{
+    ReactiveEntropyReport, ReactiveEntropyStepReport, ReactiveExteriorEntropyReport,
+    ReactiveExteriorEntropyStepReport, SplitMolecularEntropyReport,
+};
 mod reservoir;
 mod stabilized;
 pub use stabilized::{
@@ -416,7 +419,17 @@ impl ReactingEuler1d {
                 "reacting duration, CFL or retry controls",
             ));
         }
-        reservoir::admit(&self.accepted, reservoirs, &mut cancelled)?;
+        if entropy.as_ref().is_some_and(|account| account.has_exterior_states()) {
+            // Only the dedicated entropy entry interprets these borrowed cells
+            // as moving exterior traces. Legacy reservoir admission is unchanged.
+            if operator.is_some() {
+                return Err(ReactiveError::Invalid(
+                    "exterior reacting entropy does not admit molecular half steps",
+                ));
+            }
+        } else {
+            reservoir::admit(&self.accepted, reservoirs, &mut cancelled)?;
+        }
         let before = self.accepted.totals();
         let mut duration = maximum_duration.value();
         // Start within the original acoustic scale before paying for chemistry.
@@ -471,13 +484,13 @@ impl ReactingEuler1d {
                     &mut cancelled,
                 )?;
                 let (transport, transport_entropy) = if let Some(account) = entropy.as_deref_mut() {
-                    let (transport, measured) = self.trial.step_entropy_consistent(
+                    account.advance_transport(
+                        &mut self.trial,
                         Time::new(duration),
                         controls.transport,
-                        account.controls(),
+                        reservoirs,
                         &mut cancelled,
-                    )?;
-                    (transport, Some(measured))
+                    )?
                 } else {
                     (
                         self.trial.step_with_reservoirs(
@@ -540,19 +553,28 @@ impl ReactingEuler1d {
                             chemistry.maximum_temperature_k,
                         ]
                     });
-                    account.check_candidate(
-                        &self.accepted,
-                        &self.trial,
-                        temperature_bounds,
-                        transport_entropy.ok_or(ReactiveError::Invalid(
-                            "missing reacting advection entropy receipt",
-                        ))?,
-                        [
-                            first.as_ref().and_then(|half| half.entropy),
-                            second.as_ref().and_then(|half| half.entropy),
-                        ],
-                        &mut cancelled,
-                    )?;
+                    if account.has_exterior_states() {
+                        account.check_exterior_candidate(
+                            &self.accepted,
+                            &self.trial,
+                            temperature_bounds,
+                            &mut cancelled,
+                        )?;
+                    } else {
+                        account.check_candidate(
+                            &self.accepted,
+                            &self.trial,
+                            temperature_bounds,
+                            transport_entropy.ok_or(ReactiveError::Invalid(
+                                "missing reacting advection entropy receipt",
+                            ))?,
+                            [
+                                first.as_ref().and_then(|half| half.entropy),
+                                second.as_ref().and_then(|half| half.entropy),
+                            ],
+                            &mut cancelled,
+                        )?;
+                    }
                 }
                 let (dissipation, stabilized) = stabilized::split_halves(first, second);
                 Ok::<_, ReactiveError>((transport, true, dissipation, stabilized))

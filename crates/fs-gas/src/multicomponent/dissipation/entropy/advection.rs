@@ -38,13 +38,25 @@ pub struct ExteriorMixtureEntropyReport {
     pub rejected_entropy_steps: usize,
 }
 
-/// Fixed efforts only; trial transfers are reduced afresh on every attempt.
+/// Actual accepted native end transfers, independent of the entropy basis.
+/// Only this module constructs the inventory after checking BOTH SSP stages;
+/// coupled owners can contract it in their own immutable original-state basis.
+#[derive(Clone, Copy)]
+pub(in crate::multicomponent) struct ExteriorTransportInventory {
+    species_count: usize,
+    transfers: [[f64; MAX_COMPONENTS]; 2],
+    signed_measure: [f64; 2],
+    throughput: [Dd; MAX_SPECIES],
+}
+
+/// Fixed efforts and the last completely admitted native transport inventory.
 pub(super) struct ExteriorEntropyAccount {
     ends: [Option<ExteriorEntropyEffort>; 2],
+    accepted_inventory: Option<ExteriorTransportInventory>,
 }
 
 impl ExteriorEntropyAccount {
-    fn new(
+    pub(super) fn new(
         gas: &MixtureGas,
         reference_temperature: f64,
         reference_density: &[f64; MAX_SPECIES],
@@ -60,7 +72,7 @@ impl ExteriorEntropyAccount {
                 )?);
             }
         }
-        Ok(Self { ends })
+        Ok(Self { ends, accepted_inventory: None })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -73,13 +85,18 @@ impl ExteriorEntropyAccount {
         areas: [f64; 2],
         reference_entropy: &[f64; MAX_SPECIES],
         cancelled: &mut impl FnMut() -> bool,
-    ) -> Result<EntropyExchange, FlowError> {
+    ) -> Result<(EntropyExchange, ExteriorTransportInventory), FlowError> {
         if !positive(dt) || !areas.into_iter().all(positive) {
             return Err(FlowError::EntropyDomain("exterior entropy quadrature measure"));
         }
         let n = gas.species_count();
         let m = n + 2;
-        let mut exchange = EntropyExchange::default();
+        let mut inventory = ExteriorTransportInventory {
+            species_count: n,
+            transfers: [[0.0; MAX_COMPONENTS]; 2],
+            signed_measure: [0.0; 2],
+            throughput: [Dd::ZERO; MAX_SPECIES],
+        };
         for end in 0..2 {
             poll(cancelled)?;
             let (first, second, sign) = if end == 0 {
@@ -87,26 +104,23 @@ impl ExteriorEntropyAccount {
             } else {
                 (&a.right, &b.right, -1.0)
             };
-            let mut transfers = [0.0; MAX_COMPONENTS];
             for k in 0..m {
                 // Match the native accepted per-end report arithmetic exactly.
-                transfers[k] = sign * 0.5 * dt * areas[end] * (first[k] + second[k]);
-                if !transfers[k].is_finite() {
+                let value = sign * 0.5 * dt * areas[end] * (first[k] + second[k]);
+                if !value.is_finite() {
                     return Err(FlowError::EntropyDomain("non-finite exterior transfer"));
                 }
+                inventory.transfers[end][k] = value;
             }
-            let input = match &self.ends[end] {
+            inventory.signed_measure[end] = sign * dt * areas[end];
+            match &self.ends[end] {
                 Some(effort) => {
                     // Opposite stage fluxes cannot hide a zero-activity refusal.
                     effort.admit_flux(&first[..m], cancelled)?;
                     effort.admit_flux(&second[..m], cancelled)?;
-                    effort.entropy_input(
-                        &transfers[..m], sign * dt * areas[end], cancelled,
-                    )?
                 }
                 None => {
-                    // A stationary reflecting end can transfer pressure impulse
-                    // without species, energy or entropy. Check each stage.
+                    // A stationary reflecting end transfers only pressure impulse.
                     if first[..n].iter().chain(&second[..n]).any(|x| *x != 0.0)
                         || first[n + 1] != 0.0 || second[n + 1] != 0.0
                     {
@@ -114,18 +128,63 @@ impl ExteriorEntropyAccount {
                             "unowned advective species or energy transfer",
                         ));
                     }
+                }
+            }
+            let weight = Dd::from_f64(0.5 * dt * areas[end]);
+            for k in 0..n {
+                poll(cancelled)?;
+                inventory.throughput[k] = inventory.throughput[k]
+                    + weight * (Dd::from_f64(first[k].abs())
+                        + Dd::from_f64(second[k].abs()));
+                scalar(inventory.throughput[k])?;
+            }
+        }
+        let exchange = self.exchange_from_inventory(
+            gas, &inventory, reference_entropy, cancelled,
+        )?;
+        Ok((exchange, inventory))
+    }
+
+    /// Recontract accepted physical transfers in this account's fixed source
+    /// basis. No entropy report from a different split-stage basis is summed.
+    pub(super) fn exchange_from_inventory(
+        &self,
+        gas: &MixtureGas,
+        inventory: &ExteriorTransportInventory,
+        reference_entropy: &[f64; MAX_SPECIES],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<EntropyExchange, FlowError> {
+        let n = gas.species_count();
+        if inventory.species_count != n {
+            return Err(FlowError::EntropyDomain("exterior transfer species axis"));
+        }
+        let mut exchange = EntropyExchange {
+            throughput: inventory.throughput,
+            ..EntropyExchange::default()
+        };
+        for end in 0..2 {
+            poll(cancelled)?;
+            let transfers = &inventory.transfers[end];
+            let input = match &self.ends[end] {
+                Some(effort) => effort.entropy_input(
+                    &transfers[..n + 2], inventory.signed_measure[end], cancelled,
+                )?,
+                None => {
+                    if transfers[..n].iter().any(|value| *value != 0.0)
+                        || transfers[n + 1] != 0.0
+                    {
+                        return Err(FlowError::EntropyDomain(
+                            "unowned accepted exterior species or energy transfer",
+                        ));
+                    }
                     Dd::ZERO
                 }
             };
             let mut reference = Dd::ZERO;
-            let weight = Dd::from_f64(0.5 * dt * areas[end]);
             for (k, model) in gas.source().models().iter().enumerate() {
                 poll(cancelled)?;
                 let mass = Dd::from_f64(transfers[k]);
                 exchange.species[k] = exchange.species[k] + mass;
-                exchange.throughput[k] = exchange.throughput[k]
-                    + weight * (Dd::from_f64(first[k].abs())
-                        + Dd::from_f64(second[k].abs()));
                 reference = reference
                     + mass / Dd::from_f64(model.molar_mass().value())
                         * Dd::from_f64(reference_entropy[k]);
@@ -139,6 +198,7 @@ impl ExteriorEntropyAccount {
         scalar(exchange.input)?;
         Ok(exchange)
     }
+
 }
 
 impl EntropyTracker {
@@ -182,7 +242,7 @@ impl EntropyTracker {
             ));
         }
         let completion = (|| {
-            let exchange = exterior.stage_pair(
+            let (exchange, inventory) = exterior.stage_pair(
                 gas, a, b, dt, areas, &self.reference_entropy, cancelled,
             )?;
             // These shared reducers accept an additional physical species
@@ -202,7 +262,7 @@ impl EntropyTracker {
             }
             let (reference, reference_residual, _) =
                 self.reference_changes(gas, Some(&exchange.species), cancelled)?;
-            Ok(ExteriorMixtureEntropyReport {
+            Ok((ExteriorMixtureEntropyReport {
                 source_entropy_change_j_k: scalar(self.trial_entropy + reference)?,
                 boundary_entropy_input_j_k: [
                     scalar(exchange.source_input[0])?,
@@ -214,10 +274,11 @@ impl EntropyTracker {
                 minimum_step_entropy_generation_j_k: change,
                 maximum_relative_species_residual: relative,
                 rejected_entropy_steps: self.report.rejected_entropy_steps,
-            })
+            }, inventory))
         })();
         match completion {
-            Ok(report) => {
+            Ok((report, inventory)) => {
+                self.exterior[0].accepted_inventory = Some(inventory);
                 self.completed_exterior_report = Some(report);
                 self.accepted = 1;
                 Ok(())
@@ -232,6 +293,15 @@ impl EntropyTracker {
                 Err(error)
             }
         }
+    }
+
+    /// Only a fully admitted native SSP candidate can supply a coupled owner.
+    pub(in crate::multicomponent) fn exterior_transport_inventory(
+        &self,
+    ) -> ExteriorTransportInventory {
+        self.exterior.first()
+            .and_then(|account| account.accepted_inventory)
+            .expect("accepted exterior step retained native conservative transfers")
     }
 
     /// All source, balance and report arithmetic already completed before the
