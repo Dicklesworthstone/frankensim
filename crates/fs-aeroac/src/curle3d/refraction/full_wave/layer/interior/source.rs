@@ -28,6 +28,10 @@ use fs_math::{c64::C64, det};
 pub mod array;
 mod force;
 pub use force::{FULL_WAVE_INTERIOR_SOURCE_FORCE_SCOPE, PreparedInteriorSourceFullWaveForce};
+pub mod quadrupole;
+pub use quadrupole::{
+    FULL_WAVE_INTERIOR_SOURCE_QUADRUPOLE_SCOPE, PreparedInteriorSourceFullWaveQuadrupole,
+};
 
 /// Applicability of the original interior source and exterior observation.
 pub const FULL_WAVE_INTERIOR_SOURCE_SCOPE: &str = "Prescribed stationary compact 3D \
