@@ -8,9 +8,9 @@
 //! coefficient, actuator dynamics or thermal destination is inferred.
 
 use super::{
-    HeldTorque, InertiaTensor3, LieStepError, Mat3, RotorBank, RotorImpulse, RotorState,
-    RotorStep, So3, Vec3, components, dd, dot_dd, increment, invalid, product, scalar,
-    subtract3, vector, work_residual,
+    HeldTorque, InertiaTensor3, LieStepError, Mat3, RotorBank, RotorImpulse, RotorState, RotorStep,
+    So3, Vec3, components, dd, dot_dd, increment, invalid, product, scalar, subtract3, vector,
+    work_residual,
 };
 
 const ROUNDING: f64 = 8192.0 * f64::EPSILON;
@@ -294,11 +294,7 @@ impl<const N: usize> RotorLock<N> {
         // unused drift-only phase before evaluating its actual drive-work rate.
         let drift = self.drift_momenta(&first.impulse.state_after, duration_s)?;
         let drifted = drift.state_after;
-        let second = self.apply_impulse(
-            &drifted,
-            shaft_impulse,
-            impulse_at(drifted.rotation)?,
-        )?;
+        let second = self.apply_impulse(&drifted, shaft_impulse, impulse_at(drifted.rotation)?)?;
         let mut phase = state.relative_angle_rad;
         for i in 0..N {
             if !self.locked[i] {
@@ -405,11 +401,22 @@ impl<const N: usize> RotorLock<N> {
             duration_s,
         )?;
         let omega = self.inertia.velocity(after.total_momentum_body - stored)?;
+        // Transport the already-admitted lock state instead of projecting its
+        // absolute momentum again. In particular, coaxial drift has no body
+        // momentum change and must not invent a rounding-sized reaction.
+        let delta_omega = self
+            .inertia
+            .velocity(after.total_momentum_body - state.total_momentum_body)?;
         for i in 0..N {
             if self.locked[i] {
-                after.axial_momentum_nms[i] = product(
+                let reaction = product(
                     self.bank.rotors[i].axial_inertia_kg_m2,
-                    self.bank.rotors[i].axis_body.dot(omega),
+                    self.bank.rotors[i].axis_body.dot(delta_omega),
+                    "retained locked axial momentum change",
+                )?;
+                after.axial_momentum_nms[i] = increment(
+                    state.axial_momentum_nms[i],
+                    reaction,
                     "retained locked axial momentum",
                 )?;
             }
