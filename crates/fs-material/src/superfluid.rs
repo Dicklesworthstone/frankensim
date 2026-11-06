@@ -14,8 +14,9 @@
 //! All properties are frozen at the caller's reference state. The model admits
 //! positive normal and superfluid fractions; the zero-temperature and normal-
 //! fluid endpoints need their own limiting models. Friction is a homogeneous
-//! local source update with a declared coefficient, not vortex generation,
-//! vortex-line evolution, or a nonlinear thermal feedback solve. Normal wall
+//! local source update with a declared coefficient. The optional [`vinen`]
+//! closure evolves unresolved line density with an explicit line-energy store;
+//! it does not resolve vortex geometry or nonlinear thermal feedback. Normal wall
 //! viscosity has its own explicit permeability closure in [`normal_wall`].
 
 use crate::MaterialError;
@@ -27,6 +28,9 @@ pub mod helium;
 
 /// Nonlinear solid/helium heat transfer with authored area and source validity.
 pub mod kapitza;
+
+/// Energy-accounted, homogeneous growth and decay of an isotropic vortex tangle.
+pub mod vinen;
 
 /// Normal-component drag against stationary walls at authored permeability.
 pub mod normal_wall;
