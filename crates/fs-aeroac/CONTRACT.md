@@ -2798,3 +2798,38 @@ Coherent fields, independent cells, supplied coherence modes and joint Welch bin
 `RecordedQuadrupoleSpectrum::prepare_interior_source_layered_observer` and `evaluate_interior_source_layered_bin` bind the recording's actual inside-layer source order and positions, original sample clock, stress units, window and joint spectrum to exterior propagation. Native peak-bin normalization is applied once. Changed geometry/order, wrong bin/frequency and unsupported endpoints refuse. No additional density, volume, phase origin, propagation delay or inferred independence is introduced.
 
 Four focused regression groups specify both exterior orientations against native single-source fields and flux, coherent cancellation versus independent-source power, empty-array/domain/exact-reduction/work/cancellation behavior, and original recorded clock/geometry/bin power against the native homogeneous observer. Formatter checks passed; native numerical execution was unavailable in the editing environment.
+
+
+## Moving compact force fields with explicit past forcing
+
+`curle3d::moving::force` extends the original moving compact pressure operator
+with full Cartesian particle velocity for mixed volume and force sources.
+`MovingCompactObserver::prepare_force_emission` retains the original pressure
+coefficients and adds constant-work boundary coefficients only for this opt-in
+field owner. The original pressure and monopole preparation costs are unchanged.
+
+The force velocity is the Cartesian gradient of the divergence of
+`integral F(s)/|x-y(s)| ds / (4*pi*rho)`, with the upper limit equal to the
+retarded source time. Its local boundary terms retain source velocity,
+acceleration, transverse force, induction and radiation. The caller supplies
+the unscaled past-worldline integral
+`J = integral (3*n*(n.F)-F)/R^3 ds` [N s/m³] at the SAME receiver position;
+`force_history_integrand` evaluates this kernel without a Doppler multiplier.
+A zero prefix declares zero prior force contribution. Unknown initial fields
+or a prefix evaluated at a different microphone position cannot be inferred
+from the local force sample.
+
+Applications preserve the original pressure law, sum force and volume velocity
+before forming signed instantaneous `p*u`, and allocate nothing. Continuous
+clearance over the complete retained force history, integration accuracy,
+initial forcing, source bandwidth and causal root coverage remain the history
+owner's obligations. Pointwise quadrature checks do not certify inter-node
+clearance. Nonfinite or unrepresentable coefficients, history, fields or flux
+refuse the full field without changing pressure-only admission.
+
+G1/G3 `tests/moving_force_field.rs` checks the original stationary-force limit,
+coherent mixed volume/force fields, an independent retarded vector-potential
+Hessian for accelerating approach/recession/transverse motion at three
+refinement steps, rotation covariance and admission refusals. This remains
+prescribed linear compact-source acoustics in a homogeneous lossless medium,
+without finite-source, viscous, scattering, feedback or measured-SPL claims.

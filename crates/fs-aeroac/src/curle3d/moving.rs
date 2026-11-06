@@ -18,6 +18,8 @@
 //! `phi = -[Q/(4 pi R kappa)]ret`, so its velocity is the spatial gradient of
 //! that same potential. [`PreparedMovingCompactSample::evaluate_monopole_field`]
 //! retains its full near field and signed instantaneous pressure-work flux.
+//! [`force`] supplies mixed volume/force fields when the original past-force
+//! worldline integral and its initial condition are explicitly available.
 
 use super::statistics::{invalid, nonfinite};
 use crate::AeroacError;
@@ -26,6 +28,8 @@ use fs_math::{dd::Dd, det};
 
 /// Uniform-fluid frames and cached fixed laboratory source/microphone paths.
 pub mod flow;
+/// Moving-force particle velocity with explicit past-worldline integration.
+pub mod force;
 /// Finite C2 source trajectories with whole-interval motion/clearance admission.
 pub mod trajectory;
 
