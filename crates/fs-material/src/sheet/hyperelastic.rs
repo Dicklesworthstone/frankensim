@@ -468,7 +468,7 @@ fn representative<T: Real>(strain: [T; 3]) -> [T; 4] {
     [r, s, T::zero(), t]
 }
 
-fn admitted_representative(strain: [f64; 3]) -> Result<[f64; 4], SheetError> {
+pub(crate) fn admitted_representative(strain: [f64; 3]) -> Result<[f64; 4], SheetError> {
     if strain.iter().any(|v| !v.is_finite()) {
         return Err(SheetError::Invalid("finite Green strain required"));
     }
@@ -484,59 +484,71 @@ fn admitted_representative(strain: [f64; 3]) -> Result<[f64; 4], SheetError> {
 impl SheetLaw for HyperelasticMembrane {
     fn response(&self, strain: [f64; 3]) -> Result<SheetResponse, SheetError> {
         let response = self.reduced_response(strain)?;
-        let mut jacobian = [[0.0; 3]; 4];
-        let mut hessian = [[[0.0; 3]; 3]; 4];
-        // Three small nested-AD sweeps differentiate only the kinematic map.
-        // The constitutive update and transverse Schur complement are shared
-        // with all native plane-stress consumers, without a second Newton solve.
-        for col in 0..3 {
-            let vars = core::array::from_fn(|row| Dual::<Dual64<3>, 1> {
-                re: Dual64::variable(strain[row], row),
-                eps: [Dual64::constant(if row == col { 1.0 } else { 0.0 })],
-            });
-            let f = representative(vars);
-            for a in 0..4 {
-                if col == 0 {
-                    jacobian[a] = f[a].re.eps;
-                }
-                for row in 0..3 {
-                    hessian[a][row][col] = f[a].eps[0].eps[row];
-                }
-            }
-        }
-        let mut resultants_n_m = [0.0; 3];
-        let mut tangent_n_m = [0.0; 9];
-        for i in 0..3 {
-            for a in 0..4 {
-                resultants_n_m[i] += response.piola[a] * jacobian[a][i];
-                for j in 0..3 {
-                    tangent_n_m[3 * i + j] += response.piola[a] * hessian[a][i][j];
-                    for b in 0..4 {
-                        tangent_n_m[3 * i + j] +=
-                            jacobian[a][i] * response.tangent[a][b] * jacobian[b][j];
-                    }
-                }
-            }
-            resultants_n_m[i] *= self.reference_thickness_m;
-            for j in 0..3 {
-                tangent_n_m[3 * i + j] *= self.reference_thickness_m;
-            }
-        }
-        let energy_j_m2 = self.reference_thickness_m * response.energy_density_pa;
-        if !energy_j_m2.is_finite()
-            || resultants_n_m
-                .iter()
-                .chain(&tangent_n_m)
-                .any(|v| !v.is_finite())
-        {
-            return Err(SheetError::Invalid(
-                "unrepresentable hyperelastic membrane response",
-            ));
-        }
-        Ok(SheetResponse {
-            energy_j_m2,
-            resultants_n_m,
-            tangent_n_m,
-        })
+        response_from_plane_stress(strain, response, self.reference_thickness_m)
     }
+}
+
+// Shared by elastic and frozen-history membrane potentials. The admitted
+// metric and relaxed three-dimensional response must refer to the SAME strain.
+// This changes kinematic coordinates only; it cannot change the native energy,
+// material history, transverse branch, or physical meaning of the potential.
+pub(crate) fn response_from_plane_stress(
+    strain: [f64; 3],
+    response: PlaneStressResponse,
+    reference_thickness_m: f64,
+) -> Result<SheetResponse, SheetError> {
+    let mut jacobian = [[0.0; 3]; 4];
+    let mut hessian = [[[0.0; 3]; 3]; 4];
+    // Three small nested-AD sweeps differentiate only the kinematic map.
+    // The constitutive update and transverse Schur complement are shared
+    // with all native plane-stress consumers, without a second Newton solve.
+    for col in 0..3 {
+        let vars = core::array::from_fn(|row| Dual::<Dual64<3>, 1> {
+            re: Dual64::variable(strain[row], row),
+            eps: [Dual64::constant(if row == col { 1.0 } else { 0.0 })],
+        });
+        let f = representative(vars);
+        for a in 0..4 {
+            if col == 0 {
+                jacobian[a] = f[a].re.eps;
+            }
+            for row in 0..3 {
+                hessian[a][row][col] = f[a].eps[0].eps[row];
+            }
+        }
+    }
+    let mut resultants_n_m = [0.0; 3];
+    let mut tangent_n_m = [0.0; 9];
+    for i in 0..3 {
+        for a in 0..4 {
+            resultants_n_m[i] += response.piola[a] * jacobian[a][i];
+            for j in 0..3 {
+                tangent_n_m[3 * i + j] += response.piola[a] * hessian[a][i][j];
+                for b in 0..4 {
+                    tangent_n_m[3 * i + j] +=
+                        jacobian[a][i] * response.tangent[a][b] * jacobian[b][j];
+                }
+            }
+        }
+        resultants_n_m[i] *= reference_thickness_m;
+        for j in 0..3 {
+            tangent_n_m[3 * i + j] *= reference_thickness_m;
+        }
+    }
+    let energy_j_m2 = reference_thickness_m * response.energy_density_pa;
+    if !energy_j_m2.is_finite()
+        || resultants_n_m
+            .iter()
+            .chain(&tangent_n_m)
+            .any(|v| !v.is_finite())
+    {
+        return Err(SheetError::Invalid(
+            "unrepresentable finite-strain membrane response",
+        ));
+    }
+    Ok(SheetResponse {
+        energy_j_m2,
+        resultants_n_m,
+        tangent_n_m,
+    })
 }

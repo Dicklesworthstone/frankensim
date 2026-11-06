@@ -346,7 +346,9 @@ impl SheetMatrix {
 /// Energy and its exact derivatives in `[E11,E22,2E12]` Green-strain coordinates.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SheetResponse {
-    /// Energy per REFERENCE area [J/m2].
+    /// Potential per REFERENCE area [J/m2]. This is stored energy for an
+    /// elastic law; a frozen inelastic law returns its incremental potential,
+    /// with physical storage and dissipation accounted separately.
     pub energy_j_m2: f64,
     /// Work-conjugate second-Piola resultants `[S11,S22,S12]` [N/m].
     pub resultants_n_m: [f64; 3],
@@ -356,7 +358,7 @@ pub struct SheetResponse {
 /// Constitutive interface for sheet kinematics; assembly does not identify fibers
 /// or choose material laws. Implementations must return consistent derivatives.
 pub trait SheetLaw {
-    /// Evaluate energy, stress and tangent at the same material Green strain.
+    /// Evaluate potential, stress and tangent at the same material Green strain.
     fn response(&self, strain: [f64; 3]) -> Result<SheetResponse, SheetError>;
 }
 /// Fixed-state effective orthotropic sheet, independent of bending and thickness.

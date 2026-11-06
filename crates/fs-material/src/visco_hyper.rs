@@ -47,6 +47,8 @@ pub use plane_stress::{
     ViscoIncompressiblePlaneStressReferenceChange, ViscoIncompressiblePlaneStressStepResponse,
     ViscoPlaneStressReferenceChange, ViscoPlaneStressStepResponse,
 };
+/// Objective Green-strain membranes with the original finite-viscoelastic history.
+pub mod membrane;
 
 use crate::hyper::reference::ReferenceDeformation;
 use crate::hyper::{Hyperelastic, MAX_OGDEN_TERMS, OgdenTerm};

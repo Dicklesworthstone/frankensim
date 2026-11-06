@@ -1,5 +1,24 @@
 # fs-material — CONTRACT
 
+## Finite-strain membrane relaxation with original material history
+
+`visco_hyper::membrane::FrozenViscoMembrane` reduces the original finite-strain
+Maxwell potential to engineering Green strain through the same exact Cholesky
+chain rule as elastic sheets. Every trial borrows one accepted history and one
+physical interval. Finite compliance relaxes all transverse tractions; the
+explicit exact-volume variant retains native remainder history and its physical
+pressure multiplier. Material-frame viscous metrics survive nonproportional
+loading and spatial rotation without being reset to a new reference.
+
+`step_response` proposes complete native memory, physical stress, reference-area
+storage, loading work and nonnegative relaxation loss. These remain separate
+from the incremental sheet potential and any spatial endpoint-work error.
+Original thickness and natural-reference volume determine work; no current-area
+or current-thickness substitution creates mass or heat. The adapter supplies no
+new source qualification, bending, wrinkling, damage or evolving temperature.
+`tests/visco_membrane.rs` covers retained relaxation, consistent tangent,
+independent exact-volume energy, natural-reference volume and refusal atomicity.
+
 ## Exact source heat capacity through solid and phase transport
 
 Source heat-capacity ingress retains the original affine `Cp(T)` on every
