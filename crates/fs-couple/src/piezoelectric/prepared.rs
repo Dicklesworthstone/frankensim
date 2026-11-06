@@ -1,11 +1,15 @@
-//! Exact held-current motion through the existing quadratic-flow owner.
+//! Exact held-current or fixed-voltage motion through the quadratic-flow owner.
 //!
 //! The original material, consistent rod inertia, reciprocal coupling and
-//! charge remain unchanged. Cold preparation caches the full coupled matrix
-//! exponential and voltage integral. Warm stepping uses fixed caller-owned
-//! buffers, without a Newton solve, an exponential or a material clone.
+//! charge remain owned together. Cold preparation caches the exact held-input
+//! flow: current control retains coupled charge and its voltage integral, while
+//! fixed voltage eliminates only the algebraic constraint. Warm stepping uses
+//! fixed buffers without a Newton solve, exponential or material clone.
 //! "Exact" means the linear held-input model up to floating-point error; it
 //! does not remove the rod's spatial reduction or certify a real-time deadline.
+
+mod voltage;
+pub use voltage::PreparedPiezoelectricVoltage;
 
 use super::{PiezoelectricBody, PiezoelectricCouplingError, Result, invalid, poll, positive};
 use fs_phs::PreparedStepError;
@@ -17,7 +21,8 @@ use fs_phs::linear_exact::{DenseExponentialBudget, LinearSplitBudget, split_quad
 pub struct ExactPiezoelectricControls {
     /// Absolute combined stored-energy minus source-work tolerance [J].
     pub energy_tolerance_j: f64,
-    /// Absolute free-charge increment minus integrated current tolerance [C].
+    /// Absolute free-charge residual against integrated current or the
+    /// fixed-voltage induced-charge constraint [C].
     pub charge_tolerance_c: f64,
 }
 
@@ -30,13 +35,16 @@ pub struct ExactPiezoelectricStep {
     pub energy_change_j: f64,
     /// Held mechanical force times the actual extension increment [J].
     pub mechanical_supply_j: f64,
-    /// Held current times the integrated terminal voltage [J].
+    /// Held current times integrated voltage, or fixed clamp voltage times
+    /// the actual free-charge increment [J].
     pub electrical_supply_j: f64,
     /// Stored-energy change minus the two independently evaluated supplies [J].
     pub energy_residual_j: f64,
-    /// Free-charge increment minus current times duration [C].
+    /// Free-charge increment minus current times duration, or minus theta
+    /// times extension change for a fixed voltage [C].
     pub charge_residual_c: f64,
-    /// Time-mean terminal voltage [V], not an endpoint average.
+    /// Time-mean terminal voltage [V] on the continuous trajectory; constant
+    /// for a fixed clamp, otherwise obtained from its exact integral.
     pub mean_voltage_v: f64,
     /// Time-mean tip velocity [m/s].
     pub mean_velocity_m_s: f64,

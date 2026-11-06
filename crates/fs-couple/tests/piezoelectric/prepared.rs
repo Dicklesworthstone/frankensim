@@ -1,4 +1,7 @@
 //! G0/G1/G4 source-preserving exact motion, charge and source-work checks.
+#[path = "prepared/voltage.rs"]
+mod voltage;
+
 use super::{near, rod};
 use fs_couple::piezoelectric::prepared::{
     ExactPiezoelectricControls, PreparedPiezoelectricCurrent,
