@@ -21,8 +21,10 @@ pub struct MaterialEndpointConfig {
     pub maximum_passes_per_step: usize,
     /// All native momentum solves, including discarded coupling trials.
     pub maximum_momentum_solves: usize,
-    /// Actual linear energy solves across all material, caloric, compact-storage
-    /// and radiation trials. Source-caloric controls may impose a tighter bound.
+    /// Native heat-kernel calls across material, caloric, compact-storage and
+    /// radiation trials. Nested conductivity, reconstruction and linear iterations
+    /// keep their own limits; this is not an individual linear-solve count.
+    /// Source-caloric controls may impose a tighter bound.
     pub maximum_energy_solves: usize,
     /// All in-domain transport-source epochs, including the opening state,
     /// endpoint checks and separately queried relaxed trial temperatures.
@@ -267,6 +269,7 @@ impl MaterialEndpointCoupling {
                 setup: thermal,
                 previous_temperature_k: previous_temperature,
                 reference_capacity_j_k: capacity,
+                reference_storage_w_k: storage,
                 time_s,
                 time_step_s: dt,
                 physical_fixed_heat_j,

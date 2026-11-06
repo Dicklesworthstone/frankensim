@@ -192,8 +192,10 @@ pub use simple::{
 };
 pub use transient::{TransientConfig, TransientRecord, TransientSolution, march_energy};
 pub use unsteady::{
-    Boussinesq, ConjugateMarch, FlowStepRecord, UnsteadyConfig, UnsteadyFlow, march_conjugate,
-    march_conjugate_with_sgs, simple_unsteady, simple_unsteady_with_sgs,
+    Boussinesq, ConjugateMarch, FlowStepRecord, MaterialEndpointConfig, MaterialEndpointMarch,
+    MaterialEndpointStepReport, UnsteadyConfig, UnsteadyFlow, march_conjugate,
+    march_conjugate_implicit_buoyancy, march_conjugate_with_sgs, simple_unsteady,
+    simple_unsteady_with_sgs,
 };
 
 /// Semantics version of the conjugate pipeline: covers voxel indexing, face

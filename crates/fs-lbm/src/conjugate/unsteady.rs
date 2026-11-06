@@ -33,8 +33,9 @@
 //! explicit `*_with_sgs` entries instead compute Smagorinsky/WALE from each
 //! iterate's full velocity gradient, for exploration only; they do not
 //! establish resolved turbulent spectra or thermal wall resolution. The
-//! Energy coupling is first order in time. The material endpoint entry closes
-//! buoyancy and transport on the returned temperature; ordinary marches retain
+//! Energy coupling is first order in time. The native implicit-buoyancy and
+//! material endpoint entries close force and transport on the returned
+//! temperature; ordinary marches retain
 //! the explicitly documented one-step source lag.
 //! Face fans are steady models and refuse here; use
 //! internal fans. The opt-in thermal_wall::march_conjugate_with_wall_heat
@@ -44,6 +45,8 @@ use core::cell::Cell;
 use fs_exec::CancelGate;
 
 mod endpoint;
+mod native_buoyancy;
+pub use native_buoyancy::march_conjugate_implicit_buoyancy;
 pub(crate) use endpoint::MaterialEndpointCoupling;
 pub use endpoint::{MaterialEndpointConfig, MaterialEndpointMarch, MaterialEndpointStepReport};
 
@@ -217,7 +220,8 @@ pub struct ConjugateMarch {
     pub energy_records: Vec<TransientRecord>,
 }
 
-/// Boussinesq buoyancy for [`march_conjugate`].
+/// Boussinesq buoyancy for [`march_conjugate`] and
+/// [`march_conjugate_implicit_buoyancy`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Boussinesq {
     /// Gravitational acceleration, m/s^2.
@@ -622,6 +626,7 @@ pub(crate) struct MaterialHeatStep<'a> {
     pub setup: &'a ThermalSetup,
     pub previous_temperature_k: &'a [f64],
     pub reference_capacity_j_k: &'a [f64],
+    reference_storage_w_k: &'a [f64],
     pub time_s: f64,
     pub time_step_s: f64,
     /// Generated physical heat immediately rejected by fixed-cell thermostats.
@@ -700,6 +705,24 @@ impl MaterialHeatStep<'_> {
         storage_w_k: &[f64],
         conductivity_w_m_k: &[[f64; 3]],
     ) -> Result<(Vec<f64>, TransientRecord), ChtError> {
+        self.solve_with_optional_conductivity(
+            capacity_j_k, storage_w_k, Some(conductivity_w_m_k),
+        )
+    }
+
+    /// Native k(T), wall/contact and compact laws remain inside the heat owner.
+    fn solve_native(&self) -> Result<(Vec<f64>, TransientRecord), ChtError> {
+        self.solve_with_optional_conductivity(
+            self.reference_capacity_j_k, self.reference_storage_w_k, None,
+        )
+    }
+
+    fn solve_with_optional_conductivity(
+        &self,
+        capacity_j_k: &[f64],
+        storage_w_k: &[f64],
+        conductivity_w_m_k: Option<&[[f64; 3]]>,
+    ) -> Result<(Vec<f64>, TransientRecord), ChtError> {
         let (temperature, record) = if let Some(budget) = self.endpoint_energy_budget {
             let mut remaining = budget.get();
             let solved = solve_step_with_fields(
@@ -713,7 +736,7 @@ impl MaterialHeatStep<'_> {
                 self.previous_temperature_k,
                 self.time_step_s,
                 self.radiation,
-                Some(conductivity_w_m_k),
+                conductivity_w_m_k,
                 None,
                 Some(&mut remaining),
                 self.gate,
@@ -743,7 +766,7 @@ impl MaterialHeatStep<'_> {
                 self.previous_temperature_k,
                 (self.time_s, self.time_step_s, self.solids_present),
                 self.radiation,
-                Some(conductivity_w_m_k),
+                conductivity_w_m_k,
                 self.gate,
             )?
         };
@@ -1219,6 +1242,7 @@ fn march_conjugate_inner_with_material<E: From<ChtError>>(
                     setup: thermal,
                     previous_temperature_k: &temperature,
                     reference_capacity_j_k: &capacity,
+                    reference_storage_w_k: &storage,
                     time_s,
                     time_step_s: unsteady.time_step_s,
                     physical_fixed_heat_j,
