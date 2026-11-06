@@ -7,7 +7,10 @@
 //! would discard real electromechanical thermal exchange.
 //!
 //! This uses the original small-signal constitutive response and the common
-//! affine-source/capacity admission. It adds no pyroelectric offset, thermal
+//! affine-source/capacity admission. `from_tensor` also admits complete affine
+//! strain-charge tensors at a fixed oriented longitudinal projection, preserving
+//! transverse relaxation and all coupled thermal derivatives. It adds no
+//! pyroelectric offset, thermal
 //! expansion, depoling, hysteresis, phase transition or mechanical integrator.
 
 use super::*;
@@ -15,6 +18,19 @@ use crate::field_storage::{
     FieldStorageError, admit_source_temperature_refresh,
     thermal::{FieldThermalState, affine_source_path, capacity_bound},
 };
+
+mod tensor;
+
+/// Fixed frame and direction of the full original strain-charge source.
+/// Its retained scales measure cancellation roundoff, never replace source data.
+#[derive(Clone, Debug, PartialEq)]
+struct TensorThermalReduction {
+    source_frame: ContentHash,
+    frame: ContentHash,
+    source_to_frame: [[f64; 3]; 3],
+    direction: [f64; 3],
+    coefficient_roundoff_scales: [f64; 3],
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ThermalLongitudinalPiezoelectric {
@@ -29,6 +45,7 @@ pub struct ThermalLongitudinalPiezoelectric {
     scales: [f64; 2],
     minimum_eigenvalue: f64,
     derivative_norm_bound_per_k: f64,
+    tensor_reduction: Option<TensorThermalReduction>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -75,6 +92,20 @@ impl ThermalLongitudinalPiezoelectric {
             reference_temperature_k = reference;
             slopes[i] = slope;
         }
+        Self::prepare(card, original, temperature_axis, temperature_range_k,
+            reference_temperature_k, slopes, None)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn prepare(
+        card: &MaterialCard,
+        original: &LongitudinalPiezoelectric,
+        temperature_axis: &str,
+        temperature_range_k: [f64; 2],
+        reference_temperature_k: f64,
+        slopes: [f64; 3],
+        tensor_reduction: Option<TensorThermalReduction>,
+    ) -> Result<Self, PiezoelectricError> {
         let (_, density_slope, _) = affine_source_path(card, original.material(), DENSITY_PROPERTY,
             temperature_axis, temperature_range_k, true).map_err(field_error)?;
         if density_slope != 0.0 {
@@ -92,7 +123,7 @@ impl ThermalLongitudinalPiezoelectric {
         let mut law = Self { card: card.clone(), original: original.clone(),
             temperature_axis: temperature_axis.to_owned(), temperature_range_k,
             reference_temperature_k, slopes, scales, minimum_eigenvalue: f64::INFINITY,
-            derivative_norm_bound_per_k };
+            derivative_norm_bound_per_k, tensor_reduction };
         for temperature in temperature_range_k {
             let material = law.at_temperature(temperature)?.material;
             let [s,d,e] = coefficients(&material);
@@ -120,18 +151,25 @@ impl ThermalLongitudinalPiezoelectric {
         }
         let point = self.original.material().query().with(&self.temperature_axis,temperature_k)
             .map_err(|_| PiezoelectricError::Invalid("piezoelectric thermal query is unrepresentable"))?;
-        let material = LongitudinalPiezoelectric::from_material_state(
-            self.original.material().at_query_point(&self.card,&point)?,
-        )?;
-        for ((original, actual), slope) in coefficients(&self.original).into_iter()
-            .zip(coefficients(&material)).zip(self.slopes) {
+        let resolved = self.original.material().at_query_point(&self.card,&point)?;
+        let material = match &self.tensor_reduction {
+            Some(_) if resolved.identity() == self.original.material().identity() => self.original.clone(),
+            Some(reduction) => reduction.material(resolved)?,
+            None => LongitudinalPiezoelectric::from_material_state(resolved)?,
+        };
+        for (index, ((original, actual), slope)) in coefficients(&self.original).into_iter()
+            .zip(coefficients(&material)).zip(self.slopes).enumerate() {
             let expected = finite(slope.mul_add(temperature_k-self.reference_temperature_k,original))?;
             // A signed cross coefficient may pass through zero. Compare with
             // its admitted path scale, without clamping the actual source value.
             let span = (self.temperature_range_k[0]-self.reference_temperature_k).abs()
                 .max((self.temperature_range_k[1]-self.reference_temperature_k).abs());
+            // Tensor projections can cancel while individual signed terms are
+            // large. Admission uses their source scale without changing values.
+            let tensor_scale = self.tensor_reduction.as_ref()
+                .map_or(0.0, |reduction| reduction.coefficient_roundoff_scales[index]);
             let scale = original.abs().max(finite(slope.abs()*span)?)
-                .max(actual.abs()).max(expected.abs());
+                .max(actual.abs()).max(expected.abs()).max(tensor_scale);
             if (actual-expected).abs() > 512.0*f64::EPSILON*scale {
                 return Err(PiezoelectricError::Invalid("piezoelectric source left its admitted affine path"));
             }
@@ -144,15 +182,13 @@ impl ThermalLongitudinalPiezoelectric {
 
     pub fn at_material(&self, material: &LongitudinalPiezoelectric)
         -> Result<ResolvedThermalPiezoelectric, PiezoelectricError> {
-        if material.tensor_reduction().is_some() {
-            return Err(PiezoelectricError::Invalid("tensor-reduced piezoelectric material requires a tensor-aware thermal law"));
-        }
         admit_source_temperature_refresh(self.original.material(),material.material()).map_err(field_error)?;
         let temperature = material.material().query_point().iter()
             .find_map(|(name,value)| (name == &self.temperature_axis).then_some(*value))
             .ok_or(PiezoelectricError::Invalid("piezoelectric temperature coordinate is missing"))?;
         let at = self.at_temperature(temperature)?;
-        if at.material.material().properties().iter().zip(material.material().properties())
+        if at.material.tensor_reduction() != material.tensor_reduction()
+            || at.material.material().properties().iter().zip(material.material().properties())
             .any(|(a,b)| a.value_si().to_bits() != b.value_si().to_bits()) {
             return Err(PiezoelectricError::Invalid("piezoelectric dynamics and caloric law selected different source values"));
         }

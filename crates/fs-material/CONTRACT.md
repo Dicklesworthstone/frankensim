@@ -16767,3 +16767,40 @@ definitions exercise heated-state density, source retention, distinct
 coexistence responses, high-pressure and single-phase dispatch, exact phase
 limits, and use through the shared acoustic-consumer interface. These Rust
 regressions remain unexecuted in the unavailable execution environment.
+
+### Thermal longitudinal reduction of complete anisotropic piezoelectric sources
+
+`ThermalLongitudinalPiezoelectric::from_tensor` binds an original affine
+strain-charge tensor source to the existing longitudinal rod/circuit thermal
+owner. It retains all original compliance, signed coupling, permittivity and
+density roles, their source selections, fixed frame transform and oriented
+specimen/electrode direction. Complete tensor contractions include the lateral,
+shear and off-diagonal temperature derivatives. Both full coupled endpoint
+blocks must pass the native stability checks, including directions not excited
+by the longitudinal projection; affine source blocks then remain positive
+throughout the admitted interval.
+
+Every temperature trial reconstructs the original source tensor and its
+longitudinal reduction. No scalar source claims are synthesized. A matching
+original query preserves the original resolved snapshot. Caloric binding checks
+the reduction receipt as well as source values, so a changed frame or electrode
+orientation cannot silently reuse another thermal law. Signed coupling may
+cross zero; projection roundoff is admitted against original source magnitudes
+without modifying or clamping actual material values.
+
+The existing free-energy, entropy, internal-energy and field heat-capacity
+responses serve the rod/circuit and finite-caloric consumers. The scalar
+constructor continues to require scalar source roles. This model retains
+small-signal homogeneous stress and longitudinal-field constraints; it does not
+supply a finite-specimen insulating lateral-boundary solve, thermal expansion,
+pyroelectric offsets, hysteresis, depoling or arbitrary non-affine source paths.
+Affine stress-charge sources are refused because their inverted strain-charge
+coefficients are generally non-affine.
+
+Four synthetic regression definitions exercise independent full-tensor
+contractions and thermodynamic derivatives, signed coupling through zero,
+corotation and electrode reversal, incompatible reduction receipts, and
+unstable or non-affine unexcited source directions. Source/API review and
+independent analytic calculations were performed. Native Rust compilation and
+execution remain unverified because the execution environment became
+unavailable.
