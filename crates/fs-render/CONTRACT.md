@@ -8177,8 +8177,8 @@ identity, cancellation and work limits remain authoritative.
 This is an ideal, wavelength-independent detector row at the geometric camera
 launch plane. It does not provide a finite-thickness or angle-dependent
 polarizer, resolved lens propagation, polarized source emission, bulk
-birefringence, or analyzer overloads for the separate molecular-scattering and
-explicit emitter-connection consumers.
+birefringence or analyzer overloads for explicit emitter-connection consumers.
+The molecular-scattering extension is described below.
 
 Focused regressions specify passive-row admission and independent Malus
 values, a native Brewster/rotated-TIR path resolving both U and V, a curved
@@ -8188,3 +8188,51 @@ include native proposal probabilities, Beer attenuation, endpoint indices,
 identity replay and failure semantics. The implementation passed pinned Rust
 formatter/parser checks; these native regressions were added but were not
 executed in the shared editing environment.
+
+## Passive analyzers through native molecular-scattering cameras
+
+With `volumes`, `CurvedRayleighCameraScene` accepts the same original passive
+`CameraAnalyzer` through `sample_ray_analyzed`,
+`sample_ray_analyzed_with_samples` and
+`sample_ray_analyzed_with_tracking_samples`. The reciprocal seed enters the
+original Rayleigh/depolarized-Rayleigh Mueller walk once. Frame rotations,
+curved index propagation, discrete refractive interfaces and molecular
+collisions retain the complete Stokes state. The original scalar scattering
+proposal divides the Mueller response once; scattering survival remains in
+the original free-flight law. No second analyzer transmission or scalar
+scattering extinction is applied after transport.
+
+Uniform and heterogeneous density use their original flight and independent
+acceptance variates. Rejected tracking candidates preserve polarization.
+Observed surface and supported thermal emission, original phase/group paths,
+medium identities, local refractive indices, Beer attenuation and endpoint
+`n^2` conversion remain in their existing owners. Identity analysis follows
+the exact original launch. The admitted molecular law samples direction from
+the original incoming direction and world frame, independently of the
+analyzer's polarization reference axis. Original counter streams, work,
+volume-event and distance limits, cancellation and unresolved-tail failures
+are retained.
+
+The spectral raster adds `sample_pixel_rayleigh_analyzed` and
+`sample_pixel_sensor_rayleigh_analyzed`. Their original four wavelength paths
+feed the original XYZ or multichannel QE/photoconversion integration; each
+lane retains its volume-event and free-flight counts. Additional detector
+channels do not add propagation, and a failed lane publishes no partial pixel.
+The implementation shares the original launched-beam traversal bodies and
+result construction without cloning scene tables or adding path traversals.
+
+The physical scope remains the original admitted reciprocal molecular
+Mueller laws and unpolarized source models. The detector is the declared ideal
+local analyzer, without resolved polarizer/lens propagation, polarized source
+emission, bulk birefringence, or analyzer overloads for explicit emitter
+connections or the separate transient-history consumers.
+
+Three focused regression groups specify right-angle Rayleigh/depolarized
+responses and rotated analyzer frames; a closed-form gradient-index path with
+an actual collision, discrete refraction, Beer/index/Fresnel factors and a
+rejected tracking candidate; and original XYZ/QE pixels with identity replay
+and complementary analyzer channels reconstructing the scalar signal. The
+fixed raster fixture's native Philox first-flight variates were independently
+checked to include an interior collision. Formatter/parser checks passed;
+these native Rust regressions were added but were not executed in the shared
+editing environment.

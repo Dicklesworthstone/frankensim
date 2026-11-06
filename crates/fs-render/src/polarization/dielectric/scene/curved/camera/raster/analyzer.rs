@@ -10,6 +10,9 @@ use super::sensor::CurvedSensorPixelSample;
 use super::*;
 use crate::spectral::detector::QuantumEfficiencySensor;
 
+#[cfg(feature = "volumes")]
+mod molecular;
+
 impl CurvedCameraRaster<'_> {
     /// Observe a passive analyzer through the original four refractive paths.
     /// XYZ is the existing equal-energy integral of analyzed radiance, before

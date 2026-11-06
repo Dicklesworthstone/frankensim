@@ -72,6 +72,18 @@ pub struct CurvedRayleighSensorPixelSample<const CHANNELS: usize> {
 
 #[cfg(feature = "volumes")]
 impl<const C: usize> CurvedRayleighSensorPixelSample<C> {
+    pub(super) fn from_transport(
+        pixel: CurvedSensorPixelSample<C>,
+        volume_events: [u32; CAMERA_WAVELENGTHS],
+        free_flight_draws: [u32; CAMERA_WAVELENGTHS],
+    ) -> Self {
+        Self {
+            pixel,
+            volume_events,
+            free_flight_draws,
+        }
+    }
+
     pub const fn pixel_sample(&self) -> &CurvedSensorPixelSample<C> {
         &self.pixel
     }
@@ -174,11 +186,11 @@ impl CurvedCameraRaster<'_> {
                 Ok(*traced.radiance_sample())
             },
         )?;
-        Ok(CurvedRayleighSensorPixelSample {
+        Ok(CurvedRayleighSensorPixelSample::from_transport(
             pixel,
             volume_events,
             free_flight_draws,
-        })
+        ))
     }
 
     pub(super) fn sample_sensor_with_transport<const C: usize>(

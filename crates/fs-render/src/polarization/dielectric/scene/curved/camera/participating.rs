@@ -14,7 +14,8 @@
 //! local (n_camera/n_source)² factor is applied once for each encountered
 //! surface source or final environment by the existing camera consumer.
 //! Reflective emitters keep scattering along this same molecular path.
-//! This is not a general polarized camera adjoint.
+//! An explicit passive [`super::CameraAnalyzer`] can use this same reciprocal
+//! walk, retaining its full Stokes seed through scattering and refraction.
 //!
 //! References and endpoint radiometry are those of [`super::CurvedCameraScene`]; the molecular
 //! matrix is owned by [`crate::volumes::transport::scattering::polarized`].
@@ -33,6 +34,7 @@ use crate::polarization::dielectric::scene::SceneError;
 use crate::polarization::dielectric::scene::curved::participating::{
     CurvedRayleighPath, CurvedRayleighScene, CurvedRayleighTraceSettings,
 };
+use crate::polarization::dielectric::transport::PolarizedBeam;
 use fs_exec::Cx;
 
 /// One completed camera sample and the original molecular traversal counters.
@@ -105,7 +107,19 @@ impl<'a, 's, 'm, 'o> CurvedRayleighCameraScene<'a, 's, 'm, 'o> {
     ) -> Result<RayleighCameraSample, CameraRadianceError> {
         cx.checkpoint()?;
         let beam = self.camera.launch(ray, wavelength_nm, initial_medium)?;
-        let initial_index = phase_index(beam.medium(), wavelength_nm)?;
+        self.sample_launched_ray(cx, beam, initial_medium, settings, seed, path_id)
+    }
+
+    pub(super) fn sample_launched_ray(
+        &self,
+        cx: &Cx<'_>,
+        beam: PolarizedBeam,
+        initial_medium: usize,
+        settings: CurvedRayleighTraceSettings,
+        seed: u64,
+        path_id: u64,
+    ) -> Result<RayleighCameraSample, CameraRadianceError> {
+        let initial_index = phase_index(beam.medium(), beam.wavelength_nm())?;
         let mut emission = SurfaceEmission::new(self.camera, initial_index);
         let result = self
             .scattering
@@ -133,7 +147,21 @@ impl<'a, 's, 'm, 'o> CurvedRayleighCameraScene<'a, 's, 'm, 'o> {
     ) -> Result<RayleighCameraSample, CameraRadianceError> {
         cx.checkpoint()?;
         let beam = self.camera.launch(ray, wavelength_nm, initial_medium)?;
-        let initial_index = phase_index(beam.medium(), wavelength_nm)?;
+        self.sample_launched_ray_with_samples(
+            cx, beam, initial_medium, settings, surface_samples, flight_samples,
+        )
+    }
+
+    pub(super) fn sample_launched_ray_with_samples(
+        &self,
+        cx: &Cx<'_>,
+        beam: PolarizedBeam,
+        initial_medium: usize,
+        settings: CurvedRayleighTraceSettings,
+        surface_samples: impl FnMut(u32) -> [f64; 3],
+        flight_samples: impl FnMut(u32) -> [f64; 3],
+    ) -> Result<RayleighCameraSample, CameraRadianceError> {
+        let initial_index = phase_index(beam.medium(), beam.wavelength_nm())?;
         let mut emission = SurfaceEmission::new(self.camera, initial_index);
         let result = self.scattering.for_camera().trace_with_samples_events_observed(
             cx,
@@ -165,7 +193,21 @@ impl<'a, 's, 'm, 'o> CurvedRayleighCameraScene<'a, 's, 'm, 'o> {
     ) -> Result<RayleighCameraSample, CameraRadianceError> {
         cx.checkpoint()?;
         let beam = self.camera.launch(ray, wavelength_nm, initial_medium)?;
-        let initial_index = phase_index(beam.medium(), wavelength_nm)?;
+        self.sample_launched_ray_with_tracking_samples(
+            cx, beam, initial_medium, settings, surface_samples, flight_samples,
+        )
+    }
+
+    pub(super) fn sample_launched_ray_with_tracking_samples(
+        &self,
+        cx: &Cx<'_>,
+        beam: PolarizedBeam,
+        initial_medium: usize,
+        settings: CurvedRayleighTraceSettings,
+        surface_samples: impl FnMut(u32) -> [f64; 3],
+        flight_samples: impl FnMut(u32) -> [f64; 4],
+    ) -> Result<RayleighCameraSample, CameraRadianceError> {
+        let initial_index = phase_index(beam.medium(), beam.wavelength_nm())?;
         let mut emission = SurfaceEmission::new(self.camera, initial_index);
         let result = self.scattering.for_camera().trace_with_tracking_samples_events_observed(
             cx,

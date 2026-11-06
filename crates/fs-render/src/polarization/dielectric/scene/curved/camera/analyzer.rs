@@ -25,6 +25,9 @@ use fs_exec::Cx;
 use fs_geom::Vec3;
 use fs_math::det;
 
+#[cfg(feature = "volumes")]
+mod molecular;
+
 /// Passive intensity row in the actual arriving-light detector frame.
 ///
 /// For every physical Stokes input its response lies between zero and the

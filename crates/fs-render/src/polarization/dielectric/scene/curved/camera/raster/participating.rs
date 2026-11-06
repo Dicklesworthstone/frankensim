@@ -20,6 +20,18 @@ pub struct RayleighPixelSample {
 }
 
 impl RayleighPixelSample {
+    pub(super) fn from_transport(
+        pixel: CurvedPixelSample,
+        volume_events: [u32; CAMERA_WAVELENGTHS],
+        free_flight_draws: [u32; CAMERA_WAVELENGTHS],
+    ) -> Self {
+        Self {
+            pixel,
+            volume_events,
+            free_flight_draws,
+        }
+    }
+
     pub const fn pixel_sample(&self) -> &CurvedPixelSample {
         &self.pixel
     }
@@ -79,11 +91,11 @@ impl CurvedCameraRaster<'_> {
                 Ok(*traced.radiance_sample())
             },
         )?;
-        Ok(RayleighPixelSample {
-            pixel: result,
+        Ok(RayleighPixelSample::from_transport(
+            result,
             volume_events,
             free_flight_draws,
-        })
+        ))
     }
 }
 
