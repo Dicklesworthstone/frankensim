@@ -11,7 +11,9 @@
 //! barns to m². Q values are metadata only: neither is assigned to prompt heat.
 //! Group collapse integrates the admitted pointwise law with explicitly flat
 //! flux density per unit energy inside each group. It does not reconstruct
-//! resonances, Doppler broaden, self-shield, infer a spectrum or certify data.
+//! resonances, self-shield, infer a spectrum or certify data. The separate
+//! [`doppler`] owner can heat an explicitly admitted free-gas processed curve
+//! before either native group-collapse operation.
 //! Format: ENDF-102 (2023), §§0.5–0.6, 1.1 and 3.2–3.3,
 //! <https://www.nndc.bnl.gov/endfdocs/ENDF-102-2023.pdf>.
 
@@ -19,6 +21,9 @@ use std::sync::Arc;
 
 /// Explicit incident spectra and reaction-rate-preserving group collapse.
 pub mod spectrum;
+
+/// Free-gas thermal broadening before the original spectrum/group collapse.
+pub mod doppler;
 
 /// Evaluated prompt, delayed and total fission-neutron multiplicities.
 pub mod neutron_yield;

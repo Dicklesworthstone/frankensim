@@ -886,8 +886,10 @@ that reference explicit. Physical evaluations must use `rate_constants`.
 Original tables remain available through `temperature_tables()`.
 
 Supplied rows must already embody the intended processing and within-group
-spectrum assumptions. Linear temperature interpolation does not perform
-resonance reconstruction, Doppler broadening, self-shielding or transport.
+spectrum assumptions. The explicit `endf::doppler` operation below can supply
+free-gas heated pointwise curves before collapse. Linear temperature
+interpolation itself does not perform resonance reconstruction, Doppler
+broadening, self-shielding or transport.
 This deterministic multigroup law is distinct from the statistical temperature
 selection described in [OpenMC's cross-section methodology](https://docs.openmc.org/en/latest/methods/cross_sections.html).
 Dataset identity does not certify nuclear-data accuracy.
@@ -971,9 +973,10 @@ Byte, record, point, interpolation-region, group, retained-value and segment-vis
 limits bound work and allocation. All temperature rows share the collapse-work
 allowance. Checkpoints are polled during scanning and integration. Conversion,
 interpolation and integration refuse unrepresentable positive quantities instead
-of silently turning a physical coefficient into zero. No energy or temperature
-extrapolation, resonance reconstruction, Doppler broadening, self-shielding,
-spectrum calculation or evaluated-data certification is supplied.
+of silently turning a physical coefficient into zero. Import and collapse do
+not infer energy/temperature extrapolation, resonance reconstruction, Doppler
+broadening, self-shielding, a spectrum or evaluated-data certification. Explicit
+free-gas heating is a separate operation described next.
 
 Nine importer regressions exercise identity/temperature selection, malformed
 controls, numeric fields and SI conversion, histogram/linear integration with
@@ -985,6 +988,64 @@ new module exports. All 147 nuclear tests passed, including the concurrent
 capture-activation and thermal additions. These manufactured fixtures establish
 implementation behavior; full workspace Cargo and empirical validation against
 processed evaluated nuclear data remain separate gates.
+
+## Free-gas Doppler heating before native reaction collapse
+
+`endf::doppler::PreparedDopplerBroadening` heats a complete processed
+`PointwiseCrossSection` from its actual source temperature T0 to T >= T0. The
+caller explicitly admits the free-gas model for this input; an arbitrary
+processed, shielded or bound-atom curve is not assumed to satisfy it. The
+operator uses the original target/neutron atomic-weight ratio and the increment
+`theta = k_B (T-T0)/AWR`, in joules. Cooling is refused. Unchanged temperature
+uses the original bitwise evaluations, domain and discontinuity conventions;
+identity tabulation retains the original grid and interpolation laws.
+
+The physical kernel is the Maxwellian average of **relative speed times cross
+section**. It acts on `g(E)=sqrt(E)*sigma(E)`, with dimensionless relative speed
+`x=sqrt(E'/theta)` and incident speed `y=sqrt(E/theta)`. Its normalized positive
+weight is `x/(sqrt(pi)*y) * [exp(-(x-y)^2)-exp(-(x+y)^2)]`. Both image terms are
+retained, with `expm1` and a regular small-y expression avoiding cancellation.
+This preserves a 1/v law and produces the physical low-energy 1/v tail of a
+constant cross section. It follows the primary
+[NJOY BROADR free-gas formulation](https://github.com/njoy/NJOY2016-manual/blob/master/broadx.tex)
+and its incremental-temperature use; it is not Gaussian smoothing in energy.
+
+Both exterior source laws are mandatory: zero cross section or an inverse-speed
+continuation matched to the corresponding endpoint. They are declared physical
+assumptions, not inferred evaluated data. Point queries may extend outside the
+finite source interval only under those explicit laws. Heated output energies
+must be positive because the cross section generally diverges at zero speed.
+The prepared owner caches a global bound on g. Truncating `|x-y|` at L omits no
+more than `g_max/sqrt(E) * [erfc(L)+2L exp(-L^2)/sqrt(pi)]` in cross section:
+the excluded relative speeds require a target thermal speed above L. This
+separate analytic kernel-tail bound does not bound errors in the exterior laws.
+
+Integration partitions at every original histogram/linear segment and jump,
+then into panels at most one thermal width long. Deterministic Gauss 8/16
+comparison controls adaptive refinement; its reported error is a numerical
+estimate, not an interval certificate. The estimate plus omitted-kernel bound
+must fit the caller's absolute/relative point tolerance. Original zero segments
+need no quadrature. Source scanning, output allocation, segment visits, kernel
+evaluations and refinement depth are bounded; output knots share one work
+allowance. Callbacks poll cancellation throughout preparation and integration,
+and failures publish no partial curve or mutation of the original source.
+
+`tabulate` produces the original `PointwiseCrossSection` type with the actual
+heated temperature, unchanged evaluation/nuclide/reaction/AWR/Q identities and
+an explicit new data ID. Its result separately retains the source ID,
+temperature, exterior laws and maximum knot error estimates. The **caller owns
+the output energy grid**: linear interpolation of those knots adds a distinct
+approximation that is not bounded by the quadrature estimates. Broadening moves
+resonance wings away from the input knots, so reusing a coarse source grid is
+not automatically adequate. Grid refinement remains necessary before claiming
+accuracy of collapsed reaction rates.
+
+The generated curve feeds both original flat-in-energy and explicit-spectrum
+collapse APIs. Their temperature tables reach the existing irradiation,
+capture, depletion and nuclear/thermal owners without a second reaction or heat
+solver. This supplies no resonance reconstruction, self-shielding, transport,
+bound-atom scattering law, probability table, secondary-particle kinematics or
+evaluated-data accuracy certification.
 
 ## External nuclide production during full burnup
 
