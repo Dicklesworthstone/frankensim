@@ -11,6 +11,9 @@
 /// Bounded native midpoint prefixes locating approaching released-face events.
 pub mod approach;
 
+/// Coupled normal and directional frictional impulses on released paired faces.
+pub mod friction;
+
 /// Native nonlinear midpoint motion with sustained unilateral normal forces.
 pub mod sustained;
 

@@ -100,30 +100,51 @@ fn measured_law(
     config: FrictionalContactConfig,
     cx: &Cx<'_>,
 ) -> Result<EllipticContactResiduals> {
+    actual_endpoint_residuals(
+        &proposal.law,
+        &proposal.relative_velocities_before_mps,
+        velocities,
+        &proposal.order,
+        |i| contacts[i].friction_coefficient,
+        config,
+        cx,
+    )
+}
+
+/// Original physical ellipse audit shared by dense, modal and sparse solid
+/// owners. Geometry and inverse-mass assembly remain with each native body;
+/// this routine only admits the actual endpoint against the solved law.
+pub(crate) fn actual_endpoint_residuals(
+    law: &EllipticFrictionalContactResult,
+    before: &[[f64; 3]],
+    velocities: &[[f64; 3]],
+    order: &[usize],
+    friction_at: impl Fn(usize) -> EllipticFriction,
+    config: FrictionalContactConfig,
+    cx: &Cx<'_>,
+) -> Result<EllipticContactResiduals> {
     let mut r = EllipticContactResiduals::default();
     let (mut work, mut work_scale) = (Dd::ZERO, Dd::ZERO);
-    for &i in &proposal.order {
+    for &i in order {
         poll(cx)?;
-        let delta: [f64; 3] = core::array::from_fn(|a| {
-            velocities[i][a] - proposal.law.relative_velocities_after[i][a]
-        });
+        let delta: [f64; 3] =
+            core::array::from_fn(|a| velocities[i][a] - law.relative_velocities_after[i][a]);
         r.maximum_velocity_residual_m_s = r.maximum_velocity_residual_m_s.max(finite(det::hypot(
             delta[0],
             det::hypot(delta[1], delta[2]),
         ))?);
         for a in 0..3 {
-            let term = Dd::from_f64(proposal.law.impulses[i][a])
-                * (Dd::from_f64(0.5 * proposal.relative_velocities_before_mps[i][a])
-                    + Dd::from_f64(0.5 * velocities[i][a]));
+            let term = Dd::from_f64(law.impulses[i][a])
+                * (Dd::from_f64(0.5 * before[i][a]) + Dd::from_f64(0.5 * velocities[i][a]));
             work = work + term;
             work_scale = work_scale + Dd::from_f64(rounded(term)?.abs());
         }
     }
-    for &i in &proposal.law.active_indices {
+    for &i in &law.active_indices {
         poll(cx)?;
-        let (p, v) = (proposal.law.impulses[i], velocities[i]);
-        let g = finite(v[0] - proposal.law.normal_targets[i])?;
-        let friction = contacts[i].friction_coefficient;
+        let (p, v) = (law.impulses[i], velocities[i]);
+        let g = finite(v[0] - law.normal_targets[i])?;
+        let friction = friction_at(i);
         // The source coefficients/axis were already admitted by fs-contact.
         // Normalize directly from the original material axis, independently of
         // the solver's congruence map, without squaring a large input axis.
@@ -203,8 +224,7 @@ fn measured_law(
             ))?);
         }
     }
-    r.coordinate_work_residual_j =
-        rounded(work - Dd::from_f64(proposal.law.transformed.relative_work))?;
+    r.coordinate_work_residual_j = rounded(work - Dd::from_f64(law.transformed.relative_work))?;
     let work_allowance =
         finite(config.energy_tolerance + 128.0 * f64::EPSILON * rounded(work_scale)?)?;
     if r.normal_impulse_violation > config.impulse_tolerance

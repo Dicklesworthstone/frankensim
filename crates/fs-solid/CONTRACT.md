@@ -1,5 +1,39 @@
 # fs-solid CONTRACT
 
+## Native frictional impact of released brittle fragments
+
+The `brittle::solid::dynamics::fracture::contact::friction` owner accepts
+explicit per-vertex directional friction ellipses and one declared tangent
+direction per retained face. Every active non-tied pair enters one simultaneous
+normal/tangential solve, including initially separating pairs. Sparse physical
+paired rows assemble the complete `J M^-1 J^T` from original consistent-mass
+responses, with all normal/shear and intercontact blocks retained. One combined
+impulse then updates the original body. Contact/scalar-row caps bound quadratic
+scratch; only one full-body response is retained at a time.
+
+The original elliptic Coulomb owner retains its complementarity, maximum-
+dissipation, passivity, rank and determinacy limits. Equal principal coefficients
+recover circular Coulomb friction; a zero principal coefficient is exact free
+slip. The shared original physical-ellipse audit independently checks the actual
+body endpoint, not merely a predicted contact velocity. Native impulse and work,
+moving-support reaction work, total relative work, and the sum of absolute
+individual contact couples must agree before publication. A velocity-only
+determination does not establish unique local impulses, pressure or heat.
+
+Accepted events retain physical configuration, source/material/fracture history,
+reference mass, physical clock and step allowance. Any refusal leaves the
+accepted motion available. Penetration and active tangentially separated paired
+witnesses refuse. This is instantaneous contact of retained matching faces; it
+does not supply finite-sliding geometry, new-pair discovery, sustained frictional
+forces, or thermal allocation of the combined impact loss. Explicit coefficient
+inputs carry no inferred material-source authority.
+
+Focused manufactured tests use exact P1 simplex mass and independent momentum,
+angular-momentum and kinetic inventories. They cover frictionless parity,
+sliding, sticking, an exact free axis, physical texture under tangent-frame
+rotation, moving-support work and a rotated partially constrained specimen whose
+normal impulse depends on friction through a nonzero normal/tangent mobility.
+
 ## Brittle arrivals on an already loaded contact trajectory
 
 `advance_toward_released_face_contact_with_sustained` locates a new released-face
