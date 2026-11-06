@@ -1,0 +1,116 @@
+//! Two original spectral index axes of a transparent uniaxial crystal.
+//!
+//! Each eigenaxis retains its explicitly bound wavelength/property roles from
+//! SpectralComplexIndexStatePoint. Both MUST refer to the same complete
+//! material snapshot, including absolute scalar permeability. Ordinary means
+//! E perpendicular to the optic axis; extraordinary is the principal index
+//! for E along it. The latter is not the angle-dependent extraordinary phase
+//! index, which the Maxwell interface computes from the index ellipsoid.
+//!
+//! Selecting these two roles explicitly asserts a uniaxial constitutive model;
+//! no material name, surface roughness, or single isotropic spectrum supplies
+//! it. The geometry consumer owns optic-axis orientation independently.
+
+use super::{ReflectionError, SpectralOpticalResponse, SpectralOpticalSource, positive};
+use fs_material::state_point::{ResolvedMaterialStatePoint, SpectralComplexIndexStatePoint};
+
+/// Borrowed original ordinary/extraordinary spectra with same-state SI mu.
+/// Source support, interpolation gaps and optical coordinate admission reuse
+/// the existing spectral Maxwell response, without resampling or allocation.
+#[derive(Clone, Copy, Debug)]
+pub struct UniaxialOpticalResponse<'a> {
+    ordinary: &'a SpectralComplexIndexStatePoint,
+    extraordinary: &'a SpectralComplexIndexStatePoint,
+    ordinary_response: SpectralOpticalResponse<'a>,
+    extraordinary_response: SpectralOpticalResponse<'a>,
+    wavelength_bounds_nm: [f64; 2],
+}
+
+impl<'a> UniaxialOpticalResponse<'a> {
+    /// Bind explicit ordered optical roles from one original complete source.
+    /// The maximum interpolation-knot span is authored in vacuum metres.
+    /// Equal spectra are admitted as an explicit isotropic limit.
+    ///
+    /// Positive extinction is never discarded: every phase_indices query
+    /// requires both original axes to be exactly lossless at that frequency.
+    /// No extrapolation or second independently authored permeability is used.
+    pub fn try_new(
+        ordinary: &'a SpectralComplexIndexStatePoint,
+        extraordinary: &'a SpectralComplexIndexStatePoint,
+        maximum_knot_span_m: f64,
+    ) -> Result<Self, ReflectionError> {
+        if ordinary.resolved().identity() != extraordinary.resolved().identity() {
+            return Err(ReflectionError::Invalid(
+                "uniaxial optical axes require the same complete material snapshot",
+            ));
+        }
+        let ordinary_response = SpectralOpticalResponse::try_new(
+            SpectralOpticalSource::ComplexIndex(ordinary),
+            maximum_knot_span_m,
+        )?;
+        let extraordinary_response = SpectralOpticalResponse::try_new(
+            SpectralOpticalSource::ComplexIndex(extraordinary),
+            maximum_knot_span_m,
+        )?;
+        let o = ordinary.wavelength_bounds_nm();
+        let e = extraordinary.wavelength_bounds_nm();
+        let wavelength_bounds_nm = [o[0].max(e[0]), o[1].min(e[1])];
+        if wavelength_bounds_nm[0] > wavelength_bounds_nm[1] {
+            return Err(ReflectionError::Invalid(
+                "uniaxial optical axes have no common original wavelength support",
+            ));
+        }
+        Ok(Self {
+            ordinary,
+            extraordinary,
+            ordinary_response,
+            extraordinary_response,
+            wavelength_bounds_nm,
+        })
+    }
+
+    /// Original explicitly authored ordinary wavelength/key roles and receipts.
+    pub const fn ordinary_source(self) -> &'a SpectralComplexIndexStatePoint {
+        self.ordinary
+    }
+
+    /// Original explicitly authored extraordinary wavelength/key roles and receipts.
+    pub const fn extraordinary_source(self) -> &'a SpectralComplexIndexStatePoint {
+        self.extraordinary
+    }
+
+    pub const fn material(self) -> &'a ResolvedMaterialStatePoint {
+        self.ordinary.resolved()
+    }
+
+    pub const fn permeability_h_m(self) -> f64 {
+        self.ordinary_response.permeability_h_m()
+    }
+
+    pub const fn maximum_knot_span_m(self) -> f64 {
+        self.ordinary_response.maximum_knot_span_m()
+    }
+
+    /// Closed intersection of both original vacuum-wavelength supports [nm].
+    pub const fn wavelength_bounds_nm(self) -> [f64; 2] {
+        self.wavelength_bounds_nm
+    }
+
+    /// Original positive principal phase indices [ordinary, extraordinary].
+    /// Both owners admit frequency before any endpoint roundoff correction;
+    /// positive loss in either axis refuses the transparent-crystal model.
+    pub fn phase_indices(self, omega_rad_s: f64) -> Result<[f64; 2], ReflectionError> {
+        let ordinary = self.ordinary_response.complex_index(omega_rad_s)?;
+        let extraordinary = self.extraordinary_response.complex_index(omega_rad_s)?;
+        if ordinary.im != 0.0 || extraordinary.im != 0.0 {
+            return Err(ReflectionError::Invalid(
+                "transparent uniaxial refraction cannot discard source extinction in either axis",
+            ));
+        }
+        Ok([positive(ordinary.re)?, positive(extraordinary.re)?])
+    }
+}
+
+#[cfg(test)]
+#[path = "uniaxial_tests.rs"]
+mod tests;

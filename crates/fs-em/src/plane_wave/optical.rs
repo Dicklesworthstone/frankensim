@@ -29,11 +29,13 @@ use fs_math::{c64::C64, det};
 mod dispersion;
 mod gas;
 mod spectral;
+mod uniaxial;
 mod water;
 pub use gas::{MolecularGasOpticalResponse, MolecularGasOpticalSource};
 pub use spectral::{
     RefreshedSpectralOpticalSource, SpectralOpticalResponse, SpectralOpticalSource,
 };
+pub use uniaxial::UniaxialOpticalResponse;
 pub use water::WaterOpticalResponse;
 
 /// Exact SI vacuum light speed, used only to interpret vacuum wavelengths.

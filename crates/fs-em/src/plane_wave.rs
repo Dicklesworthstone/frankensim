@@ -20,8 +20,10 @@
 //! Ohmic displacement current: MIT 6.013, Electromagnetics and Applications,
 //! §9.2.4, equations 9.2.37–9.2.39:
 //! <https://ocw.mit.edu/courses/6-013-electromagnetics-and-applications-spring-2009/d3be4ea78b036a6362230fb41780cf54_MIT6_013S09_notes.pdf>.
-//! See [`layers`] for finite coherent films. No roughness, anisotropy, magnetic loss,
-//! transient wave evolution or measured-material accuracy claim is supplied.
+//! See [`layers`] for finite coherent isotropic films. The separate [`uniaxial`]
+//! owner supplies transparent-crystal refraction in a principal incidence plane.
+//! No roughness, magnetic loss, transient wave evolution or measured-material
+//! accuracy claim is supplied by these interfaces.
 
 use fs_material::{
     conductor::{ResolvedConductorState, planar::PlanarConductorMaterial},
@@ -36,6 +38,9 @@ use fs_math::{c64::C64, det};
 /// Coherent finite dielectric films, with the same source laws and conventions.
 pub mod layers;
 
+/// Source-bound ordinary/extraordinary refraction in a principal crystal section.
+pub mod uniaxial;
+
 /// Coherent vector diffraction of sampled beams through the original films.
 pub mod angular_spectrum;
 
@@ -44,7 +49,7 @@ pub mod optical;
 pub use optical::{
     MolecularGasOpticalResponse, MolecularGasOpticalSource, OpticalConductorResponse,
     OpticalMaterialResponse, RefreshedSpectralOpticalSource, SpectralOpticalResponse,
-    SpectralOpticalSource, WaterOpticalResponse,
+    SpectralOpticalSource, UniaxialOpticalResponse, WaterOpticalResponse,
 };
 
 /// Original collisional carrier transport in an admitted outgoing half-space wave.

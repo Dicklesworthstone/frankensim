@@ -5273,3 +5273,31 @@ and reciprocal winding energy/material scaling. These extend the existing
 lowest-order bounded-domain model; anisotropic saturation, hysteresis,
 frequency-dependent permeability and experimental qualification remain outside
 this linear fixed-frame law.
+
+## Principal-plane uniaxial refraction
+
+`plane_wave::uniaxial::PrincipalPlaneUniaxialInterface` binds the original
+lossless isotropic incident response to a transparent uniaxial half-space.
+`UniaxialOpticalResponse` retains two explicitly ordered original
+`SpectralComplexIndexStatePoint` projections, their same complete material
+snapshot, source wavelength/property roles, interpolation-gap limit and
+same-state scalar permeability. Either axis with nonzero extinction refuses
+at the queried frequency. The authored optic axis lies in the incidence plane;
+TE excites the ordinary mode and TM the extraordinary mode.
+
+The extraordinary wave satisfies the rotated index ellipsoid. Positive normal
+Poynting flux selects its outgoing branch; a negative normal phase component
+is retained when physically appropriate. Results distinguish phase-normal and
+energy-ray directions, preserving optical walk-off. Signed complex tangential
+E and conjugate H amplitudes, SI wavenumbers and independently evaluated normal
+power fractions retain the original exp(+i omega t), exp(-i k.z) convention.
+Critical TE/TM fields remain finite without evaluating singular admittances;
+evanescent modes decay into the crystal and publish no fictitious bulk ray.
+Power-of-two scaling and double-double discriminants protect critical-side
+classification and weak positive transmission. Queries allocate nothing.
+
+The scope is one homogeneous principal-plane half-space interface, including
+an exact isotropic constitutive limit. It does not extend the existing isotropic
+film, angular-spectrum or rendering owners to arbitrary anisotropic media.
+Out-of-plane axes, biaxial crystals, absorbing anisotropy, mode-coupled films
+and dispersive group-delay magnitudes require separate capabilities.
