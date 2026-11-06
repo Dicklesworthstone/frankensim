@@ -41,6 +41,8 @@ pub mod mean_dilatation;
 pub mod plane_stress;
 /// Retained finite-plastic P1/Q1 sheet forming with solved transverse thickness.
 pub mod plastic;
+/// Persistent finite-strain viscoelastic P1/Q1 histories and physical intervals.
+pub mod visco;
 
 /// One reference-area-weighted material point of the native P1/Q1 continuum.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -604,12 +606,23 @@ impl HyperProblem<'_> {
                         // Neither gate introduces a dimensional unit floor.
                         let roundoff =
                             64.0 * f64::EPSILON * e0.abs().max(e1.abs()).max((alpha * slope).abs());
-                        if !acceptable && (slope >= 0.0 || e1 <= e0 + roundoff) {
+                        let force_merit = slope >= 0.0 || e1 <= e0 + roundoff;
+                        // Once the predicted decrease itself is below energy
+                        // resolution, cancellation in a constitutive potential
+                        // can exceed this net-energy estimate. Admit that case
+                        // only if the actual candidate force already satisfies
+                        // the requested nonlinear tolerance. A small predicted
+                        // decrease alone must never authorize an unconverged
+                        // uphill step or loosen the force acceptance criterion.
+                        let unresolved_decrease = (alpha * slope).abs() <= roundoff;
+                        if !acceptable && (force_merit || unresolved_decrease) {
                             match self.residual_with_projection(&trial, load, &fixed, projection) {
                                 Ok(trial_residual) => {
                                     let trial_norm = norm(&trial_residual);
                                     acceptable = trial_norm.is_finite()
-                                        && trial_norm < (1.0 - 1e-4 * alpha) * rnorm;
+                                        && trial_norm < (1.0 - 1e-4 * alpha) * rnorm
+                                        && (force_merit
+                                            || trial_norm / force_scale < self.settings.tol);
                                 }
                                 Err(SolidError::MaterialRefused { .. }) => {}
                                 Err(error) => return Err(error),

@@ -40,12 +40,13 @@ type AcceptedMotion = (Vec<[f64; 3]>, crate::inertia::InertialEnergy, Vec<f64>);
 #[derive(Debug, Clone, Copy)]
 pub enum ViscoelasticLawField<'a> {
     Uniform(&'a ViscoHyperelastic),
-    /// Exactly one law per tetrahedron in connectivity order.
+    /// Exactly one law per spatial element in its connectivity order.
+    /// The consuming 2-D or 3-D solid admits exact coverage.
     PerElement(&'a [ViscoHyperelastic]),
 }
 
 impl<'a> ViscoelasticLawField<'a> {
-    fn at(self, element: usize) -> &'a ViscoHyperelastic {
+    pub(crate) fn at(self, element: usize) -> &'a ViscoHyperelastic {
         match self {
             Self::Uniform(law) => law,
             Self::PerElement(laws) => &laws[element],
