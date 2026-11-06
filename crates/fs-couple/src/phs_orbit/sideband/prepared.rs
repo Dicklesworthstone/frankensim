@@ -24,12 +24,16 @@ use fs_orbit::{
 mod adaptive;
 mod resonance;
 mod sensitivity;
+mod stability;
 pub use adaptive::{
     AdaptivePhsPortResonanceResponse, AdaptivePhsPortSidebandCarrierDerivativeResponse,
     PhsPortAdaptiveResonanceRequest, PhsPortResonanceRefinementCheck,
 };
 pub use resonance::{PhsPortResonanceRequest, PhsPortResonanceResponse};
 pub use sensitivity::PhsPortSidebandCarrierDerivativeResponse;
+pub use stability::{
+    PhsBaseStabilityControls, PhsBaseStabilityError, PhsBaseStabilityLevel, PhsBaseStabilityReport,
+};
 
 /// A complete physical response with independently measured sideband convergence.
 /// The state order is `response.state_harmonics`; the output order remains the

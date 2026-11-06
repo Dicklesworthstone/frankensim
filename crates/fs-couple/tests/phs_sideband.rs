@@ -22,6 +22,8 @@ mod autonomous;
 mod driven_feedback;
 #[path = "phs_sideband/resonance.rs"]
 mod resonance;
+#[path = "phs_sideband/stability.rs"]
+mod stability;
 
 fn controls(
     states: usize,
@@ -63,6 +65,44 @@ fn derivative_controls() -> fs_orbit::sideband::sensitivity::SidebandCarrierDeri
         maximum_work: 1_000_000_000,
         maximum_relative_residual: 1e-12,
         maximum_omitted_residual: 2e-8,
+    }
+}
+
+fn base_stability_controls(
+    scales: &[f64],
+) -> fs_couple::phs_orbit::sideband::PhsBaseStabilityControls {
+    fs_couple::phs_orbit::sideband::PhsBaseStabilityControls {
+        initial_steps_per_period: 128,
+        monodromy_change_tolerance: 2e-5,
+        spectral_radius_change_tolerance: 1e-5,
+        variational: fs_orbit::VariationalShootControls {
+            state_scales: scales.to_vec(),
+            period_scale: 1.0,
+            minimum_autonomous_excursion: 1e-3,
+            maximum_dimension: 16,
+            maximum_payload_bytes: 2_000_000,
+            maximum_work: 1_000_000_000,
+            maximum_period_maps: 1,
+        },
+        floquet: fs_spectral::floquet::FloquetControls {
+            spectrum: fs_spectral::dense::DenseSpectrumOptions {
+                maximum_dimension: 16,
+                maximum_dense_bytes: 1 << 20,
+                maximum_work: 100_000_000,
+                // The physical map already computed QR. The supplied-root
+                // path must not need a second QR allowance.
+                qr_max_sweeps_per_window: 0,
+                svd_max_sweeps: 100,
+                svd_tolerance: 2e-14,
+                maximum_relative_residual: 1e-10,
+                minimum_eigenbasis_reciprocal_condition: 1e-8,
+            },
+            unit_circle_guard: 1e-3,
+            phase_multiplier_tolerance: 2e-6,
+            maximum_phase_residual: 2e-6,
+        },
+        maximum_workspace_bytes: 8 << 20,
+        maximum_work: 1_000_000_000,
     }
 }
 fn orbit(omega: f64, coeffs: Vec<Vec<C64>>) -> HbOrbit {

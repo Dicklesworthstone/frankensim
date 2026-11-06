@@ -100,6 +100,122 @@ fn candidate(source: &CycleDrive, tau: f64, phase: f64) -> HbOrbit {
     orbit(source.omega, coefficients)
 }
 
+#[test]
+fn fixed_base_autonomous_stability_keeps_memory_phase_and_extra_neutral_family() {
+    use fs_spectral::floquet::FloquetClassification;
+
+    // These all have the same exact finite-amplitude original periodic base.
+    // Its radial dynamics may decay, grow, or retain an amplitude family. The
+    // original Maxwell memory stays in both the phase flow and complete map.
+    for (gain, expected_class) in [
+        (0.2, FloquetClassification::Stable),
+        (-0.1, FloquetClassification::Unstable),
+        (0.0, FloquetClassification::Unresolved),
+    ] {
+        let drive = CycleDrive {
+            omega: 1.2,
+            gain,
+            resistance: 0.2,
+            cubic: 0.6,
+            memory: 0.3,
+        };
+        let tau = 0.7;
+        let system = system(&drive, tau, None);
+        let base = candidate(&drive, tau, 0.0);
+        let original = base.coeffs.clone();
+        let derivative = |x: &[f64], y: &[f64], out: &mut [f64]| drive.total_derivative(x, y, out);
+        let physical = controls(3, 2, 2, 4);
+        let mut source = PhsPortSidebandSource::autonomous_feedback(
+            &system,
+            &drive,
+            &derivative,
+            &base,
+            &physical,
+        )
+        .unwrap();
+        let mut prepared = source.prepare(&scales(3), || false).unwrap();
+        let settings = super::base_stability_controls(&[0.5, 1.5, 2.5]);
+        let report = prepared
+            .analyze_base_stability(&settings, || false)
+            .unwrap();
+        assert!(report.autonomous);
+        assert_eq!(report.classification, expected_class);
+        assert_eq!(report.state_scales, settings.variational.state_scales);
+        let phase_flow = report.scaled_phase_flow.as_ref().unwrap();
+        assert_eq!(phase_flow.len(), 3);
+        near(phase_flow[0], C64::ZERO, 2e-14);
+        near(phase_flow[1], C64::from_re(-drive.omega / 1.5), 2e-14);
+        let memory_flow = (det::sqrt(drive.memory) - 2.0 * base.coeffs[2][1].re) / tau;
+        near(phase_flow[2], C64::from_re(memory_flow / 2.5), 2e-14);
+        assert!(phase_flow[2].abs() > 0.05);
+        let radial = det::exp(-2.0 * gain * report.period_s);
+        let memory = det::exp(-report.period_s / tau);
+        for (index, level) in report.levels.iter().enumerate() {
+            assert_eq!(level.monodromy.len(), 9);
+            assert_eq!(level.spectrum.spectrum.values.len(), 3);
+            assert_eq!(level.spectrum.spectrum.right_vectors.len(), 3);
+            assert!(level.maximum_scaled_base_excursion > 3.0);
+            let accuracy = if index == 2 { 3e-8 } else { 3e-6 };
+            for expected in [1.0, radial, memory] {
+                assert!(
+                    level
+                        .spectrum
+                        .spectrum
+                        .values
+                        .iter()
+                        .any(|&value| (value - C64::from_re(expected)).abs() < accuracy)
+                );
+            }
+            assert!(
+                level
+                    .spectrum
+                    .spectrum
+                    .relative_residuals
+                    .iter()
+                    .all(|&value| value <= settings.floquet.spectrum.maximum_relative_residual)
+            );
+            if gain != 0.0 {
+                let phase_index = level.spectrum.phase_multiplier_index.unwrap();
+                assert!(
+                    (level.spectrum.spectrum.values[phase_index] - C64::ONE).abs()
+                        < settings.floquet.phase_multiplier_tolerance
+                );
+                assert!(
+                    level.spectrum.phase_residual.unwrap()
+                        <= settings.floquet.maximum_phase_residual
+                );
+                assert!(
+                    (level.spectrum.effective_spectral_radius.unwrap() - radial.max(memory)).abs()
+                        < accuracy
+                );
+            } else {
+                assert_eq!(
+                    level.spectrum.classification,
+                    FloquetClassification::Unresolved
+                );
+                assert!(level.spectrum.phase_multiplier_index.is_none());
+                assert!(level.spectrum.effective_spectral_radius.is_none());
+                assert!(level.spectrum.dominant_growth_rate_per_s.is_none());
+                assert_eq!(
+                    level
+                        .spectrum
+                        .spectrum
+                        .values
+                        .iter()
+                        .filter(|&&value| (value - C64::ONE).abs()
+                            < settings.floquet.phase_multiplier_tolerance)
+                        .count(),
+                    2
+                );
+            }
+        }
+        if gain != 0.0 {
+            assert!((report.dominant_growth_rate_per_s.unwrap() + 2.0 * gain).abs() < 3e-8);
+        }
+        assert_eq!(base.coeffs, original);
+    }
+}
+
 // Independent rotating-coordinate solution. Q(theta)^T turns the original
 // perturbation into a scalar radial filter (s+2*gain)^-1 and a neutral phase
 // integrator s^-1. Rotate back to the SAME Cartesian state and phase clock.
