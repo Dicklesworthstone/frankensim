@@ -392,9 +392,11 @@ fn validate_moment_rate(moment_order: u8, rate: f64) -> Result<(), CollisionErro
     }
 }
 
-/// Collision-consistent components of `sqrt(2 D:D)` from physical Guo stress.
-/// Return the numerator to divide by the unknown shear tau and the independently
-/// fixed dilation contribution; the constitutive solver combines their norm.
+/// Separate shear and volume-change information from physical Guo stress.
+/// The first entry is the numerator of `sqrt(2 dev(D):dev(D))`, to divide by
+/// the constitutive shear tau. The second is `sqrt(2/3)|div(u)|` when bulk
+/// relaxation is independent, or its tau-weighted numerator for tied models.
+/// Dilation is retained for physical heating, never a shear-viscosity query.
 pub(crate) fn rheology_stress_components3(
     populations: &[f64; Q3],
     rho: f64,
@@ -402,14 +404,18 @@ pub(crate) fn rheology_stress_components3(
     force: [f64; 3],
     model: CollisionModel3,
 ) -> [f64; 2] {
-    let CollisionModel3::CentralMomentBulk { bulk_rate, .. } = model else {
-        return [force_corrected_shear_rate3(populations, rho, velocity, force, 1.0), 0.0];
+    let bulk_rate = match model {
+        CollisionModel3::CentralMomentBulk { bulk_rate, .. } => bulk_rate,
+        _ => 1.0,
     };
     let mut stress = force_corrected_stress3(populations, rho, velocity, force);
-    let trace = stress[0] + stress[1] + stress[2];
-    for normal in &mut stress[..3] {
-        *normal -= trace / 3.0;
-    }
+    let mean = stress[0] / 3.0 + stress[1] / 3.0 + stress[2] / 3.0;
+    // Pairwise differences retain small shear on a large isotropic stress
+    // and give exactly zero for an exactly isotropic population moment.
+    let [xx, yy, zz, ..] = stress;
+    stress[0] = (xx - yy) / 3.0 + (xx - zz) / 3.0;
+    stress[1] = (yy - xx) / 3.0 + (yy - zz) / 3.0;
+    stress[2] = (zz - xx) / 3.0 + (zz - yy) / 3.0;
     let scale = stress.iter().fold(0.0_f64, |m, value| m.max(value.abs()));
     let deviatoric = if scale == 0.0 {
         0.0
@@ -421,7 +427,7 @@ pub(crate) fn rheology_stress_components3(
     };
     // tr(Pi) = -2 rho cs² tau_bulk div(u), and
     // 2 D:D = 2 D_dev:D_dev + (2/3) div(u)².
-    let dilation = (trace / rho).abs() * (3.0 / 6.0_f64.sqrt()) * bulk_rate;
+    let dilation = (mean / rho).abs() * (9.0 / 6.0_f64.sqrt()) * bulk_rate;
     [deviatoric, dilation]
 }
 

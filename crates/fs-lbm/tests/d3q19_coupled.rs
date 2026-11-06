@@ -240,7 +240,8 @@ fn lbm3x_006_ledger_honesty_and_refusals() {
 
 /// G0/G3: the same prescribed strain and Carreau response must be recovered
 /// under arbitrary force orientation, including an accelerated zero-strain
-/// state. Normal and all three off-diagonal stresses participate.
+/// state. Deviatoric normal and all off-diagonal stresses participate;
+/// isotropic expansion/compression cannot change the shear-viscosity law.
 #[test]
 fn lbm3x_007_forced_rheology_recovers_physical_strain_and_viscosity() {
     let law = Rheology::Carreau {
@@ -254,13 +255,22 @@ fn lbm3x_007_forced_rheology_recovers_physical_strain_and_viscosity() {
         for tau in [0.7, 1.8] {
             for strain in [
                 [[0.0; 3]; 3],
+                [[0.003, 0.0, 0.0], [0.0, 0.003, 0.0], [0.0, 0.0, 0.003]],
                 [
                     [0.003, -0.004, 0.002],
                     [-0.004, -0.005, 0.001],
                     [0.002, 0.001, 0.002],
                 ],
+                [
+                    [0.006, -0.004, 0.002],
+                    [-0.004, -0.002, 0.001],
+                    [0.002, 0.001, 0.005],
+                ],
             ] {
-                let rate = (2.0_f64 * strain.iter().flatten().map(|s| s * s).sum::<f64>()).sqrt();
+                let mean = (strain[0][0] + strain[1][1] + strain[2][2]) / 3.0;
+                let rate = (2.0_f64 * (0..3).flat_map(|i| (0..3).map(move |j| {
+                    (strain[i][j] - if i == j { mean } else { 0.0 }).powi(2)
+                })).sum::<f64>()).sqrt();
                 let expected_tau = 0.5 + 3.0 * law.viscosity(rate);
                 for force in [[0.0; 3], [0.004, -0.002, 0.003], [-0.003, 0.005, -0.004]] {
                     let mut grid = PlatesGrid3::plates(2, 2, 2, tau);

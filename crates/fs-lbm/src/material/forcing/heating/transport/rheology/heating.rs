@@ -1,13 +1,13 @@
 //! Generalized-Newtonian stress power on the existing thermal/flow step.
 //!
-//! For the admitted incompressible law `stress = 2 mu D`, its irreversible
-//! power is `stress:D = 2 mu D:D = mu gamma_dot^2`. The same initial material
-//! evaluation supplies both collision viscosity and this nonnegative source.
-//! No numerical kinetic-energy residual, pressure work, bulk-viscosity loss,
-//! turbulence closure or elastic energy is relabelled as thermal power.
-//! The explicitly sourced 3-D bulk entry point instead uses
-//! `2 mu D_dev:D_dev + zeta (div u)^2`, with the same positive physical
-//! `zeta` controlling trace relaxation and heating during that step.
+//! The same initial material evaluation supplies collision viscosity and
+//! nonnegative stress power. In 3-D, the source's shear-rate query excludes
+//! dilation, while heat retains `2 mu D_dev:D_dev + zeta (div u)^2`.
+//! The ordinary collision family ties `zeta = 2 mu / 3`; independent bulk
+//! relaxation requires the explicitly sourced physical bulk entry point.
+//! The 2-D incompressible law retains `2 mu D:D = mu gamma_dot^2`.
+//! No numerical kinetic-energy residual, pressure work, turbulence closure or
+//! elastic energy is relabelled as thermal power.
 
 use super::super::super::Inputs;
 use super::super::boussinesq::{
@@ -16,7 +16,7 @@ use super::super::boussinesq::{
 use super::super::{advance_with_sampler_and_sources, advance_with_sampler_sources_and_candidate,
     candidate_with_prepared_input};
 use super::{
-    FluidTransport, FluidTransportState, HeatSourceLimits, MaterialError, MaterialSlab,
+    DilationRate, FluidTransport, FluidTransportState, HeatSourceLimits, MaterialError, MaterialSlab,
     MaterialTransportError, MaterialTransportStep, RheologyMaterial, RheologyPoint, RheologySolve,
     StressSlab, ThermalLbm, ThermalLbm3, TransportSample, poll, sample, sample_with_strain,
 };
@@ -40,9 +40,10 @@ fn physical_bulk_tau(mapping: &MaterialSlab<ThermalLbm3>, bulk_viscosity_pa_s: f
 /// Explicit source partition for an accepted physical viscous-heating step.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ViscousHeating {
-    /// Constitutive stress power [W/m3], with zero wall entries. The original
-    /// API uses `mu * gamma_dot^2`; the explicit 3-D bulk API separates
-    /// deviatoric shear and volumetric power without counting dilation twice.
+    /// Constitutive stress power [W/m3], with zero wall entries. The 3-D APIs
+    /// separate deviatoric shear and volumetric power without counting
+    /// dilation twice. The ordinary collision's bulk/shear tie is retained;
+    /// an independent bulk coefficient requires its explicit physical source.
     /// These are the applied initial-state values, held over one time step.
     pub power_w_m3: Vec<f64>,
     /// Integrated constitutive stress work converted into sensible heat [J].
@@ -89,22 +90,25 @@ fn source_inputs<S, F, const D: usize>(
         let viscosity = value.transport.dynamic_viscosity_pa_s();
         // This multiplication order avoids overflowing rate^2 before a small
         // viscosity can scale it. Both values come from the cached query.
-        let power = match (bulk_viscosity_pa_s(&value.material), value.material.strain_components_per_s) {
-            (None, None) => (viscosity * rate) * rate,
-            (Some(bulk), Some([deviatoric, dilation])) => {
-                let shear_power = (viscosity * deviatoric) * deviatoric;
-                let bulk_power = ((bulk * dilation) * dilation) * 1.5;
-                if (deviatoric != 0.0 && shear_power == 0.0)
-                    || (dilation != 0.0 && bulk_power == 0.0)
-                {
-                    return Err(MaterialTransportError::Invalid("physical viscous heating is unrepresentable"));
-                }
-                shear_power + bulk_power
+        let shear_power = (viscosity * rate) * rate;
+        let (dilation, bulk_power) = match (
+            bulk_viscosity_pa_s(&value.material), value.material.dilation_rate_per_s,
+        ) {
+            (None, None) => (0.0, 0.0),
+            (None, Some(DilationRate::Tied(dilation))) => {
+                (dilation, (viscosity * dilation) * dilation)
+            }
+            (Some(bulk), Some(DilationRate::Independent(dilation))) => {
+                (dilation, ((bulk * dilation) * dilation) * 1.5)
             }
             _ => return Err(MaterialTransportError::Invalid(
                 "independent bulk relaxation requires explicitly sourced bulk heating",
             )),
         };
+        if (rate != 0.0 && shear_power == 0.0) || (dilation != 0.0 && bulk_power == 0.0) {
+            return Err(MaterialTransportError::Invalid("physical viscous heating is unrepresentable"));
+        }
+        let power = shear_power + bulk_power;
         let energy = (power * volume) * units.timestep_s;
         if !power.is_finite()
             || power < 0.0
@@ -268,8 +272,8 @@ impl MaterialSlab<ThermalLbm> {
     /// temperature. Repeated calls close explicit temperature/viscosity feedback.
     /// Source, conversion, temperature, heat-balance, endpoint and cancellation
     /// refusals all preserve the accepted slab.
-    /// Independent central-moment bulk relaxation is refused: a shear-only
-    /// material source cannot supply its separate volumetric heat coefficient.
+    /// Independent central-moment bulk relaxation is refused: this shear-only
+    /// source has no separately authored coefficient for volumetric heat.
     ///
     /// The incompressible generalized-Newtonian, fixed-density/Cp, low-Mach
     /// assumptions of `step_with_material_rheology` still apply. Loss power is
@@ -355,7 +359,7 @@ impl MaterialSlab<ThermalLbm3> {
     /// spatially uniform and held for this step. It supplies both
     /// `tau_bulk = 1/2 + (9/2)(zeta/rho_ref) dt/dx^2` and the volumetric
     /// power `zeta (div u)^2`. The material callback still supplies the local
-    /// `mu(T, sqrt(2 D:D))`, conductivity and retained source at both epochs.
+    /// `mu(T, sqrt(2 dev(D):dev(D)))`, conductivity and retained source at both epochs.
     /// Deviatoric power is `2 mu D_dev:D_dev`, so dilation is counted once.
     /// Authored power must exclude both constitutive losses.
     ///
@@ -426,8 +430,10 @@ impl MaterialSlab<ThermalLbm3> {
         Ok(ViscousRheologyStep { transport, viscous })
     }
 
-    /// 3D counterpart, with the same physical source, feedback and atomicity.
-    /// Cell volume is the retained `dx^3`; see the 2D method for model limits.
+    /// 3D counterpart with a deviatoric material shear query and the collision's
+    /// existing `zeta = 2 mu / 3` volume heating. Independent bulk relaxation
+    /// requires the explicitly sourced bulk method. Cell volume is the retained
+    /// `dx^3`; the same source feedback, atomicity and low-Mach limits apply.
     pub fn step_with_material_rheology_and_viscous_heating<F: FluidTransport>(
         &mut self,
         power_w_m3: &[f64],

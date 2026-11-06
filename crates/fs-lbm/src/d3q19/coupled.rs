@@ -628,6 +628,8 @@ pub(crate) fn force_corrected_stress3(
 /// Update every fluid cell's τ from its local shear rate under `law` —
 /// the SAME self-consistent constitutive solve, floor, cap, and ledger as the 2-D
 /// [`crate::rheology::update_tau`] (shared, not forked).
+/// The 3-D shear invariant uses `dev(D)`; volume change retains the collision's
+/// bulk relaxation without thinning or thickening the shear response.
 #[must_use]
 pub fn update_tau3(grid: &mut PlatesGrid3, law: Rheology) -> RheologyStats {
     let law = law.prepare();
@@ -668,10 +670,10 @@ fn update_tau3_prepared<'a>(
             for x in 0..grid.nx {
                 let i = grid.idx(x, y, z);
                 let (rho, u) = grid.moments3(i);
-                let [numerator, fixed] = super::rheology_stress_components3(
+                let [numerator, _] = super::rheology_stress_components3(
                     &grid.f[i], rho, u, grid.fext[i], grid.collision_model_at(i),
                 );
-                let local = law_at(i).solve_with_fixed_strain(numerator, fixed, grid.tau[i]);
+                let local = law_at(i).solve(numerator, grid.tau[i]);
                 grid.tau[i] = local.tau;
                 stats.floored += u32::from(local.floored);
                 stats.capped += u32::from(local.capped);

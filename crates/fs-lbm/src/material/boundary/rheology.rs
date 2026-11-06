@@ -10,7 +10,7 @@ use super::{
     MaterialScaling, poll,
 };
 use crate::d3q19::{CollisionModel3, rheology_stress_components3};
-use crate::material::transport::rheology::{LocalRheologyError, solve_local_with_fixed_strain};
+use crate::material::transport::rheology::{LocalRheologyError, solve_local};
 use fs_exec::CancelGate;
 
 pub use crate::material::transport::rheology::RheologySolve;
@@ -19,7 +19,7 @@ pub use crate::material::transport::rheology::RheologySolve;
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MaterialBoundaryRheologyPoint3 {
     pub cell: [usize; 3],
-    /// sqrt(2 D:D) [1/s], in the physical held-force frame.
+    /// sqrt(2 dev(D):dev(D)) [1/s], in the physical held-force frame.
     pub shear_rate_per_s: f64,
 }
 
@@ -49,10 +49,10 @@ impl<R: FluidTransport + ?Sized> MaterialScaling<'_, R> {
     ///
     /// Incoming populations and the ACTUAL held force supply A = gamma*tau.
     /// The shared bounded local solve closes tau = 1/2 + 3 nu(gamma) dt/dx^2
-    /// together with gamma = A/(tau*dt). With independent bulk relaxation,
-    /// A contains only deviatoric stress and the fixed dilation contribution
-    /// enters gamma in quadrature. The constructor's shear relaxation is only
-    /// an initial iterate. Every trial retains the reference density and
+    /// together with gamma = A/(tau*dt). A contains only deviatoric stress;
+    /// isotropic compression/expansion cannot change the shear-viscosity query.
+    /// Independent bulk relaxation remains unchanged. The constructor's shear
+    /// relaxation is only an initial iterate. Every trial retains the reference density and
     /// uses the original source's supported rate domain; no viscosity floor,
     /// cap, constitutive fit or law-name dispatch is substituted.
     ///
@@ -113,9 +113,8 @@ impl<R: FluidTransport + ?Sized> MaterialScaling<'_, R> {
             gate,
             |cell| {
                 let index = (cell[2] * ny + cell[1]) * nx + cell[0];
-                let root = solve_local_with_fixed_strain(
-                    numerators[index][0],
-                    numerators[index][1],
+                let root = solve_local(
+                    numerators[index],
                     self.timestep_s,
                     initial_tau,
                     solve,
@@ -168,7 +167,7 @@ fn stress_field(
     grid: &BoundaryGrid3,
     max_cells: usize,
     gate: &CancelGate,
-) -> Result<(Vec<[f64; 2]>, [usize; 3]), MaterialBoundaryError3> {
+) -> Result<(Vec<f64>, [usize; 3]), MaterialBoundaryError3> {
     let dims @ [nx, ny, nz] = grid.dimensions();
     let cells = nx
         .checked_mul(ny)
@@ -181,7 +180,7 @@ fn stress_field(
     values.try_reserve_exact(cells).map_err(|_| {
         MaterialBoundaryError3::Invalid("material shear-stress allocation refused")
     })?;
-    values.resize(cells, [0.0; 2]);
+    values.resize(cells, 0.0);
     let collision = grid.collision_model();
     for (index, numerator) in values.iter_mut().enumerate() {
         if index % 64 == 0 {
@@ -206,8 +205,8 @@ fn stress_field(
         }
         *numerator = rheology_stress_components3(
             &grid.populations(x, y, z), rho, u, force, collision,
-        );
-        if numerator.iter().any(|value| !value.is_finite() || *value < 0.0) {
+        )[0];
+        if !numerator.is_finite() || *numerator < 0.0 {
             return Err(invalid("unrepresentable native non-equilibrium shear stress"));
         }
     }

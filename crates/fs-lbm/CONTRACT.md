@@ -8952,13 +8952,15 @@ retain their prior topology behavior.
 `lattice3::rheology` supplies material-rheology steps for `Grid3` and
 `ForcedGrid3`. Each incoming velocity field is interpreted with its same-time
 uniform or spatial half-force shift. The shared centered/quadratic-halfway-wall
-stencil evaluates `gamma = sqrt(2 sym(grad u):sym(grad u)) / dt` in 1/s. The
+stencil and shared material deformation-rate kernel evaluate
+`gamma = sqrt(2 dev(sym(grad u)):dev(sym(grad u))) / dt` in 1/s. Rigid spin and
+isotropic expansion/compression do not change the shear-viscosity query. The
 original producer resolves one material response per fluid cell, its transport
 view is frozen once, and `tau = 1/2 + (mu/rho0) dt / (cs^2 dx^2)` drives that
 collision/stream step. Source objects and query coordinates, time and rate are
 retained. Reference dx/dt/rho0 stay fixed; nonmatching density refuses. D3Q27
-independent bulk/higher rates and all equilibrium choices survive; D3Q19 moment
-models retain their existing second-order bulk/shear tie.
+independent bulk/higher rates and all equilibrium choices survive; D3Q19 models
+retain their configured independent bulk rate or existing bulk/shear tie.
 
 This is explicit incoming-time generalized-Newtonian feedback, not a
 self-consistent nonequilibrium-stress closure or implicit time integration.
@@ -13470,12 +13472,12 @@ transform. The extra relaxation corrects only the isotropic second moment.
 
 Native material and lattice SGS shear rebinding preserve the independently
 configured bulk and higher-order rates. Curved-wall source rheology extracts
-the deviatoric stress numerator and fixed dilation from the physical Guo stress,
-then queries the original constitutive source at their combined `sqrt(2 D:D)`
-rate. The bounded local solve retains source-domain, iteration and cancellation
-refusals; zero fixed dilation preserves the original source-query arithmetic.
-Compression therefore cannot be reinterpreted as shear solely because a different
-bulk relaxation was configured. Native boundary and immersed-solid relaxation
+the deviatoric stress numerator from the physical Guo stress for every collision
+family, then queries the original constitutive source at `sqrt(2 D_dev:D_dev)`.
+The bounded local solve retains source-domain, iteration and cancellation
+refusals. Isotropic stress changes neither this shear query nor its apparent
+viscosity, while independently relaxed dilation remains available for physical
+bulk heating. Native boundary and immersed-solid relaxation
 continue to use the shear rate for their viscous response. The separate
 free-surface stress SGS path retains its explicit BGK/TRT-only admission.
 
@@ -13497,7 +13499,7 @@ not create a heat source.
 explicit physical `zeta` in Pa s, spatially uniform and held for that step. The
 same coefficient sets `tau_bulk=1/2+(9/2)(zeta/rho_ref)dt/dx²` and volumetric
 heat `zeta(div u)²`. The retained source callback supplies local
-`mu(T,sqrt(2 D:D))` and conductivity. Its bounded constitutive solve separates
+`mu(T,sqrt(2 D_dev:D_dev))` and conductivity. Its bounded constitutive solve separates
 the Guo-corrected deviatoric numerator from independently relaxed dilation.
 Cached components at the actual accepted query give
 `q=2mu D_dev:D_dev+zeta(div u)²`; isotropic shear power is not added a second time.
@@ -13507,7 +13509,10 @@ measured wall/sensible-heat balance publish the collision selection and thermal
 state together. Cancellation or any source/conversion/temperature refusal keeps
 the accepted slab. Higher-order relaxation and numerical kinetic-energy
 residuals supply no heat. The earlier heated API refuses independent bulk unless
-this explicit physical binding is provided; BGK/TRT paths retain their behavior.
+this explicit physical binding is provided. The ordinary BGK/TRT heated path
+uses the same deviatoric material query while retaining its collision-implied
+`zeta=2mu/3` and the complete `2mu D:D` work. Pure dilation therefore supplies
+bulk heat even when the material remains at its zero-shear viscosity.
 
 This remains explicit low-Mach, fixed-density/Cp sensible-heat transport. It
 does not assert compressible total-energy conservation or an implicit heating
@@ -13526,19 +13531,18 @@ and verify endpoint/cancellation refusal without publishing state or selectors.
 explicit positive physical `zeta` in Pa s from the same material query. It reads
 the original transport owner once; no bulk/shear ratio or numerical damping law
 is inferred. `MaterialSlab3::step_with_local_bulk_rheology_and_viscous_heating`
-queries this owner at each cell's actual temperature and full strain invariant
-`gamma=sqrt(2 D:D)`. Shear viscosity, conductivity and bulk viscosity may all
+queries this owner at each cell's actual temperature and deviatoric invariant
+`gamma=sqrt(2 D_dev:D_dev)`. Shear viscosity, conductivity and bulk viscosity may all
 vary by cell and through successive accepted temperature/strain queries.
 
 For Guo-corrected stress numerators `Adev` and `Abulk`, the local root solves
-`gamma=hypot(Adev/tau_s,Abulk/tau_b)/dt`. Its single bounded constitutive
-coordinate is `tau_eff=1/hypot(wdev/tau_s,wbulk/tau_b)`, where the weights are
-the normalized stress numerators. Both physical viscosities participate even
-in pure compression with constant shear viscosity. The reported relaxation
-defect belongs to this effective coordinate; it is never used for collision.
-Collision and heat instead use the separate physical `tau_s` and `tau_b` from
-the retained source query. Their reconstructed strain agrees with the queried
-invariant to the admitted root tolerance, and heat remains
+`gamma=Adev/(tau_s dt)`. The reported relaxation defect belongs to this physical
+shear-tau root. The same accepted source returns the independent bulk viscosity
+and hence `tau_b`; `Abulk/(tau_b dt)` reconstructs the separate dilation for heat.
+Collision retains both physical relaxation times. Pure compression queries
+zero shear while preserving its bulk relaxation and positive volumetric heat.
+The reconstructed deviatoric strain agrees with the queried invariant to the
+admitted root tolerance, and heat remains
 `q=2mu D_dev:D_dev+zeta(div u)^2` without counting isotropic shear twice.
 
 `PlatesGrid3::set_central_moment_bulk_field` validates and retains a complete

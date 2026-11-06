@@ -5,9 +5,10 @@
 //! with `gamma_dot = numerator / (tau dt)`; the background tau is only an
 //! initial iterate. This avoids interpreting a state with the wrong viscosity
 //! after step-local transport restores the background relaxation field.
-//! With independent bulk relaxation, this numerator contains only
-//! deviatoric strain; the independently relaxed dilation enters the same
-//! constitutive query in quadrature and remains fixed during the shear solve.
+//! In 3-D this numerator contains only deviatoric strain. Dilation is kept
+//! separately for viscous heating, using the independently authored bulk
+//! relaxation or the collision model's existing bulk/shear tie. Volume change
+//! cannot thin or thicken a shear-calibrated material.
 //!
 //! This is an explicit generalized-Newtonian, fixed-storage coupling.
 //! Local constitutive convergence is not implicit time integration, viscoelastic
@@ -37,7 +38,8 @@ pub struct RheologyPoint {
     pub cell: usize,
     /// Absolute temperature [K] at the sampled time level.
     pub temperature_k: f64,
-    /// `sqrt(2 D:D)` [1/s], where `D = (grad u + grad u^T)/2`.
+    /// `sqrt(2 dev(D):dev(D))` [1/s] in 3-D, where `D = sym(grad u)`.
+    /// The existing 2-D incompressible adapter retains `sqrt(2 D:D)`.
     pub shear_rate_per_s: f64,
 }
 
@@ -111,13 +113,11 @@ pub(crate) fn solve_local<F, E>(
     solve_local_with_fixed_strain(numerator, 0.0, timestep_s, initial_tau, solve, check, evaluate)
 }
 
-/// Retain an independently relaxed volumetric strain in the same bounded
-/// constitutive solve. `numerator/tau` is the deviatoric contribution and
-/// `fixed_rate` the dilation contribution, both in lattice strain units.
-/// Their orthogonal norm supplies the full physical `sqrt(2 D:D)` query.
-/// Zero fixed strain preserves the original source-query arithmetic and path.
+/// Preserve the existing 2-D full-strain constitutive convention when its
+/// trace has independent relaxation. Three-dimensional material shear laws
+/// call this with zero fixed strain: volume change never enters their query.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn solve_local_with_fixed_strain<F, E>(
+fn solve_local_with_fixed_strain<F, E>(
     numerator: f64,
     fixed_rate: f64,
     timestep_s: f64,
@@ -140,8 +140,7 @@ pub(crate) fn solve_local_with_fixed_strain<F, E>(
         let rate = if fixed_rate == 0.0 {
             shear / timestep_s
         } else {
-            // Scale before squaring: avoid losing a representable strain to
-            // squared-component underflow or overflow.
+            // Preserve the 2-D scaled norm without squared-component loss.
             let scale = shear.max(fixed_rate);
             let a = shear / scale;
             let b = fixed_rate / scale;
@@ -230,10 +229,17 @@ pub struct RheologyMaterial<F> {
     transport: FluidTransportState,
     iterations: usize,
     relaxation_defect: f64,
-    // Some([sqrt(2 D_dev:D_dev), sqrt(2/dimension)|div u|]) in 1/s only when
-    // bulk is independent. Retain the queried components without subtracting
-    // nearly equal squared invariants or re-reading population stress for heat.
-    strain_components_per_s: Option<[f64; 2]>,
+    // sqrt(2/dimension)|div u| in 1/s, separate from the 3-D source query.
+    // Retain it without subtracting squared invariants or resampling stress.
+    dilation_rate_per_s: Option<DilationRate>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum DilationRate {
+    /// The 3-D collision family retains zeta = 2 mu / 3.
+    Tied(f64),
+    /// Physical bulk heat requires an explicitly sourced zeta.
+    Independent(f64),
 }
 impl<F> RheologyMaterial<F> {
     /// Original material owner, including its property/source receipts.
@@ -342,7 +348,7 @@ fn sample_with_strain<S: Slab<D, Q>, F: FluidTransport, const D: usize, const Q:
         &mut |cell, temperature_k, retained| {
             let root = solve_local_with_fixed_strain(
                 components[cell][0],
-                components[cell][1],
+                if D == 2 { components[cell][1] } else { 0.0 },
                 units.timestep_s,
                 state.momentum_relaxation()[cell],
                 solve,
@@ -392,10 +398,15 @@ fn sample_with_strain<S: Slab<D, Q>, F: FluidTransport, const D: usize, const Q:
                 },
                 iterations: root.iterations,
                 relaxation_defect: root.relaxation_defect,
-                strain_components_per_s: independent_bulk.then(|| [
-                    (components[cell][0] / root.relaxation_time) / units.timestep_s,
-                    components[cell][1] / units.timestep_s,
-                ]),
+                dilation_rate_per_s: (D == 3 || independent_bulk).then(|| {
+                    if independent_bulk {
+                        DilationRate::Independent(components[cell][1] / units.timestep_s)
+                    } else {
+                        DilationRate::Tied(
+                            (components[cell][1] / root.relaxation_time) / units.timestep_s,
+                        )
+                    }
+                }),
             })
         },
     )
@@ -504,7 +515,7 @@ impl MaterialSlab<ThermalLbm3> {
 
 #[cfg(test)]
 mod tests {
-    use super::{LocalRheologyError, RheologySolve, solve_local, solve_local_with_fixed_strain};
+    use super::{LocalRheologyError, RheologySolve, solve_local};
     use fs_material::MaterialError;
     use fs_material::fluid_transport::{FluidTransportState, rheology::CarreauYasuda};
     use std::cell::Cell;
@@ -674,16 +685,14 @@ mod tests {
     }
 
     #[test]
-    fn fixed_dilation_material_root_uses_original_carreau_transport() {
+    fn deviatoric_material_root_uses_original_carreau_transport() {
         let curve = CarreauYasuda::new(3.0, 0.1, 0.4, 0.45, 2.0, [0.0, 100.0]).unwrap();
-        let (expected, expected_tau) = carreau_transport(&curve, 2.0).unwrap();
-        // Independent manufactured D:D: sqrt(1.2²+1.6²)=2 /s, or pure
-        // dilation at 2 /s. Only the deviatoric numerator contains shear tau.
-        for (variable, fixed) in [(1.2, 1.6), (0.0, 2.0)] {
+        for expected_rate in [0.0, 1.2, 2.0] {
+            let (expected, expected_tau) = carreau_transport(&curve, expected_rate).unwrap();
             for initial_tau in [0.65, 1.8] {
                 let mut queries = Vec::new();
-                let result = solve_local_with_fixed_strain(
-                    variable * 0.01 * expected_tau, fixed * 0.01,
+                let result = solve_local(
+                    expected_rate * 0.01 * expected_tau,
                     0.01, initial_tau, controls(0.75), || Ok(()),
                     |rate| {
                         queries.push(rate);
@@ -691,46 +700,37 @@ mod tests {
                     },
                 );
                 let Ok(root) = result else { panic!("admitted Carreau root was refused") };
-                assert!((root.shear_rate_per_s - 2.0).abs() < 5e-12);
+                assert!((root.shear_rate_per_s - expected_rate).abs() < 5e-12);
                 assert!((root.value.dynamic_viscosity_pa_s() / expected.dynamic_viscosity_pa_s() - 1.0).abs() < 3e-12);
                 assert!(root.relaxation_defect < 2e-12);
                 assert_eq!(root.iterations, queries.len());
                 assert_eq!(root.shear_rate_per_s.to_bits(), queries.last().unwrap().to_bits());
-                if variable == 0.0 {
-                    assert!(queries.iter().all(|rate| rate.to_bits() == 2.0_f64.to_bits()));
+                if expected_rate == 0.0 {
+                    assert!(queries.iter().all(|rate| *rate == 0.0));
                 }
             }
         }
     }
 
     #[test]
-    fn zero_fixed_strain_preserves_original_queries_and_root_bits() {
+    fn newtonian_limit_preserves_original_queries_and_root_bits() {
         // Equal plateaus make an actual Newtonian Carreau limit. With full
         // relaxation, the original solve has exactly two known source queries:
         // at the authored initial tau, then at the material's physical tau.
         let curve = CarreauYasuda::new(0.3, 0.3, 0.4, 0.45, 2.0, [0.0, 100.0]).unwrap();
         let (_, target_tau) = carreau_transport(&curve, 0.0).unwrap();
         for numerator in [0.0, 0.01661, 1e-12] {
-            let mut legacy_queries = Vec::new();
-            let legacy = solve_local(numerator, 0.01, 0.8, controls(1.0), || Ok(()), |rate| {
-                legacy_queries.push(rate.to_bits());
+            let mut queries = Vec::new();
+            let result = solve_local(numerator, 0.01, 0.8, controls(1.0), || Ok(()), |rate| {
+                queries.push(rate.to_bits());
                 carreau_transport(&curve, rate)
             });
-            let mut fixed_queries = Vec::new();
-            let fixed = solve_local_with_fixed_strain(
-                numerator, 0.0, 0.01, 0.8, controls(1.0), || Ok(()), |rate| {
-                    fixed_queries.push(rate.to_bits());
-                    carreau_transport(&curve, rate)
-                },
-            );
-            let (Ok(legacy), Ok(fixed)) = (legacy, fixed) else { panic!("Newtonian root refused") };
+            let Ok(root) = result else { panic!("Newtonian root refused") };
             let expected = [((numerator / 0.8) / 0.01).to_bits(), ((numerator / target_tau) / 0.01).to_bits()];
-            assert_eq!(legacy_queries, expected);
-            assert_eq!(fixed_queries, expected);
-            assert_eq!(fixed.value, legacy.value);
-            assert_eq!(fixed.shear_rate_per_s.to_bits(), legacy.shear_rate_per_s.to_bits());
-            assert_eq!(fixed.relaxation_defect.to_bits(), legacy.relaxation_defect.to_bits());
-            assert_eq!(fixed.iterations, legacy.iterations);
+            assert_eq!(queries, expected);
+            assert_eq!(root.shear_rate_per_s.to_bits(), expected[1]);
+            assert_eq!(root.relaxation_defect, 0.0);
+            assert_eq!(root.iterations, 2);
         }
     }
 }

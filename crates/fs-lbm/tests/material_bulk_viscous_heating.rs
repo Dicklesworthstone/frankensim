@@ -107,12 +107,12 @@ fn manufacture_with_viscosity(
         .temperature_si(slab.lattice.gpop[CELL].iter().sum())
         .unwrap();
     let trace: f64 = (0..3).map(|a| strain[a][a]).sum();
-    let gamma = (2.0 * strain.iter().flatten().map(|d| d * d).sum::<f64>()).sqrt();
-    let mu = mu_at(temperature, gamma);
-    let tau = 0.5 + 3.0 * (mu / 1000.0) * DT / (DX * DX);
     let deviatoric: [[f64; 3]; 3] = core::array::from_fn(|a| {
         core::array::from_fn(|b| strain[a][b] - if a == b { trace / 3.0 } else { 0.0 })
     });
+    let gamma = (2.0 * deviatoric.iter().flatten().map(|d| d * d).sum::<f64>()).sqrt();
+    let mu = mu_at(temperature, gamma);
+    let tau = 0.5 + 3.0 * (mu / 1000.0) * DT / (DX * DX);
     let pi: [[f64; 3]; 3] = core::array::from_fn(|a| {
         core::array::from_fn(|b| {
             -(2.0 / 3.0)
@@ -166,6 +166,64 @@ fn local_material(
 }
 
 #[test]
+fn tied_bulk_heating_survives_shear_queries_that_ignore_dilation() {
+    for trt in [false, true] {
+        for shear in [0.0, 1.6] {
+            for dilation in [-1.8, 0.0, 1.8] {
+                let mut actual = slab();
+                let mut reference = slab();
+                if !trt {
+                    actual.lattice.grid.set_bgk_collision().unwrap();
+                    reference.lattice.grid.set_bgk_collision().unwrap();
+                }
+                let temperature = actual
+                    .temperature_si(actual.lattice.gpop[CELL].iter().sum())
+                    .unwrap();
+                let mu = viscosity(temperature, shear);
+                let zeta = (2.0 / 3.0) * mu;
+                let strain = [
+                    [dilation / 3.0, shear / 2.0, 0.0],
+                    [shear / 2.0, dilation / 3.0, 0.0],
+                    [0.0, 0.0, dilation / 3.0],
+                ];
+                let (_, expected_power, forces) = manufacture(&mut actual, strain, zeta, 1.1);
+                manufacture(&mut reference, strain, zeta, 1.1);
+                near(expected_power, mu * shear * shear + zeta * dilation * dilation, 2e-14);
+                let report = actual
+                    .step_with_material_rheology_and_viscous_heating(
+                        &[0.0; CELLS], &forces, limits(), controls(),
+                        &CancelGate::new_clock_free(), resolve,
+                    )
+                    .unwrap();
+                let applied = report.transport.applied.iter().find(|s| s.cell == CELL).unwrap();
+                near(applied.material.point().shear_rate_per_s, shear, 2e-12);
+                near(applied.transport.dynamic_viscosity_pa_s(), mu, 2e-13);
+                near(report.viscous.power_w_m3[CELL], expected_power, 2e-11);
+                if shear == 0.0 && dilation != 0.0 {
+                    assert!(report.viscous.power_w_m3[CELL] > 0.0);
+                }
+                let mut prescribed = [0.0; CELLS];
+                prescribed[CELL] = expected_power;
+                reference.step_with_material_rheology(
+                    &prescribed, &forces, limits(), controls(),
+                    &CancelGate::new_clock_free(), resolve,
+                ).unwrap();
+                for (a, b) in actual.lattice.grid.f.iter().flatten()
+                    .zip(reference.lattice.grid.f.iter().flatten())
+                {
+                    near(*a, *b, 2e-14);
+                }
+                for (a, b) in actual.lattice.gpop.iter().flatten()
+                    .zip(reference.lattice.gpop.iter().flatten())
+                {
+                    near(*a, *b, 2e-14);
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn local_shear_and_bulk_sources_recover_pure_limits_and_mixed_tensor_power() {
     for constant_mu in [true, false] {
         let mu = |temperature, rate| {
@@ -182,7 +240,10 @@ fn local_shear_and_bulk_sources_recover_pure_limits_and_mixed_tensor_power() {
         ] {
             let mut actual = slab();
             let mut reference = slab();
-            let gamma = (2.0 * strain.iter().flatten().map(|s| s * s).sum::<f64>()).sqrt();
+            let mean = (strain[0][0] + strain[1][1] + strain[2][2]) / 3.0;
+            let gamma = (2.0 * (0..3).flat_map(|a| (0..3).map(move |b| {
+                (strain[a][b] - if a == b { mean } else { 0.0 }).powi(2)
+            })).sum::<f64>()).sqrt();
             let temperature = actual
                 .temperature_si(actual.lattice.gpop[CELL].iter().sum())
                 .unwrap();
@@ -219,8 +280,12 @@ fn local_shear_and_bulk_sources_recover_pure_limits_and_mixed_tensor_power() {
                 power * DX.powi(3) * DT,
                 3e-19,
             );
-            // In the pure-dilation/constant-mu case only zeta can drive the
-            // constitutive solve; a shear-only convergence test is insufficient.
+            // Pure dilation queries the zero-shear material plateau while
+            // its independently sourced zeta still converts trace stress to heat.
+            if gamma < 1e-14 {
+                assert!(power > 0.0);
+                near(value.material.point().shear_rate_per_s, 0.0, 2e-12);
+            }
             let mut bulk_rates = [1.0; CELLS];
             for cell in 2..CELLS - 2 {
                 let t = reference

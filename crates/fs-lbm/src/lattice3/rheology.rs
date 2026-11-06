@@ -12,7 +12,7 @@ use crate::material::{MaterialLbmError, MaterialScaling, plan_scaling_from_mater
 use fs_exec::{CancelGate, Cx, KernelRunner};
 use fs_material::{
     MaterialError,
-    fluid_transport::{FluidTransport, FluidTransportState},
+    fluid_transport::{FluidTransport, FluidTransportState, viscous::DeformationRate},
 };
 
 mod moving_walls;
@@ -28,7 +28,8 @@ pub struct RheologyPoint3 {
     pub cell: usize,
     pub coordinates: [usize; 3],
     pub time_s: f64,
-    /// sqrt(2 D:D) [1/s], D=sym(grad u), including every diagonal/shear term.
+    /// sqrt(2 dev(D):dev(D)) [1/s], D=sym(grad u). Rigid spin and
+    /// isotropic expansion/compression do not change the material shear rate.
     pub shear_rate_per_s: f64,
 }
 
@@ -138,32 +139,6 @@ impl<E: core::fmt::Debug> core::fmt::Display for RheologyError3<E> {
 }
 impl<E: core::fmt::Debug> std::error::Error for RheologyError3<E> {}
 
-// sqrt(2 D:D) in lattice units. Rigid rotation cancels before the norm; scaling
-// the six independent entries avoids losing a representable rate by squaring it.
-fn strain_rate(gradient: [[f64; 3]; 3]) -> f64 {
-    let components = [
-        core::f64::consts::SQRT_2 * gradient[0][0],
-        core::f64::consts::SQRT_2 * gradient[1][1],
-        core::f64::consts::SQRT_2 * gradient[2][2],
-        gradient[0][1] + gradient[1][0],
-        gradient[0][2] + gradient[2][0],
-        gradient[1][2] + gradient[2][1],
-    ];
-    let scale = components.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
-    if scale == 0.0 {
-        return 0.0;
-    }
-    scale
-        * components
-            .iter()
-            .map(|v| {
-                let x = v / scale;
-                x * x
-            })
-            .sum::<f64>()
-            .sqrt()
-}
-
 fn prepare<L: ViscousLattice3<Q>, const Q: usize, R: FluidTransport + ?Sized, F: FluidTransport>(
     grid: &Grid3<L, Q>,
     reference: &MaterialScaling<'_, R>,
@@ -257,7 +232,14 @@ fn prepare_into<
             collisions.push(grid.collision);
             continue;
         }
-        let lattice_rate = strain_rate(gradient(cell, velocity));
+        // The same objective shear/volume decomposition as the physical
+        // material law, applied before converting the lattice rate to 1/s.
+        let lattice_rate = DeformationRate::from_velocity_gradient(gradient(cell, velocity))
+            .map_err(|_| GridError3::MaterialField {
+                cell,
+                reason: "deviatoric strain rate is unrepresentable",
+            })?
+            .shear_rate_per_s();
         let rate = lattice_rate / dt;
         if !rate.is_finite() || (lattice_rate != 0.0 && rate == 0.0) {
             return Err(GridError3::MaterialField {
@@ -1110,54 +1092,71 @@ mod tests {
     }
 
     #[test]
-    fn carreau_queries_use_incoming_force_centered_strain_and_ignore_rotation() {
+    fn carreau_queries_ignore_rotation_and_dilation_in_incoming_force_frame() {
         let material = fluid(0.05);
         let dt = 0.02;
         let reference = plan_scaling_from_material(&material, 0.001, dt, 0.005).unwrap();
         for model in [2, 3] {
             for shear in [0.0, 0.006] {
-                let force = |p: [usize; 3]| {
-                    [
-                        0.003 * (p[1] as f64 - 2.0),
-                        0.002 * (p[0] as f64 - 2.0),
-                        0.0,
-                    ]
-                };
-                let grid = grid27([5, 5, 3], model, [0.0; 3], [true; 3], |p| {
-                    let x = p[0] as f64 - 2.0;
-                    let y = p[1] as f64 - 2.0;
-                    let physical = [(shear - 0.004) * y, 0.004 * x, 0.0];
-                    equilibrium27(
-                        1.0,
-                        core::array::from_fn(|a| physical[a] - force(p)[a] / 2.0),
-                        Equilibrium27::Factorized,
-                    )
-                });
-                let forces = (0..75)
-                    .map(|cell| force(coordinates(cell, [5, 5, 3])))
-                    .collect();
-                let mut run = with_cx(|cx| ForcedGrid3::try_new(grid, cx, forces).unwrap());
-                let mut workspace = run.rheology_workspace().unwrap();
-                let carreau = |rate: f64| 0.005 + 0.045 * (1.0 + (5.0 * rate).powi(2)).powf(-0.3);
-                with_cx(|cx| {
-                    run.advance_serial_with_material_rheology_workspace(
-                        cx,
-                        &reference,
-                        vec![[0.0; 3]; 75],
-                        &mut workspace,
-                        |point, _| Ok(fluid(carreau(point.shear_rate_per_s))),
-                    )
-                    .unwrap();
-                });
-                let report = workspace.report().unwrap();
-                let center = 2 + 5 * (2 + 5);
-                let sample = report.samples[center].as_ref().unwrap();
-                let expected = shear / dt;
-                assert!((sample.point().shear_rate_per_s - expected).abs() < 2e-14);
-                assert!(
-                    (sample.transport().dynamic_viscosity_pa_s() - carreau(expected)).abs() < 2e-14
-                );
-                assert_eq!(run.forces(), vec![[0.0; 3]; 75]);
+                for (dilation, spin) in [(0.0, 0.004), (-0.003, -0.006), (0.005, 0.007)] {
+                    let force = |p: [usize; 3]| {
+                        [
+                            0.003 * (p[1] as f64 - 2.0),
+                            0.002 * (p[0] as f64 - 2.0),
+                            0.0,
+                        ]
+                    };
+                    let grid = grid27([5, 5, 3], model, [0.0; 3], [true; 3], |p| {
+                        let x = p[0] as f64 - 2.0;
+                        let y = p[1] as f64 - 2.0;
+                        let z = p[2] as f64 - 1.0;
+                        let physical = [
+                            dilation * x + (shear - spin) * y,
+                            spin * x + dilation * y,
+                            dilation * z,
+                        ];
+                        equilibrium27(
+                            1.0,
+                            core::array::from_fn(|a| physical[a] - force(p)[a] / 2.0),
+                            Equilibrium27::Factorized,
+                        )
+                    });
+                    let forces = (0..75)
+                        .map(|cell| force(coordinates(cell, [5, 5, 3])))
+                        .collect();
+                    let mut run = with_cx(|cx| ForcedGrid3::try_new(grid, cx, forces).unwrap());
+                    let mut workspace = run.rheology_workspace().unwrap();
+                    let carreau =
+                        |rate: f64| 0.005 + 0.045 * (1.0 + (5.0 * rate).powi(2)).powf(-0.3);
+                    with_cx(|cx| {
+                        run.advance_serial_with_material_rheology_workspace(
+                            cx,
+                            &reference,
+                            vec![[0.0; 3]; 75],
+                            &mut workspace,
+                            |point, _| Ok(fluid(carreau(point.shear_rate_per_s))),
+                        )
+                        .unwrap();
+                    });
+                    let report = workspace.report().unwrap();
+                    let center = 2 + 5 * (2 + 5);
+                    let sample = report.samples[center].as_ref().unwrap();
+                    let expected = shear / dt;
+                    assert!((sample.point().shear_rate_per_s - expected).abs() < 2e-14);
+                    assert!(
+                        (sample.transport().dynamic_viscosity_pa_s() - carreau(expected)).abs()
+                            < 2e-14
+                    );
+                    assert_eq!(
+                        report.collisions[center],
+                        D3q27::with_shear_relaxation(
+                            collision(model),
+                            sample.shear_relaxation_time()
+                        )
+                        .unwrap(),
+                    );
+                    assert_eq!(run.forces(), vec![[0.0; 3]; 75]);
+                }
             }
         }
     }

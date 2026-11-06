@@ -2,7 +2,7 @@
 
 use super::super::{LocalRheologyError, sample_temperatures_with, solve_local, temperatures};
 use super::{
-    FluidTransport, FluidTransportState, HeatSourceLimits, MaterialError, MaterialSlab,
+    DilationRate, FluidTransport, FluidTransportState, HeatSourceLimits, MaterialError, MaterialSlab,
     MaterialTransportError, RheologyMaterial, RheologyPoint, RheologySolve, ThermalLbm3,
     TransportSample, ViscousHeating, ViscousRheologyStep,
     advance_with_sampler_sources_and_candidate, candidate_with_prepared_input, physical_bulk_tau,
@@ -54,31 +54,6 @@ impl<F> FluidTransport for BulkViscousMaterial<F> {
     }
 }
 
-fn norm([a, b]: [f64; 2]) -> f64 {
-    let scale = a.max(b);
-    if scale == 0.0 {
-        return 0.0;
-    }
-    let a = a / scale;
-    let b = b / scale;
-    scale * (a * a + b * b).sqrt()
-}
-
-// With N=hypot(Adev,Abulk), gamma=N/(tau_eff dt), where
-// 1/tau_eff=hypot((Adev/N)/tau_s,(Abulk/N)/tau_b). This is a scalar
-// constitutive coordinate, never a substitute collision relaxation time.
-// Scale by the smaller actual tau; pure modes keep their original arithmetic.
-fn effective_tau(weights: [f64; 2], tau: [f64; 2]) -> f64 {
-    if weights[1] == 0.0 {
-        return tau[0];
-    }
-    if weights[0] == 0.0 {
-        return tau[1];
-    }
-    let scale = tau[0].min(tau[1]);
-    scale / norm([weights[0] * (scale / tau[0]), weights[1] * (scale / tau[1])])
-}
-
 #[allow(clippy::too_many_arguments)]
 fn sample<F: FluidTransport>(
     mapping: &MaterialSlab<ThermalLbm3>,
@@ -102,7 +77,7 @@ fn sample<F: FluidTransport>(
         bulk_rate: 1.0,
         higher_order_rate: 1.0,
     };
-    let mut stresses = vec![[0.0; 3]; cells];
+    let mut stresses = vec![[0.0; 2]; cells];
     for cell in plane..cells - plane {
         poll(gate)?;
         let (rho, velocity) = state.grid.moments3(cell);
@@ -113,7 +88,7 @@ fn sample<F: FluidTransport>(
             state.grid.fext[cell],
             unit,
         );
-        stresses[cell] = [a, b, norm([a, b])];
+        stresses[cell] = [a, b];
         if stresses[cell]
             .iter()
             .any(|value| !value.is_finite() || *value < 0.0)
@@ -132,26 +107,17 @@ fn sample<F: FluidTransport>(
         range,
         gate,
         &mut |cell, temperature_k, retained| {
-            let [a, b, magnitude] = stresses[cell];
-            let weights = if magnitude == 0.0 {
-                [1.0, 0.0]
-            } else {
-                [a / magnitude, b / magnitude]
-            };
+            let [a, b] = stresses[cell];
             let previous_shear = state.grid.tau[cell];
-            let previous_bulk = match state.grid.collision_model_at(cell) {
-                CollisionModel3::CentralMomentBulk { bulk_rate, .. } => 1.0 / bulk_rate,
-                _ => previous_shear,
-            };
             let error = |source| MaterialTransportError::State {
                 cell,
                 temperature_k,
                 source,
             };
             let root = solve_local(
-                magnitude,
+                a,
                 units.timestep_s,
-                effective_tau(weights, [previous_shear, previous_bulk]),
+                previous_shear,
                 solve,
                 || poll(gate),
                 |rate| {
@@ -170,14 +136,7 @@ fn sample<F: FluidTransport>(
                     .map_err(error)?;
                     let bulk_tau = physical_bulk_tau(mapping, source.bulk_viscosity_pa_s)
                         .map_err(|what| error(MaterialLbmError::Invalid(what)))?;
-                    let tau = [scale.flow().tau, bulk_tau];
-                    let effective = effective_tau(weights, tau);
-                    if !effective.is_finite() || effective <= 0.0 {
-                        return Err(error(MaterialLbmError::Invalid(
-                            "unrepresentable coupled constitutive relaxation",
-                        )));
-                    }
-                    Ok(((source, tau), effective))
+                    Ok(((source, bulk_tau), scale.flow().tau))
                 },
             )
             .map_err(|error| match error {
@@ -192,7 +151,7 @@ fn sample<F: FluidTransport>(
                     relaxation_defect,
                 },
             })?;
-            let (source, tau) = root.value;
+            let (source, bulk_tau) = root.value;
             Ok(RheologyMaterial {
                 transport: source.transport,
                 source,
@@ -203,13 +162,11 @@ fn sample<F: FluidTransport>(
                 },
                 iterations: root.iterations,
                 relaxation_defect: root.relaxation_defect,
-                // The accepted physical rates drive BOTH collision and power.
-                // Their norm agrees with the queried rate to the admitted
-                // effective-tau residual, including when shear alone is constant.
-                strain_components_per_s: Some([
-                    (a / tau[0]) / units.timestep_s,
-                    (b / tau[1]) / units.timestep_s,
-                ]),
+                // Bulk stress still supplies heat, using the independently
+                // sourced coefficient at the accepted deviatoric shear query.
+                dilation_rate_per_s: Some(DilationRate::Independent(
+                    (b / bulk_tau) / units.timestep_s,
+                )),
             })
         },
     )
@@ -217,13 +174,14 @@ fn sample<F: FluidTransport>(
 
 impl MaterialSlab<ThermalLbm3> {
     /// Advance with source-local `mu(T,gamma)` AND `zeta(T,gamma)` and their
-    /// physical viscous heat, where `gamma=sqrt(2 D:D)` in inverse seconds.
+    /// physical viscous heat, where `gamma=sqrt(2 dev(D):dev(D))` in inverse seconds.
     ///
     /// Each callback returns one original transport response and explicit bulk
-    /// viscosity for the same actual query. A single bounded scalar solve
-    /// resolves both strain contributions against both material rates. Its
-    /// `relaxation_defect` measures the effective constitutive coordinate;
-    /// collision retains the separate physical shear and bulk relaxations.
+    /// viscosity for the same actual shear query. The bounded scalar solve
+    /// resolves deviatoric strain against the material's shear relaxation;
+    /// `relaxation_defect` measures that shear-tau residual. Dilation does not
+    /// alter the query, but its separately relaxed stress supplies bulk heat.
+    /// Collision retains the separate physical shear and bulk relaxations.
     ///
     /// Initial local coefficients are held over the native thermal step. The
     /// same samples supply `2mu D_dev:D_dev+zeta(div u)^2` once. Endpoint source

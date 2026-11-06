@@ -121,6 +121,9 @@ fn material_strain_reconstruction_separates_bulk_and_shear_under_force() {
     ] {
         let dilation = strain[0][0] + strain[1][1] + strain[2][2];
         let expected = (2.0_f64 * strain.iter().flatten().map(|s| s * s).sum::<f64>()).sqrt();
+        let expected_shear = (2.0_f64 * (0..3).flat_map(|i| (0..3).map(move |j| {
+            (strain[i][j] - if i == j { dilation / 3.0 } else { 0.0 }).powi(2)
+        })).sum::<f64>()).sqrt();
         for rho in [0.4, 2.5] {
             for shear_tau in [0.57, 1.3] {
                 for bulk_tau in [0.6, 1.7] {
@@ -142,7 +145,60 @@ fn material_strain_reconstruction_separates_bulk_and_shear_under_force() {
                         let [numerator, fixed] =
                             rheology_stress_components3(&populations, rho, velocity, force, model);
                         assert!((fixed - (2.0_f64 / 3.0).sqrt() * dilation.abs()).abs() < 8e-14);
+                        assert!((numerator / shear_tau - expected_shear).abs() < 8e-14);
                         assert!(((numerator / shear_tau).hypot(fixed) - expected).abs() < 8e-14);
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn every_collision_family_excludes_isotropic_stress_from_material_shear() {
+    let rho = 1.3;
+    let tau = 0.9;
+    let models = [
+        CollisionModel3::Bgk { tau },
+        CollisionModel3::Trt { tau, magic: 3.0 / 16.0 },
+        CollisionModel3::CentralMoment {
+            second_order_rate: 1.0 / tau, higher_order_rate: 1.3,
+        },
+        CollisionModel3::ReducedCumulant {
+            second_order_rate: 1.0 / tau, third_order_rate: 1.2, fourth_order_rate: 1.4,
+        },
+        CollisionModel3::CentralMomentBulk {
+            shear_rate: 1.0 / tau, bulk_rate: 1.0 / 1.7, higher_order_rate: 1.3,
+        },
+    ];
+    for model in models {
+        let tau_bulk = match model {
+            CollisionModel3::CentralMomentBulk { bulk_rate, .. } => 1.0 / bulk_rate,
+            _ => tau,
+        };
+        for shear in [0.0, 0.006] {
+            for dilation in [-0.012, 0.0, 0.009] {
+                let stress = core::array::from_fn(|i| core::array::from_fn(|j| {
+                    let strain = if i == j {
+                        tau_bulk * dilation / 3.0
+                    } else if [i, j] == [0, 1] || [i, j] == [1, 0] {
+                        tau * shear / 2.0
+                    } else {
+                        0.0
+                    };
+                    -2.0 * rho * strain / 3.0
+                }));
+                for velocity in [[0.0; 3], [0.04, -0.03, 0.02]] {
+                    for force in [[0.0; 3], [0.001, -0.002, 0.0007]] {
+                        let populations = state(rho, velocity, stress, force);
+                        let [numerator, volume] =
+                            rheology_stress_components3(&populations, rho, velocity, force, model);
+                        assert!((numerator / tau - shear).abs() < 8e-14);
+                        let observed_volume = match model {
+                            CollisionModel3::CentralMomentBulk { .. } => volume,
+                            _ => volume / tau,
+                        };
+                        assert!((observed_volume - (2.0_f64 / 3.0).sqrt() * dilation.abs()).abs() < 8e-14);
                     }
                 }
             }

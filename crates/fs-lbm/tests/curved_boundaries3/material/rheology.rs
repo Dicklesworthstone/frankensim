@@ -167,6 +167,10 @@ fn tensor(cell: [usize; 3], factor: f64) -> [[f64; 3]; 3] {
 }
 
 fn prescribed(grid: &mut BoundaryGrid3, factor: f64) {
+    prescribed_with_dilation(grid, factor, 0.0);
+}
+
+fn prescribed_with_dilation(grid: &mut BoundaryGrid3, factor: f64, dilation: f64) {
     grid.set_force_field(|[x, y, z]| {
         [1e-4 * x as f64, -2e-5 * y as f64, 3e-5 * z as f64]
     });
@@ -187,7 +191,8 @@ fn prescribed(grid: &mut BoundaryGrid3, factor: f64) {
                     let mut contraction = 0.0;
                     for a in 0..3 {
                         for b in 0..3 {
-                            let pi = -2.0 * rho * 0.8 * d[a][b] / 3.0
+                            let strain = d[a][b] + if a == b { dilation } else { 0.0 };
+                            let pi = -2.0 * rho * 0.8 * strain / 3.0
                                 - 0.5 * (u[a] * force[b] + force[a] * u[b]);
                             contraction +=
                                 (c[a] * c[b] - if a == b { 1.0 / 3.0 } else { 0.0 }) * pi;
@@ -202,7 +207,7 @@ fn prescribed(grid: &mut BoundaryGrid3, factor: f64) {
 }
 
 #[test]
-fn sourced_thermal_shear_law_matches_independent_full_stress_root_and_curved_step() {
+fn sourced_shear_law_ignores_dilation_and_matches_curved_step() {
     let card = source_card();
     let reference = resolve_liquid_state(
         &card,
@@ -212,15 +217,15 @@ fn sourced_thermal_shear_law_matches_independent_full_stress_root_and_curved_ste
     .unwrap();
     let scaling = plan_scaling_from_material(&reference, DX, DT, 0.05).unwrap();
     let gate = CancelGate::new_clock_free();
-    for family in MODELS {
-        for factor in [0.0, 1.0] {
+    for family in MODELS.into_iter().chain([INDEPENDENT_BULK]) {
+        for (factor, dilation) in [(0.0, 0.0), (0.0, 0.003), (1.0, 0.0), (1.0, -0.004)] {
             // A deliberately stale constructor tau must be only an initial guess.
             let model = retuned(family, 1.7);
             let force = [0.001, -0.0007, 0.0003];
             let (mut grid, wall) = fractional(model, force);
             let (mut manual, _) = fractional(model, force);
-            prescribed(&mut grid, factor);
-            prescribed(&mut manual, factor);
+            prescribed_with_dilation(&mut grid, factor, dilation);
+            prescribed_with_dilation(&mut manual, factor, dilation);
             let report = scaling
                 .step_curved_walls_with_material_rheology(
                     &mut grid,
