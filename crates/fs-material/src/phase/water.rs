@@ -36,6 +36,9 @@ pub mod regional;
 /// Original Ice Ih/liquid calorimetry with physical freezing and thawing.
 pub mod freezing;
 
+/// Original water/steam calorics on the shared implicit conduction owner.
+pub mod conduction;
+
 use fs_qty::{Pressure, Temperature};
 use fs_thermochem::water::if97::bounds::{
     If97HeatCapacityBound, If97HeatCapacityBoundError, If97HeatCapacityBoundSolve,
@@ -75,6 +78,42 @@ pub enum WaterPhase {
     LiquidVapor,
     SaturatedVapor,
     SuperheatedVapor,
+}
+
+/// Constant-pressure caloric response on the original IF97 enthalpy chart.
+///
+/// A finite sensible Cp is not defined while heat changes vapor inventory at
+/// fixed saturation temperature. In particular, averaging the two pure-phase
+/// heat capacities cannot represent the latent interval.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum WaterHeatCapacityResponse {
+    /// Original regional `(dh/dT)_p`, J/(kg K), in a single-phase branch.
+    Sensible {
+        /// Original regional heat capacity, J/(kg K).
+        specific_heat_cp_j_kg_k: f64,
+    },
+    /// The original isothermal interval, including both exact endpoints.
+    /// Interior states have dT/dh = 0. At either endpoint this explicitly
+    /// selects the plateau-side generalized tangent, not a unique derivative.
+    Latent {
+        /// Original vapor inventory, including zero and one at the endpoints.
+        vapor_mass_fraction: f64,
+        /// Saturated-vapor minus saturated-liquid source enthalpy, J/kg.
+        latent_enthalpy_j_kg: f64,
+    },
+}
+
+impl WaterHeatCapacityResponse {
+    /// Exact sensible inverse tangent, or the declared plateau-side tangent
+    /// at saturation, in kg K/J. No artificial finite latent Cp is introduced.
+    pub fn temperature_enthalpy_derivative_kg_k_j(self) -> f64 {
+        match self {
+            Self::Sensible {
+                specific_heat_cp_j_kg_k,
+            } => specific_heat_cp_j_kg_k.recip(),
+            Self::Latent { .. } => 0.0,
+        }
+    }
 }
 
 /// Coordinate of an original-source inverse; residual units follow the coordinate.
@@ -184,6 +223,37 @@ impl WaterState {
     }
     pub fn specific_enthalpy_j_kg(self) -> f64 {
         self.property(|s| s.specific_enthalpy().value())
+    }
+    /// Resolve the actual local Cp or latent response without another source
+    /// evaluation or caloric inverse. Original sensible IF97 derivatives are
+    /// retained in the accepted state; phase redistribution owns latent heat.
+    pub fn isobaric_heat_capacity_response(self) -> WaterHeatCapacityResponse {
+        if let Point::Single(source) = self.point {
+            // A chart may omit either sensible branch. Its endpoint inverse
+            // then returns the original regional source at Ts; the physical
+            // tangent still belongs to the retained latent interval.
+            if source.temperature() != self.chart.saturation.temperature() {
+                return WaterHeatCapacityResponse::Sensible {
+                    specific_heat_cp_j_kg_k: source.cp().value(),
+                };
+            }
+        }
+        WaterHeatCapacityResponse::Latent {
+            vapor_mass_fraction: self.vapor_mass_fraction(),
+            latent_enthalpy_j_kg: self.chart.saturation.vapor().specific_enthalpy().value()
+                - self.chart.saturation.liquid().specific_enthalpy().value(),
+        }
+    }
+    /// Finite original single-phase Cp, J/(kg K). Coexistence and both exact
+    /// saturation endpoints refuse instead of reporting a phase-weighted or
+    /// artificially large heat capacity. Use the qualified response there.
+    pub fn specific_heat_cp_j_kg_k(self) -> Result<f64, WaterError> {
+        match self.isobaric_heat_capacity_response() {
+            WaterHeatCapacityResponse::Sensible {
+                specific_heat_cp_j_kg_k,
+            } => Ok(specific_heat_cp_j_kg_k),
+            WaterHeatCapacityResponse::Latent { .. } => Err(WaterError::AmbiguousSaturation),
+        }
     }
     pub fn specific_internal_energy_j_kg(self) -> f64 {
         self.property(|s| s.specific_internal_energy().value())

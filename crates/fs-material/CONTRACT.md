@@ -9610,6 +9610,22 @@ the caller's unchanged absolute joule budget. Nonzero heat or phase inventory
 lost to representability refuses. The shared thermal geometry remains reference
 heat-exchange geometry, while physical expansion is explicitly reported.
 
+`WaterState::isobaric_heat_capacity_response` distinguishes original finite
+sensible Cp from an isothermal latent response. Strict finite-Cp queries
+refuse coexistence and exact saturation endpoints; the latter explicitly
+select the plateau-side generalized `dT/dh=0`. The borrowed
+`phase::water::conduction::WaterConductionLaw` binds the exact registered chart
+and a caller-declared bulk k(T) to the native implicit chain/graph. One original
+enthalpy inversion supplies T and Cp, and analytic dk/dh uses that same state.
+Original enthalpy, continuous dh/T entropy, conserved reference mass and vapor
+mass fraction remain available to the thermal solver and adaptive controls.
+The declared bulk k is quality-independent at saturation; it supplies no
+inferred water/steam mixture conductivity, boiling coefficient, convection,
+evolving geometry or rigid-vessel model. Native tests cover source Cp and
+tangents, latent/omitted-sensible endpoints, source-domain refusals and
+unequal-mass implicit heat exchange through boiling with an independently
+reconstructed endpoint and conserved energy.
+
 Six native material tests exercise p,h/p,s source round trips; complete
 heating/condensation and phase depletion; explicit entropy-seam accounting;
 domain/work/cancellation refusals; the real shared thermal history through all
