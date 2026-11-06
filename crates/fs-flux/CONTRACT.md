@@ -3832,6 +3832,57 @@ and travel solutions, positive heat and signed mass/energy, temporal
 subdivision, reversal, equilibrium approach from both sides, exact geometric
 arrival times, zero-gravity delegation and support/work-budget refusal.
 
+`capillary::rheology::two_fluid::CarreauTwoFluidCapillary` additionally resolves
+horizontal displacement through two immiscible original thermal Carreau fluids.
+Both owners have the same physical tube radius and total length, but retain
+independent constitutive laws, frozen temperatures and wall-rate supports.
+Surface tension and angle must describe the actual ordered pair and substrate;
+this numerical consumer supplies no interface calibration. Positive minimum
+column lengths are declared fully developed operating limits. Reaching one
+returns its arrival time and leaves the remaining requested duration unused.
+There is no invented entrance response when either column disappears.
+
+At every interface position, the two original prescribed-flow inverses resolve
+the pressure required by a common volume flux. A bounded scalar Newton solve
+matches their summed pressure to the imposed reservoir-plus-capillary drive.
+Its positive derivative is the sum of the original differential resistances;
+no apparent-viscosity blend or finite-difference material tangent is used.
+Exact wall-rate profile queries prepare the common source-supported flow
+ceiling. Pressure at that fixed common ceiling is affine in interface position,
+so both interval endpoints admit the entire declared wet-length range.
+Geometry changes retain each prepared original thermal state.
+
+The moving front inverts its positive travel-time integral. Shared fixed-size
+Simpson accumulators integrate time and BOTH actual profile dissipation powers
+along the path, with compensated sums and two consecutive refinement agreements.
+The resulting separate phase heats are not an endpoint resistance split.
+The result retains both actual radial profiles, their flow residuals against
+the common transport flux, the series-pressure residual, signed volume and wall
+energy, reservoir work, and a separate constitutive/quadrature work defect.
+Positive physical heat is never increased to absorb those numerical defects.
+The invading inventory gains the signed transferred volume, the displaced
+inventory loses it, and the same signed volume passes their respective open
+reservoirs. No mass transfer is inferred without explicit density data.
+
+The checked entry point polls before every bounded original pipe solve and
+before publication; refusal/cancellation leaves the immutable model unchanged
+for an identical retry. Numerical pressure, time, quadrature and aggregate
+profile work limits remain explicit. The default entry point uses the same
+implementation without an external check. The path adds no per-sample heap
+allocation. This owner does not include gravity, transient radial inertia,
+compressibility, mixing, deposited films, dynamic wetting or thermal evolution.
+Using a gas requires an explicitly admitted uniform-property incompressible
+approximation and vented pressure reservoirs. Numerical residual/refinement
+estimates do not certify material uncertainty or the fully developed regime.
+
+Focused regressions recover independent two-fluid Newtonian travel and phase
+heats, identical nonlinear-fluid translation, independently partitioned mixed
+Carreau/Newtonian pressure and travel, phase exchange, reversal, subdivision,
+frozen source/temperature retention, exact declared-limit arrival, whole-range
+source refusal, numerical work refusal and late cancellation with exact retry.
+The original horizontal and inclined Carreau regressions cover the shared
+quadrature implementation as well.
+
 ## Material-bound circular capillary transport
 
 `capillary::material::MaterialCapillaryTube` binds the original

@@ -1,5 +1,6 @@
 use super::*;
 mod inclined;
+mod two_fluid;
 use fs_material::fluid_transport::rheology::{
     CarreauYasuda, ThermalCarreauYasuda, ViscosityShiftMode,
 };

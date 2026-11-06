@@ -101,48 +101,13 @@ fn integrate_positive(
     controls: CarreauMeniscusControls,
     mut sample: impl FnMut(f64) -> Result<f64, CarreauMeniscusError>,
 ) -> Result<(f64, f64), CarreauMeniscusError> {
-    if !span.is_finite() || span <= 0.0 || endpoints.iter().any(|x| !x.is_finite() || *x <= 0.0) {
-        return Err(CarreauMeniscusError::Unrepresentable);
-    }
-    let mut trapezoid = 0.5 * endpoints[0] + 0.5 * endpoints[1];
-    let mut previous: Option<f64> = None;
-    let mut consecutive = 0;
-    let mut panels = 1_u32;
-    for _ in 0..controls.maximum_quadrature_refinements {
-        let mut sum = 0.0;
-        let mut compensation = 0.0;
-        for i in 0..panels {
-            let fraction = (f64::from(i) + 0.5) / f64::from(panels);
-            let value = sample(fraction)?;
-            if !value.is_finite() || value <= 0.0 {
-                return Err(CarreauMeniscusError::Unrepresentable);
-            }
-            let term = value / f64::from(panels) - compensation;
-            let next = sum + term;
-            compensation = (next - sum) - term;
-            sum = next;
-        }
-        // Positive weights; do not create a subtractive extrapolated heat.
-        let integral = span * (trapezoid / 3.0 + 2.0 * sum / 3.0);
-        if !integral.is_finite() || integral <= 0.0 {
-            return Err(CarreauMeniscusError::Unrepresentable);
-        }
-        if let Some(old) = previous {
-            let change = (integral - old).abs() / integral.max(old);
-            consecutive = if change <= controls.relative_time_tolerance {
-                consecutive + 1
-            } else {
-                0
-            };
-            if consecutive >= 2 {
-                return Ok((integral, change));
-            }
-        }
-        previous = Some(integral);
-        trapezoid = 0.5 * trapezoid + 0.5 * sum;
-        panels *= 2;
-    }
-    Err(CarreauMeniscusError::QuadratureBudget)
+    let ([value], change) = super::integrate_positive(
+        span,
+        [[endpoints[0]], [endpoints[1]]],
+        controls,
+        |fraction| Ok([sample(fraction)?]),
+    )?;
+    Ok((value, change))
 }
 
 impl CarreauCapillaryTube {

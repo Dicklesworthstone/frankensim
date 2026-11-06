@@ -9,13 +9,15 @@
 //! The prescribed pressure and temperature are frozen throughout a step.
 //! A strictly positive minimum wet length bounds the declared developed-flow
 //! interval; there is no dry-entry singularity, entrance model, inertia,
-//! evolving contact angle, displaced-fluid resistance or thermal feedback.
-//! The horizontal owner excludes gravity; [`inclined`] adds its resolved
-//! hydrostatic load and potential energy. A step admits its load over the
+//! evolving contact angle or thermal feedback. The single-fluid owners neglect
+//! displaced-fluid resistance; [`two_fluid`] resolves both original laws in a
+//! horizontal tube. [`inclined`] adds resolved hydrostatic load and potential
+//! energy to the single-fluid owner. A step admits its load over the
 //! entire declared wet-length interval.
 //! This numerical consumer adds no empirical authority to the supplied law.
 
 pub mod inclined;
+pub mod two_fluid;
 
 use core::f64::consts::PI;
 use fs_material::MaterialError;
@@ -73,6 +75,8 @@ pub enum CarreauMeniscusError {
     ProfileBudget,
     QuadratureBudget,
     IterationBudget,
+    /// The two-fluid series-pressure solve exhausted its bounded corrections.
+    SeriesPressureBudget,
     Unrepresentable,
 }
 
@@ -159,6 +163,70 @@ struct PathSample {
     profile: CarreauPipeProfile,
     /// Absolute physical length change per integration coordinate.
     length_jacobian: f64,
+}
+
+/// Positive nested Simpson quadrature shared by time and each physical heat
+/// channel. Fixed-size accumulators retain compensation without heap storage.
+fn integrate_positive<const N: usize>(
+    span: f64,
+    endpoints: [[f64; N]; 2],
+    controls: CarreauMeniscusControls,
+    mut sample: impl FnMut(f64) -> Result<[f64; N], CarreauMeniscusError>,
+) -> Result<([f64; N], f64), CarreauMeniscusError> {
+    if !span.is_finite()
+        || span <= 0.0
+        || endpoints
+            .iter()
+            .flatten()
+            .any(|v| !v.is_finite() || *v <= 0.0)
+    {
+        return Err(CarreauMeniscusError::Unrepresentable);
+    }
+    let mut trapezoid =
+        core::array::from_fn::<_, N, _>(|k| 0.5 * endpoints[0][k] + 0.5 * endpoints[1][k]);
+    let mut previous: Option<[f64; N]> = None;
+    let mut consecutive = 0;
+    let mut panels = 1_u32;
+    for _ in 0..controls.maximum_quadrature_refinements {
+        let mut sums = [0.0; N];
+        let mut compensation = [0.0; N];
+        for i in 0..panels {
+            let values = sample((f64::from(i) + 0.5) / f64::from(panels))?;
+            if values.iter().any(|v| !v.is_finite() || *v <= 0.0) {
+                return Err(CarreauMeniscusError::Unrepresentable);
+            }
+            for k in 0..N {
+                let term = values[k] / f64::from(panels) - compensation[k];
+                let next = sums[k] + term;
+                compensation[k] = (next - sums[k]) - term;
+                sums[k] = next;
+            }
+        }
+        let integral =
+            core::array::from_fn::<_, N, _>(|k| span * (trapezoid[k] / 3.0 + 2.0 * sums[k] / 3.0));
+        if integral.iter().any(|v| !v.is_finite() || *v <= 0.0) {
+            return Err(CarreauMeniscusError::Unrepresentable);
+        }
+        if let Some(old) = previous {
+            let change = (0..N)
+                .map(|k| (integral[k] - old[k]).abs() / integral[k].max(old[k]))
+                .fold(0.0_f64, f64::max);
+            consecutive = if change <= controls.relative_time_tolerance {
+                consecutive + 1
+            } else {
+                0
+            };
+            if consecutive >= 2 {
+                return Ok((integral, change));
+            }
+        }
+        previous = Some(integral);
+        for k in 0..N {
+            trapezoid[k] = 0.5 * trapezoid[k] + 0.5 * sums[k];
+        }
+        panels *= 2;
+    }
+    Err(CarreauMeniscusError::QuadratureBudget)
 }
 
 impl CarreauCapillaryTube {
@@ -292,59 +360,18 @@ impl CarreauCapillaryTube {
         controls: CarreauMeniscusControls,
         mut sample: impl FnMut(f64) -> Result<PathSample, CarreauMeniscusError>,
     ) -> Result<Travel, CarreauMeniscusError> {
-        if !span.is_finite() || span <= 0.0 {
-            return Err(CarreauMeniscusError::Unrepresentable);
-        }
-        let a = self.integrands(&start)?;
-        let b = self.integrands(&endpoint)?;
-        let mut trapezoid = core::array::from_fn::<_, 2, _>(|k| 0.5 * a[k] + 0.5 * b[k]);
-        let mut previous: Option<[f64; 2]> = None;
-        let mut consecutive = 0;
-        let mut panels = 1_u32;
-        for _ in 0..controls.maximum_quadrature_refinements {
-            let mut sums = [0.0; 2];
-            let mut compensation = [0.0; 2];
-            for i in 0..panels {
-                let fraction = (i as f64 + 0.5) / panels as f64;
-                let values = self.integrands(&sample(fraction)?)?;
-                for k in 0..2 {
-                    // Average before accumulation to avoid a panel-count overflow.
-                    let term = values[k] / panels as f64 - compensation[k];
-                    let next = sums[k] + term;
-                    compensation[k] = (next - sums[k]) - term;
-                    sums[k] = next;
-                }
-            }
-            let refined = core::array::from_fn::<_, 2, _>(|k| 0.5 * trapezoid[k] + 0.5 * sums[k]);
-            let integral = core::array::from_fn::<_, 2, _>(|k| {
-                span * (refined[k] + (refined[k] - trapezoid[k]) / 3.0)
-            });
-            if integral.iter().any(|v| !v.is_finite() || *v <= 0.0) {
-                return Err(CarreauMeniscusError::Unrepresentable);
-            }
-            if let Some(old) = previous {
-                let change = (0..2)
-                    .map(|k| (integral[k] - old[k]).abs() / integral[k].max(old[k]))
-                    .fold(0.0_f64, f64::max);
-                consecutive = if change <= controls.relative_time_tolerance {
-                    consecutive + 1
-                } else {
-                    0
-                };
-                if consecutive >= 2 {
-                    return Ok(Travel {
-                        time_s: integral[0],
-                        heat_j: integral[1],
-                        relative_change: change,
-                        endpoint: endpoint.profile,
-                    });
-                }
-            }
-            previous = Some(integral);
-            trapezoid = refined;
-            panels *= 2;
-        }
-        Err(CarreauMeniscusError::QuadratureBudget)
+        let (integral, relative_change) = integrate_positive(
+            span,
+            [self.integrands(&start)?, self.integrands(&endpoint)?],
+            controls,
+            |fraction| self.integrands(&sample(fraction)?),
+        )?;
+        Ok(Travel {
+            time_s: integral[0],
+            heat_j: integral[1],
+            relative_change,
+            endpoint: endpoint.profile,
+        })
     }
 
     /// Advance the complete requested interval or stop at a declared geometric
