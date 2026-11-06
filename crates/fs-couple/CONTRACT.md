@@ -293,3 +293,22 @@ The mode index, N/sqrt(kg) units and force ceiling are those of its original
 is checked before any held force changes; no mechanical, caloric, material,
 radiation or propagation history is rebuilt. A force update uses the same held
 input path as the concrete renderer's original `set_forces` operation.
+
+
+## Exact reciprocal longitudinal piezoelectric storage
+
+The longitudinal rod exposes the complete original quadratic storage block in
+[extension, momentum, charge] order:
+Q = [[k_D, 0, -theta/C], [0, 1/m, 0], [-theta/C, 0, 1/C]].
+Its same source-bound energy and amplitude checks remain authoritative.
+Native descriptor and prepared solvers can use analytic charge derivatives;
+they do not need dimensionless finite-difference probes into microscopic
+electrodes. The continuous storage tangent retains both reciprocal cross terms.
+The quadratic declaration is exact for this fixed-state, small-signal rod and
+is not a linearization of ferroelectric, hysteretic or nonlinear storage.
+
+The G0 regression in tests/piezoelectric.rs compares every quadratic effort
+with the original material response, independently reconstructs stored energy,
+checks reciprocity and the analytic directional action, and verifies refusal
+outside the original strain envelope. This adds no measured material
+validation or hard real-time timing claim.

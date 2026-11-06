@@ -12,7 +12,8 @@ use fs_material::piezoelectric::{
     LongitudinalPiezoelectric, PiezoelectricError, PiezoelectricResponse,
 };
 use fs_phs::{
-    DescriptorPortHamiltonian, PhsError, PortHamiltonian, StepRecord, Storage, step_descriptor,
+    ContinuousStorageTangent, DescriptorPortHamiltonian, PhsError, PortHamiltonian, StepRecord,
+    Storage, step_descriptor,
 };
 
 /// Spatial tensor electromechanics on the native solid and dielectric operators.
@@ -222,7 +223,7 @@ impl PiezoelectricRod {
             vec![0.0, 1.0, 0.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
             vec![0.0; 9],
             vec![0.0, 0.0, 1.0, 0.0, 0.0, 1.0],
-            Box::new(RodStorage(self.clone())),
+            Box::new(RodStorage::new(self)),
         )?)
     }
 
@@ -248,29 +249,87 @@ impl PiezoelectricRod {
             j,
             vec![0.0; n * n],
             g,
-            Box::new(RodStorage(self.clone())),
+            Box::new(RodStorage::new(self)),
         )?)
     }
 }
 
 #[derive(Clone)]
-struct RodStorage(PiezoelectricRod);
+struct RodStorage {
+    rod: PiezoelectricRod,
+    // H = k_E*x^2/2 + (Q-theta*x)^2/(2*C) + p^2/(2*m).
+    // This is the complete source potential, not a fitted local tangent.
+    quadratic: [f64; 9],
+}
+impl RodStorage {
+    fn new(rod: &PiezoelectricRod) -> Self {
+        let inverse_c = 1.0 / rod.axially_clamped_capacitance_f();
+        let cross = -rod.coupling_c_m() * inverse_c;
+        Self {
+            rod: rod.clone(),
+            quadratic: [
+                rod.open_circuit_stiffness_n_m(),
+                0.0,
+                cross,
+                0.0,
+                1.0 / rod.modal_mass_kg,
+                0.0,
+                cross,
+                0.0,
+                inverse_c,
+            ],
+        }
+    }
+}
+impl ContinuousStorageTangent for RodStorage {
+    fn apply(&self, state: &[f64], direction: &[f64], out: &mut [f64]) -> bool {
+        if state.len() != 3
+            || direction.len() != 3
+            || out.len() != 3
+            || direction.iter().any(|value| !value.is_finite())
+            || self.rod.energy(state).is_err()
+        {
+            return false;
+        }
+        for (i, value) in out.iter_mut().enumerate() {
+            *value = (0..3)
+                .map(|j| self.quadratic[3 * i + j] * direction[j])
+                .sum();
+        }
+        out.iter().all(|value| value.is_finite())
+    }
+}
 impl Storage for RodStorage {
+    fn shared_clone(&self) -> Option<Box<dyn Storage>> {
+        Some(Box::new(self.clone()))
+    }
     fn hamiltonian(&self, x: &[f64]) -> f64 {
-        self.0.energy(x).unwrap_or(f64::NAN)
+        self.rod.energy(x).unwrap_or(f64::NAN)
     }
     fn gradient(&self, x: &[f64], out: &mut [f64]) {
-        match self.0.response(x[0], x[2]) {
+        match self.rod.response(x[0], x[2]) {
             Ok(response) => {
-                out[0] = self.0.area_m2 * response.stress_pa;
-                out[1] = x[1] / self.0.modal_mass_kg;
-                out[2] = self.0.length_m * response.electric_field_v_m;
+                out[0] = self.rod.area_m2 * response.stress_pa;
+                out[1] = x[1] / self.rod.modal_mass_kg;
+                out[2] = self.rod.length_m * response.electric_field_v_m;
             }
             Err(_) => out.fill(f64::NAN),
         }
     }
+    fn continuous_tangent(&self) -> Option<&dyn ContinuousStorageTangent> {
+        Some(self)
+    }
+    fn quadratic_part(&self) -> Option<fs_phs::linear_exact::QuadraticPart> {
+        Some(fs_phs::linear_exact::QuadraticPart {
+            matrix: self.quadratic.to_vec(),
+            exact: true,
+        })
+    }
+    fn exact_quadratic_matrix(&self) -> Option<&[f64]> {
+        Some(&self.quadratic)
+    }
     fn midpoint_energy_remainder(&self, a: &[f64], b: &[f64], mid: &[f64]) -> Option<f64> {
-        Some(if [a, b, mid].iter().all(|x| self.0.energy(x).is_ok()) {
+        Some(if [a, b, mid].iter().all(|x| self.rod.energy(x).is_ok()) {
             0.0
         } else {
             f64::NAN
