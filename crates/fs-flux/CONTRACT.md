@@ -3833,7 +3833,8 @@ subdivision, reversal, equilibrium approach from both sides, exact geometric
 arrival times, zero-gravity delegation and support/work-budget refusal.
 
 `capillary::rheology::two_fluid::CarreauTwoFluidCapillary` additionally resolves
-horizontal displacement through two immiscible original thermal Carreau fluids.
+horizontal and inclined displacement through two immiscible original thermal
+Carreau fluids.
 Both owners have the same physical tube radius and total length, but retain
 independent constitutive laws, frozen temperatures and wall-rate supports.
 Surface tension and angle must describe the actual ordered pair and substrate;
@@ -3869,11 +3870,42 @@ before publication; refusal/cancellation leaves the immutable model unchanged
 for an identical retry. Numerical pressure, time, quadrature and aggregate
 profile work limits remain explicit. The default entry point uses the same
 implementation without an external check. The path adds no per-sample heap
-allocation. This owner does not include gravity, transient radial inertia,
+allocation. This owner does not include transient radial inertia,
 compressibility, mixing, deposited films, dynamic wetting or thermal evolution.
 Using a gas requires an explicitly admitted uniform-property incompressible
 approximation and vented pressure reservoirs. Numerical residual/refinement
 estimates do not certify material uncertainty or the fully developed regime.
+
+The inclined entry point requires both constant phase densities and signed axial
+gravity. At wet length `x`, hydrostatic pressure is
+`g*(rho_invading*x + rho_displaced*(L-x))`; reservoir pressures belong to the
+actual tube ends. Both column resistances use their original radial profiles
+under the remaining affine drive. The source-support check compares absolute
+affine drive with the common-flow pressure ceiling at both interval endpoints.
+This admits the entire interval because absolute affine drive is convex.
+
+A stable density-contrast equilibrium uses the same logarithmic distance
+coordinate as the single-fluid inclined owner. Time is integrated in that
+coordinate while each actual phase heat is integrated in physical distance,
+keeping both integrands resolved after many relaxation times. Finite steps do
+not cross or snap to equilibrium; motion below representable position
+resolution refuses. Unstable equilibria, equal densities and signed drainage
+use the same bounded pressure and travel solves. Zero gravity preserves the
+horizontal result exactly.
+
+The inclined report retains both signed phase inventory mass changes, endpoint
+hydrostatic pressure, stored gravitational potential change and net potential
+energy transported outward to the reservoirs. Their sum is the gravitational
+work; counting only stored energy would omit displaced fluid leaving at the
+outlet elevation. Pressure work minus wall-energy change, gravitational work
+and the two actual heats leaves the explicit constitutive/quadrature defect.
+Density is authored separately and adds no source calibration authority.
+
+Focused inclined regressions recover exponential equilibrium approach and
+individual phase heats, independently integrated unequal-column Newtonian and
+nonlinear Carreau travel, signed drainage and exact arrival, phase/axis
+exchange, equal-density and zero-gravity limits, interval support, unresolved
+equilibrium refusal and late cancellation with identical retry.
 
 Focused regressions recover independent two-fluid Newtonian travel and phase
 heats, identical nonlinear-fluid translation, independently partitioned mixed

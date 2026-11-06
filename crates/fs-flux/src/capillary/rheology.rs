@@ -10,9 +10,10 @@
 //! A strictly positive minimum wet length bounds the declared developed-flow
 //! interval; there is no dry-entry singularity, entrance model, inertia,
 //! evolving contact angle or thermal feedback. The single-fluid owners neglect
-//! displaced-fluid resistance; [`two_fluid`] resolves both original laws in a
-//! horizontal tube. [`inclined`] adds resolved hydrostatic load and potential
-//! energy to the single-fluid owner. A step admits its load over the
+//! displaced-fluid resistance; [`two_fluid`] resolves both original laws and
+//! both column weights in horizontal or inclined tubes. [`inclined`] adds
+//! hydrostatic load and potential energy to the single-fluid owner. Both paths
+//! share a logarithmic coordinate near stable equilibrium. A step admits its load over the
 //! entire declared wet-length interval.
 //! This numerical consumer adds no empirical authority to the supplied law.
 

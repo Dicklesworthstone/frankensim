@@ -25,7 +25,7 @@ pub struct CarreauInclinedMeniscusStep {
 }
 
 #[derive(Clone, Copy)]
-enum Coordinate {
+pub(super) enum Coordinate {
     Distance {
         boundary: f64,
         maximum: f64,
@@ -39,13 +39,43 @@ enum Coordinate {
 }
 
 impl Coordinate {
-    fn maximum(self) -> f64 {
+    pub(super) fn new(
+        x0: f64,
+        drive0: f64,
+        gravity_gradient: f64,
+        boundary: f64,
+    ) -> Result<Self, CarreauMeniscusError> {
+        let maximum_distance = (boundary - x0).abs();
+        let equilibrium_distance = drive0.abs() / gravity_gradient;
+        if gravity_gradient > 0.0 && equilibrium_distance <= maximum_distance {
+            let equilibrium = x0 + drive0.signum() * equilibrium_distance;
+            // This is a representability limit, never an altered physical
+            // equilibrium or a finite-time arrival event.
+            let resolution = 4.0 * f64::EPSILON * equilibrium.abs().max(x0.abs());
+            let maximum = fs_math::det::ln(equilibrium_distance) - fs_math::det::ln(resolution);
+            if !maximum.is_finite() || maximum <= 0.0 {
+                return Err(CarreauMeniscusError::Unrepresentable);
+            }
+            Ok(Self::Equilibrium {
+                distance: equilibrium_distance,
+                maximum,
+                equilibrium,
+            })
+        } else {
+            Ok(Self::Distance {
+                boundary,
+                maximum: maximum_distance,
+            })
+        }
+    }
+
+    pub(super) fn maximum(self) -> f64 {
         match self {
             Self::Distance { maximum, .. } | Self::Equilibrium { maximum, .. } => maximum,
         }
     }
 
-    fn point(
+    pub(super) fn point(
         self,
         coordinate: f64,
         x0: f64,
@@ -252,27 +282,7 @@ impl CarreauCapillaryTube {
                 0,
             )?);
         }
-        let equilibrium_distance = drive0.abs() / gradient;
-        let coordinate = if gradient > 0.0 && equilibrium_distance <= maximum_distance {
-            let equilibrium = input.wet_length_m + direction * equilibrium_distance;
-            // Keep a finite representable distance from equilibrium. This is
-            // an admissibility limit, never an altered physical endpoint.
-            let resolution = 4.0 * f64::EPSILON * equilibrium.abs().max(input.wet_length_m.abs());
-            let maximum = fs_math::det::ln(equilibrium_distance) - fs_math::det::ln(resolution);
-            if !maximum.is_finite() || maximum <= 0.0 {
-                return Err(CarreauMeniscusError::Unrepresentable);
-            }
-            Coordinate::Equilibrium {
-                distance: equilibrium_distance,
-                maximum,
-                equilibrium,
-            }
-        } else {
-            Coordinate::Distance {
-                boundary,
-                maximum: maximum_distance,
-            }
-        };
+        let coordinate = Coordinate::new(input.wet_length_m, drive0, gradient, boundary)?;
         let make_sample = |value: f64, evaluations: &mut u32| {
             let (x, drive, length_jacobian) = coordinate.point(
                 value,

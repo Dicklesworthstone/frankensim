@@ -1,4 +1,4 @@
-//! Horizontal displacement with both original thermal Carreau fluids.
+//! Horizontal and inclined displacement with both original Carreau fluids.
 //!
 //! The two fully developed pipe columns carry one volume flux. At each
 //! front position, a bounded pressure solve resolves the sum of their actual
@@ -6,6 +6,8 @@
 //! integrated together along the interface path, preserving each phase's heat.
 //! The positive minimum column lengths are explicit fully developed operating
 //! limits; this owner does not invent an entrance law when a column disappears.
+
+use super::inclined::Coordinate;
 
 use super::{
     CarreauCapillaryTube, CarreauMeniscusControls, CarreauMeniscusError, CarreauMeniscusInput,
@@ -104,6 +106,25 @@ pub struct CarreauTwoFluidStep {
     pub profile_evaluations: u32,
     pub iterations: u32,
     pub endpoint: CarreauTwoFluidProfile,
+}
+
+/// Two-phase inventory and gravity accounting for an inclined straight tube.
+/// Potential energy uses the inlet elevation as zero. Reservoir transfer is
+/// signed outward: displaced liquid exits at the outlet elevation during
+/// invasion, and enters there during drainage.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CarreauInclinedTwoFluidStep {
+    pub meniscus: CarreauTwoFluidStep,
+    pub phase_densities_kg_m3: [f64; 2],
+    /// Positive acceleration opposes increasing wet length.
+    pub opposing_gravity_m_s2: f64,
+    /// Signed changes of invading/displaced mass stored inside the tube.
+    pub phase_mass_changes_kg: [f64; 2],
+    pub hydrostatic_pressure_pa: f64,
+    pub stored_potential_energy_change_j: f64,
+    pub reservoir_potential_energy_out_j: f64,
+    /// Stored change plus the net potential energy transported to reservoirs.
+    pub gravitational_work_j: f64,
 }
 
 #[derive(Clone, Copy)]
@@ -207,7 +228,7 @@ impl CarreauTwoFluidCapillary {
 
     fn envelope(
         &self,
-        drive: f64,
+        boundary_drives: [f64; 2],
         controls: CarreauTwoFluidControls,
         evaluations: &mut EvaluationWork<'_>,
     ) -> Result<Envelope, CarreauMeniscusError> {
@@ -242,11 +263,15 @@ impl CarreauTwoFluidCapillary {
         }
         // At fixed common flux, each original pressure is proportional to its
         // column length. Thus the limiting total pressure is affine in x;
+        // With gravity the drive is affine too. The absolute drive is convex;
         // checking both endpoints admits the whole declared displacement range.
-        for x in [
+        for (x, drive) in [
             self.invading.minimum_wet_length_m,
             self.maximum_wet_length_m,
-        ] {
+        ]
+        .into_iter()
+        .zip(boundary_drives)
+        {
             let available =
                 ceiling_gradient[0] * x + ceiling_gradient[1] * (self.displaced.length_m() - x);
             if !available.is_finite() {
@@ -379,6 +404,112 @@ impl CarreauTwoFluidCapillary {
         &self,
         input: CarreauMeniscusInput,
         controls: CarreauTwoFluidControls,
+        check: impl FnMut() -> Result<(), CarreauMeniscusError>,
+    ) -> Result<CarreauTwoFluidStep, CarreauMeniscusError> {
+        let pressure0 = input.applied_pressure_pa + self.invading.capillary_pressure_pa;
+        self.step_with_affine_load(input, pressure0, 0.0, controls, check)
+    }
+
+    /// Advance both original fluid columns with explicit constant densities
+    /// and signed axial gravity. Reservoir pressures are measured at the two
+    /// tube ends, so BOTH columns contribute to hydrostatic resistance.
+    ///
+    /// A stable density-contrast equilibrium is approached logarithmically,
+    /// never crossed or reached in finite time. The original source support is
+    /// checked over the entire authored wet interval. Source temperatures stay
+    /// fixed; no buoyant mixing, inertia or variable density is inferred.
+    pub fn step_inclined(
+        &self,
+        input: CarreauMeniscusInput,
+        phase_densities_kg_m3: [f64; 2],
+        opposing_gravity_m_s2: f64,
+        controls: CarreauTwoFluidControls,
+    ) -> Result<CarreauInclinedTwoFluidStep, CarreauMeniscusError> {
+        self.step_inclined_with_check(
+            input,
+            phase_densities_kg_m3,
+            opposing_gravity_m_s2,
+            controls,
+            || Ok(()),
+        )
+    }
+
+    /// Checked inclined advance; a refused step leaves the immutable owner
+    /// available for an identical retry, including late cancellation.
+    pub fn step_inclined_with_check(
+        &self,
+        input: CarreauMeniscusInput,
+        phase_densities_kg_m3: [f64; 2],
+        opposing_gravity_m_s2: f64,
+        controls: CarreauTwoFluidControls,
+        mut check: impl FnMut() -> Result<(), CarreauMeniscusError>,
+    ) -> Result<CarreauInclinedTwoFluidStep, CarreauMeniscusError> {
+        if phase_densities_kg_m3
+            .iter()
+            .any(|rho| !rho.is_finite() || *rho <= 0.0)
+            || !opposing_gravity_m_s2.is_finite()
+        {
+            return Err(CarreauMeniscusError::Input(
+                "invalid two-fluid gravity inputs",
+            ));
+        }
+        let [rho0, rho1] = phase_densities_kg_m3;
+        let length = self.displaced.length_m();
+        let pressure = input.applied_pressure_pa + self.invading.capillary_pressure_pa;
+        let gradient = opposing_gravity_m_s2 * (rho0 - rho1);
+        let pressure0 = (-opposing_gravity_m_s2 * rho1).mul_add(length, pressure);
+        let mut meniscus = if opposing_gravity_m_s2 == 0.0 {
+            self.step_horizontal_with_check(input, controls, &mut check)?
+        } else {
+            self.step_with_affine_load(input, pressure0, gradient, controls, &mut check)?
+        };
+        let mean_length = 0.5 * input.wet_length_m + 0.5 * meniscus.wet_length_m;
+        let volume = meniscus.transferred_volume_m3;
+        let phase_mass_changes_kg = [rho0 * volume, -rho1 * volume];
+        let hydrostatic_pressure_pa = opposing_gravity_m_s2
+            * (rho0 * meniscus.wet_length_m + rho1 * (length - meniscus.wet_length_m));
+        let stored_potential_energy_change_j = volume * (gradient * mean_length);
+        let reservoir_potential_energy_out_j = volume * ((opposing_gravity_m_s2 * rho1) * length);
+        // Sum column weights before multiplying by transferred volume. This
+        // avoids cancellation between stored and advected potential energy.
+        let gravitational_work_j =
+            volume * (opposing_gravity_m_s2 * (rho0 * mean_length + rho1 * (length - mean_length)));
+        meniscus.constitutive_work_defect_j = meniscus.reservoir_work_j
+            - meniscus.wall_energy_change_j
+            - gravitational_work_j
+            - meniscus.viscous_dissipation_j;
+        if !phase_mass_changes_kg
+            .iter()
+            .chain(&[
+                hydrostatic_pressure_pa,
+                stored_potential_energy_change_j,
+                reservoir_potential_energy_out_j,
+                gravitational_work_j,
+                meniscus.constitutive_work_defect_j,
+            ])
+            .all(|v| v.is_finite())
+        {
+            return Err(CarreauMeniscusError::Unrepresentable);
+        }
+        check()?;
+        Ok(CarreauInclinedTwoFluidStep {
+            meniscus,
+            phase_densities_kg_m3,
+            opposing_gravity_m_s2,
+            phase_mass_changes_kg,
+            hydrostatic_pressure_pa,
+            stored_potential_energy_change_j,
+            reservoir_potential_energy_out_j,
+            gravitational_work_j,
+        })
+    }
+
+    fn step_with_affine_load(
+        &self,
+        input: CarreauMeniscusInput,
+        pressure0: f64,
+        gradient: f64,
+        controls: CarreauTwoFluidControls,
         mut check: impl FnMut() -> Result<(), CarreauMeniscusError>,
     ) -> Result<CarreauTwoFluidStep, CarreauMeniscusError> {
         check()?;
@@ -394,15 +525,24 @@ impl CarreauTwoFluidCapillary {
                 "invalid two-fluid meniscus state, pressure or duration",
             ));
         }
-        let drive = input.applied_pressure_pa + self.invading.capillary_pressure_pa;
-        if !drive.is_finite() {
+        let drive = (-gradient).mul_add(input.wet_length_m, pressure0);
+        let boundary_drives = [
+            self.invading.minimum_wet_length_m,
+            self.maximum_wet_length_m,
+        ]
+        .map(|x| (-gradient).mul_add(x, pressure0));
+        if ![drive, pressure0, gradient]
+            .iter()
+            .chain(&boundary_drives)
+            .all(|v| v.is_finite())
+        {
             return Err(CarreauMeniscusError::Unrepresentable);
         }
         let mut evaluations = EvaluationWork {
             count: 0,
             check: &mut check,
         };
-        let envelope = self.envelope(drive, controls, &mut evaluations)?;
+        let envelope = self.envelope(boundary_drives, controls, &mut evaluations)?;
         let start = self.profile(
             input.wet_length_m,
             drive,
@@ -455,29 +595,80 @@ impl CarreauTwoFluidCapillary {
                 0,
             );
         }
-        let at_distance = |distance: f64, evaluations: &mut EvaluationWork<'_>| {
-            let x = if distance == maximum {
-                boundary
+        let coordinate = Coordinate::new(input.wet_length_m, drive, gradient, boundary)?;
+        let make_sample = |value: f64, evaluations: &mut EvaluationWork<'_>| {
+            let (x, local_drive, jacobian) = coordinate.point(
+                value,
+                input.wet_length_m,
+                direction,
+                pressure0,
+                drive,
+                gradient,
+            )?;
+            let profile = if value == 0.0 {
+                start
             } else {
-                input.wet_length_m + direction * distance
+                self.profile(x, local_drive, envelope, controls, evaluations)?
             };
-            if x == input.wet_length_m {
+            Ok::<_, CarreauMeniscusError>((profile, jacobian))
+        };
+        let (_, start_jacobian) = make_sample(0.0, &mut evaluations)?;
+        let at_coordinate = |value: f64, evaluations: &mut EvaluationWork<'_>| {
+            let (endpoint, jacobian) = make_sample(value, evaluations)?;
+            if endpoint.wet_length_m == input.wet_length_m {
                 return Err(CarreauMeniscusError::Unrepresentable);
             }
-            let endpoint = self.profile(x, drive, envelope, controls, evaluations)?;
+            if let Coordinate::Equilibrium { distance, .. } = coordinate {
+                // Integrate time in log distance, and each actual source heat
+                // in physical distance. Heat decays exponentially in the log
+                // coordinate, making a shared time/heat grid inefficient.
+                let ([time], time_change) = integrate_positive(
+                    value,
+                    [
+                        [self.integrands(&start)?[0] * start_jacobian],
+                        [self.integrands(&endpoint)?[0] * jacobian],
+                    ],
+                    controls.meniscus,
+                    |fraction| {
+                        let (profile, jacobian) = make_sample(value * fraction, evaluations)?;
+                        Ok([self.integrands(&profile)?[0] * jacobian])
+                    },
+                )?;
+                let wet_distance = distance * -fs_math::det::expm1(-value);
+                let decay = fs_math::det::exp(-value);
+                let heat_density = |profile: &CarreauTwoFluidProfile| {
+                    let integrands = self.integrands(profile)?;
+                    Ok::<_, CarreauMeniscusError>([integrands[1], integrands[2]])
+                };
+                let (heat, heat_change) = integrate_positive(
+                    wet_distance,
+                    [heat_density(&start)?, heat_density(&endpoint)?],
+                    controls.meniscus,
+                    |fraction| {
+                        let x = input.wet_length_m + direction * wet_distance * fraction;
+                        // Resolve the small remaining drive without subtracting
+                        // nearly equal reservoir and hydrostatic pressures.
+                        let local_drive = drive * ((1.0 - fraction) + fraction * decay);
+                        heat_density(&self.profile(
+                            x,
+                            local_drive,
+                            envelope,
+                            controls,
+                            evaluations,
+                        )?)
+                    },
+                )?;
+                return Ok(TwoFluidTravel {
+                    integrals: [time, heat[0], heat[1]],
+                    relative_change: time_change.max(heat_change),
+                    endpoint,
+                });
+            }
             let (integrals, relative_change) = integrate_positive(
-                distance,
+                value,
                 [self.integrands(&start)?, self.integrands(&endpoint)?],
                 controls.meniscus,
-                |fraction| {
-                    self.integrands(&self.profile(
-                        input.wet_length_m + direction * distance * fraction,
-                        drive,
-                        envelope,
-                        controls,
-                        evaluations,
-                    )?)
-                },
+                |fraction| self.integrands(&make_sample(value * fraction, evaluations)?.0),
             )?;
             Ok(TwoFluidTravel {
                 integrals,
@@ -487,26 +678,32 @@ impl CarreauTwoFluidCapillary {
         };
         // A local physical speed estimate keeps small steps local. Bracket
         // growth resolves either ordering of the two nonlinear resistance laws.
-        let speed = start.volumetric_flow_m3_s.abs() / self.invading.area_m2;
+        let speed = (start.volumetric_flow_m3_s.abs() / self.invading.area_m2) / start_jacobian;
         if !speed.is_finite() || speed <= 0.0 {
             return Err(CarreauMeniscusError::Unrepresentable);
         }
+        let maximum = coordinate.maximum();
         let mut upper = if input.duration_s >= maximum / speed {
             maximum
         } else {
             input.duration_s * speed
         };
-        let mut high = at_distance(upper, &mut evaluations)?;
+        let mut high = at_coordinate(upper, &mut evaluations)?;
         while high.integrals[0] < input.duration_s && upper < maximum {
             let next = (2.0 * upper).min(maximum);
             if next <= upper {
                 return Err(CarreauMeniscusError::Unrepresentable);
             }
             upper = next;
-            high = at_distance(upper, &mut evaluations)?;
+            high = at_coordinate(upper, &mut evaluations)?;
         }
         if upper == maximum && high.integrals[0] <= input.duration_s {
-            return self.finish(input, high.integrals[0], end, high, evaluations, 0);
+            return match coordinate {
+                Coordinate::Distance { .. } => {
+                    self.finish(input, high.integrals[0], end, high, evaluations, 0)
+                }
+                Coordinate::Equilibrium { .. } => Err(CarreauMeniscusError::Unrepresentable),
+            };
         }
         if (high.integrals[0] - input.duration_s).abs()
             <= controls.meniscus.relative_time_tolerance * input.duration_s
@@ -523,7 +720,7 @@ impl CarreauTwoFluidCapillary {
         let mut lower = 0.0;
         let mut distance = upper * (input.duration_s / high.integrals[0]);
         for iteration in 1..=controls.meniscus.maximum_iterations {
-            let trial = at_distance(distance, &mut evaluations)?;
+            let trial = at_coordinate(distance, &mut evaluations)?;
             let residual = trial.integrals[0] - input.duration_s;
             if residual.abs() <= controls.meniscus.relative_time_tolerance * input.duration_s {
                 return self.finish(
@@ -540,7 +737,16 @@ impl CarreauTwoFluidCapillary {
             } else {
                 upper = distance;
             }
-            let endpoint_speed = trial.endpoint.volumetric_flow_m3_s.abs() / self.invading.area_m2;
+            let (_, _, jacobian) = coordinate.point(
+                distance,
+                input.wet_length_m,
+                direction,
+                pressure0,
+                drive,
+                gradient,
+            )?;
+            let endpoint_speed =
+                (trial.endpoint.volumetric_flow_m3_s.abs() / self.invading.area_m2) / jacobian;
             let candidate = distance - residual * endpoint_speed;
             let next = if candidate.is_finite() && candidate > lower && candidate < upper {
                 candidate

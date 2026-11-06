@@ -3,6 +3,8 @@ use super::super::two_fluid::{
 };
 use super::*;
 
+mod inclined;
+
 fn pair(mu1: f64, thin1: bool, mu2: f64, thin2: bool) -> CarreauTwoFluidCapillary {
     CarreauTwoFluidCapillary::new(
         model(mu1, thin1, 0.0, 0.0),
