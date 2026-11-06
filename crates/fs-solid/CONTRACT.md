@@ -9829,3 +9829,10 @@ identity and atomic refusals. The existing P1/Q1/Hex20/Hex27 tensile cases
 continue through the same sampler. These are manufactured model checks;
 the observations add no failure-mode selection, damage evolution, fracture
 energy, post-failure redistribution or continuum maximum bound.
+
+
+### Sustained native plastic-shell contact
+
+`plastic_shell::contact` couples the original sustained unilateral/Coulomb solver to native layered-shell equilibrium and backward-Euler momentum. Immutable material-point/plane witnesses retain IDs, physical patch areas, reference mesh and layer bounds. The existing gauge-free P1 shell point rows observe translations and physical offset rotations; their exact transpose applies forces and moments without directly loading numerical drilling. Original element geometry is prepared once per contact interval. Every force proposal restarts from the same accepted complete material history, and the returned endpoint must match the solver's final mechanical force/path replay.
+
+Each contact reports solved force and pressure (normal force divided by explicit area), old/new gap, relative slip, body and obstacle work, physical Coulomb loss, normal complementarity work and numerical approach loss. Tangential and normal work defects have independent gates. Aggregate normal approach loss fn*g0 has its own finite budget, zero by default; it is never frictional or plastic heat. Retained drilling stiffness and reference mass stay unchanged, and failed solves, budgets, work gates or cancellation return no accepted state. Fixed frames and an affine point/plane gap path do not establish contact search, global CCD, enriched DKT interior trace accuracy, impact time or restitution. Three native regressions cover plastic pressing/sliding/release, analytical consistent-mass contact and atomic refusal; runtime execution remains pending the shared dependency build resource blocker.

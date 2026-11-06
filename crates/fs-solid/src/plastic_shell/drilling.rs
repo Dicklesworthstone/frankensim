@@ -233,7 +233,7 @@ impl<'m, L: SmallStrainLaw> SmallStrainShellProblem<'m, L> {
         })
     }
 
-    fn audit_reference_drilling(
+    pub(super) fn audit_reference_drilling(
         &self,
         elements: &[Element],
         old: Option<&[[f64; 6]]>,

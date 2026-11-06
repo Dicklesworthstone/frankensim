@@ -475,3 +475,6 @@ mod dynamics;
 
 #[path = "plastic_shell/drilling.rs"]
 mod drilling;
+
+#[path = "plastic_shell/contact.rs"]
+mod contact;

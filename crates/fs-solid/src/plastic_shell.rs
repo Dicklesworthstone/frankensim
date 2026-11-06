@@ -14,7 +14,9 @@
 //!
 //! This lane admits small strains and small rotations, dead nodal loading and
 //! facet-frame material axes. It does not model finite-strain forming, resolved
-//! transverse shear or evolving contact. The generic solve alone has no material
+//! transverse shear or evolving contact geometry. [`contact`] admits bounded
+//! sustained Coulomb contact on fixed reference point/plane witnesses.
+//! The generic solve alone has no material
 //! heat account; [`energy`] audits the native energetic laws. The drilling penalty
 //! remains a separate numerical elastic energy and never changes plastic state.
 
@@ -39,6 +41,9 @@ pub mod fatigue;
 
 /// Immutable numerical drilling stiffness across changing material coefficients.
 pub mod drilling;
+
+/// Sustained unilateral contact and friction on original physical shell points.
+pub mod contact;
 
 /// Original immutable section assignments; no material averaging across facets.
 #[derive(Debug, Clone, Copy)]
