@@ -76,6 +76,7 @@ pub struct PlanarMagnetostatics {
     materials: Vec<ResolvedMaterialStatePoint>,
     permeability_h_m: Vec<f64>,
     recoil_materials: Vec<Option<PlanarRecoilMaterial>>,
+    remanence_load: Option<Vec<f64>>,
     stiffness: Csr,
     thickness_m: f64,
 }
@@ -147,7 +148,8 @@ impl PlanarMagnetostatics {
         let mut recoil_materials = Vec::with_capacity(models.len());
         let mut permeability_h_m = Vec::with_capacity(models.len());
         let mut weights = Vec::with_capacity(models.len());
-        for model in models {
+        let mut remanence_load: Option<Vec<f64>> = None;
+        for (cell, model) in models.enumerate() {
             poll(cancelled)?;
             let (material, recoil, mu) = match model {
                 PlanarMagneticMaterial::Linear(material) => {
@@ -165,6 +167,26 @@ impl PlanarMagnetostatics {
                 return Err(MagneticError::Invalid(
                     "reluctivity must be representably positive",
                 ));
+            }
+            if let Some(recoil) = &recoil {
+                let face = mesh.faces()[cell];
+                let volume = mesh
+                    .face_measure(cell)
+                    .ok_or(MagneticError::Invalid("missing triangle measure"))?;
+                let br = recoil.remanence_t();
+                let source_h = [finite(br[0] / mu)?, finite(br[1] / mu)?];
+                let gradients = gradients(face.map(|v| mesh.vertices()[v as usize]))?;
+                let rhs = remanence_load.get_or_insert_with(|| vec![0.0; mesh.vertices().len()]);
+                // Exact weak load integral(Br/mu curl(phi)) dV, including
+                // interface and exterior terms. Immutable geometry and source
+                // data prepare this once for static and transient consumers.
+                for (local, &vertex) in face.iter().enumerate() {
+                    let moment = finite(
+                        source_h[0]
+                            .mul_add(gradients[local][1], -source_h[1] * gradients[local][0]),
+                    )?;
+                    rhs[vertex as usize] = finite(volume.mul_add(moment, rhs[vertex as usize]))?;
+                }
             }
             permeability_h_m.push(mu);
             materials.push(material);
@@ -200,6 +222,7 @@ impl PlanarMagnetostatics {
             materials,
             permeability_h_m,
             recoil_materials,
+            remanence_load,
             stiffness,
             thickness_m,
         })
@@ -288,7 +311,11 @@ impl PlanarMagnetostatics {
         }
         let n = self.mesh.vertices().len();
         let prescribed = self.admit_boundary(boundary_potential_wb_m, cancelled)?;
-        let mut rhs = vec![0.0; n];
+        let mut rhs = if include_remanence {
+            self.remanence_load.clone().unwrap_or_else(|| vec![0.0; n])
+        } else {
+            vec![0.0; n]
+        };
         for (cell, face) in self.mesh.faces().iter().enumerate() {
             poll(cancelled)?;
             let volume = self
@@ -298,27 +325,6 @@ impl PlanarMagnetostatics {
             let load = finite(current_density_a_m2[cell] * (volume / 3.0))?;
             for &vertex in face {
                 rhs[vertex as usize] = finite(rhs[vertex as usize] + load)?;
-            }
-            if let Some(recoil) = self.recoil_materials[cell]
-                .as_ref()
-                .filter(|_| include_remanence)
-            {
-                let br = recoil.remanence_t();
-                let source_h = [
-                    finite(br[0] / self.permeability_h_m[cell])?,
-                    finite(br[1] / self.permeability_h_m[cell])?,
-                ];
-                let gradients = gradients(face.map(|v| self.mesh.vertices()[v as usize]))?;
-                // Exact weak load ∫(Br/mu)·(d_y phi,-d_x phi) dV. Keeping the
-                // whole P1 moment preserves both interface and exterior terms:
-                // a constant Br has zero volume curl but a nonzero boundary load.
-                for (local, &vertex) in face.iter().enumerate() {
-                    let moment = finite(
-                        source_h[0]
-                            .mul_add(gradients[local][1], -source_h[1] * gradients[local][0]),
-                    )?;
-                    rhs[vertex as usize] = finite(volume.mul_add(moment, rhs[vertex as usize]))?;
-                }
             }
         }
         let free: Vec<_> = (0..n).filter(|&v| prescribed[v].is_none()).collect();
@@ -582,7 +588,9 @@ impl PlanarMagnetostatics {
     ) -> Result<Vec<usize>, MagneticError> {
         let n = prescribed.len();
         if n != mesh.vertices().len() {
-            return Err(MagneticError::Invalid("one trace slot per mesh vertex required"));
+            return Err(MagneticError::Invalid(
+                "one trace slot per mesh vertex required",
+            ));
         }
         let mut neighbors = vec![Vec::new(); n];
         for &[a, b] in mesh.edges() {

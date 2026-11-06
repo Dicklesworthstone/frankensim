@@ -1,13 +1,16 @@
 //! Stationary planar induction with floating, electrically isolated conductors.
 //!
 //! The SAME P1 vector potential and material FEEC stiffness obey
-//! `K A_mid + C_sigma (A_next-A_old)/dt = load(J_impressed_mid)`.
+//! `K A_mid - load(Br/mu) + C_sigma (A_next-A_old)/dt = load(J_impressed_mid)`.
 //! Each connected conductor has an axial scalar-potential gradient chosen so
 //! its integrated axial current is zero: `E_z = mean_sigma(dA/dt)-dA/dt`.
 //! Thus `C_sigma` is the consistent P1 mass minus its regional weighted-mean
 //! projection. It is positive semidefinite; the original anchored magnetic
 //! stiffness makes the increment solve positive definite. No lumped or fitted
 //! magnetic loss is added. Triangle integrals of sigma*E_z^2 supply actual heat.
+//! Fixed source-resolved recoil magnets use H=(B-Br)/mu and the original
+//! fixed-remanence energy reference; Br is neither an impressed electrical
+//! source nor an evolving magnetization state.
 //!
 //! This is a fixed-geometry, linear isotropic magnetoquasistatic section, invariant in z.
 //! Opposite axial currents close outside the modeled section; their end fields
@@ -159,7 +162,7 @@ pub struct EddyMagneticCell {
     pub volume_m3: f64,
     /// Curl of the original/accepted P1 potential; independent of gauge offsets.
     pub flux_density_t: [[f64; 2]; 2],
-    /// Actual endpoint Helmholtz energies V*|B|²/(2*mu).
+    /// Actual endpoint Helmholtz energies; recoil cells use V*|B-Br|²/(2*mu).
     pub free_energy_j: [f64; 2],
     /// ½ V B_old·B_next (1/mu_next−1/mu_old), signed parameter transfer.
     pub parameter_work_j: f64,
@@ -250,7 +253,10 @@ impl EddySection for PlanarMagnetostatics {
         triangle: usize,
         material: &ResolvedMaterialStatePoint,
     ) -> Result<(), EddyError> {
-        admit_fixed_magnetic_refresh(&self.materials[triangle], material)?;
+        match &self.recoil_materials[triangle] {
+            Some(recoil) => recoil.material().admit_fixed_material_refresh(material)?,
+            None => admit_fixed_magnetic_refresh(&self.materials[triangle], material)?,
+        }
         Ok(())
     }
 }
@@ -592,6 +598,14 @@ fn magnetic_load(
             cols.iter().zip(vals).map(|(&w, &a)| a * centered[w]).sum(),
         )?);
     }
+    if let Some(remanence) = &problem.remanence_load {
+        // The static owner prepares the complete weak source once. Its
+        // subtraction gives the gradient of the fixed-remanence energy.
+        for (value, &source) in result.iter_mut().zip(remanence) {
+            poll(cancelled)?;
+            *value = finite(*value - source)?;
+        }
+    }
     Ok(result)
 }
 
@@ -760,9 +774,9 @@ impl<'m> PlanarEddy<'m> {
             ));
         }
         let problem = initial.problem;
-        if problem.has_permanent_magnets() {
+        if initial.is_incremental_response() {
             return Err(EddyError::Invalid(
-                "permanent-magnet induction requires explicit remanence source and parameter-work ownership",
+                "induction requires an actual field, not an incremental winding response",
             ));
         }
         let prescribed = problem.admit_boundary(boundary, cancelled)?;
@@ -871,6 +885,8 @@ impl<'m> PlanarEddy<'m> {
     /// endpoints without resetting A or inventing an initialization impulse.
     /// The returned parameter work MUST be closed by a thermal/material owner
     /// or explicit external supply; it is neither Joule heat nor source work.
+    /// Fixed-recoil histories retain their magnetic owner; conductivity-only
+    /// refresh uses `step_to_candidate` with the original recoil source pinned.
     #[allow(clippy::too_many_arguments)]
     pub fn step_with_materials_candidate(
         &self,
@@ -883,6 +899,11 @@ impl<'m> PlanarEddy<'m> {
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<PlanarEddyCandidate<'m>, EddyError> {
         poll(cancelled)?;
+        if self.problem.has_permanent_magnets() {
+            return Err(EddyError::Invalid(
+                "fixed-remanence induction cannot replace magnetic materials",
+            ));
+        }
         if materials.len() != self.problem.materials.len() {
             return Err(EddyError::Invalid(
                 "complete original magnetic material correspondence required",
@@ -1078,17 +1099,21 @@ impl<'m> PlanarEddy<'m> {
             let b1 = field.magnetic_flux_density_t()[triangle];
             let mu0 = self.problem.permeability_h_m[triangle];
             let mu1 = next_problem.permeability_h_m[triangle];
-            let parameter = finite(
-                0.5 * volume_m3 * (b0[0] * b1[0] + b0[1] * b1[1]) * (mu1.recip() - mu0.recip()),
-            )?;
+            let parameter = if mu0 == mu1 {
+                0.0
+            } else {
+                finite(
+                    0.5 * volume_m3 * (b0[0] * b1[0] + b0[1] * b1[1]) * (mu1.recip() - mu0.recip()),
+                )?
+            };
             parameter_work_j = finite(parameter_work_j + parameter)?;
             magnetic_cells.push(EddyMagneticCell {
                 triangle,
                 volume_m3,
                 flux_density_t: [b0, b1],
                 free_energy_j: [
-                    finite(0.5 * volume_m3 * (b0[0] * b0[0] + b0[1] * b0[1]) / mu0)?,
-                    finite(0.5 * volume_m3 * (b1[0] * b1[0] + b1[1] * b1[1]) / mu1)?,
+                    old_field.cell_energy_j()[triangle],
+                    field.cell_energy_j()[triangle],
                 ],
                 parameter_work_j: parameter,
             });

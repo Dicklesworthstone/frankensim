@@ -583,29 +583,31 @@ fn recoil_requires_original_units_explicit_source_roles_and_fixed_condition_doma
 }
 
 #[test]
-fn affine_windings_admit_fixed_magnets_while_dynamic_induction_still_refuses() {
+fn fixed_magnets_admit_actual_induction_fields_but_not_winding_derivatives() {
     let problem = layered_problem(recoil(2e-6, 0.8), [0.0, 1.0]);
     let field = problem
         .solve(&[0.0; 4], &ends(0.0), config(), &mut || false)
         .unwrap();
-    assert!(matches!(
-        PlanarEddy::new(
-            &field,
-            vec![],
-            &[0, 1, 2, 3],
-            &ends(0.0),
-            0.0,
-            EddyControls {
-                linear: config(),
-                energy_tolerance_j: 1e-8,
-                current_balance_tolerance_a: 1e-8
-            },
-            &mut || false
-        ),
-        Err(EddyError::Invalid(
-            "permanent-magnet induction requires explicit remanence source and parameter-work ownership"
-        ))
-    ));
+    let controls = EddyControls {
+        linear: config(),
+        energy_tolerance_j: 1e-8,
+        current_balance_tolerance_a: 1e-8,
+    };
+    let state = PlanarEddy::new(
+        &field,
+        vec![],
+        &[0, 1, 2, 3],
+        &ends(0.0),
+        0.0,
+        controls,
+        &mut || false,
+    )
+    .unwrap();
+    near(state.energy_j(), field.energy_j());
+    assert_eq!(
+        state.field(&mut || false).unwrap().energy_reference(),
+        MagneticEnergyReference::FixedRemanence
+    );
     let winding = PlanarWindingBasis::new_with_fixed_remanence(
         &problem,
         vec![vec![1.0, 1.0, -1.0, -1.0]],
@@ -625,6 +627,20 @@ fn affine_windings_admit_fixed_magnets_while_dynamic_induction_still_refuses() {
     .unwrap();
     assert!(winding.bias_field().is_some());
     assert!(winding.unit_fields()[0].is_incremental_response());
+    assert!(matches!(
+        PlanarEddy::new(
+            &winding.unit_fields()[0],
+            vec![],
+            &[0, 1, 2, 3],
+            &ends(0.0),
+            0.0,
+            controls,
+            &mut || false,
+        ),
+        Err(EddyError::Invalid(
+            "induction requires an actual field, not an incremental winding response"
+        ))
+    ));
     let reconstructed = winding.field_for_currents(&[0.0], &mut || false).unwrap();
     near(reconstructed.energy_j(), field.energy_j());
     assert!(matches!(

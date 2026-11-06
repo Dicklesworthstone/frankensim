@@ -1,7 +1,7 @@
 //! Eulerian planar moving-conductor induction on the original field owner.
 //!
 //! With B=(A_y,-A_x), (v cross B)_z=-v.grad(A). Midpoint evolution solves
-//! `K A_mid + P_sigma(Adot + v.grad(A_mid)) = load(J_impressed_mid)`.
+//! `K A_mid - load(Br/mu) + P_sigma(Adot + v.grad(A_mid)) = load(J_impressed_mid)`.
 //! P_sigma is the SAME exact P1 mass and floating-region mean projection as
 //! stationary induction. The generally nonsymmetric operator uses FGMRES.
 //! Current, Joule heat and J cross B use that same stage field, closing
@@ -12,7 +12,9 @@
 //! flow through a stationary homogeneous conductor domain or motion leaving
 //! its occupancy/material field invariant; it does not move a finite body,
 //! material interfaces or magnetic sources. It is not an ALE/sliding-mesh,
-//! terminal-current, nonlinear or permanent-magnet evolution model.
+//! terminal-current or nonlinear evolution model. Source-admitted recoil
+//! remanence stays fixed in the original Eulerian frame; this does not move,
+//! rotate or demagnetize a permanent magnet.
 //! The nonrelativistic MQS/Lorentz convention and fixed-domain restriction are
 //! described in COMSOL's AC/DC guide, "Velocity (Lorentz Term)":
 //! https://doc.comsol.com/6.4/doc/com.comsol.help.acdc/acdc_ug_magnetic_fields.08.040.html.
@@ -848,6 +850,7 @@ mod tests {
             materials: vec![],
             permeability_h_m: vec![],
             recoil_materials: vec![],
+            remanence_load: None,
             stiffness: diagonal.assemble(),
             thickness_m: 0.3,
         };

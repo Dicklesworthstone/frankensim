@@ -24,8 +24,8 @@
 //! in the low-induction regime: their induced currents do not update this field.
 //! `planar::eddy` additionally retains stationary planar induction history and
 //! spatial Ohmic heat, including floating conductor current-return constraints.
-//! The linear midpoint induction owner still refuses permanent-magnet bias;
-//! the nonlinear backward-Euler owner includes fixed oriented recoil sources.
+//! Both linear midpoint and nonlinear backward-Euler induction include fixed
+//! oriented recoil sources and preserve their original operating envelopes.
 //! `planar::eddy::moving` adds prescribed Eulerian conductor velocity, spatial
 //! induction feedback and consistent Joule/Lorentz work on the same fixed mesh.
 //! `planar::eddy::nonlinear::moving` extends that motion to source-bound H(B)

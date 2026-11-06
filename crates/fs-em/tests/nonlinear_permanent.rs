@@ -5,6 +5,8 @@
 mod common;
 #[path = "nonlinear_eddy/common.rs"]
 mod induction;
+#[path = "nonlinear_permanent/midpoint.rs"]
+mod midpoint;
 #[path = "nonlinear_winding_circuit/common.rs"]
 mod winding;
 

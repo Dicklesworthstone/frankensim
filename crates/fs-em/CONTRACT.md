@@ -42,6 +42,37 @@ scalar-play voltage-driven minor loops with both winding polarities, ideal-curre
 drive with core eddy diffusion and end storage, the branchless backward-Euler RL
 limit, and source/reassembly, budget and cancellation rollback.
 
+## Fixed-recoil midpoint and Eulerian moving-conductor induction
+
+`PlanarEddy` accepts actual fields from the original `PlanarMagnetostatics`
+owner with source-admitted recoil magnets. Its midpoint residual uses the full
+weak remanence moment, `K A_mid - load(Br/mu)`, including interface and exterior
+terms. The original projected conductor mass, current-return constraints and
+checked sparse solve remain authoritative. Recovered endpoint and per-cell
+storage use the same fixed-remanence energy `V*|B-Br|^2/(2*mu)`; stationary work
+closes `delta W + Q_Joule = W_impressed` without inventing electrical work or
+heat for the retained remanence.
+
+The existing Eulerian moving-conductor path reuses that affine gradient and
+the actual midpoint B for Ohm's law and Lorentz work. Its account remains
+`delta W + Q_Joule + W_mechanical = W_impressed`. The magnet's remanence,
+orientation and occupancy stay fixed in the original frame. Every recovered
+field retains the original recoil operating-envelope checks. The immutable
+magnetic owner prepares its optional nodal remanence load once and reuses it
+in static and transient solves; induced-only problems allocate no such cache.
+
+Initialization rejects incremental winding derivative fields. Conductivity
+refresh on a recoil cell requires the original fixed-magnetic-source admission;
+replacing magnetic materials through the induced-only parameter-work path
+refuses. This supports fixed recoil bias, not changing remanence, irreversible
+demagnetization, or motion of a finite magnet or material interface.
+
+Manufactured-source regressions cover interface and natural-boundary remanence,
+analytic midpoint decay and second-order refinement, per-cell shifted storage,
+source replacement refusal, a stationary magnet with a separate moving
+conductor, zero-velocity agreement and complete-candidate recoil-envelope
+refusal. The moving reference independently checks both heat and Lorentz work.
+
 ## Shared end flux in nonlinear differential and harmonic winding response
 
 The planar and spatial incremental bases accept the same original passive
@@ -1451,7 +1482,7 @@ Each triangle reports actual old/new curl A, magnetic free energy, volume and si
 
 `PlanarMagnetostatics::new_with_material_models` accepts induced-linear and `PlanarRecoilMaterial` cells on the same mesh. Each magnet supplies a complete `ResolvedRecoilMaterial` and an explicit unit direction in the original planar frame. The same FEEC stiffness and checked CG solve impressed current together with the exact P1 weak load `integral (Br/mu_recoil).rot(grad(phi)) dV`. Retaining this whole moment includes material-interface and natural-boundary source contributions even when Br is constant inside a cell. Unprescribed exterior edges continue to impose zero tangential physical H.
 
-Recovery reports `H=(B-Br)/mu_recoil`, source-envelope operating margins, and cell storage `V*(B-Br).H/2`, with the `FixedRemanence` reference explicit. Induced cells retain `V*B.H/2`. A source-envelope exit refuses the complete field, including fully prescribed solutions. This is fixed-state constitutive storage, not a force, hysteresis-loss, demagnetization-history or live parameter-work result. Existing explicit frame/triangle sampling consumes the resulting B. Fixed-remanence winding response requires the explicit affine constructor described below. The stationary eddy-history owner continues to refuse permanent-magnet bias until its source/storage trajectory accounts for Br.
+Recovery reports `H=(B-Br)/mu_recoil`, source-envelope operating margins, and cell storage `V*(B-Br).H/2`, with the `FixedRemanence` reference explicit. Induced cells retain `V*B.H/2`. A source-envelope exit refuses the complete field, including fully prescribed solutions. This is fixed-state constitutive storage, not a force, hysteresis-loss, demagnetization-history or live parameter-work result. Existing explicit frame/triangle sampling consumes the resulting B. Fixed-remanence winding response requires the explicit affine constructor described below. Stationary midpoint and Eulerian moving-conductor histories retain the original fixed Br source and its shifted storage reference as described above.
 
 The recoil convention follows [COMSOL's remanent-flux constitutive relation](https://doc.comsol.com/6.3/doc/com.comsol.help.acdc/acdc_ug_magnetic_fields.08.032.html); the shifted fixed-state energy reference follows the linear-recoil discussion in [FEMM's permanent-magnet energy note](https://femm.info/doku/doku.php?id=pmenergy). `material_permanent` adds manufactured-source regressions for constant-Br natural boundaries, current-plus-remanence loading, magnet/air interface fields, direction reversal, material/temperature swaps, source/domain refusals and consumer guards. These are analytic model checks, not measured catalog-material validation.
 
