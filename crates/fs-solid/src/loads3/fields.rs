@@ -25,6 +25,17 @@ pub enum SurfaceField3<'a> {
     Traction { faces: &'a [usize], nodal_pascals: &'a [[[f64; 3]; 3]] },
     /// Three inward-positive scalar pressures per selected face [Pa].
     Pressure { faces: &'a [usize], nodal_pascals: &'a [[f64; 3]] },
+    /// Unclipped P1 gauge pressure, integrated as `max(0, p(x))` on each
+    /// reference triangle. Negative coefficients locate the dry part; clipping
+    /// the three samples BEFORE interpolation would load that dry area.
+    ///
+    /// For a uniform liquid, supply `rho * gravity dot (x - surface_point)`.
+    /// The zero-pressure plane is prescribed, atmospheric pressure is already
+    /// subtracted, and positive values act inward. Exact wet-area integration
+    /// retains nodal work and first moments even when a face crosses the plane.
+    /// This is a reference dead load, without fluid evolution or a follower
+    /// tangent; use the nonlinear pressure owner for moving immersion geometry.
+    FreeSurfacePressure { faces: &'a [usize], nodal_pascals: &'a [[f64; 3]] },
 }
 
 /// P1 body-force density [N/m^3], never a mass density or acceleration.
@@ -233,7 +244,8 @@ impl<'m> TetLoadGeometry3<'m> {
             poll(cx)?;
             let (faces, count) = match *row {
                 SurfaceField3::Traction { faces, nodal_pascals } => (faces, nodal_pascals.len()),
-                SurfaceField3::Pressure { faces, nodal_pascals } => (faces, nodal_pascals.len()),
+                SurfaceField3::Pressure { faces, nodal_pascals }
+                | SurfaceField3::FreeSurfacePressure { faces, nodal_pascals } => (faces, nodal_pascals.len()),
             };
             if faces.is_empty() || faces.len() > self.faces.len() || faces.len() != count {
                 return Err(LoadError3::Invalid("one P1 field per selected exterior face required"));
@@ -249,16 +261,30 @@ impl<'m> TetLoadGeometry3<'m> {
         let mut forces = vec![0.0; full_dofs];
         for row in surfaces {
             let faces = match *row {
-                SurfaceField3::Traction { faces, .. } | SurfaceField3::Pressure { faces, .. } => faces,
+                SurfaceField3::Traction { faces, .. } | SurfaceField3::Pressure { faces, .. }
+                | SurfaceField3::FreeSurfacePressure { faces, .. } => faces,
             };
             for (index, &id) in faces.iter().enumerate() {
                 poll(cx)?;
                 let face = self.faces[id];
+                if let SurfaceField3::FreeSurfacePressure { nodal_pascals, .. } = *row {
+                    let weights = crate::hyper3::pressure::free_surface_face_pressure_weights(
+                        nodal_pascals[index],
+                    ).map_err(|_| LoadError3::Invalid("nonfinite free-surface pressure or moment arithmetic"))?;
+                    for (&node, weight) in face.nodes.iter().zip(weights) {
+                        for c in 0..3 {
+                            let contribution = finite(-finite(face.area_m2 * weight)? * face.outward_normal[c])?;
+                            forces[3*node+c] = finite(forces[3*node+c] + contribution)?;
+                        }
+                    }
+                    continue;
+                }
                 let values = match *row {
                     SurfaceField3::Traction { nodal_pascals, .. } => nodal_pascals[index],
                     SurfaceField3::Pressure { nodal_pascals, .. } => {
                         nodal_pascals[index].map(|p| face.outward_normal.map(|n| -p * n))
                     }
+                    SurfaceField3::FreeSurfacePressure { .. } => unreachable!("wet integration handled above"),
                 };
                 scatter(&mut forces, face.nodes, values, face.area_m2)?;
             }

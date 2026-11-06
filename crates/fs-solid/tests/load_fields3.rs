@@ -34,6 +34,101 @@ fn g1_pressure_gradient_keeps_its_force_and_bending_moment() {
 }
 
 #[test]
+fn g1_partly_submerged_wall_has_exact_hydrostatic_force_and_center_of_pressure() {
+    let height: f64 = 0.37;
+    let specific_weight = 9_810.0;
+    for n in [1, 2, 4] {
+        let mesh = block([n; 3], [1.0; 3]);
+        with_cx(|cx| {
+            let g = TetLoadGeometry3::new(&mesh.nodes, &mesh.tets, Default::default(), 2000, cx).unwrap();
+            let right: Vec<_> = g.faces().iter().enumerate()
+                .filter_map(|(i, f)| (f.outward_normal[0] > 0.99).then_some(i)).collect();
+            let values: Vec<_> = right.iter().map(|&i| g.faces()[i].nodes.map(|node|
+                specific_weight * (height - mesh.nodes[node][2]))).collect();
+            let case = g.assemble_p1_fields(&[SurfaceField3::FreeSurfacePressure {
+                faces: &right, nodal_pascals: &values,
+            }], VolumeField3::None, &[], cx).unwrap();
+            let (force, moment) = case.resultant([0.0; 3], cx).unwrap();
+            // Independent integrals over the wet rectangle: center of pressure
+            // is h/3 above its bottom, not the wet area's centroid h/2.
+            let load = specific_weight * height.powi(2) / 2.0;
+            for (a, b) in force.into_iter().zip([-load, 0.0, 0.0]) { close(a, b, 2e-11); }
+            for (a, b) in moment.into_iter().zip([0.0, -load*height/3.0, load/2.0]) { close(a, b, 2e-11); }
+        });
+    }
+}
+
+#[test]
+fn g1_free_surface_load_preserves_archimedes_buoyancy_and_native_reactions() {
+    let height = 0.37;
+    let specific_weight = 9_810.0;
+    for n in [1, 2, 4] {
+        let mesh = block([n; 3], [1.0; 3]);
+        with_cx(|cx| {
+            let g = TetLoadGeometry3::new(&mesh.nodes, &mesh.tets, Default::default(), 2000, cx).unwrap();
+            let faces: Vec<_> = (0..g.faces().len()).collect();
+            let values: Vec<_> = g.faces().iter().map(|face| face.nodes.map(|node|
+                specific_weight * (height - mesh.nodes[node][2]))).collect();
+            let case = g.assemble_p1_fields(&[SurfaceField3::FreeSurfacePressure {
+                faces: &faces, nodal_pascals: &values,
+            }], VolumeField3::None, &[], cx).unwrap();
+            let buoyancy = specific_weight * height;
+            let (force, moment) = case.resultant([0.0; 3], cx).unwrap();
+            for (a, b) in force.into_iter().zip([0.0, 0.0, buoyancy]) { close(a, b, 3e-10); }
+            for (a, b) in moment.into_iter().zip([buoyancy/2.0, -buoyancy/2.0, 0.0]) { close(a, b, 3e-10); }
+            if n == 1 {
+                let material = TetElasticMaterial::try_new(2.0, 1e8, 0.25, [7; 32]).unwrap();
+                let thermal = TetThermalStrainState::try_new(300.0, 300.0, [0.0; 6], [7; 32], ContentHash([8; 32]), 0.1).unwrap();
+                let fixed: Vec<_> = mesh.nodes.iter().enumerate().filter(|(_, p)| p[2] == 0.0)
+                    .flat_map(|(i, _)| [3*i, 3*i+1, 3*i+2]).collect();
+                let problem = TetLinearElasticProblem { nodes_m: &mesh.nodes, tetrahedra: &mesh.tets,
+                    materials: TetMaterialField::Uniform(&material), fixed_dofs: &fixed, budget: Default::default() };
+                let solved = case.solve(&problem, TetThermalStrainField::Uniform(&thermal),
+                    Default::default(), ContentHash([9; 32]), 0.01, cx).unwrap();
+                assert!(solved.free_force_residual_n < 1e-6);
+                close(solved.support_reactions_n.iter().map(|r| r[2]).sum::<f64>(), -buoyancy, 1e-6);
+            }
+        });
+    }
+}
+
+#[test]
+fn g0_wet_triangle_uses_unclipped_coefficients_and_consistent_virtual_work() {
+    let mesh = block([1; 3], [1.0; 3]);
+    with_cx(|cx| {
+        let g = TetLoadGeometry3::new(&mesh.nodes, &mesh.tets, Default::default(), 100, cx).unwrap();
+        let face = g.faces()[0];
+        let case = g.assemble_p1_fields(&[SurfaceField3::FreeSurfacePressure {
+            faces: &[0], nodal_pascals: &[[24.0, -24.0, -24.0]],
+        }], VolumeField3::None, &[], cx).unwrap();
+        // The wet triangle has one quarter of the original area. Exact P1
+        // virtual work retains nonzero forces at both originally dry nodes.
+        for (i, weight) in [24.0/16.0, 24.0/96.0, 24.0/96.0].into_iter().enumerate() {
+            for c in 0..3 {
+                close(component(case.nodal_forces_n(), 3*face.nodes[i]+c),
+                    -face.area_m2 * face.outward_normal[c] * weight, 1e-14);
+            }
+        }
+        for values in [[-1.0, 0.0, -2.0], [0.0; 3]] {
+            let dry = g.assemble_p1_fields(&[SurfaceField3::FreeSurfacePressure {
+                faces: &[0], nodal_pascals: &[values],
+            }], VolumeField3::None, &[], cx).unwrap();
+            assert!(dry.nodal_forces_n().is_empty());
+        }
+        let wet_values = [[1.0, 3.0, 9.0]];
+        let wet = g.assemble_p1_fields(&[SurfaceField3::FreeSurfacePressure {
+            faces: &[0], nodal_pascals: &wet_values,
+        }], VolumeField3::None, &[], cx).unwrap();
+        let affine = g.assemble_p1_fields(&[SurfaceField3::Pressure {
+            faces: &[0], nodal_pascals: &wet_values,
+        }], VolumeField3::None, &[], cx).unwrap();
+        for dof in 0..3*mesh.nodes.len() {
+            close(component(wet.nodal_forces_n(), dof), component(affine.nodal_forces_n(), dof), 1e-14);
+        }
+    });
+}
+
+#[test]
 fn g0_surface_fields_use_consistent_not_equal_nodal_shares() {
     let mesh = block([1; 3], [1.0; 3]);
     with_cx(|cx| {
@@ -121,7 +216,11 @@ fn g0_bad_field_shapes_values_and_partition_refuse_without_altering_geometry() {
         for (ids, values) in [(vec![], vec![]), (vec![0], vec![]), (vec![0, 0], vec![[1.0; 3]; 2]),
             (vec![g.faces().len()], vec![[1.0; 3]]), (vec![0], vec![[f64::NAN; 3]])] {
             assert!(g.assemble_p1_fields(&[SurfaceField3::Pressure { faces: &ids, nodal_pascals: &values }], VolumeField3::None, &[], cx).is_err());
+            assert!(g.assemble_p1_fields(&[SurfaceField3::FreeSurfacePressure { faces: &ids, nodal_pascals: &values }], VolumeField3::None, &[], cx).is_err());
         }
+        assert!(g.assemble_p1_fields(&[SurfaceField3::FreeSurfacePressure {
+            faces: &[0], nodal_pascals: &[[-f64::INFINITY, -1.0, 0.0]],
+        }], VolumeField3::None, &[], cx).is_err());
         assert!(g.assemble_p1_fields(&[], VolumeField3::PerNode(&[]), &[], cx).is_err());
         assert!(g.assemble_p1_fields(&[], VolumeField3::PerElement(&[]), &[], cx).is_err());
         let bad = vec![[f64::INFINITY; 3]; mesh.nodes.len()];

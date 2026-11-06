@@ -2399,6 +2399,29 @@ G0/G1 regressions cover combined initial strain and dead force, exact affine
 displacement/stress/energy, fixed-support reactions, empty-load equivalence,
 malformed forces, stale-load refusal, signed coupon loads and strain admission.
 
+## Exact partially submerged reference pressure loads
+
+`loads3::fields::SurfaceField3::FreeSurfacePressure` integrates the positive
+part of an authored P1 gauge-pressure field over each selected exterior face.
+The caller supplies the original signed coefficients; negative values locate
+the dry portion. The existing nonlinear pressure owner's exact clipped-triangle
+kernel supplies consistent nodal forces without mesh refinement, face sampling,
+or additional per-face allocations. Clipping nodal samples before interpolation
+would load dry area and is not equivalent.
+
+Uniform-liquid hydrostatics uses `p(x) = rho * gravity dot (x - surface_point)`.
+Atmospheric pressure is already subtracted. The resulting case feeds the native
+linear static solver and the existing nodal-load history path, preserving total
+force, first moments and work against P1 displacement. The load remains fixed
+on reference geometry; moving immersion, follower stiffness, fluid evolution,
+capillarity and cavitation require their separate owners.
+
+G0/G1/G3 regressions in `tests/load_fields3.rs` check exact wet-triangle nodal
+work, a partially submerged wall's force and center of pressure on three meshes,
+Archimedes buoyancy and torque, native support reactions, wet/dry limits, and
+invalid coefficients and face assignments. These are discrete manufactured
+hydrostatic controls, not free-surface-flow validation.
+
 ## Material-bound spatial gravity loads
 
 `loads3::history::VolumeHistory3::FixedAcceleration` accepts uniform, nodal P1,

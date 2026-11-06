@@ -44,6 +44,17 @@ pub use stratified::{HydrostaticDensityLayer, StratifiedHydrostaticPressure};
 
 use free_surface::FaceMoments;
 
+/// Shared exact wet-face integration for reference and follower pressure loads.
+/// Values are UNCLIPPED P1 gauge-pressure coefficients; clipping is spatial.
+pub(crate) fn free_surface_face_pressure_weights(
+    values: [f64; 3],
+) -> Result<[f64; 3], HyperTetError> {
+    for value in values {
+        finite(value)?;
+    }
+    Ok(free_surface::face_moments::<false>(values)?.weights_pa)
+}
+
 /// Signed differential pressure in Pa, held over the declared load interval.
 /// Positive pressure acts inward; negative pressure prescribes outward traction.
 #[derive(Debug, Clone, Copy)]
