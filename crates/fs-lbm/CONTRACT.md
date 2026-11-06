@@ -13561,7 +13561,7 @@ retain their individual temperatures and series resistances. Their powers and
 conduction and finite storage. There is no additional timestep or thermal solve.
 
 `solid_boundary_heat_j` is signed inward heat on finite solids;
-`absolute_solid_boundary_heat_j` is the non-cancelling sum of its face magnitudes.
+`absolute_solid_boundary_heat_j` is the non-cancelling sum of its bath-channel magnitudes.
 Both are subaccounts of the existing total boundary report, never extra deposits.
 Solid storage closes authored solid heat plus solid boundary heat minus
 `solid_to_fluid_heat_j`, within the shared energy-defect budget. Wall endpoint
@@ -13618,3 +13618,50 @@ cancellation/retry supplement this physical distinction. These are synthetic
 constitutive regression sources, not experimental validation. Geometry,
 interfacial storage and external mechanical conditions do not evolve here;
 the original first-order heat/flow split remains authoritative.
+
+### Resolved exposed-surface conduction in phase-volume flow
+
+All four implicit conjugate entries accept `ThermalVolumeBoundaries`, borrowing
+fixed `baths` and original per-face `sources`. Existing fixed-bath slices and
+arrays convert with `.into()` without allocation. Fluid-only public signatures
+remain unchanged. Each `ThermalVolumeBoundaryFace::Law` borrows a native
+`ImplicitBoundaryLaw`; `Exchange` borrows an `ImplicitBoundaryExchangeLaw` for
+two distinct baths sharing one physical surface. The receiving cell retains
+its exact original caloric object, actual graded face area and half-width.
+Mixed fixed/source duplicates, occupied faces and unbound receivers refuse.
+
+This admits the existing `ImplicitLayerBoundary` source-integrated pure-phase
+k(T) half-cell/film balance, and native `GrayAmbientBoundary` or
+`GrayTwoBathBoundary` surface solves. Their physical assumptions remain distinct:
+the integrated layer enforces its material-temperature support through the
+half-cell; gray owners use cellwise k(h), its derivative and optionally original
+enthalpy-dependent emissivity/HTC while solving the actual exterior temperature.
+Film resistance belongs to the original boundary law. For gray owners the
+descriptor's resistance is a coating/contact before the exterior surface;
+the convective HTC owns its own film and is never counted again there.
+
+The same per-cell source aggregation supplies every selected face's complete
+inward heat and analytic enthalpy derivative to the existing sparse implicit
+graph. Original source callbacks retain their bounded work and cancellation
+checks. The bridge adds no new timestepper, face storage or thermal iteration.
+Accepted heat is independently reconstructed by evaluating the same face laws
+at the native endpoint. Each phase-resistance trial starts from the original
+wall/fluid inventories, and only the accepted face exchanges are returned.
+
+`ImplicitConductiveThermalVolumeReport::bath_exchanges` retains cell, face,
+original channel order, actual reservoir temperature and signed heat into the
+body. Directional and solid boundary totals remain net physical heat;
+absolute totals sum individual channel magnitudes. Opposing convection and
+radiation on one surface therefore remain visible even at zero net wall heat.
+These are subaccounts of the existing energy balance, never extra deposits.
+The native local-source entropy account remains explicitly unclassified; no
+complete body-plus-bath entropy claim is made by this adapter.
+
+Independent regression sources manufacture: a graded nonlinear material wall
+whose integrated X-face removes 87.5 W while a separate Y-face supplies 20 W;
+a 400 K bulk cooling through a 350 K physical surface with 200 W total gray
+exchange; and one shared surface exchanging +10/-10 J with distinct 400/300 K
+baths at zero net storage change. The mixed-face case also checks original
+caloric identity, unsupported material-face temperature, exclusive ownership
+and cancellation/retry. Held geometry, fixed external conditions, original
+source domains and the first-order heat/flow split remain authoritative.

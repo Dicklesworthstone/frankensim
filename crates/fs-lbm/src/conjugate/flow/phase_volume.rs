@@ -16,7 +16,8 @@ pub use conduction::{
     ImplicitConjugateThermalVolumeMomentumStep, ImplicitConjugateThermalVolumeReport,
     ImplicitConjugateThermalVolumeStep, ImplicitConjugateViscousThermalVolumeMomentumStep,
     ImplicitResistanceHeatWork, ImplicitThermalVolumeLinearControls,
-    ImplicitThermalVolumeSolveControls, ImplicitThermalVolumeWorkspace, ThermalVolumeContact,
+    ImplicitThermalVolumeSolveControls, ImplicitThermalVolumeWorkspace, ThermalVolumeBathExchange,
+    ThermalVolumeBoundaries, ThermalVolumeBoundaryFace, ThermalVolumeContact,
     ThermalVolumeSolidCell, ThermalVolumeSolidEndpoint,
 };
 mod momentum;

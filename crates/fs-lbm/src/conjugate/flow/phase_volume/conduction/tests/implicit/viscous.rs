@@ -290,7 +290,7 @@ fn molecular_heat_and_finite_wall_storage_close_before_the_one_fluid_route() {
             &domain,
             Some((faces, profile)),
             &conductivity,
-            &[],
+            ThermalVolumeBoundaries::default(),
             &solids,
             &contacts,
             data,

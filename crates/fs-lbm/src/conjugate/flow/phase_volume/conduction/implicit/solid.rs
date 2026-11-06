@@ -44,7 +44,7 @@ pub struct ImplicitConjugateThermalVolumeReport {
     /// in `conduction.boundary_heat_j`. Solid storage obeys authored heat plus
     /// this boundary heat minus `solid_to_fluid_heat_j`, within the shared gate.
     pub solid_boundary_heat_j: f64,
-    /// Sum of absolute solid-bath face heats, without cancellation [J].
+    /// Sum of absolute solid-bath channel heats, without cancellation [J].
     pub absolute_solid_boundary_heat_j: f64,
 }
 
@@ -126,6 +126,9 @@ impl FlowField {
     /// may heat or cool either fluid or explicitly bound solid cells through
     /// their own half-cell source law. A bath cannot also own an internal face
     /// between active bodies. Wall authored and boundary heat each enter once.
+    /// `ThermalVolumeBoundaries` also accepts complete original surface laws:
+    /// integrated material/film conduction and resolved gray surface exchange.
+    /// Convert an existing fixed-bath slice with `.into()` without allocation.
     ///
     /// Solid mass, geometry and occupancy stay fixed, including across a wall's
     /// latent interval. Source contact tangents enter the same native Newton
@@ -145,7 +148,7 @@ impl FlowField {
         domain: &VoxelDomain,
         faces: [FlowFace; 6],
         conductivity: &PreparedPhaseConductivity<'_>,
-        baths: &[ThermalVolumeBathFace],
+        baths: ThermalVolumeBoundaries<'_>,
         solids: &[ThermalVolumeSolidCell<'_, '_>],
         contacts: &[ThermalVolumeContact<'_>],
         input: CoexistenceVolumeInput<'_>,
@@ -201,7 +204,7 @@ impl FlowField {
         faces: [FlowFace; 6],
         profile: Option<StaggeredBoundaryPressure<'_>>,
         conductivity: &PreparedPhaseConductivity<'_>,
-        baths: &[ThermalVolumeBathFace],
+        baths: ThermalVolumeBoundaries<'_>,
         solids: &[ThermalVolumeSolidCell<'_, '_>],
         contacts: &[ThermalVolumeContact<'_>],
         input: ThermalVolumeMomentumInput<'_>,

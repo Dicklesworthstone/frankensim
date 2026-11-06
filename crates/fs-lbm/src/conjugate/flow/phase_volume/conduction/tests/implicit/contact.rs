@@ -256,7 +256,7 @@ fn source_phase_contact_preserves_order_pressure_and_finite_wall_energy() {
             &domain,
             [FlowFace::Wall; 6],
             &fluid,
-            &[],
+            ThermalVolumeBoundaries::default(),
             &walls,
             contacts,
             data,
@@ -354,7 +354,7 @@ fn source_phase_contact_preserves_order_pressure_and_finite_wall_energy() {
             [FlowFace::Wall; 6],
             None,
             &fluid,
-            &[],
+            ThermalVolumeBoundaries::default(),
             &walls,
             &contacts,
             ThermalVolumeMomentumInput {

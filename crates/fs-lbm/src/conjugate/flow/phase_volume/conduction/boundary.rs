@@ -65,26 +65,36 @@ pub(super) fn prepare_for_active_cells<'a>(
     let mut ordered = BTreeMap::new();
     for (index, bath) in baths.iter().enumerate() {
         poll_every(gate, index)?;
-        let side = bath.face as usize;
-        if bath.cell >= domain.cell_count()
-            || !active(bath.cell)
-            || domain.neighbor(bath.cell, side).is_some_and(&active)
-        {
-            return Err(refuse(
-                "thermal bath requires a boundary fluid-cell face or an exposed bound finite-solid face",
-            ));
-        }
-        finite_positive("flow.conductive_bath_temperature", bath.temperature_k)?;
-        if !bath.resistance_m2_k_w.is_finite() || bath.resistance_m2_k_w < 0.0 {
-            return Err(refuse(
-                "thermal bath resistance must be finite and nonnegative",
-            ));
-        }
-        if ordered.insert((bath.cell, side), bath).is_some() {
+        let key = admit_face(domain, bath, &active)?;
+        if ordered.insert(key, bath).is_some() {
             return Err(refuse("duplicate thermal bath on one boundary face"));
         }
     }
     Ok(ordered)
+}
+
+/// Admit the same physical face for scalar and source-owned boundary laws.
+pub(super) fn admit_face(
+    domain: &VoxelDomain,
+    bath: &ThermalVolumeBathFace,
+    active: impl Fn(usize) -> bool,
+) -> Result<(usize, usize), ChtError> {
+    let side = bath.face as usize;
+    if bath.cell >= domain.cell_count()
+        || !active(bath.cell)
+        || domain.neighbor(bath.cell, side).is_some_and(&active)
+    {
+        return Err(refuse(
+            "thermal bath requires a boundary fluid-cell face or an exposed bound finite-solid face",
+        ));
+    }
+    finite_positive("flow.conductive_bath_temperature", bath.temperature_k)?;
+    if !bath.resistance_m2_k_w.is_finite() || bath.resistance_m2_k_w < 0.0 {
+        return Err(refuse(
+            "thermal bath resistance must be finite and nonnegative",
+        ));
+    }
+    Ok((bath.cell, side))
 }
 
 #[derive(Default)]

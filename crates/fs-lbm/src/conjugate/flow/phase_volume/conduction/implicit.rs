@@ -1,9 +1,7 @@
 //! One native implicit enthalpy interval before the original volume transport.
 
 use super::*;
-use fs_conduction::enthalpy::conduction::implicit::source::{
-    ImplicitHeatSourceLaw, ImplicitHeatSourceState,
-};
+use fs_conduction::enthalpy::conduction::implicit::source::ImplicitHeatSourceLaw;
 use fs_conduction::enthalpy::conduction::implicit::{
     ImplicitConductionControls, ImplicitConductionGraph, ImplicitConductionLaw,
     ImplicitConductionReport,
@@ -25,6 +23,8 @@ mod momentum;
 pub use momentum::ImplicitConductiveThermalVolumeMomentumStep;
 mod contact;
 pub use contact::ThermalVolumeContact;
+mod surface;
+pub use surface::{ThermalVolumeBathExchange, ThermalVolumeBoundaries, ThermalVolumeBoundaryFace};
 mod viscous;
 pub use viscous::{
     ImplicitConductiveViscousThermalVolumeMomentumStep,
@@ -74,6 +74,10 @@ pub struct ImplicitConductiveThermalVolumeReport {
     pub boundary_faces: usize,
     /// Signed inward bath heat by x-, x+, y-, y+, z-, z+ face normal [J].
     pub boundary_heat_j: [f64; 6],
+    /// Actual prescribed bath exchanges in cell/face/channel order. Opposing
+    /// reservoirs on one shared surface remain separate, with original Kelvin.
+    pub bath_exchanges: Vec<ThermalVolumeBathExchange>,
+    /// Sum of absolute channel heats, including opposing baths on one face.
     pub absolute_boundary_heat_j: f64,
     pub exchanged_heat_j: f64,
     pub conduction_balance_defect_j: f64,
@@ -199,7 +203,7 @@ impl FlowField {
         self.implicit_conjugate_then_advance(
             domain,
             conductivity,
-            baths,
+            baths.into(),
             &[],
             &[],
             input,
@@ -217,7 +221,7 @@ impl FlowField {
         &self,
         domain: &VoxelDomain,
         conductivity: &PreparedPhaseConductivity<'_>,
-        baths: &[ThermalVolumeBathFace],
+        baths: ThermalVolumeBoundaries<'_>,
         solids: &[ThermalVolumeSolidCell<'_, '_>],
         contacts: &[ThermalVolumeContact<'_>],
         input: CoexistenceVolumeInput<'_>,
@@ -297,7 +301,7 @@ impl FlowField {
         &self,
         domain: &VoxelDomain,
         conductivity: &PreparedPhaseConductivity<'_>,
-        baths: &[ThermalVolumeBathFace],
+        baths: ThermalVolumeBoundaries<'_>,
         solids: &[ThermalVolumeSolidCell<'_, '_>],
         contacts: &[ThermalVolumeContact<'_>],
         input: CoexistenceVolumeInput<'_>,
@@ -306,6 +310,12 @@ impl FlowField {
         workspace: &mut ImplicitThermalVolumeWorkspace,
         gate: &CancelGate,
     ) -> Result<PreparedImplicitHeat, ChtError> {
+        let boundary_faces = baths
+            .baths
+            .len()
+            .checked_add(baths.sources.len())
+            .filter(|&count| count <= controls.max_conductive_faces)
+            .ok_or_else(|| refuse("conductive face-work budget exhausted by thermal boundaries"))?;
         // Retain the original fluid-only admission order and arithmetic when
         // no wall inventory is bound. Conjugate baths need the complete active
         // set so that neither an inactive receiver nor an internal face passes.
@@ -315,7 +325,7 @@ impl FlowField {
         } = prepare_input(
             domain,
             conductivity,
-            if solids.is_empty() { baths } else { &[] },
+            if solids.is_empty() { baths.baths } else { &[] },
             input,
             controls,
             gate,
@@ -329,12 +339,13 @@ impl FlowField {
             controls.max_conductive_faces,
             gate,
         )?;
+        let source_faces = baths.sources;
         let baths = if solids.is_empty() {
             fluid_baths
         } else {
             boundary::prepare_for_active_cells(
                 domain,
-                baths,
+                baths.baths,
                 controls.max_conductive_faces,
                 |cell| samples[cell].is_some(),
                 gate,
@@ -348,6 +359,15 @@ impl FlowField {
                 s.net_enthalpy_increment_j
             })
         };
+        let bath_sources = surface::prepare(
+            domain,
+            baths,
+            source_faces,
+            &samples,
+            &source,
+            controls.max_conductive_faces,
+            gate,
+        )?;
         // Pool a source only when it retains the SAME original caloric object:
         // native feedback admission checks that borrowed law by address. Equal
         // content in separately allocated curves must keep separate bindings.
@@ -439,7 +459,7 @@ impl FlowField {
                 if samples[other].is_none() {
                     continue;
                 }
-                if links.len() >= controls.max_conductive_faces.saturating_sub(baths.len()) {
+                if links.len() >= controls.max_conductive_faces.saturating_sub(boundary_faces) {
                     return Err(refuse("implicit conductive face-work budget exhausted"));
                 }
                 let id = links.len() as u64;
@@ -537,24 +557,6 @@ impl FlowField {
             || checkpoint(gate),
         )
         .map_err(|e| native_error(gate, e))?;
-        let mut bath_sources = BTreeMap::<usize, BathSource<'_, '_>>::new();
-        for (&(cell, side), bath) in &baths {
-            poll(gate)?;
-            bath_sources
-                .entry(cell)
-                .or_insert_with(|| BathSource {
-                    conductivity: source(cell),
-                    faces: Vec::new(),
-                })
-                .faces
-                .push(BoundBath {
-                    side,
-                    temperature: bath.temperature_k,
-                    area: domain.face_area(cell, side / 2),
-                    distance: 0.5 * domain.widths(cell)[side / 2],
-                    resistance: bath.resistance_m2_k_w,
-                });
-        }
         let mut graph = ImplicitConductionGraph::new(
             &initial,
             &observer,
@@ -670,6 +672,7 @@ impl FlowField {
             }
         }
         let mut boundary_heat = [Sum::default(); 6];
+        let mut bath_exchanges = Vec::with_capacity(boundary_faces);
         let mut absolute_boundary_heat = Sum::default();
         let mut solid_boundary_heat = Sum::default();
         let mut absolute_solid_boundary_heat = Sum::default();
@@ -677,23 +680,32 @@ impl FlowField {
             poll(gate)?;
             let sample = final_samples[cell].unwrap();
             for face in &law.faces {
-                let power = face
-                    .response(sample)
-                    .map_err(|e| native_error(gate, e))?
-                    .power_w;
-                let heat = dt * power;
-                finite("flow.implicit_bath_heat", heat)?;
-                if power != 0.0 && heat == 0.0 {
-                    return Err(refuse("nonzero implicit bath heat underflowed"));
-                }
-                let (value, residual) = accounted_add(increments[cell], heat)?;
-                increments[cell] = value;
-                assembly.add(residual.abs());
-                boundary_heat[face.side].add(heat);
-                absolute_boundary_heat.add(heat.abs());
-                if wall(cell).is_some() {
-                    solid_boundary_heat.add(heat);
-                    absolute_solid_boundary_heat.add(heat.abs());
+                let response = face
+                    .response(sample, &mut || checkpoint(gate))
+                    .map_err(|e| native_error(gate, e))?;
+                for (channel, bath) in response.baths[..response.bath_count].iter().enumerate() {
+                    let power = -bath.outward_power_w;
+                    let heat = dt * power;
+                    finite("flow.implicit_bath_heat", heat)?;
+                    if power != 0.0 && heat == 0.0 {
+                        return Err(refuse("nonzero implicit bath heat underflowed"));
+                    }
+                    let (value, residual) = accounted_add(increments[cell], heat)?;
+                    increments[cell] = value;
+                    assembly.add(residual.abs());
+                    boundary_heat[face.side].add(heat);
+                    absolute_boundary_heat.add(heat.abs());
+                    if wall(cell).is_some() {
+                        solid_boundary_heat.add(heat);
+                        absolute_solid_boundary_heat.add(heat.abs());
+                    }
+                    bath_exchanges.push(ThermalVolumeBathExchange {
+                        cell,
+                        face: face.face,
+                        channel,
+                        temperature_k: bath.temperature_k,
+                        heat_j: heat,
+                    });
                 }
             }
         }
@@ -788,8 +800,9 @@ impl FlowField {
             report: ImplicitConductiveThermalVolumeReport {
                 conductivity_source_identity: conductivity.identity(),
                 conductive_faces: links.len(),
-                boundary_faces: baths.len(),
+                boundary_faces,
                 boundary_heat_j,
+                bath_exchanges,
                 absolute_boundary_heat_j: absolute_boundary_heat.value,
                 exchanged_heat_j: exchanged.value,
                 conduction_balance_defect_j: balance.value.abs(),
@@ -798,98 +811,6 @@ impl FlowField {
                 absolute_enthalpy_defect_j: extra_defect,
                 solve,
             },
-        })
-    }
-}
-
-struct BoundBath {
-    side: usize,
-    temperature: f64,
-    area: f64,
-    distance: f64,
-    resistance: f64,
-}
-
-impl BoundBath {
-    fn response(
-        &self,
-        sample: PhaseConductivitySample,
-    ) -> Result<ImplicitHeatSourceState, DepositionError> {
-        let k = sample.conductivity_w_m_k();
-        let dk = sample.conductivity_enthalpy_derivative_kg_w_m_k_j();
-        if k == 0.0 {
-            // The original prepared source refuses zero k with a nonzero selected
-            // tangent. Do not silently erase the finite one-sided dG/dh limit.
-            if dk != 0.0 {
-                return Err(DepositionError::MaterialDomain);
-            }
-            return Ok(ImplicitHeatSourceState {
-                power_w: 0.0,
-                power_enthalpy_derivative_w_kg_j: 0.0,
-            });
-        }
-        let bulk = self.distance / k;
-        if !bulk.is_finite() || bulk <= 0.0 {
-            return Err(DepositionError::Arithmetic);
-        }
-        let largest = bulk.max(self.resistance);
-        let scaled_total = 1.0 + bulk.min(self.resistance) / largest;
-        let g = (self.area / largest) / scaled_total;
-        let delta = self.temperature - sample.temperature_k();
-        let dg_term = if dk == 0.0 || delta == 0.0 {
-            0.0
-        } else {
-            g * ((bulk / largest) / scaled_total) * (dk / k) * delta
-        };
-        let power = g * delta;
-        let derivative = dg_term - g * sample.temperature_enthalpy_derivative_kg_k_j();
-        if !g.is_finite()
-            || g <= 0.0
-            || !power.is_finite()
-            || !derivative.is_finite()
-            || (delta != 0.0 && power == 0.0)
-        {
-            return Err(DepositionError::Arithmetic);
-        }
-        Ok(ImplicitHeatSourceState {
-            power_w: power,
-            power_enthalpy_derivative_w_kg_j: derivative,
-        })
-    }
-}
-
-struct BathSource<'a, 'm> {
-    conductivity: &'a PreparedPhaseConductivity<'m>,
-    faces: Vec<BoundBath>,
-}
-
-impl ImplicitHeatSourceLaw for BathSource<'_, '_> {
-    fn caloric_law(&self) -> &dyn ThermalLaw {
-        self.conductivity.caloric_curve()
-    }
-    fn state_at_specific_enthalpy(
-        &self,
-        h: f64,
-        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
-    ) -> Result<ImplicitHeatSourceState, DepositionError> {
-        checkpoint()?;
-        let sample = self
-            .conductivity
-            .state_at_specific_enthalpy(h)
-            .map_err(|_| DepositionError::MaterialDomain)?;
-        let mut power = Sum::default();
-        let mut derivative = Sum::default();
-        for face in &self.faces {
-            let state = face.response(sample)?;
-            power.add(state.power_w);
-            derivative.add(state.power_enthalpy_derivative_w_kg_j);
-        }
-        if !power.value.is_finite() || !derivative.value.is_finite() {
-            return Err(DepositionError::Arithmetic);
-        }
-        Ok(ImplicitHeatSourceState {
-            power_w: power.value,
-            power_enthalpy_derivative_w_kg_j: derivative.value,
         })
     }
 }

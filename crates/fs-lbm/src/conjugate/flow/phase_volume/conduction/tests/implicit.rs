@@ -2,6 +2,7 @@
 
 mod contact;
 mod solid;
+mod surface;
 mod viscous;
 
 use super::*;

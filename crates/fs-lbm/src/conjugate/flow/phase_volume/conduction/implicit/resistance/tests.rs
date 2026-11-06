@@ -539,7 +539,7 @@ fn finite_wall_is_reheated_from_original_inventory_in_every_phase_drag_trial() {
     let run = |workspace: &mut ImplicitThermalVolumeWorkspace, gate: &CancelGate| {
         field
             .advance_isotropic_implicit_conjugate_phase_resistance_thermal_volume_momentum_with_baths(
-                &domain, faces, None, &conductivity, &[], &solids, &contacts,
+                &domain, faces, None, &conductivity, ThermalVolumeBoundaries::default(), &solids, &contacts,
                 &law, data, limits, solve, workspace, gate,
                 |_, phase| source(&card, &law, phase),
             )
@@ -589,7 +589,7 @@ fn finite_wall_is_reheated_from_original_inventory_in_every_phase_drag_trial() {
             faces,
             None,
             &conductivity,
-            &[],
+            ThermalVolumeBoundaries::default(),
             &solids,
             &contacts,
             &law,
