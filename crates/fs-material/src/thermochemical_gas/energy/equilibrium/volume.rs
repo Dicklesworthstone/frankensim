@@ -9,6 +9,9 @@
 /// Entropy-constrained volume changes with original-source frozen products.
 pub mod entropy;
 
+/// Prepared reversible reacting parcels and work-conjugate mechanical loads.
+pub mod reversible;
+
 use super::{GasEquilibriumChamberError, ThermochemicalGasModel, equilibrium_feed_mass, poll};
 use crate::thermochemical_gas::energy::{
     IsochoricGasParcel, parcel::ClosedGasParcel, updated_point,
@@ -257,7 +260,10 @@ impl ThermochemicalGasModel {
             .thermodynamics()
             .evaluate_properties(chemical.temperature(), chemical.pressure())
             .map_err(|error| {
-                GasEquilibriumChamberError::from(failure("fixed-volume equilibrium products", error))
+                GasEquilibriumChamberError::from(failure(
+                    "fixed-volume equilibrium products",
+                    error,
+                ))
             })?;
         let pressure = (mass / volume.value())
             * properties.mass_specific_gas_constant().value()

@@ -9,6 +9,9 @@
 
 use super::*;
 
+/// Prepared fixed-inventory volume queries with source-relative work increments.
+pub mod path;
+
 /// Temperature path and entropy residual for a fixed-volume isentropic solve.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct EquilibriumVolumeEntropySolveV1 {
