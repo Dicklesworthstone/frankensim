@@ -1,6 +1,7 @@
 //! Three-dimensional current-free magnetostatics on tetrahedral P1 elements.
 //!
-//! H = -grad(phi), B = mu H + Br, div(B)=0. The original tetrahedral Whitney
+//! H = -grad(phi), B = mu H + Br, div(B)=0, with scalar or oriented symmetric
+//! permeability. The original tetrahedral Whitney
 //! Hodge supplies K=d0^T M_mu d0. Remanence contributes its complete weak load,
 //! including interface and exterior terms. Material sources, recoil directions
 //! and temperature are fixed. See the scalar-potential formulation in
@@ -19,12 +20,12 @@
 //! P1 H/B are cellwise constant. Interface normal-flux jumps are reported rather
 //! than presenting the raw field as an exactly equilibrated H(div) field.
 
-/// Saturation from the original reversible H(B) source and its dual energy.
-pub mod force;
 /// Source-bearing three-dimensional Ohmic current and local Joule heat.
 pub mod conduction;
 /// Source-bound three-dimensional dielectric fields and circuit capacitance.
 pub mod electrostatic;
+/// Saturation from the original reversible H(B) source and its dual energy.
+pub mod force;
 pub mod nonlinear;
 pub mod vector_potential;
 
@@ -36,8 +37,9 @@ use fs_feec::{
 };
 use fs_material::{
     field_storage::{
-        FieldStorageError, MAGNETIC_PERMEABILITY_DIMS, linear_magnetic_permeability,
+        FieldStorageError, MAGNETIC_PERMEABILITY_DIMS,
         permanent::{RecoilOperatingPoint, ResolvedRecoilMaterial},
+        spatial::{SpatialMagneticLaw, SpatialPermeability},
     },
     state_point::ResolvedMaterialStatePoint,
 };
@@ -196,14 +198,15 @@ impl Precond for Diagonal {
     }
 }
 
-/// Prepared geometry, source-bound permeability/recoil and sparse scalar Hodge.
+/// Prepared geometry, source-bound permeability/recoil and sparse weighted Hodge.
 /// Matrix preparation is reused across boundary excitations at fixed materials.
 pub struct SpatialMagnetostatics {
     mesh: TetComplex,
     positions_m: Vec<[f64; 3]>,
     geometry: ElementGeometry,
     materials: Vec<SpatialMagneticMaterial>,
-    permeability_h_m: Vec<f64>,
+    magnetic_laws: Vec<SpatialMagneticLaw>,
+    permeability: Vec<SpatialPermeability>,
     remanence_t: Vec<[f64; 3]>,
     faces: Vec<Face>,
     components: Vec<usize>,
@@ -373,7 +376,10 @@ fn prepare_scalar_boundary(
         faces,
         components,
         boundary.potential.iter().map(|t| (t.face, t.potential_a)),
-        boundary.flux.iter().map(|t| (t.face, t.outward_flux_density_t)),
+        boundary
+            .flux
+            .iter()
+            .map(|t| (t.face, t.outward_flux_density_t)),
         flux_tolerance_wb,
         cancelled,
     )
@@ -418,9 +424,9 @@ fn prepare_scalar_boundary_traces_with_sources(
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<ScalarBoundary, SpatialMagneticError> {
     let n = mesh.vertex_count;
-    if volume_load.is_some_and(|load| {
-        load.len() != n || load.iter().any(|value| !value.is_finite())
-    }) {
+    if volume_load
+        .is_some_and(|load| load.len() != n || load.iter().any(|value| !value.is_finite()))
+    {
         return Err(invalid("complete finite scalar volume load required"));
     }
     let mut prescribed = vec![None; n];
@@ -587,9 +593,32 @@ impl SpatialMagnetostatics {
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Self, SpatialMagneticError> {
         poll(cancelled)?;
-        if tetrahedra.len() != materials.len() {
+        if tetrahedra.len() != materials.len() || tetrahedra.len() > limits.max_cells {
             return Err(invalid(
-                "one magnetic material per original tetrahedron required",
+                "one magnetic material per original tetrahedron within the cell budget required",
+            ));
+        }
+        let laws = vec![SpatialMagneticLaw::Isotropic; materials.len()];
+        Self::with_magnetic_laws(positions_m, tetrahedra, materials, laws, limits, cancelled)
+    }
+
+    /// Source-bound scalar or oriented orthotropic permeability on each cell.
+    /// The full tensor enters both the original Whitney Hodge and B(H)/energy
+    /// recovery. An explicitly orthotropic law never falls back to a scalar
+    /// property. The original recoil owner remains isotropic and must select
+    /// `Isotropic`; assigning it an unrelated principal law is refused.
+    pub fn with_magnetic_laws(
+        positions_m: Vec<[f64; 3]>,
+        tetrahedra: Vec<[u32; 4]>,
+        materials: Vec<SpatialMagneticMaterial>,
+        magnetic_laws: Vec<SpatialMagneticLaw>,
+        limits: WeightedAssemblyLimits,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self, SpatialMagneticError> {
+        poll(cancelled)?;
+        if tetrahedra.len() != materials.len() || magnetic_laws.len() != materials.len() {
+            return Err(invalid(
+                "one complete magnetic source and law per original tetrahedron required",
             ));
         }
         let SpatialGeometry {
@@ -599,26 +628,30 @@ impl SpatialMagnetostatics {
             faces,
             components,
         } = prepare_geometry(positions_m, tetrahedra, limits, cancelled)?;
-        let mut permeability_h_m = Vec::with_capacity(materials.len());
+        let mut permeability = Vec::with_capacity(materials.len());
         let mut remanence_t = Vec::with_capacity(materials.len());
-        for material in &materials {
+        let mut weights = Vec::with_capacity(materials.len());
+        for (material, &law) in materials.iter().zip(&magnetic_laws) {
             poll(cancelled)?;
             let (mu, br) = match material {
-                SpatialMagneticMaterial::Linear(source) => {
-                    (linear_magnetic_permeability(source)?, [0.0; 3])
-                }
+                SpatialMagneticMaterial::Linear(source) => (law.resolve(source)?, [0.0; 3]),
                 SpatialMagneticMaterial::Recoil(source) => {
-                    (source.material.permeability_h_m(), source.remanence_t)
+                    if law != SpatialMagneticLaw::Isotropic {
+                        return Err(invalid("original recoil source requires its isotropic law"));
+                    }
+                    (
+                        SpatialPermeability::isotropic(source.material.permeability_h_m())?,
+                        source.remanence_t,
+                    )
                 }
             };
-            permeability_h_m.push(mu);
+            weights.push(match mu.isotropic_h_m() {
+                Some(value) => CellWeight::Scalar(value),
+                None => CellWeight::Tensor(mu.matrix_h_m()),
+            });
+            permeability.push(mu);
             remanence_t.push(br);
         }
-        let weights: Vec<_> = permeability_h_m
-            .iter()
-            .copied()
-            .map(CellWeight::Scalar)
-            .collect();
         let mass = weighted_mass_matrix(
             &mesh,
             &geometry,
@@ -656,7 +689,8 @@ impl SpatialMagnetostatics {
             positions_m,
             geometry,
             materials,
-            permeability_h_m,
+            magnetic_laws,
+            permeability,
             remanence_t,
             faces,
             components,
@@ -673,6 +707,14 @@ impl SpatialMagnetostatics {
     }
     pub fn materials(&self) -> &[SpatialMagneticMaterial] {
         &self.materials
+    }
+    /// Fixed magnetic orientation/source-law choice for every original cell.
+    pub fn magnetic_laws(&self) -> &[SpatialMagneticLaw] {
+        &self.magnetic_laws
+    }
+    /// Prepared full coefficients; original source bundles remain in `materials`.
+    pub fn permeability_coefficients(&self) -> &[SpatialPermeability] {
+        &self.permeability
     }
     /// Exterior face IDs in the original canonical face table.
     pub fn exterior_faces(&self) -> Vec<usize> {
@@ -774,9 +816,14 @@ impl SpatialMagnetostatics {
                     *out = finite((-delta).mul_add(self.geometry.grads[cell][local][j], *out))?;
                 }
             }
-            let flux = std::array::from_fn(|j| {
-                self.permeability_h_m[cell].mul_add(field[j], self.remanence_t[cell][j])
-            });
+            let coefficient = self.permeability[cell];
+            let induced_flux = coefficient.flux_density_t(field);
+            let flux = if let Some(mu) = coefficient.isotropic_h_m() {
+                // Retain the original scalar/recoil arithmetic exactly.
+                std::array::from_fn(|j| mu.mul_add(field[j], self.remanence_t[cell][j]))
+            } else {
+                std::array::from_fn(|j| induced_flux[j] + self.remanence_t[cell][j])
+            };
             for value in flux {
                 finite(value)?;
             }
@@ -793,11 +840,15 @@ impl SpatialMagnetostatics {
             } else {
                 None
             };
-            let energy = finite(
-                0.5 * self.permeability_h_m[cell]
-                    * dot(field, field)
-                    * self.geometry.vol_signed[cell].abs(),
-            )?;
+            let density = if let Some(mu) = coefficient.isotropic_h_m() {
+                0.5 * mu * dot(field, field)
+            } else {
+                0.5 * dot(field, induced_flux)
+            };
+            if density < 0.0 {
+                return Err(invalid("recovered magnetic energy density is negative"));
+            }
+            let energy = finite(density * self.geometry.vol_signed[cell].abs())?;
             energy_j = finite(energy_j + energy)?;
             cell_energy_j.push(energy);
             h.push(field);

@@ -241,10 +241,13 @@ impl<'m> SpatialWindingBasis<'m> {
                     .enumerate()
                 {
                     poll(cancelled)?;
+                    let h = problem.permeability[cell]
+                        .field_strength_a_m(b)
+                        .map_err(SpatialMagneticError::Material)?;
                     energy = finite(
-                        (problem.geometry.geometry.vol_signed[cell].abs()
-                            / problem.permeability[cell])
-                            .mul_add(dot(a, b), energy),
+                        problem.geometry.geometry.vol_signed[cell]
+                            .abs()
+                            .mul_add(dot(a, h), energy),
                     )?;
                 }
                 for (i, j) in [(receiver, source), (source, receiver)] {
@@ -450,7 +453,9 @@ impl<'m> SpatialWindingBasis<'m> {
                     )?;
                 }
             }
-            let h = b.map(|v| v / problem.permeability[cell]);
+            let h = problem.permeability[cell]
+                .field_strength_a_m(b)
+                .map_err(SpatialMagneticError::Material)?;
             for value in h {
                 finite(value)?;
             }

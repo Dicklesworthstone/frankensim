@@ -5,7 +5,7 @@
 //! from retained A and its actual constitutive source; no static re-solve may
 //! erase eddy-current memory after an impressed source is switched off.
 //!
-//! Every integration cell must be an original homogeneous induced-linear
+//! Every integration cell must be an original homogeneous isotropic induced-linear
 //! exterior without a conductor or impressed current. Conducting, saturating
 //! and recoil targets may be enclosed. The conservative no-conductor collar
 //! admission does not mistake a momentarily zero current for insulating air.
@@ -27,7 +27,9 @@ use super::super::{
 use super::{SpatialMaxwellForceLimits, SurfaceGeometry, eggshell, integrate};
 use eggshell::PreparedSpatialEggshell;
 use fs_ga::{Se3, Wrench};
-use fs_material::{conductor::spatial::SpatialConductorMaterial, state_point::ResolvedMaterialStatePoint};
+use fs_material::{
+    conductor::spatial::SpatialConductorMaterial, state_point::ResolvedMaterialStatePoint,
+};
 
 // Private: arbitrary detached B/H samples cannot implement the public load API.
 // The same integration/admission code serves both original transient owners.
@@ -48,6 +50,7 @@ impl<C: SpatialConductorMaterial> Owner for SpatialInduction<'_, C> {
         &self.problem().geometry
     }
     fn linear_source(&self, cell: usize) -> Option<&ResolvedMaterialStatePoint> {
+        self.problem().permeability()[cell].isotropic_h_m()?;
         match &self.problem().materials()[cell] {
             SpatialMagneticMaterial::Linear(source) => Some(source),
             SpatialMagneticMaterial::Recoil(_) => None,
@@ -102,7 +105,7 @@ fn admit<'a>(
         ));
     }
     let source = owner.linear_source(cell).ok_or_else(|| {
-        invalid("induction Maxwell collar requires induced-linear exterior material")
+        invalid("induction Maxwell collar requires isotropic induced-linear exterior material")
     })?;
     if source != *exterior.get_or_insert(source) {
         return Err(invalid(
@@ -222,7 +225,4 @@ macro_rules! load_api {
     };
 }
 load_api!(SpatialInduction, SpatialMagneticError);
-load_api!(
-    SpatialNonlinearInduction,
-    SpatialNonlinearInductionError
-);
+load_api!(SpatialNonlinearInduction, SpatialNonlinearInductionError);

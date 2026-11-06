@@ -313,6 +313,13 @@ impl SpatialMagneticField<'_> {
             placement,
             moment_origin_m,
             |cell| {
+                if p.magnetic_laws()[cell]
+                    != fs_material::field_storage::spatial::SpatialMagneticLaw::Isotropic
+                {
+                    return Err(invalid(
+                        "eggshell transition requires isotropic exterior permeability",
+                    ));
+                }
                 let SpatialMagneticMaterial::Linear(source) = &p.materials()[cell] else {
                     return Err(invalid(
                         "eggshell transition must be induced-linear exterior material",
@@ -381,6 +388,9 @@ impl SpatialVectorField<'_> {
                     return Err(invalid(
                         "eggshell transition must be free of impressed current",
                     ));
+                }
+                if p.permeability()[cell].isotropic_h_m().is_none() {
+                    return Err(invalid("eggshell requires isotropic exterior material"));
                 }
                 let SpatialMagneticMaterial::Linear(source) = &p.materials()[cell] else {
                     return Err(invalid(

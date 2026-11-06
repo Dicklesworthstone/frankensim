@@ -43,10 +43,11 @@ impl SpatialMagneticField<'_> {
     /// faces cancel and every remaining normal points from the selected volume
     /// into its exterior. Holes and disconnected selected regions retain this
     /// orientation. Every surface face must lie strictly INSIDE the mesh, with
-    /// two incident cells of the same original induced-linear material snapshot.
+    /// two incident cells of the same original isotropic induced-linear material snapshot.
     /// All surface cells must share that snapshot; a matching permeability or
     /// material name alone is insufficient. Recoil magnets may be enclosed but
-    /// cannot touch the integration surface.
+    /// cannot touch the integration surface. Oriented magnetic interiors may
+    /// also be enclosed, but anisotropic surface material is not admitted.
     ///
     /// The caller admits the exterior stress law above (typically air/vacuum),
     /// without material striction or pressure forces. Constant P1 exterior B/H
@@ -82,6 +83,13 @@ impl SpatialMagneticField<'_> {
             moment_origin_m,
             limits,
             |inner, outer| {
+                if problem.magnetic_laws[inner] != super::SpatialMagneticLaw::Isotropic
+                    || problem.magnetic_laws[outer] != super::SpatialMagneticLaw::Isotropic
+                {
+                    return Err(invalid(
+                        "3D Maxwell surface requires isotropic exterior permeability",
+                    ));
+                }
                 let (SpatialMagneticMaterial::Linear(a), SpatialMagneticMaterial::Linear(b)) =
                     (&problem.materials[inner], &problem.materials[outer])
                 else {

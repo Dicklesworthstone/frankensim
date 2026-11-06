@@ -1,5 +1,7 @@
 //! Analytical current-free 3D fields, magnet interfaces, and mesh refinement.
 //! Manufactured material sources test the discretization, not material quality.
+#[path = "spatial_magnetostatics/anisotropic.rs"]
+mod anisotropic;
 mod common;
 use common::{material, near};
 use fs_em::{

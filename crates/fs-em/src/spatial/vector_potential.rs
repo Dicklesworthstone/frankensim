@@ -13,8 +13,11 @@
 //! No incompatible source is silently projected away. The final coexact A is
 //! M-orthogonal to all curl-free variations and must preserve every face flux.
 //!
-//! The baseline owner is a static, lowest-order, isotropic linear/fixed-recoil
-//! model. `nonlinear` adds reversible saturation; `induction` adds coupled
+//! The baseline owner is a static, lowest-order, sourced linear tensor/fixed-recoil
+//! model. Orthotropic laws retain their material axes and use the full inverse
+//! permeability in the curl-curl operator, field recovery and magnetic energy.
+//! Recoil remains explicitly isotropic. `nonlinear` adds reversible saturation;
+//! `induction` adds coupled
 //! moving-conductor evolution, nonlinear saturation and sourced thermal refresh.
 //! These rungs do not claim a
 //! Coulomb saddle/HX/higher-order discretization or TEAM qualification.
@@ -35,7 +38,10 @@ use fs_feec::{
     cohomology::coexact::{CoexactProjectionError, PreparedCoexact1},
     weighted::{CellWeight, WeightedAssemblyLimits, WeightedError, weighted_mass_matrix},
 };
-use fs_material::field_storage::{linear_magnetic_permeability, permanent::RecoilOperatingPoint};
+use fs_material::field_storage::{
+    permanent::RecoilOperatingPoint,
+    spatial::{SpatialMagneticLaw, SpatialPermeability},
+};
 use fs_qty::Dims;
 use fs_rep_mesh::TetComplex;
 use fs_solver::{CheckedCgConfig, CheckedCgError, LinearOp, SolveReport, checked_cg};
@@ -76,7 +82,9 @@ struct CellVectors {
 pub struct SpatialVectorMagnetostatics {
     pub(super) geometry: Arc<SpatialGeometry>,
     materials: Vec<SpatialMagneticMaterial>,
-    permeability: Vec<f64>,
+    magnetic_laws: Vec<SpatialMagneticLaw>,
+    permeability: Vec<SpatialPermeability>,
+    permeability_bound: Vec<f64>,
     remanence: Vec<[f64; 3]>,
     cells: Arc<[CellVectors]>,
     curl: Arc<Csr>,
@@ -185,7 +193,34 @@ impl SpatialVectorMagnetostatics {
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Self> {
         poll(cancelled)?;
-        if tetrahedra.len() != materials.len() {
+        if tetrahedra.len() != materials.len() || tetrahedra.len() > limits.max_cells {
+            return Err(invalid(
+                "complete original magnetic material map within the cell budget required",
+            ));
+        }
+        let laws = vec![SpatialMagneticLaw::Isotropic; materials.len()];
+        Self::with_magnetic_laws(positions_m, tetrahedra, materials, laws, limits, cancelled)
+    }
+
+    /// Prepare the native current-carrying edge operator with one explicit
+    /// magnetic law per cell. Orthotropic cells require three independent
+    /// absolute H/m sources and fixed orthonormal axes in mesh coordinates.
+    /// The inverse is formed in those principal axes, never by reciprocating
+    /// world-matrix entries or replacing the tensor with an average.
+    ///
+    /// The same operator supplies winding inductance and retained A-phi
+    /// induction. Material rotation during a time step, anisotropic recoil,
+    /// hysteresis and frequency-dependent magnetic loss are not inferred.
+    pub fn with_magnetic_laws(
+        positions_m: Vec<[f64; 3]>,
+        tetrahedra: Vec<[u32; 4]>,
+        materials: Vec<SpatialMagneticMaterial>,
+        laws: Vec<SpatialMagneticLaw>,
+        limits: WeightedAssemblyLimits,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self> {
+        poll(cancelled)?;
+        if tetrahedra.len() != materials.len() || laws.len() != materials.len() {
             return Err(invalid("complete original magnetic material map required"));
         }
         let geometry = Arc::new(prepare_geometry(
@@ -196,7 +231,7 @@ impl SpatialVectorMagnetostatics {
         )?);
         let cells = prepare_cells(&geometry, cancelled)?.into();
         let curl = Arc::new(incidence_to_csr(&geometry.mesh.d1()));
-        Self::assemble_materials(geometry, cells, curl, materials, limits, cancelled)
+        Self::assemble_materials(geometry, cells, curl, materials, laws, limits, cancelled)
     }
 
     // Field-history refreshes keep the actual geometry, incidence and Whitney
@@ -212,6 +247,7 @@ impl SpatialVectorMagnetostatics {
             Arc::clone(&self.cells),
             Arc::clone(&self.curl),
             materials,
+            self.magnetic_laws.clone(),
             limits,
             cancelled,
         )
@@ -222,33 +258,43 @@ impl SpatialVectorMagnetostatics {
         cells: Arc<[CellVectors]>,
         curl: Arc<Csr>,
         materials: Vec<SpatialMagneticMaterial>,
+        magnetic_laws: Vec<SpatialMagneticLaw>,
         limits: WeightedAssemblyLimits,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Self> {
         poll(cancelled)?;
-        if materials.len() != geometry.mesh.tets.len() {
+        if materials.len() != geometry.mesh.tets.len() || magnetic_laws.len() != materials.len() {
             return Err(invalid("complete original magnetic material map required"));
         }
         let mut permeability = Vec::with_capacity(materials.len());
+        let mut permeability_bound = Vec::with_capacity(materials.len());
         let mut remanence = Vec::with_capacity(materials.len());
         let mut weights = Vec::with_capacity(materials.len());
-        for material in &materials {
+        for (material, &law) in materials.iter().zip(&magnetic_laws) {
             poll(cancelled)?;
             let (mu, br) = match material {
-                SpatialMagneticMaterial::Linear(m) => (linear_magnetic_permeability(m)?, [0.0; 3]),
+                SpatialMagneticMaterial::Linear(m) => (law.resolve(m)?, [0.0; 3]),
                 SpatialMagneticMaterial::Recoil(m) => {
-                    (m.material().permeability_h_m(), m.remanence_t())
+                    if law != SpatialMagneticLaw::Isotropic {
+                        return Err(invalid(
+                            "recoil material requires its original isotropic slope",
+                        ));
+                    }
+                    (
+                        SpatialPermeability::isotropic(m.material().permeability_h_m())?,
+                        m.remanence_t(),
+                    )
                 }
             };
-            let nu = finite(mu.recip())?;
-            if nu <= 0.0 {
-                return Err(invalid(
-                    "positive representable magnetic reluctivity required",
-                ));
-            }
+            let inverse = mu.reluctivity_matrix_m_h()?;
+            let weight = match mu.isotropic_h_m() {
+                Some(value) => CellWeight::Scalar(value.recip()),
+                None => CellWeight::Tensor(inverse),
+            };
+            permeability_bound.push(mu.maximum_permeability_h_m());
             permeability.push(mu);
             remanence.push(br);
-            weights.push(CellWeight::Scalar(nu));
+            weights.push(weight);
         }
         let mass = weighted_mass_matrix(
             &geometry.mesh,
@@ -274,7 +320,11 @@ impl SpatialVectorMagnetostatics {
             for local in 0..6 {
                 let edge = vectors.edges[local];
                 let load = finite(
-                    volume * dot(vectors.curls[local], remanence[cell]) / permeability[cell],
+                    volume
+                        * dot(
+                            vectors.curls[local],
+                            permeability[cell].field_strength_a_m(remanence[cell])?,
+                        ),
                 )?;
                 remanence_load[edge] = finite(remanence_load[edge] + load)?;
             }
@@ -283,7 +333,9 @@ impl SpatialVectorMagnetostatics {
         Ok(Self {
             geometry,
             materials,
+            magnetic_laws,
             permeability,
+            permeability_bound,
             remanence,
             cells,
             curl,
@@ -303,6 +355,14 @@ impl SpatialVectorMagnetostatics {
     }
     pub fn materials(&self) -> &[SpatialMagneticMaterial] {
         &self.materials
+    }
+    /// Original per-cell constitutive choice and fixed material orientation.
+    pub fn magnetic_laws(&self) -> &[SpatialMagneticLaw] {
+        &self.magnetic_laws
+    }
+    /// Source-resolved full permeability in original tetrahedron order.
+    pub fn permeability(&self) -> &[SpatialPermeability] {
+        &self.permeability
     }
     pub fn exterior_faces(&self) -> Vec<usize> {
         self.geometry
@@ -429,9 +489,8 @@ impl SpatialVectorMagnetostatics {
                     )?;
                 }
             }
-            let field = std::array::from_fn(|j| {
-                (flux[j] - self.remanence[cell][j]) / self.permeability[cell]
-            });
+            let induced_flux = std::array::from_fn(|j| flux[j] - self.remanence[cell][j]);
+            let field = self.permeability[cell].field_strength_a_m(induced_flux)?;
             for value in field {
                 finite(value)?;
             }
@@ -450,9 +509,11 @@ impl SpatialVectorMagnetostatics {
                 None
             };
             let volume = self.geometry.geometry.vol_signed[cell].abs();
-            let energy = finite(0.5 * self.permeability[cell] * dot(field, field) * volume)?;
-            curl_energy_j =
-                finite(curl_energy_j + 0.5 * dot(flux, flux) * volume / self.permeability[cell])?;
+            let energy = finite(0.5 * dot(induced_flux, field) * volume)?;
+            curl_energy_j = finite(
+                curl_energy_j
+                    + 0.5 * volume * dot(flux, self.permeability[cell].field_strength_a_m(flux)?),
+            )?;
             energy_j = finite(energy_j + energy)?;
             cell_energy_j.push(energy);
             b.push(flux);
@@ -614,7 +675,7 @@ impl<'m> SpatialVectorField<'m> {
         &self.prescribed_edges
     }
     /// Closed exterior Maxwell traction through the shared spatial integrator.
-    /// Both incident cells must be current-free, induced-linear, and bound to
+    /// Both incident cells must be current-free, isotropic, induced-linear, and bound to
     /// the same complete material snapshot; recoil and current cells require
     /// an exterior collar before force can be sampled.
     pub fn maxwell_wrench(
@@ -638,6 +699,11 @@ impl<'m> SpatialVectorField<'m> {
             limits,
             |inner, outer| {
                 for cell in [inner, outer] {
+                    if self.problem.permeability[cell].isotropic_h_m().is_none() {
+                        return Err(invalid(
+                            "Maxwell surface requires an isotropic exterior collar",
+                        ));
+                    }
                     if self.current_density_a_m2[cell].iter().any(|&j| j != 0.0) {
                         return Err(invalid(
                             "Maxwell surface requires a current-free exterior collar",

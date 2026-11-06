@@ -57,7 +57,8 @@ pub struct SpatialInductionControls {
     pub current_tolerance_a: f64,
     pub flux_tolerance_wb: f64,
     pub energy_tolerance_j: f64,
-    /// Caller-admitted mu*sigma*max_vertex_speed*diameter/2 for unstabilized FE.
+    /// Caller-admitted mu_max*sigma_max*max_vertex_speed*diameter/2 for
+    /// unstabilized FE, using the largest principal material coefficients.
     pub maximum_cell_magnetic_peclet: f64,
 }
 #[derive(Clone, Debug)]
@@ -235,9 +236,8 @@ fn field(
                 flux[j] = finite(a[vectors.edges[e]].mul_add(vectors.curls[e][j], flux[j]))?;
             }
         }
-        let h = std::array::from_fn(|j| {
-            (flux[j] - problem.remanence[cell][j]) / problem.permeability[cell]
-        });
+        let induced = std::array::from_fn(|j| flux[j] - problem.remanence[cell][j]);
+        let h = problem.permeability[cell].field_strength_a_m(induced)?;
         for v in h {
             finite(v)?;
         }
@@ -250,7 +250,7 @@ fn field(
                 .map_err(|error| SpatialMagneticError::Recoil { cell, error })?;
         }
         let volume = problem.geometry.geometry.vol_signed[cell].abs();
-        energy = finite(energy + 0.5 * problem.permeability[cell] * dot(h, h) * volume)?;
+        energy = finite(energy + 0.5 * dot(induced, h) * volume)?;
         b.push(flux);
         strengths.push(h);
     }
@@ -432,7 +432,7 @@ impl<'m, C: SpatialConductorMaterial> SpatialInduction<'m, C> {
             g,
             velocity_m_s,
             &b0,
-            &problem.permeability,
+            &problem.permeability_bound,
             controls.maximum_cell_magnetic_peclet,
             cancelled,
         )?;
@@ -611,24 +611,25 @@ impl<'m, C: SpatialConductorMaterial> SpatialInduction<'m, C> {
             let volume = problem.geometry.geometry.vol_signed[cell].abs();
             let old_mu = original.permeability[cell];
             let new_mu = problem.permeability[cell];
-            let old_h =
-                std::array::from_fn(|j| (b0[cell][j] - original.remanence[cell][j]) / old_mu);
-            let new_h = std::array::from_fn(|j| {
-                (endpoint_flux_density_t[cell][j] - problem.remanence[cell][j]) / new_mu
+            let old_b = std::array::from_fn(|j| b0[cell][j] - original.remanence[cell][j]);
+            let new_b = std::array::from_fn(|j| {
+                endpoint_flux_density_t[cell][j] - problem.remanence[cell][j]
             });
-            let work = finite(
-                0.5 * volume
-                    * dot(b0[cell], endpoint_flux_density_t[cell])
-                    * ((old_mu - new_mu) / old_mu / new_mu),
-            )?;
+            let old_h = old_mu.field_strength_a_m(old_b)?;
+            let new_h = new_mu.field_strength_a_m(new_b)?;
+            // Endpoint-symmetric parameter work for the SAME fixed frame:
+            // W = V B0.(nu1-nu0).B1/2. Source refresh disallows recoil changes.
+            // The held-law result is exactly zero, including rotated tensors.
+            let change = old_mu.reluctivity_change_action(new_mu, endpoint_flux_density_t[cell])?;
+            let work = finite(0.5 * volume * dot(b0[cell], change))?;
             parameter_work_j = finite(parameter_work_j + work)?;
             magnetic_cells.push(SpatialInductionMagneticCell {
                 cell,
                 volume_m3: volume,
                 flux_density_t: [b0[cell], endpoint_flux_density_t[cell]],
                 free_energy_j: [
-                    finite(0.5 * volume * old_mu * dot(old_h, old_h))?,
-                    finite(0.5 * volume * new_mu * dot(new_h, new_h))?,
+                    finite(0.5 * volume * dot(old_b, old_h))?,
+                    finite(0.5 * volume * dot(new_b, new_h))?,
                 ],
                 parameter_work_j: work,
             });

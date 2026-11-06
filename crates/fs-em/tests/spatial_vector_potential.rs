@@ -1,6 +1,8 @@
 //! Independent current-carrying 3D magnetic oracles and nontrivial topology.
 //! The source cards are manufactured, not measured engineering materials.
 mod common;
+#[path = "spatial_vector_potential/permeability.rs"]
+mod permeability;
 use common::{material, near};
 use fs_em::{
     planar::permanent::MagneticEnergyReference,

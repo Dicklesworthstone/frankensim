@@ -15,8 +15,7 @@ use super::{
 };
 use fs_feec::weighted::WeightedAssemblyLimits;
 use fs_material::{
-    conductor::spatial::SpatialConductorMaterial,
-    field_storage::admit_magnetic_temperature_refresh,
+    conductor::spatial::SpatialConductorMaterial, field_storage::admit_source_temperature_refresh,
 };
 use std::sync::Arc;
 
@@ -53,7 +52,13 @@ impl<'m, C: SpatialConductorMaterial> SpatialInduction<'m, C> {
                 "complete original spatial thermal source map required",
             ));
         }
-        for (before, after) in old.problem.materials().iter().zip(&materials) {
+        for ((before, after), &law) in old
+            .problem
+            .materials()
+            .iter()
+            .zip(&materials)
+            .zip(old.problem.magnetic_laws())
+        {
             poll(cancelled)?;
             let (SpatialMagneticMaterial::Linear(before), SpatialMagneticMaterial::Linear(after)) =
                 (before, after)
@@ -62,7 +67,9 @@ impl<'m, C: SpatialConductorMaterial> SpatialInduction<'m, C> {
                     "temperature refresh requires original induced-linear magnetic cells",
                 ));
             };
-            admit_magnetic_temperature_refresh(before, after)?;
+            admit_source_temperature_refresh(before, after)?;
+            law.resolve(before)?;
+            law.resolve(after)?;
         }
         let problem = Arc::new(old.problem.with_materials(materials, assembly, cancelled)?);
         let coupling = old.coupling.refresh_sources(

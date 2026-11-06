@@ -5012,3 +5012,54 @@ collision material, lowering electrical conductivity. Gas energy retained since
 photoionization plus escaping recombination photons closes the original absorbed
 photon account. This composes the existing owners for successive prescribed
 intervals; it does not claim simultaneous radiation/field/chemistry integration.
+
+## Oriented magnetic permeability in current-free three-dimensional fields
+
+`SpatialMagnetostatics::with_magnetic_laws` retains an explicit scalar or
+orthotropic magnetic law per original tetrahedron. Original principal material
+sources and their fixed physical frame produce the complete Whitney Hodge
+`d0^T M_mu d0`; recovered flux is `B=mu H+Br`, and induced storage is
+`H.(mu H)/2` on the original cell volumes. The existing `new` entry point keeps
+the scalar path, including its original recoil arithmetic. Recoil sources keep
+their own isotropic slope and operating envelope; an unrelated principal law
+cannot be attached to a magnet.
+
+Material and orientation preparation is reused across boundary excitations.
+Existing disconnected gauges, dimensional residual/energy budgets, bounded
+assembly, cancellation and raw interface-flux diagnostics remain unchanged.
+Surface and eggshell Maxwell loads require their original homogeneous isotropic
+exterior material; an anisotropic target may be enclosed, but the target's
+magnetic response supplies no universal material stress law. G1/G3 regressions
+cover off-diagonal affine fields under potential and flux traces, layered
+normal-flux/tangential-field continuity, source-only substitutions, physical
+co-rotation and energy, scalar parity, and stress-domain refusal. They qualify
+the discrete fixed-state linear law, not experimental anisotropic material data,
+nonlinear anisotropy or moving-frame thermal/mechanical exchange.
+
+## Oriented reluctivity in current-carrying fields, windings and induction
+
+`SpatialVectorMagnetostatics::with_magnetic_laws` carries the same original
+principal sources and fixed magnetic axes into the edge curl-curl operator.
+The native face Hodge uses the complete inverse tensor, formed from reciprocal
+principal values. Field recovery applies `H=nu(B-Br)` and reversible energy
+uses `(B-Br).H/2`. Winding self/mutual terms use `B_i.nu B_j` with the original
+Whitney source pairing. Explicit shared end-flux factors remain independent of
+the resolved field. No scalar average or componentwise Cartesian inverse is
+introduced; the original isotropic/recoil constructor remains available.
+
+The retained A-phi induction owner uses those same coefficients in evolution,
+endpoint fields, stored energy and its conservative magnetic Peclet bound.
+Temperature continuation keeps the original material identity, selected claims,
+nonthermal conditions and magnetic axes. Its endpoint-symmetric parameter work
+is `V B0.(nu1-nu0)B1/2`, computed directly from principal coefficient changes;
+held sources give exactly zero. This signed work remains separate from Ohmic
+heat and impressed/motional work. Recoil refresh and moving material axes refuse.
+Mechanical surface/eggshell sampling retains its isotropic exterior collar.
+
+Focused manufactured regressions cover rotated uniform fields and gauge
+invariance, a six-tetrahedron current/induction reduction with independently
+derived stiffness and charge-eliminated mass, signed thermal parameter work,
+and reciprocal winding energy/material scaling. These extend the existing
+lowest-order bounded-domain model; anisotropic saturation, hysteresis,
+frequency-dependent permeability and experimental qualification remain outside
+this linear fixed-frame law.
