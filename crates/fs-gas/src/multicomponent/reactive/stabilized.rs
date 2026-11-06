@@ -37,6 +37,22 @@ pub struct StabilizedReactiveEntropyStepReport {
     pub operator_evaluations: usize,
 }
 
+/// Complete closed reacting window with one original-to-final entropy allowance.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct StabilizedReactiveEntropyIntervalReport {
+    /// Original interval durations, complete work budgets, chemistry and balances.
+    pub coupled: StabilizedReactiveIntervalReport,
+    /// Direct original-to-final source entropy and species-source continuity.
+    /// Its rejection count includes retries of the accepted coupled steps.
+    pub entropy: super::entropy::ReactiveEntropyReport,
+    /// Smallest accepted complete coupled-step entropy increment [J/K].
+    /// Zero for a no-op; individual step allowances do not accumulate here.
+    pub minimum_step_entropy_change_j_k: f64,
+    /// Largest source-corrected relative species residual of an accepted step.
+    /// The complete interval additionally satisfies its own direct species gate.
+    pub maximum_step_relative_species_residual: f64,
+}
+
 /// Complete-duration work bounds for stationary reacting molecular evolution.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct StabilizedReactiveIntervalControl {
@@ -282,25 +298,21 @@ impl ReactingEuler1d {
         let mut account = super::entropy::CoupledEntropy::new(
             &self.accepted, controls.transport, entropy, &mut cancelled,
         )?;
-        let mut evaluations = 0;
-        let (coupled, dissipation) = self.step_inner(
+        let step = self.stabilized_step_inner(
+            operator,
             maximum_duration,
             controls,
-            Some(operator),
-            MolecularMethod::EntropyStabilized {
-                controls: dissipation_controls,
-                entropy,
-                evaluations: &mut evaluations,
-            },
+            dissipation_controls,
             [None; 2],
+            &mut 0,
             None,
             Some(&mut account),
             &mut cancelled,
         )?;
         Ok(StabilizedReactiveEntropyStepReport {
-            coupled: account.complete(coupled),
-            dissipation: dissipation.expect("accepted stabilized composition has both halves"),
-            operator_evaluations: evaluations,
+            coupled: account.complete(step.coupled),
+            dissipation: step.dissipation,
+            operator_evaluations: step.operator_evaluations,
         })
     }
 
@@ -346,17 +358,46 @@ impl ReactingEuler1d {
         budget: Option<&mut CouplingBudget>,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<StabilizedReactiveStepReport, ReactiveError> {
+        self.stabilized_step_inner(
+            operator, maximum_duration, controls, dissipation_controls, reservoirs,
+            evaluations, budget, None, cancelled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn stabilized_step_inner<L: TransportLaw>(
+        &mut self,
+        operator: &mut DissipationOperator<L>,
+        maximum_duration: Time,
+        controls: ReactiveStepControl,
+        dissipation_controls: StabilizedDissipationControl,
+        reservoirs: [Option<Cell<'_>>; 2],
+        evaluations: &mut usize,
+        budget: Option<&mut CouplingBudget>,
+        entropy: Option<&mut super::entropy::CoupledEntropy>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<StabilizedReactiveStepReport, ReactiveError> {
         let before = *evaluations;
-        let (coupled, dissipation) = self.step_impl(
-            maximum_duration,
-            controls,
-            Some(operator),
+        let molecular = if let Some(account) = entropy.as_ref() {
+            MolecularMethod::EntropyStabilized {
+                controls: dissipation_controls,
+                entropy: account.controls(),
+                evaluations,
+            }
+        } else {
             MolecularMethod::Stabilized {
                 controls: dissipation_controls,
                 evaluations,
-            },
+            }
+        };
+        let (coupled, dissipation) = self.step_inner(
+            maximum_duration,
+            controls,
+            Some(operator),
+            molecular,
             reservoirs,
             budget,
+            entropy,
             cancelled,
         )?;
         Ok(StabilizedReactiveStepReport {
@@ -364,6 +405,80 @@ impl ReactingEuler1d {
             dissipation: dissipation.expect("accepted stabilized composition has both halves"),
             operator_evaluations: *evaluations - before,
         })
+    }
+
+    /// Complete a closed reacting duration with source-conjugate inviscid/RKL2
+    /// transport and one direct original-to-final entropy/source-inventory gate.
+    ///
+    /// The original interval owner retains exact clock-target semantics, its
+    /// reused conserved-state backup, compensated physical ledgers and shared
+    /// coupled-attempt/RHS budgets. Both molecular halves and every discarded
+    /// coupled attempt consume those same budgets. Only completely accepted
+    /// steps contribute their actual chemical species changes and absolute
+    /// per-cell/per-half throughput to the complete entropy account.
+    ///
+    /// Every accepted step retains its original component and complete-state
+    /// checks. The final account additionally measures the actual original and
+    /// final fields under ONE entropy allowance for the requested interval;
+    /// per-step allowances and rounded entropy reports are never summed to
+    /// replace that admission. Genuine chemical entropy remains included.
+    ///
+    /// A terminal remainder is actually solved. Unrepresentable durations,
+    /// exhausted work, cancellation and final entropy/source refusal preserve
+    /// the entire original field and clock. A no-op still validates the original
+    /// operator/source and the same first-order, constant-area, closed domain.
+    /// Use the target-time companion to explicitly choose a represented clock.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_stabilized_entropy_consistent_for<L: TransportLaw>(
+        &mut self,
+        operator: &mut DissipationOperator<L>,
+        duration: Time,
+        controls: StabilizedReactiveIntervalControl,
+        entropy: super::super::MixtureEntropyControl,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<StabilizedReactiveEntropyIntervalReport, ReactiveError> {
+        poll(&mut cancelled)?;
+        controls.validate()?;
+        let mut account = super::entropy::IntervalEntropy::new(
+            &self.accepted, controls.step.transport, entropy, &mut cancelled,
+        )?;
+        let coupled = self.advance_stabilized_for_inner(
+            operator, duration, controls, [None; 2], Some(&mut account), &mut cancelled,
+        )?;
+        Ok(account.complete(coupled))
+    }
+
+    /// Reach an explicit represented target through the same closed
+    /// entropy-consistent reacting interval owner.
+    ///
+    /// The final source-aware entropy and every species continuity residual are
+    /// measured directly against the original rollback rows. Rejected attempts
+    /// contribute no chemical source to that account. Failure after any accepted
+    /// prefix restores those rows and the original clock; no prefix is published.
+    /// There is no clock snap, skipped remainder or additional time integrator.
+    ///
+    /// The native physical macrostep, chemistry and source-domain controls remain
+    /// necessary. Split symmetry, component entropy admission and the RKL2 linear
+    /// stability interval provide no unconditional positivity or temporal-error
+    /// theorem for the complete reacting flow.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_stabilized_entropy_consistent_to<L: TransportLaw>(
+        &mut self,
+        operator: &mut DissipationOperator<L>,
+        target: Time,
+        controls: StabilizedReactiveIntervalControl,
+        entropy: super::super::MixtureEntropyControl,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<StabilizedReactiveEntropyIntervalReport, ReactiveError> {
+        poll(&mut cancelled)?;
+        controls.validate()?;
+        let mut account = super::entropy::IntervalEntropy::new(
+            &self.accepted, controls.step.transport, entropy, &mut cancelled,
+        )?;
+        let coupled = self.advance_stabilized_to_inner(
+            operator, target, controls, [None; 2], Some(&mut account), &mut cancelled,
+        )?;
+        Ok(account.complete(coupled))
     }
 
     /// Complete a nonnegative duration through the original coupled step owner.
@@ -388,6 +503,21 @@ impl ReactingEuler1d {
         duration: Time,
         controls: StabilizedReactiveIntervalControl,
         reservoirs: [Option<Cell<'_>>; 2],
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<StabilizedReactiveIntervalReport, ReactiveError> {
+        self.advance_stabilized_for_inner(
+            operator, duration, controls, reservoirs, None, cancelled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn advance_stabilized_for_inner<L: TransportLaw>(
+        &mut self,
+        operator: &mut DissipationOperator<L>,
+        duration: Time,
+        controls: StabilizedReactiveIntervalControl,
+        reservoirs: [Option<Cell<'_>>; 2],
+        entropy: Option<&mut super::entropy::IntervalEntropy>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<StabilizedReactiveIntervalReport, ReactiveError> {
         poll(&mut cancelled)?;
@@ -402,11 +532,12 @@ impl ReactingEuler1d {
                 "reacting duration is not representable at this clock",
             ));
         }
-        self.advance_stabilized_to_impl(
+        self.advance_stabilized_to_inner(
             operator,
             Time::new(target),
             controls,
             reservoirs,
+            entropy,
             cancelled,
         )
     }
@@ -439,6 +570,21 @@ impl ReactingEuler1d {
         target: Time,
         controls: StabilizedReactiveIntervalControl,
         reservoirs: [Option<Cell<'_>>; 2],
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<StabilizedReactiveIntervalReport, ReactiveError> {
+        self.advance_stabilized_to_inner(
+            operator, target, controls, reservoirs, None, cancelled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn advance_stabilized_to_inner<L: TransportLaw>(
+        &mut self,
+        operator: &mut DissipationOperator<L>,
+        target: Time,
+        controls: StabilizedReactiveIntervalControl,
+        reservoirs: [Option<Cell<'_>>; 2],
+        mut entropy: Option<&mut super::entropy::IntervalEntropy>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<StabilizedReactiveIntervalReport, ReactiveError> {
         poll(&mut cancelled)?;
@@ -467,20 +613,37 @@ impl ReactingEuler1d {
         let outcome = (|| {
             if target.value() == start {
                 // A no-op still admits the exact original operator and source.
-                operator.advance_stabilized_with_reservoirs_budget(
-                    &mut self.accepted,
-                    Time::new(0.0),
-                    controls.dissipation,
-                    reservoirs,
-                    &mut evaluations,
-                    &mut cancelled,
-                )?;
+                if let Some(account) = entropy.as_deref_mut() {
+                    operator.advance_stabilized_entropy_consistent_budget(
+                        &mut self.accepted,
+                        Time::new(0.0),
+                        controls.dissipation,
+                        account.controls(),
+                        &mut evaluations,
+                        &mut cancelled,
+                    )?;
+                } else {
+                    operator.advance_stabilized_with_reservoirs_budget(
+                        &mut self.accepted,
+                        Time::new(0.0),
+                        controls.dissipation,
+                        reservoirs,
+                        &mut evaluations,
+                        &mut cancelled,
+                    )?;
+                }
             }
             while self.accepted.time < target.value() {
                 poll(&mut cancelled)?;
                 let previous_time = self.accepted.time;
                 let remaining = target.value() - previous_time;
-                let step = self.stabilized_step(
+                let mut step_entropy = match entropy.as_deref() {
+                    Some(account) => Some(account.new_step(
+                        &self.accepted, controls.step.transport, &mut cancelled,
+                    )?),
+                    None => None,
+                };
+                let step = self.stabilized_step_inner(
                     operator,
                     Time::new(remaining),
                     controls.step,
@@ -488,6 +651,7 @@ impl ReactingEuler1d {
                     reservoirs,
                     &mut evaluations,
                     Some(&mut budget),
+                    step_entropy.as_mut(),
                     &mut cancelled,
                 )?;
                 if !positive(step.coupled.elapsed.value())
@@ -498,6 +662,12 @@ impl ReactingEuler1d {
                     return Err(ReactiveError::Invalid(
                         "reacting interval clock failed to progress within target",
                     ));
+                }
+                if let Some(account) = entropy.as_deref_mut() {
+                    account.accept_step(
+                        step_entropy.as_ref().expect("entropy interval retained its step account"),
+                        &mut cancelled,
+                    )?;
                 }
                 budget.completed += 1;
                 ledger.add(step, n)?;
@@ -517,6 +687,15 @@ impl ReactingEuler1d {
                 &budget,
                 evaluations,
             )?;
+            if let Some(account) = entropy.as_deref_mut() {
+                let chemistry = self.reactor.controls();
+                account.check_candidate(
+                    &self.interval_initial,
+                    &self.accepted,
+                    [chemistry.minimum_temperature_k, chemistry.maximum_temperature_k],
+                    &mut cancelled,
+                )?;
+            }
             poll(&mut cancelled)?;
             Ok::<_, ReactiveError>(complete)
         })();

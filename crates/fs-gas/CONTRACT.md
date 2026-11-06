@@ -6025,3 +6025,63 @@ attempt. That refusal must leave the public field/clock unchanged and the same
 owners reusable. The tests are definitions, not executed performance results:
 source/syntax review completed, but native Rust typechecking and test execution
 were unavailable.
+
+
+### Complete-duration entropy-consistent reacting evolution
+
+`ReactingEuler1d::advance_stabilized_entropy_consistent_for` and
+`advance_stabilized_entropy_consistent_to` connect the preceding source-conjugate
+reacting step to the existing full-duration RKL2 interval owner. The original
+loop, compensated physical ledger, exact target handling, reused conserved
+rollback buffer and aggregate work controls remain authoritative. No duplicate
+interval integrator or complete flow clone is introduced.
+
+One original source-entropy account anchors the entire requested window.
+Each native coupled step retains its own unchanged retry anchor and all
+component/complete-step checks. Only after native success and interval clock
+validation does its exact double-double chemical species change and absolute
+per-cell/per-half throughput merge into the window account. Discarded attempts
+contribute work, but no chemical source, to the accepted window. These transfers
+are independent of each step's entropy basis; rounded per-step entropy reports
+are not summed to reconstruct the final state.
+
+At completion the same original source-interval reducer compares the actual
+final field with `interval_initial`, using the immutable original temperatures
+and source reference basis. It restores genuine chemical source entropy,
+separates only numerical species-source reference defects and admits each
+species against original mass plus accepted absolute chemical throughput.
+ONE original-to-final entropy allowance applies to the complete window,
+in addition to every step's local admission. Local allowances do not accumulate
+into a larger final allowance. Endpoint scratch resets preserve merged accepted
+chemical transfers and the original anchor.
+
+Both molecular halves, every RKL2 stage, all discarded coupled attempts and all
+accepted physical steps share the existing interval RHS/coupling budgets.
+Each terminal remainder is actually integrated. A duration unrepresentable at
+the current clock refuses; the target-time companion lets the caller explicitly
+select a represented endpoint. No clock snap or epsilon remainder is substituted.
+A no-op still admits the original operator, source and closed entropy scope.
+
+The complete entropy gate runs inside the original rollback-protected closure,
+after the physical interval report is constructed and before the final
+cancellation poll. Source or entropy refusal, exhausted work, stagnant time or
+late cancellation restores the ENTIRE original accepted field and clock,
+including any internally completed prefix. The same owners remain reusable.
+
+`StabilizedReactiveEntropyIntervalReport` returns the original physical interval
+report, direct complete-window `ReactiveEntropyReport`, smallest accepted
+coupled-step entropy change and largest accepted-step species residual. The
+complete endpoint also passes its own direct species check. The original
+first-order, fixed constant-area, closed-boundary, common-support limitations
+remain; no general temporal-error, positivity or combustion theorem is inferred.
+
+Focused regressions cover multiple-step variable-Cp reacting flow with a
+nonzero species entropy datum, independent complete-state entropy/source
+balances, global work exhaustion after an accepted prefix, late cancellation
+and reuse, no-op/represented-time behavior, and the unchanged whole allowance.
+The latter uses actual source states with individually allowable entropy
+changes of about -6e-6 J/K each and a direct total of -1.2e-5 J/K: a single
+1e-5 J/K whole allowance must refuse that accumulated decrease. Syntax/source
+review and independent arithmetic were performed. Native Cargo tests,
+typechecking and the DSR gate were not run; disk pressure and unavailable
+remote build runners prevented a supported native verification run.

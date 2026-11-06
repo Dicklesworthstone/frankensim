@@ -11,7 +11,7 @@ use super::{
     poll, positive, scalar,
 };
 
-/// Original-to-final state entropy of one complete closed reacting-flow step.
+/// Original-to-final state entropy of a complete closed reacting-flow step or interval.
 ///
 /// The original chemical species source remains part of the admitted entropy.
 /// Only its numerical species-continuity defect is reported separately. This
@@ -33,9 +33,21 @@ pub struct ReactiveEntropyReport {
     /// Zero original inventory and zero chemical throughput require zero drift.
     pub maximum_relative_species_residual: f64,
     /// Whole-step endpoint attempts rejected by entropy or species admission.
+    /// An interval includes these counts from every accepted physical step.
     /// Internal chemistry, molecular and advective rejections retain their
     /// original owners' separate counters.
     pub rejected_entropy_steps: usize,
+}
+
+/// Actual accepted chemistry transfers, independent of the step's entropy basis.
+/// Only the original composition owner extracts and merges these receipts after
+/// its complete physical step succeeds. No rounded report sums enter the account.
+#[derive(Clone, Copy)]
+pub(in crate::multicomponent) struct ReactionInventory {
+    species_count: usize,
+    chemical_change: [Dd; MAX_SPECIES],
+    chemical_throughput: [Dd; MAX_SPECIES],
+    rejected_entropy_steps: usize,
 }
 
 /// The composition owner supplies actual chemical endpoint rows and the complete
@@ -66,12 +78,59 @@ impl ReactiveEntropyAccount {
     /// Each complete retry returns to the same immutable original thermal basis.
     /// Rejected endpoint temperatures and chemical transfers cannot become anchors.
     pub(in crate::multicomponent) fn begin_attempt(&mut self) {
+        self.reset_endpoint();
+        self.chemical_change.fill(Dd::ZERO);
+        self.chemical_throughput.fill(Dd::ZERO);
+    }
+
+    fn reset_endpoint(&mut self) {
         self.state.current_temperature.copy_from_slice(&self.state.initial_temperature);
         self.state.trial_entropy = Dd::ZERO;
         self.state.trial_mass.fill(Dd::ZERO);
         self.state.trial_relative = 0.0;
-        self.chemical_change.fill(Dd::ZERO);
-        self.chemical_throughput.fill(Dd::ZERO);
+    }
+
+    /// Copy only after native whole-step success. Rejected attempts have already
+    /// been discarded by begin_attempt; their work counter remains diagnostic.
+    pub(in crate::multicomponent) fn accepted_inventory(&self) -> ReactionInventory {
+        ReactionInventory {
+            species_count: self.species_count,
+            chemical_change: self.chemical_change,
+            chemical_throughput: self.chemical_throughput,
+            rejected_entropy_steps: self.rejected_entropy_steps,
+        }
+    }
+
+    /// Accumulate accepted chemistry into an interval's immutable original
+    /// account. Source-reference contributions and endpoint entropy use that
+    /// original basis at completion; per-step entropy allowances are never summed.
+    /// Refusal or cancellation leaves all previously merged transfers intact.
+    pub(in crate::multicomponent) fn merge_inventory(
+        &mut self,
+        inventory: &ReactionInventory,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(), FlowError> {
+        poll(cancelled)?;
+        if inventory.species_count != self.species_count {
+            return Err(FlowError::EntropyDomain("reacting entropy source species axis"));
+        }
+        let rejected_entropy_steps = self.rejected_entropy_steps
+            .checked_add(inventory.rejected_entropy_steps)
+            .ok_or(FlowError::EntropyDomain("reacting entropy rejection counter overflow"))?;
+        let mut change = self.chemical_change;
+        let mut throughput = self.chemical_throughput;
+        for k in 0..self.species_count {
+            poll(cancelled)?;
+            change[k] = change[k] + inventory.chemical_change[k];
+            throughput[k] = throughput[k] + inventory.chemical_throughput[k];
+            scalar(change[k])?;
+            scalar(throughput[k])?;
+        }
+        poll(cancelled)?;
+        self.chemical_change = change;
+        self.chemical_throughput = throughput;
+        self.rejected_entropy_steps = rejected_entropy_steps;
+        Ok(())
     }
 
     /// Observe the actual represented cell update after the original chemistry
@@ -126,6 +185,27 @@ impl ReactiveEntropyAccount {
         temperature_bounds: Option<[f64; 2]>,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<ReactiveEntropyReport, FlowError> {
+        if candidate.gas() != initial.gas()
+            || initial.mesh != candidate.mesh
+            || initial.boundaries != candidate.boundaries
+        {
+            return Err(FlowError::EntropyDomain("reacting entropy candidate owner or dimensions"));
+        }
+        self.check_candidate_rows(&initial.states, candidate, temperature_bounds, cancelled)
+    }
+
+    /// Check an entire interval directly against its existing conserved rollback
+    /// buffer. The caller retains the original fixed source, mesh and boundaries.
+    /// Reset only endpoint scratch: accepted chemical transfers and their absolute
+    /// throughput survive, while no earlier endpoint temperature becomes an anchor.
+    pub(in crate::multicomponent) fn check_candidate_rows(
+        &mut self,
+        initial: &[f64],
+        candidate: &MixtureEuler1d,
+        temperature_bounds: Option<[f64; 2]>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<ReactiveEntropyReport, FlowError> {
+        self.reset_endpoint();
         let check = self.check_candidate_inner(initial, candidate, temperature_bounds, cancelled);
         if matches!(&check, Err(
             FlowError::EntropyDecrease { .. } | FlowError::SpeciesInventoryDrift { .. }
@@ -137,7 +217,7 @@ impl ReactiveEntropyAccount {
 
     fn check_candidate_inner(
         &mut self,
-        initial: &MixtureEuler1d,
+        initial: &[f64],
         candidate: &MixtureEuler1d,
         temperature_bounds: Option<[f64; 2]>,
         cancelled: &mut impl FnMut() -> bool,
@@ -145,12 +225,9 @@ impl ReactiveEntropyAccount {
         let gas = candidate.gas();
         let n = self.species_count;
         let width = n + 2;
-        if gas != initial.gas()
-            || gas.species_count() != n
-            || initial.mesh != candidate.mesh
-            || initial.boundaries != candidate.boundaries
-            || initial.states.len() != candidate.states.len()
-            || initial.cell_count() != self.state.initial_temperature.len()
+        if gas.species_count() != n
+            || initial.len() != candidate.states.len()
+            || candidate.cell_count() != self.state.initial_temperature.len()
         {
             return Err(FlowError::EntropyDomain("reacting entropy candidate owner or dimensions"));
         }
@@ -159,7 +236,7 @@ impl ReactiveEntropyAccount {
         }) {
             return Err(FlowError::EntropyDomain("reacting entropy temperature interval"));
         }
-        for (i, (old, new)) in initial.states.chunks_exact(width)
+        for (i, (old, new)) in initial.chunks_exact(width)
             .zip(candidate.states.chunks_exact(width)).enumerate()
         {
             poll(cancelled)?;
@@ -170,7 +247,7 @@ impl ReactiveEntropyAccount {
                 return Err(FlowError::EntropyDomain("final molecular state is outside chemistry interval"));
             }
             self.state.candidate_cell(
-                gas, i, old, new, primitive.temperature, initial.mesh.volumes()[i], cancelled,
+                gas, i, old, new, primitive.temperature, candidate.mesh.volumes()[i], cancelled,
             )?;
         }
         let relative = self.state.inventory_with_reaction(

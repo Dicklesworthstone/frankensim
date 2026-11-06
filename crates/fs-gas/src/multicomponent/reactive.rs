@@ -28,7 +28,8 @@ mod reservoir;
 mod stabilized;
 pub use stabilized::{
     SplitStabilizedDissipationReport, StabilizedReactiveIntervalControl,
-    StabilizedReactiveEntropyStepReport, StabilizedReactiveIntervalReport,
+    StabilizedReactiveEntropyIntervalReport, StabilizedReactiveEntropyStepReport,
+    StabilizedReactiveIntervalReport,
     StabilizedReactiveStepReport,
 };
 mod inertial_walls;

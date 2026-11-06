@@ -2,6 +2,8 @@
 
 use super::molecular::molecular;
 use super::*;
+
+mod interval;
 use crate::multicomponent::dissipation::{ConstantTransport, DissipationOperator};
 use crate::multicomponent::{Boundary, MixtureEntropyControl, Reconstruction};
 use fs_thermochem::{Nasa9RegionV1, Nasa9StandardStateModelV1, required_nasa9_parameter_dims};
