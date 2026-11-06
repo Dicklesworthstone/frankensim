@@ -4,6 +4,9 @@ use super::*;
 use fs_thermochem::solution::multicomponent::caloric::MulticomponentCaloricSolveV1;
 use fs_thermochem::solution::multicomponent::caloric::equilibrium::MulticomponentEquilibriumCaloricSolveV1;
 
+#[path = "transactions.rs"]
+mod transactions;
+
 const AMOUNTS: [f64; 3] = [2.0, 3.0, 5.0];
 const GAS_CONSTANT: f64 = 8.314_462_618_153_24;
 

@@ -5,6 +5,9 @@
 //! material properties. Phase count and support stay fixed: continuation is
 //! seeded numerical evidence, not global equilibrium or a phase-onset model.
 
+/// Original-source homogeneous relaxation and unequal-temperature phase mixing.
+pub mod transactions;
+
 use super::{
     MulticomponentLiquidCaloricError, MulticomponentLiquidCaloricLaw, MulticomponentLiquidError,
     Result, SourceOwner, poll,
@@ -72,12 +75,20 @@ impl MulticomponentLiquidCaloricLaw<'_, '_> {
             controls,
             &mut cancelled,
         )?;
+        self.resolve_equilibrium_balance(balance, &mut cancelled)
+    }
+
+    fn resolve_equilibrium_balance(
+        &self,
+        balance: MulticomponentEquilibriumCaloricBalanceV1,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<MulticomponentLiquidEquilibriumCaloricBalance> {
         let equilibrium = self
             .liquid
-            .resolve_equilibrium(balance.final_state().candidate().clone(), &mut cancelled)?;
+            .resolve_equilibrium(balance.final_state().candidate().clone(), &mut *cancelled)?;
         let final_state =
             self.retain_equilibrium_state(balance.final_state().clone(), equilibrium)?;
-        poll(&mut cancelled)?;
+        poll(cancelled)?;
         Ok(MulticomponentLiquidEquilibriumCaloricBalance {
             final_state,
             balance,
