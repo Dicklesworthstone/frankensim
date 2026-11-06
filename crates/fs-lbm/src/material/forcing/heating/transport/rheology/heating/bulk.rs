@@ -136,7 +136,8 @@ fn sample<F: FluidTransport>(
                     .map_err(error)?;
                     let bulk_tau = physical_bulk_tau(mapping, source.bulk_viscosity_pa_s)
                         .map_err(|what| error(MaterialLbmError::Invalid(what)))?;
-                    Ok(((source, bulk_tau), scale.flow().tau))
+                    let shear_tau = scale.flow().tau;
+                    Ok(((source, bulk_tau), shear_tau))
                 },
             )
             .map_err(|error| match error {

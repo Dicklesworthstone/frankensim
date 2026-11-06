@@ -27,7 +27,9 @@
 
 use super::*;
 
+#[path = "nested/fields.rs"]
 mod fields;
+#[path = "nested/geometry.rs"]
 mod geometry;
 
 /// The original physical interface, with its normal pointing outward from

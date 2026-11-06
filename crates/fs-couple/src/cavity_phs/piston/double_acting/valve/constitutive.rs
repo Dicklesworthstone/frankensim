@@ -30,9 +30,6 @@ pub trait MeteredPistonGas: PistonGas {
     /// Original donor/receiver species and extensive-energy account.
     type Transfer: Clone + core::fmt::Debug + PartialEq;
 
-    /// Accepted conserved inventory mass [kg].
-    fn mass_kg(&self) -> f64;
-
     /// Propose both finite endpoints through the original material nozzle.
     ///
     /// Returns donor, receiver, transfer and throat flow in that order. Inputs
@@ -78,10 +75,6 @@ impl MeteredPistonGas for ClosedGasParcel {
     type NozzleSolve = GasNozzleStepSolve;
     type Flow = GasNozzleFlow;
     type Transfer = GasMassTransferStep;
-
-    fn mass_kg(&self) -> f64 {
-        ClosedGasParcel::mass_kg(self)
-    }
 
     fn through_metering_nozzle(
         &self,
@@ -142,10 +135,6 @@ impl MeteredPistonGas for IsochoricRealGasParcel {
     type NozzleSolve = RealGasNozzleStepSolve;
     type Flow = RealGasNozzleFlow;
     type Transfer = RealGasMassTransferStep;
-
-    fn mass_kg(&self) -> f64 {
-        IsochoricRealGasParcel::mass_kg(self)
-    }
 
     fn through_metering_nozzle(
         &self,
