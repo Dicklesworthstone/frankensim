@@ -25,6 +25,8 @@ pub mod gravity;
 pub mod reference;
 /// Source-bound tension-only links sharing this rod's equilibrium and gravity.
 pub mod tension;
+/// Sourced tensile limits on the actual segment and tension-link stresses.
+pub mod strength;
 /// Frozen reference inertia and analytical force adapter for dynamic consumers.
 pub mod motion;
 mod derivatives;

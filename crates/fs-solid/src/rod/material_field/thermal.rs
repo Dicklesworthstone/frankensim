@@ -28,6 +28,15 @@ impl ThermalField {
     pub(super) fn summary(&self, segment: usize, strain: f64) -> Result<(f64, f64), SpatialRodError> {
         Ok(self.sections[segment].axial_force_and_energy_at_strain(strain, self.limit)?)
     }
+
+    pub(super) fn assess_tensile(
+        &self, segment: usize, strain: f64, bending_moment_n_m: [f64; 2],
+        capacity: &fs_material::section::strength::AxialTensileCapacity,
+    ) -> Result<fs_material::section::strength::ConcentricTensileAssessment, SpatialRodError> {
+        Ok(capacity.assess_thermoelastic_axial_bending(
+            &self.sections[segment], strain, bending_moment_n_m, self.limit,
+        )?)
+    }
 }
 
 impl SpatialMaterialRod {
