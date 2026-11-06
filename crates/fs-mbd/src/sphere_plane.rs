@@ -1,6 +1,7 @@
 //! Event-resolved isotropic sphere motion against one prescribed plane.
 //!
-//! The plane normal, velocity and applied centre force are constant. Ideal
+//! The plane normal, velocity, applied centre force and optional world couple
+//! are constant. Ideal
 //! Coulomb support admits distinct static and kinetic coefficients. The impact
 //! coefficient remains a separate instantaneous disk law. Persistent contact
 //! admits driven rolling and collinear sliding with exact slip-arrest events.
@@ -183,6 +184,12 @@ pub struct SpherePlaneAdvance {
     pub contact_angular_impulse_world: Vec3,
     /// Work of the declared constant applied force, in J.
     pub external_force_work: f64,
+    /// Signed work of the prescribed central world couple, in J.
+    /// Braking work can be negative; ideal static traction does not create heat.
+    pub external_torque_work: f64,
+    /// Integrated prescribed central couple in world axes, in N m s.
+    /// Centre-force moments and contact moments remain separate contributions.
+    pub external_torque_impulse_world: Vec3,
     /// Signed work supplied by the moving plane, in J.
     pub plane_work: f64,
     /// Normal impact and actual tangent-force work loss, in J; not a heat
@@ -266,6 +273,8 @@ struct Ledger {
     contact_angular: Vec3,
     external_angular: Vec3,
     force_work: f64,
+    torque_work: f64,
+    torque_impulse: Vec3,
     plane_work: f64,
     loss: f64,
     impact_loss: f64,
@@ -280,6 +289,7 @@ struct TangentialImpactAdvance {
 }
 struct Engine {
     scene: SpherePlane,
+    external_torque_world: Vec3,
     config: SpherePlaneConfig,
     support_static_mu: f64,
     support_kinetic_mu: f64,
@@ -360,6 +370,7 @@ impl Engine {
         }
         Ok(Self {
             scene,
+            external_torque_world: Vec3::ZERO,
             config,
             support_static_mu: static_mu,
             support_kinetic_mu: kinetic_mu,
@@ -382,6 +393,25 @@ impl Engine {
             velocity_scale: 0.0,
         })
     }
+    /// The applied couple changes contact-point slip acceleration, independently
+    /// of centre acceleration. Resolve the force and couple in the same plane
+    /// frame before choosing static traction, arrest or sliding breakaway.
+    fn set_external_torque(&mut self, torque: Vec3) -> Result<(), SpherePlaneError> {
+        vector(torque)?;
+        self.external_torque_world = torque;
+        if torque != Vec3::ZERO {
+            let spin_acceleration = torque.scale(self.inertia.recip()).cross(self.arm);
+            vector(spin_acceleration)?;
+            for (i, tangent) in self.tangent.iter().enumerate() {
+                self.acceleration_tangent[i] = finite(
+                    self.force_tangent_world.dot(*tangent) / self.mass
+                        + spin_acceleration.dot(*tangent),
+                )?;
+            }
+        }
+        Ok(())
+    }
+
     fn plane_point(&self, time: f64) -> Result<Vec3, SpherePlaneError> {
         let p = self
             .scene
@@ -582,7 +612,13 @@ impl Engine {
         let p1 = body.linear_momentum_world().add(total.scale(h));
         let l0 = world_spin(body);
         // The normal support line passes through the centre exactly.
-        let torque = self.arm.cross(tangent_force);
+        let contact_torque = self.arm.cross(tangent_force);
+        let torque = if self.external_torque_world == Vec3::ZERO {
+            contact_torque
+        } else {
+            contact_torque.add(self.external_torque_world)
+        };
+        vector(torque)?;
         let l1 = l0.add(torque.scale(h));
         let mut orientation = body.pose().orientation();
         if commuting_directions(l0, torque) {
@@ -614,6 +650,22 @@ impl Engine {
             orientation.rotate_world_to_body(l1),
         )?;
         let contact_impulse = contact.scale(h);
+        let couple_impulse = self.external_torque_world.scale(h);
+        vector(couple_impulse)?;
+        if self.external_torque_world != Vec3::ZERO {
+            // Exact work for constant world torque and isotropic spin, using
+            // the same physical segment as contact traction. The shared
+            // compensated pairing retains small work during spin reversal.
+            let work = crate::midpoint_impulse_pairing(
+                l0.scale(self.inertia.recip()),
+                l1.scale(self.inertia.recip()),
+                couple_impulse,
+            )
+            .to_f64();
+            self.ledger.torque_work = finite(self.ledger.torque_work + work)?;
+            self.ledger.torque_impulse = self.ledger.torque_impulse.add(couple_impulse);
+            vector(self.ledger.torque_impulse)?;
+        }
         let external_angular = torque_integral(x0, v0, acceleration, self.scene.force_world, h);
         let contact_angular = torque_integral(x0.add(self.arm), v0, acceleration, contact, h);
         vector(external_angular)?;
@@ -626,8 +678,12 @@ impl Engine {
         self.ledger.plane_work =
             finite(self.ledger.plane_work + contact_impulse.dot(self.scene.velocity_world))?;
         self.ledger.impulse_scale = finite(self.ledger.impulse_scale + norm(contact_impulse)?)?;
-        self.ledger.angular_scale =
-            finite(self.ledger.angular_scale + norm(external_angular)? + norm(contact_angular)?)?;
+        self.ledger.angular_scale = finite(
+            self.ledger.angular_scale
+                + norm(external_angular)?
+                + norm(contact_angular)?
+                + norm(couple_impulse)?,
+        )?;
         self.kinematics(next)?;
         Ok(next)
     }
@@ -827,9 +883,72 @@ pub fn advance_sphere_plane_with_support_friction(
     config: SpherePlaneConfig,
     cancelled: impl FnMut() -> bool,
 ) -> Result<SpherePlaneAdvance, SpherePlaneError> {
+    advance_sphere_plane_with_torque_and_support_friction(
+        scene,
+        state,
+        Vec3::ZERO,
+        support_friction,
+        duration_s,
+        config,
+        cancelled,
+    )
+}
+
+/// Advance a sphere under a held world couple through flight and contact.
+///
+/// The couple acts about the sphere COM. Its spin acceleration contributes
+/// directly to contact slip, so the original Coulomb owner resolves motor-driven
+/// rolling, traction-limited breakaway, braking, slip arrest and reversal.
+/// The normal event geometry remains spherical and the centre force is unchanged.
+/// Applied-couple work is separate from centre-force work, plane work and actual
+/// contact dissipation. A normal-axis couple spins the sphere without point
+/// slip: this ideal point-contact model has no torsional friction.
+///
+/// Isotropic inertia, a fixed plane normal and constant force/couple are required.
+/// Changing-axis attitude and curved-slip accuracy use the existing independent
+/// bounds in `SpherePlaneConfig`. Neither conservation nor exact spin momentum
+/// certifies attitude phase or a curved Coulomb trajectory.
+pub fn advance_sphere_plane_with_torque(
+    scene: &SpherePlane,
+    state: SpherePlaneState,
+    torque_world_nm: Vec3,
+    duration_s: f64,
+    config: SpherePlaneConfig,
+    cancelled: impl FnMut() -> bool,
+) -> Result<SpherePlaneAdvance, SpherePlaneError> {
+    advance_sphere_plane_with_torque_and_support_friction(
+        scene,
+        state,
+        torque_world_nm,
+        &FrictionLaw::Coulomb {
+            static_mu: scene.friction_coefficient,
+            kinetic_mu: scene.friction_coefficient,
+        },
+        duration_s,
+        config,
+        cancelled,
+    )
+}
+
+/// Held-world-couple motion with distinct static and kinetic support friction.
+///
+/// The original impact coefficient remains `scene.friction_coefficient`.
+/// Zero applied couple follows the original force-driven arithmetic. Input
+/// states remain unchanged on invalid torque, budget exhaustion or cancellation.
+#[allow(clippy::too_many_arguments)]
+pub fn advance_sphere_plane_with_torque_and_support_friction(
+    scene: &SpherePlane,
+    state: SpherePlaneState,
+    torque_world_nm: Vec3,
+    support_friction: &FrictionLaw,
+    duration_s: f64,
+    config: SpherePlaneConfig,
+    cancelled: impl FnMut() -> bool,
+) -> Result<SpherePlaneAdvance, SpherePlaneError> {
     advance_with_contact(
         scene,
         state,
+        torque_world_nm,
         support_friction,
         duration_s,
         config,
@@ -853,6 +972,7 @@ struct SupportAdvance {
 fn advance_with_contact<C: FnMut() -> bool>(
     scene: &SpherePlane,
     state: SpherePlaneState,
+    torque_world_nm: Vec3,
     support_friction: &FrictionLaw,
     duration_s: f64,
     config: SpherePlaneConfig,
@@ -900,6 +1020,7 @@ fn advance_with_contact<C: FnMut() -> bool>(
             .tangent
             .map(|t| engine.force_tangent_world.dot(t) / engine.mass);
     }
+    engine.set_external_torque(torque_world_nm)?;
     engine.velocity_scale = state.velocity_scale;
     let initial_energy = state.body.kinetic_energy(scene.properties)?;
     let mut body = state.body;
@@ -1220,7 +1341,11 @@ fn advance_with_contact<C: FnMut() -> bool>(
     let final_energy = body.kinetic_energy(scene.properties)?;
     let ledger = engine.ledger;
     let energy_balance_residual = finite(
-        (final_energy - initial_energy) - ledger.force_work - ledger.plane_work + ledger.loss,
+        (final_energy - initial_energy)
+            - ledger.force_work
+            - ledger.torque_work
+            - ledger.plane_work
+            + ledger.loss,
     )?;
     let linear_momentum_residual = body
         .linear_momentum_world()
@@ -1230,6 +1355,7 @@ fn advance_with_contact<C: FnMut() -> bool>(
     let angular_momentum_residual = total_angular(body)
         .sub(total_angular(state.body))
         .sub(ledger.external_angular)
+        .sub(ledger.torque_impulse)
         .sub(ledger.contact_angular);
     vector(linear_momentum_residual)?;
     vector(angular_momentum_residual)?;
@@ -1237,6 +1363,7 @@ fn advance_with_contact<C: FnMut() -> bool>(
     let energy_scale = initial_energy.abs()
         + final_energy.abs()
         + ledger.force_work.abs()
+        + ledger.torque_work.abs()
         + ledger.plane_work.abs()
         + ledger.loss;
     let linear_scale = norm(state.body.linear_momentum_world())?
@@ -1267,6 +1394,8 @@ fn advance_with_contact<C: FnMut() -> bool>(
             contact_impulse_world: ledger.contact,
             contact_angular_impulse_world: ledger.contact_angular,
             external_force_work: ledger.force_work,
+            external_torque_work: ledger.torque_work,
+            external_torque_impulse_world: ledger.torque_impulse,
             plane_work: ledger.plane_work,
             dissipated_energy: ledger.loss,
             energy_balance_residual,

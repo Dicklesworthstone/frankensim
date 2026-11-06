@@ -18,6 +18,9 @@ mod rolling;
 #[path = "sphere_plane/directional.rs"]
 mod directional;
 
+#[path = "sphere_plane/torque.rs"]
+mod torque;
+
 const MASS: f64 = 2.0;
 const RADIUS: f64 = 0.5;
 const INERTIA: f64 = 0.2;

@@ -433,6 +433,8 @@ pub fn advance_viscoelastic_sphere_rolling<'a>(
             contact_impulse_world: contact_impulse,
             contact_angular_impulse_world: contact_angular,
             external_force_work: force_work,
+            external_torque_work: 0.0,
+            external_torque_impulse_world: Vec3::ZERO,
             plane_work,
             dissipated_energy: heat,
             energy_balance_residual: energy_residual,

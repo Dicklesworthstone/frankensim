@@ -2902,7 +2902,7 @@ cancellation, duplicate-work, and geometry refusal without body/history mutation
 
 `advance_sphere_plane_with_support_friction` admits the original `fs-tribo::FrictionLaw::Coulomb` with distinct static and kinetic coefficients for sustained contact. Its validated range is `0 <= mu_k <= mu_s`; source calibration remains the caller's responsibility. Zero-slip rolling uses the static limit, while already moving contact uses the kinetic limit until resolved arrest. Collinear arrest then re-establishes rolling inside the static limit or starts reverse sliding above it. This includes zero kinetic friction with nonzero static capture. The scene's original coefficient still controls instantaneous impacts; a support law does not silently redefine impact response. Velocity-dependent laws require another evolution owner and refuse here.
 
-During support, only the normal applied force is balanced. With tangent inverse mass `kappa = 1/m + radius^2/I`, rolling requires traction `-(F_t/m)/kappa` inside the circular friction limit. Collinear sliding retains analytic constant-force motion, exact slip-arrest times and resolved reversal. Frictionless support admits arbitrary tangent drive.
+During support, only the normal applied force is balanced. With zero applied couple and tangent inverse mass `kappa = 1/m + radius^2/I`, rolling requires traction `-(F_t/m)/kappa` inside the circular friction limit. Collinear sliding retains analytic constant-force motion, exact slip-arrest times and resolved reversal. Frictionless support admits arbitrary tangent drive.
 
 Resolved changing-direction sliding uses the original isotropic Coulomb disk in a velocity-implicit discretization, bounded by `max_sliding_step_s` and `max_sliding_substeps`. Actual translation, world momentum, contact-point slip and torque include the original spin inertia. Each accepted step uses its resolved constant force in the native trajectory; endpoint Coulomb feasibility does not assert an exact continuous force direction. The curved trajectory is first order and arrest is resolved at a timestep boundary. Refinement is necessary. Coarse trials that would make friction assist the initial slip are halved, including apparent endpoint arrest. Supercritical transverse drive cannot be silently converted to persistent rolling. Rejected trials count toward the work cap.
 
@@ -2914,9 +2914,40 @@ Both routes evaluate lost work from actual midpoint relative slip on each consta
 
 Attitude uses an exact exponential for commuting spin/torque and bounded second-order Lie midpoint substeps otherwise. Newly supplied penetration refuses. Each curved supported segment checks its complete quadratic normal-gap path against the original floating geometry allowance, in addition to actual endpoint kinematics. Private continuation retains only bounded contact roundoff; no pose or momentum is projected.
 
-Every accepted advance independently checks total linear impulse, orbital-plus-spin angular impulse about the world origin, and `K_after - K_before = external_force_work + plane_work - dissipated_energy`. Cancellation, unresolved geometry/work, nonadvancing clocks and exhausted event, attitude or sliding budgets publish no partial state. Accumulating rebounds do not alter restitution.
+Every accepted advance independently checks total linear impulse, orbital-plus-spin angular impulse about the world origin, and `K_after - K_before = external_force_work + external_torque_work + plane_work - dissipated_energy`. Cancellation, unresolved geometry/work, nonadvancing clocks and exhausted event, attitude or sliding budgets publish no partial state. Accumulating rebounds do not alter restitution.
 
-Fifteen focused native integration groups pass: the eleven original ballistic, support, collinear, incline, spin, frame, attitude and refusal groups plus four curved-flow groups. An independent separable continuum solution for `u' = a - B*u/|u|` verifies velocity, position, spin and loss convergence at 16/32/64 steps, with error ratios 1.8–2.2; a separate 32/64/128 ladder verifies arrest followed by driven rolling. Coarse-step passivity, supercritical non-arrest, moving-plane work, split continuation, cancellation and late sliding-budget rollback are also exercised. These are focused actual-source native tests, not a full Cargo/DSR workspace gate. General multicontact Moreau-Jean dynamics, external torque, anisotropic bodies, multiple planes, finite-mass plane recoil, rolling/torsional resistance, arbitrary-shape certified CCD, source calibration and contact adjoints remain outside this owner.
+Fifteen focused native integration groups pass: the eleven original ballistic, support, collinear, incline, spin, frame, attitude and refusal groups plus four curved-flow groups. An independent separable continuum solution for `u' = a - B*u/|u|` verifies velocity, position, spin and loss convergence at 16/32/64 steps, with error ratios 1.8–2.2; a separate 32/64/128 ladder verifies arrest followed by driven rolling. Coarse-step passivity, supercritical non-arrest, moving-plane work, split continuation, cancellation and late sliding-budget rollback are also exercised. These are focused actual-source native tests, not a full Cargo/DSR workspace gate. General multicontact Moreau-Jean dynamics, time-varying or body-held torque, anisotropic bodies, multiple planes, finite-mass plane recoil, rolling/torsional resistance, arbitrary-shape certified CCD, source calibration and contact adjoints remain outside this owner.
+
+### Applied world torque during sphere/plane contact
+
+`sphere_plane::advance_sphere_plane_with_torque` and
+`advance_sphere_plane_with_torque_and_support_friction` add a prescribed
+constant world couple about the sphere COM to the original event engine.
+Its angular acceleration contributes `(torque/I) cross arm` to the original
+contact-point driving acceleration. The existing Coulomb owner therefore
+resolves motor-driven static rolling, traction-limited breakaway, braking,
+slip arrest and reversal, including distinct static/kinetic support limits.
+Torque-updated pre-impact spin enters the original impulse law. Translation,
+geometry, restitution and contact reaction ownership remain unchanged.
+
+Each accepted segment integrates isotropic world spin under the sum of
+applied and contact torque. Signed couple work uses the shared compensated
+midpoint pairing of actual segment spin rates and couple impulse. The public
+receipt separates this work and direct angular impulse from centre-force
+work, plane work and contact dissipation. The complete orbital-plus-spin and
+kinetic/work admissions include all these channels. Zero applied couple
+retains the original arithmetic. Commuting attitude is exact; changing-axis
+attitude and curved sliding retain their separate declared refinement bounds.
+Cancellation and budget refusals return no partial state.
+
+Five focused physical groups cover powered rolling on a moving conveyor and
+spatial covariance, normal-axis spin without fictitious point-contact heat,
+traction breakaway/static hysteresis/reversal, torque-dependent impact friction
+and split continuation, transverse sliding against independent Newton/Euler RK4,
+and zero-couple parity with late refusal. The ideal spherical point contact
+does not acquire torsional friction, finite-patch rolling resistance or a
+time-varying/body-held motor law from this extension. Material-derived rolling
+and directional-source entries retain their existing zero-applied-couple APIs.
 
 ## Native rigid-body simultaneous frictional impacts
 

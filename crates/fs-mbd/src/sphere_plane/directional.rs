@@ -202,6 +202,7 @@ fn advance_directional_contact<S: Clone, E>(
     let result = advance_with_contact(
         scene,
         state,
+        Vec3::ZERO,
         // Unused by this support hook. Instantaneous tangent response comes
         // from the impact callback or the original scene-owned fallback.
         &FrictionLaw::Coulomb {
