@@ -2,8 +2,10 @@ use super::super::solve as burn;
 use super::*;
 use crate::fusion::kinetic::AlphaCollisionOperator;
 use crate::fusion::solve::Sum;
-use fs_math::det::pow;
-use fs_qty::Temperature;
+use crate::fusion::volume::{adiabatic_work_on_pools, log_volume_ratio};
+use fs_math::det::{exp, pow};
+use fs_qty::{Temperature, Volume};
+use fs_thermochem::coulomb::test_particle::PreparedTestParticleCoulombV1;
 use fs_thermochem::coulomb::{CoulombErrorV1, CoulombScreeningV1};
 use fs_thermochem::equilibrium::composition::FrozenIonizedGasStateErrorV1;
 use fs_thermochem::fusion::plasma::DtFusionPlasmaErrorV1;
@@ -15,6 +17,8 @@ const KB: f64 = 1.380_649e-23;
 pub(super) struct Point {
     core: burn::Point,
     alphas: [f64; MAX_ALPHA_BINS],
+    alpha_energy_scale: f64,
+    alpha_boundary_work: Sum,
 }
 struct Sources {
     core: burn::Sources,
@@ -25,6 +29,7 @@ pub(super) struct Problem<'a> {
     core: burn::Problem<'a>,
     thermal: &'a FusionNetworkTransport,
     alpha: &'a KineticAlphaTransport,
+    volume_history: Option<&'a FusionVolumeHistory>,
     controls: FusionNetworkSolve,
 }
 impl<'a> Problem<'a> {
@@ -34,6 +39,7 @@ impl<'a> Problem<'a> {
         heating: FusionNetworkHeating,
         thermal: &'a FusionNetworkTransport,
         alpha: &'a KineticAlphaTransport,
+        volume_history: Option<&'a FusionVolumeHistory>,
         controls: FusionNetworkSolve,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Self, FusionNetworkError> {
@@ -61,7 +67,7 @@ impl<'a> Problem<'a> {
             channels,
             heating,
             thermal,
-            None,
+            volume_history,
             controls,
             cancelled,
         )?
@@ -79,6 +85,7 @@ impl<'a> Problem<'a> {
             core,
             thermal,
             alpha,
+            volume_history,
             controls,
         };
         problem.sources(problem.start(), cancelled)?;
@@ -89,10 +96,16 @@ impl<'a> Problem<'a> {
         Point {
             core: self.core.start(),
             alphas: self.initial.alpha_amounts,
+            alpha_energy_scale: 1.0,
+            alpha_boundary_work: Sum::default(),
         }
     }
     fn moments(&self, point: &Point) -> (f64, f64) {
-        state::moments(self.initial.energy_grid(), &point.alphas)
+        state::moments_scaled(
+            self.initial.energy_grid(),
+            &point.alphas,
+            point.alpha_energy_scale,
+        )
     }
     fn admit(
         &self,
@@ -101,8 +114,15 @@ impl<'a> Problem<'a> {
     ) -> Result<(), FusionNetworkError> {
         let temperatures = self.core.admit(point.core, cancelled)?;
         let grid = self.initial.energy_grid();
+        grid.admit_scale(point.alpha_energy_scale)?;
+        if grid.energies()[grid.len() - 1].value() * point.alpha_energy_scale
+            > self.alpha.collisions().maximum_energy().value()
+        {
+            return Err(FusionNetworkError::OutsideDomain);
+        }
         if point.alphas.iter().any(|n| !n.is_finite() || *n < 0.0)
             || point.alphas[grid.len()..].iter().any(|n| *n != 0.0)
+            || !point.alpha_boundary_work.value.is_finite()
         {
             return Err(FusionNetworkError::Arithmetic(
                 "finite nonnegative canonical alpha distribution",
@@ -132,7 +152,8 @@ impl<'a> Problem<'a> {
         // admits using only the Maxwellian heavy temperature.
         if number > 0.0 {
             if let Some(radiation) = &self.thermal.bremsstrahlung {
-                let maximum_energy = grid.energies()[grid.len() - 1].value();
+                let maximum_energy =
+                    grid.energies()[grid.len() - 1].value() * point.alpha_energy_scale;
                 let ion_variance =
                     (2.0 / 3.0) * maximum_energy / self.alpha.collisions().projectile_mass_kg();
                 let electron_mass = self.initial.plasma().thermodynamics().models()
@@ -162,6 +183,24 @@ impl<'a> Problem<'a> {
         point: Point,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Sources, FusionNetworkError> {
+        let (core, prepared) = self.physical_sources(point, cancelled)?;
+        let collision = AlphaCollisionOperator::new_scaled(
+            self.initial.energy_grid(),
+            point.alpha_energy_scale,
+            &prepared,
+            &mut *cancelled,
+        )?;
+        Ok(Sources { core, collision })
+    }
+
+    /// Admit complete source coefficients at accepted endpoints and authored
+    /// knots without rebuilding their energy-grid collision matrix. Midpoint
+    /// samples alone can miss a source-domain excursion at a volume turnaround.
+    fn physical_sources(
+        &self,
+        point: Point,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(burn::Sources, PreparedTestParticleCoulombV1), FusionNetworkError> {
         self.admit(&point, cancelled)?;
         let [th, te] = self.core.temperatures(point.core)?.map(Temperature::new);
         let prepared = self
@@ -175,14 +214,14 @@ impl<'a> Problem<'a> {
                 &mut *cancelled,
             )
             .map_err(coulomb_error)?;
-        let collision =
-            AlphaCollisionOperator::new(self.initial.energy_grid(), &prepared, &mut *cancelled)?;
         let core = self.core.sources(point.core, cancelled)?;
         let energies = self.initial.energy_grid().energies();
         for channel in [0, 3] {
             if let Some(event) = core.events[channel] {
                 let birth = event.product_kinetic_energies_j()[0];
-                if birth < energies[0].value() || birth > energies[energies.len() - 1].value() {
+                if birth < energies[0].value() * point.alpha_energy_scale
+                    || birth > energies[energies.len() - 1].value() * point.alpha_energy_scale
+                {
                     // A trial's changing temperature can move a birth beyond
                     // the authored support. Permit a shorter physical trial;
                     // initial support is still admitted before any evolution.
@@ -190,7 +229,7 @@ impl<'a> Problem<'a> {
                 }
             }
         }
-        Ok(Sources { core, collision })
+        Ok((core, prepared))
     }
 
     fn collide(
@@ -233,10 +272,11 @@ impl<'a> Problem<'a> {
             let event = source.core.events[channel].ok_or(FusionNetworkError::Arithmetic(
                 "alpha birth without selected channel",
             ))?;
-            self.initial.energy_grid().inject(
+            self.initial.energy_grid().inject_scaled(
                 &mut next.alphas,
                 Amount::new(amount),
                 Energy::new(event.product_kinetic_energies_j()[0]),
+                next.alpha_energy_scale,
             )?;
         }
         self.admit(&next, cancelled)?;
@@ -254,11 +294,46 @@ impl<'a> Problem<'a> {
         if middle_time <= old.core.time || middle_time >= end {
             return Err(FusionNetworkError::StepBudget);
         }
-        let first = self.sources(old, cancelled)?;
-        let predicted = self.frozen_step(old, 0.5 * dt, &first, cancelled)?;
+        let prepared = if let Some(history) = self.volume_history {
+            self.volume_step(old, history.volume_at(Time::new(middle_time))?, cancelled)?
+        } else {
+            old
+        };
+        let first = self.sources(prepared, cancelled)?;
+        let predicted = self.frozen_step(prepared, 0.5 * dt, &first, cancelled)?;
         let middle = self.sources(predicted, cancelled)?;
-        let mut next = self.frozen_step(old, dt, &middle, cancelled)?;
+        let mut next = self.frozen_step(prepared, dt, &middle, cancelled)?;
         next.core.time = end;
+        if let Some(history) = self.volume_history {
+            self.volume_step(next, history.volume_at(Time::new(end))?, cancelled)
+        } else {
+            Ok(next)
+        }
+    }
+
+    /// Exact isotropic adiabatic motion in a comoving energy coordinate. No
+    /// remap, collision, reaction, or source clock is applied by this operation.
+    fn volume_step(
+        &self,
+        old: Point,
+        volume: Volume,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Point, FusionNetworkError> {
+        poll(cancelled)?;
+        if old.core.volume == volume {
+            return Ok(old);
+        }
+        let energy = self.moments(&old).1;
+        let work = adiabatic_work_on_pools([energy], old.core.volume, volume)?[0];
+        let mut next = old;
+        next.core = self.core.volume_step(old.core, volume, cancelled)?;
+        // Anchor every stage to the same initial coordinate. Full and refined
+        // trials at an identical volume therefore compare identical bins;
+        // returning to the reference volume restores its exact energy scale.
+        next.alpha_energy_scale =
+            exp((-2.0 / 3.0) * log_volume_ratio(self.initial.volume(), volume)?);
+        next.alpha_boundary_work.add(work);
+        self.admit(&next, cancelled)?;
         Ok(next)
     }
 
@@ -277,6 +352,12 @@ impl<'a> Problem<'a> {
             );
         }
         let (a, b) = (self.moments(&full).1, self.moments(&fine).1);
+        error = error.max(
+            (a - b).abs()
+                / (3.0 * (c.energy_tolerance_j + c.relative_tolerance * a.abs().max(b.abs()))),
+        );
+        let a = full.alpha_boundary_work.value - old.alpha_boundary_work.value;
+        let b = fine.alpha_boundary_work.value - old.alpha_boundary_work.value;
         error = error.max(
             (a - b).abs()
                 / (3.0 * (c.energy_tolerance_j + c.relative_tolerance * a.abs().max(b.abs()))),
@@ -303,11 +384,18 @@ impl<'a> Problem<'a> {
             if point.core.time == duration {
                 return Ok((point, balance));
             }
+            let next_boundary = if let Some(history) = self.volume_history {
+                history
+                    .next_knot_after(Time::new(point.core.time))?
+                    .map_or(duration, |time| time.value())
+            } else {
+                duration
+            };
             let mut next_clock = clock;
             next_clock.add(step.min(self.controls.maximum_step_s));
-            let end = next_clock.value.min(duration);
-            if end == duration {
-                next_clock = sum(duration);
+            let end = next_clock.value.min(next_boundary);
+            if end == next_boundary {
+                next_clock = sum(next_boundary);
             }
             let dt = end - point.core.time;
             let middle_time = point.core.time + 0.5 * dt;
@@ -318,7 +406,7 @@ impl<'a> Problem<'a> {
                 let full = self.midpoint(point, end, cancelled)?;
                 let half = self.midpoint(point, middle_time, cancelled)?;
                 let fine = self.midpoint(half, end, cancelled)?;
-                self.admit(&fine, cancelled)?;
+                self.physical_sources(fine, cancelled)?;
                 Ok::<_, FusionNetworkError>((fine, self.error(point, full, fine)?))
             })();
             let error = match attempt {
@@ -393,10 +481,14 @@ impl<'a> Problem<'a> {
             FrozenIonizedGasStateErrorV1::Cancelled => FusionNetworkError::Cancelled,
             e => FusionNetworkError::State(e),
         })?;
+        let physical_grid = self
+            .initial
+            .energy_grid()
+            .scaled(point.alpha_energy_scale, &mut *cancelled)?;
         let state = KineticFusionState::from_parts(
             &reference,
             self.initial.plasma(),
-            self.initial.energy_grid(),
+            &physical_grid,
             point.alphas,
             self.initial.thermal_helium4_amount,
             point.core.kinetic_alpha_amount.value,
@@ -412,6 +504,7 @@ impl<'a> Problem<'a> {
                 state.thermal_electron_energy().value(),
             ],
             energy_change,
+            point.alpha_boundary_work.value,
             balance,
             cancelled,
         )?;
@@ -421,7 +514,9 @@ impl<'a> Problem<'a> {
         let deposited = point.core.alpha_deposited.map(|v| v.value);
         let (number, _) = self.moments(&point);
         let amount_residual = number - point.core.kinetic_alpha_amount.value;
-        let energy_residual = energy_change + deposited[0] + deposited[1] - born_energy;
+        let energy_residual = energy_change + deposited[0] + deposited[1]
+            - born_energy
+            - point.alpha_boundary_work.value;
         let c = self.controls;
         if !energy_residual.is_finite()
             || !amount_residual.is_finite()
@@ -432,7 +527,8 @@ impl<'a> Problem<'a> {
                             + self.initial.alpha_energy().value()
                             + state.alpha_energy().value()
                             + deposited[0].abs()
-                            + deposited[1].abs())
+                            + deposited[1].abs()
+                            + point.alpha_boundary_work.value.abs())
             || amount_residual.abs()
                 > c.absolute_amount_tolerance_mol
                     + c.balance_relative_tolerance
@@ -448,6 +544,7 @@ impl<'a> Problem<'a> {
             deposited_heavy_energy_j: deposited[0],
             deposited_electron_energy_j: deposited[1],
             alpha_energy_change_j: energy_change,
+            boundary_work_on_alphas_j: point.alpha_boundary_work.value,
             alpha_energy_residual_j: energy_residual,
             alpha_amount_residual_mol: amount_residual,
             upper_bin_fraction: if number == 0.0 {

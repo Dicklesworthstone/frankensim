@@ -253,11 +253,21 @@ impl KineticFusionState {
 }
 
 pub(super) fn moments(grid: &AlphaEnergyGrid, amounts: &[f64; MAX_ALPHA_BINS]) -> (f64, f64) {
+    moments_scaled(grid, amounts, 1.0)
+}
+
+/// Physical moments on an adiabatically moving energy coordinate. Bin amounts
+/// stay in the original coordinate; scaling changes energy, never inventory.
+pub(super) fn moments_scaled(
+    grid: &AlphaEnergyGrid,
+    amounts: &[f64; MAX_ALPHA_BINS],
+    scale: f64,
+) -> (f64, f64) {
     let mut number = Sum::default();
     let mut energy = Sum::default();
     for (n, e) in amounts.iter().zip(grid.energies()) {
         number.add(*n);
-        energy.add((*n * AVOGADRO) * e.value());
+        energy.add((*n * AVOGADRO) * (e.value() * scale));
     }
     (number.value, energy.value)
 }

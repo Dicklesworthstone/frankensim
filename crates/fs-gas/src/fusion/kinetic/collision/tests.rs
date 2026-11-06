@@ -219,3 +219,74 @@ fn g4_collision_budgets_domains_and_late_cancellation_publish_no_partial_state()
         Err(DtFusionError::Invalid(_))
     ));
 }
+
+#[test]
+fn g1_scaled_collision_stages_match_physical_grids_and_reciprocal_heat() {
+    let temperatures = [Temperature::new(1e7), Temperature::new(3e7)];
+    let kt = temperatures.map(|t| BOLTZMANN_J_PER_K * t.value());
+    let grid = AlphaEnergyGrid::uniform_speed(
+        Energy::new(0.02 * kt[0]),
+        Energy::new(20.0 * kt[1]),
+        48,
+        || false,
+    )
+    .unwrap();
+    let original_grid = grid.clone();
+    let mut initial = [0.0; MAX_ALPHA_BINS];
+    initial[4] = 2e-6;
+    initial[38] = 3e-6;
+    let unchanged = initial;
+    // A direct finite-bath diffusion fixture exercises physical E-dependence,
+    // width scaling, detailed balance and energy rewards independently of the
+    // Coulomb coefficient source. The publication grid is an independent route
+    // through the same physical geometry, with no hidden scale in its solver.
+    let diffusion = |e: Energy| Ok([0.4 * kt[0] * e.value(), 0.6 * kt[1] * e.value()]);
+    let rigid = AlphaCollisionOperator::from_diffusion(&grid, temperatures, diffusion, || false)
+        .unwrap()
+        .advance(&initial, Time::new(0.07), 100_000, || false)
+        .unwrap();
+    for scale in [0.25, 1.7, 4.0] {
+        let physical_grid = grid.scaled(scale, || false).unwrap();
+        let moving = AlphaCollisionOperator::from_diffusion_scaled(
+            &grid,
+            scale,
+            temperatures,
+            diffusion,
+            || false,
+        )
+        .unwrap();
+        let explicit =
+            AlphaCollisionOperator::from_diffusion(&physical_grid, temperatures, diffusion, || {
+                false
+            })
+            .unwrap();
+        let moving_result = moving
+            .advance(&initial, Time::new(0.07), 100_000, || false)
+            .unwrap();
+        let explicit_result = explicit
+            .advance(&initial, Time::new(0.07), 100_000, || false)
+            .unwrap();
+        assert_eq!(moving_result, explicit_result);
+        assert_ne!(moving_result.amounts, rigid.amounts);
+        let physical_energy = |amounts: &[f64; MAX_ALPHA_BINS]| -> f64 {
+            amounts
+                .iter()
+                .zip(physical_grid.energies())
+                .map(|(n, e)| n * AVOGADRO * e.value())
+                .sum()
+        };
+        close(
+            physical_energy(&moving_result.amounts)
+                + moving_result.deposited_j[0]
+                + moving_result.deposited_j[1],
+            physical_energy(&initial),
+            3e-12,
+            2e-8,
+        );
+        close(moving_result.amounts.iter().sum(), 5e-6, 2e-12, 1e-20);
+        assert!(moving_result.amounts.iter().all(|n| *n >= 0.0));
+        assert!(moving_result.energy_residual_j.abs() < 2e-8);
+    }
+    assert_eq!(initial, unchanged);
+    assert_eq!(grid, original_grid);
+}

@@ -85,7 +85,9 @@ pub struct KineticAlphaBalance {
     pub deposited_electron_energy_j: f64,
     /// Change of the retained alpha distribution's kinetic storage [J].
     pub alpha_energy_change_j: f64,
-    /// Delta alpha energy + heat to both backgrounds - born energy [J].
+    /// Mechanical work on the kinetic alpha population [J], positive for compression.
+    pub boundary_work_on_alphas_j: f64,
+    /// Delta alpha energy + heat - born energy - alpha boundary work [J].
     pub alpha_energy_residual_j: f64,
     /// Distribution amount minus independently accumulated alpha inventory [mol].
     pub alpha_amount_residual_mol: f64,
@@ -103,6 +105,7 @@ pub struct KineticFusionResult {
     heating: FusionNetworkHeating,
     thermal_transport: FusionNetworkTransport,
     alpha_transport: KineticAlphaTransport,
+    volume_history: Option<FusionVolumeHistory>,
     controls: FusionNetworkSolve,
     elapsed: Time,
     balance: FusionNetworkBalance,
@@ -127,6 +130,18 @@ impl KineticFusionResult {
     pub const fn alpha_transport(&self) -> &KineticAlphaTransport {
         &self.alpha_transport
     }
+    /// Original prescribed geometry, or None for a rigid interval.
+    pub const fn volume_history(&self) -> Option<&FusionVolumeHistory> {
+        self.volume_history.as_ref()
+    }
+    /// Total mechanical work on the thermal and kinetic components [J].
+    pub fn total_boundary_work(&self) -> Energy {
+        Energy::new(
+            self.balance.boundary_work_on_heavy_j
+                + self.balance.boundary_work_on_electrons_j
+                + self.alpha_balance.boundary_work_on_alphas_j,
+        )
+    }
     pub const fn controls(&self) -> FusionNetworkSolve {
         self.controls
     }
@@ -135,7 +150,7 @@ impl KineticFusionResult {
     }
     /// Shared nuclear and thermal accounts. Charged-product deposition fields
     /// contain only prompt non-alpha products; alpha heat is in alpha_balance.
-    /// The total energy residual includes the change in alpha kinetic storage.
+    /// The total energy residual includes alpha kinetic storage and pressure work.
     pub const fn balance(&self) -> FusionNetworkBalance {
         self.balance
     }
@@ -165,7 +180,7 @@ impl KineticFusionResult {
 /// Radiation includes all ions only after separately admitting the fastest
 /// represented alpha against its stationary-ion velocity-variance limit.
 ///
-/// This first kinetic owner has rigid volume. It resolves no fast-secondary
+/// This entrypoint has rigid volume. It resolves no fast-secondary
 /// reactions, alpha self-collisions, pitch angles, confinement, magnetic fields
 /// or neutron transport. Numerical time error and energy-grid error are distinct;
 /// refine the authored grid for distribution and heating predictions.
@@ -176,6 +191,70 @@ pub fn advance_kinetic_fusion(
     thermal_transport: &FusionNetworkTransport,
     alpha_transport: &KineticAlphaTransport,
     duration: Time,
+    controls: FusionNetworkSolve,
+    cancelled: impl FnMut() -> bool,
+) -> Result<KineticFusionResult, FusionNetworkError> {
+    advance(
+        initial,
+        channels,
+        heating,
+        thermal_transport,
+        alpha_transport,
+        duration,
+        None,
+        controls,
+        cancelled,
+    )
+}
+
+/// Couple kinetic alpha heating and thermal burn to prescribed volume motion.
+///
+/// The parcel and its alpha population are explicitly confined and isotropic.
+/// Physical alpha centers follow E*V^(2/3)=constant under geometry alone; bin
+/// amounts remain unchanged. The moving energy coordinate avoids repeated
+/// conservative remaps and their artificial spreading. Every collision, birth,
+/// density and radiation gate uses the actual stage volume and physical energy.
+/// Thermal and kinetic pressure work are retained as three separate accounts.
+///
+/// Adiabatic half maps surround the midpoint source solve. Trials stop at every
+/// original log-volume knot, and all three work increments enter time-error
+/// control. Finite-grid support moves with volume: an expanding grid that no
+/// longer covers a birth energy refuses instead of clipping it. Output grids
+/// contain actual physical energies and remain usable by either kinetic entrypoint.
+///
+/// The caller supplies boundary motion, confinement and the isotropic closure;
+/// this is not piston dynamics, a shock model, or anisotropic magnetic work.
+pub fn advance_kinetic_fusion_with_volume(
+    initial: &KineticFusionState,
+    channels: FusionNetworkChannels,
+    heating: FusionNetworkHeating,
+    thermal_transport: &FusionNetworkTransport,
+    alpha_transport: &KineticAlphaTransport,
+    volume_history: &FusionVolumeHistory,
+    controls: FusionNetworkSolve,
+    cancelled: impl FnMut() -> bool,
+) -> Result<KineticFusionResult, FusionNetworkError> {
+    advance(
+        initial,
+        channels,
+        heating,
+        thermal_transport,
+        alpha_transport,
+        volume_history.duration(),
+        Some(volume_history),
+        controls,
+        cancelled,
+    )
+}
+
+fn advance(
+    initial: &KineticFusionState,
+    channels: FusionNetworkChannels,
+    heating: FusionNetworkHeating,
+    thermal_transport: &FusionNetworkTransport,
+    alpha_transport: &KineticAlphaTransport,
+    duration: Time,
+    volume_history: Option<&FusionVolumeHistory>,
     controls: FusionNetworkSolve,
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<KineticFusionResult, FusionNetworkError> {
@@ -191,12 +270,18 @@ pub fn advance_kinetic_fusion(
             "finite duration and zero prompt alpha fractions required",
         ));
     }
+    if volume_history.is_some_and(|history| history.initial_volume() != initial.volume()) {
+        return Err(FusionNetworkError::Invalid(
+            "volume history must start at the original kinetic state volume",
+        ));
+    }
     let problem = solve::Problem::new(
         initial,
         channels,
         heating,
         thermal_transport,
         alpha_transport,
+        volume_history,
         controls,
         &mut cancelled,
     )?;
@@ -210,6 +295,7 @@ pub fn advance_kinetic_fusion(
         heating,
         thermal_transport: thermal_transport.clone(),
         alpha_transport: alpha_transport.clone(),
+        volume_history: volume_history.cloned(),
         controls,
         elapsed: duration,
         balance,

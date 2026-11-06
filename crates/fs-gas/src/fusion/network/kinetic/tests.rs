@@ -15,6 +15,8 @@ use fs_thermochem::plasma_radiation::{
 #[path = "../tests/fixture.rs"]
 mod fixture;
 
+mod compression;
+
 const KEV_J: f64 = 1.602_176_634e-16;
 const BOLTZMANN: f64 = 1.380_649e-23;
 const DT: FusionNetworkChannels = FusionNetworkChannels::new([true, false, false, false]);
@@ -260,7 +262,7 @@ fn check_accounts(result: &KineticFusionResult) {
         alpha_energy - initial.alpha_energy().value()
             + a.deposited_heavy_energy_j
             + a.deposited_electron_energy_j,
-        a.born_alpha_energy_j,
+        a.born_alpha_energy_j + a.boundary_work_on_alphas_j,
         3e-12,
         2e-6,
     );
@@ -292,7 +294,8 @@ fn check_accounts(result: &KineticFusionResult) {
             + b.external_heavy_energy_j
             + b.external_electron_energy_j
             + b.boundary_work_on_heavy_j
-            + b.boundary_work_on_electrons_j,
+            + b.boundary_work_on_electrons_j
+            + a.boundary_work_on_alphas_j,
         3e-12,
         2e-6,
     );
@@ -315,7 +318,20 @@ fn check_accounts(result: &KineticFusionResult) {
     }
     assert!(b.maximum_normalized_local_error <= 1.0);
     assert_eq!(state.plasma(), initial.plasma());
-    assert_eq!(state.energy_grid(), initial.energy_grid());
+    if result.volume_history().is_none() {
+        assert_eq!(state.energy_grid(), initial.energy_grid());
+    } else {
+        let factor = (initial.volume().value() / state.volume().value()).powf(2.0 / 3.0);
+        assert_eq!(state.energy_grid().len(), initial.energy_grid().len());
+        for (actual, original) in state
+            .energy_grid()
+            .energies()
+            .iter()
+            .zip(initial.energy_grid().energies())
+        {
+            close(actual.value(), original.value() * factor, 3e-14, 0.0);
+        }
+    }
 }
 
 // Independent fixed-grid reference: SciPy 1.17 Radau, rtol=2e-12, directly

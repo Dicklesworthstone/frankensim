@@ -17,10 +17,8 @@ pub use grid::AlphaEnergyGrid;
 
 pub use super::network::kinetic::{
     KineticAlphaBalance, KineticAlphaTransport, KineticFusionResult, KineticFusionState,
-    advance_kinetic_fusion,
-};
-pub use super::network::kinetic::{
-    KineticFusionVolumeResult, advance_adiabatic_kinetic_fusion_volume,
+    KineticFusionVolumeResult, advance_adiabatic_kinetic_fusion_volume, advance_kinetic_fusion,
+    advance_kinetic_fusion_with_volume,
 };
 
 pub(crate) use collision::AlphaCollisionOperator;

@@ -24,6 +24,7 @@ const MAX_APPLICATIONS: usize = 1_000_000;
 /// not a drag-only characteristic or a terminal-cutoff thermalization model.
 pub(crate) struct AlphaCollisionOperator {
     grid: AlphaEnergyGrid,
+    physical_energies: [Energy; MAX_ALPHA_BINS],
     lambda: f64,
     upward: [f64; MAX_ALPHA_BINS],
     downward: [f64; MAX_ALPHA_BINS],
@@ -73,8 +74,47 @@ impl AlphaCollisionOperator {
         )
     }
 
+    /// Freeze collisions on physical cells E_i=scale*E_i,reference without
+    /// allocating a replacement grid. Rates and reciprocal heat rewards both
+    /// use these physical energies; the scale is held throughout this operator.
+    pub(crate) fn new_scaled(
+        grid: &AlphaEnergyGrid,
+        scale: f64,
+        prepared: &PreparedTestParticleCoulombV1,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, DtFusionError> {
+        if scale == 1.0 {
+            return Self::new(grid, prepared, cancelled);
+        }
+        Self::from_diffusion_scaled(
+            grid,
+            scale,
+            prepared.temperatures(),
+            |energy| {
+                prepared
+                    .evaluate(energy)
+                    .map(|value| value.energy_diffusion_j2_s)
+                    .map_err(|error| match error {
+                        CoulombErrorV1::Cancelled => DtFusionError::Cancelled,
+                        error => DtFusionError::Coulomb(error),
+                    })
+            },
+            cancelled,
+        )
+    }
+
     fn from_diffusion(
         grid: &AlphaEnergyGrid,
+        temperatures: [Temperature; 2],
+        diffusion: impl FnMut(Energy) -> Result<[f64; 2], DtFusionError>,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, DtFusionError> {
+        Self::from_diffusion_scaled(grid, 1.0, temperatures, diffusion, cancelled)
+    }
+
+    fn from_diffusion_scaled(
+        grid: &AlphaEnergyGrid,
+        scale: f64,
         temperatures: [Temperature; 2],
         mut diffusion: impl FnMut(Energy) -> Result<[f64; 2], DtFusionError>,
         mut cancelled: impl FnMut() -> bool,
@@ -86,12 +126,13 @@ impl AlphaCollisionOperator {
                 "positive finite alpha collision bath temperatures required",
             ));
         }
+        let geometry = grid.scaled_geometry(scale, &mut cancelled)?;
         let mut up = [[0.0; MAX_EDGES]; 2];
         let mut down = [[0.0; MAX_EDGES]; 2];
         for edge in 0..grid.len() - 1 {
             poll(&mut cancelled)?;
-            let low = grid.energies()[edge].value();
-            let high = grid.energies()[edge + 1].value();
+            let low = geometry.energies[edge].value();
+            let high = geometry.energies[edge + 1].value();
             let gap = high - low;
             let coefficient = diffusion(Energy::new(low + 0.5 * gap))?;
             let log_energy_ratio = log_ratio(high, low);
@@ -105,16 +146,28 @@ impl AlphaCollisionOperator {
                 if !w.is_finite() {
                     return Err(DtFusionError::Arithmetic("alpha collision edge exponent"));
                 }
-                up[bath][edge] = edge_rate(coefficient[bath], gap, grid.widths_j()[edge], w)?;
+                up[bath][edge] = edge_rate(coefficient[bath], gap, geometry.widths_j[edge], w)?;
                 down[bath][edge] =
-                    edge_rate(coefficient[bath], gap, grid.widths_j()[edge + 1], -w)?;
+                    edge_rate(coefficient[bath], gap, geometry.widths_j[edge + 1], -w)?;
             }
         }
-        Self::from_rates(grid, &up, &down, cancelled)
+        Self::from_physical_rates(grid, geometry.energies, &up, &down, cancelled)
     }
 
+    #[cfg(test)]
     fn from_rates(
         grid: &AlphaEnergyGrid,
+        up: &[[f64; MAX_EDGES]; 2],
+        down: &[[f64; MAX_EDGES]; 2],
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, DtFusionError> {
+        let geometry = grid.scaled_geometry(1.0, &mut cancelled)?;
+        Self::from_physical_rates(grid, geometry.energies, up, down, cancelled)
+    }
+
+    fn from_physical_rates(
+        grid: &AlphaEnergyGrid,
+        physical_energies: [Energy; MAX_ALPHA_BINS],
         up: &[[f64; MAX_EDGES]; 2],
         down: &[[f64; MAX_EDGES]; 2],
         mut cancelled: impl FnMut() -> bool,
@@ -158,7 +211,7 @@ impl AlphaCollisionOperator {
             }
             for edge in 0..grid.len() - 1 {
                 poll(&mut cancelled)?;
-                let gap = grid.energies()[edge + 1].value() - grid.energies()[edge].value();
+                let gap = physical_energies[edge + 1].value() - physical_energies[edge].value();
                 for bath in 0..2 {
                     // N is mol; the generator's energy coordinate is J/alpha.
                     reward_j_per_mol[bath][edge] -= (gap * (up[bath][edge] / lambda)) * AVOGADRO;
@@ -181,6 +234,7 @@ impl AlphaCollisionOperator {
         poll(&mut cancelled)?;
         Ok(Self {
             grid: grid.clone(),
+            physical_energies,
             lambda,
             upward,
             downward,
@@ -214,7 +268,8 @@ impl AlphaCollisionOperator {
             ));
         }
         let initial_number = number(amounts, self.grid.len())?;
-        let initial_energy = energy(amounts, &self.grid)?;
+        let initial_energy =
+            energy_at_centers(amounts, &self.physical_energies[..self.grid.len()])?;
         let mut result = AlphaCollisionStep {
             amounts: *amounts,
             deposited_j: [0.0; 2],
@@ -303,7 +358,8 @@ impl AlphaCollisionOperator {
         result.numerical_tail_bound = tail.value;
         result.heat_tail_bound_j = heat_tail.map(|sum| sum.value);
         result.number_residual_mol = number(&result.amounts, self.grid.len())? - initial_number;
-        let final_energy = energy(&result.amounts, &self.grid)?;
+        let final_energy =
+            energy_at_centers(&result.amounts, &self.physical_energies[..self.grid.len()])?;
         result.energy_residual_j =
             (final_energy - initial_energy) + result.deposited_j[0] + result.deposited_j[1];
         let rounding_allowance = 64.0 * f64::EPSILON * (result.applications as f64 + 1.0);
@@ -471,9 +527,12 @@ fn number(amounts: &[f64; MAX_ALPHA_BINS], len: usize) -> Result<f64, DtFusionEr
     }
 }
 
-fn energy(amounts: &[f64; MAX_ALPHA_BINS], grid: &AlphaEnergyGrid) -> Result<f64, DtFusionError> {
+fn energy_at_centers(
+    amounts: &[f64; MAX_ALPHA_BINS],
+    energies: &[Energy],
+) -> Result<f64, DtFusionError> {
     let mut total = Sum::default();
-    for (amount, energy) in amounts.iter().zip(grid.energies()) {
+    for (amount, energy) in amounts.iter().zip(energies) {
         total.add((amount * energy.value()) * AVOGADRO);
     }
     if total.value.is_finite() {
@@ -481,6 +540,11 @@ fn energy(amounts: &[f64; MAX_ALPHA_BINS], grid: &AlphaEnergyGrid) -> Result<f64
     } else {
         Err(DtFusionError::Arithmetic("finite alpha kinetic energy sum"))
     }
+}
+
+#[cfg(test)]
+fn energy(amounts: &[f64; MAX_ALPHA_BINS], grid: &AlphaEnergyGrid) -> Result<f64, DtFusionError> {
+    energy_at_centers(amounts, grid.energies())
 }
 
 #[cfg(test)]

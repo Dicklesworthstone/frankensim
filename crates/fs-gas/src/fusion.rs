@@ -3,7 +3,8 @@
 //! The original D–T entrypoints below evolve a two-temperature thermal state;
 //! [`network`] adds competing light-ion channels and prescribed compression.
 //! [`kinetic`] retains a separate isotropic alpha distribution with finite-time
-//! energy drift, diffusion, pressure and reciprocal thermal-pool heating.
+//! energy drift, diffusion, pressure, reciprocal thermal-pool heating and
+//! prescribed isotropic compression with separate kinetic pressure work.
 //!
 //! The following closure describes the original D–T thermal entrypoints.
 //!

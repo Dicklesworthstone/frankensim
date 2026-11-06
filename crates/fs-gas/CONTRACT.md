@@ -1,5 +1,69 @@
 # fs-gas contract
 
+## Kinetic fusion through prescribed compression and expansion
+
+`fusion::kinetic::advance_adiabatic_kinetic_fusion_volume` moves an original
+hybrid state without advancing its clock or redistributing alpha populations.
+For the explicitly confined, co-moving isotropic nonrelativistic closure,
+momentum scales as `V^(-1/3)` and every physical alpha energy as `V^(-2/3)`.
+The shared stable adiabatic map returns separate work on thermal ions, electrons
+and kinetic alphas, with positive sign for compression. Source temperature-path
+admission includes absent products and gaps. Original source identities, fixed
+thermal He4 stock and independent kinetic inventory survive the transformation;
+the kinetic transport supplies its explicit nonrelativistic and dilute limits.
+
+`advance_kinetic_fusion_with_volume` couples the existing `FusionVolumeHistory`
+to all four light-ion channels, finite-time alpha drift/diffusion, background
+Coulomb exchange, radiation and held external powers. During trials the alpha
+grid has one scale `s=(V_initial/V_stage)^(2/3)`. Physical centers and midpoint
+cell widths are evaluated in bounded stack storage; geometry changes no bin
+amounts and performs no remap or artificial distribution broadening. Each stage
+uses its actual volume for density, its physical grid for collision coefficients
+and heat rewards, and its source-event birth energy for conservative injection.
+Only publication allocates the final physical grid. Restart reanchors that
+physical grid at its new volume rather than discarding prior compression.
+
+Adiabatic maps surround the midpoint source solve, and attempted intervals stop
+at every authored knot. Thermal and alpha work increments enter time-error
+control. Accepted endpoints, including expansion/compression turnarounds,
+admit complete source coefficients and birth support without rebuilding a
+collision matrix. Thus supported neighboring midpoints cannot hide a knot whose
+expanded grid no longer covers an enabled birth. Every physical stage also
+checks the kinetic energy ceiling and the separate radiation motion limit.
+Unsupported grids or sources refuse without clipping or extrapolation.
+
+The alpha balance is `delta(Ualpha)+Halpha_h+Halpha_e-Ealpha_born-Walpha_on=0`.
+The full account is
+`delta(Uh+Ue+Ualpha)+En+Ephotons-Q-Eexternal-Wh_on-We_on-Walpha_on=0`.
+The result retains the original history, three work accounts and total work.
+Returning to the initial volume need not give zero net work when reactions or
+heat transfer change the populations and energy during the cycle. The rigid
+entrypoint reports zero work and agrees exactly with a constant two-knot history.
+
+The momentum/energy law follows Parker (1965), printed p. 15, Eq. (2),
+<https://polaris.nipr.ac.jp/~ryuho/coem/Parker1965PSS.pdf>; the distribution
+need not be Maxwellian when isotropy is retained (Wierzchucka et al., section
+2.1, Eqs. 2.19–2.22, <https://arxiv.org/abs/2603.25669>). Boundary motion,
+confinement and isotropy remain prescribed assumptions. This scalar geometry
+does not supply piston inertia, shocks, anisotropic magnetic compression or
+spatial heat/particle transport. Time-error control remains separate from
+finite energy-grid and model error. The `compressed_kinetic_fusion` example
+compares rigid and compress/hold/expand evolution with the same original
+Coulomb, radiation and alpha sources.
+
+All 65 native fusion tests pass, including 13 new checks for scaled collision
+geometry, separate adiabatic work, complete compress/hold/expand histories,
+restart at a compressed volume, constant-history compatibility and atomic
+domain/cancellation refusal. Independent 128-cell direct coupled Radau
+integrations check temperatures, pressure, alpha moments and populations,
+reaction accounts and all three work accounts, both with and without background
+Coulomb exchange and radiation. Tightening the reference tolerance by 100 times
+changes its energy accounts by less than `3.2e-9 J`; this checks temporal
+coupling on that grid, not continuum energy-grid convergence. The runnable
+256-cell example also completes, with its full energy residual below `6e-11 J`
+in both cases. These checks build the actual native crates and dependencies;
+the workspace DSR gate remains unavailable without DSR and sibling checkouts.
+
 ## Finite-time kinetic alpha heating in the light-ion network
 
 `fusion::kinetic::advance_kinetic_fusion` couples the existing four-channel
@@ -42,9 +106,8 @@ energies, every species, baryons, charge, and the full nuclear/escaping-energy
 balance including alpha storage. Source objects, controls and distribution
 are retained; cancellation or refusal publishes no partial result.
 
-Fourteen focused new checks bring the native gas-fusion suite to 52 passing
-tests. Exact two-cell collision/reward references and discrete Maxwellian
-refinement check the kernel. Independent 128-cell Radau integrations check
+The original rigid-alpha checks include exact two-cell collision/reward
+references and discrete Maxwellian refinement. Independent 128-cell Radau integrations check
 seeded-alpha slowing and continuous DT births with finite thermal backreaction;
 fixed-step refinement approaches that same-grid reference at second order.
 Restart, all-channel Coulomb/radiation coupling, original-source and radiation
@@ -57,7 +120,7 @@ fractions, original He4/source identities, nonrelativistic grid support and
 electron-Debye screening. Optional background Coulomb exchange excludes kinetic
 alphas. Optional free-free radiation includes their ion charge only after a
 separate fastest-represented-alpha velocity-variance check. No alpha self-collision,
-anisotropic transport, confinement, fast-secondary reactions, kinetic compression
+anisotropic transport, confinement, fast-secondary reactions
 or neutron transport is supplied. Original source/charge-reference admission
 treats total He4 at the background temperature;
 it does not certify classical occupation of an arbitrary authored alpha

@@ -133,8 +133,7 @@ impl<'a> Problem<'a> {
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Self, FusionNetworkError> {
         let helium4 = self.initial.amounts()[self.plasma.indices()[4]].value();
-        if self.volume_history.is_some()
-            || !alpha_amount.is_finite()
+        if !alpha_amount.is_finite()
             || alpha_amount < 0.0
             || !thermal_helium4_amount.is_finite()
             || thermal_helium4_amount < 0.0
@@ -143,7 +142,7 @@ impl<'a> Problem<'a> {
             || thermal_energy.iter().any(|&u| !positive(u))
         {
             return Err(FusionNetworkError::Invalid(
-                "rigid kinetic-alpha component and positive thermal stores",
+                "kinetic-alpha component and positive thermal stores",
             ));
         }
         self.kinetic_alphas = true;
@@ -534,7 +533,7 @@ impl<'a> Problem<'a> {
     }
 
     /// Exact fixed-inventory geometric map; its source clock never advances.
-    fn volume_step(
+    pub(super) fn volume_step(
         &self,
         old: Point,
         volume: Volume,
@@ -759,6 +758,7 @@ impl<'a> Problem<'a> {
                 state.electron_internal_energy().value(),
             ],
             0.0,
+            0.0,
             balance,
             cancelled,
         )?;
@@ -772,6 +772,7 @@ impl<'a> Problem<'a> {
         point: Point,
         thermal_energy: [f64; 2],
         kinetic_energy_change_j: f64,
+        kinetic_boundary_work_on_j: f64,
         balance: &mut FusionNetworkBalance,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<(), FusionNetworkError> {
@@ -795,7 +796,8 @@ impl<'a> Problem<'a> {
             - external_heavy
             - external_electron
             - point.work_on_pools[0].value
-            - point.work_on_pools[1].value;
+            - point.work_on_pools[1].value
+            - kinetic_boundary_work_on_j;
         let nuclei = [
             NuclearSpeciesV1::Proton,
             NuclearSpeciesV1::Deuterium,
@@ -842,6 +844,7 @@ impl<'a> Problem<'a> {
                     + point.work_on_pools[0].value.abs()
                     + point.work_on_pools[1].value.abs()
                     + kinetic_energy_change_j.abs()
+                    + kinetic_boundary_work_on_j.abs()
                     + self.initial_energy[0].abs()
                     + self.initial_energy[1].abs());
         if [
