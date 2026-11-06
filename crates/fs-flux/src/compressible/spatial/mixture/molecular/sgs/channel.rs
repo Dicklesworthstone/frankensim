@@ -99,7 +99,7 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
                 closure: ViscosityClosure::DynamicChannelThermal(
                     DynamicChannelThermalTransport::new(&flow.grid, normal_axis, config)?,
                 ),
-                dynamic_viscosity: allocated(flow.cell_count(), 0.0)?,
+                dynamic_coefficient_squared: allocated(flow.cell_count(), 0.0)?,
                 heat_capacity_v_density: allocated(flow.cell_count(), 0.0)?,
             });
         let bytes = result
@@ -277,11 +277,15 @@ impl DynamicChannelThermalTransport {
             }
         }
         poll(cancelled)?;
-        Ok(momentum.maximum_eddy_viscosity != 0.0 || heat.maximum_diffusivity != 0.0)
+        Ok(momentum.maximum_coefficient_squared != 0.0 || heat.maximum_diffusivity != 0.0)
     }
 
-    pub(super) fn viscosities(&self) -> &[f64] {
-        self.momentum.viscosities()
+    pub(super) fn coefficient_squared(&self, cell: usize) -> Option<f64> {
+        self.momentum.coefficient_squared(cell)
+    }
+
+    pub(super) fn filter_width(&self) -> f64 {
+        self.momentum.filter_width()
     }
 
     pub(super) fn face_heat(&self, left: usize, right: usize) -> (f64, f64) {

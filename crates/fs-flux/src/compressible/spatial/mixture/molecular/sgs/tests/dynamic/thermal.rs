@@ -74,7 +74,7 @@ fn check_heat_faces(flow: &MixtureEuler3d) -> (MolecularTransport3d<ConstantTran
         op.sgs
             .as_ref()
             .unwrap()
-            .dynamic_viscosity
+            .dynamic_coefficient_squared
             .iter()
             .all(|&mu| mu == 0.0)
     );

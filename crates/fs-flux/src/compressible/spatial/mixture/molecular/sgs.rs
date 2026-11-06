@@ -6,6 +6,9 @@
 //! `j_i^t = -(mu_t/Sc_t) grad(Y_i)`. The same original referenced partial
 //! enthalpies accompany those species fluxes in conservative total energy.
 //! There is no separate viscous or chemical heating source.
+//! Dynamic stress applies the fitted C_s squared to the conservative face
+//! strain, with separately averaged density and coefficient. It never selects
+//! a face viscosity by interpolating cell-centered strain magnitudes.
 //! An optional joint Germano fit supplies a common species diffusivity directly,
 //! independently of stress and heat; it retains this same mass-frame and
 //! referenced-enthalpy flux rather than prescribing a turbulent Schmidt number.
@@ -141,7 +144,7 @@ enum ViscosityClosure {
 pub(super) struct SubgridTransport {
     closure: ViscosityClosure,
     wall_models: [Option<EquilibriumWallConfig>; 6],
-    dynamic_viscosity: Vec<f64>,
+    dynamic_coefficient_squared: Vec<f64>,
     heat_capacity_v_density: Vec<f64>,
 }
 
@@ -163,13 +166,13 @@ impl SubgridTransport {
                 widths,
                 filter_width,
             },
-            dynamic_viscosity: allocated(grid.len(), 0.0)?,
+            dynamic_coefficient_squared: allocated(grid.len(), 0.0)?,
             heat_capacity_v_density: allocated(grid.len(), 0.0)?,
         })
     }
 
     pub(super) fn workspace_bytes(&self) -> usize {
-        (self.dynamic_viscosity.capacity() + self.heat_capacity_v_density.capacity())
+        (self.dynamic_coefficient_squared.capacity() + self.heat_capacity_v_density.capacity())
             * size_of::<f64>()
             + match &self.closure {
                 ViscosityClosure::Local { .. } => 0,
@@ -222,7 +225,7 @@ impl SubgridTransport {
                 if dynamic.prepare(primitive, cancelled)? == 0.0 {
                     // A fit can become zero after a nonzero earlier SSP stage.
                     // Preserve molecular face arithmetic without stale stress.
-                    for values in self.dynamic_viscosity.chunks_mut(64) {
+                    for values in self.dynamic_coefficient_squared.chunks_mut(64) {
                         poll(cancelled)?;
                         values.fill(0.0);
                     }
@@ -231,7 +234,7 @@ impl SubgridTransport {
             }
             ViscosityClosure::DynamicThermal(dynamic) => {
                 if !dynamic.prepare(primitive, cancelled)? {
-                    for values in self.dynamic_viscosity.chunks_mut(64) {
+                    for values in self.dynamic_coefficient_squared.chunks_mut(64) {
                         poll(cancelled)?;
                         values.fill(0.0);
                     }
@@ -240,7 +243,7 @@ impl SubgridTransport {
             }
             ViscosityClosure::DynamicSpecies(dynamic) => {
                 if !dynamic.prepare(states, primitive, cancelled)? {
-                    for values in self.dynamic_viscosity.chunks_mut(64) {
+                    for values in self.dynamic_coefficient_squared.chunks_mut(64) {
                         poll(cancelled)?;
                         values.fill(0.0);
                     }
@@ -249,7 +252,7 @@ impl SubgridTransport {
             }
             ViscosityClosure::DynamicChannelThermal(dynamic) => {
                 if !dynamic.prepare(primitive, walls, cancelled)? {
-                    for values in self.dynamic_viscosity.chunks_mut(64) {
+                    for values in self.dynamic_coefficient_squared.chunks_mut(64) {
                         poll(cancelled)?;
                         values.fill(0.0);
                     }
@@ -258,7 +261,7 @@ impl SubgridTransport {
             }
             ViscosityClosure::ChannelDynamicSpecies(dynamic) => {
                 if !dynamic.prepare(states, primitive, walls, cancelled)? {
-                    for values in self.dynamic_viscosity.chunks_mut(64) {
+                    for values in self.dynamic_coefficient_squared.chunks_mut(64) {
                         poll(cancelled)?;
                         values.fill(0.0);
                     }
@@ -269,16 +272,18 @@ impl SubgridTransport {
         let n = gas.species_count();
         for (i, (p, state)) in primitive.iter().zip(states.chunks_exact(n + 4)).enumerate() {
             poll(cancelled)?;
-            let nu = match &self.closure {
-                // Local closures are evaluated at the conservative face, where
-                // adjacent velocity differences resolve alternating-cell shear.
-                ViscosityClosure::Local { .. } => 0.0,
-                ViscosityClosure::Dynamic(dynamic) => dynamic.viscosities()[i],
-                ViscosityClosure::DynamicThermal(dynamic) => dynamic.viscosities()[i],
-                ViscosityClosure::DynamicChannelThermal(dynamic) => dynamic.viscosities()[i],
-                ViscosityClosure::DynamicSpecies(dynamic) => dynamic.viscosities()[i],
-                ViscosityClosure::ChannelDynamicSpecies(dynamic) => dynamic.viscosities()[i],
-            };
+            let coefficient = match &self.closure {
+                // Local closures supply their authored coefficient at the face.
+                ViscosityClosure::Local { .. } => Some(0.0),
+                ViscosityClosure::Dynamic(dynamic) => dynamic.coefficient_squared(i),
+                ViscosityClosure::DynamicThermal(dynamic) => dynamic.coefficient_squared(i),
+                ViscosityClosure::DynamicChannelThermal(dynamic) => dynamic.coefficient_squared(i),
+                ViscosityClosure::DynamicSpecies(dynamic) => dynamic.coefficient_squared(i),
+                ViscosityClosure::ChannelDynamicSpecies(dynamic) => dynamic.coefficient_squared(i),
+            }
+            .ok_or(DissipationError::Invalid(
+                "dynamic mixture coefficient cache length",
+            ))?;
             let mut cv = [0.0; MAX_SPECIES];
             for (k, model) in gas.source().models().iter().enumerate() {
                 if k % 16 == 0 {
@@ -295,13 +300,12 @@ impl SubgridTransport {
                 }
             }
             let cv = sum(cv[..n].iter().copied());
-            let mu = p.density * nu;
-            if !mu.is_finite() || !positive(cv) {
+            if !positive(cv) {
                 return Err(DissipationError::Invalid(
                     "unrepresentable mixture subgrid coefficients",
                 ));
             }
-            self.dynamic_viscosity[i] = mu;
+            self.dynamic_coefficient_squared[i] = coefficient;
             self.heat_capacity_v_density[i] = cv;
         }
         Ok(())
@@ -352,7 +356,39 @@ impl SubgridTransport {
             .map_err(|_| DissipationError::Invalid("mixture subgrid face gradient or viscosity"))?;
             (0.5 * primitive[left].density + 0.5 * primitive[right].density) * nu
         } else {
-            0.5 * self.dynamic_viscosity[left] + 0.5 * self.dynamic_viscosity[right]
+            let coefficient = 0.5 * self.dynamic_coefficient_squared[left]
+                + 0.5 * self.dynamic_coefficient_squared[right];
+            if coefficient == 0.0 {
+                0.0
+            } else {
+                let width = match &self.closure {
+                    ViscosityClosure::Local { filter_width, .. } => *filter_width,
+                    ViscosityClosure::Dynamic(dynamic) => dynamic.filter_width(),
+                    ViscosityClosure::DynamicThermal(dynamic) => dynamic.filter_width(),
+                    ViscosityClosure::DynamicChannelThermal(dynamic) => dynamic.filter_width(),
+                    ViscosityClosure::DynamicSpecies(dynamic) => dynamic.filter_width(),
+                    ViscosityClosure::ChannelDynamicSpecies(dynamic) => dynamic.filter_width(),
+                };
+                let transpose =
+                    |g: [[f64; 3]; 3]| std::array::from_fn(|i| std::array::from_fn(|j| g[j][i]));
+                let g = face_gradient(
+                    primitive[left].velocity,
+                    primitive[right].velocity,
+                    transpose(gradient[left]),
+                    transpose(gradient[right]),
+                    axis,
+                    distance,
+                );
+                let nu = eddy_viscosity(
+                    SgsModel::Smagorinsky {
+                        cs: fs_math::det::sqrt(coefficient),
+                    },
+                    width,
+                    g,
+                )
+                .map_err(|_| DissipationError::Invalid("dynamic mixture face strain or viscosity"))?;
+                (0.5 * primitive[left].density + 0.5 * primitive[right].density) * nu
+            }
         };
         let dynamic_heat = match &self.closure {
             ViscosityClosure::DynamicThermal(dynamic) => Some(dynamic.face_heat(left, right)),

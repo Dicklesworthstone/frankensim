@@ -81,9 +81,9 @@ fn check_dynamic_species_faces(flow: &MixtureEuler3d) -> MolecularTransport3d<Co
         .prepare(cfg.transport.model, &rho, &velocity, || false)
         .unwrap();
     assert!(fit.maximum_eddy_viscosity > 1e-5);
-    let modeled = &op.sgs.as_ref().unwrap().dynamic_viscosity;
-    for (i, (&mu, &nu)) in modeled.iter().zip(reference.viscosities()).enumerate() {
-        assert_eq!(mu, rho[i] * nu);
+    let modeled = &op.sgs.as_ref().unwrap().dynamic_coefficient_squared;
+    for (&coefficient, fitted) in modeled.iter().zip(reference.coefficients_squared()) {
+        assert_eq!(coefficient, fitted);
     }
     reference
         .prepare(
@@ -96,9 +96,8 @@ fn check_dynamic_species_faces(flow: &MixtureEuler3d) -> MolecularTransport3d<Co
     assert!(
         modeled
             .iter()
-            .zip(reference.viscosities())
-            .zip(&rho)
-            .any(|((&mu, &nu), &rho)| (mu - rho * nu).abs() > 1e-7),
+            .zip(reference.coefficients_squared())
+            .any(|(&coefficient, reynolds)| (coefficient - reynolds).abs() > 1e-7),
         "the variable-density fixture must expose a Reynolds/Favre substitution"
     );
 
@@ -109,7 +108,14 @@ fn check_dynamic_species_faces(flow: &MixtureEuler3d) -> MolecularTransport3d<Co
             c[axis] = (c[axis] + 1) % flow.grid.shape[axis];
             let right = flow.grid.index(c);
             let face = flow.grid.cell_face(axis, c);
-            let mu = 0.5 * modeled[left] + 0.5 * modeled[right];
+            let mu = dynamic_face_viscosity_reference(
+                &op,
+                [modeled[left], modeled[right]],
+                reference.filter_width(),
+                left,
+                right,
+                axis,
+            );
             let pl = op.work.primitive[left];
             let pr = op.work.primitive[right];
             let yl = flow.states()[7 * left] / pl.density;
@@ -163,7 +169,7 @@ fn g0_dynamic_mixture_zero_fit_clears_previous_stress_and_keeps_molecular_bits()
         op.sgs
             .as_ref()
             .unwrap()
-            .dynamic_viscosity
+            .dynamic_coefficient_squared
             .iter()
             .any(|&mu| mu > 0.0)
     );
@@ -177,7 +183,7 @@ fn g0_dynamic_mixture_zero_fit_clears_previous_stress_and_keeps_molecular_bits()
         op.sgs
             .as_ref()
             .unwrap()
-            .dynamic_viscosity
+            .dynamic_coefficient_squared
             .iter()
             .all(|&mu| mu == 0.0)
     );
@@ -312,4 +318,67 @@ fn g4_dynamic_mixture_budgets_topology_and_cancel_refuse_without_publication() {
     );
     assert_eq!(flow.states(), state);
     assert_eq!(op.last_step(), Some(&report));
+}
+
+#[test]
+fn dynamic_face_strain_drives_mixture_stress_and_species_at_centered_nulls() {
+    let n = 6;
+    let at = |x: usize, y: usize, z: usize| (z * n + y) * n + x;
+    let mut random = 1u32;
+    let mut velocity = vec![[0.0; 3]; n * n * n];
+    for u in &mut velocity {
+        for component in u {
+            random = random.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            *component = 0.03 * (2.0 * (random >> 8) as f64 / 16_777_216.0 - 1.0);
+        }
+    }
+    for x in 0..4 {
+        velocity[at(x, 1, 1)] = [0.0, if x % 2 == 0 { -0.01 } else { 0.01 }, 0.0];
+    }
+    for x in [1, 2] {
+        for [y, z] in [[0, 1], [2, 1], [1, 0], [1, 2]] {
+            velocity[at(x, y, z)] = [0.0; 3];
+        }
+    }
+    let mut flow = field(
+        material(0.0),
+        CartesianGrid::new(n, n, n, 1.0, 1.0, 1.0).unwrap(),
+        PERIODIC,
+        |p| {
+            let cell = at(p[0] as usize, p[1] as usize, p[2] as usize);
+            let rho = 1.0 + 0.1 * (cell % 7) as f64 / 6.0;
+            let fraction = 0.4 + 0.05 * (cell % 5) as f64;
+            ([rho * fraction, rho * (1.0 - fraction), 0.0], velocity[cell], 1.5)
+        },
+    );
+    let mut cfg = dynamic_config();
+    cfg.transport.model.averaging = DynamicAveraging::Domain;
+    let mut active = dynamic_operator(&flow, cfg);
+    let mut base = operator(&flow, None);
+    let base_rate = faces(&mut base, &flow).rate;
+    let active_rate = faces(&mut active, &flow).rate;
+    assert!(active_rate > base_rate);
+    let left = at(1, 1, 1);
+    let right = at(2, 1, 1);
+    for cell in [left, right] {
+        assert!(active.work.gradient[cell].iter().flatten().all(|g| g.abs() < 1e-15));
+    }
+    let coefficients = &active.sgs.as_ref().unwrap().dynamic_coefficient_squared;
+    // Independent physical-unit Germano reference for the fixed LCG field.
+    let expected_coefficient = 0.079_783_248_957_537_02;
+    close(coefficients[left], expected_coefficient, 2e-13);
+    close(coefficients[right], expected_coefficient, 2e-13);
+    let mu = 1.025 * expected_coefficient * 0.02;
+    let face = 7 * flow.grid.cell_face(0, [2, 1, 1]);
+    let delta = |k| active.work.flux[0][face + k] - base.work.flux[0][face + k];
+    close(delta(4), 0.02 * mu, 2e-13);
+    let species = -(mu / cfg.turbulent_schmidt) * 0.05;
+    close(delta(0), species, 2e-13);
+    close(delta(1), -species, 2e-13);
+    assert_eq!(delta(2), 0.0);
+    let report = active
+        .advance(&mut flow, Time::new(0.001), DissipationControl::default(), || false)
+        .unwrap();
+    balance(&report);
+    assert!(flow.states().chunks_exact(7).all(|row| row[2] == 0.0));
 }

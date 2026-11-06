@@ -86,7 +86,7 @@ fn g1_dynamic_species_flux_and_source_enthalpy_survive_zero_eddy_viscosity() {
             .sgs
             .as_ref()
             .unwrap()
-            .dynamic_viscosity
+            .dynamic_coefficient_squared
             .iter()
             .all(|&mu| mu == 0.0)
     );

@@ -57,7 +57,7 @@ impl MixtureDynamicSubgridConfig {
 
 impl<L: TransportLaw> MolecularTransport3d<L> {
     /// Combined flow/operator payload including the nonlocal filter, staged
-    /// density/velocity, and SGS viscosity/Cv arrays: 184 extra bytes per cell.
+    /// density/velocity, and fitted-coefficient/Cv arrays: 184 extra bytes per cell.
     /// Actual owned capacities are checked again after allocation.
     pub fn required_workspace_bytes_with_dynamic_sgs(
         flow: &MixtureEuler3d,
@@ -97,7 +97,7 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
         result.sgs = Some(SubgridTransport {
             closure: ViscosityClosure::Dynamic(dynamic),
             wall_models: [None; 6],
-            dynamic_viscosity: allocated(flow.cell_count(), 0.0)?,
+            dynamic_coefficient_squared: allocated(flow.cell_count(), 0.0)?,
             heat_capacity_v_density: allocated(flow.cell_count(), 0.0)?,
         });
         let bytes = result
@@ -184,11 +184,15 @@ impl DynamicTransport {
                 cancelled,
             )
             .map_err(dynamic_error)?;
-        Ok(report.maximum_eddy_viscosity)
+        Ok(report.maximum_coefficient_squared)
     }
 
-    pub(super) fn viscosities(&self) -> &[f64] {
-        self.filter.viscosities()
+    pub(super) fn coefficient_squared(&self, cell: usize) -> Option<f64> {
+        self.filter.coefficient_squared(cell)
+    }
+
+    pub(super) fn filter_width(&self) -> f64 {
+        self.filter.filter_width()
     }
 }
 

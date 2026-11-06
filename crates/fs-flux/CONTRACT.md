@@ -7037,3 +7037,22 @@ reference calculations were performed; native Rust execution was unavailable
 when this extension was introduced. This Estimated output does not certify
 shock derivatives, exact discrete circulation, viscous torque, applied-force
 curl, or unresolved turbulent production.
+
+## Dynamic mixture SGS face stress
+
+Under `experimental-sgs`, periodic and planar-channel Favre dynamic mixture
+closures retain the fitted nonnegative coefficient separately from cell strain
+and evaluate eddy viscosity on the actual conservative face gradient:
+`mu_t,f = rho_f (C_s²)_f Delta² |S_f|`. The normal derivative uses the two
+adjacent cell velocities; transverse derivatives retain the existing centered
+reconstruction. A nonzero fitted coefficient remains active even when a
+centered cell strain vanishes. The existing cache is reused without increasing
+the prepared per-cell workspace.
+
+The same face viscosity drives momentum stress and fixed-Prandtl/fixed-Schmidt
+heat and species transport. Independently fitted thermal and species
+diffusivities keep their original owners. Molecular transport, source-owned
+thermodynamics, stress work, species enthalpy, conservative advancement,
+transport-ratio refusal and timestep bounds remain authoritative. The
+face-reference tests include a positive-Germano-fit velocity field whose two
+adjacent centered strains vanish while its resolved face shear is nonzero.

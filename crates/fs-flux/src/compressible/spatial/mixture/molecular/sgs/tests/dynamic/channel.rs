@@ -184,8 +184,8 @@ fn check_shared(
     };
     for cell in 0..flow.cell_count() {
         assert_eq!(
-            sgs.dynamic_viscosity[cell],
-            rho[cell] * momentum.viscosities()[cell]
+            sgs.dynamic_coefficient_squared[cell],
+            momentum.coefficient_squared(cell).unwrap()
         );
         assert_eq!(
             active.face_heat(cell, cell).0,
@@ -278,7 +278,9 @@ fn g1_channel_species_and_referenced_enthalpy_remain_active_at_zero_eddy_viscosi
             let mut c = flow.grid.coordinates(left);
             c[axis] = (c[axis] + 1) % flow.grid.shape[axis];
             let right = flow.grid.index(c);
-            if sgs.dynamic_viscosity[left] != 0.0 || sgs.dynamic_viscosity[right] != 0.0 {
+            if sgs.dynamic_coefficient_squared[left] != 0.0
+                || sgs.dynamic_coefficient_squared[right] != 0.0
+            {
                 continue;
             }
             let pl = active.work.primitive[left];
@@ -430,7 +432,7 @@ fn g0_channel_zero_fit_clears_all_transport_and_keeps_molecular_trajectory() {
     stage(&mut base, &expected);
     assert_eq!(active.work.flux, base.work.flux);
     let sgs = active.sgs.as_ref().unwrap();
-    assert!(sgs.dynamic_viscosity.iter().all(|&mu| mu == 0.0));
+    assert!(sgs.dynamic_coefficient_squared.iter().all(|&c| c == 0.0));
     let ViscosityClosure::ChannelDynamicSpecies(model) = &sgs.closure else {
         unreachable!()
     };

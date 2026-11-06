@@ -98,7 +98,7 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
                 .map_err(dynamic_error)?,
                 rho_diffusivity: allocated(flow.cell_count(), 0.0)?,
             }),
-            dynamic_viscosity: allocated(flow.cell_count(), 0.0)?,
+            dynamic_coefficient_squared: allocated(flow.cell_count(), 0.0)?,
             heat_capacity_v_density: allocated(flow.cell_count(), 0.0)?,
         });
         let bytes = result
@@ -188,13 +188,20 @@ impl DynamicSpeciesTransport {
             }
         }
         poll(cancelled)?;
-        Ok(momentum.maximum_eddy_viscosity != 0.0
+        Ok(momentum.maximum_coefficient_squared != 0.0
             || heat.maximum_diffusivity != 0.0
             || species.maximum_diffusivity != 0.0)
     }
 
-    pub(in crate::compressible::spatial::mixture::molecular::sgs) fn viscosities(&self) -> &[f64] {
-        self.work.momentum.viscosities()
+    pub(in crate::compressible::spatial::mixture::molecular::sgs) fn coefficient_squared(
+        &self,
+        cell: usize,
+    ) -> Option<f64> {
+        self.work.momentum.coefficient_squared(cell)
+    }
+
+    pub(in crate::compressible::spatial::mixture::molecular::sgs) fn filter_width(&self) -> f64 {
+        self.work.momentum.filter_width()
     }
 
     pub(in crate::compressible::spatial::mixture::molecular::sgs) fn face_heat(

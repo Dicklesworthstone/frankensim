@@ -76,7 +76,7 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
             closure: ViscosityClosure::DynamicThermal(DynamicThermalTransport::new(
                 &flow.grid, config,
             )?),
-            dynamic_viscosity: allocated(flow.cell_count(), 0.0)?,
+            dynamic_coefficient_squared: allocated(flow.cell_count(), 0.0)?,
             heat_capacity_v_density: allocated(flow.cell_count(), 0.0)?,
         });
         let bytes = result
@@ -163,11 +163,18 @@ impl DynamicThermalTransport {
         self.work
             .fields
             .collect_heat(self.work.heat.diffusivities(), cancelled)?;
-        Ok(momentum.maximum_eddy_viscosity != 0.0 || heat.maximum_diffusivity != 0.0)
+        Ok(momentum.maximum_coefficient_squared != 0.0 || heat.maximum_diffusivity != 0.0)
     }
 
-    pub(in crate::compressible::spatial::mixture::molecular::sgs) fn viscosities(&self) -> &[f64] {
-        self.work.momentum.viscosities()
+    pub(in crate::compressible::spatial::mixture::molecular::sgs) fn coefficient_squared(
+        &self,
+        cell: usize,
+    ) -> Option<f64> {
+        self.work.momentum.coefficient_squared(cell)
+    }
+
+    pub(in crate::compressible::spatial::mixture::molecular::sgs) fn filter_width(&self) -> f64 {
+        self.work.momentum.filter_width()
     }
 
     /// Density-weighted thermal diffusivity and its molecular ratio bound.

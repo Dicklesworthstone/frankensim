@@ -120,6 +120,39 @@ fn faces(op: &mut MolecularTransport3d<ConstantTransport>, flow: &MixtureEuler3d
     .unwrap()
 }
 
+// Independent full-tensor face reference. The mixture owner stores gradients
+// derivative-first, while the constitutive tensor below is component-first.
+fn dynamic_face_viscosity_reference<L: TransportLaw>(
+    op: &MolecularTransport3d<L>,
+    coefficients: [f64; 2],
+    filter_width: f64,
+    left: usize,
+    right: usize,
+    axis: usize,
+) -> f64 {
+    let pl = op.work.primitive[left];
+    let pr = op.work.primitive[right];
+    let g: [[f64; 3]; 3] = std::array::from_fn(|i| {
+        std::array::from_fn(|j| {
+            if j == axis {
+                (pr.velocity[i] - pl.velocity[i]) / op.grid.spacing[axis]
+            } else {
+                0.5 * op.work.gradient[left][j][i] + 0.5 * op.work.gradient[right][j][i]
+            }
+        })
+    });
+    let mut strain_squared = 0.0;
+    for i in 0..3 {
+        for j in 0..3 {
+            strain_squared += (0.5 * (g[i][j] + g[j][i])).powi(2);
+        }
+    }
+    (0.5 * pl.density + 0.5 * pr.density)
+        * (0.5 * coefficients[0] + 0.5 * coefficients[1])
+        * filter_width.powi(2)
+        * (2.0 * strain_squared).sqrt()
+}
+
 fn linear() -> MixtureEuler3d {
     field(
         material(0.0),

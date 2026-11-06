@@ -180,8 +180,17 @@ fn channel_mixture_faces_keep_source_enthalpy_cp_and_molecular_wall_heat_work() 
                     let face = flow.grid.cell_face(axis, c);
                     let delta =
                         |k| op.work.flux[axis][7 * face + k] - base.work.flux[axis][7 * face + k];
-                    let mu = 0.5 * rho[left] * core.viscosities()[left]
-                        + 0.5 * rho[right] * core.viscosities()[right];
+                    let mu = dynamic_face_viscosity_reference(
+                        &op,
+                        [
+                            core.coefficient_squared(left).unwrap(),
+                            core.coefficient_squared(right).unwrap(),
+                        ],
+                        core.filter_width(),
+                        left,
+                        right,
+                        axis,
+                    );
                     let t = 0.5 * temperature[left] + 0.5 * temperature[right];
                     let mut cp = 0.0;
                     let mut species_energy = 0.0;
@@ -274,7 +283,7 @@ fn channel_mixture_heat_remains_active_on_planes_with_zero_momentum_fit() {
         let mut c = flow.grid.coordinates(left);
         c[0] = (c[0] + 1) % flow.grid.shape[0];
         let right = flow.grid.index(c);
-        if sgs.dynamic_viscosity[left] + sgs.dynamic_viscosity[right] != 0.0
+        if sgs.dynamic_coefficient_squared[left] + sgs.dynamic_coefficient_squared[right] != 0.0
             || thermal.face_heat(left, right).0 == 0.0
         {
             continue;
