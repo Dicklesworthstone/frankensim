@@ -4,6 +4,8 @@
 //! over the complete supported temperature span. The independently sourced yield
 //! offset may vary with temperature: it changes dissipation, not stored energy.
 //! All nine original claims are selected together and pinned for continuation.
+//! Selecting primary strain hardening adds three original kinetic claims to
+//! this same bundle, preserving accumulated creep independently of plasticity.
 //! A monotonic post-yield tangent is converted only by the original J2 owner.
 //! Nonzero translated yield surfaces require a noncoaxial coupled return map;
 //! this source family therefore does not accept the mixed-hardening basis.
@@ -13,6 +15,7 @@ use std::sync::Arc;
 use super::{NortonJ2, NortonJ2State};
 use crate::creep::source::{
     CreepSourceError, CreepSourceFamily, NortonCreepSource, NortonSourceQuery, norton_requirements,
+    norton_strain_hardening_requirements,
 };
 use crate::creep::{CreepError, CreepIncrement, CreepLaw, CreepTolerances, NortonCreep};
 use crate::plastic::source::{HardeningPropertyBasis, ResolvedJ2Plasticity, j2_requirements};
@@ -29,12 +32,26 @@ use fs_matdb::{ClaimSelection, MaterialCard};
 pub fn norton_j2_requirements(
     basis: HardeningPropertyBasis,
 ) -> Result<Vec<ScalarPropertyRequirement>, CreepSourceError> {
+    combined_requirements(basis, norton_requirements()?)
+}
+
+/// Complete twelve-claim selection for primary creep and isotropic plasticity.
+/// The three primary coefficients are independent original dimensionless claims.
+pub fn norton_j2_strain_hardening_requirements(
+    basis: HardeningPropertyBasis,
+) -> Result<Vec<ScalarPropertyRequirement>, CreepSourceError> {
+    combined_requirements(basis, norton_strain_hardening_requirements()?)
+}
+
+fn combined_requirements(
+    basis: HardeningPropertyBasis,
+    mut requirements: Vec<ScalarPropertyRequirement>,
+) -> Result<Vec<ScalarPropertyRequirement>, CreepSourceError> {
     if basis == HardeningPropertyBasis::MixedPlasticStrainModuli {
         return Err(CreepSourceError::Invalid(
             "combined radial creep/plasticity requires isotropic hardening",
         ));
     }
-    let mut requirements = norton_requirements()?;
     for requirement in j2_requirements(basis)? {
         if !requirements
             .iter()
@@ -70,17 +87,44 @@ impl<'a> NortonJ2Source<'a> {
         card: &'a MaterialCard,
         query: NortonSourceQuery<'_>,
         basis: HardeningPropertyBasis,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, CreepSourceError> {
+        Self::prepare(card, query, basis, false, cancelled)
+    }
+
+    /// Explicitly select primary creep and resolve all twelve original claims
+    /// together. Primary hardening changes creep kinetics only; the original J2
+    /// owner continues to own plastic hardening and its recoverable storage.
+    pub fn new_with_strain_hardening(
+        card: &'a MaterialCard,
+        query: NortonSourceQuery<'_>,
+        basis: HardeningPropertyBasis,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, CreepSourceError> {
+        Self::prepare(card, query, basis, true, cancelled)
+    }
+
+    fn prepare(
+        card: &'a MaterialCard,
+        query: NortonSourceQuery<'_>,
+        basis: HardeningPropertyBasis,
+        with_strain_hardening: bool,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<Self, CreepSourceError> {
         poll(&mut cancelled)?;
+        let creep_requirements = if with_strain_hardening {
+            norton_strain_hardening_requirements()?
+        } else {
+            norton_requirements()?
+        };
         let reference = resolve_material_state_point(
             card,
             query.lower,
-            &norton_j2_requirements(basis)?,
+            &combined_requirements(basis, creep_requirements.clone())?,
             query.selection,
         )?;
         let selection = MaterialPropertySelection::PinnedByProperty(
-            norton_requirements()?
+            creep_requirements
                 .iter()
                 .map(|requirement| {
                     let property = reference
@@ -93,17 +137,18 @@ impl<'a> NortonJ2Source<'a> {
                 })
                 .collect(),
         );
-        let creep = NortonCreepSource::new(
-            card,
-            NortonSourceQuery {
-                lower: query.lower,
-                upper: query.upper,
-                temperature_axis: query.temperature_axis,
-                selection,
-                strain_limit: query.strain_limit,
-            },
-            &mut cancelled,
-        )?;
+        let creep_query = NortonSourceQuery {
+            lower: query.lower,
+            upper: query.upper,
+            temperature_axis: query.temperature_axis,
+            selection,
+            strain_limit: query.strain_limit,
+        };
+        let creep = if with_strain_hardening {
+            NortonCreepSource::new_with_strain_hardening(card, creep_query, &mut cancelled)?
+        } else {
+            NortonCreepSource::new(card, creep_query, &mut cancelled)?
+        };
         for name in [YIELD_STRESS_PROPERTY, basis.property_name()] {
             poll(&mut cancelled)?;
             let property = reference

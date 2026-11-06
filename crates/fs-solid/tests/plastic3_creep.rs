@@ -2,7 +2,9 @@
 
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
-use fs_material::creep::{CreepTolerances, NortonCreep, NortonCreepParameters};
+use fs_material::creep::{
+    CreepTolerances, NortonCreep, NortonCreepParameters, StrainHardeningCreep,
+};
 use fs_material::{IsotropicElastic, SmallStrainLaw};
 use fs_solid::plastic3::creep::{CreepTetError, CreepTetTolerances};
 use fs_solid::{
@@ -272,6 +274,95 @@ fn held_length_relaxes_tension_with_first_order_physical_time_refinement() {
         errors[0] / errors[1] > 1.9 && errors[1] / errors[2] > 1.9,
         "{errors:?}"
     );
+}
+
+#[test]
+fn primary_creep_bar_converges_to_constant_stress_solution_and_conserves_physical_work() {
+    let (nodes, tets) = mesh();
+    let supports = rollers(&nodes);
+    let loads = end_force();
+    let reference_strain = 2e-4;
+    let final_time = 4.0;
+    // Integrating alpha_dot = RATE / (1 + alpha/reference_strain) at fixed stress.
+    let continuous =
+        reference_strain * ((1.0 + 2.0 * RATE * final_time / reference_strain).sqrt() - 1.0);
+    let mut errors = Vec::new();
+    for steps in [8, 16, 32] {
+        let material = law(3.0, 300.0, final_time / steps as f64)
+            .with_strain_hardening(StrainHardeningCreep {
+                reference_strain,
+                exponent: 1.0,
+                residual_rate_fraction: 0.0,
+            })
+            .unwrap();
+        let problem = SmallStrainTetProblem {
+            nodes_m: &nodes,
+            tetrahedra: &tets,
+            laws: SmallStrainLawField::Uniform(&material),
+            prescribed_m: &supports,
+            nodal_forces_n: &loads,
+            load_path: &[1.0],
+            budget: TetAssemblyBudget::standard(),
+            settings: IncrementSettings::default(),
+        };
+        with_cx(|cx| {
+            let mut displacement = elastic_displacement(&nodes);
+            let mut states = vec![material.initial_state(); tets.len()];
+            let mut physical_heat = 0.0;
+            let mut previous_increment = RATE * material.duration_s();
+            for _ in 0..steps {
+                let result = problem
+                    .solve_creep_from(&displacement, &states, tolerances(), cx)
+                    .unwrap();
+                let alpha = result.solution.element_states[0].equivalent_creep_strain;
+                let delta = alpha - states[0].equivalent_creep_strain;
+                assert!(delta > 0.0 && delta < previous_increment);
+                previous_increment = delta;
+                for (stress, state) in result
+                    .solution
+                    .element_stress
+                    .iter()
+                    .zip(&result.solution.element_states)
+                {
+                    assert!((stress[0] - STRESS).abs() < 1e-8);
+                    assert!(stress[1..].iter().all(|s| s.abs() < 1e-8));
+                    assert!((state.equivalent_creep_strain - alpha).abs() < 1e-11);
+                    assert!((state.creep_strain[0] - alpha).abs() < 1e-11);
+                }
+                for (x, u) in nodes.iter().zip(&result.solution.displacement_m) {
+                    assert!((u[0] - (STRESS / YOUNGS + alpha) * x[0]).abs() < 1e-10);
+                    for d in 1..3 {
+                        assert!(
+                            (u[d] + (POISSON * STRESS / YOUNGS + 0.5 * alpha) * x[d]).abs() < 1e-10
+                        );
+                    }
+                }
+                let heat = LENGTH * STRESS * delta;
+                assert!((result.energy.physical_dissipation_j - heat).abs() < 1e-10);
+                assert!((result.energy.applied_work_j - heat).abs() < 1e-10);
+                assert!(result.energy.balance_residual_j.abs() < tolerances().energy_j);
+                physical_heat += result.energy.physical_dissipation_j;
+                displacement = result
+                    .solution
+                    .displacement_m
+                    .iter()
+                    .flatten()
+                    .copied()
+                    .collect();
+                states = result.solution.element_states;
+            }
+            let alpha = states[0].equivalent_creep_strain;
+            assert!((physical_heat - LENGTH * STRESS * alpha).abs() < 1e-9);
+            assert!(alpha < continuous);
+            errors.push(continuous - alpha);
+        });
+    }
+    for pair in errors.windows(2) {
+        assert!(
+            pair[0] / pair[1] > 1.85 && pair[0] / pair[1] < 2.1,
+            "{errors:?}"
+        );
+    }
 }
 
 #[test]

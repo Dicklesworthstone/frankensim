@@ -11,7 +11,9 @@ use fs_material::creep::plastic::NortonJ2;
 use fs_material::creep::plastic::source::NortonJ2Source;
 use fs_material::creep::plastic::uniaxial::UniaxialNortonJ2;
 use fs_material::creep::source::{NortonSourceQuery, norton_requirements};
-use fs_material::creep::{CreepTolerances, NortonCreep, NortonCreepParameters};
+use fs_material::creep::{
+    CreepTolerances, NortonCreep, NortonCreepParameters, StrainHardeningCreep,
+};
 use fs_material::plastic::J2Plasticity;
 use fs_material::plastic::source::{HardeningPropertyBasis, ISOTROPIC_HARDENING_MODULUS_PROPERTY};
 use fs_material::state_point::{MaterialPropertySelection, YIELD_STRESS_PROPERTY};
@@ -195,6 +197,76 @@ fn loaded_member_yields_creeps_relaxes_when_held_and_keeps_both_permanent_strain
     );
     close(released.frame.element_forces(0)[0], 0.0, 1e-6);
     close(released.energy.physical_dissipation_j, 0.0, 1e-8);
+}
+
+#[test]
+fn primary_creep_and_yielding_share_equilibrium_but_keep_separate_histories_and_heat() {
+    let secondary = law(DT, 300.0);
+    let parameters = StrainHardeningCreep {
+        reference_strain: 4e-4,
+        exponent: 1.0,
+        residual_rate_fraction: 0.25,
+    };
+    let primary = UniaxialNortonJ2::new(
+        NortonJ2::new(
+            secondary
+                .backbone()
+                .creep()
+                .clone()
+                .with_strain_hardening(parameters)
+                .unwrap(),
+            secondary.backbone().plastic().clone(),
+        )
+        .unwrap(),
+    );
+    let mut accepted = frame(&primary, Geometry::Linear, true);
+    let plastic = (STRESS - YIELD) / HARDENING;
+    let mut alpha = 0.0;
+    let mut previous_increment = DT * RATE;
+    for i in 0..5 {
+        // Independent positive quadratic root for m=1 with a secondary floor.
+        let k = DT * RATE;
+        let b = parameters.reference_strain + alpha - k * parameters.residual_rate_fraction;
+        let c = k * (parameters.reference_strain + parameters.residual_rate_fraction * alpha);
+        let delta = 2.0 * c / (b + (b * b + 4.0 * c).sqrt());
+        alpha += delta;
+        let step = accepted
+            .solve_creep_step(&axial_load(FORCE), controls(), || false)
+            .unwrap();
+        close(
+            step.frame.displacements()[3],
+            STRESS / E + plastic + alpha,
+            2e-11,
+        );
+        close(step.frame.element_forces(0)[0], FORCE, 1e-6);
+        let (_, state) = step.frame.creep_plastic_fiber(0, 1, 0).unwrap();
+        close(state.creep_strain(), alpha, 2e-11);
+        close(state.equivalent_creep_strain(), alpha, 2e-11);
+        close(state.plastic_strain(), plastic, 2e-11);
+        close(state.equivalent_plastic_strain(), plastic, 2e-11);
+        close(step.energy.creep_dissipation_j, FORCE * delta, 1e-8);
+        close(
+            step.energy.plastic_dissipation_j,
+            if i == 0 {
+                2.0 * AREA * YIELD * plastic
+            } else {
+                0.0
+            },
+            1e-8,
+        );
+        close(step.energy.balance_residual_j, 0.0, controls().energy_j);
+        assert!(delta > k * parameters.residual_rate_fraction && delta < previous_increment);
+        previous_increment = delta;
+        accepted = step.frame;
+    }
+    let released = accepted
+        .solve_creep_step(&axial_load(0.0), controls(), || false)
+        .unwrap();
+    close(released.frame.displacements()[3], plastic + alpha, 2e-11);
+    close(released.energy.physical_dissipation_j, 0.0, 1e-8);
+    let (_, history) = released.frame.creep_plastic_fiber(0, 1, 0).unwrap();
+    close(history.equivalent_creep_strain(), alpha, 2e-11);
+    close(history.equivalent_plastic_strain(), plastic, 2e-11);
 }
 
 fn point(t: f64) -> QueryPoint {

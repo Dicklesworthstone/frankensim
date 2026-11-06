@@ -2,15 +2,14 @@
 //! All coefficients are manufactured; these are not measured-life predictions.
 use std::collections::BTreeMap;
 
-use fs_couple::solid_enthalpy::creep::{
-    CreepCell, CreepConfig, CreepCouplingError, CreepSolid,
-};
+use fs_couple::solid_enthalpy::creep::{CreepCell, CreepConfig, CreepCouplingError, CreepSolid};
 use fs_evidence::ValidityDomain;
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_matdb::{
     ClaimSet, InterpolationPolicy, MaterialCard, MaterialStateId, PropertyClaim, PropertyKey,
     PropertyValue, Provenance, QueryPoint, SelectionPolicy, UncertaintyModel,
 };
+use fs_material::creep::StrainHardeningCreep;
 use fs_material::creep::source::*;
 use fs_material::phase::{HeatCapacitySourceQuery, ResolvedHeatCapacityCurve, SolidLiquidPhase};
 use fs_material::state_point::{
@@ -78,9 +77,13 @@ struct Fixture {
     cp: f64,
     rate: f64,
     q: f64,
+    primary: Option<StrainHardeningCreep>,
 }
 impl Fixture {
     fn new(cp: f64, rate: f64, q: f64) -> Self {
+        Self::with_primary(cp, rate, q, None)
+    }
+    fn with_primary(cp: f64, rate: f64, q: f64, primary: Option<StrainHardeningCreep>) -> Self {
         let mut claims = ClaimSet::new();
         for claim in [
             constant(YOUNG_MODULUS_PROPERTY, Pressure::DIMS, E),
@@ -102,6 +105,23 @@ impl Fixture {
             constant("specific_heat_capacity", CP_DIMS, cp),
         ] {
             claims.insert_claim(claim).unwrap();
+        }
+        if let Some(parameters) = primary {
+            for (name, value) in [
+                (
+                    CREEP_HARDENING_REFERENCE_STRAIN_PROPERTY,
+                    parameters.reference_strain,
+                ),
+                (CREEP_HARDENING_EXPONENT_PROPERTY, parameters.exponent),
+                (
+                    CREEP_RESIDUAL_RATE_FRACTION_PROPERTY,
+                    parameters.residual_rate_fraction,
+                ),
+            ] {
+                claims
+                    .insert_claim(constant(name, Dims([0; 6]), value))
+                    .unwrap();
+            }
         }
         let card = MaterialCard::assemble(
             MaterialStateId {
@@ -135,10 +155,16 @@ impl Fixture {
             cp,
             rate,
             q,
+            primary,
         }
     }
     fn source(&self) -> NortonCreepSource<'_> {
-        NortonCreepSource::new(
+        let prepare = if self.primary.is_some() {
+            NortonCreepSource::new_with_strain_hardening
+        } else {
+            NortonCreepSource::new
+        };
+        prepare(
             &self.card,
             NortonSourceQuery {
                 lower: &point(280.0),
@@ -395,6 +421,124 @@ fn g1_source_to_loaded_tetrahedron_creeps_heats_and_continues_once_per_physical_
             }
             close(endpoints[0].0, endpoints[1].0, 2e-10);
             close(endpoints[0].1, endpoints[1].1, 2e-7);
+        }
+    });
+}
+
+#[test]
+fn g1_primary_history_survives_spatial_heat_feedback_and_keeps_only_physical_heat() {
+    let parameters = StrainHardeningCreep {
+        reference_strain: 2e-4,
+        exponent: 1.5,
+        residual_rate_fraction: 0.2,
+    };
+    let fixture = Fixture::with_primary(5.0, RATE, 30_000.0, Some(parameters));
+    with_cx(|cx| {
+        let mut thermal = initial(&fixture, &[300.0], V, &[], false);
+        let mut solid = bind(&fixture, &thermal, &NODES, &TETS, cx);
+        let mut alpha = 0.0;
+        let mut temperature = 300.0;
+        let dt = 0.5;
+        let mut previous_increment = dt * RATE;
+        let claims: Vec<_> = solid.materials()[0]
+            .material()
+            .properties()
+            .iter()
+            .map(|p| p.answer().receipt.selected)
+            .collect();
+        for step in 1..=5 {
+            // Solve the scalar fixed-stress heat equation independently of the
+            // production constitutive root and staggered thermal iteration.
+            let residual = |delta: f64| {
+                let t = temperature + STRESS * delta / (RHO * fixture.cp);
+                let rate = fixture.rate
+                    * (fixture.q / 8.314_462_618_153_24 * (1.0 / 300.0 - 1.0 / t)).exp();
+                let h = parameters.residual_rate_fraction
+                    + (1.0 - parameters.residual_rate_fraction)
+                        * (1.0 + (alpha + delta) / parameters.reference_strain)
+                            .powf(-parameters.exponent);
+                delta - dt * rate * h
+            };
+            let (mut lo, mut hi) = (0.0, 2.0 * dt * RATE);
+            assert!(residual(lo) < 0.0 && residual(hi) > 0.0);
+            for _ in 0..80 {
+                let mid = 0.5 * (lo + hi);
+                if residual(mid) > 0.0 {
+                    hi = mid;
+                } else {
+                    lo = mid;
+                }
+            }
+            let delta = 0.5 * (lo + hi);
+            assert!(delta > 0.0 && delta < previous_increment);
+            previous_increment = delta;
+            let old_history = solid.solution().element_states[0].clone();
+            let candidate = solid
+                .advance(
+                    &thermal,
+                    &(),
+                    step as f64 * dt,
+                    &ROLLERS,
+                    &[(3, STRESS * V / L)],
+                    IncrementSettings::default(),
+                    heat_config(0.025),
+                    config(),
+                    cx,
+                )
+                .unwrap();
+            assert_eq!(solid.solution().element_states[0], old_history);
+            alpha += delta;
+            temperature += STRESS * delta / (RHO * fixture.cp);
+            let solution = candidate.solid().solution();
+            close(
+                solution.element_states[0].equivalent_creep_strain,
+                alpha,
+                2e-10,
+            );
+            close(
+                solution.displacement_m[1][0],
+                L * (STRESS / E + alpha),
+                2e-12,
+            );
+            close(solution.element_stress[0][0], STRESS, 1e-2);
+            close(
+                candidate.thermal().temperature_k(CellId(0)).unwrap(),
+                temperature,
+                2e-7,
+            );
+            let report = candidate.report();
+            close(
+                report.mechanical_energy.physical_dissipation_j,
+                STRESS * V * delta,
+                1e-10,
+            );
+            close(report.applied_heat_j, STRESS * V * delta, 1e-10);
+            close(
+                report.thermal_audit.stored_energy_change_j,
+                STRESS * V * delta,
+                1e-10,
+            );
+            close(report.combined_residual_j, 0.0, config().energy_tolerance_j);
+            if step == 1 {
+                assert!(report.mechanical_energy.numerical_dissipation_j > report.applied_heat_j);
+            }
+            let material = &candidate.solid().materials()[0];
+            assert_eq!(material.law().strain_hardening(), Some(&parameters));
+            assert_eq!(
+                material
+                    .material()
+                    .properties()
+                    .iter()
+                    .map(|p| p.answer().receipt.selected)
+                    .collect::<Vec<_>>(),
+                claims
+            );
+            close(
+                material.material().state_coordinate("T").unwrap(),
+                temperature,
+                2e-7,
+            );
+            (thermal, solid, _, _) = candidate.into_parts();
         }
     });
 }

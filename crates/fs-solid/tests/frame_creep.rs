@@ -8,7 +8,9 @@ use fs_matdb::{
 };
 use fs_material::creep::source::{NortonCreepSource, NortonSourceQuery, norton_requirements};
 use fs_material::creep::uniaxial::UniaxialNorton;
-use fs_material::creep::{CreepTolerances, NortonCreep, NortonCreepParameters};
+use fs_material::creep::{
+    CreepTolerances, NortonCreep, NortonCreepParameters, StrainHardeningCreep,
+};
 use fs_material::elastic::IsotropicElastic;
 use fs_material::state_point::MaterialPropertySelection;
 use fs_solid::fiber::{Fiber, FiberLaw, Section};
@@ -133,6 +135,158 @@ fn g1_constant_force_extends_the_native_member_and_leaves_permanent_set() {
     close(released.frame.displacements()[3], 6.0 * DT * RATE, 2e-11);
     close(released.frame.element_forces(0)[0], 0.0, 1e-6);
     assert!(released.energy.physical_dissipation_j < 1e-8);
+}
+
+#[test]
+fn g1_primary_creep_decelerates_under_force_and_unloading_retains_its_resistance() {
+    let reference_strain = 4e-4;
+    let primary = UniaxialNorton::new(
+        law(DT, 300.0)
+            .backbone()
+            .clone()
+            .with_strain_hardening(StrainHardeningCreep {
+                reference_strain,
+                exponent: 1.0,
+                residual_rate_fraction: 0.0,
+            })
+            .unwrap(),
+    );
+    let mut accepted = frame(&primary, true);
+    let mut alpha = 0.0;
+    let mut previous_increment = DT * RATE;
+    // For m=1 and f=0 at fixed stress, backward Euler is a quadratic:
+    // delta * (reference_strain + old_alpha + delta) = dt * rate * reference_strain.
+    for _ in 0..6 {
+        let b = reference_strain + alpha;
+        let c = DT * RATE * reference_strain;
+        let delta = 2.0 * c / (b + (b * b + 4.0 * c).sqrt());
+        let old_history = accepted.creep_fiber(0, 0, 0).unwrap().1.clone();
+        let step = accepted
+            .solve_creep_step(&axial_load(FORCE), controls(), || false)
+            .unwrap();
+        assert_eq!(accepted.creep_fiber(0, 0, 0).unwrap().1, &old_history);
+        alpha += delta;
+        close(step.frame.displacements()[3], STRESS / E + alpha, 2e-11);
+        close(step.frame.element_forces(0)[0], FORCE, 1e-6);
+        for section in 0..3 {
+            for fiber in 0..2 {
+                let (_, state) = step.frame.creep_fiber(0, section, fiber).unwrap();
+                close(state.creep_strain(), alpha, 2e-11);
+                close(state.equivalent_creep_strain(), alpha, 2e-11);
+            }
+        }
+        close(step.energy.creep_dissipation_j, FORCE * delta, 1e-8);
+        close(step.energy.balance_residual_j, 0.0, controls().energy_j);
+        assert!(delta > 0.0 && delta < previous_increment);
+        previous_increment = delta;
+        accepted = step.frame;
+    }
+    let released = accepted
+        .solve_creep_step(&axial_load(0.0), controls(), || false)
+        .unwrap();
+    close(released.frame.displacements()[3], alpha, 2e-11);
+    close(released.energy.creep_dissipation_j, 0.0, 1e-8);
+    close(
+        released
+            .frame
+            .creep_fiber(0, 0, 0)
+            .unwrap()
+            .1
+            .equivalent_creep_strain(),
+        alpha,
+        2e-11,
+    );
+    let reloaded = released
+        .frame
+        .solve_creep_step(&axial_load(FORCE), controls(), || false)
+        .unwrap();
+    let increment = reloaded
+        .frame
+        .creep_fiber(0, 0, 0)
+        .unwrap()
+        .1
+        .creep_strain()
+        - alpha;
+    assert!(increment > 0.0 && increment < previous_increment);
+    close(
+        increment * (reference_strain + alpha + increment),
+        DT * RATE * reference_strain,
+        2e-14,
+    );
+}
+
+#[test]
+fn g0_primary_kinetics_cannot_change_when_rebinding_accepted_frame_history() {
+    let parameters = StrainHardeningCreep {
+        reference_strain: 4e-4,
+        exponent: 1.5,
+        residual_rate_fraction: 0.2,
+    };
+    let primary = |dt, temperature, parameters| {
+        UniaxialNorton::new(
+            law(dt, temperature)
+                .backbone()
+                .clone()
+                .with_strain_hardening(parameters)
+                .unwrap(),
+        )
+    };
+    let accepted = frame(&primary(DT, 300.0, parameters), true)
+        .solve_creep_step(&axial_load(FORCE), controls(), || false)
+        .unwrap()
+        .frame;
+    let history = accepted.creep_fiber(0, 0, 0).unwrap().1.clone();
+    for changed in [
+        law(DT, 300.0),
+        primary(
+            DT,
+            300.0,
+            StrainHardeningCreep {
+                reference_strain: 8e-4,
+                ..parameters
+            },
+        ),
+        primary(
+            DT,
+            300.0,
+            StrainHardeningCreep {
+                exponent: 2.0,
+                ..parameters
+            },
+        ),
+        primary(
+            DT,
+            300.0,
+            StrainHardeningCreep {
+                residual_rate_fraction: 0.4,
+                ..parameters
+            },
+        ),
+    ] {
+        assert!(matches!(
+            accepted.with_creep_laws(&vec![changed; 6], "T", || false),
+            Err(FrameCreepError::Invalid(_))
+        ));
+        assert_eq!(accepted.creep_fiber(0, 0, 0).unwrap().1, &history);
+    }
+    let shorter_warm = primary(DT / 2.0, 330.0, parameters);
+    let refreshed = accepted
+        .with_creep_laws(&vec![shorter_warm; 6], "T", || false)
+        .unwrap();
+    assert_eq!(refreshed.displacements(), accepted.displacements());
+    assert_eq!(refreshed.creep_fiber(0, 0, 0).unwrap().1, &history);
+    let step = refreshed
+        .solve_creep_step(&axial_load(FORCE), controls(), || false)
+        .unwrap();
+    assert_eq!(step.duration_s, DT / 2.0);
+    assert!(
+        step.frame
+            .creep_fiber(0, 0, 0)
+            .unwrap()
+            .1
+            .equivalent_creep_strain()
+            > history.equivalent_creep_strain()
+    );
 }
 
 #[test]

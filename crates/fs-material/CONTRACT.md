@@ -13569,6 +13569,71 @@ substitution. Three exact original source-domain tests passed in the focused
 native lane; complete material-card integration execution is not implied by
 those narrower domain checks.
 
+## Primary creep with retained strain hardening
+
+`NortonCreep::with_strain_hardening` explicitly selects
+`StrainHardeningCreep { reference_strain, exponent, residual_rate_fraction }`.
+The native accumulated equivalent creep strain supplies the history coordinate:
+`h(alpha) = f + (1-f) (1+alpha/a)^(-m)`, with `a > 0`, `m >= 0` and
+`0 <= f <= 1`. The original Norton reference rate is the **initial** rate at
+zero accumulated creep. The residual fraction specifies the asymptotic
+secondary/initial rate ratio at the same stress and temperature; zero gives
+a regularized primary power law. No parameters are inferred from yield,
+melting temperature or material names. Absent hardening, exponent zero and
+unit residual fraction retain the original numerical Norton path exactly.
+
+Tensor, free-sided axial and simultaneous isotropic J2 returns solve the
+endpoint history equation together with stress balance. A bounded scalar
+solve in `log(K delta_alpha / q)` retains small creep increments even when
+their stress decrement rounds away, as well as very small relaxed stresses.
+The exact algorithmic tangent includes the derivative of the implicit
+hardening multiplier. The coupled yield-branch decision uses the accumulated
+creep at the yield crossing; perfect plasticity still solves the creep
+history equation at fixed yield stress. Effective stiffness remains logarithmic
+through very small positive plastic hardening.
+
+The same signed creep strain, nondecreasing accumulated path, trial/commit
+separation, tensor shear convention and small-strain bounds remain authoritative.
+Rate resistance is a kinetic memory, with no inferred recoverable hardening
+energy: physical creep heat remains `q delta_alpha`, separately from plastic
+heat, elastic/plastic storage and backward-Euler numerical loss.
+Frame interval rebinding preserves the optional primary parameters.
+
+`tests/creep_hardening.rs` supplies independent quadratic returns,
+constant-stress continuum refinement, tensor covariance, nonproportional
+consistent tangents, simultaneous yielding, exact disabled reductions, and
+sub-stress-roundoff history/very-small-hardening regressions. This is an
+explicitly authored isotropic small-strain model with first-order time
+integration. It adds no cyclic recovery, tertiary damage, rupture, finite-strain
+primary creep or experimentally qualified service-life prediction.
+
+### Original source claims and native consumers
+
+`NortonCreepSource::new_with_strain_hardening` and
+`NortonJ2Source::new_with_strain_hardening` select the extended family explicitly.
+They require three additional dimensionless original claims:
+`creep_hardening_reference_strain`, `creep_hardening_exponent` and
+`creep_residual_rate_fraction`. Their complete admitted temperature lines must
+be supported and constant, including interior knots; all ten Norton claims
+or twelve joint creep/plastic claims stay pinned on refresh. The original
+constructors remain secondary-only. A card containing extra properties does
+not silently change the selected constitutive model.
+
+The existing `CreepLaw` and `CreepSourceFamily` paths carry the same history
+and kinetics through tensor and free-sided axial materials, thermal expansion,
+frame fibers, tetrahedral solids and solid/enthalpy coupling. The frame
+continuation check refuses a changed primary selection. Source temperature
+refresh changes Arrhenius kinetics without resetting the accumulated path.
+Coupled thermal trials still begin from the same accepted mechanical history,
+and only physical creep/plastic dissipation reaches the heat owner.
+
+Native tests exercise sustained-load frame deceleration, permanent unloading
+and reloading, simultaneous frame yielding with a residual secondary floor,
+tetrahedral constant-stress time refinement and source-bound self-heating.
+The self-heating reference couples the Arrhenius and primary laws to finite
+heat capacity. These are manufactured analytical/consistency cases, not new
+experimental calibration data or service-life qualification.
+
 ## Simultaneous permanent creep and isotropic yielding
 
 `creep::plastic::NortonJ2` combines the original Norton kinetics and native

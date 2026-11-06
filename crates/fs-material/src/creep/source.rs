@@ -1,15 +1,17 @@
 //! Immutable material-card binding for the native Norton/Arrhenius creep law.
 //!
-//! All seven coefficients come from explicit source claims. Their complete
+//! All seven reference coefficients come from explicit source claims. Their complete
 //! temperature line must be supported and constant: the declared Arrhenius law
 //! owns the temperature dependence of kinetics, while elastic storage is fixed.
 //! This permits temperature changes without silently discarding coefficient
-//! work. Temperature-dependent elasticity, primary/tertiary creep, damage and
-//! fitted-data qualification require other explicit models.
+//! work. Primary strain hardening is explicitly selected with three additional
+//! original claims, never inferred from the secondary reference coefficients.
+//! Temperature-dependent elasticity, tertiary creep, damage and fitted-data
+//! qualification require other explicit models.
 
 use super::{
     CreepError, CreepIncrement, CreepLaw, CreepState, CreepTolerances, NortonCreep,
-    NortonCreepParameters,
+    NortonCreepParameters, StrainHardeningCreep,
 };
 use crate::plastic::source::J2SourceError;
 use crate::state_point::{
@@ -25,7 +27,9 @@ use fs_qty::{Dims, Pressure, QuantitySpec, Temperature};
 
 /// Reference equivalent stress [Pa], never an inferred yield threshold.
 pub const CREEP_REFERENCE_STRESS_PROPERTY: &str = "creep_reference_stress";
-/// Equivalent strain rate at the reference stress and temperature [1/s].
+/// Equivalent strain rate at the reference stress and temperature [1/s]. With
+/// strain hardening selected, this is the virgin-state rate (zero accumulated
+/// equivalent creep strain), not the long-time residual rate.
 pub const CREEP_REFERENCE_RATE_PROPERTY: &str = "creep_reference_strain_rate";
 /// Dimensionless stress exponent of the secondary-creep power law.
 pub const CREEP_STRESS_EXPONENT_PROPERTY: &str = "creep_stress_exponent";
@@ -33,6 +37,12 @@ pub const CREEP_STRESS_EXPONENT_PROPERTY: &str = "creep_stress_exponent";
 pub const CREEP_ACTIVATION_ENERGY_PROPERTY: &str = "creep_activation_energy";
 /// Absolute reference temperature [K].
 pub const CREEP_REFERENCE_TEMPERATURE_PROPERTY: &str = "creep_reference_temperature";
+/// Positive dimensionless accumulated-creep scale for primary strain hardening.
+pub const CREEP_HARDENING_REFERENCE_STRAIN_PROPERTY: &str = "creep_hardening_reference_strain";
+/// Nonnegative dimensionless primary strain-hardening exponent.
+pub const CREEP_HARDENING_EXPONENT_PROPERTY: &str = "creep_hardening_exponent";
+/// Residual fraction of the virgin creep rate, dimensionless and in [0, 1].
+pub const CREEP_RESIDUAL_RATE_FRACTION_PROPERTY: &str = "creep_residual_rate_fraction";
 pub const CREEP_RATE_DIMS: Dims = Dims([0, 0, -1, 0, 0, 0]);
 pub const CREEP_ACTIVATION_ENERGY_DIMS: Dims = Dims([2, 1, -2, 0, 0, -1]);
 
@@ -78,6 +88,35 @@ pub fn norton_requirements() -> Result<Vec<ScalarPropertyRequirement>, MaterialS
     .into_iter()
     .map(|(name, dims, domain)| ScalarPropertyRequirement::try_new(name, dims, domain))
     .collect()
+}
+
+/// All ten original claims required by the explicitly selected primary law.
+/// No reference strain, exponent or residual rate is supplied by a default.
+pub fn norton_strain_hardening_requirements()
+-> Result<Vec<ScalarPropertyRequirement>, MaterialStatePointError> {
+    let mut requirements = norton_requirements()?;
+    for (name, domain) in [
+        (
+            CREEP_HARDENING_REFERENCE_STRAIN_PROPERTY,
+            ScalarAdmissibility::StrictlyPositive,
+        ),
+        (
+            CREEP_HARDENING_EXPONENT_PROPERTY,
+            ScalarAdmissibility::NonNegative,
+        ),
+        (
+            CREEP_RESIDUAL_RATE_FRACTION_PROPERTY,
+            ScalarAdmissibility::NonNegative,
+        ),
+    ] {
+        requirements.push(ScalarPropertyRequirement::try_new(
+            name,
+            Dims([0; 6]),
+            domain,
+        )?);
+    }
+    // The native law also enforces the residual fraction's inclusive upper bound.
+    Ok(requirements)
 }
 
 /// One explicit temperature interval at otherwise unchanged source conditions.
@@ -165,6 +204,7 @@ pub struct NortonCreepSource<'a> {
     reference: ResolvedMaterialStatePoint,
     elastic: IsotropicElastic,
     parameters: NortonCreepParameters,
+    strain_hardening: Option<StrainHardeningCreep>,
     temperature_axis: String,
 }
 impl<'a> NortonCreepSource<'a> {
@@ -174,16 +214,39 @@ impl<'a> NortonCreepSource<'a> {
     pub fn new(
         card: &'a MaterialCard,
         query: NortonSourceQuery<'_>,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, CreepSourceError> {
+        Self::prepare(card, query, false, cancelled)
+    }
+
+    /// Select primary strain hardening from three additional original claims.
+    /// The complete ten-claim bundle is pinned and must be constant throughout
+    /// the admitted thermal span. The original reference rate is its value at
+    /// zero accumulated equivalent creep strain. Existing `new` callers keep
+    /// secondary-creep behavior even when a card contains these extra claims.
+    pub fn new_with_strain_hardening(
+        card: &'a MaterialCard,
+        query: NortonSourceQuery<'_>,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, CreepSourceError> {
+        Self::prepare(card, query, true, cancelled)
+    }
+
+    fn prepare(
+        card: &'a MaterialCard,
+        query: NortonSourceQuery<'_>,
+        with_strain_hardening: bool,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<Self, CreepSourceError> {
         poll(&mut cancelled)?;
         let range = temperature_span(query.lower, query.upper, query.temperature_axis)?;
-        let reference = resolve_material_state_point(
-            card,
-            query.lower,
-            &norton_requirements()?,
-            query.selection,
-        )?;
+        let requirements = if with_strain_hardening {
+            norton_strain_hardening_requirements()?
+        } else {
+            norton_requirements()?
+        };
+        let reference =
+            resolve_material_state_point(card, query.lower, &requirements, query.selection)?;
         for property in reference.properties() {
             poll(&mut cancelled)?;
             if !property.has_only_fixed_external_conditions(Some(query.temperature_axis), false) {
@@ -242,16 +305,23 @@ impl<'a> NortonCreepSource<'a> {
             reference_temperature_k: value(CREEP_REFERENCE_TEMPERATURE_PROPERTY),
             temperature_range_k: range,
         };
-        // Unit duration is admission only; every executed step supplies its own dt.
-        NortonCreep::new(elastic.clone(), parameters.clone(), range[0], 1.0)?;
-        NortonCreep::new(elastic.clone(), parameters.clone(), range[1], 1.0)?;
-        Ok(Self {
+        let strain_hardening = with_strain_hardening.then(|| StrainHardeningCreep {
+            reference_strain: value(CREEP_HARDENING_REFERENCE_STRAIN_PROPERTY),
+            exponent: value(CREEP_HARDENING_EXPONENT_PROPERTY),
+            residual_rate_fraction: value(CREEP_RESIDUAL_RATE_FRACTION_PROPERTY),
+        });
+        let source = Self {
             card,
             reference,
             elastic,
             parameters,
+            strain_hardening,
             temperature_axis: query.temperature_axis.into(),
-        })
+        };
+        // Unit duration is admission only; every executed step supplies its own dt.
+        source.prepared_law(range[0], 1.0)?;
+        source.prepared_law(range[1], 1.0)?;
+        Ok(source)
     }
 
     /// Complete original source bundle at the lower admitted temperature.
@@ -260,6 +330,11 @@ impl<'a> NortonCreepSource<'a> {
     }
     pub const fn parameters(&self) -> &NortonCreepParameters {
         &self.parameters
+    }
+
+    /// The explicitly selected primary coefficients, if that family was chosen.
+    pub const fn strain_hardening(&self) -> Option<&StrainHardeningCreep> {
+        self.strain_hardening.as_ref()
     }
 
     /// Absolute-temperature coordinate retained in every original source receipt.
@@ -289,18 +364,22 @@ impl<'a> NortonCreepSource<'a> {
     }
 
     // A composed source already refreshes the complete shared property bundle.
-    // Reuse admitted coefficients without resolving the same seven claims twice.
+    // Reuse admitted coefficients without resolving the same claims twice.
     pub(crate) fn prepared_law(
         &self,
         temperature_k: f64,
         duration_s: f64,
     ) -> Result<NortonCreep, CreepSourceError> {
-        Ok(NortonCreep::new(
+        let law = NortonCreep::new(
             self.elastic.clone(),
             self.parameters.clone(),
             temperature_k,
             duration_s,
-        )?)
+        )?;
+        Ok(match self.strain_hardening {
+            Some(parameters) => law.with_strain_hardening(parameters)?,
+            None => law,
+        })
     }
 }
 

@@ -7,9 +7,12 @@ use fs_matdb::{
     PropertyValue, Provenance, QueryPoint, UncertaintyModel,
 };
 use fs_material::SmallStrainLaw;
-use fs_material::creep::plastic::source::{NortonJ2Source, norton_j2_requirements};
+use fs_material::creep::plastic::NortonJ2;
+use fs_material::creep::plastic::source::{
+    NortonJ2Source, norton_j2_requirements, norton_j2_strain_hardening_requirements,
+};
 use fs_material::creep::source::*;
-use fs_material::creep::{CreepLaw, CreepTolerances};
+use fs_material::creep::{CreepLaw, CreepTolerances, NortonCreep, StrainHardeningCreep};
 use fs_material::plastic::source::{
     HardeningPropertyBasis, ISOTROPIC_HARDENING_MODULUS_PROPERTY,
     POST_YIELD_TANGENT_MODULUS_PROPERTY,
@@ -75,6 +78,19 @@ fn coefficients() -> Vec<PropertyClaim> {
         scalar(ISOTROPIC_HARDENING_MODULUS_PROPERTY, Pressure::DIMS, 4e8),
     ]
 }
+fn primary_coefficients() -> Vec<PropertyClaim> {
+    let mut properties = coefficients();
+    properties.extend([
+        scalar(
+            CREEP_HARDENING_REFERENCE_STRAIN_PROPERTY,
+            Dims([0; 6]),
+            1e-4,
+        ),
+        scalar(CREEP_HARDENING_EXPONENT_PROPERTY, Dims([0; 6]), 1.0),
+        scalar(CREEP_RESIDUAL_RATE_FRACTION_PROPERTY, Dims([0; 6]), 0.2),
+    ]);
+    properties
+}
 fn card(properties: Vec<PropertyClaim>) -> MaterialCard {
     let mut claims = ClaimSet::new();
     for property in properties {
@@ -99,6 +115,20 @@ fn point(t: f64) -> QueryPoint {
 }
 fn source(card: &MaterialCard) -> Result<NortonJ2Source<'_>, CreepSourceError> {
     NortonJ2Source::new(
+        card,
+        NortonSourceQuery {
+            lower: &point(300.0),
+            upper: &point(500.0),
+            temperature_axis: "T",
+            selection: MaterialPropertySelection::SingleClaimOnly,
+            strain_limit: 0.02,
+        },
+        H,
+        || false,
+    )
+}
+fn primary_source(card: &MaterialCard) -> Result<NortonJ2Source<'_>, CreepSourceError> {
+    NortonJ2Source::new_with_strain_hardening(
         card,
         NortonSourceQuery {
             lower: &point(300.0),
@@ -314,4 +344,152 @@ fn g0_source_preparation_cancellation_leaves_the_original_card_usable() {
     assert!(matches!(cancelled, Err(CreepSourceError::Cancelled)));
     assert_eq!(card.content_hash(), identity);
     assert!(source(&card).unwrap().at_temperature(400.0, 1.0).is_ok());
+}
+
+#[test]
+fn g1_primary_creep_and_heated_yield_keep_twelve_pinned_claims_and_native_history() {
+    let card = card(primary_coefficients());
+    let original = primary_source(&card).unwrap();
+    let secondary = source(&card).unwrap();
+    assert_eq!(secondary.reference().properties().len(), 9);
+    assert!(secondary.creep_source().strain_hardening().is_none());
+    assert_eq!(
+        norton_j2_strain_hardening_requirements(H).unwrap().len(),
+        12
+    );
+    assert_eq!(original.reference().properties().len(), 12);
+    assert_eq!(original.creep_source().reference().properties().len(), 10);
+    let parameters = StrainHardeningCreep {
+        reference_strain: 1e-4,
+        exponent: 1.0,
+        residual_rate_fraction: 0.2,
+    };
+    let selection = MaterialPropertySelection::PinnedByProperty(
+        original
+            .reference()
+            .properties()
+            .iter()
+            .map(|property| {
+                (
+                    property.requirement().name().into(),
+                    property.answer().receipt.selected,
+                )
+            })
+            .collect(),
+    );
+    let pinned = NortonJ2Source::new_with_strain_hardening(
+        &card,
+        NortonSourceQuery {
+            lower: &point(300.0),
+            upper: &point(500.0),
+            temperature_axis: "T",
+            selection,
+            strain_limit: 0.02,
+        },
+        H,
+        || false,
+    )
+    .unwrap();
+    let cold = pinned.at_temperature(300.0, 1.0).unwrap();
+    let strain = [0.002, -0.001, -0.001, 0.0, 0.0, 0.0];
+    let loaded = cold
+        .creep_increment(&[0.0; 6], &cold.initial_state(), &strain, tolerances())
+        .unwrap();
+    assert_eq!(loaded.state.plastic.alpha, 0.0);
+    assert!(loaded.state.creep.equivalent_creep_strain > 0.0);
+    let hot = pinned.at_temperature(500.0, 0.5).unwrap();
+    let native = NortonJ2::new(
+        NortonCreep::new(
+            hot.law().creep().elastic().clone(),
+            pinned.creep_source().parameters().clone(),
+            500.0,
+            0.5,
+        )
+        .unwrap()
+        .with_strain_hardening(parameters)
+        .unwrap(),
+        hot.law().plastic().clone(),
+    )
+    .unwrap();
+    let relaxed = hot
+        .creep_increment(&strain, &loaded.state, &strain, tolerances())
+        .unwrap();
+    assert_eq!(
+        relaxed,
+        native
+            .advance_with_energy(&strain, &loaded.state, &strain, tolerances())
+            .unwrap(),
+    );
+    assert!(relaxed.state.plastic.alpha > 0.0);
+    assert!(
+        relaxed.state.creep.equivalent_creep_strain > loaded.state.creep.equivalent_creep_strain
+    );
+    assert!(relaxed.energy.creep_dissipation_j_m3 > 0.0);
+    assert!(relaxed.energy.plastic_dissipation_j_m3 > 0.0);
+    near(relaxed.energy.mechanical_work_j_m3, 0.0);
+    for resolved in [&cold, &hot] {
+        assert_eq!(resolved.law().creep().strain_hardening(), Some(&parameters));
+        assert_eq!(resolved.material().card_identity(), card.content_hash());
+        assert_eq!(resolved.material().properties().len(), 12);
+        for property in resolved.material().properties() {
+            assert_eq!(
+                property.answer().receipt.selected,
+                original
+                    .reference()
+                    .property(property.requirement().name())
+                    .unwrap()
+                    .answer()
+                    .receipt
+                    .selected,
+            );
+            assert_eq!(
+                property.answer().evidence.value.uncertainty,
+                UncertaintyModel::Unstated
+            );
+        }
+    }
+    assert_eq!(hot.material().state_coordinate("T"), Some(500.0));
+}
+
+#[test]
+fn g0_combined_primary_source_rejects_missing_invalid_or_changing_primary_claims() {
+    for index in 9..12 {
+        let incomplete = primary_coefficients()
+            .into_iter()
+            .enumerate()
+            .filter(|(position, _)| *position != index)
+            .map(|(_, property)| property)
+            .collect();
+        assert!(
+            primary_source(&card(incomplete)).is_err(),
+            "missing primary claim {index}"
+        );
+        let mut changed = primary_coefficients();
+        let (value, dims) = match changed[index].value {
+            PropertyValue::Scalar { value, dims } => (value, dims),
+            _ => unreachable!(),
+        };
+        changed[index].value = PropertyValue::Curve {
+            abscissa: "T".into(),
+            abscissa_dims: Temperature::DIMS,
+            knots: vec![(300.0, value), (400.0, value * 1.1), (500.0, value)],
+            dims,
+        };
+        changed[index].interpolation = InterpolationPolicy::LinearInside;
+        assert!(matches!(
+            primary_source(&card(changed)),
+            Err(CreepSourceError::Invalid(_))
+        ));
+    }
+    for (index, value) in [(9, 0.0), (10, -1.0), (11, 1.01)] {
+        let mut invalid = primary_coefficients();
+        if let PropertyValue::Scalar { value: actual, .. } = &mut invalid[index].value {
+            *actual = value;
+        }
+        assert!(primary_source(&card(invalid)).is_err());
+    }
+    assert!(
+        norton_j2_strain_hardening_requirements(HardeningPropertyBasis::MixedPlasticStrainModuli)
+            .is_err()
+    );
 }
