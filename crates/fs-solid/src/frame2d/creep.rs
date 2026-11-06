@@ -25,6 +25,10 @@ use fs_material::creep::{CreepEnergy, CreepError, CreepTolerances, NortonCreep};
 use fs_material::state_point::ResolvedMaterialStatePoint;
 use std::cell::Cell;
 
+/// One physical creep interval with original reference inertia and checked work.
+pub mod dynamics;
+pub use dynamics::{FrameCreepDynamicEnergy, FrameCreepDynamicStep};
+
 /// Independent physical-unit gates and work bound for one native frame step.
 #[derive(Clone, Copy, Debug)]
 pub struct FrameCreepTolerances {
@@ -298,7 +302,7 @@ impl Frame2d {
         });
         if has_creep {
             Err(SolidError::MaterialRefused {
-                what: "timed creep fibers require solve_creep_step with an explicit physical interval; untimed static/modal and inertial frame paths do not own creep history".into(),
+                what: "timed creep fibers require solve_creep_step or advance_creep_backward_euler with an explicit physical interval; untimed static/modal and Newmark paths do not own creep history".into(),
             })
         } else {
             Ok(())
@@ -511,68 +515,7 @@ impl Frame2d {
                 && self.vel.iter().chain(&self.acc).all(|v| *v == 0.0),
             "checked frame creep requires nonempty linear geometry and stationary inertia",
         )?;
-        require(
-            load.len() == self.ndof()
-                && load.iter().all(|x| x.is_finite())
-                && self.u.iter().all(|x| x.is_finite())
-                && [
-                    tolerances.energy_j,
-                    tolerances.force_n,
-                    tolerances.moment_n_m,
-                    tolerances.material.stress_pa,
-                    tolerances.material.energy_j_m3,
-                ]
-                .into_iter()
-                .all(positive)
-                && tolerances.maximum_fiber_points > 0,
-            "invalid creep loads, controls or accepted displacement",
-        )?;
-        let mut count = 0usize;
-        let mut duration = None;
-        for e in &self.elements {
-            require(
-                e.viscous_section.is_none(),
-                "frame viscosity needs a separate timed work owner",
-            )?;
-            for (p, section) in e.sections.iter().enumerate() {
-                let SectionModel::Fiber(section) = section else {
-                    return Err(FrameCreepError::Invalid(
-                        "checked creep work requires timed fiber sections",
-                    ));
-                };
-                require(
-                    !section.fibers.is_empty() && section.fibers.len() == section.states.len(),
-                    "nonempty matching fiber/history arrays required",
-                )?;
-                for (fiber, state) in section.fibers.iter().zip(&section.states) {
-                    poll(&mut cancelled)?;
-                    count = count
-                        .checked_add(1)
-                        .ok_or(FrameCreepError::Invalid("fiber count overflow"))?;
-                    require(
-                        count <= tolerances.maximum_fiber_points,
-                        "fiber work budget exceeded",
-                    )?;
-                    let law = CreepPoint::new(&fiber.law, state)?;
-                    require(
-                        positive(fiber.area) && fiber.y.is_finite(),
-                        "invalid fiber area or position",
-                    )?;
-                    let dt = law.kinetics().duration_s();
-                    if let Some(previous) = duration {
-                        require(
-                            dt == previous,
-                            "all fibers need one common physical duration",
-                        )?;
-                    } else {
-                        duration = Some(dt);
-                    }
-                    let strain = e.commit.d[p].0 - fiber.y * e.commit.d[p].1;
-                    law.tensor_strain(strain)?;
-                    self.admit_creep_geometry(e, law.kinetics().elastic().strain_limit)?;
-                }
-            }
-        }
+        let (count, duration_s) = self.admit_creep_step(load, tolerances, &mut cancelled)?;
         let mut next = self.clone();
         let cancelled_seen = Cell::new(false);
         let mut checkpoint = || {
@@ -623,6 +566,117 @@ impl Frame2d {
                 energy.support_work_j += residual * delta;
             }
         }
+        let (fibers, material_work) = self.audit_creep_materials(
+            &next,
+            count,
+            tolerances,
+            &mut energy,
+            &mut cancelled,
+        )?;
+        let work = energy.applied_work_j + energy.support_work_j;
+        energy.equilibrium_work_residual_j = work - material_work;
+        energy.balance_residual_j = work
+            - (energy.final_stored_j - energy.initial_stored_j)
+            - energy.thermoelastic_storage_change_j
+            - energy.physical_dissipation_j
+            - energy.reversible_heat_j
+            - energy.numerical_dissipation_j;
+        energy_gate(energy.equilibrium_work_residual_j, tolerances.energy_j)?;
+        energy_gate(energy.balance_residual_j, tolerances.energy_j)?;
+        poll(&mut cancelled)?;
+        Ok(FrameCreepStep {
+            frame: next,
+            duration_s,
+            equilibrium: steps.remove(0),
+            fibers,
+            energy,
+        })
+    }
+
+    /// Common material/clock admission for static and inertial physical steps.
+    fn admit_creep_step(
+        &self,
+        load: &[f64],
+        tolerances: FrameCreepTolerances,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(usize, f64), FrameCreepError> {
+        require(
+            load.len() == self.ndof()
+                && load.iter().all(|x| x.is_finite())
+                && self.u.iter().all(|x| x.is_finite())
+                && [
+                    tolerances.energy_j,
+                    tolerances.force_n,
+                    tolerances.moment_n_m,
+                    tolerances.material.stress_pa,
+                    tolerances.material.energy_j_m3,
+                ]
+                .into_iter()
+                .all(positive)
+                && tolerances.maximum_fiber_points > 0,
+            "invalid creep loads, controls or accepted displacement",
+        )?;
+        let mut count = 0usize;
+        let mut duration = None;
+        for e in &self.elements {
+            require(
+                e.viscous_section.is_none(),
+                "frame viscosity needs a separate timed work owner",
+            )?;
+            for (p, section) in e.sections.iter().enumerate() {
+                let SectionModel::Fiber(section) = section else {
+                    return Err(FrameCreepError::Invalid(
+                        "checked creep work requires timed fiber sections",
+                    ));
+                };
+                require(
+                    !section.fibers.is_empty() && section.fibers.len() == section.states.len(),
+                    "nonempty matching fiber/history arrays required",
+                )?;
+                for (fiber, state) in section.fibers.iter().zip(&section.states) {
+                    poll(cancelled)?;
+                    count = count
+                        .checked_add(1)
+                        .ok_or(FrameCreepError::Invalid("fiber count overflow"))?;
+                    require(
+                        count <= tolerances.maximum_fiber_points,
+                        "fiber work budget exceeded",
+                    )?;
+                    let law = CreepPoint::new(&fiber.law, state)?;
+                    require(
+                        positive(fiber.area) && fiber.y.is_finite(),
+                        "invalid fiber area or position",
+                    )?;
+                    let dt = law.kinetics().duration_s();
+                    if let Some(previous) = duration {
+                        require(
+                            dt == previous,
+                            "all fibers need one common physical duration",
+                        )?;
+                    } else {
+                        duration = Some(dt);
+                    }
+                    let strain = e.commit.d[p].0 - fiber.y * e.commit.d[p].1;
+                    law.tensor_strain(strain)?;
+                    self.admit_creep_geometry(e, law.kinetics().elastic().strain_limit)?;
+                }
+            }
+        }
+        Ok((
+            count,
+            duration.ok_or(FrameCreepError::Invalid("nonempty timed fibers required"))?,
+        ))
+    }
+
+    /// Audit the exact accepted native return, without aging committed history.
+    fn audit_creep_materials(
+        &self,
+        next: &Self,
+        count: usize,
+        tolerances: FrameCreepTolerances,
+        energy: &mut FrameCreepEnergy,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(Vec<FrameFiberCreepEnergy>, f64), FrameCreepError> {
         let mut fibers = Vec::with_capacity(count);
         let mut material_work = 0.0;
         for (element, (old, new)) in self.elements.iter().zip(&next.elements).enumerate() {
@@ -631,7 +685,7 @@ impl Frame2d {
                     unreachable!()
                 };
                 for (f, (fiber, state)) in section.fibers.iter().zip(&section.states).enumerate() {
-                    poll(&mut cancelled)?;
+                    poll(cancelled)?;
                     let law = CreepPoint::new(&fiber.law, state)?;
                     next.admit_creep_geometry(new, law.kinetics().elastic().strain_limit)?;
                     let old_strain = old.commit.d[p].0 - fiber.y * old.commit.d[p].1;
@@ -668,24 +722,7 @@ impl Frame2d {
                 }
             }
         }
-        let work = energy.applied_work_j + energy.support_work_j;
-        energy.equilibrium_work_residual_j = work - material_work;
-        energy.balance_residual_j = work
-            - (energy.final_stored_j - energy.initial_stored_j)
-            - energy.thermoelastic_storage_change_j
-            - energy.physical_dissipation_j
-            - energy.reversible_heat_j
-            - energy.numerical_dissipation_j;
-        energy_gate(energy.equilibrium_work_residual_j, tolerances.energy_j)?;
-        energy_gate(energy.balance_residual_j, tolerances.energy_j)?;
-        poll(&mut cancelled)?;
-        Ok(FrameCreepStep {
-            frame: next,
-            duration_s: duration.expect("admitted nonempty fibers"),
-            equilibrium: steps.remove(0),
-            fibers,
-            energy,
-        })
+        Ok((fibers, material_work))
     }
 
     fn admit_creep_geometry(

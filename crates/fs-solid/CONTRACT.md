@@ -10100,3 +10100,32 @@ Each contact reports solved force and pressure (normal force divided by explicit
 ### Identical shell-contact gap admission across retained intervals
 
 Sustained shell contact evaluates final and restarted initial gaps through the same absolute original point/plane arithmetic. It does not accumulate a gap by subtracting endpoint displacements and then re-add it to an earlier rounded gap: that could accept a zero gap which recomputed as a negative gap on the next interval. Tangential increments and relative work remain unchanged, and geometry is never clamped. An eight-interval native J2 elastic load/unload/reload regression checks bit-identical carried gaps, independent force/displacement relations, unchanged plastic history and the explicit numerical approach budget. The regression is authored; native execution remains pending the shared build resource blocker.
+
+## Native frame motion with one physical creep interval
+
+`Frame2d::advance_creep_backward_euler` advances displacement, velocity,
+acceleration and original standalone/joint/thermal creep fiber histories as one
+immutable proposal. The native reference mass, force-based fiber assembly,
+consistent tangent and Newton backtracking remain the mechanical owners. The
+endpoint acceleration solves `M a1 + f_int(u1) = load`, with
+`v1 = v0 + dt a1` and `u1 = u0 + dt v1`. Every trial and the independent fiber
+work audit start from the same accepted history. There is no initial timed
+constitutive evaluation that consumes an additional creep interval.
+
+All fibers and inertia must have the exact same positive physical duration.
+Separate force, moment, impulse and energy gates check the accepted endpoint.
+Kinetic change uses average velocity contracted with the actual momentum
+increment. Backward-Euler inertia loss `delta(v)^T M delta(v)/2` is explicit,
+nonnegative and separate from native material numerical loss; neither is heat.
+Physical creep/plastic work and reciprocal thermal transfer retain their native
+partition. Failed trials and cancellation publish no changed frame.
+
+Stationary supports, linear small-strain/rotation geometry and native
+Euler–Bernoulli fibers are admitted with lumped or consistent reference inertia.
+Attached section viscosity, transverse shear and retained Rayleigh damping
+require separate work owners and refuse in this route. The existing untimed
+and Newmark guards remain in force. This first-order dissipative integrator
+requires physical timestep refinement; it does not establish finite-rotation
+creep dynamics or coupled thermal transport. Focused analytical and history
+regressions are in `tests/frame_creep_dynamics.rs`; native execution remains
+pending an available prescribed build runner.
