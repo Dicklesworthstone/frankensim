@@ -28,7 +28,7 @@ use crate::plastic3::IncrementSettings;
 
 /// Bounds on the complete duration, with the original motion/contact controls.
 #[derive(Clone, Copy, Debug)]
-pub struct BrittleFaceTimeControls {
+pub struct BrittleFaceTimeControls<Impact = BrittleFaceImpactControls> {
     /// Largest free-flight or sustained-force interval proposed to native motion.
     /// This is a caller-selected temporal resolution, not an error estimate.
     pub maximum_interval_s: f64,
@@ -39,7 +39,7 @@ pub struct BrittleFaceTimeControls {
     /// every sustained-force response when that path is enabled.
     pub maximum_trials: usize,
     pub approach: BrittleFaceApproachControls,
-    pub impact: BrittleFaceImpactControls,
+    pub impact: Impact,
     /// Whole-duration signed balance AND sum of absolute local balance errors.
     pub total_energy_tolerance_j: f64,
 }
@@ -102,6 +102,9 @@ pub struct BrittleFaceTimeEnergy {
     /// or an additional external-work port in the physical balance.
     pub normal_contact_work_j: f64,
     pub absolute_normal_contact_work_j: f64,
+    /// Bounded static tangential work, separate from physical impact loss.
+    pub tangential_contact_work_j: f64,
+    pub absolute_tangential_contact_work_j: f64,
     pub dead_load_mean_work_j: f64,
     pub support_mean_work_j: f64,
     /// Signed reaction work at held, possibly moving velocity components.
@@ -508,21 +511,203 @@ pub(crate) struct SustainedTimePath<M: ReleasedFaceTimeMotion> {
     ) -> Result<FaceTimeSustainedApproach<M>, BrittleFaceSustainedApproachError>,
 }
 
-pub(crate) struct FaceTimeSustainedApproach<M: ReleasedFaceTimeMotion> {
-    pub advance: Option<(M, M::Energy, BrittleFaceTimedSustained<M::Energy>)>,
+pub(crate) struct FaceTimeSustainedApproach<
+    M: ReleasedFaceTimeMotion,
+    Receipt = BrittleFaceTimedSustained<<M as ReleasedFaceTimeMotion>::Energy>,
+> {
+    pub advance: Option<(M, M::Energy, Receipt)>,
     pub contact: Option<BrittleFaceContactLocation>,
     pub response_evaluations: usize,
     pub numerical_tangent_evaluations: usize,
 }
 
-pub(crate) struct NativeFaceTimeStep<M: ReleasedFaceTimeMotion> {
+pub(crate) struct NativeFaceTimeStep<
+    M: ReleasedFaceTimeMotion,
+    Impact = BrittleFaceTimedImpact,
+    Sustained = BrittleFaceTimedSustained<<M as ReleasedFaceTimeMotion>::Energy>,
+> {
     pub motion: M,
     pub intervals: Vec<BrittleFaceMotionRecord<M::Energy>>,
-    pub impacts: Vec<BrittleFaceTimedImpact>,
-    pub sustained: Vec<BrittleFaceTimedSustained<M::Energy>>,
+    pub impacts: Vec<Impact>,
+    pub sustained: Vec<Sustained>,
     pub trials: usize,
     pub numerical_tangent_evaluations: usize,
     pub energy: BrittleFaceTimeEnergy,
+}
+
+/// Physical event accounts only; complete native law receipts remain typed.
+pub(crate) struct FaceTimeImpactWork {
+    pub time_s: f64,
+    pub positive_normal_impulse: bool,
+    pub support_work_j: f64,
+    pub kinetic_change_j: f64,
+    pub dissipated_energy_j: f64,
+    pub balance_error_j: f64,
+}
+
+pub(crate) trait FaceTimeImpactReceipt {
+    fn impact_work(&self) -> FaceTimeImpactWork;
+}
+
+pub(crate) struct FaceTimeSustainedWork {
+    pub normal_contact_work_j: f64,
+    pub tangential_contact_work_j: f64,
+    pub absolute_normal_contact_work_j: f64,
+    pub absolute_tangential_contact_work_j: f64,
+}
+
+pub(crate) trait FaceTimeSustainedReceipt {
+    fn sustained_work(&self) -> FaceTimeSustainedWork;
+    /// Physical forces in the retained contact frames, never mapped solver forces.
+    fn physical_seed(&self) -> (&[BrittleFaceImpactRow], &[[f64; 3]]);
+}
+
+impl FaceTimeImpactReceipt for BrittleFaceTimedImpact {
+    fn impact_work(&self) -> FaceTimeImpactWork {
+        FaceTimeImpactWork {
+            time_s: self.location.time_s,
+            positive_normal_impulse: self.contact.normal_impulses.iter().any(|&p| p > 0.0),
+            support_work_j: self.impulse.support_work_j,
+            kinetic_change_j: self.impulse.kinetic_change_j,
+            dissipated_energy_j: self.contact.dissipated_energy,
+            balance_error_j: self.energy_balance_error_j,
+        }
+    }
+}
+
+impl<Energy> FaceTimeSustainedReceipt for BrittleFaceTimedSustained<Energy> {
+    fn sustained_work(&self) -> FaceTimeSustainedWork {
+        FaceTimeSustainedWork {
+            normal_contact_work_j: self.normal_contact_work_j,
+            tangential_contact_work_j: 0.0,
+            absolute_normal_contact_work_j: self.absolute_contact_work_j,
+            absolute_tangential_contact_work_j: 0.0,
+        }
+    }
+
+    fn physical_seed(&self) -> (&[BrittleFaceImpactRow], &[[f64; 3]]) {
+        (&self.rows, &self.solve.forces_n)
+    }
+}
+
+/// A contact-law family supplies original impulses and constrained prefixes to
+/// one physical-time driver. Source-bearing policies may stage candidates in
+/// these callbacks; only complete successful time results are published.
+pub(crate) trait ReleasedFaceTimePolicy<M: ReleasedFaceTimeMotion> {
+    type ImpactControls: Copy;
+    type Impact: FaceTimeImpactReceipt;
+    type Sustained: FaceTimeSustainedReceipt;
+    type Error: From<BrittleFaceTimeError>;
+
+    fn validate(&mut self, initial: &M, cx: &Cx<'_>) -> Result<(), Self::Error>;
+    fn impact_gates(controls: Self::ImpactControls) -> (f64, f64);
+    fn sustained_controls(&self) -> Option<BrittleFaceSustainedControls>;
+
+    #[allow(clippy::too_many_arguments)]
+    fn impact(
+        &mut self,
+        motion: &M,
+        location: BrittleFaceContactLocation,
+        restitution: &[f64],
+        held_velocity_dofs: &[usize],
+        origin_m: [f64; 3],
+        controls: Self::ImpactControls,
+        cx: &Cx<'_>,
+    ) -> Result<(M, Self::Impact), Self::Error>;
+
+    #[allow(clippy::too_many_arguments)]
+    fn sustained(
+        &mut self,
+        motion: &M,
+        duration_s: f64,
+        prescribed_end_m: &[(usize, f64)],
+        force_intervals_n: &[(usize, [f64; 2])],
+        seed: Option<(&[BrittleFaceImpactRow], &[[f64; 3]])>,
+        settings: IncrementSettings,
+        approach: BrittleFaceApproachControls,
+        controls: BrittleFaceSustainedControls,
+        cx: &Cx<'_>,
+    ) -> Result<FaceTimeSustainedApproach<M, Self::Sustained>, Self::Error>;
+}
+
+struct NormalTimePolicy<M: ReleasedFaceTimeMotion> {
+    sustained: Option<SustainedTimePath<M>>,
+}
+
+impl<M: ReleasedFaceTimeMotion> ReleasedFaceTimePolicy<M> for NormalTimePolicy<M> {
+    type ImpactControls = BrittleFaceImpactControls;
+    type Impact = BrittleFaceTimedImpact;
+    type Sustained = BrittleFaceTimedSustained<M::Energy>;
+    type Error = BrittleFaceTimeError;
+
+    fn validate(&mut self, _: &M, _: &Cx<'_>) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    fn impact_gates(controls: Self::ImpactControls) -> (f64, f64) {
+        (
+            controls.activation_tolerance_m,
+            controls.velocity_tolerance_mps,
+        )
+    }
+
+    fn sustained_controls(&self) -> Option<BrittleFaceSustainedControls> {
+        self.sustained.as_ref().map(|path| path.controls)
+    }
+
+    fn impact(
+        &mut self,
+        motion: &M,
+        location: BrittleFaceContactLocation,
+        restitution: &[f64],
+        held: &[usize],
+        origin: [f64; 3],
+        controls: Self::ImpactControls,
+        cx: &Cx<'_>,
+    ) -> Result<(M, Self::Impact), Self::Error> {
+        motion
+            .time_impact(location, restitution, held, origin, controls, cx)
+            .map_err(BrittleFaceTimeError::Impact)
+    }
+
+    fn sustained(
+        &mut self,
+        motion: &M,
+        duration: f64,
+        prescribed: &[(usize, f64)],
+        forces: &[(usize, [f64; 2])],
+        seed: Option<(&[BrittleFaceImpactRow], &[[f64; 3]])>,
+        settings: IncrementSettings,
+        approach: BrittleFaceApproachControls,
+        controls: BrittleFaceSustainedControls,
+        cx: &Cx<'_>,
+    ) -> Result<FaceTimeSustainedApproach<M, Self::Sustained>, Self::Error> {
+        let path = self
+            .sustained
+            .as_ref()
+            .ok_or(BrittleFaceTimeError::Invalid(
+                "missing configured native sustained path",
+            ))?;
+        (path.advance)(
+            motion, duration, prescribed, forces, seed, settings, approach, controls, cx,
+        )
+        .map_err(BrittleFaceTimeError::SustainedApproach)
+    }
+}
+
+enum TimeRunError<E> {
+    Time(BrittleFaceTimeError),
+    Policy(E),
+}
+impl<E> From<BrittleFaceTimeError> for TimeRunError<E> {
+    fn from(error: BrittleFaceTimeError) -> Self {
+        Self::Time(error)
+    }
+}
+impl<E> From<BrittleTetError> for TimeRunError<E> {
+    fn from(error: BrittleTetError) -> Self {
+        Self::Time(error.into())
+    }
 }
 
 /// Complete native interval driver shared by thermal and nonthermal bodies.
@@ -540,13 +725,79 @@ pub(crate) fn run_released_face_time<M: ReleasedFaceTimeMotion>(
     sustained_path: Option<SustainedTimePath<M>>,
     cx: &Cx<'_>,
 ) -> Result<NativeFaceTimeStep<M>, BrittleFaceTimeError> {
+    run_released_face_time_with(
+        initial,
+        duration_s,
+        prescribed_end_m,
+        force_intervals_n,
+        restitution,
+        origin_m,
+        settings,
+        controls,
+        &mut NormalTimePolicy {
+            sustained: sustained_path,
+        },
+        cx,
+    )
+}
+
+/// The original complete-duration loop, parameterized only by its contact law.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_released_face_time_with<
+    M: ReleasedFaceTimeMotion,
+    P: ReleasedFaceTimePolicy<M>,
+>(
+    initial: &M,
+    duration_s: f64,
+    prescribed_end_m: &[(usize, f64)],
+    force_intervals_n: &[(usize, [f64; 2])],
+    restitution: &[f64],
+    origin_m: [f64; 3],
+    settings: IncrementSettings,
+    controls: BrittleFaceTimeControls<P::ImpactControls>,
+    policy: &mut P,
+    cx: &Cx<'_>,
+) -> Result<NativeFaceTimeStep<M, P::Impact, P::Sustained>, P::Error> {
+    run_time(
+        initial,
+        duration_s,
+        prescribed_end_m,
+        force_intervals_n,
+        restitution,
+        origin_m,
+        settings,
+        controls,
+        policy,
+        cx,
+    )
+    .map_err(|error| match error {
+        TimeRunError::Time(error) => error.into(),
+        TimeRunError::Policy(error) => error,
+    })
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn run_time<M: ReleasedFaceTimeMotion, P: ReleasedFaceTimePolicy<M>>(
+    initial: &M,
+    duration_s: f64,
+    prescribed_end_m: &[(usize, f64)],
+    force_intervals_n: &[(usize, [f64; 2])],
+    restitution: &[f64],
+    origin_m: [f64; 3],
+    settings: IncrementSettings,
+    controls: BrittleFaceTimeControls<P::ImpactControls>,
+    policy: &mut P,
+    cx: &Cx<'_>,
+) -> Result<NativeFaceTimeStep<M, P::Impact, P::Sustained>, TimeRunError<P::Error>> {
     use BrittleFaceTimeError as E;
     checkpoint(cx)?;
+    policy.validate(initial, cx).map_err(TimeRunError::Policy)?;
     let initial_view = initial.time_view();
     let initial_inventory = initial.time_inventory();
     let start_time_s = initial_view.time_s;
     let target_time = start_time_s + duration_s;
-    let sustained_controls = sustained_path.as_ref().map(|path| path.controls);
+    let sustained_controls = policy.sustained_controls();
+    let (activation_tolerance_m, velocity_tolerance_mps) = P::impact_gates(controls.impact);
     if !duration_s.is_finite()
         || duration_s <= 0.0
         || !target_time.is_finite()
@@ -557,8 +808,8 @@ pub(crate) fn run_released_face_time<M: ReleasedFaceTimeMotion>(
         || controls.maximum_trials == 0
         || !controls.total_energy_tolerance_j.is_finite()
         || controls.total_energy_tolerance_j < 0.0
-        || controls.approach.activation_tolerance_m != controls.impact.activation_tolerance_m
-        || controls.approach.velocity_tolerance_mps < controls.impact.velocity_tolerance_mps
+        || controls.approach.activation_tolerance_m != activation_tolerance_m
+        || controls.approach.velocity_tolerance_mps < velocity_tolerance_mps
         || restitution.len() != initial_view.released_faces.len()
         || restitution
             .iter()
@@ -571,7 +822,8 @@ pub(crate) fn run_released_face_time<M: ReleasedFaceTimeMotion>(
     {
         return Err(E::Invalid(
             "positive bounded duration, compatible event gates and complete restitution required",
-        ));
+        )
+        .into());
     }
     if sustained_controls.is_some() {
         super::approach::validate(
@@ -587,23 +839,21 @@ pub(crate) fn run_released_face_time<M: ReleasedFaceTimeMotion>(
     let initial_u = initial_view.displacement_m.as_flattened();
     let initial_v = initial_view.velocity_mps.as_flattened();
     if prescribed_end_m.len() > initial_u.len() || force_intervals_n.len() > initial_u.len() {
-        return Err(E::Invalid("load entries exceed the original DOF count"));
+        return Err(E::Invalid("load entries exceed the original DOF count").into());
     }
     let mut supports = buffer(prescribed_end_m.len())?;
     let mut held = buffer(prescribed_end_m.len())?;
     for &(dof, end) in prescribed_end_m {
         checkpoint(cx)?;
         let Some(&start) = initial_u.get(dof) else {
-            return Err(E::Invalid("prescribed DOF outside the retained mesh"));
+            return Err(E::Invalid("prescribed DOF outside the retained mesh").into());
         };
         let speed = (end - start) / duration;
         if !end.is_finite()
             || !speed.is_finite()
             || (speed - initial_v[dof]).abs() > controls.approach.velocity_tolerance_mps
         {
-            return Err(E::Invalid(
-                "initial support velocity must match its affine path",
-            ));
+            return Err(E::Invalid("initial support velocity must match its affine path").into());
         }
         supports.push((dof, start));
         held.push(dof);
@@ -612,9 +862,7 @@ pub(crate) fn run_released_face_time<M: ReleasedFaceTimeMotion>(
     for &(dof, values) in force_intervals_n {
         checkpoint(cx)?;
         if dof >= initial_u.len() || values.iter().any(|x| !x.is_finite()) {
-            return Err(E::Invalid(
-                "finite applied forces on existing DOFs required",
-            ));
+            return Err(E::Invalid("finite applied forces on existing DOFs required").into());
         }
         forces.push((dof, values));
     }
@@ -623,16 +871,17 @@ pub(crate) fn run_released_face_time<M: ReleasedFaceTimeMotion>(
     let mut seed_record: Option<usize> = None;
     let mut current: Option<M> = None;
     let mut intervals = buffer(controls.maximum_intervals.min(32))?;
-    let mut impacts: Vec<BrittleFaceTimedImpact> = buffer(controls.maximum_impacts.min(8))?;
-    let mut sustained: Vec<BrittleFaceTimedSustained<M::Energy>> =
-        buffer(if sustained_controls.is_some() {
-            controls.maximum_intervals.min(8)
-        } else {
-            0
-        })?;
+    let mut impacts: Vec<P::Impact> = buffer(controls.maximum_impacts.min(8))?;
+    let mut sustained: Vec<P::Sustained> = buffer(if sustained_controls.is_some() {
+        controls.maximum_intervals.min(8)
+    } else {
+        0
+    })?;
     let mut sums = [Sum::default(); 12];
     let mut normal_work = Sum::default();
     let mut absolute_normal_work = Sum::default();
+    let mut tangential_work = Sum::default();
+    let mut absolute_tangential_work = Sum::default();
     let mut trials = 0usize;
     let mut tangent_evaluations = 0usize;
     loop {
@@ -647,13 +896,12 @@ pub(crate) fn run_released_face_time<M: ReleasedFaceTimeMotion>(
                 intervals: intervals.len(),
                 impacts: impacts.len(),
                 trials,
-            });
+            }
+            .into());
         }
         let end = (accepted_view.time_s + controls.maximum_interval_s).min(target_time);
         if !end.is_finite() || end <= accepted_view.time_s {
-            return Err(E::Invalid(
-                "increasing native physical time must be representable",
-            ));
+            return Err(E::Invalid("increasing native physical time must be representable").into());
         }
         let start_fraction = (accepted_view.time_s - start_time_s) / duration;
         let end_fraction = if end == target_time {
@@ -678,10 +926,9 @@ pub(crate) fn run_released_face_time<M: ReleasedFaceTimeMotion>(
                 interpolate(start, target, end_fraction),
             ];
         }
-        let (advance, contact, calls, tangents) = if let Some(path) = sustained_path.as_ref()
+        let (advance, contact, calls, tangents) = if let Some(mut c) = sustained_controls
             && resting_contact(&accepted_view, controls.approach, cx)?
         {
-            let mut c = path.controls;
             c.solve.maximum_response_evaluations = c
                 .solve
                 .maximum_response_evaluations
@@ -690,29 +937,35 @@ pub(crate) fn run_released_face_time<M: ReleasedFaceTimeMotion>(
             approach_controls.maximum_trials = approach_controls
                 .maximum_trials
                 .min(controls.maximum_trials - trials);
-            let seed = seed_record.map(|index| {
-                let record = &sustained[index];
-                (record.rows.as_slice(), record.solve.forces_n.as_slice())
-            });
-            let prefix = (path.advance)(
-                accepted,
-                end - accepted_view.time_s,
-                &supports,
-                &forces,
-                seed,
-                settings,
-                approach_controls,
-                c,
-                cx,
-            )
-            .map_err(E::SustainedApproach)?;
+            let seed = seed_record.map(|index| sustained[index].physical_seed());
+            let prefix = policy
+                .sustained(
+                    accepted,
+                    end - accepted_view.time_s,
+                    &supports,
+                    &forces,
+                    seed,
+                    settings,
+                    approach_controls,
+                    c,
+                    cx,
+                )
+                .map_err(TimeRunError::Policy)?;
             let advance = if let Some((motion, energy, record)) = prefix.advance {
-                normal_work.add(record.normal_contact_work_j);
-                absolute_normal_work.add(record.absolute_contact_work_j);
-                if !normal_work.value().is_finite() || !absolute_normal_work.value().is_finite() {
+                let work = record.sustained_work();
+                normal_work.add(work.normal_contact_work_j);
+                absolute_normal_work.add(work.absolute_normal_contact_work_j);
+                tangential_work.add(work.tangential_contact_work_j);
+                absolute_tangential_work.add(work.absolute_tangential_contact_work_j);
+                if !normal_work.value().is_finite()
+                    || !absolute_normal_work.value().is_finite()
+                    || !tangential_work.value().is_finite()
+                    || !absolute_tangential_work.value().is_finite()
+                {
                     return Err(E::Invalid(
-                        "complete normal contact work must be representable",
-                    ));
+                        "complete normal and tangential contact work must be representable",
+                    )
+                    .into());
                 }
                 push(&mut sustained, record)?;
                 seed_record = Some(sustained.len() - 1);
@@ -755,9 +1008,9 @@ pub(crate) fn run_released_face_time<M: ReleasedFaceTimeMotion>(
             .checked_add(tangents)
             .ok_or(E::Invalid("native tangent count overflow"))?;
         if advance.is_none() && contact.is_none() {
-            return Err(E::Invalid(
-                "prefix must advance physical time or resolve a contact",
-            ));
+            return Err(
+                E::Invalid("prefix must advance physical time or resolve a contact").into(),
+            );
         }
         if let Some((next, energy)) = advance {
             if intervals.len() == controls.maximum_intervals {
@@ -765,13 +1018,14 @@ pub(crate) fn run_released_face_time<M: ReleasedFaceTimeMotion>(
                     intervals: intervals.len(),
                     impacts: impacts.len(),
                     trials,
-                });
+                }
+                .into());
             }
             let next_time_s = next.time_view().time_s;
             if next_time_s <= accepted_view.time_s || next_time_s > end {
-                return Err(E::Invalid(
-                    "native prefix escaped its requested physical interval",
-                ));
+                return Err(
+                    E::Invalid("native prefix escaped its requested physical interval").into(),
+                );
             }
             let work = M::time_work(&energy);
             accumulate(
@@ -806,27 +1060,39 @@ pub(crate) fn run_released_face_time<M: ReleasedFaceTimeMotion>(
             let contact_time_s = at_contact.time_view().time_s;
             if location.time_s != contact_time_s
                 || impacts.last().is_some_and(|last| {
-                    contact_time_s - last.location.time_s <= controls.approach.time_tolerance_s
+                    contact_time_s - last.impact_work().time_s <= controls.approach.time_tolerance_s
                 })
             {
                 return Err(E::UnresolvedContact {
                     time_s: contact_time_s,
-                });
+                }
+                .into());
             }
             if impacts.len() == controls.maximum_impacts {
                 return Err(E::WorkLimit {
                     intervals: intervals.len(),
                     impacts: impacts.len(),
                     trials,
-                });
+                }
+                .into());
             }
-            let (motion, hit) = at_contact
-                .time_impact(location, restitution, &held, origin_m, controls.impact, cx)
-                .map_err(E::Impact)?;
-            if !hit.contact.normal_impulses.iter().any(|&p| p > 0.0) {
+            let (motion, hit) = policy
+                .impact(
+                    at_contact,
+                    location,
+                    restitution,
+                    &held,
+                    origin_m,
+                    controls.impact,
+                    cx,
+                )
+                .map_err(TimeRunError::Policy)?;
+            let event = hit.impact_work();
+            if !event.positive_normal_impulse {
                 return Err(E::UnresolvedContact {
                     time_s: contact_time_s,
-                });
+                }
+                .into());
             }
             accumulate(
                 &mut sums,
@@ -835,10 +1101,10 @@ pub(crate) fn run_released_face_time<M: ReleasedFaceTimeMotion>(
                     0.0,
                     0.0,
                     0.0,
-                    hit.impulse.support_work_j,
-                    hit.impulse.kinetic_change_j,
-                    hit.contact.dissipated_energy,
-                    hit.energy_balance_error_j.abs(),
+                    event.support_work_j,
+                    event.kinetic_change_j,
+                    event.dissipated_energy_j,
+                    event.balance_error_j.abs(),
                     0.0,
                     0.0,
                     0.0,
@@ -880,6 +1146,8 @@ pub(crate) fn run_released_face_time<M: ReleasedFaceTimeMotion>(
         contact_dissipation_j: contact,
         normal_contact_work_j: normal_work.value(),
         absolute_normal_contact_work_j: absolute_normal_work.value(),
+        tangential_contact_work_j: tangential_work.value(),
+        absolute_tangential_contact_work_j: absolute_tangential_work.value(),
         dead_load_mean_work_j: dead,
         support_mean_work_j: support,
         support_impulse_work_j: impulse_support,
@@ -939,6 +1207,16 @@ pub(crate) fn run_released_face_time<M: ReleasedFaceTimeMotion>(
         energy_gate(
             "released-face time absolute normal contact work",
             energy.absolute_normal_contact_work_j,
+            c.contact_work_tolerance_j,
+        )?;
+        energy_gate(
+            "released-face time tangential contact work",
+            energy.tangential_contact_work_j,
+            c.contact_work_tolerance_j,
+        )?;
+        energy_gate(
+            "released-face time absolute combined contact work",
+            energy.absolute_normal_contact_work_j + energy.absolute_tangential_contact_work_j,
             c.contact_work_tolerance_j,
         )?;
     }

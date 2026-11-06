@@ -10,7 +10,9 @@ use super::super::source::{
 };
 use super::*;
 use crate::brittle::solid::dynamics::fracture::contact::approach::ReleasedFaceMotionView;
-use crate::brittle::solid::dynamics::fracture::contact::sustained::NativeFaceSustainedTrial;
+use crate::brittle::solid::dynamics::fracture::contact::sustained::{
+    NativeFaceSustainedTrial, SustainedScope,
+};
 use fs_contact::interface_binding::thermal_friction::elliptic::impulse::SourceImpulseCoefficientRole;
 use fs_matdb::MaterialStateId;
 
@@ -126,6 +128,41 @@ pub(crate) fn solve_released_face_sustained_sourced_frictional<
     BrittleFaceSourcedSustainedFrictionResult<Step::Motion, Step::Energy>,
     BrittleFaceSourcedSustainedFrictionError,
 > {
+    solve_released_face_sustained_sourced_frictional_from(
+        old_motion,
+        material,
+        sources,
+        prescribed_m,
+        mean_nodal_forces_n,
+        None,
+        SustainedScope::Complete,
+        controls,
+        cx,
+        candidate,
+    )
+}
+
+/// The same original sampler and force owner, with physical numerical seeds
+/// and an initially eligible subset for constrained contact localization.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn solve_released_face_sustained_sourced_frictional_from<
+    'm,
+    Step: NativeFaceSustainedTrial,
+>(
+    old_motion: ReleasedFaceMotionView<'_>,
+    material: impl Fn(usize) -> Option<&'m MaterialStateId>,
+    sources: &[BrittleFaceFrictionSource<'_>],
+    prescribed_m: &[(usize, f64)],
+    mean_nodal_forces_n: &[(usize, f64)],
+    seed: Option<(&[BrittleFaceImpactRow], &[[f64; 3]])>,
+    scope: SustainedScope,
+    controls: BrittleFaceSustainedFrictionControls,
+    cx: &Cx<'_>,
+    candidate: impl FnMut(&[(usize, f64)]) -> Result<Step, BrittleTetDynamicError>,
+) -> Result<
+    BrittleFaceSourcedSustainedFrictionResult<Step::Motion, Step::Energy>,
+    BrittleFaceSourcedSustainedFrictionError,
+> {
     let directions = source_directions(old_motion.released_faces, material, sources, cx)?;
     for source in sources {
         cx.checkpoint()
@@ -142,11 +179,13 @@ pub(crate) fn solve_released_face_sustained_sourced_frictional<
         }
     }
     let mut samples = Vec::new();
-    let step = solve_released_face_sustained_frictional(
+    let step = solve_released_face_sustained_frictional_from(
         old_motion,
         &directions,
         prescribed_m,
         mean_nodal_forces_n,
+        seed,
+        scope,
         controls,
         cx,
         |face_index, row, _frame, velocity, _gap| {

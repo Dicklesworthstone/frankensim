@@ -12,6 +12,9 @@ pub mod source;
 /// Static directional-friction loads through the original nonlinear midpoint.
 pub mod sustained;
 
+/// One original physical-time driver for directional impact, static dwell and release.
+pub mod time;
+
 use std::sync::Arc;
 
 pub use fs_contact::frictional_multicontact::elliptic::EllipticFriction;
@@ -58,6 +61,22 @@ pub struct BrittleFaceFrictionFrame {
 impl BrittleFaceFrictionFrame {
     fn axes(self) -> [[f64; 3]; 3] {
         [self.normal, self.tangent1, self.tangent2]
+    }
+
+    /// Coordinate construction shared by fixed-configuration events and dwell.
+    /// The native retained normal has already been normalized by the caller.
+    pub(crate) fn from_unit_normal(
+        normal: [f64; 3],
+        direction: [f64; 3],
+    ) -> Result<Self, BrittleFaceFrictionError> {
+        let direction = unit(direction)?;
+        let tangent2 = unit(cross(normal, direction))?;
+        let tangent1 = unit(cross(tangent2, normal))?;
+        Ok(Self {
+            normal,
+            tangent1,
+            tangent2,
+        })
     }
 }
 
@@ -205,6 +224,36 @@ impl<'a> BrittleTetMotion<'a> {
         )?;
         BrittleFaceFrictionStep::from_response(self, response, cx)
     }
+
+    /// Publish an already audited native velocity without duplicating its fields.
+    pub(crate) fn friction_velocity_successor(
+        &self,
+        velocity_mps: Vec<[f64; 3]>,
+        kinetic_after_j: f64,
+        cx: &Cx<'_>,
+    ) -> Result<Self, BrittleFaceFrictionError> {
+        let solid = BrittleTetSolid {
+            geometry: self.solid.geometry,
+            materials: self.solid.materials,
+            bands: Arc::clone(&self.solid.bands),
+            released_faces: Arc::clone(&self.solid.released_faces),
+            budget: self.solid.budget,
+            solution: self.solid.solution.clone(),
+            stored_energy_j: self.solid.stored_energy_j,
+            fracture_dissipation_j: self.solid.fracture_dissipation_j,
+        };
+        checkpoint(cx)?;
+        Ok(Self {
+            solid,
+            velocity_mps,
+            reference_density_kg_m3: Arc::clone(&self.reference_density_kg_m3),
+            mass: Arc::clone(&self.mass),
+            kinetic_energy_j: kinetic_after_j,
+            time_s: self.time_s,
+            maximum_steps: self.maximum_steps,
+            accepted_steps: self.accepted_steps,
+        })
+    }
 }
 
 /// Native event before a mechanical or thermal caller publishes its unchanged
@@ -230,28 +279,12 @@ impl<'a> BrittleFaceFrictionStep<'a> {
         response: ReleasedFaceFrictionResponse,
         cx: &Cx<'_>,
     ) -> Result<Self, BrittleFaceFrictionError> {
-        let solid = BrittleTetSolid {
-            geometry: motion.solid.geometry,
-            materials: motion.solid.materials,
-            bands: Arc::clone(&motion.solid.bands),
-            released_faces: Arc::clone(&motion.solid.released_faces),
-            budget: motion.solid.budget,
-            solution: motion.solid.solution.clone(),
-            stored_energy_j: motion.solid.stored_energy_j,
-            fracture_dissipation_j: motion.solid.fracture_dissipation_j,
-        };
-        checkpoint(cx)?;
         Ok(Self {
-            motion: BrittleTetMotion {
-                solid,
-                velocity_mps: response.velocity_mps,
-                reference_density_kg_m3: Arc::clone(&motion.reference_density_kg_m3),
-                mass: Arc::clone(&motion.mass),
-                kinetic_energy_j: response.impulse.kinetic_after_j,
-                time_s: motion.time_s,
-                maximum_steps: motion.maximum_steps,
-                accepted_steps: motion.accepted_steps,
-            },
+            motion: motion.friction_velocity_successor(
+                response.velocity_mps,
+                response.impulse.kinetic_after_j,
+                cx,
+            )?,
             contact: response.contact,
             impulse: response.impulse,
             rows: response.rows,
@@ -361,14 +394,10 @@ pub(crate) fn released_face_frictional_impact_with<E: From<BrittleFaceFrictionEr
             let frame = match frame {
                 Some(frame) => frame,
                 None => {
-                    let direction = unit(tangent_directions[face_index])?;
-                    let tangent2 = unit(cross(normal, direction))?;
-                    let tangent1 = unit(cross(tangent2, normal))?;
-                    let value = BrittleFaceFrictionFrame {
+                    let value = BrittleFaceFrictionFrame::from_unit_normal(
                         normal,
-                        tangent1,
-                        tangent2,
-                    };
+                        tangent_directions[face_index],
+                    )?;
                     frame = Some(value);
                     value
                 }

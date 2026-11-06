@@ -9,6 +9,10 @@
 /// Explicit original interface sources held through static contact intervals.
 pub mod source;
 
+/// Shared constrained prefix search while static directional loads remain active.
+pub mod approach;
+pub(crate) use approach::resting_friction_rows;
+
 use fs_contact::sustained::elliptic::EllipticForceCoordinates;
 use fs_contact::sustained::solve::{MAX_CONTACTS, SolveReport};
 use fs_contact::sustained::{ContactLawError, ContactPoint, NaturalMapScales, linearize};
@@ -21,7 +25,7 @@ use crate::brittle::solid::dynamics::fracture::contact::BrittleFaceImpactRow;
 use crate::brittle::solid::dynamics::fracture::contact::approach::ReleasedFaceMotionView;
 use crate::brittle::solid::dynamics::fracture::contact::sustained::{
     BrittleFaceSustainedControls, BrittleFaceSustainedError, NativeFaceForceResponse,
-    NativeFaceSustainedTrial, Pair, SustainedContactWork, SustainedWorkAdmission,
+    NativeFaceSustainedTrial, Pair, SustainedContactWork, SustainedScope, SustainedWorkAdmission,
     admit_released_face_sustained_work, balance, pair_view, solve_released_face_force_response,
     sustained_external_loads, validate_controls,
 };
@@ -67,6 +71,8 @@ pub struct BrittleFaceSustainedFrictionResult<Motion, Energy> {
     pub tangential_contact_work_j: f64,
     /// Sum of absolute normal and individual tangent work terms for every pair.
     pub absolute_contact_work_j: f64,
+    pub absolute_normal_contact_work_j: f64,
+    pub absolute_tangential_contact_work_j: f64,
     /// Sum of individual absolute physical/solver coordinate-work differences.
     pub coordinate_work_error_j: f64,
     pub contact_work_balance_error_j: f64,
@@ -193,6 +199,45 @@ pub(crate) fn solve_released_face_sustained_frictional<
     mean_nodal_forces_n: &[(usize, f64)],
     controls: BrittleFaceSustainedFrictionControls,
     cx: &Cx<'_>,
+    resolve: impl FnMut(
+        usize,
+        &BrittleFaceImpactRow,
+        &BrittleFaceFrictionFrame,
+        [f64; 3],
+        f64,
+    ) -> Result<EllipticFriction, E>,
+    candidate: impl FnMut(&[(usize, f64)]) -> Result<Step, BrittleTetDynamicError>,
+) -> Result<NativeFaceSustainedFrictionStep<Step::Motion, Step::Energy>, E> {
+    solve_released_face_sustained_frictional_from(
+        old_motion,
+        tangent_directions,
+        prescribed_m,
+        mean_nodal_forces_n,
+        None,
+        SustainedScope::Complete,
+        controls,
+        cx,
+        resolve,
+        candidate,
+    )
+}
+
+/// Constrained prefixes keep only their initially static row subset. Unforced
+/// openings are admitted by the shared locator before any such prefix escapes.
+/// Warm seeds are physical forces keyed by paired identity, not solver coordinates.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+pub(crate) fn solve_released_face_sustained_frictional_from<
+    Step: NativeFaceSustainedTrial,
+    E: From<BrittleFaceSustainedFrictionError>,
+>(
+    old_motion: ReleasedFaceMotionView<'_>,
+    tangent_directions: &[[f64; 3]],
+    prescribed_m: &[(usize, f64)],
+    mean_nodal_forces_n: &[(usize, f64)],
+    seed: Option<(&[BrittleFaceImpactRow], &[[f64; 3]])>,
+    scope: SustainedScope,
+    controls: BrittleFaceSustainedFrictionControls,
+    cx: &Cx<'_>,
     mut resolve: impl FnMut(
         usize,
         &BrittleFaceImpactRow,
@@ -206,6 +251,23 @@ pub(crate) fn solve_released_face_sustained_frictional<
     use BrittleFaceSustainedFrictionError as F;
     checkpoint(cx).map_err(F::from)?;
     validate_controls(controls.contact).map_err(F::from)?;
+    if let Some((rows, forces)) = seed {
+        if rows.len() != forces.len()
+            || rows.len() > MAX_CONTACTS
+            || forces
+                .iter()
+                .any(|f| f.iter().any(|v| !v.is_finite()) || f[0] < 0.0)
+            || rows
+                .iter()
+                .enumerate()
+                .any(|(i, row)| rows[..i].contains(row))
+        {
+            return Err(F::from(S::Invalid(
+                "distinct finite physical force seeds with nonnegative normal components required",
+            ))
+            .into());
+        }
+    }
     if tangent_directions.len() != old_motion.released_faces.len()
         || !controls.tangent_scale_n_per_m.is_finite()
         || controls.tangent_scale_n_per_m <= 0.0
@@ -238,12 +300,6 @@ pub(crate) fn solve_released_face_sustained_frictional<
             if nodes[0] == nodes[1] {
                 continue;
             }
-            if rows.len() >= MAX_CONTACTS || rows.len() >= controls.contact.solve.maximum_contacts {
-                return Err(F::from(S::Invalid(
-                    "all released-face frames must fit the sustained solve budget",
-                ))
-                .into());
-            }
             let row = BrittleFaceImpactRow {
                 face_id: face.id,
                 vertex,
@@ -271,14 +327,11 @@ pub(crate) fn solve_released_face_sustained_frictional<
             let frame = match frame {
                 Some(frame) => frame,
                 None => {
-                    let direction = super::unit(tangent_directions[face_index]).map_err(F::from)?;
-                    let tangent2 = super::unit(super::cross(normal, direction)).map_err(F::from)?;
-                    let tangent1 = super::unit(super::cross(tangent2, normal)).map_err(F::from)?;
-                    let value = BrittleFaceFrictionFrame {
+                    let value = BrittleFaceFrictionFrame::from_unit_normal(
                         normal,
-                        tangent1,
-                        tangent2,
-                    };
+                        tangent_directions[face_index],
+                    )
+                    .map_err(F::from)?;
                     frame = Some(value);
                     value
                 }
@@ -289,6 +342,15 @@ pub(crate) fn solve_released_face_sustained_frictional<
                 && velocity
                     .iter()
                     .all(|v| v.abs() <= controls.contact.velocity_tolerance_mps);
+            if scope == SustainedScope::InitialResting && !active {
+                continue;
+            }
+            if rows.len() >= MAX_CONTACTS || rows.len() >= controls.contact.solve.maximum_contacts {
+                return Err(F::from(S::Invalid(
+                    "all participating released-face frames must fit the sustained solve budget",
+                ))
+                .into());
+            }
             let friction = if active {
                 resolve(face_index, &row, &frame, velocity, geometry.gap)?
             } else {
@@ -320,7 +382,22 @@ pub(crate) fn solve_released_face_sustained_frictional<
         };
         rows.len()
     ];
-    let seeds = vec![[0.0; 3]; rows.len()];
+    let mut seeds = Vec::with_capacity(rows.len());
+    for (row, coordinate) in rows.iter().zip(&coordinates) {
+        let physical = seed
+            .and_then(|(old_rows, forces)| {
+                old_rows
+                    .iter()
+                    .position(|old| old == row)
+                    .map(|i| forces[i])
+            })
+            .unwrap_or([0.0; 3]);
+        seeds.push(
+            coordinate
+                .force_to_solver(physical)
+                .map_err(|error| F::Law { row: *row, error })?,
+        );
+    }
     let NativeFaceForceResponse {
         step,
         solve,
@@ -358,6 +435,7 @@ pub(crate) fn solve_released_face_sustained_frictional<
         Sum::default(),
         Sum::default(),
     );
+    let (mut absolute_normal_work, mut absolute_tangent_work) = (Sum::default(), Sum::default());
     for (i, &row) in rows.iter().enumerate() {
         checkpoint(cx).map_err(F::from)?;
         let frame = frames[i];
@@ -454,6 +532,9 @@ pub(crate) fn solve_released_face_sustained_frictional<
         absolute_work.add(normal.abs());
         absolute_work.add(tangent[0].abs());
         absolute_work.add(tangent[1].abs());
+        absolute_normal_work.add(normal.abs());
+        absolute_tangent_work.add(tangent[0].abs());
+        absolute_tangent_work.add(tangent[1].abs());
         let mut actual_work = Sum::default();
         let mut mapped_work = Sum::default();
         for value in [normal, tangent[0], tangent[1]] {
@@ -476,13 +557,15 @@ pub(crate) fn solve_released_face_sustained_frictional<
         forces_n.push(force);
         paths_m.push(path);
     }
-    require_released_faces(
-        old_motion.displacement_m.len(),
-        old_motion.released_faces,
-        final_motion.displacement_m,
-        cx,
-    )
-    .map_err(F::from)?;
+    if scope == SustainedScope::Complete {
+        require_released_faces(
+            old_motion.displacement_m.len(),
+            old_motion.released_faces,
+            final_motion.displacement_m,
+            cx,
+        )
+        .map_err(F::from)?;
+    }
     let normal_contact_work_j = normal_work.value();
     let tangential_contact_work_j = tangent_work.value();
     let absolute_contact_work_j = absolute_work.value();
@@ -526,6 +609,8 @@ pub(crate) fn solve_released_face_sustained_frictional<
         normal_contact_work_j,
         tangential_contact_work_j,
         absolute_contact_work_j,
+        absolute_normal_contact_work_j: absolute_normal_work.value(),
+        absolute_tangential_contact_work_j: absolute_tangent_work.value(),
         coordinate_work_error_j,
         contact_work_balance_error_j,
         absolute_contact_couple_n_m,

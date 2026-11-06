@@ -1,5 +1,43 @@
 # fs-solid CONTRACT
 
+## Frictional time evolution after brittle fracture
+
+The native mechanical released-face trajectory can now advance a complete
+requested duration through simultaneous directional-friction impacts, sustained
+static load transfer, unloading and free separation. The existing normal and
+thermal impact entries retain the same time loop through a typed contact-policy
+seam; the original midpoint, material, consistent-mass, solver and contact owners
+remain responsible for every physical response.
+
+Constrained localization keeps only the initially matched, static friction rows
+in the force solve while scanning every retained released pair for arrival.
+Each trial uses its actual prefix of the original affine support/load path.
+Discarded trials retain no material successor and spend only the bounded native
+response allowance. Only the accepted prefix consumes a physical step; impulses
+consume an event allowance without advancing the clock. A failed full duration
+returns no partially advanced body.
+
+Directional force warm starts are physical forces matched by the complete
+paired-row identity. Each current ellipse maps those forces into its own
+work-conjugate numerical coordinates; transformed solver forces are never
+reused as physical tractions. The complete work receipt separately retains
+normal and tangential constraint work, the sum of each component's absolute
+work, fracture loss, impact loss, support work and native kinetic increments.
+Static constraint work is a bounded numerical defect, not heating or damping.
+
+This path retains the existing fixed paired-face, small-strain and source-domain
+limits. Loaded finite sliding, new-pair discovery and thermal allocation of
+impact loss remain outside it. The native sustained ellipse still refuses a
+single zero principal coefficient. Numerical safe/unsafe endpoint brackets do
+not establish global continuous collision detection. Caller-selected interval
+resolution and explicit load/source knots remain required.
+
+Focused G0/G1/G3 journeys exercise native oblique capture followed by sticking,
+affine load reversal followed by release, and arrival while an earlier face
+remains loaded. Their force, impulse, internal-mode and work expectations come
+from the original P1 consistent-mass formulas; they also cover late complete-time
+budget refusal and deterministic retry.
+
 ## Sourced static friction and thermal fracture load transfer
 
 The sustained-friction source child binds each retained face vertex to an

@@ -9,7 +9,7 @@ use fs_solid::brittle::solid::dynamics::fracture::contact::sustained::{
 use fs_solver::NewtonKrylovConfig;
 
 #[path = "sustained/approach.rs"]
-mod approach;
+pub(super) mod approach;
 #[path = "sustained/mixed_time.rs"]
 mod mixed_time;
 #[path = "sustained/time.rs"]

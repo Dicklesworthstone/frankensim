@@ -5,6 +5,8 @@
 mod source;
 #[path = "friction/sustained.rs"]
 mod sustained;
+#[path = "friction/time.rs"]
+mod time;
 
 use super::*;
 use fs_contact::frictional_multicontact::{FrictionalContactConfig, FrictionalContactDeterminacy};
@@ -53,6 +55,16 @@ fn with_oblique_motion(
     nodes: &[[f64; 3]; 5],
     normal: [f64; 3],
     velocities: [[f64; 3]; 2],
+    run: impl FnOnce(&BrittleTetMotion<'_>, &Cx<'_>),
+) {
+    with_oblique_motion_budget(nodes, normal, velocities, 2, run);
+}
+
+fn with_oblique_motion_budget(
+    nodes: &[[f64; 3]; 5],
+    normal: [f64; 3],
+    velocities: [[f64; 3]; 2],
+    maximum_steps: usize,
     run: impl FnOnce(&BrittleTetMotion<'_>, &Cx<'_>),
 ) {
     with_cx(false, |cx| {
@@ -119,7 +131,8 @@ fn with_oblique_motion(
             .advance(&prescribed(&opened), &[], settings(), work_controls(), cx)
             .unwrap()
             .solid;
-        let motion = BrittleTetMotion::try_from_solid(&open, &velocity, 2.0, 2, cx).unwrap();
+        let motion =
+            BrittleTetMotion::try_from_solid(&open, &velocity, 2.0, maximum_steps, cx).unwrap();
         let motion = motion
             .advance_midpoint(
                 APPROACH_DT,
@@ -137,7 +150,7 @@ fn with_oblique_motion(
             }
         }
         assert_eq!(motion.accepted_steps(), 1);
-        assert_eq!(motion.remaining_steps(), 1);
+        assert_eq!(motion.remaining_steps(), maximum_steps - 1);
         run(&motion, cx);
     });
 }

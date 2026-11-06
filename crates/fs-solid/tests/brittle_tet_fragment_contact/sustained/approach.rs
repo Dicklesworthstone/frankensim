@@ -8,7 +8,7 @@ use fs_solid::brittle::solid::dynamics::fracture::contact::approach::{
 use fs_solid::brittle::solid::dynamics::fracture::contact::sustained::BrittleFaceSustainedStep;
 use fs_solid::brittle::solid::dynamics::fracture::contact::sustained::approach::BrittleFaceSustainedApproachError;
 
-pub(super) const SQUARE_NODES: [[f64; 3]; 6] = [
+pub(in super::super) const SQUARE_NODES: [[f64; 3]; 6] = [
     [0.0, 0.0, 0.0],
     [1.0, 0.0, 0.0],
     [1.0, 1.0, 0.0],
@@ -16,11 +16,11 @@ pub(super) const SQUARE_NODES: [[f64; 3]; 6] = [
     [0.5, 0.5, -1.0],
     [0.5, 0.5, 1.0],
 ];
-pub(super) const SQUARE_TETS: [[usize; 4]; 4] =
+pub(in super::super) const SQUARE_TETS: [[usize; 4]; 4] =
     [[0, 2, 1, 4], [0, 1, 2, 5], [0, 3, 2, 4], [0, 2, 3, 5]];
-pub(super) const ARRIVAL_CORNER: [f64; 3] = [0.0, 1.0, 0.0];
+pub(in super::super) const ARRIVAL_CORNER: [f64; 3] = [0.0, 1.0, 0.0];
 
-pub(super) fn square_topology<'g>(
+pub(in super::super) fn square_topology<'g>(
     geometry: &'g TetLoadGeometry3<'_>,
     cx: &Cx<'_>,
 ) -> TetFractureTopology<'g> {
@@ -51,7 +51,7 @@ pub(super) fn mixed_controls() -> (BrittleFaceApproachControls, BrittleFaceSusta
     (approach, sustained)
 }
 
-pub(super) fn corner_motion<'a>(
+pub(in super::super) fn corner_motion<'a>(
     solid: &BrittleTetSolid<'a>,
     gap: f64,
     speed: f64,

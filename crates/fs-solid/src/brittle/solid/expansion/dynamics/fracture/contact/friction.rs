@@ -151,6 +151,37 @@ impl<'a> ThermalBrittleTetMotion<'a> {
             kinetic_energy_j: self.kinetic_energy_j,
         }
     }
+
+    /// Preserve the complete native thermal owner while accepting only the
+    /// already audited contact velocity and kinetic-energy successor.
+    pub(crate) fn friction_velocity_successor(
+        &self,
+        velocity_mps: Vec<[f64; 3]>,
+        kinetic_energy_j: f64,
+        cx: &Cx<'_>,
+    ) -> Result<Self, BrittleFaceFrictionError> {
+        let solid = ThermalBrittleTetSolid {
+            geometry: self.solid.geometry,
+            materials: self.solid.materials,
+            bands: Arc::clone(&self.solid.bands),
+            released_faces: Arc::clone(&self.solid.released_faces),
+            budget: self.solid.budget,
+            solution: self.solid.solution.clone(),
+            stored_energy_j: self.solid.stored_energy_j,
+            fracture_dissipation_j: self.solid.fracture_dissipation_j,
+        };
+        checkpoint(cx)?;
+        Ok(Self {
+            solid,
+            velocity_mps,
+            reference_density_kg_m3: Arc::clone(&self.reference_density_kg_m3),
+            mass: Arc::clone(&self.mass),
+            kinetic_energy_j,
+            time_s: self.time_s,
+            maximum_steps: self.maximum_steps,
+            accepted_steps: self.accepted_steps,
+        })
+    }
 }
 
 impl<'a> ThermalBrittleFaceFrictionStep<'a> {
@@ -159,28 +190,12 @@ impl<'a> ThermalBrittleFaceFrictionStep<'a> {
         response: ReleasedFaceFrictionResponse,
         cx: &Cx<'_>,
     ) -> Result<Self, BrittleFaceFrictionError> {
-        let solid = ThermalBrittleTetSolid {
-            geometry: motion.solid.geometry,
-            materials: motion.solid.materials,
-            bands: Arc::clone(&motion.solid.bands),
-            released_faces: Arc::clone(&motion.solid.released_faces),
-            budget: motion.solid.budget,
-            solution: motion.solid.solution.clone(),
-            stored_energy_j: motion.solid.stored_energy_j,
-            fracture_dissipation_j: motion.solid.fracture_dissipation_j,
-        };
-        checkpoint(cx)?;
         Ok(Self {
-            motion: ThermalBrittleTetMotion {
-                solid,
-                velocity_mps: response.velocity_mps,
-                reference_density_kg_m3: Arc::clone(&motion.reference_density_kg_m3),
-                mass: Arc::clone(&motion.mass),
-                kinetic_energy_j: response.impulse.kinetic_after_j,
-                time_s: motion.time_s,
-                maximum_steps: motion.maximum_steps,
-                accepted_steps: motion.accepted_steps,
-            },
+            motion: motion.friction_velocity_successor(
+                response.velocity_mps,
+                response.impulse.kinetic_after_j,
+                cx,
+            )?,
             contact: response.contact,
             impulse: response.impulse,
             rows: response.rows,
