@@ -207,6 +207,10 @@ impl FlowField {
     /// incoming mass m contributes the exact concave mixing remainder
     /// `-m/rho_d * ((rho_d-rho_r)/rho_r)^2`. It follows from mass and enthalpy
     /// balance, not from a density fit, volume renormalization or heat source.
+    /// With original variable Cp(T), density affine in temperature has another
+    /// caloric curvature term. The original chart evaluates the complete signed
+    /// remainder, visiting at most this one admitted interval per donor query.
+    /// Existing cell, connection and source-trial budgets bound the total work.
     ///
     /// Iteration updates ONLY the continuity source, reusing the original
     /// flow, mass, prescribed net caloric increment and boundary states. Each
@@ -629,22 +633,34 @@ impl FlowField {
             // receiver's own endpoint h and therefore zero Taylor remainder.
             let stencil = transport.accepted_mass_transport(gate)?;
             let mut mixed_volume = vec![Sum::default(); n];
+            let mut original_mixing_volume = |mass, receiver_h, donor_h| {
+                // All input, calorically advanced and transported states were
+                // admitted against the selected bounds before this query. The
+                // one-interval mode therefore has a fixed per-donor cost; full
+                // chart mode retains its aggregate crossed-interval budget.
+                let mut single_interval_budget = 1;
+                let budget = if density_law
+                    == Some(PhaseIntervalDensityLaw::AffineTemperatureDensity)
+                {
+                    &mut single_interval_budget
+                } else {
+                    &mut remaining_mixing_intervals
+                };
+                chart_mixing_volume(curve, mass, receiver_h, donor_h, budget, gate)
+            };
             for (row, &c) in stencil.cells.iter().enumerate() {
                 poll_every(gate, row)?;
-                mixed_volume[c].add(if density_law.is_some() {
+                mixed_volume[c].add(if density_law == Some(PhaseIntervalDensityLaw::AffineDensity) {
                     mixing_volume(
                         stencil.initial_mass_kg[row],
                         rho_star[c],
                         endpoint_density[c],
                     )?
                 } else {
-                    chart_mixing_volume(
-                        curve,
+                    original_mixing_volume(
                         stencil.initial_mass_kg[row],
                         transport.specific_enthalpy_j_kg[c],
                         h_star[c],
-                        &mut remaining_mixing_intervals,
-                        gate,
                     )?
                 });
             }
@@ -652,7 +668,7 @@ impl FlowField {
                 poll_every(gate, index)?;
                 if let Some(to) = route.to {
                     let c = stencil.cells[to];
-                    mixed_volume[c].add(if density_law.is_some() {
+                    mixed_volume[c].add(if density_law == Some(PhaseIntervalDensityLaw::AffineDensity) {
                         let donor_density = route.from.map_or_else(
                             || route.inlet.expect("native admitted inlet").density_kg_m3,
                             |from| endpoint_density[stencil.cells[from]],
@@ -668,13 +684,10 @@ impl FlowField {
                             },
                             |from| transport.specific_enthalpy_j_kg[stencil.cells[from]],
                         );
-                        chart_mixing_volume(
-                            curve,
+                        original_mixing_volume(
                             route.mass,
                             transport.specific_enthalpy_j_kg[c],
                             donor_h,
-                            &mut remaining_mixing_intervals,
-                            gate,
                         )?
                     });
                 }

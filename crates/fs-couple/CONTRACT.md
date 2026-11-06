@@ -1,3 +1,27 @@
+## Original specific heat in coupled capacity admission
+
+Electrical, dielectric, magnetic, piezoelectric, thermoelastic, creep and
+tensor/friction-layer thermal admission now use the original caloric interval's
+minimum Cp, rather than its average enthalpy/temperature chord. Clipped
+temperature envelopes use conservative intersecting-interval source bounds.
+Creep retains its outward arithmetic bounds. Existing source identity,
+reference mass/density, field-work and mechanical-energy accounts remain
+authoritative; no second caloric or apparent field-capacity term is inserted.
+
+String and concentric-layer thermoelastic admission evaluate the quadratic
+TOTAL capacity, including the original affine Cp slope, at endpoints and its
+interior stationary point. Local finite-solid and small-strain adiabatic wave
+gates compare original Cp at the actual state. Continuous Cp remains
+differentiable when its temperature slope changes; an actual capacity jump
+still refuses a classical wave linearization.
+
+Native regressions cover continuous source-Cp wave states and a two-knot
+capacitor/inductor caloric source whose average capacity hides negative total
+capacity elsewhere in its admitted envelope. Refusal leaves the original
+thermal and circuit state unchanged. These whole-consumer tests were not
+executed in this change because the real asupersync dependency build exceeded
+the available memory; numerical-leaf results do not substitute for them.
+
 ## Circuit-driven spatial hysteresis and finite heat
 
 The `hysteretic-eddy-heating` feature is an alias of `magnetic-hysteresis`;

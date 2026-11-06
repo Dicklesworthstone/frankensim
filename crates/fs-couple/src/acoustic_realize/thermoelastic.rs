@@ -259,9 +259,8 @@ impl ThermoelasticString {
         let volume = finite(specimen.area_m2()*self.reference_length_m)?;
         let alpha = self.expansion_per_k;
         let b = self.modulus_slope_pa_k;
-        // Psi_TT is affine in T. Hence T*Psi_TT is quadratic; its endpoints
-        // and possible stationary point give the exact worst capacity on a
-        // piecewise-linear caloric segment, without sampling away a minimum.
+        // Source Cp and Psi_TT are affine in T. Total capacity is quadratic;
+        // endpoints and its stationary point retain its true minimum.
         let slope = finite(3.0*volume*b*alpha*alpha)?;
         let curvature = |temperature: f64| -> Result<f64, ThermalStringError> {
             let delta = finite(temperature-self.initial_temperature_k)?;
@@ -270,25 +269,37 @@ impl ThermoelasticString {
             finite(volume*(modulus*alpha*alpha-2.0*b*alpha*elastic)
                 -specimen.area_m2()/string.lin_density_kg_m*b*alpha*modal_gradient)
         };
-        for pair in knots.windows(2) {
+        for (index, pair) in knots.windows(2).enumerate() {
             check(cx)?;
             let lo = pair[0].temperature_k;
             let hi = pair[1].temperature_k;
             let width = finite(hi-lo)?;
             if !positive(width) { return Err(admit("thermoelastic caloric temperatures must strictly increase")); }
-            let caloric_capacity = finite(specimen.mass_kg()
-                *(pair[1].specific_enthalpy_j_kg-pair[0].specific_enthalpy_j_kg)/width)?;
+            let bounds = curve.sensible_heat_capacity_bounds_j_kg_k(index)
+                .map_err(|_|admit("string caloric heat capacity is unrepresentable"))?;
+            let cp = curve.sensible_heat_capacities_on_interval(index)
+                .unwrap_or([bounds[0]; 2]);
+            let capacity_slope = finite(specimen.mass_kg()*((cp[1]-cp[0])/width))?;
+            let total_capacity = |t: f64| -> Result<f64, ThermalStringError> {
+                let fraction = (t-lo)/width;
+                let cp_at_t = if fraction <= 0.5 {
+                    (cp[1]-cp[0]).mul_add(fraction, cp[0])
+                } else {
+                    (cp[0]-cp[1]).mul_add((hi-t)/width, cp[1])
+                };
+                finite(specimen.mass_kg()*cp_at_t - t*curvature(t)?)
+            };
             let lower_curvature = curvature(lo)?;
-            let mut penalty = finite(lo*lower_curvature)?.max(finite(hi*curvature(hi)?)?);
+            let mut minimum = total_capacity(lo)?.min(total_capacity(hi)?);
             if slope != 0.0 {
                 // An unrepresentably distant stationary point lies outside this
-                // finite interval; the endpoint maximum remains sufficient.
-                let stationary = 0.5*(lo-lower_curvature/slope);
+                // finite interval; the endpoint minimum remains sufficient.
+                let stationary = 0.5*(lo+(capacity_slope-lower_curvature)/slope);
                 if stationary.is_finite() && stationary > lo && stationary < hi {
-                    penalty = penalty.max(finite(stationary*curvature(stationary)?)?);
+                    minimum = minimum.min(total_capacity(stationary)?);
                 }
             }
-            if !positive(caloric_capacity) || !positive(finite(caloric_capacity-penalty)?) {
+            if !positive(minimum) {
                 return Err(admit("caloric capacity does not exceed the complete axial and modal thermoelastic contribution"));
             }
         }

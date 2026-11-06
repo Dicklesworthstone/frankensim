@@ -4,6 +4,8 @@
 mod orthotropic;
 #[path = "material_phase_field/orthotropic_coupling.rs"]
 mod orthotropic_coupling;
+#[path = "material_phase_field/caloric.rs"]
+mod caloric_source;
 mod support;
 
 use fs_conduction::material::LiquidMassFractionConductivity;

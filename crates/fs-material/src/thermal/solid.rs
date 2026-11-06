@@ -42,10 +42,12 @@ impl<'a> PureSolidThermalLaw<'a> {
             });
         }
         let mut maximum_slope = 0.0_f64;
-        for pair in knots[..count].windows(2) {
+        for (index, pair) in knots[..count].windows(2).enumerate() {
             let delta_t = pair[1].temperature_k - pair[0].temperature_k;
-            let slope = delta_t
-                / (pair[1].specific_enthalpy_j_kg - pair[0].specific_enthalpy_j_kg);
+            let slope = curve.sensible_heat_capacities_on_interval(index).map_or_else(
+                || delta_t / (pair[1].specific_enthalpy_j_kg - pair[0].specific_enthalpy_j_kg),
+                |[a, b]| 1.0 / a.min(b),
+            );
             if !slope.is_finite() || (delta_t > 0.0 && slope == 0.0) {
                 return Err(PhaseStateError::UnrepresentableTemperatureDerivative);
             }
@@ -73,8 +75,8 @@ impl<'a> PureSolidThermalLaw<'a> {
 
     /// Original pure-solid specific enthalpy [J/kg] at an admitted temperature.
     ///
-    /// This is the inverse of the original piecewise-linear `T(h)` chart, not
-    /// a constant or locally frozen heat-capacity approximation. It borrows
+    /// This inverts the original caloric law, including retained affine Cp(T)
+    /// in sourced sensible intervals. It borrows
     /// the same authored solid knots and datum, allocates nothing, and finds
     /// the temperature interval by binary search. The interpolated enthalpy
     /// is admitted again by the original curve's numeric-state evaluator,
@@ -122,9 +124,7 @@ impl<'a> PureSolidThermalLaw<'a> {
         } else {
             let a = knots[upper - 1];
             let b = knots[upper];
-            let alpha = (temperature_k - a.temperature_k) / (b.temperature_k - a.temperature_k);
-            let h = (b.specific_enthalpy_j_kg - a.specific_enthalpy_j_kg)
-                .mul_add(alpha, a.specific_enthalpy_j_kg);
+            let h = self.curve.specific_enthalpy_on_sensible_interval(upper - 1, temperature_k)?;
             if !h.is_finite() || h <= a.specific_enthalpy_j_kg || h >= b.specific_enthalpy_j_kg {
                 return Err(PhaseStateError::InvalidCurve {
                     what: "interior solid temperature has no representable interior enthalpy",

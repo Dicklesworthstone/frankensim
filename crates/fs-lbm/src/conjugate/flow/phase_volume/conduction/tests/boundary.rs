@@ -13,6 +13,63 @@ fn bath(cell: usize, face: Face3, temperature_k: f64, resistance: f64) -> Therma
 }
 
 #[test]
+fn variable_capacity_bath_uses_original_minimum_cp_on_clipped_source_span() {
+    use fs_material::phase::HeatCapacityKnot;
+    let material = card("T", &[(300.0, 1.0), (500.0, 1.0)]);
+    let caloric = EquilibriumEnthalpyPhaseCurve::try_from_heat_capacity(
+        material.content_hash(),
+        SolidLiquidPhase::Liquid,
+        0.0,
+        &[(300.0, 4.0), (400.0, 4.0), (500.0, 1.0)]
+            .map(|(temperature_k, specific_heat_capacity_j_kg_k)| HeatCapacityKnot {
+                temperature_k,
+                specific_heat_capacity_j_kg_k,
+                bulk_density_kg_m3: 1.0,
+            }),
+        100.0,
+    )
+    .unwrap();
+    assert_eq!(caloric.knots().len(), 3);
+    // The source begins INSIDE original interval 1. Cp there decreases from
+    // 4 to 1, so max(dT/dh)=1. Interval 0 would give 1/4, and interval 1's
+    // temperature/enthalpy chord gives 2/5; neither bounds the original slope.
+    let source = source(&material, &caloric, [450.0, 650.0]);
+    let domain = VoxelDomain::new(1, 1, 1, 1.0).unwrap();
+    let field = FlowField::quiescent(&domain);
+    let mass = [1.0];
+    let states = [Some(caloric.state_at_specific_enthalpy(650.0).unwrap())];
+    let increments = [0.0];
+    let data = input(&mass, &states, &increments);
+    let baths = [bath(0, Face3::XMin, 490.0, 0.0)];
+    let gate = CancelGate::new_clock_free();
+    let run = |dt| {
+        field.advance_isotropic_conductive_thermal_volume_with_baths(
+            &domain,
+            [FlowFace::Wall; 6],
+            &source,
+            &baths,
+            data,
+            controls(dt),
+            &gate,
+        )
+    };
+    // G=k*A/(dx/2)=2, M=1. dt=.75 has true weight 1.5; the old
+    // chord weight .6 admits heat -15 J and overshoots the 490 K bath.
+    invalid(run(0.75), "mixing weight exceeds one");
+    let accepted = run(0.5).unwrap();
+    close(accepted.report.maximum_enthalpy_mixing_weight, 1.0);
+    close(accepted.conductive_enthalpy_increment_j[0], -10.0);
+    let phase = accepted.thermal.volume.phase_states[0].unwrap();
+    close(phase.specific_enthalpy_j_kg(), 640.0);
+    // Cooling by x kelvin removes x+.015*x^2 J/kg on the original law.
+    let expected_temperature = 500.0 - 20.0 / (1.0 + 1.6_f64.sqrt());
+    close(phase.temperature_k(), expected_temperature);
+    assert!(phase.temperature_k() >= 490.0 && phase.temperature_k() < 500.0);
+    assert_eq!(states[0].unwrap().specific_enthalpy_j_kg(), 650.0);
+    assert_eq!(field, FlowField::quiescent(&domain));
+}
+
+#[test]
 fn six_graded_faces_follow_independent_fourier_resistance_and_calorimetry() {
     // rho=1, Cp=2, k(T)=2+0.04*(T-300). At the original 350 K, k=4.
     let material = card("T", &[(300.0, 2.0), (500.0, 10.0)]);

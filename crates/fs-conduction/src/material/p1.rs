@@ -57,6 +57,31 @@ pub(crate) fn integrate_scalar_path<const N: usize>(
     })
 }
 
+/// Integrate original affine k(T) composed with source-integrated h(T), retaining
+/// the same P1 scalar coordinate, source cuts and analytic nodal derivatives.
+pub(crate) fn integrate_caloric_path<const N: usize>(
+    cx: Option<&Cx<'_>>,
+    knots: &[(f64, f64)],
+    capacities: &[Option<[f64; 2]>],
+    nodal: [f64; N],
+    with_derivatives: bool,
+) -> Result<(f64, [f64; N]), ConductionError> {
+    moments::integrate_caloric_table(nodal, knots, capacities, with_derivatives, |interval| {
+        if let Some(cx) = cx {
+            cx.checkpoint().map_err(|_| ConductionError::Cancelled {
+                stage: "integrate-caloric-conductivity-knots",
+                at: interval,
+            })?;
+        }
+        Ok(())
+    })
+    .map(|moments| (moments.average, moments.derivatives))
+    .map_err(|error| match error {
+        moments::MomentError::Interrupted(error) => error,
+        moments::MomentError::Numerical(what) => ConductionError::Conductivity { what: what.into() },
+    })
+}
+
 impl ConductivityModel {
     /// Integrate the admitted scalar components, then rotate once into the
     /// original fixed principal frame. Every nodal value must be supported;

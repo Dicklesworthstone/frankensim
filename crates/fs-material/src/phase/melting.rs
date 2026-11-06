@@ -174,6 +174,10 @@ impl ResolvedMeltingCurve {
         knots.extend_from_slice(liquid.curve().knots());
         let mut curve = EquilibriumEnthalpyPhaseCurve::try_new(card.content_hash(), knots)?;
         curve.retain_sensible_density_law();
+        let mut capacities = solid.curve().sensible_heat_capacities.clone();
+        capacities.push(None);
+        capacities.extend_from_slice(&liquid.curve().sensible_heat_capacities);
+        curve.retain_sensible_heat_capacities(capacities)?;
         let mut receipts = solid.receipts().to_vec();
         receipts.push(melting.receipt);
         receipts.push(fusion.receipt);

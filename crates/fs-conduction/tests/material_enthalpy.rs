@@ -1,5 +1,7 @@
 //! Source-paired variable-Cp transport reaches the original spatial enthalpy solve.
 mod support;
+#[path = "material_enthalpy/caloric.rs"]
+mod caloric;
 
 use fs_conduction::transient::enthalpy::material::{
     MaterialEnthalpySource, MaterialEnthalpyTransport,

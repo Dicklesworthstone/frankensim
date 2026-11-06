@@ -24,7 +24,7 @@ pub mod properties;
 /// Relative entropy and phase driving energy from the original caloric pair.
 pub mod entropy;
 
-use super::{EquilibriumEnthalpyPhaseCurve, PhaseStateError};
+use super::{EquilibriumEnthalpyPhaseCurve, PhaseStateError, caloric};
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_matdb::PropertyUsageReceipt;
 use fs_thermal::crystallization::{
@@ -61,10 +61,12 @@ impl<'a> CrystallizationCaloricBranch<'a> {
             ));
         }
         let mut minimum_heat_capacity_j_kg_k = f64::INFINITY;
-        for pair in knots.windows(2) {
+        for (index, pair) in knots.windows(2).enumerate() {
             let dt = pair[1].temperature_k - pair[0].temperature_k;
             let dh = pair[1].specific_enthalpy_j_kg - pair[0].specific_enthalpy_j_kg;
-            let cp = dh / dt;
+            let cp = curve
+                .sensible_heat_capacities_on_interval(index)
+                .map_or(dh / dt, |cp| cp[0].min(cp[1]));
             if !dt.is_finite()
                 || dt <= 0.0
                 || !cp.is_finite()
@@ -105,8 +107,8 @@ impl<'a> CrystallizationCaloricBranch<'a> {
         [knots[0].temperature_k, knots[knots.len() - 1].temperature_k]
     }
 
-    /// Lower bound on dh/dT for the actual piecewise-linear h(T) chart,
-    /// including its stated sensible interpolation error; not a source bound.
+    /// Lower bound on dh/dT for the admitted caloric law. Sourced intervals
+    /// retain their original affine Cp(T); authored intervals use their chords.
     #[must_use]
     pub const fn minimum_heat_capacity_j_kg_k(&self) -> f64 {
         self.minimum_heat_capacity_j_kg_k
@@ -125,21 +127,8 @@ impl<'a> CrystallizationCaloricBranch<'a> {
         if knots[upper].temperature_k == temperature_k {
             return Ok(knots[upper].specific_enthalpy_j_kg);
         }
-        let a = knots[upper - 1];
-        let b = knots[upper];
-        let weight = (temperature_k - a.temperature_k) / (b.temperature_k - a.temperature_k);
-        let dh = b.specific_enthalpy_j_kg - a.specific_enthalpy_j_kg;
-        let h = if weight <= 0.5 {
-            a.specific_enthalpy_j_kg + weight * dh
-        } else {
-            b.specific_enthalpy_j_kg - (1.0 - weight) * dh
-        };
-        if !h.is_finite() {
-            return Err(invalid(
-                "crystallization branch enthalpy is not representable",
-            ));
-        }
-        Ok(h)
+        self.curve
+            .specific_enthalpy_on_sensible_interval(upper - 1, temperature_k)
     }
 
     /// Original source density at the same caloric coordinate. No volume or
@@ -149,6 +138,21 @@ impl<'a> CrystallizationCaloricBranch<'a> {
         self.curve
             .values_at_specific_enthalpy(h)
             .map(|state| state.bulk_density_kg_m3)
+    }
+
+    /// One-sided original capacity on an already admitted sensible interval.
+    fn heat_capacity_on_interval(&self, index: usize, temperature_k: f64) -> f64 {
+        let lower = self.curve.knots()[index];
+        let upper = self.curve.knots()[index + 1];
+        let width = upper.temperature_k - lower.temperature_k;
+        self.curve
+            .sensible_heat_capacities_on_interval(index)
+            .map_or_else(
+                || (upper.specific_enthalpy_j_kg - lower.specific_enthalpy_j_kg) / width,
+                |cp| {
+                    caloric::capacity_at_fraction(cp, (temperature_k - lower.temperature_k) / width)
+                },
+            )
     }
 }
 
@@ -244,25 +248,62 @@ impl<'a> CrystallizationCaloricPair<'a> {
                 ));
             }
         }
-        // h_parent-h_crystal is affine between the UNION of both knot sets.
-        // Positive endpoints therefore establish a positive gap throughout the
-        // represented domain, including unequal and temperature-dependent Cp.
-        for temperature_k in [low, high].into_iter().chain(
-            parent
-                .curve
-                .knots()
-                .iter()
-                .chain(crystal.curve.knots())
-                .map(|knot| knot.temperature_k)
-                .filter(|t| *t > low && *t < high),
-        ) {
-            let gap = parent.enthalpy_at_temperature(temperature_k)?
-                - crystal.enthalpy_at_temperature(temperature_k)?;
+        let admit_gap = |gap: f64| {
             if !gap.is_finite() || gap <= 0.0 {
                 return Err(invalid(
                     "crystallization requires a positive original-phase enthalpy gap throughout its domain",
                 ));
             }
+            Ok(gap)
+        };
+        let gap_at = |temperature_k| {
+            admit_gap(
+                parent.enthalpy_at_temperature(temperature_k)?
+                    - crystal.enthalpy_at_temperature(temperature_k)?,
+            )
+        };
+        let branches = [parent, crystal];
+        let mut indices = branches.map(|branch| {
+            branch
+                .curve
+                .knots()
+                .partition_point(|knot| knot.temperature_k <= low)
+                .min(branch.curve.knots().len() - 1)
+                - 1
+        });
+        let mut start = low;
+        let mut start_gap = gap_at(start)?;
+        // Between the merged temperature boundaries the gap is quadratic and
+        // its derivative is Cp_parent-Cp_crystal. Check both endpoints and any
+        // interior minimum; authored constant-Cp spans need only endpoints.
+        while start < high {
+            let end = high
+                .min(parent.curve.knots()[indices[0] + 1].temperature_k)
+                .min(crystal.curve.knots()[indices[1] + 1].temperature_k);
+            let end_gap = gap_at(end)?;
+            let difference = |temperature| {
+                parent.heat_capacity_on_interval(indices[0], temperature)
+                    - crystal.heat_capacity_on_interval(indices[1], temperature)
+            };
+            let left = difference(start);
+            let right = difference(end);
+            if left < 0.0 && right > 0.0 {
+                let scale = (-left).max(right);
+                let fraction = (-left / scale) / ((-left / scale) + right / scale);
+                let travel = (end - start) * fraction;
+                // At the stationary point the integrated capacity difference
+                // is left*travel/2. Retain this relative temperature travel:
+                // its absolute temperature may round to a boundary, and two
+                // independently rounded h(T) values can hide a narrow minimum.
+                admit_gap((0.5 * left).mul_add(travel, start_gap))?;
+            }
+            for (branch, index) in branches.iter().zip(&mut indices) {
+                if branch.curve.knots()[*index + 1].temperature_k == end {
+                    *index += 1;
+                }
+            }
+            start = end;
+            start_gap = end_gap;
         }
         let mut hash =
             DomainHasher::new("org.frankensim.fs-material.crystallization-caloric-pair.v1");

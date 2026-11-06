@@ -214,9 +214,20 @@ fn caloric_capacity(
         upper - 1
     };
     let mut previous = None;
-    for pair in knots[first..=upper].windows(2) {
-        let capacity = (pair[1].specific_enthalpy_j_kg - pair[0].specific_enthalpy_j_kg)
-            / (pair[1].temperature_k - pair[0].temperature_k);
+    for (offset, pair) in knots[first..=upper].windows(2).enumerate() {
+        let capacity = curve
+            .sensible_heat_capacities_on_interval(first + offset)
+            .map_or_else(
+                || {
+                    (pair[1].specific_enthalpy_j_kg - pair[0].specific_enthalpy_j_kg)
+                        / (pair[1].temperature_k - pair[0].temperature_k)
+                },
+                |[lower, upper]| {
+                    let fraction = (temperature - pair[0].temperature_k)
+                        / (pair[1].temperature_k - pair[0].temperature_k);
+                    lower * (1.0 - fraction) + upper * fraction
+                },
+            );
         if !capacity.is_finite()
             || capacity <= 0.0
             || previous.is_some_and(|left| !same_derivative(left, capacity))

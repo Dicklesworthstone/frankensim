@@ -193,7 +193,7 @@ impl ConductionThermalNetwork<'_> {
                 return Err(invalid("dielectric cell requires a common nonempty thermal source interval"));
             }
             let mut minimum = f64::INFINITY;
-            for pair in bindings[&cell].curve.knots().windows(2) {
+            for (index, pair) in bindings[&cell].curve.knots().windows(2).enumerate() {
                 check(cancel)?;
                 let dt = pair[1].temperature_k - pair[0].temperature_k;
                 if dt <= 0.0 {
@@ -201,7 +201,8 @@ impl ConductionThermalNetwork<'_> {
                 }
                 if pair[1].temperature_k >= range[0] && pair[0].temperature_k <= range[1] {
                     minimum = minimum.min(finite(thermal.cells()[&cell].mass_kg
-                        * (pair[1].specific_enthalpy_j_kg - pair[0].specific_enthalpy_j_kg) / dt)?);
+                        * bindings[&cell].curve.sensible_heat_capacity_bounds_j_kg_k(index)
+                            .map_err(|_| invalid("dielectric caloric heat capacity is unrepresentable"))?[0])?);
                 }
             }
             if !minimum.is_finite() || finite(minimum + capacities[&cell])? <= 0.0 {

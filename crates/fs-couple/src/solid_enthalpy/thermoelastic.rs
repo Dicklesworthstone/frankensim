@@ -151,7 +151,7 @@ impl<'s,'m> ThermoelasticSolid<'s,'m> {
             }
             let density=bound.reference_cell.mass_kg/bound.reference_volume_m3;
             let mut minimum=f64::INFINITY;
-            for pair in knots.windows(2) {
+            for (interval, pair) in knots.windows(2).enumerate() {
                 check(cx)?;
                 let dt=pair[1].temperature_k-pair[0].temperature_k;
                 if dt<=0.0 {
@@ -166,7 +166,8 @@ impl<'s,'m> ThermoelasticSolid<'s,'m> {
                     return Err(ThermoelasticFeedbackError::Invalid("the admitted caloric interval must be fully solid at constant reference density"));
                 }
                 minimum=minimum.min(finite(bound.reference_cell.mass_kg
-                    *(pair[1].specific_enthalpy_j_kg-pair[0].specific_enthalpy_j_kg)/dt)?);
+                    *bound.source.curve.sensible_heat_capacity_bounds_j_kg_k(interval)
+                        .map_err(SolidEnthalpyError::from)?[0])?);
             }
             if !minimum.is_finite()
                 || finite(minimum+law.minimum_heat_capacity_j_k(bound.reference_volume_m3)?)?<=0.0 {

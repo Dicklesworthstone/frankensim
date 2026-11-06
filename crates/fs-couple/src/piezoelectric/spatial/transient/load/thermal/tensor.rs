@@ -314,13 +314,14 @@ impl<'model, 'mesh> ThermalTensorPiezoelectricBody<'model, 'mesh> {
             ).map_err(field)?)?;
         }
         let mut caloric = f64::INFINITY;
-        for pair in knots.windows(2) {
+        for (index, pair) in knots.windows(2).enumerate() {
             check(cx)?;
             let delta = pair[1].temperature_k - pair[0].temperature_k;
             if delta <= 0.0 { return Err(invalid("ceramic caloric chart needs increasing temperature")); }
             if pair[1].temperature_k >= range[0] && pair[0].temperature_k <= range[1] {
                 caloric = caloric.min(finite(cell.mass_kg
-                    * (pair[1].specific_enthalpy_j_kg-pair[0].specific_enthalpy_j_kg)/delta)?);
+                    * curve.sensible_heat_capacity_bounds_j_kg_k(index)
+                        .map_err(|_| invalid("ceramic caloric heat capacity is unrepresentable"))?[0])?);
             }
         }
         if !caloric.is_finite() || finite(caloric + floor)? <= 0.0 {

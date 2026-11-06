@@ -103,8 +103,10 @@ pub(super) struct Transfers {
     pub(super) absolute_heat_j: f64,
 }
 
-// The SAME piecewise-linear original caloric law supplies its global slope
-// over the source-admitted h interval. Looking only at the cell's current
+// The SAME original caloric law supplies its global slope over the source-
+// admitted h interval. Original affine Cp(T) uses 1/min(Cp), while authored
+// affine T(h) retains its chord slope. Taking full intersected intervals is
+// conservative at clipped source bounds. Looking only at the cell's current
 // slope would miss sensible heating after a latent plateau is exhausted.
 fn maximum_slope(
     conductivity: &PreparedPhaseConductivity<'_>,
@@ -123,7 +125,13 @@ fn maximum_slope(
     for (index, pair) in knots[first..=end].windows(2).enumerate() {
         poll_every(gate, index)?;
         let change = pair[1].temperature_k - pair[0].temperature_k;
-        let slope = change / (pair[1].specific_enthalpy_j_kg - pair[0].specific_enthalpy_j_kg);
+        let slope = conductivity
+            .caloric_curve()
+            .sensible_heat_capacities_on_interval(first + index)
+            .map_or_else(
+                || change / (pair[1].specific_enthalpy_j_kg - pair[0].specific_enthalpy_j_kg),
+                |capacity| capacity[0].min(capacity[1]).recip(),
+            );
         if !slope.is_finite() || slope < 0.0 || (change > 0.0 && slope == 0.0) {
             return Err(refuse(
                 "original caloric bath stability bound is unrepresentable",

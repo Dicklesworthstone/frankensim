@@ -22,13 +22,13 @@ impl ResolvedHeatCapacityCurve {
     }
 
     /// Specific enthalpy change `h(to) - h(from)` [J/kg] on the admitted
-    /// piecewise-linear chart. Integrating its crossed chord slopes avoids
+    /// original caloric law. Integrating its crossed intervals avoids
     /// subtracting a possibly large arbitrary reference enthalpy twice.
     /// Heating and cooling use the same law with opposite signs.
     ///
-    /// This is exact chart arithmetic up to floating-point rounding, not the
-    /// original source Cp law: the constructor's interpolation allowance and
-    /// source uncertainty remain distinct.
+    /// Sourced sensible intervals retain and integrate their affine Cp(T).
+    /// Explicitly authored enthalpy intervals retain their chord law. Source
+    /// uncertainty remains separate from floating-point arithmetic.
     ///
     /// # Errors
     /// Both temperatures must lie inside the chart; a nonzero unrepresentable
@@ -38,10 +38,11 @@ impl ResolvedHeatCapacityCurve {
     }
 
     /// Relative thermal entropy [J/(kg K)] between two absolute temperatures.
-    /// Integrates the original single-phase chart's chord Cp/T exactly, including
+    /// Integrates the original single-phase Cp/T law, including
     /// crossed knots, without converting either temperature to an absolute h.
     /// A large arbitrary enthalpy datum therefore cannot erase a small real
-    /// entropy increment. This is the admitted chart, not an independent Cp law.
+    /// entropy increment. Retained source Cp and authored chord laws share the
+    /// same source support and original interval traversal.
     ///
     /// The same fixed source pressure/composition convention as the chart
     /// applies. Mixing entropy, pressure work and entropy production belong to
@@ -55,7 +56,8 @@ impl ResolvedHeatCapacityCurve {
 
     /// Positive secant heat capacity [J/(kg K)] for a conservative thermal
     /// linearization. Its product with `(to_k - from_k)` is the admitted chart's
-    /// enthalpy change. At identical temperatures use the right chord slope at
+    /// enthalpy change. At identical temperatures use the local source Cp or
+    /// the authored right chord slope at
     /// interior knots and the left slope at the upper endpoint.
     ///
     /// # Errors
@@ -101,26 +103,29 @@ fn slope(left: EnthalpyPhaseKnot, right: EnthalpyPhaseKnot) -> Result<f64, Phase
     Ok(value)
 }
 
+fn capacity(
+    curve: &EquilibriumEnthalpyPhaseCurve,
+    index: usize,
+    temperature: f64,
+) -> Result<f64, PhaseStateError> {
+    let (left, right) = (curve.knots()[index], curve.knots()[index + 1]);
+    let Some([a, b]) = curve.sensible_heat_capacities_on_interval(index) else {
+        return slope(left, right);
+    };
+    let fraction = (temperature - left.temperature_k) / (right.temperature_k - left.temperature_k);
+    let value = (1.0 - fraction) * a + fraction * b;
+    if !value.is_finite() || value <= 0.0 {
+        return Err(refusal("source heat capacity is not finite and positive"));
+    }
+    Ok(value)
+}
+
 pub(crate) fn enthalpy_at_temperature(
     curve: &EquilibriumEnthalpyPhaseCurve,
     temperature: f64,
 ) -> Result<f64, PhaseStateError> {
     let index = segment(curve, temperature)?;
-    let (left, right) = (curve.knots()[index], curve.knots()[index + 1]);
-    let value = if temperature == left.temperature_k {
-        left.specific_enthalpy_j_kg
-    } else if temperature == right.temperature_k {
-        right.specific_enthalpy_j_kg
-    } else {
-        let fraction =
-            (temperature - left.temperature_k) / (right.temperature_k - left.temperature_k);
-        left.specific_enthalpy_j_kg
-            + fraction * (right.specific_enthalpy_j_kg - left.specific_enthalpy_j_kg)
-    };
-    if !value.is_finite() {
-        return Err(refusal("interpolated enthalpy is not finite"));
-    }
-    Ok(value)
+    curve.specific_enthalpy_on_sensible_interval(index, temperature)
 }
 
 fn enthalpy_change(
@@ -135,10 +140,17 @@ fn enthalpy_change(
     }
     let (lo, hi) = (from.min(to), from.max(to));
     let mut change = 0.0;
-    for pair in curve.knots()[a.min(b)..=a.max(b) + 1].windows(2) {
-        let width = pair[1].temperature_k.min(hi) - pair[0].temperature_k.max(lo);
+    let mut correction = 0.0;
+    for index in a.min(b)..=a.max(b) {
+        let lower = curve.knots()[index].temperature_k.max(lo);
+        let upper = curve.knots()[index + 1].temperature_k.min(hi);
+        let width = upper - lower;
         if width > 0.0 {
-            change += slope(pair[0], pair[1])? * width;
+            let mean = 0.5 * capacity(curve, index, lower)? + 0.5 * capacity(curve, index, upper)?;
+            let increment = mean * width - correction;
+            let next = change + increment;
+            correction = (next - change) - increment;
+            change = next;
         }
     }
     if !change.is_finite() || change <= 0.0 {
@@ -162,24 +174,34 @@ fn entropy_change(
     let (lo, hi) = (from.min(to), from.max(to));
     let mut total = 0.0;
     let mut correction = 0.0;
-    for pair in curve.knots()[a.min(b)..=a.max(b) + 1].windows(2) {
+    for (offset, pair) in curve.knots()[a.min(b)..=a.max(b) + 1].windows(2).enumerate() {
         let lower = lo.max(pair[0].temperature_k);
         let upper = hi.min(pair[1].temperature_k);
         if upper <= lower {
             continue;
         }
-        let delta = (upper - lower) / lower;
-        let rounded = 1.0 + delta;
-        let logarithm = if rounded == 1.0 {
-            delta
-        } else if rounded.is_finite() {
-            // Correct rounding of 1+delta before deterministic ln; unlike
-            // subtracting two logarithms this retains arbitrarily close T.
-            fs_math::det::ln(rounded) * (delta / (rounded - 1.0))
+        let index = a.min(b) + offset;
+        let value = if curve.sensible_heat_capacities_on_interval(index).is_some() {
+            crate::phase::affine_cp_entropy(
+                lower,
+                upper,
+                capacity(curve, index, lower)?,
+                capacity(curve, index, upper)?,
+            )?
         } else {
-            fs_math::det::ln(upper) - fs_math::det::ln(lower)
+            let delta = (upper - lower) / lower;
+            let rounded = 1.0 + delta;
+            let logarithm = if rounded == 1.0 {
+                delta
+            } else if rounded.is_finite() {
+                // Correct rounding of 1+delta before deterministic ln; unlike
+                // subtracting two logarithms this retains arbitrarily close T.
+                fs_math::det::ln(rounded) * (delta / (rounded - 1.0))
+            } else {
+                fs_math::det::ln(upper) - fs_math::det::ln(lower)
+            };
+            slope(pair[0], pair[1])? * logarithm
         };
-        let value = slope(pair[0], pair[1])? * logarithm;
         if !value.is_finite() || value <= 0.0 {
             return Err(refusal(
                 "nonzero thermal entropy is not finite and representable",
@@ -205,7 +227,7 @@ fn secant(
 ) -> Result<f64, PhaseStateError> {
     if from == to {
         let index = segment(curve, from)?;
-        return slope(curve.knots()[index], curve.knots()[index + 1]);
+        return capacity(curve, index, from);
     }
     let value = enthalpy_change(curve, from, to)? / (to - from);
     if !value.is_finite() || value <= 0.0 {
@@ -217,7 +239,7 @@ fn secant(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::phase::SolidLiquidPhase;
+    use crate::phase::{HeatCapacityKnot, SolidLiquidPhase};
     use fs_blake3::hash_bytes;
 
     fn curve(reference: f64) -> EquilibriumEnthalpyPhaseCurve {
@@ -234,6 +256,34 @@ mod tests {
                 .to_vec(),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn original_cp_integrals_ignore_chord_allowance_and_large_energy_datums() {
+        // Cp(T)=2T, so delta_h=T1^2-T0^2 and delta_s=2(T1-T0).
+        // A deliberately coarse boundary chart must still retain this law.
+        for reference in [0.0, 1e12] {
+            let c = EquilibriumEnthalpyPhaseCurve::try_from_heat_capacity(
+                hash_bytes(b"affine Cp source, no interpolation calibration"),
+                SolidLiquidPhase::Solid,
+                reference,
+                &[
+                    HeatCapacityKnot { temperature_k: 300.0, specific_heat_capacity_j_kg_k: 600.0, bulk_density_kg_m3: 1000.0 },
+                    HeatCapacityKnot { temperature_k: 600.0, specific_heat_capacity_j_kg_k: 1200.0, bulk_density_kg_m3: 900.0 },
+                ],
+                1e6,
+            ).unwrap();
+            assert_eq!(c.knots().len(), 2);
+            for (a, b) in [(300.0_f64, 500.0_f64), (500.0, 300.0), (350.25, 350.25_f64.next_up())] {
+                let expected_h = (a + b) * (b - a);
+                let expected_s = 2.0 * (b - a);
+                assert!((enthalpy_change(&c, a, b).unwrap() - expected_h).abs() <= 16.0 * f64::EPSILON * expected_h.abs());
+                assert!((entropy_change(&c, a, b).unwrap() - expected_s).abs() <= 16.0 * f64::EPSILON * expected_s.abs());
+                assert!((secant(&c, a, b).unwrap() - (a + b)).abs() <= 16.0 * f64::EPSILON * (a + b));
+            }
+            assert_eq!(secant(&c, 350.25, 350.25).unwrap(), 700.5);
+            assert!((enthalpy_at_temperature(&c, 350.25).unwrap() - reference - 32675.0625).abs() < 1e-8);
+        }
     }
 
     #[test]

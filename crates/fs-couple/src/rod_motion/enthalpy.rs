@@ -555,11 +555,11 @@ impl<'r, 'n, 'a, I: RodMotionInertia> RodThermoelasticSystem<'r, 'n, 'a, I> {
                 }
                 let knots = bound.curve.knots();
                 let mut capacity = f64::INFINITY;
-                for pair in knots.windows(2) {
+                for index in 0..knots.len() - 1 {
                     capacity = capacity.min(positive(
                         original.mass_kg
-                            * (pair[1].specific_enthalpy_j_kg - pair[0].specific_enthalpy_j_kg)
-                            / positive(pair[1].temperature_k - pair[0].temperature_k)?,
+                            * bound.curve.sensible_heat_capacity_bounds_j_kg_k(index)
+                                .map_err(|_| invalid("rod caloric heat capacity is unrepresentable"))?[0],
                     )?);
                 }
                 receivers.push(Receiver {

@@ -48,6 +48,9 @@ fn point(t: f64) -> QueryPoint {
         .unwrap()
 }
 fn card(magnetic: bool, alpha: f64, cp: f64) -> MaterialCard {
+    card_with_capacities(magnetic, alpha, [cp; 2])
+}
+fn card_with_capacities(magnetic: bool, alpha: f64, cp: [f64; 2]) -> MaterialCard {
     let mut claims = ClaimSet::new();
     let (name, dims) = if magnetic {
         (MAGNETIC_PERMEABILITY_PROPERTY, MAGNETIC_PERMEABILITY_DIMS)
@@ -65,8 +68,8 @@ fn card(magnetic: bool, alpha: f64, cp: f64) -> MaterialCard {
         (
             "specific_heat_capacity",
             SPECIFIC_HEAT_CAPACITY_DIMS,
-            cp,
-            cp,
+            cp[0],
+            cp[1],
         ),
         ("density", Density::DIMS, 1.0, 1.0),
     ] {
@@ -112,6 +115,9 @@ fn card(magnetic: bool, alpha: f64, cp: f64) -> MaterialCard {
     .unwrap()
 }
 fn caloric(card: &MaterialCard) -> ResolvedHeatCapacityCurve {
+    caloric_with_allowance(card, 1e-9)
+}
+fn caloric_with_allowance(card: &MaterialCard, allowance: f64) -> ResolvedHeatCapacityCurve {
     ResolvedHeatCapacityCurve::try_new(
         card,
         HeatCapacitySourceQuery {
@@ -124,7 +130,7 @@ fn caloric(card: &MaterialCard) -> ResolvedHeatCapacityCurve {
         },
         SolidLiquidPhase::Solid,
         0.0,
-        1e-9,
+        allowance,
     )
     .unwrap()
 }
@@ -134,6 +140,13 @@ fn thermal(curve: &ResolvedHeatCapacityCurve, source_w: f64) -> DepositionSimula
             * (curve.curve().knots()[1].specific_enthalpy_j_kg
                 - curve.curve().knots()[0].specific_enthalpy_j_kg)
             / 250.0;
+    thermal_at_enthalpy(curve, source_w, h0)
+}
+fn thermal_at_enthalpy(
+    curve: &ResolvedHeatCapacityCurve,
+    source_w: f64,
+    h0: f64,
+) -> DepositionSimulation<'_> {
     DepositionSimulation::new(
         vec![TimedEvent {
             time_s: 0.0,
@@ -709,6 +722,79 @@ fn authored_heat_and_repeated_steps_retain_field_caloric_and_source_identity() {
         let (t, c, _) = next.into_parts();
         thermal = t;
         circuit = c;
+    }
+}
+
+#[test]
+fn original_capacity_minimum_rejects_negative_total_field_capacity_hidden_by_chord() {
+    // The original affine Cp grows from 1 to 100 J/(kg K), while C(T)
+    // or L(T)=1+.01*(T-300). Unit reference mass and volume remain fixed.
+    // The complete field envelope is |q| or |lambda| <= 10.
+    for magnetic in [false, true] {
+        let card = card_with_capacities(magnetic, 0.01, [1.0, 100.0]);
+        let caloric = caloric_with_allowance(&card, 4000.0);
+        assert_eq!(caloric.curve().knots().len(), 2);
+        let h0 = caloric
+            .curve()
+            .specific_enthalpy_on_sensible_interval(0, 300.0)
+            .unwrap();
+        near(h0, 545.0);
+        let thermal = thermal_at_enthalpy(&caloric, 0.0, h0);
+        near(thermal.temperature_k(CELL).unwrap(), 300.0);
+        let context = point(300.0);
+        let cells = [cell(&card, &caloric, &context)];
+        let resistors = [resistor()];
+        let material = MaterialNetwork {
+            cells: &cells,
+            resistors: &resistors,
+            links: &[],
+        };
+        let (circuit, binding) = initial(&material, &thermal, &card, magnetic);
+        let saved_cells = thermal.cells().clone();
+        let saved_circuit = circuit.clone();
+
+        // For affine C or L, the fixed-coordinate field capacity is
+        // -T*coordinate^2*.01^2/(1+.01*(T-300))^3. At T250 it is -20 J/K,
+        // so the true total is 1-20<0. The old 50.5 J/K caloric chord and
+        // the actual initial total at T300 would both incorrectly look safe.
+        let lower_field_capacity = -250.0 * 100.0 * 0.0001 / 0.5_f64.powi(3);
+        let initial_field_capacity = -300.0 * 100.0 * 0.0001;
+        assert!(1.0 + lower_field_capacity < 0.0);
+        assert!(50.5 + lower_field_capacity > 0.0);
+        assert!(20.8 + initial_field_capacity > 0.0);
+        let field_floor = binding
+            .law
+            .minimum_heat_capacity_j_k(binding.maximum_abs_coordinate)
+            .unwrap();
+        // Even the owner's more conservative whole-envelope field bound
+        // (approximately -40 J/K) would pass with the old caloric chord.
+        assert!(1.0 + field_floor < 0.0);
+        assert!(50.5 + field_floor > 0.0);
+        let error = field_storage::step_candidate(
+            &material,
+            &thermal,
+            0.001,
+            &circuit,
+            &[],
+            &[binding],
+            &[(1, ElectricalPropertyBasis::Resistivity)],
+            controls(),
+            &[0.0],
+            || false,
+        )
+        .err()
+        .expect("negative original total capacity must refuse before endpoint trials");
+        assert!(
+            matches!(
+                &error,
+                CircuitEnthalpyError::Source(field_storage::FieldThermalError::Invalid(reason))
+                    if reason.contains("caloric plus all co-located field heat capacities")
+            ),
+            "{error:?}"
+        );
+        assert_eq!(thermal.cells(), &saved_cells);
+        assert_eq!(thermal.time_s(), 0.0);
+        assert_eq!(circuit, saved_circuit);
     }
 }
 

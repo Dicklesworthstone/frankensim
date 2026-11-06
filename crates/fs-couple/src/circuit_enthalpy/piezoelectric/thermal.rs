@@ -170,11 +170,13 @@ fn resolved_candidate<'t, S, E>(
         return Err(invalid("accepted ceramic charge exceeds its thermal capacity envelope"));
     }
     let mut minimum=f64::INFINITY;
-    for pair in knots.windows(2) {
+    for (index, pair) in knots.windows(2).enumerate() {
         check(&cancel)?; let dt=pair[1].temperature_k-pair[0].temperature_k;
         if dt<=0.0 { return Err(invalid("ceramic caloric chart requires strictly increasing temperature")); }
         if pair[1].temperature_k>=range[0] && pair[0].temperature_k<=range[1] {
-            minimum=minimum.min(finite(cell.mass_kg*(pair[1].specific_enthalpy_j_kg-pair[0].specific_enthalpy_j_kg)/dt)?);
+            minimum=minimum.min(finite(cell.mass_kg
+                *binding.curve.sensible_heat_capacity_bounds_j_kg_k(index)
+                    .map_err(|_|invalid("ceramic caloric heat capacity is unrepresentable"))?[0])?);
         }
     }
     if !minimum.is_finite() || finite(minimum+bound)?<=0.0 {

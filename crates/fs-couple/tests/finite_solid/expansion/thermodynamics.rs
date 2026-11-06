@@ -285,7 +285,38 @@ fn same_source_entropy_constraint_has_independent_bulk_increment_and_original_ma
 }
 
 #[test]
-fn source_and_caloric_kinks_endpoints_identity_and_negative_total_capacity_are_refused() {
+fn original_capacity_at_source_knots_supplies_unique_adiabatic_response() {
+    for capacities in [[1.0, 2.0, 3.0], [1.0, 1.0, 2.0]] {
+        let card = thermodynamic_card([1.01; 3], 1.0, capacities);
+        let material = bind_expansion(&card, Q, 300.0);
+        let chart = caloric(&card);
+        let state = material
+            .adiabatic_acoustic_state(
+                &I,
+                ReferenceDeformation::identity(),
+                &chart,
+                h_at_300(&chart),
+                CaloricReference::StressFreeZeroPressure,
+            )
+            .unwrap();
+        // Cp is continuous even when its own slope changes. Adiabatic
+        // linearization needs the original Cp value, not adjacent mean chords.
+        let capacity = 6.0 * capacities[1];
+        near(
+            state.native().caloric_heat_capacity_j_m3_k(),
+            capacity,
+            1e-12,
+        );
+        near(
+            state.native().fixed_deformation_heat_capacity_j_m3_k(),
+            capacity - 9.0 * 300.0 * 40.0 * 0.001_f64.powi(2),
+            1e-11,
+        );
+    }
+}
+
+#[test]
+fn source_kinks_endpoints_identity_and_negative_total_capacity_are_refused() {
     let reference = ReferenceDeformation::identity();
     let convention = CaloricReference::StressFreeZeroPressure;
     let card = thermodynamic_card([1.01; 3], 1.0, [1.0; 3]);
@@ -325,20 +356,6 @@ fn source_and_caloric_kinks_endpoints_identity_and_negative_total_capacity_are_r
         )
         .unwrap_err();
     assert!(error.to_string().contains("slope-changing expansion knot"));
-
-    let kink_card = thermodynamic_card([1.01; 3], 1.0, [1.0, 1.0, 2.0]);
-    let kink = bind_expansion(&kink_card, Q, 300.0);
-    let kink_chart = caloric(&kink_card);
-    let error = kink
-        .adiabatic_acoustic_state(
-            &I,
-            reference,
-            &kink_chart,
-            h_at_300(&kink_chart),
-            convention,
-        )
-        .unwrap_err();
-    assert!(error.to_string().contains("slope-changing caloric knot"));
 
     let insufficient = thermodynamic_card([1.01; 3], 1.0, [0.001; 3]);
     let cold_capacity = caloric(&insufficient);

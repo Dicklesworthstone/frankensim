@@ -94,12 +94,29 @@ fn joined_calorimetry_preserves_exact_reference_and_source_sensible_density() {
 #[test]
 fn affine_capacity_integrals_and_fixed_mass_work_survive_rebasing() {
     let material = card(0, 1.0, true);
-    let (lower, upper) = pair(&material, SolidLiquidPhase::Solid, 0.01);
+    let (lower, upper) = pair(&material, SolidLiquidPhase::Solid, 1e6);
     let joined = lower.try_join_at_reference(&upper, 0.0).unwrap();
+    assert_eq!(joined.curve().knots().len(), 3);
     for knot in joined.curve().knots() {
         let dt = knot.temperature_k - 300.0;
         let exact = 400.0 * dt + 0.5 * dt * dt;
         assert!((knot.specific_enthalpy_j_kg - exact).abs() < 3e-9);
+    }
+    for temperature in [287.5, 295.0, 305.0, 312.5] {
+        let dt = temperature - 300.0;
+        let h = 400.0 * dt + 0.5 * dt * dt;
+        let state = joined.curve().values_at_specific_enthalpy(h).unwrap();
+        assert!((state.temperature_k - temperature).abs() < 2e-12);
+        assert!((state.bulk_density_kg_m3 - (6000.0 - 100.0 * dt)).abs() < 2e-10);
+        assert!(
+            (joined
+                .curve()
+                .temperature_derivative_at_specific_enthalpy(h)
+                .unwrap()
+                - 1.0 / (400.0 + dt))
+                .abs()
+                < 2e-17
+        );
     }
     let initial = joined.curve().state_at_specific_enthalpy(0.0).unwrap();
     let step = joined.curve().advance_isobaric_heat(initial, 2.0, 100_000.0, 16_400.0).unwrap();

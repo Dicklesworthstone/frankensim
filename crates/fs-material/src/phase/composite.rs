@@ -14,9 +14,7 @@
 //! A fully melted PCM therefore leaves the matrix solid. No normalized
 //! solid/liquid chart or fictitious all-liquid endpoint is constructed.
 
-use super::{
-    EnthalpyPhaseKnot, EquilibriumEnthalpyPhaseCurve, PhaseIntervalDensityLaw, PhaseStateError,
-};
+use super::{EnthalpyPhaseKnot, EquilibriumEnthalpyPhaseCurve, PhaseStateError, caloric};
 use crate::thermal::solid::PureSolidThermalLaw;
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_thermal::enthalpy::{DepositionError, ThermalLaw};
@@ -82,8 +80,9 @@ pub struct PcmCompositeResponse {
 /// Immutable, prepared law for a sensible solid matrix containing one PCM.
 ///
 /// Preparation merges the original caloric temperature breakpoints. Both source
-/// charts already use piecewise-affine `T(h)`, so this preserves their admitted
-/// calorics exactly in real arithmetic, including every latent plateau. Original
+/// charts retain their authored affine T(h) or original affine Cp(T), so this
+/// preserves their calorics exactly in real arithmetic, including every latent
+/// plateau. Original
 /// component enthalpy mappings are retained: queries evaluate the original density
 /// interpolation laws and entropy integrals instead of fitting mixture density or
 /// averaging heat capacities. Queries allocate nothing and take logarithmic time.
@@ -99,8 +98,16 @@ pub struct PcmComposite<'a> {
     pcm: &'a EquilibriumEnthalpyPhaseCurve,
     pcm_mass_fraction: f64,
     knots: Vec<PcmCompositeKnot>,
+    sensible_intervals: Vec<Option<CompositeSensibleInterval>>,
     maximum_slope: f64,
     identity: ContentHash,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct CompositeSensibleInterval {
+    matrix_capacity: [f64; 2],
+    pcm_capacity: [f64; 2],
+    total_capacity: [f64; 2],
 }
 
 impl<'a> PcmComposite<'a> {
@@ -182,8 +189,7 @@ impl<'a> PcmComposite<'a> {
             }
             let a = pcm_knots[upper - 1];
             let b = pcm_knots[upper];
-            let alpha = (temperature - a.temperature_k) / (b.temperature_k - a.temperature_k);
-            let h = lerp(a.specific_enthalpy_j_kg, b.specific_enthalpy_j_kg, alpha);
+            let h = pcm.specific_enthalpy_on_sensible_interval(upper - 1, temperature)?;
             if !h.is_finite() || h <= a.specific_enthalpy_j_kg || h >= b.specific_enthalpy_j_kg {
                 return Err(invalid(
                     "matrix temperature breakpoint has no representable PCM enthalpy",
@@ -218,6 +224,7 @@ impl<'a> PcmComposite<'a> {
             }
         }
         let mut maximum_slope = 0.0_f64;
+        let mut sensible_intervals = Vec::with_capacity(knots.len() - 1);
         for pair in knots.windows(2) {
             let dh = pair[1].specific_enthalpy_j_kg - pair[0].specific_enthalpy_j_kg;
             let dt = pair[1].temperature_k - pair[0].temperature_k;
@@ -229,11 +236,38 @@ impl<'a> PcmComposite<'a> {
                     "PCM composite caloric breakpoints are not resolvably ordered",
                 ));
             }
-            let slope = dt / dh;
+            let sensible = if dt > 0.0 {
+                let (matrix_capacity, matrix_exact) = capacity_on_temperature_span(
+                    matrix.curve(),
+                    pair[0].matrix_specific_enthalpy_j_kg,
+                    [pair[0].temperature_k, pair[1].temperature_k],
+                )?;
+                let (pcm_capacity, pcm_exact) = capacity_on_temperature_span(
+                    pcm,
+                    pair[0].pcm_specific_enthalpy_j_kg,
+                    [pair[0].temperature_k, pair[1].temperature_k],
+                )?;
+                (matrix_exact || pcm_exact).then(|| CompositeSensibleInterval {
+                    matrix_capacity,
+                    pcm_capacity,
+                    total_capacity: core::array::from_fn(|index| {
+                        (1.0 - pcm_mass_fraction) * matrix_capacity[index]
+                            + pcm_mass_fraction * pcm_capacity[index]
+                    }),
+                })
+            } else {
+                None
+            };
+            let slope = sensible.map_or(dt / dh, |source| {
+                source.total_capacity[0]
+                    .min(source.total_capacity[1])
+                    .recip()
+            });
             if !slope.is_finite() || (dt > 0.0 && slope == 0.0) {
                 return Err(PhaseStateError::UnrepresentableTemperatureDerivative);
             }
             maximum_slope = maximum_slope.max(slope);
+            sensible_intervals.push(sensible);
         }
         let mut identity = DomainHasher::new("org.frankensim.fs-material.pcm-composite.v1");
         identity.update(matrix.curve().identity().as_bytes());
@@ -245,6 +279,7 @@ impl<'a> PcmComposite<'a> {
             pcm,
             pcm_mass_fraction,
             knots,
+            sensible_intervals,
             maximum_slope,
             identity: identity.finalize(),
         })
@@ -362,22 +397,45 @@ impl<'a> PcmComposite<'a> {
             }
             Ok(value)
         };
-        let temperature_slope = slope(b.temperature_k - a.temperature_k)?;
-        let matrix_slope =
-            slope(b.matrix_specific_enthalpy_j_kg - a.matrix_specific_enthalpy_j_kg)?;
-        let pcm_slope = slope(b.pcm_specific_enthalpy_j_kg - a.pcm_specific_enthalpy_j_kg)?;
+        let (temperature_slope, matrix_slope, pcm_slope) = if let Some(source) =
+            self.sensible_intervals[upper - 1]
+        {
+            let fraction =
+                (state.temperature_k - a.temperature_k) / (b.temperature_k - a.temperature_k);
+            let total_capacity = caloric::capacity_at_fraction(source.total_capacity, fraction);
+            let matrix_capacity = caloric::capacity_at_fraction(source.matrix_capacity, fraction);
+            let pcm_capacity = caloric::capacity_at_fraction(source.pcm_capacity, fraction);
+            let derivatives = [
+                total_capacity.recip(),
+                matrix_capacity / total_capacity,
+                pcm_capacity / total_capacity,
+            ];
+            if derivatives
+                .iter()
+                .any(|value| !value.is_finite() || *value <= 0.0)
+            {
+                return Err(composite_derivative_error());
+            }
+            (derivatives[0], derivatives[1], derivatives[2])
+        } else {
+            (
+                slope(b.temperature_k - a.temperature_k)?,
+                slope(b.matrix_specific_enthalpy_j_kg - a.matrix_specific_enthalpy_j_kg)?,
+                slope(b.pcm_specific_enthalpy_j_kg - a.pcm_specific_enthalpy_j_kg)?,
+            )
+        };
         let w = self.pcm_mass_fraction;
         let matrix_volume_slope = (1.0 - w)
             * constituent_volume_slope(
                 self.matrix.curve(),
                 a.matrix_specific_enthalpy_j_kg,
-                state.matrix.bulk_density_kg_m3,
+                state.matrix,
                 matrix_slope,
             )?;
         let pcm_volume_slope = w * constituent_volume_slope(
             self.pcm,
             a.pcm_specific_enthalpy_j_kg,
-            state.pcm.bulk_density_kg_m3,
+            state.pcm,
             pcm_slope,
         )?;
         let phi = state.pcm_volume_fraction;
@@ -481,19 +539,49 @@ impl<'a> PcmComposite<'a> {
         let a = self.knots[upper - 1];
         let alpha =
             (h - a.specific_enthalpy_j_kg) / (b.specific_enthalpy_j_kg - a.specific_enthalpy_j_kg);
-        let mapped = PcmCompositeKnot {
-            specific_enthalpy_j_kg: h,
-            temperature_k: lerp(a.temperature_k, b.temperature_k, alpha),
-            matrix_specific_enthalpy_j_kg: lerp(
-                a.matrix_specific_enthalpy_j_kg,
-                b.matrix_specific_enthalpy_j_kg,
-                alpha,
-            ),
-            pcm_specific_enthalpy_j_kg: lerp(
-                a.pcm_specific_enthalpy_j_kg,
-                b.pcm_specific_enthalpy_j_kg,
-                alpha,
-            ),
+        let mapped = if let Some(source) = self.sensible_intervals[upper - 1] {
+            let fraction = caloric::temperature_fraction_from_bounds(
+                [a.specific_enthalpy_j_kg, b.specific_enthalpy_j_kg],
+                b.temperature_k - a.temperature_k,
+                source.total_capacity,
+                h,
+            )?;
+            let temperature_k = caloric::interpolate(a.temperature_k, b.temperature_k, fraction);
+            let original_enthalpy = |curve: &EquilibriumEnthalpyPhaseCurve, start_h| {
+                let index = curve
+                    .knots()
+                    .partition_point(|knot| knot.specific_enthalpy_j_kg <= start_h)
+                    .min(curve.knots().len() - 1)
+                    - 1;
+                curve.specific_enthalpy_on_sensible_interval(index, temperature_k)
+            };
+            PcmCompositeKnot {
+                specific_enthalpy_j_kg: h,
+                temperature_k,
+                matrix_specific_enthalpy_j_kg: original_enthalpy(
+                    self.matrix.curve(),
+                    a.matrix_specific_enthalpy_j_kg,
+                )?,
+                pcm_specific_enthalpy_j_kg: original_enthalpy(
+                    self.pcm,
+                    a.pcm_specific_enthalpy_j_kg,
+                )?,
+            }
+        } else {
+            PcmCompositeKnot {
+                specific_enthalpy_j_kg: h,
+                temperature_k: lerp(a.temperature_k, b.temperature_k, alpha),
+                matrix_specific_enthalpy_j_kg: lerp(
+                    a.matrix_specific_enthalpy_j_kg,
+                    b.matrix_specific_enthalpy_j_kg,
+                    alpha,
+                ),
+                pcm_specific_enthalpy_j_kg: lerp(
+                    a.pcm_specific_enthalpy_j_kg,
+                    b.pcm_specific_enthalpy_j_kg,
+                    alpha,
+                ),
+            }
         };
         if mapped.pcm_specific_enthalpy_j_kg <= a.pcm_specific_enthalpy_j_kg
             || mapped.pcm_specific_enthalpy_j_kg >= b.pcm_specific_enthalpy_j_kg
@@ -509,6 +597,39 @@ impl<'a> PcmComposite<'a> {
     }
 }
 
+/// Both compiled endpoints lie in this one original sensible interval.
+fn capacity_on_temperature_span(
+    curve: &EquilibriumEnthalpyPhaseCurve,
+    start_h: f64,
+    temperatures: [f64; 2],
+) -> Result<([f64; 2], bool), PhaseStateError> {
+    let knots = curve.knots();
+    let upper = knots
+        .partition_point(|knot| knot.specific_enthalpy_j_kg <= start_h)
+        .min(knots.len() - 1);
+    let (a, b) = (knots[upper - 1], knots[upper]);
+    let width = b.temperature_k - a.temperature_k;
+    let source = curve.sensible_heat_capacities_on_interval(upper - 1);
+    let capacities = if let Some(cp) = source {
+        temperatures.map(|temperature| {
+            caloric::capacity_at_fraction(cp, (temperature - a.temperature_k) / width)
+        })
+    } else {
+        [(b.specific_enthalpy_j_kg - a.specific_enthalpy_j_kg) / width; 2]
+    };
+    if !width.is_finite()
+        || width <= 0.0
+        || temperatures[0] < a.temperature_k
+        || temperatures[1] > b.temperature_k
+        || capacities
+            .iter()
+            .any(|capacity| !capacity.is_finite() || *capacity <= 0.0)
+    {
+        return Err(composite_derivative_error());
+    }
+    Ok((capacities, source.is_some()))
+}
+
 fn composite_derivative_error() -> PhaseStateError {
     PhaseStateError::InvalidCurve {
         what: "original composite derivative is not representable",
@@ -519,7 +640,7 @@ fn composite_derivative_error() -> PhaseStateError {
 fn constituent_volume_slope(
     curve: &EquilibriumEnthalpyPhaseCurve,
     segment_start_h: f64,
-    density: f64,
+    state: EnthalpyPhaseKnot,
     enthalpy_slope: f64,
 ) -> Result<f64, PhaseStateError> {
     if enthalpy_slope == 0.0 {
@@ -530,20 +651,7 @@ fn constituent_volume_slope(
         .partition_point(|k| k.specific_enthalpy_j_kg <= segment_start_h)
         .min(knots.len() - 1);
     let (a, b) = (knots[upper - 1], knots[upper]);
-    let dh = b.specific_enthalpy_j_kg - a.specific_enthalpy_j_kg;
-    let slope = match curve.density_law_on_interval(upper - 1)? {
-        PhaseIntervalDensityLaw::AffineSpecificVolume => {
-            ((a.bulk_density_kg_m3 - b.bulk_density_kg_m3)
-                / a.bulk_density_kg_m3
-                / b.bulk_density_kg_m3
-                / dh)
-                * enthalpy_slope
-        }
-        PhaseIntervalDensityLaw::AffineDensity => {
-            ((a.bulk_density_kg_m3 - b.bulk_density_kg_m3) / dh / density / density)
-                * enthalpy_slope
-        }
-    };
+    let slope = curve.volume_slope_on_interval(upper - 1, state)?.0 * enthalpy_slope;
     if !slope.is_finite() || (a.bulk_density_kg_m3 != b.bulk_density_kg_m3 && slope == 0.0) {
         return Err(composite_derivative_error());
     }

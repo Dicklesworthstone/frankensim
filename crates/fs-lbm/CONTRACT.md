@@ -1,5 +1,27 @@
 # CONTRACT: fs-lbm
 
+## Variable-Cp phase-volume mixing and bath stability
+
+Source sensible intervals with affine rho(T) and nonconstant Cp(T) retain their
+original nonlinear h coordinate in thermal-volume coupling. The selected
+single-interval entry uses the same original-chart mixing-volume remainder as
+the full-chart entry, with one bounded interval per query and the selected
+enthalpy support enforced. The affine-in-h density shortcut applies only to
+that actual density law. Full-chart calls retain their aggregate traversal
+budget and cancellation checks.
+
+Explicit conductive baths bound dT/dh by 1/min(Cp) over every intersected
+source interval, including clipped conductivity support. Authored h/T
+intervals retain their existing slope bound. Current source conductivity,
+reference inventory, transfer accounts and the explicit mixing-weight
+acceptance gate remain the existing owners.
+
+Native regressions exercise a source-Cp volume remainder whose sign differs
+from the old density-only shortcut, selected/full-chart equivalence,
+calorimetry, traversal limits, cancellation and a variable-Cp bath overshoot.
+They are included but were not executed here; full native compilation remains
+blocked by the real asupersync dependency's memory-limit termination.
+
 ## Native D3Q19/D3Q27 open velocity and pressure faces
 
 `lattice3::open_boundaries::OpenBoundaryGrid3` binds existing face specifications

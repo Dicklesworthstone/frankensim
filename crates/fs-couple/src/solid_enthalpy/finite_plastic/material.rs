@@ -220,10 +220,10 @@ impl<'a> FiniteThermoplasticMaterial<'a> {
             .iter()
             .map(|(_, sample)| sample.evidence.value.value)
             .fold(f64::INFINITY, f64::min);
-        for pair in knots.windows(2) {
+        for index in 0..knots.len() - 1 {
             minimum_cp = minimum_cp.min(
-                (pair[1].specific_enthalpy_j_kg - pair[0].specific_enthalpy_j_kg)
-                    / (pair[1].temperature_k - pair[0].temperature_k),
+                query.caloric.curve().sensible_heat_capacity_bounds_j_kg_k(index)
+                    .map_err(|_| invalid("solid caloric heat capacity is unrepresentable"))?[0],
             );
         }
         let minimum_total_heat_capacity_j_m3_k = reference_density_kg_m3 * minimum_cp

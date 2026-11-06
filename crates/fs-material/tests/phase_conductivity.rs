@@ -14,6 +14,8 @@ use fs_thermal::enthalpy::conduction::ConductivityLaw;
 use fs_thermal::enthalpy::conduction::implicit::ImplicitConductionLaw;
 use fs_thermal::enthalpy::{DepositionError, ThermalLaw};
 
+#[path = "phase_conductivity/caloric.rs"]
+mod caloric_source;
 #[path = "phase_conductivity/mushy.rs"]
 mod mushy;
 

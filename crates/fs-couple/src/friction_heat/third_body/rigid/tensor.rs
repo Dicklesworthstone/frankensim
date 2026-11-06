@@ -124,10 +124,12 @@ impl<'a> TensorLayerMaterial<'a> {
                 TensorLayerSourceError::Invalid("tensor shear thermal capacity bound refused")
             })?;
         let mass = projected.volume_m3() * material.density_kg_m3();
-        for segment in knots.windows(2) {
+        for (index, segment) in knots.windows(2).enumerate() {
             let capacity = mass
-                * (segment[1].specific_enthalpy_j_kg - segment[0].specific_enthalpy_j_kg)
-                / (segment[1].temperature_k - segment[0].temperature_k)
+                * caloric.curve().sensible_heat_capacity_bounds_j_kg_k(index)
+                    .map_err(|_| TensorLayerSourceError::Invalid(
+                        "tensor layer caloric heat capacity is unrepresentable",
+                    ))?[0]
                 - segment[1].temperature_k * capacity_bound;
             if !capacity.is_finite() || capacity <= 0.0 {
                 return Err(TensorLayerSourceError::Invalid(

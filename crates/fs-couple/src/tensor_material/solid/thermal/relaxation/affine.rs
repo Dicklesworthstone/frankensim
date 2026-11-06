@@ -72,7 +72,7 @@ pub(super) fn admit_capacity<E>(
         }.map_err(|e| solid(SolidError::Dynamics(TensorMaterialError::Material(e))))?;
         coefficients[element] = finite(coefficients[element] + coefficient)?;
     }
-    // The original caloric owner is piecewise linear in h(T). Bound
+    // Bound the original affine Cp(T), or an authored constant chord, in
     // C_eff = mass*dh/dT - T*psi_TT on every intersecting segment, including
     // its hottest endpoint. Mechanical capacity stays in reversible exchange;
     // inserting it into the caloric curve would count the same energy twice.
@@ -84,14 +84,15 @@ pub(super) fn admit_capacity<E>(
             .get(&cell.cell)
             .ok_or_else(|| invalid("tensor caloric receiver disappeared"))?
             .mass_kg;
-        for segment in cell.caloric.curve().knots().windows(2) {
+        for (index, segment) in cell.caloric.curve().knots().windows(2).enumerate() {
             let a = segment[0];
             let b = segment[1];
             if b.temperature_k < low || a.temperature_k > high {
                 continue;
             }
-            let capacity = mass * (b.specific_enthalpy_j_kg - a.specific_enthalpy_j_kg)
-                / (b.temperature_k - a.temperature_k)
+            let capacity = mass * cell.caloric.curve()
+                .sensible_heat_capacity_bounds_j_kg_k(index)
+                .map_err(|_| invalid("tensor caloric heat capacity is unrepresentable"))?[0]
                 - high.min(b.temperature_k) * coefficient;
             if !capacity.is_finite() || capacity <= 0.0 {
                 return Err(invalid(

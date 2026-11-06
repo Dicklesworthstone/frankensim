@@ -833,7 +833,7 @@ impl<'m, 'c> EnthalpyBackwardEuler<'m, 'c> {
         Ok(())
     }
 
-    // Invert the admitted piecewise-linear chart, never a separate Cp model.
+    // Invert the original caloric interval, including its retained source Cp.
     // Monotone temperatures permit binary search; both ends of every plateau
     // are ambiguous too, regardless of the history's liquid fraction.
     fn prescribed_enthalpy(&self, vertex: usize, temperature_k: f64) -> Result<f64, EnthalpyError> {
@@ -861,10 +861,9 @@ impl<'m, 'c> EnthalpyBackwardEuler<'m, 'c> {
             }
             return Ok(knots[upper].specific_enthalpy_j_kg);
         }
-        let a = knots[upper - 1];
-        let b = knots[upper];
-        let fraction = (temperature_k - a.temperature_k) / (b.temperature_k - a.temperature_k);
-        finite(a.specific_enthalpy_j_kg * (1.0 - fraction) + b.specific_enthalpy_j_kg * fraction)
+        self.curve_for_vertex(vertex)
+            .specific_enthalpy_on_sensible_interval(upper - 1, temperature_k)
+            .map_err(|source| EnthalpyError::Phase { vertex, source })
     }
 }
 

@@ -346,7 +346,7 @@ fn admit(
             ));
         }
     }
-    for pair in knots.windows(2) {
+    for (index, pair) in knots.windows(2).enumerate() {
         check(cancel)?;
         let dt = pair[1].temperature_k - pair[0].temperature_k;
         if dt <= 0.0 {
@@ -356,8 +356,8 @@ fn admit(
         }
         if pair[1].temperature_k >= range[0] && pair[0].temperature_k <= range[1] {
             minimum_capacity = minimum_capacity.min(finite(
-                cell.mass_kg * (pair[1].specific_enthalpy_j_kg - pair[0].specific_enthalpy_j_kg)
-                    / dt,
+                cell.mass_kg * body.curve.sensible_heat_capacity_bounds_j_kg_k(index)
+                    .map_err(|_| invalid("dielectric caloric heat capacity is unrepresentable"))?[0],
             )?);
         }
     }

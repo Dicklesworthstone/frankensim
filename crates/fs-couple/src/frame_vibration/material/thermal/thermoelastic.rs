@@ -333,11 +333,11 @@ fn admit_capacity(
             .ok_or_else(|| invalid("missing original layer caloric chart"))?;
         let knots = caloric.curve.knots();
         let mut capacity = f64::INFINITY;
-        for pair in knots.windows(2) {
+        for index in 0..knots.len() - 1 {
             capacity = capacity.min(positive(
                 receiver.original.mass_kg
-                    * (pair[1].specific_enthalpy_j_kg - pair[0].specific_enthalpy_j_kg)
-                    / positive(pair[1].temperature_k - pair[0].temperature_k)?,
+                    * caloric.curve.sensible_heat_capacity_bounds_j_kg_k(index)
+                        .map_err(|_| invalid("frame caloric heat capacity is unrepresentable"))?[0],
             )?);
         }
         let (lo, hi) = (knots[0].temperature_k, knots[knots.len() - 1].temperature_k);

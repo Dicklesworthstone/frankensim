@@ -386,7 +386,7 @@ fn admit(
                 ));
             }
         }
-        for pair in knots.windows(2) {
+        for (index, pair) in knots.windows(2).enumerate() {
             check(cancel)?;
             let dt = pair[1].temperature_k - pair[0].temperature_k;
             if dt <= 0.0 {
@@ -397,8 +397,8 @@ fn admit(
             if pair[1].temperature_k >= range[0] && pair[0].temperature_k <= range[1] {
                 let capacity = finite(
                     cell.mass_kg
-                        * (pair[1].specific_enthalpy_j_kg - pair[0].specific_enthalpy_j_kg)
-                        / dt,
+                        * material_cell.curve.sensible_heat_capacity_bounds_j_kg_k(index)
+                            .map_err(|_| invalid("field caloric heat capacity is unrepresentable"))?[0],
                 )?;
                 minimum_caloric_capacity = minimum_caloric_capacity.min(capacity);
             }

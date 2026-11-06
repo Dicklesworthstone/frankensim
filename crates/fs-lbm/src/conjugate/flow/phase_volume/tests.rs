@@ -535,6 +535,129 @@ fn thermal_controls() -> ThermalVolumeControls {
 }
 
 #[test]
+fn variable_capacity_selected_interval_retains_signed_caloric_mixing_volume() {
+    use fs_material::phase::{HeatCapacityKnot, SolidLiquidPhase};
+    let curve = EquilibriumEnthalpyPhaseCurve::try_from_heat_capacity(
+        ContentHash([94; 32]),
+        SolidLiquidPhase::Liquid,
+        0.0,
+        &[
+            HeatCapacityKnot {
+                temperature_k: 300.0,
+                specific_heat_capacity_j_kg_k: 1000.0,
+                bulk_density_kg_m3: 1000.0,
+            },
+            HeatCapacityKnot {
+                temperature_k: 500.0,
+                specific_heat_capacity_j_kg_k: 3000.0,
+                bulk_density_kg_m3: 800.0,
+            },
+        ],
+        100_000.0,
+    )
+    .unwrap();
+    assert_eq!(curve.knots().len(), 2);
+    assert_eq!(
+        curve.density_law_on_interval(0).unwrap(),
+        PhaseIntervalDensityLaw::AffineTemperatureDensity
+    );
+    // h(T)=1000*(T-300)+5*(T-300)^2 and rho(T)=1300-T.
+    // At receiver T=350 and donor T=450, the original Cp curvature makes
+    // v_r+v'_r*(h_d-h_r)-v_d POSITIVE. The density-affine-in-h shortcut
+    // gives -1.30356851882027e-5 instead, with the wrong sign.
+    let receiver_h = 62_500.0;
+    let donor_h = 262_500.0;
+    let (remainder, traversed) = curve
+        .mixing_specific_volume_m3_kg(receiver_h, donor_h, 1, || false)
+        .unwrap();
+    assert!((remainder - 2.389_875_617_837_17e-5).abs() < 5e-19);
+    assert_eq!(traversed, 1);
+
+    let domain = VoxelDomain::new(1, 1, 1, 1.0).unwrap();
+    let mut faces = outlet(0);
+    faces[0] = FlowFace::Fixed;
+    let field = FlowField::from_face_velocity(&domain, faces, |axis, _| {
+        if axis == 0 { 1.0 } else { 0.0 }
+    })
+    .unwrap();
+    let mass = [950.0];
+    let states = [Some(curve.state_at_specific_enthalpy(receiver_h).unwrap())];
+    let increments = [0.0];
+    let mut data = input(&mass, &states, &increments);
+    data.boundary_inflow[0] = Some(curve.state_at_specific_enthalpy(donor_h).unwrap());
+    let mut ctl = thermal_controls();
+    ctl.volume.maximum_cell_volume_defect_m3 = 1e-12;
+    ctl.volume.transport.maximum_enthalpy_defect_j = 1e-4;
+    let gate = CancelGate::new_clock_free();
+    let selected = field
+        .advance_thermal_volume(&domain, faces, &curve, 0, data, ctl, &gate)
+        .unwrap();
+    let step = &selected.volume;
+
+    // The fixed inlet carries rho(450)*A*u*dt = 425 kg. The native donor
+    // balance fixes h independently of the EOS/source iteration. The exact
+    // original quadratic then gives T and the retained mass rho(T)*V.
+    let incoming_mass = 425.0;
+    let expected_h = (mass[0] * receiver_h + incoming_mass * donor_h)
+        / (mass[0] + incoming_mass);
+    let expected_temperature = 300.0 + 2.0 * expected_h
+        / (1000.0 + (1_000_000.0 + 20.0 * expected_h).sqrt());
+    let expected_mass = 1300.0 - expected_temperature;
+    let outgoing_mass = mass[0] + incoming_mass - expected_mass;
+    let expected_source = (outgoing_mass / expected_mass - 0.5) / 0.5;
+    close(step.transport.specific_enthalpy_j_kg[0], expected_h);
+    close(step.phase_states[0].unwrap().temperature_k(), expected_temperature);
+    close(step.transport.mass_kg[0], expected_mass);
+    close(step.transport.report.incoming_mass_kg, incoming_mass);
+    close(step.transport.report.outgoing_mass_kg, outgoing_mass);
+    close(selected.mixing_volume_source_m3_s[0], expected_source);
+    assert!(selected.mixing_volume_source_m3_s[0] > 0.0);
+    assert!(selected.source_iterations > 1);
+    assert!(step.report.maximum_final_volume_defect_m3 <= 1e-12);
+    close(
+        step.report.material_enthalpy_change_j,
+        incoming_mass * donor_h - outgoing_mass * expected_h,
+    );
+    assert_eq!(step.report.requested_enthalpy_increment_j, 0.0);
+
+    let full = field
+        .advance_piecewise_thermal_volume(
+            &domain,
+            faces,
+            &curve,
+            data,
+            PiecewiseThermalVolumeControls {
+                thermal: ctl,
+                max_mixing_intervals: 1000,
+            },
+            &gate,
+        )
+        .unwrap();
+    assert_eq!(selected, full);
+    // The selected interval has a fixed per-query allowance. It must not
+    // bypass or reset the full-chart owner's aggregate interval budget.
+    assert!(field
+        .advance_piecewise_thermal_volume(
+            &domain,
+            faces,
+            &curve,
+            data,
+            PiecewiseThermalVolumeControls {
+                thermal: ctl,
+                max_mixing_intervals: 0,
+            },
+            &gate,
+        )
+        .is_err());
+    gate.request();
+    assert!(field
+        .advance_thermal_volume(&domain, faces, &curve, 0, data, ctl, &gate)
+        .is_err());
+    assert_eq!(mass, [950.0]);
+    assert_eq!(states[0].unwrap().specific_enthalpy_j_kg(), receiver_h);
+}
+
+#[test]
 fn sensible_heat_and_cooling_drive_original_density_volume_on_every_axis() {
     let curve = sensible_chart(0.0);
     assert_eq!(

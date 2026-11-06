@@ -1,5 +1,45 @@
 # fs-material — CONTRACT
 
+## Exact source heat capacity through solid and phase transport
+
+Source heat-capacity ingress retains the original affine `Cp(T)` on every
+generated sensible interval. Its enthalpy integral, quadratic temperature
+inverse and `dT/dh = 1/Cp(T)` share the same immutable curve. The public boundary
+chart still honors the existing subdivision allowance and knot budget; runtime
+calorics no longer replace the source law by those boundary chords. Explicitly
+authored h/T charts keep their authored interpolation, and a latent plateau
+retains exactly zero temperature slope and its single original latent account.
+
+`sensible_heat_capacities_on_interval` identifies retained source intervals.
+`specific_enthalpy_on_sensible_interval` supplies their original temperature
+inverse, and `sensible_heat_capacity_bounds_j_kg_k` supplies positive minimum
+and maximum capacities for coupled stability/admission bounds. None of these
+methods extrapolates or supplies missing material data. Source context,
+receipts, reference datum, and Cp metadata remain part of curve identity.
+
+Adjacent joins, source melting charts and fixed-mass composites retain the
+original capacities and mass-weighted sensible energy. Temperature-coordinate
+relative heat integrates Cp directly; entropy integrates Cp/T with stable
+small-step kernels and the deterministic logarithm owner. The finite entropy
+mean and both analytic endpoint derivatives use that same nonlinear T(h).
+Density remains its original rho(T); the mixing-volume remainder includes the
+Cp-dependent curvature of h(T). Crystallization admission checks interior
+quadratic enthalpy-gap minima as well as the merged temperature boundaries.
+
+Prepared phase conductivity places original k(T) breakpoints at their true
+h(T), evaluates k at the original chart temperature and uses its analytic chain
+rule. A clipped upper endpoint retains the prepared interval's left derivative,
+including next to a latent plateau. Required unrepresentable source coordinates
+or tangents refuse. Evaluation performs no new source selection, hashing or
+allocation. Work remains bounded by original source/caloric intervals; no
+adaptive table resampling is added.
+
+Focused regressions cover coarse boundary charts, both Cp slopes, energy-datum
+shifts, entropy means, original conductivity knots, latent joins, composites and
+crystallization minima. Numerical-leaf execution does not establish full native
+consumer compilation, measured-material validity, pressure evolution, or
+cross-module integration-test success.
+
 ## Linear kinematic hardening of anisotropic Hill shear
 
 `plastic::hill::Hill48::with_linear_kinematic_hardening` explicitly adds the

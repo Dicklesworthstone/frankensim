@@ -2,6 +2,8 @@
 
 use super::{EquilibriumEnthalpyPhaseCurve, PhaseStateError};
 
+mod caloric;
+
 /// Finite thermal conjugate on one original equilibrium enthalpy chart.
 ///
 /// The temperature is `delta_h / delta_s`, with the continuous equal-state
@@ -22,7 +24,57 @@ pub struct EnthalpyEntropyMean {
     pub intervals: usize,
 }
 
+/// Original affine Cp(T)/T integral for temperature-coordinate consumers.
+/// The caller supplies capacities from the same admitted sensible source
+/// interval; no latent plateau, extrapolation or capacity fitting occurs.
+pub(crate) fn affine_cp_entropy(
+    lower_temperature_k: f64,
+    upper_temperature_k: f64,
+    lower_capacity_j_kg_k: f64,
+    upper_capacity_j_kg_k: f64,
+) -> Result<f64, PhaseStateError> {
+    caloric::affine_cp_entropy(
+        lower_temperature_k,
+        upper_temperature_k,
+        [lower_capacity_j_kg_k, upper_capacity_j_kg_k],
+    )
+    .ok_or(PhaseStateError::InvalidCurve {
+        what: "original affine heat-capacity entropy is not finite and representable",
+    })
+}
+
 impl EquilibriumEnthalpyPhaseCurve {
+    fn caloric_entropy_segment(
+        &self,
+        index: usize,
+        lower_enthalpy: f64,
+        upper_enthalpy: f64,
+        lower_temperature: f64,
+    ) -> Result<Option<caloric::CaloricEntropySegment>, PhaseStateError> {
+        let Some(capacities) = self.sensible_heat_capacities_on_interval(index) else {
+            return Ok(None);
+        };
+        let pair = &self.knots()[index..=index + 1];
+        // Use the original quadratic inverse before its temperature is
+        // rounded. This retains the local capacities for short enthalpy steps
+        // and uses the same nearer-endpoint datum convention as T(h), without
+        // adding binary searches or scanning unvisited knots.
+        let capacity_at = |h| {
+            super::caloric::temperature_fraction(pair[0], pair[1], capacities, h)
+                .map(|fraction| super::caloric::capacity_at_fraction(capacities, fraction))
+        };
+        let local_capacities = [capacity_at(lower_enthalpy)?, capacity_at(upper_enthalpy)?];
+        caloric::segment(
+            upper_enthalpy - lower_enthalpy,
+            lower_temperature,
+            local_capacities,
+        )
+        .map(Some)
+        .ok_or(PhaseStateError::InvalidCurve {
+            what: "original affine heat-capacity entropy is not finite and representable",
+        })
+    }
+
     /// Evaluate the exact finite entropy-conjugate temperature and its Jacobian.
     ///
     /// For unequal enthalpies, `theta = (h1-h0) / integral_h0^h1 dh/T(h)`.
@@ -130,22 +182,42 @@ impl EquilibriumEnthalpyPhaseCurve {
                 pair[1].temperature_k
             };
             let dh = b - a;
-            let (entropy, x) = segment_entropy(dh, ta, tb)?;
-            let (loss, first_moment) = logarithmic_moments(x);
-            let zeroth_moment = 1.0 / (1.0 + x);
-            let temperature_increment = pair[1].temperature_k - pair[0].temperature_k;
-            let slope = temperature_increment
-                / (pair[1].specific_enthalpy_j_kg - pair[0].specific_enthalpy_j_kg);
-            if !slope.is_finite() || (temperature_increment > 0.0 && slope == 0.0) {
-                return Err(PhaseStateError::UnrepresentableTemperatureDerivative);
-            }
+            let (entropy, loss, zeroth_moment, lower_moment, upper_moment, slope) =
+                if let Some(source) = self.caloric_entropy_segment(first + index, a, b, ta)? {
+                    (
+                        source.entropy,
+                        source.loss,
+                        source.zeroth_kernel,
+                        source.lower_kernel,
+                        source.upper_kernel,
+                        source.reciprocal_mean_capacity,
+                    )
+                } else {
+                    let (entropy, x) = segment_entropy(dh, ta, tb)?;
+                    let (loss, first_moment) = logarithmic_moments(x);
+                    let zeroth_moment = 1.0 / (1.0 + x);
+                    let temperature_increment = pair[1].temperature_k - pair[0].temperature_k;
+                    let slope = temperature_increment
+                        / (pair[1].specific_enthalpy_j_kg - pair[0].specific_enthalpy_j_kg);
+                    if !slope.is_finite() || (temperature_increment > 0.0 && slope == 0.0) {
+                        return Err(PhaseStateError::UnrepresentableTemperatureDerivative);
+                    }
+                    (
+                        entropy,
+                        loss,
+                        zeroth_moment,
+                        zeroth_moment - first_moment,
+                        first_moment,
+                        slope,
+                    )
+                };
             varying_temperature |= slope > 0.0;
             let weight = dh / width;
             let relative_temperature = lower.temperature_k / ta;
             let scaled_slope = (slope * relative_temperature) * relative_temperature;
             if weight <= 0.0
-                || first_moment <= 0.0
-                || first_moment >= zeroth_moment
+                || lower_moment <= 0.0
+                || upper_moment <= 0.0
                 || (slope > 0.0 && scaled_slope == 0.0)
             {
                 return Err(invalid());
@@ -155,10 +227,8 @@ impl EquilibriumEnthalpyPhaseCurve {
             let values = [
                 entropy,
                 dh * ((ta - lower.temperature_k) / ta + relative_temperature * loss),
-                weight
-                    * scaled_slope
-                    * (after * zeroth_moment + weight * (zeroth_moment - first_moment)),
-                weight * scaled_slope * (before * zeroth_moment + weight * first_moment),
+                weight * scaled_slope * (after * zeroth_moment + weight * lower_moment),
+                weight * scaled_slope * (before * zeroth_moment + weight * upper_moment),
             ];
             for component in 0..4 {
                 if !values[component].is_finite() || values[component] < 0.0 {
@@ -212,9 +282,9 @@ impl EquilibriumEnthalpyPhaseCurve {
     ///
     /// Each nonisothermal segment uses its exact logarithmic integral; a latent
     /// plateau contributes `delta_h / T_transition` without an apparent heat
-    /// capacity or separate latent-energy credit. This integrates the admitted
-    /// piecewise-linear chart, including one generated from heat-capacity data,
-    /// not a higher-resolution source law that the chart only approximates.
+    /// capacity or separate latent-energy credit. Sensible intervals generated
+    /// from heat-capacity data integrate the original affine Cp(T)/T exactly;
+    /// explicitly authored enthalpy charts retain their affine T(h) integral.
     /// Reversing the endpoints reverses the sign. No extrapolation is allowed.
     ///
     /// This is a relative equilibrium thermal entropy [J/(kg K)] at the chart's
@@ -258,7 +328,7 @@ impl EquilibriumEnthalpyPhaseCurve {
         };
         let mut total = 0.0;
         let mut correction = 0.0;
-        for pair in knots[first..=last].windows(2) {
+        for (index, pair) in knots[first..=last].windows(2).enumerate() {
             let a = lo.max(pair[0].specific_enthalpy_j_kg);
             let b = hi.min(pair[1].specific_enthalpy_j_kg);
             // Only the two caller endpoints can lie inside a segment. Every
@@ -274,7 +344,12 @@ impl EquilibriumEnthalpyPhaseCurve {
             } else {
                 pair[1].temperature_k
             };
-            let (entropy, _) = segment_entropy(b - a, ta, tb)?;
+            let entropy =
+                if let Some(source) = self.caloric_entropy_segment(first + index, a, b, ta)? {
+                    source.entropy
+                } else {
+                    segment_entropy(b - a, ta, tb)?.0
+                };
             // Fixed-order compensated summation preserves small segment terms.
             let increment = entropy - correction;
             let next = total + increment;
@@ -352,6 +427,135 @@ mod tests {
             ],
         )
         .unwrap()
+    }
+
+    #[test]
+    fn original_affine_capacity_controls_entropy_mean_and_analytic_jacobian() {
+        for capacities in [[1000.0, 4000.0], [4000.0, 1000.0]] {
+            let source = [300.0, 900.0].map(|temperature_k| HeatCapacityKnot {
+                temperature_k,
+                specific_heat_capacity_j_kg_k: if temperature_k == 300.0 {
+                    capacities[0]
+                } else {
+                    capacities[1]
+                },
+                bulk_density_kg_m3: 1000.0,
+            });
+            // Deliberately retain one wide original interval: chord entropy
+            // or a frozen Cp cannot satisfy this independent source oracle.
+            let curve = EquilibriumEnthalpyPhaseCurve::try_from_heat_capacity(
+                ContentHash([0x7c; 32]),
+                SolidLiquidPhase::Solid,
+                0.0,
+                &source,
+                1e9,
+            )
+            .unwrap();
+            assert_eq!(curve.knots().len(), 2);
+            let slope = (capacities[1] - capacities[0]) / 600.0;
+            let enthalpy = |t: f64| {
+                let dt = t - 300.0;
+                capacities[0] * dt + 0.5 * slope * dt * dt
+            };
+            let (ta, tb) = (400.0_f64, 750.0_f64);
+            let (ha, hb) = (enthalpy(ta), enthalpy(tb));
+            let entropy = (capacities[0] - 300.0 * slope) * (tb / ta).ln() + slope * (tb - ta);
+            let temperature = (hb - ha) / entropy;
+            let mean = curve
+                .thermodynamic_mean_temperature(ha, hb, 1, || false)
+                .unwrap();
+            assert!((mean.specific_entropy_change_j_kg_k / entropy - 1.0).abs() < 1e-14);
+            assert!((mean.temperature_k / temperature - 1.0).abs() < 1e-14);
+            let lower = (temperature / ta - 1.0) / entropy;
+            let upper = (1.0 - temperature / tb) / entropy;
+            assert!((mean.d_temperature_d_initial_enthalpy_kg_k_j / lower - 1.0).abs() < 1e-13);
+            assert!((mean.d_temperature_d_final_enthalpy_kg_k_j / upper - 1.0).abs() < 1e-13);
+            assert_eq!(
+                mean.specific_entropy_change_j_kg_k,
+                curve.specific_entropy_change_j_kg_k(ha, hb).unwrap()
+            );
+            let reverse = curve
+                .thermodynamic_mean_temperature(hb, ha, 1, || false)
+                .unwrap();
+            assert_eq!(reverse.temperature_k, mean.temperature_k);
+            assert_eq!(
+                reverse.d_temperature_d_initial_enthalpy_kg_k_j,
+                mean.d_temperature_d_final_enthalpy_kg_k_j
+            );
+            assert_eq!(
+                reverse.d_temperature_d_final_enthalpy_kg_k_j,
+                mean.d_temperature_d_initial_enthalpy_kg_k_j
+            );
+        }
+    }
+
+    #[test]
+    fn sourced_entropy_and_jacobians_cross_a_sharp_latent_plateau_without_smoothing() {
+        let mut curve = phase_curve();
+        curve
+            .retain_sensible_heat_capacities(vec![Some([50.0, 150.0]), None, Some([100.0, 300.0])])
+            .unwrap();
+        let expected = -50.0 * 2.0_f64.ln() + 100.0 + 25_000.0 / 600.0
+            - 500.0 * (800.0_f64 / 600.0).ln()
+            + 200.0;
+        let mean = curve
+            .thermodynamic_mean_temperature(0.0, 95_000.0, 3, || false)
+            .unwrap();
+        assert!((mean.specific_entropy_change_j_kg_k - expected).abs() < 1e-12);
+        let theta = 95_000.0 / expected;
+        assert!((mean.temperature_k / theta - 1.0).abs() < 1e-14);
+        assert!(
+            (mean.d_temperature_d_initial_enthalpy_kg_k_j - (theta / 300.0 - 1.0) / expected).abs()
+                < 1e-15
+        );
+        assert!(
+            (mean.d_temperature_d_final_enthalpy_kg_k_j - (1.0 - theta / 800.0) / expected).abs()
+                < 1e-15
+        );
+        let split = curve.specific_entropy_change_j_kg_k(0.0, 14_000.0).unwrap()
+            + curve
+                .specific_entropy_change_j_kg_k(14_000.0, 48_000.0)
+                .unwrap()
+            + curve
+                .specific_entropy_change_j_kg_k(48_000.0, 95_000.0)
+                .unwrap();
+        assert!((split - expected).abs() < 1e-12);
+        let plateau = curve
+            .thermodynamic_mean_temperature(40_000.0, 50_000.0, 1, || false)
+            .unwrap();
+        assert_eq!(plateau.temperature_k, 600.0);
+        assert_eq!(plateau.d_temperature_d_initial_enthalpy_kg_k_j, 0.0);
+        assert_eq!(plateau.d_temperature_d_final_enthalpy_kg_k_j, 0.0);
+    }
+
+    #[test]
+    fn source_capacity_retains_tiny_enthalpy_entropy_and_thermal_jacobians() {
+        let curve = EquilibriumEnthalpyPhaseCurve::try_from_heat_capacity(
+            ContentHash([0x7d; 32]),
+            SolidLiquidPhase::Solid,
+            0.0,
+            &[
+                HeatCapacityKnot {
+                    temperature_k: 300.0,
+                    specific_heat_capacity_j_kg_k: 1000.0,
+                    bulk_density_kg_m3: 1000.0,
+                },
+                HeatCapacityKnot {
+                    temperature_k: 900.0,
+                    specific_heat_capacity_j_kg_k: 4000.0,
+                    bulk_density_kg_m3: 1000.0,
+                },
+            ],
+            1e9,
+        )
+        .unwrap();
+        let mean = curve
+            .thermodynamic_mean_temperature(0.0, 1e-300, 1, || false)
+            .unwrap();
+        assert_eq!(mean.temperature_k, 300.0);
+        assert_eq!(mean.specific_entropy_change_j_kg_k, 1e-300 / 300.0);
+        assert_eq!(mean.d_temperature_d_initial_enthalpy_kg_k_j, 0.0005);
+        assert_eq!(mean.d_temperature_d_final_enthalpy_kg_k_j, 0.0005);
     }
 
     #[test]

@@ -575,20 +575,33 @@ impl<'a> ThermalConcentricStringRuntime<'a> {
             let curvature = finite(self.reference_length_m*layer.free_energy_temperature_second_derivative_j_m_k2
                 -layer.area_m2/mu*b*a*gradient)?;
             let slope = finite(3.0*self.reference_length_m*layer.area_m2*b*a*a)?;
-            let penalty_at = |t: f64| finite::<E>(t*(curvature+slope*(t-layer.temperature_k)));
-            for pair in knots.windows(2) {
+            for (index, pair) in knots.windows(2).enumerate() {
                 checkpoint(cx)?;
                 let (lo, hi) = (pair[0].temperature_k, pair[1].temperature_k);
-                let capacity = finite(layer.density_kg_m3*layer.area_m2*self.string.length_m
-                    *(pair[1].specific_enthalpy_j_kg-pair[0].specific_enthalpy_j_kg)/(hi-lo))?;
-                let mut penalty = penalty_at(lo)?.max(penalty_at(hi)?);
+                let bounds = binding.caloric.curve().sensible_heat_capacity_bounds_j_kg_k(index)
+                    .map_err(|_|invalid("layer caloric heat capacity is unrepresentable"))?;
+                let cp = binding.caloric.curve().sensible_heat_capacities_on_interval(index)
+                    .unwrap_or([bounds[0]; 2]);
+                let mass = finite(layer.density_kg_m3*layer.area_m2*self.string.length_m)?;
+                let cp_slope = finite((cp[1]-cp[0])/(hi-lo))?;
+                let capacity_slope = finite(mass*cp_slope)?;
+                let total_capacity = |t: f64| {
+                    let fraction = (t-lo)/(hi-lo);
+                    let capacity = if fraction <= 0.5 {
+                        (cp[1]-cp[0]).mul_add(fraction, cp[0])
+                    } else {
+                        (cp[0]-cp[1]).mul_add((hi-t)/(hi-lo), cp[1])
+                    };
+                    finite::<E>(mass*capacity - t*(curvature+slope*(t-layer.temperature_k)))
+                };
+                let mut minimum = total_capacity(lo)?.min(total_capacity(hi)?);
                 if slope != 0.0 {
-                    let stationary = 0.5*(layer.temperature_k-curvature/slope);
+                    let stationary = 0.5*(layer.temperature_k+(capacity_slope-curvature)/slope);
                     if stationary.is_finite() && stationary > lo && stationary < hi {
-                        penalty = penalty.max(penalty_at(stationary)?);
+                        minimum = minimum.min(total_capacity(stationary)?);
                     }
                 }
-                if !positive(hi-lo) || !positive(capacity) || !positive(capacity-penalty) {
+                if !positive(hi-lo) || !positive(minimum) {
                     return Err(invalid("layer caloric capacity does not exceed its axial and modal thermoelastic penalty"));
                 }
             }

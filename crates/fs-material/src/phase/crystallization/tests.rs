@@ -41,6 +41,84 @@ fn close(actual: f64, expected: f64, tolerance: f64) {
 }
 
 #[test]
+fn g0_curved_phase_gap_checks_its_interior_minimum_between_source_boundaries() {
+    let source_branch = |phase, datum, temperatures: &[f64], varying_capacity| {
+        let knots: Vec<_> = temperatures
+            .iter()
+            .map(|&temperature| HeatCapacityKnot {
+                temperature_k: temperature,
+                specific_heat_capacity_j_kg_k: if varying_capacity {
+                    1000.0 + 10.0 * (temperature - 300.0)
+                } else {
+                    2000.0
+                },
+                bulk_density_kg_m3: 1000.0,
+            })
+            .collect();
+        EquilibriumEnthalpyPhaseCurve::try_from_heat_capacity(
+            ContentHash([41; 32]),
+            phase,
+            datum,
+            &knots,
+            1e6,
+        )
+        .unwrap()
+    };
+    let crystal = source_branch(SolidLiquidPhase::Solid, 0.0, &[300.0, 500.0], false);
+    for datum in [20_000.0, 50_000.0] {
+        let parent = source_branch(SolidLiquidPhase::Liquid, datum, &[300.0, 500.0], true);
+        assert_eq!(parent.knots().len(), 2);
+        for index in [0, 1] {
+            assert!(
+                parent.knots()[index].specific_enthalpy_j_kg
+                    - crystal.knots()[index].specific_enthalpy_j_kg
+                    > 0.0
+            );
+        }
+        let parent_branch = CrystallizationCaloricBranch::new(&parent).unwrap();
+        let crystal_branch = CrystallizationCaloricBranch::new(&crystal).unwrap();
+        close(
+            parent_branch.enthalpy_at_temperature(400.0).unwrap()
+                - crystal_branch.enthalpy_at_temperature(400.0).unwrap(),
+            datum - 50_000.0,
+            1e-9,
+        );
+        assert!(CrystallizationCaloricPair::new(&parent, &crystal, [300.0, 500.0]).is_err());
+        // A positive subdomain may still be used; no unrequested global
+        // extrapolation or phase-stability restriction is introduced.
+        assert!(CrystallizationCaloricPair::new(&parent, &crystal, [300.0, 320.0]).is_ok());
+        assert!(CrystallizationCaloricPair::new(&parent, &crystal, [480.0, 500.0]).is_ok());
+    }
+    let parent = source_branch(SolidLiquidPhase::Liquid, 60_000.0, &[300.0, 500.0], true);
+    let admitted = CrystallizationCaloricPair::new(&parent, &crystal, [300.0, 500.0]).unwrap();
+    close(
+        admitted.latent_enthalpy_j_kg(400.0).unwrap(),
+        10_000.0,
+        1e-9,
+    );
+
+    // Neither source has a knot at the minimum. Their unequal boundaries must
+    // be merged before testing the affine capacity difference on each span.
+    let parent = source_branch(
+        SolidLiquidPhase::Liquid,
+        48_000.0,
+        &[300.0, 350.0, 500.0],
+        true,
+    );
+    let crystal = source_branch(SolidLiquidPhase::Solid, 0.0, &[300.0, 450.0, 500.0], false);
+    let parent_branch = CrystallizationCaloricBranch::new(&parent).unwrap();
+    let crystal_branch = CrystallizationCaloricBranch::new(&crystal).unwrap();
+    for temperature in [300.0, 350.0, 450.0, 500.0] {
+        assert!(
+            parent_branch.enthalpy_at_temperature(temperature).unwrap()
+                - crystal_branch.enthalpy_at_temperature(temperature).unwrap()
+                > 0.0
+        );
+    }
+    assert!(CrystallizationCaloricPair::new(&parent, &crystal, [300.0, 500.0]).is_err());
+}
+
+#[test]
 fn g1_distinct_original_cp_and_phase_volumes_survive_crystallization() {
     let parent = branch(SolidLiquidPhase::Liquid, 2000.0, 100_000.0, 800.0);
     let crystal = branch(SolidLiquidPhase::Solid, 1000.0, 0.0, 1000.0);

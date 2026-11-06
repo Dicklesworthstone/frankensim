@@ -276,11 +276,14 @@ fn caloric_capacity(
             "adiabatic waves require a two-sided caloric neighborhood",
         ));
     }
+    let temperature = curve
+        .temperature_at_specific_enthalpy(h)
+        .map_err(SolidEnthalpyError::from)?;
     let upper = knots.partition_point(|knot| knot.specific_enthalpy_j_kg <= h);
     let exact_knot = knots[upper - 1].specific_enthalpy_j_kg == h;
     let first = if exact_knot { upper - 2 } else { upper - 1 };
     let mut previous = None;
-    for pair in knots[first..=upper].windows(2) {
+    for (offset, pair) in knots[first..=upper].windows(2).enumerate() {
         if pair.iter().any(|knot| {
             knot.liquid_mass_fraction != 0.0 || !same_measure(knot.bulk_density_kg_m3, density)
         }) || pair[1].temperature_k <= pair[0].temperature_k
@@ -289,8 +292,19 @@ fn caloric_capacity(
                 "adiabatic solid response requires fully solid constant-reference-density caloric support",
             ));
         }
-        let capacity = (pair[1].specific_enthalpy_j_kg - pair[0].specific_enthalpy_j_kg)
-            / (pair[1].temperature_k - pair[0].temperature_k);
+        let capacity = curve
+            .sensible_heat_capacities_on_interval(first + offset)
+            .map_or_else(
+                || {
+                    (pair[1].specific_enthalpy_j_kg - pair[0].specific_enthalpy_j_kg)
+                        / (pair[1].temperature_k - pair[0].temperature_k)
+                },
+                |[lower, upper]| {
+                    let fraction = (temperature - pair[0].temperature_k)
+                        / (pair[1].temperature_k - pair[0].temperature_k);
+                    lower * (1.0 - fraction) + upper * fraction
+                },
+            );
         if !capacity.is_finite()
             || capacity <= 0.0
             || previous.is_some_and(|left| !same_measure(left, capacity))
@@ -311,4 +325,44 @@ fn caloric_capacity(
         ));
     }
     Ok(capacity)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fs_material::phase::{HeatCapacityKnot, SolidLiquidPhase};
+
+    #[test]
+    fn continuous_original_capacity_has_a_unique_knot_tangent() {
+        let curve = EquilibriumEnthalpyPhaseCurve::try_from_heat_capacity(
+            fs_blake3::ContentHash([0x9a; 32]),
+            SolidLiquidPhase::Solid,
+            0.0,
+            &[(280.0, 0.1), (300.0, 0.2), (500.0, 1.2)].map(|(t, cp)| HeatCapacityKnot {
+                temperature_k: t,
+                specific_heat_capacity_j_kg_k: cp,
+                bulk_density_kg_m3: 6.0,
+            }),
+            1e6,
+        )
+        .unwrap();
+        assert_eq!(curve.knots().len(), 3);
+        let seam = curve.knots()[1].specific_enthalpy_j_kg;
+        assert!((caloric_capacity(&curve, seam, 6.0).unwrap() - 1.2).abs() < 1e-14);
+        let h = curve
+            .specific_enthalpy_on_sensible_interval(1, 330.0)
+            .unwrap();
+        assert!((caloric_capacity(&curve, h, 6.0).unwrap() - 2.1).abs() < 1e-14);
+
+        // The same endpoint chords, explicitly authored without original Cp,
+        // really do have a discontinuous heat capacity at this knot.
+        let authored = EquilibriumEnthalpyPhaseCurve::try_single_phase(
+            curve.material_card_identity(),
+            SolidLiquidPhase::Solid,
+            curve.knots().to_vec(),
+        )
+        .unwrap();
+        assert!(caloric_capacity(&authored, seam, 6.0).is_err());
+        assert!(caloric_capacity(&curve, 0.0, 6.0).is_err());
+    }
 }

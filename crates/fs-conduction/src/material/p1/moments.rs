@@ -24,6 +24,10 @@
 //! No geometric subdivision, heap allocation or ill-conditioned divided
 //! differences are required. Repeated coordinates are ordinary spline knots.
 
+#[path = "moments/caloric.rs"]
+mod caloric;
+pub(crate) use caloric::integrate_caloric_table;
+
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ScalarMoments<const N: usize = 4> {
     pub(crate) average: f64,

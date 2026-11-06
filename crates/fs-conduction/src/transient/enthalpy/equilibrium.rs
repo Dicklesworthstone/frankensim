@@ -745,13 +745,9 @@ fn enthalpy_interval(
             knots[end].specific_enthalpy_j_kg,
         ]);
     }
-    let a = knots[upper - 1];
-    let b = knots[upper];
-    let fraction = (temperature - a.temperature_k) / (b.temperature_k - a.temperature_k);
-    let h = finite(fraction.mul_add(
-        b.specific_enthalpy_j_kg - a.specific_enthalpy_j_kg,
-        a.specific_enthalpy_j_kg,
-    ))?;
+    let h = storage.curve_for_vertex(vertex)
+        .specific_enthalpy_on_sensible_interval(upper - 1, temperature)
+        .map_err(|source| EnthalpyError::Phase { vertex, source })?;
     Ok([h, h])
 }
 

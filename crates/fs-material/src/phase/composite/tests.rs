@@ -43,6 +43,87 @@ fn close(actual: f64, expected: f64, tolerance: f64) {
 }
 
 #[test]
+fn original_affine_capacities_compose_without_linearizing_either_constituent() {
+    let matrix = EquilibriumEnthalpyPhaseCurve::try_from_heat_capacity(
+        ContentHash([0x91; 32]),
+        SolidLiquidPhase::Solid,
+        0.0,
+        &[
+            HeatCapacityKnot {
+                temperature_k: 300.0,
+                specific_heat_capacity_j_kg_k: 500.0,
+                bulk_density_kg_m3: 8000.0,
+            },
+            HeatCapacityKnot {
+                temperature_k: 500.0,
+                specific_heat_capacity_j_kg_k: 1500.0,
+                bulk_density_kg_m3: 6000.0,
+            },
+        ],
+        1e6,
+    )
+    .unwrap();
+    let mut pcm = EquilibriumEnthalpyPhaseCurve::try_new(
+        ContentHash([0x92; 32]),
+        vec![
+            knot(0.0, 300.0, 0.0, 1000.0),
+            knot(150_000.0, 400.0, 0.0, 900.0),
+            knot(350_000.0, 400.0, 1.0, 800.0),
+            knot(650_000.0, 500.0, 1.0, 700.0),
+        ],
+    )
+    .unwrap();
+    pcm.retain_sensible_density_law();
+    pcm.retain_sensible_heat_capacities(vec![Some([1000.0, 2000.0]), None, Some([2000.0, 4000.0])])
+        .unwrap();
+    let law = PcmComposite::try_new(&matrix, &pcm, 0.25, 0.0).unwrap();
+    assert_eq!(law.knots().len(), 4);
+    close(law.maximum_temperature_slope(), 1.0 / 625.0, 1e-18);
+    for (h, t, cm, cp, rho_m, rho_p) in [
+        (39_062.5, 350.0, 750.0, 1500.0, 7500.0, 950.0),
+        (217_187.5, 450.0, 1250.0, 3000.0, 6500.0, 750.0),
+    ] {
+        let response = law.response_at_specific_enthalpy(h).unwrap();
+        let state = response.state;
+        close(state.temperature_k, t, 2e-12);
+        close(state.matrix.temperature_k, t, 2e-12);
+        close(state.pcm.temperature_k, t, 2e-12);
+        close(state.matrix.bulk_density_kg_m3, rho_m, 2e-11);
+        close(state.pcm.bulk_density_kg_m3, rho_p, 2e-12);
+        close(
+            0.75 * state.matrix.specific_enthalpy_j_kg + 0.25 * state.pcm.specific_enthalpy_j_kg,
+            h,
+            2e-9,
+        );
+        let capacity = 0.75 * cm + 0.25 * cp;
+        close(response.temperature_slope_kg_k_j, 1.0 / capacity, 2e-18);
+        close(response.matrix_enthalpy_derivative, cm / capacity, 2e-15);
+        close(response.pcm_enthalpy_derivative, cp / capacity, 2e-15);
+        let difference = (law
+            .values_at_specific_enthalpy(h + 0.01)
+            .unwrap()
+            .pcm_volume_fraction
+            - law
+                .values_at_specific_enthalpy(h - 0.01)
+                .unwrap()
+                .pcm_volume_fraction)
+            / 0.02;
+        close(response.pcm_volume_fraction_slope_kg_j, difference, 2e-13);
+    }
+    let melting = law.response_at_specific_enthalpy(118_750.0).unwrap();
+    assert_eq!(melting.state.temperature_k, 400.0);
+    assert_eq!(melting.state.pcm.liquid_mass_fraction, 0.5);
+    assert_eq!(melting.temperature_slope_kg_k_j, 0.0);
+    assert_eq!(melting.matrix_enthalpy_derivative, 0.0);
+    assert_eq!(melting.pcm_enthalpy_derivative, 4.0);
+    assert_eq!(
+        law.specific_entropy_change_j_kg_k(93_750.0, 143_750.0)
+            .unwrap(),
+        125.0
+    );
+}
+
+#[test]
 fn latent_storage_and_density_use_fixed_constituent_masses() {
     let matrix = matrix(0.0);
     let pcm = pcm(0.0);

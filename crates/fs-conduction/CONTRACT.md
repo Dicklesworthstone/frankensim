@@ -1,5 +1,42 @@
 # CONTRACT: fs-conduction
 
+## Original Cp(T) in enthalpy storage and conductivity moments
+
+Material enthalpy storage and prescribed-temperature/equilibrium inverses use
+the retained source heat-capacity integral. Source boundaries may be coarse
+without replacing the physical Cp law. Nodal reference mass and the original
+stored-energy and boundary-reaction accounts remain unchanged. Classical
+adjoint admission compares the actual one-sided caloric slopes; a continuous
+Cp source is not a kink merely because adjacent h/T chords differ.
+
+`MaterialPhaseTransport` retains the original sensible Cp endpoints beside
+each prepared scalar or principal conductivity interval. P1 specific enthalpy
+still defines the conductivity sampling field. For affine source Cp(T), h(T)
+is quadratic and k(T) is affine on a source interval. Transforming the existing
+positive simplex moment integral to temperature produces degree-six
+polynomials for both mean conductivity and its nodal derivatives: four-point
+Gauss integrates them exactly in real arithmetic. The derivative transform
+cancels Cp analytically, retaining nonzero tangents for adjacent representable
+nodal enthalpies. Only original source and nodal knots split the integral.
+
+The original affine moment path remains in use when no nonlinear conductivity
+interval is crossed. Scalar/tensor assembly, source-context binding, sparse
+residuals, Newton, adaptive stepping, radiation, flux output and adjoints use
+the same moment owner. Original source k(T) slopes and shared Cp continuity
+determine sourced conductivity corners. There is no per-element allocation,
+new source query, numerical differentiation, or extra conductivity table
+approximation inside the numerical leaf.
+
+The native P1 temperature interpolant, fixed reference geometry and mass,
+explicit isotropy/orthotropy declaration, source domains and existing
+semismooth/adjoint restrictions remain part of this model. Arithmetic rounding
+and source uncertainty are separate from polynomial integration exactness.
+Six isolated production moment tests execute successfully; whole-consumer
+regressions also cover quadratic storage, Dirichlet heat, source knots, physical
+flux and assembled Jacobians. Those native consumer tests were not executed in
+this change because the real asupersync dependency build was killed by the
+environment's memory limit.
+
 ## Source-surface contact with evolving material radiation
 
 `TemperatureContacts::advance_enthalpy_with_material_ambient_radiation` and

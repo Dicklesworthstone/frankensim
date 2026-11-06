@@ -175,14 +175,20 @@ impl<'a, S: CreepSourceFamily<'a>> CreepSolid<'a, S> {
                 .source
                 .minimum_thermal_capacity_j_m3_k()
                 .map_err(CreepCouplingError::Source)?;
-            for pair in entry.caloric.curve().knots().windows(2) {
+            for (index, pair) in entry.caloric.curve().knots().windows(2).enumerate() {
                 poll(cx)?;
-                // Bound the actual piecewise-linear caloric chart, not a sampled
-                // heat capacity. Round each positive lower-bound operation down.
-                let delta_h =
-                    (pair[1].specific_enthalpy_j_kg - pair[0].specific_enthalpy_j_kg).next_down();
-                let delta_t = (pair[1].temperature_k - pair[0].temperature_k).next_up();
-                let caloric_capacity = (density * (delta_h / delta_t).next_down()).next_down();
+                // Original affine Cp is bounded by its endpoints. Authored
+                // h/T charts retain their chord; round each bound downward.
+                let minimum_cp = if let Some([a, b]) = entry.caloric.curve()
+                    .sensible_heat_capacities_on_interval(index) {
+                    a.min(b).next_down()
+                } else {
+                    let delta_h =
+                        (pair[1].specific_enthalpy_j_kg - pair[0].specific_enthalpy_j_kg).next_down();
+                    let delta_t = (pair[1].temperature_k - pair[0].temperature_k).next_up();
+                    (delta_h / delta_t).next_down()
+                };
+                let caloric_capacity = (density * minimum_cp).next_down();
                 if !mechanical_capacity.is_finite()
                     || !positive(caloric_capacity)
                     || !positive((caloric_capacity + mechanical_capacity).next_down())

@@ -85,13 +85,18 @@ impl ThermalLaw for EquilibriumEnthalpyPhaseCurve {
     }
 
     fn maximum_temperature_slope(&self) -> f64 {
-        // The chart is piecewise linear in h; plateaus contribute zero. Unlike
-        // a local derivative query this remains valid across all chart knots.
+        // Original affine Cp is positive throughout each sensible interval,
+        // so 1/min(Cp endpoints) bounds its nonlinear T(h) tangent. Authored
+        // enthalpy chords and latent plateaus keep their original slopes.
         self.knots()
             .windows(2)
-            .map(|pair| {
-                (pair[1].temperature_k - pair[0].temperature_k)
-                    / (pair[1].specific_enthalpy_j_kg - pair[0].specific_enthalpy_j_kg)
+            .enumerate()
+            .map(|(index, pair)| {
+                self.sensible_heat_capacities_on_interval(index).map_or_else(
+                    || (pair[1].temperature_k - pair[0].temperature_k)
+                        / (pair[1].specific_enthalpy_j_kg - pair[0].specific_enthalpy_j_kg),
+                    |[a, b]| 1.0 / a.min(b),
+                )
             })
             .fold(0.0, f64::max)
     }
@@ -102,6 +107,27 @@ mod tests {
     use super::*;
     use crate::phase::EnthalpyPhaseKnot;
     use fs_blake3::ContentHash;
+
+    #[test]
+    fn original_cp_bounds_whole_solid_tangent_and_temperature_inverse() {
+        use crate::phase::{HeatCapacityKnot, SolidLiquidPhase};
+        let curve = EquilibriumEnthalpyPhaseCurve::try_from_heat_capacity(
+            ContentHash([0x61; 32]), SolidLiquidPhase::Solid, 0.0,
+            &[
+                HeatCapacityKnot { temperature_k: 300.0, specific_heat_capacity_j_kg_k: 600.0, bulk_density_kg_m3: 1000.0 },
+                HeatCapacityKnot { temperature_k: 600.0, specific_heat_capacity_j_kg_k: 1200.0, bulk_density_kg_m3: 900.0 },
+            ], 1e6,
+        ).unwrap();
+        let solid = curve.pure_solid_thermal_law().unwrap();
+        assert_eq!(ThermalLaw::maximum_temperature_slope(&curve), 1.0 / 600.0);
+        assert_eq!(solid.maximum_temperature_slope(), 1.0 / 600.0);
+        for temperature in [300.0, 350.25, 479.5, 600.0] {
+            let h = solid.specific_enthalpy_at_temperature(temperature).unwrap();
+            let expected = (temperature - 300.0) * (temperature + 300.0);
+            assert!((h - expected).abs() < 1e-9);
+            assert!((solid.temperature_k(h).unwrap() - temperature).abs() < 2e-12);
+        }
+    }
 
     #[test]
     fn phase_entropy_adapter_retains_sensible_and_latent_storage() {

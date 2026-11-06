@@ -981,7 +981,12 @@ fn storage_history_derivatives(
                     vertex, specific_enthalpy_j_kg: value,
                 });
             }
-            if slope(knots[index - 1].specific_enthalpy_j_kg)? != derivative {
+            let left_derivative = if let Some([_, cp]) = curve.sensible_heat_capacities_on_interval(index - 1) {
+                1.0 / cp
+            } else {
+                slope(knots[index - 1].specific_enthalpy_j_kg)?
+            };
+            if left_derivative != derivative {
                 return Err(EnthalpyAdjointError::ChartKink {
                     vertex, specific_enthalpy_j_kg: value,
                 });
@@ -1034,7 +1039,12 @@ fn check_chart(
                     .temperature_derivative_at_specific_enthalpy(h)
                     .map_err(|source| EnthalpyError::Phase { vertex, source })
             };
-            let temperature_kink = slope(knots[index - 1].specific_enthalpy_j_kg)? != slope(value)?;
+            let left_derivative = if let Some([_, cp]) = curve.sensible_heat_capacities_on_interval(index - 1) {
+                1.0 / cp
+            } else {
+                slope(knots[index - 1].specific_enthalpy_j_kg)?
+            };
+            let temperature_kink = left_derivative != slope(value)?;
             let mut fraction_kink = false;
             if storage
                 .phase_conductivity

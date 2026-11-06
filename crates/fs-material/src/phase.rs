@@ -450,6 +450,9 @@ pub mod isobaric {
 // Relative equilibrium entropy uses this same admitted h -> T chart.
 mod entropy;
 pub use entropy::EnthalpyEntropyMean;
+pub(crate) use entropy::affine_cp_entropy;
+// Original affine Cp(T) on sensible spans, including their exact inverse.
+mod caloric;
 // Source-preserving adjacent sensible spans with an exact reference node.
 mod caloric_join;
 
@@ -870,6 +873,7 @@ pub struct EquilibriumEnthalpyPhaseCurve {
     identity: ContentHash,
     source_receipts: Vec<PropertyUsageReceipt>,
     density_interpolation: PhaseDensityInterpolation,
+    sensible_heat_capacities: Vec<Option<[f64; 2]>>,
 }
 
 /// Explicit h/rho charts retain their original specific-volume interpolation.
@@ -888,8 +892,11 @@ pub enum PhaseIntervalDensityLaw {
     /// Specific volume `1/rho` is affine in specific enthalpy.
     AffineSpecificVolume,
     /// Density is affine in specific enthalpy; its reciprocal is nonlinear.
-    /// Used by sourced sensible branches to preserve their original rho(T).
+    /// This includes sourced sensible branches with constant heat capacity.
     AffineDensity,
+    /// Density is affine in temperature, with the original affine Cp(T)
+    /// integral defining the nonlinear specific-enthalpy coordinate.
+    AffineTemperatureDensity,
 }
 
 impl EquilibriumEnthalpyPhaseCurve {
@@ -966,10 +973,13 @@ impl EquilibriumEnthalpyPhaseCurve {
     /// subdivided until its straight enthalpy chord differs from that integral
     /// by no more than `maximum_interpolation_error_j_kg`.
     ///
-    /// The resulting chart preserves the original piecewise-linear density
-    /// law at its evaluated temperature, including when constant Cp needs no
-    /// subdivision. The requested bound covers the enthalpy interpolation
-    /// arithmetic; it does not quantify source error or floating-point roundoff.
+    /// The generated boundaries retain the original affine heat capacities.
+    /// Evaluation integrates and inverts that law exactly in real arithmetic;
+    /// it does not interpolate their enthalpy chords. The existing subdivision
+    /// allowance and knot budget still bound the public boundary chart. Density
+    /// retains its original affine law at the evaluated temperature. Neither
+    /// the allowance nor exact integration quantifies source uncertainty or
+    /// floating-point roundoff at the chosen enthalpy datum.
     pub fn try_from_heat_capacity(
         material_card_identity: ContentHash,
         phase: SolidLiquidPhase,
@@ -985,6 +995,7 @@ impl EquilibriumEnthalpyPhaseCurve {
             maximum_interpolation_error_j_kg,
         )?;
         let mut generated = Vec::with_capacity(generated_count);
+        let mut capacities = Vec::with_capacity(generated_count - 1);
         generated.push(EnthalpyPhaseKnot {
             specific_enthalpy_j_kg: reference_specific_enthalpy_j_kg,
             temperature_k: knots[0].temperature_k,
@@ -993,6 +1004,11 @@ impl EquilibriumEnthalpyPhaseCurve {
         });
         let mut enthalpy = reference_specific_enthalpy_j_kg;
         for pair in knots.windows(2) {
+            let source_cp = [
+                pair[0].specific_heat_capacity_j_kg_k,
+                pair[1].specific_heat_capacity_j_kg_k,
+            ];
+            let mut previous_cp = source_cp[0];
             let segment_start_enthalpy = enthalpy;
             let delta_temperature = pair[1].temperature_k - pair[0].temperature_k;
             let enthalpy_gain = (0.5 * pair[0].specific_heat_capacity_j_kg_k
@@ -1019,23 +1035,22 @@ impl EquilibriumEnthalpyPhaseCurve {
                 } else {
                     pair[0].temperature_k + delta
                 };
+                let actual_fraction =
+                    (temperature_k - pair[0].temperature_k) / delta_temperature;
+                let capacity = caloric::capacity_at_fraction(source_cp, actual_fraction);
                 let specific_enthalpy_j_kg = if step == subdivisions {
                     endpoint_enthalpy
                 } else {
                     segment_start_enthalpy
-                        + pair[0].specific_heat_capacity_j_kg_k * delta
-                        + 0.5
-                            * (pair[1].specific_heat_capacity_j_kg_k
-                                - pair[0].specific_heat_capacity_j_kg_k)
-                            / delta_temperature
-                            * delta
-                            * delta
+                        + (0.5 * source_cp[0] + 0.5 * capacity)
+                            * (temperature_k - pair[0].temperature_k)
                 };
                 let bulk_density_kg_m3 = if step == subdivisions {
                     pair[1].bulk_density_kg_m3
                 } else {
                     pair[0].bulk_density_kg_m3
-                        + (pair[1].bulk_density_kg_m3 - pair[0].bulk_density_kg_m3) * fraction
+                        + (pair[1].bulk_density_kg_m3 - pair[0].bulk_density_kg_m3)
+                            * actual_fraction
                 };
                 if !(temperature_k.is_finite()
                     && specific_enthalpy_j_kg.is_finite()
@@ -1053,11 +1068,14 @@ impl EquilibriumEnthalpyPhaseCurve {
                     liquid_mass_fraction,
                     bulk_density_kg_m3,
                 });
+                capacities.push(Some([previous_cp, capacity]));
+                previous_cp = capacity;
                 enthalpy = specific_enthalpy_j_kg;
             }
         }
         let mut curve = Self::try_single_phase(material_card_identity, phase, generated)?;
         curve.retain_sensible_density_law();
+        curve.retain_sensible_heat_capacities(capacities)?;
         Ok(curve)
     }
 
@@ -1071,6 +1089,7 @@ impl EquilibriumEnthalpyPhaseCurve {
             knots,
             source_receipts: Vec::new(),
             density_interpolation: PhaseDensityInterpolation::SpecificVolume,
+            sensible_heat_capacities: Vec::new(),
         }
     }
 
@@ -1138,7 +1157,14 @@ impl EquilibriumEnthalpyPhaseCurve {
                 && pair.0.liquid_mass_fraction == pair.1.liquid_mass_fraction
                 && (pair.0.liquid_mass_fraction == 0.0 || pair.0.liquid_mass_fraction == 1.0)
             {
-                PhaseIntervalDensityLaw::AffineDensity
+                if self
+                    .sensible_heat_capacities_on_interval(lower_knot)
+                    .is_some_and(|cp| cp[0] != cp[1])
+                {
+                    PhaseIntervalDensityLaw::AffineTemperatureDensity
+                } else {
+                    PhaseIntervalDensityLaw::AffineDensity
+                }
             } else {
                 PhaseIntervalDensityLaw::AffineSpecificVolume
             },
@@ -1213,8 +1239,7 @@ impl EquilibriumEnthalpyPhaseCurve {
                 what: "mixing-volume original-interval budget exhausted",
             });
         }
-        let (reference_slope, _) =
-            self.volume_slope_on_interval(reference_interval, receiver.bulk_density_kg_m3)?;
+        let (reference_slope, _) = self.volume_slope_on_interval(reference_interval, receiver)?;
         let mut current = receiver;
         let mut total = 0.0;
         let mut compensation = 0.0;
@@ -1228,14 +1253,37 @@ impl EquilibriumEnthalpyPhaseCurve {
             } else {
                 self.knots[index + usize::from(forward)]
             };
-            let (local_slope, law) =
-                self.volume_slope_on_interval(index, current.bulk_density_kg_m3)?;
-            let local_remainder = if law == PhaseIntervalDensityLaw::AffineDensity {
+            let (local_slope, law) = self.volume_slope_on_interval(index, current)?;
+            let local_remainder = if law != PhaseIntervalDensityLaw::AffineSpecificVolume {
                 let relative = (next.bulk_density_kg_m3 - current.bulk_density_kg_m3)
                     / current.bulk_density_kg_m3;
-                let value = -((next.bulk_density_kg_m3.recip() * relative) * relative);
+                let capacity_remainder =
+                    if let Some(cp) = self.sensible_heat_capacities_on_interval(index)
+                        .filter(|cp| cp[0] != cp[1])
+                    {
+                        let lower = self.knots[index];
+                        let upper = self.knots[index + 1];
+                        let current_fraction = caloric::temperature_fraction(
+                            lower, upper, cp, current.specific_enthalpy_j_kg,
+                        )?;
+                        let next_fraction = caloric::temperature_fraction(
+                            lower, upper, cp, next.specific_enthalpy_j_kg,
+                        )?;
+                        let current_capacity = caloric::capacity_at_fraction(cp, current_fraction);
+                        let capacity_change = (cp[1] - cp[0]) * (next_fraction - current_fraction);
+                        (0.5 * current.bulk_density_kg_m3.recip())
+                            * (capacity_change / current_capacity)
+                    } else {
+                        0.0
+                    };
+                // The reciprocal-density remainder is augmented by the
+                // quadratic h(T) term, without subtracting absolute volumes.
+                let value = -relative
+                    * next.bulk_density_kg_m3.recip().mul_add(relative, capacity_remainder);
                 if !value.is_finite()
-                    || (next.bulk_density_kg_m3 != current.bulk_density_kg_m3 && value == 0.0)
+                    || (capacity_remainder == 0.0
+                        && next.bulk_density_kg_m3 != current.bulk_density_kg_m3
+                        && value == 0.0)
                 {
                     return Err(PhaseStateError::InvalidCurve {
                         what: "mixing-volume reciprocal remainder is unrepresentable",
@@ -1266,21 +1314,32 @@ impl EquilibriumEnthalpyPhaseCurve {
         Ok((total, count))
     }
 
-    fn volume_slope_on_interval(
+    pub(super) fn volume_slope_on_interval(
         &self,
         lower_knot: usize,
-        density_kg_m3: f64,
+        state: EnthalpyPhaseKnot,
     ) -> Result<(f64, PhaseIntervalDensityLaw), PhaseStateError> {
         let law = self.density_law_on_interval(lower_knot)?;
         let lower = self.knots[lower_knot];
         let upper = self.knots[lower_knot + 1];
         let span = upper.specific_enthalpy_j_kg - lower.specific_enthalpy_j_kg;
         let density_change = upper.bulk_density_kg_m3 - lower.bulk_density_kg_m3;
-        let slope = match law {
-            PhaseIntervalDensityLaw::AffineDensity => {
+        let density_kg_m3 = state.bulk_density_kg_m3;
+        let slope = match (law, self.sensible_heat_capacities_on_interval(lower_knot)) {
+            (_, Some(cp)) => {
+                let fraction = caloric::temperature_fraction(
+                    lower, upper, cp, state.specific_enthalpy_j_kg,
+                )?;
+                let capacity = caloric::capacity_at_fraction(cp, fraction);
+                -(((density_change / density_kg_m3)
+                    / (upper.temperature_k - lower.temperature_k))
+                    / capacity)
+                    / density_kg_m3
+            }
+            (PhaseIntervalDensityLaw::AffineDensity, None) => {
                 -((density_change / density_kg_m3) / span) / density_kg_m3
             }
-            PhaseIntervalDensityLaw::AffineSpecificVolume => {
+            (PhaseIntervalDensityLaw::AffineSpecificVolume, None) => {
                 let relative =
                     -density_change / lower.bulk_density_kg_m3.max(upper.bulk_density_kg_m3);
                 lower
@@ -1289,6 +1348,11 @@ impl EquilibriumEnthalpyPhaseCurve {
                     .recip()
                     * relative
                     / span
+            }
+            (PhaseIntervalDensityLaw::AffineTemperatureDensity, None) => {
+                return Err(PhaseStateError::InvalidCurve {
+                    what: "temperature-affine density requires its original heat capacity",
+                });
             }
         };
         if !span.is_finite() || !slope.is_finite() || (density_change != 0.0 && slope == 0.0) {
@@ -1299,19 +1363,18 @@ impl EquilibriumEnthalpyPhaseCurve {
         Ok((slope, law))
     }
 
-    /// Piecewise-linear temperature derivative `dT/dh` [K/(J/kg)] on this
+    /// Original temperature derivative `dT/dh` [K/(J/kg)] on this
     /// specific-enthalpy chart, without extrapolation or phase smoothing.
     ///
-    /// Inside a segment this is its exact chord slope, including exactly zero
-    /// throughout an isothermal latent-heat plateau. At an interior knot the
+    /// Sourced sensible intervals use `1/Cp(T)` from their original affine
+    /// capacities; authored intervals use their exact chord slope. A latent
+    /// plateau has exactly zero slope. At an interior knot the
     /// segment to the right (increasing enthalpy) is selected. The lower domain
     /// endpoint also uses its right derivative; the upper endpoint uses its
     /// left derivative. This explicit one-sided convention provides a
     /// generalized derivative for semismooth enthalpy solves; it does not claim
     /// classical differentiability at a slope-changing knot.
     ///
-    /// For a chart generated from heat-capacity data, this differentiates the
-    /// admitted piecewise-linear chart, not the original continuous Cp curve.
     /// No reciprocal or artificially large apparent heat capacity is formed
     /// on a latent plateau.
     ///
@@ -1324,10 +1387,25 @@ impl EquilibriumEnthalpyPhaseCurve {
         &self,
         specific_enthalpy_j_kg: f64,
     ) -> Result<f64, PhaseStateError> {
-        let (lower_knot, upper_knot) = self.derivative_segment(specific_enthalpy_j_kg)?;
+        let index = self.derivative_interval(specific_enthalpy_j_kg)?;
+        let (lower_knot, upper_knot) = (self.knots[index], self.knots[index + 1]);
         let temperature_increment = upper_knot.temperature_k - lower_knot.temperature_k;
-        let slope = temperature_increment
-            / (upper_knot.specific_enthalpy_j_kg - lower_knot.specific_enthalpy_j_kg);
+        let slope = if let Some(cp) = self.sensible_heat_capacities_on_interval(index) {
+            if cp[0] == cp[1] {
+                cp[0].recip()
+            } else {
+                let fraction = caloric::temperature_fraction(
+                    lower_knot,
+                    upper_knot,
+                    cp,
+                    specific_enthalpy_j_kg,
+                )?;
+                caloric::capacity_at_fraction(cp, fraction).recip()
+            }
+        } else {
+            temperature_increment
+                / (upper_knot.specific_enthalpy_j_kg - lower_knot.specific_enthalpy_j_kg)
+        };
         if !slope.is_finite() || (temperature_increment > 0.0 && slope == 0.0) {
             return Err(PhaseStateError::UnrepresentableTemperatureDerivative);
         }
@@ -1351,7 +1429,8 @@ impl EquilibriumEnthalpyPhaseCurve {
         &self,
         specific_enthalpy_j_kg: f64,
     ) -> Result<f64, PhaseStateError> {
-        let (lower_knot, upper_knot) = self.derivative_segment(specific_enthalpy_j_kg)?;
+        let index = self.derivative_interval(specific_enthalpy_j_kg)?;
+        let (lower_knot, upper_knot) = (self.knots[index], self.knots[index + 1]);
         let fraction_increment = upper_knot.liquid_mass_fraction - lower_knot.liquid_mass_fraction;
         let slope = fraction_increment
             / (upper_knot.specific_enthalpy_j_kg - lower_knot.specific_enthalpy_j_kg);
@@ -1361,10 +1440,7 @@ impl EquilibriumEnthalpyPhaseCurve {
         Ok(slope)
     }
 
-    fn derivative_segment(
-        &self,
-        specific_enthalpy_j_kg: f64,
-    ) -> Result<(EnthalpyPhaseKnot, EnthalpyPhaseKnot), PhaseStateError> {
+    fn derivative_interval(&self, specific_enthalpy_j_kg: f64) -> Result<usize, PhaseStateError> {
         if !specific_enthalpy_j_kg.is_finite() {
             return Err(PhaseStateError::NonFiniteSpecificEnthalpy);
         }
@@ -1381,7 +1457,7 @@ impl EquilibriumEnthalpyPhaseCurve {
             .knots
             .partition_point(|knot| knot.specific_enthalpy_j_kg <= specific_enthalpy_j_kg)
             .min(self.knots.len() - 1);
-        Ok((self.knots[upper_index - 1], self.knots[upper_index]))
+        Ok(upper_index - 1)
     }
 
     /// Resolve temperature in kelvin without constructing a phase-state identity.
@@ -1450,9 +1526,29 @@ impl EquilibriumEnthalpyPhaseCurve {
                 let upper_knot = self.knots[upper_index];
                 let alpha = (specific_enthalpy_j_kg - lower_knot.specific_enthalpy_j_kg)
                     / (upper_knot.specific_enthalpy_j_kg - lower_knot.specific_enthalpy_j_kg);
+                let capacities = self.sensible_heat_capacities_on_interval(upper_index - 1);
+                let temperature_fraction =
+                    if let Some(cp) = capacities {
+                        caloric::temperature_fraction(
+                            lower_knot,
+                            upper_knot,
+                            cp,
+                            specific_enthalpy_j_kg,
+                        )?
+                    } else {
+                        alpha
+                    };
                 let values = EnthalpyPhaseKnot {
                     specific_enthalpy_j_kg,
-                    temperature_k: lerp(lower_knot.temperature_k, upper_knot.temperature_k, alpha),
+                    temperature_k: if capacities.is_some() {
+                        caloric::interpolate(
+                            lower_knot.temperature_k,
+                            upper_knot.temperature_k,
+                            temperature_fraction,
+                        )
+                    } else {
+                        lerp(lower_knot.temperature_k, upper_knot.temperature_k, alpha)
+                    },
                     liquid_mass_fraction: lerp(
                         lower_knot.liquid_mass_fraction,
                         upper_knot.liquid_mass_fraction,
@@ -1470,7 +1566,7 @@ impl EquilibriumEnthalpyPhaseCurve {
                         lerp(
                             lower_knot.bulk_density_kg_m3,
                             upper_knot.bulk_density_kg_m3,
-                            alpha,
+                            temperature_fraction,
                         )
                     } else if lower_knot.bulk_density_kg_m3.to_bits()
                         == upper_knot.bulk_density_kg_m3.to_bits()

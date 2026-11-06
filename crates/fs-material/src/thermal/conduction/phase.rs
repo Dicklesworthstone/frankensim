@@ -80,6 +80,8 @@ struct Interval {
     temperature_slope: f64,
     conductivity_slope: f64,
     source_path: usize,
+    sensible_heat_capacities: Option<[f64; 2]>,
+    sensible_temperature_bounds: Option<[f64; 2]>,
 }
 
 /// Exact compiled scalar response, distinct from a fresh source-query receipt.
@@ -252,7 +254,7 @@ impl<'a> PreparedPhaseConductivity<'a> {
         for h in enthalpy_range_j_kg {
             hash.update(&h.to_bits().to_le_bytes());
         }
-        for pair in original[first..=last].windows(2) {
+        for (offset, pair) in original[first..=last].windows(2).enumerate() {
             checkpoint()?;
             let a = lo.max(pair[0].specific_enthalpy_j_kg);
             let b = hi.min(pair[1].specific_enthalpy_j_kg);
@@ -270,6 +272,11 @@ impl<'a> PreparedPhaseConductivity<'a> {
                 .query_path_pinned_typed(key, &lower, &upper, selected)?;
             checkpoint()?;
             let temperature_slope = caloric.temperature_derivative_at_specific_enthalpy(a)?;
+            let sensible_capacities = caloric.sensible_heat_capacities_on_interval(first + offset);
+            let temperatures = [
+                caloric.temperature_at_specific_enthalpy(a)?,
+                caloric.temperature_at_specific_enthalpy(b)?,
+            ];
             let path_index = source_paths.len();
             hash.update(&(path_index as u64).to_le_bytes());
             hash.update(&(path.knots.len() as u64).to_le_bytes());
@@ -285,13 +292,27 @@ impl<'a> PreparedPhaseConductivity<'a> {
                     ));
                 }
                 hash.update(answer.receipt.content_hash().as_bytes());
+                let temperature = if index == 0 {
+                    temperatures[0]
+                } else if index + 1 == path.knots.len() {
+                    temperatures[1]
+                } else {
+                    (temperatures[1] - temperatures[0]).mul_add(*fraction, temperatures[0])
+                };
                 let h = if index == 0 {
                     a
                 } else if index + 1 == path.knots.len() {
                     b
+                } else if sensible_capacities.is_some() {
+                    caloric.specific_enthalpy_on_sensible_interval(first + offset, temperature)?
                 } else {
                     (b - a).mul_add(*fraction, a)
                 };
+                let heat_capacity = sensible_capacities.map(|[ca, cb]| {
+                    let fraction = (temperature - pair[0].temperature_k)
+                        / (pair[1].temperature_k - pair[0].temperature_k);
+                    (1.0 - fraction) * ca + fraction * cb
+                });
                 Self::append(
                     &mut knots,
                     &mut intervals,
@@ -299,6 +320,8 @@ impl<'a> PreparedPhaseConductivity<'a> {
                     [h, k],
                     temperature_slope,
                     path_index,
+                    heat_capacity,
+                    temperature,
                 )?;
             }
             source_paths.push(path);
@@ -334,14 +357,16 @@ impl<'a> PreparedPhaseConductivity<'a> {
     fn append(
         knots: &mut Vec<[f64; 2]>,
         intervals: &mut Vec<Interval>,
-        previous: &mut Option<[f64; 2]>,
+        previous: &mut Option<([f64; 2], Option<f64>, f64)>,
         knot: [f64; 2],
         temperature_slope: f64,
         source_path: usize,
+        heat_capacity: Option<f64>,
+        temperature: f64,
     ) -> Result<(), PhaseConductivityError> {
-        if let Some(before) = *previous {
-            let width = knot[0] - before[0];
-            let change = knot[1] - before[1];
+        if let Some(([before_h, before_k], before_capacity, before_temperature)) = *previous {
+            let width = knot[0] - before_h;
+            let change = knot[1] - before_k;
             let slope = change / width;
             if !width.is_finite()
                 || width <= 0.0
@@ -352,10 +377,26 @@ impl<'a> PreparedPhaseConductivity<'a> {
                     "source knots or conductivity tangent cannot be represented on the caloric interval",
                 ));
             }
+            if before_capacity.zip(heat_capacity).is_some() {
+                let temperature_width = temperature - before_temperature;
+                let source_slope = change / temperature_width;
+                if !temperature_width.is_finite()
+                    || temperature_width <= 0.0
+                    || !source_slope.is_finite()
+                    || (change != 0.0 && source_slope == 0.0)
+                {
+                    return Err(PhaseConductivityError::Unrepresentable(
+                        "sensible source coordinates or conductivity tangent cannot be represented",
+                    ));
+                }
+            }
             intervals.push(Interval {
                 temperature_slope,
                 conductivity_slope: slope,
                 source_path,
+                sensible_heat_capacities: before_capacity.zip(heat_capacity).map(|(a, b)| [a, b]),
+                sensible_temperature_bounds: before_capacity.zip(heat_capacity)
+                    .map(|_| [before_temperature, temperature]),
             });
         } else if let Some(last) = knots.last() {
             if last != &knot {
@@ -363,14 +404,14 @@ impl<'a> PreparedPhaseConductivity<'a> {
                     "conductivity source must be continuous at a shared caloric knot",
                 ));
             }
-            *previous = Some(knot);
+            *previous = Some((knot, heat_capacity, temperature));
             return Ok(());
         }
         if knots.len() >= MAX_PHASE_CONDUCTIVITY_KNOTS {
             return Err(DepositionError::Budget("combined phase conductivity knots").into());
         }
         knots.push(knot);
-        *previous = Some(knot);
+        *previous = Some((knot, heat_capacity, temperature));
         Ok(())
     }
 
@@ -428,7 +469,28 @@ impl<'a> PreparedPhaseConductivity<'a> {
             - 1;
         let [a, ka] = self.knots[index];
         let [b, kb] = self.knots[index + 1];
-        let fraction = (h - a) / (b - a);
+        let interval = self.intervals[index];
+        let caloric = self.caloric.values_at_specific_enthalpy(h)?;
+        let enthalpy_fraction = (h - a) / (b - a);
+        let temperature_slope = if let Some(cp) = interval.sensible_heat_capacities {
+            if h == b {
+                // The prepared upper bound selects THIS left interval, even
+                // when the complete chart has a latent/right-hand successor.
+                1.0 / cp[1]
+            } else {
+                self.caloric.temperature_derivative_at_specific_enthalpy(h)?
+            }
+        } else {
+            interval.temperature_slope
+        };
+        let (fraction, conductivity_slope) = if let Some([ta, tb]) = interval.sensible_temperature_bounds {
+            (
+                (caloric.temperature_k - ta) / (tb - ta),
+                ((kb - ka) / (tb - ta)) * temperature_slope,
+            )
+        } else {
+            (enthalpy_fraction, interval.conductivity_slope)
+        };
         let k = if h == a {
             ka
         } else if h == b {
@@ -438,22 +500,32 @@ impl<'a> PreparedPhaseConductivity<'a> {
         } else {
             (ka - kb).mul_add(1.0 - fraction, kb)
         };
-        let interval = self.intervals[index];
-        if !k.is_finite() || k < 0.0 || (k == 0.0 && interval.conductivity_slope != 0.0) {
+        if !k.is_finite() || k < 0.0 || !conductivity_slope.is_finite()
+            || !temperature_slope.is_finite()
+            || (interval.sensible_heat_capacities.is_some() && temperature_slope <= 0.0)
+            || (k == 0.0 && conductivity_slope != 0.0) {
             return Err(PhaseConductivityError::Unrepresentable(
                 "conductivity and its native implicit tangent are not representable",
             ));
         }
-        let caloric = self.caloric.values_at_specific_enthalpy(h)?;
         Ok(PhaseConductivitySample {
             specific_enthalpy: h,
             temperature: caloric.temperature_k,
             liquid_fraction: caloric.liquid_mass_fraction,
             conductivity: k,
-            temperature_slope: interval.temperature_slope,
-            conductivity_slope: interval.conductivity_slope,
+            temperature_slope,
+            conductivity_slope,
             source_path: interval.source_path,
         })
+    }
+
+    /// Original Cp at the temperature endpoints of one compiled source interval.
+    /// `None` denotes an authored affine h path or latent interval. With `Some`,
+    /// conductivity is affine in temperature and h(T) is the original quadratic
+    /// Cp integral; an h-linear field integrator must retain this distinction.
+    #[must_use]
+    pub fn sensible_heat_capacities_on_interval(&self, index: usize) -> Option<[f64; 2]> {
+        self.intervals.get(index).and_then(|interval| interval.sensible_heat_capacities)
     }
 }
 

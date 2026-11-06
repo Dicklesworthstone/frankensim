@@ -176,14 +176,15 @@ fn admit(
                 return Err(invalid("live support needs a wholly solid constant-reference-density caloric chart"));
             }
         }
-        for pair in knots.windows(2) {
+        for (index, pair) in knots.windows(2).enumerate() {
             check(cancel)?;
             let dt = finite(pair[1].temperature_k - pair[0].temperature_k)?;
             if dt <= 0.0 {
                 return Err(invalid("live support caloric temperature must increase strictly"));
             }
             let capacity = finite(cell.mass_kg *
-                (pair[1].specific_enthalpy_j_kg - pair[0].specific_enthalpy_j_kg) / dt)?;
+                source.curve.sensible_heat_capacity_bounds_j_kg_k(index)
+                    .map_err(|_| invalid("support caloric heat capacity is unrepresentable"))?[0])?;
             minimum_capacity = minimum_capacity.min(capacity);
         }
         // Bound -T*Psi_TT over the caloric interval and every admitted elastic

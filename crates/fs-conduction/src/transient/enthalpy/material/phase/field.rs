@@ -9,7 +9,7 @@ use super::super::super::{
 use super::MaterialPhaseTransport;
 use crate::{
     ConductionMesh, ConductionProblem, ConductivityModel,
-    material::{ElementConductivity, integrate_scalar_path},
+    material::{ElementConductivity, integrate_caloric_path},
 };
 
 /// Assignments share the heterogeneous storage owner's admitted immutable maps.
@@ -146,9 +146,11 @@ impl<'c> PhaseFieldTransport<'c> {
             if element % ASSEMBLY_TILE == 0 {
                 poll(cx, element)?;
             }
-            let (average, tangent) = integrate_scalar_path(
+            let material = self.for_element(element);
+            let (average, tangent) = integrate_caloric_path(
                 Some(cx),
-                &self.for_element(element).knots[0],
+                &material.knots[0],
+                &material.heat_capacities[0],
                 vertices.map(|v| h[v as usize]),
                 with_derivatives,
             )?;
@@ -318,13 +320,37 @@ impl<'c> PhaseFieldTransport<'c> {
                 continue;
             }
             let material = self.for_element(element);
-            for knots in &material.knots[..material.conductivity_sources().len()] {
+            for (knots, capacities) in material.knots[..material.conductivity_sources().len()]
+                .iter().zip(&material.heat_capacities) {
                 if let Ok(index) = knots.binary_search_by(|k| k.0.total_cmp(&nodal[0])) {
                     if index > 0 && index + 1 < knots.len() {
                         let a = knots[index - 1];
                         let b = knots[index];
                         let c = knots[index + 1];
-                        if (b.1 - a.1) / (b.0 - a.0) != (c.1 - b.1) / (c.0 - b.0) {
+                        let different = if let (Some(left), Some(right)) =
+                            (capacities[index - 1], capacities[index]) {
+                            // Compare the ORIGINAL k(T) slope and shared Cp.
+                            // Reconstructing dk/dh from two h-chord products
+                            // can manufacture a kink through rounding alone.
+                            let temperature = |h| material.source.caloric_curve()
+                                .temperature_at_specific_enthalpy(h)
+                                .map_err(|source| EnthalpyError::Phase {
+                                    vertex: vertices[0] as usize, source,
+                                });
+                            let (ta, tb, tc) = (temperature(a.0)?, temperature(b.0)?, temperature(c.0)?);
+                            left[1] != right[0]
+                                || (b.1 - a.1) / (tb - ta) != (c.1 - b.1) / (tc - tb)
+                        } else {
+                            let left_scale = capacities[index - 1].map_or(1.0, |[ca, cb]| {
+                                0.5 * (ca / cb) + 0.5
+                            });
+                            let right_scale = capacities[index].map_or(1.0, |[ca, cb]| {
+                                0.5 + 0.5 * (cb / ca)
+                            });
+                            ((b.1 - a.1) / (b.0 - a.0)) * left_scale
+                                != ((c.1 - b.1) / (c.0 - b.0)) * right_scale
+                        };
+                        if different {
                             return Err(EnthalpyAdjointError::MaterialKink);
                         }
                     }
@@ -350,7 +376,7 @@ impl MaterialPhaseTransport<'_> {
             // Preserve the single scalar integration and its exact diagonal
             // entries for the original isotropic API.
             let (average, tangent) =
-                integrate_scalar_path(Some(cx), &self.knots[0], nodal, with_derivatives)?;
+                integrate_caloric_path(Some(cx), &self.knots[0], &self.heat_capacities[0], nodal, with_derivatives)?;
             for i in 0..3 {
                 moments.tensor[i][i] = average;
                 if with_derivatives {
@@ -361,9 +387,9 @@ impl MaterialPhaseTransport<'_> {
             }
             return Ok(moments);
         };
-        for (axis, knots) in axes.iter().zip(&self.knots) {
+        for ((axis, knots), capacities) in axes.iter().zip(&self.knots).zip(&self.heat_capacities) {
             let (average, tangent) =
-                integrate_scalar_path(Some(cx), knots, nodal, with_derivatives)?;
+                integrate_caloric_path(Some(cx), knots, capacities, nodal, with_derivatives)?;
             for i in 0..3 {
                 for j in i..3 {
                     let value = finite((average * axis[i]).mul_add(axis[j], moments.tensor[i][j]))?;

@@ -206,6 +206,70 @@ fn near(actual: f64, expected: f64) {
 }
 
 #[test]
+fn coarse_melting_boundaries_preserve_exact_sensible_capacity_and_density() {
+    let source = card_with_heat_capacities_and_densities(
+        Some(20_000.0),
+        true,
+        false,
+        [1000.0, 2000.0],
+        [2000.0, 4000.0],
+        [[1000.0, 900.0], [800.0, 700.0]],
+    );
+    let query = Query::new();
+    let melting = ResolvedMeltingCurve::try_new(&source, query.query(), 0.0, 1e6).unwrap();
+    let curve = melting.curve();
+    assert_eq!(curve.knots().len(), 4);
+    assert_eq!(
+        curve.sensible_heat_capacities_on_interval(0),
+        Some([1000.0, 2000.0])
+    );
+    assert_eq!(curve.sensible_heat_capacities_on_interval(1), None);
+    assert_eq!(
+        curve.sensible_heat_capacities_on_interval(2),
+        Some([2000.0, 4000.0])
+    );
+    for (h, t, rho, cp) in [
+        (62_500.0, 350.0, 950.0, 1500.0),
+        (295_000.0, 450.0, 750.0, 3000.0),
+    ] {
+        let state = curve.values_at_specific_enthalpy(h).unwrap();
+        assert!((state.temperature_k - t).abs() < 2e-12);
+        assert!((state.bulk_density_kg_m3 - rho).abs() < 2e-12);
+        assert!(
+            (curve
+                .temperature_derivative_at_specific_enthalpy(h)
+                .unwrap()
+                - 1.0 / cp)
+                .abs()
+                < 2e-18
+        );
+    }
+    assert_eq!(
+        curve
+            .temperature_derivative_at_specific_enthalpy(150_000.0)
+            .unwrap(),
+        0.0
+    );
+    assert_eq!(
+        curve
+            .temperature_derivative_at_specific_enthalpy(170_000.0)
+            .unwrap(),
+        1.0 / 2000.0
+    );
+    assert_eq!(
+        curve
+            .values_at_specific_enthalpy(160_000.0)
+            .unwrap()
+            .liquid_mass_fraction,
+        0.5
+    );
+    assert_eq!(
+        melting.plateau_enthalpy_bounds_j_kg(),
+        [150_000.0, 170_000.0]
+    );
+}
+
+#[test]
 fn g1_sharp_melting_mobility_retains_density_through_isobaric_heat_and_cooling() {
     use crate::phase::mushy::{MushyPhaseLaw, PhaseMobility};
 

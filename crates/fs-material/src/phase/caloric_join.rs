@@ -23,8 +23,8 @@ impl ResolvedHeatCapacityCurve {
     /// density, with the common pair retained once. The returned plain phase
     /// curve therefore remains usable by source-checking thermal consumers.
     ///
-    /// Joining preserves each span's interpolation approximation; it does not
-    /// improve its error allowance or identify experimental material behavior.
+    /// Joining preserves each span's original affine Cp(T), density law and
+    /// boundary chart; no new caloric approximation or source claim is made.
     /// Rebasing adds floating-point roundoff, not latent heat or physical work.
     /// Unrepresentable arithmetic, collapsed enthalpy intervals and a combined
     /// chart exceeding the existing source-knot budget refuse atomically.
@@ -93,6 +93,9 @@ impl ResolvedHeatCapacityCurve {
             lower.material_card_identity, phase, knots,
         )?;
         curve.retain_sensible_density_law();
+        let mut capacities = lower.sensible_heat_capacities.clone();
+        capacities.extend_from_slice(&upper.sensible_heat_capacities);
+        curve.retain_sensible_heat_capacities(capacities)?;
         let mut receipts = Vec::with_capacity(receipt_count);
         receipts.extend_from_slice(a);
         receipts.extend_from_slice(&b[2..]);

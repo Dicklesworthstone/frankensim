@@ -34,6 +34,9 @@ pub struct MaterialPhaseTransport<'a> {
     // coordinate/value view. Their coordinate remains h [J/kg], never T [K].
     // Isotropic transport uses only the first table; the other two are empty.
     knots: [Vec<(f64, f64)>; 3],
+    // Retain original Cp endpoints alongside each source k interval. They
+    // select exact transformed P1 moments when k(T(h)) is nonlinear in h.
+    heat_capacities: [Vec<Option<[f64; 2]>>; 3],
     principal_axes: Option<[[f64; 3]; 3]>,
     enthalpy_bounds_j_kg: [f64; 2],
     reference_density_kg_m3: f64,
@@ -67,6 +70,7 @@ impl<'a> MaterialPhaseTransport<'a> {
             source,
             sources: [source; 3],
             knots: [knots, Vec::new(), Vec::new()],
+            heat_capacities: [source_capacities(source), Vec::new(), Vec::new()],
             principal_axes: None,
             enthalpy_bounds_j_kg: bounds,
             reference_density_kg_m3,
@@ -148,6 +152,7 @@ impl<'a> MaterialPhaseTransport<'a> {
             source: sources[0],
             sources,
             knots,
+            heat_capacities: sources.map(source_capacities),
             principal_axes: Some(principal_axes),
             enthalpy_bounds_j_kg: bounds,
             reference_density_kg_m3,
@@ -281,6 +286,12 @@ fn source_knots(
     }
     poll(cx, knots.len())?;
     Ok(knots)
+}
+
+fn source_capacities(source: &PreparedPhaseConductivity<'_>) -> Vec<Option<[f64; 2]>> {
+    (0..source.knots().len() - 1)
+        .map(|index| source.sensible_heat_capacities_on_interval(index))
+        .collect()
 }
 
 fn admit_source_contexts(
