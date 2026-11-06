@@ -2742,6 +2742,50 @@ preparation. `tests/ionized_gas/harmonic.rs` targets independent Drude and
 two-fluid complex inverses, DC/high-frequency limits, heat/storage separation,
 polarized peak admission, source retention and invalid/cancelled responses.
 
+### Magnetized harmonic carriers and Hall current
+
+`IonizedGasHarmonic::prepare_magnetized` adds an explicitly prescribed uniform
+static B to the same frozen carrier populations, signed charges, masses,
+background relaxation sources and complete Coulomb pair friction. Under
+`exp(+i omega t)` the momentum equation is
+`(K+i omega M)u + nq*(B cross u) = nq*E`. A caller-declared ceiling in `(0,1)`
+on every carrier's `hbar*|qB/m|/(kT)` screens classical thermal applicability;
+it is not a measured material qualification or an error bound.
+
+The parallel response reuses the original relaxation eigensystem. Two circular
+polarizations retain the signed cyclotron frequencies and all mutual forces.
+Independent carriers keep O(N) preparation; coupled carriers use two bounded,
+diagonally scaled N-by-N solves through the existing cancellable complex LU,
+with the original 128-carrier limit. Complete original momentum balances must
+close within 1e-10. The prepared fixed-frequency/fixed-B owner reuses its
+mobilities for O(N + pair-count) arbitrary polarized field queries. Original
+circular factors are retained instead of first subtracting large Hall and
+transverse coefficients near resonance. The full nonsymmetric conductivity
+tensor and circular conductivities remain inspectable.
+
+Actual instantaneous peak carrier and pair-relative drifts enforce the same
+source domains, including elliptical polarization and resonant amplification.
+Heating uses only the original background/pair friction, including its signed
+drift-dependent two-temperature correction. Magnetic force does no real work.
+Conventional reactive electrical power includes a signed gyroscopic term:
+`Im(E.conj(J))/2 = 2*omega*U + Im(sum(nq*(B cross u).conj(u)))/2`.
+This term is not heat; at cyclotron resonance kinetic storage can remain
+nonzero even when electrical reactance vanishes. Heat, real magnetic work and
+reactive closure are checked separately, with resonant cancellation normalized
+by the gross reactive terms. Cancellation publishes no partial preparation or
+response, and no original source state is mutated.
+
+`tests/ionized_gas/magnetized.rs` covers the original B=0 response, an independent
+Cartesian Drude-Hall inverse, both charge signs' circular resonances, a complete
+two-fluid Coulomb inverse and thermal partition, proper-rotation covariance,
+Onsager-Casimir field reversal, source-domain refusals and cancellation. This
+is a positive-frequency classical local fluid response with prescribed B and
+fixed isotropic Markovian collision coefficients. It does not implement
+magnetized collision kinetics, quantum or finite-Larmor-radius response,
+transient initialization, background momentum evolution, Maxwell propagation,
+or empirical broadband validation. Its tensor is deliberately not admitted by
+the existing scalar unmagnetized plane-wave or symmetric-Ohmic field owners.
+
 ## Permanent secondary creep
 
 `creep::NortonCreep` adds sub-yield permanent deformation on the existing

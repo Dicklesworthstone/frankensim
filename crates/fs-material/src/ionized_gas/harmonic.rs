@@ -11,8 +11,15 @@
 //! reuse its real modes. Heat comes from the original friction, and reversible
 //! drift kinetic storage is reported separately. This local weak-drift fluid
 //! closure freezes populations, temperatures and Markovian collision rates.
-//! It supplies no Hall/kinetic/nonlocal response, transient initial condition,
-//! dielectric background, wave solve or measured broadband qualification.
+//! `prepare_magnetized` retains these same sources and adds the signed Lorentz
+//! skew operator, including Hall current and cyclotron resonance. Neither rung
+//! supplies kinetic/nonlocal response, transient initial conditions, dielectric
+//! background, a wave solve or measured broadband qualification.
+
+mod magnetized;
+pub use magnetized::{
+    IonizedGasMagneticLimits, IonizedGasMagnetizedHarmonic, IonizedGasMagnetizedHarmonicResponse,
+};
 
 use super::{
     BOLTZMANN_J_K, ELEMENTARY_CHARGE_C, IonizedGasConductivity, IonizedGasError,
@@ -138,9 +145,7 @@ impl IonizedGasConductivity {
                 let k = pair.friction_coefficient_kg_m3_s();
                 let off = k / mass_sqrt[i] / mass_sqrt[j];
                 if !positive(off) {
-                    return Err(invalid(
-                        "mass-normalized pair friction is unrepresentable",
-                    ));
+                    return Err(invalid("mass-normalized pair friction is unrepresentable"));
                 }
                 matrix[i * n + i] += k / mass_density[i];
                 matrix[j * n + j] += k / mass_density[j];
@@ -148,9 +153,7 @@ impl IonizedGasConductivity {
                 matrix[j * n + i] = -off;
                 pair_carriers.push([i, j]);
             }
-            let scale = (0..n)
-                .map(|i| matrix[i * n + i])
-                .fold(0.0_f64, f64::max);
+            let scale = (0..n).map(|i| matrix[i * n + i]).fold(0.0_f64, f64::max);
             if !positive(scale) {
                 return Err(invalid("harmonic relaxation scale is unrepresentable"));
             }
@@ -199,6 +202,43 @@ impl<'a> IonizedGasHarmonic<'a> {
         self.source
     }
 
+    /// Original zero-field mobility, also used for the parallel component of
+    /// the magnetized response. Retains the prepared mutual-drag eigensystem.
+    fn mobility(
+        &self,
+        omega_rad_s: f64,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Vec<C64>, IonizedGasError> {
+        let n = self.source.carriers.len();
+        let modal: Vec<_> = self
+            .projected_forcing
+            .iter()
+            .zip(&self.rates)
+            .map(|(&force, &rate)| C64::from_re(force) / C64::new(rate, omega_rad_s))
+            .collect();
+        let mut mobility = Vec::with_capacity(n);
+        for i in 0..n {
+            poll(cancelled)?;
+            let weighted = if let Some(modes) = &self.modes {
+                C64::new(
+                    sum((0..n).map(|j| modes[i * n + j] * modal[j].re)),
+                    sum((0..n).map(|j| modes[i * n + j] * modal[j].im)),
+                )
+            } else {
+                modal[i]
+            };
+            let value = C64::new(
+                weighted.re / self.mass_sqrt[i],
+                weighted.im / self.mass_sqrt[i],
+            );
+            if !finite(value) {
+                return Err(invalid("harmonic mobility is unrepresentable"));
+            }
+            mobility.push(value);
+        }
+        Ok(mobility)
+    }
+
     /// Evaluate a positive angular frequency [rad/s] and arbitrary vector peak
     /// phasor [V/m]. Exactly DC uses the existing static owner, avoiding a false
     /// factor of one half at zero frequency. Peak instantaneous drift (including
@@ -223,13 +263,7 @@ impl<'a> IonizedGasHarmonic<'a> {
             return Err(invalid("harmonic field magnitude is unrepresentable"));
         }
         let n = self.source.carriers.len();
-        let modal: Vec<_> = self
-            .projected_forcing
-            .iter()
-            .zip(&self.rates)
-            .map(|(&force, &rate)| C64::from_re(force) / C64::new(rate, omega_rad_s))
-            .collect();
-        let mut mobility = Vec::with_capacity(n);
+        let mobility = self.mobility(omega_rad_s, &mut cancelled)?;
         let mut velocities = Vec::with_capacity(n);
         let mut forces = Vec::with_capacity(n);
         let mut gross_forces = Vec::with_capacity(n);
@@ -237,18 +271,7 @@ impl<'a> IonizedGasHarmonic<'a> {
         let mut kinetic = 0.0;
         for (i, carrier) in self.source.carriers.iter().enumerate() {
             poll(&mut cancelled)?;
-            let weighted = if let Some(modes) = &self.modes {
-                C64::new(
-                    sum((0..n).map(|j| modes[i * n + j] * modal[j].re)),
-                    sum((0..n).map(|j| modes[i * n + j] * modal[j].im)),
-                )
-            } else {
-                modal[i]
-            };
-            let mu = C64::new(
-                weighted.re / self.mass_sqrt[i],
-                weighted.im / self.mass_sqrt[i],
-            );
+            let mu = mobility[i];
             let limit = det::sqrt(BOLTZMANN_J_K * carrier.temperature_k / carrier.mass_kg)
                 * self.source.limits.maximum_drift_thermal_ratio;
             if !finite(mu) || mu.abs() * peak_field > limit {
@@ -264,15 +287,9 @@ impl<'a> IonizedGasHarmonic<'a> {
                 self.mass_density[i] * carrier.relaxation.rate_per_s() * speed_squared;
             forces.push(drag + inertia);
             gross_forces.push(self.forcing[i].abs() + drag.abs() + inertia.abs());
-            mobility.push(mu);
             velocities.push(velocity);
         }
-        for (pair, &[i, j]) in self
-            .source
-            .coulomb_pairs()
-            .iter()
-            .zip(&self.pair_carriers)
-        {
+        for (pair, &[i, j]) in self.source.coulomb_pairs().iter().zip(&self.pair_carriers) {
             poll(&mut cancelled)?;
             let relative = mobility[i] - mobility[j];
             let force = relative.scale(pair.friction_coefficient_kg_m3_s());
@@ -280,10 +297,11 @@ impl<'a> IonizedGasHarmonic<'a> {
             forces[j] = forces[j] - force;
             gross_forces[i] += force.abs();
             gross_forces[j] += force.abs();
-            if relative.abs() * peak_field
-                > det::sqrt(pair.maximum_relative_speed_squared_m2_s2())
+            if relative.abs() * peak_field > det::sqrt(pair.maximum_relative_speed_squared_m2_s2())
             {
-                return Err(invalid("harmonic relative drift exceeds its Coulomb source domain"));
+                return Err(invalid(
+                    "harmonic relative drift exceeds its Coulomb source domain",
+                ));
             }
             let speed_squared = mean_square(electric_field_v_m.map(|e| relative * e));
             if speed_squared > 0.0 {
@@ -342,7 +360,9 @@ impl<'a> IonizedGasHarmonic<'a> {
             || !heat.heavy_power_density_w_m3.is_finite()
             || (peak_field > 0.0 && (work <= 0.0 || kinetic <= 0.0))
         {
-            return Err(invalid("harmonic current, storage or heat is unrepresentable"));
+            return Err(invalid(
+                "harmonic current, storage or heat is unrepresentable",
+            ));
         }
         let power_residual = balance(work, heat.total_power_density_w_m3())?
             .max(balance(reactive, 2.0 * omega_rad_s * kinetic)?);

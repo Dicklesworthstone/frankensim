@@ -11,6 +11,8 @@ mod coulomb;
 mod frozen;
 #[path = "ionized_gas/harmonic.rs"]
 mod harmonic;
+#[path = "ionized_gas/magnetized.rs"]
+mod magnetized;
 
 #[test]
 fn g1_saha_populations_and_particle_masses_drive_current_without_neutral_transport() {

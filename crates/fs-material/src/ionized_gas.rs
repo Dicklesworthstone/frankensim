@@ -11,13 +11,15 @@
 //! their correlated velocities with the original background anchors retained.
 //! `prepare_harmonic` retains those same sources and adds settled-harmonic
 //! carrier inertia, complex current, friction heat and reversible kinetic storage.
-//! Magnetic/Hall response, sheaths, diffusion currents, electrical breakdown,
+//! Its `prepare_magnetized` path adds an explicitly prescribed static magnetic
+//! field, Hall current and cyclotron resonance with the original mutual drag.
+//! Sheaths, diffusion currents, electrical breakdown,
 //! kinetic/nonlocal response and radiation require different constitutive models.
 //!
 //! Reference for the relaxation law and its frequency dependence: R. Fitzpatrick,
 //! *Dielectric constant of a collisional plasma*, equations 1202–1204,
 //! <https://farside.ph.utexas.edu/teaching/em/lectures/node103.html>.
-//! All responses remain local, unmagnetized and weak-drift; static methods require DC.
+//! All responses remain local and weak-drift; static methods require DC and B=0.
 
 use fs_math::det::{exp, ln, sqrt};
 use fs_qty::{Dims, Volume};
@@ -33,7 +35,10 @@ use fs_thermochem::{SpeciesId, UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K};
 mod coulomb;
 mod harmonic;
 mod relaxation;
-pub use harmonic::{IonizedGasHarmonic, IonizedGasHarmonicResponse};
+pub use harmonic::{
+    IonizedGasHarmonic, IonizedGasHarmonicResponse, IonizedGasMagneticLimits,
+    IonizedGasMagnetizedHarmonic, IonizedGasMagnetizedHarmonicResponse,
+};
 pub use relaxation::{
     CarrierMomentumRelaxation, CarrierMomentumSource, ElectronNeutralMomentumContribution,
 };
