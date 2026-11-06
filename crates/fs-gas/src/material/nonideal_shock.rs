@@ -1,4 +1,4 @@
-//! Homogeneous real-gas normal-shock compression on the original NASA/PR laws.
+//! Homogeneous real-gas shock and piston compression on the original NASA/PR laws.
 //!
 //! In the shock frame, mass and momentum give a Rayleigh pressure at each
 //! candidate density. The original material owner reconstructs the corresponding
@@ -156,13 +156,45 @@ impl RealGasNormalShock {
     }
 }
 
+/// A piston-driven compression front with signed laboratory velocities.
+///
+/// The laboratory normal points from the piston into the upstream gas. Both
+/// prescribed velocities may be negative; compression requires the piston to
+/// move faster along that normal than the upstream gas. The gas immediately
+/// behind the front moves at `piston_normal_velocity`.
+///
+/// `shock` retains positive shock-frame speed magnitudes:
+/// u1 = shock_normal_velocity - upstream_normal_velocity and
+/// u2 = shock_normal_velocity - piston_normal_velocity. Its positive mass flux
+/// is a magnitude; the signed flux through the moving front along the declared
+/// laboratory normal is MINUS `shock.mass_flux_kg_m2_s`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RealGasPistonCompression {
+    pub shock: RealGasNormalShock,
+    pub upstream_normal_velocity: Velocity,
+    pub piston_normal_velocity: Velocity,
+    pub shock_normal_velocity: Velocity,
+}
+
+#[derive(Clone, Copy)]
+enum Drive {
+    UpstreamSpeed(f64),
+    PistonIncrement(f64),
+}
+
+struct ShockFrame {
+    upstream: f64,
+    downstream: f64,
+    /// Retain the finite velocity difference without subtracting large speeds.
+    drop: f64,
+    mass_flux: f64,
+}
+
 struct Jump<'a> {
     model: &'a ThermochemicalPengRobinsonModel,
     context: &'a QueryPoint,
     upstream: ResolvedThermochemicalRealGasState,
-    velocity: f64,
-    mass_flux: f64,
-    dynamic_pressure: f64,
+    drive: Drive,
     energy: GasEnergySolve,
 }
 
@@ -171,7 +203,7 @@ struct Sample {
     state: ResolvedThermochemicalRealGasState,
     residual: f64,
     slope: f64,
-    velocity: f64,
+    frame: ShockFrame,
     caloric_iterations: usize,
 }
 
@@ -187,11 +219,40 @@ impl Jump<'_> {
         // Keep the finite compression fraction before reciprocal subtraction.
         let fraction = (ratio - 1.0) / ratio;
         let delta_volume = fraction / rho1;
-        let pressure_jump = self.dynamic_pressure * fraction;
+        let frame = match self.drive {
+            Drive::UpstreamSpeed(upstream) => {
+                let mass_flux = rho1 * upstream;
+                ShockFrame {
+                    upstream,
+                    downstream: mass_flux / density,
+                    drop: upstream * fraction,
+                    mass_flux,
+                }
+            }
+            Drive::PistonIncrement(drop) => {
+                let downstream = drop / (ratio - 1.0);
+                let upstream = drop + downstream;
+                ShockFrame {
+                    upstream,
+                    downstream,
+                    drop,
+                    mass_flux: rho1 * upstream,
+                }
+            }
+        };
+        let pressure_jump = frame.mass_flux * frame.drop;
         let rayleigh_pressure = self.upstream.pressure_pa() + pressure_jump;
-        let target = (self.upstream.pressure_pa() + 0.5 * pressure_jump) * delta_volume;
+        // j * Delta v = u1-u2, so both drives have the same stable Hugoniot
+        // increment: p1 * Delta v + (u1-u2)^2 / 2. For a prescribed piston the
+        // latter term uses the known laboratory velocity increment directly.
+        let target = self.upstream.pressure_pa() * delta_volume + (0.5 * frame.drop) * frame.drop;
         if !positive(density)
             || !positive(delta_volume)
+            || !positive(frame.upstream)
+            || !positive(frame.downstream)
+            || !positive(frame.drop)
+            || !positive(frame.mass_flux)
+            || !positive(pressure_jump)
             || !positive(rayleigh_pressure)
             || !positive(target)
         {
@@ -211,17 +272,22 @@ impl Jump<'_> {
             )?;
         let caloric_iterations = solved.iterations();
         let state = solved.into_state();
-        let velocity = self.mass_flux / density;
         let residual = state.pressure_pa() - rayleigh_pressure;
-        // d(p_EOS-p_R)/d(rho2/rho1) along the target Hugoniot energy:
-        // rho1*[c_s^2-u2^2-p_T*(p_EOS-p_R)/(rho2^2 Cv)]. The sound speed,
-        // thermal derivative and Cv all belong to the same native PR state.
+        // Exact d(p_EOS-p_R)/d(rho2/rho1) on the respective energy target.
+        // The sound speed, thermal derivative and Cv share the native PR state.
         let thermal = state.root().pressure_derivatives().0;
+        let (velocity_term, pressure_term) = match self.drive {
+            Drive::UpstreamSpeed(_) => (-frame.downstream.powi(2), residual),
+            Drive::PistonIncrement(_) => (
+                frame.downstream.powi(2),
+                state.pressure_pa() - self.upstream.pressure_pa(),
+            ),
+        };
         let slope = rho1
-            * (state.sound_speed_m_s().powi(2)
-                - velocity * velocity
-                - (residual / density) * (thermal / density) / state.specific_heat_cv_j_kg_k());
-        if !positive(velocity) || !residual.is_finite() {
+            * (state.sound_speed_m_s().powi(2) + velocity_term
+                - (pressure_term / density) * (thermal / density)
+                    / state.specific_heat_cv_j_kg_k());
+        if !residual.is_finite() {
             return Err(RealGasShockError::Invalid(
                 "finite shock pressure residual and positive downstream velocity required",
             ));
@@ -232,7 +298,7 @@ impl Jump<'_> {
             state,
             residual,
             slope,
-            velocity,
+            frame,
             caloric_iterations,
         })
     }
@@ -249,7 +315,6 @@ impl Jump<'_> {
 /// tangent with a bounded bracket safeguard; failure/cancellation mutates no
 /// input. All temperatures/densities in the brackets must belong to the
 /// declared continuous homogeneous branch.
-#[allow(clippy::too_many_lines)]
 pub fn normal_shock(
     model: &ThermochemicalPengRobinsonModel,
     context: &QueryPoint,
@@ -258,23 +323,93 @@ pub fn normal_shock(
     controls: RealGasShockControl,
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<RealGasNormalShock, RealGasShockError> {
-    controls.validate()?;
+    solve_jump(
+        model,
+        context,
+        upstream_density,
+        Drive::UpstreamSpeed(upstream_speed.value()),
+        controls,
+        &mut cancelled,
+    )
+}
+
+/// Resolve the compression front produced by a prescribed piston velocity.
+///
+/// Both input velocities are signed along the laboratory normal from piston
+/// into gas. Their finite difference, piston minus upstream, must be positive.
+/// The shock speed is solved together with the downstream density and native
+/// caloric state; no outer solve over stationary normal shocks is used.
+/// The same source domain, homogeneous branch and conservation requirements
+/// as [`normal_shock`] apply. The returned front must move faster than the
+/// piston in the chosen laboratory frame, with a representable separation.
+#[allow(clippy::too_many_arguments)]
+pub fn piston_compression(
+    model: &ThermochemicalPengRobinsonModel,
+    context: &QueryPoint,
+    upstream_density: Density,
+    upstream_normal_velocity: Velocity,
+    piston_normal_velocity: Velocity,
+    controls: RealGasShockControl,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<RealGasPistonCompression, RealGasShockError> {
     poll(&mut cancelled)?;
+    let upstream_velocity = upstream_normal_velocity.value();
+    let piston_velocity = piston_normal_velocity.value();
+    let increment = piston_velocity - upstream_velocity;
+    if !upstream_velocity.is_finite() || !piston_velocity.is_finite() || !positive(increment) {
+        return Err(RealGasShockError::Invalid(
+            "finite laboratory velocities and positive finite piston-minus-upstream velocity required",
+        ));
+    }
+    let shock = solve_jump(
+        model,
+        context,
+        upstream_density,
+        Drive::PistonIncrement(increment),
+        controls,
+        &mut cancelled,
+    )?;
+    let shock_velocity = piston_velocity + shock.downstream_speed.value();
+    if !shock_velocity.is_finite() || shock_velocity <= piston_velocity {
+        return Err(RealGasShockError::Invalid(
+            "laboratory shock speed must be finite and representably exceed the piston velocity",
+        ));
+    }
+    poll(&mut cancelled)?;
+    Ok(RealGasPistonCompression {
+        shock,
+        upstream_normal_velocity,
+        piston_normal_velocity,
+        shock_normal_velocity: Velocity::new(shock_velocity),
+    })
+}
+
+#[allow(clippy::too_many_lines)]
+fn solve_jump(
+    model: &ThermochemicalPengRobinsonModel,
+    context: &QueryPoint,
+    upstream_density: Density,
+    drive: Drive,
+    controls: RealGasShockControl,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<RealGasNormalShock, RealGasShockError> {
+    controls.validate()?;
+    poll(cancelled)?;
     let rho1 = upstream_density.value();
-    let velocity = upstream_speed.value();
+    let velocity = match drive {
+        Drive::UpstreamSpeed(speed) | Drive::PistonIncrement(speed) => speed,
+    };
     if !positive(rho1) || !positive(velocity) {
         return Err(RealGasShockError::Invalid(
             "positive finite upstream density and shock-relative speed required",
         ));
     }
     let upstream = model.evaluate_density_temperature(context, rho1)?;
-    if velocity <= upstream.sound_speed_m_s() {
+    if matches!(drive, Drive::UpstreamSpeed(speed) if speed <= upstream.sound_speed_m_s()) {
         return Err(RealGasShockError::Invalid(
             "classical compression shock requires supersonic upstream flow",
         ));
     }
-    let mass_flux = rho1 * velocity;
-    let dynamic_pressure = mass_flux * velocity;
     let [lo, hi] = controls.compression_ratio_bracket;
     // Budget the coupled residuals before solving: Delta h_0 = energy_error
     // + pressure_error/rho2; Hugoniot_error = energy_error - dp*Delta v/2.
@@ -289,9 +424,7 @@ pub fn normal_shock(
             .min(0.25 * controls.jump_energy_tolerance_j_kg),
         ..controls.energy
     };
-    if !positive(mass_flux)
-        || !positive(dynamic_pressure)
-        || !positive(volume_scale)
+    if !positive(volume_scale)
         || !positive(pressure_tolerance)
         || !positive(energy.energy_tolerance_j_kg)
     {
@@ -303,13 +436,11 @@ pub fn normal_shock(
         model,
         context,
         upstream,
-        velocity,
-        mass_flux,
-        dynamic_pressure,
+        drive,
         energy,
     };
-    let mut low = jump.sample(lo, &mut cancelled)?;
-    let mut high = jump.sample(hi, &mut cancelled)?;
+    let mut low = jump.sample(lo, cancelled)?;
+    let mut high = jump.sample(hi, cancelled)?;
     let mut caloric_iterations = low.caloric_iterations + high.caloric_iterations;
     if low.residual > 0.0 || high.residual < 0.0 {
         return Err(RealGasShockError::OutsideBracket {
@@ -318,20 +449,25 @@ pub fn normal_shock(
         });
     }
     for density_iterations in 0..=controls.maximum_density_iterations {
-        poll(&mut cancelled)?;
+        poll(cancelled)?;
         // Near the trivial root, a small residual is insufficient. Require
         // the downstream sonic branch before attempting complete admission.
-        if low.residual.abs() <= pressure_tolerance && low.velocity < low.state.sound_speed_m_s() {
+        if low.residual.abs() <= pressure_tolerance
+            && low.frame.upstream > jump.upstream.sound_speed_m_s()
+            && low.frame.downstream < low.state.sound_speed_m_s()
+        {
             return finish(
                 jump,
                 low,
                 controls,
                 density_iterations,
                 caloric_iterations,
-                &mut cancelled,
+                cancelled,
             );
         }
-        if high.residual.abs() <= pressure_tolerance && high.velocity < high.state.sound_speed_m_s()
+        if high.residual.abs() <= pressure_tolerance
+            && high.frame.upstream > jump.upstream.sound_speed_m_s()
+            && high.frame.downstream < high.state.sound_speed_m_s()
         {
             return finish(
                 jump,
@@ -339,7 +475,7 @@ pub fn normal_shock(
                 controls,
                 density_iterations,
                 caloric_iterations,
-                &mut cancelled,
+                cancelled,
             );
         }
         let best = if low.residual.abs() < high.residual.abs() {
@@ -369,7 +505,7 @@ pub fn normal_shock(
                 momentum_residual_pa: best.residual,
             });
         }
-        let sample = jump.sample(ratio, &mut cancelled)?;
+        let sample = jump.sample(ratio, cancelled)?;
         caloric_iterations += sample.caloric_iterations;
         if sample.residual <= 0.0 {
             low = sample;
@@ -405,8 +541,9 @@ fn finish(
     let entropy = jump
         .model
         .specific_entropy_change_between_densities(rho1, t1, rho2, t2)?;
-    let upstream_mach = jump.velocity / upstream.sound_speed_m_s();
-    let downstream_mach = sample.velocity / downstream.sound_speed_m_s();
+    let frame = sample.frame;
+    let upstream_mach = frame.upstream / upstream.sound_speed_m_s();
+    let downstream_mach = frame.downstream / downstream.sound_speed_m_s();
     if rho2 <= rho1
         || downstream.pressure_pa() <= upstream.pressure_pa()
         || !upstream_mach.is_finite()
@@ -422,13 +559,15 @@ fn finish(
             entropy_change_j_kg_k: entropy,
         });
     }
-    let mass_residual = rho2 * sample.velocity - jump.mass_flux;
-    let momentum_residual = (downstream.pressure_pa() - upstream.pressure_pa())
-        + jump.mass_flux * (sample.velocity - jump.velocity);
+    let mass_residual = rho2 * frame.downstream - frame.mass_flux;
+    let momentum_residual =
+        (downstream.pressure_pa() - upstream.pressure_pa()) - frame.mass_flux * frame.drop;
     let hugoniot_residual =
         du - (0.5 * downstream.pressure_pa() + 0.5 * upstream.pressure_pa()) * delta_volume;
+    // Retaining Delta avoids cancellation in u1-u2, including weak piston
+    // shocks. Split the positive products to avoid overflowing u1+u2 first.
     let enthalpy_residual =
-        dh + 0.5 * (sample.velocity - jump.velocity) * (sample.velocity + jump.velocity);
+        dh - ((0.5 * frame.drop) * frame.upstream + (0.5 * frame.drop) * frame.downstream);
     for (quantity, residual, tolerance) in [
         (
             "mass flux [kg/(m2 s)]",
@@ -463,9 +602,9 @@ fn finish(
     Ok(RealGasNormalShock {
         upstream,
         downstream,
-        upstream_speed: Velocity::new(jump.velocity),
-        downstream_speed: Velocity::new(sample.velocity),
-        mass_flux_kg_m2_s: jump.mass_flux,
+        upstream_speed: Velocity::new(frame.upstream),
+        downstream_speed: Velocity::new(frame.downstream),
+        mass_flux_kg_m2_s: frame.mass_flux,
         upstream_mach,
         downstream_mach,
         internal_energy_increase_j_kg: du,

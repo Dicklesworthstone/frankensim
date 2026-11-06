@@ -9,10 +9,10 @@
 /// Constant-pressure chemistry and heat exchange on the common material parcel.
 pub mod isobaric;
 
+/// Conservative homogeneous real-gas normal-shock and piston compression.
+pub mod nonideal_shock;
 /// Adiabatic compressor/expander outlets with original mixture phase equilibrium.
 pub mod phase_machinery;
-/// Conservative homogeneous real-gas normal-shock compression.
-pub mod nonideal_shock;
 
 /// Shared material-card viscosity/conductivity in conservative gas transport.
 #[cfg(feature = "experimental-euler")]
@@ -333,14 +333,11 @@ fn admit_sources(
             "active feed water identities differ",
         ));
     }
-    let packs = bank
-        .source_packs()
-        .iter()
-        .filter(|pack| {
-            active
-                .iter()
-                .any(|source| source.species() == &pack.species)
-        });
+    let packs = bank.source_packs().iter().filter(|pack| {
+        active
+            .iter()
+            .any(|source| source.species() == &pack.species)
+    });
     if !packs.eq(parcel.model().source_packs().iter()) {
         return Err(MaterialKineticsError::Invalid(
             "active feed source-pack identities differ",

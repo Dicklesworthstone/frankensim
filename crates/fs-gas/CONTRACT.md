@@ -4912,6 +4912,32 @@ stable branch; local stability checks do not establish global phase stability.
 It does not resolve a two-phase front, chemical or vibrational relaxation,
 shock thickness or spatial field evolution.
 
+### Real-gas compression from prescribed piston motion
+
+`material::nonideal_shock::piston_compression` instead takes signed upstream
+and piston velocities along a normal directed from the piston into the gas.
+The piston must move toward the upstream gas in that relative coordinate.
+The original bounded density solve now determines the shock speed and wall
+pressure together; the caller does not supply a guessed shock Mach number.
+Each trial uses the exact piston mass/momentum relation and finite Hugoniot
+energy increment, with an analytic tangent from the same native PR calorics.
+The complete shock retains the original source states, conservation defects
+and entropy/sonic admission, plus the laboratory velocities and shock speed.
+Its embedded normal-shock speeds and mass flux are positive magnitudes;
+the moving-shock mass flux along the declared laboratory normal is negative.
+The known velocity increment is retained in momentum and kinetic differences
+to avoid subtracting nearly equal large shock-relative speeds.
+
+This is the compressive piston branch on the same declared homogeneous
+source domain. It does not supply an expansion fan, advance a moving mesh,
+integrate piston inertia or evolve a spatial real-gas field. A common change
+of laboratory velocity leaves the physical jump unchanged within represented
+input precision; unrepresentable shock/wall separation is refused.
+Additional authored regressions cover a separate 75-digit dense PR piston oracle,
+the analytic dilute piston limit, changes of reference frame, and bounded
+source/branch/work/cancellation refusal. These numerical reference fixtures
+do not establish empirical calibration of the authored material mixture.
+
 ## Simultaneous reaction and finite reservoir heat exchange
 
 The prepared constant-volume and constant-pressure reactors accept an explicit
