@@ -2402,3 +2402,34 @@ the exact target remain pending in the accepted left-limit state. Ordinary
 public patch replacement continues to require due events to have been
 processed. No extra thermal solver, swept-contact residence law, event-location
 algorithm or unconditional nonlinear-convergence claim is introduced.
+
+
+## Conservative material removal from existing enthalpy cells
+
+`enthalpy::removal` provides `remove_material_candidate` and the explicit
+`remove_material_before_pending_events` left-limit ingress. Both stage one private
+copy of the original graph. The physical owner supplies the original material
+density, removed volume, complete replacement geometry and every incident contact
+patch; no density, receding pose, conductance or mass is inferred from hardness.
+Stored original and remaining mass/volume must agree with that supplied density
+within caller-declared arithmetic tolerances. Positive removal must change both
+represented inventories, leave positive material, and retain the exact original
+enthalpy-law identity and datum. Unsupported storage, exhaustion, stale cells,
+missing patches and incompatible coverage refuse without changing the input.
+
+Specific enthalpy is preserved bit-for-bit. Actual removed mass carries its
+current signed `dm*h` out of the retained cells; the same amount is recorded as a
+stable negative retained-energy change without subtracting large gross energies.
+The audit distinguishes requested from represented volume and reports density and
+mass/volume discrepancies. The next heat step therefore uses the actual reduced
+mass and caller-supplied geometry. This is material transport, not latent heat or
+an additional heat sink. Subsequent debris transport, phase evolution, momentum,
+strain and absolute entropy remain with their physical owners.
+
+The ordinary ingress requires due events to be processed. The explicit left-limit
+ingress permits only events exactly at the current time, preserving the clock,
+schedule and cursor so a coupled owner can apply heat, removal, then the original
+event in that order. Five source regressions cover reduced heat capacity, signed
+caloric-datum invariance, complete incident coverage, atomic late refusal and
+original endpoint-event ordering. These tests were authored and pinned-formatted;
+resource constraints prevented native execution in this session.

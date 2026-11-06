@@ -52,6 +52,10 @@ pub mod sublimation;
 #[path = "enthalpy/evaporation.rs"]
 pub mod evaporation;
 
+/// Conservative well-mixed material removal with explicitly replaced geometry.
+#[path = "enthalpy/removal.rs"]
+pub mod removal;
+
 /// Heat-driven virgin/char decomposition on these same cells and heat links.
 #[path = "enthalpy/pyrolysis.rs"]
 pub mod pyrolysis;
