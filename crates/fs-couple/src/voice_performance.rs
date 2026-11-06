@@ -50,6 +50,7 @@
 //! pulse_shimmer <seed> <sd_rel>                           (optional; a per-cycle gain on the wave the tract receives)
 //! head_sphere <radius_m> <radius source without spaces>   (optional; the mouth as a cap on a rigid sphere)
 //! head_load cap                                           (optional, needs head_sphere and termination flanged; the lips see the sphere's load)
+//! torso_sphere <radius_m> <neck_gap_m> <source without spaces>   (optional, needs head_sphere; a torso sphere under the head)
 //! ```
 //!
 //! `head_sphere` observes the mouth as a cap of its own area on a rigid sphere of that radius, centred `radius` behind
@@ -65,6 +66,14 @@
 //! that one table. It needs the `head_sphere` row (the radius is that row's) and `termination flanged` (the table adds to
 //! that load). The receiver stays the head's `S / B` on the mouth flow, which now sees the sphere's load. Without the row
 //! every line takes exactly its old path.
+//!
+//! `torso_sphere` puts a rigid torso sphere of that radius under the head sphere, the neck gap between their surfaces
+//! (Algazi, Duda and Thompson's snowman, [`crate::pcm_wav::baffled::head::TorsoSphere`]; the mouth on the head's
+//! horizontal equator facing front and the card's `+y` up are our choices). The torso's change joins the head's `S`
+//! below 1.25 times the microphone's band, and with `head_load` the lips' load gains the cap's change from the torso over
+//! the same band ([`crate::pcm_wav::baffled::head::head_torso_mouth_load`]), so the lips and the microphone see one
+//! geometry. It needs the `head_sphere` row; the third field names where the sizes are printed. Without the row nothing
+//! changes.
 //!
 //! `constriction_noise` is an opt-in glottal source on the printed duct-constriction law of Oldham and Ukpoho (J. Sound Vib.
 //! 140(2), 1990; Guedel, AIVC Contributed Report 02, eq. 3 and Fig. 10; [`crate::turbulence_noise::ConstrictionNoise`]): a
@@ -166,7 +175,7 @@ use crate::driving_point::outlet::mouth_flow_line;
 use crate::glottis::{
     FoldBody, FoldCard, FoldCardSource, FoldMode, FoldRestGap, FoldShape, GLOTTAL_LINE_MAX_TAPS, GlottalIsland,
 };
-use crate::pcm_wav::baffled::head::{HeadSphere, head_mouth_load};
+use crate::pcm_wav::baffled::head::{HeadSphere, TorsoSphere, head_mouth_load, head_torso_mouth_load};
 use crate::pcm_wav::baffled::{BaffledPressure, CircularOutletReceiver, RayleighMedium};
 use crate::pcm_wav::observation::PressureRenderer;
 use crate::render::RenderError;
@@ -187,6 +196,7 @@ use fs_vfit::discretize::DelayedFilter;
 pub const VOICE_PERFORMANCE_SCHEMA: &str = "frankensim-voice-performance-v1";
 const HEAD_LOAD_NEEDS_SPHERE: &str = "head_load needs the head_sphere row: the load is that sphere's";
 const HEAD_LOAD_NEEDS_FLANGED: &str = "head_load needs `termination flanged`: it adds the sphere's change to the flanged load";
+const TORSO_NEEDS_SPHERE: &str = "torso_sphere needs the head_sphere row: the torso sits under that head";
 /// Largest accepted file.
 pub const MAX_VOICE_PERFORMANCE_BYTES: usize = 1 << 20;
 const MAX_SECTIONS: usize = 1024;
@@ -251,6 +261,8 @@ pub struct VoiceDescription {
     pub head_sphere: Option<HeadSphereCard>,
     /// Opt-in `head_load cap`: the lips see that sphere's radiation load (module doc); `false` keeps the declared one.
     pub head_load: bool,
+    /// Opt-in torso under the head sphere ([`TorsoSphereCard`]); `None` keeps the head alone.
+    pub torso_sphere: Option<TorsoSphereCard>,
 }
 
 /// A `head_sphere` row: the sphere's radius and where it is printed.
@@ -259,6 +271,15 @@ pub struct HeadSphereCard {
     /// Head radius [m].
     pub radius_m: f64,
     /// Where the radius is printed (an identifier without spaces).
+    pub source: String,
+}
+
+/// A `torso_sphere` row: the torso sphere under the head and where its sizes are printed.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TorsoSphereCard {
+    /// The torso's radius and the neck gap between the two surfaces [m].
+    pub torso: TorsoSphere,
+    /// Where the sizes are printed (an identifier without spaces).
     pub source: String,
 }
 
@@ -350,6 +371,7 @@ impl VoiceDescription {
         let mut pulse_shimmer = None;
         let mut head_sphere = None;
         let mut head_load = None;
+        let mut torso_sphere = None;
         let mut fold_mapping = None;
         let mut fold_shape = None;
         let mut fold_damping_upper = None;
@@ -597,6 +619,13 @@ impl VoiceDescription {
                     }
                     once(&mut head_load, (), key)?;
                 }
+                "torso_sphere" => {
+                    arity(&rest, 3, key)?;
+                    let torso =
+                        TorsoSphere { radius_m: field(&rest, 0, "torso radius")?, neck_gap_m: field(&rest, 1, "neck gap")? };
+                    torso.validate()?;
+                    once(&mut torso_sphere, TorsoSphereCard { torso, source: rest[2].to_string() }, key)?;
+                }
                 "fold_mapping" => {
                     arity(&rest, 1, key)?;
                     if rest[0] != "bilateral" {
@@ -681,6 +710,9 @@ impl VoiceDescription {
                 return Err(HEAD_LOAD_NEEDS_FLANGED.into());
             }
         }
+        if torso_sphere.is_some() && head_sphere.is_none() {
+            return Err(TORSO_NEEDS_SPHERE.into());
+        }
         Ok(Self {
             output_rate_hz,
             samples,
@@ -707,6 +739,7 @@ impl VoiceDescription {
             pulse_shimmer,
             head_sphere,
             head_load: head_load.is_some(),
+            torso_sphere,
         })
     }
 
@@ -737,8 +770,12 @@ impl VoiceDescription {
         .map_err(|e| format!("tract chart refused: {e:?}"))?;
         let duct = chart.to_duct();
         let mechanics_rate = self.output_rate_hz * self.mechanics_per_output;
+        if self.torso_sphere.is_some() && self.head_sphere.is_none() {
+            return Err(TORSO_NEEDS_SPHERE.into());
+        }
         // `head_load`: one table on the finest rung's bins, read by the island's line, the mouth-flow line and the
-        // passive formants alike. Without the row each takes the declared termination exactly as before.
+        // passive formants alike, with the torso's change when there is a torso (one geometry for the lips and the
+        // microphone). Without the row each takes the declared termination exactly as before.
         let head_load = match (self.head_load, &self.head_sphere) {
             (false, _) => None,
             (true, None) => return Err(HEAD_LOAD_NEEDS_SPHERE.into()),
@@ -746,8 +783,12 @@ impl VoiceDescription {
                 return Err(HEAD_LOAD_NEEDS_FLANGED.into());
             }
             (true, Some(card)) => Some(
-                head_mouth_load(card.radius_m, &duct, gas, mechanics_rate, GLOTTAL_LINE_MAX_TAPS)
-                    .map_err(|e| format!("head load refused: {e}"))?,
+                match &self.torso_sphere {
+                    None => head_mouth_load(card.radius_m, &duct, gas, mechanics_rate, GLOTTAL_LINE_MAX_TAPS),
+                    Some(t) => head_torso_mouth_load(card.radius_m, t.torso, self.microphone.maximum_frequency_hz, &duct,
+                        gas, mechanics_rate, GLOTTAL_LINE_MAX_TAPS),
+                }
+                .map_err(|e| format!("head load refused: {e}"))?,
             ),
         };
         let mouth_load = head_load.as_ref().map_or(MouthLoad::Analytic(self.termination), MouthLoad::Tabulated);
@@ -794,8 +835,12 @@ impl VoiceDescription {
         )?;
         let head = match &self.head_sphere {
             Some(card) => Some(
-                HeadSphere::new(card.radius_m, mouth_radius_m, self.microphone, medium, self.output_rate_hz)
-                    .map_err(|e| format!("head sphere refused: {e}"))?,
+                match &self.torso_sphere {
+                    None => HeadSphere::new(card.radius_m, mouth_radius_m, self.microphone, medium, self.output_rate_hz),
+                    Some(t) => HeadSphere::with_torso(card.radius_m, mouth_radius_m, self.microphone, medium,
+                        self.output_rate_hz, t.torso),
+                }
+                .map_err(|e| format!("head sphere refused: {e}"))?,
             ),
             None => None,
         };
@@ -821,6 +866,7 @@ impl VoiceDescription {
             passive_formants_hz,
             head_sphere_radius_m: self.head_sphere.as_ref().map(|card| card.radius_m),
             head_load: head_load.is_some(),
+            torso_sphere: self.torso_sphere.as_ref().map(|card| card.torso),
         };
         let aspiration = match self.aspiration_noise {
             Some(card) => Some(GlottalAspiration::new(card).map_err(str::to_string)?),
@@ -909,6 +955,8 @@ pub struct VoiceInfo {
     pub head_sphere_radius_m: Option<f64>,
     /// Whether the lips see the head sphere's radiation load (`head_load`) instead of the declared termination.
     pub head_load: bool,
+    /// The `torso_sphere` row's torso; `None` for the head alone.
+    pub torso_sphere: Option<TorsoSphere>,
 }
 
 /// Source-side summaries over the physical substeps rendered so far.
@@ -2324,6 +2372,64 @@ mod tests {
             assert!((y / x - 1.0).abs() < 0.02, "formant {x} -> {y} Hz");
         }
         assert_ne!(pressure(&headed), pressure(&loaded));
+    }
+
+    const SNOWMAN: &str = "head_sphere 0.087 algazi-duda-thompson-2002\ntorso_sphere 0.169 0.053 algazi-duda-thompson-2002\n";
+
+    /// The torso without `head_load` moves the microphone and nothing else: the pressure is the plain card's baffled
+    /// pressure through the snowman's FIR, by hand. With `head_load` the lips' load gains the torso's change too, so the
+    /// passive formants move from the head's own, by well under 1 % (the change is 0.2-0.8 % of the cap's load).
+    #[test]
+    fn torso_sphere_moves_the_microphone_and_with_head_load_the_lips() {
+        let plain = VoiceDescription::from_bytes(fixture("").as_bytes()).unwrap();
+        let headed = VoiceDescription::from_bytes(fixture("head_sphere 0.087 algazi-duda-thompson-2002\n").as_bytes()).unwrap();
+        let snow = VoiceDescription::from_bytes(fixture(SNOWMAN).as_bytes()).unwrap();
+        let kemar = TorsoSphere { radius_m: 0.169, neck_gap_m: 0.053 };
+        assert_eq!(snow.torso_sphere, Some(TorsoSphereCard { torso: kemar, source: "algazi-duda-thompson-2002".into() }));
+        assert_eq!(headed.torso_sphere, None);
+        let (a, b) = (headed.build().unwrap(), snow.build().unwrap());
+        assert_eq!(b.filter_delay_samples(), a.filter_delay_samples());
+        assert_eq!((a.info().torso_sphere, b.info().torso_sphere), (None, Some(kemar)));
+        assert_eq!(a.info().passive_formants_hz, b.info().passive_formants_hz, "no head_load: the lips' load is the card's");
+        let gas = plain.ambient_gas();
+        let medium = RayleighMedium { density: gas.density, sound_speed: gas.sound_speed };
+        let mouth = plain.build().unwrap().info().mouth_radius_m;
+        let mut head = HeadSphere::with_torso(0.087, mouth, plain.microphone, medium, 48_000, kemar).unwrap();
+        let by_hand: Vec<f64> = pressure(&plain).into_iter().map(|p| head.step(p)).collect();
+        assert_eq!(pressure(&snow), by_hand);
+        assert_ne!(pressure(&snow), pressure(&headed));
+        let head_loaded =
+            VoiceDescription::from_bytes(fixture("head_sphere 0.087 algazi-duda-thompson-2002\nhead_load cap\n").as_bytes()).unwrap();
+        let snow_loaded = VoiceDescription::from_bytes(fixture(&format!("{SNOWMAN}head_load cap\n")).as_bytes()).unwrap();
+        let (c, d) = (head_loaded.build().unwrap(), snow_loaded.build().unwrap());
+        assert!(c.info().head_load && d.info().head_load);
+        let (fc, fd) = (c.info().passive_formants_hz.clone().unwrap(), d.info().passive_formants_hz.clone().unwrap());
+        assert_eq!(fc.len(), fd.len());
+        assert_ne!(fc, fd, "the torso must reach the lips' load");
+        for (x, y) in fc.iter().zip(&fd) {
+            assert!((y / x - 1.0).abs() < 0.01, "formant {x} -> {y} Hz");
+        }
+        assert_ne!(pressure(&head_loaded), pressure(&snow_loaded));
+    }
+
+    #[test]
+    fn torso_sphere_rows_are_refused_by_name() {
+        for (row, why) in [
+            ("torso_sphere 0.169 0.053 src\n", "needs the head_sphere row"),
+            ("head_sphere 0.087 s\ntorso_sphere 0.169 0.053\n", "takes 3 fields"),
+            ("head_sphere 0.087 s\ntorso_sphere 0 0.053 src\n", "torso radius must be finite and positive"),
+            ("head_sphere 0.087 s\ntorso_sphere 0.169 0 src\n", "must not touch"),
+            ("head_sphere 0.087 s\ntorso_sphere 0.169 nan src\n", "neck gap must be finite"),
+            ("head_sphere 0.087 s\ntorso_sphere 0.169 0.053 a\ntorso_sphere 0.169 0.053 b\n", "only appear once"),
+        ] {
+            let err = VoiceDescription::from_bytes(fixture(row).as_bytes()).unwrap_err();
+            assert!(err.contains(why), "{row}: {err}");
+        }
+        // The fields are public, so `build` refuses a torso without a head again.
+        let mut bare = VoiceDescription::from_bytes(fixture("").as_bytes()).unwrap();
+        bare.torso_sphere = Some(TorsoSphereCard { torso: TorsoSphere { radius_m: 0.169, neck_gap_m: 0.053 }, source: "s".into() });
+        let err = bare.build().err().expect("refused");
+        assert!(err.contains("needs the head_sphere row"), "{err}");
     }
 
     #[test]

@@ -85,22 +85,43 @@ pub(super) fn run_with_gas_sources(
     });
     // Only a performance with the `head_sphere` row writes this block and the sphere's scope; without it the sidecar is byte
     // for byte what it was. `filter_delay_samples` is the microphone's whole filter latency, the head's FIR included.
-    // Only one with `head_load` as well names the lips' load inside the block and in the scope.
+    // Only one with `head_load` as well names the lips' load inside the block and in the scope. Only one with
+    // `torso_sphere` as well names the torso inside the block, in the lips' load and in the scope.
+    let snow = description.torso_sphere.as_ref();
+    let torso = snow.map_or_else(String::new, |t| {
+        format!(
+            ",\"torso_sphere\":{{\"radius_m\":{:e},\"neck_gap_m\":{:e},\"source\":{}}}",
+            t.torso.radius_m, t.torso.neck_gap_m, json_string(&t.source)
+        )
+    });
     let (head, scope) = match &description.head_sphere {
         Some(card) if description.head_load => (
             format!(
                 "\"head_sphere\":{{\"radius_m\":{:e},\"source\":{},\"filter_delay_samples\":{:e},\
-                 \"lips_load\":\"flanged + (cap on this sphere - baffled piston)\"}},",
-                card.radius_m, json_string(&card.source), performance.filter_delay_samples()
+                 \"lips_load\":\"{}\"{torso}}},",
+                card.radius_m, json_string(&card.source), performance.filter_delay_samples(),
+                if snow.is_some() {
+                    "flanged + (cap on this sphere and torso - baffled piston), the torso's part below 1.25 times the resolved band"
+                } else {
+                    "flanged + (cap on this sphere - baffled piston)"
+                }
             ),
-            "lumped fold pHS on a plane-wave series tract with TMM viscothermal loss; mouth flow observed as a cap of the opening's area on a rigid sphere (the baffled opening's pressure through the sphere's causal FIR, the baffle's image kept above the resolved band), and the lips' radiation load is the declared flanged load plus that cap's change on the same sphere; no torso, nasal branch or side cavity; the supraglottal pressure is never the output",
+            if snow.is_some() {
+                "lumped fold pHS on a plane-wave series tract with TMM viscothermal loss; mouth flow observed as a cap of the opening's area on a rigid sphere with a rigid torso sphere under it (the baffled opening's pressure through the two spheres' causal FIR, the torso's change below 1.25 times the resolved band, the baffle's image kept above the resolved band), and the lips' radiation load is the declared flanged load plus that cap's change on the same head and torso; no neck, nasal branch or side cavity; the supraglottal pressure is never the output"
+            } else {
+                "lumped fold pHS on a plane-wave series tract with TMM viscothermal loss; mouth flow observed as a cap of the opening's area on a rigid sphere (the baffled opening's pressure through the sphere's causal FIR, the baffle's image kept above the resolved band), and the lips' radiation load is the declared flanged load plus that cap's change on the same sphere; no torso, nasal branch or side cavity; the supraglottal pressure is never the output"
+            },
         ),
         Some(card) => (
             format!(
-                "\"head_sphere\":{{\"radius_m\":{:e},\"source\":{},\"filter_delay_samples\":{:e}}},",
+                "\"head_sphere\":{{\"radius_m\":{:e},\"source\":{},\"filter_delay_samples\":{:e}{torso}}},",
                 card.radius_m, json_string(&card.source), performance.filter_delay_samples()
             ),
-            "lumped fold pHS on a plane-wave series tract with TMM viscothermal loss and a declared radiation load; mouth flow observed as a cap of the opening's area on a rigid sphere (the baffled opening's pressure through the sphere's causal FIR, the baffle's image kept above the resolved band; the lips' radiation load is still the declared one), no torso, nasal branch or side cavity; the supraglottal pressure is never the output",
+            if snow.is_some() {
+                "lumped fold pHS on a plane-wave series tract with TMM viscothermal loss and a declared radiation load; mouth flow observed as a cap of the opening's area on a rigid sphere with a rigid torso sphere under it (the baffled opening's pressure through the two spheres' causal FIR, the torso's change below 1.25 times the resolved band, the baffle's image kept above the resolved band; the lips' radiation load is still the declared one), no neck, nasal branch or side cavity; the supraglottal pressure is never the output"
+            } else {
+                "lumped fold pHS on a plane-wave series tract with TMM viscothermal loss and a declared radiation load; mouth flow observed as a cap of the opening's area on a rigid sphere (the baffled opening's pressure through the sphere's causal FIR, the baffle's image kept above the resolved band; the lips' radiation load is still the declared one), no torso, nasal branch or side cavity; the supraglottal pressure is never the output"
+            },
         ),
         None => (
             String::new(),

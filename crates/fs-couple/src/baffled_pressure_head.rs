@@ -36,9 +36,16 @@
 //! [`HeadSphere::latency_samples`], never physical travel. At 48 kHz the FIR matches `G` within 0.005 dB and 0.02 degrees
 //! from 50 Hz to the band (tested below).
 //!
-//! Limits, not hidden: the head is a rigid sphere (no torso, neck, nose, protruding lips or hair); the mouth is a curved
-//! cap of the disk's area, not the lips' shape; and [`HeadSphere`] changes only the observed pressure. The lips'
-//! radiation LOAD changes only through the separate, opt-in [`head_mouth_load`] below.
+//! Limits, not hidden: the head is a rigid sphere (no neck, nose, protruding lips or hair, and no torso unless a
+//! [`TorsoSphere`] is given); the mouth is a curved cap of the disk's area, not the lips' shape; and [`HeadSphere`]
+//! changes only the observed pressure. The lips' radiation LOAD changes only through the separate, opt-in
+//! [`head_mouth_load`] (or [`head_torso_mouth_load`]) below.
+//!
+//! The torso ([`HeadSphere::with_torso`], [`head_torso_mouth_load`]; the law in the `torso` child module): the snowman
+//! of Algazi, Duda and Thompson 2002, a rigid torso sphere coaxially under the head, solved by multipole expansions about
+//! both centres. Below `1.25 band` the torso's change is added to `S` (so `G = (S + dS) / B`, blended as before) and to
+//! `Z_cap` (weighted 1 up to the band, by the same raised cosine to 0 at `1.25 band`, 0 above), so the microphone and the
+//! lips see one geometry over the same band. Without a torso every path is exactly the head's alone.
 //!
 //! The lips' load ([`head_mouth_load`]): the same cap on the same sphere, seen from the tract. Its self-impedance per
 //! unit volume flow (the cap's mean pressure over its flow; Morse and Ingard sec. 7.2, `e^{+j w t}`, `h_n = h_n^(2)`) is
@@ -75,6 +82,11 @@ use fs_duct::{Duct, Segment, TabulatedLoad, TabulatedMouth, Termination};
 use fs_material::gas::GasState;
 use fs_math::det;
 
+/// The snowman's torso under the head (module doc, "The torso").
+#[path = "baffled_pressure_head_torso.rs"]
+mod torso;
+pub use torso::{TORSO_MAX_ORDER, TorsoSphere};
+
 /// Largest series order admitted; a geometry that needs more is refused, never truncated.
 pub const MAX_ORDER: usize = 4096;
 /// Largest order of the cap's self-impedance series ([`head_mouth_load`]): its terms fall only as `n^-3`, so it needs
@@ -89,7 +101,7 @@ const LATENCY_DIVISOR: u32 = 750;
 const MAX_RATIO: f64 = 4.0;
 
 /// Minimal complex arithmetic in plain IEEE operations (no fused multiply-add), so every build rounds the same way.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 struct Cx {
     re: f64,
     im: f64,
@@ -250,6 +262,8 @@ pub struct HeadSphere {
     history: Vec<f64>,
     cursor: usize,
     latency: usize,
+    /// The snowman's torso (module doc, "The torso"); `None` is the head alone.
+    torso: Option<torso::Snowman>,
 }
 
 impl HeadSphere {
@@ -260,11 +274,22 @@ impl HeadSphere {
     /// Nyquist, a series beyond [`MAX_ORDER`] or a ratio over 4 in the blend, or any circular-receiver refusal.
     pub fn new(radius_m: f64, mouth_radius_m: f64, receiver: CircularOutletReceiver, medium: RayleighMedium,
         output_rate: u32) -> Result<Self, String> {
-        Self::with_margin(radius_m, mouth_radius_m, receiver, medium, output_rate, 30)
+        Self::with_margin(radius_m, mouth_radius_m, receiver, medium, output_rate, 30, None)
+    }
+
+    /// The head with the snowman's torso under it (module doc, "The torso"): the torso's change joins `S` below
+    /// `1.25 band`.
+    ///
+    /// # Errors
+    /// Every refusal of [`HeadSphere::new`], a torso refusal ([`TorsoSphere::validate`]), a microphone inside the
+    /// torso, or a band needing more than [`TORSO_MAX_ORDER`] orders.
+    pub fn with_torso(radius_m: f64, mouth_radius_m: f64, receiver: CircularOutletReceiver, medium: RayleighMedium,
+        output_rate: u32, torso: TorsoSphere) -> Result<Self, String> {
+        Self::with_margin(radius_m, mouth_radius_m, receiver, medium, output_rate, 30, Some(torso))
     }
 
     fn with_margin(radius_m: f64, mouth_radius_m: f64, receiver: CircularOutletReceiver, medium: RayleighMedium,
-        output_rate: u32, margin: usize) -> Result<Self, String> {
+        output_rate: u32, margin: usize, torso: Option<TorsoSphere>) -> Result<Self, String> {
         if !radius_m.is_finite() || radius_m <= 0.0 {
             return Err("the head radius must be finite and positive".into());
         }
@@ -278,6 +303,11 @@ impl HeadSphere {
         }
         let surface = BaffledPressure::circular_surface(mouth_radius_m, receiver, medium)?;
         let series = Series::new(radius_m, mouth_radius_m, receiver.position_m, medium, 1.25 * band_hz, margin)?;
+        let torso = match torso {
+            Some(t) => Some(torso::Snowman::new(radius_m, mouth_radius_m, t, Some(receiver.position_m), medium.density,
+                medium.sound_speed, 1.25 * band_hz)?),
+            None => None,
+        };
         let mut head = Self {
             series,
             surface,
@@ -288,20 +318,41 @@ impl HeadSphere {
             history: Vec::new(),
             cursor: 0,
             latency: output_rate.div_ceil(LATENCY_DIVISOR) as usize,
+            torso,
         };
         head.design(margin)?;
         Ok(head)
     }
 
-    /// `G(f) = S / B`, blended to 1 over `[band, 1.25 band]` and 1 above; `f_hz >= 0` (0 Hz takes the limit).
+    /// The frequency a bin is evaluated at: `G` is finite at 0 Hz, where `S` and `B` both vanish like `w`, and a
+    /// thousandth of a bin stands in for it.
+    fn probe(f_hz: f64, df: f64) -> f64 {
+        if f_hz > 0.0 { f_hz } else { 1e-3 * df }
+    }
+
+    /// `G(f) = (S + dS) / B` (`dS` the torso's change, when there is one), blended to 1 over `[band, 1.25 band]` and 1
+    /// above; `f_hz >= 0` (0 Hz takes the limit).
     fn ratio(&self, f_hz: f64, df: f64, margin: usize) -> Result<Cx, String> {
+        let ds = match &self.torso {
+            Some(t) if f_hz < 1.25 * self.band_hz => Some(t.change(Self::probe(f_hz, df))?.0),
+            _ => None,
+        };
+        self.ratio_with(f_hz, df, margin, ds)
+    }
+
+    /// [`Self::ratio`] with the torso's change `ds` already solved (or none: the head alone, exactly as before).
+    fn ratio_with(&self, f_hz: f64, df: f64, margin: usize, ds: Option<Cx>) -> Result<Cx, String> {
         let top = 1.25 * self.band_hz;
         if f_hz >= top {
             return Ok(Cx::ONE);
         }
-        // G is finite at 0 Hz, where S and B both vanish like w; a thousandth of a bin stands in for it.
-        let f = if f_hz > 0.0 { f_hz } else { 1e-3 * df };
-        let g = self.series.pressure(f, margin)?.div(baffle(f, &self.surface, self.mic, self.series.medium));
+        let f = Self::probe(f_hz, df);
+        let s = self.series.pressure(f, margin)?;
+        let s = match ds {
+            Some(d) => s.add(d),
+            None => s,
+        };
+        let g = s.div(baffle(f, &self.surface, self.mic, self.series.medium));
         if !g.finite() || g.abs() > MAX_RATIO {
             return Err("the head's ratio is singular in its band (the baffle's directivity null is too low)".into());
         }
@@ -326,9 +377,18 @@ impl HeadSphere {
         let half = n_fft / 2;
         let taps = n_fft / 16;
         let df = self.rate / n_fft as f64;
+        // The torso's change on every bin below 1.25 band (a prefix of the bins), each bin solved alone.
+        let ds: Vec<Cx> = match &self.torso {
+            Some(t) => {
+                let top = 1.25 * self.band_hz;
+                let n = (0..=half).take_while(|&k| (k as f64 * df) < top).count();
+                torso::par_map(n, |k| Ok(t.change(Self::probe(k as f64 * df, df))?.0))?
+            }
+            None => Vec::new(),
+        };
         let mut bins = Vec::with_capacity(half + 1);
         for k in 0..=half {
-            let g = self.ratio(k as f64 * df, df, margin)?;
+            let g = self.ratio_with(k as f64 * df, df, margin, ds.get(k).copied())?;
             // e^{-j 2 pi k D / N}: the latency, so the band-limited response's acausal part is kept.
             let shift = Cx::expj_neg(core::f64::consts::TAU * ((k * self.latency) % n_fft) as f64 / n_fft as f64);
             bins.push(g.mul(shift));
@@ -470,6 +530,24 @@ impl CapLoad {
 /// row the table refuses (not finite or not passive within 1e-12).
 pub fn head_mouth_load(radius_m: f64, duct: &Duct, gas: &GasState, sample_rate_hz: u32, max_taps: usize)
     -> Result<TabulatedLoad, String> {
+    mouth_load(radius_m, None, duct, gas, sample_rate_hz, max_taps)
+}
+
+/// [`head_mouth_load`] with the snowman's torso under the head (module doc, "The torso"): the cap's self-impedance gains
+/// the torso's change `dZ`, weighted 1 up to `band_hz` (the microphone's resolved band), by a raised cosine to 0 at
+/// `1.25 band_hz`, and 0 above, so the lips see the geometry the microphone does over the same band. Each weighted row is
+/// a convex mix of two passive self-impedances, so the table stays passive.
+///
+/// # Errors
+/// Every refusal of [`head_mouth_load`], a torso refusal, a band that is not finite and positive, or a band needing more
+/// than [`TORSO_MAX_ORDER`] orders.
+pub fn head_torso_mouth_load(radius_m: f64, torso: TorsoSphere, band_hz: f64, duct: &Duct, gas: &GasState,
+    sample_rate_hz: u32, max_taps: usize) -> Result<TabulatedLoad, String> {
+    mouth_load(radius_m, Some((torso, band_hz)), duct, gas, sample_rate_hz, max_taps)
+}
+
+fn mouth_load(radius_m: f64, torso: Option<(TorsoSphere, f64)>, duct: &Duct, gas: &GasState, sample_rate_hz: u32,
+    max_taps: usize) -> Result<TabulatedLoad, String> {
     if !radius_m.is_finite() || radius_m <= 0.0 {
         return Err("the head radius must be finite and positive".into());
     }
@@ -487,17 +565,49 @@ pub fn head_mouth_load(radius_m: f64, duct: &Duct, gas: &GasState, sample_rate_h
         (1..=max_taps / 2).map(|k| core::f64::consts::TAU * k as f64 / (max_taps as f64 * dt)).collect();
     let top = omegas[omegas.len() - 1];
     let cap = CapLoad::new(radius_m, mouth, gas.density, gas.sound_speed, top)?;
+    // The torso's change on every row below 1.25 band (a prefix of the rows), each row solved alone, and its weight.
+    let (dz, weights): (Vec<Cx>, Vec<f64>) = match torso {
+        Some((t, band)) => {
+            if !(band.is_finite() && band > 0.0) {
+                return Err("the torso's band must be finite and positive".into());
+            }
+            let top_hz = 1.25 * band;
+            let snow = torso::Snowman::new(radius_m, mouth, t, None, gas.density, gas.sound_speed, top_hz)?;
+            let n = omegas.iter().take_while(|&&w| w / core::f64::consts::TAU < top_hz).count();
+            let dz = torso::par_map(n, |i| Ok(snow.change(omegas[i] / core::f64::consts::TAU)?.1))?;
+            let weights = omegas[..n]
+                .iter()
+                .map(|&w| {
+                    let f = w / core::f64::consts::TAU;
+                    if f <= band { 1.0 } else { 0.5 * (1.0 + det::cos(core::f64::consts::PI * (f - band) / (top_hz - band))) }
+                })
+                .collect();
+            (dz, weights)
+        }
+        None => (Vec::new(), Vec::new()),
+    };
     let mut z = Vec::with_capacity(omegas.len());
-    for &omega in &omegas {
+    for (i, &omega) in omegas.iter().enumerate() {
         let flanged = fs_duct::compact_radiation_impedance(Termination::FlangedOpen, gas, mouth, omega)
             .map_err(|e| format!("the flanged load refused at {omega} rad/s: {e:?}"))?;
         let (r_piston, x_piston) = fs_phs::baffled_piston_impedance(gas.density, gas.sound_speed, mouth, omega)
             .map_err(|e| format!("the baffled piston refused at {omega} rad/s: {e:?}"))?;
         let c = cap.impedance(omega)?;
+        let c = match (dz.get(i), weights.get(i)) {
+            (Some(d), Some(&w)) => c.add(d.scale(w)),
+            _ => c,
+        };
         // conj(Z_cap) carries the series' e^{+j w t} over to fs-duct's e^{-i w t}.
         z.push(fs_math::c64::C64::new(flanged.re + (c.re - r_piston), flanged.im + (-c.im - x_piston)));
     }
-    let source = format!("head-cap-on-sphere a={radius_m:e} b={mouth:e} (morse-ingard-1968-7.2) + flanged - baffled piston");
+    let source = match torso {
+        None => format!("head-cap-on-sphere a={radius_m:e} b={mouth:e} (morse-ingard-1968-7.2) + flanged - baffled piston"),
+        Some((t, band)) => format!(
+            "head-cap-on-sphere a={radius_m:e} b={mouth:e} (morse-ingard-1968-7.2) + torso sphere b={:e} h={:e} below {band:e} Hz \
+             (algazi-duda-thompson-2002, multipole) + flanged - baffled piston",
+            t.radius_m, t.neck_gap_m
+        ),
+    };
     TabulatedLoad::try_new(omegas, z, &source, 1.0e-12)
         .and_then(|table| {
             table.with_mouth(TabulatedMouth { axial_position_m: length, radius_m: mouth, gas: *gas, dc_impedance: 0.0 })
@@ -559,7 +669,7 @@ mod tests {
     #[test]
     fn the_series_is_converged() {
         let base = HeadSphere::new(0.0875, 0.013_548, mic(16, 64, 8000.0), AIR, 48_000).unwrap();
-        let more = HeadSphere::with_margin(0.0875, 0.013_548, mic(16, 64, 8000.0), AIR, 48_000, 60).unwrap();
+        let more = HeadSphere::with_margin(0.0875, 0.013_548, mic(16, 64, 8000.0), AIR, 48_000, 60, None).unwrap();
         for f in [50.0, 700.0, 3000.0, 7900.0] {
             let (a, b) = (base.ratio(f, 1.0, 30).unwrap(), more.ratio(f, 1.0, 60).unwrap());
             assert!(a.sub(b).abs() < 1e-12 * a.abs(), "{f} Hz: {a:?} vs {b:?}");
@@ -598,6 +708,73 @@ mod tests {
             assert!(ratio.im.atan2(ratio.re).to_degrees().abs() < 0.02, "{f} Hz phase");
             f += 50.0;
         }
+    }
+
+    /// The print's KEMAR torso (Algazi, Duda and Thompson 2002).
+    const KEMAR: TorsoSphere = TorsoSphere { radius_m: 0.169, neck_gap_m: 0.053 };
+
+    /// With the torso the FIR is still its ratio (the design's precomputed change against the ratio's own, 50 Hz to the
+    /// band), the latency is the head's, the ratio is 1 above `1.25 band`, and the torso moves the C3 microphone by at
+    /// most 1.847 dB at 50 Hz steps, at 1 kHz (numpy prototype `torso/proto.py`, against the same head alone).
+    #[test]
+    fn the_torso_joins_the_ratio_and_the_fir_is_still_the_ratio() {
+        let head = HeadSphere::new(0.087, 0.013_548, mic(16, 64, 8000.0), AIR, 48_000).unwrap();
+        let snow = HeadSphere::with_torso(0.087, 0.013_548, mic(16, 64, 8000.0), AIR, 48_000, KEMAR).unwrap();
+        assert_eq!(snow.latency_samples(), head.latency_samples());
+        let taps = snow.taps();
+        let mut worst = (0.0, 0.0_f64);
+        let mut f = 50.0;
+        while f <= 8000.0 {
+            let w = core::f64::consts::TAU * f / 48_000.0;
+            let mut h = Cx::new(0.0, 0.0);
+            for (n, t) in taps.iter().enumerate() {
+                h = h.add(Cx::expj_neg(w * (n as f64 - 64.0)).scale(*t));
+            }
+            let want = g(&snow, f);
+            let ratio = h.div(want);
+            assert!(db(ratio.abs()).abs() < 0.005, "{f} Hz: {} dB", db(ratio.abs()));
+            assert!(ratio.im.atan2(ratio.re).to_degrees().abs() < 0.02, "{f} Hz phase");
+            let moved = db(want.abs() / g(&head, f).abs());
+            if moved.abs() > worst.1.abs() {
+                worst = (f, moved);
+            }
+            f += 50.0;
+        }
+        assert!(worst.0 == 1000.0 && (worst.1 + 1.847).abs() < 0.005, "{worst:?}");
+        assert_eq!(g(&snow, 10_000.0), Cx::ONE);
+    }
+
+    /// The lips' load with the torso: each row below `1.25 band` is the head's plus the snowman's `dZ` (conjugated to
+    /// fs-duct's time factor) times the raised-cosine weight, every row above is the head's bit for bit, and a torso
+    /// 500 m down gives the head's table back.
+    #[test]
+    fn the_torso_adds_its_change_to_the_lips_load() {
+        let gas = air_state();
+        let (b, band) = (0.013_548, 4000.0);
+        let head = head_mouth_load(0.087, &tube(b), &gas, 48_000, 4096).unwrap();
+        let snow = head_torso_mouth_load(0.087, KEMAR, band, &tube(b), &gas, 48_000, 4096).unwrap();
+        let far = head_torso_mouth_load(0.087, TorsoSphere { radius_m: 0.169, neck_gap_m: 500.0 }, band, &tube(b), &gas,
+            48_000, 4096).unwrap();
+        let s = torso::Snowman::new(0.087, b, KEMAR, None, gas.density, gas.sound_speed, 1.25 * band).unwrap();
+        let dt = 1.0 / 48_000.0;
+        let mut rows = 0;
+        for k in 1..=2048_usize {
+            let omega = TAU * k as f64 / (4096.0 * dt);
+            let f = omega / TAU;
+            let (zh, zs, zf) = (head.z_at(omega).unwrap(), snow.z_at(omega).unwrap(), far.z_at(omega).unwrap());
+            if f >= 1.25 * band {
+                assert_eq!((zs.re.to_bits(), zs.im.to_bits()), (zh.re.to_bits(), zh.im.to_bits()), "{f} Hz");
+                continue;
+            }
+            rows += 1;
+            let w = if f <= band { 1.0 } else { 0.5 * (1.0 + (core::f64::consts::PI * (f - band) / (0.25 * band)).cos()) };
+            let dz = s.change(f).unwrap().1.scale(w);
+            let scale = zh.abs();
+            assert!((zs.re - zh.re - dz.re).abs() < 1e-12 * scale && (zs.im - zh.im + dz.im).abs() < 1e-12 * scale,
+                "{f} Hz: {zs:?} - {zh:?} against conj {dz:?}");
+            assert!((zf - zh).abs() < 1e-6 * scale, "{f} Hz far torso: {zf:?} vs {zh:?}");
+        }
+        assert_eq!(rows, 426);
     }
 
     /// The head lowers the lows toward free field and leaves the band's top near the baffle (C3 card geometry).
