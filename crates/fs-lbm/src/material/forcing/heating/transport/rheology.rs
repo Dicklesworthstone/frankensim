@@ -5,7 +5,7 @@
 //! with `gamma_dot = numerator / (tau dt)`; the background tau is only an
 //! initial iterate. This avoids interpreting a state with the wrong viscosity
 //! after step-local transport restores the background relaxation field.
-//! With independent bulk relaxation in 3-D, this numerator contains only
+//! With independent bulk relaxation, this numerator contains only
 //! deviatoric strain; the independently relaxed dilation enters the same
 //! constitutive query in quadrature and remains fixed during the shear solve.
 //!
@@ -230,7 +230,7 @@ pub struct RheologyMaterial<F> {
     transport: FluidTransportState,
     iterations: usize,
     relaxation_defect: f64,
-    // Some([sqrt(2 D_dev:D_dev), sqrt(2/3)|div u|]) in 1/s only when
+    // Some([sqrt(2 D_dev:D_dev), sqrt(2/dimension)|div u|]) in 1/s only when
     // bulk is independent. Retain the queried components without subtracting
     // nearly equal squared invariants or re-reading population stress for heat.
     strain_components_per_s: Option<[f64; 2]>,
@@ -268,8 +268,12 @@ impl StressSlab<2, 5> for ThermalLbm {
     fn strain_components(&self, cell: usize) -> [f64; 2] {
         let m = self.grid.moments(cell);
         let force = std::array::from_fn(|d| self.grid.g[d].mul_add(m.rho, self.grid.fext[cell][d]));
-        [crate::core2::force_corrected_shear_rate(&self.grid.f[cell], m.rho, m.u, force, 1.0), 0.0]
+        crate::rheology::strain_components2(
+            &self.grid.f[cell], m.rho, m.u, force,
+            self.grid.collision.central_moment_bulk_tau(),
+        )
     }
+    fn independent_bulk(&self) -> bool { self.grid.collision.central_moment_bulk_tau().is_some() }
 }
 impl StressSlab<3, 7> for ThermalLbm3 {
     fn strain_components(&self, cell: usize) -> [f64; 2] {

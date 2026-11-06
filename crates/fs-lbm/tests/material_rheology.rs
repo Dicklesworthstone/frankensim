@@ -259,6 +259,108 @@ fn query(temperature: f64, shear_rate: f64) -> QueryPoint {
         )
         .unwrap()
 }
+
+// Exact prescribed first/second moments for a general symmetric strain. The
+// trace relaxes with bulk_tau, independently of the deviatoric shear modes.
+fn mixed_strain_populations2(
+    strain: [[f64; 2]; 2],
+    shear_tau: f64,
+    bulk_tau: f64,
+    force: [f64; 2],
+) -> [f64; 9] {
+    let rho = 1.0;
+    let u = [0.03, -0.02];
+    let equilibrium = fs_lbm::equilibrium(rho, u[0], u[1]);
+    let isotropic = 0.5 * (strain[0][0] + strain[1][1]);
+    std::array::from_fn(|q| {
+        let momentum: f64 = (0..2).map(|d| -0.5 * E2[q][d] * force[d]).sum();
+        let mut contraction = 0.0;
+        for a in 0..2 {
+            for b in 0..2 {
+                let trace = if a == b { isotropic } else { 0.0 };
+                let stress = -2.0 * rho / 3.0
+                    * (shear_tau * (strain[a][b] - trace) + bulk_tau * trace)
+                    - (u[a] * force[b] + force[a] * u[b]) / 2.0;
+                contraction +=
+                    (E2[q][a] * E2[q][b] - if a == b { 1.0 / 3.0 } else { 0.0 }) * stress;
+            }
+        }
+        equilibrium[q] + W2[q] * (3.0 * momentum + 4.5 * contraction)
+    })
+}
+
+#[test]
+fn planar_material_rheology_respects_independent_trace_relaxation() {
+    use fs_lbm::core2::CollisionModel2;
+    use fs_material::fluid_transport::rheology::CarreauYasuda;
+
+    let curve = CarreauYasuda::new(3.0, 0.1, 0.4, 0.45, 2.0, [0.0, 100.0]).unwrap();
+    for strain in [
+        [[0.01, 0.0], [0.0, 0.01]],
+        [[0.012, 0.008], [0.008, -0.004]],
+        [[0.004, -0.006], [-0.006, -0.004]],
+    ] {
+        let expected_rate =
+            (2.0_f64 * strain.iter().flatten().map(|d| d * d).sum::<f64>()).sqrt() / DT;
+        let expected_viscosity = curve.viscosity_pa_s(expected_rate).unwrap();
+        let expected_tau = 0.5 + 3.0 * (expected_viscosity / 1000.0) * DT / (DX * DX);
+        for (collision, bulk_tau) in [
+            (CollisionModel2::Bgk, expected_tau),
+            (CollisionModel2::CentralMoment, 1.0),
+            (CollisionModel2::CentralMomentBulk { bulk_tau: 0.7 }, 0.7),
+            (CollisionModel2::CentralMomentBulk { bulk_tau: 1.8 }, 1.8),
+        ] {
+            for force in [[0.0; 2], [0.003, -0.002]] {
+                for previous_tau in [0.6, 1.6] {
+                    let mut slab = slab2();
+                    slab.lattice.grid.collision = collision;
+                    slab.lattice.grid.tau[6] = previous_tau;
+                    slab.lattice.grid.f[6] = mixed_strain_populations2(
+                        strain, expected_tau, bulk_tau, force,
+                    );
+                    slab.lattice.grid.fext[6] = force;
+                    let result = slab.step_with_material_rheology(
+                        &[0.0; 16], &[[0.0; 2]; 16], DX, limits(), controls(),
+                        &CancelGate::new(),
+                        |point, _| Ok(fluid(curve.viscosity_pa_s(point.shear_rate_per_s)?)),
+                    ).unwrap();
+                    let applied = result.applied.iter().find(|sample| sample.cell == 6).unwrap();
+                    near(applied.material.point().shear_rate_per_s, expected_rate, 2e-11);
+                    near(applied.transport.dynamic_viscosity_pa_s(), expected_viscosity, 2e-11);
+                    assert!(applied.material.relaxation_defect() < 3e-12);
+                    assert_eq!(slab.lattice.grid.collision, collision);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn planar_independent_bulk_cannot_be_thermalized_as_shear_only_loss() {
+    use fs_lbm::core2::CollisionModel2;
+
+    for collision in [
+        CollisionModel2::CentralMoment,
+        CollisionModel2::CentralMomentBulk { bulk_tau: 0.7 },
+    ] {
+        let mut slab = slab2();
+        slab.lattice.grid.collision = collision;
+        let populations = slab.lattice.grid.f.clone();
+        let temperatures = slab.lattice.gpop.clone();
+        let tau = slab.lattice.grid.tau.clone();
+        let result = slab.step_with_material_rheology_and_viscous_heating(
+            &[0.0; 16], &[[0.0; 2]; 16], DX, limits(), controls(), &CancelGate::new(),
+            |_, _| Ok(fluid(1.0)),
+        );
+        assert!(matches!(result, Err(MaterialTransportError::Invalid(
+            "independent bulk relaxation requires explicitly sourced bulk heating"
+        ))));
+        assert_eq!(slab.lattice.grid.f, populations);
+        assert_eq!(slab.lattice.gpop, temperatures);
+        assert_eq!(slab.lattice.grid.tau, tau);
+        assert_eq!(slab.lattice.grid.collision, collision);
+    }
+}
 fn card(slope: f64) -> MaterialCard {
     card_curve(
         "shear_rate",

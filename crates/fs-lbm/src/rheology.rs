@@ -748,6 +748,31 @@ pub fn update_tau_field(
     Ok(update_tau_prepared(grid, |i| laws.prepared(i)))
 }
 
+/// Collision-consistent 2-D strain components shared by native and
+/// source-backed rheology. The first value is the shear-dependent numerator;
+/// the second is the independently relaxed dilation. Callers resolve and
+/// validate `central_bulk_tau` once per sweep when the collision is fixed.
+pub(crate) fn strain_components2(
+    f: &[f64; Q],
+    rho: f64,
+    u: [f64; 2],
+    force: [f64; 2],
+    central_bulk_tau: Option<f64>,
+) -> [f64; 2] {
+    if let Some(bulk_tau) = central_bulk_tau {
+        let [sxx, sxy, syy] = force_corrected_stress(f, rho, u, force);
+        // Pi_dev = -2 rho cs² tau D_dev and tr(Pi) =
+        // -2 rho cs² tau_bulk tr(D), independently of the shear tau.
+        // In 2-D, 2 D:D = 4(D_dev,xx² + D_xy²) + tr(D)².
+        let scale = 3.0 / rho;
+        let numerator = scale * combined_strain_rate((0.5 * (sxx - syy)).abs(), sxy.abs());
+        let dilation = 0.5 * scale * (sxx + syy).abs() / bulk_tau;
+        [numerator, dilation]
+    } else {
+        [force_corrected_shear_rate(f, rho, u, force, 1.0), 0.0]
+    }
+}
+
 // Static dispatch keeps the scalar-law path free of field indexing and
 // per-cell law validation; both APIs share the complete strain/solve loop.
 fn update_tau_prepared<'a>(
@@ -768,19 +793,10 @@ fn update_tau_prepared<'a>(
         let law = law_at(i);
         let mm = grid.moments(i);
         let force = std::array::from_fn(|d| grid.g[d].mul_add(mm.rho, grid.fext[i][d]));
-        let local = if let Some(bulk_tau) = central_bulk_tau {
-            let [sxx, sxy, syy] = force_corrected_stress(&grid.f[i], mm.rho, mm.u, force);
-            // Pi_dev = -2 rho cs² tau D_dev and tr(Pi) =
-            // -2 rho cs² tau_bulk tr(D), independently of the shear tau.
-            // In 2-D, 2 D:D = 4(D_dev,xx² + D_xy²) + tr(D)².
-            let scale = 3.0 / mm.rho;
-            let numerator = scale * combined_strain_rate((0.5 * (sxx - syy)).abs(), sxy.abs());
-            let dilation = 0.5 * scale * (sxx + syy).abs() / bulk_tau;
-            law.solve_with_fixed_strain(numerator, dilation, grid.tau[i])
-        } else {
-            let numerator = force_corrected_shear_rate(&grid.f[i], mm.rho, mm.u, force, 1.0);
-            law.solve(numerator, grid.tau[i])
-        };
+        let [numerator, dilation] = strain_components2(
+            &grid.f[i], mm.rho, mm.u, force, central_bulk_tau,
+        );
+        let local = law.solve_with_fixed_strain(numerator, dilation, grid.tau[i]);
         grid.tau[i] = local.tau;
         stats.floored += u32::from(local.floored);
         stats.capped += u32::from(local.capped);

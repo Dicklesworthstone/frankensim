@@ -268,6 +268,8 @@ impl MaterialSlab<ThermalLbm> {
     /// temperature. Repeated calls close explicit temperature/viscosity feedback.
     /// Source, conversion, temperature, heat-balance, endpoint and cancellation
     /// refusals all preserve the accepted slab.
+    /// Independent central-moment bulk relaxation is refused: a shear-only
+    /// material source cannot supply its separate volumetric heat coefficient.
     ///
     /// The incompressible generalized-Newtonian, fixed-density/Cp, low-Mach
     /// assumptions of `step_with_material_rheology` still apply. Loss power is
