@@ -38,6 +38,9 @@ mod transmitting_coating;
 
 #[path = "optical_heating/fluorescence.rs"]
 mod fluorescence;
+#[path = "optical_heating/luminescence.rs"]
+mod luminescence;
+
 mod coating_emission;
 mod coating_exchange;
 

@@ -167,6 +167,7 @@ pub struct FluorescentOpticalHeating<const N: usize, const M: usize> {
     heating: OpticalHeating<N>,
     power: FluorescencePower<M>,
     energy: FluorescenceEnergy<M>,
+    cell_emission_w: Vec<(usize, [f64; M])>,
 }
 
 impl<const N: usize, const M: usize> FluorescentOpticalHeating<N, M> {
@@ -246,6 +247,10 @@ impl<const N: usize, const M: usize> FluorescentOpticalHeating<N, M> {
         let mut nonradiative = CheckedSum::default();
         let mut stokes = CheckedSum::default();
         let mut total_heat = CheckedSum::default();
+        let mut cell_emission_w = Vec::new();
+        cell_emission_w
+            .try_reserve_exact(deposition.cells.len())
+            .map_err(|_| invalid("fluorescence cell-emission allocation refused"))?;
         for cell in &deposition.cells {
             checkpoint()?;
             if cell.cell_index >= medium.cell_count() {
@@ -254,6 +259,7 @@ impl<const N: usize, const M: usize> FluorescentOpticalHeating<N, M> {
                 ));
             }
             let mut heat = CheckedSum::default();
+            let mut cell_emission = [CheckedSum::default(); M];
             for lane in 0..N {
                 let absorbed = cell.absorbed_power_w[lane];
                 let wavelength = deposition.wavelengths_nm[lane];
@@ -263,7 +269,9 @@ impl<const N: usize, const M: usize> FluorescentOpticalHeating<N, M> {
                 for bin in 0..M {
                     let emitted_nm = source.wavelengths_nm[bin];
                     let weight = absorbed * source.quantum_yield * source.photon_fractions[bin];
-                    escaped[bin].add(ratio_power(weight, wavelength, emitted_nm)?)?;
+                    let emitted = ratio_power(weight, wavelength, emitted_nm)?;
+                    escaped[bin].add(emitted)?;
+                    cell_emission[bin].add(emitted)?;
                     // Positive loss preserves weak Stokes heating even when
                     // the escaped/absorbed power ratio rounds to exactly one.
                     let loss = ratio_power(weight, emitted_nm - wavelength, emitted_nm)?;
@@ -271,6 +279,11 @@ impl<const N: usize, const M: usize> FluorescentOpticalHeating<N, M> {
                     heat.add(loss)?;
                 }
             }
+            let mut emitted = [0.0; M];
+            for (value, sum) in emitted.iter_mut().zip(cell_emission) {
+                *value = sum.value()?;
+            }
+            cell_emission_w.push((cell.cell_index, emitted));
             let heat = heat.value()?;
             total_heat.add(heat)?;
             if let Some(&id) = bindings.get(&cell.cell_index) {
@@ -318,6 +331,7 @@ impl<const N: usize, const M: usize> FluorescentOpticalHeating<N, M> {
             heating,
             power,
             energy: power.integrate(0.0)?,
+            cell_emission_w,
         };
         result.check_temperatures(thermal, &mut checkpoint)?;
         checkpoint()?;
@@ -347,6 +361,14 @@ impl<const N: usize, const M: usize> FluorescentOpticalHeating<N, M> {
     /// Original native thermal cells receiving the positive local heat, W.
     pub fn sources_w(&self) -> &BTreeMap<CellId, f64> {
         self.heating.sources_w()
+    }
+
+    /// Isotropic emitted watts per original optical cell and discrete photon
+    /// node. These are integrated powers, not a per-nanometre density. The
+    /// spatial observer may distribute each power uniformly over that cell;
+    /// this adds an explicit cell-uniform source approximation to the beam.
+    pub fn cell_emission_w(&self) -> &[(usize, [f64; M])] {
+        &self.cell_emission_w
     }
 
     fn check_temperatures(
@@ -425,7 +447,11 @@ fn optical_error(_: VolumeTransportError) -> OpticalHeatingError {
 // A tiny wavelength fraction can still carry representable watts. Evaluate
 // ordinary ratios directly, preserving the near-zero Stokes difference; use
 // the native deterministic log owner only when that ratio is subnormal.
-fn ratio_power(power: f64, numerator: f64, denominator: f64) -> Result<f64, OpticalHeatingError> {
+pub(super) fn ratio_power(
+    power: f64,
+    numerator: f64,
+    denominator: f64,
+) -> Result<f64, OpticalHeatingError> {
     let ratio = numerator / denominator;
     if power == 0.0 || numerator == 0.0 || ratio >= f64::MIN_POSITIVE {
         finite(power * ratio)

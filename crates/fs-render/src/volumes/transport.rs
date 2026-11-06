@@ -22,6 +22,8 @@ mod cells;
 pub mod deposition;
 /// Physical emitting-cell direction proposals and their solid-angle density.
 pub mod emission;
+/// Nonthermal isotropic cell powers observed as physical line/bin radiance.
+pub mod luminescence;
 /// Outward bounds on direct transport through the retained physical cells.
 #[cfg(feature = "photometry")]
 pub mod enclosure;

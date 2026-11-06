@@ -2929,6 +2929,22 @@ photon/energy closure, native temperature response, thin/opaque and yield limits
 one-ULP Stokes heat, domain refusals and transactional rollback have focused
 regressions in `tests/optical_heating/fluorescence.rs`.
 
+`volumes::transport::luminescence::LuminescenceGrid` observes original prompt
+or delayed cell emission as nonthermal SI radiance. It borrows the original
+absorption grid and prepares a bounded sparse map of 1–16 discrete-node powers,
+with source, wavelength and numerical snapshot identities. Each cell declares
+uniform isotropic emission `j = P/(4*pi*V)`; the native DDA integrates emission
+and foreground Beer attenuation analytically, including the transparent limit.
+Output is line/bin-integrated W/(m² sr), without an invented spectral width or
+temperature. Rays allocate nothing; preparation and original cell traversal
+retain explicit limits and cancellation. Thin/opaque limits, grid refinement,
+direction-dependent shielding, extreme but representable radiance, and native
+fluorescence power/heat consistency have G1/G3 tests in
+`tests/optical_heating/luminescence.rs`. This is a stationary non-scattering,
+index-one observation component; it does not feed absorbed secondary light
+back to heat or solve fluorescence cascades, subcell pump structure, dipole
+anisotropy, surfaces or light-travel delay. Thermal emission remains separate.
+
 ### Temperature-dependent optical heating
 
 `volumes::heating::feedback::TemperatureOpticalHeating` retains source-bound
