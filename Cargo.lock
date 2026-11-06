@@ -2089,6 +2089,7 @@ dependencies = [
  "fs-math",
  "fs-qty",
  "fs-rand",
+ "fs-solver",
  "fs-thermal",
  "fs-thermochem",
 ]

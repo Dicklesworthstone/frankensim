@@ -11678,6 +11678,52 @@ and audit exactly. Five regression sources cover an independent nonlinear
 thermal-network solution, opposing phase transfers, birth/covering timing,
 retry/cancellation/zero-heat behavior, and complete-clock time refinement.
 
+### Simultaneous thermal-network and finite-atmosphere phase endpoints
+
+`evaporation::gas::implicit::solve_deposition_with_gas` solves every original
+thermal cell, one shared volatile inventory and the original finite-gas energy
+at the same backward-Euler endpoint. Selected positive liquid cells retain
+their individual phase laws, caloric offsets, pure-liquid domains and exposed
+reference areas. They share one explicit volatile identity, with all original
+carrier inventories, source identities, gas volume and query context preserved.
+Endpoint total/vapor pressure and gas temperature feed the original Stefan
+films; native heat sources, contacts, baths and conservative heat transfers
+remain inside the same thermal solve. Each supplied sensible film coefficient
+exchanges `dt*h*A*(Tgas-Tliquid)` with the opposite gas debit exactly once.
+
+Evaporating mass carries the original vapor enthalpy at its liquid surface;
+condensing mass carries upstream enthalpy at the endpoint gas temperature.
+The shared corrected thermal ingress includes source alignment and incoming
+vapor sensible enthalpy in complete stream energy while retaining latent heat
+as `dm*L`. Opposing surfaces retain their individual receipts, gross withdrawal
+limits and energy transfers even when their net vapor mass is zero. Condensation
+shares the original gas donor budget; simultaneous evaporation cannot finance
+an oversized withdrawal. Every original liquid and source-domain gate remains.
+
+The original `fs_solver` finite-difference Newton--Krylov owner solves native
+cell-energy coordinates plus numerically scaled vapor mass and gas temperature.
+Initial gas Cv supplies only a coordinate scale. Each gas residual evaluates
+the original final-composition NASA-9 internal-energy increment directly:
+`dU_sensible - dm*Rv*Tgas0 - sum(dm_i*dh_v(Tgas0,Tupstream_i)) + Q_sensible`.
+Formation constants cancel before arithmetic; no frozen heat capacity or
+per-trial nested caloric root is used. One final original species-boundary
+reconstruction supplies the accepted gas, followed by a fresh thermal/film
+evaluation at that actual gas state. Native cell/global energy and mass gates,
+carrier/volatile/total gas mass, source-relative gas energy, and the combined
+mass/energy account must all pass before either owner is returned. The gas
+reconstruction receipt and final coupled consistency residuals remain distinct.
+
+The residual cache holds two numerical points and never accepted payloads.
+The source-owned initial mass predictor, every uncached stencil/line-search
+trial and both final physical checks spend one evaluation budget; the sole
+gas inversion retains its original bounded work. Original source refusals and
+cancellation propagate atomically. Invalid numerical probes refuse rather than
+clipping humidity or manufacturing trace vapor. Callers must choose source-
+supported difference scales and durations. This event-free, first-order owner
+requires physical timestep refinement: start events must already be processed,
+interior events refuse and endpoint events remain pending. It adds no boiling,
+dry-film onset, moving interface, liquid displacement work or bulk melting model.
+
 ### Condensate onset and complete dry-out at a prescribed wall
 
 `evaporation::gas::wall_film` admits an explicitly fully wetting, locally planar

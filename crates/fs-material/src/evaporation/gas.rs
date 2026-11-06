@@ -23,6 +23,8 @@
 pub mod chamber;
 /// Implicit reciprocal sensible film heat, separately from vapor-carried energy.
 pub mod heat;
+/// Simultaneous original heat-network, vapor-inventory and gas-energy endpoints.
+pub mod implicit;
 /// Original heat transport and finite humidity feedback on one physical clock.
 pub mod timeline;
 /// Fully-wetting wall films with dry onset and complete finite-inventory dry-out.

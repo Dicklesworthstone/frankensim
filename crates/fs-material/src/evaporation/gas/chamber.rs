@@ -143,12 +143,12 @@ impl<'catalog> GasLiquidChamberCandidate<'catalog> {
 
 /// Deterministic compensated accumulation through the shared arithmetic owner.
 #[derive(Default)]
-struct Total {
+pub(super) struct Total {
     sum: f64,
     correction: f64,
 }
 impl Total {
-    fn add(&mut self, value: f64) -> Result<(), GasEvaporationError> {
+    pub(super) fn add(&mut self, value: f64) -> Result<(), GasEvaporationError> {
         let (sum, error) = fs_math::eft::two_sum(self.sum, value);
         let correction = self.correction + error;
         if ![value, sum, error, correction]
@@ -161,7 +161,7 @@ impl Total {
         self.correction = correction;
         Ok(())
     }
-    fn value(&self) -> Result<f64, GasEvaporationError> {
+    pub(super) fn value(&self) -> Result<f64, GasEvaporationError> {
         finite(self.sum + self.correction)
     }
 }
