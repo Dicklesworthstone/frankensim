@@ -223,7 +223,7 @@ impl<'a> Problem<'a> {
         source_pool_calorics(self.initial, pool == 1, temperature, cancelled)
     }
 
-    /// Finite source entropy, with the SAME lagged conductance and endpoint
+    /// Finite source entropy, with the SAME endpoint conductance and
     /// temperatures as the implicit energy step. For positive source Cv,
     /// entropy is concave in each pool's internal energy:
     /// Delta S >= sum(Delta U_pool / T_pool,end). With exact energy closure
@@ -238,21 +238,28 @@ impl<'a> Problem<'a> {
     ) -> Result<EntropyStep, ElectronHeavyEnergyError> {
         poll(cancelled)?;
         let mut changes = [Sum::default(), Sum::default()];
-        for (i, (amount, model)) in self.initial.amounts().iter()
-            .zip(self.initial.thermodynamics().models()).enumerate()
+        for (i, (amount, model)) in self
+            .initial
+            .amounts()
+            .iter()
+            .zip(self.initial.thermodynamics().models())
+            .enumerate()
         {
             if amount.value() == 0.0 {
                 continue;
             }
             poll(cancelled)?;
             let pool = usize::from(Some(i) == self.initial.electron_index());
-            let change = model.molar_isochoric_entropy_change(
-                Temperature::new(start.temperatures[pool]),
-                Temperature::new(end.temperatures[pool]),
-            ).map_err(|source| ElectronHeavyEnergyError::Species {
-                species: model.species().clone(),
-                source,
-            })?.value();
+            let change = model
+                .molar_isochoric_entropy_change(
+                    Temperature::new(start.temperatures[pool]),
+                    Temperature::new(end.temperatures[pool]),
+                )
+                .map_err(|source| ElectronHeavyEnergyError::Species {
+                    species: model.species().clone(),
+                    source,
+                })?
+                .value();
             changes[pool].add(amount.value() * change);
         }
         let dt = end.time - start.time;
@@ -277,16 +284,24 @@ impl<'a> Problem<'a> {
         // into entropy with the lowest admitted temperature, then add a
         // rounding budget for the actual terms, without an arbitrary entropy
         // floor. This is numerical admission, not an interval certificate.
-        let magnitude = changes[0].value.abs() + changes[1].value.abs()
-            + power_terms[0].abs() + power_terms[1].abs() + collision.abs();
-        let tolerance = 4.0 * (self.controls.energy_tolerance_j
-            / self.controls.minimum_temperature_k) + 128.0 * f64::EPSILON * magnitude;
+        let magnitude = changes[0].value.abs()
+            + changes[1].value.abs()
+            + power_terms[0].abs()
+            + power_terms[1].abs()
+            + collision.abs();
+        let tolerance = 4.0
+            * (self.controls.energy_tolerance_j / self.controls.minimum_temperature_k)
+            + 128.0 * f64::EPSILON * magnitude;
         if [entropy, power, collision, numerical.value, tolerance]
-            .into_iter().any(|x| !x.is_finite())
+            .into_iter()
+            .any(|x| !x.is_finite())
         {
-            return Err(ElectronHeavyEnergyError::Arithmetic("discrete entropy balance"));
+            return Err(ElectronHeavyEnergyError::Arithmetic(
+                "discrete entropy balance",
+            ));
         }
-        if collision < 0.0 || numerical.value < -tolerance
+        if collision < 0.0
+            || numerical.value < -tolerance
             || (self.powers == [0.0; 2] && entropy < -tolerance)
         {
             return Err(ElectronHeavyEnergyError::Balance(
@@ -294,7 +309,12 @@ impl<'a> Problem<'a> {
             ));
         }
         poll(cancelled)?;
-        Ok(EntropyStep { power, collision, numerical: numerical.value, tolerance })
+        Ok(EntropyStep {
+            power,
+            collision,
+            numerical: numerical.value,
+            tolerance,
+        })
     }
 
     fn invert(
@@ -393,18 +413,32 @@ impl<'a> Problem<'a> {
         })
     }
 
+    /// Backward Euler for the original state-dependent collision law.
+    ///
+    /// Positive source Cv makes the temperature difference decrease with
+    /// exchanged energy. Positive G therefore fixes the residual signs at
+    /// the source-energy endpoints whenever the no-transfer point is inside
+    /// that interval. Driven steps whose no-transfer point lies outside it
+    /// must first establish the missing endpoint sign; otherwise retry with a
+    /// shorter step. This is a sign bracket, not a monotonicity claim for G.
+    ///
+    /// A candidate beyond equal temperature has a known residual sign and
+    /// tightens the bracket without evaluating a collision law there. The
+    /// frozen-G and secant slopes below are only safeguarded proposals;
+    /// insufficient residual reduction selects bisection instead.
+    /// Arbitrary cross sections can admit multiple nonlinear roots. The outer
+    /// full/two-half comparison still controls an estimated trajectory error.
     pub fn step(
         &self,
         start: &Point,
         end: f64,
-        coupling: Coupling,
+        start_coupling: Coupling,
         cancelled: &mut impl FnMut() -> bool,
-    ) -> Result<Point, ElectronHeavyEnergyError> {
-        let total_coupling = coupling.total();
-        let alpha = (end - start.time) * total_coupling;
-        if !alpha.is_finite() {
+    ) -> Result<(Point, Coupling), ElectronHeavyEnergyError> {
+        let dt = end - start.time;
+        if !positive(dt) {
             return Err(ElectronHeavyEnergyError::Arithmetic(
-                "implicit exchange coefficient",
+                "positive finite exchange step",
             ));
         }
         let external = self.targets(end, 0.0)?;
@@ -412,23 +446,57 @@ impl<'a> Problem<'a> {
             (self.energy_limits[0][0] - external[0]).max(external[1] - self.energy_limits[1][1]);
         let mut upper =
             (self.energy_limits[0][1] - external[0]).min(external[1] - self.energy_limits[1][0]);
+        if !lower.is_finite() || !upper.is_finite() {
+            return Err(ElectronHeavyEnergyError::Arithmetic(
+                "source exchange bracket",
+            ));
+        }
         if lower > upper {
             return Err(ElectronHeavyEnergyError::OutsideDomain);
         }
-        let mut exchange = if (lower..=upper).contains(&start.exchange) {
-            start.exchange
-        } else {
-            lower + 0.5 * (upper - lower)
-        };
-        for _ in 0..self.controls.maximum_iterations {
+        let below_source_interval = start.exchange < lower;
+        let above_source_interval = start.exchange > upper;
+        let mut exchange = start.exchange.max(lower).min(upper);
+        let mut previous: Option<(f64, f64)> = None;
+        for iteration in 0..self.controls.maximum_iterations {
             poll(cancelled)?;
             let targets = self.targets(end, exchange)?;
             let (th, ch) = self.invert(0, targets[0], start.temperatures[0], cancelled)?;
             let (te, ce) = self.invert(1, targets[1], start.temperatures[1], cancelled)?;
             let increment = exchange - start.exchange;
             let difference = te - th;
+            // The constitutive residual is increment - dt G (Te-Th).
+            // These signs hold for every nonnegative G, even a nonmonotone
+            // original cross-section law. Do not query that law across the
+            // equal-temperature boundary merely to discover the same sign.
+            if (increment > 0.0 && difference < 0.0) || (increment < 0.0 && difference > 0.0) {
+                if iteration == 0 && (below_source_interval || above_source_interval) {
+                    return Err(ElectronHeavyEnergyError::OutsideDomain);
+                }
+                if increment > 0.0 {
+                    upper = exchange;
+                } else {
+                    lower = exchange;
+                }
+                exchange = 0.5 * lower + 0.5 * upper;
+                continue;
+            }
+            let mut point = Point {
+                time: end,
+                exchange,
+                coulomb_exchange: start.coulomb_exchange,
+                temperatures: [th, te],
+                capacities: [ch, ce],
+            };
+            let coupling = if point.temperatures == start.temperatures {
+                start_coupling
+            } else {
+                self.coupling(&point, cancelled)?
+            };
+            let total_coupling = coupling.total();
+            let alpha = dt * total_coupling;
             let residual = increment - alpha * difference;
-            if !residual.is_finite() {
+            if !alpha.is_finite() || !residual.is_finite() {
                 return Err(ElectronHeavyEnergyError::Arithmetic("exchange residual"));
             }
             let temperature_scale = self.controls.temperature_tolerance_k
@@ -437,40 +505,47 @@ impl<'a> Problem<'a> {
             let tolerance = (self.controls.energy_tolerance_j / 8.0)
                 .min(capacity_scale * (temperature_scale / 64.0));
             if residual.abs() <= tolerance {
-                if increment * difference < -tolerance * difference.abs() {
-                    return Err(ElectronHeavyEnergyError::Balance(
-                        "elastic heat transfer against temperature difference",
-                    ));
-                }
-                return Ok(Point {
-                    time: end,
-                    exchange,
-                    coulomb_exchange: start.coulomb_exchange
-                        + if total_coupling == 0.0 {
-                            0.0
-                        } else {
-                            increment * (coupling.coulomb / total_coupling)
-                        },
-                    temperatures: [th, te],
-                    capacities: [ch, ce],
-                });
+                point.coulomb_exchange += if total_coupling == 0.0 {
+                    0.0
+                } else {
+                    increment * (coupling.coulomb / total_coupling)
+                };
+                return Ok((point, coupling));
+            }
+            // When imposed powers push the zero-transfer point outside the
+            // source interval, do not assume an unobserved sign or search for
+            // a disconnected nonlinear branch. The adaptive owner can retry.
+            if iteration == 0
+                && ((below_source_interval && residual > 0.0)
+                    || (above_source_interval && residual < 0.0))
+            {
+                return Err(ElectronHeavyEnergyError::OutsideDomain);
             }
             if residual > 0.0 {
                 upper = exchange;
             } else {
                 lower = exchange;
             }
-            let derivative = 1.0
+            let mut slope = 1.0
                 + if alpha == 0.0 {
                     0.0
                 } else {
-                    alpha * (1.0 / ch + 1.0 / ce)
+                    alpha / ch + alpha / ce
                 };
-            let next = exchange - residual / derivative;
-            exchange = if next > lower && next < upper {
+            if let Some((old_exchange, old_residual)) = previous {
+                let secant = (residual - old_residual) / (exchange - old_exchange);
+                if positive(secant) {
+                    slope = secant;
+                }
+            }
+            let next = exchange - residual / slope;
+            let reducing =
+                previous.is_none_or(|(_, old_residual)| residual.abs() < 0.5 * old_residual.abs());
+            previous = Some((exchange, residual));
+            exchange = if reducing && next > lower && next < upper {
                 next
             } else {
-                lower + 0.5 * (upper - lower)
+                0.5 * lower + 0.5 * upper
             };
         }
         Err(ElectronHeavyEnergyError::Nonconvergence)

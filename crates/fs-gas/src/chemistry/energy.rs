@@ -14,9 +14,12 @@
 //! Inelastic, radiative and field power are not inferred. A user may supply
 //! separately calculated electron/heavy electrical heating to these pools.
 //!
-//! Each substep lags G at its actual starting Te, then solves one monotone
-//! implicit exchange with equal and opposite pool increments. Full/two-half
-//! step comparison controls an ESTIMATED local error. All caloric inversions
+//! Each substep solves the conservative backward-Euler exchange with G
+//! evaluated at its actual endpoint Th and Te. A physical temperature-order
+//! bracket and safeguarded iteration admit temperature-dependent, potentially
+//! nonmonotone collision laws without assuming a unique nonlinear root.
+//! Full/two-half step comparison controls an ESTIMATED local error.
+//! All caloric inversions
 //! use original-source energy DIFFERENCES from the initial state, so formation
 //! energy is retained once and never subtracted as two large total energies.
 //! Temperature/source limits, numerical work and the massive-target regime
@@ -24,8 +27,8 @@
 //! two-temperature molecular reverse rate, or per-trial heap allocation.
 //!
 //! Accepted half steps also close the original-source matter entropy change.
-//! Their collision term uses the same lagged G and backward endpoint
-//! temperatures. Positive Cv makes entropy concave in internal energy, so
+//! Their collision term uses the same converged endpoint G and temperatures.
+//! Positive Cv makes entropy concave in internal energy, so
 //! backward Euler has a nonnegative entropy excess beyond that collision
 //! term and endpoint-weighted external power. This numerical excess remains
 //! separate from physical transfer. The power term is not a reservoir entropy
@@ -86,7 +89,7 @@ pub struct ElectronHeavyEnergySolve {
     pub maximum_step_s: f64,
     /// Bound on accepted plus rejected steps.
     pub maximum_steps: usize,
-    /// Bound on each monotone caloric/exchange solve.
+    /// Bound on each caloric inversion and bracketed nonlinear exchange solve.
     pub maximum_iterations: usize,
 }
 impl ElectronHeavyEnergySolve {
@@ -174,7 +177,7 @@ pub enum ElectronHeavyEnergyError {
     Coulomb(CoulombErrorV1),
     /// A temperature/energy or stationary-heavy trial exceeds the declared domain.
     OutsideDomain,
-    /// A bounded monotone nonlinear solve failed to converge.
+    /// A bounded caloric or bracketed nonlinear exchange solve did not converge.
     Nonconvergence,
     /// The explicit time-step/work bound was exhausted.
     StepBudget,
@@ -231,8 +234,8 @@ pub struct ElectronHeavyEntropyBalance {
     /// Sum dt (Ph/Th_end + Pe/Te_end), evaluated on accepted half steps.
     /// A matter deposition term; not an inferred boundary entropy flux.
     pub external_power_contribution_j_k: f64,
-    /// Sum dt G_lag (Te_end-Th_end)^2/(Te_end Th_end), nonnegative.
-    /// The same neutral/Coulomb conductance drives the implicit energy steps.
+    /// Sum dt G_end (Te_end-Th_end)^2/(Te_end Th_end), nonnegative.
+    /// The same converged neutral/Coulomb conductance drives each energy step.
     pub collision_production_j_k: f64,
     /// Sum of finite Delta S minus power and collision contributions.
     /// Backward-Euler concavity excess plus nonlinear/rounding defects;
@@ -332,7 +335,7 @@ pub fn advance_frozen_energy(
 ///
 /// The Coulomb model must retain exactly these species models, populations and
 /// volume. Its coefficients and domain diagnostics are refreshed at actual Th
-/// and Te for each lagged step. Each populated neutral still requires its own
+/// and Te within each implicit step. Each populated neutral still requires its own
 /// momentum cross section; a fully ionized parcel supplies an empty neutral
 /// list. All heavy species share Th; no ionization or radiation is inferred.
 ///
@@ -404,11 +407,17 @@ fn advance(
             initial.electron_heat_capacity_j_k(),
         ],
     };
+    let mut coupling = problem.coupling(&point, &mut cancelled)?;
     let mut accepted = 0;
     let mut rejected = 0;
     let mut maximum_error = 0.0_f64;
     // Only accepted half steps contribute; rejected trials remain scratch.
-    let mut entropy_terms = [Sum::default(), Sum::default(), Sum::default(), Sum::default()];
+    let mut entropy_terms = [
+        Sum::default(),
+        Sum::default(),
+        Sum::default(),
+        Sum::default(),
+    ];
     let mut step = controls.initial_step_s;
     while point.time < duration.value() {
         poll(&mut cancelled)?;
@@ -420,15 +429,13 @@ fn advance(
         if middle <= point.time || middle >= end {
             return Err(ElectronHeavyEnergyError::StepBudget);
         }
-        let coupling = problem.coupling(&point, &mut cancelled)?;
         let trial = (|| {
-            let full = problem.step(&point, end, coupling, &mut cancelled)?;
-            let half = problem.step(&point, middle, coupling, &mut cancelled)?;
-            let coupling_half = problem.coupling(&half, &mut cancelled)?;
-            let two = problem.step(&half, end, coupling_half, &mut cancelled)?;
-            Ok::<_, ElectronHeavyEnergyError>((full, half, two, coupling_half))
+            let (full, _) = problem.step(&point, end, coupling, &mut cancelled)?;
+            let (half, coupling_half) = problem.step(&point, middle, coupling, &mut cancelled)?;
+            let (two, coupling_two) = problem.step(&half, end, coupling_half, &mut cancelled)?;
+            Ok::<_, ElectronHeavyEnergyError>((full, half, two, coupling_half, coupling_two))
         })();
-        let (full, half, two, coupling_half) = match trial {
+        let (full, half, two, coupling_half, coupling_two) = match trial {
             Ok(result) => result,
             Err(
                 ElectronHeavyEnergyError::OutsideDomain | ElectronHeavyEnergyError::Nonconvergence,
@@ -478,8 +485,8 @@ fn advance(
             continue;
         }
         for entropy in [
-            problem.entropy_step(&point, &half, coupling, &mut cancelled)?,
-            problem.entropy_step(&half, &two, coupling_half, &mut cancelled)?,
+            problem.entropy_step(&point, &half, coupling_half, &mut cancelled)?,
+            problem.entropy_step(&half, &two, coupling_two, &mut cancelled)?,
         ] {
             entropy_terms[0].add(entropy.power);
             entropy_terms[1].add(entropy.collision);
@@ -489,6 +496,7 @@ fn advance(
         maximum_error = maximum_error.max(error);
         let accepted_step = end - point.time;
         point = two;
+        coupling = coupling_two;
         accepted += 1;
         let factor = if error == 0.0 {
             2.0
@@ -499,7 +507,6 @@ fn advance(
             .min(controls.maximum_step_s)
             .max(controls.minimum_step_s);
     }
-    problem.coupling(&point, &mut cancelled)?;
     let targets = problem.targets(point.time, point.exchange)?;
     let mut residuals = [0.0; 2];
     for pool in 0..2 {
@@ -531,15 +538,17 @@ fn advance(
         FrozenIonizedGasStateErrorV1::Cancelled => ElectronHeavyEnergyError::Cancelled,
         error => ElectronHeavyEnergyError::State(error),
     })?;
-    let entropy_change = initial.entropy_change(
-        state.heavy_temperature(),
-        state.electron_temperature(),
-        state.volume(),
-        &mut cancelled,
-    ).map_err(|error| match error {
-        FrozenIonizedGasStateErrorV1::Cancelled => ElectronHeavyEnergyError::Cancelled,
-        error => ElectronHeavyEnergyError::State(error),
-    })?;
+    let entropy_change = initial
+        .entropy_change(
+            state.heavy_temperature(),
+            state.electron_temperature(),
+            state.volume(),
+            &mut cancelled,
+        )
+        .map_err(|error| match error {
+            FrozenIonizedGasStateErrorV1::Cancelled => ElectronHeavyEnergyError::Cancelled,
+            error => ElectronHeavyEnergyError::State(error),
+        })?;
     let [power, collision, numerical, step_tolerance] = entropy_terms.map(|term| term.value);
     let mut entropy_residual = Sum::default();
     entropy_residual.add(entropy_change.heavy_j_k);
@@ -547,16 +556,32 @@ fn advance(
     entropy_residual.add(-power);
     entropy_residual.add(-collision);
     entropy_residual.add(-numerical);
-    let entropy_tolerance = step_tolerance + 128.0 * f64::EPSILON
-        * (entropy_change.heavy_j_k.abs() + entropy_change.electron_j_k.abs()
-            + power.abs() + collision.abs() + numerical.abs());
-    if [power, collision, numerical, entropy_residual.value, entropy_tolerance]
-        .into_iter().any(|x| !x.is_finite())
+    let entropy_tolerance = step_tolerance
+        + 128.0
+            * f64::EPSILON
+            * (entropy_change.heavy_j_k.abs()
+                + entropy_change.electron_j_k.abs()
+                + power.abs()
+                + collision.abs()
+                + numerical.abs());
+    if [
+        power,
+        collision,
+        numerical,
+        entropy_residual.value,
+        entropy_tolerance,
+    ]
+    .into_iter()
+    .any(|x| !x.is_finite())
     {
-        return Err(ElectronHeavyEnergyError::Arithmetic("final entropy balance"));
+        return Err(ElectronHeavyEnergyError::Arithmetic(
+            "final entropy balance",
+        ));
     }
     if entropy_residual.value.abs() > entropy_tolerance {
-        return Err(ElectronHeavyEnergyError::Balance("final source entropy closure"));
+        return Err(ElectronHeavyEnergyError::Balance(
+            "final source entropy closure",
+        ));
     }
     let entropy_balance = ElectronHeavyEntropyBalance {
         heavy_entropy_change_j_k: entropy_change.heavy_j_k,

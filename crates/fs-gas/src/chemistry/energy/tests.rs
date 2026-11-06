@@ -95,7 +95,12 @@ fn state_with_entropy(
         .unwrap(),
         ChargeVector::new(ids, vec![0, 1, -1]).unwrap(),
         vec![
-            species_with_entropy("H", proton + ELECTRON_MASS_KG, formation_shift, entropy_offset),
+            species_with_entropy(
+                "H",
+                proton + ELECTRON_MASS_KG,
+                formation_shift,
+                entropy_offset,
+            ),
             species_with_entropy("H+", proton, formation_shift + 1.3e6, entropy_offset),
             species_with_entropy("e", ELECTRON_MASS_KG, 0.0, entropy_offset),
         ],
@@ -184,6 +189,144 @@ fn analytic_constant_sigma(
     let end_e = eq * ((1.0 + z) / (1.0 - z)).powi(2);
     let end_h = th + (ce / ch) * (te - end_e);
     (end_e, end_h)
+}
+
+fn initial_point(initial: &FrozenIonizedGasStateV1) -> Point {
+    Point {
+        time: 0.0,
+        exchange: 0.0,
+        coulomb_exchange: 0.0,
+        temperatures: [
+            initial.heavy_temperature().value(),
+            initial.electron_temperature().value(),
+        ],
+        capacities: [
+            initial.heavy_heat_capacity_j_k(),
+            initial.electron_heat_capacity_j_k(),
+        ],
+    }
+}
+
+// Independent Maxwellian moment for a constant momentum cross section.
+// No production collision quadrature or returned conductance enters this law.
+fn constant_sigma_conductance(
+    initial: &FrozenIonizedGasStateV1,
+    sigma: f64,
+    electron_temperature: f64,
+) -> f64 {
+    let mass = initial.thermodynamics().models()[0].molar_mass().value() / AVOGADRO_PER_MOL;
+    let electrons = initial.amounts()[2].value() * AVOGADRO_PER_MOL;
+    let mean_speed = (8.0 * BOLTZMANN_J_PER_K * electron_temperature
+        / (core::f64::consts::PI * ELECTRON_MASS_KG))
+        .sqrt();
+    3.0 * BOLTZMANN_J_PER_K
+        * electrons
+        * initial.number_density_per_m3(0).unwrap()
+        * (ELECTRON_MASS_KG / mass)
+        * (4.0 / 3.0)
+        * sigma
+        * mean_speed
+}
+
+#[test]
+fn nonlinear_exchange_closes_the_endpoint_collision_law_in_both_directions() {
+    let sigma = 1e-24;
+    let dt = 0.002;
+    for (th, te) in [(4000.0, 12000.0), (12000.0, 4000.0)] {
+        let initial = state(te, th, 1e-4, 1e12);
+        let sources = [collision(sigma, 200.0)];
+        let mut c = controls();
+        c.energy_tolerance_j = 1e-9;
+        c.relative_tolerance = 1e-8;
+        let problem = Problem::new(&initial, &sources, None, [0.0; 2], c, &mut || false).unwrap();
+        let start = initial_point(&initial);
+        let start_coupling = problem.coupling(&start, &mut || false).unwrap();
+        let (end, endpoint_coupling) = problem
+            .step(&start, dt, start_coupling, &mut || false)
+            .unwrap();
+        let [ch, ce] = start.capacities;
+        let [end_h, end_e] = end.temperatures;
+        let g_end = constant_sigma_conductance(&initial, sigma, end_e);
+        assert!((end.exchange - dt * g_end * (end_e - end_h)).abs() < 2.0 * c.energy_tolerance_j);
+        assert!(end.exchange * (end_e - end_h) > 0.0);
+
+        // Independently bracket the analytic constant-Cv, sqrt(Te) equation.
+        // The production solver uses source caloric inversions and cross-
+        // section quadrature; neither is used by this scalar reconstruction.
+        let equilibrium_exchange = (te - th) / (1.0 / ch + 1.0 / ce);
+        let mut lower = equilibrium_exchange.min(0.0);
+        let mut upper = equilibrium_exchange.max(0.0);
+        for _ in 0..80 {
+            let q = 0.5 * (lower + upper);
+            let h = th + q / ch;
+            let e = te - q / ce;
+            let residual = q - dt * constant_sigma_conductance(&initial, sigma, e) * (e - h);
+            if residual > 0.0 {
+                upper = q;
+            } else {
+                lower = q;
+            }
+        }
+        let reference = 0.5 * (lower + upper);
+        assert!((end.exchange - reference).abs() < 2.0 * c.energy_tolerance_j);
+
+        // The previous lagged-coefficient step solves a different equation.
+        // At this finite step its actual endpoint rate defect exceeds 10%.
+        let g_start = constant_sigma_conductance(&initial, sigma, te);
+        let lagged_q = dt * g_start * (te - th) / (1.0 + dt * g_start * (1.0 / ch + 1.0 / ce));
+        let lagged_e = te - lagged_q / ce;
+        let lagged_h = th + lagged_q / ch;
+        let lagged_defect = lagged_q
+            - dt * constant_sigma_conductance(&initial, sigma, lagged_e) * (lagged_e - lagged_h);
+        assert!(lagged_defect.abs() > 0.1 * lagged_q.abs());
+        assert!((end_e - lagged_e).abs() > 100.0);
+
+        let entropy = problem
+            .entropy_step(&start, &end, endpoint_coupling, &mut || false)
+            .unwrap();
+        let collision_entropy = dt * g_end * (end_e - end_h).powi(2) / (end_e * end_h);
+        assert!((entropy.collision - collision_entropy).abs() < 1e-9 * collision_entropy.abs());
+        assert!(entropy.numerical >= -entropy.tolerance);
+    }
+}
+
+#[test]
+fn implicit_exchange_can_keep_driven_source_boundary_states_inside_their_domain() {
+    for (th, heavy_power) in [(1000.0, -1.0), (30000.0, 1.0)] {
+        let initial = state(12000.0, th, 1e-4, 0.0);
+        let start = initial_point(&initial);
+        let c = controls();
+        let sources = [collision(1e-24, 200.0)];
+        let problem = Problem::new(&initial, &sources, None, [heavy_power, 0.0], c, &mut || {
+            false
+        })
+        .unwrap();
+        let coupling = problem.coupling(&start, &mut || false).unwrap();
+        let dt = 1e-4;
+        let (end, _) = problem.step(&start, dt, coupling, &mut || false).unwrap();
+        assert!(end.temperatures[0] > c.minimum_temperature_k);
+        assert!(end.temperatures[0] < c.maximum_temperature_k);
+        let heavy_change = start.capacities[0] * (end.temperatures[0] - th);
+        assert!((heavy_change - heavy_power * dt - end.exchange).abs() < c.energy_tolerance_j);
+
+        // Without collisional rescue the held power has no source-admitted
+        // endpoint. Refuse instead of clipping either pool at a bound.
+        let zero_sources = [collision(0.0, 200.0)];
+        let uncoupled = Problem::new(
+            &initial,
+            &zero_sources,
+            None,
+            [heavy_power, 0.0],
+            c,
+            &mut || false,
+        )
+        .unwrap();
+        let zero = uncoupled.coupling(&start, &mut || false).unwrap();
+        assert!(matches!(
+            uncoupled.step(&start, dt, zero, &mut || false),
+            Err(ElectronHeavyEnergyError::OutsideDomain)
+        ));
+    }
 }
 
 #[test]
@@ -468,43 +611,76 @@ fn slow_but_light_target_does_not_acquire_massive_target_physics() {
 #[test]
 fn g1_frozen_entropy_retains_two_temperatures_and_volume_expansion() {
     let initial = state(12000.0, 4000.0, 1e-4, 1e12);
-    let change = initial.entropy_change(
-        Temperature::new(5000.0), Temperature::new(8000.0), Volume::new(2.0), || false,
-    ).unwrap();
-    let heavy = initial.heavy_heat_capacity_j_k() * (5000.0_f64 / 4000.0).ln()
-        + R * 2.0_f64.ln();
+    let change = initial
+        .entropy_change(
+            Temperature::new(5000.0),
+            Temperature::new(8000.0),
+            Volume::new(2.0),
+            || false,
+        )
+        .unwrap();
+    let heavy = initial.heavy_heat_capacity_j_k() * (5000.0_f64 / 4000.0).ln() + R * 2.0_f64.ln();
     let electron = initial.electron_heat_capacity_j_k() * (8000.0_f64 / 12000.0).ln()
         + 1e-4 * R * 2.0_f64.ln();
     assert!((change.heavy_j_k / heavy - 1.0).abs() < 5e-14);
     assert!((change.electron_j_k / electron - 1.0).abs() < 5e-14);
     let final_state = FrozenIonizedGasStateV1::new(
-        initial.thermodynamics(), initial.amounts(), Volume::new(2.0),
-        Temperature::new(5000.0), Temperature::new(8000.0), 1e-12, || false,
-    ).unwrap();
-    let reverse = final_state.entropy_change(
-        initial.heavy_temperature(), initial.electron_temperature(), initial.volume(), || false,
-    ).unwrap();
+        initial.thermodynamics(),
+        initial.amounts(),
+        Volume::new(2.0),
+        Temperature::new(5000.0),
+        Temperature::new(8000.0),
+        1e-12,
+        || false,
+    )
+    .unwrap();
+    let reverse = final_state
+        .entropy_change(
+            initial.heavy_temperature(),
+            initial.electron_temperature(),
+            initial.volume(),
+            || false,
+        )
+        .unwrap();
     assert_eq!(reverse.heavy_j_k, -change.heavy_j_k);
     assert_eq!(reverse.electron_j_k, -change.electron_j_k);
 
     let neutral = state(4000.0, 4000.0, 0.0, 0.0);
     // Absent electrons impose no source-temperature interval.
-    let absent = neutral.entropy_change(
-        Temperature::new(4500.0), Temperature::new(90000.0), Volume::new(1.0), || false,
-    ).unwrap();
+    let absent = neutral
+        .entropy_change(
+            Temperature::new(4500.0),
+            Temperature::new(90000.0),
+            Volume::new(1.0),
+            || false,
+        )
+        .unwrap();
     assert_eq!(absent.electron_j_k, 0.0);
     assert!(absent.heavy_j_k > 0.0);
     let saved = initial.clone();
-    assert!(initial.entropy_change(
-        Temperature::new(5000.0), Temperature::new(8000.0), Volume::new(0.0), || false,
-    ).is_err());
+    assert!(
+        initial
+            .entropy_change(
+                Temperature::new(5000.0),
+                Temperature::new(8000.0),
+                Volume::new(0.0),
+                || false,
+            )
+            .is_err()
+    );
     let mut calls = 0;
-    assert_eq!(initial.entropy_change(
-        Temperature::new(5000.0), Temperature::new(8000.0), Volume::new(2.0), || {
-            calls += 1;
-            calls > 2
-        },
-    ), Err(FrozenIonizedGasStateErrorV1::Cancelled));
+    assert_eq!(
+        initial.entropy_change(
+            Temperature::new(5000.0),
+            Temperature::new(8000.0),
+            Volume::new(2.0),
+            || {
+                calls += 1;
+                calls > 2
+            },
+        ),
+        Err(FrozenIonizedGasStateErrorV1::Cancelled)
+    );
     assert_eq!(initial, saved);
 }
 
@@ -514,9 +690,15 @@ fn g3_passive_entropy_is_reference_invariant_with_colder_electrons() {
     for offset in [0.0, 1e24] {
         let initial = state_with_entropy(4000.0, 12000.0, 1e-4, 1e12, offset);
         let result = advance_frozen_energy(
-            &initial, &[collision(1e-24, 200.0)],
-            Power::new(0.0), Power::new(0.0), Time::new(0.002), controls(), || false,
-        ).unwrap();
+            &initial,
+            &[collision(1e-24, 200.0)],
+            Power::new(0.0),
+            Power::new(0.0),
+            Time::new(0.002),
+            controls(),
+            || false,
+        )
+        .unwrap();
         let th = result.state().heavy_temperature().value();
         let te = result.state().electron_temperature().value();
         assert!(te > 4000.0 && th < 12000.0);
@@ -538,9 +720,15 @@ fn g3_passive_entropy_is_reference_invariant_with_colder_electrons() {
 fn g1_external_cooling_keeps_power_and_collision_entropy_separate() {
     let initial = state(6000.0, 4000.0, 1e-4, 0.0);
     let result = advance_frozen_energy(
-        &initial, &[collision(0.0, 200.0)],
-        Power::new(-2.0), Power::new(-4.0), Time::new(0.001), controls(), || false,
-    ).unwrap();
+        &initial,
+        &[collision(0.0, 200.0)],
+        Power::new(-2.0),
+        Power::new(-4.0),
+        Time::new(0.001),
+        controls(),
+        || false,
+    )
+    .unwrap();
     let entropy = result.entropy_balance();
     assert!(entropy.total_entropy_change_j_k() < 0.0);
     assert!(entropy.external_power_contribution_j_k < 0.0);
@@ -551,9 +739,15 @@ fn g1_external_cooling_keeps_power_and_collision_entropy_separate() {
     for duration in [0.0, 0.001] {
         let equilibrium = state(6000.0, 6000.0, 1e-4, 0.0);
         let result = advance_frozen_energy(
-            &equilibrium, &[collision(1e-24, 200.0)],
-            Power::new(0.0), Power::new(0.0), Time::new(duration), controls(), || false,
-        ).unwrap();
+            &equilibrium,
+            &[collision(1e-24, 200.0)],
+            Power::new(0.0),
+            Power::new(0.0),
+            Time::new(duration),
+            controls(),
+            || false,
+        )
+        .unwrap();
         let entropy = result.entropy_balance();
         assert_eq!(entropy.total_entropy_change_j_k(), 0.0);
         assert_eq!(entropy.external_power_contribution_j_k, 0.0);
@@ -568,15 +762,16 @@ fn g0_discrete_second_law_refuses_energy_conserving_cold_to_hot_transfer() {
     let initial = state(12000.0, 4000.0, 1e-4, 0.0);
     let c = controls();
     let sources = [collision(1e-24, 200.0)];
-    let problem = Problem::new(
-        &initial, &sources, None, [0.0; 2], c, &mut || false,
-    ).unwrap();
+    let problem = Problem::new(&initial, &sources, None, [0.0; 2], c, &mut || false).unwrap();
     let start = Point {
         time: 0.0,
         exchange: 0.0,
         coulomb_exchange: 0.0,
         temperatures: [4000.0, 12000.0],
-        capacities: [initial.heavy_heat_capacity_j_k(), initial.electron_heat_capacity_j_k()],
+        capacities: [
+            initial.heavy_heat_capacity_j_k(),
+            initial.electron_heat_capacity_j_k(),
+        ],
     };
     let coupling = problem.coupling(&start, &mut || false).unwrap();
     // Independent forbidden trajectory: equal/opposite energy moves from the
