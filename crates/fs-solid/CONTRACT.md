@@ -1484,6 +1484,48 @@ or evolve fatigue damage into stiffness, heat, fracture topology, or crack
 growth. The existing fixed-temperature small-strain J2 and source-validity
 limits remain authoritative.
 
+## Fatigue on original frame fibers and material layers
+
+`frame2d::fatigue::FrameFatiguePath` owns one native frame and fixed gauges at
+existing member/Lobatto stations. Static load ramps, displacement-controlled
+cycles and Newmark records observe every accepted step. The initial supplied
+native state is observed once; damage before admission is not reconstructed.
+Newton trials never enter a fatigue counter. A failure in mechanics, any gauge,
+or cancellation publishes neither the requested block nor its fatigue histories.
+The native frame and gauge banks are cloned once per requested block, and the
+Newmark operator is prepared once per record. Bounded unresolved histories
+survive blocks and path clones without retaining the entire loading record.
+
+Metal fiber gauges use accepted `epsilon_0 - y*kappa` and the original committed
+uniaxial stress. J2, Voce and Chaboche (one through eight backstress branches)
+retain their actual plastic strain; Menegotto-Pinto retains its actual committed
+hysteretic stress. No elastic reconstruction replaces plastic stress. The shared
+bounded CMB counters support uncorrected, Morrow and paired SWT policies using
+the actual accepted stress/strain endpoints. Raw native fiber laws do not carry
+material-card provenance. An explicitly supplied `FiberMaterial` must match
+the exact original law, and a source-backed CMB curve additionally checks its
+original material card, state, typed operating coordinates and modulus receipt.
+Authored curves remain empirical estimates. Concrete and time-dependent or
+thermal fiber histories are outside this fixed-condition, rate-independent path.
+
+Elastic gauges name a physical `[y,z]` point in one original concentric material
+annulus. Each uses that layer's actual retained modulus, not an effective section
+modulus, to observe signed normal stress `E_layer*(epsilon_0-y*kappa)`. The shared
+S-N counter retains its declared mean-stress correction. Admission checks the
+point's annulus, original source identity/state/query, material/process and
+explicit typed absolute-temperature coordinate. This is an axial/bending normal-
+stress estimate; it does not infer shear/torsion or multiaxial fatigue. Material
+viscosity is refused because omitting its local stress would change the observed
+stress history. Stress-free reference and source temperature remain fixed.
+
+`FrameFatigueSummary` returns separate fiber strain-life and elastic stress-life
+results together. `preview_finish` evaluates all endpoint half cycles without
+changing the frame, counters or future continuation; `finish` publishes both
+banks atomically. These observations do not introduce stiffness degradation,
+heat generation, crack topology, a sequence-dependent damage law or a qualified
+component service life. `examples/frame_fatigue.rs --demo` demonstrates the
+native plastic loading path with deliberately synthetic CMB parameters.
+
 ## Provisional observation of native fatigue histories
 
 The quasistatic and inertial elastic/J2 fatigue owners expose `preview_fatigue`

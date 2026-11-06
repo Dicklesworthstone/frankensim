@@ -54,6 +54,9 @@ use fs_material::section::ConcentricElasticSection;
 /// Physical-time permanent creep on the original fiber-section frame solver.
 pub mod creep;
 
+/// Strain-life observation on accepted native static and inertial fiber states.
+pub mod fatigue;
+
 /// Full forced resonance of the original elastic frame and its material losses.
 pub mod harmonic;
 
@@ -1206,6 +1209,16 @@ impl Frame2d {
         steps: usize,
         checkpoint: &mut impl FnMut() -> Result<(), SolidError>,
     ) -> Result<Vec<StaticStep>, SolidError> {
+        self.static_load_observed(load, steps, checkpoint, &mut |_| Ok(()))
+    }
+
+    fn static_load_observed(
+        &mut self,
+        load: &[f64],
+        steps: usize,
+        checkpoint: &mut impl FnMut() -> Result<(), SolidError>,
+        accepted: &mut (impl FnMut(&Self) -> Result<(), SolidError> + ?Sized),
+    ) -> Result<Vec<StaticStep>, SolidError> {
         checkpoint()?;
         let n = self.ndof();
         if load.len() != n || steps == 0 {
@@ -1255,6 +1268,7 @@ impl Frame2d {
             checkpoint()?;
             self.u = u;
             self.commit_trials(trials);
+            accepted(self)?;
             out.push(StaticStep {
                 lambda,
                 u: self.u.clone(),
@@ -1277,6 +1291,20 @@ impl Frame2d {
         control: usize,
         targets: &[f64],
     ) -> Result<Vec<StaticStep>, SolidError> {
+        self.displacement_control_observed(
+            pattern, control, targets, &mut || Ok(()), &mut |_| Ok(()),
+        )
+    }
+
+    fn displacement_control_observed(
+        &mut self,
+        pattern: &[f64],
+        control: usize,
+        targets: &[f64],
+        checkpoint: &mut impl FnMut() -> Result<(), SolidError>,
+        accepted: &mut (impl FnMut(&Self) -> Result<(), SolidError> + ?Sized),
+    ) -> Result<Vec<StaticStep>, SolidError> {
+        checkpoint()?;
         self.require_untimed_materials()?;
         let n = self.ndof();
         if pattern.len() != n || control >= n || self.fixed[control] {
@@ -1288,11 +1316,12 @@ impl Frame2d {
         let mut lambda = 0.0f64;
         let mut out = Vec::with_capacity(targets.len());
         for &target in targets {
+            checkpoint()?;
             let mut u = self.u.clone();
             let mut history = Vec::new();
             let mut done = None;
             for it in 0..60 {
-                let (f, k, trials) = self.assemble(&u)?;
+                let (f, k, trials) = self.assemble_controlled(&u, checkpoint)?;
                 let r: Vec<f64> = (0..n).map(|d| lambda * pattern[d] - f[d]).collect();
                 let rn = self.free_norm(&r);
                 let gap = target - u[control];
@@ -1339,8 +1368,10 @@ impl Frame2d {
             let Some((iterations, trials)) = done else {
                 return Err(SolidError::NewtonStalled { history });
             };
+            checkpoint()?;
             self.u = u;
             self.commit_trials(trials);
+            accepted(self)?;
             out.push(StaticStep {
                 lambda,
                 u: self.u.clone(),
@@ -1552,6 +1583,23 @@ impl Frame2d {
         damping: Rayleigh,
         sustained_load: &[f64],
     ) -> Result<DynamicHistory, SolidError> {
+        self.newmark_with_load_observed(
+            ground, dt, dir, damping, sustained_load, &mut || Ok(()), &mut |_| Ok(()),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    fn newmark_with_load_observed(
+        &mut self,
+        ground: &[f64],
+        dt: f64,
+        dir: (f64, f64),
+        damping: Rayleigh,
+        sustained_load: &[f64],
+        checkpoint: &mut impl FnMut() -> Result<(), SolidError>,
+        accepted: &mut (impl FnMut(&Self) -> Result<(), SolidError> + ?Sized),
+    ) -> Result<DynamicHistory, SolidError> {
+        checkpoint()?;
         self.require_untimed_materials()?;
         let n = self.ndof();
         if !(dt.is_finite() && dt > 0.0) {
@@ -1628,7 +1676,7 @@ impl Frame2d {
             iterations: vec![0],
         };
         // Consistent initial acceleration on massive DOFs.
-        let (f0, _, _) = self.assemble(&self.u)?;
+        let (f0, _, _) = self.assemble_controlled(&self.u, checkpoint)?;
         let p0 = pext(ground.first().copied().unwrap_or(0.0));
         let c0 = cv(&self.vel);
         let initial_force: Vec<f64> = (0..n).map(|d| p0[d] - c0[d] - f0[d]).collect();
@@ -1647,6 +1695,7 @@ impl Frame2d {
         let mut p_prev = p0;
         let mut c_prev = c0;
         for step in 1..ground.len() {
+            checkpoint()?;
             let p1 = pext(ground[step]);
             let (u0, v0, a0) = (self.u.clone(), self.vel.clone(), self.acc.clone());
             let mut acc = a0.clone();
@@ -1674,7 +1723,7 @@ impl Frame2d {
                     .collect()
             };
             let mut u = position(&acc);
-            let mut assembled = self.assemble(&u);
+            let mut assembled = self.assemble_controlled(&u, checkpoint);
             if !assembled.as_ref().is_ok_and(|(f, k, _)| {
                 f.iter().chain(k).all(|v| v.is_finite())
                     && dyn_residual(&acc, f).iter().all(|v| v.is_finite())
@@ -1688,10 +1737,11 @@ impl Frame2d {
                     acc[d] = -v0[d] / (beta * dt) - ((0.5 - beta) / beta) * a0[d];
                 }
                 u = position(&acc);
-                assembled = self.assemble(&u);
+                assembled = self.assemble_controlled(&u, checkpoint);
             }
             let (mut f, mut kt, mut trials) = assembled?;
             for it in 0..60 {
+                checkpoint()?;
                 let r = dyn_residual(&acc, &f);
                 if r.iter().any(|value| !value.is_finite()) {
                     return Err(SolidError::NewtonStalled { history });
@@ -1725,8 +1775,8 @@ impl Frame2d {
                     done = Some((it, trials, f, vel, cvel));
                     break;
                 }
-                let (at, asm) = backtrack(&acc, &da, rn, &mut || Ok(()), |at, _| {
-                    let asm = self.assemble(&position(at))?;
+                let (at, asm) = backtrack(&acc, &da, rn, checkpoint, |at, checkpoint| {
+                    let asm = self.assemble_controlled(&position(at), checkpoint)?;
                     let residual = dyn_residual(at, &asm.0);
                     let norm = if residual.iter().all(|v| v.is_finite()) {
                         self.free_norm(&residual)
@@ -1776,10 +1826,12 @@ impl Frame2d {
                 .filter(|&d| self.fixed[d] && d % 3 == 0)
                 .map(|d| p1[d] - m.row_action(d, &acc) - cvel[d] - f[d])
                 .sum();
+            checkpoint()?;
             self.u = u;
             self.vel = vel;
             self.acc = acc;
             self.commit_trials(trials);
+            accepted(self)?;
             let last = hist.t.len() - 1;
             hist.t.push(step as f64 * dt);
             hist.u.push(self.u.clone());
