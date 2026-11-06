@@ -233,3 +233,34 @@ balance or claim a pressure-work certificate. Fixed six-slot preparation
 copies no histories or population fields. G0/G3 regressions in
 `tests/scenario_open_boundary.rs` exercise mixed native velocity/density
 response and all-or-none refusal, including the original collision Mach bound.
+
+
+## Hardness-dependent changing contact area in finite heat feedback
+
+`friction_heat::plastic_wear::PlasticSlidingHeatContact::new_evolving_area`
+opts the existing source-backed sliding/Archard/thermal owner into changes of the
+positive-pressure cells on its original finite-gap grid. The complete projected
+grid area must fit both uniform thermal face areas. Every nonlinear trial starts
+from the exact accepted plastic, signed tangential and removed-volume histories;
+recruitment and opening never reset or heal them. Original material cards still
+supply temperature-dependent hardness, dry friction and caloric state separately.
+
+Frictional dissipation and native Archard increments use the refreshed beginning
+pressure. The final worn pressure footprint determines actual endpoint contact
+area, source-derived half-cell conductance and ambient exposure through the same
+backward-Euler contact-patch ingress as all other thermal links. Reports retain
+the previous, refreshed and final areas and the exact accepted conductivity.
+Successful candidates own their successor route and active mask, so the next
+interval validates the accepted coverage and physical conductance. The default
+constructor continues to require its original active cells.
+
+This resolves total area between two uniform finite caloric receivers; it does
+not resolve lateral thermal fields, constriction resistance, contact residence
+or swept patches. The native beginning-pressure wear/endpoint-area split requires
+physical time and grid refinement, and an activation discontinuity may refuse
+nonlinear convergence. Complete detachment refuses an undefined massless
+interface temperature. This base adapter still holds thermal mass and geometry
+fixed within its explicit original-inventory removal envelope. Source regressions
+exercise thermal-softening recruitment followed by wear-induced opening, actual
+friction/volume/heat accounts, original irreversible histories, incomplete face
+support and late source refusal using independent two-cell elastic/heat references.

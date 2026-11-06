@@ -2,6 +2,9 @@
 //! These synthetic data exercise the declared fixed-inventory approximation;
 //! they are not material calibration or a complete body-energy model.
 
+#[path = "plastic_sliding_heat/area.rs"]
+mod area;
+
 #[path = "../../fs-contact/tests/source_point/common.rs"]
 mod source_common;
 

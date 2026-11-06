@@ -8,10 +8,14 @@
 //! endpoint values; wear geometry uses the native beginning-pressure split and
 //! requires physical step refinement. This is not a fully implicit wear solve.
 //!
-//! One fixed active-cell footprint shares two uniform bulk temperatures and one
-//! interface temperature. Its area must equal the original thermal contact face;
-//! opening, recruitment, or migration of contact cells refuses. The thermal
-//! masses and geometry stay fixed. A caller's cumulative removal fraction bounds
+//! Two uniform bulk temperatures and one interface temperature cover the native
+//! active cells. The default requires a fixed active footprint. The evolving-area
+//! constructor admits recruitment and opening on the original grid: final worn
+//! endpoint area supplies actual half-cell conductance and ambient coverage,
+//! while friction/wear still use the native refreshed beginning pressure. This
+//! first-order split requires time and grid refinement; discontinuous cell
+//! activation can prevent nonlinear convergence. Complete detachment refuses.
+//! The thermal masses and geometry stay fixed. A cumulative removal fraction bounds
 //! this small-removal approximation; removed material carries no modeled mass,
 //! enthalpy, or debris transport. Zero permitted removal gives a no-wear rung.
 //!
@@ -79,6 +83,16 @@ pub enum PlasticSlidingHeatBoundary {
         drive: FiniteGapPlasticDrive,
         controls: FiniteGapPlasticLoadControls,
     },
+}
+
+/// Spatial scope of the two uniform finite caloric receivers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PlasticSlidingHeatFootprint {
+    /// Every originally loaded cell stays loaded, and no other cell loads.
+    FixedActiveCells,
+    /// Loaded cells may change within the same grid on both original faces.
+    /// Heat uses final endpoint area, with no swept residence or lateral field.
+    EvolvingActiveCells,
 }
 
 /// Independent numerical work and contact/thermal residual limits.
@@ -206,10 +220,11 @@ pub struct PlasticSlidingHeatContact<'a> {
     state: SourcePlasticSlidingWearState,
     material_cards: [&'a MaterialCard; 2],
     caloric: [&'a ResolvedHeatCapacityCurve; 2],
-    route: &'a FrictionHeatRoute,
+    route: FrictionHeatRoute,
     original_body_ids: [u64; 2],
     original_volume_m3: [f64; 2],
     active_cells: Vec<bool>,
+    footprint: PlasticSlidingHeatFootprint,
     limits: PlasticSlidingHeatLimits,
     time_s: f64,
 }
@@ -219,6 +234,13 @@ pub struct PlasticSlidingHeatReport<P> {
     pub heat: FrictionHeatReport,
     /// Exact original conductivity/transport callback payload at the accepted root.
     pub source: P,
+    /// Exact original material conductivity supplied at the accepted thermal root.
+    pub conductivity_w_m_k: [f64; 2],
+    pub previous_contact_area_m2: f64,
+    /// Native temperature-refreshed pressure area before this interval's wear.
+    pub refreshed_contact_area_m2: f64,
+    /// Final native worn pressure area; the evolving route uses it for heat.
+    pub endpoint_contact_area_m2: f64,
     pub nonlinear: NewtonReport,
     pub trials: usize,
     /// Largest absolute local normal or actual tangential work residual [J].
@@ -263,12 +285,19 @@ impl<'a, 't, P> PlasticSlidingHeatCandidate<'a, 't, P> {
     }
 }
 
-struct Staged<P> {
+struct PreparedMechanics {
     source: SourcePlasticSlidingWear,
     mechanics: PlasticSlidingHeatMechanics,
-    payload: P,
     contact_work_residual_j: f64,
     removed_volume_fraction: [f64; 2],
+    refreshed_contact_area_m2: f64,
+    endpoint_contact_area_m2: f64,
+}
+
+struct Staged<P> {
+    prepared: PreparedMechanics,
+    payload: P,
+    conductivity_w_m_k: [f64; 2],
 }
 
 fn checkpoint(cx: &Cx<'_>) -> Result<(), DepositionError> {
@@ -304,8 +333,64 @@ impl<'a> PlasticSlidingHeatContact<'a> {
         state: SourcePlasticSlidingWearState,
         material_cards: [&'a MaterialCard; 2],
         caloric: [&'a ResolvedHeatCapacityCurve; 2],
-        route: &'a FrictionHeatRoute,
+        route: &FrictionHeatRoute,
         limits: PlasticSlidingHeatLimits,
+        cx: &Cx<'_>,
+    ) -> Result<Self, PlasticSlidingHeatError> {
+        Self::new_with_footprint(
+            thermal,
+            source,
+            state,
+            material_cards,
+            caloric,
+            route,
+            limits,
+            PlasticSlidingHeatFootprint::FixedActiveCells,
+            cx,
+        )
+    }
+
+    /// Bind changing loaded cells on the same projected finite-gap grid.
+    ///
+    /// The entire original grid must fit both uniform prismatic thermal faces;
+    /// every current positive-pressure cell contributes its actual grid area.
+    /// No pressure/hardness area surrogate or effective conductivity is used.
+    /// The shared uniform-body model resolves total area, not lateral temperature
+    /// gradients, contact residence, constriction resistance, or cell-edge events.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_evolving_area(
+        thermal: &DepositionSimulation<'_>,
+        source: SourcePlasticSlidingWear,
+        state: SourcePlasticSlidingWearState,
+        material_cards: [&'a MaterialCard; 2],
+        caloric: [&'a ResolvedHeatCapacityCurve; 2],
+        route: &FrictionHeatRoute,
+        limits: PlasticSlidingHeatLimits,
+        cx: &Cx<'_>,
+    ) -> Result<Self, PlasticSlidingHeatError> {
+        Self::new_with_footprint(
+            thermal,
+            source,
+            state,
+            material_cards,
+            caloric,
+            route,
+            limits,
+            PlasticSlidingHeatFootprint::EvolvingActiveCells,
+            cx,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new_with_footprint(
+        thermal: &DepositionSimulation<'_>,
+        source: SourcePlasticSlidingWear,
+        state: SourcePlasticSlidingWearState,
+        material_cards: [&'a MaterialCard; 2],
+        caloric: [&'a ResolvedHeatCapacityCurve; 2],
+        route: &FrictionHeatRoute,
+        limits: PlasticSlidingHeatLimits,
+        footprint: PlasticSlidingHeatFootprint,
         cx: &Cx<'_>,
     ) -> Result<Self, PlasticSlidingHeatError> {
         checkpoint(cx)?;
@@ -420,13 +505,15 @@ impl<'a> PlasticSlidingHeatContact<'a> {
             state,
             material_cards,
             caloric,
-            route,
+            route: route.clone(),
             original_body_ids: cells.map(|id| thermal.cells()[&id].body_id),
             original_volume_m3: cells.map(|id| thermal.cells()[&id].geometry.volume_m3),
             active_cells,
+            footprint,
             limits,
             time_s: thermal.time_s(),
         };
+        bound.admit_footprint_support()?;
         bound.admit_removal(&bound.state)?;
         checkpoint(cx)?;
         Ok(bound)
@@ -443,6 +530,12 @@ impl<'a> PlasticSlidingHeatContact<'a> {
     }
     pub const fn limits(&self) -> PlasticSlidingHeatLimits {
         self.limits
+    }
+    pub const fn route(&self) -> &FrictionHeatRoute {
+        &self.route
+    }
+    pub const fn footprint(&self) -> PlasticSlidingHeatFootprint {
+        self.footprint
     }
 
     /// Propose one heat/contact interval from the exact accepted histories.
@@ -472,7 +565,15 @@ impl<'a> PlasticSlidingHeatContact<'a> {
     ) -> Result<PlasticSlidingHeatCandidate<'a, 't, P>, PlasticSlidingHeatError<E>> {
         checkpoint(cx)?;
         self.admit_thermal(thermal)?;
-        self.admit_footprint(&self.state, cx)?;
+        let previous_contact_area_m2 = self.admit_footprint(&self.state, cx)?;
+        let bound_area = self.route.contact_area_m2();
+        if (previous_contact_area_m2 - bound_area).abs()
+            > 64.0 * f64::EPSILON * previous_contact_area_m2.max(bound_area)
+        {
+            return Err(PlasticSlidingHeatError::Invalid(
+                "accepted native pressure area differs from its thermal contact",
+            ));
+        }
         controls.newton.validate()?;
         let cells = thermal.cells().len();
         let dimension = cells
@@ -507,40 +608,47 @@ impl<'a> PlasticSlidingHeatContact<'a> {
             ));
         }
         let check = || checkpoint(cx);
-        let step = FrictionHeatStep::new(thermal, target_s, self.route, check)?;
+        let step = FrictionHeatStep::new(thermal, target_s, &self.route, check)?;
         let duration_s = step.duration_s();
         let trials = Cell::new(0usize);
-        let evaluate = |x: &[f64]| {
-            check()?;
-            if trials.get() >= controls.maximum_trials {
-                return Err(PlasticSlidingHeatError::TrialBudget);
-            }
-            trials.set(trials.get() + 1);
-            if x.len() != dimension || x.iter().any(|v| !v.is_finite()) {
-                return Err(PlasticSlidingHeatError::Invalid(
-                    "complete finite energy/interface-temperature iterate required",
-                ));
-            }
-            let interface_temperature = finite(
-                interface_temperature_guess_k + x[cells] / controls.temperature_scale_j_per_k,
-            )?;
-            step.evaluate(
-                &x[..cells],
-                interface_temperature,
-                |endpoint, interface_temperature| {
-                    let bulk_temperature = temperatures(endpoint, self.caloric, self.route)?;
-                    let (source, mechanics) = self.advance_mechanics(
-                        bulk_temperature,
-                        interface_temperature,
-                        motion,
-                        duration_s,
-                        boundary,
-                        controls.friction,
-                        cx,
-                    )?;
-                    let contact_work_residual_j =
-                        mechanics.admit_work(controls.contact_work_tolerance_j, cx)?;
-                    let removed_volume_fraction = self.admit_removal(mechanics.candidate())?;
+        let evaluate =
+            |x: &[f64]| {
+                check()?;
+                if trials.get() >= controls.maximum_trials {
+                    return Err(PlasticSlidingHeatError::TrialBudget);
+                }
+                trials.set(trials.get() + 1);
+                if x.len() != dimension || x.iter().any(|v| !v.is_finite()) {
+                    return Err(PlasticSlidingHeatError::Invalid(
+                        "complete finite energy/interface-temperature iterate required",
+                    ));
+                }
+                let interface_temperature = finite(
+                    interface_temperature_guess_k + x[cells] / controls.temperature_scale_j_per_k,
+                )?;
+                let prepare = |endpoint: &DepositionSimulation<'t>, interface_temperature|
+                -> Result<(f64, PreparedMechanics), PlasticSlidingHeatError<E>> {
+                let bulk_temperature = temperatures(endpoint, self.caloric, &self.route)?;
+                let (source, mechanics, contact_areas) = self.advance_mechanics(
+                    bulk_temperature, interface_temperature, motion, duration_s,
+                    boundary, controls.friction, cx,
+                )?;
+                let contact_work_residual_j =
+                    mechanics.admit_work(controls.contact_work_tolerance_j, cx)?;
+                let removed_volume_fraction = self.admit_removal(mechanics.candidate())?;
+                let [refreshed_contact_area_m2, endpoint_contact_area_m2] = contact_areas;
+                Ok((endpoint_contact_area_m2, PreparedMechanics {
+                    source, mechanics, contact_work_residual_j, removed_volume_fraction,
+                    refreshed_contact_area_m2, endpoint_contact_area_m2,
+                }))
+            };
+                let heat_input = |endpoint: &DepositionSimulation<'t>,
+                                  interface_temperature,
+                                  prepared: PreparedMechanics|
+                 -> Result<
+                    FrictionHeatInput<Staged<P>>,
+                    PlasticSlidingHeatError<E>,
+                > {
                     let PlasticSlidingHeatSource {
                         conductivity_w_m_k,
                         transport,
@@ -552,29 +660,49 @@ impl<'a> PlasticSlidingHeatContact<'a> {
                         payload,
                     } = transport;
                     Ok(FrictionHeatInput {
-                        // No normal plastic work or signed parameter work is
-                        // added to heat. The existing route exports this loss once.
-                        dissipated_j: mechanics.frictional_work_j(),
+                        // Neither normal plastic work nor signed parameter work is
+                        // supplied as heat. The original route exports friction once.
+                        dissipated_j: prepared.mechanics.frictional_work_j(),
                         conductivity_w_m_k,
                         transport: StepCoefficients {
                             sources_w,
                             conductances_w_k,
                             payload: Staged {
-                                source,
-                                mechanics,
+                                prepared,
                                 payload,
-                                contact_work_residual_j,
-                                removed_volume_fraction,
+                                conductivity_w_m_k,
                             },
                         },
                     })
-                },
-                check,
-            )
-        };
+                };
+                if self.footprint == PlasticSlidingHeatFootprint::EvolvingActiveCells {
+                    step.evaluate_with_area(
+                        &x[..cells],
+                        interface_temperature,
+                        prepare,
+                        heat_input,
+                        check,
+                    )
+                    .map(|area_trial| {
+                        let (trial, route) = area_trial.into_trial_and_route();
+                        (trial, Some(route))
+                    })
+                } else {
+                    step.evaluate(
+                        &x[..cells],
+                        interface_temperature,
+                        |endpoint, temperature| {
+                            let (_, prepared) = prepare(endpoint, temperature)?;
+                            heat_input(endpoint, temperature, prepared)
+                        },
+                        check,
+                    )
+                    .map(|trial| (trial, None))
+                }
+            };
         let problem =
             FallibleFiniteDifference::new(dimension, controls.difference_step_j, |x: &[f64]| {
-                evaluate(x).map(|trial| trial.residual_j().to_vec())
+                evaluate(x).map(|(trial, _)| trial.residual_j().to_vec())
             })
             .map_err(numerical)?;
         let mut initial = energy_guess_j.to_vec();
@@ -598,27 +726,56 @@ impl<'a> PlasticSlidingHeatContact<'a> {
         if !result.report.converged {
             return Err(PlasticSlidingHeatError::NotConverged(result.report));
         }
-        let trial = evaluate(&solver.x)?;
+        let (trial, successor_route) = evaluate(&solver.x)?;
         let (thermal, staged, heat) = trial.accept(controls.heat, check)?;
-        let t = staged.mechanics.temperature_normal();
-        let w = staged.mechanics.wear_normal();
+        let Staged {
+            prepared,
+            payload,
+            conductivity_w_m_k,
+        } = staged;
+        let PreparedMechanics {
+            source,
+            mechanics,
+            contact_work_residual_j,
+            removed_volume_fraction,
+            refreshed_contact_area_m2,
+            endpoint_contact_area_m2,
+        } = prepared;
+        let t = mechanics.temperature_normal();
+        let w = mechanics.wear_normal();
         let temperature_parameter_work_j = t.parameter_work_j;
         let wear_parameter_work_j = w.parameter_work_j;
         let normal_plastic_work_j = finite(t.response.plastic_work_j + w.response.plastic_work_j)?;
         let normal_work_j = finite(t.normal_work_j + w.normal_work_j)?;
-        let removed_volume_m3 = staged.mechanics.candidate().wear_state().volumes_m3();
-        let frictional_work_j = staged.mechanics.frictional_work_j();
+        let removed_volume_m3 = mechanics.candidate().wear_state().volumes_m3();
+        let frictional_work_j = mechanics.frictional_work_j();
+        let mut active_cells = Vec::with_capacity(self.active_cells.len());
+        for (i, p) in mechanics
+            .candidate()
+            .wear_state()
+            .contact_state()
+            .contact_state()
+            .pressure_pa()
+            .iter()
+            .enumerate()
+        {
+            if i % 64 == 0 {
+                check()?;
+            }
+            active_cells.push(*p > 0.0);
+        }
         let contact = Self {
-            source: staged.source,
+            source,
             // Clone the accepted candidate once for continuing the sealed
             // owner; all Newton trials retained only their native candidate.
-            state: staged.mechanics.candidate().clone(),
+            state: mechanics.candidate().clone(),
             material_cards: self.material_cards,
             caloric: self.caloric,
-            route: self.route,
+            route: successor_route.unwrap_or_else(|| self.route.clone()),
             original_body_ids: self.original_body_ids,
             original_volume_m3: self.original_volume_m3,
-            active_cells: self.active_cells.clone(),
+            active_cells,
+            footprint: self.footprint,
             limits: self.limits,
             time_s: target_s,
         };
@@ -627,19 +784,23 @@ impl<'a> PlasticSlidingHeatContact<'a> {
             contact,
             thermal,
             report: PlasticSlidingHeatReport {
-                mechanics: staged.mechanics,
+                mechanics,
                 heat,
-                source: staged.payload,
+                source: payload,
+                conductivity_w_m_k,
+                previous_contact_area_m2,
+                refreshed_contact_area_m2,
+                endpoint_contact_area_m2,
                 nonlinear: result.report,
                 trials: trials.get(),
-                contact_work_residual_j: staged.contact_work_residual_j,
+                contact_work_residual_j,
                 frictional_work_j,
                 temperature_parameter_work_j,
                 wear_parameter_work_j,
                 normal_plastic_work_j,
                 normal_work_j,
                 removed_volume_m3,
-                removed_volume_fraction: staged.removed_volume_fraction,
+                removed_volume_fraction,
             },
         })
     }
@@ -654,8 +815,14 @@ impl<'a> PlasticSlidingHeatContact<'a> {
         boundary: PlasticSlidingHeatBoundary,
         controls: TangentialSolveConfig,
         cx: &Cx<'_>,
-    ) -> Result<(SourcePlasticSlidingWear, PlasticSlidingHeatMechanics), PlasticSlidingHeatError<E>>
-    {
+    ) -> Result<
+        (
+            SourcePlasticSlidingWear,
+            PlasticSlidingHeatMechanics,
+            [f64; 2],
+        ),
+        PlasticSlidingHeatError<E>,
+    > {
         match boundary {
             PlasticSlidingHeatBoundary::HeldApproach => {
                 let refresh = self.source.refresh_at_temperatures(
@@ -733,10 +900,16 @@ impl<'a> PlasticSlidingHeatContact<'a> {
         )
             -> Result<SourcePlasticSlidingWearAdvance<B>, SourcePlasticSlidingError>,
         wrap: impl FnOnce(PlasticSlidingHeatResponse<B>) -> PlasticSlidingHeatMechanics,
-    ) -> Result<(SourcePlasticSlidingWear, PlasticSlidingHeatMechanics), PlasticSlidingHeatError<E>>
-    {
+    ) -> Result<
+        (
+            SourcePlasticSlidingWear,
+            PlasticSlidingHeatMechanics,
+            [f64; 2],
+        ),
+        PlasticSlidingHeatError<E>,
+    > {
         let (source, before, temperature) = refresh.into_parts();
-        self.admit_footprint(&before, cx)?;
+        let refreshed_area = self.admit_footprint(&before, cx)?;
         if temperature.normal.parameter_work_j.abs() > self.limits.maximum_absolute_parameter_work_j
         {
             return Err(PlasticSlidingHeatError::Invalid(
@@ -744,7 +917,7 @@ impl<'a> PlasticSlidingHeatContact<'a> {
             ));
         }
         let sliding = advance(&source, &before)?;
-        self.admit_footprint(&sliding.candidate, cx)?;
+        let endpoint_area = self.admit_footprint(&sliding.candidate, cx)?;
         self.admit_removal(&sliding.candidate)?;
         let supplied = finite(
             temperature.normal.parameter_work_j.abs() + sliding.normal.parameter_work_j.abs(),
@@ -761,6 +934,7 @@ impl<'a> PlasticSlidingHeatContact<'a> {
                 temperature,
                 sliding,
             }),
+            [refreshed_area, endpoint_area],
         ))
     }
 
@@ -769,6 +943,7 @@ impl<'a> PlasticSlidingHeatContact<'a> {
         thermal: &DepositionSimulation<'_>,
     ) -> Result<[f64; 2], PlasticSlidingHeatError<E>> {
         self.route.validate(thermal)?;
+        self.admit_footprint_support()?;
         if self.time_s != thermal.time_s()
             || self.route.cells().map(|id| thermal.cells()[&id].body_id) != self.original_body_ids
         {
@@ -776,7 +951,7 @@ impl<'a> PlasticSlidingHeatContact<'a> {
                 "contact and thermal clocks or original body identities differ",
             ));
         }
-        let temperature = temperatures(thermal, self.caloric, self.route)?;
+        let temperature = temperatures(thermal, self.caloric, &self.route)?;
         let bulk = original_bulk(&self.source);
         if (0..2).any(|i| bulk[i].state_coordinate("T") != Some(temperature[i])) {
             return Err(PlasticSlidingHeatError::Invalid(
@@ -791,7 +966,7 @@ impl<'a> PlasticSlidingHeatContact<'a> {
         &self,
         state: &SourcePlasticSlidingWearState,
         cx: &Cx<'_>,
-    ) -> Result<(), PlasticSlidingHeatError<E>> {
+    ) -> Result<f64, PlasticSlidingHeatError<E>> {
         let pressure = state
             .wear_state()
             .contact_state()
@@ -802,14 +977,52 @@ impl<'a> PlasticSlidingHeatContact<'a> {
                 "contact grid changed within fixed thermal registration",
             ));
         }
+        let mut count = 0usize;
         for (i, (&p, &active)) in pressure.iter().zip(&self.active_cells).enumerate() {
             if i % 64 == 0 {
                 checkpoint(cx)?;
             }
-            if (p > 0.0) != active {
+            if !p.is_finite() || p < 0.0 {
+                return Err(PlasticSlidingHeatError::Invalid(
+                    "native thermal footprint requires finite nonnegative pressure",
+                ));
+            }
+            count += usize::from(p > 0.0);
+            if self.footprint == PlasticSlidingHeatFootprint::FixedActiveCells
+                && (p > 0.0) != active
+            {
                 return Err(PlasticSlidingHeatError::Invalid(
                     "temperature or wear changed the admitted active thermal footprint",
                 ));
+            }
+        }
+        if count == 0 {
+            return Err(PlasticSlidingHeatError::Invalid(
+                "detached normal contact has no massless thermal interface temperature",
+            ));
+        }
+        let grid = self.source.wear_source().contact().model().config().grid;
+        finite(count as f64 * (grid.cell_width_m * grid.cell_depth_m))
+    }
+
+    fn admit_footprint_support<E>(&self) -> Result<(), PlasticSlidingHeatError<E>> {
+        if self.footprint == PlasticSlidingHeatFootprint::EvolvingActiveCells {
+            let grid = self.source.wear_source().contact().model().config().grid;
+            let support =
+                finite(self.active_cells.len() as f64 * (grid.cell_width_m * grid.cell_depth_m))?;
+            if support <= 0.0 {
+                return Err(PlasticSlidingHeatError::Invalid(
+                    "finite positive original grid area required",
+                ));
+            }
+            for i in 0..2 {
+                let face =
+                    finite(self.route.geometry[i].volume_m3 / (2.0 * self.route.distances_m[i]))?;
+                if support - face > 64.0 * f64::EPSILON * support.max(face) {
+                    return Err(PlasticSlidingHeatError::Invalid(
+                        "evolving contact grid exceeds an original uniform thermal face",
+                    ));
+                }
             }
         }
         Ok(())
