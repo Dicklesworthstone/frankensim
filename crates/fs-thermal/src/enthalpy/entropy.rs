@@ -19,8 +19,11 @@ pub struct AdvectiveEntropyContribution {
     pub boundary_entropy_input_j_k: f64,
     /// Sum dm*[(h_donor-h_receiver)/T_receiver - (s_donor-s_receiver)].
     /// This is upwind/control-volume mixing, not constitutive fluid dissipation.
-    /// It is nonnegative for monotone T(h) in exact arithmetic; signed roundoff
-    /// is retained, and latent energy at one temperature produces no mixing.
+    /// It is nonnegative for one immutable monotone T(h) in exact arithmetic.
+    /// Source-anchored stationary mixtures retain signed composition/pressure
+    /// terms; per-face nonnegativity requires additional physical assumptions.
+    /// Signed roundoff is retained, and same-law latent energy at one
+    /// temperature produces no mixing.
     pub upwind_mixing_j_k: f64,
     /// Original transported energy/T minus boundary entropy and mixing. Keeps
     /// admitted continuity roundoff and flux arithmetic separate from production.

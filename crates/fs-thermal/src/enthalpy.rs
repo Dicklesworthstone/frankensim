@@ -128,6 +128,12 @@ pub trait ThermalLaw {
     /// Optional frozen mixture/reference binding for stationary species advection.
     /// The original single-material path does not require or infer this data.
     fn advected_composition(&self) -> Option<advection::species::CaloricComposition<'_>> { None }
+    /// Optional original-source entropy anchor for stationary mixture transport.
+    /// Together with this law's `specific_entropy_change_j_kg_k`, it supplies
+    /// actual mixing/pressure/phase entropy in a shared, species-reduced
+    /// convention. The stationary owner checks that every cell and inlet uses
+    /// that same convention; no chemical entropy is inferred from calorics.
+    fn advected_entropy_anchor(&self) -> Option<advection::species::CaloricEntropyAnchor<'_>> { None }
 }
 
 /// Declared reservoir contact, independent of mechanical adhesion or strength.

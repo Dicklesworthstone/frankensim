@@ -312,7 +312,8 @@ impl ImplicitConductionChain<'_> {
         Ok(self)
     }
 
-    /// Classify entropy of an already attached bulk or liquid upwind flow.
+    /// Classify entropy of an already attached bulk, liquid or stationary-mixture
+    /// upwind flow with its original source entropy closure.
     ///
     /// The existing caloric integral supplies actual storage, and the original
     /// flow owner supplies inlet/outlet entropy and upwind mixing. The native
@@ -322,8 +323,10 @@ impl ImplicitConductionChain<'_> {
     /// trajectories publish no entropy. Numerical time/algebraic defects remain
     /// separate from conductive production and spatial upwind mixing.
     ///
-    /// Every flowing material must supply its original caloric entropy. No
-    /// chemical entropy, pressure-work model or full fluid dissipation law is
+    /// Every flowing material must supply its original caloric entropy.
+    /// Stationary mixtures additionally require source entropy anchors in one
+    /// shared species-reduced convention. Their mixing/pressure contributions
+    /// retain their sign; no pressure-work or full fluid dissipation law is
     /// inferred. A stationary-skeleton liquid carrier uses its original liquid
     /// h/s at every stage while storage uses mixture entropy; no additional
     /// latent-energy source is introduced. Original phase support, source

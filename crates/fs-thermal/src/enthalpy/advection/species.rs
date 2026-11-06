@@ -38,6 +38,29 @@ pub struct CaloricComposition<'a> {
     pub enthalpy_reference: &'a str,
 }
 
+/// Original-source entropy anchor for one immutable frozen mixture.
+///
+/// The law's entropy coordinate is `s_reduced(h_anchor) + integral(dh/T)`.
+/// It retains composition mixing, pressure and phase terms, but excludes one
+/// COMMON set of linear species constants `sum(Y_i * s_i_reference)`. The
+/// stationary graph conserves every component and fixes every stored mixture,
+/// so these constants cancel analytically before floating-point evaluation.
+/// Subtracting large rounded absolute mixture entropies is not an equivalent
+/// implementation. The source owner must provide this reduction explicitly;
+/// caloric enthalpy and heat capacity cannot determine it.
+#[derive(Clone, Copy, Debug)]
+pub struct CaloricEntropyAnchor<'a> {
+    /// Admitted source enthalpy at which the reduced entropy is supplied, J/kg.
+    pub specific_h_j_kg: f64,
+    /// Original entropy after the shared linear species reference is removed,
+    /// J/(kg K). Includes original mixing/pressure/phase contributions.
+    pub reduced_specific_entropy_j_kg_k: f64,
+    /// Identity of the shared species constants and entropy convention. This
+    /// includes their source identities and reference temperature/pressure;
+    /// identical energy references alone do not establish entropy compatibility.
+    pub entropy_reference: &'a str,
+}
+
 /// Species carried by one already-declared inlet mass connection.
 #[derive(Clone, Debug, PartialEq)]
 pub struct InletSpecies {

@@ -1045,11 +1045,34 @@ wrapper, so actual nonadvective source flags survive signed cancellation without
 subtracting large transport accounts. Both owners use the same accepted states,
 CFL/event grid and original source/history hooks. The returned observer retains
 its inner history and enabled flow entropy account, with the usual per-advance
-`begin()` reset semantics. Balanced same-law bulk and admitted liquid-carrier
-flow are covered; stationary species, selective streams and chemical entropy
-remain outside this closure. G1/G3/G4 regressions cover actual bath temperatures,
+`begin()` reset semantics. Balanced same-law bulk, admitted liquid-carrier flow,
+and stationary mixtures with original source entropy anchors are covered.
+Selective streams still require an outgoing-stream entropy and work closure.
+G1/G3/G4 regressions cover actual bath temperatures,
 datum shifts, latent storage, unchanged heat trajectories, retained histories,
 events, unavailable entropy and cancellation without publication.
+
+Stationary mixture entropy uses `ThermalLaw::advected_entropy_anchor` and the
+same law's exact `dh/T` integral. `CaloricEntropyAnchor` supplies an original
+enthalpy and reduced specific entropy at that state, plus a shared source
+convention identity. Reduced entropy retains chemical mixing, pressure and phase
+terms but analytically omits one common set of linear species reference
+constants. Frozen storage and admitted local species balance cancel those
+constants; subtracting large rounded absolute source entropies is not an
+admissible replacement. Missing anchors, incompatible conventions and nonfinite
+source values refuse before publishing a state. The source coordinate is
+evaluated once per participating cell or inlet, then reused across its faces.
+
+Unlike-composition/pressure mixing terms remain signed accounting contributions;
+same-law per-face nonnegativity does not generalize without physical pressure
+and work assumptions. Formation-enthalpy heat contributions are compensated
+per receiving cell before division by its temperature, separately from the
+source entropy sum. This preserves small isothermal mixing entropy beside large
+positive or negative formation energies. The native transported-power account
+remains independent, leaving its finite continuity/arithmetic difference in the
+reported residue. Analytic ideal-mixture regressions cover nonzero mixing at
+matched temperatures, unequal-temperature mixing, recirculation and reversed
+flow orientation, signed pressure terms, source ambiguity and cancellation.
 
 
 ## Shared chambers on actual multi-cell heat histories
@@ -2415,14 +2438,15 @@ enthalpy reference, inlet-law support and local mass/species admission. The
 compiled directed enthalpy tangent is unchanged; each cell's original nonlinear
 law still maps its own stored h to temperature. Convection and conduction use
 the same BE/SDIRK stages without an explicit flow CFL. This does not evolve
-species, invent reaction heat, change density, or supply chemical mixing entropy.
+species, invent reaction heat, or change density. Chemical mixing entropy is
+available only through original source anchors in the explicit shared reduced
+convention described above; caloric data alone never supplies it.
 
 Selective streams and flow-entropy histories still refuse until their own
-endpoint closures exist. Stationary mixtures explicitly refuse the thermal-only
-advection entropy opt-in. Thermal entropy leaves mass-carried
+endpoint closures exist. Thermal entropy leaves mass-carried
 transfers unclassified unless the caller selects
 `with_implicit_advection_entropy` after binding an admitted bulk or liquid
-upwind flow.
+upwind flow or a source-anchored stationary mixture.
 No phase mobility, moving inventory, pressure work or momentum feedback is
 inferred. The selected method's time error and upwind spatial diffusion still
 require independent refinement.
@@ -2431,12 +2455,17 @@ The entropy opt-in reuses the explicit flow owner's original caloric entropy
 differences and the actual native endpoint powers. Its
 `EntropyAudit::advection` separates net inlet-minus-outlet entropy, upwind
 control-volume mixing and the transport arithmetic/continuity residue. The
-same immutable material law and reference convention must cover each flowing
-component. A common relative entropy datum cancels under mass continuity;
-chemical mixing and unlike-law streams are not inferred. Upwind mixing is a
-spatial discretization/control-volume contribution, not constitutive fluid
-dissipation, and is nonnegative for monotone T(h) in exact arithmetic. Isothermal
-latent transport carries entropy without inventing mixing production.
+same immutable material law covers each ordinary flowing component. Stationary
+mixtures use each stream's original law and compatible source entropy anchors.
+A common relative entropy datum cancels under mass continuity; common linear
+species reference constants cancel under the stationary species balance.
+Upwind mixing is a spatial discretization/control-volume contribution, not
+constitutive fluid dissipation, and is nonnegative for a same-law monotone T(h)
+in exact arithmetic. Unlike-law pressure/composition contributions remain signed.
+Isothermal latent transport carries entropy without inventing mixing production.
+Native backward-Euler and SDIRK2 quadrature integrates the same endpoint kernel;
+analytic mixture tests check both beyond the explicit flow CFL while retaining
+their exact ordinary energy trajectories and separate temporal defects.
 
 For a stationary solid skeleton, both explicit and implicit entropy fluxes use
 the same original carrier: `h_liquid=max(h,h_liquidus)` and its caloric entropy.

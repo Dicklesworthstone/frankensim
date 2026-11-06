@@ -520,7 +520,7 @@ fn a_shared_enthalpy_reference_does_not_admit_stationary_species_entropy() {
     assert!(matches!(
         s.advance_advected_with_entropy(&audited, 0.125, cfg(1.0), || Ok(())),
         Err(DepositionError::InvalidInput(
-            "thermal advection entropy does not cover stationary species mixing"
+            "stationary species entropy requires original source entropy anchors"
         ))
     ));
     assert_eq!(s.time_s(), 0.0);

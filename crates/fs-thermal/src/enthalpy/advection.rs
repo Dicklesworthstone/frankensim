@@ -462,14 +462,14 @@ impl<O: DepositionObserver> DepositionObserver for Advected<O> {
         if !self.selective_outlets.is_empty() && self.stationary_species.is_none() {
             return Err(invalid("selective outlets require stationary species admission").into());
         }
-        if self.entropy.is_some() && self.stationary_species.is_some() {
-            return Err(invalid("thermal advection entropy does not cover stationary species mixing").into());
-        }
-        if let Some(entropy) = &mut self.entropy {
-            entropy.capture(thermal, check)?;
-        }
         if let Some(species) = &self.stationary_species {
             species.validate_laws(thermal, &self.boundaries, &self.selective_outlets)?;
+        }
+        if let Some(entropy) = &mut self.entropy {
+            if !self.selective_outlets.is_empty() {
+                return Err(invalid("selective outlets require original stream entropy and work closure").into());
+            }
+            entropy.capture(thermal, self.stationary_species.as_ref(), &self.boundaries, check)?;
         }
         let mut sources = self.inner.sources(thermal, check)?;
         let mut pending = BoundaryPending { time_s: thermal.time_s(), ..BoundaryPending::default() };

@@ -1,12 +1,13 @@
 //! Frozen mixture compositions share the original native heat/flow solve.
 use super::*;
-use crate::enthalpy::advection::species::{CaloricComposition, InletSpecies};
+use crate::enthalpy::advection::species::{CaloricComposition, CaloricEntropyAnchor, InletSpecies};
 
 struct MixtureLaw {
     names: Vec<String>,
     fractions: Vec<f64>,
     datum: f64,
     reference: &'static str,
+    entropy_anchor: bool,
 }
 
 impl MixtureLaw {
@@ -16,6 +17,7 @@ impl MixtureLaw {
             fractions,
             datum,
             reference: "fixed-species-formation-reference",
+            entropy_anchor: false,
         }
     }
     fn cp(&self) -> f64 {
@@ -57,6 +59,14 @@ impl ThermalLaw for MixtureLaw {
         Ok(Some(
             self.cp() * (self.temperature_k(b)? / self.temperature_k(a)?).ln(),
         ))
+    }
+    fn advected_entropy_anchor(&self) -> Option<CaloricEntropyAnchor<'_>> {
+        self.entropy_anchor.then(|| CaloricEntropyAnchor {
+            specific_h_j_kg: self.h(300.0),
+            reduced_specific_entropy_j_kg_k: -self.fractions.iter()
+                .filter(|&&y| y > 0.0).map(|y| y * y.ln()).sum::<f64>(),
+            entropy_reference: "equal-molar-mass-ideal-mixture-T300-p0",
+        })
     }
 }
 
@@ -160,7 +170,8 @@ fn prepare_mixtures<'a>(
         .map(|(i, law)| (MaterialId(i as u64), law as &dyn ConductivityLaw))
         .collect();
     let budget = DepositionBudget {
-        max_cells: temperatures.len(),
+        // Inlet-only caloric laws share the timeline's material budget.
+        max_cells: temperatures.len().max(laws.len()),
         max_links: 4,
         max_events: events.len(),
         max_substeps: 1024,
@@ -454,7 +465,7 @@ fn implicit_stationary_species_keep_caloric_bindings_and_refuse_chemical_entropy
     assert!(matches!(
         flow.endpoint_transport_with_entropy(&thermal, || Ok(())),
         Err(DepositionError::InvalidInput(
-            "thermal advection entropy does not cover stationary species mixing"
+            "stationary species entropy requires original source entropy anchors"
         ))
     ));
     let system = ImplicitConductionChain::new(&thermal, &conduction, &bindings(&laws), || Ok(()))
@@ -465,7 +476,7 @@ fn implicit_stationary_species_keep_caloric_bindings_and_refuse_chemical_entropy
         system.with_implicit_advection_entropy(&thermal, || Ok(())),
         Err(ImplicitConductionError::Thermal(
             DepositionError::InvalidInput(
-                "thermal advection entropy does not cover stationary species mixing",
+                "stationary species entropy requires original source entropy anchors",
             )
         ))
     ));
@@ -488,6 +499,69 @@ fn implicit_stationary_species_keep_caloric_bindings_and_refuse_chemical_entropy
         assert_eq!(thermal.time_s(), 0.0);
         assert_eq!(flow.audit().substeps, 0);
     }
+}
+
+#[test]
+fn stationary_mixture_entropy_uses_actual_be_and_sdirk_stage_quadrature() {
+    let (mut laws, flow) = single_mixer(0.0);
+    for law in &mut laws { law.entropy_anchor = true; }
+    let (thermal, conduction) = prepare_mixtures(&laws, &[280.0], &[2.0], false);
+    let original = ImplicitConductionChain::new(&thermal, &conduction, &bindings(&laws), || Ok(()))
+        .unwrap().with_implicit_advection(&thermal, &flow, || Ok(())).unwrap();
+    let audited = ImplicitConductionChain::new(&thermal, &conduction, &bindings(&laws), || Ok(()))
+        .unwrap().with_implicit_advection(&thermal, &flow, || Ok(())).unwrap()
+        .with_implicit_advection_entropy(&thermal, || Ok(())).unwrap();
+    let dt = 4.0; // dt*mass_rate/cell_mass = 2, beyond explicit flow CFL.
+    let gamma = 1.0 - core::f64::consts::FRAC_1_SQRT_2;
+    let first = (280.0 + gamma * dt * 155.0) / (1.0 + gamma * dt * 0.5);
+    let mixture_entropy = -0.25 * 0.25_f64.ln() - 0.75 * 0.75_f64.ln();
+    let mut workspace = ImplicitConductionWorkspace::new(1).unwrap();
+    for second_order in [false, true] {
+        let (next, report) = if second_order {
+            audited.advance_sdirk2_to(&thermal, dt, controls(dt), &mut workspace, || Ok(()))
+        } else {
+            audited.advance_to(&thermal, dt, controls(dt), &mut workspace, || Ok(()))
+        }.unwrap();
+        let (plain, plain_report) = if second_order {
+            original.advance_sdirk2_to(&thermal, dt, controls(dt), &mut workspace, || Ok(()))
+        } else {
+            original.advance_to(&thermal, dt, controls(dt), &mut workspace, || Ok(()))
+        }.unwrap();
+        assert_eq!(next.cells(), plain.cells());
+        assert_eq!(report.energy, plain_report.energy);
+        assert_eq!(report.energy.substeps, 1);
+        let final_t = if second_order {
+            (280.0 + (1.0 - gamma) * dt * 0.5 * (310.0 - first) + gamma * dt * 155.0)
+                / (1.0 + gamma * dt * 0.5)
+        } else { (280.0 + dt * 155.0) / (1.0 + dt * 0.5) };
+        near(next.temperature_k(CellId(0)).unwrap(), final_t, 1e-10);
+        let samples = if second_order {
+            [((1.0 - gamma) * dt, first), (gamma * dt, final_t)]
+        } else { [(dt, final_t), (0.0, final_t)] };
+        let mut boundary = 0.0;
+        let mut mixing = 0.0;
+        let mut heat_at_cell = 0.0;
+        for (weight, t) in samples {
+            boundary += weight * (0.5 * (400.0_f64 / 300.0).ln()
+                - 5.0 * (t / 300.0).ln() - mixture_entropy);
+            let phi = |ratio: f64| ratio - 1.0 - ratio.ln();
+            mixing += weight * (0.5 * phi(400.0 / t) + 4.5 * phi(300.0 / t) + mixture_entropy);
+            heat_at_cell += weight * 5.0 * (310.0 - t) / t;
+        }
+        let entropy = report.entropy;
+        let carried = entropy.advection.unwrap();
+        near(carried.boundary_entropy_input_j_k, boundary, 1e-12);
+        near(carried.upwind_mixing_j_k, mixing, 1e-12);
+        near(carried.balance_residual_j_k, 0.0, 1e-12);
+        let storage = 10.0 * (final_t / 280.0).ln();
+        near(entropy.thermal_storage_change_j_k, storage, 1e-12);
+        near(entropy.temporal_defect_j_k, storage - heat_at_cell, 1e-12);
+        assert!(!entropy.has_unclassified_sources);
+        assert_eq!(entropy.unclassified_source_at_cell_j_k, 0.0);
+        near(report.energy.external_heat_j, 10.0 * (final_t - 280.0), 1e-9);
+    }
+    assert_eq!(thermal.time_s(), 0.0);
+    assert_eq!(flow.audit().substeps, 0);
 }
 
 #[test]

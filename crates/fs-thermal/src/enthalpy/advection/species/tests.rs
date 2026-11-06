@@ -38,14 +38,25 @@ struct MixtureLaw {
     names: Vec<String>,
     fractions: Vec<f64>,
     reference: &'static str,
+    entropy_reference: Option<&'static str>,
+    formation: [f64; 2],
+    pressure_ratio: f64,
 }
 impl MixtureLaw {
     fn new(fractions: Vec<f64>) -> Self {
-        Self { names: vec!["A".into(), "B".into()], fractions, reference: "analytic-species-reference" }
+        Self { names: vec!["A".into(), "B".into()], fractions,
+            reference: "analytic-species-reference",
+            entropy_reference: Some("equal-molar-mass-ideal-mixture-T300-p0"),
+            formation: [1000.0, -400.0], pressure_ratio: 1.0 }
     }
     fn cp(&self) -> f64 { 2.0 * self.fractions[0] + 6.0 * self.fractions[1] }
-    fn offset(&self) -> f64 { 1000.0 * self.fractions[0] - 400.0 * self.fractions[1] }
+    fn offset(&self) -> f64 { self.formation[0] * self.fractions[0] + self.formation[1] * self.fractions[1] }
     fn h(&self, t: f64) -> f64 { self.cp() * t + self.offset() }
+    fn mixing_entropy(&self) -> f64 {
+        // Equal molar masses and R_specific=1 J/(kg K): mass and mole
+        // fractions agree. This is independent of Cp and formation enthalpy.
+        -self.fractions.iter().filter(|&&y| y > 0.0).map(|y| y * y.ln()).sum::<f64>()
+    }
 }
 impl ThermalLaw for MixtureLaw {
     fn temperature_k(&self, h: f64) -> Result<f64, DepositionError> {
@@ -56,6 +67,15 @@ impl ThermalLaw for MixtureLaw {
     fn advected_composition(&self) -> Option<CaloricComposition<'_>> {
         Some(CaloricComposition { species: &self.names, mass_fractions: &self.fractions,
             enthalpy_reference: self.reference })
+    }
+    fn specific_entropy_change_j_kg_k(&self, a: f64, b: f64)
+        -> Result<Option<f64>, DepositionError> {
+        Ok(Some(self.cp() * (self.temperature_k(b)? / self.temperature_k(a)?).ln()))
+    }
+    fn advected_entropy_anchor(&self) -> Option<CaloricEntropyAnchor<'_>> {
+        Some(CaloricEntropyAnchor { specific_h_j_kg: self.h(300.0),
+            reduced_specific_entropy_j_kg_k: self.mixing_entropy() - self.pressure_ratio.ln(),
+            entropy_reference: self.entropy_reference? })
     }
 }
 fn cfg() -> StepConfig { StepConfig { max_dt_s: 0.2, energy_tolerance_j: 1e-9 } }
@@ -76,16 +96,136 @@ fn prepared<'a>(laws: &'a [MixtureLaw], initial_t: f64) -> DepositionSimulation<
     ).unwrap().advance_to(0.0, cfg(), || Ok(())).unwrap().0
 }
 fn mixed(laws: &[MixtureLaw]) -> Advected<()> {
+    mixed_at(laws, [400.0, 300.0])
+}
+fn mixed_at(laws: &[MixtureLaw], inlet_temperatures: [f64; 2]) -> Advected<()> {
     Advected::new((), vec![], 0).unwrap().with_boundaries(vec![
         MassBoundary::Inlet { id: 10, cell: CellId(0), kg_s: 0.25,
-            material_id: MaterialId(1), specific_h_j_kg: laws[1].h(400.0) },
+            material_id: MaterialId(1), specific_h_j_kg: laws[1].h(inlet_temperatures[0]) },
         MassBoundary::Inlet { id: 11, cell: CellId(0), kg_s: 0.75,
-            material_id: MaterialId(2), specific_h_j_kg: laws[2].h(300.0) },
+            material_id: MaterialId(2), specific_h_j_kg: laws[2].h(inlet_temperatures[1]) },
         MassBoundary::Outlet { id: 12, cell: CellId(0), kg_s: 1.0 },
     ], 3).unwrap().with_stationary_species(vec!["A".into(), "B".into()], vec![
         InletSpecies { boundary_id: 10, mass_fractions: vec![1.0, 0.0] },
         InletSpecies { boundary_id: 11, mass_fractions: vec![0.0, 1.0] },
     ], 1, 2).unwrap()
+}
+
+#[test]
+fn g1_stationary_isothermal_mixing_retains_source_entropy_without_heat() {
+    let expected = -0.25 * 0.25_f64.ln() - 0.75 * 0.75_f64.ln();
+    for formation in [[1000.0, -400.0], [2.0_f64.powi(40), -2.0_f64.powi(41)],
+        [-2.0_f64.powi(40), 2.0_f64.powi(41)]] {
+        let mut laws = [MixtureLaw::new(vec![0.25, 0.75]),
+            MixtureLaw::new(vec![1.0, 0.0]), MixtureLaw::new(vec![0.0, 1.0])];
+        for law in &mut laws { law.formation = formation; }
+        let flow = mixed_at(&laws, [300.0; 2]);
+        let initial = prepared(&laws, 300.0);
+        let (next, observed, energy, entropy) = initial
+            .advance_advected_with_entropy(&flow, 0.25, cfg(), || Ok(())).unwrap();
+        assert_eq!(next.cells(), initial.cells());
+        assert_eq!(energy.external_heat_j, 0.0);
+        assert_eq!(entropy.thermal_storage_change_j_k, 0.0);
+        let carried = entropy.advection.unwrap();
+        assert!((carried.boundary_entropy_input_j_k + 0.25 * expected).abs() < 1e-14);
+        assert!((carried.upwind_mixing_j_k - 0.25 * expected).abs() < 1e-14);
+        assert!(carried.balance_residual_j_k.abs() < 1e-14);
+        assert!(entropy.temporal_defect_j_k.abs() < 1e-14);
+        assert!(!entropy.has_unclassified_sources);
+        assert_eq!(observed.stationary_species(), flow.stationary_species());
+        let (_, endpoint) = flow.endpoint_transport_with_entropy(&initial, || Ok(())).unwrap();
+        assert!((endpoint.boundary_entropy_input_w_k + expected).abs() < 1e-14);
+        assert!((endpoint.upwind_mixing_w_k - expected).abs() < 1e-14);
+        assert_eq!(flow.audit().substeps, 0);
+    }
+}
+
+#[test]
+fn g1_stationary_mixture_entropy_combines_caloric_and_composition_mixing() {
+    let laws = [MixtureLaw::new(vec![0.25, 0.75]),
+        MixtureLaw::new(vec![1.0, 0.0]), MixtureLaw::new(vec![0.0, 1.0])];
+    let flow = mixed(&laws);
+    let initial = prepared(&laws, 280.0);
+    let (plain, _, plain_energy) = initial.advance_observed(&flow, 0.1, cfg(), || Ok(())).unwrap();
+    let (next, observed, energy, entropy) = initial
+        .advance_advected_with_entropy(&flow, 0.1, cfg(), || Ok(())).unwrap();
+    assert_eq!(next.cells(), plain.cells());
+    assert_eq!(energy, plain_energy);
+    let mixture_entropy = laws[0].mixing_entropy();
+    let boundary_rate = 0.5 * (400.0_f64 / 300.0).ln()
+        - 5.0 * (280.0_f64 / 300.0).ln() - mixture_entropy;
+    let thermal_mixing = |ratio: f64| ratio - 1.0 - ratio.ln();
+    let mixing_rate = 0.5 * thermal_mixing(400.0 / 280.0)
+        + 4.5 * thermal_mixing(300.0 / 280.0) + mixture_entropy;
+    let storage = 10.0 * (281.5_f64 / 280.0).ln();
+    let carried = entropy.advection.unwrap();
+    assert!((carried.boundary_entropy_input_j_k - 0.1 * boundary_rate).abs() < 1e-14);
+    assert!((carried.upwind_mixing_j_k - 0.1 * mixing_rate).abs() < 1e-14);
+    assert!((entropy.thermal_storage_change_j_k - storage).abs() < 1e-14);
+    assert!((entropy.temporal_defect_j_k - (storage - 15.0 / 280.0)).abs() < 1e-14);
+    assert!(carried.balance_residual_j_k.abs() < 1e-14);
+    assert!(observed.entropy_audit().unwrap().other_energy_at_cell_temperature_j_k.abs() < 1e-14);
+}
+
+#[test]
+fn g0_stationary_entropy_retains_signed_source_pressure_terms() {
+    let mut laws = [MixtureLaw::new(vec![0.25, 0.75]),
+        MixtureLaw::new(vec![1.0, 0.0]), MixtureLaw::new(vec![0.0, 1.0])];
+    laws[1].pressure_ratio = 0.25;
+    laws[2].pressure_ratio = 0.25;
+    let initial = prepared(&laws, 300.0);
+    let flow = mixed_at(&laws, [300.0; 2]);
+    let (_, _, energy, entropy) = initial
+        .advance_advected_with_entropy(&flow, 0.1, cfg(), || Ok(())).unwrap();
+    let carried = entropy.advection.unwrap();
+    // This prescribed stream pushes low-pressure gas into a higher-pressure
+    // control volume without a mechanical compressor model. Its signed
+    // entropy deficit must remain visible, never clipped into claimed heat.
+    let deficit = 0.1 * (laws[0].mixing_entropy() + 0.25_f64.ln());
+    assert!(deficit < 0.0);
+    assert!((carried.upwind_mixing_j_k - deficit).abs() < 1e-14);
+    assert!((carried.boundary_entropy_input_j_k + deficit).abs() < 1e-14);
+    assert_eq!(energy.external_heat_j, 0.0);
+    assert_eq!(entropy.thermal_storage_change_j_k, 0.0);
+}
+
+#[test]
+fn g4_stationary_entropy_requires_source_alignment_and_cancels_atomically() {
+    for reference in [None, Some("unrelated-entropy-reference"), Some("")] {
+        let mut laws = [MixtureLaw::new(vec![0.25, 0.75]),
+            MixtureLaw::new(vec![1.0, 0.0]), MixtureLaw::new(vec![0.0, 1.0])];
+        laws[1].entropy_reference = reference;
+        let initial = prepared(&laws, 280.0);
+        let flow = mixed(&laws);
+        assert!(initial.advance_advected_with_entropy(&flow, 0.1, cfg(), || Ok(())).is_err());
+        assert!(flow.endpoint_transport_with_entropy(&initial, || Ok(())).is_err());
+        assert_eq!(initial.time_s(), 0.0);
+        assert_eq!(flow.audit().substeps, 0);
+        assert!(flow.entropy_audit().is_none());
+        assert!(initial.advance_observed(&flow, 0.1, cfg(), || Ok(())).is_ok());
+    }
+    let laws = [MixtureLaw::new(vec![0.25, 0.75]),
+        MixtureLaw::new(vec![1.0, 0.0]), MixtureLaw::new(vec![0.0, 1.0])];
+    let initial = prepared(&laws, 280.0);
+    let flow = mixed(&laws);
+    let mut polls = 0;
+    assert!(matches!(initial.advance_advected_with_entropy(&flow, 1.0, cfg(), || {
+        polls += 1;
+        if polls > 60 { Err(DepositionError::Cancelled) } else { Ok(()) }
+    }), Err(DepositionError::Cancelled)));
+    assert_eq!(initial.time_s(), 0.0);
+    assert_eq!(flow.audit().substeps, 0);
+    assert!(flow.entropy_audit().is_none());
+    drop(initial);
+    let mut laws = laws;
+    for pressure in [0.0, f64::INFINITY, f64::NAN] {
+        laws[1].pressure_ratio = pressure;
+        let initial = prepared(&laws, 280.0);
+        let flow = mixed(&laws);
+        assert!(matches!(initial.advance_advected_with_entropy(&flow, 0.1, cfg(), || Ok(())),
+            Err(DepositionError::Arithmetic)));
+        assert_eq!(initial.time_s(), 0.0);
+    }
 }
 
 fn selective_stream(selected_rate: f64) -> Advected<()> {
@@ -437,6 +577,31 @@ fn g1_recirculating_mixtures_advance_original_enthalpy_and_external_work_once() 
     assert!((audit.external_heat_j - 20.0).abs() < 1e-10);
     assert!((accepted.audit().external_enthalpy_j - 20.0).abs() < 1e-10);
     assert_eq!(observer.audit().substeps, 0);
+    let (audited, _, audited_energy, entropy) = initial
+        .advance_advected_with_entropy(&observer, 0.1, cfg(), || Ok(())).unwrap();
+    assert_eq!(audited.cells(), next.cells());
+    assert_eq!(audited_energy, audit);
+    // The two pure feeds leave as 2 kg/s of equal-mass ideal mixture. The
+    // internal cycle cannot add another copy of this composition entropy.
+    let boundary_rate = 2.0 * (400.0_f64 / 300.0).ln() - 2.0 * 2.0_f64.ln();
+    let mixing_rate = 2.0 * (400.0 / 300.0 - 1.0 - (400.0_f64 / 300.0).ln())
+        + 2.0 * 2.0_f64.ln();
+    let carried = entropy.advection.unwrap();
+    assert!((carried.boundary_entropy_input_j_k - 0.1 * boundary_rate).abs() < 1e-13);
+    assert!((carried.upwind_mixing_j_k - 0.1 * mixing_rate).abs() < 1e-13);
+    assert!(carried.balance_residual_j_k.abs() < 1e-13);
+    let reversed = Advected::new((), observer.flows().iter().map(|flow| MassFlow {
+        id: flow.id, a: flow.b, b: flow.a, kg_s: -flow.kg_s,
+    }).collect(), 2).unwrap().with_boundaries(observer.boundaries().to_vec(), 5).unwrap()
+        .with_stationary_species(vec!["A".into(), "B".into()], vec![
+            InletSpecies { boundary_id: 2, mass_fractions: vec![1.0, 0.0] },
+            InletSpecies { boundary_id: 3, mass_fractions: vec![0.0, 1.0] },
+        ], 2, 2).unwrap();
+    let (replayed, _, replayed_energy, replayed_entropy) = initial
+        .advance_advected_with_entropy(&reversed, 0.1, cfg(), || Ok(())).unwrap();
+    assert_eq!(replayed.cells(), audited.cells());
+    assert_eq!(replayed_energy, audited_energy);
+    assert_eq!(replayed_entropy, entropy);
     // Two different mixture caloric laws reach different temperatures. Using
     // mixture-blind temperature averaging or a second heat integrator cannot
     // satisfy both local balances and this common enthalpy datum.
