@@ -307,3 +307,210 @@ fn invalid_inventory_chart_cancellation_and_work_budget_refuse() {
         Err(SublimationError::NonConverged)
     );
 }
+
+fn coupled_heat(
+    initial: SupportedSurfaceState,
+    reservoir: VaporReservoir,
+    duration_s: f64,
+    heat_j: f64,
+    substrate_datum: f64,
+    deposit_datum: f64,
+) -> Result<SupportedSurfaceStep, SublimationError> {
+    advance_supported_surface_with_heat(
+        &ManufacturedLaw,
+        kinetics(),
+        initial,
+        reservoir,
+        duration_s,
+        heat_j,
+        SolverConfig::default(),
+        |h| {
+            let t = (h - substrate_datum) / 500.0;
+            if (100.0..=400.0).contains(&t) {
+                Ok(t)
+            } else {
+                Err(SublimationError::Invalid("substrate caloric domain"))
+            }
+        },
+        |t| Ok(2000.0 * t + deposit_datum),
+        || Ok(()),
+    )
+}
+
+#[test]
+fn supplied_heat_drives_coated_sublimation_and_bare_deposition_without_an_outer_heat_state() {
+    let rate = 10.0
+        * state().area_m2
+        * (0.018 / (2.0 * core::f64::consts::PI * MOLAR_GAS_CONSTANT * 230.0)).sqrt();
+    for (deposit_mass, pressure, target_t) in [(0.02, 0.0, 250.0), (0.0, 20.0, 210.0)] {
+        let initial = SupportedSurfaceState {
+            deposit_mass_kg: deposit_mass,
+            ..state()
+        };
+        let dm = if pressure == 0.0 { rate } else { -rate } * 1000.0;
+        let capacity = initial.substrate_mass_kg * 500.0 + deposit_mass * 2000.0;
+        let heat = dm * 2.8e6 + capacity * (target_t - 230.0);
+        assert!(!(100.0..=400.0).contains(&(230.0 + heat / capacity)));
+        let original = coupled_heat(initial, bath(pressure), 1000.0, heat, 0.0, 0.0).unwrap();
+        near(original.phase.surface_temperature_k, target_t, 1e-7, 0.0);
+        near(original.phase.transferred_mass_kg, dm, 1e-17, 1e-13);
+        near(
+            original.state.deposit_mass_kg,
+            deposit_mass - dm,
+            1e-17,
+            1e-13,
+        );
+        assert_eq!(original.phase.supplied_heat_j, heat);
+        near(
+            original.substrate_energy_change_j
+                + original.deposit_energy_change_j
+                + original.phase.vapor_energy_j
+                - heat,
+            0.0,
+            1e-5,
+            0.0,
+        );
+        let shifted = coupled_heat(
+            SupportedSurfaceState {
+                substrate_specific_enthalpy_j_kg: initial.substrate_specific_enthalpy_j_kg + 1e6,
+                ..initial
+            },
+            bath(pressure),
+            1000.0,
+            heat,
+            1e6,
+            -3e6,
+        )
+        .unwrap();
+        near(shifted.phase.surface_temperature_k, target_t, 1e-7, 0.0);
+        near(shifted.phase.transferred_mass_kg, dm, 1e-17, 1e-13);
+        near(
+            shifted.phase.vapor_energy_j - original.phase.vapor_energy_j,
+            -3e6 * dm,
+            1e-5,
+            0.0,
+        );
+        near(
+            shifted.substrate_energy_change_j
+                + shifted.deposit_energy_change_j
+                + shifted.phase.vapor_energy_j
+                - heat,
+            0.0,
+            1e-5,
+            0.0,
+        );
+    }
+}
+
+#[test]
+fn supplied_heat_respects_finite_vapor_and_exact_coating_exhaustion() {
+    let initial = SupportedSurfaceState {
+        deposit_mass_kg: 0.02,
+        ..state()
+    };
+    let volume = 0.001;
+    let equilibrium = 10.0 * volume * 0.018 / (MOLAR_GAS_CONSTANT * 230.0);
+    let reservoir = VaporReservoir::Finite {
+        vapor_mass_kg: 0.0,
+        volume_m3: volume,
+        temperature_k: 230.0,
+    };
+    let step = coupled_heat(initial, reservoir, 1e4, 100.0, 0.0, 0.0).unwrap();
+    near(step.phase.transferred_mass_kg, equilibrium, 1e-20, 1e-13);
+    near(
+        step.phase.surface_temperature_k,
+        230.0 + (100.0 - equilibrium * 2.8e6) / 50.0,
+        1e-8,
+        0.0,
+    );
+    let VaporReservoir::Finite { vapor_mass_kg, .. } = step.phase.reservoir else {
+        panic!()
+    };
+    near(
+        step.state.deposit_mass_kg + vapor_mass_kg,
+        initial.deposit_mass_kg,
+        1e-17,
+        0.0,
+    );
+    near(
+        step.substrate_energy_change_j + step.deposit_energy_change_j + step.phase.vapor_energy_j,
+        100.0,
+        1e-7,
+        0.0,
+    );
+    let thin = SupportedSurfaceState {
+        deposit_mass_kg: 1e-6,
+        ..state()
+    };
+    let exhausted = coupled_heat(
+        thin,
+        bath(0.0),
+        1000.0,
+        thin.deposit_mass_kg * 2.8e6,
+        0.0,
+        0.0,
+    )
+    .unwrap();
+    assert_eq!(exhausted.state.deposit_mass_kg, 0.0);
+    assert_eq!(exhausted.state.substrate_mass_kg, thin.substrate_mass_kg);
+    assert_eq!(exhausted.phase.surface_temperature_k, 230.0);
+    assert_eq!(exhausted.phase.transferred_mass_kg, thin.deposit_mass_kg);
+}
+
+#[test]
+fn supplied_heat_zero_wrapper_invalid_inputs_and_final_checkpoint_keep_transaction_semantics() {
+    let initial = SupportedSurfaceState {
+        deposit_mass_kg: 0.02,
+        ..state()
+    };
+    let reservoir = bath(0.0);
+    assert_eq!(
+        coupled_heat(initial, reservoir, 1.0, 0.0, 0.0, 0.0).unwrap(),
+        run(initial, reservoir, 1.0)
+    );
+    for heat in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        assert!(coupled_heat(initial, reservoir, 1.0, heat, 0.0, 0.0).is_err());
+    }
+    let mut checkpoints = 0;
+    advance_supported_surface_with_heat(
+        &ManufacturedLaw,
+        kinetics(),
+        initial,
+        reservoir,
+        1.0,
+        100.0,
+        SolverConfig::default(),
+        |h| Ok(h / 500.0),
+        |t| Ok(2000.0 * t),
+        || {
+            checkpoints += 1;
+            Ok(())
+        },
+    )
+    .unwrap();
+    for stop in [1, checkpoints] {
+        let mut seen = 0;
+        assert_eq!(
+            advance_supported_surface_with_heat(
+                &ManufacturedLaw,
+                kinetics(),
+                initial,
+                reservoir,
+                1.0,
+                100.0,
+                SolverConfig::default(),
+                |h| Ok(h / 500.0),
+                |t| Ok(2000.0 * t),
+                || {
+                    seen += 1;
+                    if seen == stop {
+                        Err(SublimationError::Cancelled)
+                    } else {
+                        Ok(())
+                    }
+                },
+            ),
+            Err(SublimationError::Cancelled),
+        );
+    }
+}

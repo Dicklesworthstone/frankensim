@@ -571,3 +571,202 @@ fn preexisting_coating_on_a_future_birth_carries_its_own_mass_and_sensible_energ
     assert_eq!(state.pending_events().len(), 1);
     closes(&audit);
 }
+
+#[test]
+fn direct_coating_heat_reaches_coupled_endpoints_without_sensible_only_domain_excursions() {
+    for (mass, pressure, target_t) in [(0.02, 0.0, 250.0), (0.0, 20.0, 210.0)] {
+        let caloric = Caloric { datum: 1e6 };
+        let shifted_deposit = |t| Ok(deposit_h(t)? - 3e6);
+        let mut substrate = cell(1, INITIAL_T, 777.0);
+        substrate.specific_h_j_kg += caloric.datum;
+        let mut state = simulation(
+            vec![birth(0.0, substrate.clone())],
+            &caloric,
+            &[surface(1, mass, 1.0, bath(pressure), &shifted_deposit)],
+            8,
+        );
+        let dm = if pressure == 0.0 {
+            growth_per_second()
+        } else {
+            -growth_per_second()
+        } * 1000.0;
+        let capacity = SUBSTRATE_MASS * SUBSTRATE_CP + mass * DEPOSIT_CP;
+        let heat = dm * LATENT + capacity * (target_t - INITIAL_T);
+        assert!(!(100.0..=400.0).contains(&(INITIAL_T + heat / capacity)));
+        let initial_energy = state.energy_j();
+        let step = state
+            .sublimate_cell_with_heat(CellId(1), 1000.0, heat, phase(), || Ok(()))
+            .unwrap();
+        close(state.temperature_k(CellId(1)).unwrap(), target_t, 1e-7);
+        close(state.coatings()[&CellId(1)].mass_kg, mass - dm, 1e-16);
+        close(step.phase.transferred_mass_kg, dm, 1e-16);
+        assert_eq!(step.phase.supplied_heat_j, heat);
+        close(
+            step.substrate_energy_change_j
+                + step.deposit_energy_change_j
+                + step.phase.vapor_energy_j
+                - heat,
+            0.0,
+            1e-6,
+        );
+        close(
+            state.energy_j() - initial_energy + step.phase.vapor_energy_j - heat,
+            0.0,
+            1e-6,
+        );
+        // The supplied energy is applied once; the authored source is retained.
+        substrate.specific_h_j_kg = state.cells()[&CellId(1)].specific_h_j_kg;
+        assert_eq!(state.cells()[&CellId(1)], substrate);
+        assert_eq!(state.time_s(), 0.0);
+        assert!(state.links().is_empty());
+        assert!(state.pending_events().is_empty());
+    }
+}
+
+#[test]
+fn direct_coating_heat_allows_exact_exhaustion_and_later_seed_free_regrowth() {
+    let thin = 1e-6;
+    let mut state = simulation(
+        vec![birth(0.0, cell(1, INITIAL_T, 0.0))],
+        &CALORIC,
+        &[surface(1, thin, 1.0, bath(0.0), &deposit_h)],
+        8,
+    );
+    let original = state.cells()[&CellId(1)].clone();
+    let exhausted = state
+        .sublimate_cell_with_heat(CellId(1), 1000.0, thin * LATENT, phase(), || Ok(()))
+        .unwrap();
+    assert_eq!(state.coatings()[&CellId(1)].mass_kg, 0.0);
+    assert_eq!(exhausted.phase.transferred_mass_kg, thin);
+    assert_eq!(state.cells()[&CellId(1)], original);
+    state
+        .set_reservoir(CellId(1), bath(20.0), || Ok(()))
+        .unwrap();
+    let dm = -growth_per_second();
+    let regrown = state
+        .sublimate_cell_with_heat(CellId(1), 1.0, dm * LATENT, phase(), || Ok(()))
+        .unwrap();
+    close(state.coatings()[&CellId(1)].mass_kg, -dm, 1e-17);
+    close(regrown.phase.surface_temperature_k, INITIAL_T, 1e-10);
+    assert_eq!(state.cells()[&CellId(1)], original);
+    assert_eq!(state.time_s(), 0.0);
+}
+
+#[test]
+fn direct_coating_heat_finite_vapor_and_first_or_last_cancellation_are_atomic() {
+    let reservoir = VaporReservoir::Finite {
+        vapor_mass_kg: 0.0,
+        volume_m3: 0.001,
+        temperature_k: INITIAL_T,
+    };
+    let original = simulation(
+        vec![birth(0.0, cell(1, INITIAL_T, 0.0))],
+        &CALORIC,
+        &[surface(1, 0.02, 1.0, reservoir, &deposit_h)],
+        8,
+    );
+    let mut accepted = original.clone();
+    let mut checkpoints = 0;
+    let step = accepted
+        .sublimate_cell_with_heat(CellId(1), 1e4, 100.0, phase(), || {
+            checkpoints += 1;
+            Ok(())
+        })
+        .unwrap();
+    let VaporReservoir::Finite { vapor_mass_kg, .. } = step.phase.reservoir else {
+        panic!()
+    };
+    close(
+        accepted.coatings()[&CellId(1)].mass_kg + vapor_mass_kg,
+        0.02,
+        1e-17,
+    );
+    close(
+        step.substrate_energy_change_j + step.deposit_energy_change_j + step.phase.vapor_energy_j,
+        100.0,
+        1e-7,
+    );
+    for stop in [1, checkpoints] {
+        let mut candidate = original.clone();
+        let mut seen = 0;
+        let error = candidate
+            .sublimate_cell_with_heat(CellId(1), 1e4, 100.0, phase(), || {
+                seen += 1;
+                if seen == stop {
+                    Err(DepositionError::Cancelled)
+                } else {
+                    Ok(())
+                }
+            })
+            .unwrap_err();
+        assert_eq!(
+            error,
+            ThermalSublimationError::Thermal(DepositionError::Cancelled)
+        );
+        same_state(&candidate, &original);
+    }
+    for heat in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        let mut candidate = original.clone();
+        assert!(
+            candidate
+                .sublimate_cell_with_heat(CellId(1), 1.0, heat, phase(), || Ok(()))
+                .is_err()
+        );
+        same_state(&candidate, &original);
+    }
+    let mut limited = original.clone();
+    assert!(
+        limited
+            .sublimate_cell_with_heat(
+                CellId(1),
+                1e4,
+                100.0,
+                SolverConfig {
+                    max_iterations: 1,
+                    ..phase()
+                },
+                || Ok(()),
+            )
+            .is_err()
+    );
+    same_state(&limited, &original);
+}
+
+#[test]
+fn independent_coating_heat_refuses_a_shared_chamber_without_spending_its_inventory() {
+    let state = simulation(
+        vec![birth(0.0, cell(1, INITIAL_T, 0.0))],
+        &CALORIC,
+        &[surface(1, 0.02, 1.0, bath(0.0), &deposit_h)],
+        8,
+    );
+    let reservoir = VaporReservoir::Finite {
+        vapor_mass_kg: 0.001,
+        volume_m3: 0.001,
+        temperature_k: INITIAL_T,
+    };
+    let mut shared = CoatingSimulation::new_shared_chamber(
+        state.thermal.clone(),
+        &[super::ChamberCoatingSurface {
+            cell_id: CellId(1),
+            kinetics: SurfaceKinetics {
+                accommodation_coefficient: 1.0,
+                mass_transfer_coefficient_m_s: None,
+            },
+            initial_mass_kg: 0.02,
+        }],
+        &PHASE,
+        &deposit_h,
+        reservoir,
+        || Ok(()),
+    )
+    .unwrap();
+    let original = shared.clone();
+    assert!(
+        shared
+            .sublimate_cell_with_heat(CellId(1), 1.0, 100.0, phase(), || Ok(()))
+            .is_err()
+    );
+    same_state(&shared, &original);
+    assert_eq!(shared.shared_reservoir(), Some(reservoir));
+}

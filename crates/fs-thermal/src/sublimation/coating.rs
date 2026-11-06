@@ -19,7 +19,7 @@ pub mod chamber;
 use super::{
     Endpoint, SolidSurfaceState, SolverConfig, SublimationError, SublimationLaw, SurfaceKinetics,
     SurfaceStep, VaporReservoir, finish_surface_step, finite, nonnegative, positive, properties,
-    solve_endpoint, transfer, validate_solver,
+    solve_endpoint, solve_endpoint_with_scale, transfer, validate_solver,
 };
 
 /// Original substrate storage plus the separately conserved solid deposit.
@@ -182,6 +182,47 @@ pub fn advance_supported_surface<L: SublimationLaw + ?Sized>(
     config: SolverConfig,
     substrate_temperature: impl Fn(f64) -> Result<f64, SublimationError>,
     deposit_enthalpy: impl Fn(f64) -> Result<f64, SublimationError>,
+    checkpoint: impl FnMut() -> Result<(), SublimationError>,
+) -> Result<SupportedSurfaceStep, SublimationError> {
+    advance_supported_surface_with_heat(
+        law,
+        kinetics,
+        state,
+        reservoir,
+        duration_s,
+        0.0,
+        config,
+        substrate_temperature,
+        deposit_enthalpy,
+        checkpoint,
+    )
+}
+
+/// Apply supplied heat and deposit/vapor exchange at one common endpoint.
+///
+/// Positive heat enters the supported surface; negative heat is extracted.
+/// Both original caloric charts participate in the same balance:
+///
+/// M_s (h_s1-h_s0) + m_d0 (h_d1-h_d0) + dm L(T1) = supplied_heat_j.
+///
+/// No heat-only intermediate temperature is formed. Heating can supply latent
+/// sublimation directly, and cooling can remove deposition heat even when a
+/// sensible-only update would leave either chart's domain. The caller owns the
+/// source debit; latent heat is already part of the exported vapor enthalpy.
+/// A deposit may start or end at exactly zero while its substrate persists.
+/// Original charts, frozen area, thermostatted vapor and bounded-work semantics
+/// are the same as in [`advance_supported_surface`].
+#[allow(clippy::too_many_arguments)]
+pub fn advance_supported_surface_with_heat<L: SublimationLaw + ?Sized>(
+    law: &L,
+    kinetics: SurfaceKinetics,
+    state: SupportedSurfaceState,
+    reservoir: VaporReservoir,
+    duration_s: f64,
+    supplied_heat_j: f64,
+    config: SolverConfig,
+    substrate_temperature: impl Fn(f64) -> Result<f64, SublimationError>,
+    deposit_enthalpy: impl Fn(f64) -> Result<f64, SublimationError>,
     mut checkpoint: impl FnMut() -> Result<(), SublimationError>,
 ) -> Result<SupportedSurfaceStep, SublimationError> {
     if !positive(state.substrate_mass_kg)
@@ -189,9 +230,10 @@ pub fn advance_supported_surface<L: SublimationLaw + ?Sized>(
         || !nonnegative(state.deposit_mass_kg)
         || !nonnegative(state.area_m2)
         || !nonnegative(duration_s)
+        || !supplied_heat_j.is_finite()
     {
         return Err(SublimationError::Invalid(
-            "invalid substrate storage or deposit inventory",
+            "invalid supported heat, substrate storage or deposit inventory",
         ));
     }
     validate_solver(config)?;
@@ -219,7 +261,8 @@ pub fn advance_supported_surface<L: SublimationLaw + ?Sized>(
         let residual = finite(
             state.substrate_mass_kg * (h - state.substrate_specific_enthalpy_j_kg)
                 + state.deposit_mass_kg * (deposit_h - initial_deposit_h)
-                + dm * p.latent_heat_j_kg,
+                + dm * p.latent_heat_j_kg
+                - supplied_heat_j,
         )?;
         Ok(Endpoint {
             h,
@@ -230,7 +273,13 @@ pub fn advance_supported_surface<L: SublimationLaw + ?Sized>(
         })
     };
     let initial = evaluate(state.substrate_specific_enthalpy_j_kg)?;
-    let endpoint = solve_endpoint(initial, state.substrate_mass_kg, config, &mut evaluate)?;
+    let endpoint = solve_endpoint_with_scale(
+        initial,
+        state.substrate_mass_kg,
+        supplied_heat_j.abs(),
+        config,
+        &mut evaluate,
+    )?;
     let deposit_h = finite(deposit_enthalpy(endpoint.t)?)?;
     let phase = finish_surface_step(
         solid,
@@ -239,7 +288,7 @@ pub fn advance_supported_surface<L: SublimationLaw + ?Sized>(
             h: deposit_h,
             ..endpoint
         },
-        0.0,
+        supplied_heat_j,
     )?;
     let substrate_energy_change_j =
         finite(state.substrate_mass_kg * (endpoint.h - state.substrate_specific_enthalpy_j_kg))?;

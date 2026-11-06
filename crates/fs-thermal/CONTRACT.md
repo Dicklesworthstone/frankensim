@@ -698,6 +698,24 @@ closes `M_s*(h_s1-h_s0) + m_d0*(h_d1-h_d0) + dm*L(T1) = 0`, where positive
 dm enters the vapor. The vapor carries the deposit's `h_d1+L`; substrate,
 deposit and vapor energy changes close one common account.
 
+`advance_supported_surface_with_heat` includes an explicit signed heat input
+in that same substrate/deposit/latent endpoint. The original two caloric charts
+retain independent enthalpy references; the substrate is not consumed and the
+deposit remains thermally active. Heating can sublime an existing coating,
+while cooling can sustain deposition on an exactly bare substrate without a
+sensible-only temperature excursion. The phase receipt records supplied heat
+once; its full vapor enthalpy already includes latent energy.
+
+`CoatingSimulation::sublimate_cell_with_heat` applies the accepted endpoint to
+one actual substrate, coating and independent vapor bath. It checks represented
+inventory changes, includes their energy roundoff in the receipt, validates the
+original substrate law and commits after the final checkpoint. Exact coating
+exhaustion leaves the substrate intact and supports later seed-free regrowth.
+The direct operation retains the clock, authored sources and reference geometry;
+shared chambers require their joint phase owner. Seven focused regressions
+cover coupled heating/cooling, independent datums, finite vapor, extinction and
+regrowth, invalid input, bounded work and first/final cancellation.
+
 This is a thin, isothermal deposit approximation with frozen exchange area
 and the existing prescribed-temperature reservoir semantics. It supplies no
 nucleation barrier, porosity, resolved coating temperature gradient or

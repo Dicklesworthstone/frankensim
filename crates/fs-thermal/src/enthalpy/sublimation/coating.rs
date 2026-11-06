@@ -27,7 +27,8 @@ use crate::enthalpy::{
     StepConfig, ThermalLink, ThermalStorageBasis, TimedEvent, finite, nonnegative, positive,
 };
 use crate::sublimation::coating::{
-    SupportedSurfaceState, SupportedSurfaceStep, advance_supported_surface, heat_supported_surface,
+    SupportedSurfaceState, SupportedSurfaceStep, advance_supported_surface,
+    advance_supported_surface_with_heat, heat_supported_surface,
 };
 use crate::sublimation::{
     SolverConfig, SublimationError, SublimationLaw, SurfaceKinetics, VaporReservoir,
@@ -279,6 +280,130 @@ impl<'a> CoatingSimulation<'a> {
         checkpoint()?;
         self.coatings.get_mut(&id).unwrap().reservoir = reservoir;
         Ok(())
+    }
+
+    /// Exchange one coating with its independent bath while applying signed heat.
+    ///
+    /// Both original caloric charts and latent transfer close at one endpoint;
+    /// no heat-only intermediate temperature is formed. The caller owns the
+    /// supplied heat and duration. This direct operation does not integrate
+    /// authored sources or advance event time. Reference geometry and contacts
+    /// determine the exposed area and stay fixed.
+    ///
+    /// A coating may exhaust exactly: its substrate remains available for later
+    /// deposition. Shared chambers require a joint surface solve and refuse
+    /// this independent-bath operation. Due events must already be processed.
+    /// All admission and cancellation checks precede the atomic cell/coating/
+    /// vapor commit. The receipt includes represented inventory roundoff in its
+    /// deposit storage and common energy residual.
+    pub fn sublimate_cell_with_heat(
+        &mut self,
+        id: CellId,
+        duration_s: f64,
+        supplied_heat_j: f64,
+        config: SolverConfig,
+        mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<SupportedSurfaceStep, ThermalSublimationError> {
+        checkpoint()?;
+        self.require_processed_events()?;
+        if self.chamber.is_some() {
+            return Err(DepositionError::InvalidInput(
+                "shared coating chambers require a joint surface solve",
+            )
+            .into());
+        }
+        let coating = *self.coatings.get(&id).ok_or(DepositionError::InvalidInput(
+            "coating exchange requires an active coated substrate",
+        ))?;
+        let model = &self.surfaces[&id];
+        let cell = &self.thermal.cells[&id];
+        let caloric = self.thermal.materials[&cell.material_id];
+        let area = self.thermal.exposed_area_m2(id)?;
+        let chart_error = std::cell::RefCell::new(None);
+        let mut checkpoint_error = None;
+        let result = advance_supported_surface_with_heat(
+            model.law,
+            model.kinetics,
+            supported_state(cell, coating, area),
+            coating.reservoir,
+            duration_s,
+            supplied_heat_j,
+            config,
+            |h| {
+                caloric.temperature_k(h).map_err(|error| {
+                    *chart_error.borrow_mut() = Some(error);
+                    SublimationError::Invalid("original substrate calorics refused coupled trial")
+                })
+            },
+            model.deposit_enthalpy,
+            || {
+                checkpoint().map_err(|error| {
+                    checkpoint_error = Some(error);
+                    SublimationError::Cancelled
+                })
+            },
+        );
+        if let Some(error) = checkpoint_error {
+            return Err(error.into());
+        }
+        // Invalid outer trials may be backtracked successfully. Preserve a
+        // native chart refusal only when the complete endpoint solve failed.
+        let mut step = match result {
+            Ok(step) => step,
+            Err(error) => {
+                if let Some(original) = chart_error.into_inner() {
+                    return Err(original.into());
+                }
+                return Err(error.into());
+            }
+        };
+        let dm = step.phase.transferred_mass_kg;
+        let actual_dm = finite(step.state.deposit_mass_kg - coating.mass_kg)?;
+        let mass_defect = finite(actual_dm + dm)?;
+        admit_mass(coating.mass_kg, step.state.deposit_mass_kg, dm, mass_defect)?;
+        if let (
+            VaporReservoir::Finite {
+                vapor_mass_kg: old, ..
+            },
+            VaporReservoir::Finite {
+                vapor_mass_kg: new, ..
+            },
+        ) = (coating.reservoir, step.phase.reservoir)
+        {
+            admit_mass(old, new, dm, finite((new - old) - dm)?)?;
+        }
+        let deposit_h = step.phase.solid.specific_enthalpy_j_kg;
+        let sensible = finite(coating.mass_kg * (deposit_h - coating.specific_enthalpy_j_kg))?;
+        step.deposit_energy_change_j = finite(sensible + actual_dm * deposit_h)?;
+        step.phase.energy_residual_j =
+            finite(step.phase.energy_residual_j + finite(mass_defect * deposit_h)?)?;
+        let tolerance = finite(
+            config.absolute_energy_tolerance_j
+                + config.relative_tolerance
+                    * supplied_heat_j
+                        .abs()
+                        .max(step.phase.latent_energy_j.abs())
+                        .max(step.substrate_energy_change_j.abs())
+                        .max(sensible.abs()),
+        )?;
+        if step.phase.energy_residual_j.abs() > tolerance {
+            return Err(DepositionError::EnergyBalance(step.phase.energy_residual_j).into());
+        }
+        let mut candidate = cell.clone();
+        candidate.specific_h_j_kg = step.state.substrate_specific_enthalpy_j_kg;
+        caloric.validate_cell(&candidate)?;
+        let next_coating = CoatingState {
+            mass_kg: step.state.deposit_mass_kg,
+            specific_enthalpy_j_kg: deposit_h,
+            reservoir: step.phase.reservoir,
+        };
+        finite(candidate.mass_kg * candidate.specific_h_j_kg)?;
+        finite(next_coating.mass_kg * next_coating.specific_enthalpy_j_kg)?;
+        checkpoint()?;
+        // No fallible work follows this last checkpoint.
+        self.thermal.cells.get_mut(&id).unwrap().specific_h_j_kg = candidate.specific_h_j_kg;
+        *self.coatings.get_mut(&id).unwrap() = next_coating;
+        Ok(step)
     }
 
     /// Advance heat, coating exchange and native events transactionally.
