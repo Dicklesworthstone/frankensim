@@ -26,6 +26,8 @@ pub mod mann_inflow;
 pub mod mixture;
 /// Source-owned molecular stress and heat transport for the volumetric field.
 pub mod molecular;
+/// Native physical curl and resolved inviscid vorticity production.
+pub mod vorticity;
 
 /// Conservative averages in coherent SI units and the source's energy gauge.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]

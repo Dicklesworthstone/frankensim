@@ -6999,3 +6999,31 @@ when adjacent centered gradients vanish; it does not resolve unrepresented
 scales or validate a turbulent flow. Regression sources include a positive
 Germano-fit field with zero adjacent centered strains, Cartesian face-flux
 references, channel references and conservative evolution.
+
+## Native compressible vorticity budget
+
+`compressible::spatial::vorticity` provides an explicitly byte-budgeted,
+reusable `VorticityWorkspace3d` and `Euler3d::vorticity`. Every query decodes
+each accepted conservative cell once through its original frozen-gas EOS.
+The result separates physical curl, divergence, vortex stretching,
+compressible dilation, and baroclinic production
+`grad(rho) cross grad(p) / rho^2`. Their sum is the smooth inviscid material
+rate D(omega)/Dt, not the Eulerian partial time derivative. Existing
+conservative pressure fluxes already generate baroclinicity; querying never
+adds another source or changes accepted cells, time, loads, or reports.
+
+Centered derivatives use each physical axis width and periodic wrapping.
+A singleton periodic axis denotes homogeneous extrusion; every other axis
+requires at least three cells. Nonperiodic boundary cells use a second-order
+one-sided reconstruction through interior cell centers, without inventing
+wall or reservoir ghosts. Cancellation or numerical/source refusal exposes
+no partial output, and repeated queries allocate no new field buffers.
+
+The G0/G1/G4 tests cover affine expansion/rotation and Galilean boosts,
+variable-caloric-source baroclinicity in all orientations, barotropic zero,
+anisotropic quadratic boundary stencils, periodic refinement, native Euler
+baroclinic onset, and workspace/cancellation refusals. Independent numerical
+reference calculations were performed; native Rust execution was unavailable
+when this extension was introduced. This Estimated output does not certify
+shock derivatives, exact discrete circulation, viscous torque, applied-force
+curl, or unresolved turbulent production.
