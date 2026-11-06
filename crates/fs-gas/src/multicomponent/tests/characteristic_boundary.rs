@@ -57,7 +57,7 @@ fn mixture_characteristic_outlet_passes_original_variable_cp_simple_waves_and_en
     let gas = variable_source(0.0);
     let shifted = variable_source(1e18);
     for fraction in [0.0, 0.25, 0.8, 1.0] {
-        let r = fraction + (1.0 - fraction) * 0.5;
+        let r: f64 = fraction + (1.0 - fraction) * 0.5;
         let a = fraction * 3.5 + (1.0 - fraction) * 2.1;
         let b = 0.2;
         let c0 = ((a + b) / (a + b - r) * r).sqrt();
