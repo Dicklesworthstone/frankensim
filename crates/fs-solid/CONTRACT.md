@@ -1,5 +1,33 @@
 # fs-solid CONTRACT
 
+## Shared-face constraints in brittle crack-contact modes
+
+Adjacent crack faces can repeat the same paired-node displacement constraint.
+The native modal projection now reduces exact signed copies of each supported
+covector before QR, including reversed pair/direction and aliases exposed by
+held coordinates. No numerical rank tolerance identifies an alias; unresolved
+linear combinations and near dependencies still refuse in the original QR.
+
+`original_constraints()` retains every admitted physical row, including rows
+identically satisfied by supports. `constraint_aliases()` records its exact
+signed representative or support-only status. `constraints()` remains the
+deterministic independent basis, so existing force-shape indexing stays valid.
+Every lifted mode and nullspace vector is checked against all original rows.
+
+Reaction increments are aggregate multipliers determined by the free equations:
+each equals the signed sum over its original aliases. They do not determine
+individual face pressures or the allocation between contact and support
+reactions. `individual_reactions_determined()` exposes that distinction.
+Normal, sticking, sourced and thermal entry points share this reduction;
+original mass and frozen material stiffness are unchanged.
+
+The incoming scalar-row cap applies before reduction, and dense admission
+includes retained witnesses and alias mappings. Focused native-projection
+regressions specify exact spring/mass spectra, aggregate force balance,
+reversed signs, common sticking components, support-induced aliases and empty
+physical spectra. Non-alias dependencies are explicitly rejected.
+
+
 ## Original interface sources in brittle sticking modes
 
 `frozen_sourced_sticking_contact_modes` on mechanical and thermal brittle
@@ -85,10 +113,12 @@ is introduced. Frictionless tangential motion remains unconstrained.
 
 This complete dense reduction is capped at 128 free displacement coordinates
 before contact reduction. Explicit row and dense-entry budgets include lifted
-full-node shapes; sparse assembly retains its own bounds. Rows identically
-satisfied by supports are omitted because their reactions are inseparable from
-support reactions. Other unresolved rank refuses without arbitrary constraint
-removal. A fully constrained displacement space has an empty physical spectrum.
+full-node shapes; sparse assembly retains its own bounds. Exact signed aliases
+enter one independent supported row; all original witnesses and their mappings
+remain available. Support-only rows retain witnesses but no independent free
+reaction. Force shapes are aggregate free-equation multipliers when aliases
+exist. Other unresolved rank refuses without arbitrary constraint removal.
+A fully constrained displacement space has an empty physical spectrum.
 
 Mechanical and thermal owners share the same contact reduction. The thermal
 owner retains its accepted mechanical-strain branch, current coefficients and

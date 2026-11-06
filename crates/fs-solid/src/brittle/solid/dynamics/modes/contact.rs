@@ -16,6 +16,9 @@
 /// Exact sticking constraints strictly inside the native directional friction law.
 pub mod friction;
 
+#[cfg(test)]
+mod aliases;
+
 use super::{FrozenBrittleModesControls, FrozenBrittlePencil, assemble_frozen_pencil};
 use crate::brittle::solid::dynamics::BrittleTetMotion;
 use crate::brittle::solid::dynamics::fracture::contact::BrittleFaceImpactRow;
@@ -88,14 +91,30 @@ pub struct BrittleModeConstraint {
     pub direction: [f64; 3],
 }
 
+/// Exact relationship between an original trace and an independent FREE row.
+///
+/// On free coordinates, J_original = orientation * J_independent. A None row
+/// is identically satisfied by the supports and has orientation zero. Signs
+/// are exactly +1/-1; no tolerance, proportionality fit or rank truncation
+/// identifies aliases. Original traces may differ on held coordinates.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BrittleModeConstraintAlias {
+    pub independent_constraint: Option<usize>,
+    pub orientation: f64,
+}
+
 #[derive(Clone, Debug)]
 pub struct FrozenBrittleContactMode {
     /// Native mass-normalized mode of the projected pencil, with signed value.
     pub coordinates: ModePair,
     /// FULL original node-major xyz shape; fixed coordinates are zero.
     pub displacement_shape: Vec<f64>,
-    /// Constraint-order force increments. Multiply by the SAME modal coordinate
-    /// as displacement_shape to obtain N. These are not equilibrium preloads.
+    /// AGGREGATE multipliers of constraints(), determined by FREE momentum.
+    /// For an independent row k, this is sum_i orientation_i * df_original_i
+    /// over its exact aliases. Multiply by the same modal coordinate as
+    /// displacement_shape to obtain N. No unique individual face forces,
+    /// pressure allocation or full contact/support force recovery is implied
+    /// when aliases or support-only rows exist. These are not preloads.
     pub constraint_force_shape: Vec<f64>,
     pub constraint_relative_residual: f64,
     pub momentum_relative_residual: f64,
@@ -106,6 +125,8 @@ pub struct FrozenBrittleContactMode {
 pub struct FrozenBrittleContactModes {
     pencil: FrozenBrittlePencil,
     constraints: Vec<BrittleModeConstraint>,
+    original_constraints: Vec<BrittleModeConstraint>,
+    constraint_aliases: Vec<BrittleModeConstraintAlias>,
     basis: Vec<f64>,
     stiffness: Vec<f64>,
     mass: Vec<f64>,
@@ -116,10 +137,26 @@ impl FrozenBrittleContactModes {
     pub const fn pencil(&self) -> &FrozenBrittlePencil {
         &self.pencil
     }
-    /// Rows identically satisfied by the supports are omitted; their reaction
-    /// increments cannot be separated from support reactions by free momentum.
+    /// First native representative of each independent supported covector.
+    /// Exact signed aliases and support-only rows retain their full witnesses
+    /// in original_constraints(). Returned force shapes are free-space
+    /// aggregates, not individual loads assigned to these representative faces.
     pub fn constraints(&self) -> &[BrittleModeConstraint] {
         &self.constraints
+    }
+    /// Every admitted physical row BEFORE supports and exact alias reduction.
+    pub fn original_constraints(&self) -> &[BrittleModeConstraint] {
+        &self.original_constraints
+    }
+    /// One exact mapping per original_constraints() entry, in original order.
+    pub fn constraint_aliases(&self) -> &[BrittleModeConstraintAlias] {
+        &self.constraint_aliases
+    }
+    /// Whether free momentum determines every original contact increment.
+    /// Aliases need a distribution law; support-only forces need further
+    /// support information. This observer supplies neither by convention.
+    pub fn individual_reactions_determined(&self) -> bool {
+        self.original_constraints.len() == self.constraints.len()
     }
     /// May be zero when independent contact rows constrain all free DOFs.
     /// In that case the projected operators and complete spectrum are empty.
@@ -288,7 +325,8 @@ fn admit_counts(
         return Err(Error::Invalid("contact modal count or tolerance domain"));
     }
     // Includes native QR/eigensolver scratch, both projected operators, mode
-    // coordinates and force shapes, and full-node lifted results (r <= n).
+    // coordinates and force shapes, original/canonical row witnesses, alias
+    // mappings and full-node lifted results (r <= n). m is the INCOMING count.
     // This conservative allocation admission is not an OS/RSS bound.
     let entries = n
         .checked_mul(n)
@@ -305,7 +343,7 @@ fn admit_counts(
         })
         .and_then(|x| {
             n.checked_add(m)
-                .and_then(|y| y.checked_mul(32))
+                .and_then(|y| y.checked_mul(48))
                 .and_then(|y| x.checked_add(y))
         })
         .ok_or(Error::Invalid("contact modal dense count overflow"))?;
@@ -404,9 +442,10 @@ pub(crate) fn project_contact_pencil(
     checkpoint(cx)?;
     let free = pencil.free_dofs();
     let n = free.len();
-    admit_counts(pencil.full_dofs(), n, constraints.len(), c)?;
-    let mut rows = Vec::with_capacity(constraints.len());
-    for constraint in constraints {
+    let original_count = constraints.len();
+    admit_counts(pencil.full_dofs(), n, original_count, c)?;
+    let mut original_transpose = vec![0.0; n * original_count];
+    for (column, constraint) in constraints.iter().enumerate() {
         checkpoint(cx)?;
         if constraint
             .row
@@ -417,33 +456,71 @@ pub(crate) fn project_contact_pencil(
         {
             return Err(Error::Invalid("invalid physical modal constraint"));
         }
-        if (0..3).any(|axis| {
-            constraint.direction[axis] != 0.0
-                && constraint.row.nodes[0] != constraint.row.nodes[1]
-                && constraint
-                    .row
-                    .nodes
-                    .iter()
-                    .any(|&node| free.binary_search(&(3 * node + axis)).is_ok())
-        }) {
-            rows.push(constraint);
+        for (side, &node) in constraint.row.nodes.iter().enumerate() {
+            for axis in 0..3 {
+                if let Ok(row) = free.binary_search(&(3 * node + axis)) {
+                    original_transpose[row * original_count + column] +=
+                        (if side == 0 { -1.0 } else { 1.0 }) * constraint.direction[axis];
+                }
+            }
         }
     }
-    let m = rows.len();
+    // Adjacent physical faces can share the SAME paired-node covector. Compare
+    // the original represented coefficients exactly, including after supports.
+    // This is algebraic aliasing, never tolerance-based dependency removal.
+    let mut independent = Vec::with_capacity(original_count);
+    let mut constraint_aliases = Vec::with_capacity(original_count);
+    for column in 0..original_count {
+        checkpoint(cx)?;
+        if (0..n).all(|i| original_transpose[i * original_count + column] == 0.0) {
+            constraint_aliases.push(BrittleModeConstraintAlias {
+                independent_constraint: None,
+                orientation: 0.0,
+            });
+            continue;
+        }
+        let mut alias = None;
+        for (index, &prior) in independent.iter().enumerate() {
+            checkpoint(cx)?;
+            for orientation in [1.0, -1.0] {
+                if (0..n).all(|i| {
+                    original_transpose[i * original_count + column]
+                        == orientation * original_transpose[i * original_count + prior]
+                }) {
+                    alias = Some(BrittleModeConstraintAlias {
+                        independent_constraint: Some(index),
+                        orientation,
+                    });
+                    break;
+                }
+            }
+            if alias.is_some() {
+                break;
+            }
+        }
+        constraint_aliases.push(alias.unwrap_or_else(|| {
+            let index = independent.len();
+            independent.push(column);
+            BrittleModeConstraintAlias {
+                independent_constraint: Some(index),
+                orientation: 1.0,
+            }
+        }));
+    }
+    let m = independent.len();
     if m > n {
         return Err(Error::Invalid("unresolved contact constraint rank"));
     }
     let r = n - m;
+    let rows = independent
+        .iter()
+        .map(|&index| constraints[index])
+        .collect();
     let mut transpose = vec![0.0; n * m];
-    for (column, constraint) in rows.iter().enumerate() {
+    for i in 0..n {
         checkpoint(cx)?;
-        for (side, &node) in constraint.row.nodes.iter().enumerate() {
-            for axis in 0..3 {
-                if let Ok(row) = free.binary_search(&(3 * node + axis)) {
-                    transpose[row * m + column] +=
-                        (if side == 0 { -1.0 } else { 1.0 }) * constraint.direction[axis];
-                }
-            }
+        for (column, &original) in independent.iter().enumerate() {
+            transpose[i * m + column] = original_transpose[i * original_count + original];
         }
     }
     let scale = transpose.iter().map(|x| x.abs()).fold(0.0_f64, f64::max);
@@ -461,7 +538,7 @@ pub(crate) fn project_contact_pencil(
     for i in 0..m {
         if !factor.r(i, i).is_finite() || factor.r(i, i).abs() <= c.rank_tolerance {
             return Err(Error::Invalid(
-                "unresolved contact constraint rank; no row was dropped",
+                "unresolved contact constraint rank after exact alias reduction",
             ));
         }
     }
@@ -474,7 +551,7 @@ pub(crate) fn project_contact_pencil(
         gate(
             "contact basis",
             column,
-            constraint_residual(&transpose, n, m, &vector)?,
+            constraint_residual(&original_transpose, n, original_count, &vector)?,
             c.constraint_tolerance,
         )?;
         for row in 0..n {
@@ -529,7 +606,8 @@ pub(crate) fn project_contact_pencil(
                     .sum::<f64>()
             })
             .collect();
-        let constraint_relative_residual = constraint_residual(&transpose, n, m, &phi)?;
+        let constraint_relative_residual =
+            constraint_residual(&original_transpose, n, original_count, &phi)?;
         gate(
             "contact mode",
             index,
@@ -594,6 +672,8 @@ pub(crate) fn project_contact_pencil(
     Ok(FrozenBrittleContactModes {
         pencil,
         constraints: rows,
+        original_constraints: constraints,
+        constraint_aliases,
         basis,
         stiffness,
         mass,
