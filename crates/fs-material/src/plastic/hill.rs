@@ -440,8 +440,15 @@ impl Hill48 {
         if stress.iter().any(|v| !v.is_finite()) {
             return Err(HillError::State("stress must be finite"));
         }
-        // Normalize before differences and Mandel scaling: finite components
-        // can overflow those intermediates while the effective stress is finite.
+        // Subtract nearby normal stresses before rescaling: these differences
+        // can be exact even when their common hydrostatic part is enormous.
+        // Normalizing first would discard a substantial part of that signal.
+        let direct = self.modes.equivalent(&self.modes.coordinates(stress));
+        if direct.is_finite() {
+            return Ok(direct);
+        }
+        // A finite effective stress can still have overflowing coordinate or
+        // Mandel intermediates. Normalize only when that direct path fails.
         let scale = stress.iter().fold(0.0_f64, |s, x| s.max(x.abs()));
         if scale == 0.0 {
             return Ok(0.0);

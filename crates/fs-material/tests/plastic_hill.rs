@@ -163,6 +163,46 @@ fn directional_ratios_have_explicit_shear_normalization() {
 }
 
 #[test]
+fn sheet_r_fit_predicts_directional_yields_and_keeps_transverse_shear_independent() {
+    let [r0, r45, r90] = [1.8, 1.1, 2.4];
+    let shear_ratios = [0.75, 1.4];
+    let law = material(
+        Hill48Coefficients::from_planar_r_values([r0, r45, r90], shear_ratios).unwrap(),
+        0.0,
+    );
+    // Closed-form predictions written directly in terms of coupon r-values,
+    // not reconstructed from the production Hill coefficients.
+    let transverse = Y * (r90 * (1.0 + r0) / (r0 * (1.0 + r90))).sqrt();
+    let thickness = Y * (r90 * (1.0 + r0) / (r0 + r90)).sqrt();
+    let in_plane_shear = Y * ((1.0 + r0) * r90 / ((2.0 * r45 + 1.0) * (r0 + r90))).sqrt();
+    let expected = [
+        Y,
+        transverse,
+        thickness,
+        in_plane_shear,
+        Y * shear_ratios[0] / 3.0_f64.sqrt(),
+        Y * shear_ratios[1] / 3.0_f64.sqrt(),
+    ];
+    for axis in 0..6 {
+        let mut stress = [0.0; 6];
+        stress[axis] = expected[axis];
+        near(law.equivalent_stress_pa(&stress).unwrap(), Y, 3e-5, 2e-13);
+    }
+    let diagonal = Y * (2.0 * r90 * (1.0 + r0) / ((1.0 + r45) * (r0 + r90))).sqrt();
+    let stress = [
+        0.5 * diagonal,
+        0.5 * diagonal,
+        0.0,
+        0.5 * diagonal,
+        0.0,
+        0.0,
+    ];
+    near(law.equivalent_stress_pa(&stress).unwrap(), Y, 3e-5, 2e-13);
+    assert!((transverse / Y - 1.0).abs() > 0.01);
+    assert!((diagonal / Y - 1.0).abs() > 0.1);
+}
+
+#[test]
 fn anisotropic_tangent_is_the_derivative_at_fixed_accepted_history() {
     let law = material(coefficients(), HARDENING);
     let old = law
@@ -264,6 +304,29 @@ fn hydrostatic_pressure_preserves_yielding_and_flow_is_isochoric() {
         );
     }
     near(trace(&a.state.plastic_strain), 0.0, 3e-18, 0.0);
+}
+
+#[test]
+fn equivalent_stress_preserves_small_deviatoric_differences_under_large_pressure() {
+    let law = material(Hill48Coefficients::isotropic(), HARDENING);
+    for magnitude in [1e-200_f64, 1e-9, 1.0, 1e9, 1e200, 1e300] {
+        for sign in [-1.0, 1.0] {
+            let x = sign * magnitude;
+            let previous = x.next_down();
+            // For two equal principal stresses, Mises q is exactly the
+            // difference from the third. These neighboring inputs subtract
+            // exactly; dividing each by their common scale first does not.
+            let expected = (x - previous).abs();
+            let actual = law
+                .equivalent_stress_pa(&[x, previous, x, 0.0, 0.0, 0.0])
+                .unwrap();
+            near(actual, expected, 0.0, 8.0 * f64::EPSILON);
+            assert_eq!(
+                law.equivalent_stress_pa(&[x, x, x, 0.0, 0.0, 0.0]).unwrap(),
+                0.0,
+            );
+        }
+    }
 }
 
 #[test]

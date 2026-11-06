@@ -17534,11 +17534,14 @@ and accepted-history updates. Stress and history requests do not construct a
 accepted history remains in the original material coordinates. Full responses
 retain the analytic discrete tangent and tensor-shear transformation.
 
-Public effective-stress evaluation normalizes finite stress components before
-normal differences and Mandel scaling, preserving representable answers even
-when those intermediate operations would otherwise overflow. It still refuses
-nonfinite inputs or an unrepresentable effective stress. Independent numerical
-oracles and exact path-parity cases live in `tests/plastic_hill_robustness.rs`.
+Public effective-stress evaluation first preserves finite deviatoric differences
+in the original stress scale. It normalizes finite stress components only when
+the direct evaluation is nonfinite, recovering representable answers despite
+intermediate overflow without discarding small represented differences on a
+large hydrostatic offset. It still refuses nonfinite inputs or an unrepresentable
+effective stress. Independent numerical oracles and exact path-parity cases live
+in `tests/plastic_hill_robustness.rs`; near-hydrostatic scale regressions are in
+`tests/plastic_hill.rs`.
 
 
 ## Retained layered plane-stress plastic sections

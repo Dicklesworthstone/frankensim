@@ -6,9 +6,9 @@
 
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
+use fs_material::IsotropicElastic;
 use fs_material::plastic::hill::{Hill48, Hill48Coefficients};
 use fs_material::plastic::reduction::{ReducedState, ReductionConfig};
-use fs_material::{IsotropicElastic, SmallStrainLaw};
 use fs_solid::{
     Formulation, IncrementSettings, Mesh2, PlaneAssemblyBudget, PlaneKind, SmallStrainLawField,
     SmallStrainPlaneProblem, SmallStrainTetProblem, TetAssemblyBudget,
