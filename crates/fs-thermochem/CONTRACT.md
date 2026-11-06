@@ -471,6 +471,28 @@ component inventory. Positive heat is INTO the liquid inventory. This is an
 enthalpy balance with constant-pressure boundary work, not a constant-volume
 internal-energy closure.
 
+`BinaryCaloricStateV1::isobaric_heat_capacity_j_per_k` differentiates that same
+enthalpy at fixed component inventory. A homogeneous state sums the original
+species Cp(T); an equilibrated two-liquid state also includes
+`n R (B/T)^2 (1-2x)^2 x(1-x) / [1-2 chi x(1-x)]` from changing coexistence
+compositions. The retained positive log-odds root supplies a cancellation-free
+response near criticality, including its finite split-side limit. No new
+phase solve, temperature differencing, fitted total Cp or allocation occurs.
+An explicitly homogeneous nonequilibrium parcel retains its fixed-composition
+constraint. Temperature-independent interactions have zero redistribution
+capacity, including at critical/binodal compositions.
+
+The strict heat-capacity query refuses distinct one-sided critical/binodal
+limits and feeds unresolved by the retained numerical coexistence bracket.
+`isobaric_heat_capacity_response` exposes the same smooth derivative, but
+explicitly qualifies a selected homogeneous-side tangent at either kind of
+boundary for an implicit thermal solve. That tangent changes no enthalpy or
+accepted energy residual and is not reported as a unique physical Cp. Source
+and arithmetic errors still refuse; there is no general fallback capacity.
+Focused tests compare the response with independent original enthalpy and
+entropy differences for upper/lower critical solution laws, variable pure Cp,
+inventory/species scaling, the near-critical jump and boundary qualification.
+
 The thermal residual integrates sensible increments directly from each
 original parcel and differences the mixing products before inventory scaling.
 It never subtracts large absolute reference enthalpies to recover a small

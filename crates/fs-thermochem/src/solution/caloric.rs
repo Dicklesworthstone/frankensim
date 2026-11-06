@@ -24,8 +24,10 @@ use std::sync::Arc;
 
 mod entropy;
 mod heat_capacity;
+mod response;
 
 pub use heat_capacity::{MAX_CALORIC_KNOTS_V1, MolarHeatCapacityCurveV1};
+pub use response::{BinaryCaloricHeatCapacityQualificationV1, BinaryCaloricHeatCapacityResponseV1};
 
 /// Maximum source points per pure-component heat-capacity curve.
 pub const MAX_LIQUID_CALORIC_KNOTS_V1: usize = MAX_CALORIC_KNOTS_V1;
@@ -83,6 +85,14 @@ impl PureLiquidHeatCapacityV1 {
     }
     pub fn temperature_domain(&self) -> [Temperature; 2] {
         self.curve.temperature_domain()
+    }
+    /// Original positive pure-liquid molar Cp at this temperature [J/(mol K)].
+    /// Uses the retained piecewise-linear source without extrapolation.
+    pub fn heat_capacity_at(
+        &self,
+        temperature: Temperature,
+    ) -> Result<MolarThermalQuantityV1, BinaryCaloricErrorV1> {
+        self.curve.heat_capacity_at(temperature)
     }
     /// Exact integral of the original piecewise-linear Cp [J/mol].
     pub fn enthalpy_change_j_per_mol(
