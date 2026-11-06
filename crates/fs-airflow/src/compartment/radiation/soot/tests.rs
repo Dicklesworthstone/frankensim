@@ -343,3 +343,169 @@ fn g1_population_drives_original_enclosure_exchange_with_exact_pair_accounting()
         assert_eq!(report.absorption, absorption);
     }
 }
+
+
+#[test]
+fn g1_particle_opacity_matches_number_density_times_rayleigh_cross_sections() {
+    let model = soot();
+    let (fraction, radius, wavelength) = (2e-6, 2e-9_f64, 500e-9_f64);
+    let optics = model
+        .particle_opacity(fraction, Length::new(radius), Length::new(wavelength))
+        .unwrap();
+    let [n, k] = model.refractive_index();
+    let pi = core::f64::consts::PI;
+    let number_density = fraction / ((4.0 / 3.0) * pi * radius.powi(3));
+    let contrast_squared = ((n * n - k * k - 1.0).powi(2) + (2.0 * n * k).powi(2))
+        / ((n * n - k * k + 2.0).powi(2) + (2.0 * n * k).powi(2));
+    let cross_section = (8.0 * pi / 3.0)
+        * (2.0 * pi / wavelength).powi(4)
+        * radius.powi(6)
+        * contrast_squared;
+    close(optics.scattering_per_m(), number_density * cross_section, 3e-15);
+    assert_eq!(
+        optics.absorption_per_m(),
+        model.spectral_coefficient(fraction, Length::new(wavelength)).unwrap().value()
+    );
+    assert_eq!(
+        optics.extinction_per_m(),
+        optics.absorption_per_m() + optics.scattering_per_m()
+    );
+    assert!(core::ptr::eq(optics.model(), &model));
+    assert_eq!(optics.radius().value(), radius);
+    assert_eq!(optics.wavelength().value(), wavelength);
+    assert_eq!(optics.volume_fraction(), fraction);
+}
+
+#[test]
+fn g3_particle_opacity_respects_population_radius_and_wavelength_scaling() {
+    let model = soot();
+    let sample = |fraction, radius, wavelength| {
+        model.particle_opacity(fraction, Length::new(radius), Length::new(wavelength)).unwrap()
+    };
+    let base = sample(2e-6, 2e-9, 1e-6);
+    let doubled_mass = sample(4e-6, 2e-9, 1e-6);
+    let doubled_radius = sample(2e-6, 4e-9, 1e-6);
+    let doubled_wavelength = sample(2e-6, 2e-9, 2e-6);
+    close(doubled_mass.absorption_per_m(), 2.0 * base.absorption_per_m(), 2e-15);
+    close(doubled_mass.scattering_per_m(), 2.0 * base.scattering_per_m(), 2e-15);
+    close(doubled_mass.extinction_per_m(), 2.0 * base.extinction_per_m(), 2e-15);
+    close(doubled_radius.absorption_per_m(), base.absorption_per_m(), 2e-15);
+    close(doubled_radius.scattering_per_m(), 8.0 * base.scattering_per_m(), 2e-15);
+    close(doubled_wavelength.absorption_per_m(), base.absorption_per_m() / 2.0, 2e-15);
+    close(doubled_wavelength.scattering_per_m(), base.scattering_per_m() / 16.0, 2e-15);
+    let from_mass = model.particle_opacity_from_mass_concentration(
+        Density::new(2e-6 * model.particle_density().value()),
+        Length::new(2e-9),
+        Length::new(1e-6),
+    ).unwrap();
+    close(from_mass.extinction_per_m(), base.extinction_per_m(), 2e-15);
+}
+
+#[test]
+fn g3_primary_beam_transfer_partitions_energy_and_composes_paths() {
+    let model = soot();
+    let optics = model.particle_opacity(2e-6, Length::new(2e-9), Length::new(500e-9)).unwrap();
+    let first = optics.direct_beam(Length::new(0.02)).unwrap();
+    let second = optics.direct_beam(Length::new(0.03)).unwrap();
+    let whole = optics.direct_beam(Length::new(0.05)).unwrap();
+    for beam in [first, second, whole] {
+        close(beam.transmittance + beam.absorbed_fraction + beam.scattered_fraction, 1.0, 3e-15);
+        close(beam.opacity, beam.absorbed_fraction + beam.scattered_fraction, 3e-15);
+        assert!(beam.scattered_fraction > 0.0 && beam.absorbed_fraction > 0.0);
+    }
+    close(whole.transmittance, first.transmittance * second.transmittance, 3e-15);
+    close(
+        whole.absorbed_fraction,
+        first.absorbed_fraction + first.transmittance * second.absorbed_fraction,
+        3e-15,
+    );
+    close(
+        whole.scattered_fraction,
+        first.scattered_fraction + first.transmittance * second.scattered_fraction,
+        3e-15,
+    );
+}
+
+#[test]
+fn g0_primary_beam_resolves_thin_zero_and_opaque_limits() {
+    let model = soot();
+    let optics = model.particle_opacity(2e-6, Length::new(2e-9), Length::new(500e-9)).unwrap();
+    let path = 1e-18 / optics.extinction_per_m();
+    let thin = optics.direct_beam(Length::new(path)).unwrap();
+    assert_eq!(thin.transmittance, 1.0);
+    close(thin.opacity, 1e-18, 2e-15);
+    close(thin.absorbed_fraction, optics.absorption_per_m() * path, 2e-15);
+    close(thin.scattered_fraction, optics.scattering_per_m() * path, 2e-15);
+    let zero = optics.direct_beam(Length::new(0.0)).unwrap();
+    assert_eq!((zero.transmittance, zero.opacity, zero.absorbed_fraction, zero.scattered_fraction),
+        (1.0, 0.0, 0.0, 0.0));
+    assert!(optics.extinction_per_m() > 1.0);
+    let opaque = optics.direct_beam(Length::new(f64::MAX)).unwrap();
+    assert_eq!((opaque.transmittance, opaque.opacity), (0.0, 1.0));
+    close(opaque.absorbed_fraction + opaque.scattered_fraction, 1.0, 2e-15);
+}
+
+#[test]
+fn g0_nonabsorbing_particles_remove_beam_power_without_depositing_heat() {
+    let model = RayleighSoot::new(
+        1.5, 0.0, Density::new(1800.0), domain(), "lossless spheres",
+    )
+    .unwrap();
+    let optics = model.particle_opacity(1e-4, Length::new(2e-9), Length::new(500e-9)).unwrap();
+    assert_eq!(optics.absorption_per_m(), 0.0);
+    assert!(optics.scattering_per_m() > 0.0);
+    let beam = optics.direct_beam(Length::new(1.0 / optics.extinction_per_m())).unwrap();
+    close(beam.transmittance, (-1.0_f64).exp(), 2e-15);
+    assert_eq!(beam.absorbed_fraction, 0.0);
+    assert_eq!(beam.scattered_fraction, beam.opacity);
+
+    let matched = RayleighSoot::new(
+        1.0, 0.0, Density::new(1800.0), domain(), "index-matched spheres",
+    )
+    .unwrap();
+    for optics in [
+        model.particle_opacity(0.0, Length::new(2e-9), Length::new(500e-9)).unwrap(),
+        matched.particle_opacity(1e-4, Length::new(2e-9), Length::new(500e-9)).unwrap(),
+    ] {
+        assert_eq!(optics.extinction_per_m(), 0.0);
+        let beam = optics.direct_beam(Length::new(f64::MAX)).unwrap();
+        assert_eq!(
+            (beam.transmittance, beam.opacity, beam.absorbed_fraction, beam.scattered_fraction),
+            (1.0, 0.0, 0.0, 0.0),
+        );
+    }
+}
+
+#[test]
+fn g0_particle_opacity_enforces_loading_size_resonance_and_path_domains() {
+    let model = soot();
+    for invalid in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+        assert!(model.particle_opacity(1e-6, Length::new(invalid), Length::new(1e-6)).is_err());
+        assert!(model.particle_opacity(1e-6, Length::new(1e-9), Length::new(invalid)).is_err());
+    }
+    for invalid in [-1.0, 2e-3, f64::NAN, f64::INFINITY] {
+        assert!(model.particle_opacity(invalid, Length::new(1e-9), Length::new(1e-6)).is_err());
+    }
+    assert!(model.particle_opacity(1e-6, Length::new(1e-6), Length::new(1e-6)).is_err());
+    let high_index = RayleighSoot::new(
+        10.0, 0.0, Density::new(1800.0), domain(), "high-index limit",
+    )
+    .unwrap();
+    assert!(high_index.particle_opacity(
+        1e-6, Length::new(0.02e-6 / core::f64::consts::TAU), Length::new(1e-6),
+    ).is_err());
+    let resonant = RayleighSoot::new(
+        1e-10, 2.0_f64.sqrt(), Density::new(1800.0), domain(), "resonance limit",
+    )
+    .unwrap();
+    assert!(resonant.particle_opacity(
+        1e-6, Length::new(0.01e-6 / core::f64::consts::TAU), Length::new(1e-6),
+    ).is_err());
+    let optics = model.particle_opacity(1e-6, Length::new(1e-9), Length::new(1e-6)).unwrap();
+    for invalid in [-1.0, f64::NAN, f64::INFINITY] {
+        assert!(optics.direct_beam(Length::new(invalid)).is_err());
+        assert!(model.particle_opacity_from_mass_concentration(
+            Density::new(invalid), Length::new(1e-9), Length::new(1e-6),
+        ).is_err());
+    }
+}

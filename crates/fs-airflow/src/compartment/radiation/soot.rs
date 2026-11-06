@@ -23,12 +23,18 @@
 //! it does not exactly represent a nonequilibrium spectrum, spectral filtering
 //! along a finite path, or a nongray mixed enclosure.
 //!
-//! The caller must justify small primary particles, dilution, negligible
-//! scattering, constant optical properties over the relevant spectrum, and
+//! For the absorption-only thermal closures, the caller must justify small
+//! primary particles, dilution, negligible scattering, constant optical properties
+//! over the relevant spectrum, and
 //! thermal equilibration if using the gas layer's temperature. No particle-size
 //! cutoff, soot yield, refractive index, density, or molecular gas absorption is
 //! guessed. Soot concentration is condensed particulate mass per mixture volume;
 //! these methods never add it to ideal-gas species, moles, pressure or energy.
+//!
+//! With an explicit monodisperse radius, `particle_opacity` additionally
+//! resolves elastic scattering and primary-beam extinction under a bounded
+//! electrostatic Rayleigh policy. It does not insert scattering into the
+//! absorption-only Planck means or thermal enclosure.
 
 use super::{
     AbsorptionCoefficient, LayerAbsorption, RadiationError, finite, nonnegative, positive,
@@ -257,6 +263,203 @@ impl RayleighSoot {
         let mut report = self.planck_from_volume_fraction(fraction, spectral_temperature)?;
         report.mass_concentration = concentration;
         Ok(report)
+    }
+}
+
+/// Bulk optical coefficients for an explicit monodisperse Rayleigh population.
+///
+/// The borrowed model owns the original optical constants, density and source.
+/// Coefficients are inverse metres. Scattering removes light from the primary
+/// beam but is not thermal absorption. Preparation and subsequent beam queries
+/// allocate nothing; the population does not change ideal-gas mass or pressure.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RayleighParticleOpacity<'a> {
+    model: &'a RayleighSoot,
+    volume_fraction: f64,
+    radius: Length,
+    wavelength: Length,
+    absorption_per_m: f64,
+    scattering_per_m: f64,
+    extinction_per_m: f64,
+}
+
+/// Fractions of an incident collimated beam after a uniform particle path.
+///
+/// Only the first interaction with that beam is partitioned. Scattered light
+/// remains radiation; its later escape, scattering and absorption are not
+/// solved here. These values are neither total deposited heat nor a human
+/// visibility prediction.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DirectBeamTransfer {
+    /// Fraction reaching the endpoint without any interaction.
+    pub transmittance: f64,
+    /// Removed fraction, evaluated without subtracting from transmittance.
+    pub opacity: f64,
+    /// Fraction absorbed at its first interaction with the primary beam.
+    pub absorbed_fraction: f64,
+    /// Fraction scattered at its first interaction, retaining radiative energy.
+    pub scattered_fraction: f64,
+}
+
+impl RayleighSoot {
+    /// Resolve absorption, scattering and extinction of homogeneous spheres.
+    ///
+    /// The host is nonabsorbing with index one; `radius` is not diameter and
+    /// `wavelength` is the vacuum wavelength. With `x = 2 pi radius / wavelength`
+    /// and `A = (m^2 - 1)/(m^2 + 2)`, the electrostatic Rayleigh approximation
+    /// gives `sigma_s = 2 f_v x^4 |A|^2 / radius`. Absorption is exactly the
+    /// original `spectral_coefficient`; extinction is their sum, never a
+    /// replacement for absorption in the existing thermal enclosure.
+    ///
+    /// Reference: Mishchenko, Travis & Lacis (2002), section 7.1, equations
+    /// 7.3--7.4, multiplied by `3 f_v / (4 pi radius^3)`:
+    /// <https://www.giss.nasa.gov/pubs/books/2002_Mishchenko_mi06300n/book2_part_ii.pdf>.
+    ///
+    /// This explicit use policy requires `x <= 0.1`, `|m| x <= 0.1`, and
+    /// `x^2 |A| <= 0.1` to avoid extrapolating the electrostatic dipole near a
+    /// narrow material resonance. These checks do not certify approximation
+    /// error. The caller still owns dilution, independent particles and the
+    /// optical source's validity at this wavelength. Aggregates, size
+    /// distributions, dependent scattering and a general Mie solution are
+    /// outside this closure.
+    pub fn particle_opacity(
+        &self,
+        volume_fraction: f64,
+        radius: Length,
+        wavelength: Length,
+    ) -> Result<RayleighParticleOpacity<'_>, RadiationError> {
+        self.volume_fraction(volume_fraction)?;
+        if !positive(radius.value()) || !positive(wavelength.value()) {
+            return Err(RadiationError::Invalid(
+                "positive finite particle radius and vacuum wavelength required",
+            ));
+        }
+        let x = core::f64::consts::TAU * (radius.value() / wavelength.value());
+        let [n, k] = self.refractive_index;
+        if !positive(x) || x > 0.1 || n.hypot(k) * x > 0.1 {
+            return Err(RadiationError::Invalid(
+                "particle size exceeds the electrostatic Rayleigh domain",
+            ));
+        }
+        // Retain weak index contrast rather than forming n*n and subtracting 1.
+        // The sign of the imaginary part cancels in the squared magnitude.
+        let real = finite((n - 1.0) * (n + 1.0) - k * k)?;
+        let imaginary = finite(2.0 * n * k)?;
+        let norm = finite((real + 3.0).hypot(imaginary))?;
+        let polarizability = finite(real.hypot(imaginary) / norm)?;
+        let scaled_dipole = finite(x * (x * polarizability))?;
+        if scaled_dipole > 0.1 {
+            return Err(RadiationError::Invalid(
+                "resonant particle response exceeds the electrostatic Rayleigh domain",
+            ));
+        }
+        let absorption_per_m = self
+            .spectral_coefficient(volume_fraction, wavelength)?
+            .value();
+        // N*C_sca = 2*f_v*x^4*|A|^2/a. The admitted scaled dipole is <= 0.1;
+        // this form avoids separately forming the enormous wavelength^-4.
+        let scattering_per_m = finite(
+            (2.0 * volume_fraction / radius.value()) * scaled_dipole * scaled_dipole,
+        )?;
+        if volume_fraction > 0.0 && polarizability > 0.0 && scattering_per_m == 0.0 {
+            return Err(RadiationError::Invalid(
+                "positive particle scattering underflow",
+            ));
+        }
+        let extinction_per_m = finite(absorption_per_m + scattering_per_m)?;
+        Ok(RayleighParticleOpacity {
+            model: self,
+            volume_fraction,
+            radius,
+            wavelength,
+            absorption_per_m,
+            scattering_per_m,
+            extinction_per_m,
+        })
+    }
+
+    /// Resolve the same population from particulate mass per mixture volume.
+    /// The source's condensed-particle density, not ideal-gas density, owns
+    /// the conversion to volume fraction.
+    pub fn particle_opacity_from_mass_concentration(
+        &self,
+        concentration: Density,
+        radius: Length,
+        wavelength: Length,
+    ) -> Result<RayleighParticleOpacity<'_>, RadiationError> {
+        if !nonnegative(concentration.value()) {
+            return Err(RadiationError::Invalid(
+                "finite nonnegative soot mass concentration required",
+            ));
+        }
+        let fraction = finite(concentration.value() / self.particle_density.value())?;
+        if concentration.value() > 0.0 && fraction == 0.0 {
+            return Err(RadiationError::Invalid(
+                "positive soot volume fraction underflow",
+            ));
+        }
+        self.particle_opacity(fraction, radius, wavelength)
+    }
+}
+
+impl<'a> RayleighParticleOpacity<'a> {
+    /// Original immutable material model and its explicit source.
+    pub const fn model(&self) -> &'a RayleighSoot {
+        self.model
+    }
+    /// Particulate volume divided by mixture volume, not gas mole fraction.
+    pub const fn volume_fraction(&self) -> f64 {
+        self.volume_fraction
+    }
+    /// Common physical sphere radius [m].
+    pub const fn radius(&self) -> Length {
+        self.radius
+    }
+    /// Original vacuum wavelength [m].
+    pub const fn wavelength(&self) -> Length {
+        self.wavelength
+    }
+    /// True intensity absorption [1/m], retaining the original soot law.
+    pub const fn absorption_per_m(&self) -> f64 {
+        self.absorption_per_m
+    }
+    /// Elastic scattering out of the incident beam [1/m], not heat.
+    pub const fn scattering_per_m(&self) -> f64 {
+        self.scattering_per_m
+    }
+    /// Total primary-beam attenuation [1/m]: absorption plus scattering.
+    pub const fn extinction_per_m(&self) -> f64 {
+        self.extinction_per_m
+    }
+
+    /// Propagate an unscattered beam through this uniform population.
+    ///
+    /// `tau = extinction * distance`; loss uses `-expm1(-tau)` so a thin
+    /// path retains its positive opacity even when transmittance rounds to one.
+    /// Finite coefficients/distances whose product overflows have the opaque
+    /// limit. No scattered source or in-scattering is added to the beam.
+    pub fn direct_beam(&self, distance: Length) -> Result<DirectBeamTransfer, RadiationError> {
+        if !nonnegative(distance.value()) {
+            return Err(RadiationError::Invalid(
+                "finite nonnegative particle path length required",
+            ));
+        }
+        if self.extinction_per_m == 0.0 {
+            return Ok(DirectBeamTransfer {
+                transmittance: 1.0,
+                opacity: 0.0,
+                absorbed_fraction: 0.0,
+                scattered_fraction: 0.0,
+            });
+        }
+        let depth = self.extinction_per_m * distance.value();
+        let opacity = -(-depth).exp_m1();
+        Ok(DirectBeamTransfer {
+            transmittance: (-depth).exp(),
+            opacity,
+            absorbed_fraction: opacity * (self.absorption_per_m / self.extinction_per_m),
+            scattered_fraction: opacity * (self.scattering_per_m / self.extinction_per_m),
+        })
     }
 }
 

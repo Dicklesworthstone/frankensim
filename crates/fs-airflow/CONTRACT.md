@@ -4071,3 +4071,31 @@ and reversal, each section's heat and kinetic inventory, heterogeneous viscous
 history against the original full common-flow descriptor, unchanged energy
 through a nonsteady material update, steady local heat, complex impedance and
 atomic physical-limit refusals. Runtime verification is reported separately.
+
+
+### Particle-size-resolved soot opacity and direct-beam transport
+
+RayleighSoot::particle_opacity and particle_opacity_from_mass_concentration
+prepare a source-borrowing monodisperse sphere report with distinct absorption,
+scattering and extinction in inverse metres. The original soot spectral
+absorption is retained exactly; elastic Rayleigh scattering is added only to
+primary-beam extinction. Source identity, condensed-particle density, radius,
+vacuum wavelength and original population remain available from the report.
+The host is nonabsorbing with refractive index one.
+
+Admission requires the original loading domain and positive finite size and
+wavelength, with x <= 0.1, |m| x <= 0.1 and x² |(m²-1)/(m²+2)| <= 0.1.
+These are explicit asymptotic-use restrictions, not certified approximation
+error bounds. Aggregation, particle-size distributions, dependent scattering
+and the full Mie regime require separate models. The source must justify its
+optical constants at the requested wavelength.
+
+RayleighParticleOpacity::direct_beam returns unscattered transmission,
+expm1-evaluated thin-path opacity, and separate primary-beam absorbed and
+scattered fractions. Their energy partition and consecutive-path composition
+are checked against analytic references. Scattered power remains radiation:
+the returned absorbed fraction is first-interaction absorption, not total heat
+after multiple scattering. Existing thermal LayerAbsorption and Planck means
+receive no scattering coefficient. Preparation and beam queries allocate
+nothing, and overflow of a finite positive optical-depth product has the
+opaque limit. This is not a human-visibility or full radiative-transfer solver.
