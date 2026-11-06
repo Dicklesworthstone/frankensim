@@ -20,6 +20,9 @@ use crate::{FluxSystem, TriMesh};
 /// Bounded density substeps with one compatible time-averaged mass flux.
 pub mod subcycle;
 
+/// Conservative material-inventory continuation between prepared native meshes.
+pub mod remap;
+
 /// Conservative second-order time stages with the original donor-cell flux.
 pub mod ssprk2;
 

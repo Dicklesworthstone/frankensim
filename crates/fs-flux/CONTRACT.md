@@ -6736,3 +6736,36 @@ conservative loads and source immutability. Reacting molecular tests include
 the nonzero-epoch rounded endpoint case, so split clocks cannot observe beyond
 the retained source interval. These are manufactured numerical composition
 checks, not an experimental validation or a full workspace acceptance gate.
+
+### Density and inventory continuation across prepared meshes
+
+With `continuum`, `ns::transport::density::remap` adds
+`PreparedDensityTransport::remap_from` for a receiving native transport plan.
+It reuses `fs_mesh::conservative_cell_remap` for physical volume, mass, and each
+extensive `mass*specific` quantity through the same canonical source-volume
+fractions. Actual source/target plan volumes determine cell mass and reconstructed
+density; specific fields are reconstructed from received extensive inventory and
+received mass. Source fractions must cover every source, and compensated local
+checks require every target's overlap volume to match its native physical volume.
+The caller supplies overlap geometry and the separately admitted target advector.
+
+Volume [m³], mass [kg], and each carried inventory have distinct absolute
+conservation allowances. Final residuals accumulate individual source and actual
+reconstructed target amounts with compensation and carried-product FMA remainders,
+preserving small defects that subtracting rounded endpoint totals can conceal.
+Positive representable masses
+and densities are required; signed inventories and `N=0` are supported. There is
+no clipping, mass repair, species renormalization, or numerical loss converted to
+heat. Phase-specific errors retain original scalar-owner refusals. Adapter vector
+payload is admitted separately from the original remapper's existing per-call
+caps; allocations are fallible and cancellation is polled through all scans.
+No input state or plan changes before a complete candidate is returned.
+
+The returned cells continue through the original target `advance_into` or
+density-subcycling owner. This is prescribed-advector P0 material transport,
+not a BDM velocity/pressure projection, coupled Navier–Stokes checkpoint,
+angular/kinetic conservation claim, geometric intersection generator, or
+constitutive-history transfer. Focused `density_transport/remap.rs` regressions
+advance, refine, advance, coarsen and continue enthalpy/species-like inventories;
+they also cover extreme density contrast, small signed defects, physical-volume
+mismatch, cancellation and storage refusal.
