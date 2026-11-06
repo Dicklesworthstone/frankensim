@@ -1629,6 +1629,8 @@ pub enum AirflowError {
         /// Raw IEEE-754 bits of the rejected value.
         value_bits: u64,
     },
+    /// Original specific-heat source support or caloric integration refusal.
+    CaloricSource(fs_material::thermal::transport::ThermalTransportError),
     /// An air path was declared with no segments.
     EmptyAirPath,
     /// Two air-path segments claim the same solid Robin region.
@@ -1861,6 +1863,7 @@ impl fmt::Display for AirflowError {
                  positive coherent-SI value",
                 f64::from_bits(*value_bits)
             ),
+            Self::CaloricSource(error) => write!(formatter, "conjugate caloric source: {error}"),
             Self::EmptyAirPath => write!(
                 formatter,
                 "an air path needs at least one segment; fix: declare the solid Robin \

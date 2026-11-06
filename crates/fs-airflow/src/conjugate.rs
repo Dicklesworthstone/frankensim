@@ -96,6 +96,12 @@
 //!   [`fs_couple::EnergyAudit`] records every exchange's imbalance. The
 //!   window-balance ledger path (`BoundaryTemperatureReference`,
 //!   `WindowEvidenceRef`) is not wired.
+//!
+//! [`caloric::CaloricAirPath`] uses the same coupled driver with original
+//! source Cp(T) integrated through each segment. Its prescribed mass flow,
+//! pressure, composition and h remain fixed; source support is checked along
+//! the actual fluid-temperature path. The constant-Cp goal/transfer formulas
+//! below remain scoped to `AirPath`.
 
 use core::cmp::Ordering;
 
@@ -110,6 +116,10 @@ use crate::AirflowError;
 
 /// Discrete solid-temperature goals with the air-reference feedback retained.
 pub mod goal;
+
+/// Source-integrated, temperature-dependent Cp on the same steady channel and
+/// solid-coupling owner.
+pub mod caloric;
 
 /// The `fs-couple` port kind this seam exchanges: temperature (effort) against
 /// entropy flow.
@@ -283,9 +293,11 @@ pub struct SegmentState {
     /// The effective Robin reference temperature, K: the value that makes
     /// `h A (T_w − T_ref) ≡ Q` for this segment.
     pub reference_temperature_k: f64,
-    /// `h A / (ṁ c_p)`.
+    /// `h A / (ṁ c_p)`; for a source-caloric path, Cp is evaluated at this
+    /// segment's inlet and this is a diagnostic, not a frozen constitutive law.
     pub ntu: f64,
-    /// `1 − e^(−NTU)`.
+    /// Fraction of the inlet-to-wall temperature difference traversed. This
+    /// is `1 − e^(−NTU)` for constant Cp; source-caloric paths integrate Cp(T).
     pub effectiveness: f64,
     /// Heat absorbed by the air over this segment, W (positive = into the
     /// air, matching the solid's positive-leaving convention).
@@ -623,7 +635,7 @@ pub struct RegionBalance {
     pub region: String,
     /// `∫ h (T_h − T_ref) dA` from the conduction solve, W.
     pub solid_heat_rate_w: f64,
-    /// `ṁ c_p ΔT` from the air march, W.
+    /// `ṁ Δh` from the air march, W; this is `ṁ c_p ΔT` for constant Cp.
     pub air_heat_rate_w: f64,
     /// `solid − air`, W.
     pub imbalance_w: f64,
@@ -819,8 +831,8 @@ pub fn solve_conjugate_iqn_from<F>(
 where
     F: FnMut(&Cx<'_>, &[f64]) -> Result<Vec<SolidRegionState>, AirflowError>,
 {
-    let acceleration = IqnIls::new(path.segments().len(), acceleration_config)
-        .map_err(conjugate_iqn_error)?;
+    let acceleration =
+        IqnIls::new(path.segments().len(), acceleration_config).map_err(conjugate_iqn_error)?;
     solve_conjugate_driver(
         cx,
         path,
@@ -852,11 +864,37 @@ fn solve_conjugate_driver<F>(
     path: &AirPath,
     config: &ConjugateConfig,
     initial_references_k: &[f64],
-    mut acceleration: Option<IqnIls>,
-    mut solid: F,
+    acceleration: Option<IqnIls>,
+    solid: F,
 ) -> Result<ConjugateSolution, AirflowError>
 where
     F: FnMut(&Cx<'_>, &[f64]) -> Result<Vec<SolidRegionState>, AirflowError>,
+{
+    solve_conjugate_driver_with_march(
+        cx,
+        path,
+        config,
+        initial_references_k,
+        acceleration,
+        solid,
+        |walls| path.march(walls),
+    )
+}
+
+// Geometry, response admission, acceleration, cancellation and watt gates have
+// one owner. Only the stream's constitutive march differs for source Cp(T).
+fn solve_conjugate_driver_with_march<F, M>(
+    cx: &Cx<'_>,
+    path: &AirPath,
+    config: &ConjugateConfig,
+    initial_references_k: &[f64],
+    mut acceleration: Option<IqnIls>,
+    mut solid: F,
+    mut march_path: M,
+) -> Result<ConjugateSolution, AirflowError>
+where
+    F: FnMut(&Cx<'_>, &[f64]) -> Result<Vec<SolidRegionState>, AirflowError>,
+    M: FnMut(&[f64]) -> Result<AirMarch, AirflowError>,
 {
     admit_conjugate_inputs(path, config, initial_references_k)?;
     let mut aitken = admit_relaxation(config.relaxation)?;
@@ -879,7 +917,7 @@ where
             .iter()
             .map(|state| state.mean_wall_temperature_k)
             .collect();
-        let march = path.march(&walls)?;
+        let march = march_path(&walls)?;
 
         let solid_total = finite_sum(
             "total solid heat rate",

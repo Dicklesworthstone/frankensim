@@ -1,5 +1,32 @@
 # CONTRACT: fs-airflow
 
+## Source-specific heat in steady conjugate channels
+
+`conjugate::caloric::CaloricAirPath` binds the original
+`IsobaricHeatCapacityLaw` to native ordered `AirSegment` geometry and a
+prescribed mass flow. It integrates `Cp(T)/(T_wall-T)` over the traversed
+source intervals to obtain each outlet, then reports heat from the original
+relative enthalpy integral. Source knots, pressure/composition context,
+identity, receipts and uncertainty remain with the immutable material law.
+Cloning shares that law and its prepared caloric index.
+
+The Robin reference uses the same actual watts as the stream. `solve`,
+`solve_from` and `solve_iqn` reuse the existing conjugate driver's response
+admission, region ownership, fixed/Aitken/IQN acceleration, cancellation,
+temperature tolerance and independent per-region watt gates. Original
+constant-Cp goal and refinement formulas cannot silently consume this distinct
+path type. Per-segment NTU is the inlet-Cp diagnostic; effectiveness comes from
+the integrated temperature change, not an assumed constant-Cp exponential.
+
+The model remains steady, single-phase, one-dimensional and isobaric, at fixed
+composition, mass flow and heat-transfer coefficient. It adds no hydraulic
+feedback, pressure work, temperature-dependent h, mixing junctions or adjoint.
+Walls may be outside the fluid's caloric support; the actual traversed fluid
+temperatures may not. A source refusal returns no partial march or solution.
+Tests compare constant/affine-Cp analytic channels, heating and cooling across
+source knots, segment refinement, datum independence, support refusal and a
+power-driven coupled solid/stream balance.
+
 ## Transient original Carreau hydraulic networks and storage
 
 `graph::rheology::transient::TransientCarreauGraph` connects original

@@ -27,6 +27,9 @@ use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_ladder::{LadderRegistry, Transfer};
 use fs_qty::Temperature;
 
+#[path = "conjugate/caloric.rs"]
+mod caloric;
+
 const INLET_K: f64 = 300.0;
 const MASS_FLOW_KG_S: f64 = 0.004;
 const CP_J_KG_K: f64 = 1_005.0;
