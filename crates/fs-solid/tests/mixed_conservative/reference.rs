@@ -176,6 +176,77 @@ fn g1_bulk_reference_event_resolves_cancelling_modulus_work_without_resetting_vo
 }
 
 #[test]
+fn g1_material_stiffness_event_keeps_signed_work_beneath_unchanged_bulk_storage() {
+    with_cx(|cx| {
+        let (nodes, elements) = mesh(cx);
+        let material = law(1e24);
+        let changed_material = Hyperelastic::new(
+            HyperelasticModel::MooneyRivlin {
+                c10: 4.5,
+                c01: 2.0,
+                kappa: 1e24,
+            },
+            4.0,
+        )
+        .unwrap();
+        let density = [DENSITY];
+        let displacement =
+            affine_displacement(&nodes, [2.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]);
+        let velocity = vec![[0.0; 3]; nodes.len()];
+        let accepted = ConservativeTetDefinition {
+            formulation: ConservativeFormulation::FullMaterial,
+            ..definition(&nodes, &elements, &material, &density)
+        }
+        .prepare(&displacement, &velocity, cx)
+        .unwrap();
+        let changed = accepted
+            .change_reference(
+                MixedLawField::Uniform(&changed_material),
+                ConservativeReferenceField::Identity,
+                &[],
+                1e-12,
+                cx,
+            )
+            .unwrap();
+        // Only c10 changes. At F=diag(2,1,1), I1=6 and J=2;
+        // the original isochoric source work is Delta(c10)*(6 J^(-2/3)-3).
+        let expected = VOLUME * 0.5 * (6.0 * 2.0_f64.powf(-2.0 / 3.0) - 3.0);
+        assert_eq!(
+            changed.energy.stored_after_j,
+            changed.energy.stored_before_j
+        );
+        near(changed.energy.reference_work_j, expected, 2e-13);
+        near(changed.energy.stored_change_j, expected, 2e-13);
+        assert_eq!(changed.solid.displacement_m(), accepted.displacement_m());
+        let held: Vec<_> = displacement
+            .as_flattened()
+            .iter()
+            .copied()
+            .enumerate()
+            .collect();
+        let step = changed
+            .solid
+            .advance(0.01, &held, &[], [0.0; 3], settings(), 1e-12, cx)
+            .unwrap();
+        near(step.energy.stored_change_j, 0.0, 0.0);
+        near(step.energy.constraint_reference_work_j, 0.0, 0.0);
+        near(step.energy.cumulative_balance_error_j, 0.0, 1e-12);
+        let reversed = step
+            .solid
+            .change_reference(
+                MixedLawField::Uniform(&material),
+                ConservativeReferenceField::Identity,
+                &[],
+                1e-12,
+                cx,
+            )
+            .unwrap();
+        near(reversed.energy.reference_work_j, -expected, 2e-13);
+        near(reversed.energy.cumulative_balance_error_j, 0.0, 1e-12);
+    });
+}
+
+#[test]
 fn g1_large_reference_free_motion_preserves_natural_volume_and_original_mass() {
     with_cx(|cx| {
         let (nodes, elements) = mesh(cx);

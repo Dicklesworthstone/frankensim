@@ -357,6 +357,10 @@ fn gent_trace_shift<T: Real>(f: &[T; 9]) -> T {
 }
 
 fn gent_energy<T: Real>(shift: T, mu: f64, locking_invariant: f64) -> T {
+    gent_energy_amplitude(shift, T::from_f64(0.5 * mu), locking_invariant)
+}
+
+fn gent_energy_amplitude<T: Real>(shift: T, half_mu: T, locking_invariant: f64) -> T {
     let x = shift / T::from_f64(locking_invariant);
     // Factor out the invariant increment. This avoids both subtracting a
     // sub-ULP x from one and forming mu*Jm, which can overflow even when
@@ -376,7 +380,7 @@ fn gent_energy<T: Real>(shift: T, mu: f64, locking_invariant: f64) -> T {
     } else {
         -(T::one() - x).ln() / x
     };
-    T::from_f64(0.5 * mu) * shift * logarithm_ratio
+    half_mu * shift * logarithm_ratio
 }
 
 // Rationalize I4/det(C)^(1/3)-1 using I4^3-det(C). Group equal orders
@@ -580,6 +584,31 @@ impl Hyperelastic {
         increment::energy_change(self, before, after, true)
     }
 
+    /// Original potential change between two explicit native source snapshots.
+    ///
+    /// Each deformation is admitted only by its own law. With a shared
+    /// nonlinear shape, finite changes of the native shear/fibre/Ogden and bulk
+    /// amplitudes travel with the deformation increments. Changed shape or
+    /// family uses its own endpoint remainder potentials, with bulk evaluated
+    /// separately; no interpolated law or crossed-domain state is introduced.
+    /// Nonlinear shape includes Gent's chain limit, Ogden exponents/order and
+    /// HGO's fibre directions, invariant convention, dispersion and k2.
+    ///
+    /// A prescribed source change requires a signed external-work account;
+    /// this method supplies neither a source evolution nor a dissipation law.
+    /// Invalid endpoints or unrepresentable original storage/change return NaN.
+    pub fn energy_increment_to(
+        &self,
+        before: &[f64; 9],
+        after_law: &Self,
+        after: &[f64; 9],
+    ) -> f64 {
+        if self.check_state(before).is_err() || after_law.check_state(after).is_err() {
+            return f64::NAN;
+        }
+        increment::energy_change_between(self, before, after_law, after, true)
+    }
+
     /// Change of the same matrix/fibre remainder returned by
     /// [`Self::isochoric_energy`], without evaluating an unused bulk penalty.
     /// Full-invariant fibres retain their actual volume dependence. The
@@ -589,6 +618,23 @@ impl Hyperelastic {
             return f64::NAN;
         }
         increment::energy_change(self, before, after, false)
+    }
+
+    /// Source-snapshot change of the original matrix/fibre remainder.
+    ///
+    /// Semantics and admission match [`Self::energy_increment_to`], while no
+    /// unused bulk energy is evaluated. Full-invariant fibres retain their
+    /// actual volume dependence, as in [`Self::isochoric_energy`].
+    pub fn isochoric_energy_increment_to(
+        &self,
+        before: &[f64; 9],
+        after_law: &Self,
+        after: &[f64; 9],
+    ) -> f64 {
+        if self.check_state(before).is_err() || after_law.check_state(after).is_err() {
+            return f64::NAN;
+        }
+        increment::energy_change_between(self, before, after_law, after, false)
     }
 
     /// Distortional/matrix-plus-fibre energy for a mixed displacement/pressure

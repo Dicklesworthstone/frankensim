@@ -11,7 +11,6 @@ use super::{
 use crate::MaterialError;
 use crate::hyper::Hyperelastic;
 use crate::hyper::reference::ReferenceDeformation;
-use fs_math::dd::Dd;
 
 #[derive(Clone, Copy, Debug)]
 pub(super) struct ReferenceBinding<'a> {
@@ -37,11 +36,10 @@ impl<'a> DiscreteGradientPoint<'a> {
     /// Original stored-energy change between two admitted material points.
     ///
     /// Both points must select the same energy part. A change of reference G
-    /// is explicit and includes its relaxed-volume factor. Equal native laws
-    /// retain their original finite-pair potential increment independently of
-    /// absolute storage. Different laws retain their own admitted endpoint
-    /// potentials; that fallback cannot recover a parameter change lost in
-    /// either scalar endpoint energy.
+    /// is explicit and includes its relaxed-volume factor. Native amplitude
+    /// changes retain their original finite-pair potential independently of
+    /// absolute storage. Changed nonlinear shapes retain each source's own
+    /// endpoint potential, with matrix/fibre remainder and bulk kept separate.
     ///
     /// At fixed total F, the result is signed external work from the changed
     /// reference or material source. It is not a strain work, discrete stress,
@@ -52,10 +50,16 @@ impl<'a> DiscreteGradientPoint<'a> {
                 "stored-energy increment requires the same energy part",
             ));
         }
-        let elastic_increment = if core::ptr::eq(self.law, after.law) || self.law == after.law {
-            Potential::Material(self.law, self.part).increment(&self.accepted_f, &after.accepted_f)
-        } else {
-            (Dd::from_f64(after.energy_before_pa) - Dd::from_f64(self.energy_before_pa)).to_f64()
+        let elastic_increment = match self.part {
+            EnergyPart::Full => {
+                self.law
+                    .energy_increment_to(&self.accepted_f, after.law, &after.accepted_f)
+            }
+            EnergyPart::Remainder => self.law.isochoric_energy_increment_to(
+                &self.accepted_f,
+                after.law,
+                &after.accepted_f,
+            ),
         };
         let identity = ReferenceDeformation::identity();
         let before_reference = self.reference.map_or(&identity, |r| r.reference);

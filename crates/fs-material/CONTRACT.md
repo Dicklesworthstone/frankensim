@@ -6715,10 +6715,28 @@ work of a source-owned constant density when relaxed volume changes. Direct
 determinant increments retain small natural-volume changes; principal-reference
 construction retains its supplied length products, so rotating their axes alone
 does no volume work. Native points require matching full/remainder energy parts.
-Equal native laws retain their finite-pair increments; different elastic laws
-use their own admitted endpoint potentials and cannot recover parameter changes
-already lost in those scalar energies. These events supply no history transport,
-heat closure or dissipative source law.
+Native `energy_increment_to` and `isochoric_energy_increment_to` admit each
+endpoint only under its own original law. With a shared nonlinear shape they
+carry finite coefficient changes alongside deformation: Neo-Hookean mu/lambda,
+Mooney-Rivlin c10/c01, Gent mu, every Ogden mu, HGO c10/k1, and the original bulk
+modulus. Gent's locking invariant, Ogden exponents/order, and HGO's fibre axes,
+activation convention, dispersion and k2 define that shared shape. The existing
+small-strain Ogden series shares its original invariants with the paired
+amplitudes; no repeated eigensolve per coefficient or synthetic intermediate
+material is introduced. When both endpoints admit the original bounded
+normalized-strain expression, it also retains the absolute isochoric invariants
+needed for stiffness work beneath a finite common dilation.
+
+Changed nonlinear shapes or families retain their own endpoint remainder
+potentials, with bulk evaluated separately so an unrelated large bulk preload
+cannot erase the remainder change. An absent fibre family remains inactive
+before exponentiation. If symmetric cross-products overflow while both own
+endpoint potentials remain finite, the native increment uses their compensated
+endpoint difference; it still refuses nonfinite original storage. Source and
+reference events supply no history transport, heat closure or dissipative source
+law. Physical source-change regressions cover all five native models and a
+fixed-deformation solid stiffness event beneath an unchanged `1e24 Pa` bulk
+modulus, including a held mechanical interval and reversal.
 
 `DiscreteBulkPoint::energy_increment_to` retains both snapshots' original bulk
 family, modulus, natural volume and physical mixed volume. Quadratic,

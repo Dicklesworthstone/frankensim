@@ -73,6 +73,19 @@ fn derivative_difference(a: f64, b: f64, r: f64) -> f64 {
 // near zero. Both bounded series are evaluated on Real, so the same potential
 // supplies the stress and consistent tangent; this is not linearization.
 pub(super) fn small_ogden_energy<T: Real>(a: &[T; 9], terms: &[OgdenTerm]) -> Option<T> {
+    small_ogden_energy_with_amplitudes(a, terms, |i| {
+        T::from_f64(0.25 * (terms[i].mu_pa * terms[i].alpha))
+    })
+}
+
+// The original strain series is shared by fixed and explicitly changing
+// source amplitudes. The callback supplies mu*alpha/4 in the same scalar;
+// exponents and their convergence domain remain owned by the original terms.
+pub(super) fn small_ogden_energy_with_amplitudes<T: Real>(
+    a: &[T; 9],
+    terms: &[OgdenTerm],
+    amplitude: impl Fn(usize) -> T,
+) -> Option<T> {
     let three = T::from_f64(3.0);
     let mean = T::one() + (a[0] + a[4] + a[8]) / three;
     let mut b = a.map(|entry| entry / mean);
@@ -124,7 +137,7 @@ pub(super) fn small_ogden_energy<T: Real>(a: &[T; 9], terms: &[OgdenTerm]) -> Op
         + T::from_f64(2.0) * (log[1] * log[1] + log[2] * log[2] + log[5] * log[5]);
     let trace3 = three * super::det3(&log);
     let mut energy = T::zero();
-    for term in terms {
+    for (i, term) in terms.iter().enumerate() {
         let r = T::from_f64(0.5 * term.alpha);
         let h = log.map(|entry| r * entry);
         let q = -T::from_f64(0.5)
@@ -147,7 +160,7 @@ pub(super) fn small_ogden_energy<T: Real>(a: &[T; 9], terms: &[OgdenTerm]) -> Op
         }
         // ||alpha L/2||_inf <= 1/8; the exponential tail and its first
         // two derivatives in that argument are below 1e-25 before the modulus.
-        energy = T::from_f64(0.25 * (term.mu_pa * term.alpha)).mul_add(sum, energy);
+        energy = amplitude(i).mul_add(sum, energy);
     }
     Some(energy)
 }

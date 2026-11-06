@@ -3,13 +3,288 @@
 use fs_material::hyper::cards::HyperelasticMaterial;
 use fs_material::hyper::mixed::{MixedFiniteStrainPotential, VolumetricTreatment};
 use fs_material::hyper::reference::{ReferenceDeformation, ReferencedHyperelastic};
-use fs_material::hyper::{Hyperelastic, HyperelasticModel, Volumetric};
+use fs_material::hyper::{FibreInvariants, Hyperelastic, HyperelasticModel, OgdenTerm, Volumetric};
 
 const I: [f64; 9] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
 // Nonsymmetric prescribed shear catches inverse/cofactor transpose mistakes
 // that a symmetric thermal reference cannot expose.
 const G: [f64; 9] = [1.12, 0.17, -0.04, 0.0, 0.93, 0.08, 0.0, 0.0, 1.07];
 const FE: [f64; 9] = [1.06, 0.09, -0.03, 0.02, 0.97, 0.06, -0.01, 0.03, 1.04];
+
+#[test]
+fn native_source_amplitudes_retain_stiffness_work_beneath_unchanged_bulk() {
+    let delta = 2.0_f64.powi(-20);
+    for gamma in [1e-5_f64, 0.4] {
+        let mut f = I.map(|x| 2.0 * x);
+        f[1] = 2.0 * gamma;
+        let volumetric = Volumetric::Quadratic { kappa: 1e24 };
+        let models = [
+            (
+                HyperelasticModel::NeoHookean {
+                    mu: 1024.0,
+                    lambda: 1e24,
+                },
+                delta * (4.5 + 2.0 * gamma * gamma - 8.0_f64.ln()),
+            ),
+            (
+                HyperelasticModel::MooneyRivlin {
+                    c10: 1024.0,
+                    c01: 512.0,
+                    kappa: 1e24,
+                },
+                3.0 * delta * gamma * gamma,
+            ),
+            (
+                HyperelasticModel::Gent {
+                    mu: 1024.0,
+                    locking_invariant: 10.0,
+                    volumetric,
+                },
+                -5.0 * delta * (-gamma * gamma / 10.0).ln_1p(),
+            ),
+            (
+                HyperelasticModel::Ogden {
+                    terms: vec![
+                        OgdenTerm {
+                            mu_pa: 1024.0,
+                            alpha: 1.3,
+                        },
+                        OgdenTerm {
+                            mu_pa: -512.0,
+                            alpha: -2.0,
+                        },
+                    ],
+                    volumetric,
+                },
+                // Isochoric simple-shear stretches are exp(+-asinh(gamma/2)), 1.
+                4.0 * delta / 1.3 * (0.65 * (0.5 * gamma).asinh()).sinh().powi(2)
+                    + delta * gamma * gamma,
+            ),
+            (
+                HyperelasticModel::HolzapfelGasserOgden {
+                    c10: 1024.0,
+                    k1: 512.0,
+                    k2: 100.0,
+                    dispersion: 0.0,
+                    fibres: vec![[0.0, 1.0, 0.0]],
+                    invariants: FibreInvariants::Isochoric,
+                    volumetric,
+                },
+                delta * gamma * gamma + delta / 100.0 * (100.0 * gamma.powi(4)).exp_m1(),
+            ),
+        ];
+        for (model, expected) in models {
+            let original = Hyperelastic::new(model, 4.0).unwrap();
+            let mut changed = original.clone();
+            match &mut changed.model {
+                HyperelasticModel::NeoHookean { mu, .. } | HyperelasticModel::Gent { mu, .. } => {
+                    *mu += delta;
+                }
+                HyperelasticModel::MooneyRivlin { c10, c01, .. } => {
+                    *c10 += delta;
+                    *c01 += 2.0 * delta;
+                }
+                HyperelasticModel::Ogden { terms, .. } => {
+                    terms[0].mu_pa += delta;
+                    terms[1].mu_pa -= 2.0 * delta;
+                }
+                HyperelasticModel::HolzapfelGasserOgden { c10, k1, .. } => {
+                    *c10 += delta;
+                    *k1 += 2.0 * delta;
+                }
+            }
+            assert_eq!(changed.energy(&f), original.energy(&f));
+            let change = original.energy_increment_to(&f, &changed, &f);
+            near(change, expected, expected.abs(), 3e-11);
+            near(
+                changed.energy_increment_to(&f, &original, &f),
+                -change,
+                expected.abs(),
+                3e-14,
+            );
+            assert_eq!(original.energy_increment_to(&f, &original, &f), 0.0);
+        }
+    }
+}
+
+#[test]
+fn changed_nonlinear_shapes_keep_their_remainders_separate_from_common_bulk() {
+    let gamma = 0.4_f64;
+    let mut f = I.map(|x| 2.0 * x);
+    f[1] = 2.0 * gamma;
+    let volumetric = Volumetric::Quadratic { kappa: 1e24 };
+    let gent = |locking_invariant| {
+        Hyperelastic::new(
+            HyperelasticModel::Gent {
+                mu: 1024.0,
+                locking_invariant,
+                volumetric,
+            },
+            4.0,
+        )
+        .unwrap()
+    };
+    let ogden = |alpha| {
+        Hyperelastic::new(
+            HyperelasticModel::Ogden {
+                terms: vec![OgdenTerm {
+                    mu_pa: 1024.0,
+                    alpha,
+                }],
+                volumetric,
+            },
+            4.0,
+        )
+        .unwrap()
+    };
+    let hgo = |direction| {
+        Hyperelastic::new(
+            HyperelasticModel::HolzapfelGasserOgden {
+                c10: 1024.0,
+                k1: 512.0,
+                k2: 1.7,
+                dispersion: 0.0,
+                fibres: vec![direction],
+                invariants: FibreInvariants::Isochoric,
+                volumetric,
+            },
+            4.0,
+        )
+        .unwrap()
+    };
+    let gent_energy = |limit: f64| -512.0 * limit * (-gamma * gamma / limit).ln_1p();
+    let ogden_energy =
+        |alpha: f64| 4096.0 / alpha * (0.5 * alpha * (0.5 * gamma).asinh()).sinh().powi(2);
+    let cases = [
+        (gent(1.0), gent(10.0), gent_energy(10.0) - gent_energy(1.0)),
+        (
+            ogden(1.3),
+            ogden(2.4),
+            ogden_energy(2.4) - ogden_energy(1.3),
+        ),
+        (
+            hgo([0.0, 1.0, 0.0]),
+            hgo([1.0, 0.0, 0.0]),
+            -512.0 / 3.4 * (1.7 * gamma.powi(4)).exp_m1(),
+        ),
+        (
+            gent(10.0),
+            ogden(2.4),
+            ogden_energy(2.4) - gent_energy(10.0),
+        ),
+    ];
+    for (original, changed, expected) in cases {
+        assert_eq!(original.energy(&f), changed.energy(&f));
+        let change = original.energy_increment_to(&f, &changed, &f);
+        near(change, expected, expected.abs(), 5e-12);
+        near(
+            changed.energy_increment_to(&f, &original, &f),
+            -change,
+            expected.abs(),
+            5e-14,
+        );
+    }
+}
+
+#[test]
+fn native_source_change_admits_only_each_sources_actual_endpoint() {
+    let volumetric = Volumetric::Quadratic { kappa: 1e24 };
+    let before = Hyperelastic::new(
+        HyperelasticModel::Gent {
+            mu: 1024.0,
+            locking_invariant: 0.01,
+            volumetric,
+        },
+        1.1,
+    )
+    .unwrap();
+    let after = Hyperelastic::new(
+        HyperelasticModel::Gent {
+            mu: 2048.0,
+            locking_invariant: 10.0,
+            volumetric,
+        },
+        4.0,
+    )
+    .unwrap();
+    let mut f = I;
+    f[1] = 0.4;
+    assert!(before.check_state(&f).is_err());
+    let expected = -10240.0 * (-0.016_f64).ln_1p();
+    near(
+        before.energy_increment_to(&I, &after, &f),
+        expected,
+        expected,
+        3e-13,
+    );
+    near(
+        after.energy_increment_to(&f, &before, &I),
+        -expected,
+        expected,
+        3e-13,
+    );
+    assert!(before.energy_increment_to(&f, &after, &f).is_nan());
+    assert!(after.energy_increment_to(&f, &before, &f).is_nan());
+
+    // A switched-off family must never evaluate its unused overflowing
+    // exponential at the new source's otherwise admissible deformation.
+    let fibre = |k1| {
+        Hyperelastic::new(
+            HyperelasticModel::HolzapfelGasserOgden {
+                c10: 1024.0,
+                k1,
+                k2: 1000.0,
+                dispersion: 0.0,
+                fibres: vec![[0.0, 1.0, 0.0]],
+                invariants: FibreInvariants::Isochoric,
+                volumetric,
+            },
+            4.0,
+        )
+        .unwrap()
+    };
+    let active = fibre(512.0);
+    let inactive = fibre(0.0);
+    f[1] = 3.0;
+    assert!(!active.energy(&f).is_finite());
+    let expected = 1024.0 * 9.0;
+    near(
+        active.energy_increment_to(&I, &inactive, &f),
+        expected,
+        expected,
+        5e-14,
+    );
+    near(
+        inactive.energy_increment_to(&f, &active, &I),
+        -expected,
+        expected,
+        5e-14,
+    );
+}
+
+#[test]
+fn opposing_stiffness_and_strain_scales_keep_finite_native_source_work() {
+    let law = |c10| {
+        Hyperelastic::new(
+            HyperelasticModel::MooneyRivlin {
+                c10,
+                c01: 0.0,
+                kappa: 60.0,
+            },
+            1e110,
+        )
+        .unwrap()
+    };
+    let before = law(1e200);
+    let after = law(1e-140);
+    let f = [1e70, 0.0, 0.0, 0.0, 1e-35, 0.0, 0.0, 0.0, 1e-35];
+    before.check_state(&I).unwrap();
+    after.check_state(&f).unwrap();
+    assert_eq!(before.energy(&I), 0.0);
+    near(after.energy(&f), 1.0, 1.0, 3e-14);
+    near(before.energy_increment_to(&I, &after, &f), 1.0, 1.0, 3e-14);
+    near(after.energy_increment_to(&f, &before, &I), -1.0, 1.0, 3e-14);
+}
 
 #[test]
 fn changing_reference_retains_weak_shear_work_beneath_bulk_storage() {

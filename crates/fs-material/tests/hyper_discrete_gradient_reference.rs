@@ -174,6 +174,51 @@ fn accepted_source_changes_retain_both_endpoint_potentials() {
 }
 
 #[test]
+fn simultaneous_reference_and_stiffness_changes_retain_weak_signed_source_work() {
+    let identity = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+    let material = |factor| {
+        Hyperelastic::new(
+            HyperelasticModel::MooneyRivlin {
+                c10: factor * 900.0,
+                c01: factor * 600.0,
+                kappa: 1e24,
+            },
+            4.0,
+        )
+        .unwrap()
+    };
+    let original = material(1.0);
+    let changed = material(2.0);
+    let g0 = ReferenceDeformation::try_new(identity.map(|x| 2.0 * x)).unwrap();
+    let mut gradient = *g0.deformation_gradient();
+    gradient[1] = 4e-7;
+    let g1 = ReferenceDeformation::try_new(gradient).unwrap();
+    let total = identity.map(|x| 4.0 * x);
+    let expected = 8.0 * 3000.0 * (2e-7_f64).powi(2);
+    for part in [EnergyPart::Full, EnergyPart::Remainder] {
+        let before =
+            DiscreteGradientPoint::try_new_with_reference(&original, part, &g0, total, settings())
+                .unwrap();
+        let after =
+            DiscreteGradientPoint::try_new_with_reference(&changed, part, &g1, total, settings())
+                .unwrap();
+        if part == EnergyPart::Full {
+            assert_eq!(before.energy_before_pa(), after.energy_before_pa());
+        }
+        close(
+            before.energy_increment_to(&after).unwrap(),
+            expected,
+            3e-12 * expected,
+        );
+        close(
+            after.energy_increment_to(&before).unwrap(),
+            -expected,
+            3e-12 * expected,
+        );
+    }
+}
+
+#[test]
 fn reference_work_torque_and_nonsymmetric_endpoint_tangent_retain_native_laws() {
     let g = reference();
     let f0 = multiply(&F0E, g.deformation_gradient());
