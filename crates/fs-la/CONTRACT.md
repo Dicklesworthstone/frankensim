@@ -992,3 +992,46 @@ growth or unrepresentable transfers can refuse. No spatial transport, adaptive
 changing-rate integration, sparse full-library depletion or isotope data is
 provided by this mathematical owner.
 
+## Continuous production in general reaction networks
+
+`decay::reaction::source::ReactionSourcePlan` extends the original positive
+reaction/count propagator to a constant external production vector. For
+integrated supplied counts J over an interval t, it applies
+`N1 = P*N0 + Fbar*J` and `removals = C*N0 + Gbar*J`, where
+`Fbar = integral(P)/t` and `Gbar = integral(C)/t`. Newly supplied populations
+retain their actual distribution of reaction ages, including repeated visits
+through cycles, finite sinks, self-return and declared product multiplicities.
+Source-map coefficients may exceed one; no yield normalization or population
+conservation is invented.
+
+Optional source terms reuse the existing nonnegative shifted powers and
+semigroup compositions. No inverse generator, quadrature, added numerical
+nuclides or duplicate homogeneous matrices are required. All 64 original node
+slots remain available. Each additional allocation stage, matrix product and
+source series step uses the original work limits and cancellation boundary.
+The source-series tail test accounts for its additional integration order.
+Noncyclic diagonals retain independently evaluated phi1/phi2 limits, including
+net-zero self-return and multiplication; cyclic paths retain their complete
+positive matrix responses.
+
+Initial populations and supplied counts remain separate in node and aggregate
+balance calculations, so small supplies cannot disappear when added to a much
+larger initial inventory before accounting. Continuing production has fresh
+material even when old transient populations have exhausted: source coefficients
+receive no exhausted-inventory exception to the large-inventory underflow guard.
+Zero duration requires zero supply; an instantaneous dose belongs in the initial
+inventory. Source vectors are independent of preparation and can change between
+applications of the same frozen operator and interval.
+
+The normalized source interpretation is the standard exponential-integrator
+phi-function construction; see [Al-Mohy and Higham (2011)](https://eprints.maths.manchester.ac.uk/1591/).
+This implementation retains FrankenSim's existing positive reaction algorithm,
+not that paper's general algorithm or backward-error guarantees. Existing dense
+node/work bounds, extreme cyclic-stiffness and representability refusals remain.
+Numerical balance admission is not a certified floating-point error enclosure.
+
+The focused native numerical gate passed all 44 decay, source and reaction
+regressions, including nine general-source cases: independent scalar/cyclic
+solutions, equal-rate multiplying daughters, self-return, composition/order,
+stable and zero intervals, full node capacity, stiff tiny events, fresh-source
+range refusal and exact work/cancellation boundaries.

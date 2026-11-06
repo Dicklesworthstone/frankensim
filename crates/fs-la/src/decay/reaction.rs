@@ -25,6 +25,10 @@ use super::{
     Sum, cap, charge, det, poll, positive_or_zero,
 };
 
+/// Uniform production through the same positive reaction/count propagation.
+#[path = "reaction/source.rs"]
+pub mod source;
+
 /// An expected number of products per removal of a parent. Repeated endpoints
 /// add, self-products are allowed, and a parent with no edges is a finite sink.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -40,9 +44,11 @@ pub struct ReactionAdvance {
     pub populations: Vec<f64>,
     /// Integral lambda_i N_i(s) ds, including repeated visits in a cycle.
     pub removals: Vec<f64>,
-    /// N1_i - N0_i + removals_i - sum_j Y_ij removals_j, uncorrected.
+    /// N1_i - N0_i - injected_i + removals_i - sum_j Y_ij removals_j,
+    /// uncorrected. The homogeneous plan has zero injected counts.
     pub balance_residuals: Vec<f64>,
-    /// Total population change less sum_i (sum_j Y_ji - 1) removals_i.
+    /// Total population change less injected counts and
+    /// sum_i (sum_j Y_ji - 1) removals_i.
     /// This does not assume population conservation for multiplying reactions.
     pub population_balance_residual: f64,
 }
@@ -120,8 +126,27 @@ impl ReactionPlan {
         edges: &[ReactionEdge],
         duration_s: f64,
         limits: DecayLimits,
-        mut cancelled: impl FnMut() -> bool,
+        cancelled: impl FnMut() -> bool,
     ) -> Result<Self, DecayError> {
+        Self::prepare_impl(
+            removal_rates_per_s,
+            edges,
+            duration_s,
+            limits,
+            false,
+            cancelled,
+        )
+        .map(|(plan, _)| plan)
+    }
+
+    fn prepare_impl(
+        removal_rates_per_s: &[f64],
+        edges: &[ReactionEdge],
+        duration_s: f64,
+        limits: DecayLimits,
+        with_source: bool,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<(Self, Option<source::SourceMaps>), DecayError> {
         poll(&mut cancelled)?;
         let n = removal_rates_per_s.len();
         if limits.maximum_nodes == 0
@@ -202,8 +227,11 @@ impl ReactionPlan {
         }
         let shift = removal_rates_per_s.iter().copied().fold(0.0, f64::max);
         if duration_s == 0.0 || shift == 0.0 {
+            if with_source {
+                charge(&mut plan.work, 2 * n * n, limits.maximum_work)?;
+            }
             poll(&mut cancelled)?;
-            return Ok(plan);
+            return Ok((plan, with_source.then(|| source::SourceMaps::identity(n))));
         }
         let mut production = vec![0.0; n * n];
         let mut maximum_production = 0.0_f64;
@@ -327,6 +355,12 @@ impl ReactionPlan {
         for i in 0..n {
             sum_p[i * n + i].add(1.0);
         }
+        let mut source_terms = if with_source {
+            charge(&mut plan.work, 6 * n * n, limits.maximum_work)?;
+            Some(source::SourceTerms::new(n))
+        } else {
+            None
+        };
         let mut norm_term = 1.0;
         // A tighter base-series allowance accounts for the number of repeated
         // compositions. Roundoff is still assessed by the final balances.
@@ -336,6 +370,17 @@ impl ReactionPlan {
         }
         let mut converged = false;
         for k in 1..=limits.maximum_series_terms {
+            if let Some(source) = &mut source_terms {
+                source.step(
+                    &term_p,
+                    &term_c,
+                    mu,
+                    k,
+                    &mut plan.work,
+                    limits.maximum_work,
+                    &mut cancelled,
+                )?;
+            }
             charge(
                 &mut plan.work,
                 n * (nonzero_terms + 2 * n),
@@ -367,10 +412,16 @@ impl ReactionPlan {
             // Requiring at least n+1 terms exposes every shortest path in both
             // blocks. A common absolute tail compared to every represented
             // positive entry avoids dropping small but resolved branches.
-            if k >= n + 1
+            if k >= n + 1 + usize::from(with_source)
                 && sum_p.iter().chain(&sum_c).all(|entry| {
                     let value = entry.total();
                     value == 0.0 || tail <= base_tolerance * value
+                })
+                && source_terms.as_ref().is_none_or(|source| {
+                    // An integrated block's kth term is bounded by
+                    // block_norm^(k-1)/(k-1)!, one order below P/C.
+                    let source_tail = norm_term / (1.0 - block_norm / (k + 1) as f64);
+                    source.converged(source_tail, base_tolerance)
                 })
             {
                 converged = true;
@@ -392,7 +443,26 @@ impl ReactionPlan {
             .map(|entry| damping * entry.total())
             .collect();
         restore_diagonals(&mut plan, &net_rates, &cyclic, time)?;
+        if with_source {
+            charge(&mut plan.work, 2 * n * n + n, limits.maximum_work)?;
+        }
+        let mut source_maps = source_terms
+            .map(|source| source.finish(&plan.rates, &net_rates, &cyclic, time, damping))
+            .transpose()?;
         for _ in 0..plan.squarings {
+            if let Some(source) = &mut source_maps {
+                source.double(
+                    &plan.transition,
+                    &plan.integrated,
+                    &plan.rates,
+                    &net_rates,
+                    &cyclic,
+                    time + time,
+                    &mut plan.work,
+                    limits.maximum_work,
+                    &mut cancelled,
+                )?;
+            }
             charge(&mut plan.work, 2 * n * n * n, limits.maximum_work)?;
             for i in 0..n {
                 poll(&mut cancelled)?;
@@ -419,10 +489,22 @@ impl ReactionPlan {
             let initial: Vec<_> = (0..n).map(|i| if i == j { 1.0 } else { 0.0 }).collect();
             let populations: Vec<_> = (0..n).map(|i| plan.transition[i * n + j]).collect();
             let removals: Vec<_> = (0..n).map(|i| plan.integrated[i * n + j]).collect();
-            plan.check_balance(&initial, &populations, &removals, j)?;
+            plan.check_balance(&initial, None, &populations, &removals, j)?;
+        }
+        if let Some(source) = &source_maps {
+            charge(&mut plan.work, n * n * (n + 3), limits.maximum_work)?;
+            for j in 0..n {
+                poll(&mut cancelled)?;
+                let injected: Vec<_> = (0..n).map(|i| if i == j { 1.0 } else { 0.0 }).collect();
+                let populations: Vec<_> = (0..n).map(|i| source.population[i * n + j]).collect();
+                let removals: Vec<_> = (0..n).map(|i| source.removals[i * n + j]).collect();
+                // A source column satisfies Fbar-I+(I-Y)Gbar=0, the same
+                // unit-input balance as one homogeneous map column.
+                plan.check_balance(&injected, None, &populations, &removals, j)?;
+            }
         }
         poll(&mut cancelled)?;
-        Ok(plan)
+        Ok((plan, source_maps))
     }
 
     #[must_use]
@@ -505,7 +587,7 @@ impl ReactionPlan {
             removals[i] = count.total();
         }
         let (balance_residuals, population_balance_residual) =
-            self.check_balance(populations, &endpoint, &removals, n)?;
+            self.check_balance(populations, None, &endpoint, &removals, n)?;
         poll(&mut cancelled)?;
         Ok(ReactionAdvance {
             populations: endpoint,
@@ -518,6 +600,7 @@ impl ReactionPlan {
     fn check_balance(
         &self,
         initial: &[f64],
+        injected: Option<&[f64]>,
         populations: &[f64],
         removals: &[f64],
         column: usize,
@@ -541,6 +624,10 @@ impl ReactionPlan {
                 residual.add(value);
                 scale.add(value.abs());
             }
+            if let Some(injected) = injected {
+                residual.add(-injected[i]);
+                scale.add(injected[i]);
+            }
             for j in 0..n {
                 residual.product(-self.yields[i * n + j], removals[j]);
                 scale.product(self.yields[i * n + j], removals[j]);
@@ -556,6 +643,10 @@ impl ReactionPlan {
         for i in 0..n {
             residual.add(populations[i]);
             residual.add(-initial[i]);
+            if let Some(injected) = injected {
+                residual.add(-injected[i]);
+                scale.add(injected[i]);
+            }
             residual.product(-self.net_yields[i], removals[i]);
             scale.add(populations[i]);
             scale.add(initial[i]);
