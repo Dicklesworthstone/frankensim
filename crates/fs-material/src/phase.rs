@@ -449,6 +449,7 @@ pub mod isobaric {
 
 // Relative equilibrium entropy uses this same admitted h -> T chart.
 mod entropy;
+pub use entropy::EnthalpyEntropyMean;
 // Source-preserving adjacent sensible spans with an exact reference node.
 mod caloric_join;
 
@@ -1759,6 +1760,8 @@ pub enum PhaseStateError {
     UnrepresentableLiquidMassFractionDerivative,
     /// A bounded original-chart mixing-volume evaluation was cancelled.
     MixingVolumeCancelled,
+    /// A bounded original-chart entropy or conjugate-temperature query was cancelled.
+    EntropyEvaluationCancelled,
     /// A signed energy increment was not finite.
     NonFiniteSpecificEnergyIncrement,
     /// A nonzero signed energy increment rounded completely away in stored enthalpy.

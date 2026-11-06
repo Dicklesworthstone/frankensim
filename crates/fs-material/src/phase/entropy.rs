@@ -2,7 +2,212 @@
 
 use super::{EquilibriumEnthalpyPhaseCurve, PhaseStateError};
 
+/// Finite thermal conjugate on one original equilibrium enthalpy chart.
+///
+/// The temperature is `delta_h / delta_s`, with the continuous equal-state
+/// limit. It supplies a discrete-gradient heat effort, not a transport law or
+/// an absolute entropy datum. Pressure, composition and work conventions stay
+/// with the original chart and its coupled physical owner.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct EnthalpyEntropyMean {
+    /// Entropy-conjugate temperature [K], between the two endpoint temperatures.
+    pub temperature_k: f64,
+    /// Signed original-chart integral of `dh / T(h)` [J/(kg K)].
+    pub specific_entropy_change_j_kg_k: f64,
+    /// Partial derivative of the mean with respect to initial h [kg K/J].
+    pub d_temperature_d_initial_enthalpy_kg_k_j: f64,
+    /// Partial derivative of the mean with respect to final h [kg K/J].
+    pub d_temperature_d_final_enthalpy_kg_k_j: f64,
+    /// Original intervals visited; zero for equal enthalpies.
+    pub intervals: usize,
+}
+
 impl EquilibriumEnthalpyPhaseCurve {
+    /// Evaluate the exact finite entropy-conjugate temperature and its Jacobian.
+    ///
+    /// For unequal enthalpies, `theta = (h1-h0) / integral_h0^h1 dh/T(h)`.
+    /// The same logarithmic sensible integrals and exact latent plateaus as
+    /// [`Self::specific_entropy_change_j_kg_k`] are used. Reversing endpoints
+    /// preserves theta, reverses entropy, and swaps the two derivatives.
+    /// No apparent heat capacity, resampling, extrapolation or phase-state
+    /// hashing is introduced. All fixed-pressure/composition qualifications of
+    /// that entropy integral still apply; a transport owner must independently
+    /// account for heat direction, boundary entropy and any additional work.
+    ///
+    /// At equal enthalpies, theta is the original T(h), entropy is zero and
+    /// each derivative is half the original dT/dh. At a chart corner this
+    /// selects the existing right derivative (left at the upper endpoint),
+    /// not a claim of a unique two-sided derivative. A latent interval has
+    /// exactly its transition temperature and zero temperature derivatives.
+    ///
+    /// The endpoint derivatives integrate the positive kernels
+    /// `theta^2 * (1-u) T'(h(u))/T(h(u))^2` and
+    /// `theta^2 * u T'(h(u))/T(h(u))^2`, where
+    /// `h(u) = (1-u) h0 + u h1`. This avoids subtracting nearly equal entropy
+    /// quotients for small sensible steps, including steps whose temperatures
+    /// round to the same floating-point value.
+    ///
+    /// Work is O(log N + K), with no allocation. Only K crossed original
+    /// intervals are visited, once each; K must not exceed `max_intervals`.
+    /// A caller bounding an entire solve passes its remaining interval budget
+    /// and subtracts the returned count. Cancellation is checked before and
+    /// after evaluation and every 64 intervals. The original endpoint density
+    /// and domain admission is retained. Unrepresentable required arithmetic
+    /// refuses without a candidate or a hidden temperature/derivative clamp.
+    #[allow(clippy::too_many_lines)]
+    pub fn thermodynamic_mean_temperature(
+        &self,
+        initial_enthalpy_j_kg: f64,
+        final_enthalpy_j_kg: f64,
+        max_intervals: usize,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<EnthalpyEntropyMean, PhaseStateError> {
+        if cancelled() {
+            return Err(PhaseStateError::EntropyEvaluationCancelled);
+        }
+        let initial = self.values_at_specific_enthalpy(initial_enthalpy_j_kg)?;
+        let final_state = self.values_at_specific_enthalpy(final_enthalpy_j_kg)?;
+        let invalid = || PhaseStateError::InvalidCurve {
+            what: "entropy-conjugate temperature or derivative is not finite and representable",
+        };
+        if initial_enthalpy_j_kg == final_enthalpy_j_kg {
+            let slope = self.temperature_derivative_at_specific_enthalpy(initial_enthalpy_j_kg)?;
+            let derivative = 0.5 * slope;
+            if slope > 0.0 && derivative == 0.0 {
+                return Err(invalid());
+            }
+            if cancelled() {
+                return Err(PhaseStateError::EntropyEvaluationCancelled);
+            }
+            return Ok(EnthalpyEntropyMean {
+                temperature_k: initial.temperature_k,
+                specific_entropy_change_j_kg_k: 0.0,
+                d_temperature_d_initial_enthalpy_kg_k_j: derivative,
+                d_temperature_d_final_enthalpy_kg_k_j: derivative,
+                intervals: 0,
+            });
+        }
+        let forward = final_enthalpy_j_kg > initial_enthalpy_j_kg;
+        let (lower, upper) = if forward {
+            (initial, final_state)
+        } else {
+            (final_state, initial)
+        };
+        let lo = lower.specific_enthalpy_j_kg;
+        let hi = upper.specific_enthalpy_j_kg;
+        let width = hi - lo;
+        if !width.is_finite() || width <= 0.0 {
+            return Err(invalid());
+        }
+        let knots = self.knots();
+        let first = knots.partition_point(|knot| knot.specific_enthalpy_j_kg <= lo) - 1;
+        let last = knots.partition_point(|knot| knot.specific_enthalpy_j_kg < hi);
+        let intervals = last - first;
+        if intervals > max_intervals {
+            return Err(PhaseStateError::InvalidCurve {
+                what: "thermal-entropy original-interval budget exhausted",
+            });
+        }
+        // Entropy, integral (T-T_lo)/T dh, and both derivative kernels scaled
+        // by T_lo^2. Scaling avoids squaring absolute temperatures or tiny dh.
+        let mut totals = [0.0; 4];
+        let mut corrections = [0.0; 4];
+        let mut varying_temperature = false;
+        for (index, pair) in knots[first..=last].windows(2).enumerate() {
+            if index.is_multiple_of(64) && cancelled() {
+                return Err(PhaseStateError::EntropyEvaluationCancelled);
+            }
+            let a = lo.max(pair[0].specific_enthalpy_j_kg);
+            let b = hi.min(pair[1].specific_enthalpy_j_kg);
+            let ta = if a == lo {
+                lower.temperature_k
+            } else {
+                pair[0].temperature_k
+            };
+            let tb = if b == hi {
+                upper.temperature_k
+            } else {
+                pair[1].temperature_k
+            };
+            let dh = b - a;
+            let (entropy, x) = segment_entropy(dh, ta, tb)?;
+            let (loss, first_moment) = logarithmic_moments(x);
+            let zeroth_moment = 1.0 / (1.0 + x);
+            let temperature_increment = pair[1].temperature_k - pair[0].temperature_k;
+            let slope = temperature_increment
+                / (pair[1].specific_enthalpy_j_kg - pair[0].specific_enthalpy_j_kg);
+            if !slope.is_finite() || (temperature_increment > 0.0 && slope == 0.0) {
+                return Err(PhaseStateError::UnrepresentableTemperatureDerivative);
+            }
+            varying_temperature |= slope > 0.0;
+            let weight = dh / width;
+            let relative_temperature = lower.temperature_k / ta;
+            let scaled_slope = (slope * relative_temperature) * relative_temperature;
+            if weight <= 0.0
+                || first_moment <= 0.0
+                || first_moment >= zeroth_moment
+                || (slope > 0.0 && scaled_slope == 0.0)
+            {
+                return Err(invalid());
+            }
+            let before = (a - lo) / width;
+            let after = (hi - b) / width;
+            let values = [
+                entropy,
+                dh * ((ta - lower.temperature_k) / ta + relative_temperature * loss),
+                weight
+                    * scaled_slope
+                    * (after * zeroth_moment + weight * (zeroth_moment - first_moment)),
+                weight * scaled_slope * (before * zeroth_moment + weight * first_moment),
+            ];
+            for component in 0..4 {
+                if !values[component].is_finite() || values[component] < 0.0 {
+                    return Err(invalid());
+                }
+                let increment = values[component] - corrections[component];
+                let next = totals[component] + increment;
+                corrections[component] = (next - totals[component]) - increment;
+                totals[component] = next;
+            }
+        }
+        let entropy = totals[0];
+        // Equivalent to width/entropy, but a plateau is exactly T_lo and a
+        // near-isothermal sensible interval retains its small temperature rise.
+        let temperature = lower.temperature_k + totals[1] / entropy;
+        let scale = temperature / lower.temperature_k;
+        let lower_derivative = (totals[2] * scale) * scale;
+        let upper_derivative = (totals[3] * scale) * scale;
+        if !entropy.is_finite()
+            || entropy <= 0.0
+            || !temperature.is_finite()
+            || temperature < lower.temperature_k
+            || temperature > upper.temperature_k
+            || !scale.is_finite()
+            || !lower_derivative.is_finite()
+            || !upper_derivative.is_finite()
+            || lower_derivative < 0.0
+            || upper_derivative < 0.0
+            || (varying_temperature && (lower_derivative == 0.0 || upper_derivative == 0.0))
+        {
+            return Err(invalid());
+        }
+        if cancelled() {
+            return Err(PhaseStateError::EntropyEvaluationCancelled);
+        }
+        let (initial_derivative, final_derivative) = if forward {
+            (lower_derivative, upper_derivative)
+        } else {
+            (upper_derivative, lower_derivative)
+        };
+        Ok(EnthalpyEntropyMean {
+            temperature_k: temperature,
+            specific_entropy_change_j_kg_k: if forward { entropy } else { -entropy },
+            d_temperature_d_initial_enthalpy_kg_k_j: initial_derivative,
+            d_temperature_d_final_enthalpy_kg_k_j: final_derivative,
+            intervals,
+        })
+    }
+
     /// Integrate `ds = dh / T(h)` between two admitted specific enthalpies.
     ///
     /// Each nonisothermal segment uses its exact logarithmic integral; a latent
@@ -69,17 +274,7 @@ impl EquilibriumEnthalpyPhaseCurve {
             } else {
                 pair[1].temperature_k
             };
-            let dh = b - a;
-            let relative_temperature = (tb - ta) / ta;
-            let ratio = if relative_temperature == 0.0 {
-                1.0
-            } else {
-                relative_temperature.ln_1p() / relative_temperature
-            };
-            let entropy = (dh / ta) * ratio;
-            if !relative_temperature.is_finite() || !entropy.is_finite() || entropy <= 0.0 {
-                return Err(invalid());
-            }
+            let (entropy, _) = segment_entropy(b - a, ta, tb)?;
             // Fixed-order compensated summation preserves small segment terms.
             let increment = entropy - correction;
             let next = total + increment;
@@ -94,6 +289,41 @@ impl EquilibriumEnthalpyPhaseCurve {
         } else {
             total
         })
+    }
+}
+
+// Keep the original entropy arithmetic shared by the scalar query and the
+// finite conjugate. x is nonnegative on the admitted monotone caloric chart.
+fn segment_entropy(dh: f64, ta: f64, tb: f64) -> Result<(f64, f64), PhaseStateError> {
+    let x = (tb - ta) / ta;
+    let ratio = if x == 0.0 { 1.0 } else { x.ln_1p() / x };
+    let entropy = (dh / ta) * ratio;
+    if !x.is_finite() || !entropy.is_finite() || entropy <= 0.0 {
+        return Err(PhaseStateError::InvalidCurve {
+            what: "relative thermal entropy is not finite and representable",
+        });
+    }
+    Ok((entropy, x))
+}
+
+// Return 1-ln(1+x)/x and integral_0^1 u/(1+x*u)^2 du. Direct subtraction
+// loses small sensible-temperature changes; these convergent series retain
+// them. Twenty terms at x<=1/8 have truncation error below 1e-18.
+fn logarithmic_moments(x: f64) -> (f64, f64) {
+    if x <= 0.125 {
+        let mut power = 1.0;
+        let mut loss_over_x = 0.0;
+        let mut first = 0.0;
+        for n in 0..20 {
+            let denominator = f64::from(n + 2);
+            loss_over_x += power / denominator;
+            first += power * f64::from(n + 1) / denominator;
+            power *= -x;
+        }
+        (x * loss_over_x, first)
+    } else {
+        let logarithm = x.ln_1p();
+        (1.0 - logarithm / x, ((logarithm - x / (1.0 + x)) / x) / x)
     }
 }
 
@@ -271,6 +501,267 @@ mod tests {
             assert_eq!(
                 curve.specific_entropy_change_j_kg_k(h, h).unwrap_err(),
                 original
+            );
+            assert_eq!(
+                curve
+                    .thermodynamic_mean_temperature(h, 1000.0, 1, || false)
+                    .unwrap_err(),
+                original
+            );
+            assert_eq!(
+                curve
+                    .thermodynamic_mean_temperature(0.0, h, 1, || false)
+                    .unwrap_err(),
+                original
+            );
+            assert_eq!(
+                curve
+                    .thermodynamic_mean_temperature(h, h, 0, || false)
+                    .unwrap_err(),
+                original
+            );
+        }
+    }
+
+    #[test]
+    fn finite_thermal_conjugate_spans_sensible_and_latent_storage() {
+        let curve = phase_curve();
+        let mean = curve
+            .thermodynamic_mean_temperature(0.0, 95_000.0, 3, || false)
+            .unwrap();
+        let entropy = 100.0 * 2.0_f64.ln() + 25_000.0 / 600.0 + 200.0 * (800.0_f64 / 600.0).ln();
+        let temperature = 95_000.0 / entropy;
+        let initial_derivative = (temperature / 300.0 - 1.0) / entropy;
+        let final_derivative = (1.0 - temperature / 800.0) / entropy;
+        assert!((mean.temperature_k - temperature).abs() <= 2.0e-13);
+        assert!((mean.d_temperature_d_initial_enthalpy_kg_k_j - initial_derivative).abs() < 1e-16);
+        assert!((mean.d_temperature_d_final_enthalpy_kg_k_j - final_derivative).abs() < 1e-16);
+        assert_eq!(mean.intervals, 3);
+        assert_eq!(
+            mean.specific_entropy_change_j_kg_k,
+            curve.specific_entropy_change_j_kg_k(0.0, 95_000.0).unwrap()
+        );
+        assert!(
+            (mean.temperature_k * mean.specific_entropy_change_j_kg_k - 95_000.0).abs() < 3e-11
+        );
+
+        let reverse = curve
+            .thermodynamic_mean_temperature(95_000.0, 0.0, 3, || false)
+            .unwrap();
+        assert_eq!(reverse.temperature_k, mean.temperature_k);
+        assert_eq!(
+            reverse.specific_entropy_change_j_kg_k,
+            -mean.specific_entropy_change_j_kg_k
+        );
+        assert_eq!(
+            reverse.d_temperature_d_initial_enthalpy_kg_k_j,
+            mean.d_temperature_d_final_enthalpy_kg_k_j
+        );
+        assert_eq!(
+            reverse.d_temperature_d_final_enthalpy_kg_k_j,
+            mean.d_temperature_d_initial_enthalpy_kg_k_j
+        );
+    }
+
+    #[test]
+    fn latent_and_equal_state_means_retain_original_chart_jacobians() {
+        let curve = phase_curve();
+        for (from, to) in [(30_000.0, 55_000.0), (50_000.0, 40_000.0)] {
+            let mean = curve
+                .thermodynamic_mean_temperature(from, to, 1, || false)
+                .unwrap();
+            assert_eq!(mean.temperature_k, 600.0);
+            assert_eq!(mean.specific_entropy_change_j_kg_k, (to - from) / 600.0);
+            assert_eq!(mean.d_temperature_d_initial_enthalpy_kg_k_j, 0.0);
+            assert_eq!(mean.d_temperature_d_final_enthalpy_kg_k_j, 0.0);
+            assert_eq!(mean.intervals, 1);
+        }
+        // At the plateau's start/end use the chart's existing right derivative;
+        // the final domain endpoint uses its existing left derivative.
+        for (h, temperature, derivative) in [
+            (10_000.0, 400.0, 0.005),
+            (30_000.0, 600.0, 0.0),
+            (55_000.0, 600.0, 0.0025),
+            (95_000.0, 800.0, 0.0025),
+        ] {
+            let mean = curve
+                .thermodynamic_mean_temperature(h, h, 0, || false)
+                .unwrap();
+            assert_eq!(mean.temperature_k, temperature);
+            assert_eq!(mean.specific_entropy_change_j_kg_k, 0.0);
+            assert_eq!(mean.d_temperature_d_initial_enthalpy_kg_k_j, derivative);
+            assert_eq!(mean.d_temperature_d_final_enthalpy_kg_k_j, derivative);
+            assert_eq!(mean.intervals, 0);
+        }
+    }
+
+    #[test]
+    fn tiny_sensible_steps_keep_their_nonzero_thermal_jacobian() {
+        let knot = |h, t| EnthalpyPhaseKnot {
+            specific_enthalpy_j_kg: h,
+            temperature_k: t,
+            liquid_mass_fraction: 0.0,
+            bulk_density_kg_m3: 1000.0,
+        };
+        let curve = EquilibriumEnthalpyPhaseCurve::try_single_phase(
+            ContentHash([0x78; 32]),
+            SolidLiquidPhase::Solid,
+            vec![knot(0.0, 300.0), knot(300.0, 600.0)],
+        )
+        .unwrap();
+        // Both endpoint temperatures round to 300 K; the original sensible
+        // chart still has dT/dh=1, rather than a latent plateau.
+        let mean = curve
+            .thermodynamic_mean_temperature(0.0, 1e-300, 1, || false)
+            .unwrap();
+        assert_eq!(mean.temperature_k, 300.0);
+        assert_eq!(mean.specific_entropy_change_j_kg_k, 1e-300 / 300.0);
+        assert_eq!(mean.d_temperature_d_initial_enthalpy_kg_k_j, 0.5);
+        assert_eq!(mean.d_temperature_d_final_enthalpy_kg_k_j, 0.5);
+
+        let ta = 300.0;
+        let tb = ta + 1e-10;
+        let curve = EquilibriumEnthalpyPhaseCurve::try_single_phase(
+            ContentHash([0x79; 32]),
+            SolidLiquidPhase::Solid,
+            vec![knot(0.0, ta), knot(1.0, tb)],
+        )
+        .unwrap();
+        let mean = curve
+            .thermodynamic_mean_temperature(0.0, 1.0, 1, || false)
+            .unwrap();
+        let half_slope = 0.5 * (tb - ta);
+        assert!(mean.temperature_k >= ta && mean.temperature_k <= tb);
+        assert!((mean.temperature_k - 0.5 * (ta + tb)).abs() <= f64::EPSILON * ta);
+        assert!((mean.d_temperature_d_initial_enthalpy_kg_k_j / half_slope - 1.0).abs() < 1e-12);
+        assert!((mean.d_temperature_d_final_enthalpy_kg_k_j / half_slope - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn thermal_conjugates_preserve_the_energy_datum_and_reciprocal_heat_entropy() {
+        let curve = phase_curve();
+        let offset = 1e12;
+        let shifted = EquilibriumEnthalpyPhaseCurve::try_new(
+            ContentHash([0x7a; 32]),
+            curve
+                .knots()
+                .iter()
+                .map(|knot| EnthalpyPhaseKnot {
+                    specific_enthalpy_j_kg: knot.specific_enthalpy_j_kg + offset,
+                    ..*knot
+                })
+                .collect(),
+        )
+        .unwrap();
+        assert_eq!(
+            curve
+                .thermodynamic_mean_temperature(1000.0, 77_000.0, 3, || false)
+                .unwrap(),
+            shifted
+                .thermodynamic_mean_temperature(offset + 1000.0, offset + 77_000.0, 3, || false,)
+                .unwrap(),
+        );
+
+        // One signed 10 kJ transfer between two 1 kg bodies has no separate
+        // latent account. The exact finite entropy uses the two mean efforts.
+        let hot = curve
+            .thermodynamic_mean_temperature(95_000.0, 85_000.0, 1, || false)
+            .unwrap();
+        let cold = curve
+            .thermodynamic_mean_temperature(0.0, 10_000.0, 1, || false)
+            .unwrap();
+        let entropy_change =
+            hot.specific_entropy_change_j_kg_k + cold.specific_entropy_change_j_kg_k;
+        let exchange_entropy = 10_000.0 * (cold.temperature_k.recip() - hot.temperature_k.recip());
+        assert!(hot.temperature_k > cold.temperature_k);
+        assert!(entropy_change > 0.0);
+        assert!((entropy_change - exchange_entropy).abs() < 1e-14);
+    }
+
+    #[test]
+    fn mean_queries_enforce_original_interval_work_and_cancellation() {
+        let curve = EquilibriumEnthalpyPhaseCurve::try_single_phase(
+            ContentHash([0x7b; 32]),
+            SolidLiquidPhase::Solid,
+            (0..=129)
+                .map(|index| EnthalpyPhaseKnot {
+                    specific_enthalpy_j_kg: 1000.0 * f64::from(index),
+                    temperature_k: 300.0 + f64::from(index),
+                    liquid_mass_fraction: 0.0,
+                    bulk_density_kg_m3: 1000.0,
+                })
+                .collect(),
+        )
+        .unwrap();
+        let full = curve
+            .thermodynamic_mean_temperature(0.0, 129_000.0, 129, || false)
+            .unwrap();
+        assert_eq!(full.intervals, 129);
+        assert_eq!(
+            full.specific_entropy_change_j_kg_k,
+            curve
+                .specific_entropy_change_j_kg_k(0.0, 129_000.0)
+                .unwrap()
+        );
+        let local = curve
+            .thermodynamic_mean_temperature(64_250.0, 64_750.0, 1, || false)
+            .unwrap();
+        assert_eq!(local.intervals, 1);
+        let mut polls = 0;
+        let refused = curve.thermodynamic_mean_temperature(0.0, 129_000.0, 128, || {
+            polls += 1;
+            false
+        });
+        assert_eq!(
+            polls, 1,
+            "the budget must refuse before traversing any interval"
+        );
+        assert_eq!(
+            refused,
+            Err(PhaseStateError::InvalidCurve {
+                what: "thermal-entropy original-interval budget exhausted",
+            })
+        );
+        assert_eq!(
+            curve.thermodynamic_mean_temperature(0.0, 0.0, 0, || true),
+            Err(PhaseStateError::EntropyEvaluationCancelled)
+        );
+        polls = 0;
+        let cancelled = curve.thermodynamic_mean_temperature(0.0, 129_000.0, 129, || {
+            polls += 1;
+            polls == 3
+        });
+        assert_eq!(polls, 3);
+        assert_eq!(cancelled, Err(PhaseStateError::EntropyEvaluationCancelled));
+        // A cancellation arriving after the one visited interval still refuses.
+        polls = 0;
+        let cancelled = curve.thermodynamic_mean_temperature(64_250.0, 64_750.0, 1, || {
+            polls += 1;
+            polls == 3
+        });
+        assert_eq!(polls, 3);
+        assert_eq!(cancelled, Err(PhaseStateError::EntropyEvaluationCancelled));
+    }
+
+    #[test]
+    fn unrepresentable_sensible_derivative_does_not_become_a_latent_plateau() {
+        let knot = |h, t| EnthalpyPhaseKnot {
+            specific_enthalpy_j_kg: h,
+            temperature_k: t,
+            liquid_mass_fraction: 0.0,
+            bulk_density_kg_m3: 1000.0,
+        };
+        let curve = EquilibriumEnthalpyPhaseCurve::try_single_phase(
+            ContentHash([0x7c; 32]),
+            SolidLiquidPhase::Solid,
+            vec![knot(0.0, 1.0), knot(1e308, 1.0_f64.next_up())],
+        )
+        .unwrap();
+        assert_eq!(curve.specific_entropy_change_j_kg_k(0.0, 1.0).unwrap(), 1.0);
+        for to in [0.0, 1.0] {
+            assert_eq!(
+                curve.thermodynamic_mean_temperature(0.0, to, 1, || false),
+                Err(PhaseStateError::UnrepresentableTemperatureDerivative),
             );
         }
     }
