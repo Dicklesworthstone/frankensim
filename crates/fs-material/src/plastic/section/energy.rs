@@ -1,4 +1,4 @@
-//! Reference-thickness work accounting for native energetic plastic laws.
+//! Reference-thickness work accounting for native energetic material laws.
 //!
 //! Audit the exact old/new histories of one already evaluated section. Native
 //! `advance_with_energy` remains the sole constitutive energy owner; this
@@ -8,6 +8,10 @@
 //! interval. This account does not transport heat or calibrate its partition.
 
 use super::{LayeredPlaneStressSection, LayeredPlaneStressState, SectionError};
+use crate::creep::plastic::NortonJ2;
+use crate::creep::plastic::source::ResolvedNortonJ2;
+use crate::creep::source::ResolvedNortonCreep;
+use crate::creep::{CreepEnergy, CreepTolerances, NortonCreep};
 use crate::plastic::J2Plasticity;
 use crate::plastic::chaboche::ChabocheJ2;
 use crate::plastic::energy::{EnergyError, EnergyTolerances, IncrementEnergy, StoredEnergy};
@@ -89,6 +93,123 @@ native_energy!(
         .validate_overstress_history(strain, state),
     |law| Some(law.duration_s())
 );
+
+// These explicit isothermal implementations keep thermal expansion/entropy
+// out of the mechanical-only account. Primary strain hardening is kinetic:
+// its accumulated creep never becomes recoverable hardening energy.
+impl NativeSectionEnergyLaw for NortonCreep {
+    fn physical_duration_s(&self) -> Option<f64> {
+        Some(self.duration_s())
+    }
+
+    fn native_energy_increment(
+        &self,
+        old_strain: &Voigt,
+        old_state: &Self::State,
+        strain: &Voigt,
+        tolerances: EnergyTolerances,
+    ) -> Result<(Self::State, Voigt, IncrementEnergy), MaterialError> {
+        let value = self
+            .advance_with_energy(old_strain, old_state, strain, creep_tolerances(tolerances))
+            .map_err(|e| MaterialError::State {
+                what: e.to_string(),
+            })?;
+        let elastic_storage = |elastic_j_m3| StoredEnergy {
+            elastic_j_m3,
+            hardening_j_m3: 0.0,
+            kinematic_hardening_j_m3: 0.0,
+        };
+        let energy = creep_energy(
+            value.energy,
+            elastic_storage(value.energy.initial_stored_j_m3),
+            elastic_storage(value.energy.final_stored_j_m3),
+        );
+        Ok((value.state, value.stress_pa, energy))
+    }
+}
+
+impl NativeSectionEnergyLaw for NortonJ2 {
+    fn physical_duration_s(&self) -> Option<f64> {
+        Some(self.creep().duration_s())
+    }
+
+    fn native_energy_increment(
+        &self,
+        old_strain: &Voigt,
+        old_state: &Self::State,
+        strain: &Voigt,
+        tolerances: EnergyTolerances,
+    ) -> Result<(Self::State, Voigt, IncrementEnergy), MaterialError> {
+        let value = self
+            .advance_with_energy(old_strain, old_state, strain, creep_tolerances(tolerances))
+            .map_err(|e| MaterialError::State {
+                what: e.to_string(),
+            })?;
+        // Query the original energetic J2 owner with the shared elastic strain.
+        // Subtracting H alpha_p^2/2 from a large total would lose this partition.
+        let storage = |total: &Voigt, state: &Self::State| {
+            let elastic = core::array::from_fn(|i| {
+                total[i] - state.creep.creep_strain[i] - state.plastic.plastic_strain[i]
+            });
+            self.plastic()
+                .energy_of(&elastic, state.plastic.alpha, &state.plastic.plastic_strain)
+                .map_err(|e| MaterialError::State {
+                    what: e.to_string(),
+                })
+        };
+        let energy = creep_energy(
+            value.energy,
+            storage(old_strain, old_state)?,
+            storage(strain, &value.state)?,
+        );
+        Ok((value.state, value.stress_pa, energy))
+    }
+}
+
+fn creep_tolerances(value: EnergyTolerances) -> CreepTolerances {
+    CreepTolerances {
+        stress_pa: value.yield_pa,
+        energy_j_m3: value.energy_j_m3,
+    }
+}
+
+fn creep_energy(
+    native: CreepEnergy,
+    initial: StoredEnergy,
+    final_state: StoredEnergy,
+) -> IncrementEnergy {
+    IncrementEnergy {
+        initial,
+        final_state,
+        mechanical_work_j_m3: native.mechanical_work_j_m3,
+        physical_dissipation_j_m3: native.physical_dissipation_j_m3,
+        numerical_dissipation_j_m3: native.numerical_dissipation_j_m3,
+        residual_j_m3: native.residual_j_m3,
+    }
+}
+
+macro_rules! native_creep_source {
+    ($law:ty) => {
+        impl NativeSectionEnergyLaw for $law {
+            fn physical_duration_s(&self) -> Option<f64> {
+                self.law().physical_duration_s()
+            }
+
+            fn native_energy_increment(
+                &self,
+                old_strain: &Voigt,
+                old_state: &Self::State,
+                strain: &Voigt,
+                tolerances: EnergyTolerances,
+            ) -> Result<(Self::State, Voigt, IncrementEnergy), MaterialError> {
+                self.law()
+                    .native_energy_increment(old_strain, old_state, strain, tolerances)
+            }
+        }
+    };
+}
+native_creep_source!(ResolvedNortonCreep);
+native_creep_source!(ResolvedNortonJ2);
 
 impl<const N: usize> NativeSectionEnergyLaw for ChabocheJ2<N> {
     fn native_energy_increment(

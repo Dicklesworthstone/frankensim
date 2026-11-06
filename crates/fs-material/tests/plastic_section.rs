@@ -394,3 +394,5 @@ fn g0_invalid_geometry_budget_and_stale_history_refuse_atomically() {
 mod energy;
 #[path = "plastic_section/thermal.rs"]
 mod thermal;
+#[path = "plastic_section/creep.rs"]
+mod creep;
