@@ -63,6 +63,135 @@ fn near(actual: f64, expected: f64, tolerance: f64) {
     );
 }
 
+#[test]
+fn small_pressure_work_survives_a_large_unrelated_mesh_volume() {
+    let nodes = [
+        NODES[0],
+        NODES[1],
+        NODES[2],
+        NODES[3],
+        [1e9, 1e9, 1e9],
+        [1e9 + 1e6, 1e9, 1e9],
+        [1e9, 1e9 + 1e6, 1e9],
+        [1e9, 1e9, 1e9 + 1e6],
+    ];
+    with_cx(|_, cx| {
+        for tets in [[[0, 1, 2, 3], [4, 5, 6, 7]], [[0, 2, 1, 3], [4, 6, 5, 7]]] {
+            let surface =
+                ClosedTetPressureSurface::new(&nodes, &tets, TetAssemblyBudget::standard(), 8, cx)
+                    .unwrap();
+            let before = [0.0; 24];
+            let mut after = before;
+            after[3] = 0.125;
+            assert_eq!(
+                surface.volume_m3(&before, cx).unwrap(),
+                surface.volume_m3(&after, cx).unwrap(),
+            );
+            for field in [
+                TetPressure::Uniform(48.0),
+                TetPressure::Affine {
+                    origin_m: [0.0; 3],
+                    pressure_pa: 48.0,
+                    gradient_pa_m: [0.0; 3],
+                },
+                TetPressure::FreeSurface {
+                    origin_m: [0.0; 3],
+                    pressure_pa: 48.0,
+                    gradient_pa_m: [0.0; 3],
+                },
+            ] {
+                // The small tet gains (1/8)/6 cubic metres: -48 Delta V = -1 J.
+                near(
+                    surface.work_j(&before, &after, field, cx).unwrap(),
+                    -1.0,
+                    2e-14,
+                );
+                near(
+                    surface.work_j(&after, &before, field, cx).unwrap(),
+                    1.0,
+                    2e-14,
+                );
+            }
+        }
+    });
+}
+
+#[test]
+fn uniform_and_wet_pressure_retain_sub_ulp_volume_work() {
+    use fs_solid::hyper3::pressure::{HydrostaticDensityLayer, StratifiedHydrostaticPressure};
+    with_cx(|_, cx| {
+        let surface =
+            ClosedTetPressureSurface::new(&NODES, &TETS, TetAssemblyBudget::standard(), 4, cx)
+                .unwrap();
+        let before = [0.0; 12];
+        let shear = 2.0_f64.powi(-28);
+        // Symmetric shear about the original centroid keeps the affine
+        // pressure mean fixed, while det(F) changes by exactly -shear².
+        let after: [f64; 12] = core::array::from_fn(|dof| match dof % 3 {
+            0 => shear * (NODES[dof / 3][1] - 0.25),
+            1 => shear * (NODES[dof / 3][0] - 0.25),
+            _ => 0.0,
+        });
+        assert_eq!(
+            surface.volume_m3(&before, cx).unwrap(),
+            surface.volume_m3(&after, cx).unwrap(),
+        );
+        let profile = StratifiedHydrostaticPressure::new(
+            [0.0, 0.0, 10.0],
+            [0.0, 0.0, -10.0],
+            &[HydrostaticDensityLayer {
+                top_depth_m: 0.0,
+                density_kg_m3: 1000.0,
+            }],
+            1,
+            cx,
+        )
+        .unwrap();
+        for (field, mean) in [
+            (TetPressure::Uniform(1e5), 1e5),
+            (
+                TetPressure::Affine {
+                    origin_m: [0.0; 3],
+                    pressure_pa: 1e5,
+                    gradient_pa_m: [2.0, 0.0, 0.0],
+                },
+                1e5 + 0.5,
+            ),
+            (
+                TetPressure::Affine {
+                    origin_m: [0.0; 3],
+                    pressure_pa: -1e5,
+                    gradient_pa_m: [-2.0, 0.0, 0.0],
+                },
+                -1e5 - 0.5,
+            ),
+            (
+                TetPressure::FreeSurface {
+                    origin_m: [0.0; 3],
+                    pressure_pa: 1e5,
+                    gradient_pa_m: [2.0, 0.0, 0.0],
+                },
+                1e5 + 0.5,
+            ),
+            // Depth is unchanged by this xy shear. The fully wet one-layer
+            // pressure mean is rho*g*(10-centroid_z) = 97500 Pa.
+            (profile.loading(), 97500.0),
+        ] {
+            let expected = mean * shear * shear / 6.0;
+            near(
+                surface.work_j(&before, &after, field, cx).unwrap(),
+                expected,
+                expected.abs() * 2e-14,
+            );
+            near(
+                surface.work_j(&after, &before, field, cx).unwrap(),
+                -expected,
+                expected.abs() * 2e-14,
+            );
+        }
+    });
+}
+
 /// d det[x1-x0,x2-x0,x3-x0]/dx, derived directly from the scalar triple product.
 fn tet_oracle(x: [[f64; 3]; 4], pressure: f64) -> (f64, [[f64; 3]; 4]) {
     let a = sub(x[1], x[0]);

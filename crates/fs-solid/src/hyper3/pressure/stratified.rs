@@ -10,12 +10,13 @@
 //! the displaced fluid's density.
 
 use fs_exec::Cx;
+use fs_math::dd::Dd;
 
 use super::algorithmic::{self, PressureMean};
 use super::free_surface::{self, FaceMoments};
 use super::{
     ClosedTetPressureSurface, HyperTetError, TetPressure, checkpoint, finite, invalid,
-    signed_volume,
+    signed_volume, signed_volume_increment,
 };
 
 /// One fluid layer, extending from this depth to the next layer's top.
@@ -326,7 +327,11 @@ impl StratifiedHydrostaticPressure {
             let volume_before = orientation * signed_volume(tet.map(|node| before[node]))?;
             let volume_after = orientation * signed_volume(tet.map(|node| after[node]))?;
             let volume_mean = finite(0.5 * volume_before + 0.5 * volume_after)?;
-            let volume_change = finite(volume_after - volume_before)?;
+            let volume_change = Dd::from_f64(orientation)
+                * signed_volume_increment(
+                    tet.map(|node| before[node]),
+                    tet.map(|node| after[node]),
+                )?;
             let mut depth_changes = [0.0; 4];
             for (local, &node) in tet.iter().enumerate() {
                 for axis in 0..3 {
@@ -361,8 +366,11 @@ impl StratifiedHydrostaticPressure {
                     finite(mean_after - mean_before)?
                 };
                 let mean = finite(0.5 * mean_before + 0.5 * mean_after)?;
-                let increment =
-                    finite(-mean.mul_add(volume_change, finite(volume_mean * mean_change)?))?;
+                let increment = finite(
+                    (-Dd::from_f64(mean) * volume_change
+                        - Dd::from_f64(volume_mean) * Dd::from_f64(mean_change))
+                    .to_f64(),
+                )?;
                 work.add(finite(load_factor * self.quadratic_pressure_pa_m2)? * increment)?;
             }
             for ramp in &self.ramps {
@@ -385,7 +393,9 @@ impl StratifiedHydrostaticPressure {
                 };
                 let mean_pressure = finite(0.5 * mean_before + 0.5 * mean_after)?;
                 let increment = finite(
-                    -mean_pressure.mul_add(volume_change, finite(volume_mean * mean_change)?),
+                    (-Dd::from_f64(mean_pressure) * volume_change
+                        - Dd::from_f64(volume_mean) * Dd::from_f64(mean_change))
+                    .to_f64(),
                 )?;
                 let coefficient = finite(load_factor * ramp.pressure_gradient_pa_m)?;
                 work.add(coefficient * increment)?;

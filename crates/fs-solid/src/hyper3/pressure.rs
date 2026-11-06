@@ -28,6 +28,7 @@
 use std::collections::BTreeMap;
 
 use fs_exec::Cx;
+use fs_math::dd::Dd;
 use fs_sparse::{Coo, Csr};
 
 use super::{HyperTetError, checkpoint};
@@ -453,16 +454,15 @@ impl ClosedTetPressureSurface {
 
     /// Work of held pressure over the declared displacement segment.
     ///
-    /// Uniform pressure uses exact endpoint-volume work, independently of
-    /// the path. Other fields integrate force along the straight segment with
-    /// Simpson's rule: exact to rounding for a held face pressure (quadratic
-    /// force) and a fixed affine spatial field (cubic force). The affine field
-    /// is conservative on a closed surface, with potential `integral p(x) dV`.
-    /// It retains common translation work on open patches. Subdividing a
-    /// curved trajectory is necessary to resolve its physical path work.
-    /// A free surface instead uses exact clipped-tetrahedron endpoint moments
-    /// of `integral max(0,p(x)) dV`, including changes in immersion. No fixed
-    /// time quadrature is assumed exact across a wet/dry transition.
+    /// Uniform pressure uses exact endpoint-volume work. Affine, free-surface
+    /// and stratified fields use differences of their original volume moments,
+    /// retaining small volume changes before absolute potentials are rounded.
+    /// Free surfaces use `integral max(0,p(x)) dV`, including changes in immersion.
+    /// A held per-face pressure integrates its quadratic force along the
+    /// straight segment with Simpson's rule, retaining common translation work
+    /// on loaded patches. Subdividing a curved trajectory is necessary for that
+    /// path-dependent face field. No fixed time quadrature is assumed exact
+    /// across a wet/dry transition.
     pub fn work_j<'p>(
         &self,
         before_m: &[f64],
@@ -491,9 +491,23 @@ impl ClosedTetPressureSurface {
             _ => None,
         };
         if let Some(value) = uniform {
-            let before = self.volume_m3(before_m, cx)?;
-            let after = self.volume_m3(after_m, cx)?;
-            return finite(-value * finite(after - before)?);
+            // Keep the original endpoint geometry/domain checks, but form
+            // each physical volume increment before a large unrelated mesh
+            // volume can round it away in either global diagnostic total.
+            let (before, _) = self.positions_and_volume(before_m, cx)?;
+            let (after, _) = self.positions_and_volume(after_m, cx)?;
+            let mut change = Dd::ZERO;
+            for (tet, &orientation) in self.tetrahedra.iter().zip(&self.orientations) {
+                checkpoint(cx)?;
+                change = change
+                    + Dd::from_f64(orientation)
+                        * signed_volume_increment(
+                            tet.map(|node| before[node]),
+                            tet.map(|node| after[node]),
+                        )?;
+            }
+            checkpoint(cx)?;
+            return finite((-Dd::from_f64(value) * change).to_f64());
         }
         if let TetPressure::Stratified {
             profile,
@@ -502,18 +516,24 @@ impl ClosedTetPressureSurface {
         {
             return profile.work_j(self, before_m, after_m, load_factor, cx);
         }
-        if let TetPressure::FreeSurface {
+        if let TetPressure::Affine {
+            origin_m,
+            pressure_pa,
+            gradient_pa_m,
+        }
+        | TetPressure::FreeSurface {
             origin_m,
             pressure_pa,
             gradient_pa_m,
         } = pressure
         {
-            return self.free_surface_work_j(
+            return self.spatial_potential_work_j(
                 before_m,
                 after_m,
                 origin_m,
                 pressure_pa,
                 gradient_pa_m,
+                matches!(pressure, TetPressure::FreeSurface { .. }),
                 cx,
             );
         }
@@ -623,17 +643,18 @@ impl ClosedTetPressureSurface {
         Ok(value)
     }
 
-    /// Conservative endpoint work from positive clipped-volume moments.
+    /// Conservative endpoint work from affine or positive clipped-volume moments.
     /// Summing element increments avoids subtracting large global potentials;
     /// the symmetric product difference avoids large endpoint energy products.
     #[allow(clippy::too_many_arguments)]
-    fn free_surface_work_j(
+    fn spatial_potential_work_j(
         &self,
         before_m: &[f64],
         after_m: &[f64],
         origin_m: [f64; 3],
         pressure_pa: f64,
         gradient_pa_m: [f64; 3],
+        clipped: bool,
         cx: &Cx<'_>,
     ) -> Result<f64, HyperTetError> {
         let (before, _) = self.positions_and_volume(before_m, cx)?;
@@ -663,14 +684,23 @@ impl ClosedTetPressureSurface {
             checkpoint(cx)?;
             let before_values = tet.map(|node| before_pressure[node]);
             let after_values = tet.map(|node| after_pressure[node]);
-            let mean_before = free_surface::tet_mean(before_values)?;
-            let mean_after = free_surface::tet_mean(after_values)?;
-            if mean_before == 0.0 && mean_after == 0.0 {
+            let mean = |values: [f64; 4]| {
+                if clipped {
+                    free_surface::tet_mean(values)
+                } else {
+                    finite(values.iter().fold(Dd::ZERO, |sum, &value| {
+                        sum + Dd::from_f64(0.25) * Dd::from_f64(value)
+                    }).to_f64())
+                }
+            };
+            let mean_before = mean(before_values)?;
+            let mean_after = mean(after_values)?;
+            if clipped && mean_before == 0.0 && mean_after == 0.0 {
                 continue;
             }
             let volume_before = orientation * signed_volume(tet.map(|node| before[node]))?;
             let volume_after = orientation * signed_volume(tet.map(|node| after[node]))?;
-            let mean_change = if before_values
+            let mean_change = if !clipped || before_values
                 .iter()
                 .chain(&after_values)
                 .all(|&value| value >= 0.0)
@@ -692,10 +722,16 @@ impl ClosedTetPressureSurface {
             };
             let mean_volume = finite(0.5 * volume_before + 0.5 * volume_after)?;
             let mean_pressure = finite(0.5 * mean_before + 0.5 * mean_after)?;
-            let increment = finite(-mean_pressure.mul_add(
-                finite(volume_after - volume_before)?,
-                finite(mean_volume * mean_change)?,
-            ))?;
+            let volume_change = Dd::from_f64(orientation)
+                * signed_volume_increment(
+                    tet.map(|node| before[node]),
+                    tet.map(|node| after[node]),
+                )?;
+            let increment = finite(
+                (-Dd::from_f64(mean_pressure) * volume_change
+                    - Dd::from_f64(mean_volume) * Dd::from_f64(mean_change))
+                .to_f64(),
+            )?;
             let corrected = finite(increment - compensation)?;
             let next = finite(work + corrected)?;
             compensation = (next - work) - corrected;
@@ -806,6 +842,61 @@ fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
     a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
 }
 
+/// Difference of the original cubic volume potential at represented endpoints.
+/// Keep the midpoint and endpoint subtraction tails before evaluating the
+/// polarized determinant; an independently rounded midpoint loses those terms.
+pub(super) fn determinant_increment(before: &[f64; 9], after: &[f64; 9]) -> Dd {
+    determinant_increment_dd(&before.map(Dd::from_f64), &after.map(Dd::from_f64))
+}
+
+fn determinant_increment_dd(before: &[Dd; 9], after: &[Dd; 9]) -> Dd {
+    let half = Dd::from_f64(0.5);
+    let midpoint = core::array::from_fn::<_, 9, _>(|i| half * before[i] + half * after[i]);
+    let delta = core::array::from_fn::<_, 9, _>(|i| after[i] - before[i]);
+    let cofactor = |f: &[Dd; 9], ij: usize| {
+        let (a, b) = ((ij / 3 + 1) % 3, (ij / 3 + 2) % 3);
+        let (c, d) = ((ij % 3 + 1) % 3, (ij % 3 + 2) % 3);
+        f[3 * a + c] * f[3 * b + d] - f[3 * a + d] * f[3 * b + c]
+    };
+    let linear = delta.iter().enumerate().fold(Dd::ZERO, |sum, (i, &value)| {
+        sum + cofactor(&midpoint, i) * value
+    });
+    let cubic = (0..3).fold(Dd::ZERO, |sum, i| sum + delta[i] * cofactor(&delta, i));
+    linear + Dd::from_f64(0.25) * cubic
+}
+
+fn signed_volume_increment(
+    before: [[f64; 3]; 4],
+    after: [[f64; 3]; 4],
+) -> Result<Dd, HyperTetError> {
+    // Columns are physical edges. Scaling in compensated precision preserves
+    // the original endpoint differences while avoiding cubic overflow.
+    let edges = |points: &[[f64; 3]; 4]| {
+        core::array::from_fn::<_, 9, _>(|ij| {
+            Dd::from_f64(points[ij % 3 + 1][ij / 3]) - Dd::from_f64(points[0][ij / 3])
+        })
+    };
+    let before = edges(&before);
+    let after = edges(&after);
+    let scale = before
+        .iter()
+        .chain(&after)
+        .fold(0.0_f64, |largest, edge| largest.max(edge.hi.abs()));
+    if !scale.is_finite() || scale == 0.0 {
+        return Err(invalid(
+            "unrepresentable pressure volume increment geometry",
+        ));
+    }
+    let scale = Dd::from_f64(scale);
+    let change = determinant_increment_dd(
+        &before.map(|edge| edge / scale),
+        &after.map(|edge| edge / scale),
+    );
+    let change = (((change / Dd::from_f64(6.0)) * scale) * scale) * scale;
+    finite(change.to_f64())?;
+    Ok(change)
+}
+
 fn signed_volume(points: [[f64; 3]; 4]) -> Result<f64, HyperTetError> {
     let edges = [
         difference(points[1], points[0])?,
@@ -840,4 +931,72 @@ fn area_vector(a: [f64; 3], b: [f64; 3], c: [f64; 3]) -> Result<[f64; 3], HyperT
         return Err(invalid("collapsed or unrepresentable pressure face"));
     }
     Ok(area)
+}
+
+#[cfg(test)]
+mod potential_increment_tests {
+    use super::{determinant_increment, signed_volume, signed_volume_increment};
+
+    const UNIT: [[f64; 3]; 4] = [
+        [0.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        [0.0, 0.0, 1.0],
+    ];
+
+    #[test]
+    fn cubic_increment_retains_the_represented_midpoint_tail() {
+        let before = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+        let mut after = before;
+        let epsilon = f64::EPSILON;
+        after[0] += epsilon;
+        after[4] -= epsilon;
+        // (1+epsilon)(1-epsilon)-1 = -epsilon². Both absolute
+        // determinants round to one, and an f64 midpoint loses half the work.
+        assert_eq!(after[0] * after[4], 1.0);
+        assert_eq!(
+            determinant_increment(&before, &after).to_f64(),
+            -epsilon * epsilon
+        );
+        assert_eq!(
+            determinant_increment(&after, &before).to_f64(),
+            epsilon * epsilon
+        );
+        assert_eq!(determinant_increment(&after, &after).to_f64(), 0.0);
+    }
+
+    #[test]
+    fn physical_volume_increment_retains_quadratic_work_below_endpoint_roundoff() {
+        let shear = 2.0_f64.powi(-28);
+        let mut after = UNIT;
+        after[1][1] = shear;
+        after[2][0] = shear;
+        assert_eq!(signed_volume(UNIT).unwrap(), signed_volume(after).unwrap());
+        let expected = -shear * shear / 6.0;
+        let change = signed_volume_increment(UNIT, after).unwrap().to_f64();
+        assert!((change / expected - 1.0).abs() < 4.0 * f64::EPSILON);
+        assert_eq!(
+            signed_volume_increment(after, UNIT).unwrap().to_f64(),
+            -change
+        );
+    }
+
+    #[test]
+    fn physical_volume_increment_preserves_scale_and_orientation() {
+        for scale in [1e-90, 1.0, 1e90] {
+            let before = UNIT.map(|point| point.map(|coordinate| coordinate * scale));
+            let mut after = before;
+            after[1][0] *= 1.125;
+            // Independent axial extrusion: area * the represented edge travel / 6.
+            let expected = (((after[1][0] - before[1][0]) / 6.0) * scale) * scale;
+            let change = signed_volume_increment(before, after).unwrap().to_f64();
+            assert!((change / expected - 1.0).abs() < 16.0 * f64::EPSILON);
+            let reversed_before = [before[0], before[2], before[1], before[3]];
+            let reversed_after = [after[0], after[2], after[1], after[3]];
+            let reversed = signed_volume_increment(reversed_before, reversed_after)
+                .unwrap()
+                .to_f64();
+            assert!((reversed / expected + 1.0).abs() < 16.0 * f64::EPSILON);
+        }
+    }
 }

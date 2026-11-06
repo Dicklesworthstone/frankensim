@@ -308,3 +308,103 @@ fn signed_pressure_tangent_objectivity_and_exact_zero_delegation() {
     }
     assert!(evaluate_with_uniform_pressure(&material, &a, &b, f64::NAN, false).is_err());
 }
+
+#[test]
+fn uniform_pressure_preserves_resolved_equal_volume_shear_work() {
+    let material = Hyperelastic::new(
+        HyperelasticModel::MooneyRivlin {
+            c10: 500.0,
+            c01: 0.0,
+            kappa: 1e6,
+        },
+        4.0,
+    )
+    .unwrap();
+    let before: [f64; 9] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+    for shear in [2e-7_f64, 5e-7, 1e-6, 1e-5] {
+        let mut after = before;
+        after[1] = shear;
+        // J0=J1=1 exactly. Pressure does no work, and the independent
+        // Mooney-Rivlin shear potential is W=c10*gamma². These increments
+        // enter the resolved correction branch, not its midpoint limit.
+        let delta_c_squared = 2.0 * shear * shear + shear.powi(4);
+        let mean_c_squared = 3.0 + 1.5 * shear * shear + 0.25 * shear.powi(4);
+        assert!(delta_c_squared > 64.0 * f64::EPSILON * mean_c_squared);
+        let expected = 500.0 * shear * shear;
+        for pressure in [-1e5_f64, 1e5] {
+            let response =
+                evaluate_with_uniform_pressure(&material, &before, &after, pressure, false)
+                    .unwrap();
+            near(response.piola[1] * shear, expected, expected * 5e-10);
+        }
+    }
+}
+
+#[test]
+fn uniform_pressure_volume_work_coefficient_and_endpoint_tangent_agree() {
+    let material = law();
+    let before: [f64; 9] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+    let after: [f64; 9] = [
+        17.0 / 16.0,
+        1.0 / 8.0,
+        -1.0 / 16.0,
+        0.0,
+        31.0 / 32.0,
+        1.0 / 32.0,
+        0.0,
+        0.0,
+        65.0 / 64.0,
+    ];
+    let delta = core::array::from_fn::<_, 9, _>(|i| after[i] - before[i]);
+    // The triangular dyadic endpoints give this independent exact volume
+    // increment; neither the production determinant helper nor its cofactors
+    // are needed by the oracle.
+    let volume_change = 1487.0 / 32768.0;
+    let material_change = energy(&after) - energy(&before);
+    let coefficient = volume_stress(&material, &before, &after).unwrap();
+    near(dot(&coefficient, &delta), volume_change, 2e-14);
+    let original = evaluate(&material, &before, &after, false).unwrap();
+    for pressure in [-1e5_f64, 1e5] {
+        let response =
+            evaluate_with_uniform_pressure(&material, &before, &after, pressure, true).unwrap();
+        near(
+            dot(&response.piola, &delta),
+            pressure.mul_add(volume_change, material_change),
+            5e-10,
+        );
+        for i in 0..9 {
+            near(
+                response.piola[i],
+                pressure.mul_add(coefficient[i], original.piola[i]),
+                5e-9,
+            );
+        }
+        let tangent = response.tangent_after.unwrap();
+        let scale = tangent
+            .iter()
+            .flatten()
+            .map(|v| v.abs())
+            .fold(1.0, f64::max);
+        for column in 0..9 {
+            let (mut high, mut low) = (after, after);
+            let step = 2e-6;
+            high[column] += step;
+            low[column] -= step;
+            let high_force =
+                evaluate_with_uniform_pressure(&material, &before, &high, pressure, false)
+                    .unwrap()
+                    .piola;
+            let low_force =
+                evaluate_with_uniform_pressure(&material, &before, &low, pressure, false)
+                    .unwrap()
+                    .piola;
+            for row in 0..9 {
+                near(
+                    tangent[row][column],
+                    (high_force[row] - low_force[row]) / (2.0 * step),
+                    5e-8 * scale,
+                );
+            }
+        }
+    }
+}

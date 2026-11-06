@@ -2478,6 +2478,30 @@ admission; its original endpoint-volume work remains independently measurable.
 The analytic cofactor stress and Hessian preserve the original material/source
 domain. Zero pressure delegates exactly to the unpressurized algorithm.
 
+The work target combines the original material increment with `p Delta J`
+before rounding, rather than subtracting two absolute `W+pJ` values. This
+retains acoustic-scale elastic work at equal volume even under much larger
+ambient pressure. The shared cubic determinant increment evaluates
+`cof(M):D + det(D)/4` with compensated endpoint means and differences, retaining
+the tails lost by a rounded midpoint. Its endpoint derivative remains the
+original material stress plus `p cof(F_after)`; the pressure-coefficient force
+uses the same volume increment. No generic material energy-datum capability is
+inferred from this pressure decomposition.
+
+Uniform closed-surface pressure work accumulates oriented element volume
+increments before applying pressure. Affine, free-surface and stratified work
+use the same increment in the symmetric volume/pressure product difference.
+Held per-face loading retains its original path-dependent force quadrature.
+The geometry path normalizes physical edge matrices before the cubic operation
+and retains original endpoint volume, orientation and source-domain admission.
+It preserves small work beside a large unrelated mesh volume without changing
+surface traction or pressure fields. Eight original stress tests and three
+volume-kernel tests pass, including the previously failing 100 kPa small-shear
+case, rounded-midpoint tails, scales, reversal and consistent tangents. Three
+pressure-owner regressions also pass through the original geometry, clipping
+and stratified algorithms with a non-cancelled context shell; full executor/Cx
+and Cargo qualification remain outside that focused verification.
+
 The symmetric algorithmic second-Piola stress closes pressure work and midpoint
 torque together. Exact straight-segment averaging of face forces closes work
 alone and can produce a midpoint torque defect; a nontrivial regression exposes

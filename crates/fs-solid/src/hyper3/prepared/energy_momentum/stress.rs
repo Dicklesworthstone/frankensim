@@ -8,6 +8,9 @@
 use fs_la::factor::{Cholesky, Lu, cholesky, lu};
 use fs_material::MaterialError;
 use fs_material::hyper::cards::HyperelasticMaterial;
+use fs_math::dd::Dd;
+
+use crate::hyper3::pressure::determinant_increment;
 
 pub(super) struct AlgorithmicStress {
     pub(super) piola: [f64; 9],
@@ -73,10 +76,26 @@ pub(super) fn evaluate<L: HyperelasticMaterial>(
     after: &[f64; 9],
     tangent: bool,
 ) -> Result<AlgorithmicStress, MaterialError> {
+    evaluate_with_increment(material, before, after, tangent, || {
+        material.energy_density(after) - material.energy_density(before)
+    })
+}
+
+// Keep the endpoint work target separate from absolute storage. The material
+// owner still supplies its own energy difference; pressure adds p*Delta J
+// before either endpoint's large p*J value rounds away that material work.
+// Evaluate the increment only after the original endpoint domain admissions.
+fn evaluate_with_increment<L: HyperelasticMaterial>(
+    material: &L,
+    before: &[f64; 9],
+    after: &[f64; 9],
+    tangent: bool,
+    increment: impl FnOnce() -> f64,
+) -> Result<AlgorithmicStress, MaterialError> {
     // Both endpoints retain the original source and principal-stretch gates.
     material.first_piola(before)?;
     let p_after = material.first_piola(after)?;
-    let energy_change = material.energy_density(after) - material.energy_density(before);
+    let energy_change = increment();
     let midpoint = core::array::from_fn(|i| 0.5 * before[i] + 0.5 * after[i]);
     let delta_f = core::array::from_fn(|i| after[i] - before[i]);
     let c0 = product(&transpose(before), before);
@@ -178,7 +197,7 @@ pub(super) fn evaluate_with_uniform_pressure<L: HyperelasticMaterial>(
     if pressure_pa == 0.0 {
         return evaluate(material, before, after, tangent);
     }
-    evaluate(
+    evaluate_with_increment(
         &Pressurized {
             material,
             pressure_pa,
@@ -186,6 +205,11 @@ pub(super) fn evaluate_with_uniform_pressure<L: HyperelasticMaterial>(
         before,
         after,
         tangent,
+        || {
+            let material_change = material.energy_density(after) - material.energy_density(before);
+            let pressure_change = Dd::from_f64(pressure_pa) * determinant_increment(before, after);
+            (Dd::from_f64(material_change) + pressure_change).to_f64()
+        },
     )
 }
 
@@ -223,7 +247,14 @@ pub(super) fn volume_stress<L: HyperelasticMaterial>(
             Ok(result)
         }
     }
-    Ok(evaluate(&Volume(material.hyperelastic()), before, after, false)?.piola)
+    Ok(evaluate_with_increment(
+        &Volume(material.hyperelastic()),
+        before,
+        after,
+        false,
+        || determinant_increment(before, after).to_f64(),
+    )?
+    .piola)
 }
 
 struct Pressurized<'a, L> {
