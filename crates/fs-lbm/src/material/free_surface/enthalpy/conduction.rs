@@ -208,7 +208,7 @@ struct Conduction<'a, 'm> {
     body_atmosphere: atmosphere::BodyAtmosphere,
     body_radiation: radiation::BodyRadiation,
     electrical: Option<electrical::ElectricalTimeline>,
-    viscous_feedback: Option<viscous_feedback::ViscousFeedback>,
+    viscous_feedback: Option<viscous_feedback::ViscousFeedback<'a>>,
 }
 
 struct Samples {

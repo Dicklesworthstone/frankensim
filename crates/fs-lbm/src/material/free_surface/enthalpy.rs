@@ -364,6 +364,7 @@ type SurfaceTensionResolver<'a> = dyn FnMut(
 struct ResolvedFlowMaterials {
     states: BTreeMap<MassLocation3, ResolvedLiquidState>,
     tau: BTreeMap<(u64, usize), f64>,
+    bulk_relaxations: Option<BTreeMap<(u64, usize), f64>>,
     forces: Option<BTreeMap<(u64, usize), [f64; 3]>>,
     surface_tensions: Option<BTreeMap<(u64, usize), f64>>,
     rheology: BTreeMap<MassLocation3, rheology::FreeSurfaceRheologySample>,
@@ -460,6 +461,8 @@ impl<'s> MaterialFreeSurface3<'s> {
         }
         if let Some(binding) = &rheology {
             binding.admit_pressure_reference(&self.scaling)?;
+        } else {
+            self.scaling.admit_frozen_bulk_source()?;
         }
         if self.scaling.planar_wetting.is_some() {
             return Err(Error::Invalid(
@@ -478,6 +481,7 @@ impl<'s> MaterialFreeSurface3<'s> {
             ));
         }
         admit_capillary_source(source, law, thermocapillary.is_some())?;
+        self.scaling.bulk_relaxation_rate_at(law.reference_state().material())?;
         let viscosity = match source.viscosity_basis() {
             fs_material::liquid_temperature::LiquidViscosityBasis::Dynamic => "dynamic_viscosity",
             fs_material::liquid_temperature::LiquidViscosityBasis::Kinematic => {
@@ -564,6 +568,9 @@ impl<'s> MaterialFreeSurface3<'s> {
         };
         let resolved =
             candidate.resolve_states(&candidate.flow.lattice, &candidate.h, &masses, gate)?;
+        if let Some(field) = resolved.bulk_relaxations {
+            candidate.flow.lattice.rebind_bulk_relaxations(field, gate)?;
+        }
         if let Some(surface_tensions) = resolved.surface_tensions {
             candidate.flow.lattice.rebind_surface_tensions(surface_tensions, gate)?;
         }
@@ -1000,6 +1007,9 @@ impl<'s, 'm> MaterialFreeSurfaceEnthalpy3<'s, 'm> {
         // reconstructing surface normals and Marangoni stress. This is the
         // existing private candidate, not an extra population clone.
         let mut lattice = self.flow.lattice.clone();
+        if let Some(field) = resolved.bulk_relaxations.take() {
+            lattice.rebind_bulk_relaxations(field, gate)?;
+        }
         let prepared_wetting = if graph_wetting {
             self.prepare_wetting(&mut lattice, &resolved.states, wetting_outer_gas, gate)?
         } else {
@@ -1071,6 +1081,9 @@ impl<'s, 'm> MaterialFreeSurfaceEnthalpy3<'s, 'm> {
             &trace.after, &mut h, &heated, self.uniform_thermal_capillarity() || graph_wetting,
         )?;
         let mut endpoint = self.resolve_liquid_states(&lattice, &h, &trace.after, gate)?;
+        if let Some(field) = endpoint.bulk_relaxations.take() {
+            lattice.rebind_bulk_relaxations(field, gate)?;
+        }
         let accepted_wetting = if graph_wetting {
             self.endpoint_wetting(prepared_wetting.as_ref(), &mut lattice, &endpoint.states, gate)?
         } else {
@@ -1234,9 +1247,13 @@ impl<'s, 'm> MaterialFreeSurfaceEnthalpy3<'s, 'm> {
             }
             states.insert(location, state);
         }
+        let bulk_relaxations = self.flow.scaling.source_bulk_relaxations(
+            states.iter().map(|(&location, material)| (location, material.material())), gate,
+        )?;
         Ok(ResolvedFlowMaterials {
             states,
             tau,
+            bulk_relaxations,
             forces,
             surface_tensions: None,
             rheology,

@@ -78,6 +78,7 @@ pub use motion::{
 };
 pub(crate) mod thermocapillary;
 pub(crate) mod transport;
+mod bulk;
 pub(crate) mod wetting;
 #[cfg(test)]
 #[path = "freesurface3/wetting/smoothing_tests.rs"]
@@ -373,6 +374,9 @@ pub struct FreeSurface3 {
     /// Source-evolved coefficients on the current wet cells. The original
     /// scalar path remains unchanged when all coefficients equal `sigma`.
     local_sigma: Option<BTreeMap<(u64, usize), f64>>,
+    /// Source-owned independent trace rates, complete for every accepted wet
+    /// cell. A missing rate never falls back to the reference collision.
+    local_bulk_relaxation: Option<BTreeMap<(u64, usize), f64>>,
     redistribution: ConversionRedistribution3,
     contact: ContactModel3,
     planar_contact: Option<PlanarContactAngle3>,
@@ -609,6 +613,7 @@ impl FreeSurface3 {
             solid,
             sigma,
             local_sigma: None,
+            local_bulk_relaxation: None,
             redistribution: ConversionRedistribution3::default(),
             contact,
             planar_contact: None,
@@ -861,7 +866,9 @@ impl FreeSurface3 {
             }
         };
         self.grid
-            .set_collision_model(super::CollisionModel3::Trt { tau, magic })
+            .set_collision_model(super::CollisionModel3::Trt { tau, magic })?;
+        self.local_bulk_relaxation = None;
+        Ok(())
     }
 
     /// Select independent volumetric relaxation while retaining the current
@@ -886,7 +893,9 @@ impl FreeSurface3 {
             shear_rate,
             bulk_rate,
             higher_order_rate,
-        })
+        })?;
+        self.local_bulk_relaxation = None;
+        Ok(())
     }
 
     /// Impose a homogeneous equilibrium angle through the liquid at one planar
@@ -1312,6 +1321,7 @@ impl FreeSurface3 {
                                 })?
                             },
                         };
+                        let cell_model = self.collision_with_bulk(key, lane, cell_model)?;
                         collide(populations, cell_model, self.force_at_lane(key, lane)).map_err(
                             |source| FreeSurfaceError3::Collision {
                                 tile_key: key,

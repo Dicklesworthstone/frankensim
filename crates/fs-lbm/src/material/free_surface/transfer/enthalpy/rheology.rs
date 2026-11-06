@@ -16,6 +16,7 @@ pub(super) fn admit_source(
     limits: TetEnthalpyTransferLimits,
     queries: &mut usize,
     buoyancy: Option<BoussinesqConfig<3>>,
+    scaling: &MaterialFreeSurfaceScaling<'_>,
     cx: &Cx<'_>,
     gate: &CancelGate,
 ) -> Result<(f64, f64, Vec<f64>), TetEnthalpyTransferError> {
@@ -66,7 +67,7 @@ pub(super) fn admit_source(
         // so they must be re-admitted at each actual constitutive coordinate.
         for specific in h {
             checkpoint(cx)?;
-            admit_source_sample(specific, density, law, caloric, limits, queries, coordinate, buoyancy)?;
+            admit_source_sample(specific, density, law, caloric, limits, queries, coordinate, buoyancy, scaling)?;
         }
         for knot in caloric.knots() {
             checkpoint(cx)?;
@@ -80,11 +81,12 @@ pub(super) fn admit_source(
                     queries,
                     coordinate,
                     buoyancy,
+                    scaling,
                 )?;
             }
         }
         admit_source_lines(
-            lower, upper, density, law, caloric, limits, queries, coordinate, buoyancy, cx,
+            lower, upper, density, law, caloric, limits, queries, coordinate, buoyancy, scaling, cx,
         )?;
         minimum_h = minimum_h.min(lower);
         maximum_h = maximum_h.max(upper);

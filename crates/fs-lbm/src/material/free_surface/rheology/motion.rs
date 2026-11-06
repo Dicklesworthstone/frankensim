@@ -94,7 +94,7 @@ impl MaterialFreeSurfaceRheology3<'_, '_> {
             .flow
             .prepare_planar_wall_velocity_field_si(motion, controls, gate)?;
         let tau = self.local_relaxation(gate)?;
-        let (lattice, exchange) = self
+        let (mut lattice, exchange) = self
             .flow
             .lattice
             .planar_wall_field_candidate_with_relaxation(
@@ -108,6 +108,11 @@ impl MaterialFreeSurfaceRheology3<'_, '_> {
                 gate,
             )?;
         let samples = self.sample_lattice(&lattice, gate)?;
+        if let Some(field) = self.flow.scaling.source_bulk_relaxations(
+            samples.iter().map(|(&location, cell)| (location, cell.material.material())), gate,
+        )? {
+            lattice.rebind_bulk_relaxations(field, gate)?;
+        }
         let report =
             self.flow
                 .planar_wall_field_report_si(exchange, motion.moment_origin_m, gate)?;

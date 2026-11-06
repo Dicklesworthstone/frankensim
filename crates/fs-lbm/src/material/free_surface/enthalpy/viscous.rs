@@ -18,6 +18,11 @@ pub struct FreeSurfaceViscousCell {
     pub shear_power_w_m3: f64,
     /// Applied volumetric molecular stress power [W/m3].
     pub bulk_power_w_m3: f64,
+    /// Actual bulk coefficient [Pa s] from this same material response, or the
+    /// selected uniform coefficient / default `2mu/3` tie.
+    pub bulk_viscosity_pa_s: f64,
+    /// Molecular trace relaxation used to reconstruct this sample.
+    pub bulk_collision_tau: f64,
     /// Located carrier mass divided by retained reference density [m3].
     /// Zero-mass interface ghosts and numerical carry get no cell heat.
     pub liquid_volume_m3: f64,
@@ -90,17 +95,22 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
                 continue;
             }
             let material = resolved.states[&location].clone();
-            let [lattice_rate, lattice_dilation] = self
-                .flow
-                .lattice
-                .transport_strain_rates(location, resolved.tau[&(key, lane)])?;
+            let tau = resolved.tau[&(key, lane)];
+            let independent_bulk = self.flow.scaling.bulk_viscosity_at(material.material())?;
+            let bulk_rate = self.flow.scaling.bulk_relaxation_rate_at(material.material())?;
+            let numerators = self.flow.lattice.transport_stress_numerators(location)?;
+            let lattice_rate = numerators[0] / tau;
+            let lattice_dilation = match bulk_rate {
+                Some(rate) => numerators[1] * rate,
+                None => numerators[1] / tau,
+            };
             let rate = lattice_rate / dt;
             let dilation = lattice_dilation / dt;
             let mass = native_mass * mass_unit;
             let volume = mass / rho0;
             let mu = material.dynamic_viscosity_pa_s();
             let [shear_power, bulk_power] = molecular_power(
-                rate, dilation, mu, self.flow.scaling.bulk_viscosity_pa_s(),
+                rate, dilation, mu, independent_bulk,
             );
             let divergence = dilation * 1.5_f64.sqrt();
             let power = shear_power + bulk_power;
@@ -134,6 +144,8 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
                 divergence_magnitude_per_s: divergence,
                 shear_power_w_m3: shear_power,
                 bulk_power_w_m3: bulk_power,
+                bulk_viscosity_pa_s: independent_bulk.unwrap_or((2.0 / 3.0) * mu),
+                bulk_collision_tau: bulk_rate.map_or(tau, |rate| 1.0 / rate),
                 liquid_volume_m3: volume,
                 power_w_m3: power,
                 heat_j: heat,

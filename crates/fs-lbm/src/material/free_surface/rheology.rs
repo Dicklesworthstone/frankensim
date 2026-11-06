@@ -456,6 +456,11 @@ impl<'s, 'm> MaterialFreeSurfaceRheology3<'s, 'm> {
             samples: BTreeMap::new(),
         };
         candidate.samples = candidate.sample_lattice(&candidate.flow.lattice, gate)?;
+        if let Some(field) = candidate.flow.scaling.source_bulk_relaxations(
+            candidate.samples.iter().map(|(&location, cell)| (location, cell.material.material())), gate,
+        )? {
+            candidate.flow.lattice.rebind_bulk_relaxations(field, gate)?;
+        }
         poll(gate)?;
         cx.checkpoint().map_err(|_| FreeSurfaceError3::Cancelled)?;
         Ok(candidate)
@@ -483,6 +488,27 @@ impl<'s, 'm> MaterialFreeSurfaceRheology3<'s, 'm> {
     #[must_use]
     pub const fn bulk_viscosity_pa_s(&self) -> Option<f64> {
         self.flow.scaling.bulk_viscosity_pa_s()
+    }
+
+    /// Bind a retained bulk-viscosity claim at each already accepted local
+    /// material query. Both coefficients then refresh from the same source
+    /// response on every native step. This preserves populations and changes
+    /// trace interpretation as for [`Self::set_bulk_viscosity`]. Admission and
+    /// cancellation finish before either binding or collision field changes.
+    pub fn set_bulk_viscosity_source(
+        &mut self,
+        property: &str,
+        higher_order_rate: f64,
+        gate: &CancelGate,
+    ) -> Result<(), Error> {
+        poll(gate)?;
+        let scaling = self.flow.scaling.with_bulk_viscosity_source(property, higher_order_rate)?;
+        let field = scaling.source_bulk_relaxations(
+            self.samples.iter().map(|(&location, cell)| (location, cell.material.material())), gate,
+        )?.expect("bound bulk source");
+        scaling.apply_source_bulk_field(&mut self.flow.lattice, field, gate)?;
+        self.flow.scaling = scaling;
+        Ok(())
     }
 
     /// Source assignment, declared evolving coordinates and original claim receipts.
@@ -665,6 +691,11 @@ impl<'s, 'm> MaterialFreeSurfaceRheology3<'s, 'm> {
         }
         lattice.step_with_material_relaxation_and_pressure(gate, &tau, gas_pressure)?;
         let samples = self.sample_lattice(&lattice, gate)?;
+        if let Some(field) = self.flow.scaling.source_bulk_relaxations(
+            samples.iter().map(|(&location, cell)| (location, cell.material.material())), gate,
+        )? {
+            lattice.rebind_bulk_relaxations(field, gate)?;
+        }
         poll(gate)?;
         self.flow.lattice = lattice;
         self.samples = samples;
@@ -723,6 +754,7 @@ impl<'s, 'm> MaterialFreeSurfaceRheology3<'s, 'm> {
                 || poll(gate),
                 |rate| {
                     let material = self.law.resolve(rate, pressure)?;
+                    scaling.bulk_relaxation_rate_at(material.material())?;
                     let (plan, _) = plan_momentum_scaling(
                         material.kinematic_viscosity_m2_s(),
                         scaling.cell_size_m,

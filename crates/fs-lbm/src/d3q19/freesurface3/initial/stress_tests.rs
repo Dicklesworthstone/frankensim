@@ -283,3 +283,93 @@ fn g1_initial_strain_retains_independent_shear_and_bulk_stress() {
         }
     });
 }
+
+#[test]
+fn source_bulk_initialization_overrides_only_the_provisional_trace_stress() {
+    let gate = CancelGate::new_clock_free();
+    ArenaPool::new(ArenaConfig::default()).scope(|arena| {
+        let cx = Cx::new(
+            &gate, arena,
+            StreamKey { seed: 28, kernel_id: 69, tile: 0, iteration: 0 },
+            Budget::INFINITE, ExecMode::Deterministic,
+        );
+        let coordinates = [1, 1, 1];
+        let force = [0.0002, -0.0001, 0.0003];
+        let mut flow = FreeSurface3::from_cells(
+            [4; 3], 0.91, force, 0.0, ContactModel3::Neutral, &[],
+            &[FreeSurfaceInitialCell3 {
+                coordinates, fill_fraction: 0.6, density: 1.2,
+                velocity: [0.03, -0.02, 0.01],
+            }], &cx,
+        ).unwrap();
+        let key = morton3(0, 0, 0);
+        let lane = 1 + TILE * (1 + TILE);
+        let slot = flow.grid.slot_of(key).unwrap();
+        let original = flow.grid.populations(slot, lane).map(f64::to_bits);
+        let local_tau = 0.83;
+        // Even a zero-strain request may not smuggle independent bulk into a
+        // tied collision family or partially change the represented state.
+        assert!(flow.initialize_strain_at_with_bulk(
+            coordinates, [0.0; 6], local_tau, Some(1.0),
+        ).is_err());
+        assert_eq!(flow.grid.populations(slot, lane).map(f64::to_bits), original);
+
+        flow.set_central_moment_bulk(1.0 / 1.19, 1.2).unwrap();
+        let applied_rate = 1.0 / 0.74;
+        flow.rebind_bulk_relaxations(BTreeMap::from([((key, lane), applied_rate)]), &gate)
+            .unwrap();
+        let collision = flow.collision_model_at(coordinates).unwrap();
+        let field = flow.local_bulk_relaxation.clone();
+        let before = flow.sample_at(1, 1, 1).unwrap();
+        let mass = flow.ledger_mass();
+        let strain = [0.002, -0.001, 0.0005, 0.0007, -0.0004, 0.0009];
+        let theta = strain[0] + strain[1] + strain[2];
+        let tensor = [
+            [strain[0], strain[3], strain[4]],
+            [strain[3], strain[1], strain[5]],
+            [strain[4], strain[5], strain[2]],
+        ];
+        // No override uses the applied cell field, not its reference rate.
+        // An explicit source rate can differ from BOTH while assembling the
+        // unpublished field; only the provisional population trace changes.
+        for supplied in [None, Some(1.0 / 1.37)] {
+            flow.initialize_strain_at_with_bulk(coordinates, strain, local_tau, supplied)
+                .unwrap();
+            let rate = supplied.unwrap_or(applied_rate);
+            let after = flow.sample_at(1, 1, 1).unwrap();
+            let populations = flow.grid.populations(slot, lane);
+            assert_eq!(before.density.to_bits(), after.density.to_bits());
+            assert_eq!(mass.to_bits(), flow.ledger_mass().to_bits());
+            assert_eq!(flow.collision_model_at(coordinates).unwrap(), collision);
+            assert_eq!(flow.local_bulk_relaxation, field);
+            for a in 0..3 {
+                assert!((after.velocity[a] - before.velocity[a]).abs() < 4e-16);
+                for b in 0..3 {
+                    let second = populations.iter().enumerate().map(|(q, &f)| {
+                        let e = [E3[q].0, E3[q].1, E3[q].2];
+                        f * f64::from(e[a]) * f64::from(e[b])
+                    }).sum::<f64>();
+                    let pi = second
+                        + 0.5 * (after.velocity[a] * force[b] + force[a] * after.velocity[b])
+                        - after.density * after.velocity[a] * after.velocity[b]
+                        - if a == b { after.density / 3.0 } else { 0.0 };
+                    let mean = if a == b { theta / 3.0 } else { 0.0 };
+                    let expected = -2.0 * after.density / 3.0
+                        * (local_tau * (tensor[a][b] - mean) + mean / rate);
+                    assert!((pi - expected).abs() < 8e-16,
+                        "bulk rate {rate}, ({a},{b}): {pi} != {expected}");
+                }
+            }
+        }
+        let accepted = flow.grid.populations(slot, lane).map(f64::to_bits);
+        for rate in [0.0, -1.0, 2.0, f64::INFINITY, f64::NAN] {
+            assert!(flow.initialize_strain_at_with_bulk(
+                coordinates, [0.0; 6], local_tau, Some(rate),
+            ).is_err());
+            assert_eq!(flow.grid.populations(slot, lane).map(f64::to_bits), accepted);
+            assert_eq!(flow.collision_model_at(coordinates).unwrap(), collision);
+            assert_eq!(flow.local_bulk_relaxation, field);
+            assert_eq!(mass.to_bits(), flow.ledger_mass().to_bits());
+        }
+    });
+}

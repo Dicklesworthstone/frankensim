@@ -2,6 +2,9 @@
 //! Manufactured source tables isolate the equations, not measured materials.
 
 use super::*;
+
+#[cfg(feature = "enthalpy-coupling")]
+mod source_bulk_feedback;
 use crate::material::free_surface::enthalpy::FreeSurfaceEnthalpyError;
 use crate::material::free_surface::enthalpy::rheology::RheologySolve;
 use fs_qty::Frequency;
@@ -304,6 +307,149 @@ fn p1_transfer_retains_independent_bulk_work_without_changing_the_shear_law() {
             }
         }
     });
+}
+
+fn sourced_bulk_card(cold_vertex_refusal: bool) -> MaterialCard {
+    let original = source_card(0.02, 100.0);
+    let mut claims = ClaimSet::new();
+    for (_, claim) in original.claims().claims_ordered() {
+        claims.insert_claim(claim.clone()).unwrap();
+    }
+    let dims = fs_qty::DynViscosity::DIMS;
+    claims.insert_claim(PropertyClaim {
+        key: PropertyKey::new("bulk_eta", dims),
+        value: PropertyValue::Surface2D {
+            axes: ["T".into(), "rate".into()],
+            axis_dims: [Temperature::DIMS, Frequency::DIMS],
+            samples: [[300.0, 0.0], [500.0, 0.0], [300.0, 100.0], [500.0, 100.0]]
+                .into_iter().map(|p| (p, if cold_vertex_refusal {
+                    // Reference T/rate and every receiving cell average are
+                    // positive, but the coldest original P1 vertex is not.
+                    0.001 * (p[0] - 393.0) + 0.0001 * (p[1] - 20.0)
+                } else {
+                    sourced_bulk_at(p[0], p[1])
+                })).collect(),
+            triangles: vec![[0, 1, 2], [1, 3, 2]], dims,
+        },
+        validity: ValidityDomain::unconstrained().with("T", 300.0, 500.0)
+            .with_quantity("rate", QuantitySpec::dimensional(Frequency::DIMS), 0.0, 100.0),
+        interpolation: InterpolationPolicy::LinearInside,
+        uncertainty: UncertaintyModel::Unstated,
+        observations: vec![],
+        provenance: Provenance {
+            source: "manufactured local volumetric viscosity".into(),
+            license: "test-only".into(), artifact: None,
+        },
+    }).unwrap();
+    MaterialCard::assemble(original.id().clone(), claims, vec![]).unwrap()
+}
+
+fn sourced_bulk_at(temperature: f64, shear: f64) -> f64 {
+    0.03 + 0.001 * (temperature - 300.0) + 0.002 * shear
+}
+
+fn sourced_bulk_law(card: &MaterialCard) -> LiquidTemperatureLaw<'_> {
+    use fs_material::state_point::{
+        ScalarAdmissibility, ScalarPropertyRequirement, resolve_material_state_point,
+    };
+    let reference = shear_point(1.5);
+    let transport = LiquidTemperatureLaw::try_new(
+        card, &reference, "T", LiquidViscosityBasis::Dynamic,
+        MaterialPropertySelection::SingleClaimOnly,
+    ).unwrap();
+    let mut requirements: Vec<_> = transport.reference_state().material().properties()
+        .iter().map(|property| property.requirement().clone()).collect();
+    requirements.push(ScalarPropertyRequirement::try_new(
+        "bulk_eta", fs_qty::DynViscosity::DIMS, ScalarAdmissibility::StrictlyPositive,
+    ).unwrap());
+    let bundle = resolve_material_state_point(
+        card, &reference, &requirements, MaterialPropertySelection::SingleClaimOnly,
+    ).unwrap();
+    LiquidTemperatureLaw::try_from_material(card, bundle, "T", LiquidViscosityBasis::Dynamic).unwrap()
+}
+
+#[test]
+fn p1_transfer_seeds_source_local_bulk_stress_and_its_first_physical_heat() {
+    let card = sourced_bulk_card(false);
+    let law = sourced_bulk_law(&card);
+    let surface = ResolvedLiquidSurfaceState::try_for_shear_rate_evolution(
+        law.reference_state().material().clone(), LiquidViscosityBasis::Dynamic, "T", "rate",
+    ).unwrap();
+    let caloric = chart(&card, 1000.0);
+    let (points, tets, _) = cube([0.0; 3]);
+    let h: Vec<_> = points.iter().copied().map(affine_h).collect();
+    let shear = 20.0;
+    let velocities: Vec<_> = points.iter().map(|point| {
+        let r = sub(*point, [0.004; 3]);
+        [0.01 + shear * r[1] + 5.0 * r[0], -0.004 + 5.0 * r[1], 0.002 + 5.0 * r[2]]
+    }).collect();
+    let gate = CancelGate::new_clock_free();
+    with_cx(&gate, |cx| {
+        let scaling = plan_free_surface_from_material(&surface, 0.001, 0.0005, 0.1)
+            .unwrap().with_bulk_viscosity_source("bulk_eta", 1.2).unwrap();
+        let mut receiving = domain();
+        receiving.gravity_m_s2 = [0.5, -0.75, 0.25];
+        let (mut liquid, report) = scaling.free_surface3_from_tetrahedra_with_enthalpy_and_rheology(
+            receiving, [0.0; 3], source(&points, &tets, &velocities, &h),
+            &law, &caloric, bounds(), Default::default(), solve(), cx, &gate,
+        ).unwrap();
+        for &rate in &report.source_shear_rates_per_s { close(rate, shear, 1e-11); }
+        close(report.target_enthalpy_j, report.source_enthalpy_j, 1e-11);
+        let mut expected_heat = 0.0;
+        let mut minimum_bulk = f64::INFINITY;
+        let mut maximum_bulk = f64::NEG_INFINITY;
+        for component in &report.mechanical.components {
+            for &cell in &component.target_cells {
+                let state = liquid.material_at(cell).unwrap();
+                let temperature = state.material().state_coordinate("T").unwrap();
+                let bulk = state.material().property("bulk_eta").unwrap().value_si();
+                close(bulk, sourced_bulk_at(temperature, shear), 1e-10);
+                minimum_bulk = minimum_bulk.min(bulk);
+                maximum_bulk = maximum_bulk.max(bulk);
+                close(liquid.rheology_at(cell).unwrap().shear_rate_per_s, shear, 1e-8);
+                let native = liquid.flow().sample_at_si(cell[0], cell[1], cell[2]).unwrap().unwrap();
+                let volume = native.density_kg_m3 / 1000.0 * native.fill_fraction * 0.001_f64.powi(3);
+                expected_heat += (viscosity_at(temperature, shear, 0.02) * shear * shear
+                    + bulk * 15.0_f64.powi(2)) * volume * 0.0005;
+            }
+        }
+        assert!(maximum_bulk - minimum_bulk > 0.002);
+        let step = liquid.step_with_viscous_heating(&[], &gate).unwrap();
+        for sample in &step.applied {
+            let temperature = sample.material.material().state_coordinate("T").unwrap();
+            close(sample.shear_rate_per_s, shear, 1e-8);
+            close(sample.divergence_magnitude_per_s, 15.0, 1e-8);
+            close(sample.bulk_power_w_m3, sourced_bulk_at(temperature, shear) * 225.0, 1e-7);
+        }
+        close(step.flow.viscous_heat_j, expected_heat, expected_heat * 1e-7);
+        close(step.flow.external_heat_j, 0.0, 0.0);
+        close(step.flow.balance_defect_j, 0.0, 2e-11);
+        close(liquid.total_enthalpy_j().unwrap(), report.target_enthalpy_j + expected_heat, 2e-11);
+    });
+}
+
+#[test]
+fn local_bulk_admission_checks_original_p1_vertices_before_averaging() {
+    let card = sourced_bulk_card(true);
+    let law = sourced_bulk_law(&card);
+    let surface = ResolvedLiquidSurfaceState::try_for_shear_rate_evolution(
+        law.reference_state().material().clone(), LiquidViscosityBasis::Dynamic, "T", "rate",
+    ).unwrap();
+    let caloric = chart(&card, 1000.0);
+    let (points, tets, _) = cube([0.0; 3]);
+    let h: Vec<_> = points.iter().copied().map(affine_h).collect();
+    let velocities: Vec<_> = points.iter().map(|point| [20.0 * (point[1] - 0.004), 0.0, 0.0]).collect();
+    let before = (points.clone(), tets.clone(), velocities.clone(), h.clone());
+    let gate = CancelGate::new_clock_free();
+    with_cx(&gate, |cx| {
+        let scaling = plan_free_surface_from_material(&surface, 0.001, 0.0005, 0.1)
+            .unwrap().with_bulk_viscosity_source("bulk_eta", 1.2).unwrap();
+        assert!(scaling.free_surface3_from_tetrahedra_with_enthalpy_and_rheology(
+            domain(), [0.0; 3], source(&points, &tets, &velocities, &h),
+            &law, &caloric, bounds(), Default::default(), solve(), cx, &gate,
+        ).is_err());
+    });
+    assert_eq!((points, tets, velocities, h), before);
 }
 
 #[test]

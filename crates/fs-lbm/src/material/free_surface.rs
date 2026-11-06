@@ -83,7 +83,7 @@ pub struct MaterialFreeSurfaceScaling<'a> {
     surface_tension_lattice: f64,
     planar_wetting: Option<(PlanarWall3, &'a ResolvedLiquidWettingState)>,
     density_dependent_gravity: bool,
-    bulk_viscosity: Option<bulk::BulkViscosity>,
+    bulk_viscosity: Option<bulk::BulkViscosity<'a>>,
 }
 
 /// Stationary voxel domain and explicitly chosen numerical wall model.
@@ -250,6 +250,7 @@ impl<'a> MaterialFreeSurfaceScaling<'a> {
                 "shear-rate material requires the evolving free-surface rheology constructor",
             ));
         }
+        self.admit_frozen_bulk_source()?;
         Ok(())
     }
 

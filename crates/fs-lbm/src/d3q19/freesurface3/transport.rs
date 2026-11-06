@@ -215,7 +215,14 @@ impl FreeSurface3 {
         location: MassLocation3,
         tau: f64,
     ) -> Result<f64, FreeSurfaceError3> {
-        Ok(self.transport_strain_rates(location, tau)?[0])
+        if !tau.is_finite() || tau <= 0.5 {
+            return Err(FreeSurfaceError3::Transport("invalid stress relaxation"));
+        }
+        let rate = self.transport_stress_numerators(location)?[0] / tau;
+        if !rate.is_finite() {
+            return Err(FreeSurfaceError3::Transport("unrepresentable liquid strain rate"));
+        }
+        Ok(rate)
     }
 
     /// Deviatoric shear and sqrt(2/3)|div(u)| in lattice units. Tied models
@@ -227,11 +234,37 @@ impl FreeSurface3 {
         location: MassLocation3,
         tau: f64,
     ) -> Result<[f64; 2], FreeSurfaceError3> {
+        if !tau.is_finite() || tau <= 0.5 {
+            return Err(FreeSurfaceError3::Transport("invalid stress relaxation"));
+        }
+        let coordinates = Self::transport_coordinates(location)
+            .ok_or(FreeSurfaceError3::Transport("carry has no resolved stress"))?;
+        let model = self.collision_model_at(coordinates)?;
+        let components = self.transport_stress_numerators(location)?;
+        let dilation = match model {
+            crate::d3q19::CollisionModel3::CentralMomentBulk { bulk_rate, .. } => components[1] * bulk_rate,
+            _ => components[1] / tau,
+        };
+        let rates = [components[0] / tau, dilation];
+        if rates.iter().any(|rate| !rate.is_finite() || *rate < 0.0) {
+            return Err(FreeSurfaceError3::Transport("unrepresentable liquid strain rate"));
+        }
+        Ok(rates)
+    }
+
+    /// Guo-corrected deviatoric and spherical stress numerators before either
+    /// molecular relaxation is applied. Newly wet source queries may use these
+    /// moments before their local bulk coefficient has been resolved; no
+    /// constitutive rate or collision coefficient is fabricated by this read.
+    pub(crate) fn transport_stress_numerators(
+        &self,
+        location: MassLocation3,
+    ) -> Result<[f64; 2], FreeSurfaceError3> {
         let MassLocation3::Cell(key, lane) = location else {
             return Err(FreeSurfaceError3::Transport("carry has no resolved stress"));
         };
-        if !tau.is_finite() || tau <= 0.5 {
-            return Err(FreeSurfaceError3::Transport("invalid stress relaxation"));
+        if self.tiles.get(&key).is_none_or(|tile| tile.cells[lane] == Cell3::Gas) {
+            return Err(FreeSurfaceError3::Transport("stress requires an active liquid cell"));
         }
         let slot = self.grid.slot_of(key).ok_or(FreeSurfaceError3::Transport(
             "stress requires an active liquid cell",
@@ -242,27 +275,19 @@ impl FreeSurface3 {
         }
         let force = self.force_at_lane(key, lane);
         let u = core::array::from_fn(|d| raw[d] + 0.5 * force[d] / rho);
-        let model = self.collision_model();
         let components = crate::d3q19::rheology_stress_components3(
             &self.grid.populations(slot, lane),
             rho,
             u,
             force,
-            model,
+            crate::d3q19::CollisionModel3::Bgk { tau: 1.0 },
         );
-        let bulk_tau = if matches!(model, crate::d3q19::CollisionModel3::CentralMomentBulk { .. }) {
-            // The canonical helper has already applied the independent rate.
-            1.0
-        } else {
-            tau
-        };
-        let rates = [components[0] / tau, components[1] / bulk_tau];
-        if rates.iter().any(|rate| !rate.is_finite() || *rate < 0.0) {
+        if components.iter().any(|rate| !rate.is_finite() || *rate < 0.0) {
             return Err(FreeSurfaceError3::Transport(
                 "unrepresentable liquid strain rate",
             ));
         }
-        Ok(rates)
+        Ok(components)
     }
 
     pub(crate) fn mass_snapshot(&self) -> BTreeMap<MassLocation3, f64> {

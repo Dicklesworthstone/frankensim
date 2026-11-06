@@ -13789,12 +13789,14 @@ constitutive coupling checks, not experimental validation of a liquid.
 
 `FreeSurface3::set_central_moment_bulk` selects the existing D3Q19 central-moment
 operator, retaining the molecular shear rate and authored independent trace and
-higher rates. Prepared analytic and source-resolved rheology replace only shear
-relaxation. Material plans select `with_bulk_viscosity(zeta_pa_s, higher_rate)`;
+higher rates. Prepared analytic rheology replaces only shear relaxation.
+Material plans select `with_bulk_viscosity(zeta_pa_s, higher_rate)` for a
+uniform coefficient;
 the shared dense/free-surface conversion is
 `tau_bulk = 1/2 + (9/2) zeta dt/(rho0 dx^2)`. This is an explicitly authored
-uniform physical scalar, not a temperature/pressure/composition source law or a
-coefficient inferred from numerical damping. Zero/unrepresentable viscosity or
+uniform physical scalar, without a coefficient inferred from numerical damping.
+The separate source selection below retains a material law.
+Zero/unrepresentable viscosity or
 rates outside `(0,2)` refuse without a floor. D2Q9 and sparse SGS consumers
 explicitly refuse this selection.
 
@@ -13802,14 +13804,39 @@ Native/P1 initialization uses `tau_s dev(D) + tau_bulk tr(D) I/3` for the retain
 nonequilibrium second moment. Frozen and thermally refreshed viscous heating use
 `mu gamma^2 + zeta (div u)^2`, with separate diagnostic powers and absolute
 divergence; neither carry nor zero-mass ghosts receive heat. Thermal feedback
-holds the independent trace rate while local temperature/shear changes the
-source viscosity. The default still retains the original `zeta=2mu/3` arithmetic.
+holds the independent trace rate for a uniform authored bulk coefficient.
+The default still retains the original `zeta=2mu/3` arithmetic.
 Runtime coefficient setters preserve populations and therefore change the
 inferred trace strain; selecting the plan before initialization preserves an
 authored initial gradient. This supplies no reversible pressure work, surface
 energy, compressible EOS, physical acoustic speed or discrete kinetic-energy
 thermalization claim. Focused regressions cover forced moments, source shear
 independence, actual collision, transfer heat and thermal bulk/shear separation.
+
+`with_bulk_viscosity_source(property, higher_rate)` instead binds one already
+selected positive Pa s property in the original material bundle. The original
+card, complete scalar requirement and selected claim remain pinned. The same
+temperature, deviatoric-shear and supported pressure query supplies both mu and
+zeta; all retained properties pass the existing source-axis admission. Frozen
+consumers permit only source support appropriate to their held coordinates.
+Missing sources, unsupported dynamics and invalid relaxation refuse.
+
+The sparse native owner applies a complete local bulk-rate field alongside the
+local shear rates. Every wet collision cell, including empty interface
+carriers, requires its own admitted rate. New wet cells first expose raw stress
+numerators to the material query, and the complete source field is installed
+before publication. Isothermal, moving-wall and thermal endpoints retain this
+same rule. Failed or cancelled coefficient replacement leaves accepted state
+unchanged.
+
+P1 transfer validates original vertices and pinned source support lines, then
+initializes shear and trace moments with coefficients from each receiver's same
+material sample. Thermal feedback retains raw trace stress and recomputes both
+zeta and tau_bulk at every fresh material evaluation; it never reuses a stale
+trace rate with a new coefficient. Reported bulk viscosity, bulk relaxation and
+separate shear/bulk powers identify the applied response. Focused regressions
+cover spatially varying source coefficients, the first transferred heat step,
+nonlinear thermal feedback, strict local fields and refusal without mutation.
 
 ## Implicit conduction inside phase-resistance heat/volume coupling
 

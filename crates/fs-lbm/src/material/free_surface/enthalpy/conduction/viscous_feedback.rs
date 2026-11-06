@@ -17,6 +17,10 @@ pub struct FreeSurfaceViscousFeedbackSample {
     pub shear_power_w_m3: f64,
     /// Applied volumetric molecular stress power [W/m3].
     pub bulk_power_w_m3: f64,
+    /// Source-local or uniformly authored bulk coefficient [Pa s], or `2mu/3`.
+    pub bulk_viscosity_pa_s: f64,
+    /// Molecular trace relaxation for this SAME thermal/material evaluation.
+    pub bulk_collision_tau: f64,
     /// Physical molecular collision coefficient used in that reconstruction.
     pub collision_tau: f64,
     /// Located original liquid mass / reference density [m3].
@@ -43,18 +47,19 @@ struct StressCell {
     volume_m3: f64,
     /// Guo-corrected deviatoric gamma_lattice * tau, held during thermal splitting.
     numerator: f64,
-    /// Spherical stress numerator for tied models, or the already reconstructed
-    /// sqrt(2/3)|div u| for an independently held bulk rate.
+    /// Raw spherical stress numerator for tied/source-local models. A uniform
+    /// independent coefficient retains its already reconstructed dilation,
+    /// preserving the original arithmetic on that unchanged physical law.
     dilation_numerator: f64,
 }
 
 #[derive(Clone)]
-pub(super) struct ViscousFeedback {
+pub(super) struct ViscousFeedback<'s> {
     cells: Vec<StressCell>,
     dx: f64,
     dt: f64,
     maximum_speed: f64,
-    independent_bulk_pa_s: Option<f64>,
+    scaling: crate::material::free_surface::MaterialFreeSurfaceScaling<'s>,
     // These cache only the immutable source/stress binding of this candidate.
     // Never reuse a response across a different enthalpy bit pattern or step.
     last_applied_h: Vec<u64>,
@@ -62,7 +67,7 @@ pub(super) struct ViscousFeedback {
     pub(super) report: FreeSurfaceViscousFeedbackReport,
 }
 
-impl ViscousFeedback {
+impl<'s> ViscousFeedback<'s> {
     fn cached(&self, id: CellId, h: f64) -> Option<&FreeSurfaceViscousFeedbackSample> {
         // The original thermal owner assigns consecutive liquid IDs before
         // any finite-body IDs. Verify the binding instead of trusting an index.
@@ -84,7 +89,7 @@ impl ViscousFeedback {
     }
 
     pub(super) fn prepare(
-        liquid: &MaterialFreeSurfaceEnthalpy3<'_, '_>,
+        liquid: &MaterialFreeSurfaceEnthalpy3<'s, '_>,
         ids: &BTreeMap<MassLocation3, CellId>,
         thermal: &DepositionSimulation<'_>,
         gate: &CancelGate,
@@ -95,8 +100,11 @@ impl ViscousFeedback {
             let coordinates = FreeSurface3::transport_coordinates(location).ok_or(
                 Error::Invalid("molecular power requires a located liquid cell"),
             )?;
-            let [numerator, dilation_numerator] =
-                liquid.flow.lattice.transport_strain_rates(location, 1.0)?;
+            let [numerator, dilation_numerator] = if liquid.flow.scaling.bulk_viscosity_property().is_some() {
+                liquid.flow.lattice.transport_stress_numerators(location)?
+            } else {
+                liquid.flow.lattice.transport_strain_rates(location, 1.0)?
+            };
             if [numerator, dilation_numerator].iter().any(|value| !value.is_finite() || *value < 0.0) {
                 return Err(Error::Invalid("unrepresentable liquid stress numerator"));
             }
@@ -113,7 +121,7 @@ impl ViscousFeedback {
             dx: liquid.flow.scaling.cell_size_m(),
             dt: liquid.flow.scaling.timestep_s(),
             maximum_speed: liquid.flow.scaling.flow.u_lattice * liquid.flow.scaling.velocity_scale,
-            independent_bulk_pa_s: liquid.flow.scaling.bulk_viscosity_pa_s(),
+            scaling: liquid.flow.scaling,
             last_applied_h: Vec::new(),
             thermal_endpoint_h: Vec::new(),
             report: FreeSurfaceViscousFeedbackReport {
@@ -163,11 +171,17 @@ impl Conduction<'_, '_> {
                 let rate = (cell.numerator / scaling.tau) / feedback.dt;
                 (material, rate, scaling.tau)
             };
-            let bulk_tau = if feedback.independent_bulk_pa_s.is_some() { 1.0 } else { tau };
-            let dilation = (cell.dilation_numerator / bulk_tau) / feedback.dt;
+            let independent_bulk = feedback.scaling.bulk_viscosity_at(material.material())?;
+            let bulk_rate = feedback.scaling.bulk_relaxation_rate_at(material.material())?;
+            let dilation = if feedback.scaling.bulk_viscosity_property().is_some() {
+                (cell.dilation_numerator * bulk_rate.expect("bound source bulk")) / feedback.dt
+            } else {
+                let divisor = if independent_bulk.is_some() { 1.0 } else { tau };
+                (cell.dilation_numerator / divisor) / feedback.dt
+            };
             let mu = material.dynamic_viscosity_pa_s();
             let [shear_power, bulk_power] = super::super::viscous::molecular_power(
-                rate, dilation, mu, feedback.independent_bulk_pa_s,
+                rate, dilation, mu, independent_bulk,
             );
             let divergence = dilation * 1.5_f64.sqrt();
             let power = shear_power + bulk_power;
@@ -193,6 +207,8 @@ impl Conduction<'_, '_> {
                 divergence_magnitude_per_s: divergence,
                 shear_power_w_m3: shear_power,
                 bulk_power_w_m3: bulk_power,
+                bulk_viscosity_pa_s: independent_bulk.unwrap_or((2.0 / 3.0) * mu),
+                bulk_collision_tau: bulk_rate.map_or(tau, |rate| 1.0 / rate),
                 collision_tau: tau,
                 liquid_volume_m3: cell.volume_m3,
                 power_w_m3: power,

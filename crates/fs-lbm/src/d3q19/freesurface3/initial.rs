@@ -50,6 +50,21 @@ impl FreeSurface3 {
         strain: [f64; 6],
         tau: f64,
     ) -> Result<(), FreeSurfaceError3> {
+        self.initialize_strain_at_with_bulk(coordinates, strain, tau, None)
+    }
+
+    /// Initialize a private transfer candidate using the SAME source sample's
+    /// shear and bulk coefficients. A supplied bulk rate overrides only the
+    /// trace while its complete source field is being assembled; it does not
+    /// change the accepted collision binding or advance any physical state.
+    /// None uses the cell's currently applied collision law.
+    pub(crate) fn initialize_strain_at_with_bulk(
+        &mut self,
+        coordinates: [usize; 3],
+        strain: [f64; 6],
+        tau: f64,
+        bulk_rate: Option<f64>,
+    ) -> Result<(), FreeSurfaceError3> {
         let fail = |reason| refused(Some(coordinates), reason);
         if !tau.is_finite() || tau <= 0.5 || strain.iter().any(|v| !v.is_finite()) {
             return Err(fail("initial viscous strain or relaxation is inadmissible"));
@@ -59,6 +74,16 @@ impl FreeSurface3 {
             .filter(|state| matches!(state.cell, Cell3::Fluid | Cell3::Interface)
                 && state.fill_fraction > 0.0)
             .ok_or_else(|| fail("initial viscous strain requires an occupied liquid cell"))?;
+        let collision = match (bulk_rate, self.collision_model()) {
+            (Some(bulk_rate), super::super::CollisionModel3::CentralMomentBulk {
+                shear_rate, higher_order_rate, ..
+            }) => super::super::CollisionModel3::CentralMomentBulk {
+                shear_rate, bulk_rate, higher_order_rate,
+            },
+            (Some(_), _) => return Err(fail("initial independent bulk stress requires its collision family")),
+            (None, _) => self.collision_model_at(coordinates)?,
+        };
+        collision.validate().map_err(|_| fail("initial bulk relaxation is inadmissible"))?;
         // Retain the exact existing equilibrium/Guo representation at zero
         // strain, including rigid-motion input and its density reduction.
         if strain == [0.0; 6] {
@@ -74,7 +99,7 @@ impl FreeSurface3 {
         // Pi_neq = -2 rho cs^2 [tau_s dev(D) + tau_b tr(D) I/3].
         // Each physical stress mode restores its OWN half-collision factor;
         // using tau-1/2 here would seed the wrong physical deformation rate.
-        let expected = match self.collision_model() {
+        let expected = match collision {
             super::super::CollisionModel3::CentralMomentBulk { bulk_rate, .. } => {
                 let [xx, yy, zz, xy, xz, yz] = strain;
                 let rate = fs_material::fluid_transport::viscous::DeformationRate::from_tensor(
@@ -322,6 +347,7 @@ impl FreeSurface3 {
             solid,
             sigma,
             local_sigma: None,
+            local_bulk_relaxation: None,
             redistribution: ConversionRedistribution3::default(),
             contact,
             planar_contact: None,

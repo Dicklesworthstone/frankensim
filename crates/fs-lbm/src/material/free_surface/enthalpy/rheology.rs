@@ -393,6 +393,28 @@ impl<'s, 'm> MaterialFreeSurfaceEnthalpy3<'s, 'm> {
         Ok(())
     }
 
+    /// Bind an already selected positive Pa s claim to both source-local
+    /// collision and molecular heat. The same retained material response owns
+    /// shear and bulk viscosity. An unowned pressure/rate dependence, missing
+    /// claim, invalid relaxation or observed cancellation publishes nothing.
+    pub fn set_bulk_viscosity_source(
+        &mut self,
+        property: &str,
+        higher_order_rate: f64,
+        gate: &CancelGate,
+    ) -> Result<(), Error> {
+        poll(gate)?;
+        let scaling = self.flow.scaling.with_bulk_viscosity_source(property, higher_order_rate)?;
+        if self.rheology.is_none() { scaling.admit_frozen_bulk_source()?; }
+        scaling.bulk_relaxation_rate_at(self.law.reference_state().material())?;
+        let field = scaling.source_bulk_relaxations(
+            self.states.iter().map(|(&location, material)| (location, material.material())), gate,
+        )?.expect("bound bulk source");
+        scaling.apply_source_bulk_field(&mut self.flow.lattice, field, gate)?;
+        self.flow.scaling = scaling;
+        Ok(())
+    }
+
     /// Current rate, physical collision coefficient and local convergence check.
     #[must_use]
     pub fn rheology_at(&self, coordinates: [usize; 3]) -> Option<&FreeSurfaceRheologySample> {

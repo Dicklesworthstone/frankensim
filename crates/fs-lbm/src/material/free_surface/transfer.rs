@@ -464,10 +464,12 @@ impl<'a> MaterialFreeSurfaceScaling<'a> {
         check_projection(&original, &predicted, domain.gravity_m_s2, limits)?;
         let mut flow = self.free_surface3_from_cells_inner(domain, &initial, cx)?;
         if source_h.is_none() {
+            let bulk_rate = self.bulk_relaxation_rate_at(self.material().material())?;
             for (&coordinates, &strain) in &thermal.strain_per_s {
                 checkpoint(cx)?;
-                flow.lattice.initialize_strain_at(
+                flow.lattice.initialize_strain_at_with_bulk(
                     coordinates, strain.map(|value| value * self.timestep_s()), self.flow.tau,
+                    bulk_rate,
                 ).map_err(MaterialLbmError::from)?;
             }
         }
