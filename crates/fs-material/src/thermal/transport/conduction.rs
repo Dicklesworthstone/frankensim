@@ -20,6 +20,11 @@ pub use gray_boundary::IntegratedCaloricGrayBoundary;
 pub mod gray_link;
 pub use gray_link::IntegratedCaloricGrayLink;
 
+/// Original finite caloric bodies joined by a source-resolved two-surface law.
+#[path = "conduction/surface_link.rs"]
+pub mod surface_link;
+pub use surface_link::IntegratedCaloricSurfaceLink;
+
 use super::{
     isobaric::conduction::IsobaricConductionLaw, isochoric::conduction::IsochoricConductionLaw,
 };

@@ -2193,6 +2193,26 @@ their combined material/surface elimination rather than infer monotonicity.
 The original finite caloric storage, heat/entropy accounts and time solver
 remain owners; no new surface state, flow state or clock is introduced.
 
+### Two finite caloric coordinates and two actual surface temperatures
+
+`ImplicitSurfaceExchangeLaw` supplies one passive interface flux and separate
+partials in the ordered original energies and the two actual material-face
+temperatures. Each energy retains its original h/Cp or u/Cv meaning and exact
+caloric object. The source owns its complete interface, original coefficient
+data, external conditions and coupled support. Source bounds do not authorize
+extrapolation or substitute a face temperature for the body's stored energy.
+
+`ImplicitSurfaceExchangeState::from_conductance` forms j=G*(Tsa-Tsb) and
+its full product-rule derivatives from source-owned G partials, preserving
+zero-conductance onset. Direct state construction remains possible for an
+original law that already supplies the flux and its derivatives; the consuming
+material layer verifies passive flux/secant consistency at the actual query.
+These carriers introduce no surface storage, geometry/view inference or time
+integration. The material adapter eliminates its original conductivity
+profiles, combines explicit source and caloric derivatives, and enters the
+existing `ImplicitLinkLaw` owner. Original finite heat/entropy accounting and
+transactional chain/graph stepping remain authoritative.
+
 ## Implicit upwind enthalpy with native conduction
 
 `ImplicitConductionChain::with_implicit_advection` and its graph counterpart

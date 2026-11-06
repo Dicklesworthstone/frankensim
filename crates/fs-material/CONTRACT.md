@@ -8694,6 +8694,53 @@ asymmetric coverage, source-domain, disjoint-support, insulation and exact
 radiation-disabled contact limits. All 25 focused native original Cp/Cv and
 integrated exchange tests pass.
 
+## Live two-surface sources on original finite Cp/Cv networks
+
+`IntegratedCaloricSurfaceLink` binds the source-resolved material surface
+kernel to the ORIGINAL ordered finite caloric cells through
+`ImplicitLinkLaw`. Each original k(T) profile is prepared once and borrowed.
+The original h/Cp or u/Cv storage, cell mass, caloric identity, accepted time
+and entropy remain with the native chain/graph. Preparation immediately uses
+the actual source and its supported face intervals; it does not require an
+intermediate perfect-contact state.
+
+One `ImplicitSurfaceExchangeLaw` evaluates both original specific energies
+and both ACTUAL solved surface temperatures. This admits temperature-dependent
+contact/gap transport and declared radiative exchange with cross-coupled
+source response. Each energy bound lies within its own original material
+chart, and exact ordered caloric objects must match. Face support may be
+narrower than the material charts and exclude either bulk temperature. The
+source must admit its complete coupled query; interval bounds alone do not
+authorize extrapolation. Geometry is planar with equal actual covered areas,
+and the same source owns the entire interface.
+
+The complete native energy tangent combines the original material/surface
+endpoint derivatives times their original 1/Cp or 1/Cv with the explicit source
+partials at fixed faces, scaled by the SAME surface balance's A/D. No bulk
+dk/de term is added to the differentiated conductivity integral. Signed
+feedback and zero-conductance onset retain both original energy derivatives.
+The same native secant applies the ONE accepted heat transfer; no independent
+conduction/radiation deposit, extra surface inventory or second clock is added.
+
+`ImplicitSurfaceExchangeState::from_conductance` applies the exact product
+rule for j=G(e_A,e_B,Tsa,Tsb)*(Tsa-Tsb), including G=0 onset. Its inputs are
+source-owned conductance partials; it infers no material data, heat-conversion
+policy, emissivity or view factors. General enclosures continue to use the
+existing radiosity owner. Trial evaluation allocates no adapter tables and
+retains the accepted source result without re-query; source evaluation keeps
+its own costs. Original geometry mismatch, source failure and cancellation
+cannot publish a partial native thermal step.
+
+Four new native integration tests pass: live gray/HTC exchange with crossed
+energy/face dependencies against independent quadratic-k/quartic calculations
+and full original-energy finite differences; actual mixed-Cv/U and Cp/H BE
+evolution with energy, entropy and late cancellation/retry; independent face
+support plus identity/geometry/domain refusals; and zero-conductance onset with
+positive cold-side differential feedback. Together with the preceding kernel
+increment, 48 selected native tests pass. Complete thermal production and
+focused material sources compile; full workspace gates remain unavailable
+because external constellation dependencies are absent.
+
 ## Source-resolved exchange between two material surfaces
 
 `TwoLayerConduction::evaluate_surface_exchange` closes both original supported

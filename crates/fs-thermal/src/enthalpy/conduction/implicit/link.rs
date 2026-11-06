@@ -9,6 +9,10 @@ use std::collections::BTreeMap;
 mod radiation;
 pub use radiation::{GrayRadiativeControls, GrayRadiativeLink, GrayRadiativeResponse};
 
+#[path = "link/surface.rs"]
+mod surface;
+pub use surface::{ImplicitSurfaceExchangeLaw, ImplicitSurfaceExchangeState};
+
 /// One passive link flux and its full derivatives at the same trial state.
 /// Positive power is from A to B: `Q = G * (T_A - T_B)`. The derivatives
 /// differentiate this complete Q, not G, with the other enthalpy held fixed.
@@ -85,7 +89,9 @@ impl<'a> ImplicitConductionChain<'a> {
                 .conduction
                 .links
                 .get(&id)
-                .ok_or(ImplicitConductionError::Invalid("inactive implicit flux link"))?;
+                .ok_or(ImplicitConductionError::Invalid(
+                    "inactive implicit flux link",
+                ))?;
             if self.contacts.contains_key(&id) || bindings.insert(id, law).is_some() {
                 return Err(ImplicitConductionError::Invalid(
                     "implicit link flux needs a unique owner without a separate contact law",
