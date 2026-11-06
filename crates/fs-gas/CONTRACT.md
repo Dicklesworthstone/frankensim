@@ -38,6 +38,44 @@ the plasma's neutron energy debit unchanged. Downstream owners choose their
 emission-time and energy projection explicitly; no deposit or spectrum is
 inferred from an escaped-energy scalar.
 
+## Accepted-interval fusion neutron histories
+
+`DtFusionSolve::record_neutron_history` (also shared by `FusionNetworkSolve`)
+opts into one `FusionNeutronIntervalV1` per accepted adaptive interval. It is
+false by default. The D-T, network and kinetic-alpha results expose the records
+through `neutron_history()`: disabled recording is `None`, while a recorded
+zero-duration solve is `Some` with an empty slice. Positive-duration intervals
+with zero emission remain present, so the accepted clock has no artificial gaps.
+Both rigid and prescribed-volume entrypoints use the same option; moving-volume
+records end at every original geometry knot.
+
+Each trial keeps separate compensated D-T and D-D-neutron amounts and kinetic
+energies, credited directly by the original finite-stock reaction maps. The
+history never differences cumulative source accounts: a representable weak late
+source survives even when it is smaller than an ULP of the previous total.
+Midpoint predictors, coarse trials and rejected attempts are discarded. Only
+the accepted two-half solution contributes a record. Kinetic fusion obtains
+these moments from the same shared reaction owner while alpha births, collision
+heat, storage and pressure work retain their existing independent accounts.
+
+Record boundaries are the native represented relative-time endpoints; their
+emission duration is exactly `end-start`. Separate interval reductions reproduce
+the cumulative accepted source to roundoff, without requiring bit equality of
+differently grouped sums. Recording does not alter source evaluation, local
+error control, accepted step selection or the physical state. Records supply
+integrated number/energy moments, not an intra-interval waveform or neutron
+spectrum; a downstream time/energy projection remains explicit, with its own
+resolution and domain requirements.
+
+Numerical trials remain allocation-free. Only requested accepted records may
+grow a vector, with fallible allocation and at most `maximum_steps` entries.
+The optional history stays private until final source/state publication and
+cancellation checks succeed; any refusal returns neither a partial state nor a
+partial history. Focused regressions cover changing D-T source intensity,
+rejected-step exclusion, late cancellation, empty histories and zero-emission
+intervals, both neutron channels, geometry boundaries, a late source below
+cumulative rounding resolution, and unchanged kinetic/confinement evolution.
+
 ## Kinetic fusion through prescribed compression and expansion
 
 `fusion::kinetic::advance_adiabatic_kinetic_fusion_volume` moves an original

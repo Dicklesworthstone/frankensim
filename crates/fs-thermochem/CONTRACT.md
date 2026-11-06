@@ -10,12 +10,23 @@ contains neutrons. Empty channels create no fictitious zero-energy particles.
 The fixed-size representation checks finite/nonnegative data, consistent
 number/energy pairs, positive duration for emission, and representable totals.
 
+`FusionNeutronIntervalV1` retains one complete emission with its original
+accepted start/end times. Both endpoints must be finite and nonnegative,
+and end must be strictly after start. The emission duration must exactly
+match the represented endpoint difference. The immutable, fixed-size record
+never moves an endpoint, changes a duration, or rescales number/energy
+moments to accommodate clock roundoff. Empty emission can occupy a positive
+interval. This supplies accepted source history without selecting an
+emission profile inside a step.
+
 This is a common L1 handoff for already accepted source accounts. It creates
 neither a neutron spectrum nor a temporal/angular emission profile, and it
 does not turn emitted kinetic energy into heat. Consumers must explicitly
 choose their projection, transport, deposition and validity assumptions.
 Focused G0/G3 regressions cover channel identity, SI count/energy conversion,
 empty intervals, invalid domains, arithmetic extremes and extensive scaling.
+Interval regressions also cover exact endpoint retention, empty steps, invalid
+windows and duration mismatch at ordinary and large absolute clock offsets.
 
 ## Original-source isotropic test-ion energy drift and diffusion
 

@@ -110,6 +110,7 @@ pub struct KineticFusionResult {
     elapsed: Time,
     balance: FusionNetworkBalance,
     alpha_balance: KineticAlphaBalance,
+    neutron_history: Option<Vec<FusionNeutronIntervalV1>>,
 }
 impl KineticFusionResult {
     pub const fn state(&self) -> &KineticFusionState {
@@ -156,6 +157,13 @@ impl KineticFusionResult {
     }
     pub const fn alpha_balance(&self) -> KineticAlphaBalance {
         self.alpha_balance
+    }
+    /// Accepted relative-time neutron intervals from the same hybrid evolution.
+    /// Recording is opt-in and includes only direct accepted reaction moments,
+    /// independently of alpha storage, slowing heat and pressure work. An empty
+    /// recorded solve has an empty slice; disabled recording returns `None`.
+    pub fn neutron_history(&self) -> Option<&[FusionNeutronIntervalV1]> {
+        self.neutron_history.as_deref()
     }
 }
 
@@ -285,7 +293,8 @@ fn advance(
         controls,
         &mut cancelled,
     )?;
-    let (point, mut balance) = problem.integrate(duration.value(), &mut cancelled)?;
+    let (point, mut balance, neutron_history) =
+        problem.integrate(duration.value(), &mut cancelled)?;
     let (state, alpha_balance) = problem.publish(point, &mut balance, &mut cancelled)?;
     poll(&mut cancelled)?;
     Ok(KineticFusionResult {
@@ -300,6 +309,7 @@ fn advance(
         elapsed: duration,
         balance,
         alpha_balance,
+        neutron_history,
     })
 }
 

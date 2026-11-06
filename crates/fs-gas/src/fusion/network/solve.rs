@@ -1,3 +1,4 @@
+use super::super::emission::{self, NeutronMoments};
 use super::super::solve::{Sum, frozen_depletion};
 use super::super::thermal::{self, ThermalSources};
 use super::super::volume::{adiabatic_work_on_pools, log_volume_ratio};
@@ -27,6 +28,7 @@ pub(super) struct Point {
     deposited: [Sum; 2], // heavy, electron
     ion_removal: Sum,
     neutrons: Sum,
+    pub(super) neutron_interval: Option<NeutronMoments>,
     exchange: Sum,
     photons: Sum,
 }
@@ -169,6 +171,10 @@ impl<'a> Problem<'a> {
             deposited: [Sum::default(); 2],
             ion_removal: Sum::default(),
             neutrons: Sum::default(),
+            neutron_interval: self
+                .controls
+                .record_neutron_history
+                .then(NeutronMoments::default),
             exchange: Sum::default(),
             photons: Sum::default(),
         }
@@ -392,6 +398,9 @@ impl<'a> Problem<'a> {
             next.products[r][p].add(energy);
             if *product == NuclearSpeciesV1::Neutron {
                 next.neutrons.add(energy);
+                if let Some(moments) = &mut next.neutron_interval {
+                    moments.add(r, extent, energy);
+                }
             } else {
                 next.amounts[indices[species_slot(*product)]].add(extent);
                 if self.kinetic_alphas && *product == NuclearSpeciesV1::Helium4 {
@@ -700,17 +709,18 @@ impl<'a> Problem<'a> {
         &self,
         duration: f64,
         cancelled: &mut impl FnMut() -> bool,
-    ) -> Result<(Point, FusionNetworkBalance), FusionNetworkError> {
+    ) -> Result<(Point, FusionNetworkBalance, emission::NeutronHistory), FusionNetworkError> {
         let mut point = self.start();
         // Compensate accepted elapsed increments. Repeatedly rounding t+h
         // can otherwise leave an unresolvable sliver at an authored endpoint.
         let mut clock = Sum::default();
         let mut balance = FusionNetworkBalance::default();
+        let mut neutron_history = self.controls.record_neutron_history.then(Vec::new);
         let mut step = self.controls.initial_step_s;
         for _ in 0..self.controls.maximum_steps {
             poll(cancelled)?;
             if point.time == duration {
-                return Ok((point, balance));
+                return Ok((point, balance, neutron_history));
             }
             let next_boundary = if let Some(history) = self.volume_history {
                 history
@@ -731,8 +741,12 @@ impl<'a> Problem<'a> {
                 return Err(FusionNetworkError::StepBudget);
             }
             let trial = (|| {
-                let full = self.midpoint(point, end_time, cancelled)?;
-                let half = self.midpoint(point, middle_time, cancelled)?;
+                let mut start = point;
+                if let Some(moments) = &mut start.neutron_interval {
+                    *moments = NeutronMoments::default();
+                }
+                let full = self.midpoint(start, end_time, cancelled)?;
+                let half = self.midpoint(start, middle_time, cancelled)?;
                 let fine = self.midpoint(half, end_time, cancelled)?;
                 self.admit(fine, cancelled)?;
                 let error = self.error(point, full, fine)?;
@@ -740,6 +754,12 @@ impl<'a> Problem<'a> {
             })();
             let error = match trial {
                 Ok((next, error)) if error <= 1.0 => {
+                    emission::record_interval(
+                        &mut neutron_history,
+                        point.time,
+                        next.time,
+                        next.neutron_interval,
+                    )?;
                     point = next;
                     clock = next_clock;
                     balance.accepted_steps += 1;
@@ -773,7 +793,7 @@ impl<'a> Problem<'a> {
             }
         }
         if point.time == duration {
-            Ok((point, balance))
+            Ok((point, balance, neutron_history))
         } else {
             Err(FusionNetworkError::StepBudget)
         }

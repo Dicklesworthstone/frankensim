@@ -42,6 +42,7 @@ use fs_thermochem::coulomb::{CoulombErrorV1, CoulombModelV1};
 use fs_thermochem::equilibrium::composition::{
     FrozenIonizedGasStateErrorV1, FrozenIonizedGasStateV1,
 };
+use fs_thermochem::fusion::neutrons::{FusionNeutronIntervalV1, NeutronEmissionErrorV1};
 use fs_thermochem::fusion::plasma::{
     DtFusionPlasmaErrorV1, DtFusionPlasmaLimitsV1, DtFusionPlasmaV1,
 };
@@ -184,6 +185,10 @@ pub struct DtFusionSolve {
     pub maximum_step_s: f64,
     /// Maximum total accepted and rejected attempts, at most one million.
     pub maximum_steps: usize,
+    /// Retain one channel-resolved neutron record per accepted time interval.
+    /// Disabled by default; enabling it allocates a bounded history only on
+    /// accepted steps. History and final state publish together on success.
+    pub record_neutron_history: bool,
 }
 
 impl DtFusionSolve {
@@ -211,6 +216,7 @@ impl DtFusionSolve {
             minimum_step_s: 1e-18,
             maximum_step_s: 1.0,
             maximum_steps: 100_000,
+            record_neutron_history: false,
         }
     }
 
@@ -258,12 +264,16 @@ pub enum DtFusionError {
     Coulomb(CoulombErrorV1),
     /// Original radiation source or physical-domain refusal.
     Radiation(BremsstrahlungErrorV1),
+    /// Accepted neutron moments could not be represented by the shared source.
+    NeutronEmission(NeutronEmissionErrorV1),
     /// Final common ionized-gas state could not be published.
     State(FrozenIonizedGasStateErrorV1),
     /// The selected source/temperature/positivity domain was exhausted.
     OutsideDomain,
     /// The declared attempt or minimum-step budget was exhausted.
     StepBudget,
+    /// Optional output storage could not be allocated.
+    Allocation(&'static str),
     /// A physical result could not be represented as finite f64.
     Arithmetic(&'static str),
     /// An independently evaluated energy or inventory account failed.
@@ -335,6 +345,7 @@ pub struct DtFusionResult {
     controls: DtFusionSolve,
     elapsed: Time,
     balance: DtFusionBalance,
+    neutron_history: Option<Vec<FusionNeutronIntervalV1>>,
 }
 
 impl DtFusionResult {
@@ -369,6 +380,14 @@ impl DtFusionResult {
     /// Complete independently checked interval accounts.
     pub const fn balance(&self) -> DtFusionBalance {
         self.balance
+    }
+    /// Accepted relative-time intervals with direct D–T neutron moments.
+    /// Returns `None` unless recording was requested, and an empty slice for
+    /// a recorded zero-duration solve. Rejected trials and midpoint predictors
+    /// never enter this history. A consumer chooses its intra-interval source
+    /// projection; the records do not assert a resolved emission waveform.
+    pub fn neutron_history(&self) -> Option<&[FusionNeutronIntervalV1]> {
+        self.neutron_history.as_deref()
     }
     /// Escaped neutron amount, outside the material/chemical species bank.
     pub const fn neutron_amount(&self) -> Amount {
@@ -452,7 +471,8 @@ pub fn advance_dt_fusion_with_transport(
         controls,
         &mut cancelled,
     )?;
-    let (point, mut balance) = problem.integrate(duration.value(), &mut cancelled)?;
+    let (point, mut balance, neutron_history) =
+        problem.integrate(duration.value(), &mut cancelled)?;
     let state = problem.publish(point, &mut balance, &mut cancelled)?;
     poll(&mut cancelled)?;
     Ok(DtFusionResult {
@@ -464,6 +484,7 @@ pub fn advance_dt_fusion_with_transport(
         controls,
         elapsed: duration,
         balance,
+        neutron_history,
     })
 }
 

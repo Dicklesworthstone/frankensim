@@ -1,3 +1,4 @@
+use super::emission::NeutronMoments;
 use super::*;
 use fs_math::det::{exp, expm1, pow};
 
@@ -37,6 +38,7 @@ pub(super) struct Point {
     alpha_energy: Sum,
     ion_removal: Sum,
     neutron_energy: Sum,
+    neutron_interval: Option<NeutronMoments>,
     coulomb_transfer: Sum,
     photon_energy: Sum,
 }
@@ -128,6 +130,10 @@ impl<'a> Problem<'a> {
             alpha_energy: Sum::default(),
             ion_removal: Sum::default(),
             neutron_energy: Sum::default(),
+            neutron_interval: self
+                .controls
+                .record_neutron_history
+                .then(NeutronMoments::default),
             coulomb_transfer: Sum::default(),
             photon_energy: Sum::default(),
         }
@@ -290,7 +296,11 @@ impl<'a> Problem<'a> {
         next.extent.add(extent);
         next.alpha_energy.add(alpha_energy);
         next.ion_removal.add(removed_energy);
-        next.neutron_energy.add((neutron * AVOGADRO) * extent);
+        let neutron_energy = (neutron * AVOGADRO) * extent;
+        next.neutron_energy.add(neutron_energy);
+        if let Some(moments) = &mut next.neutron_interval {
+            moments.add(0, extent, neutron_energy);
+        }
         let fraction = self.heating.alpha_electron_fraction;
         self.add_pool_energy(
             &mut next,
@@ -379,14 +389,15 @@ impl<'a> Problem<'a> {
         &self,
         duration: f64,
         cancelled: &mut impl FnMut() -> bool,
-    ) -> Result<(Point, DtFusionBalance), DtFusionError> {
+    ) -> Result<(Point, DtFusionBalance, emission::NeutronHistory), DtFusionError> {
         let mut point = self.start();
         let mut balance = DtFusionBalance::default();
+        let mut neutron_history = self.controls.record_neutron_history.then(Vec::new);
         let mut step = self.controls.initial_step_s;
         for _ in 0..self.controls.maximum_steps {
             poll(cancelled)?;
             if point.time == duration {
-                return Ok((point, balance));
+                return Ok((point, balance, neutron_history));
             }
             let remaining = duration - point.time;
             let dt = step.min(self.controls.maximum_step_s).min(remaining);
@@ -394,8 +405,12 @@ impl<'a> Problem<'a> {
                 return Err(DtFusionError::StepBudget);
             }
             let trial = (|| {
-                let full = self.midpoint(point, dt, cancelled)?;
-                let half = self.midpoint(point, 0.5 * dt, cancelled)?;
+                let mut start = point;
+                if let Some(moments) = &mut start.neutron_interval {
+                    *moments = NeutronMoments::default();
+                }
+                let full = self.midpoint(start, dt, cancelled)?;
+                let half = self.midpoint(start, 0.5 * dt, cancelled)?;
                 let mut fine = self.midpoint(half, 0.5 * dt, cancelled)?;
                 // Hit the authored interval endpoint despite half-step rounding.
                 fine.time = point.time + dt;
@@ -405,6 +420,12 @@ impl<'a> Problem<'a> {
             })();
             let error = match trial {
                 Ok((next, error)) if error <= 1.0 => {
+                    emission::record_interval(
+                        &mut neutron_history,
+                        point.time,
+                        next.time,
+                        next.neutron_interval,
+                    )?;
                     point = next;
                     balance.accepted_steps += 1;
                     balance.maximum_normalized_local_error =
@@ -438,7 +459,7 @@ impl<'a> Problem<'a> {
             }
         }
         if point.time == duration {
-            Ok((point, balance))
+            Ok((point, balance, neutron_history))
         } else {
             Err(DtFusionError::StepBudget)
         }

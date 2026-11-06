@@ -5,9 +5,10 @@
 //! SI Avogadro constant, subject only to binary64 representation. Fractional
 //! expected particle counts are admitted for continuum source models.
 //!
-//! These are integrated moments, not a neutron spectrum or a source history.
-//! A consumer must explicitly choose its time/energy projection and transport
-//! domain. In particular, emitted energy is not automatically deposited heat.
+//! These are integrated moments, not a neutron spectrum. An interval record
+//! retains the exact accepted start/end times without assigning a within-step
+//! emission profile. Consumers explicitly choose time/energy projections and
+//! transport domains; emitted energy is not automatically deposited heat.
 
 use super::FusionReactionV1;
 use crate::electron_collision::AVOGADRO_PER_MOL;
@@ -18,6 +19,10 @@ use fs_qty::{Amount, Energy, Time};
 pub enum NeutronEmissionErrorV1 {
     /// Duration must be finite and nonnegative, and positive for any emission.
     InvalidDuration,
+    /// Start/end times must be finite, nonnegative and strictly increasing.
+    InvalidInterval,
+    /// The retained emission duration must exactly equal end minus start.
+    InconsistentIntervalDuration,
     /// A channel amount is negative or nonfinite.
     InvalidAmount(FusionReactionV1),
     /// A channel's integrated kinetic energy is negative or nonfinite.
@@ -198,6 +203,62 @@ impl FusionNeutronEmissionV1 {
     /// Sum of the separately converted channel particle counts.
     pub const fn total_particle_count(&self) -> f64 {
         self.total_particle_count
+    }
+}
+
+/// One accepted fusion-neutron emission on its original physical clock.
+///
+/// The complete channel accounts are retained unchanged. Start/end times
+/// locate the interval; they do not specify the emission profile within it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FusionNeutronIntervalV1 {
+    start: Time,
+    end: Time,
+    emission: FusionNeutronEmissionV1,
+}
+
+impl FusionNeutronIntervalV1 {
+    /// Retain a finite, strictly positive interval with its integrated emission.
+    /// The emission duration must exactly equal the represented `end - start`.
+    /// Producers should derive that duration from their accepted endpoints;
+    /// no tolerance, clock adjustment or rescaling changes the source moments.
+    /// Empty emission is admitted over a positive interval.
+    pub fn new(
+        start: Time,
+        end: Time,
+        emission: FusionNeutronEmissionV1,
+    ) -> Result<Self, NeutronEmissionErrorV1> {
+        if !start.value().is_finite()
+            || !end.value().is_finite()
+            || start.value() < 0.0
+            || end.value() < 0.0
+            || end.value() <= start.value()
+        {
+            return Err(NeutronEmissionErrorV1::InvalidInterval);
+        }
+        if emission.duration().value() != end.value() - start.value() {
+            return Err(NeutronEmissionErrorV1::InconsistentIntervalDuration);
+        }
+        Ok(Self {
+            start,
+            end,
+            emission,
+        })
+    }
+
+    /// Original accepted start time [s].
+    pub const fn start(&self) -> Time {
+        self.start
+    }
+
+    /// Original accepted end time [s].
+    pub const fn end(&self) -> Time {
+        self.end
+    }
+
+    /// Unchanged channel-resolved integrated emission over this interval.
+    pub const fn emission(&self) -> &FusionNeutronEmissionV1 {
+        &self.emission
     }
 }
 

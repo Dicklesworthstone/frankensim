@@ -1,5 +1,6 @@
 use super::*;
 use fs_thermochem::fusion::{KELVIN_PER_KEV, NuclearSpeciesV1, SPEED_OF_LIGHT_M_S};
+pub(super) mod history;
 #[path = "../../examples/dt_fusion/source.rs"]
 mod source;
 mod transport;
@@ -202,7 +203,10 @@ fn g0_burn_closes_source_energy_charge_baryons_and_mass_defect() {
     assert_eq!(emission.channels()[1].amount().value(), 0.0);
     assert_eq!(emission.channels()[1].mean_particle_energy(), None);
     close(
-        emission.channels()[0].mean_particle_energy().unwrap().value()
+        emission.channels()[0]
+            .mean_particle_energy()
+            .unwrap()
+            .value()
             * emission.total_particle_count(),
         b.neutron_energy_escaped_j,
         4e-15,

@@ -18,6 +18,7 @@ use super::volume::FusionVolumeHistory;
 use super::{AVOGADRO, CV_MOLAR, poll, positive};
 use fs_qty::{Amount, Energy, Power, Time};
 use fs_thermochem::equilibrium::composition::FrozenIonizedGasStateV1;
+use fs_thermochem::fusion::neutrons::FusionNeutronIntervalV1;
 use fs_thermochem::fusion::plasma::LightIonFusionPlasmaV1;
 use fs_thermochem::fusion::{FusionReactionV1, NuclearSpeciesV1};
 
@@ -186,6 +187,7 @@ pub struct FusionNetworkResult {
     controls: FusionNetworkSolve,
     elapsed: Time,
     balance: FusionNetworkBalance,
+    neutron_history: Option<Vec<FusionNeutronIntervalV1>>,
 }
 impl FusionNetworkResult {
     /// Accepted original-bank state, reusable by other admitted physics owners.
@@ -227,6 +229,14 @@ impl FusionNetworkResult {
     /// Independently checked particle and energy accounts.
     pub const fn balance(&self) -> FusionNetworkBalance {
         self.balance
+    }
+    /// Direct D–T and D–D neutron moments over accepted relative-time intervals.
+    /// Recording is opt-in; disabled solves return `None`, and recorded
+    /// zero-duration solves return an empty slice. Only the accepted two-half
+    /// solution contributes, and no interval crosses a prescribed volume knot.
+    /// A downstream source must declare its intra-interval time projection.
+    pub fn neutron_history(&self) -> Option<&[FusionNeutronIntervalV1]> {
+        self.neutron_history.as_deref()
     }
     /// Emitted neutron inventory for an explicitly separate transport consumer.
     pub const fn neutron_amount(&self) -> Amount {
@@ -344,7 +354,8 @@ fn advance(
         controls,
         &mut cancelled,
     )?;
-    let (point, mut balance) = problem.integrate(duration.value(), &mut cancelled)?;
+    let (point, mut balance, neutron_history) =
+        problem.integrate(duration.value(), &mut cancelled)?;
     let state = problem.publish(point, &mut balance, &mut cancelled)?;
     poll(&mut cancelled)?;
     Ok(FusionNetworkResult {
@@ -358,6 +369,7 @@ fn advance(
         controls,
         elapsed: duration,
         balance,
+        neutron_history,
     })
 }
 

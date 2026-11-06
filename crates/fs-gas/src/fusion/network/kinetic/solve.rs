@@ -1,5 +1,6 @@
 use super::super::solve as burn;
 use super::*;
+use crate::fusion::emission::{self, NeutronMoments};
 use crate::fusion::kinetic::AlphaCollisionOperator;
 use crate::fusion::solve::Sum;
 use crate::fusion::volume::{adiabatic_work_on_pools, log_volume_ratio};
@@ -374,15 +375,16 @@ impl<'a> Problem<'a> {
         &self,
         duration: f64,
         cancelled: &mut impl FnMut() -> bool,
-    ) -> Result<(Point, FusionNetworkBalance), FusionNetworkError> {
+    ) -> Result<(Point, FusionNetworkBalance, emission::NeutronHistory), FusionNetworkError> {
         let mut point = self.start();
         let mut clock = Sum::default();
         let mut balance = FusionNetworkBalance::default();
+        let mut neutron_history = self.controls.record_neutron_history.then(Vec::new);
         let mut step = self.controls.initial_step_s;
         for _ in 0..self.controls.maximum_steps {
             poll(cancelled)?;
             if point.core.time == duration {
-                return Ok((point, balance));
+                return Ok((point, balance, neutron_history));
             }
             let next_boundary = if let Some(history) = self.volume_history {
                 history
@@ -403,14 +405,24 @@ impl<'a> Problem<'a> {
                 return Err(FusionNetworkError::StepBudget);
             }
             let attempt = (|| {
-                let full = self.midpoint(point, end, cancelled)?;
-                let half = self.midpoint(point, middle_time, cancelled)?;
+                let mut start = point;
+                if let Some(moments) = &mut start.core.neutron_interval {
+                    *moments = NeutronMoments::default();
+                }
+                let full = self.midpoint(start, end, cancelled)?;
+                let half = self.midpoint(start, middle_time, cancelled)?;
                 let fine = self.midpoint(half, end, cancelled)?;
                 self.physical_sources(fine, cancelled)?;
                 Ok::<_, FusionNetworkError>((fine, self.error(point, full, fine)?))
             })();
             let error = match attempt {
                 Ok((next, error)) if error <= 1.0 => {
+                    emission::record_interval(
+                        &mut neutron_history,
+                        point.core.time,
+                        next.core.time,
+                        next.core.neutron_interval,
+                    )?;
                     point = next;
                     clock = next_clock;
                     balance.accepted_steps += 1;
@@ -454,7 +466,7 @@ impl<'a> Problem<'a> {
             }
         }
         if point.core.time == duration {
-            Ok((point, balance))
+            Ok((point, balance, neutron_history))
         } else {
             Err(FusionNetworkError::StepBudget)
         }

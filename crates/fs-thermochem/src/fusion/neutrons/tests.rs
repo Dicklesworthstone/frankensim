@@ -193,3 +193,97 @@ fn g3_scaling_integrated_accounts_retains_each_channel_mean() {
         );
     }
 }
+
+#[test]
+fn g0_interval_preserves_original_clock_and_complete_channel_accounts() {
+    let start = Time::new(0.2);
+    let end = Time::new(0.6);
+    let emission = FusionNeutronEmissionV1::new(
+        Time::new(end.value() - start.value()),
+        [Amount::new(2e-6), Amount::new(3e-6)],
+        [Energy::new(5.0), Energy::new(7.0)],
+    )
+    .unwrap();
+    let interval = FusionNeutronIntervalV1::new(start, end, emission).unwrap();
+    let copy = interval;
+    assert_eq!(interval, copy);
+    assert_eq!(interval.start(), start);
+    assert_eq!(interval.end(), end);
+    assert_eq!(interval.emission(), &emission);
+}
+
+#[test]
+fn g0_interval_retains_empty_emission_only_on_a_positive_matching_window() {
+    let emission =
+        FusionNeutronEmissionV1::new(Time::new(0.5), [Amount::new(0.0); 2], [Energy::new(0.0); 2])
+            .unwrap();
+    let interval = FusionNeutronIntervalV1::new(Time::new(2.0), Time::new(2.5), emission).unwrap();
+    assert_eq!(interval.emission(), &emission);
+    assert_eq!(interval.emission().total_particle_count(), 0.0);
+    let zero_duration =
+        FusionNeutronEmissionV1::new(Time::new(0.0), [Amount::new(0.0); 2], [Energy::new(0.0); 2])
+            .unwrap();
+    assert_eq!(
+        FusionNeutronIntervalV1::new(Time::new(2.0), Time::new(2.5), zero_duration),
+        Err(NeutronEmissionErrorV1::InconsistentIntervalDuration)
+    );
+}
+
+#[test]
+fn g3_interval_rejects_invalid_clock_windows_without_retiming_emission() {
+    let emission = FusionNeutronEmissionV1::new(
+        Time::new(0.5),
+        [Amount::new(1e-6), Amount::new(0.0)],
+        [Energy::new(2.0), Energy::new(0.0)],
+    )
+    .unwrap();
+    for (start, end) in [
+        (-1.0, -0.5),
+        (-0.5, 0.0),
+        (1.0, 1.0),
+        (1.0, 0.5),
+        (f64::NAN, 0.5),
+        (0.0, f64::NAN),
+        (f64::INFINITY, f64::INFINITY),
+        (0.0, f64::INFINITY),
+        (f64::NEG_INFINITY, 0.5),
+    ] {
+        assert_eq!(
+            FusionNeutronIntervalV1::new(Time::new(start), Time::new(end), emission),
+            Err(NeutronEmissionErrorV1::InvalidInterval)
+        );
+    }
+    assert_eq!(
+        FusionNeutronIntervalV1::new(Time::new(1.0), Time::new(2.0), emission),
+        Err(NeutronEmissionErrorV1::InconsistentIntervalDuration)
+    );
+}
+
+#[test]
+fn g3_interval_requires_exact_duration_at_ordinary_and_large_clock_offsets() {
+    for (start, end, authored_duration) in [
+        (0.2, 0.6, 0.4),
+        (2.0_f64.powi(52), 2.0_f64.powi(52) + 0.75, 0.75),
+    ] {
+        assert_ne!(end - start, authored_duration);
+        let emission = FusionNeutronEmissionV1::new(
+            Time::new(authored_duration),
+            [Amount::new(1e-6), Amount::new(0.0)],
+            [Energy::new(2.0), Energy::new(0.0)],
+        )
+        .unwrap();
+        assert_eq!(
+            FusionNeutronIntervalV1::new(Time::new(start), Time::new(end), emission),
+            Err(NeutronEmissionErrorV1::InconsistentIntervalDuration)
+        );
+        let matching = FusionNeutronEmissionV1::new(
+            Time::new(end - start),
+            emission.channels().map(|channel| channel.amount()),
+            emission.channels().map(|channel| channel.kinetic_energy()),
+        )
+        .unwrap();
+        let interval =
+            FusionNeutronIntervalV1::new(Time::new(start), Time::new(end), matching).unwrap();
+        assert_eq!(interval.emission(), &matching);
+    }
+}

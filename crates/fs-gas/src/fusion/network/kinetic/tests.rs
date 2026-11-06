@@ -17,6 +17,7 @@ mod fixture;
 
 mod compression;
 mod confinement;
+mod history;
 
 const KEV_J: f64 = 1.602_176_634e-16;
 const BOLTZMANN: f64 = 1.380_649e-23;
