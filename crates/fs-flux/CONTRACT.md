@@ -1522,6 +1522,16 @@ reuse, both immutable histories and the homogeneous source adapter.
 
 ## Nonlinear pressure-driven flow with explicit backflow behavior
 
+`solve_navier_stokes_mixed`, its frozen spatial-viscosity variant, and
+`solve_navier_stokes_mixed_rheology` solve the true steady equations with
+convection and symmetric viscous stress. Their initial velocity is a nonlinear
+guess only: the original assembly receives zero mass coefficient and no
+history. They reuse the mixed Picard endpoint checks, physical boundary
+reactions, Navier-slip law, reservoir momentum and explicit backflow policies.
+Steady boundary admission retains the original rigid-mode anchoring refusal;
+no fictitious timestep or inertia makes an unanchored domain admissible.
+Nonlinear controls and finite initial moments are checked before callbacks.
+
 `bdf1_navier_stokes_mixed_step` advances constant-density incompressible
 Navier–Stokes with backward Euler and endpoint convection. Its frozen spatial
 viscosity counterpart admits `nu(cell, point)` without changing the physical
@@ -1552,11 +1562,13 @@ traction and backflow analysis see Dong and Shen (2015), JCP 291, 254–278,
 is not implemented here.
 
 The existing bounded mixed Picard loop is shared with constitutive Stokes.
-Boundary samples are admitted once, every iteration uses the same old mass
-history, and acceptance requires the unrelaxed correction and independently
+Boundary samples are admitted once. Transient calls retain the same old mass
+history; steady calls have no mass/history term. Acceptance requires the
+unrelaxed correction and independently
 reassembled original and row-scaled endpoint residuals. Under-relaxation never
 changes the timestep or physical loads. Exhausted work or any invalid input
-returns no endpoint. Inertia anchors entirely open components; closed
+returns no endpoint. Transient inertia anchors entirely open components.
+Steady solves require the original physical rigid-mode anchors; closed
 components retain independent pressure gauges and flux compatibility.
 `NavierStokesStep` retains each open edge's selected policy with the nonlinear
 work and residuals. The SI `MaterialFluxSystem` entry binds the same source

@@ -380,3 +380,289 @@ fn invalid_or_unconverged_nonlinear_steps_never_publish_history() {
     assert!(calls.get() > 0);
     assert!(previous.iter().all(|v| *v == 0.0));
 }
+
+// G1: affine nonzero convection with a real impermeable Navier-slip wall.
+// grad(u)=[[.3,.2],[0,-.3]], gamma^2=.4, u.grad(u)=[.09*x+.12,.09*y].
+// For nu=.5+s*x, div(2 nu D(u))=[.6*s,.2*s]. The open total traction
+// fixes p=5+shift+2*x-3*y; no transient mass or velocity history is present.
+#[test]
+fn steady_mixed_flow_resolves_convection_slip_and_material_rate() {
+    let mesh = TriMesh::from_mesh2(&Mesh2::triangles(1.0, 1.0, 2, 2));
+    let system = FluxSystem::new(&mesh);
+    let params = FluxParams::default();
+    let controls = NavierStokesControls {
+        relative_tolerance: 1e-10,
+        ..NavierStokesControls::default()
+    };
+    let target = |p: [f64; 2]| [0.3 * p[0] + 0.2 * p[1] + 0.4, -0.3 * p[1]];
+    let initial = vec![0.0; system.n_u];
+    for slope in [0.0, 0.1] {
+        let viscosity = |_: usize, p: [f64; 2]| 0.5 + slope * p[0];
+        let force = |p: [f64; 2]| {
+            [
+                0.09 * p[0] + 2.12 - 0.6 * slope,
+                0.09 * p[1] - 3.0 - 0.2 * slope,
+            ]
+        };
+        // On y=0, t.tau.n=-.2*nu=-beta*(u_x-wall_x), beta=.8.
+        let wall = |p: [f64; 2]| [0.3 * p[0] + 0.4 - 0.25 * viscosity(0, p), 0.0];
+        let mut velocities = Vec::new();
+        for shift in [0.0, 17.0] {
+            let traction = |p: [f64; 2], n: [f64; 2]| {
+                let pressure = 5.0 + shift + 2.0 * p[0] - 3.0 * p[1];
+                let nu = viscosity(0, p);
+                [
+                    (0.6 * nu - pressure) * n[0] + 0.2 * nu * n[1],
+                    0.2 * nu * n[0] + (-0.6 * nu - pressure) * n[1],
+                ]
+            };
+            let boundaries: Vec<_> = mesh
+                .edges
+                .iter()
+                .enumerate()
+                .filter(|(edge, _)| mesh.is_boundary(*edge))
+                .map(|(edge, face)| {
+                    if face.normal[0].abs() > 0.5 {
+                        NavierStokesBoundary::Open {
+                            edge,
+                            traction: &traction,
+                            backflow: OpenBoundaryPolicy::NaturalTraction,
+                        }
+                    } else if face.normal[1] < 0.0 {
+                        NavierStokesBoundary::NavierSlip {
+                            edge,
+                            value: &wall,
+                            tangential_resistance_m_s: 0.8,
+                        }
+                    } else {
+                        NavierStokesBoundary::Velocity {
+                            edge,
+                            value: &target,
+                        }
+                    }
+                })
+                .collect();
+            let check = |solved: &fs_flux::NavierStokesStep| {
+                let (error, divergence) = system.velocity_error(&solved.solution.field.x, &target);
+                assert!(error < 2e-9 && divergence < 2e-9, "{error}, {divergence}");
+                assert!(solved.nonlinear_residual <= controls.relative_tolerance);
+                assert_eq!(
+                    solved.solution.pressure_reference,
+                    StokesPressureReference::TractionDatum
+                );
+                for (actual, point) in solved.solution.pressure.iter().zip(&mesh.centroids) {
+                    let expected = 5.0 + shift + 2.0 * point[0] - 3.0 * point[1];
+                    assert!((actual - expected).abs() < 3e-8, "{actual} != {expected}");
+                }
+                assert!(
+                    solved
+                        .open_boundary_policies
+                        .iter()
+                        .all(|(_, policy)| *policy == OpenBoundaryPolicy::NaturalTraction)
+                );
+            };
+            let solved = system
+                .solve_navier_stokes_mixed_variable_viscosity(
+                    params,
+                    &viscosity,
+                    &force,
+                    &boundaries,
+                    &initial,
+                    controls,
+                )
+                .unwrap();
+            check(&solved);
+            assert!(solved.iterations > 1);
+            if slope == 0.0 && shift == 0.0 {
+                let constant = system
+                    .solve_navier_stokes_mixed(
+                        FluxParams { nu: 0.5, ..params },
+                        &force,
+                        &boundaries,
+                        &initial,
+                        controls,
+                    )
+                    .unwrap();
+                check(&constant);
+                for (a, b) in constant
+                    .solution
+                    .field
+                    .x
+                    .iter()
+                    .zip(&solved.solution.field.x)
+                {
+                    assert!((a - b).abs() < 2e-10);
+                }
+            }
+            if slope > 0.0 && shift == 0.0 {
+                let max_rate = Cell::new(0.0_f64);
+                let law = |cell: usize, point: [f64; 2], rate: f64| {
+                    max_rate.set(max_rate.get().max(rate));
+                    viscosity(cell, point) * (1.0 + 0.2 * rate * rate) / 1.08
+                };
+                let rheology = system
+                    .solve_navier_stokes_mixed_rheology(
+                        params,
+                        &law,
+                        &force,
+                        &boundaries,
+                        &initial,
+                        controls,
+                    )
+                    .unwrap();
+                check(&rheology);
+                assert!(max_rate.get() > 0.6);
+                let stokes: Vec<_> = boundaries
+                    .iter()
+                    .map(|boundary| match *boundary {
+                        NavierStokesBoundary::Velocity { edge, value } => {
+                            StokesBoundary::Velocity { edge, value }
+                        }
+                        NavierStokesBoundary::NavierSlip {
+                            edge,
+                            value,
+                            tangential_resistance_m_s,
+                        } => StokesBoundary::NavierSlip {
+                            edge,
+                            value,
+                            tangential_resistance_m_s,
+                        },
+                        NavierStokesBoundary::Open { edge, traction, .. }
+                        | NavierStokesBoundary::OpenReservoir { edge, traction, .. } => {
+                            StokesBoundary::TotalTraction {
+                                edge,
+                                value: traction,
+                            }
+                        }
+                    })
+                    .collect();
+                let creeping = system
+                    .assemble_stokes_mixed_variable_viscosity(params, &viscosity, &force, &stokes)
+                    .unwrap()
+                    .solve()
+                    .unwrap();
+                assert!(system.velocity_error(&creeping.field.x, &target).0 > 1e-4);
+                assert!(matches!(
+                    system.solve_navier_stokes_mixed_variable_viscosity(
+                        params,
+                        &viscosity,
+                        &force,
+                        &boundaries,
+                        &initial,
+                        NavierStokesControls {
+                            maximum_iterations: 1,
+                            ..controls
+                        },
+                    ),
+                    Err(StokesBoundaryError::Rheology(
+                        fs_flux::FluxRheologyError::NonlinearConvergence { .. }
+                    ))
+                ));
+            }
+            velocities.push(solved.solution.field.x[..system.n_u].to_vec());
+        }
+        for (a, b) in velocities[0].iter().zip(&velocities[1]) {
+            assert!((a - b).abs() < 2e-9);
+        }
+    }
+    assert!(initial.iter().all(|value| *value == 0.0));
+}
+
+// G0/G3: initial guesses never provide fictitious inertia or ground an open
+// component. Admission precedes boundary, load and constitutive callbacks.
+#[test]
+fn steady_mixed_refuses_unanchored_components_before_source_queries() {
+    let mesh = TriMesh::from_mesh2(&Mesh2::triangles(1.0, 1.0, 1, 1));
+    let system = FluxSystem::new(&mesh);
+    let params = FluxParams::default();
+    let controls = NavierStokesControls::default();
+    let calls = Cell::new(0);
+    let traction = |_: [f64; 2], _: [f64; 2]| {
+        calls.set(calls.get() + 1);
+        [0.0; 2]
+    };
+    let force = |_: [f64; 2]| {
+        calls.set(calls.get() + 1);
+        [0.0; 2]
+    };
+    let viscosity = |_: usize, _: [f64; 2]| {
+        calls.set(calls.get() + 1);
+        1.0
+    };
+    let law = |cell, point, _| viscosity(cell, point);
+    let boundaries = open(&mesh, &traction, OpenBoundaryPolicy::NaturalTraction);
+    let initial = vec![0.0; system.n_u];
+    assert!(matches!(
+        system.solve_navier_stokes_mixed(params, &force, &boundaries, &initial, controls),
+        Err(StokesBoundaryError::NoVelocityBoundary)
+    ));
+    assert!(matches!(
+        system.solve_navier_stokes_mixed_variable_viscosity(
+            params,
+            &viscosity,
+            &force,
+            &boundaries,
+            &initial,
+            controls,
+        ),
+        Err(StokesBoundaryError::NoVelocityBoundary)
+    ));
+    assert!(matches!(
+        system.solve_navier_stokes_mixed_rheology(
+            params,
+            &law,
+            &force,
+            &boundaries,
+            &initial,
+            controls,
+        ),
+        Err(StokesBoundaryError::NoVelocityBoundary)
+    ));
+    for invalid in [vec![], vec![f64::NAN; system.n_u]] {
+        assert!(matches!(
+            system.solve_navier_stokes_mixed_rheology(
+                params,
+                &law,
+                &force,
+                &boundaries,
+                &invalid,
+                controls,
+            ),
+            Err(StokesBoundaryError::InvalidInput(_))
+        ));
+    }
+    let disconnected = separate_domains();
+    let pair = FluxSystem::new(&disconnected);
+    let mixed: Vec<_> = disconnected
+        .edges
+        .iter()
+        .enumerate()
+        .filter(|(edge, _)| disconnected.is_boundary(*edge))
+        .map(|(edge, face)| {
+            if pair.pressure_components()[face.tris.0] == 0 {
+                NavierStokesBoundary::Velocity {
+                    edge,
+                    value: &force,
+                }
+            } else {
+                NavierStokesBoundary::Open {
+                    edge,
+                    traction: &traction,
+                    backflow: OpenBoundaryPolicy::NaturalTraction,
+                }
+            }
+        })
+        .collect();
+    assert!(matches!(
+        pair.solve_navier_stokes_mixed(params, &force, &mixed, &vec![0.0; pair.n_u], controls,),
+        Err(StokesBoundaryError::UnanchoredComponent { component: 1 })
+    ));
+    assert_eq!(calls.get(), 0);
+
+    // Real BDF1 inertia still admits the same all-open component.
+    let transient =
+        system.bdf1_navier_stokes_mixed_step(params, &force, &boundaries, &initial, 0.1, controls);
+    assert!(transient.is_ok());
+    assert!(calls.get() > 0);
+    assert!(initial.iter().all(|value| *value == 0.0));
+}

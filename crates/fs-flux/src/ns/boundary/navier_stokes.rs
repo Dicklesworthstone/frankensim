@@ -1,4 +1,4 @@
-//! Fully implicit pressure-driven flow on the original BDM1/P0 operators.
+//! Steady and fully implicit pressure-driven flow on the original BDM1/P0 operators.
 
 use super::{
     AdmittedBoundary, StokesAssembly, StokesBoundary, StokesBoundaryError, StokesRheologyControls,
@@ -85,7 +85,7 @@ pub enum NavierStokesBoundary<'a> {
 /// Bounded Picard controls shared with the existing mixed constitutive solver.
 pub type NavierStokesControls = StokesRheologyControls;
 
-/// A nonlinear endpoint accepted against its own convection and viscosity.
+/// A steady or implicit endpoint accepted against its own convection and viscosity.
 pub struct NavierStokesStep {
     /// Velocity and pressure with component-local datums and actual endpoint
     /// residuals, rather than only the last frozen Oseen solve's residuals.
@@ -102,6 +102,160 @@ pub struct NavierStokesStep {
 }
 
 impl<'m> FluxSystem<'m> {
+    /// Solve steady incompressible flow with mixed velocity, slip and open
+    /// total-traction boundaries:
+    /// `div(u tensor u) - div(2 nu D(u)) + grad(p) = f`.
+    ///
+    /// The initial velocity is only a nonlinear guess; there is no mass term,
+    /// history load or artificial timestep. Each connected component needs the
+    /// original steady velocity/slip support; all-open components are refused.
+    /// The same admitted boundary samples, conservative convection and endpoint
+    /// reactions are retained. Both nonlinear residuals and the unrelaxed
+    /// correction must satisfy the existing controls before publication.
+    ///
+    /// Force and pressure are divided by the same constant reference density,
+    /// velocity is m/s and mesh coordinates metres. Callbacks must remain pure
+    /// and fixed. Open-boundary policies retain their literal stress meaning;
+    /// this solve does not imply convergence, uniqueness or stability for
+    /// arbitrary flow data.
+    ///
+    /// # Errors
+    /// Refuses invalid guesses/controls, unanchored components, inadmissible
+    /// boundaries/coefficients, failed linear solves and exhausted iterations.
+    pub fn solve_navier_stokes_mixed(
+        &self,
+        params: FluxParams,
+        force: &dyn Fn([f64; 2]) -> [f64; 2],
+        boundaries: &[NavierStokesBoundary<'_>],
+        initial_velocity: &[f64],
+        controls: NavierStokesControls,
+    ) -> Result<NavierStokesStep, StokesBoundaryError> {
+        if !params.nu.is_finite() || params.nu <= 0.0 {
+            return Err(StokesBoundaryError::InvalidInput(
+                "invalid Navier–Stokes viscosity",
+            ));
+        }
+        self.solve_navier_stokes_mixed_variable_viscosity(
+            params,
+            &|_, _| params.nu,
+            force,
+            boundaries,
+            initial_velocity,
+            controls,
+        )
+    }
+
+    /// Steady convection with a frozen positive spatial `nu(cell, point)`
+    /// [m²/s]. The original symmetric stress and harmonic one-sided SIP weights
+    /// are retained. `params.nu` is unused; no strain queries or material
+    /// evolution are added to this frozen-viscosity path.
+    ///
+    /// # Errors
+    /// Inherits [`Self::solve_navier_stokes_mixed`] acceptance and refusals.
+    #[allow(clippy::too_many_arguments)]
+    pub fn solve_navier_stokes_mixed_variable_viscosity(
+        &self,
+        params: FluxParams,
+        viscosity: &dyn Fn(usize, [f64; 2]) -> f64,
+        force: &dyn Fn([f64; 2]) -> [f64; 2],
+        boundaries: &[NavierStokesBoundary<'_>],
+        initial_velocity: &[f64],
+        controls: NavierStokesControls,
+    ) -> Result<NavierStokesStep, StokesBoundaryError> {
+        self.solve_navier_stokes_mixed_endpoint(
+            params,
+            boundaries,
+            initial_velocity,
+            controls,
+            0.0,
+            &[],
+            &|admitted, velocity| {
+                self.assemble_stokes_admitted_operator(
+                    params,
+                    viscosity,
+                    force,
+                    admitted,
+                    None,
+                    0.0,
+                    None,
+                    Some(&velocity[..self.n_u]),
+                )
+            },
+            &|| true,
+        )
+    }
+
+    /// Steady generalized-Newtonian flow with viscosity and convection at the
+    /// same accepted velocity. `law(cell, point, sqrt(2 D:D))` returns positive
+    /// finite kinematic viscosity [m²/s]; rate is in 1/s. Its temperature and
+    /// composition context stays fixed. `params.nu` is unused.
+    ///
+    /// The initial guess supplies the first objective strain. Every candidate
+    /// uses the full symmetric-stress operator, including one-sided face
+    /// tractions, and acceptance reassembles that law at the returned endpoint.
+    /// No pseudo-time mass, thermal evolution or viscoelastic memory is added.
+    ///
+    /// # Errors
+    /// Inherits [`Self::solve_navier_stokes_mixed`] acceptance and refusals.
+    #[allow(clippy::too_many_arguments)]
+    pub fn solve_navier_stokes_mixed_rheology(
+        &self,
+        params: FluxParams,
+        law: &dyn Fn(usize, [f64; 2], f64) -> f64,
+        force: &dyn Fn([f64; 2]) -> [f64; 2],
+        boundaries: &[NavierStokesBoundary<'_>],
+        initial_velocity: &[f64],
+        controls: NavierStokesControls,
+    ) -> Result<NavierStokesStep, StokesBoundaryError> {
+        self.solve_navier_stokes_mixed_rheology_checked(
+            params,
+            law,
+            force,
+            boundaries,
+            initial_velocity,
+            controls,
+            &|| true,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn solve_navier_stokes_mixed_rheology_checked(
+        &self,
+        params: FluxParams,
+        law: &dyn Fn(usize, [f64; 2], f64) -> f64,
+        force: &dyn Fn([f64; 2]) -> [f64; 2],
+        boundaries: &[NavierStokesBoundary<'_>],
+        initial_velocity: &[f64],
+        controls: NavierStokesControls,
+        source_is_valid: &dyn Fn() -> bool,
+    ) -> Result<NavierStokesStep, StokesBoundaryError> {
+        self.solve_navier_stokes_mixed_endpoint(
+            params,
+            boundaries,
+            initial_velocity,
+            controls,
+            0.0,
+            &[],
+            &|admitted, velocity| {
+                let rates = self.shear_rates(velocity);
+                if rates.iter().any(|rate| !rate.is_finite()) {
+                    return Err(StokesBoundaryError::InvalidInput("nonfinite shear rate"));
+                }
+                self.assemble_stokes_admitted_operator(
+                    params,
+                    &|cell, point| law(cell, point, rates[cell]),
+                    force,
+                    admitted,
+                    None,
+                    0.0,
+                    None,
+                    Some(&velocity[..self.n_u]),
+                )
+            },
+            source_is_valid,
+        )
+    }
+
     /// Assemble one BDF1 Oseen operator with an explicitly frozen advecting
     /// velocity. The nonlinear endpoint is supplied by
     /// [`Self::bdf1_navier_stokes_mixed_step`]. All callbacks belong to the new
@@ -675,7 +829,36 @@ impl<'m> FluxSystem<'m> {
         source_is_valid: &dyn Fn() -> bool,
     ) -> Result<NavierStokesStep, StokesBoundaryError> {
         self.check_mixed_bdf1_history(previous_velocity, timestep_s)?;
-        if controls.maximum_iterations == 0
+        self.solve_navier_stokes_mixed_endpoint(
+            params,
+            boundaries,
+            previous_velocity,
+            controls,
+            absolute_velocity_tolerance_m_s,
+            &vec![true; self.pressure_roots.len()],
+            assemble,
+            source_is_valid,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn solve_navier_stokes_mixed_endpoint<'a>(
+        &'a self,
+        params: FluxParams,
+        boundaries: &[NavierStokesBoundary<'_>],
+        initial_velocity: &[f64],
+        controls: NavierStokesControls,
+        absolute_velocity_tolerance_m_s: f64,
+        anchors_velocity: &[bool],
+        assemble: &dyn Fn(
+            &AdmittedBoundary,
+            &[f64],
+        ) -> Result<StokesAssembly<'a, 'm>, StokesBoundaryError>,
+        source_is_valid: &dyn Fn() -> bool,
+    ) -> Result<NavierStokesStep, StokesBoundaryError> {
+        if initial_velocity.len() != self.n_u
+            || initial_velocity.iter().any(|value| !value.is_finite())
+            || controls.maximum_iterations == 0
             || !absolute_velocity_tolerance_m_s.is_finite()
             || absolute_velocity_tolerance_m_s < 0.0
             || !controls.relative_tolerance.is_finite()
@@ -685,12 +868,16 @@ impl<'m> FluxSystem<'m> {
             || controls.relaxation > 1.0
         {
             return Err(StokesBoundaryError::InvalidInput(
-                "positive nonlinear budget/tolerance and relaxation in (0,1] required",
+                "finite velocity dofs, positive nonlinear budget/tolerance and relaxation in (0,1] required",
             ));
         }
-        let admitted = self.admit_navier_stokes_boundaries(params, boundaries)?;
+        let admitted = self.admit_navier_stokes_boundaries_with_velocity_anchors(
+            params,
+            boundaries,
+            anchors_velocity,
+        )?;
         let solved = self.solve_mixed_picard_with_velocity_tolerance(
-            previous_velocity,
+            initial_velocity,
             controls,
             absolute_velocity_tolerance_m_s,
             &|velocity| assemble(&admitted, velocity),
@@ -736,6 +923,19 @@ impl<'m> FluxSystem<'m> {
         params: FluxParams,
         boundaries: &[NavierStokesBoundary<'_>],
     ) -> Result<AdmittedBoundary, StokesBoundaryError> {
+        self.admit_navier_stokes_boundaries_with_velocity_anchors(
+            params,
+            boundaries,
+            &vec![true; self.pressure_roots.len()],
+        )
+    }
+
+    fn admit_navier_stokes_boundaries_with_velocity_anchors(
+        &self,
+        params: FluxParams,
+        boundaries: &[NavierStokesBoundary<'_>],
+        anchors_velocity: &[bool],
+    ) -> Result<AdmittedBoundary, StokesBoundaryError> {
         let stresses: Vec<_> = boundaries
             .iter()
             .map(|boundary| match *boundary {
@@ -760,11 +960,8 @@ impl<'m> FluxSystem<'m> {
                 }
             })
             .collect();
-        let mut admitted = self.admit_stokes_problem_with_velocity_anchors(
-            params,
-            &stresses,
-            &vec![true; self.pressure_roots.len()],
-        )?;
+        let mut admitted =
+            self.admit_stokes_problem_with_velocity_anchors(params, &stresses, anchors_velocity)?;
         let mut policies = vec![None; self.mesh.edges.len()];
         let mut reservoirs = boundaries
             .iter()
