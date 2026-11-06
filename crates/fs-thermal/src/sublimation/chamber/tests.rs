@@ -2,7 +2,7 @@ use super::super::{
     MOLAR_GAS_CONSTANT, SolidSurfaceState, SolverConfig, SublimationError, SublimationLaw,
     SublimationProperties, SurfaceKinetics, VaporReservoir,
 };
-use super::{ChamberSolverConfig, ChamberSurface, advance_chamber};
+use super::{ChamberSolverConfig, ChamberSurface, advance_chamber, advance_chamber_with_heat};
 
 const MOLAR_MASS: f64 = 0.020;
 const LATENT_HEAT: f64 = 500_000.0;
@@ -491,4 +491,183 @@ fn g1_finite_caloric_capacities_close_mass_sensible_and_latent_energy() {
         2.0e-12,
     );
     assert!(step.energy_residual_j.abs() <= 2.0e-7);
+}
+
+#[test]
+fn g1_signed_heat_drives_joint_emission_and_deposition_with_complete_local_balances() {
+    let surfaces = [surface(0.1, 0.02), surface(0.2, 0.03)];
+    let heat = [50.0, -25.0];
+    let capacity = [1000.0, 1800.0];
+    let initial_mass = 100.0 * 0.1 * MOLAR_MASS / (MOLAR_GAS_CONSTANT * 250.0);
+    let step = advance_chamber_with_heat(
+        &ReferenceLaw,
+        &surfaces,
+        reservoir(initial_mass, 250.0),
+        0.05,
+        &heat,
+        controls(),
+        |i, h| Ok(250.0 + h / capacity[i]),
+        || Ok(()),
+    )
+    .unwrap();
+    assert!(step.surfaces[0].transferred_mass_kg > 0.0);
+    assert!(step.surfaces[1].transferred_mass_kg < 0.0);
+    assert!(step.surfaces[0].surface_temperature_k > 250.0);
+    assert!(step.surfaces[1].surface_temperature_k < 250.0);
+    let temperatures: Vec<_> = step
+        .surfaces
+        .iter()
+        .map(|s| s.surface_temperature_k)
+        .collect();
+    let (expected_pressure, expected_transfers, _, _) =
+        isothermal_oracle(&surfaces, &temperatures, initial_mass, 250.0, 0.05);
+    let actual_pressure =
+        vapor_mass(step.reservoir) * MOLAR_GAS_CONSTANT * 250.0 / MOLAR_MASS / 0.1;
+    close(actual_pressure, expected_pressure, 2.0e-8);
+    let mut stored_change = 0.0;
+    let mut mass = vapor_mass(step.reservoir) - initial_mass;
+    for (i, (old, new)) in surfaces.iter().zip(&step.surfaces).enumerate() {
+        assert_eq!(new.reservoir, step.reservoir);
+        assert!(new.solid.mass_kg > 0.0);
+        assert_eq!(new.supplied_heat_j, heat[i]);
+        close(new.transferred_mass_kg, expected_transfers[i], 2.0e-12);
+        let stored = new.solid.mass_kg * new.solid.specific_enthalpy_j_kg
+            - old.solid.mass_kg * old.solid.specific_enthalpy_j_kg;
+        close(
+            stored + new.vapor_energy_j - heat[i],
+            new.energy_residual_j,
+            2.0e-8,
+        );
+        assert!(new.energy_residual_j.abs() <= 1.0e-7);
+        stored_change += stored;
+        mass += new.solid.mass_kg - old.solid.mass_kg;
+    }
+    assert!(vapor_mass(step.reservoir) >= 0.0);
+    close(mass, 0.0, 2.0e-14);
+    assert_eq!(step.supplied_heat_j, 25.0);
+    close(
+        stored_change + step.vapor_energy_j - step.supplied_heat_j,
+        step.energy_residual_j,
+        3.0e-8,
+    );
+    assert!(step.energy_residual_j.abs() <= 2.0e-7);
+}
+
+#[test]
+fn g1_heating_can_raise_shared_pressure_above_initial_equilibrium_envelope() {
+    let surfaces = [surface(0.1, 0.02), surface(0.2, 0.03)];
+    let initial_mass = 100.0 * 0.1 * MOLAR_MASS / (MOLAR_GAS_CONSTANT * 250.0);
+    let step = advance_chamber_with_heat(
+        &ReferenceLaw,
+        &surfaces,
+        reservoir(initial_mass, 250.0),
+        0.05,
+        &[20.0, 40.0],
+        controls(),
+        |_, h| Ok(250.0 + h / 1000.0),
+        || Ok(()),
+    )
+    .unwrap();
+    assert!(vapor_mass(step.reservoir) > initial_mass);
+    assert!(
+        step.surfaces
+            .iter()
+            .all(|s| s.surface_temperature_k > 250.0)
+    );
+    assert_eq!(step.supplied_heat_j, 60.0);
+    assert!(step.energy_residual_j.abs() <= 2.0e-7);
+}
+
+#[test]
+fn g1_supplied_chamber_heat_preserves_the_common_enthalpy_reference() {
+    let original = [surface(0.1, 0.02), surface(0.2, 0.03)];
+    let initial_mass = 100.0 * 0.1 * MOLAR_MASS / (MOLAR_GAS_CONSTANT * 250.0);
+    let run = |shift: f64| {
+        let surfaces = original.map(|mut s| {
+            s.solid.specific_enthalpy_j_kg += shift;
+            s
+        });
+        advance_chamber_with_heat(
+            &ReferenceLaw,
+            &surfaces,
+            reservoir(initial_mass, 250.0),
+            0.05,
+            &[50.0, -25.0],
+            controls(),
+            |_, h| Ok(250.0 + (h - shift) / 1000.0),
+            || Ok(()),
+        )
+        .unwrap()
+    };
+    let reference = run(0.0);
+    let shift = 1.0e6;
+    let shifted = run(shift);
+    close(
+        vapor_mass(shifted.reservoir),
+        vapor_mass(reference.reservoir),
+        2.0e-12,
+    );
+    assert_eq!(shifted.supplied_heat_j, reference.supplied_heat_j);
+    for (base, changed) in reference.surfaces.iter().zip(&shifted.surfaces) {
+        close(
+            changed.transferred_mass_kg,
+            base.transferred_mass_kg,
+            2.0e-12,
+        );
+        close(
+            changed.surface_temperature_k,
+            base.surface_temperature_k,
+            2.0e-8,
+        );
+        close(changed.latent_energy_j, base.latent_energy_j, 1.0e-6);
+        close(
+            changed.vapor_energy_j - base.vapor_energy_j,
+            shift * changed.transferred_mass_kg,
+            3.0e-6,
+        );
+        assert!(changed.energy_residual_j.abs() <= 2.0e-7);
+    }
+}
+
+#[test]
+fn g0_supplied_heat_validation_and_zero_heat_compatibility() {
+    let surfaces = [surface(0.1, 0.02), surface(0.2, 0.03)];
+    let gas = reservoir(2.0e-5, 250.0);
+    let base = advance_chamber(
+        &ReferenceLaw,
+        &surfaces,
+        gas,
+        0.05,
+        controls(),
+        |_, h| Ok(250.0 + h / 1000.0),
+        || Ok(()),
+    )
+    .unwrap();
+    let zero = advance_chamber_with_heat(
+        &ReferenceLaw,
+        &surfaces,
+        gas,
+        0.05,
+        &[0.0, 0.0],
+        controls(),
+        |_, h| Ok(250.0 + h / 1000.0),
+        || Ok(()),
+    )
+    .unwrap();
+    assert_eq!(zero, base);
+    for heat in [&[1.0][..], &[f64::NAN, 0.0], &[0.0, f64::INFINITY]] {
+        assert!(matches!(
+            advance_chamber_with_heat(
+                &ReferenceLaw,
+                &surfaces,
+                gas,
+                0.05,
+                heat,
+                controls(),
+                |_, h| Ok(250.0 + h / 1000.0),
+                || Ok(()),
+            ),
+            Err(SublimationError::Invalid(_)),
+        ));
+    }
 }

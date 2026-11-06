@@ -925,6 +925,22 @@ vapor inventory. One volatile species with constant molar mass, pure-solid
 caloric branches and compatible enthalpy references are required. Gas volume
 and temperature stay prescribed.
 
+`advance_chamber_with_heat` accepts one finite signed heat amount per input
+surface. Each original caloric balance includes its own heat once while all
+surfaces retain the same solved vapor pressure. The joint receipt exposes the
+compensated total supplied heat; local residuals already subtract their heat.
+The pressure bracket can expand above the initial-temperature equilibrium
+envelope when heating raises the final saturation pressure.
+
+`DepositionSimulation::sublimate_chamber_with_heat` applies that joint endpoint
+to actual cells and one vapor inventory. Heat follows caller cell identity
+through canonical sorting, and unheated/actively cooled surfaces continue to
+participate in the shared balance. Every candidate material and the final
+checkpoint are admitted before any cell or reservoir write. The direct
+operation leaves the clock and authored heat sources unchanged. Six focused
+regressions cover hot-to-cold redistribution, pressure-envelope expansion,
+caloric reference shifts, input validation, cell-order mapping and rollback.
+
 A frozen-temperature predictor and safeguarded scalar pressure interpolation
 avoid a dense coupled matrix; each trial costs O(surfaces), with explicit
 surface, local-iteration and total pressure-trial ceilings. Unsupported outer

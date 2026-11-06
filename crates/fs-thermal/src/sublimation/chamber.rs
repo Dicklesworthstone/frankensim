@@ -14,7 +14,7 @@
 
 use super::{
     MOLAR_GAS_CONSTANT, SolidSurfaceState, SolverConfig, SublimationError, SublimationLaw,
-    SublimationProperties, SurfaceKinetics, SurfaceStep, VaporReservoir, advance_surface,
+    SublimationProperties, SurfaceKinetics, SurfaceStep, VaporReservoir, advance_surface_with_heat,
     coefficients, finite, nonnegative, positive, properties, validate_surface,
 };
 
@@ -64,7 +64,9 @@ pub struct ChamberStep {
     /// Final mass is reconstructed from accepted transfers, so this nonlinear
     /// residual cannot silently manufacture or destroy vapor inventory.
     pub nonlinear_mass_residual_kg: f64,
-    /// Sum of original solid stored-energy plus vapor-energy residuals.
+    /// Signed heat supplied to all solids, counted once in their local balances.
+    pub supplied_heat_j: f64,
+    /// Sum of local storage plus carried vapor energy minus supplied heat.
     pub energy_residual_j: f64,
     pub pressure_iterations: usize,
 }
@@ -161,6 +163,67 @@ pub fn advance_chamber<L: SublimationLaw + ?Sized>(
     temperature: impl Fn(usize, f64) -> Result<f64, SublimationError>,
     checkpoint: impl FnMut() -> Result<(), SublimationError>,
 ) -> Result<ChamberStep, SublimationError> {
+    advance_chamber_impl(
+        law,
+        surfaces,
+        reservoir,
+        duration_s,
+        |_| 0.0,
+        config,
+        temperature,
+        checkpoint,
+    )
+}
+
+/// Advance one finite chamber with signed heat supplied to each solid during
+/// the interval. Heat entries follow the INPUT surface order; positive values
+/// heat the solid and negative values cool it. Every entry must be finite.
+///
+/// Heat, latent transfer and shared endpoint pressure are solved together.
+/// Each original caloric chart remains authoritative, and each local residual
+/// is `m0*(h1-h0) + dm*L - Q`. The complete carried vapor energy includes
+/// `dm*h1`; latent energy is not an additional heat source. A zero-duration
+/// interval admits caloric impulses but no mass exchange. No input is mutated.
+#[allow(clippy::too_many_arguments)]
+pub fn advance_chamber_with_heat<L: SublimationLaw + ?Sized>(
+    law: &L,
+    surfaces: &[ChamberSurface],
+    reservoir: VaporReservoir,
+    duration_s: f64,
+    supplied_heat_j: &[f64],
+    config: ChamberSolverConfig,
+    temperature: impl Fn(usize, f64) -> Result<f64, SublimationError>,
+    mut checkpoint: impl FnMut() -> Result<(), SublimationError>,
+) -> Result<ChamberStep, SublimationError> {
+    checkpoint()?;
+    if supplied_heat_j.len() != surfaces.len() {
+        return Err(SublimationError::Invalid(
+            "chamber heat must match the input surface count",
+        ));
+    }
+    advance_chamber_impl(
+        law,
+        surfaces,
+        reservoir,
+        duration_s,
+        |index| supplied_heat_j[index],
+        config,
+        temperature,
+        checkpoint,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn advance_chamber_impl<L: SublimationLaw + ?Sized>(
+    law: &L,
+    surfaces: &[ChamberSurface],
+    reservoir: VaporReservoir,
+    duration_s: f64,
+    supplied_heat_j: impl Fn(usize) -> f64,
+    config: ChamberSolverConfig,
+    temperature: impl Fn(usize, f64) -> Result<f64, SublimationError>,
+    mut checkpoint: impl FnMut() -> Result<(), SublimationError>,
+) -> Result<ChamberStep, SublimationError> {
     let solution = solve_chamber(
         surfaces.len(),
         reservoir,
@@ -168,6 +231,9 @@ pub fn advance_chamber<L: SublimationLaw + ?Sized>(
         config,
         |index| {
             let surface = surfaces[index];
+            if !supplied_heat_j(index).is_finite() {
+                return Err(SublimationError::Invalid("nonfinite supplied chamber heat"));
+            }
             validate_surface(surface.solid, duration_s)?;
             let t = temperature(index, surface.solid.specific_enthalpy_j_kg)?;
             Ok(InitialSurface {
@@ -180,12 +246,13 @@ pub fn advance_chamber<L: SublimationLaw + ?Sized>(
         },
         |index, reservoir, checkpoint| {
             let surface = surfaces[index];
-            let value = advance_surface(
+            let value = advance_surface_with_heat(
                 law,
                 surface.kinetics,
                 surface.solid,
                 reservoir,
                 duration_s,
+                supplied_heat_j(index),
                 config.surface_solver,
                 |h| temperature(index, h),
                 checkpoint,
@@ -193,8 +260,20 @@ pub fn advance_chamber<L: SublimationLaw + ?Sized>(
             let molar_mass = properties(law, value.surface_temperature_k)?.molar_mass_kg_mol;
             Ok((value, molar_mass))
         },
-        checkpoint,
+        &mut checkpoint,
     )?;
+    let mut supplied = 0.0;
+    let mut supplied_correction = 0.0;
+    for (index, surface) in solution.surfaces.iter().enumerate() {
+        if index % 256 == 0 {
+            checkpoint()?;
+        }
+        compensated_add(
+            &mut supplied,
+            &mut supplied_correction,
+            surface.supplied_heat_j,
+        );
+    }
     Ok(ChamberStep {
         surfaces: solution.surfaces,
         reservoir: solution.reservoir,
@@ -203,6 +282,7 @@ pub fn advance_chamber<L: SublimationLaw + ?Sized>(
         vapor_energy_j: solution.vapor_energy_j,
         mass_residual_kg: solution.mass_residual_kg,
         nonlinear_mass_residual_kg: solution.nonlinear_mass_residual_kg,
+        supplied_heat_j: finite(supplied + supplied_correction)?,
         energy_residual_j: solution.energy_residual_j,
         pressure_iterations: solution.pressure_iterations,
     })
@@ -387,7 +467,15 @@ pub(crate) fn solve_chamber<T: ChamberExchange, C: FnMut() -> Result<(), Sublima
     } else {
         let sign = initial.residual_kg.signum();
         let mut near = initial;
-        let mut candidate_pressure = if sign > 0.0 { 0.0 } else { upper_pressure };
+        let mut candidate_pressure = if sign > 0.0 {
+            0.0
+        } else if upper_pressure > near.pressure_pa {
+            upper_pressure
+        } else {
+            // Supplied heat can raise the endpoint above every INITIAL
+            // equilibrium pressure, including an initially equilibrated bath.
+            finite(near.pressure_pa * 2.0 + initial_pressure.max(1.0))?
+        };
         let mut invalid_bound = None;
         let far = loop {
             if candidate_pressure == near.pressure_pa {

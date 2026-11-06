@@ -14,7 +14,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::{ThermalSublimationError, add_thermal, sum};
 use crate::enthalpy::{
-    CellId, DepositionError, DepositionSimulation, EnergyAudit, Event, StepConfig, ThermalStorageBasis,
+    CellId, DepositionError, DepositionSimulation, EnergyAudit, Event, StepConfig,
+    ThermalStorageBasis,
 };
 use crate::sublimation::{
     SolidSurfaceState, SublimationError, SublimationLaw, SurfaceKinetics, VaporReservoir,
@@ -157,14 +158,22 @@ impl DepositionSimulation<'_> {
     ) -> Result<Vec<(ChamberSurface, f64)>, ThermalSublimationError> {
         let mut selected = Vec::with_capacity(ordered.len());
         for (index, surface) in ordered.iter().enumerate() {
-            if index % 256 == 0 { checkpoint()?; }
-            if self.cells.contains_key(&surface.cell_id) { selected.push(surface.cell_id); }
+            if index % 256 == 0 {
+                checkpoint()?;
+            }
+            if self.cells.contains_key(&surface.cell_id) {
+                selected.push(surface.cell_id);
+            }
         }
         let areas = self.exposed_areas_m2(&selected, &mut *checkpoint)?;
         let mut exposed = Vec::with_capacity(selected.len());
         for (index, surface) in ordered.iter().enumerate() {
-            if index % 256 == 0 { checkpoint()?; }
-            if let Some(&area) = areas.get(&surface.cell_id) { exposed.push((*surface, area)); }
+            if index % 256 == 0 {
+                checkpoint()?;
+            }
+            if let Some(&area) = areas.get(&surface.cell_id) {
+                exposed.push((*surface, area));
+            }
         }
         checkpoint()?;
         Ok(exposed)
@@ -197,17 +206,80 @@ impl DepositionSimulation<'_> {
             law,
             reservoir,
             duration_s,
+            None,
             config,
             &mut checkpoint,
         )
     }
 
+    /// Apply signed heat and joint sublimation/deposition to real cells in one
+    /// interval. Heat entries follow the INPUT selection order, before canonical
+    /// cell sorting. Positive values heat the selected solid; negative values
+    /// cool it. Every entry must be finite and there must be one per surface.
+    ///
+    /// The original caloric chart, inventory, exposure and shared gas pressure
+    /// participate in the same endpoint solve. Supplied heat is counted once in
+    /// each surface receipt and its sum in `exchange.supplied_heat_j`. The
+    /// caller owns these heat amounts: this operation neither integrates nor
+    /// changes authored boundary sources and does not advance the clock.
+    ///
+    /// All candidate cells and the one reservoir commit together only after
+    /// original material validation and the final cancellation checkpoint.
+    #[allow(clippy::too_many_arguments)]
+    pub fn sublimate_chamber_with_heat<L: SublimationLaw + ?Sized>(
+        &mut self,
+        surfaces: &[ChamberSurface],
+        law: &L,
+        reservoir: &mut VaporReservoir,
+        duration_s: f64,
+        supplied_heat_j: &[f64],
+        config: ChamberSolverConfig,
+        mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<ChamberCellStep, ThermalSublimationError> {
+        checkpoint()?;
+        if supplied_heat_j.len() != surfaces.len() {
+            return Err(DepositionError::InvalidInput(
+                "chamber heat must match the input surface count",
+            )
+            .into());
+        }
+        finite_vapor_mass(*reservoir)?;
+        let ordered =
+            self.chamber_selection(surfaces, config.max_surfaces, false, &mut checkpoint)?;
+        let mut heat_by_cell = Vec::with_capacity(surfaces.len());
+        for (index, (surface, &heat)) in surfaces.iter().zip(supplied_heat_j).enumerate() {
+            if index % 256 == 0 {
+                checkpoint()?;
+            }
+            if !heat.is_finite() {
+                return Err(
+                    DepositionError::InvalidInput("nonfinite supplied chamber heat").into(),
+                );
+            }
+            heat_by_cell.push((surface.cell_id, heat));
+        }
+        heat_by_cell.sort_unstable_by_key(|&(id, _)| id);
+        let ordered_heat: Vec<_> = heat_by_cell.into_iter().map(|(_, heat)| heat).collect();
+        let exposed = self.chamber_exposure(&ordered, &mut checkpoint)?;
+        self.sublimate_chamber_over_areas(
+            &exposed,
+            law,
+            reservoir,
+            duration_s,
+            Some(&ordered_heat),
+            config,
+            &mut checkpoint,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn sublimate_chamber_over_areas<L: SublimationLaw + ?Sized>(
         &mut self,
         exposed: &[(ChamberSurface, f64)],
         law: &L,
         reservoir: &mut VaporReservoir,
         duration_s: f64,
+        supplied_heat_j: Option<&[f64]>,
         config: ChamberSolverConfig,
         checkpoint: &mut impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<ChamberCellStep, ThermalSublimationError> {
@@ -243,25 +315,39 @@ impl DepositionSimulation<'_> {
         }
         let chart_error = std::cell::RefCell::new(None);
         let mut checkpoint_error = None;
-        let result = phase::advance_chamber(
-            law,
-            &inputs,
-            *reservoir,
-            duration_s,
-            config,
-            |index, h| {
-                caloric[index].temperature_k(h).map_err(|error| {
-                    *chart_error.borrow_mut() = Some(error);
-                    SublimationError::Invalid("thermal caloric chart refused chamber endpoint")
-                })
-            },
-            || {
-                checkpoint().map_err(|error| {
-                    checkpoint_error = Some(error);
-                    SublimationError::Cancelled
-                })
-            },
-        );
+        let temperature = |index: usize, h: f64| {
+            caloric[index].temperature_k(h).map_err(|error| {
+                *chart_error.borrow_mut() = Some(error);
+                SublimationError::Invalid("thermal caloric chart refused chamber endpoint")
+            })
+        };
+        let phase_checkpoint = || {
+            checkpoint().map_err(|error| {
+                checkpoint_error = Some(error);
+                SublimationError::Cancelled
+            })
+        };
+        let result = match supplied_heat_j {
+            Some(heat) => phase::advance_chamber_with_heat(
+                law,
+                &inputs,
+                *reservoir,
+                duration_s,
+                heat,
+                config,
+                temperature,
+                phase_checkpoint,
+            ),
+            None => phase::advance_chamber(
+                law,
+                &inputs,
+                *reservoir,
+                duration_s,
+                config,
+                temperature,
+                phase_checkpoint,
+            ),
+        };
         if let Some(error) = checkpoint_error {
             return Err(error.into());
         }
@@ -399,6 +485,7 @@ impl DepositionSimulation<'_> {
                 law,
                 &mut reservoir,
                 stop_s - start_s,
+                None,
                 phase_config,
                 &mut checkpoint,
             )?;

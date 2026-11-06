@@ -688,3 +688,172 @@ fn empty_chamber_timeline_jumps_to_births_without_phase_or_thermal_work() {
     assert_eq!(audit.cells[&CellId(1)], CellPhaseAudit::default());
     assert_eq!(audit.cells[&CellId(2)], CellPhaseAudit::default());
 }
+
+#[test]
+fn supplied_heat_follows_cell_identity_and_keeps_original_caloric_sources() {
+    let mut second = cell(2, 0.0, -4.0);
+    second.material_id = MaterialId(2);
+    let original = scheduled(vec![birth(0.0, cell(1, 0.0, 7.5)), birth(0.0, second)], 100)
+        .advance_to(0.0, thermal_config(1.0), || Ok(()))
+        .unwrap()
+        .0;
+    let mut thermal = original.clone();
+    let original_bath = bath(100.0, 0.001);
+    let mut chamber = original_bath;
+    let forward = selection();
+    let reverse = [forward[1], forward[0]];
+    let step = thermal
+        .sublimate_chamber_with_heat(
+            &reverse,
+            &Ice,
+            &mut chamber,
+            0.5,
+            &[-15.0, 30.0],
+            phase_config(),
+            || Ok(()),
+        )
+        .unwrap();
+    assert_eq!(step.cell_ids, vec![CellId(1), CellId(2)]);
+    assert!(step.exchange.surfaces[0].transferred_mass_kg > 0.0);
+    assert!(step.exchange.surfaces[1].transferred_mass_kg < 0.0);
+    assert_eq!(step.exchange.supplied_heat_j, 15.0);
+    for (index, (id, heat, capacity)) in [(CellId(1), 30.0, 2000.0), (CellId(2), -15.0, 4000.0)]
+        .iter()
+        .enumerate()
+    {
+        let old = &original.cells()[id];
+        let new = &thermal.cells()[id];
+        let phase = &step.exchange.surfaces[index];
+        assert_eq!(phase.supplied_heat_j, *heat);
+        assert_eq!(phase.reservoir, chamber);
+        assert_eq!(new.boundary.source_w, old.boundary.source_w);
+        close(
+            thermal.temperature_k(*id).unwrap(),
+            250.0 + new.specific_h_j_kg / capacity,
+            1e-12,
+        );
+        let stored = new.mass_kg * new.specific_h_j_kg - old.mass_kg * old.specific_h_j_kg;
+        close(
+            stored + phase.vapor_energy_j - heat,
+            phase.energy_residual_j,
+            1e-8,
+        );
+        assert!(phase.energy_residual_j.abs() < 1e-7);
+    }
+    assert_eq!(thermal.time_s, original.time_s);
+    close(
+        thermal.mass_kg() + vapor_mass(chamber),
+        original.mass_kg() + vapor_mass(original_bath),
+        1e-16,
+    );
+    close(
+        thermal.energy_j() - original.energy_j() + step.exchange.vapor_energy_j
+            - step.exchange.supplied_heat_j,
+        step.exchange.energy_residual_j,
+        1e-8,
+    );
+    assert!(step.exchange.energy_residual_j.abs() < 2e-7);
+    let mut canonical = original;
+    let mut canonical_bath = original_bath;
+    let canonical_step = canonical
+        .sublimate_chamber_with_heat(
+            &forward,
+            &Ice,
+            &mut canonical_bath,
+            0.5,
+            &[30.0, -15.0],
+            phase_config(),
+            || Ok(()),
+        )
+        .unwrap();
+    assert_eq!(canonical_step, step);
+    assert_eq!(canonical.cells(), thermal.cells());
+    assert_eq!(canonical_bath, chamber);
+}
+
+#[test]
+fn supplied_heat_validation_work_limit_and_final_cancellation_preserve_all_owners() {
+    let original = initial(0.0);
+    let original_bath = bath(100.0, 0.001);
+    for heat in [&[1.0][..], &[f64::NAN, 0.0], &[0.0, f64::INFINITY]] {
+        let mut thermal = original.clone();
+        let mut chamber = original_bath;
+        assert!(
+            thermal
+                .sublimate_chamber_with_heat(
+                    &selection(),
+                    &Ice,
+                    &mut chamber,
+                    0.5,
+                    heat,
+                    phase_config(),
+                    || Ok(()),
+                )
+                .is_err()
+        );
+        assert_eq!(thermal.cells(), original.cells());
+        assert_eq!(chamber, original_bath);
+    }
+    let mut limited = original.clone();
+    let mut limited_bath = original_bath;
+    let mut one_trial = phase_config();
+    one_trial.max_iterations = 1;
+    assert!(
+        limited
+            .sublimate_chamber_with_heat(
+                &selection(),
+                &Ice,
+                &mut limited_bath,
+                0.5,
+                &[30.0, -15.0],
+                one_trial,
+                || Ok(()),
+            )
+            .is_err()
+    );
+    assert_eq!(limited.cells(), original.cells());
+    assert_eq!(limited_bath, original_bath);
+
+    let mut probe = original.clone();
+    let mut probe_bath = original_bath;
+    let mut checkpoints = 0;
+    probe
+        .sublimate_chamber_with_heat(
+            &selection(),
+            &Ice,
+            &mut probe_bath,
+            0.5,
+            &[30.0, -15.0],
+            phase_config(),
+            || {
+                checkpoints += 1;
+                Ok(())
+            },
+        )
+        .unwrap();
+    let mut thermal = original.clone();
+    let mut chamber = original_bath;
+    let mut calls = 0;
+    let result = thermal.sublimate_chamber_with_heat(
+        &selection(),
+        &Ice,
+        &mut chamber,
+        0.5,
+        &[30.0, -15.0],
+        phase_config(),
+        || {
+            calls += 1;
+            if calls == checkpoints {
+                Err(DepositionError::Cancelled)
+            } else {
+                Ok(())
+            }
+        },
+    );
+    assert_eq!(
+        result,
+        Err(ThermalSublimationError::Thermal(DepositionError::Cancelled))
+    );
+    assert_eq!(thermal.cells(), original.cells());
+    assert_eq!(chamber, original_bath);
+}
