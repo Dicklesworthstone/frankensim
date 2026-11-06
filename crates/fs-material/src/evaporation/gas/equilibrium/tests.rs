@@ -12,13 +12,13 @@ use fs_thermochem::{Composition, CompositionBasis, mixture::FrozenIdealGasMixtur
 
 const MOLAR_MASS: f64 = 0.018015;
 const R: f64 = fs_thermochem::UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K / MOLAR_MASS;
-pub(super) const CP: f64 = 4.0 * R;
-pub(super) const MELTING: f64 = 300.0;
-pub(super) const FUSION: f64 = 100_000.0;
-pub(super) const VAPORIZATION: f64 = 200_000.0;
-pub(super) const TRANSFER: f64 = 0.02;
+pub(in crate::evaporation::gas) const CP: f64 = 4.0 * R;
+pub(in crate::evaporation::gas) const MELTING: f64 = 300.0;
+pub(in crate::evaporation::gas) const FUSION: f64 = 100_000.0;
+pub(in crate::evaporation::gas) const VAPORIZATION: f64 = 200_000.0;
+pub(in crate::evaporation::gas) const TRANSFER: f64 = 0.02;
 
-pub(super) fn catalog(reference: f64) -> ThermochemicalGasModel {
+pub(in crate::evaporation::gas) fn catalog(reference: f64) -> ThermochemicalGasModel {
     ThermochemicalGasModel::new(
         FrozenIdealGasMixtureModelV1::new(
             vec![
@@ -34,7 +34,7 @@ pub(super) fn catalog(reference: f64) -> ThermochemicalGasModel {
     .unwrap()
 }
 
-pub(super) fn curve() -> EquilibriumEnthalpyPhaseCurve {
+pub(in crate::evaporation::gas) fn curve() -> EquilibriumEnthalpyPhaseCurve {
     let liquid_h = CP * MELTING - VAPORIZATION;
     let solid_h = liquid_h - FUSION;
     let knot = |h, t, fraction: f64| EnthalpyPhaseKnot {
@@ -56,7 +56,10 @@ pub(super) fn curve() -> EquilibriumEnthalpyPhaseCurve {
     .unwrap()
 }
 
-pub(super) fn bulk(curve: &EquilibriumEnthalpyPhaseCurve, fraction: f64) -> LiquidSurfaceState {
+pub(in crate::evaporation::gas) fn bulk(
+    curve: &EquilibriumEnthalpyPhaseCurve,
+    fraction: f64,
+) -> LiquidSurfaceState {
     LiquidSurfaceState {
         mass_kg: 0.01,
         area_m2: 1e-3,
@@ -64,7 +67,7 @@ pub(super) fn bulk(curve: &EquilibriumEnthalpyPhaseCurve, fraction: f64) -> Liqu
     }
 }
 
-pub(super) fn near(a: f64, b: f64, tolerance: f64) {
+pub(in crate::evaporation::gas) fn near(a: f64, b: f64, tolerance: f64) {
     assert!(
         (a - b).abs() <= tolerance,
         "{a} != {b}; tolerance {tolerance}"

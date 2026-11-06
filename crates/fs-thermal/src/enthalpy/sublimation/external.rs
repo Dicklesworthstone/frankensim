@@ -1,4 +1,4 @@
-//! Thermal-owner admission for externally solved solid/gas exchange.
+//! Thermal-owner admission for externally solved condensed/gas exchange.
 //!
 //! The external owner supplies an admitted enthalpy interval and the complete
 //! expected cell. This owner retains identities, caloric laws, reference
@@ -34,12 +34,14 @@ pub struct SolidCellExchange {
 /// A phase-partitioned endpoint on an explicitly identified original caloric law.
 ///
 /// The external phase owner admits constituent masses, latent storage and exposed
-/// solid area. This boundary only commits its complete bulk mass/enthalpy update;
+/// phase-interface area. This boundary only commits its complete bulk mass/enthalpy update;
 /// it does not infer a phase fraction from temperature or add latent heat.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CondensedCellExchange {
     pub expected: DepositedCell,
     pub interval_exposed_area_m2: f64,
+    /// The legacy carrier contains bulk mass, enthalpy and area only; it does
+    /// not assert a solid interface. The external phase owner supplies that admission.
     pub replacement: SolidSurfaceState,
     /// Inclusive original-source bulk enthalpy interval [J/kg].
     pub enthalpy_range_j_kg: [f64; 2],

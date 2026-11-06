@@ -306,4 +306,4 @@ pub fn advance_equilibrium_surface<'curve, 'catalog, L: EvaporationLaw + ?Sized>
 }
 
 #[cfg(test)]
-mod tests;
+pub(in crate::evaporation::gas) mod tests;

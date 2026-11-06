@@ -12265,6 +12265,21 @@ thermal work spends that allowance; rejected events, births and transfers do
 not enter physical accounts. The original anchored time grid resumes when its
 endpoint is reached. Source/domain errors still refuse directly.
 
+`evaporation::gas::timeline::equilibrium` admits the original sharp fusion chart
+on that same event/retry loop. Native conduction, contact and source heat,
+optional reciprocal gas-film heat, and signed vapor exchange evolve one bulk
+enthalpy coordinate. The registered thermal caloric identity must match the
+original phase chart, including scheduled births and zero-duration requests.
+Numeric phase admission at heat substeps avoids rebuilding hashed phase reports;
+the complete original-or-birth-to-final partition is reconstructed once. It
+includes heat-driven fusion after the liquid interface becomes covered, which
+a sum of vapor-only reports would miss. The original fixed geometry, birth and
+exposure timing, attempted-work limit and whole-window conservation accounts
+remain shared with the pure-liquid lane. A positive liquid seed is required at
+each accepted heat and vapor endpoint; terminal freezing needs an explicit
+interface event. The full heat/phase split requires timestep refinement, and
+neither failure nor cancellation publishes either original owner's candidate.
+
 ### Several retained films sharing one finite atmosphere
 
 `evaporation::gas::chamber` advances multiple positive liquid inventories against
