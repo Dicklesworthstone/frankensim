@@ -19,6 +19,9 @@
 //! changes are ordered before the straight mechanical-strain path; callers
 //! resolve intermediate source changes, reversals and fracture events.
 
+/// Same-source reference density and native path-mean thermal force response.
+pub mod dynamics;
+
 use super::{
     BrittleSourceError, ResolvedBrittleCrackBand, brittle_crack_band_requirements, coefficient,
 };
@@ -69,17 +72,33 @@ pub fn resolve_thermal_brittle(
     selection: MaterialPropertySelection,
     settings: BrittleCrackBandSettings,
 ) -> Result<ResolvedThermalBrittle, BrittleSourceError> {
+    resolve_with_requirements(
+        card,
+        reference_query,
+        current_query,
+        selection,
+        settings,
+        &thermal_brittle_requirements()?,
+    )
+}
+
+/// One source-selection, reference-binding and integrated-expansion owner for
+/// static and inertial consumers. Extra requirements remain in the complete
+/// source bundle and are refreshed with their original selected claims.
+fn resolve_with_requirements(
+    card: &MaterialCard,
+    reference_query: &QueryPoint,
+    current_query: &QueryPoint,
+    selection: MaterialPropertySelection,
+    settings: BrittleCrackBandSettings,
+    requirements: &[ScalarPropertyRequirement],
+) -> Result<ResolvedThermalBrittle, BrittleSourceError> {
     if reference_query.axis_quantities() != current_query.axis_quantities() {
         return Err(BrittleSourceError::Invalid(
             "thermal expansion must retain the reference coordinate conventions",
         ));
     }
-    let material = resolve_material_state_point(
-        card,
-        reference_query,
-        &thermal_brittle_requirements()?,
-        selection,
-    )?;
+    let material = resolve_material_state_point(card, reference_query, requirements, selection)?;
     coefficient(
         &material,
         LINEAR_THERMAL_EXPANSION_COEFFICIENT_PROPERTY,

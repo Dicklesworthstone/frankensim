@@ -394,3 +394,6 @@ fn numerically_identical_alpha_cannot_silently_switch_selected_evidence() {
     assert!(a.transfer_temperature(&state, &b, 1e-6).is_err());
     assert_eq!(state.damage(), 0.0);
 }
+
+#[path = "expansion/dynamics.rs"]
+mod dynamics;
