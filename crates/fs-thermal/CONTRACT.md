@@ -2671,3 +2671,31 @@ entropy quadrature, common-datum shifts, clipping in all four time paths,
 first/second temporal refinement, stopped-liquid heating and restart refusal,
 the limited-face exact Jacobian, frozen stationary mixtures with distinct inlet
 laws, malformed histories, shared work ceilings and late cancellation.
+
+## Finite-lifetime luminescent excitation
+
+`luminescence::ExcitationDecay` advances an authored emitting-state energy store
+under constant pump power and constant total lifetime with the analytic linear
+rate solution. It reports separately integrated pump input, remaining excitation,
+radiative-channel release, nonradiative heat and the signed represented-energy
+residual. Radiative release precedes photon-spectrum conversion and is not an
+assertion of escaped optical energy. The caller owns the emitting-state energy
+datum, prompt vibrational/Stokes heat, photon energies, transport and acceptance.
+No saturation, stimulated emission, intersystem crossing, measured material law
+or general phosphorescence mechanism is inferred.
+
+Small-exposure pump release uses a cancellation-free series; the existing strict
+math decay owner preserves initial-store loss and representable late tails.
+The prompt limit does not require lifetime-sized thermal steps. The scalar core
+is allocation-free and bounded, and returns no candidate for invalid inputs or
+unrepresentable required results. Its compensated residual reports arithmetic
+loss instead of hiding it in heat. Identical inputs use one deterministic
+operation order; no new cross-ISA evidence or interval certificate is claimed.
+
+Adding a nonradiative rate preserves the original radiative rate while changing
+both lifetime and yield. `ArrheniusQuenching` evaluates an explicitly supplied
+attempt rate and per-excitation barrier in SI units; its source owner must enforce
+the measured temperature domain and resolve changing-temperature coefficients.
+Focused G0/G1/G3 tests cover closed-form pumping and afterglow, tiny exposures,
+prompt/large-lifetime limits, scaled late tails, split-step conservation, consistent
+quenching, Arrhenius units and admission boundaries.

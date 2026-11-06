@@ -20,6 +20,8 @@ pub mod sublimation;
 pub mod evaporation;
 /// Finite-rate crystal history with original-branch latent-energy feedback.
 pub mod crystallization;
+/// Finite-lifetime excitation storage, radiative branching and nonradiative heat.
+pub mod luminescence;
 
 /// Compatibility path for the original conduction-owned timeline. This is a
 /// re-export, not a second implementation or a conversion between state types.
