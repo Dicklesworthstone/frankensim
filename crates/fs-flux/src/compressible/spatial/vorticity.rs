@@ -84,13 +84,12 @@ impl Euler3d {
     /// Each resolved axis needs at least three cells; a singleton periodic axis
     /// is admitted as homogeneous extrusion. Nonperiodic derivatives use only
     /// the interior, independently of exterior reservoir or wall prescriptions.
-    pub fn vorticity_workspace(
-        &self,
-        maximum_bytes: usize,
-    ) -> Result<VorticityWorkspace3d, Error> {
+    pub fn vorticity_workspace(&self, maximum_bytes: usize) -> Result<VorticityWorkspace3d, Error> {
         admit_axes(&self.grid, self.boundaries)?;
         if self.required_vorticity_workspace_bytes()? > maximum_bytes {
-            return Err(Error::Invalid("vorticity workspace exceeds its byte budget"));
+            return Err(Error::Invalid(
+                "vorticity workspace exceeds its byte budget",
+            ));
         }
         let work = VorticityWorkspace3d {
             grid: self.grid,
@@ -120,7 +119,9 @@ impl Euler3d {
         poll(&mut cancelled)?;
         admit_axes(&self.grid, self.boundaries)?;
         if work.grid != self.grid {
-            return Err(Error::Invalid("vorticity workspace and physical grid differ"));
+            return Err(Error::Invalid(
+                "vorticity workspace and physical grid differ",
+            ));
         }
         for (cell, (primitive, state)) in work.primitive.iter_mut().zip(&self.states).enumerate() {
             if cell % 64 == 0 {
@@ -139,7 +140,7 @@ impl Euler3d {
     }
 }
 
-fn admit_axes(grid: &CartesianGrid, boundaries: Boundaries3d) -> Result<(), Error> {
+pub(super) fn admit_axes(grid: &CartesianGrid, boundaries: Boundaries3d) -> Result<(), Error> {
     for axis in 0..3 {
         let count = grid.shape[axis];
         if count < 3 && !(count == 1 && boundaries.axis(axis) == AxisBoundaries::Periodic) {
@@ -151,32 +152,40 @@ fn admit_axes(grid: &CartesianGrid, boundaries: Boundaries3d) -> Result<(), Erro
     Ok(())
 }
 
-/// Derivatives of [rho, u, v, w, p], retaining each axis's physical spacing.
-fn derivative(
+/// Shared physical derivative for cell-centered primitive or acceleration fields.
+pub(super) fn derivative<const N: usize>(
     grid: &CartesianGrid,
     boundaries: Boundaries3d,
-    primitive: &[Primitive],
     cell: usize,
     axis: usize,
-) -> [f64; 5] {
+    value: impl Fn(usize) -> [f64; N],
+) -> [f64; N] {
     let c = grid.coordinates(cell);
     let count = grid.shape[axis];
     if count == 1 {
-        return [0.0; 5];
+        return [0.0; N];
     }
     let at = |position| {
         let mut other = c;
         other[axis] = position;
-        primitive[grid.index(other)].array()
+        value(grid.index(other))
     };
     let h = grid.spacing[axis];
     let position = c[axis];
     if boundaries.axis(axis) == AxisBoundaries::Periodic || (position > 0 && position + 1 < count) {
-        let lower = at(if position == 0 { count - 1 } else { position - 1 });
-        let upper = at(if position + 1 == count { 0 } else { position + 1 });
+        let lower = at(if position == 0 {
+            count - 1
+        } else {
+            position - 1
+        });
+        let upper = at(if position + 1 == count {
+            0
+        } else {
+            position + 1
+        });
         return std::array::from_fn(|d| (0.5 * (upper[d] - lower[d])) / h);
     }
-    let center = primitive[cell].array();
+    let center = value(cell);
     let (near, far, sign) = if position == 0 {
         (at(1), at(2), 1.0)
     } else {
@@ -188,7 +197,7 @@ fn derivative(
     })
 }
 
-fn budget(
+pub(super) fn budget(
     grid: &CartesianGrid,
     boundaries: Boundaries3d,
     primitive: &[Primitive],
@@ -196,13 +205,17 @@ fn budget(
 ) -> Result<VorticityBudget3d, Error> {
     let mut gradient = [[0.0; 3]; 5];
     for axis in 0..3 {
-        let column = derivative(grid, boundaries, primitive, cell, axis);
+        let column = derivative(grid, boundaries, cell, axis, |other| {
+            primitive[other].array()
+        });
         for (component, row) in gradient.iter_mut().enumerate() {
             row[axis] = column[component];
         }
     }
     if !gradient.iter().flatten().all(|value| value.is_finite()) {
-        return Err(Error::Invalid("unrepresentable physical vorticity gradient"));
+        return Err(Error::Invalid(
+            "unrepresentable physical vorticity gradient",
+        ));
     }
     let omega = [
         gradient[3][1] - gradient[2][2],
@@ -210,9 +223,7 @@ fn budget(
         gradient[2][0] - gradient[1][1],
     ];
     let divergence = gradient[1][0] + gradient[2][1] + gradient[3][2];
-    let stretching = std::array::from_fn(|i| {
-        (0..3).map(|j| gradient[i + 1][j] * omega[j]).sum()
-    });
+    let stretching = std::array::from_fn(|i| (0..3).map(|j| gradient[i + 1][j] * omega[j]).sum());
     // Normalize both gradients before the cross product; rho^2 need never
     // overflow or underflow merely because the caller's density scale changes.
     let density = primitive[cell].density;

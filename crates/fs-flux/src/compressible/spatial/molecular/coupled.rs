@@ -375,6 +375,31 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
         self.molecular.law()
     }
 
+    /// Required additional storage for the accepted field's complete stress curl.
+    pub fn required_vorticity_workspace_bytes(&self) -> Result<usize, MolecularError> {
+        self.molecular.required_vorticity_workspace_bytes()
+    }
+
+    /// Allocate reusable inviscid/stress observations under an explicit byte cap.
+    pub fn vorticity_workspace(
+        &self,
+        maximum_bytes: usize,
+    ) -> Result<StressVorticityWorkspace3d, MolecularError> {
+        self.molecular.vorticity_workspace(maximum_bytes)
+    }
+
+    /// Observe the accepted state with its configured molecular/SGS face stress.
+    ///
+    /// Includes held wall and enabled reservoir traction; imposed body-force
+    /// curl remains excluded. No accepted state, clock or step load is changed.
+    pub fn vorticity<'a>(
+        &mut self,
+        work: &'a mut StressVorticityWorkspace3d,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<&'a [StressVorticityBudget3d], MolecularError> {
+        self.molecular.vorticity(&self.accepted, work, cancelled)
+    }
+
     /// Last completely accepted physical interval.
     pub const fn last_step(&self) -> Option<&MolecularStepReport3d> {
         self.last_step.as_ref()

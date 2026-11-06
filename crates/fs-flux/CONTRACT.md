@@ -7121,3 +7121,41 @@ The deferred three-dimensional turbulence epic remains open.
 rotation and translation invariance, mixed-traction BDF1/BDF2 endpoint
 consistency, zero-closure molecular equivalence, no-slip decay and refusal of
 unrepresentable transport without mutating either history.
+
+## Source-owned stress vorticity production
+
+`compressible::spatial::molecular` adds `StressVorticityBudget3d` and
+`StressVorticityWorkspace3d` to both `MolecularTransport3d` and its coupled
+`MolecularEuler3d` owner. The native `vorticity` query evaluates the original
+configured face stress, reuses the advancement kernel's conservative divergence,
+divides by each accepted cell's density, and computes
+`curl((div(tau))/rho)`. Temperature-dependent shear/bulk viscosity, density
+gradients, full cross stresses, selected SGS and authored no-slip/Navier-slip
+or enabled reservoir traction remain in that operator. Molecular and SGS
+contributions are combined explicitly, not mislabeled as independently
+separated measurements. No additional momentum or heat source is applied.
+
+One original EOS recovery per cell supplies both the inviscid budget and
+the stress operator. Source primitives, velocity gradients and face buffers
+reuse prepared molecular storage. Additional byte-budgeted storage is one
+three-component acceleration and one combined result per cell (152 numerical
+bytes per cell), with no new field allocation during queries. The same
+physical derivative handles acceleration and primitive fields, preserving
+anisotropic spacing, periodic wrapping, singleton periodic extrusion and
+one-sided interior derivatives. The output is Estimated for smooth resolved
+fields, without a wall-sheet, shock or exact-circulation claim.
+
+Queries use accepted held reservoir profiles and do not sample a timed provider.
+They preserve accepted cells, physical time and published interval loads;
+transport-law and closure caches remain reusable scratch. Cancellation or
+source refusal exposes no partial output. The combined material-rate method
+excludes imposed body-force curl; Fourier heat affects subsequent states
+without a separate instantaneous momentum source.
+
+The G1/G4 tests in `molecular/vorticity_tests.rs` cover Fourier vortex decay
+under the actual molecular advance, quadratic convergence, irrotational
+vorticity production from variable viscosity/density, no-slip and Navier-slip
+wall generation, and capped/cancelled/reused coupled observations. Native
+rustfmt and isolated Rust checks of the exact shared divergence/derivative
+kernels against independent stress fixtures passed. Full crate compilation
+and these native owner-level tests were unavailable when introduced.

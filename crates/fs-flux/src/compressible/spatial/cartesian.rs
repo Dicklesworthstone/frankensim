@@ -257,7 +257,7 @@ pub(super) fn update_energy_projected<const MAX: usize, E: Failure, C: FnMut() -
     })
 }
 
-fn divergence<const MAX: usize, E: Failure, C: FnMut() -> bool>(
+pub(super) fn divergence<const MAX: usize, E: Failure, C: FnMut() -> bool>(
     grid: &CartesianGrid,
     width: usize,
     dt: f64,

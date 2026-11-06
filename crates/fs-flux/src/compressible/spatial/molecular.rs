@@ -22,6 +22,8 @@ mod stabilized;
 pub use stabilized::StabilizedMolecularReport3d;
 mod reservoir;
 mod timed;
+mod vorticity;
+pub use vorticity::{StressVorticityBudget3d, StressVorticityWorkspace3d};
 
 /// Explicit local or periodic dynamic subgrid transport for low-Mach studies.
 #[cfg(feature = "experimental-sgs")]
