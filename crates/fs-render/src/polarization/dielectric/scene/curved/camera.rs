@@ -6,7 +6,9 @@
 //! transport. For reciprocal paths, the reverse Mueller matrix is a transpose
 //! up to polarization-convention sign matrices D. With unpolarized emission
 //! and intensity-only detection, e0^T D M^T D e0 = e0^T M e0. This does NOT
-//! provide a general polarized camera.
+//! provide a general polarized camera. [`CameraAnalyzer`] supplies an explicit
+//! passive detector row for the same unpolarized sources: its reciprocal seed
+//! retains Q/U/V and its physical throughput through this original walk.
 //!
 //! Radiance obeys L/n^2 along smooth isotropic lossless propagation. Consequently
 //! each source contribution is multiplied ONCE by (n_camera/n_source)^2,
@@ -71,6 +73,10 @@ mod thermal;
 pub use thermal::{DiffuseThermalEmitter, IsothermalVolumeEmitter, SpatialVolumeEmitter, TemperatureField};
 #[cfg(feature = "material-state")]
 pub use thermal::AxialGasTemperatureField;
+
+/// Passive polarization analysis at the original camera launch plane.
+pub mod analyzer;
+pub use analyzer::CameraAnalyzer;
 
 /// Physical camera and spectral pixel integration over these native paths.
 pub mod raster;
@@ -495,7 +501,19 @@ impl<'s, 'm> CurvedCameraScene<'s, 'm> {
     ) -> Result<CameraRadianceSample, CameraRadianceError> {
         cx.checkpoint()?;
         let beam = self.launch(ray, wavelength_nm, initial_medium)?;
-        let initial_index = phase_index(beam.medium(), wavelength_nm)?;
+        self.sample_launched_ray(cx, beam, initial_medium, settings, seed, path_id)
+    }
+
+    fn sample_launched_ray(
+        &self,
+        cx: &Cx<'_>,
+        beam: PolarizedBeam,
+        initial_medium: usize,
+        settings: CurvedTraceSettings,
+        seed: u64,
+        path_id: u64,
+    ) -> Result<CameraRadianceSample, CameraRadianceError> {
+        let initial_index = phase_index(beam.medium(), beam.wavelength_nm())?;
         let mut emission = SurfaceEmission::new(self, initial_index);
         let result = self.scene.trace_with_seed_events_mode(
             cx,
@@ -529,7 +547,18 @@ impl<'s, 'm> CurvedCameraScene<'s, 'm> {
     ) -> Result<CameraRadianceSample, CameraRadianceError> {
         cx.checkpoint()?;
         let beam = self.launch(ray, wavelength_nm, initial_medium)?;
-        let initial_index = phase_index(beam.medium(), wavelength_nm)?;
+        self.sample_launched_ray_with_samples(cx, beam, initial_medium, settings, samples)
+    }
+
+    fn sample_launched_ray_with_samples(
+        &self,
+        cx: &Cx<'_>,
+        beam: PolarizedBeam,
+        initial_medium: usize,
+        settings: CurvedTraceSettings,
+        samples: impl FnMut(u32) -> [f64; 3],
+    ) -> Result<CameraRadianceSample, CameraRadianceError> {
+        let initial_index = phase_index(beam.medium(), beam.wavelength_nm())?;
         let mut emission = SurfaceEmission::new(self, initial_index);
         let result = self.scene.trace_with_samples_events_mode(
             cx,

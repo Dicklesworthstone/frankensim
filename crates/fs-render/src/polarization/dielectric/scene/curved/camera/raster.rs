@@ -25,6 +25,9 @@ use crate::spectral::{LAMBDA_MAX, LAMBDA_MIN, cie_x, cie_y, cie_z, y_integral};
 use fs_exec::Cx;
 use fs_rand::philox::philox4x32_10;
 
+// Passive analyzers share the original packet/raster and detector owners.
+mod analyzer;
+
 /// Spectral pixel integration with native curved molecular scattering.
 #[cfg(feature = "volumes")]
 pub mod participating;

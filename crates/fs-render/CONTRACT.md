@@ -8144,3 +8144,47 @@ Three G1/G3/G4 tests cover static pixel/sensor parity and replay, channel-count
 independent transport work, chromatic pulse energy/photon references, and
 failed-lane/cancellation behavior. These are authored numerical regressions;
 execution is reported separately.
+
+## Passive analyzer measurements through native refracting cameras
+
+`CameraAnalyzer` supplies a declared passive detector intensity row and a world
+reference axis to the existing reciprocal curved camera. Authored rows are
+admitted only when `0 < a0 <= 1` and `norm([aQ,aU,aV]) <= min(a0,1-a0)`;
+their response is consequently between zero and the incident intensity for
+every physical Stokes vector. Ideal linear and circular constructors retain
+their physical one-half unpolarized transmission. All-zero rows refuse under
+the existing extinction/underflow semantics. A polarized analyzer whose axis
+cannot define the queried transverse frame also refuses.
+
+For the original opposite-travel frame convention, the reciprocal seed is
+`[a0,aQ,-aU,aV]`. The full Stokes vector traverses the original Fresnel, TIR,
+coating and gradient-index owners. The analyzer is therefore applied inside
+transport, with the original branch proposal division and endpoint `n^2`
+conversion exactly once. It is not an additional scalar postprocessing loss.
+An identity row takes the original scalar launch path exactly. Nonpolarizing
+rows do not require a distinguished transverse axis.
+
+`CurvedCameraScene::sample_ray_analyzed` and
+`sample_ray_analyzed_with_samples` observe the existing unpolarized surface,
+environment and supported thermal emissions. The geometric spectral raster
+adds `sample_pixel_analyzed` and `sample_pixel_sensor_analyzed`; the original
+four wavelength-dependent paths, counter streams, CIE or multichannel QE
+responses, lens/pupil weights and all-or-error pixel behavior are retained.
+No scene-table clone, extra traversal, per-query allocation or second spectral
+integration is introduced. Native phase/group paths, Beer absorption, medium
+identity, cancellation and work limits remain authoritative.
+
+This is an ideal, wavelength-independent detector row at the geometric camera
+launch plane. It does not provide a finite-thickness or angle-dependent
+polarizer, resolved lens propagation, polarized source emission, bulk
+birefringence, or analyzer overloads for the separate molecular-scattering and
+explicit emitter-connection consumers.
+
+Focused regressions specify passive-row admission and independent Malus
+values, a native Brewster/rotated-TIR path resolving both U and V, a curved
+gradient-index path that reaches an emitter missed by its straight launch,
+and the original XYZ and multichannel QE raster. The numerical expectations
+include native proposal probabilities, Beer attenuation, endpoint indices,
+identity replay and failure semantics. The implementation passed pinned Rust
+formatter/parser checks; these native regressions were added but were not
+executed in the shared editing environment.
