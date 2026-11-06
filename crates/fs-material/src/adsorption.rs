@@ -731,7 +731,14 @@ fn integrate_sites(
     }
     let (relax, remainder) = relaxation(u)?;
     let delta = capacity * ((target - theta) * relax);
-    let next = initial + delta;
+    // Subtracting the lost fraction erases resolved survivors after about 37
+    // decay times. Relax the moles directly, keeping their late tail and an
+    // exactly equilibrated history even if conversion from coverage rounds.
+    let next = if target == theta {
+        initial
+    } else {
+        fs_math::decay::relax_toward(initial, capacity * target, u)
+    };
     if !nonnegative(next)
         || next > capacity
         || (target != theta && (delta == 0.0 || next == initial))

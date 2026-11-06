@@ -200,6 +200,55 @@ fn exact_frozen_langmuir_relaxation_retains_both_gross_streams_and_empty_site_tu
 }
 
 #[test]
+fn g1_frozen_desorption_retains_resolved_late_survivors() {
+    for exposure in [40.0_f64, 100.0] {
+        let result = integrate_sites(0.4, 2.0, 0.25, 0.1, 0.0, exposure / 0.1).unwrap();
+        let expected = 0.4 * (-exposure).exp();
+        near(result.final_moles, expected, 5e-14 * expected);
+        assert_eq!(result.adsorption, 0.0);
+        near(result.desorption, 0.4 - expected, 2e-15);
+    }
+}
+
+#[test]
+fn g1_frozen_desorption_retains_a_tiny_positive_equilibrium() {
+    let activity = 1e-30;
+    let equilibrium_moles = 2.0 * activity / (1.0 + activity);
+    for duration in [400.0_f64, 1000.0] {
+        let result = integrate_sites(0.4, 2.0, 0.25, 0.1, 4e-30, duration).unwrap();
+        let expected = equilibrium_moles
+            + (0.4 - equilibrium_moles) * (-0.1 * (1.0 + activity) * duration).exp();
+        near(result.final_moles, expected, 5e-14 * expected);
+        assert!(result.adsorption > 0.0);
+        near(
+            result.adsorption - result.desorption,
+            result.final_moles - 0.4,
+            2e-15,
+        );
+    }
+}
+
+#[test]
+fn g3_frozen_desorption_endpoint_and_gross_streams_compose_in_time() {
+    for pressure in [0.0, 4e-30] {
+        let whole = integrate_sites(0.4, 2.0, 0.25, 0.1, pressure, 400.0).unwrap();
+        let mut moles = 0.4;
+        let mut adsorption = 0.0;
+        let mut desorption = 0.0;
+        for _ in 0..16 {
+            let part = integrate_sites(moles, 2.0, 0.25, 0.1, pressure, 25.0).unwrap();
+            moles = part.final_moles;
+            adsorption += part.adsorption;
+            desorption += part.desorption;
+        }
+        near(moles, whole.final_moles, 5e-14 * whole.final_moles);
+        near(adsorption, whole.adsorption, 5e-14 * whole.adsorption);
+        near(desorption, whole.desorption, 5e-14 * whole.desorption);
+        near(adsorption - desorption, moles - 0.4, 2e-15);
+    }
+}
+
+#[test]
 fn thermodynamic_affinity_matches_constant_heat_vant_hoff_and_source_units() {
     let catalog = model(vec![0.5, 0.5], 0.0);
     let law = adsorbent(&catalog, 2e-5, 0.4);
