@@ -634,6 +634,7 @@
     "crates/fs-conduction/tests/mms.rs",
     "crates/fs-conduction/tests/nonlinear_backward_euler.rs",
     "crates/fs-conduction/tests/nonmatching_contact.rs",
+    "crates/fs-conduction/tests/nonmatching_contact/steady_goal.rs",
     "crates/fs-conduction/tests/pcb_homogenization.rs",
     "crates/fs-conduction/tests/power.rs",
     "crates/fs-conduction/tests/power_table_e2e.rs",

@@ -326,7 +326,7 @@ impl RobinResponse {
     }
 }
 
-fn admit_linear(linear: LinearConfig) -> Result<(), ConductionError> {
+pub(crate) fn admit_linear(linear: LinearConfig) -> Result<(), ConductionError> {
     if !(linear.tolerance.is_finite() && linear.tolerance > 0.0
         && linear.tolerance < 1.0 && linear.max_iterations > 0)
     { return Err(invalid("positive Krylov budget and a relative tolerance in (0, 1) required")); }
@@ -377,7 +377,7 @@ pub(crate) fn bind_boundary_ports(cx: &Cx<'_>, mesh: &crate::ConductionMesh,
     Ok(ports)
 }
 
-fn true_residual(matrix: &Csr, x: &[f64], rhs: &[f64]) -> Result<f64, ConductionError> {
+pub(crate) fn true_residual(matrix: &Csr, x: &[f64], rhs: &[f64]) -> Result<f64, ConductionError> {
     let mut ax = vec![0.0; rhs.len()];
     matrix.spmv(x, &mut ax);
     let scale = rhs.iter().chain(&ax).map(|v| v.abs()).fold(0.0_f64, f64::max);

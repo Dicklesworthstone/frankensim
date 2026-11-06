@@ -8,6 +8,8 @@ mod mapped_temperature;
 mod steady;
 #[path = "nonmatching_contact/steady_linearization.rs"]
 mod steady_linearization;
+#[path = "nonmatching_contact/steady_goal.rs"]
+mod steady_goal;
 #[path = "nonmatching_contact/newton.rs"]
 mod newton;
 use support::with_cx;

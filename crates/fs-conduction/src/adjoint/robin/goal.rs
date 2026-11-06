@@ -40,7 +40,8 @@ pub struct DiscreteGoalComparison {
     pub dual_relative_residual: f64,
     /// Inner Krylov iterations consumed by this comparison, excluding primals.
     pub dual_iterations: usize,
-    /// True when the actual nonsymmetric K'(T) material tangent was used.
+    /// True when the complete nonlinear tangent was used, including any
+    /// material K'(T) or source-backed contact-temperature feedback.
     pub uses_nonlinear_jacobian: bool,
 }
 

@@ -1107,6 +1107,73 @@ the true transpose. Endpoint tampering, singular insulated equilibria and
 exhausted trace budgets refuse. These analytical fixtures establish no
 measured-data validation.
 
+## Mesh-goal comparisons with live source contact laws
+
+`TemperatureContacts::compare_steady_goal` compares an unchanged, physically
+admitted steady reference with another full nodal field on the identical mesh.
+The original selected contact source is evaluated independently at both fields,
+with both A/B temperatures and the declared face-mean or pointwise quadrature.
+Bulk material assignments and temperature-dependent conductivity remain with
+that same physical problem. Geometry, nonthermal source context, loads and
+prescribed Dirichlet/Neumann/Robin data stay fixed. Boundary laws with feedback
+need their own complete residual owner; this method does not add that feedback.
+
+The reference must pass the original free-node residual and whole-domain heat
+checks in watts. The reported relative primal residual is diagnostic and never
+substitutes the derivative solver's tolerance for those physical gates. One
+bounded transpose solve uses the complete bulk and contact Jacobian, including
+both resistance temperature partials. No extra primal solve, claim selection,
+contact freezing across fields or derivative through iteration history occurs.
+
+Full nodal contributions are `lambda_i * [R(T_ref)-R(T_approx)]_i`, with zero
+fixed-node entries. The signed direct goal difference and its observed finite
+nonlinear remainder are retained separately; their identity includes remaining
+linear-solve and arithmetic error. The remainder must remain in a refinement
+estimate. These are discrete refinement indicators, not continuum error bounds.
+
+Malformed or nonfinite fields/weights, altered prescribed values, invalid
+linear/watt/trace budgets, extrapolated source queries, a dirty or nonsmooth
+reference, failed transpose solve and cancellation refuse without publishing a
+partial comparison. A finite approximate field may cross source segments or
+land at a source corner because it requires only the physical law, not a
+unique derivative there. Phase-state contact keeps its temperature-only refusal.
+
+Independent two-slab regressions cover matching and nonmatching trace meshes,
+explicit two-state residuals, the analytic complete transpose and a nonzero
+quadratic finite remainder. Frozen-law comparisons fail those same oracles.
+A constant source recovers the linear goal identity, and simultaneous nonlinear
+bulk/contact feedback retains a quadratic remainder. Source corners, physical
+endpoint tampering, source-domain exits, numerical budgets and cancellation
+have direct regression cases. Their synthetic sources imply no measured-data
+validation and the observed mesh difference implies no continuum guarantee.
+
+`compare_steady_goal_with_robin_feedback` additionally binds each field's own
+uniform Robin values on selected original regions. The boundary-law owner
+supplies `[h, reference, dh/dmean, dreference/dmean]` at the reference, actual
+`[h, reference]` at the approximation, and an additional row-major reference
+feedback map between region means. Diagonal map entries add to local slopes;
+the same derivative must never be supplied twice. Neither contact queries nor
+the approximate boundary reuse the reference field's constitutive values.
+
+The same complete contact/bulk transpose receives consistent P1 Robin
+coefficient, local-reference and cross-region reference corrections. Both
+physical watt gates remain in force before the dual, including for a zero
+goal. Up to 64 distinct existing uniform Robin regions and four nodal factor
+vectors per region must fit the separate feedback-entry allowance. Malformed
+law/map dimensions, nonfinite values, nonpositive coefficients, duplicate or
+unsupported regions, and exhausted storage allowances refuse before boundary
+cloning. The original boundary partition, source claims, prescribed values,
+input fields and contact ownership remain unchanged. Law evaluations and
+slopes retain the consumer's responsibility; this supplies neither pointwise
+boundary feedback nor an unrequested radiation model.
+
+An independent four-temperature slab circuit exercises nonlinear Robin laws,
+asymmetric affine reference coupling and live two-sided contact on matching
+and nonmatching traces. Its directly solved transpose and finite nonlinear
+remainder distinguish frozen approximate boundaries and omitted reference
+feedback. Stale-reference, malformed/budget and cancellation regressions retain
+the same refusal contract.
+
 ## Temperature-dependent source laws on nonmatching thermal interfaces
 
 `TemperatureContact::new_nonmatching` assigns an ordered source law to two
