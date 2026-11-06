@@ -712,3 +712,137 @@ fn sublimation_and_deposition_balance_ignore_unchanged_neighbor_energy() {
         }
     }
 }
+
+#[test]
+fn supplied_heat_drives_native_phase_transfer_without_sensible_overshoot() {
+    let duration = 1000.0;
+    for partial_pressure_pa in [0.0, 200.0] {
+        let mut thermal = initial(7.0);
+        let original = thermal.cells()[&CellId(1)].clone();
+        let mut gas = VaporReservoir::Prescribed {
+            partial_pressure_pa,
+            temperature_k: 250.0,
+        };
+        // Independent Hertz-Knudsen flux at the fixture's original 250 K.
+        let transfer = (0.018
+            / (2.0 * core::f64::consts::PI * crate::sublimation::MOLAR_GAS_CONSTANT * 250.0))
+            .sqrt()
+            * 0.01
+            * (100.0 - partial_pressure_pa)
+            * original.geometry.surface_area_m2
+            * duration;
+        let latent = crate::sublimation::MOLAR_GAS_CONSTANT / 0.018 * 6000.0;
+        let heat = transfer * latent;
+        let sensible_only_t = 250.0 + heat / (original.mass_kg * 2000.0);
+        assert!(!(180.0..=273.0).contains(&sensible_only_t));
+        let step = thermal
+            .sublimate_cell_with_heat(
+                CellId(1),
+                &Ice,
+                kinetics(),
+                &mut gas,
+                duration,
+                heat,
+                phase(),
+                || Ok(()),
+            )
+            .unwrap();
+
+        assert_eq!(thermal.temperature_k(CellId(1)).unwrap(), 250.0);
+        assert_eq!(step.supplied_heat_j, heat);
+        close(step.transferred_mass_kg, transfer, 1e-16);
+        close(step.latent_energy_j, heat, 1e-7);
+        close(
+            thermal.mass_kg() + step.transferred_mass_kg,
+            original.mass_kg,
+            1e-17,
+        );
+        close(thermal.energy_j() + step.vapor_energy_j, heat, 1e-7);
+        assert_eq!(step.transferred_mass_kg > 0.0, partial_pressure_pa == 0.0);
+        assert_eq!(thermal.cells()[&CellId(1)].geometry, original.geometry);
+        assert_eq!(thermal.cells()[&CellId(1)].boundary, original.boundary);
+        assert_eq!(thermal.time_s(), 0.0);
+        // The authored 7 W is retained for the heat owner. This direct operation
+        // spends exactly its supplied heat, without applying that source again.
+    }
+}
+
+#[test]
+fn heated_sublimation_refuses_invalid_heat_and_final_cancellation_atomically() {
+    let reservoir = VaporReservoir::Finite {
+        vapor_mass_kg: 0.0,
+        volume_m3: 0.1,
+        temperature_k: 250.0,
+    };
+    let mut successful = initial(0.0);
+    let mut successful_gas = reservoir;
+    let mut polls = 0;
+    successful
+        .sublimate_cell_with_heat(
+            CellId(1),
+            &Ice,
+            kinetics(),
+            &mut successful_gas,
+            1.0,
+            10.0,
+            phase(),
+            || {
+                polls += 1;
+                Ok(())
+            },
+        )
+        .unwrap();
+
+    for cancel_at in [1, polls] {
+        let mut thermal = initial(0.0);
+        let before = thermal.cells().clone();
+        let mut gas = reservoir;
+        let mut visited = 0;
+        let result = thermal.sublimate_cell_with_heat(
+            CellId(1),
+            &Ice,
+            kinetics(),
+            &mut gas,
+            1.0,
+            10.0,
+            phase(),
+            || {
+                visited += 1;
+                if visited == cancel_at {
+                    Err(DepositionError::Cancelled)
+                } else {
+                    Ok(())
+                }
+            },
+        );
+        assert_eq!(
+            result,
+            Err(ThermalSublimationError::Thermal(DepositionError::Cancelled))
+        );
+        assert_eq!(thermal.cells(), &before);
+        assert_eq!(thermal.time_s(), 0.0);
+        assert_eq!(gas, reservoir);
+    }
+
+    let mut thermal = initial(0.0);
+    let before = thermal.cells().clone();
+    for heat in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        let mut gas = reservoir;
+        assert!(matches!(
+            thermal.sublimate_cell_with_heat(
+                CellId(1),
+                &Ice,
+                kinetics(),
+                &mut gas,
+                1.0,
+                heat,
+                phase(),
+                || Ok(()),
+            ),
+            Err(ThermalSublimationError::Surface(SublimationError::Invalid(_)))
+        ));
+        assert_eq!(thermal.cells(), &before);
+        assert_eq!(thermal.time_s(), 0.0);
+        assert_eq!(gas, reservoir);
+    }
+}

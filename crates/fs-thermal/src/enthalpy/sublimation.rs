@@ -33,8 +33,8 @@ pub mod external;
 use super::observe::EnergySum;
 use super::{CellId, DepositionError, DepositionSimulation, EnergyAudit, Event, StepConfig};
 use crate::sublimation::{
-    SolidSurfaceState, SolverConfig, SublimationError, SublimationLaw, SurfaceKinetics,
-    SurfaceStep, VaporReservoir, advance_surface,
+    SolidSurfaceState, SolverConfig, SublimationError, SublimationLaw, SurfaceKinetics, SurfaceStep,
+    VaporReservoir, advance_surface_with_heat,
 };
 
 /// Original thermal/constitutive failure, or an unsupported topology transition.
@@ -142,6 +142,34 @@ impl DepositionSimulation<'_> {
         reservoir: &mut VaporReservoir,
         duration_s: f64,
         config: SolverConfig,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<SurfaceStep, ThermalSublimationError> {
+        self.sublimate_cell_with_heat(
+            id, law, kinetics, reservoir, duration_s, 0.0, config, checkpoint,
+        )
+    }
+
+    /// Apply signed supplied heat and solid/vapor transfer at one endpoint.
+    ///
+    /// The original caloric law closes storage change plus complete vapor
+    /// enthalpy against this one heat input. It never visits a sensible-only
+    /// intermediate state, so supplied heat can feed latent transfer directly.
+    /// The caller owns the source debit and the interval; authored heat sources,
+    /// convection and contacts are not integrated by this direct operation.
+    ///
+    /// Mass, enthalpy and the supplied vapor inventory commit together after
+    /// constitutive admission and cancellation. Clock, reference geometry,
+    /// contacts and authored boundary data remain unchanged.
+    #[allow(clippy::too_many_arguments)]
+    pub fn sublimate_cell_with_heat<L: SublimationLaw + ?Sized>(
+        &mut self,
+        id: CellId,
+        law: &L,
+        kinetics: SurfaceKinetics,
+        reservoir: &mut VaporReservoir,
+        duration_s: f64,
+        supplied_heat_j: f64,
+        config: SolverConfig,
         mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<SurfaceStep, ThermalSublimationError> {
         checkpoint()?;
@@ -153,6 +181,7 @@ impl DepositionSimulation<'_> {
             reservoir,
             area,
             duration_s,
+            supplied_heat_j,
             config,
             &mut checkpoint,
         )
@@ -167,6 +196,7 @@ impl DepositionSimulation<'_> {
         reservoir: &mut VaporReservoir,
         exposed_area_m2: f64,
         duration_s: f64,
+        supplied_heat_j: f64,
         config: SolverConfig,
         checkpoint: &mut impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<SurfaceStep, ThermalSublimationError> {
@@ -188,12 +218,13 @@ impl DepositionSimulation<'_> {
         // Preserve the original chart/checkpoint refusal in the adapter error.
         let chart_error = std::cell::RefCell::new(None);
         let mut checkpoint_error = None;
-        let result = advance_surface(
+        let result = advance_surface_with_heat(
             law,
             kinetics,
             solid,
             *reservoir,
             duration_s,
+            supplied_heat_j,
             config,
             |h| {
                 caloric.temperature_k(h).map_err(|error| {
@@ -371,6 +402,7 @@ impl DepositionSimulation<'_> {
                     &mut reservoir,
                     area,
                     stop_s - start_s,
+                    0.0,
                     phase_config,
                     &mut checkpoint,
                 )?;

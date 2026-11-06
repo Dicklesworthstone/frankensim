@@ -854,6 +854,16 @@ existing caloric chart remains authoritative; rejected out-of-domain trial
 points do not invalidate a successfully converged in-domain endpoint. All
 failures and cancellation preserve the original timeline and reservoir.
 
+`sublimate_cell_with_heat` supplies a signed energy input to that same atomic
+cell/reservoir operation. It solves original solid storage plus complete vapor
+enthalpy against the supplied heat at one endpoint, allowing heat-driven
+sublimation and cooling-driven deposition without an out-of-domain
+sensible-only intermediate state. The caller owns the source debit and duration;
+this direct operation neither advances the clock nor integrates authored heat,
+convection or contacts. The zero-heat method and split timeline retain their
+existing composition. Native regressions cover both signs of latent transfer,
+unchanged authored boundary data, invalid heat and final-checkpoint rollback.
+
 The whole-window audit uses compensated per-cell changes relative to each
 cell's starting or birth enthalpy, together with vapor enthalpy on that same
 relative reference. Mass conservation is checked separately. Unchanged large
