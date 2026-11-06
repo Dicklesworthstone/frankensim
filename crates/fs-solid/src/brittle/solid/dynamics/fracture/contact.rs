@@ -8,6 +8,9 @@
 //! change. This fixed-configuration event does not locate collisions, repair
 //! penetration, supply persistent contact forces or infer impact heat.
 
+/// Bounded native midpoint prefixes locating approaching released-face events.
+pub mod approach;
+
 use std::sync::Arc;
 
 use fs_contact::multicontact::{

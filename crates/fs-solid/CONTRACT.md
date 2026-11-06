@@ -1,5 +1,42 @@
 # fs-solid CONTRACT
 
+## Native brittle-fragment contact localization
+
+`brittle::solid::dynamics::fracture::contact::approach` advances an original
+`BrittleTetMotion` toward approaching released faces without requiring a caller
+to choose the impact time exactly. Every trial replays the same accepted native
+material history through `advance_midpoint`, its cached consistent mass, Newton
+solve and physical-work admission. Affine applied forces are resampled at each
+actual prefix mean; prescribed coordinates follow the accepted-to-target path.
+No state interpolation, gap correction, extra material law or impulse is added.
+
+Only an explicit native released-face closure or a strictly negative paired gap
+narrows the unsafe endpoint. A successful full endpoint returns directly;
+otherwise bounded bisection retains a nonnegative native prefix until an actual
+approaching witness lies within both the positive activation-distance allowance
+and the safe/unsafe endpoint-time allowance. Every non-tied pair is checked
+before returning a witness, so another pair's penetration cannot be hidden.
+Even penetration inside the existing opening roundoff tolerance is rejected.
+Initially active approach returns a zero-time witness without spending a motion
+step; all accepted nonzero prefixes spend exactly one. Native attempts have a
+hard count, cancellation is polled, and any refusal leaves the original clock,
+velocity, history and step allowance available for deterministic retry.
+
+The geometric claim is nonpenetration on the accepted affine-displacement
+trace. The reported time bracket concerns sampled native endpoint admission;
+it is not a globally first collision certificate for a continuous or
+nonmonotone trajectory. Callers choose temporal resolution and resolve forcing
+knots. Persistent contact forces, finite sliding and new fragment-pair discovery
+remain outside this entry. A witness is only an approach observation; the
+original simultaneous impact owner still collects every active contact row.
+
+G1/G3 regressions in `tests/brittle_tet_fragment_contact/approach.rs` compare
+ballistic closure and constant-acceleration contact against independent roots,
+check actual prefix means under affine transverse forces, and cover finite
+precontact motion, initial approach/separation, strict tiny-overlap rejection,
+bounded refusal, cancellation and retained deterministic retry. These are
+manufactured native mechanics checks, not experimental validation or global CCD.
+
 ## Simultaneous impacts on released brittle faces
 
 `BrittleTetMotion::impact_released_faces` binds the retained matching-face

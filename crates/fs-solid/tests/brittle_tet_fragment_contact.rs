@@ -31,6 +31,9 @@ use fs_solid::loads3::TetLoadGeometry3;
 use fs_solid::plastic3::IncrementSettings;
 use fs_solver::CheckedCgConfig;
 
+#[path = "brittle_tet_fragment_contact/approach.rs"]
+mod approach;
+
 const NODES: [[f64; 3]; 5] = [
     [0.0, 0.0, 0.0],
     [1.0, 0.0, 0.0],
