@@ -2,6 +2,8 @@
 //! bridge oracle is solved independently in closed form; nonlinear targets
 //! use prescribed pipe flows to manufacture a different, looped pressure solve.
 
+mod injections;
+
 use super::super::tests::with_cx;
 use super::*;
 use fs_alloc::{ArenaConfig, ArenaPool};

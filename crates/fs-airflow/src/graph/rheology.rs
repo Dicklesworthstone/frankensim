@@ -36,6 +36,19 @@ pub struct CarreauPipeBranch {
     pub pipe: LaminarCarreauPipe,
 }
 
+/// An ideal prescribed volume-flow port at a node, in m³/s.
+/// Positive flow supplies the pipes; negative flow withdraws fluid. Repeated
+/// entries at one node are summed in input order with compensated arithmetic.
+/// A pressure reservoir may coexist at the node and supplies the remaining
+/// exchange. A balanced pair represents an ideal flow-controlled transfer;
+/// its pressure work is resolved by the network, with no equipment-efficiency
+/// or head-capability model implied.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FlowInjection {
+    pub node: usize,
+    pub flow: VolumetricFlowRate,
+}
+
 /// Independent network, linear and constitutive accuracy/work controls.
 /// Small continuity residuals do not certify the pipe quadrature's accuracy.
 #[derive(Clone, Copy, Debug)]
@@ -44,7 +57,8 @@ pub struct CarreauGraphControls {
     pub relative_flow_tolerance: f64,
     /// Total Newton corrections across accepted AND rejected pressure stages.
     pub maximum_newton_iterations: usize,
-    /// Total attempts to advance the prescribed pressures from rest to target.
+    /// Total attempts to advance prescribed pressures AND injections from rest
+    /// to their full targets; the pressure-only entry point uses the same cap.
     pub maximum_pressure_attempts: usize,
     /// Maximum halvings of each Newton correction; at most 64.
     pub maximum_backtracks: usize,
@@ -116,8 +130,9 @@ pub enum CarreauGraphError {
         max_node_imbalance: VolumetricFlowRate,
         boundary_imbalance: VolumetricFlowRate,
     },
-    /// Only the full target pressure is publishable. The last refusal records
-    /// a source ceiling, numerical failure or unsuccessful damped correction.
+    /// Only the full target pressures and injections are publishable. The last
+    /// refusal records a source ceiling, numerical failure or unsuccessful
+    /// damped correction.
     PressureContinuationLimit {
         reached_fraction: f64,
         attempts: usize,
@@ -166,20 +181,33 @@ pub struct CarreauGraphSolution {
     /// Positive outflow means the node supplies volume to its incident pipes.
     pub node_outflows: Vec<VolumetricFlowRate>,
     pub boundaries: Vec<FixedPressure>,
+    /// Original prescribed flow ports, including signed and repeated entries.
+    pub injections: Vec<FlowInjection>,
+    /// Net reservoir outflows in pressure-boundary input order: actual pipe
+    /// outflow minus the authored net injection at that node.
+    pub reservoir_outflows: Vec<VolumetricFlowRate>,
+    /// Maximum free-node |pipe outflow - prescribed injection|.
     pub max_node_imbalance: VolumetricFlowRate,
+    /// Net reservoir exchange plus all prescribed injections. Fixed-node
+    /// injections cancel their reservoir contribution before accumulation.
     pub boundary_imbalance: VolumetricFlowRate,
-    /// Sum of prescribed pressure times signed reservoir outflow [W].
+    /// Sum of prescribed pressure times NET signed reservoir outflow [W].
     pub boundary_power_w: f64,
+    /// Sum of solved nodal pressure times prescribed net injection [W]. This
+    /// is signed work, not viscous heat; withdrawal can return pressure work.
+    pub injection_power_w: f64,
     /// Sum of original accepted pipe pressure times flow [W], nonnegative.
     pub dissipated_power_w: f64,
     /// Sum of (accepted minus requested pipe pressure) times its flow [W].
     pub constitutive_residual_power_w: f64,
     /// Sum of free-node pressure times its remaining continuity residual [W].
     pub node_residual_power_w: f64,
-    /// boundary + node residual + constitutive residual - dissipation [W].
+    /// boundary + injection + node residual + constitutive residual
+    /// - dissipation [W].
     /// This is an observed floating-point defect, not an energy certificate.
     pub power_balance_residual_w: f64,
     pub newton_iterations: usize,
+    /// Attempts to advance the prescribed pressure and flow forcing together.
     pub pressure_attempts: usize,
 }
 
@@ -258,20 +286,43 @@ impl CarreauPipeGraph {
         controls: CarreauGraphControls,
         cx: &Cx<'_>,
     ) -> Result<CarreauGraphSolution, CarreauGraphError> {
+        self.solve_with_injections(boundaries, &[], controls, cx)
+    }
+
+    /// Solve the original pipe network with signed prescribed volume inputs.
+    ///
+    /// Free-node continuity is pipe outflow = net authored injection. Pressure
+    /// remains unknown at those nodes, so the required source pressure and its
+    /// signed work emerge from the original shear-dependent material response.
+    /// A pressure boundary still anchors each connected component; its reservoir
+    /// exchanges the remaining flow after any injection at the same node.
+    ///
+    /// Pressure differences and injections continue together from rest without
+    /// changing a source ceiling. Demand magnitudes enter continuity tolerances;
+    /// the original differential conductance and checked linear solve remain
+    /// unchanged. Only convergence at ALL full targets publishes. Numerical
+    /// storage is O(nodes + pipes), plus the retained original flow-port list.
+    pub fn solve_with_injections(
+        &self,
+        boundaries: &[FixedPressure],
+        injections: &[FlowInjection],
+        controls: CarreauGraphControls,
+        cx: &Cx<'_>,
+    ) -> Result<CarreauGraphSolution, CarreauGraphError> {
         checkpoint(cx)?;
         controls.validate()?;
-        let layout = self.boundary_layout(boundaries, cx)?;
+        let layout = self.boundary_layout(boundaries, injections, cx)?;
         let mut pressures = layout.reference_pressure.clone();
-        let mut at_rest = true;
+        let mut at_rest = !layout.has_injection;
         for boundary in boundaries {
             checkpoint(cx)?;
             at_rest &= boundary.pressure.value() == layout.reference_pressure[boundary.node];
         }
         // Also admits the original constitutive controls before any retreat is
         // possible: malformed controls do not masquerade as a source ceiling.
-        let rest = self.evaluate(&pressures, &layout, controls, cx)?;
+        let rest = self.evaluate(&pressures, &layout, 0.0, controls, cx)?;
         if at_rest {
-            return self.finish(pressures, boundaries, &layout, rest, 0, 0, cx);
+            return self.finish(pressures, boundaries, injections, &layout, rest, 0, 0, cx);
         }
         let (mut reached, mut increment) = (0.0, 1.0);
         let (mut iterations, mut attempts) = (0, 0);
@@ -304,12 +355,13 @@ impl CarreauPipeGraph {
                     )?
                 };
             }
-            match self.solve_stage(trial, &layout, controls, &mut iterations, cx) {
+            match self.solve_stage(trial, &layout, target, controls, &mut iterations, cx) {
                 Ok((accepted_pressures, state)) => {
                     if target == 1.0 {
                         return self.finish(
                             accepted_pressures,
                             boundaries,
+                            injections,
                             &layout,
                             state,
                             iterations,
@@ -343,6 +395,7 @@ impl CarreauPipeGraph {
     fn boundary_layout(
         &self,
         boundaries: &[FixedPressure],
+        injections: &[FlowInjection],
         cx: &Cx<'_>,
     ) -> Result<BoundaryLayout, GraphError> {
         let mut fixed = vec![false; self.node_count()];
@@ -363,6 +416,16 @@ impl CarreauPipeGraph {
             }
             fixed[boundary.node] = true;
             reference_pressure[boundary.node] = boundary.pressure.value();
+        }
+        let mut injection_sums = vec![Sum::default(); self.node_count()];
+        for (index, injection) in injections.iter().enumerate() {
+            periodic_checkpoint(index, cx)?;
+            if injection.node >= self.node_count() || !injection.flow.value().is_finite() {
+                return Err(GraphError::InvalidInput(
+                    "invalid Carreau nodal volume injection",
+                ));
+            }
+            injection_sums[injection.node].add(injection.flow.value())?;
         }
         // Every component starts at its OWN uniform pressure. Translating a
         // different component's gauge must never consume this fluid's rate
@@ -411,8 +474,13 @@ impl CarreauPipeGraph {
         }
         let mut free_nodes = Vec::new();
         let mut free_index = vec![None; self.node_count()];
+        let mut node_injections = Vec::with_capacity(self.node_count());
+        let mut has_injection = false;
         for (node, &is_fixed) in fixed.iter().enumerate() {
             periodic_checkpoint(node, cx)?;
+            let injection = injection_sums[node].value()?;
+            node_injections.push(injection);
+            has_injection |= injection != 0.0;
             if !is_fixed {
                 free_index[node] = Some(free_nodes.len());
                 free_nodes.push(node);
@@ -423,6 +491,8 @@ impl CarreauPipeGraph {
             free_nodes,
             free_index,
             reference_pressure,
+            node_injections,
+            has_injection,
         })
     }
 
@@ -439,6 +509,7 @@ impl CarreauPipeGraph {
         &self,
         pressures: &[f64],
         layout: &BoundaryLayout,
+        injection_scale: f64,
         controls: CarreauGraphControls,
         cx: &Cx<'_>,
     ) -> Result<FlowState, CarreauGraphError> {
@@ -471,17 +542,27 @@ impl CarreauPipeGraph {
             conductance.push(slope);
         }
         let mut outflows = Vec::with_capacity(self.node_count());
+        let mut residuals = Vec::with_capacity(self.node_count());
         let (mut boundary_sum, mut boundary_magnitude) = (Sum::default(), Sum::default());
         let mut max_node_imbalance: f64 = 0.0;
         let mut converged = true;
         for (node, &is_fixed) in layout.fixed.iter().enumerate() {
             periodic_checkpoint(node, cx)?;
-            let residual = sums[node].value()?;
-            outflows.push(residual);
+            let outflow = sums[node].value()?;
+            let injection = injection_scale * layout.node_injections[node];
+            let residual = finite(outflow - injection, "Carreau injection continuity residual")?;
+            outflows.push(outflow);
+            residuals.push(residual);
             if is_fixed {
-                boundary_sum.add(residual)?;
-                boundary_magnitude.add(residual.abs())?;
+                // The prescribed flow here cancels its own reservoir exchange.
+                // Cancel it before forming convergence scales, so adding a port
+                // at fixed pressure cannot change the physical pressure solve.
+                boundary_sum.add(outflow)?;
+                boundary_magnitude.add(outflow.abs())?;
             } else {
+                boundary_sum.add(injection)?;
+                boundary_magnitude.add(injection.abs())?;
+                magnitudes[node].add(injection.abs())?;
                 max_node_imbalance = max_node_imbalance.max(residual.abs());
                 converged &= residual.abs() <= controls.threshold(magnitudes[node].value()?)?;
             }
@@ -493,6 +574,7 @@ impl CarreauPipeGraph {
             profiles,
             conductance,
             outflows,
+            residuals,
             max_node_imbalance,
             boundary_imbalance,
             converged,
@@ -503,11 +585,12 @@ impl CarreauPipeGraph {
         &self,
         mut pressures: Vec<f64>,
         layout: &BoundaryLayout,
+        injection_scale: f64,
         controls: CarreauGraphControls,
         iterations: &mut usize,
         cx: &Cx<'_>,
     ) -> Result<(Vec<f64>, FlowState), CarreauGraphError> {
-        let mut state = self.evaluate(&pressures, layout, controls, cx)?;
+        let mut state = self.evaluate(&pressures, layout, injection_scale, controls, cx)?;
         loop {
             checkpoint(cx)?;
             if state.converged {
@@ -530,7 +613,7 @@ impl CarreauPipeGraph {
                     periodic_checkpoint(index, cx)?;
                     trial[node] = pressures[node] + step * correction[index];
                 }
-                match self.evaluate(&trial, layout, controls, cx) {
+                match self.evaluate(&trial, layout, injection_scale, controls, cx) {
                     Ok(candidate) => {
                         if candidate.converged
                             || candidate.max_node_imbalance
@@ -568,7 +651,7 @@ impl CarreauPipeGraph {
         let mut inverse_diagonal = Vec::with_capacity(layout.free_nodes.len());
         for &node in &layout.free_nodes {
             checkpoint(cx)?;
-            rhs.push(-state.outflows[node]);
+            rhs.push(-state.residuals[node]);
             let mut diagonal = Sum::default();
             for (ordinal, &edge) in self.adjacency[node].iter().enumerate() {
                 periodic_checkpoint(ordinal, cx)?;
@@ -608,6 +691,7 @@ impl CarreauPipeGraph {
         &self,
         pressures: Vec<f64>,
         boundaries: &[FixedPressure],
+        injections: &[FlowInjection],
         layout: &BoundaryLayout,
         state: FlowState,
         iterations: usize,
@@ -615,12 +699,17 @@ impl CarreauPipeGraph {
         cx: &Cx<'_>,
     ) -> Result<CarreauGraphSolution, CarreauGraphError> {
         let (mut boundary_power, mut node_power) = (Sum::default(), Sum::default());
+        let mut injection_power = Sum::default();
         for (node, &pressure) in pressures.iter().enumerate() {
             periodic_checkpoint(node, cx)?;
             let power = finite(
-                pressure * state.outflows[node],
+                pressure * state.residuals[node],
                 "Carreau nodal pressure work",
             )?;
+            injection_power.add(finite(
+                pressure * layout.node_injections[node],
+                "Carreau prescribed-flow pressure work",
+            )?)?;
             if layout.fixed[node] {
                 boundary_power.add(power)?;
             } else {
@@ -649,17 +738,29 @@ impl CarreauPipeGraph {
             });
         }
         let boundary_power_w = boundary_power.value()?;
+        let injection_power_w = injection_power.value()?;
         let node_residual_power_w = node_power.value()?;
         let dissipated_power_w = dissipation.value()?;
         let constitutive_residual_power_w = constitutive_power.value()?;
         let mut balance = Sum::default();
         for work in [
             boundary_power_w,
+            injection_power_w,
             node_residual_power_w,
             constitutive_residual_power_w,
             -dissipated_power_w,
         ] {
             balance.add(work)?;
+        }
+        let mut retained_injections = Vec::with_capacity(injections.len());
+        for (index, &injection) in injections.iter().enumerate() {
+            periodic_checkpoint(index, cx)?;
+            retained_injections.push(injection);
+        }
+        let mut reservoir_outflows = Vec::with_capacity(boundaries.len());
+        for (index, boundary) in boundaries.iter().enumerate() {
+            periodic_checkpoint(index, cx)?;
+            reservoir_outflows.push(VolumetricFlowRate::new(state.residuals[boundary.node]));
         }
         checkpoint(cx)?;
         Ok(CarreauGraphSolution {
@@ -671,9 +772,12 @@ impl CarreauPipeGraph {
                 .map(VolumetricFlowRate::new)
                 .collect(),
             boundaries: boundaries.to_vec(),
+            injections: retained_injections,
+            reservoir_outflows,
             max_node_imbalance: VolumetricFlowRate::new(state.max_node_imbalance),
             boundary_imbalance: VolumetricFlowRate::new(state.boundary_imbalance),
             boundary_power_w,
+            injection_power_w,
             dissipated_power_w,
             constitutive_residual_power_w,
             node_residual_power_w,
@@ -689,12 +793,15 @@ struct BoundaryLayout {
     free_nodes: Vec<usize>,
     free_index: Vec<Option<usize>>,
     reference_pressure: Vec<f64>,
+    node_injections: Vec<f64>,
+    has_injection: bool,
 }
 
 struct FlowState {
     profiles: Vec<CarreauPipeProfile>,
     conductance: Vec<f64>,
     outflows: Vec<f64>,
+    residuals: Vec<f64>,
     max_node_imbalance: f64,
     boundary_imbalance: f64,
     converged: bool,
