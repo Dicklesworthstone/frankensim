@@ -32,6 +32,7 @@ use fs_material::thermochemical_gas::energy::parcel::ClosedGasParcel;
 
 mod tangent;
 pub use tangent::TetCavityGasTangent;
+pub(crate) mod equilibrium;
 
 use super::{
     ClosedTetPressureSurface, HyperTetError, area_vector, checkpoint, cross, difference, dot,

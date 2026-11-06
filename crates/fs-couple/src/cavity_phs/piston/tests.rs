@@ -391,6 +391,7 @@ fn invalid_work_bounds_source_failures_and_late_cancellation_roll_back() {
 
 #[cfg(test)]
 mod adiabatic_solid_cavity_bridge {
+    mod equilibrium;
     use super::gas;
     use fs_alloc::{ArenaConfig, ArenaPool};
     use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
@@ -612,3 +613,4 @@ mod adiabatic_solid_cavity_bridge {
         });
     }
 }
+
