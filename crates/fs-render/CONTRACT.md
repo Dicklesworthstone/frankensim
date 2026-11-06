@@ -1410,12 +1410,23 @@ differentiable lift). Pure Rust throughout.
   over-relaxation uses the standard certified fallback (retreat when
   spheres fail to overlap). `ray_intersect_nurbs` is grid-seeded 3×3
   Newton on `S(u,v) − o − t·d` with the `[S_u, S_v, −d]` Jacobian. Its
-  allocation-bearing legacy seed grid is checked, capped, and fallibly
-  reserved before evaluation; defensive sealed-source invariant failure,
+  seed evaluation grid is checked and capped; a stable streaming top-k retains
+  only the admitted Newton starts (six by default), with fallible reservation
+  before evaluation. `NurbsRayBudget` and `ray_intersect_nurbs_with_budget`
+  admit caller work units, start/iteration counts and retained-seed bytes.
+  The work charge conservatively prices the source structure, full grid,
+  retained Newton attempts, hull scan and seed ranking; the seed-byte allowance
+  does not include the native evaluator's separately bounded scratch or source
+  storage. Defensive sealed-source invariant failure,
   invalid settings, resource refusal, cancellation, and bounded-search
-  nonconvergence remain distinct typed outcomes. The current Newton path has no exclusion theorem,
-  so exhausted starts fail closed as `IterationLimit`; `Ok(None)` is reserved
-  for a future certified miss. Jacobian columns and residuals are normalized
+  nonconvergence remain distinct typed outcomes. Outward interval projection
+  of the stored homogeneous controls encloses the entire positive-weight
+  rational surface. Interval slab intersection against the original positive
+  ray proves global misses, returned as `Ok(None)`, without a finite cutoff or
+  a lost small direction component. A ray intersecting this control hull still
+  needs Newton; exhausted starts fail closed as `IterationLimit`. The hull test
+  does not certify Newton hit existence, nearest-hit completeness or trimmed
+  geometry. Jacobian columns and residuals are normalized
   before the dimensionless angular-volume condition test, and residual/normal
   norms use scale-safe finite arithmetic, so knot-domain or ray scaling cannot
   manufacture convergence, a miss, or a `Some(NaN)` normal.
@@ -2331,8 +2342,12 @@ publishes none of that sample.
 ## Cancellation behavior
 
 `sphere_trace` polls its `Cx` before and after each chart evaluation and before
-terminal success. Cancellable NURBS seeding/Newton and BVH traversal poll before
-and after each bounded seed/iteration/node/triangle. Differentiable scanline rendering
+terminal success. Cancellable NURBS tracing carries the same `Cx` through native
+surface admission, basis/contraction evaluation and partial derivatives, checks
+each control during outward hull construction, and polls before and after each
+bounded seed/iteration. Final cancellation wins over either a hit or a proved
+miss. BVH traversal polls before and after each bounded node/triangle.
+Differentiable scanline rendering
 polls at entry, per search iteration, row, pixel, and loss-reduction element and
 propagates `RenderError::Cancelled`. Spectral scene preflight polls while
 validating each light and primitive and while materializing canonical light

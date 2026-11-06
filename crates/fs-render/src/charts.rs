@@ -18,7 +18,10 @@ use fs_evidence::{NumericalCertificate, NumericalKind};
 use fs_exec::{Cancelled, Cx};
 use fs_geom::{Chart, ChartSample, Point3, TraceStepClaim, Vec3};
 use fs_math::eft::two_sum;
-use fs_rep_nurbs::{NurbsError, NurbsSurface};
+use fs_rep_nurbs::{
+    AdmittedNurbsSurface, NurbsError, NurbsSurface, SurfaceAdmissionRun, SurfaceEvaluationRun,
+    SurfacePartialsRun,
+};
 
 pub mod proximity;
 
@@ -128,6 +131,13 @@ pub enum NurbsRayError {
         /// Maximum admitted work units.
         cap: u128,
     },
+    /// The bounded retained Newton seed buffer exceeds its caller allowance.
+    MemoryLimit {
+        /// Required seed-buffer payload bytes, excluding allocator bookkeeping.
+        requested: usize,
+        /// Caller-admitted seed-buffer payload bytes.
+        cap: usize,
+    },
     /// A bounded seed allocation was refused by the allocator.
     ResourceExhausted,
     /// The bounded heuristic search did not construct a hit. This is not a
@@ -163,7 +173,11 @@ impl core::fmt::Display for NurbsRayError {
             ),
             Self::WorkLimit { requested, cap } => write!(
                 formatter,
-                "NURBS ray request needs {requested} work units above defensive ceiling {cap}"
+                "NURBS ray request needs {requested} work units above admitted ceiling {cap}"
+            ),
+            Self::MemoryLimit { requested, cap } => write!(
+                formatter,
+                "NURBS ray seed buffer needs {requested} bytes above caller allowance {cap}"
             ),
             Self::ResourceExhausted => formatter.write_str("NURBS ray seed allocation was refused"),
             Self::IterationLimit {
@@ -1587,10 +1601,47 @@ fn gradient_fd(chart: &dyn Chart, cx: &Cx<'_>, p: Point3) -> Option<Vec3> {
     normalize_gradient(g)
 }
 
+/// Caller-owned limits for one NURBS ray search.
+///
+/// Work is a conservative structure-sensitive admission charge, not elapsed
+/// time. The memory allowance covers only the retained ranked seeds; source
+/// storage and the NURBS owner's bounded evaluation scratch are separate.
+/// Exhausting Newton work is inconclusive, never a geometric miss.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NurbsRayBudget {
+    /// Maximum ranked starts retained and attempted, in `1..=64`.
+    pub max_newton_starts: usize,
+    /// Maximum Newton iterations for each retained start, in `1..=1024`.
+    pub max_iterations_per_start: u32,
+    /// Maximum conservative work charge, subject to the defensive ceiling.
+    pub max_work_units: u128,
+    /// Maximum bytes in the retained seed buffer (four `f64`s per seed).
+    pub max_seed_bytes: usize,
+}
+
+impl Default for NurbsRayBudget {
+    fn default() -> Self {
+        Self {
+            max_newton_starts: 6,
+            max_iterations_per_start: 24,
+            max_work_units: NURBS_RAY_MAX_WORK_UNITS,
+            max_seed_bytes: 6 * core::mem::size_of::<NurbsRaySeed>(),
+        }
+    }
+}
+
+type NurbsRaySeed = (f64, f64, f64, f64); // (distance, u, v, ray parameter)
+
 /// NURBS ray intersection: coarse-grid seeds ranked by distance to the
 /// ray line, then 3×3 Newton on `F(u, v, t) = S(u, v) − o − t·d = 0`
 /// with the Jacobian `[S_u, S_v, −d]` — the Bézier-clipping-seeded
 /// Newton the plan names, adapted from the closest-point machinery.
+///
+/// `Ok(None)` proves that the entire positive ray misses the outward Cartesian
+/// control hull of the admitted rational surface. Otherwise a failed Newton
+/// search remains [`NurbsRayError::IterationLimit`]. Hits retain the existing
+/// numerical Newton witness; neither existence nor nearest-hit isolation is
+/// upgraded by the hull exclusion test.
 #[allow(clippy::too_many_lines)]
 pub fn ray_intersect_nurbs(
     surface: &NurbsSurface<f64>,
@@ -1598,7 +1649,14 @@ pub fn ray_intersect_nurbs(
     seeds_per_axis: usize,
     eps: f64,
 ) -> Result<Option<Hit>, NurbsRayError> {
-    ray_intersect_nurbs_impl(surface, None, ray, seeds_per_axis, eps)
+    ray_intersect_nurbs_impl(
+        surface,
+        None,
+        ray,
+        seeds_per_axis,
+        eps,
+        NurbsRayBudget::default(),
+    )
 }
 
 /// Cancellable NURBS ray intersection for production mixed-backend paths.
@@ -1609,26 +1667,62 @@ pub fn ray_intersect_nurbs_with_cx(
     seeds_per_axis: usize,
     eps: f64,
 ) -> Result<Option<Hit>, NurbsRayError> {
-    ray_intersect_nurbs_impl(surface, Some(cx), ray, seeds_per_axis, eps)
+    ray_intersect_nurbs_with_budget(
+        surface,
+        cx,
+        ray,
+        seeds_per_axis,
+        eps,
+        NurbsRayBudget::default(),
+    )
 }
 
-/// Defensive cap for the allocation-bearing legacy coarse seed grid. The
-/// successor should accept an explicit work/memory budget and retain only a
-/// bounded top-k frontier.
+/// Search with explicit work, Newton and retained-seed allowances under the
+/// caller's cancellation context. One context reaches structural admission,
+/// control-hull exclusion, every basis evaluation and derivative evaluation,
+/// and final publication. The caller owns scope drain/finalization.
+pub fn ray_intersect_nurbs_with_budget(
+    surface: &NurbsSurface<f64>,
+    cx: &Cx<'_>,
+    ray: &Ray,
+    seeds_per_axis: usize,
+    eps: f64,
+    budget: NurbsRayBudget,
+) -> Result<Option<Hit>, NurbsRayError> {
+    ray_intersect_nurbs_impl(surface, Some(cx), ray, seeds_per_axis, eps, budget)
+}
+
+/// Defensive cap for coarse-grid evaluations. Only the bounded best starts
+/// are retained, independently of the number of seed points evaluated.
 const NURBS_RAY_MAX_SEEDS: usize = 65_536;
 
-/// Structure-sensitive synchronous work ceiling for seed evaluation plus the
-/// six retained Newton starts. This is a defensive legacy constant, not a
-/// substitute for the planned caller-owned budget.
+/// Structure-sensitive defensive ceiling, in addition to the caller allowance.
 const NURBS_RAY_MAX_WORK_UNITS: u128 = 67_108_864;
 
 fn preflight_nurbs_ray_work(
     surface: &NurbsSurface<f64>,
     seed_count: usize,
-) -> Result<(), NurbsRayError> {
+    budget: NurbsRayBudget,
+) -> Result<usize, NurbsRayError> {
+    if !(1..=64).contains(&budget.max_newton_starts)
+        || !(1..=1024).contains(&budget.max_iterations_per_start)
+    {
+        return Err(NurbsRayError::InvalidInput {
+            what: "Newton starts must be in 1..=64 and iterations in 1..=1024",
+        });
+    }
+    let retained_seeds = seed_count.min(budget.max_newton_starts);
+    let seed_bytes = retained_seeds * core::mem::size_of::<NurbsRaySeed>();
+    if seed_bytes > budget.max_seed_bytes {
+        return Err(NurbsRayError::MemoryLimit {
+            requested: seed_bytes,
+            cap: budget.max_seed_bytes,
+        });
+    }
+    let work_cap = budget.max_work_units.min(NURBS_RAY_MAX_WORK_UNITS);
     let limit = || NurbsRayError::WorkLimit {
         requested: u128::MAX,
-        cap: NURBS_RAY_MAX_WORK_UNITS,
+        cap: work_cap,
     };
     let knots_u = surface.knots_u();
     let knots_v = surface.knots_v();
@@ -1664,20 +1758,98 @@ fn preflight_nurbs_ray_work(
         .and_then(|work| work.checked_add(basis_work))
         .and_then(|work| work.checked_add(accumulation_work))
         .ok_or_else(limit)?;
-    let newton_equivalent_evaluations = 6u128 * 24 * 8;
+    let newton_equivalent_evaluations =
+        retained_seeds as u128 * u128::from(budget.max_iterations_per_start) * 8;
     let total_evaluations = (seed_count as u128)
         .checked_add(newton_equivalent_evaluations)
         .ok_or_else(limit)?;
     let requested = per_evaluation
         .checked_mul(total_evaluations)
+        // Original control-hull projection and stable top-k seed insertion.
+        .and_then(|work| work.checked_add(control_work))
+        .and_then(|work| work.checked_add(seed_count as u128 * retained_seeds as u128))
         .ok_or_else(limit)?;
-    if requested > NURBS_RAY_MAX_WORK_UNITS {
+    if requested > work_cap {
         return Err(NurbsRayError::WorkLimit {
             requested,
-            cap: NURBS_RAY_MAX_WORK_UNITS,
+            cap: work_cap,
         });
     }
-    Ok(())
+    Ok(retained_seeds)
+}
+
+/// A rational B-spline with admitted positive weights is a convex combination
+/// of its Cartesian controls on every original span, including one-sided
+/// limits. Project the STORED homogeneous controls with outward intervals;
+/// using rounded Cartesian points here would lose the exclusion theorem.
+/// Slab intersection uses the original ray, since normalizing a direction can
+/// underflow a nonzero component. Infinite interval bounds are conservative.
+#[allow(clippy::float_cmp)] // Exact zero identifies a parallel ray/slab pair.
+fn nurbs_control_hull_excludes_ray(
+    surface: AdmittedNurbsSurface<'_, f64>,
+    ray: &Ray,
+    cx: Option<&Cx<'_>>,
+) -> Result<bool, NurbsRayError> {
+    use fs_ivl::Interval;
+
+    let mut lower = [f64::INFINITY; 3];
+    let mut upper = [f64::NEG_INFINITY; 3];
+    for row in surface.homogeneous_control_net() {
+        for control in row {
+            if let Some(cx) = cx {
+                cx.checkpoint()?;
+            }
+            for axis in 0..3 {
+                let projected = Interval::point(control[axis]) / Interval::point(control[3]);
+                lower[axis] = lower[axis].min(projected.lo());
+                upper[axis] = upper[axis].max(projected.hi());
+            }
+        }
+    }
+    let origin = [ray.origin.x, ray.origin.y, ray.origin.z];
+    let direction = [ray.dir.x, ray.dir.y, ray.dir.z];
+    let mut first = 0.0_f64;
+    let mut last = f64::INFINITY;
+    let mut excluded = false;
+    for axis in 0..3 {
+        if direction[axis] == 0.0 {
+            if origin[axis] < lower[axis] || origin[axis] > upper[axis] {
+                excluded = true;
+                break;
+            }
+        } else {
+            let slab = (Interval::new(lower[axis], upper[axis]) - Interval::point(origin[axis]))
+                / Interval::point(direction[axis]);
+            first = first.max(slab.lo());
+            last = last.min(slab.hi());
+            if first > last {
+                excluded = true;
+                break;
+            }
+        }
+    }
+    if let Some(cx) = cx {
+        cx.checkpoint()?;
+    }
+    Ok(excluded)
+}
+
+/// Preserve the legacy stable ranking (distance, then ray parameter, then
+/// original grid order) while retaining at most `capacity` seeds. Pop before
+/// insertion so Vec never allocates a hidden extra slot at capacity.
+fn retain_nurbs_seed(seeds: &mut Vec<NurbsRaySeed>, candidate: NurbsRaySeed, capacity: usize) {
+    let insertion = seeds.partition_point(|seed| {
+        seed.0
+            .total_cmp(&candidate.0)
+            .then(seed.3.total_cmp(&candidate.3))
+            != core::cmp::Ordering::Greater
+    });
+    if insertion < capacity {
+        if seeds.len() == capacity {
+            seeds.pop();
+        }
+        seeds.insert(insertion, candidate);
+    }
 }
 
 // Bead frankensim-8ll9: NURBS traversal stages kept inline so the
@@ -1689,6 +1861,7 @@ fn ray_intersect_nurbs_impl(
     input_ray: &Ray,
     seeds_per_axis: usize,
     eps: f64,
+    budget: NurbsRayBudget,
 ) -> Result<Option<Hit>, NurbsRayError> {
     if !eps.is_finite() || eps <= 0.0 {
         return Err(NurbsRayError::InvalidInput {
@@ -1713,7 +1886,7 @@ fn ray_intersect_nurbs_impl(
             cap: NURBS_RAY_MAX_SEEDS,
         });
     }
-    preflight_nurbs_ray_work(surface, seed_count)?;
+    let retained_seeds = preflight_nurbs_ray_work(surface, seed_count, budget)?;
     if let Some(cx) = cx {
         cx.checkpoint().map_err(NurbsRayError::from)?;
     }
@@ -1728,16 +1901,29 @@ fn ray_intersect_nurbs_impl(
             what: "scaled ray direction has no finite positive squared norm",
         });
     }
-    let surface = surface.admit().map_err(NurbsRayError::InvalidSurface)?;
+    let surface = if let Some(cx) = cx {
+        match surface
+            .admit_with_cx(cx)
+            .map_err(NurbsRayError::InvalidSurface)?
+        {
+            SurfaceAdmissionRun::Complete { admitted } => admitted,
+            SurfaceAdmissionRun::Cancelled => return Err(NurbsRayError::Cancelled),
+        }
+    } else {
+        surface.admit().map_err(NurbsRayError::InvalidSurface)?
+    };
     if let Some(cx) = cx {
         cx.checkpoint().map_err(NurbsRayError::from)?;
+    }
+    if nurbs_control_hull_excludes_ray(surface, input_ray, cx)? {
+        return Ok(None);
     }
     let (ulo, uhi) = surface.knots_u().domain();
     let (vlo, vhi) = surface.knots_v().domain();
     // Seed ranking: distance from the sample point to the ray LINE.
-    let mut seeds: Vec<(f64, f64, f64, f64)> = Vec::new(); // (dist, u, v, t)
+    let mut seeds: Vec<NurbsRaySeed> = Vec::new();
     seeds
-        .try_reserve_exact(seed_count)
+        .try_reserve_exact(retained_seeds)
         .map_err(|_| NurbsRayError::ResourceExhausted)?;
     for a in 0..seeds_per_axis {
         for b in 0..seeds_per_axis {
@@ -1748,7 +1934,17 @@ fn ray_intersect_nurbs_impl(
             let u = ulo + (uhi - ulo) * (a as f64 + 0.5) / seeds_per_axis as f64;
             #[allow(clippy::cast_precision_loss)]
             let v = vlo + (vhi - vlo) * (b as f64 + 0.5) / seeds_per_axis as f64;
-            let evaluated = surface.eval(u, v).map_err(NurbsRayError::InvalidSurface)?;
+            let evaluated = if let Some(cx) = cx {
+                match surface
+                    .eval_with_cx(u, v, cx)
+                    .map_err(NurbsRayError::InvalidSurface)?
+                {
+                    SurfaceEvaluationRun::Complete { point } => point,
+                    SurfaceEvaluationRun::Cancelled => return Err(NurbsRayError::Cancelled),
+                }
+            } else {
+                surface.eval(u, v).map_err(NurbsRayError::InvalidSurface)?
+            };
             if let Some(cx) = cx {
                 cx.checkpoint().map_err(NurbsRayError::from)?;
             }
@@ -1768,24 +1964,35 @@ fn ray_intersect_nurbs_impl(
             ));
             if t.is_finite() && t > 0.0 {
                 let Some(dist) = dist else { continue };
-                seeds.push((dist, u, v, t));
+                retain_nurbs_seed(&mut seeds, (dist, u, v, t), retained_seeds);
             }
         }
     }
-    seeds.sort_by(|x, y| x.0.total_cmp(&y.0).then(x.3.total_cmp(&y.3)));
-    let starts = seeds.len().min(6);
+    let starts = seeds.len();
     let mut best: Option<Hit> = None;
     for &(_, u0, v0, t0) in seeds.iter().take(starts) {
         let (mut u, mut v, mut t) = (u0, v0, t0);
-        for iter_count in 1..=24u32 {
+        for iter_count in 1..=budget.max_iterations_per_start {
             if let Some(cx) = cx {
                 cx.checkpoint().map_err(NurbsRayError::from)?;
             }
-            let partials = surface.partials(u, v);
+            let partials = if let Some(cx) = cx {
+                match surface
+                    .partials_with_cx(u, v, cx)
+                    .map_err(NurbsRayError::InvalidSurface)?
+                {
+                    SurfacePartialsRun::Complete { partials } => partials,
+                    SurfacePartialsRun::Cancelled => return Err(NurbsRayError::Cancelled),
+                }
+            } else {
+                surface
+                    .partials(u, v)
+                    .map_err(NurbsRayError::InvalidSurface)?
+            };
             if let Some(cx) = cx {
                 cx.checkpoint().map_err(NurbsRayError::from)?;
             }
-            let (pos, su, sv) = partials.map_err(NurbsRayError::InvalidSurface)?;
+            let (pos, su, sv) = partials;
             let f = [
                 pos[0] - ray.origin.x - t * ray.dir.x,
                 pos[1] - ray.origin.y - t * ray.dir.y,
@@ -1842,7 +2049,7 @@ fn ray_intersect_nurbs_impl(
     }
     best.map(Some).ok_or(NurbsRayError::IterationLimit {
         starts,
-        iterations_per_start: 24,
+        iterations_per_start: budget.max_iterations_per_start,
     })
 }
 
@@ -2546,6 +2753,7 @@ impl From<NurbsRayError> for SceneTraceError {
             NurbsRayError::InvalidInput { .. }
             | NurbsRayError::ResourceLimit { .. }
             | NurbsRayError::WorkLimit { .. }
+            | NurbsRayError::MemoryLimit { .. }
             | NurbsRayError::ResourceExhausted => {
                 Self::BackendFailure(TraceTermination::InvalidInput)
             }
@@ -2636,6 +2844,31 @@ pub fn trace_scene(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ranked_nurbs_seeds_match_stable_full_sort_with_bounded_capacity() {
+        let candidates: [NurbsRaySeed; 7] = [
+            (3.0, 0.0, 0.0, 1.0),
+            (1.0, 1.0, 0.0, 2.0),
+            (1.0, 2.0, 0.0, 1.0),
+            (1.0, 3.0, 0.0, 1.0),
+            (0.0, 4.0, 0.0, 4.0),
+            (1.0, 5.0, 0.0, 1.0),
+            (4.0, 6.0, 0.0, 1.0),
+        ];
+        let mut reference = candidates.to_vec();
+        reference.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.3.total_cmp(&b.3)));
+        for count in 1..=candidates.len() {
+            let mut retained = Vec::with_capacity(count);
+            let capacity = retained.capacity();
+            for candidate in candidates {
+                retain_nurbs_seed(&mut retained, candidate, count);
+                assert!(retained.len() <= count);
+                assert_eq!(retained.capacity(), capacity);
+            }
+            assert_eq!(retained, reference[..count]);
+        }
+    }
 
     #[test]
     fn watertight_triangle_test_does_not_open_a_shared_edge() {
@@ -3055,4 +3288,3 @@ mod tests {
         assert!(guarded_distance <= safe_radius);
     }
 }
-

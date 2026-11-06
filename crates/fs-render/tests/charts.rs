@@ -20,8 +20,9 @@ use fs_geom::{Aabb, Chart, ChartSample, Point3, TraceStepClaim, Vec3};
 use fs_math::eft::two_sum;
 use fs_render::charts::{
     Backend, CHART_BACKEND_BIT_SEMANTICS_VERSION, DEFAULT_SPHERE_TRACE_STEP_BUDGET,
-    MAX_SPHERE_TRACE_STEP_BUDGET, NurbsRayError, Ray, SceneTraceError, TraceTermination, TriMesh,
-    ray_intersect_nurbs, sphere_trace, sphere_trace_with_step_budget, trace_scene,
+    MAX_SPHERE_TRACE_STEP_BUDGET, NurbsRayBudget, NurbsRayError, Ray, SceneTraceError,
+    TraceTermination, TriMesh, ray_intersect_nurbs, ray_intersect_nurbs_with_budget, sphere_trace,
+    sphere_trace_with_step_budget, trace_scene,
 };
 use fs_rep_frep::{BoolOp, BoolStyle, Frep, FrepBuilder};
 
@@ -1943,14 +1944,248 @@ fn rb_003b_nurbs_ray_admission_is_bounded_and_fail_closed() {
         origin: Point3::new(3.0, 3.0, 3.0),
         dir: Vec3::new(1.0, 0.0, 0.0),
     };
-    assert!(matches!(
+    assert_eq!(
         ray_intersect_nurbs(&sphere_nurbs(), &geometric_miss, 8, 1e-9),
-        Err(NurbsRayError::IterationLimit { .. })
-    ));
+        Ok(None),
+        "outward control-hull exclusion proves this global positive-ray miss"
+    );
     verdict(
         "rb-003b",
         "invalid requests refuse before unbounded work, and heuristic nonconvergence cannot impersonate a certified miss",
     );
+}
+
+#[test]
+fn rb_003c_nurbs_global_exclusion_and_unresolved_search_are_distinct() {
+    let sphere = sphere_nurbs();
+    // Parallel slab exclusion, a box entirely behind the ray, and disjoint
+    // parameter intervals across two nonparallel slabs are separate cases.
+    for (origin, direction) in [
+        (Point3::new(3.0, 3.0, 0.0), Vec3::new(-1.0, 0.0, 0.0)),
+        (Point3::new(3.0, 0.0, 0.0), Vec3::new(1.0, 0.0, 0.0)),
+        (Point3::new(3.0, 0.0, 0.0), Vec3::new(-1.0, 2.0, 0.0)),
+    ] {
+        for scale in [1e-300, 1.0, 1e300] {
+            let ray = Ray {
+                origin,
+                dir: direction.scale(scale),
+            };
+            assert_eq!(ray_intersect_nurbs(&sphere, &ray, 8, 1e-12), Ok(None));
+        }
+    }
+    // Its Cartesian box contains this ray, but the actual diamond does not.
+    // Newton exhaustion must not borrow the control hull's exclusion authority.
+    let knots = fs_rep_nurbs::KnotVector::new(vec![0.0, 0.0, 1.0, 1.0], 1).unwrap();
+    let diamond = fs_rep_nurbs::NurbsSurface::new(
+        knots.clone(),
+        knots,
+        &[
+            vec![[0.0, -1.0, 0.0], [-1.0, 0.0, 0.0]],
+            vec![[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+        ],
+        &[vec![1.0; 2], vec![1.0; 2]],
+    )
+    .unwrap();
+    let ray = Ray {
+        origin: Point3::new(0.9, 0.9, 1.0),
+        dir: Vec3::new(0.0, 0.0, -1.0),
+    };
+    assert!(matches!(
+        ray_intersect_nurbs(&diamond, &ray, 4, 1e-12),
+        Err(NurbsRayError::IterationLimit { .. })
+    ));
+}
+
+#[test]
+fn rb_003f_nurbs_outward_projection_retains_exact_rational_edge_hit() {
+    // The exact stored surface is z=1/3. The ray reaches its x=0 edge at
+    // t=1/3. A rounded z box puts the intersection just before x reaches zero;
+    // projecting controls outward must retain this genuine boundary contact.
+    let knots = fs_rep_nurbs::KnotVector::new(vec![0.0, 0.0, 1.0, 1.0], 1).unwrap();
+    let plane = fs_rep_nurbs::NurbsSurface::from_homogeneous(
+        knots.clone(),
+        knots,
+        vec![
+            vec![[0.0, 0.0, 1.0, 3.0], [0.0, 3.0, 1.0, 3.0]],
+            vec![[3.0, 0.0, 1.0, 3.0], [3.0, 3.0, 1.0, 3.0]],
+        ],
+    )
+    .unwrap();
+    let ray = Ray {
+        origin: Point3::new(-1.0, 0.5, 0.0),
+        dir: Vec3::new(3.0, 0.0, 1.0),
+    };
+    let hit = ray_intersect_nurbs(&plane, &ray, 4, 1e-12)
+        .unwrap()
+        .expect("rational edge hit");
+    assert!((hit.t - 1.0 / 3.0).abs() < 1e-12);
+    assert!(hit.point.x.abs() < 1e-12);
+}
+
+#[test]
+fn rb_003d_nurbs_caller_limits_preserve_hits_and_bound_seed_storage() {
+    with_cx(|cx| {
+        let sphere = sphere_nurbs();
+        let ray = Ray {
+            origin: Point3::new(3.0, 0.1, 0.2),
+            dir: Vec3::new(-1.0, 0.0, 0.0),
+        };
+        let budget = NurbsRayBudget::default();
+        // Hundreds of grid evaluations retain only six seeds. Synchronous and
+        // Cx-aware native evaluation must preserve the same Newton result bits.
+        let expected = ray_intersect_nurbs(&sphere, &ray, 16, 1e-12).unwrap();
+        assert!(expected.is_some());
+        assert_eq!(
+            ray_intersect_nurbs_with_budget(&sphere, cx, &ray, 16, 1e-12, budget),
+            Ok(expected)
+        );
+        assert!(matches!(
+            ray_intersect_nurbs_with_budget(
+                &sphere,
+                cx,
+                &ray,
+                16,
+                1e-12,
+                NurbsRayBudget {
+                    max_seed_bytes: budget.max_seed_bytes - 1,
+                    ..budget
+                }
+            ),
+            Err(NurbsRayError::MemoryLimit { .. })
+        ));
+        let requested = match ray_intersect_nurbs_with_budget(
+            &sphere,
+            cx,
+            &ray,
+            16,
+            1e-12,
+            NurbsRayBudget {
+                max_work_units: 0,
+                ..budget
+            },
+        ) {
+            Err(NurbsRayError::WorkLimit { requested, cap: 0 }) => requested,
+            result => panic!("zero work must refuse: {result:?}"),
+        };
+        assert_eq!(
+            ray_intersect_nurbs_with_budget(
+                &sphere,
+                cx,
+                &ray,
+                16,
+                1e-12,
+                NurbsRayBudget {
+                    max_work_units: requested,
+                    ..budget
+                }
+            ),
+            Ok(expected)
+        );
+        assert!(matches!(
+            ray_intersect_nurbs_with_budget(
+                &sphere,
+                cx,
+                &ray,
+                16,
+                1e-12,
+                NurbsRayBudget {
+                    max_work_units: requested - 1,
+                    ..budget
+                }
+            ),
+            Err(NurbsRayError::WorkLimit { .. })
+        ));
+        assert!(matches!(
+            ray_intersect_nurbs_with_budget(
+                &sphere,
+                cx,
+                &ray,
+                8,
+                1e-12,
+                NurbsRayBudget {
+                    max_iterations_per_start: 1,
+                    ..budget
+                }
+            ),
+            Err(NurbsRayError::IterationLimit {
+                iterations_per_start: 1,
+                ..
+            })
+        ));
+        for bad in [
+            NurbsRayBudget {
+                max_newton_starts: 0,
+                ..budget
+            },
+            NurbsRayBudget {
+                max_newton_starts: 65,
+                ..budget
+            },
+            NurbsRayBudget {
+                max_iterations_per_start: 0,
+                ..budget
+            },
+            NurbsRayBudget {
+                max_iterations_per_start: 1025,
+                ..budget
+            },
+        ] {
+            assert!(matches!(
+                ray_intersect_nurbs_with_budget(&sphere, cx, &ray, 8, 1e-12, bad),
+                Err(NurbsRayError::InvalidInput { .. })
+            ));
+        }
+    });
+}
+
+#[test]
+fn rb_003e_nurbs_miss_composes_in_mixed_scene_and_cancellation_wins() {
+    let sphere = sphere_nurbs();
+    let ray = Ray {
+        origin: Point3::new(3.0, 3.0, 0.0),
+        dir: Vec3::new(-1.0, 0.0, 0.0),
+    };
+    with_cx(|cx| {
+        let mesh = TriMesh::new(
+            vec![[0.0, 2.0, -1.0], [0.0, 4.0, -1.0], [0.0, 3.0, 1.0]],
+            vec![[0, 1, 2]],
+        );
+        let expected = mesh
+            .intersect(&ray)
+            .expect("triangle behind disjoint spline");
+        let actual = trace_scene(
+            &[Backend::Nurbs(&sphere), Backend::Mesh(&mesh)],
+            cx,
+            &ray,
+            5.0,
+            1e-9,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(actual.0, 1);
+        assert_eq!(actual.1.point, expected.point);
+    });
+    let gate = CancelGate::new();
+    let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
+    pool.scope(|arena| {
+        let cx = Cx::new(
+            &gate,
+            arena,
+            StreamKey {
+                seed: 3,
+                kernel_id: 9,
+                tile: 0,
+                iteration: 0,
+            },
+            Budget::INFINITE,
+            ExecMode::Deterministic,
+        );
+        gate.request();
+        assert_eq!(
+            ray_intersect_nurbs_with_budget(&sphere, &cx, &ray, 8, 1e-9, NurbsRayBudget::default()),
+            Err(NurbsRayError::Cancelled)
+        );
+    });
 }
 
 /// An octahedron-subdivision icosphere-ish mesh of the unit sphere.
