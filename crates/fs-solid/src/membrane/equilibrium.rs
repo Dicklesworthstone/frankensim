@@ -1,5 +1,6 @@
 //! Boundary elimination and fallible physics adapter for the original solver.
-use super::{MembraneError, MembranePatch, finite_vectors, poll};
+use super::{MembraneError, MembraneEvaluation, MembraneInertialPotential, MembranePatch, finite_vectors, poll};
+use fs_material::sheet::{SheetError, SheetLaw, SheetResponse};
 use fs_solver::nonlinear::{NewtonKrylovConfig, NewtonKrylovState, NewtonReport, NonlinearProblem, SolverRunProgress};
 use std::cell::{Cell, RefCell};
 
@@ -22,13 +23,17 @@ pub struct MembraneSolveSettings {
 pub struct MembraneSolution {
     /// Three Cartesian displacements per original reference node, in metres.
     pub displacement_m: Vec<[f64; 3]>,
-    /// Internal gradient minus dead and current-area pressure loads. At prescribed DOFs this is the
-    /// applied support reaction; free entries meet the declared residual gate.
+    /// Internal gradient plus any composed inertia, minus dead and current-area
+    /// pressure loads. At prescribed DOFs this is the applied support reaction;
+    /// free entries meet the declared residual gate.
     pub residual_n: Vec<[f64; 3]>,
-    /// Integrated reference-area stored energy, in joules.
+    /// Integrated constitutive potential [J]: stored energy for an elastic
+    /// patch, incremental potential for a frozen viscoelastic interval.
+    /// Any composed inertial potential is excluded from this field.
     pub strain_energy_j: f64,
-    /// Stored energy minus dead-load and pressure work, in joules. Pressure
-    /// work is referenced to zero free displacement at the prescribed perimeter.
+    /// Constitutive plus any inertial potential, minus dead-load and pressure
+    /// work [J]. Pressure work is referenced to zero free displacement at the
+    /// prescribed perimeter.
     pub potential_energy_j: f64,
     /// Held signed pressure jump [Pa], positive along the oriented normal.
     pub pressure_pa: f64,
@@ -40,8 +45,10 @@ pub struct MembraneSolution {
     pub evaluations: usize,
 }
 
-struct Adapter<'a, C> {
+struct Adapter<'a, C, R> {
     patch: &'a MembranePatch,
+    response: &'a R,
+    inertia: Option<&'a dyn MembraneInertialPotential>,
     loads: &'a [[f64; 3]],
     pressure_pa: f64,
     fixed: Vec<Option<f64>>,
@@ -51,7 +58,10 @@ struct Adapter<'a, C> {
     evaluations: Cell<usize>,
     maximum: usize,
 }
-impl<C: FnMut() -> bool> Adapter<'_, C> {
+impl<C, R> Adapter<'_, C, R>
+where C: FnMut() -> bool,
+      R: Fn(usize, [f64; 3]) -> Result<SheetResponse, SheetError>,
+{
     fn cancel(&self) -> bool {
         if self.stopped.borrow().is_some() { return true; }
         if (self.cancelled.borrow_mut())() {
@@ -79,8 +89,27 @@ impl<C: FnMut() -> bool> Adapter<'_, C> {
         for (&dof,&value) in self.free.iter().zip(x) { u[dof/3][dof%3] = value; }
         u
     }
+    fn evaluate(&self, u: &[[f64; 3]]) -> Result<(MembraneEvaluation, f64), MembraneError> {
+        let mut value = self.patch.evaluate_with_response(u, self.response, ||self.cancel())?;
+        let mut inertial_potential_j = 0.0;
+        if let Some(inertia) = self.inertia {
+            let contribution = inertia.evaluate(u, &mut ||self.cancel())?;
+            if !contribution.strain_energy_j.is_finite()
+                || !finite_vectors(&contribution.internal_gradient_n, u.len()) {
+                return Err(MembraneError::Invalid("finite complete inertial potential required"));
+            }
+            inertial_potential_j = contribution.strain_energy_j;
+            for (force, extra) in value.internal_gradient_n.iter_mut().zip(contribution.internal_gradient_n) {
+                for axis in 0..3 { force[axis] += extra[axis]; }
+            }
+        }
+        Ok((value, inertial_potential_j))
+    }
 }
-impl<C: FnMut() -> bool> NonlinearProblem for Adapter<'_, C> {
+impl<C, R> NonlinearProblem for Adapter<'_, C, R>
+where C: FnMut() -> bool,
+      R: Fn(usize, [f64; 3]) -> Result<SheetResponse, SheetError>,
+{
     fn dimension(&self) -> usize { self.free.len() }
     fn residual(&self, x: &[f64], output: &mut [f64]) {
         // The original driver rejects nonfinite trial residuals and backtracks.
@@ -88,7 +117,7 @@ impl<C: FnMut() -> bool> NonlinearProblem for Adapter<'_, C> {
         output.fill(f64::NAN);
         if x.len()!=self.free.len() || output.len()!=self.free.len() || !self.begin() { return; }
         let u = self.expand(x,false);
-        if let Ok(value) = self.patch.evaluate(&u,||self.cancel()) {
+        if let Ok((value, _)) = self.evaluate(&u) {
             let pressure = if self.pressure_pa == 0.0 { None } else {
                 match self.patch.pressure_load_n(&u,self.pressure_pa,||self.cancel()) {
                     Ok(force) => Some(force), Err(_) => return,
@@ -106,7 +135,16 @@ impl<C: FnMut() -> bool> NonlinearProblem for Adapter<'_, C> {
             || output.len()!=self.free.len() || !self.begin() { return; }
         let u = self.expand(x,false);
         let v = self.expand(direction,true);
-        if let Ok(value) = self.patch.tangent_apply(&u,&v,||self.cancel()) {
+        if let Ok(mut value) = self.patch.tangent_with_response(&u,&v,self.response,||self.cancel()) {
+            if let Some(inertia) = self.inertia {
+                let extra = match inertia.tangent_apply(&v, &mut ||self.cancel()) {
+                    Ok(value) if finite_vectors(&value, v.len()) => value,
+                    _ => return,
+                };
+                for (force, extra) in value.iter_mut().zip(extra) {
+                    for axis in 0..3 { force[axis] += extra[axis]; }
+                }
+            }
             let pressure = if self.pressure_pa == 0.0 { None } else {
                 match self.patch.pressure_tangent_apply(&u,&v,self.pressure_pa,||self.cancel()) {
                     Ok(force) => Some(force), Err(_) => return,
@@ -151,6 +189,22 @@ impl MembranePatch {
         initial_displacement_m: &[[f64;3]], settings: MembraneSolveSettings,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<MembraneSolution, MembraneError> {
+        self.solve_with_response(
+            &|index, strain| self.elements[index].law.response(strain), None,
+            dead_load_n, pressure_pa, prescribed, initial_displacement_m, settings, &mut cancelled,
+        )
+    }
+
+    // All trials keep one immutable constitutive interval. Histories and their
+    // physical work are committed only by the composing accepted-state owner.
+    #[allow(clippy::too_many_arguments)]
+    fn solve_with_response(
+        &self, response: &impl Fn(usize, [f64; 3]) -> Result<SheetResponse, SheetError>,
+        inertia: Option<&dyn MembraneInertialPotential>,
+        dead_load_n: &[[f64;3]], pressure_pa: f64, prescribed: &[(usize,f64)],
+        initial_displacement_m: &[[f64;3]], settings: MembraneSolveSettings,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<MembraneSolution, MembraneError> {
         poll(&mut cancelled)?;
         settings.newton.validate().map_err(MembraneError::Newton)?;
         let n = self.mesh.nodes.len();
@@ -172,13 +226,13 @@ impl MembranePatch {
         if pressure_pa != 0.0 { self.admit_pressure_perimeter(&fixed,&mut cancelled)?; }
         let free: Vec<_> = (0..3*n).filter(|&dof|fixed[dof].is_none()).collect();
         let x: Vec<_> = free.iter().map(|&dof|initial_displacement_m[dof/3][dof%3]).collect();
-        let adapter = Adapter { patch:self, loads:dead_load_n, pressure_pa, fixed, free,
+        let adapter = Adapter { patch:self, response, inertia, loads:dead_load_n, pressure_pa, fixed, free,
             cancelled:RefCell::new(&mut cancelled), stopped:RefCell::new(None),
             evaluations:Cell::new(0), maximum:settings.max_evaluations };
         // Attribute invalid initial geometry to its physical element, rather
         // than returning only the generic solver's nonfinite-residual error.
         if !adapter.begin() { return Err(adapter.stopped.borrow_mut().take().expect("stopped adapter")); }
-        self.evaluate(&adapter.expand(&x,false),||adapter.cancel())?;
+        adapter.evaluate(&adapter.expand(&x,false))?;
         let initial = NewtonKrylovState::new(&adapter,x,settings.newton);
         if let Some(error) = adapter.stopped.borrow_mut().take() { return Err(error); }
         let mut state = initial.map_err(MembraneError::Newton)?;
@@ -191,7 +245,7 @@ impl MembranePatch {
         if !result.report.converged { return Err(MembraneError::Unconverged(result.report)); }
         if !adapter.begin() { return Err(adapter.stopped.borrow_mut().take().expect("stopped adapter")); }
         let displacement_m = adapter.expand(&state.x,false);
-        let value = self.evaluate(&displacement_m,||adapter.cancel())?;
+        let (value, inertial_potential_j) = adapter.evaluate(&displacement_m)?;
         let pressure = if pressure_pa == 0.0 { vec![[0.0;3];n] } else {
             self.pressure_load_n(&displacement_m,pressure_pa,||adapter.cancel())?
         };
@@ -205,7 +259,7 @@ impl MembranePatch {
             let baseline = adapter.expand(&vec![0.0;adapter.free.len()],false);
             self.pressure_work_j(&baseline,&displacement_m,pressure_pa,||adapter.cancel())?
         };
-        let potential_energy_j = value.strain_energy_j-work-pressure_work_j;
+        let potential_energy_j = value.strain_energy_j+inertial_potential_j-work-pressure_work_j;
         if !finite_vectors(&residual_n,n) || !free_norm.is_finite() || free_norm > target
             || !potential_energy_j.is_finite() {
             return Err(MembraneError::Invalid("fresh physical residual or energy did not satisfy the solve contract"));

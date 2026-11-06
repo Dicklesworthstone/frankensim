@@ -1,5 +1,28 @@
 # fs-solid CONTRACT
 
+## Retained finite-strain membrane loading, creep and relaxation
+
+`membrane::visco::FiniteViscoMembrane` binds original per-triangle Maxwell laws
+to the existing source-bound hyperelastic patch. Equilibrium energy, natural
+reference, thickness, grain, mass, volume treatment and local plane-stress
+settings remain those of the original sheets. Explicit branch parameters do
+not acquire source qualification from this binding. Each triangle retains its
+own full or exact-volume remainder history through physical time intervals.
+
+The existing membrane kinematics, reference-area virtual work, geometric
+stiffness, matrix-free Newton solve and current-area pressure are reused.
+An exact repeated-strain cache within each immutable history/interval avoids
+repeating constitutive Hessians during Krylov products; it cannot reuse a
+response across a changed history or timestep. Prescribed supports are
+eliminated and the existing pressure-perimeter requirement remains in force.
+
+Complete endpoint proposals separate native storage/loading/relaxation loss,
+incremental potential, endpoint force work, pressure path work and signed
+integration defect. Failed solves, work gates and cancellation publish no
+partial displacement, history or elapsed time. `tests/visco_membrane.rs`
+checks native material agreement, rotated histories/reactions, pressure creep,
+regional spectra, natural references and refusal/cancellation atomicity.
+
 ## Bounded torsional shear and layer resultants on native rods
 
 `MaterialRod` and `SpatialMaterialRod` extend their original

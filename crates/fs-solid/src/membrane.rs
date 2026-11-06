@@ -111,7 +111,20 @@ pub struct MembraneEvaluation {
     pub internal_gradient_n: Vec<[f64; 3]>,
 }
 
-fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<(), MembraneError> {
+// A physical time integrator supplies its original reference-inertia potential
+// without duplicating the membrane geometry, constitutive or Newton owners.
+// The constitutive energy in MembraneSolution remains separate from this term.
+trait MembraneInertialPotential {
+    fn evaluate(
+        &self, displacement_m: &[[f64; 3]], cancelled: &mut dyn FnMut() -> bool,
+    ) -> Result<MembraneEvaluation, MembraneError>;
+
+    fn tangent_apply(
+        &self, direction_m: &[[f64; 3]], cancelled: &mut dyn FnMut() -> bool,
+    ) -> Result<Vec<[f64; 3]>, MembraneError>;
+}
+
+fn poll(cancelled: &mut (impl FnMut() -> bool + ?Sized)) -> Result<(), MembraneError> {
     if cancelled() { Err(MembraneError::Cancelled) } else { Ok(()) }
 }
 fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
@@ -240,7 +253,7 @@ impl MembranePatch {
             ],
         }
     }
-    fn response(&self, index: usize, kinematics: SurfaceKinematics) -> Result<SheetResponse, MembraneError> {
+    fn admit_kinematics(&self, index: usize, kinematics: SurfaceKinematics) -> Result<[f64; 3], MembraneError> {
         let [a, b] = kinematics.gradient;
         let cross = [a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]];
         let area_ratio = cross[0].hypot(cross[1]).hypot(cross[2]);
@@ -249,7 +262,17 @@ impl MembranePatch {
             || strain.iter().any(|e| !e.is_finite() || e.abs() > self.domain.maximum_abs_strain) {
             return Err(MembraneError::State { element: index, reason: "surface collapse or material strain outside declared operating envelope" });
         }
-        self.elements[index].law.response(strain)
+        Ok(strain)
+    }
+    fn response(&self, index: usize, kinematics: SurfaceKinematics) -> Result<SheetResponse, MembraneError> {
+        self.response_with(index, kinematics, &|index, strain| self.elements[index].law.response(strain))
+    }
+    fn response_with(
+        &self, index: usize, kinematics: SurfaceKinematics,
+        response: &impl Fn(usize, [f64; 3]) -> Result<SheetResponse, SheetError>,
+    ) -> Result<SheetResponse, MembraneError> {
+        let strain = self.admit_kinematics(index, kinematics)?;
+        response(index, strain)
             .map_err(|source| MembraneError::Material { element: index, source })
     }
     // A semismooth equilibrium tangent is not automatically a unique vibration
@@ -271,15 +294,32 @@ impl MembranePatch {
     /// staged, so cancellation/refusal cannot publish a partial force array.
     pub fn evaluate(&self, displacement_m: &[[f64; 3]], mut cancelled: impl FnMut() -> bool)
         -> Result<MembraneEvaluation, MembraneError> {
+        self.evaluate_with_response(displacement_m,
+            &|index, strain| self.elements[index].law.response(strain), &mut cancelled)
+    }
+    fn evaluate_with_response(
+        &self, displacement_m: &[[f64; 3]],
+        response: &impl Fn(usize, [f64; 3]) -> Result<SheetResponse, SheetError>,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<MembraneEvaluation, MembraneError> {
         poll(&mut cancelled)?;
         let mut internal_gradient_n = vec![[0.0;3]; self.mesh.nodes.len()];
-        let strain_energy_j = self.evaluate_into(displacement_m, &mut internal_gradient_n, &mut cancelled)?;
+        let strain_energy_j = self.evaluate_into_with_response(displacement_m,
+            &mut internal_gradient_n, response, &mut cancelled)?;
         Ok(MembraneEvaluation { strain_energy_j, internal_gradient_n })
     }
     // Shared assembly into a caller-owned trial buffer. Only this private
     // workspace may be partially written on refusal; public states are staged.
     fn evaluate_into(&self, displacement_m: &[[f64;3]], internal_gradient_n: &mut [[f64;3]],
         cancelled: &mut impl FnMut()->bool) -> Result<f64,MembraneError> {
+        self.evaluate_into_with_response(displacement_m, internal_gradient_n,
+            &|index, strain| self.elements[index].law.response(strain), cancelled)
+    }
+    fn evaluate_into_with_response(
+        &self, displacement_m: &[[f64;3]], internal_gradient_n: &mut [[f64;3]],
+        response: &impl Fn(usize, [f64; 3]) -> Result<SheetResponse, SheetError>,
+        cancelled: &mut impl FnMut()->bool,
+    ) -> Result<f64,MembraneError> {
         poll(cancelled)?;
         if !finite_vectors(displacement_m, self.mesh.nodes.len()) {
             return Err(MembraneError::Invalid("one finite displacement vector per reference node required"));
@@ -293,7 +333,7 @@ impl MembranePatch {
             poll(cancelled)?;
             let kinematics = self.kinematics(e, displacement_m);
             let f = kinematics.gradient;
-            let r = self.response(index, kinematics)?;
+            let r = self.response_with(index, kinematics, response)?;
             strain_energy_j += e.area*r.energy_j_m2;
             let [s11,s22,s12] = r.resultants_n_m;
             for (a, &node) in e.nodes.iter().enumerate() {
@@ -314,6 +354,14 @@ impl MembranePatch {
     /// stiffness. No finite differencing and no dense global Hessian allocation.
     pub fn tangent_apply(&self, displacement_m: &[[f64; 3]], direction_m: &[[f64; 3]],
         mut cancelled: impl FnMut() -> bool) -> Result<Vec<[f64; 3]>, MembraneError> {
+        self.tangent_with_response(displacement_m, direction_m,
+            &|index, strain| self.elements[index].law.response(strain), &mut cancelled)
+    }
+    fn tangent_with_response(
+        &self, displacement_m: &[[f64; 3]], direction_m: &[[f64; 3]],
+        response: &impl Fn(usize, [f64; 3]) -> Result<SheetResponse, SheetError>,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Vec<[f64; 3]>, MembraneError> {
         poll(&mut cancelled)?;
         let n = self.mesh.nodes.len();
         if !finite_vectors(displacement_m,n) || !finite_vectors(direction_m,n) {
@@ -324,7 +372,7 @@ impl MembranePatch {
             poll(&mut cancelled)?;
             let kinematics = self.kinematics(e,displacement_m);
             let f = kinematics.gradient;
-            let r = self.response(index,kinematics)?;
+            let r = self.response_with(index,kinematics,response)?;
             let mut df = [[0.0;3];2];
             for a in 1..3 { for i in 0..3 { for alpha in 0..2 {
                 df[alpha][i] += (direction_m[e.nodes[a]][i]-direction_m[e.nodes[0]][i])*e.gradients[a][alpha];
@@ -371,3 +419,6 @@ pub mod vibration;
 
 /// Source-bound objective strain-rate loss and full modal material resistance.
 pub mod viscosity;
+
+/// Finite-strain relaxation with retained native Maxwell histories.
+pub mod visco;
