@@ -359,6 +359,54 @@ impl<'a> MembraneViscosity<'a> {
         Ok(power_w)
     }
 
+    /// Six physical source rows at one admitted held geometry, in local-node order.
+    /// Their squared action on nodal velocity is the facet's dissipated power.
+    /// The caller admits the full state once; local checks keep a complete cache
+    /// linear in the number of facets instead of rescanning every node per facet.
+    pub(super) fn element_dissipation_rows(
+        &self,
+        index: usize,
+        displacement_m: &[[f64; 3]],
+    ) -> Result<[[[f64; 3]; 3]; 6]> {
+        let element = self.patch.elements.get(index)
+            .ok_or_else(|| invalid("original membrane triangle index required"))?;
+        if displacement_m.len() != self.patch.mesh.nodes.len()
+            || element.nodes.iter().any(|&node|
+                displacement_m[node].iter().any(|value| !value.is_finite()))
+        {
+            return Err(invalid("complete locally finite membrane displacement required"));
+        }
+        let f = self.patch.deformation(element, displacement_m);
+        self.patch.response(index, f)?;
+        let scale = self.volumes_m3[index].sqrt();
+        let factor = &self.factors[index];
+        let mut rows = [[[0.0; 3]; 3]; 6];
+        for (k, row) in rows.iter_mut().enumerate() {
+            for a in 1..3 {
+                let [gx, gy] = element.gradients[a];
+                let along_first = factor[0][k] * gx + factor[2][k] * gy;
+                let along_second = factor[2][k] * gx + factor[1][k] * gy;
+                for axis in 0..3 {
+                    let value = along_first * f[0][axis] + along_second * f[1][axis];
+                    let scaled = scale * value;
+                    if !scaled.is_finite() || (value != 0.0 && scaled == 0.0) {
+                        return Err(invalid("unrepresentable membrane dissipation row"));
+                    }
+                    row[a][axis] = scaled;
+                }
+            }
+            // Balance the original triangle algebraically, including roundoff
+            // in its stored gradients; no net translational resistance is added.
+            for axis in 0..3 {
+                row[0][axis] = -(row[1][axis] + row[2][axis]);
+                if !row[0][axis].is_finite() {
+                    return Err(invalid("unrepresentable membrane dissipation row"));
+                }
+            }
+        }
+        Ok(rows)
+    }
+
     /// Project full material resistance through the ORIGINAL complete basis.
     ///
     /// Geometry is retained by the modal owner; foreign patches refuse.

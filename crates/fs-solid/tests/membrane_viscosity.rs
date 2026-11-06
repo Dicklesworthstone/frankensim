@@ -292,3 +292,6 @@ mod modal;
 
 #[path = "membrane_viscosity/natural_reference.rs"]
 mod natural_reference;
+
+#[path = "membrane_viscosity/dynamics.rs"]
+mod dynamics;

@@ -1236,6 +1236,22 @@ bases refuse rather than truncate. This is motion linearized at the original
 geometry, not nonlinear damped integration or a guarantee that arbitrary
 forcing stays within the declared source band.
 
+`membrane::dynamics::viscosity::DampedMembraneMotion` also composes physical
+loss with the original finite-amplitude `MembraneMotion`. It retains lumped,
+dense consistent or sparse consistent reference inertia and all original
+stationary supports. Each held-geometry source Gram channel has an exact
+rank-one exponential and independently integrated nonnegative heat. Symmetric
+forward/reverse channel sweeps around the original elastic Verlet step give
+second-order split dynamics, with explicit time/energy-defect and source-row/
+inverse-work budgets. There is no dense damping matrix or modal ceiling.
+Lumped channel work is local and linear in triangle count; consistent channels
+reuse the original mass inverse and retain M_cf delta_v in support impulses.
+Prepared state/scratch buffers are reused; cancelled or refused trials publish
+neither motion nor heat. Per-element and accumulated physical heat are separate
+from the signed numerical defect. This is not the full coupled exponential,
+a nonlinear stability/phase certificate, follower-pressure coupling, material
+temperature evolution or an inferred source-bandwidth qualification.
+
 ## Variable-amplitude critical-plane Miner damage on native J2 histories
 
 The quasistatic and backward-Euler J2 fatigue owners now admit

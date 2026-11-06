@@ -602,3 +602,6 @@ impl<'a> MembraneMotion<'a> {
         })
     }
 }
+
+/// Finite-amplitude physical loss composed with the original nonlinear motion.
+pub mod viscosity;

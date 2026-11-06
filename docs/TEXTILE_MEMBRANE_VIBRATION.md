@@ -116,6 +116,45 @@ state coordinates (two per structural mode); projection also takes its own
 explicit work/storage limit. This path provides linear motion around the
 retained configuration, not nonlinear damped membrane time integration.
 
+## Finite-amplitude material damping
+
+`membrane::dynamics::viscosity::DampedMembraneMotion` consumes an existing
+`MembraneMotion` and its same `MembraneViscosity`. The original motion
+selects lumped, dense consistent or sparse consistent reference inertia;
+its constraints, nonlinear constitutive law and prepared factors are retained.
+
+At each held endpoint geometry the material Gram rows give
+`C(u) = sum s_r s_r^T`. Each rank-one viscous channel advances by its exact
+exponential, with independently integrated positive heat. Forward and reverse
+channel sweeps form a symmetric damping stage. Half a damping stage, the
+original full nonlinear Verlet step, and another half damping stage form a
+second-order composition. Noncommuting channels and evolving geometry still
+have splitting error: use time refinement for motion and heat. The existing
+complete modal exponential remains the exact choice for its admitted linear
+model.
+
+The new path has no modal truncation or 42-mode ceiling. Lumped damping touches
+at most nine local coordinates per source row and costs O(triangles) per sweep.
+Consistent damping uses the original prepared mass inverse for its nonlocal
+velocity response. All modes of inertia retain stationary-support impulses,
+including the prescribed/free consistent-mass contribution. Warm steps reuse
+the wrapper's state and work buffers; original constitutive owners keep their
+own costs.
+
+`MembraneDampingBudget` bounds source-row storage, consistent inverse actions,
+positive step duration and absolute signed energy defect. The record reports
+physical material heat separately from mechanical energy, held-load work and
+numerical error. Last-step triangle heat and accumulated heat are available
+for physical accounting; neither introduces a temperature evolution law.
+Energy closure alone does not establish phase accuracy or stability.
+
+A flat prestretched transverse launch initially has zero material loss, but
+finite transverse deformation creates Green-strain rate and activates the
+corresponding damping. Source null directions remain intact. Explicit
+nonthermal natural references use the same transformed Gram rows described
+above. Trials that violate the material domain, step/work budget, energy
+budget or cancellation leave accepted motion and heat unchanged.
+
 ## Focused native checks
 
 ```sh
@@ -124,14 +163,17 @@ cargo test -p fs-solid --test membrane_viscosity -- --test-threads=1
 cargo test -p fs-couple --example textile_sheet -- --test-threads=1
 ```
 
-The material-damping additions were reviewed against the existing owners, but
-native Rust compilation, formatting and these new tests could not run because
-the execution environment was unavailable. Independent numerical mechanics
-checks confirmed objective strain-rate work and heat; they do not substitute
-for native tests.
+The damping sources received API/physics review and rustfmt parsing; new
+runtime and test modules were formatted. Native Cargo compilation and tests
+remain unexecuted: the restored host has a full shared filesystem, a stale
+checkout without these commits, and a refused sibling-dependency preflight.
+Independent numerical references checked natural-frame work/heat, exact
+channel flows and second-order refinement. These do not substitute for the
+native checks above.
 
 The example remains a fixed-state elastic membrane and lossless vibration
-demonstration. The opt-in viscosity API adds material damping and linearized
-time evolution when the source supplies the required coefficients. It adds no
-wrinkle relaxation, bending/contact, evolving material state, nonlinear damped
-trajectory, continuum stability certificate or empirical fabric validation.
+demonstration. The opt-in viscosity APIs add complete linear modal evolution
+and nonlinear damped motion when the source supplies the required coefficients.
+The nonlinear wrapper retains the original dead-load/stationary-support scope;
+it supplies no follower pressure, gas feedback, bending/contact, evolving
+material state, continuum stability certificate or empirical fabric validation.
