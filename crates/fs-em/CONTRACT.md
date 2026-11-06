@@ -1,5 +1,41 @@
 # fs-em contract
 
+## Retained three-dimensional vector hysteretic induction
+
+The default-off `magnetic-hysteresis` feature exposes
+`spatial::vector_potential::induction::hysteretic`. Its
+`SpatialHystereticProblem` retains the original tetrahedral geometry and one
+source-selected isotropic vector play law per cell.
+`SpatialHystereticInduction` retains the Whitney edge potential, impressed
+current, physical time and every branch polarization. It starts demagnetized;
+actual loading steps establish remanence and minor-loop history. A branchless
+source supplies the ordinary linear background without a second material law.
+
+The original A–phi coupling owns relative tree gauge, floating charge
+components, topological admission, source compatibility, scalar or oriented
+tensor conductivity and exact local P1 current/Ohmic recovery. Both reversible
+saturation and hysteresis use the same bounded Newton/FGMRES kernel. Every
+constitutive trial starts from identical accepted cell memories; the original
+three-component return map and its differential reluctivity supply H and the
+curl-curl tangent. Failed trials cannot advance magnetic memory.
+
+The field receipt separates actual conductor Joule heat, irreversible pinning
+heat on every magnetic tetrahedron, stable magnetic storage change and numerical
+endpoint dissipation. The accepted work identity is
+`delta W + Q_Joule + Q_pinning + D_numerical = W_impressed`.
+Only the two physical loss channels are available for thermal deposition;
+there is no added empirical core-loss map. Original Ampere, charge, flux and
+energy gates all precede immutable candidate publication. Source-bound
+conductivity refresh retains material occupancy and accepted vector history.
+
+This is fixed-geometry, stationary-material, first-order MQS induction with
+constant fitted magnetic coefficients and explicitly selected isotropy.
+Prescribed traces remain fixed. Moving hysteretic material requires transport
+and rotation of its stored polarization; a velocity argument cannot supply
+that physics and is intentionally absent. The fit's original source evidence
+is retained without claiming measured rotational validity, anisotropic
+hysteresis, temperature-dependent magnetic entropy or continuum error bounds.
+
 ## Axisymmetric magnetic fields from azimuthal currents
 
 `planar::axisymmetric::AxisymmetricMagnetostatics` retains the original

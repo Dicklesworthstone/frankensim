@@ -13,13 +13,19 @@
 //! thermal child refreshes source-bound linear material and conductivity.
 //! Motion is prescribed and nonrelativistic. The terminals child adds physical
 //! equipotential electrodes to this same coupled field. Moving interfaces/ALE
-//! and hysteresis are outside these owners. Joule and Lorentz transfers require
+//! are outside these owners. The opt-in hysteretic child advances stationary
+//! three-dimensional vector memory with separate pinning and numerical loss;
+//! it supplies no motion/transport law. Joule and Lorentz transfers require
 //! their receivers' own accounts.
 //! Source pairing is current-controlled, with piecewise linear impressed current
 //! and held velocity. Displacement current is outside the MQS approximation.
 //! A-v formulation reference: https://getdp.info/doc/texinfo/getdp.html .
 
 mod coupling;
+mod kernel;
+/// Stationary A–phi evolution with the original three-dimensional vector memory.
+#[cfg(feature = "magnetic-hysteresis")]
+pub mod hysteretic;
 pub mod mechanical;
 pub mod nonlinear;
 /// Physical conductor electrodes, terminal currents and their electrical work.
