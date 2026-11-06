@@ -2,7 +2,7 @@
 
 ## Purpose and layer
 
-Layer: **L3 FLUX** (deps: fs-ad, fs-blake3, fs-exec, fs-ga, fs-la,
+Layer: **L3 FLUX** (deps: fs-ad, fs-blake3, fs-exec, fs-ga, fs-ivl, fs-la,
 fs-math, and the shared fs-solver operator/Newton-Krylov spine — all downward
 or same-layer services).
 Structure-preserving time integration (plan §8.5): integrators that
@@ -623,6 +623,24 @@ where claimed below.
   Dormand–Prince 5(4), max-norm error against atol + rtol·|u|, PI
   update h ← h·safety·err^{−0.14}·err_prev^{0.08} clamped to
   [0.2, 5.0]; rejections shrink with the classical −1/5 exponent.
+- `validated::{validated_step, ValidatedStep, ValidatedOptions}` supplies
+  a smooth explicit-ODE foundation for extension-plan §3.4
+  (`frankensim-ext-time-validated-step-ow2o`). Outward interval arithmetic
+  checks strict Picard inclusion `X0 + [0,h] F([t0,t1],Y) ⊂ interior(Y)`.
+  Accepted objects retain the initial uncertainty, whole-step enclosure,
+  endpoint enclosure and derivative box; subwindow queries reuse that proof.
+  The caller must supply an honest interval extension of one deterministic
+  vector field that is continuous and locally Lipschitz in state on an open
+  neighborhood of the tested box. These mathematical callback properties
+  are assumptions, not conclusions inferred from finite samples.
+  Dimension, width, iteration, callback and component-work limits are explicit;
+  ambient execution budgets and cancellation are checked at bounded tiles and
+  around callbacks. Callbacks own their internal work and cancellation. Invalid
+  or unwritten derivatives, overflow, unsuccessful inclusion and exhausted
+  budgets publish no step. Four state-sized interval vectors are retained;
+  five are live during construction. The interval elementary-function
+  assumptions remain those of `fs-ivl`. This first-order enclosure can wrap
+  badly; a refusal does not prove that the ODE itself is ill-posed.
 - `se3` module (bead 3ol0): canonical `fs-ga::Twist` uses
   `[angular, linear]` ordering. `se3_exp_step(T, twist_body, h)` performs the
   right/body update `T Exp(h twist_body)` and
@@ -961,8 +979,12 @@ per-relation and aggregate reset-target caps.
 - No Krylov φ-actions for large nonsymmetric A (needs Arnoldi);
   `ExpEuler` is dense-symmetric only. No Rosenbrock/SDIRK families,
   no BDF/multistep.
-- No dense output / continuous extension for RK45; no stiffness
-  detection; no event location.
+- RK45 dense output and event brackets describe the numerical interpolant.
+  The separate validated explicit-ODE owner encloses the true flow under its
+  callback assumptions; it does not upgrade RK45 brackets into true-flow
+  certificates. No complete event/root accounting, grazing/simultaneous reset
+  proof, constrained DAE tube, stiffness detection or Zeno certificate is
+  provided by that owner.
 - Adjoint support is specific to each admitted map: Verlet, free-body DEP,
   frozen-step/recorded RK45, autonomous operator IMEX ARS(2,2,2), and
   operator-backed first-order and structural second-order generalized-alpha.

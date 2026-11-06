@@ -25,6 +25,8 @@ pub mod se3;
 pub mod slabs;
 pub mod stiff;
 pub mod symplectic;
+/// Conditional true-flow enclosures for smooth explicit ODEs.
+pub mod validated;
 
 pub use adaptive::events::{
     DenseAdvance, DenseStep, EventAdvance, EventDirection, EventError, EventOccurrence,
@@ -60,6 +62,7 @@ pub use symplectic::{
     verlet_momentum_adjoint, verlet_momentum_parameter_adjoint, verlet_momentum_step,
     verlet_momentum_step_with_displacement, verlet_step,
 };
+pub use validated::{ValidatedError, ValidatedOptions, ValidatedStep, validated_step};
 
 /// Crate version, re-exported for provenance stamping.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

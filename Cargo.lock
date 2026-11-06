@@ -2965,6 +2965,7 @@ dependencies = [
  "fs-casebook",
  "fs-exec",
  "fs-ga",
+ "fs-ivl",
  "fs-la",
  "fs-math",
  "fs-solver",
