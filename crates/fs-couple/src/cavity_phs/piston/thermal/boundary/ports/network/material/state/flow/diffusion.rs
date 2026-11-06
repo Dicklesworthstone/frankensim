@@ -4,6 +4,8 @@
 
 /// Error control over diffusion AND the complete reacting/thermal/moving assembly.
 pub mod coupled;
+/// Adaptive exponential binary mixing before the original full assembly solve.
+pub mod binary;
 
 use super::*;
 use fs_material::thermochemical_gas::energy::parcel::transfer::{

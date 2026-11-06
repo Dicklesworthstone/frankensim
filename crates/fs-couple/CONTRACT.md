@@ -1001,3 +1001,30 @@ error nor phase-crossing order.
 G1/G4 regression definitions cover opposing fields with a stationary pure bath,
 finite concentration/activity feedback against an independent continuous
 reference, accepted signed transfers and late stage-work exhaustion.
+
+## Adaptive exponential binary diffusion in the live material assembly
+
+`MaterialExchangeState::adaptive_binary_diffusion_step_candidate` and
+`advance_with_adaptive_binary_diffusion` connect the original finite binary
+gas network to the existing reaction, thermal, electrical and piston owners.
+The gas stage refreshes actual source states and partial enthalpies, resolves
+local species/temperature error, and enforces separate trial/pair-work limits.
+Every accepted gross transfer marks both chambers' closed two-port audits open,
+including counterdiffusion with zero net mass.
+
+The original assembly balance encloses the pre-diffusion inventories. Actual
+diffused species feed the original reaction owner once; transported and reaction
+enthalpy remain in their gas inventories and are not redeposited as external
+heat. The common feedback and whole-window mass/energy gates must pass before
+gas, thermal field, charge, motion and clock publish together. Source failures,
+pair-work exhaustion, late feedback refusal and cancellation preserve the
+entire accepted assembly.
+
+The complete diffusion/reaction/heat-motion split remains first order, and the
+gas-only local estimate does not certify coupled splitting error. This path
+retains the original binary molar-frame and fixed-volume transport substage;
+pressure/thermal diffusion, resolved nozzle flow and a simultaneous
+moving-volume constitutive solve require their existing distinct owners.
+G1/G4 regression definitions cover an independent stiff exponential limit,
+original-owner composition with the full feedback solve, reaction consumption,
+zero-net-mass open audits and transactional late failures.

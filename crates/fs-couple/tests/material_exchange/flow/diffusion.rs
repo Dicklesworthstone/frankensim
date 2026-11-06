@@ -2,6 +2,8 @@
 //! Manufactured properties; no measured engine or diffusion validation claim.
 #[path = "diffusion/coupled.rs"]
 mod coupled_tests;
+#[path = "diffusion/binary.rs"]
+mod binary_tests;
 use super::*;
 use fs_material::thermochemical_gas::energy::parcel::transfer::species::{
     network::SpeciesNetworkSolve,
