@@ -36,6 +36,11 @@ mod density_profile;
 mod step;
 mod finite_tank;
 mod finite_layered;
+mod articulated;
+pub use articulated::{
+    ArticulatedHydrostaticError, ArticulatedHydrostaticLoad, PreparedArticulatedHydrostatics,
+    PrescribedHydrostaticReservoir,
+};
 pub use finite_layered::{
     FiniteHydrostaticLayer, FiniteLayerDensityChange, FiniteLayeredHydrostaticTank,
     FiniteLayeredTankDensityChange, FiniteTankBodiesInterface, FiniteTankInterface,

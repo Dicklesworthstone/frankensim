@@ -1,5 +1,7 @@
 //! Source data -> clipped displacement -> forces, torque and actual mechanics.
 mod common;
+#[path = "hydrostatic/articulated.rs"]
+mod articulated;
 #[path = "hydrostatic/motion.rs"]
 mod motion;
 #[path = "hydrostatic/layered.rs"]

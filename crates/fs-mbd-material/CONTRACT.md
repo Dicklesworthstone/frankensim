@@ -1891,3 +1891,32 @@ Five regression groups cover independent analytic rotary impedance and spectral 
 
 Scope remains a no-slip uniform sphere, frozen transport in an unbounded Newtonian fluid, with low relative translational and rotational Reynolds numbers. The strict original constructor still requires initially comoving translation and zero spin. Explicit prehistory constructors may instead seed a finite linear-ramp or established translational slip and, independently, a finite linear angular-acceleration ramp or established spin. Rotary modes are initialized in world axes from the actual native angular momentum; preparation changes neither pose nor momentum, and prior holding work is outside the new accounting window. The explicit uniform-flow acceleration path above can drive translation on the same clock; it does not rotate the ambient fluid. Cutoff, quadrature and physical-time refinement remain required. No ambient vorticity/strain, wall/gap interaction, arbitrary measured prehistory, finite-Re Magnus force or nonspherical history is inferred.
 
+## Articulated buoyancy in prescribed hydrostatic reservoirs
+
+`PreparedArticulatedHydrostatics` binds one displacement envelope per link of
+the original `ResolvedArticulated`. It caches the existing principal-frame
+lowering and enforces one global tetrahedron budget. Each query evaluates native
+forward kinematics at the actual base pose and joint coordinates, then reuses
+the existing uniform, layered, linear-gradient or sampled-profile hydrostatics.
+
+The original coadjoint transports each pressure resultant from its principal
+COM frame to the authored link origin. Returned body-axis wrenches feed native
+inverse, forward and free-floating dynamics directly; body weight is excluded
+and the reservoir's gravity must be supplied once to that dynamics owner.
+The sum of pressure potentials remains separate from body gravitational energy,
+and its generalized-coordinate derivative gives the buoyant holding effort.
+
+The sealed prescribed-reservoir trait excludes finite tanks: separate link
+queries cannot independently move one shared waterline or duplicate its liquid
+energy. Displacement envelopes remain explicit, nonoverlapping caller geometry;
+sealed and flooded voids are not inferred from material mass. This adds no drag,
+added mass, waves, contact, or new motion integrator. Native kinematics is a
+bounded traversal, followed by per-link/per-cell cancellation; failures publish
+no partial collection. The query allocates O(links) storage and does not repeat
+material resolution or principal eigensolves.
+
+`tests/hydrostatic/articulated.rs` contains G0/G3 regressions for unequal mass
+and displacement centroids, analytic submerged-hinge holding torque, partial
+immersion virtual work in all four prescribed media, linked-body rise/neutrality/
+sinking through free-floating dynamics, world-frame covariance, global budgets
+and transactional cancellation.
