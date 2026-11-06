@@ -50,12 +50,12 @@ impl StrainHardeningCreep {
         )
     }
 
-    fn active(&self) -> bool {
+    pub(crate) fn active(&self) -> bool {
         self.exponent > 0.0 && self.residual_rate_fraction < 1.0
     }
 
     // Return log(h) and the fraction of h supplied by its decaying term.
-    fn value(&self, alpha: f64) -> Result<(f64, f64)> {
+    pub(crate) fn value(&self, alpha: f64) -> Result<(f64, f64)> {
         if !self.active() {
             return Ok((0.0, 0.0));
         }
@@ -89,7 +89,7 @@ impl StrainHardeningCreep {
 
     // -increment * d(log h)/d alpha. Scaling the ratio first avoids both an
     // overflowing alpha+a and a derivative overflow when a is very small.
-    fn sensitivity(&self, alpha: f64, increment: f64, weight: f64) -> f64 {
+    pub(crate) fn sensitivity(&self, alpha: f64, increment: f64, weight: f64) -> f64 {
         let scale = alpha.max(self.reference_strain);
         let fraction = (increment / scale) / (alpha / scale + self.reference_strain / scale);
         (self.exponent * fraction) * weight
@@ -134,11 +134,51 @@ impl NortonCreep {
         let Some(parameters) = self.strain_hardening.filter(StrainHardeningCreep::active) else {
             return self.relaxation(q_trial, log_step_scale);
         };
+        let returned = parameters.relaxation(
+            q_trial,
+            log_step_scale,
+            log_modulus,
+            old_alpha,
+            self.parameters.stress_exponent,
+            self.log_reference_stress,
+        )?;
+        Ok(Relaxation {
+            q: returned.q,
+            delta_alpha: returned.delta_alpha,
+            ratio: returned.ratio,
+            radial: returned.radial,
+        })
+    }
+}
+
+/// Scalar kinetic return shared by additive and multiplicative creep owners.
+pub(crate) struct PrimaryCreepReturn {
+    pub(crate) q: f64,
+    pub(crate) delta_alpha: f64,
+    pub(crate) ratio: f64,
+    pub(crate) radial: f64,
+    /// Stable dq/dq_trial - q/q_trial, including positive primary resistance.
+    pub(crate) radial_correction: f64,
+}
+
+impl StrainHardeningCreep {
+    /// Solve the same dimensionless endpoint equation for an explicitly supplied
+    /// elastic modulus and stress normalization. Stress measure and kinematics
+    /// remain owned by the caller; Kirchhoff and Cauchy fits are not interchanged.
+    pub(crate) fn relaxation(
+        &self,
+        q_trial: f64,
+        log_step_scale: f64,
+        log_modulus: f64,
+        old_alpha: f64,
+        n: f64,
+        log_reference_stress: f64,
+    ) -> Result<PrimaryCreepReturn> {
+        let parameters = self;
         require(
             log_modulus.is_finite(),
             "primary creep stiffness is not representable",
         )?;
-        let n = self.parameters.stress_exponent;
         let old_log_h = parameters.value(old_alpha)?.0;
         if q_trial == 0.0 {
             let ratio = if n == 1.0 {
@@ -146,22 +186,23 @@ impl NortonCreep {
             } else {
                 1.0
             };
-            return Ok(Relaxation {
+            return Ok(PrimaryCreepReturn {
                 q: 0.0,
                 delta_alpha: 0.0,
                 ratio,
                 radial: ratio,
+                radial_correction: 0.0,
             });
         }
         let log_q_trial = det::ln(q_trial);
         let log_compliance = log_q_trial - log_modulus;
-        let log_k = log_step_scale + (n - 1.0) * (log_q_trial - self.log_reference_stress);
+        let log_k = log_step_scale + (n - 1.0) * (log_q_trial - log_reference_stress);
         let log_initial_k = log_k + old_log_h;
         require(
             log_initial_k.is_finite(),
             "primary creep step is not representable",
         )?;
-        let evaluate = |z: f64| -> Result<(f64, f64, f64, f64, f64, f64)> {
+        let evaluate = |z: f64| -> Result<(f64, f64, f64, f64, f64, f64, f64)> {
             let (log_ratio, log_fraction) = if z >= 0.0 {
                 let correction = log_one_plus(det::exp(-z));
                 (-z - correction, -correction)
@@ -190,7 +231,7 @@ impl NortonCreep {
             let ratio = det::exp(log_ratio);
             let fraction = det::exp(log_fraction);
             let slope = 1.0 + (n - 1.0) * fraction + beta * ratio;
-            Ok((residual, roundoff, ratio, delta, beta, slope))
+            Ok((residual, roundoff, ratio, delta, beta, slope, fraction))
         };
         // h(alpha_old) bounds the rate from above. Bounded bracket expansion
         // accounts for the further hardening inside this physical interval.
@@ -214,7 +255,7 @@ impl NortonCreep {
         )?;
         let mut z = upper;
         for _ in 0..96 {
-            let (residual, roundoff, ratio, delta_alpha, beta, slope) = evaluate(z)?;
+            let (residual, roundoff, ratio, delta_alpha, beta, slope, fraction) = evaluate(z)?;
             if residual.abs() <= roundoff {
                 let q = q_trial * ratio;
                 require(
@@ -226,11 +267,17 @@ impl NortonCreep {
                     radial.is_finite(),
                     "primary creep tangent is not representable",
                 )?;
-                return Ok(Relaxation {
+                let radial_correction = radial * fraction * ((beta - (n - 1.0)) / (1.0 + beta));
+                require(
+                    radial_correction.is_finite(),
+                    "primary creep radial correction is not representable",
+                )?;
+                return Ok(PrimaryCreepReturn {
                     q,
                     delta_alpha,
                     ratio,
                     radial,
+                    radial_correction,
                 });
             }
             if residual > 0.0 {
@@ -250,7 +297,9 @@ impl NortonCreep {
             "bounded primary creep root did not converge",
         ))
     }
+}
 
+impl NortonCreep {
     /// Perfect-plastic joint branch: q is fixed at yield, but its creep increment
     /// must still solve the implicit hardening equation. The branch test supplies
     /// a finite strict upper bound before any plastic increment can be accepted.

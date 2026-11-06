@@ -855,20 +855,10 @@ impl<'a, L: FiniteThermalJ2Material> FiniteThermoplasticHexSolid<'a, L> {
                     account.incremental_potential_j_m3,
                     energy.incremental_potential_j,
                 );
-                let flow = if let Some(kinetics) = family.overstress() {
-                    let p = family.parameters();
-                    let yield_pa = p.slopes.yield_stress_pa_k.mul_add(
-                        new_temperatures_k[e] - p.reference_temperature_k,
-                        p.reference.yield_stress_pa,
-                    );
-                    let yield_work = yield_pa * value.mechanical.plastic_increment;
-                    yield_work
-                        + (1.0 / (1.0 + 1.0 / kinetics.exponent))
-                            * (account.inelastic_dissipation_j_m3() - yield_work)
-                } else {
-                    account.inelastic_dissipation_j_m3()
-                };
-                flow_potential = weight.mul_add(flow, flow_potential);
+                // Retained creep resistance changes the inverse-flow integral;
+                // physical heat alone does not determine this potential.
+                flow_potential =
+                    weight.mul_add(value.mechanical.flow_potential_j_m3, flow_potential);
                 physical.push(coordinates.physical_deformation[q]);
                 assumed.push(coordinates.assumed_deformation[q]);
                 stress.push(value.mechanical.first_piola_pa);

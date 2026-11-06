@@ -22,6 +22,7 @@
 //! is not silently substituted for the explicit Pa-s convention used here.
 
 use super::{FiniteJ2, FiniteJ2Error, FiniteJ2Response, FiniteJ2State};
+use crate::creep::StrainHardeningCreep;
 use fs_math::det;
 
 /// Physical kinetics at one fixed temperature; there are no inferred defaults.
@@ -62,6 +63,7 @@ pub struct FiniteOverstressJ2 {
     parameters: FiniteOverstressParameters,
     duration_s: f64,
     log_viscosity_over_duration: f64,
+    norton_strain_hardening: Option<StrainHardeningCreep>,
 }
 
 pub(super) struct FlowReturn {
@@ -90,7 +92,8 @@ impl FiniteOverstressJ2 {
             let p = backbone.parameters();
             if !modulus.is_finite()
                 || modulus <= 0.0
-                || !(3.0 * p.shear_modulus_pa + backbone.hardening_tangent(0.0) + modulus).is_finite()
+                || !(3.0 * p.shear_modulus_pa + backbone.hardening_tangent(0.0) + modulus)
+                    .is_finite()
             {
                 return Err(FiniteJ2Error::Parameters(
                     "linear finite overstress modulus and return denominator must be representable",
@@ -103,6 +106,7 @@ impl FiniteOverstressJ2 {
             parameters,
             duration_s,
             log_viscosity_over_duration,
+            norton_strain_hardening: None,
         })
     }
 
@@ -117,6 +121,40 @@ impl FiniteOverstressJ2 {
     /// Physical duration used by this backward-Euler return.
     pub const fn duration_s(&self) -> f64 {
         self.duration_s
+    }
+    /// Select primary resistance only on an explicitly threshold-free Norton
+    /// backbone or a combined Norton/J2 inspection backbone. Perzyna plastic
+    /// accumulation must never be reinterpreted as a creep-hardening path.
+    pub fn with_norton_strain_hardening(
+        mut self,
+        parameters: StrainHardeningCreep,
+    ) -> Result<Self, FiniteJ2Error> {
+        parameters.validate().map_err(|_| {
+            FiniteJ2Error::Parameters(
+                "primary creep requires a > 0, m >= 0 and residual fraction in [0,1]",
+            )
+        })?;
+        let p = self.backbone.parameters();
+        if self.backbone.maximum_creep_alpha.is_none()
+            && (p.yield_stress_pa != 0.0
+                || p.hardening_modulus_pa != 0.0
+                || self.backbone.voce_hardening().is_some())
+        {
+            return Err(FiniteJ2Error::Parameters(
+                "primary creep requires a Norton family, not a Perzyna threshold law",
+            ));
+        }
+        self.norton_strain_hardening = Some(parameters);
+        Ok(self)
+    }
+
+    pub const fn norton_strain_hardening(&self) -> Option<&StrainHardeningCreep> {
+        self.norton_strain_hardening.as_ref()
+    }
+
+    pub(super) fn active_primary(&self) -> Option<StrainHardeningCreep> {
+        self.norton_strain_hardening
+            .filter(StrainHardeningCreep::active)
     }
     /// Unstrained, virgin native history.
     pub fn initial_state(&self) -> FiniteJ2State {
@@ -181,7 +219,7 @@ impl FiniteOverstressJ2 {
         f: &[f64; 9],
         old: &FiniteJ2State,
     ) -> Result<FiniteJ2Response, FiniteJ2Error> {
-        let returned = self.backbone.return_map_with_rate(f, old, Some(self))?;
+        let returned = self.return_map(f, old)?;
         self.backbone.response_from_return(f, old, returned)
     }
 
@@ -191,12 +229,29 @@ impl FiniteOverstressJ2 {
         f: &[f64; 9],
         old: &FiniteJ2State,
     ) -> Result<([f64; 9], f64), FiniteJ2Error> {
-        let returned = self.backbone.return_map_with_rate(f, old, Some(self))?;
+        let returned = self.return_map(f, old)?;
         Ok((returned.first_piola, returned.potential))
     }
 
+    fn return_map(
+        &self,
+        f: &[f64; 9],
+        old: &FiniteJ2State,
+    ) -> Result<super::ReturnMap, FiniteJ2Error> {
+        if let Some(primary) = self.active_primary() {
+            super::creep::primary::standalone(self, primary, f, old)
+        } else {
+            self.backbone.return_map_with_rate(f, old, Some(self))
+        }
+    }
+
     /// Evaluate the declared kinetic relation at a nonnegative flow increment.
+    /// A selected primary Norton law uses virgin old creep history here;
+    /// continuation must supply that history to `endpoint_overstress_from`.
     pub fn endpoint_overstress_pa(&self, increment: f64) -> Result<f64, FiniteJ2Error> {
+        if self.active_primary().is_some() {
+            return self.endpoint_overstress_from(increment, 0.0);
+        }
         if !increment.is_finite() || increment < 0.0 {
             return Err(FiniteJ2Error::Parameters(
                 "finite nonnegative flow increment required",
@@ -222,6 +277,16 @@ impl FiniteOverstressJ2 {
             ));
         }
         Ok(stress)
+    }
+
+    /// Explicit old creep accumulation for a primary Norton inverse-rate query.
+    /// Its driving stress is full equivalent Kirchhoff stress, not yield excess.
+    pub fn endpoint_overstress_from(
+        &self,
+        increment: f64,
+        old_creep_alpha: f64,
+    ) -> Result<f64, FiniteJ2Error> {
+        super::creep::primary::endpoint_stress(self, increment, old_creep_alpha)
     }
 
     /// Logarithm of the explicit Norton increment evaluated at positive stress.

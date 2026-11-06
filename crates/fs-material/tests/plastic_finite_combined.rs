@@ -1,5 +1,6 @@
 //! Independent synthetic joint creep/yield oracles, not measured calibration.
 
+use fs_material::creep::StrainHardeningCreep;
 use fs_material::plastic::finite::combined::FiniteNortonJ2;
 use fs_material::plastic::finite::creep::FiniteNortonCreep;
 use fs_material::plastic::finite::rate::{FiniteOverstressJ2, FiniteOverstressParameters};
@@ -172,6 +173,107 @@ fn independent_linear_joint_return_separates_mechanisms_storage_heat_and_potenti
         check_tangent(&law, &f, &old);
     }
     assert_eq!(old, law.initial_state());
+}
+
+#[test]
+fn primary_creep_jointly_yields_with_perfect_linear_and_voce_plastic_hardening() {
+    let (eta, dt, mean, reference) = (40e6, 0.2, 0.015, 0.015);
+    let (old_plastic, old_creep, dp) = (0.02_f64, 0.035_f64, 0.025_f64);
+    let old_total = old_plastic + old_creep;
+    let old = FiniteJ2State {
+        inverse_plastic_cauchy_green: [
+            (-2.0 * old_total).exp(),
+            old_total.exp(),
+            old_total.exp(),
+            0.0,
+            0.0,
+            0.0,
+        ],
+        alpha: old_plastic,
+        creep_alpha: old_creep,
+    };
+    let primary = StrainHardeningCreep {
+        reference_strain: reference,
+        exponent: 1.0,
+        residual_rate_fraction: 0.0,
+    };
+    for (linear, saturation) in [(0.0, 0.0), (H, 0.0), (H, 15e6)] {
+        let rate = 12.0;
+        let backbone = backbone(linear)
+            .with_voce_hardening(saturation, rate)
+            .unwrap();
+        let native = FiniteNortonJ2::new(backbone, kinetics(eta, 1.0), dt, 3.0).unwrap();
+        let material = native.clone().with_strain_hardening(primary).unwrap();
+        material.validate_history(&old).unwrap();
+        let plastic = old_plastic + dp;
+        let saturation_fraction = 1.0 - (-rate * plastic).exp();
+        // Author the yielded endpoint, then derive its independent primary
+        // creep increment and the compatible finite deformation.
+        let q = Y + linear * plastic + saturation * saturation_fraction;
+        let shifted = reference + old_creep;
+        let drive = reference * dt * q / eta;
+        let dc = 2.0 * drive / (shifted + (shifted * shifted + 4.0 * drive).sqrt());
+        let raw = FiniteOverstressJ2::new(material.backbone().clone(), kinetics(eta, 1.0), dt)
+            .unwrap()
+            .with_norton_strain_hardening(primary)
+            .unwrap();
+        near(raw.endpoint_overstress_from(dc, old.creep_alpha).unwrap(), q, 3e-5, 2e-11);
+        near(
+            raw.endpoint_overstress_pa(dc).unwrap(),
+            eta * dc / dt * (1.0 + dc / reference),
+            3e-5,
+            2e-11,
+        );
+        let total = old_total + dp + dc;
+        let f = coaxial(mean, total + q / (3.0 * MU));
+        let r = material.response(&f, &old).unwrap();
+        let stored = 0.5 * K * (3.0 * mean).powi(2)
+            + q * q / (6.0 * MU)
+            + 0.5 * linear * plastic * plastic
+            + saturation * (plastic - saturation_fraction / rate);
+        let creep_potential = eta / dt
+            * (0.5 * (1.0 + old_creep / reference) * dc * dc + dc.powi(3) / (3.0 * reference));
+        let flow = Y * dp + creep_potential;
+        near(r.plastic_increment, dp, 2e-13, 2e-11);
+        near(r.creep_increment, dc, 2e-13, 2e-11);
+        near(r.state.alpha, plastic, 2e-13, 2e-11);
+        near(r.state.creep_alpha, old_creep + dc, 2e-13, 2e-11);
+        near(r.equivalent_kirchhoff_pa, q, 3e-5, 2e-11);
+        near(r.stored_energy_j_m3, stored, 2e-5, 2e-11);
+        near(r.plastic_dissipation_j_m3, Y * dp, 2e-5, 2e-11);
+        near(r.creep_dissipation_j_m3, q * dc, 2e-5, 2e-11);
+        near(r.flow_potential_j_m3, flow, 2e-5, 2e-10);
+        near(r.incremental_potential_j_m3, stored + flow, 2e-5, 2e-10);
+        assert!(creep_potential < 0.5 * q * dc);
+        for (actual, expected) in r.state.inverse_plastic_cauchy_green.iter().zip([
+            (-2.0 * total).exp(),
+            total.exp(),
+            total.exp(),
+            0.0,
+            0.0,
+            0.0,
+        ]) {
+            near(*actual, expected, 2e-13, 2e-11);
+        }
+        material.validate_committed(&f, &r.state, 1e-4).unwrap();
+        check_tangent(&material, &f, &old);
+        for disabled in [
+            StrainHardeningCreep {
+                exponent: 0.0,
+                ..primary
+            },
+            StrainHardeningCreep {
+                residual_rate_fraction: 1.0,
+                ..primary
+            },
+        ] {
+            let reduced = native.clone().with_strain_hardening(disabled).unwrap();
+            assert_eq!(
+                reduced.response(&f, &old).unwrap(),
+                native.response(&f, &old).unwrap()
+            );
+        }
+    }
 }
 
 #[test]

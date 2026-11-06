@@ -14,15 +14,19 @@
 //! the scalar problem reduces to the same native monotone rate solve with
 //! effective stiffness `3mu*H/(3mu+H)`. No sequential mechanism splitting occurs.
 //!
-//! Physical losses are separately `Y*dp` and `q*dc`. The reduced potential is
-//! `psi+Y*dp+n/(n+1)*q*dc`. Its full derivative is the returned Piola stress;
+//! Physical losses are separately `Y*dp` and `q*dc`. For secondary creep the
+//! reduced potential is `psi+Y*dp+n/(n+1)*q*dc`. Its full derivative is Piola stress;
 //! the common native tensor tangent differentiates the actual joint scalar
 //! return. All stresses are Kirchhoff and energies use original reference
-//! volume. Parameter calibration, primary/tertiary creep and rupture are not
+//! volume. `with_strain_hardening` selects the shared primary multiplier on
+//! creep_alpha only. Its inverse rate is integrated for the reduced potential;
+//! one scalar coupled solve also retains energetic Voce plastic saturation.
+//! Parameter calibration, tertiary creep, cyclic recovery and rupture are not
 //! supplied by this explicitly bounded constitutive family.
 
 use super::rate::{FiniteOverstressJ2, FiniteOverstressParameters};
 use super::{FiniteJ2, FiniteJ2Error, FiniteJ2Response, FiniteJ2State, RadialReturn, ReturnMap};
+use crate::creep::StrainHardeningCreep;
 use fs_math::det;
 
 /// One immutable combined material and one positive physical interval.
@@ -55,6 +59,18 @@ impl FiniteNortonJ2 {
     }
     pub fn duration_s(&self) -> f64 {
         self.native.duration_s()
+    }
+    /// Primary resistance uses only the independent creep_alpha counter;
+    /// plastic alpha retains its original energetic linear/Voce meaning.
+    pub fn with_strain_hardening(
+        mut self,
+        parameters: StrainHardeningCreep,
+    ) -> Result<Self, FiniteJ2Error> {
+        self.native = self.native.with_norton_strain_hardening(parameters)?;
+        Ok(self)
+    }
+    pub fn strain_hardening(&self) -> Option<&StrainHardeningCreep> {
+        self.native.norton_strain_hardening()
     }
     pub fn maximum_accumulated_creep_strain(&self) -> f64 {
         self.backbone()
@@ -111,11 +127,25 @@ impl FiniteNortonJ2 {
                 "combined trial stress is not finite",
             ));
         }
-        let radial = self.radial_return(q_trial, old.alpha)?;
+        let radial = self.radial_return(q_trial, old.alpha, old.creep_alpha)?;
         backbone.finish_return(f, old, trial, q_trial, radial)
     }
 
-    fn radial_return(&self, trial: f64, alpha: f64) -> Result<RadialReturn, FiniteJ2Error> {
+    fn radial_return(
+        &self,
+        trial: f64,
+        alpha: f64,
+        creep_alpha: f64,
+    ) -> Result<RadialReturn, FiniteJ2Error> {
+        if let Some(primary) = self.native.active_primary() {
+            return super::creep::primary::combined(
+                &self.native,
+                primary,
+                trial,
+                alpha,
+                creep_alpha,
+            );
+        }
         let p = self.backbone().parameters();
         let h = 3.0 * p.shear_modulus_pa;
         let hardening = p.hardening_modulus_pa;

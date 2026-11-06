@@ -14,22 +14,27 @@
 //! mechanism. This is not a simultaneous creep-plus-plasticity model; source
 //! selection must retain this distinction rather than relabel old history.
 //!
-//! Physical heat is `q*dgamma`. The incremental potential adds
+//! Physical heat is `q*dgamma`. For the secondary selection, the potential adds
 //! `n/(n+1)*q*dgamma` to elastic storage; its gradient is Piola stress. There
 //! is no artificial energetic hardening, equilibrium yield projection or
 //! inference of creep parameters from melting temperature. Every positive
 //! resolved stress drives flow; an increment below retained-history precision
 //! refuses explicitly. The exact linear relaxed tangent holds at zero stress.
-//! Finite strain and accumulated-history bounds remain explicit. Primary or
-//! tertiary creep, rupture, damage and empirical calibration are outside this
-//! bounded secondary-creep law.
+//! `with_strain_hardening` explicitly selects the shared normalized primary
+//! multiplier, using accumulated creep rather than elapsed time. Its inverse
+//! rate is integrated for the Newton potential; physical heat stays q*dgamma.
+//! Finite strain and accumulated-history bounds remain explicit. Tertiary
+//! creep, rupture, damage and empirical calibration remain outside this law.
+
+pub(super) mod primary;
 
 use super::rate::{FiniteOverstressJ2, FiniteOverstressParameters};
 use super::{
     FiniteJ2, FiniteJ2Error, FiniteJ2Limits, FiniteJ2Parameters, FiniteJ2Response, FiniteJ2State,
 };
+use crate::creep::StrainHardeningCreep;
 
-/// One explicitly authored finite secondary-creep law and physical interval.
+/// One explicitly authored finite Norton law and physical interval.
 /// It deliberately has no rate-independent `FiniteJ2Material` adapter.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FiniteNortonCreep {
@@ -80,6 +85,18 @@ impl FiniteNortonCreep {
     pub fn duration_s(&self) -> f64 {
         self.native.duration_s()
     }
+    /// Select explicit primary/secondary resistance on accumulated creep.
+    /// The original viscosity describes the virgin rate at the same temperature.
+    pub fn with_strain_hardening(
+        mut self,
+        parameters: StrainHardeningCreep,
+    ) -> Result<Self, FiniteJ2Error> {
+        self.native = self.native.with_norton_strain_hardening(parameters)?;
+        Ok(self)
+    }
+    pub fn strain_hardening(&self) -> Option<&StrainHardeningCreep> {
+        self.native.norton_strain_hardening()
+    }
     /// Virgin creep metric and zero accumulated equivalent creep.
     pub fn initial_state(&self) -> FiniteJ2State {
         self.native.initial_state()
@@ -119,6 +136,15 @@ impl FiniteNortonCreep {
     }
     /// Endpoint equivalent Kirchhoff stress implied by a nonnegative increment.
     pub fn endpoint_equivalent_stress_pa(&self, increment: f64) -> Result<f64, FiniteJ2Error> {
-        self.native.endpoint_overstress_pa(increment)
+        self.endpoint_equivalent_stress_from(increment, 0.0)
+    }
+    /// Endpoint stress implied by the increment and explicitly retained OLD
+    /// creep accumulation. The selected resistance uses old_alpha+increment.
+    pub fn endpoint_equivalent_stress_from(
+        &self,
+        increment: f64,
+        old_alpha: f64,
+    ) -> Result<f64, FiniteJ2Error> {
+        primary::endpoint_stress(&self.native, increment, old_alpha)
     }
 }

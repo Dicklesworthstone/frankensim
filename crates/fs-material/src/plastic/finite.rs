@@ -115,6 +115,9 @@ pub struct FiniteJ2Response {
     /// rate potential, which is distinct from physical viscous dissipation.
     /// Its derivative is P; it is not the stored energy of the candidate.
     pub incremental_potential_j_m3: f64,
+    /// Integrated yield/kinetic potential, retained separately to avoid
+    /// subtracting large stored energies. This is not physical inelastic heat.
+    pub flow_potential_j_m3: f64,
     /// Actual elastic plus energetic-hardening storage at the returned endpoint.
     pub stored_energy_j_m3: f64,
     /// Physical dissipation only: sigma_y dgamma plus endpoint viscous work
@@ -456,6 +459,7 @@ impl FiniteJ2 {
             kirchhoff_pa: returned.tau,
             tangent_pa: tangent,
             incremental_potential_j_m3: returned.potential,
+            flow_potential_j_m3: returned.flow_potential,
             stored_energy_j_m3: returned.stored,
             plastic_dissipation_j_m3: returned.dissipation,
             plastic_increment: returned.dgamma,
@@ -670,10 +674,13 @@ impl FiniteJ2 {
         };
         let stored = self.energy(trial.log_j, &returned_deviator, alpha)?;
         let potential = stored + radial.primary_potential + radial.rate_potential;
+        let flow_potential = radial.primary_potential + radial.rate_potential;
         let dissipation = radial.plastic_dissipation;
         let creep_dissipation = radial.creep_dissipation;
         if tau.iter().chain(first_piola.iter()).any(|x| !x.is_finite())
             || !potential.is_finite()
+            || !flow_potential.is_finite()
+            || flow_potential < 0.0
             || !dissipation.is_finite()
             || !creep_dissipation.is_finite()
             || dissipation < 0.0
@@ -700,6 +707,7 @@ impl FiniteJ2 {
             dissipation,
             creep_dissipation,
             potential,
+            flow_potential,
             tangent_correction: radial.tangent_correction,
         })
     }
@@ -882,6 +890,7 @@ struct ReturnMap {
     dissipation: f64,
     creep_dissipation: f64,
     potential: f64,
+    flow_potential: f64,
     tangent_correction: f64,
 }
 

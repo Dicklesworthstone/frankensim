@@ -625,26 +625,11 @@ impl<'a, L: FiniteThermalJ2Material> FiniteThermoplasticTetSolid<'a, L> {
                 .map_err(|source| FiniteThermoplasticTetError::Material { element, source })?;
             let account = FiniteThermoplasticElementEnergy::from_increment(&value);
             let v = geometry.volume;
-            // The rate potential integrates the viscous stress over its flow
-            // increment. For Perzyna this is the overstress contribution; for
-            // simultaneous Norton/J2 it is the separate creep work. Both give
-            // Y*delta_p + n/(n+1)*(D_total-Y*delta_p), with Y=0 for standalone
-            // Norton. Physical heat remains the full D_total.
-            let family = self.families[element].thermal_finite_j2();
-            let flow_potential = if let Some(kinetics) = family.overstress() {
-                let p = family.parameters();
-                let yield_pa = p.slopes.yield_stress_pa_k.mul_add(
-                    new_temperatures_k[element] - p.reference_temperature_k,
-                    p.reference.yield_stress_pa,
-                );
-                let yield_loss = yield_pa * value.mechanical.plastic_increment;
-                yield_loss
-                    + kinetics.exponent / (kinetics.exponent + 1.0)
-                        * (account.inelastic_dissipation_j_m3() - yield_loss)
-            } else {
-                account.inelastic_dissipation_j_m3()
-            };
-            flow_potential_j = v.mul_add(flow_potential, flow_potential_j);
+            // The native law integrates its inverse kinetics, including any
+            // retained primary-creep resistance. This potential is distinct
+            // from the full physical dissipation deposited as caloric heat.
+            flow_potential_j =
+                v.mul_add(value.mechanical.flow_potential_j_m3, flow_potential_j);
             energy_gate(
                 "finite thermal point energy identity",
                 v * account.balance_error_j_m3,
