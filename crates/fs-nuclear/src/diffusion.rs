@@ -15,7 +15,9 @@
 //! including precursors, and a state reuses one immutable interval preparation.
 //! This is a small spatial diffusion model, not a scalable angular transport,
 //! criticality, resonance-processing or evaluated-data-validation solver.
-//! Precursors remain in their birth cell; no material flow is inferred.
+//! An optional prescribed flow transports delayed precursors conservatively;
+//! continuous external sources retain their actual injection ages. Neither
+//! option evolves bulk fluid, material heat or whole-fuel circulation.
 //!
 //! The conventional multigroup/precursor equations and diffusion limitations
 //! are described in <https://arfc.github.io/moltres/getting_started/theory.html>.
@@ -34,9 +36,17 @@ use crate::{Accumulator, FissionError, nonnegative, positive, sum};
 
 /// Composition-dependent neutron/depletion coupling on this same geometry.
 pub mod burnup;
+/// Uniform external injection through the same integrated reaction history.
+pub mod source;
+/// Explicit delayed-precursor material flow and outflow.
+pub mod transport;
 
-/// An explicitly identified stationary precursor family. Each disappearance
-/// emits one delayed neutron distributed over the supplied group spectrum.
+pub use transport::{PrecursorOutflow, PrecursorTransfer, PrecursorTransport};
+
+use source::{PreparedPlan, SourceRates};
+
+/// An explicitly identified precursor family. Each decay emits one delayed
+/// neutron distributed over the supplied spectrum in its current cell.
 #[derive(Clone, Debug, PartialEq)]
 pub struct DelayedGroup {
     pub data_id: String,
@@ -105,10 +115,12 @@ pub struct DiffusionLimits {
     pub max_neutron_groups: usize,
     pub max_delayed_groups: usize,
     pub max_reactions: usize,
+    /// Neutron interfaces plus directed precursor transfer paths.
     pub max_links: usize,
+    /// Neutron leakage faces plus precursor outflow paths.
     pub max_leakage_boundaries: usize,
     /// Authored speeds, volumes, decay constants, spectra, cross sections,
-    /// fission multiplicities and interface/boundary conductances combined.
+    /// fission multiplicities, conductances and precursor flow rates combined.
     pub max_coefficients: usize,
     pub propagation: DecayLimits,
 }
@@ -140,6 +152,7 @@ pub struct DiffusionBudget {
 #[derive(Clone, Debug, PartialEq)]
 pub struct DiffusionModel {
     data: DiffusionData,
+    precursor_transport: PrecursorTransport,
     neutron_nodes: usize,
     nodes: usize,
     coefficients: usize,
@@ -147,6 +160,8 @@ pub struct DiffusionModel {
     reaction_rates: Vec<f64>,
     link_rates: Vec<[f64; 2]>,
     leakage_rates: Vec<f64>,
+    precursor_transfer_rates: Vec<f64>,
+    precursor_outflow_rates: Vec<f64>,
     removal_rates: Vec<f64>,
     edges: Vec<ReactionEdge>,
 }
@@ -160,6 +175,29 @@ impl DiffusionModel {
     pub fn new_with_checkpoint(
         data: DiffusionData,
         limits: DiffusionLimits,
+        checkpoint: impl FnMut() -> Result<(), FissionError>,
+    ) -> Result<Self, DiffusionError> {
+        Self::new_with_transport_and_checkpoint(
+            data,
+            PrecursorTransport::default(),
+            limits,
+            checkpoint,
+        )
+    }
+
+    /// Admit prescribed delayed-precursor flow alongside the original data.
+    pub fn new_with_transport(
+        data: DiffusionData,
+        transport: PrecursorTransport,
+        limits: DiffusionLimits,
+    ) -> Result<Self, DiffusionError> {
+        Self::new_with_transport_and_checkpoint(data, transport, limits, || Ok(()))
+    }
+
+    pub fn new_with_transport_and_checkpoint(
+        data: DiffusionData,
+        transport: PrecursorTransport,
+        limits: DiffusionLimits,
         mut checkpoint: impl FnMut() -> Result<(), FissionError>,
     ) -> Result<Self, DiffusionError> {
         checkpoint()?;
@@ -167,6 +205,7 @@ impl DiffusionModel {
         let groups = data.groups.len();
         let families = data.delayed_groups.len();
         shape_limits(&data, limits)?;
+        transport.check_limits(&data, limits)?;
         if data.data_id.trim().is_empty() || cells == 0 || data.speeds_m_s.len() != groups {
             return Err(DiffusionError::Invalid(
                 "identified cells, positive volumes and one positive speed per group required",
@@ -265,6 +304,10 @@ impl DiffusionModel {
             }
         }
 
+        coefficients = add_coefficients(coefficients, transport.transfers.len(), limits)?;
+        coefficients = add_coefficients(coefficients, transport.outflows.len(), limits)?;
+        let transport_rates = transport.rates(&data, &mut checkpoint)?;
+
         let mut removals = filled(nodes, Accumulator::new(0.0))?;
         let mut flux_per_neutron = reserved(neutron_nodes)?;
         for &volume in &data.cell_volumes_m3 {
@@ -313,6 +356,18 @@ impl DiffusionModel {
             for (family, data) in data.delayed_groups.iter().enumerate() {
                 removals[neutron_nodes + cell * families + family]
                     .add(data.decay_constant_s_inv)?;
+            }
+        }
+        for (transfer, &rate) in transport.transfers.iter().zip(&transport_rates.transfers) {
+            checkpoint()?;
+            for family in 0..families {
+                removals[neutron_nodes + transfer.from_cell * families + family].add(rate)?;
+            }
+        }
+        for (outflow, &rate) in transport.outflows.iter().zip(&transport_rates.outflows) {
+            checkpoint()?;
+            for family in 0..families {
+                removals[neutron_nodes + outflow.cell * families + family].add(rate)?;
             }
         }
         let removal_rates: Vec<_> = removals.into_iter().map(Accumulator::value).collect();
@@ -386,16 +441,32 @@ impl DiffusionModel {
             checkpoint()?;
             for (family, data) in data.delayed_groups.iter().enumerate() {
                 let source = neutron_nodes + cell * families + family;
+                let decay_fraction = fraction(data.decay_constant_s_inv, removal_rates[source])?;
                 for (group, &weight) in data.spectrum.iter().enumerate() {
                     push_edge(
                         &mut edges,
                         source,
                         cell * groups + group,
-                        1.0,
+                        decay_fraction,
                         weight,
                         limits,
                     )?;
                 }
+            }
+        }
+        for (transfer, &rate) in transport.transfers.iter().zip(&transport_rates.transfers) {
+            checkpoint()?;
+            for family in 0..families {
+                let source = neutron_nodes + transfer.from_cell * families + family;
+                let destination = neutron_nodes + transfer.to_cell * families + family;
+                push_edge(
+                    &mut edges,
+                    source,
+                    destination,
+                    fraction(rate, removal_rates[source])?,
+                    1.0,
+                    limits,
+                )?;
             }
         }
         // Original-owner admission checks every numerical limit and topology;
@@ -406,6 +477,7 @@ impl DiffusionModel {
         checkpoint()?;
         Ok(Self {
             data,
+            precursor_transport: transport,
             neutron_nodes,
             nodes,
             coefficients,
@@ -413,6 +485,8 @@ impl DiffusionModel {
             reaction_rates,
             link_rates,
             leakage_rates,
+            precursor_transfer_rates: transport_rates.transfers,
+            precursor_outflow_rates: transport_rates.outflows,
             removal_rates,
             edges,
         })
@@ -463,8 +537,31 @@ impl DiffusionModel {
         &self.reaction_rates
     }
 
+    #[must_use]
+    pub fn precursor_transport(&self) -> &PrecursorTransport {
+        &self.precursor_transport
+    }
+
+    /// Rebuild material coefficients while retaining the admitted precursor
+    /// flow. Callers then use `rebind_model` to preserve the inventory only if
+    /// geometry and ordered physical identities still agree.
+    pub fn rebuild_with_data(
+        &self,
+        data: DiffusionData,
+        limits: DiffusionLimits,
+        checkpoint: impl FnMut() -> Result<(), FissionError>,
+    ) -> Result<Self, DiffusionError> {
+        Self::new_with_transport_and_checkpoint(
+            data,
+            self.precursor_transport.clone(),
+            limits,
+            checkpoint,
+        )
+    }
+
     fn check_limits(&self, limits: DiffusionLimits) -> Result<(), DiffusionError> {
         shape_limits(&self.data, limits)?;
+        self.precursor_transport.check_limits(&self.data, limits)?;
         node_limit(self.nodes, limits)?;
         coefficient_limit(self.coefficients, limits)?;
         if self.edges.len() > limits.propagation.maximum_edges {
@@ -478,7 +575,7 @@ impl DiffusionModel {
 struct PreparedDiffusion {
     model: Arc<DiffusionModel>,
     limits: DiffusionLimits,
-    plan: ReactionPlan,
+    plan: PreparedPlan,
 }
 
 /// A complete accepted spatial inventory. Clones retain independent counts
@@ -560,6 +657,10 @@ impl DiffusionState {
             || self.model.speeds_m_s() != model.speeds_m_s()
             || self.model.cell_volumes_m3() != model.cell_volumes_m3()
             || self.model.delayed_groups() != model.delayed_groups()
+            || !self
+                .model
+                .precursor_transport
+                .same_topology(&model.precursor_transport)
             || self.model.links().len() != model.links().len()
             || !self
                 .model
@@ -598,6 +699,16 @@ impl DiffusionState {
         &self,
         duration_s: f64,
         budget: DiffusionBudget,
+        checkpoint: impl FnMut() -> Result<(), FissionError>,
+    ) -> Result<(Self, DiffusionStep), DiffusionError> {
+        self.trial_from_sources(duration_s, None, budget, checkpoint)
+    }
+
+    fn trial_from_sources(
+        &self,
+        duration_s: f64,
+        sources: Option<SourceRates<'_>>,
+        budget: DiffusionBudget,
         mut checkpoint: impl FnMut() -> Result<(), FissionError>,
     ) -> Result<(Self, DiffusionStep), DiffusionError> {
         checkpoint()?;
@@ -607,22 +718,31 @@ impl DiffusionState {
             ));
         }
         self.model.check_limits(budget.limits)?;
+        let mut accounts = Accounts::new(self.model.nodes)?;
+        let mut injected = source::injected_counts(
+            sources,
+            self.model.neutron_nodes,
+            self.model.nodes,
+            duration_s,
+            &mut accounts,
+            &mut checkpoint,
+        )?;
+        let with_sources = injected.iter().any(|&count| count > 0.0);
         let prepared = if let Some(prepared) = self.prepared.as_ref().filter(|prepared| {
             Arc::ptr_eq(&self.model, &prepared.model)
                 && prepared.plan.duration_s().to_bits() == duration_s.to_bits()
                 && prepared.limits == budget.limits
+                && (!with_sources || prepared.plan.supports_sources())
         }) {
             Arc::clone(prepared)
         } else {
-            let plan = owner_call(&mut checkpoint, |cancelled| {
-                ReactionPlan::prepare_with_population_integrals(
-                    &self.model.removal_rates,
-                    &self.model.edges,
-                    duration_s,
-                    budget.limits.propagation,
-                    cancelled,
-                )
-            })?;
+            let plan = PreparedPlan::prepare(
+                &self.model,
+                duration_s,
+                budget.limits,
+                with_sources,
+                &mut checkpoint,
+            )?;
             Arc::new(PreparedDiffusion {
                 model: Arc::clone(&self.model),
                 limits: budget.limits,
@@ -632,18 +752,13 @@ impl DiffusionState {
         let mut initial = reserved(self.model.nodes)?;
         initial.extend_from_slice(&self.neutron_counts);
         initial.extend_from_slice(&self.precursor_counts);
-        let evolved = owner_call(&mut checkpoint, |cancelled| {
-            prepared.plan.apply_with_cancel(&initial, cancelled)
-        })?;
-        let integrals = owner_call(&mut checkpoint, |cancelled| {
-            prepared
-                .plan
-                .integrate_populations_with_cancel(&initial, cancelled)
-        })?;
+        let evolved = prepared.plan.apply(&initial, &injected, &mut checkpoint)?;
+        let integrals = prepared
+            .plan
+            .integrals(&initial, &injected, &mut checkpoint)?;
         let groups = self.model.groups().len();
         let families = self.model.delayed_groups().len();
         let neutron_nodes = self.model.neutron_nodes;
-        let mut accounts = Accounts::new(self.model.nodes)?;
         let mut reaction_counts = reserved(self.model.reactions().len())?;
         for (reaction, &rate) in self
             .model
@@ -729,6 +844,48 @@ impl DiffusionState {
             }
         }
 
+        let mut precursor_transfer_counts = reserved(count_product(
+            self.model.precursor_transport.transfers.len(),
+            families,
+        )?)?;
+        for (transfer, &rate) in self
+            .model
+            .precursor_transport
+            .transfers
+            .iter()
+            .zip(&self.model.precursor_transfer_rates)
+        {
+            checkpoint()?;
+            for family in 0..families {
+                let source = neutron_nodes + transfer.from_cell * families + family;
+                let destination = neutron_nodes + transfer.to_cell * families + family;
+                let count = accounts.multiply(rate, integrals[source])?;
+                accounts.remove(source, count)?;
+                accounts.produce(destination, count, 1.0)?;
+                precursor_transfer_counts.push(count);
+            }
+        }
+        let mut precursor_outflow_counts = reserved(count_product(
+            self.model.precursor_transport.outflows.len(),
+            families,
+        )?)?;
+        for (outflow, &rate) in self
+            .model
+            .precursor_transport
+            .outflows
+            .iter()
+            .zip(&self.model.precursor_outflow_rates)
+        {
+            checkpoint()?;
+            for family in 0..families {
+                let source = neutron_nodes + outflow.cell * families + family;
+                let count = accounts.multiply(rate, integrals[source])?;
+                accounts.remove(source, count)?;
+                accounts.total(ESCAPED_PRECURSORS, count)?;
+                precursor_outflow_counts.push(count);
+            }
+        }
+
         let mut population_balance_residuals = reserved(self.model.nodes)?;
         for node in 0..self.model.nodes {
             checkpoint()?;
@@ -737,6 +894,7 @@ impl DiffusionState {
             let residual = checked(sum(&[
                 evolved.populations[node],
                 -initial[node],
+                -injected[node],
                 outgoing.hi,
                 outgoing.lo,
                 -incoming.hi,
@@ -767,6 +925,7 @@ impl DiffusionState {
             (LEAKED, 1.0),
             (PROMPT, -1.0),
             (DELAYED, -1.0),
+            (SOURCE_NEUTRONS, -1.0),
         ] {
             account_add(
                 &mut neutron_balance,
@@ -779,7 +938,12 @@ impl DiffusionState {
                 &mut accounts.error,
             )?;
         }
-        for (kind, sign) in [(PRECURSORS, -1.0), (DECAYS, 1.0)] {
+        for (kind, sign) in [
+            (PRECURSORS, -1.0),
+            (DECAYS, 1.0),
+            (SOURCE_PRECURSORS, -1.0),
+            (ESCAPED_PRECURSORS, 1.0),
+        ] {
             account_add(
                 &mut precursor_balance,
                 sign * accounts.totals[kind].hi,
@@ -826,6 +990,7 @@ impl DiffusionState {
         }
         let mut neutron_counts = evolved.populations;
         let precursor_counts = neutron_counts.split_off(neutron_nodes);
+        let injected_precursor_counts = injected.split_off(neutron_nodes);
         let next = Self {
             model: Arc::clone(&self.model),
             neutron_counts,
@@ -844,6 +1009,13 @@ impl DiffusionState {
                 link_b_to_a_counts,
                 leakage_counts,
                 delayed_decays,
+                injected_neutron_counts: injected,
+                injected_precursor_counts,
+                precursor_transfer_counts,
+                precursor_outflow_counts,
+                injected_neutrons: accounts.totals[SOURCE_NEUTRONS].value(),
+                injected_precursors: accounts.totals[SOURCE_PRECURSORS].value(),
+                escaped_precursors: accounts.totals[ESCAPED_PRECURSORS].value(),
                 fissions: accounts.totals[FISSIONS].value(),
                 captures: accounts.totals[CAPTURES].value(),
                 scatters: accounts.totals[SCATTERS].value(),
@@ -888,6 +1060,16 @@ pub struct DiffusionStep {
     pub leakage_counts: Vec<f64>,
     /// Actual precursor disappearances, cell-major then family.
     pub delayed_decays: Vec<f64>,
+    /// Uniform external injection totals, in the corresponding state order.
+    pub injected_neutron_counts: Vec<f64>,
+    pub injected_precursor_counts: Vec<f64>,
+    /// Directed transfer-major then delayed-family counts.
+    pub precursor_transfer_counts: Vec<f64>,
+    /// Outflow-major then delayed-family counts; no later exterior decay is inferred.
+    pub precursor_outflow_counts: Vec<f64>,
+    pub injected_neutrons: f64,
+    pub injected_precursors: f64,
+    pub escaped_precursors: f64,
     pub fissions: f64,
     pub captures: f64,
     pub scatters: f64,
@@ -896,7 +1078,7 @@ pub struct DiffusionStep {
     pub precursor_decays: f64,
     pub delayed_neutrons: f64,
     pub leaked_neutrons: f64,
-    /// N1 - N0 + removals - products per neutron node, then precursor node.
+    /// N1 - N0 - injection + removals - products, neutrons then precursors.
     pub population_balance_residuals: Vec<f64>,
     pub neutron_balance_residual: f64,
     pub precursor_balance_residual: f64,
@@ -938,11 +1120,14 @@ const PRECURSORS: usize = 4;
 const DECAYS: usize = 5;
 const DELAYED: usize = 6;
 const LEAKED: usize = 7;
+const SOURCE_NEUTRONS: usize = 8;
+const SOURCE_PRECURSORS: usize = 9;
+const ESCAPED_PRECURSORS: usize = 10;
 
 struct Accounts {
     incoming: Vec<Accumulator>,
     outgoing: Vec<Accumulator>,
-    totals: [Accumulator; 8],
+    totals: [Accumulator; 11],
     error: Accumulator,
 }
 
@@ -951,7 +1136,7 @@ impl Accounts {
         Ok(Self {
             incoming: filled(nodes, Accumulator::new(0.0))?,
             outgoing: filled(nodes, Accumulator::new(0.0))?,
-            totals: [Accumulator::new(0.0); 8],
+            totals: [Accumulator::new(0.0); 11],
             error: Accumulator::new(0.0),
         })
     }

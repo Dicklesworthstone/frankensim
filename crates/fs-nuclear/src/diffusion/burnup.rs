@@ -7,15 +7,21 @@
 //! the caller's allowance. No trial iterate is an accepted physical substep.
 //! This closes the discrete reaction accounts; it does not make the frozen
 //! temperature/group data or within-step flux approximation exact.
+//! External neutron/precursor rates and continuous nuclide supply participate
+//! through their original affine propagators. The product of interval-mean
+//! flux and inventory still approximates their time correlation; simultaneous
+//! source startup therefore needs physical timestep refinement.
 
 use std::{collections::BTreeSet, sync::Arc};
 
 use super::{
-    DiffusionBudget, DiffusionError, DiffusionModel, DiffusionReactionKind, DiffusionState,
-    DiffusionStep,
+    DiffusionBudget, DiffusionError, DiffusionReactionKind, DiffusionState, DiffusionStep,
 };
 use crate::burnup::{BurnupBudget, BurnupError, BurnupInventory, BurnupRate, BurnupStep};
 use crate::{Accumulator, FissionError, nonnegative, positive};
+
+#[cfg(test)]
+use super::DiffusionModel;
 
 /// Bind one incident-energy neutron channel to its original nuclear reaction.
 /// The diffusion channel supplies the physical cell and incident group.
@@ -23,6 +29,68 @@ use crate::{Accumulator, FissionError, nonnegative, positive};
 pub struct ReactionBinding {
     pub diffusion_reaction: usize,
     pub burnup_reaction: usize,
+}
+
+/// Constant external sources over one physical interval. Neutrons are
+/// cell-major then group; precursors are cell-major then delayed family.
+/// Each nuclide row follows that cell's original burnup inventory order.
+/// All rates are extensive expected particles/s or nuclei/s, not densities.
+/// Nuclide feed does not imply feed enthalpy or a change in bulk thermal mass.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DiffusionBurnupSources {
+    pub neutron_rates_s: Vec<f64>,
+    pub precursor_rates_s: Vec<f64>,
+    pub nuclide_rates_s: Vec<Vec<f64>>,
+}
+
+impl DiffusionBurnupSources {
+    /// Validate against the original spatial/inventory layout without preparing
+    /// any propagator or changing a history. Zero rates still require full shape.
+    pub fn validate(&self, state: &DiffusionBurnupState) -> Result<(), DiffusionBurnupError> {
+        self.validate_with_checkpoint(state, || Ok(()))
+    }
+
+    pub fn validate_with_checkpoint(
+        &self,
+        state: &DiffusionBurnupState,
+        mut checkpoint: impl FnMut() -> Result<(), FissionError>,
+    ) -> Result<(), DiffusionBurnupError> {
+        checkpoint()?;
+        if self.neutron_rates_s.len() != state.neutrons.neutron_counts().len()
+            || self.precursor_rates_s.len() != state.neutrons.precursor_counts().len()
+            || self.nuclide_rates_s.len() != state.inventories.len()
+        {
+            return Err(DiffusionBurnupError::Invalid(
+                "external source vectors must match original neutron, precursor and cell layouts",
+            ));
+        }
+        for &rate in self.neutron_rates_s.iter().chain(&self.precursor_rates_s) {
+            checkpoint()?;
+            if !nonnegative(rate) {
+                return Err(DiffusionBurnupError::Invalid(
+                    "finite nonnegative external particle rates required",
+                ));
+            }
+        }
+        for (rates, inventory) in self.nuclide_rates_s.iter().zip(&state.inventories) {
+            checkpoint()?;
+            if rates.len() != inventory.populations().len() {
+                return Err(DiffusionBurnupError::Invalid(
+                    "one external rate per original cell nuclide required",
+                ));
+            }
+            for &rate in rates {
+                checkpoint()?;
+                if !nonnegative(rate) {
+                    return Err(DiffusionBurnupError::Invalid(
+                        "finite nonnegative external nuclide rates required",
+                    ));
+                }
+            }
+        }
+        checkpoint()?;
+        Ok(())
+    }
 }
 
 /// Component work/accounts and a separate nonlinear reaction-consistency limit.
@@ -101,6 +169,12 @@ pub struct DiffusionBurnupStep {
     pub neutrons: DiffusionStep,
     /// Original burnup reports in diffusion-cell order.
     pub burnup: Vec<BurnupStep>,
+    /// External supply integrated by the original production owner, in the
+    /// original cell/nuclide order. Reaction-created products are not included.
+    pub produced_nuclei: Vec<Vec<f64>>,
+    /// Scalar exports of the supplied counts per cell. Their projection and
+    /// summation defects are included in that cell's burnup population roundoff.
+    pub produced_nuclei_by_cell: Vec<f64>,
     pub iterations: usize,
     pub reaction_defect: f64,
     pub reaction_defect_by_cell: Vec<f64>,
@@ -207,6 +281,37 @@ impl DiffusionBurnupState {
         duration_s: f64,
         temperatures_k: &[f64],
         budget: DiffusionBurnupBudget,
+        checkpoint: impl FnMut() -> Result<(), FissionError>,
+    ) -> Result<(Self, DiffusionBurnupStep), DiffusionBurnupError> {
+        self.trial_optional_sources(duration_s, temperatures_k, None, budget, checkpoint)
+    }
+
+    /// Simultaneous external particles and continuous nuclide feed. Every
+    /// nonlinear iterate starts from the original neutron and nuclide histories,
+    /// so repeated trials neither inject the source twice nor reset product ages.
+    pub fn trial_with_sources(
+        &self,
+        duration_s: f64,
+        temperatures_k: &[f64],
+        sources: &DiffusionBurnupSources,
+        budget: DiffusionBurnupBudget,
+        checkpoint: impl FnMut() -> Result<(), FissionError>,
+    ) -> Result<(Self, DiffusionBurnupStep), DiffusionBurnupError> {
+        self.trial_optional_sources(
+            duration_s,
+            temperatures_k,
+            Some(sources),
+            budget,
+            checkpoint,
+        )
+    }
+
+    fn trial_optional_sources(
+        &self,
+        duration_s: f64,
+        temperatures_k: &[f64],
+        sources: Option<&DiffusionBurnupSources>,
+        budget: DiffusionBurnupBudget,
         mut checkpoint: impl FnMut() -> Result<(), FissionError>,
     ) -> Result<(Self, DiffusionBurnupStep), DiffusionBurnupError> {
         checkpoint()?;
@@ -215,6 +320,12 @@ impl DiffusionBurnupState {
             return Err(DiffusionBurnupError::Invalid(
                 "finite duration and one temperature per cell required",
             ));
+        }
+        self.neutrons
+            .model()
+            .check_limits(budget.diffusion.limits)?;
+        if let Some(sources) = sources {
+            sources.validate_with_checkpoint(self, &mut checkpoint)?;
         }
         if self.bindings.len() > budget.diffusion.limits.max_reactions {
             return Err(FissionError::Budget("coupled neutron reaction bindings").into());
@@ -257,11 +368,27 @@ impl DiffusionBurnupState {
             };
             microscopic.push(sigma);
         }
-        let mut means: Vec<Vec<f64>> = self
-            .inventories
-            .iter()
-            .map(|inventory| inventory.populations().to_vec())
-            .collect();
+        let mut means = Vec::with_capacity(self.inventories.len());
+        let mut has_production = Vec::with_capacity(self.inventories.len());
+        for (cell, inventory) in self.inventories.iter().enumerate() {
+            checkpoint()?;
+            let mut mean = inventory.populations().to_vec();
+            let mut producing = false;
+            if let Some(sources) = sources {
+                for (parent, (&initial, &rate)) in inventory
+                    .populations()
+                    .iter()
+                    .zip(&sources.nuclide_rates_s[cell])
+                    .enumerate()
+                {
+                    checkpoint()?;
+                    producing |= rate > 0.0;
+                    mean[parent] = supplied_mean(initial, supplied_count(rate, duration_s)?)?;
+                }
+            }
+            means.push(mean);
+            has_production.push(producing);
+        }
         let mut last_defect = 0.0;
         for iteration in 1..=budget.max_iterations {
             checkpoint()?;
@@ -281,28 +408,55 @@ impl DiffusionBurnupState {
             let model = if &data == self.neutrons.model().data() {
                 Arc::clone(self.neutrons.model())
             } else {
-                Arc::new(DiffusionModel::new_with_checkpoint(
+                Arc::new(self.neutrons.model().rebuild_with_data(
                     data,
                     budget.diffusion.limits,
                     &mut checkpoint,
                 )?)
             };
             let initial = self.neutrons.rebind_model(model)?;
-            let (neutrons, neutron_step) =
-                initial.trial(duration_s, budget.diffusion, &mut checkpoint)?;
+            let (neutrons, neutron_step) = if let Some(sources) = sources {
+                initial.trial_with_sources(
+                    duration_s,
+                    &sources.neutron_rates_s,
+                    &sources.precursor_rates_s,
+                    budget.diffusion,
+                    &mut checkpoint,
+                )?
+            } else {
+                initial.trial(duration_s, budget.diffusion, &mut checkpoint)?
+            };
             let mut candidates = Vec::with_capacity(self.inventories.len());
             let mut reports = Vec::with_capacity(self.inventories.len());
+            let mut produced_nuclei = Vec::with_capacity(self.inventories.len());
+            let mut produced_nuclei_by_cell = Vec::with_capacity(self.inventories.len());
             let mut next_means = Vec::with_capacity(self.inventories.len());
             for (cell, inventory) in self.inventories.iter().enumerate() {
                 checkpoint()?;
                 let flux = &neutron_step.mean_fluxes[cell];
-                let (candidate, report) = inventory.trial(
-                    duration_s,
-                    flux,
-                    temperatures_k[cell],
-                    budget.burnup,
-                    &mut checkpoint,
-                )?;
+                let (candidate, mut report, produced) =
+                    if let Some(sources) = sources.filter(|_| has_production[cell]) {
+                        let (candidate, production) = inventory.trial_with_production(
+                            duration_s,
+                            flux,
+                            temperatures_k[cell],
+                            &sources.nuclide_rates_s[cell],
+                            budget.burnup,
+                            &mut checkpoint,
+                        )?;
+                        (candidate, production.burnup, production.produced_nuclei)
+                    } else {
+                        let (candidate, report) = inventory.trial(
+                            duration_s,
+                            flux,
+                            temperatures_k[cell],
+                            budget.burnup,
+                            &mut checkpoint,
+                        )?;
+                        (candidate, report, vec![0.0; inventory.populations().len()])
+                    };
+                let produced_total =
+                    export_supplied_count(&produced, &mut report, budget.burnup, &mut checkpoint)?;
                 let rates = inventory.model().rate_constants(
                     flux,
                     temperatures_k[cell],
@@ -325,18 +479,28 @@ impl DiffusionBurnupState {
                 let mut mean = inventory.populations().to_vec();
                 if duration_s > 0.0 {
                     for parent in 0..mean.len() {
+                        checkpoint()?;
                         if hazards[parent].value() > 0.0 {
                             mean[parent] = mean_population(
                                 removal[parent].value(),
                                 hazards[parent].value(),
                                 duration_s,
                             )?;
+                        } else {
+                            // Direct continuous feed has mean N0 + s*dt/2
+                            // when this parent has no removal hazard. Internal
+                            // ingrowth in an unreactive node cannot affect the
+                            // bound neutron channels on this frozen-flux trial.
+                            mean[parent] =
+                                supplied_mean(inventory.populations()[parent], produced[parent])?;
                         }
                     }
                 }
                 next_means.push(mean);
                 candidates.push(candidate);
                 reports.push(report);
+                produced_nuclei.push(produced);
+                produced_nuclei_by_cell.push(produced_total);
             }
             let mut by_reaction: Vec<Vec<Accumulator>> = self
                 .inventories
@@ -378,6 +542,8 @@ impl DiffusionBurnupState {
                     DiffusionBurnupStep {
                         neutrons: neutron_step,
                         burnup: reports,
+                        produced_nuclei,
+                        produced_nuclei_by_cell,
                         iterations: iteration,
                         reaction_defect: last_defect,
                         reaction_defect_by_cell: defects,
@@ -415,6 +581,62 @@ impl DiffusionBurnupState {
         *self = next;
         Ok(report)
     }
+
+    /// Atomically publish all spatial particles, supplied nuclei, products and
+    /// energy accounts after both numerical owners and channel closure accept.
+    pub fn advance_with_sources(
+        &mut self,
+        duration_s: f64,
+        temperatures_k: &[f64],
+        sources: &DiffusionBurnupSources,
+        budget: DiffusionBurnupBudget,
+        checkpoint: impl FnMut() -> Result<(), FissionError>,
+    ) -> Result<DiffusionBurnupStep, DiffusionBurnupError> {
+        let (next, report) =
+            self.trial_with_sources(duration_s, temperatures_k, sources, budget, checkpoint)?;
+        *self = next;
+        Ok(report)
+    }
+}
+
+fn supplied_count(rate: f64, duration: f64) -> Result<f64, FissionError> {
+    let count = rate * duration;
+    if !nonnegative(count) || (rate > 0.0 && duration > 0.0 && count == 0.0) {
+        return Err(FissionError::Arithmetic);
+    }
+    Ok(count)
+}
+
+fn supplied_mean(initial: f64, produced: f64) -> Result<f64, FissionError> {
+    let mean = initial + produced * 0.5;
+    if !nonnegative(mean) || (mean == 0.0 && (initial > 0.0 || produced > 0.0)) {
+        return Err(FissionError::Arithmetic);
+    }
+    Ok(mean)
+}
+
+fn export_supplied_count(
+    produced: &[f64],
+    report: &mut BurnupStep,
+    budget: BurnupBudget,
+    checkpoint: &mut impl FnMut() -> Result<(), FissionError>,
+) -> Result<f64, DiffusionBurnupError> {
+    let mut total = Accumulator::new(0.0);
+    let mut error = Accumulator::new(report.population_roundoff_nuclei);
+    for &count in produced {
+        checkpoint()?;
+        error.add(total.add(count)?.abs())?;
+    }
+    let rounded = total.value();
+    if !nonnegative(rounded) {
+        return Err(FissionError::Arithmetic.into());
+    }
+    error.add(crate::sum(&[total.hi, total.lo, -rounded]).abs())?;
+    report.population_roundoff_nuclei = upper_value(&error)?;
+    if report.population_roundoff_nuclei > budget.nuclei_tolerance {
+        return Err(BurnupError::Budget("coupled supplied-nuclei scalar export roundoff").into());
+    }
+    Ok(rounded)
 }
 
 fn macroscopic(population: f64, sigma: f64, volume: f64) -> Result<f64, FissionError> {
@@ -480,3 +702,6 @@ fn mean_population(count: f64, rate: f64, duration: f64) -> Result<f64, FissionE
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod source_tests;

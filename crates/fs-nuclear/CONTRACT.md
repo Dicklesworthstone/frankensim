@@ -1296,3 +1296,40 @@ all 150 tests. The `evaluated_decay` example also compiled and ran: at the
 imported half-life it retained half the original tritium, produced the other
 half as helium-3, and deposited the explicitly routed 5690 eV mean electron
 energy per transformation rather than the 18590 eV Q value.
+
+## Continuous spatial sources and moving delayed-neutron precursors
+
+The bounded spatial diffusion owner accepts an explicit extensive neutron and
+precursor influx, in expected particles/s per original cell/group or
+cell/precursor family. The original positive reaction propagator evolves each
+supplied particle for its actual residence time within the frozen interval;
+integrated fluence therefore includes source-created particles, including in
+zero-removal receiver groups. Injection is a separate balance debit, not an
+initial or endpoint inventory dose. Changing source magnitudes reuses an
+unchanged operator preparation.
+
+Optional directed precursor transfers use authored volumetric flow Q [m³/s]
+and donor-cell volume V [m³], giving a first-order transfer rate Q/V for every
+well-mixed delayed family. The receiving cell owns subsequent delayed-neutron
+emission. Internal transfers cancel in the combined precursor balance;
+explicit outflows export precursors without emitting or heating inside the
+model. This describes prescribed precursor transport only. It does not solve
+carrier-fluid momentum, advect bulk fuel or enthalpy, infer an incoming
+composition, or model an exterior return history. External return precursors
+can be supplied explicitly through the source vector.
+
+Finite burnup accepts the same neutron/precursor sources plus per-cell,
+original-nuclide production rates. Newly supplied nuclei participate in the
+existing simultaneous decay/capture/fission network, with event energies and
+future daughter decay retained by that owner. Coupling iterations restart the
+original accepted histories; they match neutron reaction counts to burnup
+counts under the existing frozen-temperature, mean-flux/mean-inventory
+approximation. Changing external rates requires explicit interval splitting; spatial transport,
+finite fuel and temperature feedback retain their timestep-refinement requirements.
+
+Limits remain the numerical owner's bounded dense population graph, with at
+most 64 combined neutron and delayed-precursor nodes. Prescribed transport is
+well mixed per cell and has no angular neutron transport, fluid-flow solution,
+resonance reconstruction or self-shielding. Manufactured analytic,
+conservation and timestep-refinement checks establish the implemented discrete
+equations; they do not qualify a particular reactor or evaluated data library.
