@@ -353,8 +353,26 @@ pub(super) fn advance_entropy_consistent<L: TransportLaw>(
     account: &mut EntropyTracker,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<StabilizedDissipationReport, DissipationError> {
+    advance_entropy_consistent_budget(
+        owner, flow, duration, controls, reservoirs, &mut 0, account, cancelled,
+    )
+}
+
+/// Retain one actual RHS budget across both molecular halves and every
+/// discarded coupled attempt. Entropy admission does not restart the counter.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn advance_entropy_consistent_budget<L: TransportLaw>(
+    owner: &mut DissipationOperator<L>,
+    flow: &mut MixtureEuler1d,
+    duration: Time,
+    controls: StabilizedDissipationControl,
+    reservoirs: ReservoirEnds<'_>,
+    evaluations: &mut usize,
+    account: &mut EntropyTracker,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<StabilizedDissipationReport, DissipationError> {
     advance_inner::<true, L>(
-        owner, flow, duration, controls, reservoirs, &mut 0, Some(account), cancelled,
+        owner, flow, duration, controls, reservoirs, evaluations, Some(account), cancelled,
     )
 }
 

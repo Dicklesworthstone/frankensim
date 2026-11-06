@@ -39,12 +39,30 @@ impl<L: TransportLaw> DissipationOperator<L> {
         duration: Time,
         controls: StabilizedDissipationControl,
         entropy: MolecularEntropyControl,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<(StabilizedDissipationReport, MolecularEntropyReport), DissipationError> {
+        self.advance_stabilized_entropy_consistent_budget(
+            flow, duration, controls, entropy, &mut 0, cancelled,
+        )
+    }
+
+    /// Original closed RKL2/entropy owner with a caller-retained RHS counter.
+    /// Coupled retries must not obtain a fresh molecular work budget.
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::multicomponent) fn advance_stabilized_entropy_consistent_budget(
+        &mut self,
+        flow: &mut MixtureEuler1d,
+        duration: Time,
+        controls: StabilizedDissipationControl,
+        entropy: MolecularEntropyControl,
+        evaluations: &mut usize,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<(StabilizedDissipationReport, MolecularEntropyReport), DissipationError> {
         controls.validate()?;
         let mut account = EntropyTracker::new(flow, entropy, &mut cancelled)?;
-        let report = crate::multicomponent::dissipation::stabilized::advance_entropy_consistent(
-            self, flow, duration, controls, [None; 2], &mut account, &mut cancelled,
+        let report = crate::multicomponent::dissipation::stabilized::advance_entropy_consistent_budget(
+            self, flow, duration, controls, [None; 2], evaluations,
+            &mut account, &mut cancelled,
         )?;
         Ok((report, account.report))
     }

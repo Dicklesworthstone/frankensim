@@ -2,6 +2,7 @@ use super::*;
 
 mod cell;
 mod entropy;
+mod entropy_stabilized;
 mod molecular;
 mod piston;
 mod spatial_cell;

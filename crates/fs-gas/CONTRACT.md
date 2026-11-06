@@ -5987,3 +5987,41 @@ fixed-energy polynomial example gives Delta S=0.09976352648220975 J/K, including
 0.04494595720774408 J/K of real chemical source-reference contribution. These
 arithmetic checks and source parsing do not claim native Rust execution or
 typechecking, which were unavailable.
+
+
+### Source-conjugate RKL2 in complete reacting entropy evolution
+
+`ReactingEuler1d::step_entropy_consistent_with_stabilized_dissipation` selects
+the original RKL2 recurrence for both molecular halves of the same closed
+D-C-A-C-D composition. It reuses the preceding explicit entry's scope admission,
+chemistry, source-aware whole-state account, native duration restarts and atomic
+publication. The inviscid middle step and both molecular halves use their
+original source-derived entropy fluxes; no duplicate constitutive operator,
+reactor or composition loop is added.
+
+The original molecular RKL2 owner now has a counter-preserving conjugate entry.
+One actual RHS counter is retained across BOTH halves and ALL discarded coupled
+attempts. Acoustic shortening, entropy rejection or source refusal cannot reset
+the allowance. Original stage/end-state calls consume that counter before
+evaluation; work exhaustion remains terminal in both molecular and coupled
+retry loops. Each retained half report describes its accepted molecular call,
+while `StabilizedReactiveEntropyStepReport::operator_evaluations` includes
+abandoned coupled work as well.
+
+Every actual molecular macrostep endpoint and complete half interval retains
+the original caloric, positivity, constitutive, species and entropy admission.
+Internal Legendre stages remain algebraic auxiliary states; they are not
+misclassified as consecutive physical entropy-producing time steps. The whole
+reacting state is still independently admitted after the complete composition.
+Caller-selected macrostep and chemistry controls remain necessary; no global
+temporal-error, nonlinear positivity, contact-equilibrium or combustion theorem
+is inferred from symmetric splitting or the RKL2 linear stability interval.
+
+Two focused regression definitions compare a diffusion-dominated smooth coupled
+mode with the explicit source-conjugate split, check independent endpoint
+entropy and physical-energy balances, exercise extended stage counts and actual
+RHS work, and exhaust a three-call budget after an abandoned heat-release
+attempt. That refusal must leave the public field/clock unchanged and the same
+owners reusable. The tests are definitions, not executed performance results:
+source/syntax review completed, but native Rust typechecking and test execution
+were unavailable.

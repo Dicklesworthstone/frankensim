@@ -26,6 +26,17 @@ pub struct StabilizedReactiveStepReport {
     pub operator_evaluations: usize,
 }
 
+/// One entropy-admitted reacting step with source-conjugate RKL2 molecular halves.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct StabilizedReactiveEntropyStepReport {
+    /// Original complete composition, physical entropy, and accepted half-step receipts.
+    pub coupled: super::entropy::ReactiveEntropyStepReport,
+    /// Original RKL2 work and conservative balances for the accepted molecular halves.
+    pub dissipation: SplitStabilizedDissipationReport,
+    /// All actual molecular RHS calls, including both halves and discarded coupled attempts.
+    pub operator_evaluations: usize,
+}
+
 /// Complete-duration work bounds for stationary reacting molecular evolution.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct StabilizedReactiveIntervalControl {
@@ -108,6 +119,11 @@ pub(super) enum MolecularMethod<'a> {
         controls: DissipationControl,
         entropy: MolecularEntropyControl,
     },
+    EntropyStabilized {
+        controls: StabilizedDissipationControl,
+        entropy: MolecularEntropyControl,
+        evaluations: &'a mut usize,
+    },
     Stabilized {
         controls: StabilizedDissipationControl,
         evaluations: &'a mut usize,
@@ -148,6 +164,22 @@ impl MolecularMethod<'_> {
                     physical,
                     stabilized: None,
                     entropy: Some(report),
+                })
+            }
+            Self::EntropyStabilized { controls, entropy, evaluations } => {
+                if reservoirs.iter().any(Option::is_some) {
+                    return Err(ReactiveError::Invalid(
+                        "entropy-consistent composition requires closed molecular boundaries",
+                    ));
+                }
+                let (report, entropy_report) =
+                    operator.advance_stabilized_entropy_consistent_budget(
+                        flow, duration, *controls, *entropy, evaluations, cancelled,
+                    )?;
+                Ok(MolecularHalf {
+                    physical: report.transport,
+                    stabilized: Some(report),
+                    entropy: Some(entropy_report),
                 })
             }
             Self::Stabilized {
@@ -214,6 +246,64 @@ impl CouplingBudget {
 }
 
 impl ReactingEuler1d {
+    /// Evolve a closed reacting field with original-source inviscid and molecular
+    /// entropy fluxes, RKL2 diffusion, and actual whole-composition admission.
+    ///
+    /// This is the same D-C-A-C-D owner used by the explicit entropy method.
+    /// Both molecular halves use the original RKL2 recurrence and source-conjugate
+    /// constitutive operator; chemistry keeps its selected original method.
+    /// Acoustic shortening replays the complete composition. A single actual
+    /// RHS counter covers both halves and every discarded attempt, and exhaustion
+    /// is terminal. Shortening cannot renew that molecular work allowance.
+    ///
+    /// Each molecular macrostep and half interval, the inviscid SSP-RK2 step,
+    /// and the actual complete reacting state retain their own entropy gates.
+    /// The complete gate restores real chemical species conversion while
+    /// separating only numerical source-reference inventory residuals.
+    ///
+    /// Scope is first-order space, fixed constant area, and periodic or two
+    /// stationary reflecting ends with common species support at transport
+    /// faces. Caller-selected macrostep and chemistry controls remain necessary:
+    /// symmetric composition and the RKL2 linear stability interval do not
+    /// provide a global temporal-error, positivity, or combustion theorem.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_entropy_consistent_with_stabilized_dissipation<L: TransportLaw>(
+        &mut self,
+        operator: &mut DissipationOperator<L>,
+        maximum_duration: Time,
+        controls: ReactiveStepControl,
+        dissipation_controls: StabilizedDissipationControl,
+        entropy: super::super::MixtureEntropyControl,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<StabilizedReactiveEntropyStepReport, ReactiveError> {
+        poll(&mut cancelled)?;
+        controls.validate()?;
+        dissipation_controls.validate()?;
+        let mut account = super::entropy::CoupledEntropy::new(
+            &self.accepted, controls.transport, entropy, &mut cancelled,
+        )?;
+        let mut evaluations = 0;
+        let (coupled, dissipation) = self.step_inner(
+            maximum_duration,
+            controls,
+            Some(operator),
+            MolecularMethod::EntropyStabilized {
+                controls: dissipation_controls,
+                entropy,
+                evaluations: &mut evaluations,
+            },
+            [None; 2],
+            None,
+            Some(&mut account),
+            &mut cancelled,
+        )?;
+        Ok(StabilizedReactiveEntropyStepReport {
+            coupled: account.complete(coupled),
+            dissipation: dissipation.expect("accepted stabilized composition has both halves"),
+            operator_evaluations: evaluations,
+        })
+    }
+
     /// Opt into RKL2 for both molecular halves of the original D-C-A-C-D step.
     ///
     /// Acoustic/heat-release restarts replay the complete original composition.
