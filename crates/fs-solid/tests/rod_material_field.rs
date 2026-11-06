@@ -103,6 +103,47 @@ fn each_segment_contributes_its_actual_axial_and_torsional_compliance() {
 }
 
 #[test]
+fn native_torsional_stresses_preserve_series_torque_and_layer_materials() {
+    use fs_solid::rod::MaterialRod;
+    let sections = vec![section(1.0), section(2.0), section(0.5)];
+    let mut rod = SpatialMaterialRod::try_nonuniform_straight(
+        vec![0.125, 0.375, 0.5], sections.clone(),
+    ).unwrap();
+    let load = TipLoad { force: [0.0; 3], moment: [0.01, 0.0, 0.0] };
+    rod.solve_static(&load, 1, 1e-9, &CancelGate::new()).unwrap();
+    let radius: f64 = 0.05;
+    let polar = core::f64::consts::PI * radius.powi(4) / 2.0;
+    let mut recovered_energy = 0.0;
+    for i in 0..sections.len() {
+        let local = rod.segment_torsional_stress_bounded(i, 0, [radius, 0.0], 0.01).unwrap();
+        assert_eq!(local, rod.segment_torsional_stress(i, 0, [radius, 0.0]).unwrap());
+        let layer = rod.segment_torsional_layer_response(i, 0, 0.01).unwrap();
+        near(local.shear_stress_pa[1], load.moment[0] * radius / polar, 2e-7);
+        near(layer.maximum_shear_pa,
+            fs_math::det::hypot(local.shear_stress_pa[0], local.shear_stress_pa[1]), 2e-14);
+        near(layer.torque_n_m, load.moment[0], 2e-7);
+        near(layer.torque_n_m, rod.segment_resultants(i).unwrap().1[0], 2e-14);
+        recovered_energy += layer.energy_per_length_j_m * rod.reference_segment_lengths_m()[i];
+    }
+    near(recovered_energy, rod.energy_j().unwrap(), 2e-14);
+    assert!(rod.segment_torsional_stress_bounded(3, 0, [radius, 0.0], 0.01).is_err());
+    assert!(rod.segment_torsional_stress_bounded(0, 1, [radius, 0.0], 0.01).is_err());
+    assert!(rod.segment_torsional_stress_bounded(0, 0, [0.0; 2], 1e-5).is_err());
+
+    let mut uniform = MaterialRod::try_straight(0.8, 2, sections[0].clone()).unwrap();
+    uniform.solve_static(&load, 1, 1e-9).unwrap();
+    let local = uniform.segment_torsional_stress_bounded(1, 0, [0.0, radius], 0.01).unwrap();
+    near(local.shear_stress_pa[0], -load.moment[0] * radius / polar, 2e-7);
+    let layer = uniform.segment_torsional_layer_response(1, 0, 0.01).unwrap();
+    near(layer.torque_n_m, load.moment[0], 2e-7);
+    let recovered_energy: f64 = (0..2).map(|segment| {
+        uniform.segment_torsional_layer_response(segment, 0, 0.01).unwrap()
+            .energy_per_length_j_m * (uniform.reference_length_m() / 2.0)
+    }).sum();
+    near(recovered_energy, uniform.rod().energy().unwrap(), 2e-14);
+}
+
+#[test]
 fn moving_the_soft_material_changes_bending_without_changing_average_properties() {
     let soft = section(0.5);
     let stiff = section(2.0);

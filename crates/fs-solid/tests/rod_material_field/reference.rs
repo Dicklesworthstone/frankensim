@@ -67,6 +67,14 @@ fn g0_intrinsic_camber_and_twist_do_not_create_phantom_stress() {
             .iter()
             .all(|(_, k)| (k[0] - 0.8).abs() < 1e-13)
     );
+    for segment in 0..4 {
+        assert_eq!(rod.segment_torsional_stress_bounded(segment, 0, [0.05, 0.0], 0.01)
+            .unwrap().shear_stress_pa, [0.0; 2]);
+        let layer = rod.segment_torsional_layer_response(segment, 0, 0.01).unwrap();
+        assert_eq!(layer.maximum_shear_pa, 0.0);
+        assert_eq!(layer.torque_n_m, 0.0);
+        assert_eq!(layer.energy_per_length_j_m, 0.0);
+    }
 }
 
 #[test]

@@ -1,5 +1,31 @@
 # fs-material — CONTRACT
 
+## Bounded circular torsion and exact layer resultants
+
+`ConcentricShearSection::torsional_stress_at_twist_bounded` extends the
+original `torsional_stress_at_twist` observation with an explicit small-shear
+limit at the selected layer's outer radius. It returns the same
+`section::torsion::TorsionalStressPoint`, delegating point stress, tensor
+conventions and representability checks to that canonical law. Original G
+remains cached at source admission; neither observation allocates source keys.
+Both sides of a material interface retain their separate G and stress, with
+no averaged material or transverse-shear correction factor.
+
+`torsional_layer_response` gives the analytical outer-radius shear maximum,
+signed layer torque GJk and reversible energy per length GJk^2/2. Their layer
+sums recover the original circular rod stiffness and storage. An explicit
+small-engineering-shear bound applies even when querying near the axis.
+Invalid layers, bore/exterior points, nonfinite inputs, and unrepresentable
+outputs (including positive layer storage underflow) refuse without changing
+source state. Layer GJ uses the same multiplication order as native admission.
+
+`tests/section_shear.rs` checks analytical solid/tubular and layered resultants,
+torque/energy sums, reversal, explicit zero twist, exact delegation and hidden
+surface overstrain. The original torsional point-law tests remain unchanged. This is
+Saint-Venant circular torsion with perfect bonding;
+it does not recover transverse-shear or bending stress, end effects, noncircular
+warping, plastic redistribution, shear strength or fracture.
+
 ## Native implicit conduction from volumetric heat capacity
 
 `thermal::transport::volumetric::timeline::FixedVolumeThermalLaw` implements the

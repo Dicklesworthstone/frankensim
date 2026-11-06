@@ -1,5 +1,26 @@
 # fs-solid CONTRACT
 
+## Bounded torsional shear and layer resultants on native rods
+
+`MaterialRod` and `SpatialMaterialRod` extend their original
+`segment_torsional_stress` with `segment_torsional_stress_bounded` and
+`segment_torsional_layer_response` on their accepted native Cosserat strains.
+They reuse the canonical circular-section point law and cached per-layer G,
+including actual material-temperature refresh. Coordinates use the segment's
+geodesic-midpoint material frame. Spatial rods subtract their original
+intrinsic curvature, so stress-free reference twist creates no shear stress.
+Layer torque and energy sum to the original native torsional resultant and
+storage on each actual reference interval. There is no re-solve, source refit,
+geometry update or independent copied constitutive history.
+
+The material field regressions compare recovered torque/stress with a loaded
+shaft's analytical solution, native energy on non-unit lengths, heterogeneous
+series compliance, explicit surface limits and stress-free intrinsic twist.
+These observations are only the Saint-Venant
+torsional contribution; transverse shear, axial/bending stress, end/interface
+effects, warping, plasticity and a failure criterion are outside their scope.
+The caller supplies an explicit small-engineering-shear applicability bound.
+
 ## Frozen-history brittle vibration operators
 
 `BrittleTetMotion::frozen_vibration_pencil` and

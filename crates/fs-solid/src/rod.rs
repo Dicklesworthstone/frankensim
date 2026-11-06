@@ -683,6 +683,36 @@ impl MaterialRod {
             .map_err(|error| SolidError::MaterialRefused { what: error.to_string() })
     }
 
+    /// Bound accepted native torsional shear by an explicit outer-radius limit.
+    /// Coordinates [y,z] lie in the segment's geodesic-midpoint material frame.
+    /// This is the circular Saint-Venant torsional contribution, excluding
+    /// bending/axial stress, transverse shear, end effects and failure.
+    pub fn segment_torsional_stress_bounded(
+        &self,
+        segment: usize,
+        layer: usize,
+        coordinates_yz_m: [f64; 2],
+        maximum_engineering_shear: f64,
+    ) -> Result<fs_material::section::torsion::TorsionalStressPoint, SolidError> {
+        let (_, curvature) = self.rod.strains(segment)?;
+        self.section.torsional_stress_at_twist_bounded(
+            layer, coordinates_yz_m, curvature[0], maximum_engineering_shear,
+        ).map_err(|error| SolidError::MaterialRefused { what: error.to_string() })
+    }
+
+    /// Layer torque, maximum torsional shear and energy at the accepted twist.
+    /// Summing the layer torques recovers the native GJ-times-twist resultant.
+    pub fn segment_torsional_layer_response(
+        &self,
+        segment: usize,
+        layer: usize,
+        maximum_engineering_shear: f64,
+    ) -> Result<fs_material::section::stress::CircularTorsionLayer, SolidError> {
+        let (_, curvature) = self.rod.strains(segment)?;
+        self.section.torsional_layer_response(layer, curvature[0], maximum_engineering_shear)
+            .map_err(|error| SolidError::MaterialRefused { what: error.to_string() })
+    }
+
     /// Solve with the existing energy/Newton/Lie-group implementation.
     /// Only a fully successful, finite result replaces the previous geometry.
     /// This preserves the legacy solver's numerical and no-dynamics boundaries;

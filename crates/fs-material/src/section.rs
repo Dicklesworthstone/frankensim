@@ -24,6 +24,8 @@ pub mod modal_loss;
 pub mod relaxation;
 /// Axial tensile capacity from per-layer sourced strength limits.
 pub mod strength;
+/// Bounded torsional stress observations and exact layer peak/resultant recovery.
+pub mod stress;
 /// Computed Zener thermoelastic bending loss of homogeneous solid members.
 pub mod ted;
 pub mod thermal;

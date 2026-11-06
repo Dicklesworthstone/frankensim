@@ -203,6 +203,39 @@ impl SpatialMaterialRod {
         Ok(self.sections[segment].torsional_stress_at_twist(layer, position_yz_m, curvature[0])?)
     }
 
+    /// Bound local Saint-Venant torsional shear from the original section and native
+    /// curvature relative to its stress-free material frames. Thermal refreshes
+    /// use the actual refreshed G; intrinsic twist creates no artificial stress.
+    /// Coordinates [y,z] use the segment's geodesic-midpoint material frame.
+    /// This reports only the torsional contribution, not transverse shear,
+    /// axial/bending stress, interlayer end effects or a failure criterion.
+    pub fn segment_torsional_stress_bounded(
+        &self,
+        segment: usize,
+        layer: usize,
+        coordinates_yz_m: [f64; 2],
+        maximum_engineering_shear: f64,
+    ) -> Result<fs_material::section::torsion::TorsionalStressPoint, SpatialRodError> {
+        let (_, curvature) = self.segment_strains(segment)?;
+        Ok(self.sections[segment].torsional_stress_at_twist_bounded(
+            layer, coordinates_yz_m, curvature[0], maximum_engineering_shear,
+        )?)
+    }
+
+    /// Exact layer torque, outer-radius shear and stored torsional energy per
+    /// reference length, with the same material interval as native equilibrium.
+    pub fn segment_torsional_layer_response(
+        &self,
+        segment: usize,
+        layer: usize,
+        maximum_engineering_shear: f64,
+    ) -> Result<fs_material::section::stress::CircularTorsionLayer, SpatialRodError> {
+        let (_, curvature) = self.segment_strains(segment)?;
+        Ok(self.sections[segment].torsional_layer_response(
+            layer, curvature[0], maximum_engineering_shear,
+        )?)
+    }
+
     // The same constitutive response supplies observations and analytical
     // assembly. No separately copied thermal-force or intrinsic-strain law.
     fn resultants_from_strains(&self, segment: usize, g: [f64; 3], k: [f64; 3])
