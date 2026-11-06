@@ -12,6 +12,12 @@
 //! map, loading work is the frozen-metric loading increment; a spatial integrator
 //! owns its separate difference from endpoint nodal work.
 
+/// Prescribed natural-strain events with retained histories and transverse balance.
+pub mod reference_change;
+pub use reference_change::{
+    ViscoIncompressiblePlaneStressReferenceChange, ViscoPlaneStressReferenceChange,
+};
+
 use super::{
     ViscoHyperelastic, ViscoRemainderState, ViscoRemainderStepResponse, ViscoState,
     ViscoStepResponse,

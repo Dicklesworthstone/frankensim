@@ -43,7 +43,10 @@ pub mod reference;
 pub use reference::{ViscoReferenceChange, ViscoRemainderReferenceChange};
 /// Accepted-history updates under finite or exact-incompressible plane stress.
 pub mod plane_stress;
-pub use plane_stress::{ViscoIncompressiblePlaneStressStepResponse, ViscoPlaneStressStepResponse};
+pub use plane_stress::{
+    ViscoIncompressiblePlaneStressReferenceChange, ViscoIncompressiblePlaneStressStepResponse,
+    ViscoPlaneStressReferenceChange, ViscoPlaneStressStepResponse,
+};
 
 use crate::hyper::reference::ReferenceDeformation;
 use crate::hyper::{Hyperelastic, MAX_OGDEN_TERMS, OgdenTerm};
