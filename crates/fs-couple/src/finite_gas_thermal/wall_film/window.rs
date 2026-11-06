@@ -8,13 +8,20 @@
 //! This is admission-driven subdivision, not a temporal-error estimator: refine
 //! `maximum_step_s` to assess the complete coupled time discretization.
 
-use super::{WallFilmThermalEnvironment, WallFilmThermalError};
+use super::implicit::{WallFilmImplicitError, WallFilmImplicitReport};
+use super::{WallFilmThermalEnvironment, WallFilmThermalError, WallFilmThermalReport};
 use fs_exec::Cx;
 use fs_material::{
-    evaporation::gas::{GasEvaporationError, wall_film::GasWallFilmInventory},
-    phase::{UniformEnthalpyStep, UniformEnthalpyStepInput},
+    evaporation::gas::{
+        GasEvaporationError,
+        wall_film::{GasWallFilmInventory, GasWallFilmStep},
+    },
+    phase::{EquilibriumPhaseState, UniformEnthalpyStep, UniformEnthalpyStepInput},
     thermochemical_gas::energy::{GasEnergyError, parcel::ClosedGasParcel},
 };
+
+mod implicit;
+pub use implicit::{WallFilmImplicitWindowControls, WallFilmImplicitWindowReport};
 
 /// One physical-window work and conservation allowance, never renewed per step.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -33,6 +40,7 @@ pub struct WallFilmWindowSolve {
 pub enum WallFilmWindowError {
     Invalid(&'static str),
     Step(WallFilmThermalError),
+    Implicit(WallFilmImplicitError),
     Gas(GasEnergyError),
     Cancelled,
     WorkLimit {
@@ -65,6 +73,18 @@ impl From<GasEnergyError> for WallFilmWindowError {
         Self::Gas(error)
     }
 }
+impl From<WallFilmImplicitError> for WallFilmWindowError {
+    fn from(error: WallFilmImplicitError) -> Self {
+        if matches!(
+            error,
+            WallFilmImplicitError::Physical(WallFilmThermalError::Cancelled)
+        ) {
+            Self::Cancelled
+        } else {
+            Self::Implicit(error)
+        }
+    }
+}
 
 /// Compact accepted physical history; no cloned gas catalog per sample.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -90,8 +110,9 @@ pub struct WallFilmWindowReport {
     pub accepted_intervals: usize,
     pub attempted_intervals: usize,
     pub rejected_intervals: usize,
-    /// Work inside accepted proposals only; rejected proposals still spend the
-    /// `maximum_attempts` allowance and their own nested solve bounds.
+    /// Legacy scalar work inside accepted proposals only. These two counters
+    /// are zero for simultaneous implicit windows, whose report owns the
+    /// shared numerical-work account instead.
     pub accepted_wall_trials: usize,
     pub accepted_sensible_trials: usize,
     pub evaporated_mass_kg: f64,
@@ -120,19 +141,19 @@ pub struct WallFilmWindowReport {
 }
 
 #[derive(Clone, Copy, Default)]
-struct Sum {
+pub(super) struct Sum {
     main: f64,
     correction: f64,
 }
 impl Sum {
-    fn add(&mut self, value: f64) -> Result<(), WallFilmWindowError> {
+    pub(super) fn add(&mut self, value: f64) -> Result<(), WallFilmWindowError> {
         let (main, residual) = fs_math::eft::two_sum(self.main, value);
         self.main = main;
         self.correction += residual;
         finite(self.value())?;
         Ok(())
     }
-    fn value(self) -> f64 {
+    pub(super) fn value(self) -> f64 {
         self.main + self.correction
     }
     fn difference(self, reference: f64) -> Result<f64, WallFilmWindowError> {
@@ -158,8 +179,9 @@ struct Totals {
     gas_storage: Sum,
     energy_residual: Sum,
     absolute_energy_residual: Sum,
+    absolute_mass_residual: Sum,
 }
-fn finite(value: f64) -> Result<f64, WallFilmWindowError> {
+pub(super) fn finite(value: f64) -> Result<f64, WallFilmWindowError> {
     if value.is_finite() {
         Ok(value)
     } else {
@@ -168,13 +190,18 @@ fn finite(value: f64) -> Result<f64, WallFilmWindowError> {
         ))
     }
 }
-fn positive(value: f64) -> bool {
+pub(super) fn positive(value: f64) -> bool {
     value.is_finite() && value > 0.0
 }
-fn poll(cx: &Cx<'_>) -> Result<(), WallFilmWindowError> {
+pub(super) fn poll(cx: &Cx<'_>) -> Result<(), WallFilmWindowError> {
     cx.checkpoint().map_err(|_| WallFilmWindowError::Cancelled)
 }
-fn increment(total: f64, start: f64, end: f64, duration: f64) -> Result<f64, WallFilmWindowError> {
+pub(super) fn increment(
+    total: f64,
+    start: f64,
+    end: f64,
+    duration: f64,
+) -> Result<f64, WallFilmWindowError> {
     let at = |time| {
         if time == duration {
             total
@@ -190,7 +217,7 @@ fn increment(total: f64, start: f64, end: f64, duration: f64) -> Result<f64, Wal
     }
     Ok(value)
 }
-fn count(total: usize, increment: usize) -> Result<usize, WallFilmWindowError> {
+pub(super) fn count(total: usize, increment: usize) -> Result<usize, WallFilmWindowError> {
     total
         .checked_add(increment)
         .ok_or(WallFilmWindowError::Invalid("window work count overflows"))
@@ -215,43 +242,40 @@ impl WallFilmThermalEnvironment<'_> {
         input: UniformEnthalpyStepInput<'_>,
         controls: WallFilmWindowSolve,
     ) -> Result<UniformEnthalpyStep<WallFilmWindowReport>, WallFilmWindowError> {
-        poll(cx)?;
-        if !positive(input.duration_s)
-            || !input.internal_heat_j.is_finite()
-            || !self.gas_heat_j.is_finite()
-            || !positive(controls.maximum_step_s)
-            || !positive(controls.minimum_step_s)
-            || controls.minimum_step_s > controls.maximum_step_s
-            || controls.maximum_attempts == 0
-            || !positive(controls.energy_tolerance_j)
-            || !positive(controls.mass_tolerance_kg)
-        {
-            return Err(WallFilmWindowError::Invalid(
-                "positive finite window, steps, work and balance budgets required",
-            ));
-        }
-        let mut state = input.initial;
-        let mut gas = self.gas.clone();
-        let mut film = self.film;
-        let mut samples = vec![WallFilmWindowSample {
-            time_s: 0.0,
-            wall_temperature_k: state.temperature_k(),
-            gas_temperature_k: gas.state().state().temperature,
-            film_mass_kg: film.mass_kg(),
-            transferred_mass_kg: 0.0,
-            film_formed: false,
-            dry_out_time_s: None,
-        }];
-        let mut totals = Totals::default();
-        let mut time = 0.0;
+        self.advance_window_with(cx, input, controls, |environment, part| {
+            environment
+                .advance(cx, part)
+                .map(WindowStep::legacy)
+                .map_err(|error| {
+                    if matches!(error, WallFilmThermalError::Cancelled) {
+                        WallFilmWindowError::Cancelled
+                    } else {
+                        WallFilmWindowError::Step(error)
+                    }
+                })
+        })
+        .map(|(candidate, _)| candidate)
+    }
+
+    /// One clock and uniform source allocation for either original step owner.
+    pub(super) fn advance_window_with<'w>(
+        &self,
+        cx: &Cx<'_>,
+        input: UniformEnthalpyStepInput<'w>,
+        controls: WallFilmWindowSolve,
+        mut advance: impl FnMut(
+            &WallFilmThermalEnvironment<'_>,
+            UniformEnthalpyStepInput<'w>,
+        ) -> Result<UniformEnthalpyStep<WindowStep>, WallFilmWindowError>,
+    ) -> Result<(UniformEnthalpyStep<WallFilmWindowReport>, f64), WallFilmWindowError> {
+        let mut account = WindowAccumulator::new(cx, self, input, controls)?;
         let mut grid_index = 1_usize;
         let mut grid_end = controls.maximum_step_s.min(input.duration_s);
         let mut trial_end = grid_end;
         let mut attempted = 0;
         let mut rejected = 0;
-        let mut accepted_wall_trials = 0;
-        let mut accepted_sensible_trials = 0;
-        while time < input.duration_s {
+        while account.time_s < input.duration_s {
+            let time = account.time_s;
             poll(cx)?;
             if attempted >= controls.maximum_attempts {
                 return Err(WallFilmWindowError::WorkLimit {
@@ -269,29 +293,37 @@ impl WallFilmThermalEnvironment<'_> {
                 increment(input.internal_heat_j, time, trial_end, input.duration_s)?;
             let gas_heat = increment(self.gas_heat_j, time, trial_end, input.duration_s)?;
             let environment = WallFilmThermalEnvironment {
-                gas: &gas,
+                gas: &account.gas,
                 catalog: self.catalog,
-                film,
+                film: account.film,
                 boundary: self.boundary,
                 body: self.body,
                 gas_heat_j: gas_heat,
                 solve: self.solve,
             };
             attempted += 1;
-            let candidate = match environment.advance(
-                cx,
+            let candidate = match advance(
+                &environment,
                 UniformEnthalpyStepInput {
-                    initial: state,
+                    initial: account.state,
                     internal_heat_j: internal_heat,
                     duration_s: dt,
                     ..input
                 },
             ) {
                 Ok(candidate) => candidate,
-                Err(WallFilmThermalError::Phase(GasEvaporationError::StepSizeLimit {
-                    maximum_duration_s,
-                    reason,
-                })) => {
+                Err(WallFilmWindowError::Step(WallFilmThermalError::Phase(
+                    GasEvaporationError::StepSizeLimit {
+                        maximum_duration_s,
+                        reason,
+                    },
+                )))
+                | Err(WallFilmWindowError::Implicit(WallFilmImplicitError::Physical(
+                    WallFilmThermalError::Phase(GasEvaporationError::StepSizeLimit {
+                        maximum_duration_s,
+                        reason,
+                    }),
+                ))) => {
                     rejected += 1;
                     let next_dt = maximum_duration_s.min(0.5 * dt);
                     let next_end = time + next_dt;
@@ -311,77 +343,13 @@ impl WallFilmThermalEnvironment<'_> {
                     trial_end = next_end;
                     continue;
                 }
-                Err(WallFilmThermalError::Cancelled) => return Err(WallFilmWindowError::Cancelled),
-                Err(error) => return Err(WallFilmWindowError::Step(error)),
+                Err(error) => return Err(error),
             };
-            let report = candidate.report;
-            let phase = &report.phase;
-            totals.evaporated.add(phase.transferred_mass_kg.max(0.0))?;
-            totals
-                .condensed
-                .add((-phase.transferred_mass_kg).max(0.0))?;
-            totals.vapor_energy.add(phase.energy_into_gas_j)?;
-            totals.latent.add(phase.latent_energy_j)?;
-            totals.film_sensible.add(phase.film_sensible_energy_j)?;
-            totals.sensible_heat.add(report.solid_to_gas_heat_j)?;
-            totals
-                .phase_wall_heat
-                .add(report.wall_heat_into_phase_system_j)?;
-            totals.external_wall_heat.add(candidate.external_heat_j)?;
-            totals.radiation.add(report.radiation_heat_j)?;
-            totals.internal_body_heat.add(internal_heat)?;
-            totals.external_gas_heat.add(gas_heat)?;
-            totals.wall_storage.add(
-                input.mass_kg
-                    * (candidate.state.specific_enthalpy_j_kg() - state.specific_enthalpy_j_kg()),
-            )?;
-            totals.film_storage.add(phase.film_enthalpy_change_j)?;
-            totals
-                .gas_storage
-                .add(report.gas_heat.stored_energy_change_j)?;
-            totals.gas_storage.add(phase.gas_internal_energy_change_j)?;
-            totals
-                .energy_residual
-                .add(report.combined_energy_residual_j)?;
-            totals
-                .absolute_energy_residual
-                .add(report.sum_absolute_energy_residual_j)?;
-            if totals.absolute_energy_residual.value() > controls.energy_tolerance_j {
-                return Err(WallFilmWindowError::EnergyBalance {
-                    residual_j: totals.absolute_energy_residual.value(),
-                    tolerance_j: controls.energy_tolerance_j,
-                });
-            }
-            accepted_wall_trials = count(accepted_wall_trials, report.trials)?;
-            accepted_sensible_trials =
-                count(accepted_sensible_trials, report.total_sensible_trials)?;
-            let dry_out_time_s = phase
-                .dry_out_time_s
-                .map(|event| if event == dt { trial_end } else { time + event });
-            if let Some(event) = dry_out_time_s {
-                if !event.is_finite() || event <= time || event > trial_end {
-                    return Err(WallFilmWindowError::Invalid(
-                        "dry-out event is not representable on the window clock",
-                    ));
-                }
-            }
-            samples.push(WallFilmWindowSample {
-                time_s: trial_end,
-                wall_temperature_k: candidate.state.temperature_k(),
-                gas_temperature_k: report.next_gas.state().state().temperature,
-                film_mass_kg: report.next_film.mass_kg(),
-                transferred_mass_kg: phase.transferred_mass_kg,
-                film_formed: phase.film_formed,
-                dry_out_time_s,
-            });
-            state = candidate.state;
-            gas = report.next_gas;
-            film = report.next_film;
-            time = trial_end;
-            if time == grid_end && time < input.duration_s {
+            account.record_step(trial_end, internal_heat, gas_heat, candidate)?;
+            if account.time_s == grid_end && account.time_s < input.duration_s {
                 grid_index = count(grid_index, 1)?;
                 grid_end = (grid_index as f64 * controls.maximum_step_s).min(input.duration_s);
-                if !grid_end.is_finite() || grid_end <= time {
+                if !grid_end.is_finite() || grid_end <= account.time_s {
                     return Err(WallFilmWindowError::Invalid(
                         "nominal window grid cannot advance",
                     ));
@@ -389,7 +357,250 @@ impl WallFilmThermalEnvironment<'_> {
             }
             trial_end = grid_end;
         }
+        let mass_defect = account.sum_absolute_mass_residual_kg();
+        Ok((account.finish(cx, attempted, rejected)?, mass_defect))
+    }
+}
+
+/// Only the accepted physical ports needed by the common window account.
+pub(super) struct WindowStep {
+    next_gas: ClosedGasParcel,
+    next_film: GasWallFilmInventory,
+    phase: GasWallFilmStep,
+    solid_to_gas_heat_j: f64,
+    wall_heat_into_phase_system_j: f64,
+    radiation_heat_j: f64,
+    separate_gas_heat_storage_j: f64,
+    combined_energy_residual_j: f64,
+    sum_absolute_energy_residual_j: f64,
+    sum_absolute_mass_residual_kg: Option<f64>,
+    wall_trials: usize,
+    sensible_trials: usize,
+}
+impl WindowStep {
+    fn legacy(candidate: UniformEnthalpyStep<WallFilmThermalReport>) -> UniformEnthalpyStep<Self> {
+        let report = candidate.report;
+        UniformEnthalpyStep {
+            state: candidate.state,
+            external_heat_j: candidate.external_heat_j,
+            energy_residual_tolerance_j: candidate.energy_residual_tolerance_j,
+            report: Self {
+                next_gas: report.next_gas,
+                next_film: report.next_film,
+                phase: report.phase,
+                solid_to_gas_heat_j: report.solid_to_gas_heat_j,
+                wall_heat_into_phase_system_j: report.wall_heat_into_phase_system_j,
+                radiation_heat_j: report.radiation_heat_j,
+                separate_gas_heat_storage_j: report.gas_heat.stored_energy_change_j,
+                combined_energy_residual_j: report.combined_energy_residual_j,
+                sum_absolute_energy_residual_j: report.sum_absolute_energy_residual_j,
+                sum_absolute_mass_residual_kg: None,
+                wall_trials: report.trials,
+                sensible_trials: report.total_sensible_trials,
+            },
+        }
+    }
+    pub(super) fn implicit(
+        candidate: UniformEnthalpyStep<WallFilmImplicitReport>,
+    ) -> UniformEnthalpyStep<Self> {
+        let report = candidate.report;
+        UniformEnthalpyStep {
+            state: candidate.state,
+            external_heat_j: candidate.external_heat_j,
+            energy_residual_tolerance_j: candidate.energy_residual_tolerance_j,
+            report: Self {
+                next_gas: report.next_gas,
+                next_film: report.next_film,
+                phase: report.phase,
+                solid_to_gas_heat_j: report.solid_to_gas_heat_j,
+                wall_heat_into_phase_system_j: report.wall_heat_into_phase_system_j,
+                radiation_heat_j: report.radiation_heat_j,
+                separate_gas_heat_storage_j: 0.0,
+                combined_energy_residual_j: report.combined_energy_residual_j,
+                sum_absolute_energy_residual_j: report.sum_absolute_energy_residual_j,
+                sum_absolute_mass_residual_kg: Some(report.sum_absolute_mass_residual_kg),
+                wall_trials: 0,
+                sensible_trials: 0,
+            },
+        }
+    }
+}
+
+/// Physical account shared by fixed-grid and accuracy-controlled continuations.
+/// Only accepted native steps enter it; trial/rejected work belongs to meters.
+pub(super) struct WindowAccumulator<'e, 'a, 'w> {
+    environment: &'e WallFilmThermalEnvironment<'a>,
+    input: UniformEnthalpyStepInput<'w>,
+    controls: WallFilmWindowSolve,
+    pub(super) state: EquilibriumPhaseState,
+    pub(super) gas: ClosedGasParcel,
+    pub(super) film: GasWallFilmInventory,
+    pub(super) time_s: f64,
+    samples: Vec<WallFilmWindowSample>,
+    totals: Totals,
+    accepted_wall_trials: usize,
+    accepted_sensible_trials: usize,
+}
+impl<'e, 'a, 'w> WindowAccumulator<'e, 'a, 'w> {
+    pub(super) fn new(
+        cx: &Cx<'_>,
+        environment: &'e WallFilmThermalEnvironment<'a>,
+        input: UniformEnthalpyStepInput<'w>,
+        controls: WallFilmWindowSolve,
+    ) -> Result<Self, WallFilmWindowError> {
         poll(cx)?;
+        if !positive(input.duration_s)
+            || !input.internal_heat_j.is_finite()
+            || !environment.gas_heat_j.is_finite()
+            || !positive(controls.maximum_step_s)
+            || !positive(controls.minimum_step_s)
+            || controls.minimum_step_s > controls.maximum_step_s
+            || controls.maximum_attempts == 0
+            || !positive(controls.energy_tolerance_j)
+            || !positive(controls.mass_tolerance_kg)
+        {
+            return Err(WallFilmWindowError::Invalid(
+                "positive finite window, steps, work and balance budgets required",
+            ));
+        }
+        Ok(Self {
+            environment,
+            input,
+            controls,
+            state: input.initial,
+            gas: environment.gas.clone(),
+            film: environment.film,
+            time_s: 0.0,
+            samples: vec![WallFilmWindowSample {
+                time_s: 0.0,
+                wall_temperature_k: input.initial.temperature_k(),
+                gas_temperature_k: environment.gas.state().state().temperature,
+                film_mass_kg: environment.film.mass_kg(),
+                transferred_mass_kg: 0.0,
+                film_formed: false,
+                dry_out_time_s: None,
+            }],
+            totals: Totals::default(),
+            accepted_wall_trials: 0,
+            accepted_sensible_trials: 0,
+        })
+    }
+    pub(super) fn sum_absolute_mass_residual_kg(&self) -> f64 {
+        self.totals.absolute_mass_residual.value()
+    }
+    pub(super) fn record_step(
+        &mut self,
+        end_s: f64,
+        internal_heat: f64,
+        gas_heat: f64,
+        candidate: UniformEnthalpyStep<WindowStep>,
+    ) -> Result<(), WallFilmWindowError> {
+        let time = self.time_s;
+        let dt = finite(end_s - time)?;
+        let report = candidate.report;
+        let phase = &report.phase;
+        if dt <= 0.0 || end_s > self.input.duration_s || phase.duration_s != dt {
+            return Err(WallFilmWindowError::Invalid(
+                "accepted wall/film/gas interval must share the window clock",
+            ));
+        }
+        let totals = &mut self.totals;
+        totals.evaporated.add(phase.transferred_mass_kg.max(0.0))?;
+        totals
+            .condensed
+            .add((-phase.transferred_mass_kg).max(0.0))?;
+        totals.vapor_energy.add(phase.energy_into_gas_j)?;
+        totals.latent.add(phase.latent_energy_j)?;
+        totals.film_sensible.add(phase.film_sensible_energy_j)?;
+        totals.sensible_heat.add(report.solid_to_gas_heat_j)?;
+        totals
+            .phase_wall_heat
+            .add(report.wall_heat_into_phase_system_j)?;
+        totals.external_wall_heat.add(candidate.external_heat_j)?;
+        totals.radiation.add(report.radiation_heat_j)?;
+        totals.internal_body_heat.add(internal_heat)?;
+        totals.external_gas_heat.add(gas_heat)?;
+        totals.wall_storage.add(
+            self.input.mass_kg
+                * (candidate.state.specific_enthalpy_j_kg() - self.state.specific_enthalpy_j_kg()),
+        )?;
+        totals.film_storage.add(phase.film_enthalpy_change_j)?;
+        totals.gas_storage.add(report.separate_gas_heat_storage_j)?;
+        totals.gas_storage.add(phase.gas_internal_energy_change_j)?;
+        totals
+            .energy_residual
+            .add(report.combined_energy_residual_j)?;
+        totals
+            .absolute_energy_residual
+            .add(report.sum_absolute_energy_residual_j)?;
+        if totals.absolute_energy_residual.value() > self.controls.energy_tolerance_j {
+            return Err(WallFilmWindowError::EnergyBalance {
+                residual_j: totals.absolute_energy_residual.value(),
+                tolerance_j: self.controls.energy_tolerance_j,
+            });
+        }
+        if let Some(defect) = report.sum_absolute_mass_residual_kg {
+            totals.absolute_mass_residual.add(defect)?;
+            if totals.absolute_mass_residual.value() > self.controls.mass_tolerance_kg {
+                return Err(WallFilmWindowError::MassBalance {
+                    residual_kg: totals.absolute_mass_residual.value(),
+                    tolerance_kg: self.controls.mass_tolerance_kg,
+                });
+            }
+        }
+        self.accepted_wall_trials = count(self.accepted_wall_trials, report.wall_trials)?;
+        self.accepted_sensible_trials =
+            count(self.accepted_sensible_trials, report.sensible_trials)?;
+        let dry_out_time_s = phase
+            .dry_out_time_s
+            .map(|event| if event == dt { end_s } else { time + event });
+        if let Some(event) = dry_out_time_s {
+            if !event.is_finite() || event <= time || event > end_s {
+                return Err(WallFilmWindowError::Invalid(
+                    "dry-out event is not representable on the window clock",
+                ));
+            }
+        }
+        self.samples.push(WallFilmWindowSample {
+            time_s: end_s,
+            wall_temperature_k: candidate.state.temperature_k(),
+            gas_temperature_k: report.next_gas.state().state().temperature,
+            film_mass_kg: report.next_film.mass_kg(),
+            transferred_mass_kg: phase.transferred_mass_kg,
+            film_formed: phase.film_formed,
+            dry_out_time_s,
+        });
+        self.state = candidate.state;
+        self.gas = report.next_gas;
+        self.film = report.next_film;
+        self.time_s = end_s;
+        Ok(())
+    }
+    pub(super) fn finish(
+        self,
+        cx: &Cx<'_>,
+        attempted: usize,
+        rejected: usize,
+    ) -> Result<UniformEnthalpyStep<WallFilmWindowReport>, WallFilmWindowError> {
+        poll(cx)?;
+        if self.time_s != self.input.duration_s {
+            return Err(WallFilmWindowError::Invalid(
+                "physical window has not reached its requested endpoint",
+            ));
+        }
+        let Self {
+            environment,
+            input,
+            controls,
+            state,
+            gas,
+            film,
+            samples,
+            totals,
+            accepted_wall_trials,
+            accepted_sensible_trials,
+            ..
+        } = self;
         let wall_storage = finite(
             input.mass_kg
                 * (state.specific_enthalpy_j_kg() - input.initial.specific_enthalpy_j_kg()),
@@ -400,8 +611,9 @@ impl WallFilmThermalEnvironment<'_> {
         let body_heat_apportionment_residual_j = totals
             .internal_body_heat
             .difference(input.internal_heat_j)?;
-        let gas_heat_apportionment_residual_j =
-            totals.external_gas_heat.difference(self.gas_heat_j)?;
+        let gas_heat_apportionment_residual_j = totals
+            .external_gas_heat
+            .difference(environment.gas_heat_j)?;
         let energy_residual = finite(
             totals.energy_residual.value()
                 + telescoping_residual
@@ -427,19 +639,20 @@ impl WallFilmThermalEnvironment<'_> {
                 tolerance_j: controls.energy_tolerance_j,
             });
         }
-        let film_mass_change = film.mass_kg() - self.film.mass_kg();
-        let mass_residual = finite(gas.mass_kg() - self.gas.mass_kg() + film_mass_change)?;
-        let volatile = &self.boundary.binding.species;
+        let film_mass_change = film.mass_kg() - environment.film.mass_kg();
+        let mass_residual = finite(gas.mass_kg() - environment.gas.mass_kg() + film_mass_change)?;
+        let volatile = &environment.boundary.binding.species;
         let volatile_residual = finite(
-            gas.species_mass_kg(volatile)? - self.gas.species_mass_kg(volatile)? + film_mass_change,
+            gas.species_mass_kg(volatile)? - environment.gas.species_mass_kg(volatile)?
+                + film_mass_change,
         )?;
         let mut maximum_carrier_residual: f64 = 0.0;
-        for source in self.gas.model().thermodynamics().components() {
+        for source in environment.gas.model().thermodynamics().components() {
             poll(cx)?;
             if source.species() != volatile {
                 let residual = finite(
                     gas.species_mass_kg(source.species())?
-                        - self.gas.species_mass_kg(source.species())?,
+                        - environment.gas.species_mass_kg(source.species())?,
                 )?;
                 maximum_carrier_residual = maximum_carrier_residual.max(residual.abs());
             }
@@ -447,7 +660,8 @@ impl WallFilmThermalEnvironment<'_> {
         let maximum_mass_residual = mass_residual
             .abs()
             .max(volatile_residual.abs())
-            .max(maximum_carrier_residual);
+            .max(maximum_carrier_residual)
+            .max(totals.absolute_mass_residual.value());
         if maximum_mass_residual > controls.mass_tolerance_kg {
             return Err(WallFilmWindowError::MassBalance {
                 residual_kg: maximum_mass_residual,
@@ -462,8 +676,8 @@ impl WallFilmThermalEnvironment<'_> {
             report: WallFilmWindowReport {
                 next_gas: gas,
                 next_film: film,
+                accepted_intervals: samples.len() - 1,
                 samples,
-                accepted_intervals: attempted - rejected,
                 attempted_intervals: attempted,
                 rejected_intervals: rejected,
                 accepted_wall_trials,
@@ -476,7 +690,7 @@ impl WallFilmThermalEnvironment<'_> {
                 solid_to_gas_heat_j: totals.sensible_heat.value(),
                 wall_heat_into_phase_system_j: totals.phase_wall_heat.value(),
                 internal_body_heat_j: input.internal_heat_j,
-                external_gas_heat_j: self.gas_heat_j,
+                external_gas_heat_j: environment.gas_heat_j,
                 body_heat_apportionment_residual_j,
                 gas_heat_apportionment_residual_j,
                 radiation_heat_j: totals.radiation.value(),

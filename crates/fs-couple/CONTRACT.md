@@ -514,3 +514,38 @@ radial moving-pad openings, entrance jets and transition prediction remain
 outside its scope. Existing terminal-group, gas-refresh, caloric-heat and
 harmonic-field regressions now include annular geometry and independent ring
 mass and logarithmic-shear calculations.
+
+## Continuous simultaneous wall-film-gas windows
+
+`WallFilmThermalEnvironment::advance_implicit_window` advances the coupled
+enthalpy/volatile/gas endpoint over the complete requested duration. It shares
+the original window clock, cumulative source apportionment and accepted-step
+account with the split continuation. Wall internal heat and gas external heat
+are full-window joules, assigned once by represented interval endpoints.
+Accepted wall storage, liquid-film storage, gas internal energy, phase transfer,
+sensible heat and radiation remain separate physical accounts. The implicit
+gas storage already contains its sensible supply and is never counted twice.
+
+`WallFilmImplicitWindowControls` bounds attempts and the complete window's
+Newton iterations, residual evaluations and gas inversion work. Coarse or
+rejected proposals cannot renew these budgets. Gas finalization reserves its
+remaining original inversion bound; success refunds unused iterations, while
+a failed finalizer retains the reservation when no partial receipt is available.
+The report distinguishes known iterations from conservatively charged work.
+Only an original phase donor `StepSizeLimit` may shorten and retry an interval;
+source, caloric, nonlinear, balance and cancellation refusals remain terminal.
+
+Every accepted step contributes to compensated whole-window balances. Final
+admission independently checks actual wall storage, total and volatile mass,
+carrier preservation, source allocation and accumulated absolute energy and
+mass defects. Rejected proposals contribute no heat, mass, events or physical
+time. A late failure publishes none of the accepted prefix. Exactly dry film
+may form, evaporate completely and form again across successive windows;
+original wall phase plateaus retain their enthalpy and phase-fraction storage.
+
+This fixed-grid, first-order continuation inherits the endpoint model's
+uniform-wall, pure-liquid, fixed-area and fixed-volume assumptions. Endpoint
+rate exhaustion estimates still require physical timestep refinement.
+Four focused groups cover manual endpoint composition and source allocation,
+dry/wet/dry/wet continuation, native wall latent storage and late atomic
+refusal; existing window and single-endpoint regression groups also pass.

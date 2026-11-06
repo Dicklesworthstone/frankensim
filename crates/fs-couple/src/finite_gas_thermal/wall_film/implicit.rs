@@ -50,6 +50,8 @@ pub enum WallFilmImplicitError {
     NonConverged(NewtonReport),
     Interrupted(SolverRunProgress),
     EvaluationBudget,
+    IterationBudget,
+    GasIterationBudget,
 }
 impl core::fmt::Display for WallFilmImplicitError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -78,6 +80,79 @@ impl From<NewtonError> for WallFilmImplicitError {
     }
 }
 type Result<T> = core::result::Result<T, WallFilmImplicitError>;
+
+/// Shared numerical allowance for complete physical proposals. Failed trials
+/// keep their evaluation/Newton charges. A gas reconstruction reserves its
+/// bounded loop only when called; success refunds unused iterations. A failed
+/// finalizer exposes no partial receipt, so its full reservation stays charged.
+pub(super) struct WorkMeter {
+    evaluations: Cell<usize>,
+    iterations: Cell<usize>,
+    gas_iterations: Cell<usize>,
+    gas_charged: Cell<usize>,
+    maximum_evaluations: usize,
+    maximum_iterations: usize,
+    maximum_gas_iterations: usize,
+}
+impl WorkMeter {
+    pub(super) fn new(
+        controls: WallFilmImplicitControls,
+        maximum_gas_iterations: usize,
+    ) -> Result<Self> {
+        if controls.maximum_evaluations == 0
+            || controls.maximum_iterations == 0
+            || maximum_gas_iterations == 0
+        {
+            return Err(Error::Invalid("positive implicit work allowances required").into());
+        }
+        Ok(Self {
+            evaluations: Cell::new(0),
+            iterations: Cell::new(0),
+            gas_iterations: Cell::new(0),
+            gas_charged: Cell::new(0),
+            maximum_evaluations: controls.maximum_evaluations,
+            maximum_iterations: controls.maximum_iterations,
+            maximum_gas_iterations,
+        })
+    }
+    pub(super) fn newton_iterations(&self) -> usize {
+        self.iterations.get()
+    }
+    pub(super) fn residual_evaluations(&self) -> usize {
+        self.evaluations.get()
+    }
+    pub(super) fn gas_iterations(&self) -> usize {
+        self.gas_iterations.get()
+    }
+    pub(super) fn charged_gas_iterations(&self) -> usize {
+        self.gas_charged.get()
+    }
+    fn remaining_iterations(&self) -> Result<usize> {
+        let remaining = self.maximum_iterations - self.iterations.get();
+        if remaining == 0 {
+            Err(WallFilmImplicitError::IterationBudget)
+        } else {
+            Ok(remaining)
+        }
+    }
+    fn gas_limit(&self, original_limit: usize) -> Result<usize> {
+        let remaining = self.maximum_gas_iterations - self.gas_charged.get();
+        if remaining == 0 {
+            Err(WallFilmImplicitError::GasIterationBudget)
+        } else {
+            Ok(original_limit.min(remaining))
+        }
+    }
+    fn refund_gas(&self, reserved: usize, actual: usize) -> Result<()> {
+        if actual > reserved {
+            return Err(Error::Invalid("original gas work exceeded its reserved loop").into());
+        }
+        self.gas_charged
+            .set(self.gas_charged.get() - (reserved - actual));
+        self.gas_iterations.set(self.gas_iterations.get() + actual);
+        Ok(())
+    }
+}
 
 /// Actual original endpoints and source-relative physical receipts. Latent,
 /// vapor sensible, liquid sensible and nonadvective sensible heat stay separate.
@@ -280,10 +355,28 @@ impl WallFilmThermalEnvironment<'_> {
         input: UniformEnthalpyStepInput<'_>,
         controls: WallFilmImplicitControls,
     ) -> Result<UniformEnthalpyStep<WallFilmImplicitReport>> {
+        let meter = WorkMeter::new(controls, self.solve.phase.gas.gas.maximum_iterations)?;
+        self.advance_implicit_metered(cx, input, controls, &meter)
+    }
+
+    pub(super) fn advance_implicit_metered(
+        &self,
+        cx: &Cx<'_>,
+        input: UniformEnthalpyStepInput<'_>,
+        controls: WallFilmImplicitControls,
+        meter: &WorkMeter,
+    ) -> Result<UniformEnthalpyStep<WallFilmImplicitReport>> {
         poll(cx)?;
-        let prepared = Prepared::new(self, input, controls)?;
-        let evaluations = Cell::new(0usize);
-        spend(&evaluations, controls.maximum_evaluations)?;
+        let remaining_iterations = meter
+            .remaining_iterations()?
+            .min(controls.maximum_iterations);
+        let gas_limit = meter.gas_limit(self.solve.phase.gas.gas.maximum_iterations)?;
+        let mut bounded = self.clone();
+        bounded.solve.phase.gas.gas.maximum_iterations = gas_limit;
+        let prepared = Prepared::new(&bounded, input, controls)?;
+        let evaluations = &meter.evaluations;
+        let initial_evaluations = evaluations.get();
+        spend(evaluations, meter.maximum_evaluations)?;
         let zero = prepared.project(&[0.0; 3]);
         let predictor = prepared.evaluate(&zero, cx)?;
         let guess = prepared.project(&[
@@ -317,7 +410,7 @@ impl WallFilmThermalEnvironment<'_> {
                         return Ok(residual);
                     }
                 }
-                spend(&evaluations, controls.maximum_evaluations)?;
+                spend(evaluations, meter.maximum_evaluations)?;
                 let residual = prepared
                     .evaluate(&point, cx)?
                     .residual(controls.mass_coordinate_scale_j_kg)?;
@@ -336,13 +429,16 @@ impl WallFilmThermalEnvironment<'_> {
         }
         let mut solver = initialization?;
         let mut cancelled = false;
-        let run = solver.run_controlled(&problem, controls.maximum_iterations, &mut || {
+        let run = solver.run_controlled(&problem, remaining_iterations, &mut || {
             if problem.has_failed() {
                 return true;
             }
             cancelled = cx.checkpoint().is_err();
             cancelled
         });
+        meter
+            .iterations
+            .set(meter.iterations.get() + run.report.iterations);
         if let Some(error) = problem.take_failure() {
             return Err(difference_error(error));
         }
@@ -355,15 +451,17 @@ impl WallFilmThermalEnvironment<'_> {
         if !run.report.converged {
             return Err(WallFilmImplicitError::NonConverged(run.report));
         }
-        spend(&evaluations, controls.maximum_evaluations)?;
+        spend(evaluations, meter.maximum_evaluations)?;
         let trial = prepared.evaluate(&prepared.project(&solver.x), cx)?;
         prepared.phase.check_balance(&trial.phase)?;
         gate(trial.wall.residual_j, self.solve.wall.source_tolerance_j)?;
         // The material finalizer performs exactly one fresh physical recheck.
-        spend(&evaluations, controls.maximum_evaluations)?;
+        spend(evaluations, meter.maximum_evaluations)?;
+        meter.gas_charged.set(meter.gas_charged.get() + gas_limit);
         let candidate = prepared
             .phase
             .finalize(&trial.phase, || cx.checkpoint().is_err())?;
+        meter.refund_gas(gas_limit, candidate.gas_exchange().step().iterations)?;
         let mut body_environment = self.body.clone();
         let gas_t = candidate.gas().state().state().temperature;
         body_environment.temperature_k = gas_t;
@@ -387,7 +485,7 @@ impl WallFilmThermalEnvironment<'_> {
             .evaluate(storage, gas_t, input.internal_heat_j)?;
         let q = -wall.convection_heat_j;
         let (gas_heat, gas_roundoff) = combine(self.gas_heat_j, q)?;
-        spend(&evaluations, controls.maximum_evaluations)?;
+        spend(evaluations, meter.maximum_evaluations)?;
         let phase = prepared.phase.evaluate_at_gas(
             liquid_h(self, body.state.temperature_k())?,
             candidate.gas(),
@@ -533,7 +631,7 @@ impl WallFilmThermalEnvironment<'_> {
                 wall_source_combination_residual_j,
                 external_heat_roundoff_j,
                 newton_iterations: run.report.iterations,
-                residual_evaluations: evaluations.get(),
+                residual_evaluations: evaluations.get() - initial_evaluations,
                 gas_iterations: candidate.gas_exchange().step().iterations,
                 maximum_accepted_residual_norm_j: run.report.residual_norm,
             },

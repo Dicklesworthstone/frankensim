@@ -16,6 +16,8 @@ mod implicit;
 mod implicit_plateau;
 #[path = "wall_film_thermal/implicit_time.rs"]
 mod implicit_time;
+#[path = "wall_film_thermal/implicit_window.rs"]
+mod implicit_window;
 
 #[test]
 fn dry_condensation_warms_finite_wall_and_retains_actual_film_capacity() {
