@@ -6,6 +6,7 @@ use crate::acoustics::thermoviscous::time::{
 use fs_modal::time::{ModalAcousticMode, ModalAcousticTimeBudget, ModalAcousticTimeModel};
 
 mod heat_source;
+mod volume_source;
 mod molecular;
 mod wall;
 

@@ -66,13 +66,14 @@ impl<'c> ThermoviscousFe<'c> {
                 "nonempty original heat sources and explicit spatial-wall resolution required",
             ));
         }
-        let fields = PreparedThermoviscousTime::new_with_heat_sources(
+        let fields = PreparedThermoviscousTime::new_with_volume_sources(
             self,
             duration_s,
             frozen_cp_j_kg_k,
             reservoirs,
             walls,
             tangential,
+            &[],
             heat_sources,
             limits,
             cancelled,
@@ -220,6 +221,7 @@ impl<'c> PreparedThermoviscousHeatTime<'_, 'c> {
                     drive * candidate.integrals[HEAT_CHANNELS + pressure_ports + mode]
                 })
                 .sum(),
+            body_force_work_j: 0.0,
             heat_source_work_j,
             conductive_boundary_work_j: 0.0,
             fluid_viscous_heat_j: candidate.integrals[0],

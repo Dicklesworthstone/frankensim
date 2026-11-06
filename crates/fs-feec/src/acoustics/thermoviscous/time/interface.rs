@@ -451,6 +451,7 @@ impl<'p, 'a, 'c> PreparedThermoviscousTimePair<'p, 'a, 'c> {
                 ),
                 pressure_work_j: external_work[side] + interface_work_j[side],
                 conductive_boundary_work_j: conductive_work_j[side],
+                body_force_work_j: 0.0,
                 heat_source_work_j: 0.0,
                 structural_work_j: wall_forces_n_per_sqrt_kg[side]
                     .iter()
