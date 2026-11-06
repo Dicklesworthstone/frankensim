@@ -1835,3 +1835,31 @@ twist, an independently derived J2 rectangular-section bending/springback law
 under equal-and-opposite principal curvatures, actual incremental nodal-load
 equilibrium and release, frozen-history tangent finite differences, and refused
 or cancelled attempts with unchanged accepted histories.
+
+
+## Native shell reference inertia independent of stiffness
+
+`shell::inertia::prepare_reference_mass` exposes the original local P1
+midsurface/director kinetic integral independently of elastic coefficients.
+Positive P1 thickness and normalized reference density moments retain actual
+material inventory and signed first-moment translation/rotation coupling.
+`ShellReferenceMass` separates the physical matrix from the existing numerical
+relative-drilling matrix. Normal director spin acquires no physical mass.
+Existing homogeneous assembly retains its original arithmetic; general moment
+assembly and the new preparation share the original point/moment kernels.
+
+`reference_kinetic_bilinear` evaluates both kinetic products on the same
+positive reference quadrature without building matrices or subtracting nearly
+equal total/gauge energies. Pivoted square completion preserves nonnegative
+physical quadratic storage for eccentric inventories. The mesh owner supplies
+frame rotation, work-preserving coordinate scaling, aggregate budgets and
+cancellation between facets. Retained dynamics must keep the original matter
+inventory; no current-density update, finite-rotation kinematics or thermal
+transfer is supplied by this kinetic API.
+
+Five G0/G3 regressions in `tests/shell_retained_inertia.rs` define agreement
+with native flat/oblique pencils, independent volume integration for tapered
+graded layers, signed reference-surface shifts, rigid-spin/pure-drilling energy
+separation and domain refusal. Rustfmt and scoped whitespace checks passed.
+Native compilation and regression execution remain unverified because the
+shared runner exhausted its available disk and memory.

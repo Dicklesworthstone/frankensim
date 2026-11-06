@@ -6,6 +6,9 @@
 use super::FacetGeometry;
 use crate::{PlateError, PlateSection};
 
+mod retained;
+pub use retained::{ShellReferenceMass, prepare_reference_mass, reference_kinetic_bilinear};
+
 /// Mass discretization of the flat-facet CST/DKT shell.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CstDktMass {
@@ -355,37 +358,10 @@ pub(super) fn consistent_mass_with_reference_density_moments(
     let thickness = thickness.unwrap_or([section.thickness; 3]);
     let mut m = [0.0; 324];
     for_each_reference_point(|n, weight| {
-        let h = n[0] * thickness[0] + n[1] * thickness[1] + n[2] * thickness[2];
-        let at = |value: fn(ReferenceDensityMoments) -> f64| {
-            n[0] * value(moments[0]) + n[1] * value(moments[1]) + n[2] * value(moments[2])
-        };
-        let translation = at(ReferenceDensityMoments::zeroth_kg_m3) * h * g.area_m2 * weight;
-        let first = at(ReferenceDensityMoments::first_kg_m3) * h * h * g.area_m2 * weight;
-        let rotary = at(ReferenceDensityMoments::second_kg_m3) * h * h * h * g.area_m2 * weight;
-        if !translation.is_finite()
-            || translation <= 0.0
-            || !first.is_finite()
-            || !rotary.is_finite()
-            || rotary <= 0.0
-        {
-            return Err(PlateError::BadSection {
-                what: "layered shell reference inertia is unrepresentable",
-            });
-        }
+        let (translation, first, rotary) =
+            reference_point_moments(g, thickness, moments, n, weight)?;
         accumulate_point(&mut m, g, n, translation, rotary);
-        if first != 0.0 {
-            for i in 0..3 {
-                for j in 0..3 {
-                    let value = n[i] * n[j] * first;
-                    for (translation_axis, rotation_axis, sign) in [(0, 4, 1.0), (1, 3, -1.0)] {
-                        let row = 6 * i + translation_axis;
-                        let col = 6 * j + rotation_axis;
-                        m[18 * row + col] += sign * value;
-                        m[18 * col + row] += sign * value;
-                    }
-                }
-            }
-        }
+        accumulate_first_moment(&mut m, n, first);
         Ok(())
     })?;
     if m.iter().any(|v| !v.is_finite()) {
@@ -394,6 +370,35 @@ pub(super) fn consistent_mass_with_reference_density_moments(
         });
     }
     Ok(m)
+}
+
+// Same admitted normalized density moments and physical thickness at a native
+// reference quadrature point. Keep the original multiplication order.
+fn reference_point_moments(
+    g: &FacetGeometry,
+    thickness: [f64; 3],
+    moments: [ReferenceDensityMoments; 3],
+    n: [f64; 3],
+    weight: f64,
+) -> Result<(f64, f64, f64), PlateError> {
+    let h = n[0] * thickness[0] + n[1] * thickness[1] + n[2] * thickness[2];
+    let at = |value: fn(ReferenceDensityMoments) -> f64| {
+        n[0] * value(moments[0]) + n[1] * value(moments[1]) + n[2] * value(moments[2])
+    };
+    let translation = at(ReferenceDensityMoments::zeroth_kg_m3) * h * g.area_m2 * weight;
+    let first = at(ReferenceDensityMoments::first_kg_m3) * h * h * g.area_m2 * weight;
+    let rotary = at(ReferenceDensityMoments::second_kg_m3) * h * h * h * g.area_m2 * weight;
+    if !translation.is_finite()
+        || translation <= 0.0
+        || !first.is_finite()
+        || !rotary.is_finite()
+        || rotary <= 0.0
+    {
+        return Err(PlateError::BadSection {
+            what: "layered shell reference inertia is unrepresentable",
+        });
+    }
+    Ok((translation, first, rotary))
 }
 
 // Shared positive degree-six rule for both reference-density representations.
@@ -436,6 +441,13 @@ fn accumulate_point(
     translation: f64,
     rotary: f64,
 ) {
+    accumulate_physical_point(m, n, translation, rotary);
+    accumulate_drilling_point(m, g, n, rotary);
+}
+
+// Physical P1 midsurface velocity and director rotation. Normal drilling
+// rotation does not move the through-thickness material director.
+fn accumulate_physical_point(m: &mut [f64; 324], n: [f64; 3], translation: f64, rotary: f64) {
     for i in 0..3 {
         for j in i..3 {
             for c in 0..5 {
@@ -447,6 +459,28 @@ fn accumulate_point(
             }
         }
     }
+}
+
+// Signed first mass moment from u_dot + z*(theta_dot cross normal).
+fn accumulate_first_moment(m: &mut [f64; 324], n: [f64; 3], first: f64) {
+    if first != 0.0 {
+        for i in 0..3 {
+            for j in 0..3 {
+                let value = n[i] * n[j] * first;
+                for (translation_axis, rotation_axis, sign) in [(0, 4, 1.0), (1, 3, -1.0)] {
+                    let row = 6 * i + translation_axis;
+                    let col = 6 * j + rotation_axis;
+                    m[18 * row + col] += sign * value;
+                    m[18 * col + row] += sign * value;
+                }
+            }
+        }
+    }
+}
+
+// Original numerical relative-spin gauge, kept separate by retained motion
+// owners so its storage and integration losses cannot be labeled material heat.
+fn accumulate_drilling_point(m: &mut [f64; 324], g: &FacetGeometry, n: [f64; 3], rotary: f64) {
     let slots = [0, 1, 5, 6, 7, 11, 12, 13, 17];
     let spin: [f64; 9] = std::array::from_fn(|i| match i % 3 {
         0 => 0.5 * g.gradient[i / 3][1],
