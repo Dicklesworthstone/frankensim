@@ -2,6 +2,7 @@ use super::*;
 
 mod adaptive;
 mod coupled;
+mod navier_slip;
 mod reservoir;
 mod reservoir_stages;
 mod stabilized;

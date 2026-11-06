@@ -97,13 +97,16 @@ pub(super) fn velocity_neighbour(
         return Ok(ghost);
     }
     let (neighbour, reflected) = cartesian::neighbour(grid, boundaries, cell, axis, upper);
-    let mut velocity = [0.0; 3];
-    for (component, value) in velocity.iter_mut().enumerate() {
-        *value = wall_velocity_sample(
-            primitive, neighbour, cell, axis, upper, component, reflected, walls,
-        )?;
-    }
-    Ok(velocity)
+    wall_velocity_sample(
+        primitive,
+        neighbour,
+        cell,
+        axis,
+        upper,
+        reflected,
+        walls,
+        0.5 * grid.spacing[axis],
+    )
 }
 
 /// Midpoint tangential derivative between the actual cell and exterior traces.

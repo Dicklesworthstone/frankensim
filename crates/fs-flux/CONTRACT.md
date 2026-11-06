@@ -2752,8 +2752,9 @@ coupled temporal-order theorem is asserted.
 ### Finite Navier slip in planar and volumetric molecular gas flow
 
 `MolecularWall::NavierSlip` adds finite wall friction to the original frozen-gas
-`MolecularTransport2d` and `MolecularTransport3d` operators and their composing
-time owners. The authored wall velocity is constant on a flat reflecting side
+`MolecularTransport2d` and `MolecularTransport3d` operators and the evolving-
+species `spatial::mixture::molecular::MolecularTransport3d` owner, including
+their coupled and reactive steps. The authored wall velocity is constant on a flat reflecting side
 and has zero normal component. Slip length `b` is finite and nonnegative; the
 friction-heat fraction `chi` is finite and in `[0,1]`. The original gas transport
 source still owns face viscosity, bulk viscosity and conductivity at the actual
@@ -2794,17 +2795,36 @@ original conservative energy update. The conductive thermal condition and
 this authored interface heat partition are separate physical inputs; wall
 temperature and conjugate wall heat storage are not solved here.
 
-The evolving-species molecular source explicitly refuses this wall law, as do
-channel filters and equilibrium SGS wall closures that require no slip. The
-law does not add slip to the finite-inertia wall owner or structural wall-load
-couplers. Original no-slip and free-slip configurations retain their behavior.
+The evolving-species spatial owner uses the same ghost, tangential-trace and
+traction/heat kernel as frozen gas. Its original `SpatialTransport` source
+admits the impermeable species boundary, normal stress and Fourier heat at the
+actual local mole composition and cell/wall temperature. The source's returned
+dynamic viscosity supplies the shared finite-slip stress, while its already
+evaluated conductive heat flux is retained exactly. This needs one material
+query per face, preserves zero wall flux for every species, and does not add
+another chemical or viscous volume heat source. Its original conservative
+boundary integration also carries the authored interface heat partition
+through both molecular halves of a reactive step. Zero slip uses the original
+no-slip source path and arithmetic.
+
+Channel filters and equilibrium SGS wall closures that require no slip still
+refuse this condition explicitly, including when reconfiguring an existing
+operator. Prescribed wall acceleration and finite-inertia wall bindings remain
+limited to their supported no-slip interfaces. The law does not add slip to
+structural wall-load couplers or planar evolving-species flow. Original no-slip
+and free-slip configurations retain their behavior.
 
 Focused native wall tests cover all six oriented faces, series-resistance
 traction and analytic interface energy, the finite-slip normal-stress term,
 exact Couette velocity with physical viscous heating, actual conservative
 energy changes under different heat partitions, bit-identical zero-slip
 stepping and receipts, parameter refusals, and agreement between the planar
-owner and its three-dimensional extrusion.
+owner and its three-dimensional extrusion. Evolving-species tests additionally
+check actual temperature/mole-composition-dependent transport on all six sides,
+zero species leakage, finite-slip normal stress, exact mixture Couette heating,
+bit-identical zero-slip updates and receipts, reactive species conversion with
+the complete absolute-energy balance under both heat partitions, and late
+reactive cancellation with unchanged composition, wall loads and replay.
 
 ### Evolving-species molecular transport and reacting diffusion in two dimensions
 

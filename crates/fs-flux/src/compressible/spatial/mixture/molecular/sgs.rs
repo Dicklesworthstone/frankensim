@@ -192,7 +192,7 @@ impl SubgridTransport {
         match &self.closure {
             ViscosityClosure::DynamicChannelThermal(dynamic) => dynamic.admit_wall(wall),
             ViscosityClosure::ChannelDynamicSpecies(_)
-                if matches!(wall, MolecularWall3d::SlipAdiabatic) =>
+                if !matches!(wall, MolecularWall3d::NoSlip { .. }) =>
             {
                 Err(DissipationError::Invalid(
                     "channel SGS requires no-slip wall values",

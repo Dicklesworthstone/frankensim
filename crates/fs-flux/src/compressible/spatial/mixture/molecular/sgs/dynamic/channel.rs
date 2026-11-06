@@ -75,7 +75,7 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
         let normal = channel_axis(&flow.grid, flow.boundaries).map_err(dynamic_error)?;
         if walls
             .iter()
-            .any(|wall| matches!(wall, MolecularWall3d::SlipAdiabatic))
+            .any(|wall| !matches!(wall, MolecularWall3d::NoSlip { .. }))
         {
             return Err(DissipationError::Invalid(
                 "channel SGS requires explicit no-slip walls",

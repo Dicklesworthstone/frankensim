@@ -98,8 +98,10 @@ struct Workspace {
 ///
 /// One stored face flux serves both neighbors, including exact periodic copies.
 /// Reflecting faces default to stationary adiabatic slip walls and may be
-/// configured as impermeable no-slip walls with prescribed tangential velocity
-/// and fixed-temperature or adiabatic heat transfer. A transmissive end needs
+/// configured as impermeable no-slip or finite Navier-slip walls with prescribed
+/// tangential velocity and fixed-temperature or adiabatic conductive transfer.
+/// Navier walls explicitly partition interfacial friction heat between the
+/// fluid and prescribed wall. A transmissive end needs
 /// the same complete, source-admitted reservoir used by the Euler face. Its
 /// species diffusion, heat and stress use the physical half-cell distance and
 /// the bath's enthalpy/velocity for boundary energy transfer. Uniform and
@@ -246,30 +248,12 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
                 "molecular wall model requires a reflecting Euler side",
             ));
         }
-        if matches!(wall, MolecularWall3d::NavierSlip { .. }) {
-            return Err(DissipationError::Invalid(
-                "finite Navier slip is not implemented by the evolving-species wall source",
-            ));
-        }
-        if let MolecularWall3d::NoSlip { velocity, thermal } = wall {
-            if velocity.iter().any(|v| !v.is_finite()) || velocity[side.axis()] != 0.0 {
-                return Err(DissipationError::Invalid(
-                    "no-slip wall velocity must be finite and tangential",
-                ));
-            }
-            if let WallThermalCondition::Isothermal(t) = thermal {
-                let value = t.value();
-                if !value.is_finite()
-                    || !(self.gas().domain().minimum_temperature
-                        ..=self.gas().domain().maximum_temperature)
-                        .contains(&value)
-                {
-                    return Err(DissipationError::Invalid(
-                        "molecular wall temperature outside caloric domain",
-                    ));
-                }
-            }
-        }
+        wall.validate(
+            side.axis(),
+            self.gas().domain().minimum_temperature,
+            self.gas().domain().maximum_temperature,
+        )
+        .map_err(DissipationError::Invalid)?;
         #[cfg(feature = "experimental-sgs")]
         if let Some(sgs) = &self.sgs {
             sgs.admit_wall(side, wall)?;
@@ -888,8 +872,8 @@ fn spatial<'a, L: TransportLaw>(
         *value = cell(row, species).primitive(source.gas(), &mut *cancelled)?;
     }
     // A single nine-derivative cache supplies both tangential directions of
-    // every face. Slip ghosts reflect only normal velocity. No-slip and
-    // complete reservoir ghosts mirror all components about their face trace.
+    // every face. Free-slip ghosts reflect only normal velocity. No-slip,
+    // finite-slip and complete reservoir ghosts use their actual fluid trace.
     for (index, row) in gradient.iter_mut().enumerate() {
         poll(cancelled)?;
         for (axis, derivative) in row.iter_mut().enumerate() {
@@ -980,24 +964,74 @@ fn spatial<'a, L: TransportLaw>(
                         output,
                         &mut *cancelled,
                     )?,
-                    MolecularWall3d::NoSlip { velocity, thermal } => source
-                        .no_slip_wall_from_primitive(
+                    MolecularWall3d::NoSlip { velocity, thermal }
+                    | MolecularWall3d::NavierSlip {
+                        velocity,
+                        thermal,
+                        slip_length_m: 0.0,
+                        ..
+                    } => source.no_slip_wall_from_primitive(
+                        normal(cell, axis),
+                        0.5 * grid.spacing[axis],
+                        sign,
+                        [velocity[a], velocity[b]],
+                        thermal,
+                        -sign * 2.0 * primitive[cell].velocity[axis] / grid.spacing[axis],
+                        // One constant prescribed wall velocity has zero
+                        // tangential divergence at the physical face.
+                        [0.0; 2],
+                        output,
+                        &mut *cancelled,
+                    )?,
+                    MolecularWall3d::NavierSlip { thermal, .. } => {
+                        let distance = 0.5 * grid.spacing[axis];
+                        let p = primitive[cell];
+                        let ghost = wall
+                            .velocity_ghost(axis, distance, p.velocity)
+                            .ok_or(DissipationError::Invalid("missing Navier wall fluid trace"))?;
+                        let trace = [a, b].map(|t| 0.5 * p.velocity[t] + 0.5 * ghost[t]);
+                        let fraction = wall.tangential_trace_fraction(distance);
+                        // The original source admits impermeable species,
+                        // normal stress and Fourier heat at the actual local
+                        // composition and cell/wall temperature. Evaluate it
+                        // once, using the resolved fluid trace and its retained
+                        // tangential derivatives, not the solid's velocity.
+                        let receipt = source.no_slip_wall_from_primitive(
                             normal(cell, axis),
-                            0.5 * grid.spacing[axis],
+                            distance,
                             sign,
-                            [velocity[a], velocity[b]],
+                            trace,
                             thermal,
-                            -sign * 2.0 * primitive[cell].velocity[axis] / grid.spacing[axis],
-                            // One constant prescribed wall velocity has zero
-                            // tangential divergence at the physical face.
-                            [0.0; 2],
+                            -sign * 2.0 * p.velocity[axis] / grid.spacing[axis],
+                            [
+                                fraction * gradient[cell][a][a],
+                                fraction * gradient[cell][b][b],
+                            ],
                             output,
                             &mut *cancelled,
-                        )?,
-                    MolecularWall3d::NavierSlip { .. } => {
-                        return Err(DissipationError::Invalid(
-                            "finite Navier slip is not implemented by the evolving-species wall source",
-                        ));
+                        )?;
+                        // Share the robust finite-slip traction and mechanical
+                        // energy law with frozen gas. Conductive heat is zero
+                        // in this call because the original source's exact heat
+                        // flux below already owns its evaluated conductivity.
+                        let (shear, mechanical_energy) = wall.shear_and_energy(
+                            axis,
+                            sign,
+                            p.velocity,
+                            p.temperature,
+                            distance,
+                            receipt.dynamic_viscosity_pa_s,
+                            0.0,
+                        );
+                        output[species + 1] = -shear[a];
+                        output[species + 2] = -shear[b];
+                        output[species + 3] = mechanical_energy + receipt.reduced_heat_flux_w_m2;
+                        if !output.iter().all(|value| value.is_finite()) {
+                            return Err(DissipationError::Invalid(
+                                "Navier molecular wall flux overflow",
+                            ));
+                        }
+                        receipt
                     }
                 };
                 #[cfg(feature = "experimental-sgs")]
@@ -1119,25 +1153,28 @@ fn wall_velocity_sample(
     cell: usize,
     axis: usize,
     upper: bool,
-    component: usize,
     reflected: bool,
     walls: &[MolecularWall3d; 6],
-) -> Result<f64, DissipationError> {
+    wall_distance: f64,
+) -> Result<[f64; 3], DissipationError> {
     if !reflected {
-        return Ok(primitive[neighbour].velocity[component]);
+        return Ok(primitive[neighbour].velocity);
     }
     let side = side_for(axis, upper);
-    match walls[side_index(side)] {
-        MolecularWall3d::SlipAdiabatic => {
-            Ok(primitive[cell].velocity[component] * if component == axis { -1.0 } else { 1.0 })
-        }
-        MolecularWall3d::NoSlip { velocity, .. } => {
-            Ok(2.0 * velocity[component] - primitive[cell].velocity[component])
-        }
-        MolecularWall3d::NavierSlip { .. } => Err(DissipationError::Invalid(
-            "finite Navier slip is not implemented by the evolving-species wall source",
-        )),
+    let cell_velocity = primitive[cell].velocity;
+    let velocity = walls[side_index(side)]
+        .velocity_ghost(axis, wall_distance, cell_velocity)
+        .unwrap_or_else(|| {
+            std::array::from_fn(|component| {
+                cell_velocity[component] * if component == axis { -1.0 } else { 1.0 }
+            })
+        });
+    if !velocity.iter().all(|value| value.is_finite()) {
+        return Err(DissipationError::Invalid(
+            "molecular wall ghost velocity overflow",
+        ));
     }
+    Ok(velocity)
 }
 
 #[allow(clippy::too_many_arguments)]
