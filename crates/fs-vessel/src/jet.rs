@@ -7,23 +7,27 @@
 //! the material transit time L/U. The report keeps logarithmic amplitudes so
 //! strongly amplified candidates remain comparable without exponent overflow.
 //!
-//! This is a uniform, inviscid, un-stretched cylinder with a prescribed
+//! This is a uniform, un-stretched cylinder with a prescribed
 //! infinitesimal normal mode, not an inlet-forced spatial stability problem,
 //! a nozzle boundary-value solution or nonlinear pinch-off/drop-size dynamics.
 //! Liquid/exterior assumptions and the dispersion remain in fs-lbm::jet.
+//! The selected owner admits either the full inviscid cylindrical relation or
+//! an explicitly bounded viscous slender-jet relation. Source-bound owners
+//! retain the original material alongside the study. No runtime dispatch or
+//! duplicate free-flight calculation is introduced.
 
-use fs_lbm::jet::{CapillaryJet, JetBandMaximum, JetError};
+use fs_lbm::jet::{CapillaryJet, JetBandMaximum, JetDispersion, JetError};
 
 /// An authored SI free-flight study; no liquid or disturbance defaults.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct FreeJetStudy {
-    /// Original cylindrical physics owner, including explicit inviscid choice.
-    pub jet: CapillaryJet,
+pub struct FreeJetStudy<J = CapillaryJet> {
+    /// Original cylindrical physics owner and its explicit approximation.
+    pub jet: J,
     /// Positive liquid volume flow [m^3/s], through the declared cylinder.
     pub volume_flow_m3_s: f64,
     /// Nonnegative distance travelled by the material [m].
     pub flight_length_m: f64,
-    /// Closed physical wavenumber band [rad/m], including its stable tail.
+    /// Closed physical wavenumber band [rad/m], within the model's domain.
     pub wavenumbers_rad_m: [f64; 2],
     /// Common initial amplitude/radius of each normal mode, strictly in (0,1).
     /// This is not an arbitrary displacement with unspecified initial velocity.
@@ -56,10 +60,10 @@ pub struct FreeJetReport {
     pub threshold_reached: bool,
 }
 
-impl FreeJetStudy {
+impl<J: JetDispersion> FreeJetStudy<J> {
     /// Evaluate one uniform cylindrical segment without allocating or sampling.
     ///
-    /// No implied viscous calibration, gravity stretching, surrounding-gas
+    /// No implied material calibration, gravity stretching, surrounding-gas
     /// inertia, arbitrary disturbance evolution or nonlinear breakup is added.
     /// Invalid inputs and unrepresentable derived quantities refuse the study.
     pub fn evaluate(self) -> Result<FreeJetReport, JetError> {
@@ -255,5 +259,42 @@ mod tests {
         ] {
             assert!(candidate.evaluate().is_err());
         }
+    }
+
+    #[test]
+    fn g1_viscous_model_reduces_the_actual_flight_amplification() {
+        use fs_lbm::jet::viscous::ViscousSlenderJet;
+
+        let base = study();
+        let inviscid = FreeJetStudy {
+            wavenumbers_rad_m: [0.0, 300.0],
+            ..base
+        }.evaluate().unwrap();
+        let viscous_study = FreeJetStudy {
+            jet: ViscousSlenderJet::new(0.001, 1000.0, 0.072, 0.001, 0.3).unwrap(),
+            volume_flow_m3_s: base.volume_flow_m3_s,
+            flight_length_m: base.flight_length_m,
+            wavenumbers_rad_m: [0.0, 300.0],
+            initial_relative_amplitude: base.initial_relative_amplitude,
+            threshold_relative_amplitude: base.threshold_relative_amplitude,
+        };
+        let viscous = viscous_study.evaluate().unwrap();
+        near(viscous.mean_velocity_m_s, inviscid.mean_velocity_m_s);
+        near(viscous.residence_time_s, inviscid.residence_time_s);
+        let omega = (0.072_f64 / (1000.0 * 0.001_f64.powi(3))).sqrt();
+        let oh = 0.001 / (0.072_f64 * 0.001 / 1000.0).sqrt();
+        let expected_growth = omega / (8.0_f64.sqrt() + 6.0 * oh);
+        near(viscous.fastest.mode.growth_per_s, expected_growth);
+        near(viscous.log_amplification, expected_growth * 0.1);
+        assert!(viscous.log_amplification < inviscid.log_amplification);
+        assert!(
+            viscous.linear_threshold_distance_m.unwrap()
+                > inviscid.linear_threshold_distance_m.unwrap()
+        );
+        assert!(!viscous.threshold_reached);
+        assert!(FreeJetStudy {
+            wavenumbers_rad_m: [0.0, 400.0],
+            ..viscous_study
+        }.evaluate().is_err());
     }
 }

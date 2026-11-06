@@ -4,8 +4,11 @@
 //! point as the existing free-surface and film owners. The inviscid dispersion
 //! omits viscous stresses; its explicit Ohnesorge budget is an applicability
 //! screen, not a bound on growth-rate error or a measured breakup certificate.
+//! The viscous binding retains the source viscosity in the Newtonian slender
+//! model, with an explicit wavelength budget instead of an inviscid allowance.
 
-use super::{CapillaryJet, JetError};
+use super::viscous::ViscousSlenderJet;
+use super::{CapillaryJet, JetBandMaximum, JetDispersion, JetError};
 use fs_material::liquid::surface::ResolvedLiquidSurfaceState;
 
 /// An inviscid jet together with its original immutable material and viscosity
@@ -98,5 +101,81 @@ impl<'a> MaterialCapillaryJet<'a> {
     #[must_use]
     pub const fn maximum_ohnesorge(self) -> f64 {
         self.maximum_ohnesorge
+    }
+}
+
+impl JetDispersion for MaterialCapillaryJet<'_> {
+    fn radius_m(self) -> f64 {
+        self.jet.radius_m()
+    }
+
+    fn fastest_mode(self, wavenumbers_rad_m: [f64; 2]) -> Result<JetBandMaximum, JetError> {
+        self.jet.fastest_mode(wavenumbers_rad_m)
+    }
+}
+
+/// Newtonian viscous jet retaining the original source state and receipts.
+///
+/// No viscosity cutoff is inferred. The native long-wave approximation uses
+/// the source density, kinematic viscosity and surface tension together.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MaterialViscousSlenderJet<'a> {
+    material: &'a ResolvedLiquidSurfaceState,
+    jet: ViscousSlenderJet,
+}
+
+impl<'a> MaterialViscousSlenderJet<'a> {
+    /// Bind an admitted source at the actual radius with an explicit kR budget.
+    ///
+    /// A changed temperature/composition requires a new source resolution and
+    /// binding. The budget must be in (0,1]; it declares the admitted wavelengths
+    /// and does not certify the accuracy of the slender approximation.
+    ///
+    /// # Errors
+    /// Refuses omitted surface tension, evolving non-Newtonian rheology,
+    /// invalid geometry/budget, or nonrepresentable native coefficients.
+    pub fn try_new(
+        material: &'a ResolvedLiquidSurfaceState,
+        radius_m: f64,
+        maximum_kr: f64,
+    ) -> Result<Self, JetError> {
+        if material.rheology_axes().is_some() || material.rheology_pressure_axis().is_some() {
+            return Err(JetError::InvalidInput(
+                "a constant Newtonian jet cannot freeze an evolving rheology source",
+            ));
+        }
+        let sigma = material.surface_tension_n_m().ok_or(JetError::InvalidInput(
+            "a material capillary jet requires explicitly sourced surface tension",
+        ))?;
+        let jet = ViscousSlenderJet::new(
+            radius_m,
+            material.density_kg_m3(),
+            sigma,
+            material.kinematic_viscosity_m2_s(),
+            maximum_kr,
+        )?;
+        Ok(Self { material, jet })
+    }
+
+    /// Exact original material, with its selections, coordinates and receipts.
+    #[must_use]
+    pub const fn material(self) -> &'a ResolvedLiquidSurfaceState {
+        self.material
+    }
+
+    /// Native allocation-free viscous dispersion using this source's values.
+    #[must_use]
+    pub const fn jet(self) -> ViscousSlenderJet {
+        self.jet
+    }
+}
+
+impl JetDispersion for MaterialViscousSlenderJet<'_> {
+    fn radius_m(self) -> f64 {
+        self.jet.radius_m()
+    }
+
+    fn fastest_mode(self, wavenumbers_rad_m: [f64; 2]) -> Result<JetBandMaximum, JetError> {
+        self.jet.fastest_mode(wavenumbers_rad_m)
     }
 }

@@ -350,7 +350,7 @@ retains its explicitly authored lattice-opacity convention.
 
 ## Cylindrical free-jet capillary screen
 
-`jet::FreeJetStudy` composes the original `fs_lbm::jet::CapillaryJet`
+`jet::FreeJetStudy<J>` composes an original `fs_lbm::jet::JetDispersion`
 owner with an authored cylindrical radius, volume flow, flight length,
 continuous physical wavenumber band and disturbance amplitude/threshold.
 Continuity fixes U=Q/(pi R²). Native temporal growth is observed over L/U;
@@ -361,15 +361,30 @@ no threshold time. Large scores remain logarithmic, avoiding exponential
 overflow. Evaluation is allocation-free and independent of wavelength
 sampling density.
 
-The inviscid owner includes azimuthal curvature and its stable capillary-wave
-branch. This screen is a translating uniform cylinder with an authored
-normal-mode amplitude; it does not infer a jet radius or noise spectrum from
-the 2-D pour, replace its mass field, solve inlet-forced spatial instability,
-or resolve gravity stretching, liquid/gas viscosity, gas inertia, surfactants
-or nonlinear pinch-off. A threshold crossing is a linear extrapolation, not
-a simulated breakup or measured droplet size. The caller must justify the
-inviscid and small-disturbance approximations. Material-source consumers can
-supply the same native owner through its source-bound adapter.
+The inviscid `CapillaryJet` includes azimuthal curvature and its stable
+capillary-wave branch. The Newtonian `ViscousSlenderJet` includes extensional
+viscous damping in the linearized one-dimensional cylindrical model and
+requires an explicit maximum kR in (0,1]. It refuses a band outside that
+budget. Its zero-viscosity limit is the slender approximation, not the exact
+inviscid cylindrical dispersion. Both models maximize the continuous admitted
+band with at most three mode evaluations; no sampling or runtime dispatch is
+introduced.
+
+`MaterialCapillaryJet` and `MaterialViscousSlenderJet` implement the same
+trait and can be carried directly by a study. They borrow the exact resolved
+liquid source, preserving its density, viscosity, tension, query coordinates,
+property selections and receipts. The inviscid binding requires a declared
+Ohnesorge allowance; the viscous binding consumes the source viscosity
+directly. Neither silently freezes an evolving non-Newtonian rheology source.
+
+This screen is a translating uniform cylinder with an authored normal-mode
+amplitude; it does not infer a jet radius or noise spectrum from the 2-D pour,
+replace its mass field, solve inlet-forced spatial instability, or resolve
+gravity stretching, gas inertia/viscosity, surfactants or nonlinear pinch-off.
+A threshold crossing is a linear extrapolation, not a simulated breakup or
+measured droplet size. The caller must justify the selected model and
+small-disturbance approximation. A long-wave budget declares admitted
+wavelengths; it does not certify their approximation error.
 
 The module's G0/G1/G3 tests cover the independently evaluated cylindrical
 dispersion reaching the final score, conserved volume flux, flow/length

@@ -17,7 +17,42 @@
 /// Bind the original liquid source and explicit viscosity applicability.
 pub mod material;
 
-/// Most amplified inviscid eigenbranch, measured in the jet's rest frame.
+/// Newtonian viscous slender-jet model with an explicit long-wave budget.
+pub mod viscous;
+
+/// Fixed-property cylindrical model consumed by physical free-flight studies.
+/// Implementations retain their own inviscid or long-wave admission boundaries.
+/// An admitted model has a finite positive radius and finite nonnegative growth;
+/// the returned maximum covers the entire requested band or refuses it.
+pub trait JetDispersion: Copy {
+    /// Unperturbed cylindrical radius in metres.
+    fn radius_m(self) -> f64;
+
+    /// Continuous maximum over the entire admitted physical wavenumber band.
+    fn fastest_mode(self, wavenumbers_rad_m: [f64; 2]) -> Result<JetBandMaximum, JetError>;
+}
+
+impl JetDispersion for CapillaryJet {
+    fn radius_m(self) -> f64 {
+        CapillaryJet::radius_m(self)
+    }
+
+    fn fastest_mode(self, wavenumbers_rad_m: [f64; 2]) -> Result<JetBandMaximum, JetError> {
+        CapillaryJet::fastest_mode(self, wavenumbers_rad_m)
+    }
+}
+
+impl JetDispersion for viscous::ViscousSlenderJet {
+    fn radius_m(self) -> f64 {
+        viscous::ViscousSlenderJet::radius_m(self)
+    }
+
+    fn fastest_mode(self, wavenumbers_rad_m: [f64; 2]) -> Result<JetBandMaximum, JetError> {
+        viscous::ViscousSlenderJet::fastest_mode(self, wavenumbers_rad_m)
+    }
+}
+
+/// Most amplified capillary shape branch, measured in the jet's rest frame.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct JetMode {
     /// Wavenumber times the unperturbed cylindrical radius.
@@ -208,7 +243,10 @@ impl CapillaryJet {
             let k = PEAK_KR / self.radius_m;
             represented(k, true)?;
             let mode = self.mode(k)?;
-            if mode.growth_per_s > maximum.mode.growth_per_s {
+            if mode.growth_per_s > maximum.mode.growth_per_s
+                || (mode.growth_per_s == maximum.mode.growth_per_s
+                    && k < maximum.wavenumber_rad_m)
+            {
                 maximum = JetBandMaximum {
                     wavenumber_rad_m: k,
                     mode,

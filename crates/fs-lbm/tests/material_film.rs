@@ -338,12 +338,17 @@ fn apparent_viscosity_requiring_shear_or_pressure_evolution_is_never_frozen() {
             fs_lbm::jet::material::MaterialCapillaryJet::inviscid(source, 0.001, 0.1),
             Err(fs_lbm::jet::JetError::InvalidInput(_))
         ));
+        assert!(matches!(
+            fs_lbm::jet::material::MaterialViscousSlenderJet::try_new(source, 0.001, 0.3),
+            Err(fs_lbm::jet::JetError::InvalidInput(_))
+        ));
     }
 }
 
 #[test]
 fn cylindrical_jet_reuses_both_source_viscosity_bases_and_original_receipts() {
     use fs_lbm::jet::material::MaterialCapillaryJet;
+    use fs_lbm::jet::JetDispersion;
 
     for basis in [LiquidViscosityBasis::Dynamic, LiquidViscosityBasis::Kinematic] {
         let card = card(basis, true, false);
@@ -355,7 +360,7 @@ fn cylindrical_jet_reuses_both_source_viscosity_bases_and_original_receipts() {
         assert_eq!(bound.material().material().properties().len(), 3);
         near(bound.ohnesorge(), 0.002 / (1000.0_f64 * 0.08 * 0.001).sqrt());
         assert_eq!(bound.maximum_ohnesorge(), 0.01);
-        let maximum = bound.jet().fastest_mode([0.0, 1000.0]).unwrap();
+        let maximum = bound.fastest_mode([0.0, 1000.0]).unwrap();
         near(maximum.mode.kr, 0.697_018_898_306_3);
         // Classical dimensionless inviscid maximum, independent of the material adapter.
         let rate_scale = (0.08_f64 / (1000.0 * 0.001_f64.powi(3))).sqrt();
@@ -407,4 +412,78 @@ fn cylindrical_material_jet_requires_active_tension_and_explicit_valid_budget() 
     assert!(MaterialCapillaryJet::inviscid(&source, 0.001, bound.ohnesorge()).is_ok());
     // Shrinking the same sourced jet raises Oh; units are physical radius.
     assert!(MaterialCapillaryJet::inviscid(&source, 0.0001, 0.01).is_err());
+}
+
+#[test]
+fn viscous_jet_uses_both_source_bases_in_the_dimensional_dispersion() {
+    use fs_lbm::jet::material::MaterialViscousSlenderJet;
+    use fs_lbm::jet::JetDispersion;
+
+    for basis in [
+        LiquidViscosityBasis::Dynamic,
+        LiquidViscosityBasis::Kinematic,
+    ] {
+        let card = card(basis, true, false);
+        let source = resolve(&card, basis, LiquidCapillarity::Sourced);
+        let bound = MaterialViscousSlenderJet::try_new(&source, 0.001, 0.3).unwrap();
+        assert!(core::ptr::eq(bound.material(), &source));
+        assert_eq!(bound.material().material().card_identity(), card.content_hash());
+        assert_eq!(bound.material().viscosity_basis(), basis);
+        assert_eq!(bound.material().material().properties().len(), 3);
+        assert_eq!(bound.jet().maximum_kr(), 0.3);
+        near(bound.jet().kinematic_viscosity_m2_s(), 2e-6);
+        let maximum = bound.fastest_mode([0.0, 250.0]).unwrap();
+        let k = maximum.wavenumber_rad_m;
+        let s = maximum.mode.growth_per_s;
+        let radius = bound.radius_m();
+        // Independent dimensional momentum/mass-balance residual.
+        near(
+            s * s + 3.0 * 2e-6 * k * k * s,
+            0.08 * k * k * (1.0 - radius * radius * k * k)
+                / (2.0 * 1000.0 * radius),
+        );
+        assert!(bound.fastest_mode([0.0, 400.0]).is_err());
+    }
+}
+
+#[test]
+fn viscous_source_temperature_is_retained_when_the_inviscid_budget_refuses() {
+    use fs_lbm::jet::material::{MaterialCapillaryJet, MaterialViscousSlenderJet};
+    use fs_lbm::jet::JetDispersion;
+
+    let source_card = card(LiquidViscosityBasis::Dynamic, true, false);
+    let cold = resolve(&source_card, LiquidViscosityBasis::Dynamic, LiquidCapillarity::Sourced);
+    let hot = ResolvedLiquidSurfaceState::try_from_material(
+        cold.material().at_query_point(&source_card, &point(400.0)).unwrap(),
+        cold.viscosity_basis(),
+        cold.capillarity(),
+    ).unwrap();
+    let radius = 1e-7;
+    for source in [&cold, &hot] {
+        assert!(MaterialCapillaryJet::inviscid(source, radius, 0.1).is_err());
+    }
+    let first = MaterialViscousSlenderJet::try_new(&cold, radius, 0.3).unwrap();
+    let second = MaterialViscousSlenderJet::try_new(&hot, radius, 0.3).unwrap();
+    near(second.jet().density_kg_m3(), 800.0);
+    near(second.jet().surface_tension_n_m(), 0.04);
+    near(second.jet().kinematic_viscosity_m2_s(), 5e-6);
+    assert!(core::ptr::eq(second.material(), &hot));
+    let before = first.fastest_mode([0.0, 2.5e6]).unwrap();
+    let after = second.fastest_mode([0.0, 2.5e6]).unwrap();
+    assert!(after.mode.growth_per_s < before.mode.growth_per_s);
+    for previous in cold.material().properties() {
+        let refreshed = second.material().material().property(previous.requirement().name()).unwrap();
+        assert_eq!(refreshed.answer().receipt.selected, previous.answer().receipt.selected);
+        assert_eq!(refreshed.answer().receipt.axis_quantities, *point(400.0).axis_quantities());
+    }
+    let without_surface = card(LiquidViscosityBasis::Dynamic, false, false);
+    let neglected = resolve(
+        &without_surface,
+        LiquidViscosityBasis::Dynamic,
+        LiquidCapillarity::Neglected,
+    );
+    assert!(MaterialViscousSlenderJet::try_new(&neglected, radius, 0.3).is_err());
+    for budget in [0.0, -0.1, 1.01, f64::NAN, f64::INFINITY] {
+        assert!(MaterialViscousSlenderJet::try_new(&cold, radius, budget).is_err());
+    }
 }
