@@ -36,6 +36,9 @@
 //! complete signed P1 modal surface and prepares the shared distributed
 //! Rayleigh receiver. Its path-dependent travel times and numerical latency
 //! are reported separately. The legacy `observer DISTANCE_M` remains compact.
+//! An optional `observer_gas` row after `radiation-load` (or directly after
+//! `observer`) selects the shared bounded per-path gas propagation grammar.
+//! It requires the spatial receiver and cannot combine with `observer_law`.
 
 use std::collections::BTreeSet;
 use std::str::{FromStr, Lines, SplitAsciiWhitespace};
@@ -49,6 +52,7 @@ use fs_material::gas_species::input::{GasInputError, GasRecord, ThermochemicalSo
 use fs_plate::{AssemblyOptions, EdgeSupport, PlateChart, PlateMesh, PlateSection};
 use crate::acoustic_realize::AcousticRealizeError;
 use crate::air_path::{ObserverFilterReceipt, input::{ObserverLawInput, observer_filter}};
+use crate::pcm_wav::baffled::gas::{GasPropagation, GasPropagationReport};
 use crate::render::{ControlDelta, RenderContext, RenderError, RenderVoice};
 use crate::render::schedule::{ScheduledControl, ScheduledRenderer};
 use crate::thin_plate::{PlateChartRadiation, PlateMassModel, certified_chart_radiators_with_mass,
@@ -209,8 +213,13 @@ impl PlatePerformance {
                 let reduced = certified_chart_surface_radiators(&input.chart, &input.options,
                     input.kinetic_mass, spatial.subdivisions)
                     .map_err(PlatePerformanceError::Reduction)?;
-                CompactPlateVoice::from_surface_radiators(reduced, input.initial_force_n,
-                    input.config, spatial.position_m, spatial.maximum_frequency_hz)
+                match input.observer_gas.as_ref() {
+                    Some(propagation) => CompactPlateVoice::from_surface_radiators_with_gas_propagation(
+                        reduced, input.initial_force_n, input.config, spatial.position_m,
+                        spatial.maximum_frequency_hz, propagation, &mut || false),
+                    None => CompactPlateVoice::from_surface_radiators(reduced, input.initial_force_n,
+                        input.config, spatial.position_m, spatial.maximum_frequency_hz),
+                }
             }
             None => {
                 let bodies = certified_chart_radiators_with_mass(&input.chart, &input.options,
@@ -266,6 +275,16 @@ impl PlatePerformance {
     #[must_use]
     pub const fn gas_record(&self) -> &GasRecord { &self.gas_record }
 
+    /// Original per-path gas receipts from this performance's actual receiver.
+    /// The renderer retains the only copy and its continuing pressure history.
+    #[must_use]
+    pub fn spatial_gas_propagation_report(&self) -> Option<&GasPropagationReport> {
+        match self.renderer.context().voices.first() {
+            Some(RenderVoice::CompactPlate(voice)) => voice.spatial_gas_propagation_report(),
+            _ => None,
+        }
+    }
+
     /// Transfer the complete physical state to existing rendering/WAV consumers.
     #[must_use]
     pub fn into_renderer(self) -> ScheduledRenderer { self.renderer }
@@ -286,6 +305,7 @@ struct Parsed {
     baffled_piston_loading: bool,
     kinetic_mass: PlateMassModel,
     observer_law: Option<ObserverLawInput>,
+    observer_gas: Option<GasPropagation>,
     spatial_observer: Option<SpatialObserverInput>,
     samples: u64,
     full_scale_pa: f64,
@@ -370,6 +390,18 @@ impl Parsed {
         if spatial_observer.is_some() && observer_law.is_some() {
             return Err(bad(r.line, "Rayleigh observation requires path-resolved atmosphere; a compact observer_law cannot be reused"));
         }
+        let observer_gas = if r.lines.clone().next()
+            .and_then(|line| line.split_ascii_whitespace().next()) == Some("observer_gas")
+        {
+            let mut row = r.row("observer_gas")?;
+            if spatial_observer.is_none() || observer_law.is_some() {
+                return Err(bad(row.line, "observer_gas requires a Rayleigh observer without a compact observer_law"));
+            }
+            let propagation = GasPropagation::read_record_for_gas(&mut row.fields, &gas_record)
+                .map_err(|source| PlatePerformanceError::Gas { line: row.line, source })?;
+            row.finish()?;
+            Some(propagation)
+        } else { None };
         let mut limits = r.row("limits")?;
         let max_modes = limits.count(MAX_MODES)?;
         let nyquist_guard_fraction = limits.scalar()?;
@@ -526,7 +558,7 @@ impl Parsed {
         if r.lines.next().is_some() { return Err(bad(r.line + 1, "unexpected trailing record")); }
         let options = PlateChartRadiation { assembly: AssemblyOptions { pretension, support },
             eigenvalue_window, n_modes, damping_ratio, unit_force_weights };
-        Ok(Self { gas_record, chart, options, config, baffled_piston_loading, kinetic_mass, observer_law, spatial_observer,
+        Ok(Self { gas_record, chart, options, config, baffled_piston_loading, kinetic_mass, observer_law, observer_gas, spatial_observer,
             samples, full_scale_pa, initial_force_n,
             sections: sections_count, section_provenance, events, max_events })
     }

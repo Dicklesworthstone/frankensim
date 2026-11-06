@@ -199,6 +199,80 @@ fn spatial_observer_refuses_invalid_geometry_band_and_compact_atmosphere() {
     }
 }
 
+/// G3: the native file reaches per-path material propagation and the existing
+/// scheduler retains exactly the same pressure across callback partitions.
+#[test]
+fn spatial_gas_record_reaches_native_pressure_and_block_replay() {
+    let spatial = std::str::from_utf8(SOURCE).unwrap().replace("observer 1.0",
+        "observer rayleigh 0.6 0.15 1.0 1 700.0");
+    let source = spatial.replace("limits ",
+        "observer_gas stokes-kirchhoff 16384 4000000 500000000\nlimits ");
+    let input = Parsed::read(source.as_bytes(), 4801, None).unwrap();
+    let reduced = certified_chart_surface_radiators(&input.chart, &input.options,
+        input.kinetic_mass, 1).unwrap();
+    let mut direct = CompactPlateVoice::from_surface_radiators_with_gas_propagation(
+        reduced, 1.0, input.config, [0.6, 0.15, 1.0], 700.0,
+        input.observer_gas.as_ref().unwrap(), &mut || false,
+    ).unwrap();
+    let filters = direct.spatial_gas_propagation_report().unwrap().filters.clone();
+    assert!(filters.len() > 1, "surface distances must remain distinct");
+    let mut expected = vec![0.0; 4801];
+    for (range, force) in [(0..37, 1.0), (37..1701, 0.0), (1701..1738, -0.4), (1738..4801, 0.0)] {
+        direct.set_force_admitted(force);
+        direct.step_block(&mut expected[range]).unwrap();
+    }
+    assert!(expected.iter().any(|p| p.abs() > 1e-9));
+    for block in [37, 571] {
+        let performance = PlatePerformance::from_bytes(source.as_bytes(), block).unwrap();
+        let report = performance.spatial_gas_propagation_report().unwrap();
+        assert_eq!(report.gas, performance.info().gas);
+        assert_eq!(report.law, crate::air_path::GasAbsorptionModel::StokesKirchhoff);
+        assert_eq!(report.filters, filters);
+        assert_eq!(report.surface_filter_indices.len(), 40 * 3 * 4);
+        assert_eq!(performance.info().spatial_observer.unwrap().filter_delay_samples,
+            direct.spatial_observer_receipt().unwrap().filter_delay_samples);
+        assert!(performance.info().observer_filter.is_none());
+        let mut renderer = performance.into_renderer();
+        let mut actual = vec![0.0; expected.len()];
+        for chunk in actual.chunks_mut(block) { renderer.block(chunk).unwrap(); }
+        assert_eq!(actual, expected, "block {block}");
+    }
+    let plain = PlatePerformance::from_bytes(spatial.as_bytes(), 571).unwrap();
+    assert!(plain.spatial_gas_propagation_report().is_none());
+    let mut plain = plain.into_renderer();
+    let mut lossless = vec![0.0; expected.len()];
+    for chunk in lossless.chunks_mut(571) { plain.block(chunk).unwrap(); }
+    assert_ne!(lossless, expected, "declared gas transport must reach native pressure");
+}
+
+#[test]
+fn spatial_gas_records_bind_molecular_composition_and_refuse_invalid_combinations() {
+    use crate::air_path::GasAbsorptionModel;
+    let spatial = std::str::from_utf8(SOURCE).unwrap().replace("observer 1.0",
+        "observer rayleigh 0.6 0.15 0.4 2 700.0");
+    let declaration = "molecular 16384 4000000 500000000 declared 1 CO2 1 vibration 1 960 2 power 10.1325 293.15 0 200 400";
+    let selected = spatial.replace("ambient 293.15 101325 0", "ambient mixture 293.15 101325 mole 1 CO2 1")
+        .replace("limits ", &format!("observer_gas {declaration}\nlimits "));
+    let parsed = Parsed::read(selected.as_bytes(), 64, None).unwrap();
+    let propagation = parsed.observer_gas.as_ref().unwrap();
+    assert_eq!(propagation.law, GasAbsorptionModel::MolecularRelaxation);
+    assert!(propagation.relaxation.is_some());
+    assert!(Parsed::read(selected.replace("mole 1 CO2 1", "mole 1 He 1").as_bytes(), 64, None).is_err());
+    for row in ["lossless", "stokes-kirchhoff 0 100 100", "unknown 1 1 1",
+        "stokes-kirchhoff 1 1 1 extra", "molecular 1 1 1",
+        "lossless 1 1 1\nobserver_gas lossless 1 1 1",
+        "lossless 1 1 1\nobserver_law none"] {
+        let source = spatial.replace("limits ", &format!("observer_gas {row}\nlimits "));
+        assert!(Parsed::read(source.as_bytes(), 64, None).is_err(), "{row}");
+    }
+    let compact = std::str::from_utf8(SOURCE).unwrap().replace("limits ",
+        "observer_gas lossless 1 1 1\nlimits ");
+    assert!(Parsed::read(compact.as_bytes(), 64, None).is_err());
+    let undersized = spatial.replace("limits ",
+        "observer_gas stokes-kirchhoff 1 4000000 500000000\nlimits ");
+    assert!(PlatePerformance::from_bytes(undersized.as_bytes(), 64).is_err());
+}
+
 #[test]
 fn every_record_is_required_and_ignored_suffixes_and_extra_fields_refuse() {
     let text = std::str::from_utf8(SOURCE).unwrap();

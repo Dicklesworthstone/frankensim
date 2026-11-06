@@ -71,7 +71,8 @@ accuracy; they do not prove that a transient source has no higher frequencies.
 
 The existing bandlimited derivative and propagation filter are prepared once.
 The sidecar separates each surface path's physical travel-time range from
-`filter_delay_samples` (80 samples at this single-rate clock). Numerical latency
+`filter_delay_samples` (80 samples at this single-rate clock without a material
+propagation law; an admitted gas law may add common causal padding). Numerical latency
 is retained in the WAV and is not hidden by trimming or altering the force
 schedule. `listener_m` and its scalar delay are the chart-origin reference;
 `spatial_observer` records the actual receiver coordinates, path range and band.
@@ -79,8 +80,37 @@ This is a stationary planar radiator in an infinite rigid baffle. The existing
 optional compact piston reaction may still load the mechanics independently;
 the spatial observation does not add a second reaction load. A compact
 `observer_law` refuses with this choice because atmosphere must be resolved on
-each distinct path. The new native path currently uses the declared gas's
-lossless density and sound speed, with no room or lid scattering.
+each distinct path. Without an additional row the spatial receiver uses the
+declared gas's lossless density and sound speed, with no room or lid scattering.
+
+To apply the existing gas absorption and dispersion on every original surface
+path, place one optional row after `radiation-load`, or directly after
+`observer` when no reaction row is present:
+
+```text
+observer_gas stokes-kirchhoff MAX_PATHS MAX_FILTER_TAPS MAX_KERNEL_TERMS
+```
+
+The shared grammar also accepts `lossless` for an explicit comparison, or
+`molecular MAX_PATHS MAX_FILTER_TAPS MAX_KERNEL_TERMS LAW`, where `LAW` is the
+material relaxation grammar (`iso9613-terrestrial-air` or an explicit `declared`
+species/reservoir/rate law). Molecular selection binds the original `ambient`
+record, including its composition and source restrictions. The three positive
+work budgets have shared ceilings 16384, 4000000 and 500000000 respectively.
+They bound distinct path designs, total filter taps and preparation products.
+
+Each signed surface contribution receives its own material transfer before
+summation. The receiver compensates each filter's low-frequency delay once and
+reports any common numerical padding separately. The same source-derived
+viscosity, conductivity and heat capacity that determine classical absorption
+therefore reach the rendered pressure; no mean-distance atmosphere filter is
+substituted. `observer_gas` requires `observer rayleigh` and cannot combine with
+`observer_law`. Standalone and ensemble sidecars retain the applied law, gas,
+path counts, truncation summaries and latency under `observer_gas`; full
+per-path receipts remain available through the performance and voice APIs.
+This is an observation model: it changes neither the mechanical trajectory nor
+the independently selected reaction load and deposits no heat into an ambient
+reservoir.
 
 `GAS_RECORD` is the shared gas declaration read by
 `fs_material::gas_species::input::read_gas_record`, as in the bowed, lip and
@@ -169,13 +199,15 @@ certificate. Modal reduction is offline and presently not cancellable. Audio
 output staging is block-sized, uses the existing PCM16 encoder, counts clips,
 and never peak-normalizes. Existing output/sidecar files are never overwritten.
 
-Pressure uses the existing signed-area compact baffled monopole observation,
+With `observer DISTANCE_M`, pressure uses the existing signed-area compact baffled monopole observation,
 `rho A a(t - r/c) / (2 pi r)`, with `rho` and `c` from the ambient record. The
 retarded acceleration is evaluated exactly inside the recorded exact-ZOH step,
 not interpolated; before the first wavefront arrives the output is zero. There
-is no atmospheric absorption, resolved directivity, or whole-fluid energy
-balance in this input path. Reaction loading is the explicit selection above;
-large/noncompact radiators need a more complete acoustic model.
+is no resolved directivity in this compact image. Its optional `observer_law`
+uses the existing compact atmosphere filter; `observer rayleigh` and its
+per-path `observer_gas` selection are described above. Neither observation
+closes a whole-fluid energy balance. Reaction loading is the explicit selection
+above; compact observation does not resolve large/noncompact radiators.
 The source hash binds exact bytes; relocation does not change it, but whitespace
 changes do. The sidecar is numerical/software provenance, not a certificate of
 experimental validity, continuum accuracy, or source material truth.

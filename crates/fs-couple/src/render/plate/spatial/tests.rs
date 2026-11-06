@@ -6,6 +6,7 @@ use crate::render::{ControlDelta, RenderContext, RenderVoice};
 use crate::thin_plate::CompactBody;
 use fs_material::gas::GasState;
 use fs_scenario::RadiatingPlate;
+use crate::pcm_wav::baffled::gas::GasPropagationLimits;
 
 fn air() -> GasState { GasState::try_new_moist_air(293.15, 101_325.0, 0.0).unwrap() }
 
@@ -237,4 +238,87 @@ fn surface_observer_refuses_single_range_atmosphere_and_late_load_attachment() {
     assert_eq!(voice.samples_rendered(), 1);
     assert_eq!(velocities, voice.bodies().iter().map(|b| b.modal_velocity_m_s()).collect::<Vec<_>>());
     assert!(voice.step_block(&mut [0.0; 1]).is_ok(), "cold-only refusal does not poison rendering");
+}
+
+/// G3: the live plate executes the original material Rayleigh operator on its
+/// exact mechanical velocities; changing transport cannot change those states.
+#[test]
+fn spatial_gas_uses_every_original_path_without_changing_plate_motion() {
+    use fs_material::gas::{ConductivityModel, GasSpec};
+    let mut source = GasSpec::dry_air_ussa1976();
+    source.sutherland_beta *= 100.0; // Explicit manufactured transport contrast.
+    source.conductivity = ConductivityModel::Eucken;
+    let cfg = PlateVoiceConfig {
+        gas: GasState::try_new(&source, 293.15, 101_325.0).unwrap(),
+        ..config()
+    };
+    let position = [0.6, 0.15, 0.5];
+    let propagation = GasPropagation::classical(GasPropagationLimits::surface_reference());
+    let reduction = surface(true);
+    let (mut reference, expected_report) = BaffledPressure::new_multirate_gas_differentiating(
+        reduction.surface(), 2, cfg.sample_rate_hz, cfg.sample_rate_hz, position,
+        &cfg.gas, &propagation, &mut || false,
+    ).unwrap();
+    assert!(reference.differentiate_pressure().unwrap());
+    let mut original = CompactPlateVoice::from_surface_radiators(
+        reduction.clone(), 1.0, cfg, position, 1500.0,
+    ).unwrap();
+    let mut material = CompactPlateVoice::from_surface_radiators_with_gas_propagation(
+        reduction, 1.0, cfg, position, 1500.0, &propagation, &mut || false,
+    ).unwrap();
+    let report = material.spatial_gas_propagation_report().unwrap();
+    assert_eq!(report.gas, cfg.gas);
+    assert_eq!(report.surface_filter_indices, [0, 1]);
+    assert_eq!(report.filters, expected_report.filters);
+    assert_ne!(report.filters[0].range_m, report.filters[1].range_m);
+    assert_eq!(material.spatial_observer_receipt().unwrap().filter_delay_samples,
+        reference.filter_delay_samples());
+    assert!(material.observer_receipt().is_none());
+    assert!(material.history.is_empty());
+    let mut difference = 0.0_f64;
+    for i in 0..2048 {
+        let mut pressures = [0.0; 2];
+        for (voice, output) in [&mut original, &mut material].into_iter().zip(&mut pressures) {
+            voice.set_force_admitted(force(i));
+            voice.step_block(core::slice::from_mut(output)).unwrap();
+        }
+        let velocities: Vec<_> = original.bodies().iter().map(|b| b.modal_velocity_m_s()).collect();
+        assert_eq!(velocities, material.bodies().iter().map(|b| b.modal_velocity_m_s()).collect::<Vec<_>>());
+        assert_eq!(pressures[1].to_bits(), reference.step_trace(&velocities).unwrap().to_bits());
+        difference = difference.max((pressures[1] - pressures[0]).abs());
+    }
+    assert!(difference > 1e-7, "source transport must reach pressure: {difference}");
+}
+
+/// G4: a refused preparation never publishes a partial receiver; the same
+/// unchanged reduction can be retried with its source law and physical state.
+#[test]
+fn spatial_gas_budget_and_late_cancellation_preserve_the_retry_inputs() {
+    let reduction = surface(true);
+    let config = config();
+    let position = [0.6, 0.15, 0.5];
+    let mut propagation = GasPropagation::classical(GasPropagationLimits::surface_reference());
+    propagation.limits.max_unique_paths = 1;
+    assert!(CompactPlateVoice::from_surface_radiators_with_gas_propagation(
+        reduction.clone(), 1.0, config, position, 1500.0, &propagation, &mut || false,
+    ).is_err());
+    propagation.limits = GasPropagationLimits::surface_reference();
+    let mut polls = 0;
+    let result = CompactPlateVoice::from_surface_radiators_with_gas_propagation(
+        reduction.clone(), 1.0, config, position, 1500.0, &propagation,
+        &mut || { polls += 1; polls == 12 },
+    );
+    assert!(matches!(result, Err(RenderError::Voice(AcousticRealizeError::Cancelled))));
+    assert_eq!(polls, 12);
+    let mut retry = CompactPlateVoice::from_surface_radiators_with_gas_propagation(
+        reduction.clone(), 1.0, config, position, 1500.0, &propagation, &mut || false,
+    ).unwrap();
+    let mut direct = CompactPlateVoice::from_surface_radiators_with_gas_propagation(
+        reduction, 1.0, config, position, 1500.0, &propagation, &mut || false,
+    ).unwrap();
+    let mut actual = [0.0; 512];
+    let mut expected = [0.0; 512];
+    retry.step_block(&mut actual).unwrap();
+    direct.step_block(&mut expected).unwrap();
+    assert_eq!(bits(&actual), bits(&expected));
 }

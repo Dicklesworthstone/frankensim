@@ -8,6 +8,7 @@
 use super::{CompactPlateVoice, PlateVoiceConfig, RenderError, admit_radiators, invalid};
 use crate::acoustic_realize::AcousticRealizeError;
 use crate::pcm_wav::baffled::{BaffledPressure, RayleighMedium};
+use crate::pcm_wav::baffled::gas::{GasPropagation, GasPropagationReport};
 use crate::thin_plate::PlateSurfaceRadiators;
 
 /// Actual path geometry, admitted band and numerical work of a surface observer.
@@ -37,6 +38,7 @@ pub(super) struct SpatialPlateObserver {
     receiver: BaffledPressure,
     velocities: Vec<f64>,
     receipt: PlateSpatialObserverReceipt,
+    gas_propagation: Option<GasPropagationReport>,
 }
 
 impl CompactPlateVoice {
@@ -69,6 +71,44 @@ impl CompactPlateVoice {
         receiver_position_m: [f64; 3],
         maximum_frequency_hz: f64,
     ) -> Result<Self, RenderError> {
+        Self::from_surface_radiators_with_propagation(reduction, initial_force_n, config,
+            receiver_position_m, maximum_frequency_hz, None, &mut || false)
+    }
+
+    /// Observe the same signed plate surface through the shared material-gas
+    /// Rayleigh owner. Each quadrature path retains its own absorption,
+    /// dispersion and travel time; the declared gas is also the radiation
+    /// medium. No mean-range filter or additional compact delay is applied.
+    ///
+    /// Original modal motion, force participation and reaction loads remain
+    /// unchanged. Preparation polls cancellation and honors the supplied work
+    /// limits. The returned report separates common numerical padding from
+    /// physical propagation. This observation adds no mechanical loss or heat.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_surface_radiators_with_gas_propagation(
+        reduction: PlateSurfaceRadiators,
+        initial_force_n: f64,
+        config: PlateVoiceConfig,
+        receiver_position_m: [f64; 3],
+        maximum_frequency_hz: f64,
+        propagation: &GasPropagation,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self, RenderError> {
+        Self::from_surface_radiators_with_propagation(reduction, initial_force_n, config,
+            receiver_position_m, maximum_frequency_hz, Some(propagation), cancelled)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn from_surface_radiators_with_propagation(
+        reduction: PlateSurfaceRadiators,
+        initial_force_n: f64,
+        config: PlateVoiceConfig,
+        receiver_position_m: [f64; 3],
+        maximum_frequency_hz: f64,
+        propagation: Option<&GasPropagation>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self, RenderError> {
+        if cancelled() { return Err(RenderError::Voice(AcousticRealizeError::Cancelled)); }
         admit_radiators(reduction.bodies(), config)?;
         if !initial_force_n.is_finite() || initial_force_n.abs() > config.maximum_abs_force_n
             || reduction.bodies().iter()
@@ -98,6 +138,7 @@ impl CompactPlateVoice {
         }
         let mut propagation_delay_s = [f64::INFINITY, 0.0_f64];
         for sample in reduction.surface() {
+            if cancelled() { return Err(RenderError::Voice(AcousticRealizeError::Cancelled)); }
             // Use the original receiver's metric and gas, with no reference
             // range substitution or modal-area averaging of path lengths.
             let radius = fs_math::det::sqrt((0..3)
@@ -109,10 +150,24 @@ impl CompactPlateVoice {
             propagation_delay_s[0] = propagation_delay_s[0].min(delay);
             propagation_delay_s[1] = propagation_delay_s[1].max(delay);
         }
-        let mut receiver = BaffledPressure::new_differentiating(
-            reduction.surface(), reduction.bodies().len(), config.sample_rate_hz,
-            receiver_position_m, RayleighMedium::from(&config.gas),
-        ).map_err(receiver_error)?;
+        let (mut receiver, gas_propagation) = match propagation {
+            Some(propagation) => {
+                let mut stopped = false;
+                let result = BaffledPressure::new_multirate_gas_differentiating(
+                    reduction.surface(), reduction.bodies().len(), config.sample_rate_hz,
+                    config.sample_rate_hz, receiver_position_m, &config.gas, propagation,
+                    &mut || { stopped = cancelled(); stopped },
+                );
+                let (receiver, report) = result.map_err(|error| if stopped {
+                    RenderError::Voice(AcousticRealizeError::Cancelled)
+                } else { receiver_error(error) })?;
+                (receiver, Some(report))
+            }
+            None => (BaffledPressure::new_differentiating(
+                reduction.surface(), reduction.bodies().len(), config.sample_rate_hz,
+                receiver_position_m, RayleighMedium::from(&config.gas),
+            ).map_err(receiver_error)?, None),
+        };
         // At this one-to-one clock, differentiation commutes with the fixed
         // Rayleigh sum. Its shared cold optimization runs the same derivative
         // once per output rather than once per retained structural mode.
@@ -128,10 +183,11 @@ impl CompactPlateVoice {
         };
         let velocities = vec![0.0; reduction.bodies().len()];
         let (bodies, _) = reduction.into_parts();
+        if cancelled() { return Err(RenderError::Voice(AcousticRealizeError::Cancelled)); }
         Ok(Self {
             bodies, config, force_n: initial_force_n, sample_index: 0, poisoned: false,
             delay_whole: 0, retarded_elapsed_s: 0.0, history: Vec::new(), observer: None,
-            spatial: Some(SpatialPlateObserver { receiver, velocities, receipt }),
+            spatial: Some(SpatialPlateObserver { receiver, velocities, receipt, gas_propagation }),
         })
     }
 
@@ -140,6 +196,13 @@ impl CompactPlateVoice {
     #[must_use]
     pub fn spatial_observer_receipt(&self) -> Option<&PlateSpatialObserverReceipt> {
         self.spatial.as_ref().map(|spatial| &spatial.receipt)
+    }
+
+    /// Original per-path material propagation receipts, when explicitly selected.
+    /// Absent for the original lossless spatial image and for compact observers.
+    #[must_use]
+    pub fn spatial_gas_propagation_report(&self) -> Option<&GasPropagationReport> {
+        self.spatial.as_ref().and_then(|spatial| spatial.gas_propagation.as_ref())
     }
 
     // Public step_block has already admitted count, clock, poison and nonempty

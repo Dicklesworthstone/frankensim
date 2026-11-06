@@ -49,6 +49,16 @@ fn observer_json(info: PlatePerformanceInfo) -> String {
         filter.absorption.law == GasAbsorptionModel::Lossless, omission.is_some())
 }
 
+/// The actual observation law, shared by standalone and ensemble plate renders.
+pub(super) fn atmosphere_json(performance: &PlatePerformance) -> String {
+    match performance.spatial_gas_propagation_report() {
+        Some(report) => format!(
+            ",\"observer\":{{\"law\":\"path-resolved\",\"declared\":true}},\"observer_gas\":{}",
+            super::duct_metadata::observer_gas_provenance(Some(report))),
+        None => format!("{},\"observer_gas\":null", observer_json(performance.info())),
+    }
+}
+
 pub(super) fn spatial_observer_json(info: PlatePerformanceInfo) -> String {
     let Some(r) = info.spatial_observer else {
         return ",\"spatial_observer\":null".into();
@@ -106,7 +116,7 @@ pub(super) fn run_with_gas_sources(
     let section_sources = section_sources_json(performance.section_provenance());
     let gas_sources = super::thermochemical::provenance(core::slice::from_ref(performance.gas_record()));
     let info = performance.info();
-    let observer = observer_json(info);
+    let observer = atmosphere_json(&performance);
     let spatial_observer = spatial_observer_json(info);
     let observer_scope = if info.spatial_observer.is_some() {
         "distributed P1 Rayleigh surface in an infinite rigid baffle; path-dependent propagation with separately reported bandlimited reconstruction latency"
