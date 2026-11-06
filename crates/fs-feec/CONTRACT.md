@@ -1441,6 +1441,20 @@ The response retains original-coordinate pressure, velocity and temperature,
 all port flows, and independently integrated shear, bulk, conduction and
 caloric work. Losses and work residuals are not clipped.
 
+`ThermoviscousFe::prepare_stress_at` retains the original P2 physical velocity
+gradients and P1 pressure interpolation at an admitted point of an affine or
+quadratic tetrahedron. Warm harmonic and instantaneous observations read ten
+velocity and four pressure coefficients without allocation or a solve. The
+result separates `2 mu dev(sym(grad v))`, independent `zeta div(v)`, and
+thermodynamic pressure. Physical tensor shear uses xx/yy/zz/xy/yz/zx ordering.
+Harmonic heating includes the cycle-average 1/2; instantaneous heating does not.
+Traction normalizes a finite nonzero normal direction and computes tangential
+stress from the deviator alone, so a large pressure cannot erase small wall
+shear. Rigid spin and isotropic expansion produce zero shear. Selected-element
+stress traces are unsmoothed and inherit spatial discretization error; these
+point observations do not replace the original weak moving-wall reactions or
+constitute an equilibrated interface stress or mesh-accuracy certificate.
+
 Four focused native tests cover traction-work closure and all live loss
 channels, reciprocity, simultaneous drives, direct power scattering, replay,
 boundary/material/budget/cancellation refusals, and independent continuum
