@@ -2,9 +2,11 @@
 //! wrong density that must move every frequency by exactly the root of the ratio, card refusals, and a
 //! coarse end-to-end strike that must be finite and replay bit for bit.
 use crate::card::{Card, Profile, Resonator, Tube, pack_scalar};
-use crate::render::Body;
-use crate::{bar, radiation, resonator, strike, structure, tube};
-use fs_couple::modal_acoustic_time::ModalAcousticMode;
+use crate::render::{Body, Loss};
+use crate::{bar, radiation, render, resonator, strike, structure, tube};
+use fs_couple::modal_acoustic_time::{
+    ModalAcousticMode, ModalAcousticState, ModalAcousticTimeModel, ModalAcousticWorkspace,
+};
 use fs_math::{c64::C64, det};
 use std::path::{Path, PathBuf};
 
@@ -193,6 +195,140 @@ fn certificate_row_is_optional_and_bounded() {
             Card::parse(&with(bad), &root())
                 .unwrap_err()
                 .contains("maximum_relative_halfwidth"),
+            "{bad} must be refused"
+        );
+    }
+}
+
+#[test]
+fn window_cap_rows_are_optional_bounded_and_change_only_the_caps() {
+    let card = blank();
+    // Absent, the solver gets exactly the caps every earlier card ran under.
+    assert_eq!(card.window_factor_bytes, 1 << 30);
+    assert_eq!(card.window_budget_bytes, 16 << 30);
+    assert_eq!(
+        bar::slice_options(&card).ldlt.max_factor_bytes,
+        Some(1 << 30)
+    );
+    let plan = bar::window_plan(&card, 8);
+    assert_eq!(
+        (plan.maximum_bytes, plan.threads, plan.maximum_windows),
+        (16 << 30, 8, 8)
+    );
+    assert_eq!(bar::window_plan(&card, 20).threads, 13);
+    let text = card.text.clone();
+    let with = |rows: &str| format!("{text}\n{rows}\n");
+    let raised = Card::parse(
+        &with("window_factor_gib\t2\nwindow_budget_gib\t40"),
+        &root(),
+    )
+    .expect("the rows parse");
+    assert_eq!(
+        bar::slice_options(&raised).ldlt.max_factor_bytes,
+        Some(2 << 30)
+    );
+    let wide = bar::window_plan(&raised, 8);
+    assert_eq!(wide.maximum_bytes, 40 << 30);
+    // The same windows, threads and certificate: only the two caps moved.
+    assert_eq!(wide.windows, plan.windows);
+    assert_eq!(
+        (wide.threads, wide.maximum_windows),
+        (plan.threads, plan.maximum_windows)
+    );
+    assert_eq!(
+        wide.maximum_relative_halfwidth,
+        plan.maximum_relative_halfwidth
+    );
+    for (key, value) in [
+        ("window_factor_gib", "0"),
+        ("window_factor_gib", "9"),
+        ("window_factor_gib", "1.5"),
+        ("window_budget_gib", "15"),
+        ("window_budget_gib", "65"),
+    ] {
+        assert!(
+            Card::parse(&with(&format!("{key}\t{value}")), &root())
+                .unwrap_err()
+                .contains(key),
+            "{key} {value} must be refused"
+        );
+    }
+}
+
+/// The optional `loss_factor` row: absent, every mode's damping ratio is the two-term law's to the bit (the
+/// law is the render's only use of the loss file, through `render::bar_modes`); alone, it decays every mode
+/// at pi eta f, read both from the ratio and from the modal time model's own free decay.
+#[test]
+fn loss_factor_row_is_optional_and_alone_decays_each_mode_at_pi_eta_f() {
+    let pi = core::f64::consts::PI;
+    let fit = std::fs::read_to_string(
+        root().join("data/instruments/descriptions/bars/rosewood-loss-fit3-test.tsv"),
+    )
+    .expect("the shipped fit3 law");
+    let law = Loss::read(&fit).expect("the fit3 law reads");
+    let a0 = render::scalar(&fit, "fluid_damping_gamma_b").expect("gamma_B") / 2.0;
+    let a2 = 2.0 * pi * pi * render::scalar(&fit, "viscoelastic_constant_eta").expect("eta");
+    for f in [92.4986, 220.0, 523.2511, 1244.508, 4978.0, 9827.5] {
+        assert_eq!(
+            law.ratio(f).to_bits(),
+            ((a0 + a2 * f * f) / (bar::TAU * f)).to_bits(),
+            "{f} Hz"
+        );
+    }
+    let eta = 0.0045;
+    let alone = "scalar\tfluid-damping\tt\tfluid_damping_gamma_b\t0\t1/s\tconstant\n\
+                 scalar\tviscoelastic-constant\tt\tviscoelastic_constant_eta\t0\ts\tconstant\n\
+                 scalar\tloss-factor\tt\tloss_factor\t0.0045\t1\tconstant\n";
+    let alone = Loss::read(alone).expect("the loss_factor row reads");
+    let rate_hz = 48_000 * 32;
+    for f in [92.4986, 523.2511, 1244.508, 9827.5] {
+        let w = bar::TAU * f;
+        let zeta = alone.ratio(f);
+        assert!(
+            (zeta * w / (pi * eta * f) - 1.0).abs() < 1e-15,
+            "{f} Hz: {}",
+            zeta * w
+        );
+        // Free decay in the modal time model: (v + s x)^2 + (wd x)^2 falls as exp(-2 s t) for s = zeta w.
+        let mode = ModalAcousticMode {
+            angular_frequency_rad_s: w,
+            damping_ratio: zeta,
+            pressure_per_modal_velocity: C64::ZERO,
+        };
+        let mut model =
+            ModalAcousticTimeModel::try_new(rate_hz, vec![mode], render::strike_budget())
+                .expect("one mode");
+        model
+            .restore_states(&[ModalAcousticState {
+                displacement_m_sqrt_kg: 1e-6,
+                velocity_m_sqrt_kg_per_s: 0.0,
+            }])
+            .expect("a start");
+        let mut work = ModalAcousticWorkspace::new(&model);
+        let (s, wd) = (zeta * w, w * (1.0 - zeta * zeta).sqrt());
+        let energy = |m: &ModalAcousticTimeModel| {
+            let q = m.states()[0];
+            (q.velocity_m_sqrt_kg_per_s + s * q.displacement_m_sqrt_kg).powi(2)
+                + (wd * q.displacement_m_sqrt_kg).powi(2)
+        };
+        let start = energy(&model);
+        let steps = rate_hz / 10;
+        for _ in 0..steps {
+            model.step_into(&[0.0], &mut work).expect("a free step");
+        }
+        let decay = -(energy(&model) / start).ln() / (2.0 * f64::from(steps) / f64::from(rate_hz));
+        assert!(
+            (decay / (pi * eta * f) - 1.0).abs() < 1e-9,
+            "{f} Hz: {decay} 1/s against {}",
+            pi * eta * f
+        );
+    }
+    for bad in ["0", "-0.001", "0.2", "x"] {
+        let text = format!("{fit}scalar\tloss-factor\tt\tloss_factor\t{bad}\t1\tconstant\n");
+        assert!(
+            Loss::read(&text)
+                .err()
+                .is_some_and(|e| e.contains("loss_factor")),
             "{bad} must be refused"
         );
     }

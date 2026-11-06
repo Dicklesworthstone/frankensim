@@ -23,24 +23,51 @@ pub fn scalar(text: &str, property: &str) -> Result<f64, String> {
         .ok_or_else(|| format!("required source property missing: {property}"))
 }
 
-/// Amplitude-decay law 1/tau = a0 + a2 f^2 as a modal damping ratio (Chaigne and Doutaut 1997,
-/// Eqs. 18-19: a0 = gamma_B / 2, a2 = 2 pi^2 eta); `None` when the card declares no loss.
+/// An optional `scalar` row: absent is `None`; present but not a finite number is refused.
+fn optional_scalar(text: &str, property: &str) -> Result<Option<f64>, String> {
+    let row = text
+        .lines()
+        .map(|line| line.split('\t').collect::<Vec<_>>())
+        .find(|fields| fields.first() == Some(&"scalar") && fields.get(3) == Some(&property));
+    match row {
+        None => Ok(None),
+        Some(fields) => match fields.get(4).and_then(|v| v.parse::<f64>().ok()) {
+            Some(x) if x.is_finite() => Ok(Some(x)),
+            _ => Err(format!("source property {property} is not a finite number")),
+        },
+    }
+}
+
+/// Amplitude-decay law 1/tau = a0 + a1 f + a2 f^2 as a modal damping ratio (Chaigne and Doutaut 1997,
+/// Eqs. 18-19: a0 = gamma_B / 2, a2 = 2 pi^2 eta). The optional scalar `loss_factor`, a loss factor
+/// eta_h constant in frequency (a printed whole-bar value), adds a1 = pi eta_h; absent, the law is the
+/// two-term one, evaluated exactly as before the row existed. `None` when the card declares no loss.
 pub struct Loss {
     a0: f64,
+    a1: Option<f64>,
     a2: f64,
 }
 
 impl Loss {
     pub fn read(text: &str) -> Result<Loss, String> {
         let pi = core::f64::consts::PI;
+        let a1 = match optional_scalar(text, "loss_factor")? {
+            None => None,
+            Some(eta) if eta > 0.0 && eta <= 0.1 => Some(pi * eta),
+            Some(eta) => return Err(format!("loss_factor {eta} must lie in (0, 0.1]")),
+        };
         Ok(Loss {
             a0: scalar(text, "fluid_damping_gamma_b")? / 2.0,
+            a1,
             a2: 2.0 * pi * pi * scalar(text, "viscoelastic_constant_eta")?,
         })
     }
 
     pub fn ratio(&self, f_hz: f64) -> f64 {
-        (self.a0 + self.a2 * f_hz * f_hz) / (TAU * f_hz)
+        match self.a1 {
+            None => (self.a0 + self.a2 * f_hz * f_hz) / (TAU * f_hz),
+            Some(a1) => (self.a0 + a1 * f_hz + self.a2 * f_hz * f_hz) / (TAU * f_hz),
+        }
     }
 }
 

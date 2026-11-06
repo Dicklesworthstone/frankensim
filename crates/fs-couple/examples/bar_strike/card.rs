@@ -93,6 +93,14 @@ pub struct Card {
     /// `maximum_relative_halfwidth`; absent, 1e-8. It builds the same bar and loosens only what is accepted, so
     /// a card that sets it says so, with the half-width in Hz from the report's `eigen_uncertainty_hz`.
     pub maximum_relative_halfwidth: f64,
+    /// Bytes each band window's LDLT factor may take. The optional row `window_factor_gib`, whole GiB in
+    /// 1..=8; absent, 1 GiB, as every card before it. A mesh fine enough for a high band's radiation floor
+    /// outgrows 1 GiB in its factor; the row raises the cap and nothing else, so the bar and its windows are
+    /// the same.
+    pub window_factor_bytes: usize,
+    /// Bytes the whole band plan may take (`WindowPlan::maximum_bytes`). The optional row `window_budget_gib`,
+    /// whole GiB in 16..=64; absent, 16 GiB, as every card before it.
+    pub window_budget_bytes: usize,
     /// The optional rows `observer broadband`, `observer_fit_order` and `observer_held_out_budget`: the
     /// receiver is the engine's broadband modal observer. Absent, the narrow-band receiver, as ever.
     pub observer: Option<ObserverRow>,
@@ -183,6 +191,15 @@ fn parse_f64(key: &str, text: &str) -> Result<f64, String> {
         Ok(x)
     } else {
         Err(format!("row `{key}`: `{text}` is not finite"))
+    }
+}
+
+/// Whole GiB as bytes, refused outside `low..=high`.
+fn gib(n: usize, key: &str, low: usize, high: usize) -> Result<usize, String> {
+    if (low..=high).contains(&n) {
+        Ok(n << 30)
+    } else {
+        Err(format!("row `{key}` must lie in {low}..={high}"))
     }
 }
 
@@ -315,6 +332,19 @@ impl Card {
             maximum_relative_halfwidth: match rows.get("maximum_relative_halfwidth") {
                 Err(_) => 1e-8,
                 Ok(_) => rows.number("maximum_relative_halfwidth")?,
+            },
+            window_factor_bytes: match rows.get("window_factor_gib") {
+                Err(_) => 1 << 30,
+                Ok(_) => gib(rows.count("window_factor_gib")?, "window_factor_gib", 1, 8)?,
+            },
+            window_budget_bytes: match rows.get("window_budget_gib") {
+                Err(_) => 16 << 30,
+                Ok(_) => gib(
+                    rows.count("window_budget_gib")?,
+                    "window_budget_gib",
+                    16,
+                    64,
+                )?,
             },
             observer: match rows.get("observer") {
                 Err(_) => None,

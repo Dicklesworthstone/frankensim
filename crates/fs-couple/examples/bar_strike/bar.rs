@@ -157,7 +157,7 @@ pub fn assemble(
     Ok((nodes, elements.len(), a))
 }
 
-fn slice_options() -> SliceOptions {
+pub(crate) fn slice_options(card: &Card) -> SliceOptions {
     let mut o = SliceOptions {
         max_lanczos: 2048,
         max_restarts: 48,
@@ -165,13 +165,14 @@ fn slice_options() -> SliceOptions {
         mass_diagonal_equilibration: true,
         ..SliceOptions::default()
     };
-    // A window holds a few modes: a bounded Krylov budget per window, and a 1 GiB factor cap each.
+    // A window holds a few modes: a bounded Krylov budget per window, and the card's factor cap each
+    // (1 GiB unless the row `window_factor_gib` raises it).
     o.max_lanczos = 512;
-    o.ldlt.max_factor_bytes = Some(1 << 30);
+    o.ldlt.max_factor_bytes = Some(card.window_factor_bytes);
     o
 }
 
-/// Windows that may factor at once under `band_modes_in`'s budget.
+/// Windows that may factor at once under the plan's budget.
 const MAX_WINDOWS_AT_WORK: usize = 13;
 
 /// Every elastic mode of the free body from 20 Hz to the card's band, in ordered parallel windows.
@@ -195,29 +196,35 @@ pub fn band_modes(
     Err(last)
 }
 
-fn band_modes_in(
-    card: &Card,
-    a: &TetElasticAssembly,
-    cx: &Cx<'_>,
-    n: usize,
-) -> Result<Vec<ModePair>, String> {
+/// `n` equal windows from 20 Hz to the card's band. Each window at work may hold its factor cap against the
+/// plan's budget: 1 GiB against 16 GiB, so 13 run at once and a longer plan queues the rest (at 13 windows or
+/// fewer this is `n`, as it always was). A card whose rows raise the factor cap raises the budget with it, or
+/// the plan is refused (`MemoryBudget`) before any window's Lanczos runs.
+pub(crate) fn window_plan(card: &Card, n: usize) -> WindowPlan {
     let edges: Vec<f64> = (0..=n)
         .map(|i| ELASTIC_LOW_HZ + (card.band_hz - ELASTIC_LOW_HZ) * i as f64 / n as f64)
         .collect();
-    // Each window at work may hold a 1 GiB factor against the 16 GiB cap, so 13 run at once and a longer plan
-    // queues the rest. At 13 windows or fewer this is `n`, as it always was.
-    let plan = WindowPlan {
+    WindowPlan {
         windows: edges
             .windows(2)
             .map(|w| ((TAU * w[0]).powi(2), (TAU * w[1]).powi(2)))
             .collect(),
         threads: n.min(MAX_WINDOWS_AT_WORK),
         maximum_windows: n,
-        maximum_bytes: 16 << 30,
+        maximum_bytes: card.window_budget_bytes,
         maximum_relative_halfwidth: card.maximum_relative_halfwidth,
         coordinates: None,
-    };
-    let report = slice_windows(&a.stiffness, &a.mass, &plan, &slice_options(), cx)
+    }
+}
+
+fn band_modes_in(
+    card: &Card,
+    a: &TetElasticAssembly,
+    cx: &Cx<'_>,
+    n: usize,
+) -> Result<Vec<ModePair>, String> {
+    let plan = window_plan(card, n);
+    let report = slice_windows(&a.stiffness, &a.mass, &plan, &slice_options(card), cx)
         .map_err(|e| format!("certified band windows: {e:?}"))?;
     let mut modes: Vec<ModePair> = report.reports.into_iter().flat_map(|w| w.modes).collect();
     canonical_phase(&mut modes);
