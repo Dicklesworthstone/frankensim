@@ -13,11 +13,12 @@
 pub mod quadrupole;
 pub use quadrupole::{MutualQuadrupoleGravity, MutualQuadrupoleLoad};
 
-use super::{GravityError, finite, poll, same_frame};
+use super::{GravityError, finite, inverse_radius_potential_increment, poll, same_frame};
 use crate::{
     DynamicsDiagnostics, DynamicsError, Gravity, MassProperties, RigidBodyIntegrator,
     RigidBodyState, Vec3, Wrench,
 };
+use fs_math::dd::Dd;
 
 /// Explicit inertial frame, Newtonian constant, separation domain and work cap.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -50,6 +51,11 @@ pub struct MutualGravityStepReceipt {
     pub diagnostics_before: DynamicsDiagnostics,
     /// Whole-system energies and momenta after the step, about the same world origin.
     pub diagnostics_after: DynamicsDiagnostics,
+    /// Direct sum of pair-potential changes, U_after - U_before [J]. Its negative
+    /// is conservative gravity work; small work need not survive subtracting
+    /// the two absolute binding-energy diagnostics. It includes both recoils
+    /// and, when selected, both bodies' quadrupole corrections exactly once.
+    pub potential_energy_change_j: f64,
     /// Interactions per pass: two force samples and one drift-domain check.
     pub pair_count: usize,
 }
@@ -202,10 +208,17 @@ impl MutualGravity {
                     .state_after,
             );
         }
-        check_drift_separations(
+        let potential_energy_change_j = drift_potential_change(
             states,
             &candidates,
             |_, _, radius| self.admit_radius(radius).map(|_| ()),
+            |i, j, before, after| {
+                self.pair_potential_change(
+                    before,
+                    after,
+                    [properties[i].mass(), properties[j].mass()],
+                )
+            },
             &mut cancelled,
         )?;
         let after = self.load(frame, &candidates, properties, &mut cancelled)?;
@@ -225,8 +238,42 @@ impl MutualGravity {
             states_after: candidates,
             diagnostics_before,
             diagnostics_after,
+            potential_energy_change_j,
             pair_count: before.pair_count,
         })
+    }
+
+    fn pair_potential_change(
+        self,
+        before: [Vec3; 2],
+        after: [Vec3; 2],
+        masses: [f64; 2],
+    ) -> Result<Dd, GravityError> {
+        let radius_before = self.admit_separation(before[1].sub(before[0]))?;
+        let radius_after = self.admit_separation(after[1].sub(after[0]))?;
+        // Retain the original binary-scaled coefficients: G*m_i*m_j need not
+        // be representable even when both the energy and force are admitted.
+        let (magnitude_before, _) = pair_magnitudes(
+            self.gravitational_constant,
+            masses[0],
+            masses[1],
+            radius_before,
+        )?;
+        if radius_before < 0.5 * radius_after || radius_after < 0.5 * radius_before {
+            let (magnitude_after, _) = pair_magnitudes(
+                self.gravitational_constant,
+                masses[0],
+                masses[1],
+                radius_after,
+            )?;
+            return Ok(Dd::from_f64(magnitude_before) - Dd::from_f64(magnitude_after));
+        }
+        Ok(inverse_radius_potential_increment(
+            before,
+            after,
+            [radius_before, radius_after],
+            magnitude_before,
+        ))
     }
 
     fn pair_count(self, count: usize) -> Result<usize, GravityError> {
@@ -257,25 +304,29 @@ impl MutualGravity {
     }
 }
 
-// Endpoints are admitted by the two load samples. Inspect every interior
-// minimum of the actual straight relative split drift with the same pair domain.
-fn check_drift_separations(
+// Fuse direct pair work into the existing drift-domain pass, with no additional
+// pair traversal or per-pair storage. Endpoint loads retain their own admission.
+fn drift_potential_change(
     states: &[RigidBodyState],
     candidates: &[RigidBodyState],
     mut admit_radius: impl FnMut(usize, usize, f64) -> Result<(), GravityError>,
+    mut pair_change: impl FnMut(usize, usize, [Vec3; 2], [Vec3; 2]) -> Result<Dd, GravityError>,
     cancelled: &mut impl FnMut() -> bool,
-) -> Result<(), GravityError> {
+) -> Result<f64, GravityError> {
+    let mut potential_change = Dd::ZERO;
     for i in 0..states.len() {
         for j in i + 1..states.len() {
             poll(cancelled)?;
-            let start = states[j]
-                .pose()
-                .position_world()
-                .sub(states[i].pose().position_world());
-            let end = candidates[j]
-                .pose()
-                .position_world()
-                .sub(candidates[i].pose().position_world());
+            let before = [
+                states[i].pose().position_world(),
+                states[j].pose().position_world(),
+            ];
+            let after = [
+                candidates[i].pose().position_world(),
+                candidates[j].pose().position_world(),
+            ];
+            let start = before[1].sub(before[0]);
+            let end = after[1].sub(after[0]);
             let change = end.sub(start);
             let length = change.stable_norm("mutual gravity drift displacement")?;
             if length > 0.0 {
@@ -287,9 +338,10 @@ fn check_drift_separations(
                     admit_radius(i, j, segment_line_distance(start, end, length)?)?;
                 }
             }
+            potential_change = potential_change + pair_change(i, j, before, after)?;
         }
     }
-    Ok(())
+    finite(potential_change.to_f64())
 }
 
 fn kick(state: RigidBodyState, force: Vec3, duration: f64) -> Result<RigidBodyState, GravityError> {

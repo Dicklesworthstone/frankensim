@@ -257,39 +257,12 @@ impl CentralGravity {
             // avoids an unrepresentable ratio between two admitted radii.
             return Ok(Dd::from_f64(potential_after) - Dd::from_f64(potential_before));
         }
-        let scale = radius_before.max(radius_after);
-        let divisor = Dd::from_f64(scale);
-        let mut radius_squared_change = Dd::ZERO;
-        for (a, b, center) in [
-            (after.x, before.x, self.center_world_m.x),
-            (after.y, before.y, self.center_world_m.y),
-            (after.z, before.z, self.center_world_m.z),
-        ] {
-            let a = Dd::from_f64(a);
-            let b = Dd::from_f64(b);
-            let center = Dd::from_f64(center);
-            let a_scaled = (a - center) / divisor;
-            let b_scaled = (b - center) / divisor;
-            let difference = a - b;
-            let difference = if difference.hi.is_finite() {
-                difference / divisor
-            } else {
-                // Opposite finite endpoints can overflow their unscaled
-                // separation even though each source radius is admitted.
-                a_scaled - b_scaled
-            };
-            let sum = a_scaled + b_scaled;
-            radius_squared_change = radius_squared_change + difference * sum;
-        }
-        // Rationalize 1/r_before - 1/r_after using the coordinate difference,
-        // not two rounded radii. This retains even a tiny transverse motion
-        // whose squared contribution cannot change either rounded radius.
-        // Scaling keeps radius squares, products and sums representable.
-        let before_scaled = Dd::from_f64(radius_before / scale);
-        let after_scaled = Dd::from_f64(radius_after / scale);
-        let relative_change =
-            radius_squared_change / ((before_scaled + after_scaled) * after_scaled);
-        Ok(Dd::from_f64(-potential_before) * relative_change)
+        Ok(inverse_radius_potential_increment(
+            [self.center_world_m, before],
+            [self.center_world_m, after],
+            [radius_before, radius_after],
+            -potential_before,
+        ))
     }
 
     /// Select a finite-body quadrupole model with a caller-supplied COM bounding
@@ -316,6 +289,45 @@ impl CentralGravity {
             maximum_radius_ratio,
         })
     }
+}
+
+// Comparable admitted radii only: rationalize U_after - U_before for U = -C/r.
+// Both original positions participate before rounding the relative displacement,
+// so this same owner retains fixed-source work and finite-source recoil.
+fn inverse_radius_potential_increment(
+    before: [Vec3; 2],
+    after: [Vec3; 2],
+    radii: [f64; 2],
+    magnitude_before: f64,
+) -> Dd {
+    let scale = radii[0].max(radii[1]);
+    let divisor = Dd::from_f64(scale);
+    let mut radius_squared_change = Dd::ZERO;
+    for (a0, a1, b0, b1) in [
+        (after[0].x, after[1].x, before[0].x, before[1].x),
+        (after[0].y, after[1].y, before[0].y, before[1].y),
+        (after[0].z, after[1].z, before[0].z, before[1].z),
+    ] {
+        let [a0, a1, b0, b1] = [a0, a1, b0, b1].map(Dd::from_f64);
+        let a_scaled = (a1 - a0) / divisor;
+        let b_scaled = (b1 - b0) / divisor;
+        let difference = (a1 - b1) - (a0 - b0);
+        let difference = if difference.hi.is_finite() {
+            difference / divisor
+        } else {
+            // Common translation can overflow each body's unscaled travel
+            // even while both relative endpoint separations remain admitted.
+            a_scaled - b_scaled
+        };
+        radius_squared_change = radius_squared_change + difference * (a_scaled + b_scaled);
+    }
+    // Use coordinate increments, not the difference of rounded norms. A tiny
+    // transverse displacement can change potential while those norms are equal.
+    let before_scaled = Dd::from_f64(radii[0] / scale);
+    let after_scaled = Dd::from_f64(radii[1] / scale);
+    let relative_change =
+        radius_squared_change / ((before_scaled + after_scaled) * after_scaled);
+    Dd::from_f64(magnitude_before) * relative_change
 }
 
 impl RigidGravityField for CentralGravity {

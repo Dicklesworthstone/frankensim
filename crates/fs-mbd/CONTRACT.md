@@ -818,6 +818,15 @@ momentum and orbital-plus-spin world angular momentum. Smooth fixed-step motion
 is second order and symplectic; energy is not exact, and bounded long-time behavior
 requires resolved bounded trajectories. No momentum or energy projection is used.
 
+`potential_energy_change_j` retains the direct sum of physical pair-potential
+increments separately from those absolute diagnostics. The shared rationalized
+inverse-radius owner uses both bodies' actual COM displacement before rounding
+the relative separation, retaining small transverse work and source recoil.
+The original binary-scaled pair coefficient remains authoritative. The negative
+of this increment is gravity work, without implying exact finite-step energy closure.
+This accumulation shares the existing drift-domain traversal and adds no
+per-pair storage. Empty and single-body systems have zero potential change.
+
 Pair work is admitted before allocation. Cancellation is polled per body/pair and
 at publication; refused allocation, arithmetic, frame, budget or separation leaves
 the immutable input system untouched and returns no candidate. Both endpoints and
@@ -850,6 +859,14 @@ free rotation. The existing system receipt carries both kinetic energies, pair
 potential, linear momentum and total orbital-plus-spin angular momentum. The
 resolved fixed-step map is second order and symmetric; energy has a timestep
 defect and is not claimed to be exact.
+
+The same direct potential-change receipt keeps each body's quadrupole correction
+change separate from the monopole binding energy, using original admitted
+inertia traces and the original correction owner. Small tidal spin/orbital work
+therefore survives when the two rounded total potentials are identical. Focused
+regressions independently check both rotating shapes' analytic energy changes,
+small transverse pair motion, finite source displacement, translation/body-order
+invariance and reversal without changing force or integration stages.
 
 The sum of the two bounding radii divided by separation must not exceed an
 explicit ratio strictly below one. Radius values, necessary inertia/radius

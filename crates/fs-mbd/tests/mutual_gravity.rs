@@ -81,6 +81,98 @@ fn finite_sources_recoil_and_pair_potential_is_counted_once() {
         -10.0,
         1e-14,
     );
+    let radius_after = norm(
+        receipt.states_after[1]
+            .pose()
+            .position_world()
+            .sub(receipt.states_after[0].pose().position_world()),
+    );
+    close(
+        receipt.potential_energy_change_j,
+        10.0 - 30.0 / radius_after,
+        3e-15,
+    );
+}
+
+#[test]
+fn direct_pair_work_retains_transverse_recoil_below_binding_energy_roundoff() {
+    let model = MutualGravity::new(FRAME, 1e12, 0.0, 1).unwrap();
+    let properties = [mass(2.0), mass(3.0)];
+    let initial = [
+        state(Vec3::new(-5e7, 0.0, 0.0), Vec3::new(0.0, -7500.0, 0.0)),
+        state(Vec3::new(5e7, 0.0, 0.0), Vec3::new(0.0, 7500.0, 0.0)),
+    ];
+    // The native drifts are -3/8 and +1/4 m. The first omitted binomial term
+    // is below 4e-29 J, so the independent transverse-energy oracle is much
+    // more accurate than the asserted tolerance. Neither rounded norm changes.
+    let expected = 0.5 * (1e12 * 2.0 * 3.0 / 1e24) * 0.625_f64.powi(2);
+    for shift in [Vec3::ZERO, Vec3::new(2e9, 1024.0, -512.0)] {
+        let states = initial.map(|s| {
+            state(s.pose().position_world().add(shift), s.linear_momentum_world())
+        });
+        let receipt = model
+            .step(FRAME, &states, &properties, 1e-4, || false)
+            .unwrap();
+        assert_eq!(receipt.pair_count, 1);
+        assert_eq!(
+            receipt.diagnostics_after.gravitational_potential_energy,
+            receipt.diagnostics_before.gravitational_potential_energy,
+        );
+        close(receipt.potential_energy_change_j, expected, 2e-27);
+        for body in 0..2 {
+            assert_eq!(
+                receipt.states_after[body].pose().position_world().x,
+                states[body].pose().position_world().x,
+            );
+        }
+
+        let reordered = model
+            .step(
+                FRAME,
+                &[states[1], states[0]],
+                &[properties[1], properties[0]],
+                1e-4,
+                || false,
+            )
+            .unwrap();
+        assert_eq!(
+            receipt.potential_energy_change_j,
+            reordered.potential_energy_change_j,
+        );
+        assert_eq!(receipt.states_after[0], reordered.states_after[1]);
+        assert_eq!(receipt.states_after[1], reordered.states_after[0]);
+
+        let reversed: Vec<_> = receipt
+            .states_after
+            .iter()
+            .map(|s| {
+                state(s.pose().position_world(), s.linear_momentum_world().scale(-1.0))
+            })
+            .collect();
+        let back = model
+            .step(FRAME, &reversed, &properties, 1e-4, || false)
+            .unwrap();
+        close(back.potential_energy_change_j, -expected, 2e-27);
+    }
+}
+
+#[test]
+fn source_displacement_survives_a_rounded_unchanged_pair_separation() {
+    let model = MutualGravity::new(FRAME, 1e20, 0.0, 1).unwrap();
+    let properties = [mass(2.0), mass(3.0)];
+    let states = [
+        state(Vec3::ZERO, Vec3::new(2.0, 0.0, 0.0)),
+        state(Vec3::new(1e20, 0.0, 0.0), Vec3::ZERO),
+    ];
+    let receipt = model
+        .step(FRAME, &states, &properties, 1.0, || false)
+        .unwrap();
+    assert_eq!(receipt.states_after[0].pose().position_world().x, 1.0);
+    assert_eq!(receipt.states_after[1].pose().position_world().x, 1e20);
+    assert_eq!(receipt.diagnostics_after.gravitational_potential_energy, -6.0);
+    assert_eq!(receipt.diagnostics_before.gravitational_potential_energy, -6.0);
+    // -6/(1 - 1e-20) + 6 = -6e-20 + O(1e-40); the source moves, too.
+    close(receipt.potential_energy_change_j, -6e-20, 2e-35);
 }
 
 #[test]
@@ -406,6 +498,7 @@ fn empty_single_body_and_extreme_radius_queries_use_original_owners() {
     assert!(empty.states_after.is_empty());
     assert_eq!(empty.pair_count, 0);
     assert_eq!(empty.diagnostics_after.mechanical_energy, 0.0);
+    assert_eq!(empty.potential_energy_change_j, 0.0);
     let initial = state(Vec3::new(1.0, 2.0, 3.0), Vec3::new(0.3, -0.2, 0.1));
     let expected = RigidBodyIntegrator::new(Gravity::ZERO)
         .step_symplectic(initial, mass(2.0), Wrench::ZERO, 0.1)
@@ -415,6 +508,7 @@ fn empty_single_body_and_extreme_radius_queries_use_original_owners() {
         .unwrap();
     assert_eq!(actual.states_after, vec![expected.state_after]);
     assert_eq!(actual.diagnostics_after, expected.diagnostics_after);
+    assert_eq!(actual.potential_energy_change_j, 0.0);
     let model = MutualGravity::new(FRAME, 1.0, 0.0, 1).unwrap();
     for (body_mass, radius, expected_force) in [(1e100, 1e200, 1e-200), (1e-100, 1e-200, 1e200)] {
         let bodies = [

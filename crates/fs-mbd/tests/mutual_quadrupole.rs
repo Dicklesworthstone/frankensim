@@ -233,6 +233,83 @@ fn mutual_second_moments_match_independent_resolved_mass_clouds() {
 }
 
 #[test]
+fn both_rotating_shapes_retain_tidal_work_below_monopole_roundoff() {
+    let properties = [
+        MassProperties::new(2.0, Vec3::ZERO, Vec3::new(0.7, 0.9, 1.2)).unwrap(),
+        MassProperties::new(3.0, Vec3::ZERO, Vec3::new(1.0, 1.2, 1.5)).unwrap(),
+    ];
+    let radii = [2.0, 3.0];
+    let dt = 1e-4;
+    let angles = [0.7_f64, -0.4_f64];
+    let states = [
+        RigidBodyState::new(
+            Pose::new(Vec3::new(-5e11, 0.0, 0.0), UnitQuaternion::IDENTITY).unwrap(),
+            Vec3::ZERO,
+            Vec3::new(0.0, 0.0, 1.2 * angles[0] / dt),
+        )
+        .unwrap(),
+        RigidBodyState::new(
+            Pose::new(Vec3::new(5e11, 0.0, 0.0), UnitQuaternion::IDENTITY).unwrap(),
+            Vec3::ZERO,
+            Vec3::new(0.0, 0.0, 1.5 * angles[1] / dt),
+        )
+        .unwrap(),
+    ];
+    let base = MutualGravity::new(FRAME, 1e12, 0.0, 1).unwrap();
+    let model = base.quadrupole(&radii, 0.1).unwrap();
+    let step = model
+        .step(FRAME, &states, &properties, dt, || false)
+        .unwrap();
+    for body in 0..2 {
+        assert_eq!(
+            step.states_after[body].pose().position_world(),
+            states[body].pose().position_world(),
+        );
+    }
+    assert_eq!(step.diagnostics_before.gravitational_potential_energy, -6.0);
+    assert_eq!(step.diagnostics_after.gravitational_potential_energy, -6.0);
+    // Each principal-z spin changes n.I.n by (Iy-Ix)*sin(theta)^2.
+    // The other finite body's original mass weights that body's correction.
+    let expected = 1.5e-24
+        * (3.0 * (0.9 - 0.7) * angles[0].sin().powi(2)
+            + 2.0 * (1.2 - 1.0) * angles[1].sin().powi(2));
+    close(step.potential_energy_change_j, expected, 2e-38);
+
+    let reverse_radii = [radii[1], radii[0]];
+    let reordered = base
+        .quadrupole(&reverse_radii, 0.1)
+        .unwrap()
+        .step(
+            FRAME,
+            &[states[1], states[0]],
+            &[properties[1], properties[0]],
+            dt,
+            || false,
+        )
+        .unwrap();
+    close(reordered.potential_energy_change_j, expected, 2e-38);
+    assert_eq!(step.states_after[0], reordered.states_after[1]);
+    assert_eq!(step.states_after[1], reordered.states_after[0]);
+
+    let reversed: Vec<_> = step
+        .states_after
+        .iter()
+        .map(|s| {
+            RigidBodyState::new(
+                s.pose(),
+                s.linear_momentum_world().scale(-1.0),
+                s.angular_momentum_body().scale(-1.0),
+            )
+            .unwrap()
+        })
+        .collect();
+    let back = model
+        .step(FRAME, &reversed, &properties, dt, || false)
+        .unwrap();
+    close(back.potential_energy_change_j, -expected, 2e-38);
+}
+
+#[test]
 fn combined_extent_drift_budget_and_late_cancellation_refuse_atomically() {
     let (states, properties) = fixture();
     let base = MutualGravity::new(FRAME, 0.8, 0.01, 1).unwrap();

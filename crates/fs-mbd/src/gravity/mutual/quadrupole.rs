@@ -10,10 +10,11 @@
 use super::super::{quadrupole_correction, quadrupole_inertia_trace};
 use super::{
     GravityError, MutualGravity, MutualGravityStepReceipt, Sum, VectorSum, binary_parts,
-    check_drift_separations, diagnostics, force_component, pair_magnitudes, poll, same_frame,
+    diagnostics, drift_potential_change, force_component, pair_magnitudes, poll, same_frame,
     scaled_positive, storage,
 };
 use crate::{DynamicsError, Gravity, MassProperties, RigidBodyIntegrator, RigidBodyState, Vec3, Wrench};
+use fs_math::dd::Dd;
 
 /// An explicitly selected extended-body model on an existing mutual-gravity owner.
 ///
@@ -84,8 +85,18 @@ impl MutualQuadrupoleGravity<'_> {
         frame: u64,
         states: &[RigidBodyState],
         properties: &[MassProperties],
-        mut cancelled: impl FnMut() -> bool,
+        cancelled: impl FnMut() -> bool,
     ) -> Result<MutualQuadrupoleLoad, GravityError> {
+        Ok(self.load_with_traces(frame, states, properties, cancelled)?.0)
+    }
+
+    fn load_with_traces(
+        self,
+        frame: u64,
+        states: &[RigidBodyState],
+        properties: &[MassProperties],
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<(MutualQuadrupoleLoad, Vec<f64>), GravityError> {
         poll(&mut cancelled)?;
         same_frame(frame, self.monopole.frame)?;
         if states.len() != properties.len() || states.len() != self.body_radii_m.len() {
@@ -187,11 +198,14 @@ impl MutualQuadrupoleGravity<'_> {
         }
         let potential_energy_j = potential.value()?;
         poll(&mut cancelled)?;
-        Ok(MutualQuadrupoleLoad {
-            wrenches,
-            potential_energy_j,
-            pair_count,
-        })
+        Ok((
+            MutualQuadrupoleLoad {
+                wrenches,
+                potential_energy_j,
+                pair_count,
+            },
+            traces,
+        ))
     }
 
     /// Advance all bodies through the original native Verlet stages.
@@ -219,7 +233,7 @@ impl MutualQuadrupoleGravity<'_> {
         if !duration_seconds.is_finite() || duration_seconds <= 0.0 {
             return Err(DynamicsError::InvalidStepDuration.into());
         }
-        let before = self.load(frame, states, properties, &mut cancelled)?;
+        let (before, traces) = self.load_with_traces(frame, states, properties, &mut cancelled)?;
         let diagnostics_before = diagnostics(
             states,
             properties,
@@ -235,10 +249,57 @@ impl MutualQuadrupoleGravity<'_> {
             candidates.push(stage.drifted_state());
             stages.push(stage);
         }
-        check_drift_separations(
+        let potential_energy_change_j = drift_potential_change(
             states,
             &candidates,
             |i, j, radius| self.admit_pair_radius(i, j, radius),
+            |i, j, before, after| {
+                let monopole_change = self.monopole.pair_potential_change(
+                    before,
+                    after,
+                    [properties[i].mass(), properties[j].mass()],
+                )?;
+                // Keep each shape's endpoint correction separate from the much
+                // larger monopole energy. Reuse the original admitted inertias
+                // and correction owner; neither body is held fixed.
+                let mut shape_changes = [Dd::ZERO; 2];
+                let indices = [i, j];
+                for (pair, sign) in [
+                    ([states[i], states[j]], -1.0),
+                    ([candidates[i], candidates[j]], 1.0),
+                ] {
+                    let displacement = pair[1]
+                        .pose()
+                        .position_world()
+                        .sub(pair[0].pose().position_world());
+                    let radius = self.monopole.admit_separation(displacement)?;
+                    self.admit_pair_radius(i, j, radius)?;
+                    let n = Vec3::new(
+                        displacement.x / radius,
+                        displacement.y / radius,
+                        displacement.z / radius,
+                    );
+                    for target in 0..2 {
+                        let body = indices[target];
+                        let source = indices[1 - target];
+                        let correction = quadrupole_correction(
+                            pair[target].pose(),
+                            properties[body],
+                            if target == 0 { n.scale(-1.0) } else { n },
+                            radius,
+                            inverse_cube_parameter(
+                                self.monopole.gravitational_constant,
+                                properties[source].mass(),
+                                radius,
+                            )?,
+                            traces[body],
+                        )?;
+                        shape_changes[target] = shape_changes[target]
+                            + Dd::from_f64(sign * correction.potential_energy_j);
+                    }
+                }
+                Ok(monopole_change + shape_changes[0] + shape_changes[1])
+            },
             &mut cancelled,
         )?;
         let after = self.load(frame, &candidates, properties, &mut cancelled)?;
@@ -258,6 +319,7 @@ impl MutualQuadrupoleGravity<'_> {
             states_after: candidates,
             diagnostics_before,
             diagnostics_after,
+            potential_energy_change_j,
             pair_count: before.pair_count,
         })
     }
