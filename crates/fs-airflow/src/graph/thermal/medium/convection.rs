@@ -32,7 +32,8 @@ pub use sphere::{MaterialSphereConvection, evaluate_sphere_from_material};
 /// Turbulent circular tubes with source-resolved bulk and wall viscosity.
 pub mod tube;
 pub use tube::{
-    MaterialTubeConvection, MaterialTurbulentTubeSection, evaluate_tube_from_material,
+    MaterialTubeConvection, MaterialTurbulentTubeSection, TurbulentTubeSectionDetails,
+    evaluate_tube_from_material,
     evaluate_turbulent_tube_section_from_material,
 };
 

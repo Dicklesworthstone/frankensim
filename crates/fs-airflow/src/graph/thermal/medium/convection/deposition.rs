@@ -57,6 +57,15 @@ pub enum CellConvectionLaw {
         speed_m_s: f64,
         start: Length,
     },
+    /// Developing turbulent circular-tube section from one physical heated
+    /// entrance. Characteristic length is the actual inside diameter. Both
+    /// distances are measured from the same inlet; flow reversal needs rebinding.
+    /// The same bulk transport state supplies Re, Pr and k, with K=1.
+    ForcedTubeSection {
+        speed_m_s: f64,
+        start: Length,
+        end: Length,
+    },
     /// Whitaker's isolated isothermal sphere. The primary material supplies
     /// BULK transport; this second fluid state supplies only wall viscosity.
     /// Both states must retain one fluid, pressure, composition and source.
@@ -117,6 +126,21 @@ impl CellConvectionLaw {
                 ));
             }
         }
+        if let Self::ForcedTubeSection { speed_m_s, start, end } = self {
+            let wetted_area = core::f64::consts::PI * length.value() * (end.value() - start.value());
+            if !speed_m_s.is_finite() || speed_m_s <= 0.0
+                || !length.value().is_finite() || length.value() <= 0.0
+                || !start.value().is_finite() || start.value() < 0.0
+                || !end.value().is_finite() || end.value() <= start.value()
+                || (start.value() > 0.0 && start.value() / length.value() == 0.0)
+                || !wetted_area.is_finite() || wetted_area <= 0.0
+                || !area_m2.is_finite() || area_m2 < 0.0 || area_m2 > wetted_area
+            {
+                return Err(ConvectionSourceError::Invalid(
+                    "tube sections require positive speed and diameter, finite 0 <= start < end and area within the actual wetted interval",
+                ));
+            }
+        }
         if matches!(self, Self::ForcedSphere { .. })
             && (!length.value().is_finite() || length.value() <= 0.0
                 || !area_m2.is_finite() || area_m2 < 0.0
@@ -170,14 +194,20 @@ pub struct CellConvectionEvaluation {
     /// the downstream mean above. Positive starts keep an unbounded local-model
     /// discrepancy in `coefficient`, as required by the shared section owner.
     pub section: Option<PlateSectionDetails>,
+    /// Physical tube interval, whose Nu uses diameter rather than axial length.
+    /// This is present only for a developing turbulent tube section.
+    pub tube_section: Option<TurbulentTubeSectionDetails>,
 }
 
 impl CellConvectionEvaluation {
     /// Actual dimensionless coefficient: strip mean when a section is present,
     /// otherwise the original whole-geometry correlation result.
     pub fn effective_nusselt(&self) -> f64 {
-        self.section.as_ref().map_or(self.nusselt.evidence().value,
-            |section| section.nusselt)
+        self.tube_section.as_ref().map_or_else(
+            || self.section.as_ref().map_or(self.nusselt.evidence().value,
+                |section| section.nusselt),
+            |section| section.nusselt,
+        )
     }
 }
 
@@ -400,7 +430,16 @@ pub(crate) fn evaluate_convection_state(
             )?;
             let (_, nusselt, coefficient, section) = evaluated.into_parts();
             return Ok(Some(CellConvectionEvaluation {
-                nusselt, coefficient, section: Some(section),
+                nusselt, coefficient, section: Some(section), tube_section: None,
+            }));
+        }
+        CellConvectionLaw::ForcedTubeSection { speed_m_s, start, end } => {
+            let evaluated = evaluate_turbulent_tube_section_from_material(
+                transport, speed_m_s, length, start, end,
+            )?;
+            let (_, nusselt, coefficient, section) = evaluated.into_parts();
+            return Ok(Some(CellConvectionEvaluation {
+                nusselt, coefficient, section: None, tube_section: Some(section),
             }));
         }
         CellConvectionLaw::ForcedSphere { speed_m_s, surface_transport } => {
@@ -408,14 +447,14 @@ pub(crate) fn evaluate_convection_state(
                 transport, &surface_transport, speed_m_s, length,
             )?;
             let (_, nusselt, coefficient) = result.into_parts();
-            return Ok(Some(CellConvectionEvaluation { nusselt, coefficient, section: None }));
+            return Ok(Some(CellConvectionEvaluation { nusselt, coefficient, section: None, tube_section: None }));
         }
         CellConvectionLaw::ForcedTube { speed_m_s, length_over_diameter, surface_transport } => {
             let result = evaluate_tube_from_material(
                 transport, &surface_transport, speed_m_s, length, length_over_diameter,
             )?;
             let (_, nusselt, coefficient) = result.into_parts();
-            return Ok(Some(CellConvectionEvaluation { nusselt, coefficient, section: None }));
+            return Ok(Some(CellConvectionEvaluation { nusselt, coefficient, section: None, tube_section: None }));
         }
         CellConvectionLaw::VerticalPlate { gravity_m_s2, expansion_per_k } => {
             natural(NaturalConvectionGeometry::VerticalPlate, gravity_m_s2, expansion_per_k)
@@ -435,6 +474,6 @@ pub(crate) fn evaluate_convection_state(
     }?;
     Ok(result.map(|value| {
         let (_, nusselt, coefficient) = value.into_parts();
-        CellConvectionEvaluation { nusselt, coefficient, section: None }
+        CellConvectionEvaluation { nusselt, coefficient, section: None, tube_section: None }
     }))
 }

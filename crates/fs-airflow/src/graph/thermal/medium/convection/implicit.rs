@@ -12,6 +12,9 @@ use super::deposition::{
     source::{ConvectionPropertyTemperature, SourceCellConvectionLaw},
 };
 use super::*;
+use fs_convection::developing::{
+    FlatPlateSectionError, evaluate_flat_plate_section, evaluate_turbulent_circular_duct_section,
+};
 use fs_matdb::PropertyLineSlice;
 use fs_material::liquid::VOLUMETRIC_EXPANSION_PROPERTY;
 use fs_material::liquid_temperature::{LiquidTemperatureLaw, LiquidViscosityBasis};
@@ -33,8 +36,8 @@ pub struct LiquidExteriorConvectionSettings {
     pub surface_temperature_bounds_k: [f64; 2],
     pub characteristic_length: Length,
     pub property_temperature: ConvectionPropertyTemperature,
-    /// Forced, forced-sphere, natural-geometry or laminar aiding mixed law.
-    /// Finite plate strips are not admitted here.
+    /// Forced, finite plate/tube section, forced-sphere, natural-geometry or
+    /// laminar aiding mixed law.
     pub law: SourceCellConvectionLaw,
     /// Constant total hemispherical gray emissivity on the same exterior.
     pub emissivity: f64,
@@ -88,6 +91,16 @@ impl From<CorrelationError> for LiquidExteriorConvectionError {
         Self::Correlation(error)
     }
 }
+impl From<FlatPlateSectionError> for LiquidExteriorConvectionError {
+    fn from(error: FlatPlateSectionError) -> Self {
+        match error {
+            FlatPlateSectionError::Correlation(error) => Self::Correlation(error),
+            FlatPlateSectionError::UnsupportedCorrelation(_) => Self::Invalid(
+                "finite plate strips require an original flat-plate mean correlation",
+            ),
+        }
+    }
+}
 impl From<ConvectionSourceError> for LiquidExteriorConvectionError {
     fn from(error: ConvectionSourceError) -> Self {
         Self::Convection(error)
@@ -108,7 +121,13 @@ pub struct LiquidExteriorConvectionResponse {
     pub property_temperature_k: f64,
     pub transport: FluidTransportState,
     pub surface_dynamic_viscosity_pa_s: Option<f64>,
+    /// Original correlation evaluation; for a finite section this is the
+    /// downstream cumulative mean, not the section's Nusselt number.
     pub nusselt: NusseltEvaluation,
+    /// Actual plate-strip geometry, upstream mean and strip-average Nu.
+    pub plate_section: Option<PlateSectionDetails>,
+    /// Actual circular-tube geometry, upstream mean and section-average Nu.
+    pub tube_section: Option<TurbulentTubeSectionDetails>,
     pub coefficient: Evidence<HeatTransferCoefficient>,
     pub coefficient_surface_derivative_w_m2_k2: f64,
 }
@@ -130,6 +149,10 @@ pub struct LiquidExteriorConvectionResponse {
 /// Aiding mixed convection retains the same source-owned expansion and the
 /// caller's signed flow and density-departure bound. Its forced/natural
 /// components and analytic partials remain with the original correlation.
+/// Finite plate strips retain the physical leading edge, both original means
+/// and the section coefficient's own Re/Pr partials. Film derivatives act on
+/// that coefficient, including its conductivity. Tube sections retain bulk
+/// properties with the original K=1 approximation and zero surface derivative.
 ///
 /// A genuine source kink or unavailable active correlation partial refuses.
 /// Source interval endpoints use their inward derivative. At equal sphere/bath
@@ -183,14 +206,6 @@ impl<'a, 'm> ImplicitLiquidConvection<'a, 'm> {
             if !temperature.is_finite() || temperature <= 0.0 {
                 return Err(Invalid("the original caloric endpoints must be physical"));
             }
-        }
-        if matches!(
-            settings.law,
-            SourceCellConvectionLaw::ForcedPlateSection { .. }
-        ) {
-            return Err(Invalid(
-                "implicit liquid exterior does not support finite plate strips",
-            ));
         }
         if let SourceCellConvectionLaw::AidingVerticalPlate { settings } = settings.law {
             settings.validate()?;
@@ -319,6 +334,68 @@ impl<'a, 'm> ImplicitLiquidConvection<'a, 'm> {
         let dpr = finite(state.prandtl() * (dmu / mu + dcp / cp - dk / k))?;
         let varying_transport =
             film_factor != 0.0 && sample.derivatives.iter().any(|slope| *slope != 0.0);
+        if let SourceCellConvectionLaw::ForcedPlateSection {
+            correlation, speed_m_s, start,
+        } = self.settings.law {
+            let re = state.reynolds(speed_m_s, length.value())?;
+            let dre = finite(re * (drho / rho - dmu / mu))?;
+            let section = evaluate_flat_plate_section(
+                correlation, re, state.prandtl(), start.value() / length.value(),
+            )?;
+            let coefficient = section.heat_transfer_coefficient_with_sensitivities(
+                ThermalConductivity::new(k), length,
+            )?;
+            // Require each potentially moving source group even at a zero
+            // first-order chain factor; a fixed group needs no invented slope
+            // at its empirical boundary. Use the SECTION's partials: the
+            // turbulent leading-edge correction cancels at positive starts.
+            let derivative = finite(
+                coefficient_partial(&coefficient, "Re", dre, drho != 0.0 || dmu != 0.0)?
+                    + coefficient_partial(
+                        &coefficient, "Pr", dpr, dmu != 0.0 || dcp != 0.0 || dk != 0.0,
+                    )?
+                    + coefficient_partial(&coefficient, "k", dk, dk != 0.0)?,
+            )?;
+            let (_, upstream, nusselt, section_nusselt) = section.into_parts();
+            return Ok(LiquidExteriorConvectionResponse {
+                property_temperature_k,
+                transport: state,
+                surface_dynamic_viscosity_pa_s: None,
+                nusselt,
+                plate_section: Some(PlateSectionDetails {
+                    start, end: length, upstream, nusselt: section_nusselt,
+                }),
+                tube_section: None,
+                coefficient,
+                coefficient_surface_derivative_w_m2_k2: derivative,
+            });
+        }
+        if let SourceCellConvectionLaw::ForcedTubeSection {
+            speed_m_s, start, end,
+        } = self.settings.law {
+            let re = state.reynolds(speed_m_s, length.value())?;
+            let section = evaluate_turbulent_circular_duct_section(
+                re, state.prandtl(), start.value() / length.value(), end.value() / length.value(),
+            )?;
+            let coefficient = section.heat_transfer_coefficient(
+                ThermalConductivity::new(k), length,
+            )?;
+            let (_, _, upstream, nusselt, section_nusselt) = section.into_parts();
+            // Constructor admission requires bulk properties and K=1 here;
+            // varying the wall cannot change any source coordinate or h.
+            return Ok(LiquidExteriorConvectionResponse {
+                property_temperature_k,
+                transport: state,
+                surface_dynamic_viscosity_pa_s: None,
+                nusselt,
+                plate_section: None,
+                tube_section: Some(TurbulentTubeSectionDetails {
+                    diameter: length, start, end, upstream, nusselt: section_nusselt,
+                }),
+                coefficient,
+                coefficient_surface_derivative_w_m2_k2: 0.0,
+            });
+        }
         let mut wall_viscosity = None;
         let mut varying_wall_viscosity = false;
         let (nusselt, dnu) = match self.settings.law {
@@ -456,7 +533,10 @@ impl<'a, 'm> ImplicitLiquidConvection<'a, 'm> {
                 let derivative = partial(&nu, "Ra", dra * ra.signum())? + partial(&nu, "Pr", dpr)?;
                 (nu, finite(derivative)?)
             }
-            _ => unreachable!("constructor excludes unsupported geometry"),
+            SourceCellConvectionLaw::ForcedPlateSection { .. }
+            | SourceCellConvectionLaw::ForcedTubeSection { .. } => {
+                unreachable!("finite sections return their own coefficient above")
+            }
         };
         // Moving source properties can have a zero aggregate group derivative
         // at a local extremum. That does not establish differentiability of a
@@ -478,6 +558,8 @@ impl<'a, 'm> ImplicitLiquidConvection<'a, 'm> {
             transport: state,
             surface_dynamic_viscosity_pa_s: wall_viscosity,
             nusselt,
+            plate_section: None,
+            tube_section: None,
             coefficient,
             coefficient_surface_derivative_w_m2_k2: derivative,
         })
@@ -699,6 +781,20 @@ fn partial(
         .ok_or(LiquidExteriorConvectionError::MissingDerivative { axis })?;
     finite(derivative * input_derivative)
 }
+fn coefficient_partial(
+    coefficient: &Evidence<HeatTransferCoefficient>,
+    axis: &'static str,
+    input_derivative: f64,
+    source_varies: bool,
+) -> Result<f64, LiquidExteriorConvectionError> {
+    if !source_varies {
+        return Ok(0.0);
+    }
+    let derivative = coefficient.sensitivity.d_qoi.get(axis)
+        .ok_or(LiquidExteriorConvectionError::MissingDerivative { axis })?;
+    finite(derivative * input_derivative)
+}
+
 fn finite(value: f64) -> Result<f64, LiquidExteriorConvectionError> {
     if value.is_finite() {
         Ok(value)

@@ -47,6 +47,15 @@ pub enum SourceCellConvectionLaw {
         speed_m_s: f64,
         start: Length,
     },
+    /// Developing turbulent circular-tube interval. Characteristic length is
+    /// diameter; start and end retain the physical heated entrance. Reservoir
+    /// bulk properties are mandatory for the explicit K=1 model. Re-evaluating
+    /// a cell does not restart its inlet or introduce a wall-property correction.
+    ForcedTubeSection {
+        speed_m_s: f64,
+        start: Length,
+        end: Length,
+    },
     /// Isolated isothermal sphere with Whitaker's original bulk/surface
     /// property convention. Select `Reservoir` for the primary state; the
     /// SAME resolver is additionally queried at the actual wall temperature.
@@ -87,6 +96,10 @@ impl SourceCellConvectionLaw {
             CellConvectionLaw::ForcedPlateSection { correlation, speed_m_s, start }
                 .admit_area(0.0, length)?;
         }
+        if let Self::ForcedTubeSection { speed_m_s, start, end } = self {
+            CellConvectionLaw::ForcedTubeSection { speed_m_s, start, end }
+                .admit_area(0.0, length)?;
+        }
         if let Self::Forced {
             correlation: CorrelationId::SiederTateTurbulent | CorrelationId::GnielinskiDeveloping,
             settings, ..
@@ -114,7 +127,8 @@ impl SourceCellConvectionLaw {
                 "viscosity-corrected convection requires bulk properties plus separately resolved wall viscosity",
             ));
         }
-        if matches!(self, Self::Forced { correlation: CorrelationId::GnielinskiDeveloping, .. })
+        if matches!(self, Self::Forced { correlation: CorrelationId::GnielinskiDeveloping, .. }
+            | Self::ForcedTubeSection { .. })
             && convention != ConvectionPropertyTemperature::Reservoir
         {
             return Err(ConvectionSourceError::Invalid(
@@ -179,6 +193,9 @@ impl SourceCellConvectionLaw {
             },
             Self::ForcedPlateSection { correlation, speed_m_s, start } => {
                 CellConvectionLaw::ForcedPlateSection { correlation, speed_m_s, start }
+            }
+            Self::ForcedTubeSection { speed_m_s, start, end } => {
+                CellConvectionLaw::ForcedTubeSection { speed_m_s, start, end }
             }
             Self::ForcedSphere { speed_m_s } => CellConvectionLaw::ForcedSphere {
                 speed_m_s,

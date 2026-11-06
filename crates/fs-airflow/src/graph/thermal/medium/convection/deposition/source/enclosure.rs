@@ -356,6 +356,7 @@ pub fn evaluate_source_enclosed_gas_layers<F: ThermalFluidTransport, E>(
                 nusselt,
                 coefficient,
                 section: None,
+                tube_section: None,
             },
         });
     }

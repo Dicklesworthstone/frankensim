@@ -5,6 +5,20 @@ use fs_convection::developing::{
     TurbulentCircularDuctSection, evaluate_turbulent_circular_duct_section,
 };
 
+/// Physical circular-tube interval and the actual section-average coefficient.
+/// The containing thermal sample keeps the original downstream mean separately.
+/// Positive starts also retain the upstream mean and an unbounded local-model
+/// discrepancy; their inferred profile has no independent experimental bound.
+#[derive(Debug)]
+pub struct TurbulentTubeSectionDetails {
+    pub diameter: Length,
+    pub start: Length,
+    pub end: Length,
+    pub upstream: Option<NusseltEvaluation>,
+    /// Actual section-average h * diameter / k.
+    pub nusselt: f64,
+}
+
 /// Original bulk material, circular geometry and cumulative entrance transfer.
 /// The finite section's coefficient can enter the existing conduction Robin row.
 #[derive(Debug)]
@@ -46,6 +60,24 @@ impl<F: FluidTransport + ?Sized> MaterialTurbulentTubeSection<'_, F> {
     /// The actual section coefficient, with its own model discrepancy boundary.
     pub const fn coefficient(&self) -> &Evidence<HeatTransferCoefficient> {
         &self.coefficient
+    }
+
+    pub(crate) fn into_parts(self) -> (
+        FluidTransportState,
+        NusseltEvaluation,
+        Evidence<HeatTransferCoefficient>,
+        TurbulentTubeSectionDetails,
+    ) {
+        let (_, _, upstream, downstream, nusselt) = self.section.into_parts();
+        (
+            self.transport,
+            downstream,
+            self.coefficient,
+            TurbulentTubeSectionDetails {
+                diameter: self.diameter, start: self.start, end: self.end,
+                upstream, nusselt,
+            },
+        )
     }
 
     /// Lower this same section into native conduction. The reference is the

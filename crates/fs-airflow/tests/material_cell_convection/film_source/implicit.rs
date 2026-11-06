@@ -1,5 +1,8 @@
 //! G1/G3: original liquid curves -> actual nonlinear surface -> native heat history.
 use super::*;
+
+#[path = "implicit/sections.rs"]
+mod sections;
 use fs_airflow::graph::thermal::medium::convection::{
     AidingVerticalPlateSettings, HorizontalPlateFacing, NaturalConvectionGeometry,
     evaluate_aiding_vertical_plate_from_material, evaluate_natural_from_material,
@@ -568,6 +571,22 @@ fn g3_mixed_surface_closes_integrated_half_cell_and_native_backward_euler_energy
 }
 
 fn source_surface_energy(mixed: bool) {
+    let law = if mixed {
+        SourceCellConvectionLaw::AidingVerticalPlate { settings: mixed_settings(0.1, 9.81) }
+    } else {
+        SourceCellConvectionLaw::Forced {
+            correlation: CorrelationId::FlatPlateLaminarAverage,
+            speed_m_s: 0.1,
+            settings: ForcedConvectionSettings::default(),
+        }
+    };
+    source_surface_energy_with(settings(law), |temperature| reference(temperature, mixed));
+}
+
+fn source_surface_energy_with(
+    configuration: LiquidExteriorConvectionSettings,
+    reference: impl Fn(f64) -> (f64, [f64; 2]),
+) {
     let card = liquid_card(0.3, 0.01, 320.0);
     let liquid = liquid_law(&card)
         .with_density_expansion(Temperature::new(280.0), Temperature::new(320.0))
@@ -609,15 +628,7 @@ fn source_surface_energy(mixed: bool) {
         layer.caloric_law(),
         layer.energy_bounds_j_kg(),
         &liquid,
-        settings(if mixed {
-            SourceCellConvectionLaw::AidingVerticalPlate { settings: mixed_settings(0.1, 9.81) }
-        } else {
-            SourceCellConvectionLaw::Forced {
-                correlation: CorrelationId::FlatPlateLaminarAverage,
-                speed_m_s: 0.1,
-                settings: ForcedConvectionSettings::default(),
-            }
-        }),
+        configuration,
     )
     .unwrap();
     let geometry = ImplicitBoundaryGeometry {
@@ -648,14 +659,14 @@ fn source_surface_energy(mixed: bool) {
     let result = boundary
         .evaluate(energy(body_temperature), 300.0, &mut || Ok(()))
         .unwrap();
-    let (surface, powers) = reference(body_temperature, mixed);
+    let (surface, powers) = reference(body_temperature);
     near(result.surface_temperature_k, surface, 2e-9);
     near(result.convection_power_w, powers[0], 1e-8);
     near(result.radiation_power_w, powers[1], 1e-8);
     near(result.surface_residual_w, 0.0, 1e-8);
     let temperature_delta = 1e-3;
-    let a = reference(body_temperature + temperature_delta, mixed).1;
-    let b = reference(body_temperature - temperature_delta, mixed).1;
+    let a = reference(body_temperature + temperature_delta).1;
+    let b = reference(body_temperature - temperature_delta).1;
     let derivative = ((a[0] + a[1]) - (b[0] + b[1]))
         / (energy(body_temperature + temperature_delta)
             - energy(body_temperature - temperature_delta));
@@ -753,7 +764,7 @@ fn source_surface_energy(mixed: bool) {
         )
         .unwrap();
     let temperature = next.temperature_k(cell).unwrap();
-    let (_, p) = reference(temperature, mixed);
+    let (_, p) = reference(temperature);
     near(
         MASS * (energy(temperature) - energy(body_temperature)) + dt * (p[0] + p[1]),
         0.0,

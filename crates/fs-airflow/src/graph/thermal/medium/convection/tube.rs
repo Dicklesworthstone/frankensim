@@ -8,7 +8,10 @@ use super::*;
 
 /// Developing turbulent sections retain the original physical tube entrance.
 pub mod developing;
-pub use developing::{MaterialTurbulentTubeSection, evaluate_turbulent_tube_section_from_material};
+pub use developing::{
+    MaterialTurbulentTubeSection, TurbulentTubeSectionDetails,
+    evaluate_turbulent_tube_section_from_material,
+};
 
 /// Original bulk and wall-temperature fluid sources for one tube evaluation.
 /// The surface source is the same FLUID at the wall temperature, not the solid.

@@ -40,6 +40,123 @@ fn developing_link(length_over_diameter: f64) -> SourceConvectiveLink {
     }
 }
 
+fn section_link(start_m: f64, end_m: f64) -> SourceConvectiveLink {
+    SourceConvectiveLink {
+        law: SourceCellConvectionLaw::ForcedTubeSection {
+            speed_m_s: 1.0,
+            start: Length::new(start_m),
+            end: Length::new(end_m),
+        },
+        ..tube_link()
+    }
+}
+
+// Independent difference of cumulative entrance transfer, moderate intervals.
+fn section_coefficient(bulk: f64, start_m: f64, end_m: f64) -> f64 {
+    let developed = developing_coefficient(bulk, 1e6) / (1.0 + 1e6_f64.powf(-2.0 / 3.0));
+    let a = start_m / 0.1;
+    let b = end_m / 0.1;
+    developed * ((b + b.cbrt()) - (a + a.cbrt())) / (b - a)
+}
+
+#[test]
+fn downstream_tube_sections_close_finite_body_energy_with_the_actual_bulk_source() {
+    let chart = curve();
+    let (card, caloric) = fluid_source(1.0);
+    let law = liquid_law(&card);
+    let dt = 0.2;
+    let mut final_walls = Vec::new();
+    for start_m in [0.0, 1.0] {
+        let (mut lo, mut hi) = (294.0, 310.0);
+        for _ in 0..80 {
+            let wall = 0.5 * lo + 0.5 * hi;
+            let bulk = 290.0 + CP / FLUID_CP * (310.0 - wall);
+            let heat = dt * LINK_AREA * section_coefficient(bulk, start_m, 2.0) * (wall - bulk);
+            if MASS * CP * (wall - 310.0) + heat > 0.0 { hi = wall; }
+            else { lo = wall; }
+        }
+        let wall = 0.5 * lo + 0.5 * hi;
+        let expected = [wall, 290.0 + CP / FLUID_CP * (310.0 - wall)];
+        for reversed in [false, true] {
+            let thermal = pair(&chart, &caloric, reversed, 0.0);
+            let step = BackwardEulerStep::new(&thermal, dt, || Ok(())).unwrap();
+            let mut queried = Vec::new();
+            let trial = step.evaluate(&increments(&step, expected), |state| {
+                let sources = evaluate_source_link_convection(
+                    state, &[section_link(start_m, 2.0)], 1,
+                    |_, _, temperature| {
+                        queried.push(temperature.value());
+                        law.at_temperature(temperature)
+                    }, || false,
+                )?;
+                Ok::<_, SourceCellConvectionError<MaterialStatePointError>>(StepCoefficients {
+                    sources_w: BTreeMap::new(),
+                    conductances_w_k: sources.conductances_w_k().clone(), payload: sources,
+                })
+            }, || Ok(())).unwrap();
+            let (next, source, audit) = trial.accept(1e-8, 1e-8, || Ok(())).unwrap();
+            assert_eq!(queried.len(), 1);
+            near(queried[0], expected[1], 1e-12);
+            let sample = &source.samples()[0];
+            assert!(sample.surface.is_none());
+            let evaluation = sample.evaluation.as_ref().unwrap();
+            assert!(evaluation.section.is_none());
+            let details = evaluation.tube_section.as_ref().unwrap();
+            assert_eq!(details.diameter.value(), 0.1);
+            assert_eq!(details.start.value(), start_m);
+            assert_eq!(details.end.value(), 2.0);
+            assert_eq!(details.upstream.is_some(), start_m > 0.0);
+            assert_eq!(evaluation.effective_nusselt(), details.nusselt);
+            assert_eq!(evaluation.coefficient.model.discrepancy_rel.is_infinite(), start_m > 0.0);
+            near(sample.conductance_w_k,
+                LINK_AREA * section_coefficient(expected[1], start_m, 2.0), 1e-9);
+            near(next.temperature_k(IDS[0]).unwrap(), expected[0], 1e-9);
+            near(next.temperature_k(IDS[1]).unwrap(), expected[1], 1e-9);
+            near(next.energy_j(), thermal.energy_j(), 1e-8);
+            near(audit.external_heat_j, 0.0, 1e-12);
+            near(audit.residual_j, 0.0, 1e-8);
+            near(MASS * CP * (expected[0] - 310.0) + dt * sample.heat_into_fluid_w,
+                0.0, 1e-8);
+        }
+        final_walls.push(wall);
+    }
+    assert!(final_walls[1] > final_walls[0] + 0.1,
+        "a downstream section must not repeat the physical inlet enhancement");
+}
+
+#[test]
+fn tube_section_geometry_and_property_convention_refuse_before_material_queries() {
+    let chart = curve();
+    let (card, caloric) = fluid_source(1.0);
+    let law = liquid_law(&card);
+    let thermal = pair(&chart, &caloric, false, 0.0);
+    let invalid = [
+        section_link(-1.0, 2.0), section_link(2.0, 2.0), section_link(3.0, 2.0),
+        section_link(0.0, f64::NAN),
+        SourceConvectiveLink {
+            characteristic_length: Length::new(0.0), ..section_link(1.0, 2.0)
+        },
+        SourceConvectiveLink {
+            property_temperature: ConvectionPropertyTemperature::FilmMean,
+            ..section_link(1.0, 2.0)
+        },
+        SourceConvectiveLink {
+            law: SourceCellConvectionLaw::ForcedTubeSection {
+                speed_m_s: 0.0, start: Length::new(1.0), end: Length::new(2.0),
+            },
+            ..section_link(1.0, 2.0)
+        },
+    ];
+    for binding in invalid {
+        let mut calls = 0;
+        assert!(evaluate_source_link_convection(&thermal, &[binding], 1, |_, _, t| {
+            calls += 1;
+            law.at_temperature(t)
+        }, || false).is_err());
+        assert_eq!(calls, 0);
+    }
+}
+
 // Independent Gnielinski (2013) Eq. (2) with corrected Eq. (6), K=1.
 fn developing_coefficient(bulk: f64, length_over_diameter: f64) -> f64 {
     let mu = 0.001 * (1.0 - 0.01 * (bulk - 300.0));

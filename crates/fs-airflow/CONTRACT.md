@@ -4382,3 +4382,29 @@ conditional on one isothermal passage and common bulk state. The
 `liquid_pressure/source_graph/developing` regression checks solved flow,
 upstream/downstream transfer, reversed entrance positions, bulk convention and
 the unsupported endpoint regime with independently evaluated formula values.
+
+## Physical sections in native implicit and finite-cell heat exchange
+
+`SourceCellConvectionLaw::ForcedTubeSection` and its borrowed-material
+counterpart retain the actual circular diameter and both distances from the
+heated inlet. They use Reservoir bulk properties for the shared developing
+Gnielinski K=1 model. Native exposed-cell boundaries, reciprocal finite-fluid
+links and shared heat/circuit consumers retain one thermal exchange and the
+source at the current trial temperature. Tube patch area cannot exceed its
+physical wetted interval. Returned `tube_section` metadata and
+`effective_nusselt()` distinguish the actual section coefficient from its
+retained original downstream mean.
+
+`ImplicitLiquidConvection` also admits finite plate strips and tube sections.
+Prepared plate-film property curves provide the full temperature chain through
+the actual section coefficient's Re, Pr and conductivity partials, including
+the half-factor from mean-film temperature and density conversion for kinematic
+viscosity. Independent fixed-group boundaries do not remove available moving
+group derivatives; a required missing partial or genuine source kink refuses.
+Turbulent downstream strips differentiate their cancellation-corrected section,
+not the whole-plate mean. Bulk K=1 tube coefficients have zero surface-
+temperature derivative. Both retain upstream/downstream source evidence and
+their actual section Nu, while native surface elimination, conduction,
+radiation, body storage and time integration remain the existing owners.
+Focused regressions cover material queries, signed reciprocal heat, entrance
+position, analytic film chains and native body energy/entropy closure.
