@@ -4,8 +4,8 @@
 //! These allocation-free kernels return coefficients or transferred energy;
 //! they do not advance time, change composition or publish a material state.
 
-use super::{DtFusionError, DtFusionTransport, poll};
-use fs_math::det::{expm1, sqrt};
+use super::{DtFusionError, DtFusionTransport, FusionEnergyConfinement, poll};
+use fs_math::det::{exp, expm1, ln, sqrt};
 use fs_qty::{Amount, Temperature, Volume};
 use fs_thermochem::coulomb::CoulombErrorV1;
 use fs_thermochem::plasma_radiation::BremsstrahlungErrorV1;
@@ -129,6 +129,51 @@ pub(super) fn radiated_energy(
         ));
     }
     Ok(loss)
+}
+
+/// Exact fixed-population relaxation to explicitly prescribed exteriors.
+/// Returns positive surviving pool energies and independently evaluated signed
+/// outgoing transfers [J], both ordered heavy/electron. Computing the survivor
+/// as a convex combination preserves a small thermal store after deep cooling;
+/// `initial - outgoing` would erase it. `expm1` retains weak transport without
+/// subtracting two nearly equal temperatures. Infinite exposure is the exact
+/// equilibrium limit; no temperature floor or negative-energy clipping is used.
+pub(super) fn confined_energy(
+    energies: [f64; 2],
+    capacities: [f64; 2],
+    dt: f64,
+    confinement: FusionEnergyConfinement,
+) -> Result<([f64; 2], [f64; 2]), DtFusionError> {
+    let mut remaining = energies;
+    let mut outgoing = [0.0; 2];
+    for i in 0..2 {
+        let target = capacities[i] * confinement.exterior_temperatures[i].value();
+        let exposure = dt / confinement.times[i].value();
+        if !target.is_finite() || exposure.is_nan() || exposure < 0.0 {
+            return Err(DtFusionError::Arithmetic(
+                "finite confinement exterior energy and nonnegative exposure required",
+            ));
+        }
+        let relaxed = -expm1(-exposure);
+        outgoing[i] = (energies[i] - target) * relaxed;
+        let survival = exp(-exposure);
+        remaining[i] = if survival.is_normal() {
+            energies[i].mul_add(survival, target * relaxed)
+        } else {
+            // An underflowed survival fraction can still leave a representable
+            // extensive energy. Combine scales before the final exponential.
+            exp(ln(energies[i]) - exposure) + target * relaxed
+        };
+        if !remaining[i].is_finite() || !outgoing[i].is_finite() {
+            return Err(DtFusionError::Arithmetic(
+                "finite confinement energy transfer",
+            ));
+        }
+        if remaining[i] <= 0.0 {
+            return Err(DtFusionError::OutsideDomain);
+        }
+    }
+    Ok((remaining, outgoing))
 }
 
 fn coulomb_error(error: CoulombErrorV1) -> DtFusionError {

@@ -12,6 +12,7 @@ use fs_thermochem::plasma_radiation::{
 };
 
 mod compression;
+mod confinement;
 mod fixture;
 
 const MIXED_DENSITY: [f64; 5] = [2e19, 3e20, 7e19, 4e19, 1e19];
@@ -56,6 +57,7 @@ fn mixed_heating() -> FusionNetworkHeating {
 
 fn transport(state: &FrozenIonizedGasStateV1) -> FusionNetworkTransport {
     FusionNetworkTransport {
+        energy_confinement: None,
         coulomb: Some(
             CoulombModelV1::new_with_cutoff(
                 state,
@@ -244,6 +246,28 @@ fn check_reference(result: &FusionNetworkResult, reference: &Reference) {
 
 fn check_accounts(result: &FusionNetworkResult) {
     let b = result.balance();
+    let emission = result.neutron_emission().unwrap();
+    assert_eq!(emission.duration(), result.elapsed_time());
+    for (i, channel) in emission.channels().iter().enumerate() {
+        assert_eq!(channel.reaction(), FusionReactionV1::ALL[i]);
+        assert_eq!(channel.amount().value(), b.reaction_extents_mol[i]);
+        assert_eq!(
+            channel.kinetic_energy().value(),
+            b.product_kinetic_energies_j[i][1],
+        );
+    }
+    close(
+        emission.total_amount().value(),
+        b.neutron_amount_mol,
+        2e-13,
+        0.0,
+    );
+    close(
+        emission.total_kinetic_energy().value(),
+        b.neutron_energy_escaped_j,
+        2e-13,
+        0.0,
+    );
     let nuclei = [
         NuclearSpeciesV1::Proton,
         NuclearSpeciesV1::Deuterium,

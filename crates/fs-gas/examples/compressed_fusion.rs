@@ -9,6 +9,7 @@
 #[path = "light_ion_fusion/source.rs"]
 mod source;
 
+use fs_gas::fusion::FusionEnergyConfinement;
 use fs_gas::fusion::network::{
     FusionNetworkChannels, FusionNetworkHeating, FusionNetworkResult, FusionNetworkSolve,
     FusionNetworkTransport, advance_fusion_network, advance_fusion_network_with_volume,
@@ -73,6 +74,10 @@ fn report(label: &str, result: &FusionNetworkResult) {
         balance.photon_energy_escaped_j
     );
     println!(
+        "  thermal energy transported out from ions/electrons: {:.9} / {:.9} J",
+        balance.heavy_transport_energy_out_j, balance.electron_transport_energy_out_j
+    );
+    println!(
         "  signed electron-to-ion Coulomb transfer: {:.9} J",
         balance.electron_to_heavy_coulomb_energy_j
     );
@@ -81,7 +86,7 @@ fn report(label: &str, result: &FusionNetworkResult) {
         balance.boundary_work_on_heavy_j, balance.boundary_work_on_electrons_j
     );
     println!(
-        "  energy residual (delta U + neutrons + photons - Q - heat - work): {:.6e} J",
+        "  energy residual (delta U + neutrons + photons + transport - Q - heat - work): {:.6e} J",
         balance.total_energy_residual_j
     );
     println!(
@@ -104,6 +109,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         heavy_power: Power::new(0.0),
     };
     let transport = FusionNetworkTransport {
+        energy_confinement: None,
         coulomb: Some(CoulombModelV1::new_with_cutoff(
             &initial,
             CoulombScreeningV1::StaticAllChargedDebye,
@@ -184,5 +190,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?;
     report("Same-duration rigid baseline:", &rigid);
     report("Prescribed compression, hold and expansion:", &compressed);
+    let mut confined_transport = transport.clone();
+    confined_transport.energy_confinement = Some(FusionEnergyConfinement::new(
+        Time::new(0.2),
+        Time::new(0.13),
+        Temperature::new(2.0 * KELVIN_PER_KEV),
+        Temperature::new(KELVIN_PER_KEV),
+    )?);
+    let confined = advance_fusion_network_with_volume(
+        &initial,
+        &plasma,
+        FusionNetworkChannels::ALL,
+        heating,
+        &confined_transport,
+        &history,
+        controls(),
+        || false,
+    )?;
+    println!(
+        "Third case prescribes non-radiative ion/electron energy-confinement times .2/.13 s and fixed exteriors 2/1 keV."
+    );
+    println!(
+        "These are authored transport parameters; particle inventories remain governed only by fusion."
+    );
+    report(
+        "Same volume history with finite thermal energy confinement:",
+        &confined,
+    );
     Ok(())
 }

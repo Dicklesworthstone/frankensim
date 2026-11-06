@@ -18,6 +18,7 @@ pub(super) struct Point {
     // Reconstructing it as U_initial + W can erase it after deep expansion.
     thermal_energy: [Sum; 2],
     work_on_pools: [Sum; 2],
+    transport_energy_out: [Sum; 2],
     pub(super) kinetic_alpha_amount: Sum,
     pub(super) alpha_deposited: [Sum; 2],
     amounts: [Sum; 6],
@@ -159,6 +160,7 @@ impl<'a> Problem<'a> {
             volume: self.initial.volume(),
             thermal_energy: self.initial_energy.map(sum),
             work_on_pools: [Sum::default(); 2],
+            transport_energy_out: [Sum::default(); 2],
             kinetic_alpha_amount: sum(self.initial_alpha_amount),
             alpha_deposited: [Sum::default(); 2],
             amounts: self.initial_amounts.map(sum),
@@ -202,10 +204,16 @@ impl<'a> Problem<'a> {
         ]
     }
     pub(super) fn pool_energy(&self, point: Point) -> [f64; 2] {
-        if self.volume_history.is_some() || self.kinetic_alphas {
+        if self.retains_thermal_energy() {
             return point.thermal_energy.map(|x| x.value);
         }
         self.accounted_energy(point)
+    }
+
+    fn retains_thermal_energy(&self) -> bool {
+        self.volume_history.is_some()
+            || self.kinetic_alphas
+            || self.transport.energy_confinement.is_some()
     }
     /// Independent cumulative transfer accounts, also used to verify moving
     /// states. The rigid path retains its original arithmetic and fast path.
@@ -216,18 +224,20 @@ impl<'a> Problem<'a> {
                 + (point.deposited[0].value - point.ion_removal.value)
                 + point.exchange.value
                 + point.work_on_pools[0].value
-                + point.alpha_deposited[0].value,
+                + point.alpha_deposited[0].value
+                - point.transport_energy_out[0].value,
             self.initial_energy[1]
                 + self.heating.electron_power.value() * point.time
                 + point.deposited[1].value
                 - point.exchange.value
                 - point.photons.value
                 + point.work_on_pools[1].value
-                + point.alpha_deposited[1].value,
+                + point.alpha_deposited[1].value
+                - point.transport_energy_out[1].value,
         ]
     }
     fn add_pool_energy(&self, point: &mut Point, increments: [f64; 2]) {
-        if self.volume_history.is_some() || self.kinetic_alphas {
+        if self.retains_thermal_energy() {
             for (energy, increment) in point.thermal_energy.iter_mut().zip(increments) {
                 energy.add(increment);
             }
@@ -241,6 +251,7 @@ impl<'a> Problem<'a> {
             && point.photons.value == 0.0
             && point.work_on_pools.iter().all(|x| x.value == 0.0)
             && point.alpha_deposited.iter().all(|x| x.value == 0.0)
+            && point.transport_energy_out.iter().all(|x| x.value == 0.0)
             && point.volume == self.initial.volume()
             && (point.time == 0.0
                 || (self.heating.heavy_power.value() == 0.0
@@ -271,9 +282,13 @@ impl<'a> Problem<'a> {
             || !positive(point.volume.value())
             || point.work_on_pools.iter().any(|x| !x.value.is_finite())
             || point.alpha_deposited.iter().any(|x| !x.value.is_finite())
+            || point
+                .transport_energy_out
+                .iter()
+                .any(|x| !x.value.is_finite())
             || !point.kinetic_alpha_amount.value.is_finite()
             || point.kinetic_alpha_amount.value < 0.0
-            || ((self.volume_history.is_some() || self.kinetic_alphas)
+            || (self.retains_thermal_energy()
                 && point.thermal_energy.iter().any(|x| !x.value.is_finite()))
             || point
                 .amounts
@@ -417,10 +432,14 @@ impl<'a> Problem<'a> {
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Point, FusionNetworkError> {
         poll(cancelled)?;
-        if sources.conductance_w_k == 0.0 && sources.radiation_w_per_sqrt_k == 0.0 {
+        if sources.conductance_w_k == 0.0
+            && sources.radiation_w_per_sqrt_k == 0.0
+            && self.transport.energy_confinement.is_none()
+        {
             return Ok(old);
         }
-        let first = self.radiate(old, 0.5 * dt, sources.radiation_w_per_sqrt_k)?;
+        let confined = self.confine(old, 0.5 * dt, cancelled)?;
+        let first = self.radiate(confined, 0.5 * dt, sources.radiation_w_per_sqrt_k)?;
         self.admit(first, cancelled)?;
         let transfer = thermal::exchange_energy(
             self.temperatures(first)?,
@@ -433,6 +452,31 @@ impl<'a> Problem<'a> {
         self.add_pool_energy(&mut exchanged, [transfer, -transfer]);
         self.admit(exchanged, cancelled)?;
         let next = self.radiate(exchanged, 0.5 * dt, sources.radiation_w_per_sqrt_k)?;
+        self.admit(next, cancelled)?;
+        self.confine(next, 0.5 * dt, cancelled)
+    }
+
+    fn confine(
+        &self,
+        old: Point,
+        dt: f64,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Point, FusionNetworkError> {
+        let Some(confinement) = self.transport.energy_confinement else {
+            return Ok(old);
+        };
+        let energies = self.pool_energy(old);
+        let (remaining, outgoing) =
+            thermal::confined_energy(energies, self.capacities(old), dt, confinement)?;
+        let mut next = old;
+        for i in 0..2 {
+            next.transport_energy_out[i].add(outgoing[i]);
+            if outgoing[i] > 0.5 * energies[i] {
+                next.thermal_energy[i] = sum(remaining[i]);
+            } else {
+                next.thermal_energy[i].add(-outgoing[i]);
+            }
+        }
         self.admit(next, cancelled)?;
         Ok(next)
     }
@@ -607,6 +651,16 @@ impl<'a> Problem<'a> {
             (full.ion_removal, fine.ion_removal, old.ion_removal),
             (full.exchange, fine.exchange, old.exchange),
             (full.photons, fine.photons, old.photons),
+            (
+                full.transport_energy_out[0],
+                fine.transport_energy_out[0],
+                old.transport_energy_out[0],
+            ),
+            (
+                full.transport_energy_out[1],
+                fine.transport_energy_out[1],
+                old.transport_energy_out[1],
+            ),
             (
                 full.alpha_deposited[0],
                 fine.alpha_deposited[0],
@@ -791,7 +845,11 @@ impl<'a> Problem<'a> {
         let change = (thermal_energy[0] - self.initial_energy[0])
             + (thermal_energy[1] - self.initial_energy[1])
             + kinetic_energy_change_j;
-        let total_residual = change + point.neutrons.value + point.photons.value
+        let total_residual = change
+            + point.neutrons.value
+            + point.photons.value
+            + point.transport_energy_out[0].value
+            + point.transport_energy_out[1].value
             - released.value
             - external_heavy
             - external_electron
@@ -841,6 +899,8 @@ impl<'a> Problem<'a> {
                 * (released.value.abs()
                     + external_heavy.abs()
                     + external_electron.abs()
+                    + point.transport_energy_out[0].value.abs()
+                    + point.transport_energy_out[1].value.abs()
                     + point.work_on_pools[0].value.abs()
                     + point.work_on_pools[1].value.abs()
                     + kinetic_energy_change_j.abs()
@@ -877,6 +937,8 @@ impl<'a> Problem<'a> {
             neutron_energy_escaped_j: point.neutrons.value,
             electron_to_heavy_coulomb_energy_j: point.exchange.value,
             photon_energy_escaped_j: point.photons.value,
+            heavy_transport_energy_out_j: point.transport_energy_out[0].value,
+            electron_transport_energy_out_j: point.transport_energy_out[1].value,
             external_electron_energy_j: external_electron,
             external_heavy_energy_j: external_heavy,
             boundary_work_on_heavy_j: point.work_on_pools[0].value,

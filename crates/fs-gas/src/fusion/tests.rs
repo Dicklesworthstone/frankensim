@@ -191,6 +191,23 @@ fn g0_burn_closes_source_energy_charge_baryons_and_mass_defect() {
     let initial = r.initial_state();
     let state = r.state();
     let b = r.balance();
+    let emission = r.neutron_emission().unwrap();
+    assert_eq!(emission.duration(), r.elapsed_time());
+    assert_eq!(emission.total_amount(), r.neutron_amount());
+    assert_eq!(emission.total_kinetic_energy(), r.escaped_neutron_energy());
+    assert_eq!(
+        emission.channels()[0].reaction(),
+        FusionReactionV1::DeuteriumTritium,
+    );
+    assert_eq!(emission.channels()[1].amount().value(), 0.0);
+    assert_eq!(emission.channels()[1].mean_particle_energy(), None);
+    close(
+        emission.channels()[0].mean_particle_energy().unwrap().value()
+            * emission.total_particle_count(),
+        b.neutron_energy_escaped_j,
+        4e-15,
+        0.0,
+    );
     let [d, t, he] = r.plasma().indices();
     let e = r.plasma().electron_index();
     assert_eq!(initial.amounts()[e], state.amounts()[e]);
@@ -251,6 +268,13 @@ fn g1_no_fuel_preserves_composition_and_uses_original_thermal_capacities() {
     assert_eq!(r.state().amounts(), state.amounts());
     assert_eq!(r.neutron_amount().value(), 0.0);
     assert_eq!(r.escaped_neutron_energy().value(), 0.0);
+    assert!(
+        r.neutron_emission()
+            .unwrap()
+            .channels()
+            .iter()
+            .all(|channel| channel.mean_particle_energy().is_none())
+    );
     close(
         r.state().electron_temperature().value() - state.electron_temperature().value(),
         20.0 / state.electron_heat_capacity_j_k(),
@@ -266,6 +290,7 @@ fn g1_no_fuel_preserves_composition_and_uses_original_thermal_capacities() {
     let zero = advance_dt_fusion(&state, &model, h, Time::new(0.0), controls(), || false).unwrap();
     assert_eq!(zero.state(), &state);
     assert_eq!(zero.balance().accepted_steps, 0);
+    assert_eq!(zero.neutron_emission().unwrap().duration(), Time::new(0.0));
     // A zero-time request at either inclusive rate endpoint must retain the
     // exact original state despite independently rounded NASA-9 calorics.
     for ion_kev in [0.2, 100.0] {

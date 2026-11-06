@@ -2,8 +2,11 @@ use super::*;
 use fs_thermochem::coulomb::{CoulombLimitsV1, CoulombScreeningV1, CoulombShortRangeCutoffV1};
 use fs_thermochem::plasma_radiation::{BremsstrahlungControlsV1, BremsstrahlungGauntFactorV1};
 
+mod confinement;
+
 fn thermal_sources(state: &FrozenIonizedGasStateV1) -> DtFusionTransport {
     DtFusionTransport {
+        energy_confinement: None,
         coulomb: Some(
             CoulombModelV1::new_with_cutoff(
                 state,

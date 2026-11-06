@@ -10,6 +10,13 @@ pub(super) struct Sum {
     correction: f64,
 }
 impl Sum {
+    pub(super) const fn new(value: f64) -> Self {
+        Self {
+            value,
+            correction: 0.0,
+        }
+    }
+
     pub(super) fn add(&mut self, x: f64) {
         let y = x - self.correction;
         let next = self.value + y;
@@ -21,6 +28,10 @@ impl Sum {
 #[derive(Clone, Copy, Debug)]
 pub(super) struct Point {
     time: f64,
+    // Confinement can remove almost all initial energy. Retain its positive
+    // survivor directly instead of reconstructing initial minus total loss.
+    thermal_energy: [Sum; 2],
+    transport_energy_out: [Sum; 2],
     limiting_fuel: f64,
     extent: Sum,
     alpha_energy: Sum,
@@ -110,6 +121,8 @@ impl<'a> Problem<'a> {
         let [d, t, _] = self.plasma.indices();
         Point {
             time: 0.0,
+            thermal_energy: self.initial_pool_energy.map(Sum::new),
+            transport_energy_out: [Sum::default(); 2],
             limiting_fuel: self.initial_amounts[d].min(self.initial_amounts[t]),
             extent: Sum::default(),
             alpha_energy: Sum::default(),
@@ -135,18 +148,35 @@ impl<'a> Problem<'a> {
     }
 
     fn pool_energy(&self, point: Point) -> [f64; 2] {
+        if self.transport.energy_confinement.is_some() {
+            return point.thermal_energy.map(|energy| energy.value);
+        }
+        self.accounted_energy(point)
+    }
+
+    fn accounted_energy(&self, point: Point) -> [f64; 2] {
         let f = self.heating.alpha_electron_fraction;
         [
             self.initial_pool_energy[0]
                 + self.heating.heavy_power.value() * point.time
                 + ((1.0 - f) * point.alpha_energy.value - point.ion_removal.value)
-                + point.coulomb_transfer.value,
+                + point.coulomb_transfer.value
+                - point.transport_energy_out[0].value,
             self.initial_pool_energy[1]
                 + self.heating.electron_power.value() * point.time
                 + f * point.alpha_energy.value
                 - point.coulomb_transfer.value
-                - point.photon_energy.value,
+                - point.photon_energy.value
+                - point.transport_energy_out[1].value,
         ]
+    }
+
+    fn add_pool_energy(&self, point: &mut Point, increments: [f64; 2]) {
+        if self.transport.energy_confinement.is_some() {
+            for (energy, increment) in point.thermal_energy.iter_mut().zip(increments) {
+                energy.add(increment);
+            }
+        }
     }
 
     fn temperatures(&self, point: Point) -> Result<[f64; 2], DtFusionError> {
@@ -156,6 +186,10 @@ impl<'a> Problem<'a> {
         if point.time == 0.0
             && point.coulomb_transfer.value == 0.0
             && point.photon_energy.value == 0.0
+            && point
+                .transport_energy_out
+                .iter()
+                .all(|energy| energy.value == 0.0)
         {
             return Ok([
                 self.initial.heavy_temperature().value(),
@@ -199,6 +233,15 @@ impl<'a> Problem<'a> {
         .iter()
         .any(|x| !x.is_finite() || *x < 0.0)
             || !point.coulomb_transfer.value.is_finite()
+            || point
+                .transport_energy_out
+                .iter()
+                .any(|energy| !energy.value.is_finite())
+            || (self.transport.energy_confinement.is_some()
+                && point
+                    .thermal_energy
+                    .iter()
+                    .any(|energy| !energy.value.is_finite()))
         {
             return Err(DtFusionError::Arithmetic("finite nonnegative burn state"));
         }
@@ -239,13 +282,24 @@ impl<'a> Problem<'a> {
         )?;
         let removed = event.reacting_ion_energy_j();
         let [alpha, neutron] = event.product_kinetic_energies_j();
+        let alpha_energy = (alpha * AVOGADRO) * extent;
+        let removed_energy = (removed * AVOGADRO) * extent;
         let mut next = old;
         next.time = old.time + dt;
         next.limiting_fuel = remaining;
         next.extent.add(extent);
-        next.alpha_energy.add((alpha * AVOGADRO) * extent);
-        next.ion_removal.add((removed * AVOGADRO) * extent);
+        next.alpha_energy.add(alpha_energy);
+        next.ion_removal.add(removed_energy);
         next.neutron_energy.add((neutron * AVOGADRO) * extent);
+        let fraction = self.heating.alpha_electron_fraction;
+        self.add_pool_energy(
+            &mut next,
+            [
+                (1.0 - fraction) * alpha_energy - removed_energy
+                    + self.heating.heavy_power.value() * dt,
+                fraction * alpha_energy + self.heating.electron_power.value() * dt,
+            ],
+        );
         Ok(next)
     }
 
@@ -308,6 +362,13 @@ impl<'a> Problem<'a> {
             fine.photon_energy.value - old.photon_energy.value,
             c.energy_tolerance_j,
         );
+        for i in 0..2 {
+            add(
+                full.transport_energy_out[i].value - old.transport_energy_out[i].value,
+                fine.transport_energy_out[i].value - old.transport_energy_out[i].value,
+                c.energy_tolerance_j,
+            );
+        }
         if !norm.is_finite() {
             return Err(DtFusionError::Arithmetic("local error estimate"));
         }
@@ -412,14 +473,18 @@ impl<'a> Problem<'a> {
         let released = self.q_molar * point.extent.value;
         let external_heavy = self.heating.heavy_power.value() * point.time;
         let external_electron = self.heating.electron_power.value() * point.time;
-        let expected = self.pool_energy(point);
+        let expected = self.accounted_energy(point);
         let heavy_residual = state.heavy_internal_energy().value() - expected[0];
         let electron_residual = state.electron_internal_energy().value() - expected[1];
         // Source differences are computed separately by pool, avoiding subtraction
         // of the huge rest-energy datum (which is deliberately not in the gas U).
         let actual_change = (state.heavy_internal_energy().value() - self.initial_pool_energy[0])
             + (state.electron_internal_energy().value() - self.initial_pool_energy[1]);
-        let total_residual = actual_change + point.neutron_energy.value + point.photon_energy.value
+        let total_residual = actual_change
+            + point.neutron_energy.value
+            + point.photon_energy.value
+            + point.transport_energy_out[0].value
+            + point.transport_energy_out[1].value
             - released
             - external_heavy
             - external_electron;
@@ -441,6 +506,8 @@ impl<'a> Problem<'a> {
                 * (released.abs()
                     + external_heavy.abs()
                     + external_electron.abs()
+                    + point.transport_energy_out[0].value.abs()
+                    + point.transport_energy_out[1].value.abs()
                     + self.initial_pool_energy[0].abs()
                     + self.initial_pool_energy[1].abs());
         if [
@@ -470,6 +537,8 @@ impl<'a> Problem<'a> {
             neutron_energy_escaped_j: point.neutron_energy.value,
             electron_to_heavy_coulomb_energy_j: point.coulomb_transfer.value,
             photon_energy_escaped_j: point.photon_energy.value,
+            heavy_transport_energy_out_j: point.transport_energy_out[0].value,
+            electron_transport_energy_out_j: point.transport_energy_out[1].value,
             external_electron_energy_j: external_electron,
             external_heavy_energy_j: external_heavy,
             electron_energy_residual_j: electron_residual,

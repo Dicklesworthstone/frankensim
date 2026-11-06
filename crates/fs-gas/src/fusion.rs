@@ -29,10 +29,10 @@
 //! atomic on cancellation, domain refusal or exhausted work.
 //!
 //! The local error estimate is not a global error certificate. This owner does
-//! not solve confinement, spatial transport, fast-particle distributions,
-//! radiation transport or magnetic fields. Optional original-source Coulomb
-//! exchange and optically thin bremsstrahlung participate in the same thermal
-//! feedback and energy account. Its
+//! not predict confinement times, spatial transport, radiation transport or
+//! magnetic fields. Optional original-source Coulomb exchange, optically thin
+//! bremsstrahlung and explicitly prescribed thermal energy confinement
+//! participate in the same feedback and energy account. Its
 //! returned common state can enter existing thermal owners in a separately
 //! declared coupling schedule, subject to each owner's physical domain.
 
@@ -74,7 +74,68 @@ pub struct DtFusionHeating {
     pub heavy_power: Power,
 }
 
-/// Optional thermal operators sharing the burn's original species bank.
+/// Prescribed thermal energy transport to two fixed-temperature exteriors.
+///
+/// Each Maxwellian pool obeys `dU_s/dt = -(U_s - Cv_s*T_ext,s)/tau_s`,
+/// excluding nuclear heating, Coulomb exchange, photons and pressure work.
+/// Heat capacities follow the actual thermal populations. With a zero exterior
+/// temperature this is the conventional zero-dimensional `P_loss = U/tau_E`
+/// closure; see [UKAEA PROCESS](https://ukaea.github.io/PROCESS/physics-models/plasma_confinement/)
+/// (confinement time and transport powers).
+/// The finite exterior offset and separate pool times are authored assumptions,
+/// not an empirical confinement scaling or a resolved transport calculation.
+///
+/// Positive outgoing energy heats the prescribed exterior; a hotter exterior
+/// can instead heat the plasma. Its temperature is held fixed, so this does
+/// not evolve a finite receiving body. No particles, charge or kinetic alphas
+/// leave the parcel. Radiation is accounted separately: times supplied here
+/// must describe non-radiative thermal transport, avoiding double counting.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FusionEnergyConfinement {
+    times: [Time; 2],
+    exterior_temperatures: [Temperature; 2],
+}
+
+impl FusionEnergyConfinement {
+    /// Both relaxation times must be positive and finite; prescribed absolute
+    /// exterior temperatures must be finite and nonnegative. A zero-temperature
+    /// exterior is the ideal loss-only limit, not an admitted plasma state.
+    /// The evolving plasma must remain inside all original source domains.
+    pub fn new(
+        heavy_time: Time,
+        electron_time: Time,
+        heavy_exterior_temperature: Temperature,
+        electron_exterior_temperature: Temperature,
+    ) -> Result<Self, DtFusionError> {
+        let times = [heavy_time, electron_time];
+        let exterior_temperatures = [heavy_exterior_temperature, electron_exterior_temperature];
+        if times.iter().any(|t| !positive(t.value()))
+            || exterior_temperatures
+                .iter()
+                .any(|t| !t.value().is_finite() || t.value() < 0.0)
+        {
+            return Err(DtFusionError::Invalid(
+                "positive finite confinement times and nonnegative finite exterior temperatures required",
+            ));
+        }
+        Ok(Self {
+            times,
+            exterior_temperatures,
+        })
+    }
+
+    /// Original effective energy-confinement times [s], heavy then electron.
+    pub const fn confinement_times(&self) -> [Time; 2] {
+        self.times
+    }
+
+    /// Original fixed exterior temperatures [K], heavy then electron.
+    pub const fn exterior_temperatures(&self) -> [Temperature; 2] {
+        self.exterior_temperatures
+    }
+}
+
+/// Optional source-owned thermal laws and explicit energy-confinement closure.
 ///
 /// Coulomb energy is transferred reciprocally between the two thermal pools.
 /// Bremsstrahlung removes electron energy and records it as escaping photons:
@@ -88,6 +149,8 @@ pub struct DtFusionTransport {
     pub coulomb: Option<CoulombModelV1>,
     /// Original electron-ion free-free emission law, with all photons escaping.
     pub bremsstrahlung: Option<ElectronIonBremsstrahlungV1>,
+    /// Prescribed non-radiative thermal transport, independent of particle loss.
+    pub energy_confinement: Option<FusionEnergyConfinement>,
 }
 
 /// Declared physical domain and bounded numerical work for one burn interval.
@@ -234,6 +297,11 @@ pub struct DtFusionBalance {
     pub electron_to_heavy_coulomb_energy_j: f64,
     /// Electron-ion bremsstrahlung energy carried away by photons [J].
     pub photon_energy_escaped_j: f64,
+    /// Signed thermal ion energy transported to its prescribed exterior [J].
+    /// Negative means the exterior heated the ions; no particles are removed.
+    pub heavy_transport_energy_out_j: f64,
+    /// Signed thermal electron energy transported to its prescribed exterior [J].
+    pub electron_transport_energy_out_j: f64,
     /// Constant externally supplied electron energy [J].
     pub external_electron_energy_j: f64,
     /// Constant externally supplied heavy-particle energy [J].
@@ -242,7 +310,7 @@ pub struct DtFusionBalance {
     pub electron_energy_residual_j: f64,
     /// Final source heavy energy minus its independently accumulated budget [J].
     pub heavy_energy_residual_j: f64,
-    /// Delta thermal U + escaping neutron/photon energy - Q - external heat [J].
+    /// Delta thermal U + neutron/photon/transport energy out - Q - external heat [J].
     pub total_energy_residual_j: f64,
     /// Relative baryon inventory drift, including escaped neutrons.
     pub relative_baryon_residual: f64,

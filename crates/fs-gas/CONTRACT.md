@@ -1,5 +1,43 @@
 # fs-gas contract
 
+## Finite thermal energy confinement and neutron-source handoff
+
+`FusionEnergyConfinement` explicitly authors separate ion/electron energy
+relaxation times and exterior temperatures. `DtFusionTransport::energy_confinement`
+applies that closure through the common thermal kernels used by the original
+D-T burn, the four-channel network, kinetic-alpha evolution and prescribed
+volume histories. For fixed populations, each pool obeys
+`dU_s/dt = -(U_s - C_s T_exterior,s)/tau_s`. Exact exponential source maps
+retain the positive survivor under stiff cooling and use `expm1` for small
+transfers. Symmetric composition retains the existing local error controls.
+
+Separate signed `heavy_transport_energy_out_j` and
+`electron_transport_energy_out_j` enter both error estimation and independent
+publication balances. Positive values leave the plasma; a hotter exterior
+produces negative outgoing heat. These are distinct from neutron/photon escape,
+Coulomb redistribution, imposed powers, alpha storage and mechanical work.
+The full account adds both transport exports to the existing energy balance.
+Kinetic alphas lose energy only through their original collision owner; this
+closure removes no particles and supplies no fast-alpha escape model.
+
+The conventional zero-dimensional `P_transport = W/tau_E` interpretation and
+separate radiation accounting are described by
+[UKAEA PROCESS](https://ukaea.github.io/PROCESS/physics-models/plasma_confinement/).
+Separate pool times and finite exterior-temperature offsets are explicitly
+authored extensions here, not a fitted magnetic confinement or turbulence law.
+The exterior is prescribed; its own thermal storage is not evolved by this
+closure. Numerical tests cover analytic relaxation, signed reservoir heating,
+stiff and tiny exposures, burn feedback, restart, compression/work refinement,
+kinetic-alpha accounting and atomic refusal. `compressed_fusion` compares the
+existing rigid and compression cases with an explicit finite-confinement case.
+
+All three result families expose `neutron_emission()`, returning the shared
+L1 `FusionNeutronEmissionV1`. This preserves the original accepted D-T and
+D-D-neutron extents, product kinetic energies and interval duration. It leaves
+the plasma's neutron energy debit unchanged. Downstream owners choose their
+emission-time and energy projection explicitly; no deposit or spectrum is
+inferred from an escaped-energy scalar.
+
 ## Kinetic fusion through prescribed compression and expansion
 
 `fusion::kinetic::advance_adiabatic_kinetic_fusion_volume` moves an original

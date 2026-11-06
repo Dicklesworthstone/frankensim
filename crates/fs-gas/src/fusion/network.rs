@@ -25,7 +25,7 @@ use fs_thermochem::fusion::{FusionReactionV1, NuclearSpeciesV1};
 pub use super::DtFusionError as FusionNetworkError;
 /// Shared physical/numerical controls, including the original plasma limits.
 pub use super::DtFusionSolve as FusionNetworkSolve;
-/// Shared optional Coulomb and optically thin radiation source owners.
+/// Shared Coulomb/radiation sources and optional thermal energy confinement.
 pub use super::DtFusionTransport as FusionNetworkTransport;
 
 pub(crate) mod kinetic;
@@ -139,6 +139,11 @@ pub struct FusionNetworkBalance {
     pub electron_to_heavy_coulomb_energy_j: f64,
     /// Free-free emission escaping the explicitly optically thin boundary [J].
     pub photon_energy_escaped_j: f64,
+    /// Signed ion thermal energy transported to its prescribed exterior [J].
+    /// Negative means exterior heating. Neither fuel nor kinetic alphas escape.
+    pub heavy_transport_energy_out_j: f64,
+    /// Signed electron thermal energy transported to its prescribed exterior [J].
+    pub electron_transport_energy_out_j: f64,
     /// Held external electron energy [J].
     pub external_electron_energy_j: f64,
     /// Held external ion energy [J].
@@ -151,7 +156,7 @@ pub struct FusionNetworkBalance {
     pub electron_energy_residual_j: f64,
     /// Final source ion energy minus its independent transfer account [J].
     pub heavy_energy_residual_j: f64,
-    /// Delta thermal U + escaped neutron/photon energy - Q - external heat
+    /// Delta thermal U + neutron/photon/transport energy out - Q - external heat
     /// - work on ions - work on electrons [J].
     pub total_energy_residual_j: f64,
     /// Relative baryon drift, including all emitted neutrons.

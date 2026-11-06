@@ -16,6 +16,7 @@ use fs_thermochem::plasma_radiation::{
 mod fixture;
 
 mod compression;
+mod confinement;
 
 const KEV_J: f64 = 1.602_176_634e-16;
 const BOLTZMANN: f64 = 1.380_649e-23;
@@ -99,6 +100,7 @@ fn thermal_transport(
     ion_variance_limit: f64,
 ) -> FusionNetworkTransport {
     FusionNetworkTransport {
+        energy_confinement: None,
         coulomb: Some(alpha.collisions().background().clone()),
         bremsstrahlung: Some(
             ElectronIonBremsstrahlungV1::new(
@@ -210,6 +212,28 @@ fn check_accounts(result: &KineticFusionResult) {
     let (initial, state) = (result.initial_state(), result.state());
     let b = result.balance();
     let a = result.alpha_balance();
+    let emission = result.neutron_emission().unwrap();
+    assert_eq!(emission.duration(), result.elapsed_time());
+    for (i, channel) in emission.channels().iter().enumerate() {
+        assert_eq!(channel.reaction(), FusionReactionV1::ALL[i]);
+        assert_eq!(channel.amount().value(), b.reaction_extents_mol[i]);
+        assert_eq!(
+            channel.kinetic_energy().value(),
+            b.product_kinetic_energies_j[i][1],
+        );
+    }
+    close(
+        emission.total_amount().value(),
+        b.neutron_amount_mol,
+        2e-13,
+        0.0,
+    );
+    close(
+        emission.total_kinetic_energy().value(),
+        b.neutron_energy_escaped_j,
+        2e-13,
+        0.0,
+    );
     assert!(
         state
             .alpha_populations_mol()
@@ -272,7 +296,8 @@ fn check_accounts(result: &KineticFusionResult) {
             - b.reacting_ion_energy_removed_j
             + b.electron_to_heavy_coulomb_energy_j
             + b.external_heavy_energy_j
-            + b.boundary_work_on_heavy_j,
+            + b.boundary_work_on_heavy_j
+            - b.heavy_transport_energy_out_j,
         3e-12,
         2e-6,
     );
@@ -282,14 +307,17 @@ fn check_accounts(result: &KineticFusionResult) {
             - b.electron_to_heavy_coulomb_energy_j
             - b.photon_energy_escaped_j
             + b.external_electron_energy_j
-            + b.boundary_work_on_electrons_j,
+            + b.boundary_work_on_electrons_j
+            - b.electron_transport_energy_out_j,
         3e-12,
         2e-6,
     );
     close(
         state.internal_energy().value() - initial.internal_energy().value()
             + b.neutron_energy_escaped_j
-            + b.photon_energy_escaped_j,
+            + b.photon_energy_escaped_j
+            + b.heavy_transport_energy_out_j
+            + b.electron_transport_energy_out_j,
         b.nuclear_energy_released_j
             + b.external_heavy_energy_j
             + b.external_electron_energy_j

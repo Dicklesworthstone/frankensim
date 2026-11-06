@@ -1,6 +1,6 @@
 //! Original-source thermal operators within the finite-fuel midpoint solve.
 
-use super::super::thermal::{evaluate, exchange_energy, radiated_energy};
+use super::super::thermal::{confined_energy, evaluate, exchange_energy, radiated_energy};
 use super::*;
 
 pub(super) use super::super::thermal::ThermalSources as Sources;
@@ -19,8 +19,8 @@ impl Problem<'_> {
 
     /// Freeze coefficients at the predictor midpoint, then compose thermal
     /// half steps around the exact finite-fuel/external-power map. The thermal
-    /// map itself symmetrically composes analytic free-free cooling and exact
-    /// reciprocal exchange. Each thermal stage uses its actual heat capacities.
+    /// map itself symmetrically composes confinement, analytic free-free cooling
+    /// and exact reciprocal exchange. Every stage uses actual heat capacities.
     pub(super) fn frozen_coupled_step(
         &self,
         old: Point,
@@ -44,16 +44,20 @@ impl Problem<'_> {
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Point, DtFusionError> {
         poll(cancelled)?;
-        if sources.conductance_w_k == 0.0 && sources.radiation_w_per_sqrt_k == 0.0 {
+        if sources.conductance_w_k == 0.0
+            && sources.radiation_w_per_sqrt_k == 0.0
+            && self.transport.energy_confinement.is_none()
+        {
             return Ok(old);
         }
-        let first = self.radiate(old, 0.5 * dt, sources.radiation_w_per_sqrt_k)?;
+        let confined = self.confine(old, 0.5 * dt, cancelled)?;
+        let first = self.radiate(confined, 0.5 * dt, sources.radiation_w_per_sqrt_k)?;
         self.admit(first, cancelled)?;
         let exchanged = self.exchange(first, dt, sources.conductance_w_k)?;
         self.admit(exchanged, cancelled)?;
-        let next = self.radiate(exchanged, 0.5 * dt, sources.radiation_w_per_sqrt_k)?;
-        self.admit(next, cancelled)?;
-        Ok(next)
+        let radiated = self.radiate(exchanged, 0.5 * dt, sources.radiation_w_per_sqrt_k)?;
+        self.admit(radiated, cancelled)?;
+        self.confine(radiated, 0.5 * dt, cancelled)
     }
 
     /// Fixed-composition Cv values from the admitted original monatomic bank.
@@ -86,6 +90,7 @@ impl Problem<'_> {
         )?;
         let mut next = old;
         next.coulomb_transfer.add(transfer);
+        self.add_pool_energy(&mut next, [transfer, -transfer]);
         Ok(next)
     }
 
@@ -102,6 +107,32 @@ impl Problem<'_> {
         let loss = radiated_energy(te, ce, dt, coefficient)?;
         let mut next = old;
         next.photon_energy.add(loss);
+        self.add_pool_energy(&mut next, [0.0, -loss]);
+        Ok(next)
+    }
+
+    fn confine(
+        &self,
+        old: Point,
+        dt: f64,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Point, DtFusionError> {
+        let Some(confinement) = self.transport.energy_confinement else {
+            return Ok(old);
+        };
+        let energies = self.pool_energy(old);
+        let (remaining, outgoing) =
+            confined_energy(energies, self.capacities(old), dt, confinement)?;
+        let mut next = old;
+        for i in 0..2 {
+            next.transport_energy_out[i].add(outgoing[i]);
+            if outgoing[i] > 0.5 * energies[i] {
+                next.thermal_energy[i] = Sum::new(remaining[i]);
+            } else {
+                next.thermal_energy[i].add(-outgoing[i]);
+            }
+        }
+        self.admit(next, cancelled)?;
         Ok(next)
     }
 }
