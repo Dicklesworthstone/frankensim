@@ -78,7 +78,7 @@ impl<C: SpatialConductorMaterial> super::nonlinear::SpatialNonlinearInductionCan
     }
 }
 
-fn recover(
+pub(super) fn recover(
     positions_m: &[[f64; 3]],
     tets: &[[u32; 4]],
     cells: &[SpatialInductionCell],

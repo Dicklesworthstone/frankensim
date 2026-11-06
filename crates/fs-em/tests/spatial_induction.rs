@@ -4,6 +4,8 @@
 mod nonlinear;
 #[path = "spatial_induction/orthotropic.rs"]
 mod orthotropic;
+#[path = "spatial_induction/terminals.rs"]
+mod terminals;
 use fs_em::spatial::{
     SpatialMagneticError, SpatialMagneticMaterial, SpatialRecoilMaterial,
     vector_potential::{

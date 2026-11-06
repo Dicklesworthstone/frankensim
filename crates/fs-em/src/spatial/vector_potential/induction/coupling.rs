@@ -71,6 +71,8 @@ pub(super) struct Coupling<C: SpatialConductorMaterial> {
 pub(super) struct Current {
     pub cells: Vec<SpatialInductionCell>,
     pub edge_current_a: Vec<f64>,
+    /// Full nodal weak outward currents, including prescribed-potential nodes.
+    pub charge_current_a: Vec<f64>,
     pub maximum_charge_residual_a: f64,
     pub heat_j: f64,
     pub mechanical_work_j: f64,
@@ -90,6 +92,25 @@ fn join(parent: &mut [usize], a: usize, b: usize) -> bool {
         parent[a.max(b)] = a.min(b);
         true
     }
+}
+
+/// Connected prescribed-A traces. A scalar terminal voltage difference is
+/// gauge-independent here only along a path whose A increment is fixed.
+pub(super) fn fixed_trace_components(
+    mesh: &TetComplex,
+    fixed_edges: &[bool],
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<Vec<usize>> {
+    let mut parent: Vec<_> = (0..mesh.vertex_count).collect();
+    for (e, &[a, b]) in mesh.edges.iter().enumerate() {
+        poll(cancelled)?;
+        if fixed_edges[e] {
+            join(&mut parent, a as usize, b as usize);
+        }
+    }
+    Ok((0..mesh.vertex_count)
+        .map(|v| root(&mut parent, v))
+        .collect())
 }
 impl<C: SpatialConductorMaterial> Coupling<C> {
     /// Prepare once from a source-admitted field's actual trace and cochain.
@@ -123,17 +144,8 @@ impl<C: SpatialConductorMaterial> Coupling<C> {
                 "complete bounded conductor, trace and potential maps required",
             ));
         }
-        let mut fixed_parent: Vec<_> = (0..mesh.vertex_count).collect();
-        for (e, &[a, b]) in mesh.edges.iter().enumerate() {
-            poll(cancelled)?;
-            if fixed_edges[e] {
-                join(&mut fixed_parent, a as usize, b as usize);
-            }
-        }
-        let fixed_component: Vec<_> = (0..mesh.vertex_count)
-            .map(|v| root(&mut fixed_parent, v))
-            .collect();
-        let mut forest = fixed_parent.clone();
+        let fixed_component = fixed_trace_components(mesh, &fixed_edges, cancelled)?;
+        let mut forest = fixed_component.clone();
         let mut tree_edges = vec![];
         let mut adjacency = vec![vec![]; mesh.vertex_count];
         for (e, &[a, b]) in mesh.edges.iter().enumerate() {
@@ -358,6 +370,111 @@ impl<C: SpatialConductorMaterial> Coupling<C> {
         Ok(csr(rows))
     }
 
+    /// Keep the original relative magnetic gauge and conductor support while
+    /// replacing floating electric gauges by physical potential traces. A
+    /// component with no trace retains its original one-node floating gauge.
+    pub fn with_prescribed_charges(
+        &self,
+        g: Geometry<'_>,
+        prescribed: &[bool],
+        limits: SpatialInductionLimits,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self> {
+        poll(cancelled)?;
+        if prescribed.len() != self.charge_vertices.len()
+            || self.cells.len() > limits.maximum_conducting_cells
+        {
+            return Err(invalid(
+                "complete bounded conductor potential traces required",
+            ));
+        }
+        let mut grounded = BTreeMap::new();
+        for (&(component, _), &fixed) in self.charge_vertices.iter().zip(prescribed) {
+            *grounded.entry(component).or_insert(false) |= fixed;
+        }
+        let mut unknowns = self.edge_unknown.iter().filter(|i| i.is_some()).count();
+        let mut charge_unknown = Vec::with_capacity(prescribed.len());
+        let mut previous = None;
+        for (&(component, _), &fixed) in self.charge_vertices.iter().zip(prescribed) {
+            poll(cancelled)?;
+            let gauge = !grounded[&component] && previous != Some(component);
+            previous = Some(component);
+            charge_unknown.push(if fixed || gauge {
+                None
+            } else {
+                let index = unknowns;
+                unknowns = unknowns
+                    .checked_add(1)
+                    .ok_or_else(|| invalid("charge dimension overflow"))?;
+                Some(index)
+            });
+        }
+        if unknowns > limits.maximum_unknowns {
+            return Err(invalid("terminal induction unknown budget exceeded"));
+        }
+        let mut cells = self.cells.clone();
+        for c in &mut cells {
+            poll(cancelled)?;
+            for a in 0..4 {
+                c.indices[a + 6] = charge_unknown[c.charges[a]];
+            }
+        }
+        let (mass, physical_mass_diagonal) = assemble_mass(g, &cells, unknowns, cancelled)?;
+        Ok(Self {
+            cells,
+            charge_unknown,
+            mass,
+            physical_mass_diagonal,
+            ..self.clone()
+        })
+    }
+
+    /// Known scalar-potential contribution to the SAME Whitney/charge form.
+    /// The input is zero at every free or numerical-gauge charge node.
+    pub fn potential_drive(
+        &self,
+        potential_v: &[f64],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Vec<f64>> {
+        if potential_v.len() != self.charge_vertices.len()
+            || potential_v.iter().any(|v| !v.is_finite())
+            || potential_v
+                .iter()
+                .zip(&self.charge_unknown)
+                .any(|(&v, i)| i.is_some() && v != 0.0)
+        {
+            return Err(invalid(
+                "finite prescribed-only electric potential map required",
+            ));
+        }
+        let mut drive = vec![0.0; self.mass.nrows()];
+        for c in &self.cells {
+            poll(cancelled)?;
+            let mut gradient = [0.0; 3];
+            for a in 0..4 {
+                for j in 0..3 {
+                    gradient[j] = finite(
+                        potential_v[c.charges[a]].mul_add(c.basis[0][a + 6][j], gradient[j]),
+                    )?;
+                }
+            }
+            for a in 0..10 {
+                if let Some(i) = c.indices[a] {
+                    drive[i] = finite(
+                        drive[i]
+                            - conductivity_product(
+                                c.sigma,
+                                c.basis.map(|q| q[a]),
+                                [gradient; 4],
+                                c.volume,
+                            ),
+                    )?;
+                }
+            }
+        }
+        Ok(drive)
+    }
+
     pub fn current_load(
         &self,
         g: Geometry<'_>,
@@ -429,8 +546,12 @@ impl<C: SpatialConductorMaterial> Coupling<C> {
                     )));
                 }
             }
-            let peclet = finite(0.5 * permeability_bound[c.cell]
-                * c.sigma.maximum_conductivity_s_m() * speed * diameter)?;
+            let peclet = finite(
+                0.5 * permeability_bound[c.cell]
+                    * c.sigma.maximum_conductivity_s_m()
+                    * speed
+                    * diameter,
+            )?;
             observed = observed.max(peclet);
             if peclet > maximum_peclet {
                 return Err(invalid(
@@ -443,7 +564,13 @@ impl<C: SpatialConductorMaterial> Coupling<C> {
                     continue;
                 };
                 drive[i] = finite(
-                    drive[i] + conductivity_product(c.sigma, c.basis.map(|q| q[a]), initial_motion, c.volume),
+                    drive[i]
+                        + conductivity_product(
+                            c.sigma,
+                            c.basis.map(|q| q[a]),
+                            initial_motion,
+                            c.volume,
+                        ),
                 )?;
                 for b in 0..6 {
                     if let Some(j) = c.indices[b] {
@@ -452,7 +579,12 @@ impl<C: SpatialConductorMaterial> Coupling<C> {
                             &mut rows,
                             i,
                             j,
-                            finite(conductivity_product(c.sigma, c.basis.map(|q| q[a]), motion, c.volume))?,
+                            finite(conductivity_product(
+                                c.sigma,
+                                c.basis.map(|q| q[a]),
+                                motion,
+                                c.volume,
+                            ))?,
                         )?;
                     }
                 }
@@ -473,6 +605,25 @@ impl<C: SpatialConductorMaterial> Coupling<C> {
         dt: f64,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Current> {
+        self.recover_with_potentials(g, delta, solution, stage_b, velocity, dt, None, cancelled)
+    }
+
+    /// Original current recovery, with optional physical scalar-potential traces.
+    #[allow(clippy::too_many_arguments)]
+    pub fn recover_with_potentials(
+        &self,
+        g: Geometry<'_>,
+        delta: &[f64],
+        solution: &[f64],
+        stage_b: &[[f64; 3]],
+        velocity: &[[f64; 3]],
+        dt: f64,
+        prescribed_v: Option<&[f64]>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Current> {
+        if prescribed_v.is_some_and(|v| v.len() != self.charge_vertices.len()) {
+            return Err(invalid("complete physical potential traces required"));
+        }
         let mut edge_current_a = vec![0.0; g.mesh().edges.len()];
         let mut charge = vec![0.0; self.charge_vertices.len()];
         let mut cells = Vec::with_capacity(self.cells.len());
@@ -482,9 +633,10 @@ impl<C: SpatialConductorMaterial> Coupling<C> {
             poll(cancelled)?;
             let vectors = &g.cells[c.cell];
             let velocity = g.mesh().tets[c.cell].map(|v| velocity[v as usize]);
-            let potential_v = c
-                .charges
-                .map(|i| self.charge_unknown[i].map_or(0.0, |j| solution[j] / dt));
+            let potential_v = c.charges.map(|i| {
+                self.charge_unknown[i]
+                    .map_or_else(|| prescribed_v.map_or(0.0, |v| v[i]), |j| solution[j] / dt)
+            });
             let mut laboratory = [[0.0; 3]; 4];
             for k in 0..4 {
                 for j in 0..3 {
@@ -541,6 +693,7 @@ impl<C: SpatialConductorMaterial> Coupling<C> {
             cells,
             edge_current_a,
             maximum_charge_residual_a: charge.iter().fold(0.0_f64, |m, v| m.max(v.abs())),
+            charge_current_a: charge,
             heat_j,
             mechanical_work_j,
         })
@@ -557,8 +710,9 @@ fn conductivity_product(
 ) -> f64 {
     match sigma {
         SpatialConductivity::Scalar(s) => s * product(a, b, volume),
-        SpatialConductivity::Tensor(_) =>
-            product(a, b.map(|v| sigma.current_density_a_m2(v)), volume),
+        SpatialConductivity::Tensor(_) => {
+            product(a, b.map(|v| sigma.current_density_a_m2(v)), volume)
+        }
     }
 }
 
@@ -574,9 +728,12 @@ fn assemble_mass(
         poll(cancelled)?;
         for a in 0..10 {
             for b in a..10 {
-                let value = finite(
-                    conductivity_product(c.sigma, c.basis.map(|q| q[a]), c.basis.map(|q| q[b]), c.volume),
-                )?;
+                let value = finite(conductivity_product(
+                    c.sigma,
+                    c.basis.map(|q| q[a]),
+                    c.basis.map(|q| q[b]),
+                    c.volume,
+                ))?;
                 if a == b && a < 6 {
                     let e = g.cells[c.cell].edges[a];
                     diagonal[e] = finite(diagonal[e] + value)?;

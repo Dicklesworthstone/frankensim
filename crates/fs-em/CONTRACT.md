@@ -2471,9 +2471,10 @@ Conductivity must retain the identical original magnetic material bundle and
 fixed external conditions. Impressed cell current is piecewise linear in time;
 nodal velocity is held over a step. Coefficients and Eulerian occupancy stay
 fixed. This is a lowest-order, linear/fixed-recoil MQS rung: moving interfaces,
-ALE, terminals, displacement current, saturation, hysteresis and thermal
-feedback are not inferred. Heat and mechanical transfers require their own
-receivers; returned candidates do not silently advance either receiver.
+ALE, displacement current, saturation, hysteresis and thermal feedback are not
+inferred. The terminal extension below separately admits physical electrodes.
+Heat and mechanical transfers require their own receivers; returned candidates
+do not silently advance either receiver.
 
 `spatial_induction` checks real floating charge cancellation of uniform motion,
 gradient-gauge invariance, an independently integrated charge-eliminated cube
@@ -2481,6 +2482,37 @@ mode and second-order time refinement, analytic three-dimensional motional
 feedback/Ohmic/Lorentz work, separated floating conductors, fixed-recoil energy
 and source limits, and bounded/cancelled deterministic rollback. Synthetic
 materials qualify equations and discretization, not empirical devices.
+
+### Physical electrodes on three-dimensional inducing conductors
+
+`induction::terminals::SpatialTerminalInduction` attaches disjoint equipotential
+electrodes to an accepted native A–phi history. Each electrode is a union of
+complete exterior faces of one face-connected conductor, with fixed tangential
+A. All electrodes on a conductor share a connected fixed-A reference path;
+disconnected trace pieces cannot silently define a gauge-dependent voltage.
+The original relative magnetic gauge, cell materials, anisotropic/scalar
+conductivity, physical state and clock are retained. Conductors without terminals
+keep their floating charge gauge. Prescribed midpoint potentials enter the same
+Whitney/charge form; the scalar field and induction current are solved together.
+
+The native nodal weak reactions supply signed total electrode currents rather
+than a presumed uniform current profile. Interior/floating charge residuals and
+the sum of terminal currents on each conductor independently gate acceptance.
+Voltages are shifted to each conductor's first electrode before assembly and
+power accounting. `terminal_work_j` is the incoming electrical supply and enters
+the existing magnetic-storage/Ohmic/Lorentz/impressed-work balance separately.
+Candidates reuse the original consistent nodal Lorentz-load transfer, including
+its exact P1 virtual-work pairing. No terminal impulse changes accepted A.
+
+The voltage-driven rung holds geometry, occupancy and material sources fixed;
+it does not supply contact impedance, external circuit/lead fields, ALE,
+nonlinear or hysteretic magnetic evolution, or displacement current. Existing
+floating nonlinear and thermal histories retain their separate contracts.
+`spatial_induction::terminals` checks an independently integrated conducting
+cube's RL transient, second-order time refinement, the DC resistance limit,
+free-charge/electrode conservation, exact voltage common-mode invariance,
+motional open-voltage and short-circuit response, mechanical transfer, and
+budget/geometry/cancellation refusal without partial state publication.
 
 ## Source-backed orthotropic conductivity in native 3D induction
 

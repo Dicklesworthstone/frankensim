@@ -53,6 +53,9 @@
 //! traces. Scalar and oriented principal permittivities retain their original
 //! material sources. Its charge-checked capacitance feeds the same native
 //! circuit owner, and its exterior Maxwell stress supplies mechanical wrenches.
+//! [`spatial::vector_potential::induction::terminals`] drives actual 3D
+//! conducting regions through physical electrodes, preserving native induction,
+//! charge continuity, local heat, Lorentz loads and terminal electrical work.
 
 /// Spatial source-bound DC current, Joule heat and geometry-derived resistance.
 pub mod conduction;

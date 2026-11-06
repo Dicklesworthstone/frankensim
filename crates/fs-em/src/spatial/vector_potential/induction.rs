@@ -11,7 +11,8 @@
 //! The base step holds linear/recoil material, conductivity and Eulerian
 //! occupancy fixed. The nonlinear child supplies reversible saturation; the
 //! thermal child refreshes source-bound linear material and conductivity.
-//! Motion is prescribed and nonrelativistic. Moving interfaces/ALE, terminals
+//! Motion is prescribed and nonrelativistic. The terminals child adds physical
+//! equipotential electrodes to this same coupled field. Moving interfaces/ALE
 //! and hysteresis are outside these owners. Joule and Lorentz transfers require
 //! their receivers' own accounts.
 //! Source pairing is current-controlled, with piecewise linear impressed current
@@ -21,6 +22,8 @@
 mod coupling;
 pub mod mechanical;
 pub mod nonlinear;
+/// Physical conductor electrodes, terminal currents and their electrical work.
+pub mod terminals;
 pub mod thermal;
 
 use super::super::{SpatialMagneticError, SpatialMagneticMaterial, dot, finite, invalid, poll};
@@ -37,6 +40,7 @@ use std::{
     ops::Deref,
     sync::Arc,
 };
+use terminals::{SpatialInductionTerminalTransfer, TerminalDrive};
 
 type Result<T> = core::result::Result<T, SpatialMagneticError>;
 
@@ -89,6 +93,10 @@ pub struct SpatialInductionStep {
     pub heat_j: f64,
     pub mechanical_work_j: f64,
     pub impressed_work_j: f64,
+    /// Electrical work entering through physical conductor electrodes [J].
+    pub terminal_work_j: f64,
+    /// Native weak electrode currents, distinct from impressed volume sources.
+    pub terminals: Vec<SpatialInductionTerminalTransfer>,
     pub energy_residual_j: f64,
     pub maximum_ampere_residual_a: f64,
     pub maximum_charge_residual_a: f64,
@@ -380,6 +388,28 @@ impl<'m, C: SpatialConductorMaterial> SpatialInduction<'m, C> {
         controls: SpatialInductionControls,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<SpatialInductionCandidate<'m, C>> {
+        self.step_driven_candidate(
+            prepared,
+            endpoint_current_a_m2,
+            velocity_m_s,
+            duration_s,
+            controls,
+            None,
+            cancelled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn step_driven_candidate(
+        &self,
+        prepared: Arc<Prepared<'m, C>>,
+        endpoint_current_a_m2: &[[f64; 3]],
+        velocity_m_s: &[[f64; 3]],
+        duration_s: f64,
+        controls: SpatialInductionControls,
+        terminal_drive: Option<&TerminalDrive<'_>>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<SpatialInductionCandidate<'m, C>> {
         poll(cancelled)?;
         let p = &prepared;
         let problem = &*p.problem;
@@ -426,6 +456,14 @@ impl<'m, C: SpatialConductorMaterial> SpatialInduction<'m, C> {
                     load[e] + f64::midpoint(original.remanence_load[e], problem.remanence_load[e])
                         - f64::midpoint(old_magnetic[e], refreshed_magnetic[e]),
                 )?;
+            }
+        }
+        if let Some(drive) = terminal_drive {
+            for (rhs, known) in rhs
+                .iter_mut()
+                .zip(p.potential_drive(&drive.potential_v, cancelled)?)
+            {
+                *rhs = finite(*rhs + known)?;
             }
         }
         let (motion, drive, maximum_cell_magnetic_peclet) = p.motion(
@@ -560,16 +598,22 @@ impl<'m, C: SpatialConductorMaterial> SpatialInduction<'m, C> {
         let stored_after_j = endpoint_field.stored_energy_j;
         let endpoint_flux_density_t = endpoint_field.flux_density_t;
         let endpoint_magnetic = apply(&problem.stiffness, &next, cancelled)?;
-        let current = p.recover(
+        let current = p.recover_with_potentials(
             g,
             &delta,
             &x,
             &stage_flux_density_t,
             velocity_m_s,
             duration_s,
+            terminal_drive.map(|drive| drive.potential_v.as_slice()),
             cancelled,
         )?;
-        let maximum_charge_residual_a = current.maximum_charge_residual_a;
+        let (terminals, terminal_work_j, maximum_charge_residual_a) =
+            if let Some(drive) = terminal_drive {
+                drive.transfers(&current.charge_current_a, duration_s, cancelled)?
+            } else {
+                (vec![], 0.0, current.maximum_charge_residual_a)
+            };
         let mut maximum_ampere_residual_a = 0.0_f64;
         for e in 0..mesh.edges.len() {
             poll(cancelled)?;
@@ -637,11 +681,12 @@ impl<'m, C: SpatialConductorMaterial> SpatialInduction<'m, C> {
         let energy_residual_j = finite(
             stored_after_j - stored_before_j + current.heat_j + current.mechanical_work_j
                 - impressed_work_j
+                - terminal_work_j
                 - parameter_work_j,
         )?;
         if energy_residual_j.abs() > controls.energy_tolerance_j {
             return Err(invalid(
-                "magnetic, Ohmic, Lorentz and impressed work do not close",
+                "magnetic, Ohmic, Lorentz, terminal and impressed work do not close",
             ));
         }
         poll(cancelled)?;
@@ -663,6 +708,8 @@ impl<'m, C: SpatialConductorMaterial> SpatialInduction<'m, C> {
                 heat_j: current.heat_j,
                 mechanical_work_j: current.mechanical_work_j,
                 impressed_work_j,
+                terminal_work_j,
+                terminals,
                 energy_residual_j,
                 maximum_ampere_residual_a,
                 maximum_charge_residual_a,
