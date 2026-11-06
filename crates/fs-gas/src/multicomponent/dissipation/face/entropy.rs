@@ -138,7 +138,7 @@ pub(in crate::multicomponent::dissipation) fn interior<L: TransportLaw>(
         &mut || cancelled(),
     )?;
     coefficients.validate()?;
-    let maximum_diffusion = validate_binary(binary, n)?;
+    let maximum_diffusion = maximum_active_diffusivity(binary, &x[..n])?;
     let mut heats = [0.0; MAX_SPECIES];
     let coupled = law.heats_of_transport(
         Temperature::new(t),

@@ -457,3 +457,112 @@ fn g4_late_cancel_work_limit_and_geometry_refusal_preserve_the_field() {
         Err(DissipationError::Invalid(_))
     ));
 }
+
+fn dormant_pair_field() -> MixtureEuler1d {
+    let g = MixtureGas::new(
+        bank(
+            ["A", "B", "C", "D"]
+                .into_iter()
+                .map(|name| source(name, R, 3.5, 0.0, 0.0))
+                .collect(),
+        ),
+        CaloricDomain::new(Temperature::new(0.001), Temperature::new(50.0)),
+        || false,
+    )
+    .unwrap();
+    field(g, 8, Boundaries::Periodic, |x| {
+        let a = 0.5 + 0.1 * (2.0 * core::f64::consts::PI * x).sin();
+        (vec![a, 1.0 - a, 0.0, 0.0], 0.0, 2.0)
+    })
+}
+
+fn dormant_pair_law(flow: &MixtureEuler1d, dormant_diffusivity: f64) -> ConstantTransport {
+    let original = law(flow, 0.0, 0.0, 0.0, 0.03);
+    let mut binary = vec![0.03; 16];
+    for i in 0..4 {
+        binary[i * 4 + i] = 0.0;
+    }
+    binary[2 * 4 + 3] = dormant_diffusivity;
+    binary[3 * 4 + 2] = dormant_diffusivity;
+    ConstantTransport::new(
+        flow.gas().source().clone(),
+        "manufactured-dormant-pair",
+        1,
+        original.domain(),
+        original.coefficients(),
+        binary,
+    )
+    .unwrap()
+}
+
+#[test]
+fn g0_dormant_pairs_do_not_exhaust_molecular_step_budgets() {
+    for entropy_consistent in [false, true] {
+        let mut reference = None;
+        for dormant_diffusivity in [0.03, 30_000.0] {
+            let mut flow = dormant_pair_field();
+            let initial = flow.states.clone();
+            let mut op = DissipationOperator::new(
+                &flow,
+                dormant_pair_law(&flow, dormant_diffusivity),
+                || false,
+            )
+            .unwrap();
+            // The physical binary diffusion fits in one step. A million-fold
+            // change to the absent C/D pair must not spend the work budget.
+            let controls = DissipationControl {
+                maximum_steps: 1,
+                ..Default::default()
+            };
+            let report = if entropy_consistent {
+                let (report, entropy) = op
+                    .advance_entropy_consistent_for(
+                        &mut flow,
+                        Time::new(0.01),
+                        controls,
+                        MolecularEntropyControl::default(),
+                        || false,
+                    )
+                    .unwrap();
+                assert!(entropy.entropy_change_j_k > 0.0);
+                report
+            } else {
+                op.advance_for(&mut flow, Time::new(0.01), controls, || false)
+                    .unwrap()
+            };
+            assert_eq!(report.accepted_steps, 1);
+            assert_eq!(report.rejected_steps, 0);
+            assert_ne!(flow.states, initial);
+            for i in 0..flow.cell_count() {
+                assert_eq!(&flow.cell(i).unwrap().partial_densities[2..], &[0.0, 0.0]);
+            }
+            if let Some((states, previous_report)) = &reference {
+                assert_eq!(&flow.states, states);
+                assert_eq!(&report, previous_report);
+            } else {
+                reference = Some((flow.states.clone(), report));
+            }
+        }
+    }
+}
+
+#[test]
+fn g0_dormant_diffusivities_still_require_a_complete_valid_source_matrix() {
+    let x = [0.4, 0.6, 0.0, 0.0];
+    let mut binary = [0.03; 16];
+    for i in 0..4 {
+        binary[i * 4 + i] = 0.0;
+    }
+    for pair in [
+        [0.0, 0.0],
+        [-1.0, -1.0],
+        [f64::INFINITY, f64::INFINITY],
+        [f64::NAN, f64::NAN],
+        [0.03, 0.04],
+    ] {
+        binary[2 * 4 + 3] = pair[0];
+        binary[3 * 4 + 2] = pair[1];
+        assert!(super::law::maximum_active_diffusivity(&binary, &x).is_err());
+        assert!(super::law::validate_binary(&binary, 4).is_err());
+    }
+}

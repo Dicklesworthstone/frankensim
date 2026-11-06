@@ -1,6 +1,6 @@
 //! Shared original-source molecular faces for axial, planar and spatial fields.
 use super::evolve::{close_simplex, fractions, heat_capacity_density};
-use super::law::validate_binary;
+use super::law::{maximum_active_diffusivity, validate_binary};
 use super::*;
 use crate::multicomponent::{MAX_NORMAL_COMPONENTS, MAX_SPECIES, NormalCell, NormalPrimitive, sum};
 use fs_qty::{AmountConcentration, Pressure, Temperature};
@@ -16,6 +16,8 @@ pub use spatial::SpatialTransport;
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct TransportFaceReport {
     /// Maximum face diffusion scale before spatial inverse lengths [m²/s].
+    /// Pairs with both species absent contribute no molecular timestep scale;
+    /// their source coefficients remain validated at every face evaluation.
     pub diffusivity_m2_s: f64,
     /// Original molecular shear viscosity at this face [Pa s], before any
     /// composing modeled transport. Exposes the actual source evaluation
@@ -656,7 +658,7 @@ fn interior_components<const TRANSVERSE: usize, L: TransportLaw>(
         &mut || cancelled(),
     )?;
     coefficients.validate()?;
-    let maximum_diffusion = validate_binary(binary, n)?;
+    let maximum_diffusion = maximum_active_diffusivity(binary, &x[..n])?;
     let mut heats = [0.0; MAX_SPECIES];
     let coupled = law.heats_of_transport(
         Temperature::new(t),

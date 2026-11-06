@@ -476,3 +476,66 @@ fn planar_no_slip_wall_carries_shear_heat_and_prescribed_wall_work() {
     assert_ne!(stationary[3], 0.0);
     assert_eq!(stationary[4], 0.0);
 }
+
+#[test]
+fn planar_dormant_pairs_preserve_flux_and_reactivate_at_any_positive_trace() {
+    let flow = dormant_pair_field();
+    let mut baseline = PlanarTransport::new(
+        flow.gas().clone(),
+        dormant_pair_law(&flow, 0.03),
+        || false,
+    )
+    .unwrap();
+    let mut fast_pair = PlanarTransport::new(
+        flow.gas().clone(),
+        dormant_pair_law(&flow, 30_000.0),
+        || false,
+    )
+    .unwrap();
+    let mut baseline_flux = [0.0; 7];
+    let mut fast_pair_flux = [0.0; 7];
+    let mut evaluate = |left: &[f64], right: &[f64]| {
+        let a = baseline
+            .face_from_primitives(
+                input(left, [0.0; 2], 2.0),
+                input(right, [0.0; 2], 2.0),
+                0.25,
+                [0.0; 2],
+                MaxwellStefanSolveV1::default(),
+                &mut baseline_flux,
+                || false,
+            )
+            .unwrap();
+        let b = fast_pair
+            .face_from_primitives(
+                input(left, [0.0; 2], 2.0),
+                input(right, [0.0; 2], 2.0),
+                0.25,
+                [0.0; 2],
+                MaxwellStefanSolveV1::default(),
+                &mut fast_pair_flux,
+                || false,
+            )
+            .unwrap();
+        assert_eq!(baseline_flux, fast_pair_flux);
+        (a, b, baseline_flux)
+    };
+    let (baseline_report, dormant_report, flux) =
+        evaluate(&[0.3, 0.7, 0.0, 0.0], &[0.5, 0.5, 0.0, 0.0]);
+    assert_eq!(baseline_report, dormant_report);
+    close(dormant_report.diffusivity_m2_s, 0.03 * 1.4);
+    // Equal masses and calorics give j_A=-rho D grad(x_A).
+    close(flux[0], -0.024);
+    close(flux[1], 0.024);
+    assert_eq!(&flux[2..4], &[0.0, 0.0]);
+
+    for species in [2, 3] {
+        let mut densities = [0.4, 0.6, 0.0, 0.0];
+        densities[species] = 1e-100;
+        let (baseline_report, active_report, _) = evaluate(&densities, &densities);
+        close(
+            active_report.diffusivity_m2_s / baseline_report.diffusivity_m2_s,
+            1_000_000.0,
+        );
+    }
+}

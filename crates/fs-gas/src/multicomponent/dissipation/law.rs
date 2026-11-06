@@ -445,6 +445,26 @@ impl TransportLaw for KineticTransport {
 }
 
 pub(crate) fn validate_binary(d: &[f64], n: usize) -> Result<f64, DissipationError> {
+    validate_binary_pairs(d, n, |_, _| true)
+}
+
+/// Validate the complete source matrix while measuring only pairs that can
+/// contribute friction at the admitted face composition. Two exactly absent
+/// species contribute nothing; a positive trace immediately restores the pair.
+pub(super) fn maximum_active_diffusivity(
+    d: &[f64],
+    mole_fractions: &[f64],
+) -> Result<f64, DissipationError> {
+    validate_binary_pairs(d, mole_fractions.len(), |i, j| {
+        mole_fractions[i] != 0.0 || mole_fractions[j] != 0.0
+    })
+}
+
+fn validate_binary_pairs(
+    d: &[f64],
+    n: usize,
+    include_in_maximum: impl Fn(usize, usize) -> bool,
+) -> Result<f64, DissipationError> {
     if d.len() != n * n {
         return Err(DissipationError::Invalid("binary diffusivity dimensions"));
     }
@@ -459,7 +479,9 @@ pub(crate) fn validate_binary(d: &[f64], n: usize) -> Result<f64, DissipationErr
                     "positive symmetric binary diffusivities required",
                 ));
             }
-            maximum = maximum.max(d[i * n + j]);
+            if include_in_maximum(i, j) {
+                maximum = maximum.max(d[i * n + j]);
+            }
         }
     }
     Ok(maximum)
