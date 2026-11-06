@@ -14,6 +14,16 @@ pub struct ImplicitConductiveViscousThermalVolumeMomentumStep {
     pub report: ImplicitConductiveThermalVolumeReport,
 }
 
+/// One molecular momentum kick with fluid and finite-wall caloric endpoints.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ImplicitConjugateViscousThermalVolumeMomentumStep {
+    pub evolution: ViscousThermalVolumeMomentumStep,
+    /// Conductive heat supplied to fluid transport; solid entries stay zero.
+    pub conductive_enthalpy_increment_j: Vec<f64>,
+    pub solid_endpoints: Vec<ThermalVolumeSolidEndpoint>,
+    pub report: ImplicitConjugateThermalVolumeReport,
+}
+
 impl FlowField {
     /// Prepare molecular momentum and physical heat once, solve that heat with
     /// source conduction and baths, then advance original volume and momentum.
@@ -44,6 +54,60 @@ impl FlowField {
         workspace: &mut ImplicitThermalVolumeWorkspace,
         gate: &CancelGate,
     ) -> Result<ImplicitConductiveViscousThermalVolumeMomentumStep, ChtError> {
+        let accepted = self
+            .advance_isotropic_implicit_conjugate_thermal_volume_momentum_with_viscosity_and_baths(
+                domain,
+                reservoir,
+                conductivity,
+                baths,
+                &[],
+                &[],
+                input,
+                viscosity,
+                controls,
+                viscosity_controls,
+                solve,
+                workspace,
+                gate,
+            )?;
+        Ok(ImplicitConductiveViscousThermalVolumeMomentumStep {
+            evolution: accepted.evolution,
+            conductive_enthalpy_increment_j: accepted.conductive_enthalpy_increment_j,
+            report: accepted.report.conduction,
+        })
+    }
+
+    /// Conduct authored and physical molecular heat into finite solid storage
+    /// in the same implicit enthalpy graph, before native fluid transport.
+    ///
+    /// Viscosity is prepared once from the original fluid inventory. The solid
+    /// owns its supplied held mass, caloric chart and k(T,f), and may cross a
+    /// latent interval without entering mass or momentum transport. Each
+    /// fluid/solid or solid/solid face has one equal-and-opposite heat transfer;
+    /// explicit contact resistance belongs to that same native graph link.
+    /// Molecular numerical loss and pressure work remain separate from heat.
+    ///
+    /// This retains the original frozen-viscosity, first-order heat/flow split.
+    /// Workspace has one entry per fluid cell plus explicitly bound solid.
+    /// All caloric, molecular-assembly and transport defects share the original
+    /// thermal budget. Failure or cancellation returns neither endpoint.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_isotropic_implicit_conjugate_thermal_volume_momentum_with_viscosity_and_baths(
+        &self,
+        domain: &VoxelDomain,
+        reservoir: Option<([FlowFace; 6], StaggeredBoundaryPressure<'_>)>,
+        conductivity: &PreparedPhaseConductivity<'_>,
+        baths: &[ThermalVolumeBathFace],
+        solids: &[ThermalVolumeSolidCell<'_, '_>],
+        contacts: &[crate::conjugate::FaceContactResistance],
+        input: ThermalVolumeMomentumInput<'_>,
+        viscosity: MaterialMomentumViscosityInput<'_>,
+        controls: ConductiveThermalVolumeMomentumControls,
+        viscosity_controls: MaterialViscosityControls,
+        solve: ImplicitThermalVolumeSolveControls,
+        workspace: &mut ImplicitThermalVolumeWorkspace,
+        gate: &CancelGate,
+    ) -> Result<ImplicitConjugateViscousThermalVolumeMomentumStep, ChtError> {
         poll(gate)?;
         let (faces, profile, mouth) = match reservoir {
             Some((faces, profile)) => (
@@ -84,10 +148,12 @@ impl FlowField {
             momentum_kg_m_s: &viscous.momentum_kg_m_s,
             ..input
         };
-        let mut accepted = self.implicit_conduct_then_advance(
+        let mut accepted = self.implicit_conjugate_then_advance(
             domain,
             conductivity,
             baths,
+            solids,
+            contacts,
             heated.volume,
             ConductiveThermalVolumeControls {
                 volume: controls.evolution.volume,
@@ -142,16 +208,18 @@ impl FlowField {
         }
         accepted.report.absolute_enthalpy_defect_j = total;
         poll(gate)?;
-        Ok(ImplicitConductiveViscousThermalVolumeMomentumStep {
+        let (evolution, increments, solid_endpoints, report) = accepted.into_conjugate();
+        Ok(ImplicitConjugateViscousThermalVolumeMomentumStep {
             evolution: ViscousThermalVolumeMomentumStep {
-                evolution: accepted.evolution,
+                evolution,
                 viscosity_reconstruction: viscous.reconstruction,
                 viscosity: viscous.report,
                 absolute_heat_assembly_defect_j: molecular_assembly.to_f64(),
                 absolute_enthalpy_defect_j: viscous_defect,
             },
-            conductive_enthalpy_increment_j: accepted.increments,
-            report: accepted.report,
+            conductive_enthalpy_increment_j: increments,
+            solid_endpoints,
+            report,
         })
     }
 }

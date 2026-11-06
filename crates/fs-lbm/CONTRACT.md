@@ -13504,3 +13504,38 @@ wall with unequal half distances, finite contact resistance and k(f), a heated
 solid strip conducting through both solid/solid and fluid/solid faces, total
 fluid-plus-solid energy, unchanged solid mass, native momentum composition,
 empty-wall parity, exclusive face ownership and source/cancellation rollback.
+
+### Finite-solid conduction inside molecular and phase-resistance coupling
+
+The implicit conjugate viscosity entry prepares the original molecular kick
+once, then places its physical dissipation and authored fluid/solid heat in the
+same finite-wall graph before native volume and momentum transport. Each wall
+retains its separate caloric inventory and source conductivity. The accepted
+wall endpoint therefore responds to molecular heat during that heat interval.
+Molecular backward-Euler/scatter losses and mechanical pressure work retain
+their existing separate accounts; they do not become additional heat. The
+combined caloric, heat-addition and transport defects use the original shared
+enthalpy budget. Source viscosity remains frozen over the original split.
+
+The implicit conjugate phase-resistance entry uses that same fluid/wall graph
+inside each native drag/phase/pressure trial. Both inventories start from their
+original mass and enthalpy on every trial. Authored wall heat is applied for
+one physical interval each time; rejected trials never advance wall history.
+The accepted fluid phase, constitutive drag, physical heat and pressure must
+meet the existing outer gates before either fluid or wall endpoint is returned.
+The accepted wall result travels with that trial's heat payload, while the
+whole-call residual/Krylov ceilings account for all attempted thermal solves.
+
+Both entries reuse the same fixed geometry, constant face-contact resistance,
+source bounds and finite-wall energy account as the base conjugate solver.
+Only fluid heat enters native advection; no solid mass or momentum is routed.
+Existing fluid-only methods use empty wall/contact inputs through the same
+owners. These paths retain the original first-order heat/flow split and do not
+add evolving wall geometry, wall mechanical recoil or viscosity iteration.
+
+Focused regression sources independently close a one-fluid/one-wall molecular
+case with Q_mu=8/25 J, Q_wall=46/225 J and wall h=652/225 J/kg, and a latent
+fluid/finite-wall phase-drag case with Q_wall=1 J and Q_drag=1/27 J. Nonzero
+fluid throughflow leaves the manufactured caloric endpoint unchanged, while
+solid transport stays absent. The latter requires multiple coupling trials
+and checks late cancellation followed by exact retry from original wall state.

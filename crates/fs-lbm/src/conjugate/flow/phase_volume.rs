@@ -1,22 +1,23 @@
 //! Original-chart thermal volume evolution on the conservative flux owner.
 
 mod conduction;
-#[cfg(feature = "implicit-enthalpy-coupling")]
-pub use conduction::{
-    ImplicitConjugateThermalVolumeMomentumStep, ImplicitConjugateThermalVolumeReport,
-    ImplicitConjugateThermalVolumeStep, ThermalVolumeSolidCell, ThermalVolumeSolidEndpoint,
-    ImplicitConductiveResistiveThermalVolumeMomentumStep, ImplicitResistanceHeatWork,
-    ImplicitConductiveThermalVolumeMomentumStep, ImplicitConductiveThermalVolumeReport,
-    ImplicitConductiveThermalVolumeStep, ImplicitConductiveViscousThermalVolumeMomentumStep,
-    ImplicitThermalVolumeLinearControls, ImplicitThermalVolumeSolveControls,
-    ImplicitThermalVolumeWorkspace,
-};
 pub use conduction::{
     ConductiveResistiveThermalVolumeMomentumControls, ConductiveResistiveThermalVolumeMomentumStep,
     ConductiveThermalVolumeControls, ConductiveThermalVolumeMomentumControls,
     ConductiveThermalVolumeMomentumStep, ConductiveThermalVolumeReport,
-    ConductiveThermalVolumeStep, ConductiveViscousThermalVolumeMomentumStep,
-    ThermalVolumeBathFace,
+    ConductiveThermalVolumeStep, ConductiveViscousThermalVolumeMomentumStep, ThermalVolumeBathFace,
+};
+#[cfg(feature = "implicit-enthalpy-coupling")]
+pub use conduction::{
+    ImplicitConductiveResistiveThermalVolumeMomentumStep,
+    ImplicitConductiveThermalVolumeMomentumStep, ImplicitConductiveThermalVolumeReport,
+    ImplicitConductiveThermalVolumeStep, ImplicitConductiveViscousThermalVolumeMomentumStep,
+    ImplicitConjugateResistiveThermalVolumeMomentumStep,
+    ImplicitConjugateThermalVolumeMomentumStep, ImplicitConjugateThermalVolumeReport,
+    ImplicitConjugateThermalVolumeStep, ImplicitConjugateViscousThermalVolumeMomentumStep,
+    ImplicitResistanceHeatWork, ImplicitThermalVolumeLinearControls,
+    ImplicitThermalVolumeSolveControls, ImplicitThermalVolumeWorkspace, ThermalVolumeSolidCell,
+    ThermalVolumeSolidEndpoint,
 };
 mod momentum;
 pub use momentum::{

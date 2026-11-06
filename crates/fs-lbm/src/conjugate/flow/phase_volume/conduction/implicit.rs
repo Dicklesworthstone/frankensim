@@ -24,7 +24,10 @@ pub use fs_conduction::enthalpy::conduction::implicit::{
 mod momentum;
 pub use momentum::ImplicitConductiveThermalVolumeMomentumStep;
 mod viscous;
-pub use viscous::ImplicitConductiveViscousThermalVolumeMomentumStep;
+pub use viscous::{
+    ImplicitConductiveViscousThermalVolumeMomentumStep,
+    ImplicitConjugateViscousThermalVolumeMomentumStep,
+};
 mod solid;
 pub use solid::{
     ImplicitConjugateThermalVolumeMomentumStep, ImplicitConjugateThermalVolumeReport,
@@ -32,7 +35,8 @@ pub use solid::{
 };
 mod resistance;
 pub use resistance::{
-    ImplicitConductiveResistiveThermalVolumeMomentumStep, ImplicitResistanceHeatWork,
+    ImplicitConductiveResistiveThermalVolumeMomentumStep,
+    ImplicitConjugateResistiveThermalVolumeMomentumStep, ImplicitResistanceHeatWork,
 };
 
 /// Bounded native analytic Newton/Krylov work for ONE backward-Euler interval.
@@ -276,32 +280,6 @@ impl FlowField {
             solid_enthalpy_change_j,
             solid_to_fluid_heat_j,
         })
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn prepare_implicit_conductive_heat(
-        &self,
-        domain: &VoxelDomain,
-        conductivity: &PreparedPhaseConductivity<'_>,
-        baths: &[ThermalVolumeBathFace],
-        input: CoexistenceVolumeInput<'_>,
-        controls: ConductiveThermalVolumeControls,
-        solve: ImplicitThermalVolumeSolveControls,
-        workspace: &mut ImplicitThermalVolumeWorkspace,
-        gate: &CancelGate,
-    ) -> Result<PreparedImplicitHeat, ChtError> {
-        self.prepare_implicit_conjugate_heat(
-            domain,
-            conductivity,
-            baths,
-            &[],
-            &[],
-            input,
-            controls,
-            solve,
-            workspace,
-            gate,
-        )
     }
 
     #[allow(clippy::too_many_arguments)]

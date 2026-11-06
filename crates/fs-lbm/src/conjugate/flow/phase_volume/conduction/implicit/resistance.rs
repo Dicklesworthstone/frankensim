@@ -32,6 +32,16 @@ pub struct ImplicitConductiveResistiveThermalVolumeMomentumStep {
     pub work: ImplicitResistanceHeatWork,
 }
 
+/// Accepted phase/drag/pressure trial with its own finite-wall heat endpoint.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ImplicitConjugateResistiveThermalVolumeMomentumStep {
+    pub evolution: ResolvedResistiveThermalVolumeMomentumStep,
+    pub conductive_enthalpy_increment_j: Vec<f64>,
+    pub solid_endpoints: Vec<ThermalVolumeSolidEndpoint>,
+    pub report: ImplicitConjugateThermalVolumeReport,
+    pub work: ImplicitResistanceHeatWork,
+}
+
 impl FlowField {
     /// Close implicit conduction/baths, phase resistance and physical drag heat
     /// through the SAME original chart, pressure and material-volume iteration.
@@ -79,6 +89,67 @@ impl FlowField {
             &EquilibriumPhaseState,
         ) -> Result<ResolvedPhaseTransportState, ChtError>,
     ) -> Result<ImplicitConductiveResistiveThermalVolumeMomentumStep, ChtError> {
+        let accepted = self
+            .advance_isotropic_implicit_conjugate_phase_resistance_thermal_volume_momentum_with_baths(
+                domain,
+                faces,
+                profile,
+                conductivity,
+                baths,
+                &[],
+                &[],
+                law,
+                input,
+                controls,
+                solve,
+                workspace,
+                gate,
+                resolve,
+            )?;
+        Ok(ImplicitConductiveResistiveThermalVolumeMomentumStep {
+            evolution: accepted.evolution,
+            conductive_enthalpy_increment_j: accepted.conductive_enthalpy_increment_j,
+            report: accepted.report.conduction,
+            work: accepted.work,
+        })
+    }
+
+    /// Couple finite solid storage to the original phase-resistance iteration.
+    ///
+    /// Each drag/phase trial reconstructs BOTH fluid and wall from their
+    /// original inventories, then solves authored heat, the trial's physical
+    /// drag heat, source conductivity and contact exchange in one sparse
+    /// implicit graph. Only the accepted trial's wall endpoint is returned.
+    /// Rejected trials cannot accumulate wall heat or advance wall time.
+    /// Solid mass and momentum remain excluded from native fluid transport.
+    ///
+    /// Whole-call heat-work ceilings include every rejected coupled trial.
+    /// The shared thermal/mechanical acceptance gate includes the finite wall
+    /// storage residual. Source bounds, phase mobility and the first-order
+    /// pre-advection heat split retain their existing meanings. Workspace has
+    /// one entry per fluid cell plus explicitly bound solid. Refusal publishes
+    /// neither the fluid endpoint nor a partially heated wall.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_isotropic_implicit_conjugate_phase_resistance_thermal_volume_momentum_with_baths(
+        &self,
+        domain: &VoxelDomain,
+        faces: [FlowFace; 6],
+        profile: Option<StaggeredBoundaryPressure<'_>>,
+        conductivity: &PreparedPhaseConductivity<'_>,
+        baths: &[ThermalVolumeBathFace],
+        solids: &[ThermalVolumeSolidCell<'_, '_>],
+        contacts: &[crate::conjugate::FaceContactResistance],
+        law: &MushyPhaseLaw<'_>,
+        input: ThermalVolumeMomentumInput<'_>,
+        controls: ConductiveResistiveThermalVolumeMomentumControls,
+        solve: ImplicitThermalVolumeSolveControls,
+        workspace: &mut ImplicitThermalVolumeWorkspace,
+        gate: &CancelGate,
+        resolve: impl FnMut(
+            usize,
+            &EquilibriumPhaseState,
+        ) -> Result<ResolvedPhaseTransportState, ChtError>,
+    ) -> Result<ImplicitConjugateResistiveThermalVolumeMomentumStep, ChtError> {
         poll(gate)?;
         let curve = conductivity.caloric_curve();
         if curve.identity() != law.curve().identity()
@@ -89,7 +160,7 @@ impl FlowField {
             ));
         }
         let mut work = ImplicitResistanceHeatWork::default();
-        let (evolution, (increments, mut report)) = self
+        let (evolution, (increments, solid_endpoints, mut report)) = self
             .advance_resolved_phase_resistance_thermal_volume_with_heat(
                 domain,
                 faces,
@@ -113,10 +184,12 @@ impl FlowField {
                     {
                         return Err(refuse("implicit resistance whole-call heat work exhausted"));
                     }
-                    let prepared = self.prepare_implicit_conductive_heat(
+                    let prepared = self.prepare_implicit_conjugate_heat(
                         domain,
                         conductivity,
                         baths,
+                        solids,
+                        contacts,
                         CoexistenceVolumeInput {
                             net_enthalpy_increment_j: &heat,
                             ..input.volume
@@ -129,7 +202,7 @@ impl FlowField {
                         workspace,
                         gate,
                     )?;
-                    let native = prepared.report.solve;
+                    let native = &prepared.report.solve;
                     for (count, added) in [
                         (&mut work.heat_trials, 1),
                         (&mut work.nonlinear_iterations, native.nonlinear_iterations),
@@ -140,10 +213,11 @@ impl FlowField {
                             .checked_add(added)
                             .ok_or_else(|| refuse("implicit resistance work count overflow"))?;
                     }
+                    let (combined, increments, solid_endpoints, report) = prepared.into_conjugate();
                     Ok((
-                        prepared.combined,
-                        prepared.report.absolute_enthalpy_defect_j,
-                        (prepared.increments, prepared.report),
+                        combined,
+                        report.conduction.absolute_enthalpy_defect_j,
+                        (increments, solid_endpoints, report),
                     ))
                 },
             )?;
@@ -151,11 +225,11 @@ impl FlowField {
         // These are the same non-cancelling terms already admitted together by
         // the native outer iteration, including its mechanics energy gate.
         let coupling = &native.coupling;
-        report.absolute_enthalpy_defect_j =
+        report.conduction.absolute_enthalpy_defect_j =
             (Dd::from_f64(coupling.absolute_heat_coupling_defect_j)
                 + Dd::from_f64(coupling.absolute_constitutive_heat_defect_j)
                 + Dd::from_f64(native.thermal.volume.report.absolute_enthalpy_defect_j)
-                + Dd::from_f64(report.absolute_enthalpy_defect_j))
+                + Dd::from_f64(report.conduction.absolute_enthalpy_defect_j))
             .to_f64();
         for (cell, state) in native.thermal.volume.phase_states.iter().enumerate() {
             poll_every(gate, cell)?;
@@ -164,9 +238,10 @@ impl FlowField {
             }
         }
         poll(gate)?;
-        Ok(ImplicitConductiveResistiveThermalVolumeMomentumStep {
+        Ok(ImplicitConjugateResistiveThermalVolumeMomentumStep {
             evolution,
             conductive_enthalpy_increment_j: increments,
+            solid_endpoints,
             report,
             work,
         })

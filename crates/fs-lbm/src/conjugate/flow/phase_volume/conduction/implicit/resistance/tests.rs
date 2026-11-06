@@ -449,3 +449,171 @@ fn latent_bath_drag_and_phase_share_one_accepted_energy_and_momentum_endpoint() 
         [Some(curve.state_at_specific_enthalpy(50.0).unwrap())]
     );
 }
+
+#[test]
+fn finite_wall_is_reheated_from_original_inventory_in_every_phase_drag_trial() {
+    use crate::conjugate::{FaceContactResistance, Voxel};
+
+    let (card, curve) = fixture();
+    let law = MushyPhaseLaw::try_new_with_immobile_solid(&curve, 2.0, 2.0, 1.0).unwrap();
+    let context = context();
+    let prepare = |bounds| {
+        PreparedPhaseConductivity::new(
+            &curve,
+            ThermalMaterialPoint {
+                material: &card,
+                context: &context,
+                temperature_axis: "T",
+                liquid_fraction_axis: Some("liquid"),
+            },
+            &PropertyKey::with_quantity(
+                THERMAL_CONDUCTIVITY_PROPERTY,
+                quantity(QuantityKind::ThermalConductivity),
+            ),
+            ClaimSelection::Policy(SelectionPolicy::SingleClaimOnly),
+            bounds,
+            || Ok(()),
+        )
+        .unwrap()
+    };
+    let conductivity = prepare([40.0, 90.0]);
+    let wall_conductivity = prepare([110.0, 130.0]);
+    let mut domain = VoxelDomain::new(1, 2, 1, 1.0).unwrap();
+    domain.set(0, 1, 0, Voxel::Solid(0));
+    let field = FlowField::quiescent(&domain);
+    let mut faces = [FlowFace::Wall; 6];
+    faces[0] = FlowFace::Free;
+    faces[1] = FlowFace::Free;
+    let mass = [2.0, 0.0];
+    let phases = [Some(curve.state_at_specific_enthalpy(50.0).unwrap()), None];
+    let momentum = [[0.0; 3]; 2];
+    let beta = 4.0 / 27.0;
+    let force = [[8.0 + beta, 0.0, 0.0], [0.0; 3]];
+    let authored = [49.0 - 1.0 / 27.0, 0.0];
+    let mut data = ThermalVolumeMomentumInput {
+        volume: CoexistenceVolumeInput {
+            mass_kg: &mass,
+            phase_states: &phases,
+            net_enthalpy_increment_j: &authored,
+            boundary_inflow: [None; 6],
+        },
+        momentum_kg_m_s: &momentum,
+        acceleration_m_s2: [0.0; 3],
+        force_density_n_m3: &force,
+        boundary_velocity_m_s: [None; 6],
+    };
+    data.volume.boundary_inflow[0] = Some(curve.state_at_specific_enthalpy(75.0).unwrap());
+    data.boundary_velocity_m_s[0] = Some([1.0, 0.0, 0.0]);
+    let solids = [ThermalVolumeSolidCell {
+        cell: 1,
+        conductivity: &wall_conductivity,
+        mass_kg: 2.0,
+        phase: curve.state_at_specific_enthalpy(116.5).unwrap(),
+        net_enthalpy_increment_j: 0.0,
+    }];
+    let contacts = [FaceContactResistance {
+        cells: [0, 1],
+        resistance_m2_k_w: 16.0 / 15.0,
+    }];
+    // At f_fluid*=3/4, k_f=5/16 and k_s=3/8. The actual half cells and
+    // contact give R=8/5+4/3+16/15=4 K/W. At T_wall*=516, T_f*=500,
+    // dt=1/4 the wall supplies exactly 1 J, so M_s*(116-116.5)=-1 J.
+    // The fluid gains 50 J from Q_authored=49-1/27, Q_drag=1/27 and Q_wall=1.
+    // Its manufactured transported h=75 still gives beta=4/27 and u=1.
+    let mut limits = controls();
+    limits
+        .resistance
+        .thermal
+        .volume
+        .thermal
+        .volume
+        .transport
+        .max_cells = 2;
+    limits.resistance.thermal.mechanics.reconstruction.max_cells = 2;
+    limits.resistance.thermal.mechanics.forcing.max_cells = 2;
+    let solve = ImplicitThermalVolumeSolveControls {
+        cell_tolerance_j: 1e-12,
+        ..ImplicitThermalVolumeSolveControls::default()
+    };
+    let mut workspace = ImplicitThermalVolumeWorkspace::new(2).unwrap();
+    let run = |workspace: &mut ImplicitThermalVolumeWorkspace, gate: &CancelGate| {
+        field
+            .advance_isotropic_implicit_conjugate_phase_resistance_thermal_volume_momentum_with_baths(
+                &domain, faces, None, &conductivity, &[], &solids, &contacts,
+                &law, data, limits, solve, workspace, gate,
+                |_, phase| source(&card, &law, phase),
+            )
+    };
+    let result = run(&mut workspace, &CancelGate::new_clock_free()).unwrap();
+    let native = &result.evolution.evolution;
+    let volume = &native.thermal.volume;
+    close(
+        volume.phase_states[0].unwrap().specific_enthalpy_j_kg(),
+        75.0,
+    );
+    assert_eq!(volume.phase_states[1], None);
+    assert_eq!(volume.transport.mass_kg, vec![2.0, 0.0]);
+    close(native.momentum.momentum_kg_m_s[0][0], 2.0);
+    assert_eq!(native.momentum.momentum_kg_m_s[1], [0.0; 3]);
+    close(native.resistance_pa_s_m2[0], beta);
+    close(native.resistance.resistance_heat_j, 1.0 / 27.0);
+    close(native.resistance.backward_euler_loss_j, 1.0);
+    close(result.conductive_enthalpy_increment_j[0], 1.0);
+    assert_eq!(result.conductive_enthalpy_increment_j[1], 0.0);
+    assert_eq!(result.solid_endpoints.len(), 1);
+    let wall = &result.solid_endpoints[0];
+    assert_eq!(wall.cell, 1);
+    close(wall.mass_kg, 2.0);
+    close(wall.phase.specific_enthalpy_j_kg(), 116.0);
+    close(wall.phase.temperature_k(), 516.0);
+    close(result.report.solid_enthalpy_change_j, -1.0);
+    close(result.report.solid_to_fluid_heat_j, 1.0);
+    assert_eq!(result.report.solid_authored_heat_j, 0.0);
+    assert_eq!(result.report.conduction.boundary_faces, 0);
+    close(
+        volume.report.material_enthalpy_change_j + result.report.solid_enthalpy_change_j,
+        authored[0] + native.resistance.resistance_heat_j,
+    );
+    assert!(native.coupling.coupling_iterations > 2);
+    assert_eq!(result.work.heat_trials, native.coupling.coupling_iterations);
+    assert!(result.work.residual_evaluations > result.report.conduction.solve.residual_evaluations);
+    assert!(result.report.conduction.absolute_enthalpy_defect_j <= 1e-7);
+
+    // Cancellation after at least one solved heat trial must not warm-start
+    // physical wall history. Scratch reuse then reproduces the original result.
+    let gate = CancelGate::new_clock_free();
+    let mut queries = 0;
+    let cancelled = field
+        .advance_isotropic_implicit_conjugate_phase_resistance_thermal_volume_momentum_with_baths(
+            &domain,
+            faces,
+            None,
+            &conductivity,
+            &[],
+            &solids,
+            &contacts,
+            &law,
+            data,
+            limits,
+            solve,
+            &mut workspace,
+            &gate,
+            |_, phase| {
+                queries += 1;
+                if queries == 2 {
+                    gate.request();
+                }
+                source(&card, &law, phase)
+            },
+        );
+    assert!(matches!(cancelled, Err(ChtError::Cancelled)));
+    assert_eq!(queries, 2);
+    assert_eq!(
+        run(&mut workspace, &CancelGate::new_clock_free()).unwrap(),
+        result
+    );
+    close(solids[0].phase.specific_enthalpy_j_kg(), 116.5);
+    assert_eq!(mass, [2.0, 0.0]);
+    assert_eq!(momentum, [[0.0; 3]; 2]);
+    assert_eq!(field, FlowField::quiescent(&domain));
+}

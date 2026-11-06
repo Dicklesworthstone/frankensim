@@ -204,3 +204,139 @@ fn molecular_heat_enters_the_asymmetric_bath_endpoint_before_native_momentum() {
     assert_eq!(momentum, [[2.0, 0.0, 0.0]; 2]);
     assert_eq!(states[0].unwrap().specific_enthalpy_j_kg(), 1.0);
 }
+
+#[test]
+fn molecular_heat_and_finite_wall_storage_close_before_the_one_fluid_route() {
+    use crate::conjugate::FaceContactResistance;
+
+    let material = card("T", &[(300.0, 2.0), (304.0, 2.0)]);
+    let caloric = curve(&material, &[(0.0, 300.0, 1.0, 2.0), (4.0, 304.0, 1.0, 2.0)]);
+    let conductivity = source(&material, &caloric, [0.0, 4.0]);
+    let mut domain = VoxelDomain::new(1, 2, 1, 1.0).unwrap();
+    domain.set(0, 1, 0, Voxel::Solid(0));
+    let field = FlowField::quiescent(&domain);
+    let mass = [2.0, 0.0];
+    let states = [Some(caloric.state_at_specific_enthalpy(1.0).unwrap()), None];
+    let momentum = [[2.0, 0.0, 0.0], [0.0; 3]];
+    let force = [[0.0; 3]; 2];
+    let authored = [0.0; 2];
+    let molecular = CountedTransport {
+        state: FluidTransportState::try_new(2.0, 1.0, 2.0, 1.0).unwrap(),
+        calls: Cell::new(0),
+    };
+    let sources: [Option<&dyn FluidTransport>; 2] = [Some(&molecular), None];
+    let viscosity = MaterialMomentumViscosityInput {
+        sources: &sources,
+        boundaries: [
+            FvBoundary::Outlet,
+            FvBoundary::Outlet,
+            FvBoundary::wall(),
+            FvBoundary::wall(),
+            FvBoundary::Symmetry,
+            FvBoundary::Symmetry,
+        ],
+    };
+    let viscosity_controls = MaterialViscosityControls {
+        max_cells: 100,
+        max_sweeps: 200,
+        relative_tolerance: 1e-12,
+        maximum_impulse_defect_kg_m_s: 1e-8,
+        maximum_angular_impulse_defect_kg_m2_s: 1e-8,
+        maximum_energy_defect_j: 1e-8,
+    };
+    let faces = [
+        FlowFace::Free,
+        FlowFace::Free,
+        FlowFace::Wall,
+        FlowFace::Wall,
+        FlowFace::Wall,
+        FlowFace::Wall,
+    ];
+    let profile = StaggeredBoundaryPressure {
+        x_pa: &[Some(0.0), Some(0.0), None, None],
+        y_pa: &[None; 3],
+        z_pa: &[None; 4],
+    };
+    // Both no-slip y walls still give u_mu=4/5 and Q_mu=8/25 J.
+    // R_total=.5/2+.5+.5/2=1 K/W, M_f=M_s=2, Cp=1, dt=1/8.
+    // Thus 17*h_f-h_s=464/25 and -h_f+17*h_s=48; independently,
+    // h_f*=284/225, h_s*=652/225, Q_s->f=46/225 J.
+    let fluid_h = 284.0 / 225.0;
+    let mut volume = input(&mass, &states, &authored);
+    volume.boundary_inflow[0] = Some(caloric.state_at_specific_enthalpy(fluid_h).unwrap());
+    let mut incoming = [None; 6];
+    incoming[0] = Some([0.8, 0.0, 0.0]);
+    let data = ThermalVolumeMomentumInput {
+        volume,
+        momentum_kg_m_s: &momentum,
+        acceleration_m_s2: [0.0; 3],
+        force_density_n_m3: &force,
+        boundary_velocity_m_s: incoming,
+    };
+    let solids = [ThermalVolumeSolidCell {
+        cell: 1,
+        conductivity: &conductivity,
+        mass_kg: 2.0,
+        phase: caloric.state_at_specific_enthalpy(3.0).unwrap(),
+        net_enthalpy_increment_j: 0.0,
+    }];
+    let contacts = [FaceContactResistance {
+        cells: [0, 1],
+        resistance_m2_k_w: 0.5,
+    }];
+    let controls = super::super::momentum::coupled_controls(0.125);
+    let result = field
+        .advance_isotropic_implicit_conjugate_thermal_volume_momentum_with_viscosity_and_baths(
+            &domain,
+            Some((faces, profile)),
+            &conductivity,
+            &[],
+            &solids,
+            &contacts,
+            data,
+            viscosity,
+            controls,
+            viscosity_controls,
+            solve_controls(),
+            &mut ImplicitThermalVolumeWorkspace::new(2).unwrap(),
+            &CancelGate::new_clock_free(),
+        )
+        .unwrap();
+    assert_eq!(molecular.calls.get(), 1);
+    let native = &result.evolution.evolution;
+    let volume = &native.thermal.volume;
+    close(
+        volume.phase_states[0].unwrap().specific_enthalpy_j_kg(),
+        fluid_h,
+    );
+    assert_eq!(volume.phase_states[1], None);
+    assert_eq!(volume.transport.mass_kg, vec![2.0, 0.0]);
+    close(volume.transport.report.incoming_mass_kg, 0.2);
+    close(volume.transport.report.outgoing_mass_kg, 0.2);
+    close(volume.transport.report.carried_enthalpy_j, 0.0);
+    close(native.momentum.velocity_m_s[0][0], 0.8);
+    assert_eq!(native.momentum.momentum_kg_m_s[1], [0.0; 3]);
+    close(result.evolution.viscosity.molecular_heat_j, 8.0 / 25.0);
+    close(result.evolution.viscosity.backward_euler_loss_j, 1.0 / 25.0);
+    close(result.conductive_enthalpy_increment_j[0], 46.0 / 225.0);
+    assert_eq!(result.conductive_enthalpy_increment_j[1], 0.0);
+    close(
+        result.solid_endpoints[0].phase.specific_enthalpy_j_kg(),
+        652.0 / 225.0,
+    );
+    close(result.report.solid_to_fluid_heat_j, 46.0 / 225.0);
+    close(result.report.solid_enthalpy_change_j, -46.0 / 225.0);
+    close(
+        volume.report.material_enthalpy_change_j + result.report.solid_enthalpy_change_j,
+        result.evolution.viscosity.molecular_heat_j,
+    );
+    close(
+        result.report.conduction.solve.energy.external_heat_j,
+        8.0 / 25.0,
+    );
+    assert_eq!(result.report.conduction.boundary_faces, 0);
+    assert!(result.report.conduction.absolute_enthalpy_defect_j <= 1e-8);
+    assert_eq!(field, FlowField::quiescent(&domain));
+    assert_eq!(mass, [2.0, 0.0]);
+    close(solids[0].phase.specific_enthalpy_j_kg(), 3.0);
+}

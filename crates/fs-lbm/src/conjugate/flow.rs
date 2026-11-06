@@ -44,16 +44,6 @@ pub use material_momentum::{
     ViscousMaterialMomentumAdvance,
 };
 mod phase_volume;
-#[cfg(feature = "implicit-enthalpy-coupling")]
-pub use phase_volume::{
-    ImplicitConjugateThermalVolumeMomentumStep, ImplicitConjugateThermalVolumeReport,
-    ImplicitConjugateThermalVolumeStep, ThermalVolumeSolidCell, ThermalVolumeSolidEndpoint,
-    ImplicitConductiveResistiveThermalVolumeMomentumStep, ImplicitResistanceHeatWork,
-    ImplicitConductiveThermalVolumeMomentumStep, ImplicitConductiveThermalVolumeReport,
-    ImplicitConductiveThermalVolumeStep, ImplicitConductiveViscousThermalVolumeMomentumStep,
-    ImplicitThermalVolumeLinearControls, ImplicitThermalVolumeSolveControls,
-    ImplicitThermalVolumeWorkspace,
-};
 pub use phase_volume::{
     CoexistenceVolumeControls, CoexistenceVolumeInput, CoexistenceVolumeReport,
     CoexistenceVolumeStep, ConductiveResistiveThermalVolumeMomentumControls,
@@ -61,12 +51,23 @@ pub use phase_volume::{
     ConductiveThermalVolumeMomentumControls, ConductiveThermalVolumeMomentumStep,
     ConductiveThermalVolumeReport, ConductiveThermalVolumeStep,
     ConductiveViscousThermalVolumeMomentumStep, PiecewiseThermalVolumeControls,
-    ThermalVolumeBathFace,
     ResistiveThermalVolumeMomentumControls, ResistiveThermalVolumeMomentumStep,
     ResolvedResistiveThermalVolumeMomentumStep, ResolvedViscousThermalVolumeMomentumStep,
-    ThermalResistanceCouplingReport, ThermalVolumeControls, ThermalVolumeMomentumControls,
-    ThermalVolumeMomentumInput, ThermalVolumeMomentumStep, ThermalVolumeStep,
-    ViscousThermalVolumeMomentumStep,
+    ThermalResistanceCouplingReport, ThermalVolumeBathFace, ThermalVolumeControls,
+    ThermalVolumeMomentumControls, ThermalVolumeMomentumInput, ThermalVolumeMomentumStep,
+    ThermalVolumeStep, ViscousThermalVolumeMomentumStep,
+};
+#[cfg(feature = "implicit-enthalpy-coupling")]
+pub use phase_volume::{
+    ImplicitConductiveResistiveThermalVolumeMomentumStep,
+    ImplicitConductiveThermalVolumeMomentumStep, ImplicitConductiveThermalVolumeReport,
+    ImplicitConductiveThermalVolumeStep, ImplicitConductiveViscousThermalVolumeMomentumStep,
+    ImplicitConjugateResistiveThermalVolumeMomentumStep,
+    ImplicitConjugateThermalVolumeMomentumStep, ImplicitConjugateThermalVolumeReport,
+    ImplicitConjugateThermalVolumeStep, ImplicitConjugateViscousThermalVolumeMomentumStep,
+    ImplicitResistanceHeatWork, ImplicitThermalVolumeLinearControls,
+    ImplicitThermalVolumeSolveControls, ImplicitThermalVolumeWorkspace, ThermalVolumeSolidCell,
+    ThermalVolumeSolidEndpoint,
 };
 
 /// Mass-flow role of one domain face for flux construction and projection.
@@ -841,7 +842,7 @@ impl LbmFlow {
 /// [`ChtError::LatticeResolution`] when `tau < min_tau`,
 /// [`ChtError::FlowDiverged`], [`ChtError::FlowNotSteady`], projection
 /// refusals, or [`ChtError::Cancelled`].
-#[allow(clippy::too_many_lines)] // one linear admission -> run -> projection story
+#[allow(clippy::too_many_lines)]// one linear admission -> run -> projection story
 pub fn lbm_duct_flow(
     domain: &VoxelDomain,
     fluid: &FluidProperties,
