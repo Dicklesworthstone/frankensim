@@ -2713,3 +2713,33 @@ the measured temperature domain and resolve changing-temperature coefficients.
 Focused G0/G1/G3 tests cover closed-form pumping and afterglow, tiny exposures,
 prompt/large-lifetime limits, scaled late tails, split-step conservation, consistent
 quenching, Arrhenius units and admission boundaries.
+
+
+### Explicit singlet/triplet transfer
+
+`luminescence::transfer::SingletTripletDecay` admits two positive authored
+excitation energies (`E_s >= E_t`) and competing radiative, nonradiative and
+intersystem-crossing rates. Its reusable fixed-interval plan delegates populations
+and integrated event counts to the existing positive `fs-la` reaction/source
+owner. Forward crossing deposits the energy gap as heat; reverse crossing
+withdraws it from the bath. Both exchanges and both radiative channels remain
+separate, including repeated visits, so delayed singlet emission cannot silently
+create energy. Radiative channel joules still precede spectral Stokes conversion.
+Pump rates are admitted excitation counts per second, with pump-photon relaxation
+owned by the caller. The source owner must provide thermally admissible rates and
+resolve changing temperatures; no detailed-balance relation is invented. This
+linear dilute model excludes ground-state depletion, annihilation and stimulated
+emission. Numerical admission, budgets and cancellation retain the `fs-la` owner's
+meaning. Candidate energy residuals are reported without correction. Focused
+tests cover independent two-state solutions, equal rates, tiny intervals, reverse
+crossing, stiff afterglow, stable stores and constant-pump semigroup composition.
+Admission refuses a positive ground-state sink rounded away by a unit crossing
+fraction. Every candidate additionally checks compensated excitation balance
+against the caller's relative tolerance using only initial/final inventories,
+injection and ground-state events; reversible crossing counts cannot inflate its
+allowance. Public positive channel counts and energies that underflow to zero
+refuse, including counts whose later energy rescaling would be representable.
+
+Pinned formatter/parser checks and independent physics/API review passed. Eleven
+focused tests are authored; native test execution was unavailable in the shared
+editing environment.

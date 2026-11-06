@@ -12,8 +12,9 @@
 //! <https://doi.org/10.1351/goldbook.Q04991>). For one fixed-energy emitting
 //! state the radiative branching probability is `kr/(kr+knr)` and the lifetime
 //! is `1/(kr+knr)`. Adding a nonradiative channel changes BOTH consistently.
-//! No material constants, saturation, stimulated emission, intersystem crossing
-//! or phosphorescence mechanism are inferred. Coefficients must remain fixed
+//! No material constants, saturation or stimulated emission are inferred.
+//! [`transfer`] adds explicitly authored singlet/triplet crossing and reverse
+//! crossing with separate thermal exchanges. Coefficients must remain fixed
 //! over each step; a thermal owner must resolve changing-temperature rates.
 //!
 //! Scalar work is bounded and allocation-free. Elementary functions use the
@@ -21,6 +22,10 @@
 
 use core::fmt;
 use fs_math::{decay, eft::two_sum};
+
+/// Positive singlet/triplet kinetics, delayed emission and transfer heat.
+#[path = "luminescence_transfer.rs"]
+pub mod transfer;
 
 /// Invalid physical inputs or an unrepresentable candidate leave state untouched.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
