@@ -9,10 +9,14 @@
 //!
 //! These are paired, fixed-reference, frictionless normal events. The approach
 //! and time children compose native motion and impacts at a held thermal state.
-//! Persistent thermal contact forces and finite sliding remain separate problems.
+//! The sustained child also admits explicit thermal transitions under normal
+//! contact forces. Finite sliding and new-pair discovery remain outside this model.
 
 /// Bounded native midpoint prefixes at the admitted thermal state.
 pub mod approach;
+
+/// Native normal-force contact with explicitly resolved thermal transitions.
+pub mod sustained;
 
 /// Complete native physical intervals through localized thermal-fragment impacts.
 pub mod time;

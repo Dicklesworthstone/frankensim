@@ -89,8 +89,44 @@ impl<'a> ThermalBrittleTetMotion<'a> {
     ///
     /// Every source, solver, time/budget, cancellation and physical-work gate
     /// passes before the new material owner, velocity and clock are published.
-    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    #[allow(clippy::too_many_arguments)]
     pub fn advance_midpoint<'next>(
+        &self,
+        next_materials: &'next [ResolvedThermalBrittle],
+        dt_s: f64,
+        prescribed_m: &[(usize, f64)],
+        mean_forces_n: &[(usize, f64)],
+        settings: IncrementSettings,
+        controls: BrittleTetMidpointControls,
+        cx: &Cx<'_>,
+    ) -> Result<ThermalBrittleTetMidpointStep<'next>, BrittleTetDynamicError>
+    where
+        'a: 'next,
+    {
+        let step = self.midpoint_candidate(
+            next_materials,
+            dt_s,
+            prescribed_m,
+            mean_forces_n,
+            settings,
+            controls,
+            cx,
+        )?;
+        self.solid
+            .require_released_faces(&step.motion.solid.solution.displacement_m, cx)?;
+        checkpoint(cx)?;
+        Ok(step)
+    }
+
+    /// Unpublished native response for the sustained-contact force solve.
+    /// Only released-face opening admission is deferred: signed force probes
+    /// may overlap while the original contact owner solves complementarity.
+    /// Every thermal source, mechanical history, inertia and work gate remains
+    /// identical to public midpoint, including an explicitly supplied source
+    /// transition. The receiving contact owner must admit all actual openings
+    /// and physical force/work accounts before publishing a successor.
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    pub(in crate::brittle::solid::expansion::dynamics) fn midpoint_candidate<'next>(
         &self,
         next_materials: &'next [ResolvedThermalBrittle],
         dt_s: f64,

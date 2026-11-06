@@ -336,6 +336,7 @@ impl<'a> ThermalBrittleTetSolid<'a> {
         let mut solution = problem
             .solve_from(old_u, &prepared.states, cx)
             .map_err(BrittleTetError::from)?;
+        self.require_released_faces(&solution.displacement_m, cx)?;
         let ThermalBrittleTetRecovery {
             mut energy,
             element_energy,
@@ -509,6 +510,8 @@ impl<'a> ThermalBrittleTetSolid<'a> {
     /// endpoint-force or path-mean-force assembly. Endpoint stress is restored
     /// in the returned native solution; its reactions retain the solver's
     /// original force semantics. No alternate history or fracture law is used.
+    /// Public endpoints admit released-face opening separately; only unpublished
+    /// native sustained-contact force probes may defer that geometric check.
     #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     fn recover_material<'next>(
         &self,
@@ -526,7 +529,6 @@ impl<'a> ThermalBrittleTetSolid<'a> {
             )
             .into());
         }
-        self.require_released_faces(&solution.displacement_m, cx)?;
         let mut energy = prepared.energy;
         let mut element_energy = Vec::with_capacity(next_materials.len());
         let mut cumulative_loss_j = 0.0;

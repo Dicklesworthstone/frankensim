@@ -297,6 +297,8 @@ impl<'a> ThermalBrittleTetMotion<'a> {
             dt_s,
             cx,
         )?;
+        self.solid
+            .require_released_faces(&step.solution.displacement_m, cx)?;
         let recovered = self
             .solid
             .recover_material(
