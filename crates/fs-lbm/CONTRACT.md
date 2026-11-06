@@ -1208,6 +1208,19 @@ be rewritten refuse. Field, flow and cancellation admission
 remain shared. The public `source_caloric_endpoint` regressions cover nonlinear
 enthalpy heat, stale-law refusal and unchanged prescribed/compact temperatures.
 
+`EnergyConfig::evaluate_step_with_conductivity` and
+`evaluate_step_with_enthalpy` extend that unchanged-state audit to physical
+backward-Euler storage. Ordinary cells supply their original-law energy secants
+from the fixed old time level; compact junctions refresh exact secants through
+their existing storage owner and never borrow capacity from aliases. The same
+native local heat residual includes storage, and the original step ledger
+retains exact compact energy, prescribed-temperature jumps and physical sinks.
+Source enthalpy anchors and limited traces are evaluated at the candidate;
+no Krylov solve or constitutive update occurs. The public
+`source_caloric_step_endpoint` regressions specify independent nonlinear
+storage/advection balances for upwind and limited transport, compact C(T),
+reservoir jumps and unchanged-state/refusal behavior.
+
 The material owner re-evaluates the true caloric chart at the returned state
 and requires both the maximum individual face-heat defect and the maximum
 cell net-heat defect to meet the explicit tolerance, alongside its original

@@ -224,6 +224,194 @@ fn g0_source_caloric_endpoint_preserves_imposed_and_compact_temperatures() {
     assert_eq!(setup, before);
 }
 
+#[test]
+fn g1_source_caloric_step_endpoint_closes_exact_storage_and_limited_fluxes() {
+    use fs_lbm::conjugate::{
+        AdvectiveEnthalpyField, AffineSpecificEnthalpy, ChtError, FlowFace, FlowField,
+        FluidProperties,
+    };
+    let domain = VoxelDomain::from_fn(3, 1, 1, 1.0, |_| Voxel::Fluid).unwrap();
+    let flow = FlowField::from_face_velocity(
+        &domain,
+        [
+            FlowFace::Fixed,
+            FlowFace::Fixed,
+            FlowFace::Wall,
+            FlowFace::Wall,
+            FlowFace::Wall,
+            FlowFace::Wall,
+        ],
+        |axis, _| if axis == 0 { 1.0 } else { 0.0 },
+    )
+    .unwrap();
+    let mut faces = [ThermalFace::Adiabatic; 6];
+    faces[0] = ThermalFace::Inflow { temperature: 300.0 };
+    faces[1] = ThermalFace::Outflow {
+        backflow_temperature: 300.0,
+    };
+    let previous = [300.0; 3];
+    let temperature = [301.0, 303.0, 304.0];
+    let cells = temperature.map(|t| {
+        let theta = t - 300.0;
+        Some(AffineSpecificEnthalpy {
+            temperature_k: t,
+            enthalpy_j_kg: theta + theta * theta,
+            heat_capacity_j_kg_k: 1.0 + 2.0 * theta,
+        })
+    });
+    let field = AdvectiveEnthalpyField {
+        cells: &cells,
+        boundary_j_kg: [Some(0.0), Some(0.0), None, None, None, None],
+    };
+    let fluid = FluidProperties {
+        density_kg_m3: 1.0,
+        specific_heat_j_kg_k: 999.0,
+        conductivity_w_m_k: 19.0,
+        kinematic_viscosity_m2_s: 1.0,
+    };
+    for scheme in [ConvectionScheme::Upwind, ConvectionScheme::EnthalpyMinmod] {
+        let config = EnergyConfig { scheme, ..EnergyConfig::default() };
+        let mut setup = ThermalSetup::new(faces);
+        // h(theta)=theta+theta^2, unit masses, dt=1/2: the exact secant
+        // capacities [2,4,5] store [2,12,20] J. The independently computed
+        // upwind conduction/advection terms are [2,11,9] W. Minmod raises
+        // the middle donor's outgoing h by min(10,8)/2=4 J/kg; this adds
+        // +4/-4 W to its two incident cell balances, with zero net heat.
+        let correction = if scheme == ConvectionScheme::EnthalpyMinmod { 4.0 } else { 0.0 };
+        setup.power_w = vec![6.0, 35.0 + correction, 49.0 - correction];
+        let before = setup.clone();
+        let evaluate = |capacity: &[f64], values: &[f64], field, gate: &CancelGate| {
+            config.evaluate_step_with_enthalpy(
+                &domain, &fluid, &[], &flow, &setup, &[[1.0; 3]; 3],
+                field, capacity, &previous, 0.5, values, gate,
+            )
+        };
+        let (result, record) = evaluate(
+            &[2.0, 4.0, 5.0], &temperature, field, &CancelGate::new(),
+        ).unwrap();
+        assert_eq!(result.temperature, temperature);
+        assert_eq!(result.report.iterations, 0);
+        assert_eq!(record.iterations, 0);
+        near(record.stored_energy_change_j, 34.0, 1e-13);
+        near(record.source_j, 45.0, 1e-13);
+        near(record.boundary_outflow_j, 11.0, 1e-13);
+        assert!(record.closure_j.abs() < 1e-11);
+        near(result.report.balance.advective_outflow_w, 20.0, 1e-13);
+        near(result.report.balance.residual_w, 68.0, 1e-13);
+        // Point Cp at the new temperature is NOT a backward-Euler energy
+        // secant. The wrong storage image must fail the original heat check.
+        assert!(matches!(
+            evaluate(&[3.0, 7.0, 9.0], &temperature, field, &CancelGate::new()),
+            Err(ChtError::SolverNotConverged { .. })
+        ));
+        let stale = cells.map(|h| h.map(|h| AffineSpecificEnthalpy {
+            temperature_k: h.temperature_k - 1.0,
+            enthalpy_j_kg: h.enthalpy_j_kg - h.heat_capacity_j_kg_k,
+            ..h
+        }));
+        assert!(matches!(
+            evaluate(
+                &[2.0, 4.0, 5.0], &temperature,
+                AdvectiveEnthalpyField { cells: &stale, ..field }, &CancelGate::new(),
+            ),
+            Err(ChtError::InvalidInput { field: "thermal.material_endpoint", .. })
+        ));
+        assert!(evaluate(&[2.0, 4.0], &temperature, field, &CancelGate::new()).is_err());
+        assert!(evaluate(&[2.0, 4.0, 5.0], &temperature[..2], field, &CancelGate::new()).is_err());
+        let gate = CancelGate::new();
+        gate.request();
+        assert!(matches!(
+            evaluate(&[2.0, 4.0, 5.0], &temperature, field, &gate),
+            Err(ChtError::Cancelled)
+        ));
+        assert_eq!(setup, before);
+        assert_eq!(previous, [300.0; 3]);
+        assert_eq!(temperature, [301.0, 303.0, 304.0]);
+    }
+}
+
+#[test]
+fn g1_source_caloric_step_endpoint_uses_compact_energy_and_fixed_reservoir_jumps() {
+    use fs_lbm::Face3;
+    use fs_lbm::conjugate::{
+        ChtError, CompactComponent, CompactHeatStorage, CompactHeatStorageLaw,
+        FlowField, FluidProperties,
+    };
+    use fs_material::thermal::transport::storage::TabulatedHeatStorage;
+    let domain = VoxelDomain::from_fn(1, 1, 4, 1.0, |_| Voxel::Solid(0)).unwrap();
+    let flow = FlowField::quiescent(&domain);
+    let solids = [SolidMaterial::new("synthetic compact surroundings", 123.0)];
+    let fluid = FluidProperties {
+        density_kg_m3: 1.0,
+        specific_heat_j_kg_k: 999.0,
+        conductivity_w_m_k: 19.0,
+        kinematic_viscosity_m2_s: 1.0,
+    };
+    let capacity = [2.0, 0.0, 0.0, 2.0];
+    let previous = [300.0; 4];
+    let temperature = [304.0, 310.0, 310.0, 304.0];
+    let config = EnergyConfig::default();
+    for imposed in [false, true] {
+        let mut setup = ThermalSetup::new([ThermalFace::Adiabatic; 6]);
+        setup.power_w = vec![3.2, 0.0, 0.0, 3.2];
+        if imposed {
+            setup.power_w[0] = 0.0;
+            setup.fixed_temperature.push((0, 304.0));
+        }
+        setup.compact_components.push(CompactComponent {
+            lo: [0, 0, 1],
+            hi: [1, 1, 3],
+            board_face: Face3::ZMin,
+            power_w: 79.6,
+            junction_to_case_k_w: 1.0,
+            junction_to_board_k_w: 1.0,
+            heat_capacity_j_k: None,
+        });
+        setup.compact_heat_storage.push(CompactHeatStorage {
+            component: 0,
+            law: CompactHeatStorageLaw::Tabulated(
+                TabulatedHeatStorage::try_new(&[[300.0, 2.0], [320.0, 22.0]]).unwrap(),
+            ),
+        });
+        let before = setup.clone();
+        let evaluate = |capacity: &[f64], previous: &[f64], temperature: &[f64], dt| {
+            config.evaluate_step_with_conductivity(
+                &domain, &fluid, &solids, &flow, &setup, &[[2.0; 3]; 4],
+                capacity, previous, dt, temperature, &CancelGate::new(),
+            )
+        };
+        let (result, record) = evaluate(&capacity, &previous, &temperature, 1.0).unwrap();
+        // Each branch is G=1/(1+0.5/2)=0.8 W/K and carries 4.8 W.
+        // Junction C(T)=2+(T-300) stores 20+50=70 J, not startup-Cp*10.
+        // Ordinary cells store 2*4=8 J each; aliases add no second storage.
+        assert_eq!(result.temperature, temperature);
+        assert_eq!(result.report.iterations, 0);
+        assert_eq!(record.iterations, 0);
+        near(result.junctions[0].board_w, 4.8, 1e-12);
+        near(result.junctions[0].case_w, 4.8, 1e-12);
+        near(record.stored_energy_change_j, 86.0, 1e-12);
+        near(record.source_j, if imposed { 82.8 } else { 86.0 }, 1e-12);
+        // The prescribed reservoir supplies its 8 J temperature jump while
+        // receiving 4.8 J from the junction: net injection is 3.2 J.
+        near(record.boundary_outflow_j, if imposed { -3.2 } else { 0.0 }, 1e-12);
+        assert!(record.closure_j.abs() < 1e-10);
+        assert!(evaluate(&[2.0, 1.0, 0.0, 2.0], &previous, &temperature, 1.0).is_err());
+        assert!(evaluate(&capacity, &previous[..3], &temperature, 1.0).is_err());
+        assert!(evaluate(&capacity, &previous, &temperature, 0.0).is_err());
+        let mut changed = temperature;
+        let perturbed = if imposed { 0 } else { 2 };
+        changed[perturbed] = f64::from_bits(changed[perturbed].to_bits() + 1);
+        assert!(matches!(
+            evaluate(&capacity, &previous, &changed, 1.0),
+            Err(ChtError::InvalidInput { field: "thermal.material_endpoint", .. })
+        ));
+        assert!(evaluate(&capacity, &previous, &[304.0, 321.0, 321.0, 304.0], 1.0).is_err());
+        assert_eq!(setup, before);
+        assert_eq!(previous, [300.0; 4]);
+        assert_eq!(temperature, [304.0, 310.0, 310.0, 304.0]);
+    }
+}
+
 fn absolute() -> QuantitySpec {
     QuantitySpec::semantic(SemanticType::new(
         QuantityKind::AbsoluteTemperature,

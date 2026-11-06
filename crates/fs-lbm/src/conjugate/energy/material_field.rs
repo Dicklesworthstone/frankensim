@@ -158,6 +158,26 @@ impl EnergyConfig {
         temperature_k: &[f64],
         gate: &CancelGate,
     ) -> Result<EnergySolution, ChtError> {
+        self.evaluate_with_fields(
+            domain, fluid, solids, flow, setup, molecular_w_m_k,
+            Some(enthalpy), None, temperature_k, gate,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn evaluate_with_fields(
+        &self,
+        domain: &VoxelDomain,
+        fluid: &FluidProperties,
+        solids: &[SolidMaterial],
+        flow: &FlowField,
+        setup: &ThermalSetup,
+        molecular_w_m_k: &[[f64; 3]],
+        enthalpy: Option<AdvectiveEnthalpyField<'_>>,
+        step: Option<&PseudoStep<'_>>,
+        temperature_k: &[f64],
+        gate: &CancelGate,
+    ) -> Result<EnergySolution, ChtError> {
         super::super::poll(gate)?;
         admit_molecular_field(domain, solids, molecular_w_m_k, gate)?;
         let invalid = |reason: &str| ChtError::InvalidInput {
@@ -178,9 +198,10 @@ impl EnergyConfig {
             }
             // The native field admission still owns malformed shapes and
             // fluid/solid slots. Never extrapolate a valid fluid tangent here.
-            if enthalpy.cells.len() == temperature_k.len()
+            if let Some(field) = enthalpy
+                && field.cells.len() == temperature_k.len()
                 && domain.is_fluid(cell)
-                && let Some(h) = enthalpy.cells[cell]
+                && let Some(h) = field.cells[cell]
                 && h.temperature_k != temperature
             {
                 return Err(invalid(
@@ -212,10 +233,10 @@ impl EnergyConfig {
             flow,
             setup,
             self,
-            None,
+            step,
             Some((&[], Some(temperature_k))),
             Some(molecular_w_m_k),
-            Some(enthalpy),
+            enthalpy,
             true,
             gate,
         )?;
@@ -300,7 +321,7 @@ impl EnergyConfig {
         gate: &CancelGate,
     ) -> Result<(EnergySolution, crate::conjugate::TransientRecord), ChtError> {
         self.step_with_fields(domain, fluid, solids, flow, setup, molecular_w_m_k,
-            None, capacity_j_k, previous_k, time_step_s, gate)
+            None, capacity_j_k, previous_k, time_step_s, None, gate)
     }
 
     /// Backward-Euler material storage and conservative source-enthalpy
@@ -329,7 +350,82 @@ impl EnergyConfig {
         time_step_s: f64, gate: &CancelGate,
     ) -> Result<(EnergySolution, crate::conjugate::TransientRecord), ChtError> {
         self.step_with_fields(domain, fluid, solids, flow, setup, molecular_w_m_k,
-            Some(enthalpy), capacity_j_k, previous_k, time_step_s, gate)
+            Some(enthalpy), capacity_j_k, previous_k, time_step_s, None, gate)
+    }
+
+    /// Audit a backward-Euler endpoint without solving or changing temperature.
+    ///
+    /// Supply conductivity at `temperature_k` and the same per-cell capacities
+    /// as [`Self::step_with_conductivity`]. A nonlinear material owner supplies
+    /// exact storage secants `m * delta(h) / delta(T)` from `previous_k` to this
+    /// candidate, using the local capacity when both temperatures coincide.
+    /// The native algebraic and local physical heat residuals include storage.
+    ///
+    /// Compact aliases retain zero cell capacity. Each compact storage law
+    /// supplies its own exact energy secant at this candidate; its initial Cp
+    /// is not substituted. The returned record uses the original stored-energy,
+    /// reservoir and sink accounting, including prescribed-temperature jumps.
+    /// Original material, contact and radiation owners must already be resolved
+    /// at the endpoint. No constitutive iteration occurs in this audit.
+    ///
+    /// # Errors
+    /// Retains [`Self::step_with_conductivity`] admission and the unchanged-state
+    /// requirements of [`Self::evaluate_with_enthalpy`]. Unsupported compact
+    /// temperatures and unbalanced local heat refuse without a returned field.
+    #[allow(clippy::too_many_arguments)]
+    pub fn evaluate_step_with_conductivity(
+        &self,
+        domain: &VoxelDomain,
+        fluid: &FluidProperties,
+        solids: &[SolidMaterial],
+        flow: &FlowField,
+        setup: &ThermalSetup,
+        molecular_w_m_k: &[[f64; 3]],
+        capacity_j_k: &[f64],
+        previous_k: &[f64],
+        time_step_s: f64,
+        temperature_k: &[f64],
+        gate: &CancelGate,
+    ) -> Result<(EnergySolution, crate::conjugate::TransientRecord), ChtError> {
+        self.step_with_fields(
+            domain, fluid, solids, flow, setup, molecular_w_m_k,
+            None, capacity_j_k, previous_k, time_step_s, Some(temperature_k), gate,
+        )
+    }
+
+    /// Audit actual source enthalpy transport and backward-Euler storage at an
+    /// unchanged endpoint. Each fluid tangent is anchored exactly at its
+    /// candidate temperature, and the original limiter refreshes its traces
+    /// there when [`super::ConvectionScheme::EnthalpyMinmod`] is selected.
+    ///
+    /// Cell capacity secants and compact storage have the same meaning as in
+    /// [`Self::evaluate_step_with_conductivity`]. Boundary enthalpies share the
+    /// source datum. No Krylov solve, temperature update or material extrapolation
+    /// is performed; the caller retains ownership of original-law evaluation.
+    ///
+    /// # Errors
+    /// Combines [`Self::evaluate_step_with_conductivity`] and
+    /// [`Self::evaluate_with_enthalpy`] admission and residual checks.
+    #[allow(clippy::too_many_arguments)]
+    pub fn evaluate_step_with_enthalpy(
+        &self,
+        domain: &VoxelDomain,
+        fluid: &FluidProperties,
+        solids: &[SolidMaterial],
+        flow: &FlowField,
+        setup: &ThermalSetup,
+        molecular_w_m_k: &[[f64; 3]],
+        enthalpy: AdvectiveEnthalpyField<'_>,
+        capacity_j_k: &[f64],
+        previous_k: &[f64],
+        time_step_s: f64,
+        temperature_k: &[f64],
+        gate: &CancelGate,
+    ) -> Result<(EnergySolution, crate::conjugate::TransientRecord), ChtError> {
+        self.step_with_fields(
+            domain, fluid, solids, flow, setup, molecular_w_m_k,
+            Some(enthalpy), capacity_j_k, previous_k, time_step_s, Some(temperature_k), gate,
+        )
     }
 
     #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
@@ -337,8 +433,9 @@ impl EnergyConfig {
         &self, domain: &VoxelDomain, fluid: &FluidProperties, solids: &[SolidMaterial],
         flow: &FlowField, setup: &ThermalSetup, molecular_w_m_k: &[[f64; 3]],
         enthalpy: Option<AdvectiveEnthalpyField<'_>>, capacity_j_k: &[f64], previous_k: &[f64],
-        time_step_s: f64, gate: &CancelGate,
+        time_step_s: f64, endpoint_k: Option<&[f64]>, gate: &CancelGate,
     ) -> Result<(EnergySolution, crate::conjugate::TransientRecord), ChtError> {
+        use super::super::compact_storage::CompactStorageIteration;
         use super::super::transient::{junction_capacity, solve_step_with_fields, storage_record};
         let invalid = |reason: &str| ChtError::InvalidInput {
             field: "thermal.material_storage", reason: reason.into(),
@@ -386,10 +483,35 @@ impl EnergyConfig {
             capacity.push(value);
             storage.push(rate);
         }
-        let (solution, _, _) = solve_step_with_fields(
-            domain, fluid, solids, flow, setup, self, &storage, previous_k, time_step_s,
-            None, Some(molecular_w_m_k), enthalpy, None, gate,
-        )?;
+        let solution = if let Some(temperature_k) = endpoint_k {
+            // Compact storage samples its representative cells before the
+            // shared endpoint audit; establish shape safety first.
+            if temperature_k.len() != cells {
+                return Err(ChtError::InvalidInput {
+                    field: "thermal.material_endpoint",
+                    reason: "one endpoint temperature per cell is required".into(),
+                });
+            }
+            if let Some(mut compact) = CompactStorageIteration::new(
+                domain, setup, previous_k, time_step_s, gate,
+            )? {
+                compact.write_rates(temperature_k, &mut storage[cells..], gate)?;
+            }
+            let step = PseudoStep {
+                coefficient_w_k: &storage[..cells],
+                previous: previous_k,
+                junction_coefficient_w_k: &storage[cells..],
+            };
+            self.evaluate_with_fields(
+                domain, fluid, solids, flow, setup, molecular_w_m_k,
+                enthalpy, Some(&step), temperature_k, gate,
+            )?
+        } else {
+            solve_step_with_fields(
+                domain, fluid, solids, flow, setup, self, &storage, previous_k, time_step_s,
+                None, Some(molecular_w_m_k), enthalpy, None, gate,
+            )?.0
+        };
         for (cell, &temperature) in solution.temperature.iter().enumerate() {
             if cell.is_multiple_of(4096) { super::super::poll(gate)?; }
             if !temperature.is_finite() || temperature <= 0.0 {
