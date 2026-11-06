@@ -177,7 +177,7 @@ impl TransientCurvedCameraScene<'_, '_, '_> {
         }
     }
 
-    fn exposure_scale(
+    pub(super) fn exposure_scale(
         &self,
         cx: &Cx<'_>,
         window: ExposureWindow,
@@ -186,33 +186,42 @@ impl TransientCurvedCameraScene<'_, '_, '_> {
         let Some((binding, opening)) = self.source_query(cx, window.open_s, path)? else {
             return Ok(1.0);
         };
-        let object_id = binding.object_id;
-        let emission_close_s = retarded_time(window.close_s, opening.group_delay_s, object_id)?;
-        let duration_error =
-            ((emission_close_s - opening.emission_time_s) - window.duration_s).abs();
-        if !opening.emission_time_s.lt(emission_close_s)
-            || (window.duration_s * Dd::from_f64(64.0 * f64::EPSILON)).lt(duration_error)
-        {
-            return Err(TransientCameraError::UnresolvedClock { object_id });
-        }
-        let scale = binding
-            .history
-            .average(
-                cx,
-                SurfaceExposureQuery {
-                    opening,
-                    observation_close_s: window.close_s,
-                    emission_close_s,
-                    duration_s: window.duration_s,
-                },
-            )
-            .map_err(|error| TransientCameraError::History { object_id, error })?;
-        cx.checkpoint()?;
-        if !scale.is_finite() || scale < 0.0 {
-            return Err(TransientCameraError::InvalidHistoryScale { object_id });
-        }
-        Ok(scale)
+        average_history(cx, binding, opening, window)
     }
+}
+
+pub(super) fn average_history(
+    cx: &Cx<'_>,
+    binding: SurfaceEmissionHistoryBinding<'_>,
+    opening: SurfaceEmissionQuery,
+    window: ExposureWindow,
+) -> Result<f64, TransientCameraError> {
+    let object_id = binding.object_id;
+    let emission_close_s = retarded_time(window.close_s, opening.group_delay_s, object_id)?;
+    let duration_error =
+        ((emission_close_s - opening.emission_time_s) - window.duration_s).abs();
+    if !opening.emission_time_s.lt(emission_close_s)
+        || (window.duration_s * Dd::from_f64(64.0 * f64::EPSILON)).lt(duration_error)
+    {
+        return Err(TransientCameraError::UnresolvedClock { object_id });
+    }
+    let scale = binding
+        .history
+        .average(
+            cx,
+            SurfaceExposureQuery {
+                opening,
+                observation_close_s: window.close_s,
+                emission_close_s,
+                duration_s: window.duration_s,
+            },
+        )
+        .map_err(|error| TransientCameraError::History { object_id, error })?;
+    cx.checkpoint()?;
+    if !scale.is_finite() || scale < 0.0 {
+        return Err(TransientCameraError::InvalidHistoryScale { object_id });
+    }
+    Ok(scale)
 }
 
 pub(super) fn finish(

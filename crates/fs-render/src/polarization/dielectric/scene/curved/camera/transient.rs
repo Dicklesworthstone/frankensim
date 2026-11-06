@@ -18,7 +18,8 @@
 //! shifts, fluorescence or additional interface/coating residence time.
 //! Unbound surface, environment and LTE sources remain explicitly steady.
 //! Only original authored finite surface emitters admit histories; this owner
-//! supplies no temporal environment, volume or direct-light-connection history.
+//! supplies no temporal environment or volume history. The finite-area adapter
+//! also evaluates each native source connection at its own combined group delay.
 //!
 //! Path-dependent transient weighting follows the original refractive path
 //! formulation in Pediredla et al. (2020), section 7.1:
@@ -40,13 +41,15 @@ use fs_math::dd::Dd;
 
 const LIGHT_M_S: f64 = 299_792_458.0;
 
+pub mod area_lights;
 pub mod exposure;
 #[cfg(feature = "volumes")]
 pub mod participating;
 
-/// Original surface encounter and its retarded physical clock. Position is the
-/// integrated native endpoint within the original contact-resolution envelope;
-/// it has not been snapped to an independently computed surface point.
+/// Original finite source and its retarded physical clock. An emitting camera
+/// hit retains its integrated native endpoint within the contact-resolution
+/// envelope. An explicit area connection retains its actual sampled source
+/// endpoint. Neither is replaced by an independently reconstructed point.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SurfaceEmissionQuery {
     pub object_id: u64,
@@ -377,16 +380,7 @@ impl<'a, 's, 'm> TransientCurvedCameraScene<'a, 's, 'm> {
         let Some((binding, query)) = self.source_query(cx, observation_time_s, path)? else {
             return Ok(1.0);
         };
-        let object_id = binding.object_id;
-        let scale = binding
-            .history
-            .sample(cx, query)
-            .map_err(|error| TransientCameraError::History { object_id, error })?;
-        cx.checkpoint()?;
-        if !scale.is_finite() || scale < 0.0 {
-            return Err(TransientCameraError::InvalidHistoryScale { object_id });
-        }
-        Ok(scale)
+        sample_history(cx, binding, query)
     }
 
     fn source_query(
@@ -436,6 +430,23 @@ impl<'a, 's, 'm> TransientCurvedCameraScene<'a, 's, 'm> {
             },
         )))
     }
+}
+
+fn sample_history(
+    cx: &Cx<'_>,
+    binding: SurfaceEmissionHistoryBinding<'_>,
+    query: SurfaceEmissionQuery,
+) -> Result<f64, TransientCameraError> {
+    let object_id = binding.object_id;
+    let scale = binding
+        .history
+        .sample(cx, query)
+        .map_err(|error| TransientCameraError::History { object_id, error })?;
+    cx.checkpoint()?;
+    if !scale.is_finite() || scale < 0.0 {
+        return Err(TransientCameraError::InvalidHistoryScale { object_id });
+    }
+    Ok(scale)
 }
 
 fn retarded_time(

@@ -123,14 +123,7 @@ impl<'a, 's, 'm> SurfaceEmission<'a, 's, 'm> {
         path: &CurvedPathResult,
         weight: f64,
     ) -> Result<(), CurvedSceneError> {
-        // Area-source MIS applies only to the surface term. Thermal emission
-        // has no competing source proposal and retains its full path weight.
-        self.add_thermal(path, false)
-            .and_then(|()| self.add_surface(path, weight, 1.0))
-            .map_err(|error| {
-                self.error = Some(error);
-                CurvedSceneError::NumericalRange
-            })
+        self.observe_weighted_modulated(path, weight, 1.0)
     }
 
     /// A finite source's prescribed radiance history changes only its own Le.
@@ -140,8 +133,19 @@ impl<'a, 's, 'm> SurfaceEmission<'a, 's, 'm> {
         path: &CurvedPathResult,
         source_scale: f64,
     ) -> Result<(), CurvedSceneError> {
+        self.observe_weighted_modulated(path, 1.0, source_scale)
+    }
+
+    /// Combine the original emitter-hit MIS weight with that source's own
+    /// retarded history before range recovery. Neither factor changes LTE.
+    pub(super) fn observe_weighted_modulated(
+        &mut self,
+        path: &CurvedPathResult,
+        weight: f64,
+        source_scale: f64,
+    ) -> Result<(), CurvedSceneError> {
         self.add_thermal(path, false)
-            .and_then(|()| self.add_surface(path, 1.0, source_scale))
+            .and_then(|()| self.add_surface(path, weight, source_scale))
             .map_err(|error| {
                 self.error = Some(error);
                 CurvedSceneError::NumericalRange

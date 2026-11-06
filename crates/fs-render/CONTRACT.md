@@ -8116,7 +8116,9 @@ This is frozen-geometry, frozen-medium, incoherent spectral envelope transport
 with a narrow-band group-delay approximation. It supplies no carrier phase,
 within-bin pulse reshaping, moving-medium frequency shift, fluorescence,
 unmodeled lens transit, interface/coating residence time, or temporal environment,
-volume or light-connection history. Unbound sources remain explicitly steady.
+volume, point-source-connection or molecular-connection history. The finite-area
+adapter below supports timed clear-medium connections. Unbound sources remain
+explicitly steady.
 
 Seven G1/G3/G4 tests cover native static/RNG parity, distinct per-source delays,
 chromatic pulse arrivals, an independent curved-path group integral, large-epoch
@@ -8225,7 +8227,7 @@ The physical scope remains the original admitted reciprocal molecular
 Mueller laws and unpolarized source models. The detector is the declared ideal
 local analyzer, without resolved polarizer/lens propagation, polarized source
 emission, bulk birefringence, or analyzer overloads for explicit emitter
-connections or the separate transient-history consumers.
+connections or the separate molecular transient-history consumers.
 
 Three focused regression groups specify right-angle Rayleigh/depolarized
 responses and rotated analyzer frames; a closed-form gradient-index path with
@@ -8409,3 +8411,13 @@ epoch; and chromatic XYZ/QE observation, shared four-path work, zero-response
 channels and unsupported-source-integral refusal. Pinned Rust formatting/
 parser checks and bounded source/API/physics review passed. The native Rust
 regressions were authored but not executed in the shared editing environment.
+
+## Retarded finite-area source connections and finite shutters
+
+`camera::transient::area_lights::TransientCurvedAreaLightCameraScene` couples original finite-surface histories to the native clear-medium area-light camera. Each discovered refracted connection image uses the original camera-prefix plus connection group path, summed in DD before conversion to delay. It samples the original source identity at the actual sampled emitter endpoint and its own retarded time. Complementary camera emitter hits use their original accumulated group delay and MIS weight. Distinct optical images never share an averaged clock.
+
+The adapter borrows exactly the same prepared camera as the area-source owner and retains the native analyzer launch, continuation samples, image discovery, Jacobians, refractive transport, source PDFs, MIS, cancellation, and bounded work. One modulation callback changes only source radiance. Logarithmic range recovery retains representable contributions across attenuation and source scaling. Unbound sources, supported thermal emission, and environment emission remain steady; thermal terms receive neither surface-history scaling nor surface MIS weights. Missing group delay on a contributing bound source, invalid source scale, unresolved clock, or a source-history failure refuses the complete observation.
+
+`sample_ray_with_samples_at_time` returns the complete native radiance and per-image work at a DD observation clock. `sample_ray_with_samples_during_exposure` requests each source's mean over its individually retarded shutter interval on that same frozen transport, then returns mean radiance and integrated radiance [J/(m² sr nm)]. No temporal path sampling, extra image tracing, midpoint source substitution, or additional geometric delay is introduced. Geometry/optical coefficients stay frozen; moving media, pulse reshaping, interface residence time, point-source connections, and molecular-scattering connections are outside this adapter.
+
+Four focused regression groups cover unity/native-sample and work parity, dispersive group clocks at a large epoch, triangular shutter integration on both MIS strategies, distinct refracted-image clocks, and complete refusal for missing connection group delay or source failures. They were authored and formatter/parser checked; native numerical execution was unavailable in the editing environment.

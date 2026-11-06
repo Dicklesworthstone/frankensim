@@ -16,7 +16,7 @@
 //! this surface-only consumer.
 
 use super::{
-    AreaEmitterError, AreaEmitterSample, CurvedAreaEmitter, Sum, weighted_irradiance,
+    AreaEmitterError, AreaEmitterSample, CurvedAreaEmitter, Sum, weighted_irradiance_modulated,
 };
 use super::super::emission::SurfaceEmission;
 use super::super::{
@@ -246,6 +246,19 @@ pub struct CurvedAreaLightCameraScene<'a, 's, 'm, 'l> {
     pub(super) bindings: &'a [AreaLightBinding<'l, 's, 'm>],
 }
 
+/// An original emitting hit or one individual native connection image. The
+/// temporal consumer combines both group paths without replacing transport.
+pub(in super::super) enum AreaSourcePath<'p> {
+    Surface(&'p CurvedPathResult),
+    Connected {
+        object_id: u64,
+        position_m: Point3,
+        wavelength_nm: f64,
+        camera_group_m: Option<f64>,
+        connection_group_m: Option<f64>,
+    },
+}
+
 impl<'a, 's, 'm, 'l> CurvedAreaLightCameraScene<'a, 's, 'm, 'l> {
     pub fn try_new(
         cx: &Cx<'_>,
@@ -299,7 +312,26 @@ impl<'a, 's, 'm, 'l> CurvedAreaLightCameraScene<'a, 's, 'm, 'l> {
         settings: AreaLightCameraSettings,
         workspace: &mut AreaLightCameraWorkspace,
         surface_samples: impl FnMut(u32) -> [f64; 3],
+        area_samples: impl FnMut(u32, usize) -> [f64; 2],
+    ) -> Result<AreaLightCameraSample, AreaLightCameraError> {
+        self.sample_with_modulation(cx,
+            || self.camera.launch(ray, wavelength_nm, initial_medium),
+            initial_medium, settings, workspace, surface_samples, area_samples, |_| Ok(1.0))
+    }
+
+    /// Shared original walker. A source history changes only each source's Le;
+    /// native continuation, image discovery, PDFs and work stay in this owner.
+    #[allow(clippy::too_many_arguments)]
+    pub(in super::super) fn sample_with_modulation(
+        &self,
+        cx: &Cx<'_>,
+        launch: impl FnOnce() -> Result<PolarizedBeam, CameraRadianceError>,
+        initial_medium: usize,
+        settings: AreaLightCameraSettings,
+        workspace: &mut AreaLightCameraWorkspace,
+        surface_samples: impl FnMut(u32) -> [f64; 3],
         mut area_samples: impl FnMut(u32, usize) -> [f64; 2],
+        mut source_scale: impl FnMut(AreaSourcePath<'_>) -> Result<f64, AreaLightCameraError>,
     ) -> Result<AreaLightCameraSample, AreaLightCameraError> {
         cx.checkpoint()?;
         if settings.max_area_samples == 0 || settings.max_trace_evaluations == 0 {
@@ -307,8 +339,8 @@ impl<'a, 's, 'm, 'l> CurvedAreaLightCameraScene<'a, 's, 'm, 'l> {
         }
         workspace.history.clear();
         workspace.reverse_events.clear();
-        let beam = self.camera.launch(ray, wavelength_nm, initial_medium)?;
-        let initial_index = phase_index(beam.medium(), wavelength_nm)?;
+        let beam = launch()?;
+        let initial_index = phase_index(beam.medium(), beam.wavelength_nm())?;
         let mut emission = SurfaceEmission::new(self.camera, initial_index);
         let mut state = PathState::default();
         let mut work = Work::default();
@@ -330,9 +362,16 @@ impl<'a, 's, 'm, 'l> CurvedAreaLightCameraScene<'a, 's, 'm, 'l> {
                                 return Err(CurvedSceneError::NumericalRange);
                             }
                         };
-                        emission.observe_weighted(path, weight)?;
+                        let scale = match source_scale(AreaSourcePath::Surface(path)) {
+                            Ok(scale) => scale,
+                            Err(error) => {
+                                source_error = Some(error);
+                                return Err(CurvedSceneError::NumericalRange);
+                            }
+                        };
+                        emission.observe_weighted_modulated(path, weight, scale)?;
                         self.add_contact(cx, path, settings, initial_index,
-                            &mut work, &mut radiance, workspace, &mut area_samples)
+                            &mut work, &mut radiance, workspace, &mut area_samples, &mut source_scale)
                     }
                     CurvedTraceEvent::Departure { path, incoming_beam, event, pdf, delta } => {
                         emission.depart(path);
@@ -364,6 +403,7 @@ impl<'a, 's, 'm, 'l> CurvedAreaLightCameraScene<'a, 's, 'm, 'l> {
         radiance: &mut Sum,
         workspace: &mut AreaLightCameraWorkspace,
         area_samples: &mut impl FnMut(u32, usize) -> [f64; 2],
+        source_scale: &mut impl FnMut(AreaSourcePath<'_>) -> Result<f64, AreaLightCameraError>,
     ) -> Result<(), AreaLightCameraError> {
         let Some(receiver) = SurfaceReceiver::at_arrival(self.camera, path)? else { return Ok(()); };
         let contact = receiver.contact;
@@ -414,9 +454,19 @@ impl<'a, 's, 'm, 'l> CurvedAreaLightCameraScene<'a, 's, 'm, 'l> {
                     binding.source.mis_weights(sample, connection, target, settings.connection.projection)
                 }.map_err(|error| AreaLightCameraError::Source { binding: index, error })?;
                 let source_cosine = sample.normal().dot(bundle.propagation().initial_ray().dir).abs().min(1.0);
-                let irradiance = weighted_irradiance(
+                let scale = if source_cosine == 0.0 || weights.light_weight() == 0.0
+                    || bundle.interface_log_power() == f64::NEG_INFINITY { 1.0 } else {
+                    source_scale(AreaSourcePath::Connected {
+                        object_id: binding.source.emitter.object_id(),
+                        position_m: sample.position_m(),
+                        wavelength_nm: wavelength,
+                        camera_group_m: path.group_optical_path_length_m(),
+                        connection_group_m: bundle.propagation().propagation().group_optical_path_length_m,
+                    })?
+                };
+                let irradiance = weighted_irradiance_modulated(
                     bundle, response.normal, settings.connection.projection, source_radiance,
-                    source_cosine, sample.pdf_area_per_m2(), 0.0, false,
+                    source_cosine, sample.pdf_area_per_m2(), 0.0, false, scale,
                 ).map_err(|error| AreaLightCameraError::Source { binding: index, error })?;
                 if irradiance == 0.0 || weights.light_weight() == 0.0 { continue; }
                 if beam.power().i == 0.0 {

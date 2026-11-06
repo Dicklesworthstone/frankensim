@@ -676,6 +676,21 @@ fn weighted_irradiance(
     normal: Vec3, projection: ProjectionOptions, radiance: f64, cosine: f64,
     pdf_area: f64, log_survival: f64, ratio_zero: bool,
 ) -> Result<f64, AreaEmitterError> {
+    weighted_irradiance_modulated(bundle, normal, projection, radiance, cosine,
+        pdf_area, log_survival, ratio_zero, 1.0)
+}
+
+/// Keep source modulation in the same native logarithmic range recovery as
+/// the source spectrum, attenuated bundle and area Jacobian.
+#[allow(clippy::too_many_arguments)]
+fn weighted_irradiance_modulated(
+    bundle: &crate::polarization::dielectric::transport::bundle::PolarizedRayBundle,
+    normal: Vec3, projection: ProjectionOptions, radiance: f64, cosine: f64,
+    pdf_area: f64, log_survival: f64, ratio_zero: bool, source_scale: f64,
+) -> Result<f64, AreaEmitterError> {
+    if !source_scale.is_finite() || source_scale < 0.0 {
+        return Err(AreaEmitterError::NumericalRange);
+    }
     if ratio_zero {
         return if log_survival == f64::NEG_INFINITY { Ok(0.0) }
             else { Err(AreaEmitterError::NumericalRange) };
@@ -683,7 +698,8 @@ fn weighted_irradiance(
     if !log_survival.is_finite() || log_survival > 0.0 {
         return Err(AreaEmitterError::NumericalRange);
     }
-    if radiance == 0.0 || cosine == 0.0 || bundle.interface_log_power() == f64::NEG_INFINITY {
+    if radiance == 0.0 || cosine == 0.0 || source_scale == 0.0
+        || bundle.interface_log_power() == f64::NEG_INFINITY {
         return Ok(0.0);
     }
     let intensity = (radiance * cosine) / pdf_area;
@@ -691,6 +707,7 @@ fn weighted_irradiance(
         match bundle.point_source_irradiance(normal, projection, intensity) {
             Ok(irradiance) => {
                 let value = irradiance * det::exp(log_survival);
+                let value = if source_scale == 1.0 { value } else { value * source_scale };
                 if value.is_finite() && value > 0.0 { return Ok(value); }
             }
             Err(PolarizedBundleError::NumericalRange) => {}
@@ -706,6 +723,7 @@ fn weighted_irradiance(
     let logarithm = det::ln(radiance) + det::ln(cosine) - det::ln(pdf_area)
         + bundle.interface_log_power() - bundle.propagation().propagation().optical_depth
         - det::ln(area) + log_survival;
+    let logarithm = if source_scale == 1.0 { logarithm } else { logarithm + det::ln(source_scale) };
     let value = det::exp(logarithm);
     if value.is_finite() && value > 0.0 { Ok(value) }
     else { Err(AreaEmitterError::NumericalRange) }
