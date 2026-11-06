@@ -5,11 +5,57 @@ use fs_mbd::articulated::{
     apply_free_floating_impulses, apply_prescribed_base_impulses, free_floating_momentum,
 };
 use fs_mbd::{
-    Gravity, MassProperties, Pose, RigidBodyIntegrator, RigidBodyState, UnitQuaternion, Vec3,
+    Gravity, MassProperties, Pose, RigidBodyIntegrator, RigidBodyState, RigidKineticEnergyChange, UnitQuaternion, Vec3,
     Wrench, apply_equal_and_opposite_impulse_at_body_points,
 };
 
 const LARGE: f64 = (1u64 << 55) as f64;
+
+#[test]
+fn native_impulse_storage_exposes_nondyadic_velocity_rounding() {
+    let p = 2.0_f64.powi(54);
+    let property = MassProperties::new(3.0, Vec3::ZERO, Vec3::new(3.0, 3.0, 3.0)).unwrap();
+    let before = state(Vec3::ZERO, Vec3::new(p, 0.0, 0.0));
+    let impulse = Vec3::new(4.0, 0.0, 0.0);
+    let resultant = before.apply_momentum_impulse(property, impulse, Vec3::ZERO).unwrap();
+    let point = before.apply_impulse_at_body_point(property, Vec3::ZERO, impulse).unwrap();
+    // Exact storage is ((2^54+4)^2-(2^54)^2)/6 = 24019198012642648.
+    // Native COM velocities pair to 24019198012642646; their rounded work
+    // equals rounded storage, but the independent 2 J defect must survive.
+    for receipt in [resultant.work, point.work] {
+        assert_eq!(receipt.kinetic_energy_change_j, 24_019_198_012_642_648.0);
+        assert_eq!(receipt.kinetic_energy_change_j, receipt.impulse_work_j);
+        assert_eq!(receipt.work_energy_residual_j, 2.0);
+    }
+    let spin = RigidBodyState::new(Pose::identity(), Vec3::ZERO, Vec3::new(p, 0.0, 0.0)).unwrap();
+    let result = spin.apply_momentum_impulse(property, Vec3::ZERO, Vec3::new(8.0, 0.0, 0.0)).unwrap();
+    // Exact rotational change is 144115188075855904/3; native angular
+    // velocities give work 48038396025285300, leaving a 4/3 J defect.
+    assert_eq!(result.work.kinetic_energy_change_j, 48_038_396_025_285_304.0);
+    assert!((result.work.work_energy_residual_j - 4.0 / 3.0).abs() < 2e-14);
+}
+
+#[test]
+fn public_body_reduction_and_action_reaction_share_the_same_physical_storage() {
+    let p = 2.0_f64.powi(54);
+    let before = state(Vec3::ZERO, Vec3::new(p, 0.0, 0.0));
+    for mass in [2.0, 3.0, 7.0] {
+        let property = MassProperties::new(mass, Vec3::ZERO, Vec3::new(3.0, 3.0, 3.0)).unwrap();
+        let pair = apply_equal_and_opposite_impulse_at_body_points(
+            before, property, Vec3::ZERO, before, property, Vec3::ZERO,
+            Vec3::new(4.0, 0.0, 0.0),
+        ).unwrap();
+        let mut change = RigidKineticEnergyChange::new();
+        change.add_body(property, before, pair.first.state_after).unwrap();
+        change.add_body(property, before, pair.second.state_after).unwrap();
+        let expected = 16.0 / mass;
+        assert!((pair.kinetic_energy_change_j - expected).abs() <= 8.0 * f64::EPSILON * expected);
+        assert_eq!(change.finish().unwrap(), pair.kinetic_energy_change_j);
+        assert!((pair.kinetic_energy_change_j - pair.impulse_work_j - pair.work_energy_residual_j).abs()
+            <= 16.0 * f64::EPSILON * expected);
+    }
+    assert_eq!(RigidKineticEnergyChange::new().finish().unwrap(), 0.0);
+}
 
 fn properties() -> MassProperties {
     MassProperties::new(1.0, Vec3::ZERO, Vec3::new(1.0, 1.0, 1.0)).unwrap()

@@ -464,18 +464,12 @@ fn kinetic_change(
             "kinetic increment body coverage",
         ));
     }
-    let mut change = crate::MomentumWork::default();
+    let mut change = crate::RigidKineticEnergyChange::new();
     for ((&old, &new), &property) in before.iter().zip(after).zip(properties) {
         poll(gate)?;
-        old.accumulate_kinetic_energy_change(property, new, &mut change)?;
+        change.add_body(property, old, new)?;
     }
-    let value = change.total().to_f64();
-    if !value.is_finite() {
-        return Err(RigidFrictionError::Invalid(
-            "unrepresentable kinetic increment",
-        ));
-    }
-    Ok(value)
+    Ok(change.finish()?)
 }
 
 fn totals(

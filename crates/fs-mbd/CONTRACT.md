@@ -6367,6 +6367,16 @@ and actual total angular increment remain visible; no fictitious force arm or
 pose repair hides them. The joint receipt also retains original free steps,
 point-gap angular impulse, scalar residuals and authored-joint row spans.
 
+The shared rigid impulse owner evaluates fixed-mass/principal-inertia storage
+from compensated endpoint momenta, including non-dyadic mass and inertia
+quotients. Native endpoint-velocity work stays independent: both represented
+impulse loss and the velocity-rounding defect remain in its work residual.
+Point pairs reduce the original storage and commanded point-work product layers
+before rounding, rather than adding rounded per-body energies or residuals.
+`RigidKineticEnergyChange` exposes this allocation-free storage reduction to
+coupled consumers; each body must enter once with fixed mass and material-frame
+inertia, and the caller retains its own work, heat, and cancellation ownership.
+
 The generic `DistanceGraphStep` defaults to its original point receipt, so
 existing distance, driven-distance and spherical APIs retain their event type
 and native event layout. The current geometry-cache cost is specified in the
