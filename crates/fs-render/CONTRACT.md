@@ -8495,6 +8495,34 @@ depth and emission use compensated sums, and extreme positive products have
 a logarithmic range-recovery path. Analytic regressions cover ordered slabs,
 radiance balance, thin/opaque/vacuum limits, spatial subdivision, translations,
 SI unit changes, bright sources behind thick foregrounds, and admission
-refusals. These are representation-level arithmetic checks; there is no claim
-of continuous-field preintegration, lateral antialiasing, experimental optical
-calibration, scattering transport or measured performance.
+refusals. These are representation-level arithmetic checks; this piecewise-constant
+path makes no claim of continuous-field preintegration, lateral antialiasing,
+experimental optical calibration, scattering transport or measured performance.
+
+### Continuous scalar-field transfer preintegration
+
+`volumes::preintegrated` adds bounded source/extinction integration for linear
+scalar segments and orthographic rendering of borrowed node-centered grids.
+The renderer reconstructs the scalar field before applying the existing
+transfer function, splits segments at every crossed transfer knot, and
+integrates optical depth analytically for that reconstruction. Node spacing
+defines an extent of `(dims - 1) * spacing`; no extra cell thickness is invented.
+Narrow transfer peaks remain visible even when both sampled endpoints are
+transparent.
+
+Constant-source and constant-extinction source terms have analytic paths.
+Remaining source transport uses deterministic adaptive 8/16-point Gauss
+quadrature over cumulative absorption probability, resolving optically thick
+ramps without stepping through tiny physical mean free paths. Pixel, node,
+segment, transfer-interval and quadrature limits apply to the whole call.
+Failed admission or exhausted work publishes no partial image.
+
+G1/G3 controls cover analytic Beer-Lambert slabs, source gradients, thin layers,
+narrow peaks, thick-ramp asymptotics, an independent physical-distance Simpson
+integral, endpoint reversal and node-grid refinement. Returned source-error
+values are quadrature estimates and exclude roundoff, reconstruction and
+transfer-data errors. The path does not claim arbitrary-ray reconstruction,
+lateral antialiasing, scattering, refraction, measured optical authority, or a
+per-call cancellation hook. The source convention remains `j = sigma * S`.
+See [Engel, Kraus and Ertl (2001)](https://doi.org/10.1145/383507.383515)
+for preintegration and interpolation-before-classification.

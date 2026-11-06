@@ -13,6 +13,9 @@
 
 use fs_rand::StreamKey;
 
+/// Bounded preintegration of continuous scalar fields and node-centered images.
+pub mod preintegrated;
+
 /// Exact scalar-transfer transport and physical mass-density opacity.
 pub mod opacity;
 pub use opacity::{
