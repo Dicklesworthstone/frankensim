@@ -293,9 +293,35 @@ impl HyperProblem<'_> {
         self.solve_with_projection(None)
     }
 
+    /// Solve from an admitted nodal displacement in the original mesh frame.
+    ///
+    /// This is a numerical starting state, not a new reference configuration
+    /// or a constitutive history commit. The original absolute boundary data
+    /// and load-step ramp are retained; use one load step for a changed-reference
+    /// endpoint with already deformed initial geometry. Each prescribed value
+    /// is lifted exactly at its load step. The borrowed input is never changed.
+    ///
+    /// # Errors
+    /// Refuses incomplete/nonfinite initial data or an inadmissible initial
+    /// deformation before boundary lifting, as well as the failures of [`Self::solve`].
+    pub fn solve_from(
+        &self,
+        initial_displacement: &[[f64; 2]],
+    ) -> Result<(Vec<[f64; 2]>, NewtonReport), SolidError> {
+        self.solve_with_projection_from(None, Some(initial_displacement))
+    }
+
     fn solve_with_projection(
         &self,
         projection: Projection<'_, '_>,
+    ) -> Result<(Vec<[f64; 2]>, NewtonReport), SolidError> {
+        self.solve_with_projection_from(projection, None)
+    }
+
+    fn solve_with_projection_from(
+        &self,
+        projection: Projection<'_, '_>,
+        initial_displacement: Option<&[[f64; 2]]>,
     ) -> Result<(Vec<[f64; 2]>, NewtonReport), SolidError> {
         checkpoint(projection)?;
         // Reduced formulations already admitted every law during preparation.
@@ -312,7 +338,39 @@ impl HyperProblem<'_> {
             });
         }
         let n = self.mesh.node_count();
-        let mut u = vec![0.0f64; 2 * n];
+        let mut u = if let Some(initial) = initial_displacement {
+            if initial.len() != n {
+                return Err(SolidError::InvalidInput {
+                    what: "initial finite-strain displacement must cover every mesh node".into(),
+                });
+            }
+            let mut u = Vec::with_capacity(2 * n);
+            for (node, value) in initial.iter().enumerate() {
+                if node % 256 == 0 {
+                    checkpoint(projection)?;
+                }
+                if value.iter().any(|v| !v.is_finite()) {
+                    return Err(SolidError::InvalidInput {
+                        what: "initial finite-strain displacement must be finite".into(),
+                    });
+                }
+                u.extend_from_slice(value);
+            }
+            // Use the same actual-state reduction as Newton. No identity
+            // substitute, reference reset or target-boundary overwrite may
+            // authorize an inadmissible supplied starting state.
+            if !self
+                .energy_with_projection(&u, 0.0, projection)?
+                .is_finite()
+            {
+                return Err(SolidError::MaterialRefused {
+                    what: "initial finite-strain deformation is outside the material domain".into(),
+                });
+            }
+            u
+        } else {
+            vec![0.0f64; 2 * n]
+        };
         let mut report = NewtonReport::default();
         for step in 1..=self.settings.load_steps {
             checkpoint(projection)?;

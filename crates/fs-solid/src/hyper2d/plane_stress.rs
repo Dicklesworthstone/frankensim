@@ -398,15 +398,35 @@ impl HyperProblem<'_> {
         local: PlaneStressSettings,
         cx: &Cx<'_>,
     ) -> Result<(Vec<[f64; 2]>, NewtonReport), SolidError> {
-        self.solve_plane_stress_constrained(local, Constraint::FiniteBulk, cx)
+        self.solve_plane_stress_constrained(local, Constraint::FiniteBulk, None, cx)
+    }
+
+    /// Continue plane-stress equilibrium from an admitted displacement field.
+    ///
+    /// The same transverse reduction and global Newton owner admit and evolve
+    /// the starting geometry. Load ramps and absolute boundary lifting retain
+    /// the semantics of [`Self::solve_from`]; no reference or history is reset.
+    pub fn solve_plane_stress_from(
+        &self,
+        initial_displacement: &[[f64; 2]],
+        local: PlaneStressSettings,
+        cx: &Cx<'_>,
+    ) -> Result<(Vec<[f64; 2]>, NewtonReport), SolidError> {
+        self.solve_plane_stress_constrained(
+            local,
+            Constraint::FiniteBulk,
+            Some(initial_displacement),
+            cx,
+        )
     }
 
     /// Solve an exactly volume-preserving thin hyperelastic continuum.
     ///
     /// The original material remainder supplies energy and transverse shear
-    /// relaxation; `det F = 1` fixes thickness and traction equilibrium fixes
+    /// relaxation; `det F = J_ref` fixes thickness and traction equilibrium fixes
     /// the pressure multiplier. No bulk penalty or pressure mesh is needed for
-    /// this plane-stress reduction. This is not a general 3-D mixed element.
+    /// this plane-stress reduction. Prescribed natural volume is retained.
+    /// This is not a general 3-D mixed element.
     /// Material stretch bounds, global equilibrium and cancellation retain the
     /// same gates as [`Self::solve_plane_stress`].
     pub fn solve_incompressible_plane_stress(
@@ -414,13 +434,33 @@ impl HyperProblem<'_> {
         local: PlaneStressSettings,
         cx: &Cx<'_>,
     ) -> Result<(Vec<[f64; 2]>, NewtonReport), SolidError> {
-        self.solve_plane_stress_constrained(local, Constraint::Incompressible, cx)
+        self.solve_plane_stress_constrained(local, Constraint::Incompressible, None, cx)
+    }
+
+    /// Continue exact elastic-volume plane stress from an admitted displacement.
+    ///
+    /// The original reference-volume constraint and material history remain
+    /// unchanged. The borrowed starting field is checked before boundary lifting;
+    /// load ramps retain the semantics of [`Self::solve_from`].
+    pub fn solve_incompressible_plane_stress_from(
+        &self,
+        initial_displacement: &[[f64; 2]],
+        local: PlaneStressSettings,
+        cx: &Cx<'_>,
+    ) -> Result<(Vec<[f64; 2]>, NewtonReport), SolidError> {
+        self.solve_plane_stress_constrained(
+            local,
+            Constraint::Incompressible,
+            Some(initial_displacement),
+            cx,
+        )
     }
 
     fn solve_plane_stress_constrained(
         &self,
         local: PlaneStressSettings,
         constraint: Constraint,
+        initial_displacement: Option<&[[f64; 2]]>,
         cx: &Cx<'_>,
     ) -> Result<(Vec<[f64; 2]>, NewtonReport), SolidError> {
         if !self.settings.tol.is_finite()
@@ -434,7 +474,10 @@ impl HyperProblem<'_> {
             ));
         }
         let prepared = Prepared::new(self, local, constraint, cx)?;
-        self.solve_with_projection(Some(Reduction::PlaneStress(&prepared, cx)))
+        self.solve_with_projection_from(
+            Some(Reduction::PlaneStress(&prepared, cx)),
+            initial_displacement,
+        )
     }
 
     /// Unconstrained force residual and consistent reduced tangent. At a solved

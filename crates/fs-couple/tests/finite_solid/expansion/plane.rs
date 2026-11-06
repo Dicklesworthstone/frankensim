@@ -93,10 +93,11 @@ fn source_domain_and_large_thermal_volume_survive_thin_recovery() {
         assert!(material.law().law().tangent(&total).is_err());
         assert!(material.native_hyperelastic().is_none());
         let mesh = Mesh2::triangles(1.0, 0.7, 1, 1);
+        let left = |_: f64, y: f64| [0.0, 3.0 * y];
         let problem = HyperProblem {
             mesh: &mesh,
             material: &material,
-            dirichlet: vec![],
+            dirichlet: vec![(Patch::Left, &left)],
             traction: vec![],
             settings: settings(),
         };
@@ -119,6 +120,28 @@ fn source_domain_and_large_thermal_volume_survive_thin_recovery() {
         }
         // This request has elastic in-plane stretches 1/4 and must still fail.
         assert!(incompressible_plane_stress(&material, &[1.0, 0.0, 0.0, 1.0], local).is_err());
+        // Continue from an admitted deformed body. A restart at zero
+        // displacement violates the source's original elastic domain.
+        assert!(problem.solve_plane_stress(local, cx).is_err());
+        let initial: Vec<[f64; 2]> = mesh
+            .nodes
+            .iter()
+            .map(|[x, y]| [3.05 * x, 3.05 * y])
+            .collect();
+        let preserved = initial.clone();
+        for exact in [false, true] {
+            let (u, _) = if exact {
+                problem.solve_incompressible_plane_stress_from(&initial, local, cx)
+            } else {
+                problem.solve_plane_stress_from(&initial, local, cx)
+            }
+            .unwrap();
+            for (value, [x, y]) in u.iter().zip(&mesh.nodes) {
+                near(value[0], 3.0 * x, 5e-8);
+                near(value[1], 3.0 * y, 5e-8);
+            }
+        }
+        assert_eq!(initial, preserved);
         near(material.reference_density_kg_m3(), 6.0, 0.0);
     });
 }

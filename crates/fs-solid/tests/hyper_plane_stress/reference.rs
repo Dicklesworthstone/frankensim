@@ -368,3 +368,82 @@ fn g1_frozen_prony_sheet_equilibrium_retains_history_and_incremental_potential()
         assert_eq!(accepted, before);
     });
 }
+
+#[test]
+fn g1_continuation_uses_admitted_deformed_geometry_without_resetting_reference() {
+    with_cx(|cx, _| {
+        let original = Hyperelastic::new(
+            HyperelasticModel::NeoHookean {
+                mu: 2.0,
+                lambda: 40.0,
+            },
+            1.15,
+        )
+        .unwrap();
+        let settings = PlaneStressSettings::default();
+        for mesh in [
+            Mesh2::triangles(1.0, 0.7, 2, 2),
+            Mesh2::quads(1.0, 0.7, 2, 2),
+        ] {
+            for form in FORMS {
+                let thickness = if matches!(form, Form::Strain) {
+                    1.0
+                } else {
+                    4.1
+                };
+                let reference = ReferenceDeformation::try_new([
+                    4.1, 0.0, 0.0, 0.0, 4.1, 0.0, 0.0, 0.0, thickness,
+                ])
+                .unwrap();
+                let material = ReferencedHyperelastic::new(&original, reference);
+                let left = |_: f64, y: f64| [0.0, 3.1 * y];
+                let mut p = sheet(&mesh, &material);
+                p.dirichlet = vec![(Patch::Left, &left)];
+                // The previous body's in-plane stretch is four. A new modest
+                // change of natural strain is admissible there; restarting at
+                // identity lies far outside this same elastic material domain.
+                let initial: Vec<_> = mesh.nodes.iter().map(|[x, y]| [3.0 * x, 3.0 * y]).collect();
+                let before = initial.clone();
+                let zero_start = match form {
+                    Form::Strain => p.solve(),
+                    Form::Stress => p.solve_plane_stress(settings, cx),
+                    Form::Exact => p.solve_incompressible_plane_stress(settings, cx),
+                };
+                assert!(
+                    zero_start.is_err(),
+                    "{form:?} must admit actual initial geometry"
+                );
+                let run = |start: &[[f64; 2]]| match form {
+                    Form::Strain => p.solve_from(start),
+                    Form::Stress => p.solve_plane_stress_from(start, settings, cx),
+                    Form::Exact => p.solve_incompressible_plane_stress_from(start, settings, cx),
+                };
+                let (u, report) = run(&initial).unwrap();
+                assert_eq!(report.histories.len(), 1);
+                assert!(*report.histories[0].last().unwrap() < p.settings.tol);
+                for (actual, &[x, y]) in u.iter().zip(&mesh.nodes) {
+                    close(actual[0], 3.1 * x, 4e-8);
+                    close(actual[1], 3.1 * y, 4e-8);
+                }
+                let flat: Vec<_> = u.iter().flatten().copied().collect();
+                close(potential(&p, &flat, form, cx), 0.0, 2e-9);
+                assert_eq!(initial, before);
+                assert!(matches!(
+                    run(&initial[..initial.len() - 1]),
+                    Err(SolidError::InvalidInput { .. })
+                ));
+                let mut invalid = initial.clone();
+                invalid[0][0] = f64::NAN;
+                assert!(matches!(
+                    run(&invalid),
+                    Err(SolidError::InvalidInput { .. })
+                ));
+                assert!(matches!(
+                    run(&vec![[0.0; 2]; mesh.nodes.len()]),
+                    Err(SolidError::MaterialRefused { .. })
+                ));
+                assert_eq!(initial, before);
+            }
+        }
+    });
+}
