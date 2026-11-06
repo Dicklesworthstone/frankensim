@@ -10,9 +10,10 @@
 
 use super::*;
 use super::super::super::{
-    ModalContact, ModalContactConfig, ZeroStorage, contact_column, extension,
-    force_tolerance, law_force, solve_contact,
+    Bracket, ModalContact, ModalContactConfig, ZeroStorage, bracket_reaction, contact_column, extension,
+    force_tolerance, law_force,
 };
+use crate::render::schedule::force::coupled::extension_terms;
 use fs_contact::normal_patch::source::SourcePointContact;
 use fs_dcontact::{ContactStorage, OpeningContactStep};
 use fs_phs::Storage;
@@ -304,6 +305,18 @@ impl MultiFrictionModalSystem {
     }
 }
 
+// gamma_n = n u / (1 - n u), u = 2^-53 (Higham, Accuracy and Stability of Numerical Algorithms,
+// 2nd ed., sec. 3.1): the relative bound on n rounded operations. A sum of n terms with magnitude
+// sum S is wrong by at most gamma_n S (sec. 4.2). Zero (no floor) where n u is not small.
+fn gamma(n: usize) -> f64 {
+    let nu = n as f64 * (f64::EPSILON/2.0);
+    if nu < 0.5 { nu/(1.0 - nu) } else { 0.0 }
+}
+
+// The terms a stop's closure is a sum of: their count and the sum of their magnitudes.
+#[derive(Clone, Copy)]
+struct Terms { scale: f64, count: usize }
+
 struct NormalPoint {
     contact: ModalContact,
     source: Option<SourcePointContact>,
@@ -341,19 +354,43 @@ impl NormalPoint {
     }
     // `share` of the declared tolerance bounds the residual: all of it at the
     // actual endpoint, half of it on a prediction solved with headroom.
-    fn check(&self, reaction: f64, x: f64, dt: f64, share: f64) -> Result<(f64, f64, f64), ModalCouplingError> {
-        self.check_counted(reaction, x, dt, share, self.iterations)
+    fn check(&self, reaction: f64, x: f64, terms: Terms, dt: f64, share: f64) -> Result<(f64, f64, f64), ModalCouplingError> {
+        self.check_counted(reaction, x, terms, dt, share, self.iterations)
+    }
+    // The force the closure `x` cannot resolve. The closure is a cancelling sum of
+    // `terms.count` terms whose magnitudes add to `terms.scale` = S, so each evaluation of
+    // it is wrong by at most gamma_n S (Higham, Accuracy and Stability of Numerical
+    // Algorithms, 2nd ed., sec. 4.2), not by a multiple of its own, possibly tiny, result.
+    // The root solve and this check evaluate it along different paths (a few terms in one,
+    // every modal term in the other), so the two endpoints differ by at most twice that
+    // bound, and the law's slope turns the difference into force. This is a worst-case
+    // bound, not a typical error. Zero where the law cannot be read on both sides of x, so
+    // a refusal there stands exactly as before.
+    fn force_floor(&self, x: f64, terms: Terms, dt: f64) -> f64 {
+        let step = (1e-4*(x - self.contact.law.gaps()[0]).abs()).max(1e-12);
+        let (Ok((above, _)), Ok((below, _))) =
+            (law_force(&self.law, self.old, x + step, dt), law_force(&self.law, self.old, x - step, dt))
+        else { return 0.0 };
+        let slope = ((above - below)/(2.0*step)).abs();
+        if slope.is_finite() { 2.0*gamma(terms.count)*terms.scale*slope } else { 0.0 }
     }
     // `check`, naming `iterations` as the root work behind `reaction` in a refusal.
-    fn check_counted(&self, reaction: f64, x: f64, dt: f64, share: f64, iterations: usize)
+    // A residual past the share of the tolerance is still accepted when it is within
+    // what the closure can resolve there (`force_floor`); the tolerance then
+    // reported is the one the residual was held to.
+    fn check_counted(&self, reaction: f64, x: f64, terms: Terms, dt: f64, share: f64, iterations: usize)
         -> Result<(f64, f64, f64), ModalCouplingError>
     {
         let (expected, elastic) = law_force(&self.law, self.old, x, dt)?;
-        let tolerance = force_tolerance(reaction, expected, self.config)?;
+        let mut tolerance = force_tolerance(reaction, expected, self.config)?;
         let residual = finite(reaction-expected)?;
         if residual.abs() > share*tolerance {
-            return Err(ModalCouplingError::ContactSolve { residual_n: residual,
-                tolerance_n: share*tolerance, iterations });
+            let floor = self.force_floor(x, terms, dt);
+            if residual.abs() > share*tolerance + floor {
+                return Err(ModalCouplingError::ContactSolve { residual_n: residual,
+                    tolerance_n: share*tolerance + floor, iterations });
+            }
+            tolerance += floor;
         }
         // Exactly the original nonadhesive constitutive loss, not a new damper
         // or a residual disguised as physical dissipation.
@@ -361,6 +398,34 @@ impl NormalPoint {
         if loss < 0.0 { return Err(invalid("obstacle loss must not create energy")); }
         Ok((loss, residual, tolerance))
     }
+}
+
+// The stop's bracketed root at held friction (`solve_contact`), except where
+// floating-point bisection is exhausted before the target is met. The closure is
+// `free - C r`, a difference of numbers of the size of the free deflection, so a
+// target below ulp(free) dF/dx (the headroom solve tightens it eightfold, and a
+// declared tolerance can sit there itself) cannot be met by any reaction. The best
+// iterate goes on to the stop's own check at the actual endpoint, as the static
+// equilibrium's does, and is refused there unless it passes. A spent iteration
+// budget and every evaluation error still refuse here.
+fn solve_stop(law: &OpeningContactStep, x0: f64, free: f64, compliance: f64, dt: f64,
+    config: ModalContactConfig, gate: Option<&CancelGate>) -> Result<(f64, usize), ModalCouplingError>
+{
+    let evaluate = |reaction: f64| -> Result<(f64, f64), ModalCouplingError> {
+        poll(gate)?;
+        let x = finite(free - compliance*reaction)?;
+        let (expected, _) = law_force(law, x0, x, dt)?;
+        Ok((finite(reaction-expected)?, force_tolerance(reaction, expected, config)?))
+    };
+    match bracket_reaction(evaluate, config)? {
+        Bracket::Root { reaction, iterations } | Bracket::Exhausted { best: reaction, iterations, .. } =>
+            Ok((reaction, iterations)),
+    }
+}
+
+// The magnitude of the terms of `dot(a, b)`: what rounds the sum, however small it ends.
+fn abs_dot(a: &[f64], b: &[f64]) -> Result<f64, ModalCouplingError> {
+    a.iter().zip(b).try_fold(0.0, |sum, (a, b)| finite(sum + (a*b).abs()))
 }
 
 /// The stops condensed at held friction (see `ObstacleSet::condensed`).
@@ -695,7 +760,7 @@ impl ObstacleSet {
                         if config.force_absolute_tolerance_n*0.125 > 0.0 { config.force_absolute_tolerance_n *= 0.125; }
                         if config.force_relative_tolerance*0.125 > 0.0 { config.force_relative_tolerance *= 0.125; }
                     }
-                    let (reaction, iterations) = solve_contact(&point.law, point.old, frees[0], self.nn[i*q+i], dt, config, gate)?;
+                    let (reaction, iterations) = solve_stop(&point.law, point.old, frees[0], self.nn[i*q+i], dt, config, gate)?;
                     reactions[i] = reaction; used[i] += iterations;
                 } else {
                     let (ri, rj, iterations) = self.solve_pair(i, j, frees[0], frees[1], dt, gate)?;
@@ -722,7 +787,7 @@ impl ObstacleSet {
                 if config.force_absolute_tolerance_n*0.125 > 0.0 { config.force_absolute_tolerance_n *= 0.125; }
                 if config.force_relative_tolerance*0.125 > 0.0 { config.force_relative_tolerance *= 0.125; }
             }
-            let (reaction, iterations) = solve_contact(&point.law, point.old, free, self.nn[i*q+i], dt, config, gate)?;
+            let (reaction, iterations) = solve_stop(&point.law, point.old, free, self.nn[i*q+i], dt, config, gate)?;
             reactions[i] = reaction; used[i] += iterations;
         }
         Ok(())
@@ -753,8 +818,13 @@ impl ObstacleSet {
             poll(gate)?;
             let x = finite(finite(point.free+dot(&self.nt[i*p..(i+1)*p], friction)?)?
                 - dot(&self.nn[i*q..(i+1)*q], reactions)?)?;
+            // The terms that sum to x: free, the p friction terms and the q reaction terms, plus the
+            // two further additions that join them.
+            let scale = finite(point.free.abs() + abs_dot(&self.nt[i*p..(i+1)*p], friction)?
+                + abs_dot(&self.nn[i*q..(i+1)*q], reactions)?)?;
             let iterations = used.map_or(point.iterations, |used| used[i]);
-            point.check_counted(reactions[i], x, dt, if self.headroom { 0.5 } else { 1.0 }, iterations)?;
+            point.check_counted(reactions[i], x, Terms { scale, count: p + q + 2 },
+                dt, if self.headroom { 0.5 } else { 1.0 }, iterations)?;
         }
         Ok(())
     }
@@ -863,7 +933,14 @@ impl ObstacleSet {
             let actuator_work_j = if attachment_work_j == 0.0 { translation_work_j }
                 else { finite(translation_work_j+attachment_work_j)? };
             let penetration_m = point.penetration(x)?;
-            let (dissipation_j, constitutive_residual_n, force_tolerance_n) = match point.check(self.reactions[i], x, dt, 1.0) {
+            // The staged closure is a sum over every modal term, less the lag and the support
+            // offset: n products and two further subtractions.
+            let column = match &self.geometry { Some(g) if g.moving[i] => &g.end_columns[i], _ => &point.column };
+            let scale = finite(extension_terms(models, column, 0.0)? + lag.abs()
+                + self.motion.as_ref().map_or(0.0, |motion| motion.candidate[i].abs()))?;
+            let modal_terms = models.iter().map(|m| m.states().len()).sum::<usize>().min(column.len());
+            let terms = Terms { scale, count: modal_terms + 2 };
+            let (dissipation_j, constitutive_residual_n, force_tolerance_n) = match point.check(self.reactions[i], x, terms, dt, 1.0) {
                 Ok(checked) => checked,
                 Err(error) => {
                     self.endpoint_missed = matches!(error, ModalCouplingError::ContactSolve { .. });

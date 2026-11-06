@@ -48,8 +48,9 @@ fn friction(network: CoupledModalSystem) -> FrictionModalSystem {
             force_absolute_tolerance_n: 1e-12, force_relative_tolerance: 1e-10, sticking_tolerance_m: 1e-12 },
         &CancelGate::new_clock_free()).unwrap()
 }
-fn multi(core: FrictionModalSystem) -> MultiFrictionModalSystem {
-    core.with_additional_ports(vec![], MultiFrictionConfig { max_ports: 8, max_sweeps: 128, max_setup_terms: 100000 },
+fn multi(core: FrictionModalSystem) -> MultiFrictionModalSystem { multi_sweeps(core, 128) }
+fn multi_sweeps(core: FrictionModalSystem, max_sweeps: usize) -> MultiFrictionModalSystem {
+    core.with_additional_ports(vec![], MultiFrictionConfig { max_ports: 8, max_sweeps, max_setup_terms: 100000 },
         &CancelGate::new_clock_free()).unwrap()
 }
 fn limits() -> FrictionObstacleConfig { FrictionObstacleConfig { max_contacts: 8, max_setup_terms: 100000 } }
@@ -327,11 +328,112 @@ fn an_actual_endpoint_pushed_past_a_prediction_inside_the_tolerance_is_a_named_m
     assert!(!set.take_endpoint_miss());
 }
 
+// A linear stop of the given stiffness whose closure at rest is about a millimetre,
+// carrying `force_n` there, under the bass bow's stop tolerance (1e-11 N absolute,
+// 1e-9 relative). The closure is a difference of numbers of that size, so it
+// resolves 2.2e-19 m, and the stop turns that into about k x 2.2e-19 N.
+fn millimetre_stop(stiffness: f64, force_n: f64, config: ModalContactConfig) -> MultiFrictionModalSystem {
+    let gate = CancelGate::new_clock_free();
+    multi(friction(network(1000.0))).with_obstacles(vec![(ModalContact {
+        left: attachment(0, 1.0), right: attachment(0, 0.0),
+        law: Obstacle::new(vec![-1.0], 1, 1, vec![1e-3 - force_n/stiffness], vec![1.0], stiffness, 1.0,
+            "synthetic compliant support, not a finger material measurement".into()).unwrap() }, config)], limits(), &gate).unwrap()
+}
+fn stop_tolerance() -> ModalContactConfig {
+    ModalContactConfig { max_iterations: 96, maximum_force_n: 50.0, maximum_penetration_m: 0.01,
+        force_absolute_tolerance_n: 1e-11, force_relative_tolerance: 1e-9 }
+}
+
+// bh-C3 was refused 0.358 s in: "modal contact residual 2.6128149643867005e-10 N
+// exceeds 2.1584497387841928e-10 N". Half of a tolerance of 4.317e-10 N is a stop
+// carrying 0.4217 N at the bass bow's gate, which is what this stop carries. The
+// refusal and its tolerance are the card's; the closure is a stand-in: in the card's
+// own staged checks the closure is 3e-9 to 1.3e-7 m, a sum of 643 modal terms whose
+// magnitudes add to 9e-5 to 1.2e-3 m, which is why 2 ulps of the result is far too
+// small a floor and the sum's own rounding bound is not. A residual within that
+// bound is a closure rounded along another path, not a miss.
+#[test]
+fn a_residual_within_the_summation_bound_passes_the_final_check_and_one_past_it_still_refuses() {
+    let k = 1e9;
+    let mut joint = millimetre_stop(k, 0.4217, stop_tolerance());
+    let dt = joint.sample_period_s();
+    let set = joint.obstacles.as_mut().unwrap();
+    let shape = set.points[0].column[0];
+    set.prepare(&[1e-3/shape], &[0.0], None, None).unwrap();
+    let point = &set.points[0];
+    let x = point.old;
+    let (expected, _) = law_force(&point.law, point.old, x, dt).unwrap();
+    assert!((expected - 0.4217).abs() < 1e-9, "{expected}");
+    // At rest the step's law has slope k/2 per unit of endpoint. The closure here is a sum of three terms of
+    // the size of x, so the floor is twice gamma_3 x (k/2); terms 64 times larger give 64 times the floor, and
+    // 512 modal terms give gamma_514/gamma_3 times it.
+    let terms = Terms { scale: x, count: 3 };
+    let floor = point.force_floor(x, terms, dt);
+    let expected_floor = 2.0*gamma(3)*x*0.5*k;
+    assert!((floor - expected_floor).abs() < 1e-6*expected_floor, "{floor} against {expected_floor}");
+    assert!((gamma(3) - 3.0*f64::EPSILON/2.0).abs() < 1e-30, "gamma_3 = 3u/(1 - 3u) = {}", gamma(3));
+    assert_eq!(point.force_floor(x, Terms { scale: 64.0*x, ..terms }, dt), 64.0*floor);
+    assert!((point.force_floor(x, Terms { count: 514, ..terms }, dt)/floor - gamma(514)/gamma(3)).abs() < 1e-9);
+    let share = 0.5;
+    let held = |residual: f64| share*force_tolerance(expected + residual, expected, point.config).unwrap();
+    let residual = 2.6128149643867005e-10;
+    assert!(residual > held(residual), "today's check refuses {residual} against {}", held(residual));
+    assert!(residual < held(residual) + floor);
+    let (_, found, reported) = point.check_counted(expected + residual, x, terms, dt, share, 821).unwrap();
+    assert!((found - residual).abs() < 1e-15 && reported >= found.abs() && reported > held(residual)/share);
+    // The same stop and tolerance, a residual past the floor: refused, naming the allowance it was held to.
+    let past = held(0.0) + 1.5*floor;
+    match point.check_counted(expected + past, x, terms, dt, share, 821) {
+        Err(ModalCouplingError::ContactSolve { residual_n, tolerance_n, iterations }) => {
+            assert!((residual_n - past).abs() < 1e-15 && iterations == 821);
+            assert!((tolerance_n - (held(past) + floor)).abs() < 1e-15, "{tolerance_n}");
+            assert!(residual_n.abs() > tolerance_n);
+        }
+        other => panic!("expected a refusal past the floor, got {other:?}"),
+    }
+    // Inside the share of the tolerance nothing is added: the reported tolerance is the declared one.
+    let (_, _, declared) = point.check_counted(expected + 0.5*held(0.0), x, terms, dt, share, 0).unwrap();
+    assert_eq!(declared, force_tolerance(expected + 0.5*held(0.0), expected, point.config).unwrap());
+}
+
+// The same stop under a tolerance below the closure's resolution (1e-18 N): no
+// reaction meets it, floating-point bisection is exhausted, and the root solve used
+// to refuse there. The best iterate now goes on to the stop's own check.
+#[test]
+fn a_root_target_below_the_closures_resolution_goes_on_to_the_stops_own_check() {
+    let k = 1e9;
+    let below = ModalContactConfig { force_absolute_tolerance_n: 1e-18, force_relative_tolerance: 1e-30, ..stop_tolerance() };
+    let mut joint = millimetre_stop(k, 0.4217, below);
+    let dt = joint.sample_period_s();
+    let set = joint.obstacles.as_mut().unwrap();
+    let shape = set.points[0].column[0];
+    set.prepare(&[1e-3/shape], &[0.0], None, None).unwrap();
+    let point = &set.points[0];
+    let (x0, compliance) = (point.old, set.nn[0]);
+    // The free closure that leaves this stop carrying about `force` N after its own
+    // compliance. Whether the rounding of the closure leaves an exact root depends on
+    // the root, so the first of a few roots that the plain solve refuses is the case.
+    let solve_contact = super::super::super::super::solve_contact;
+    let (force, free) = (0..64).map(|i| 0.4217 + 1.234e-7*f64::from(i)).map(|force| (force, x0 + compliance*force))
+        .find(|&(_, free)| solve_contact(&point.law, x0, free, compliance, dt, point.config, None).is_err())
+        .expect("no root of 64 lies below the closure's resolution");
+    let refused = solve_contact(&point.law, x0, free, compliance, dt, point.config, None);
+    assert!(matches!(refused, Err(ModalCouplingError::ContactSolve { .. })), "{refused:?}");
+    let (reaction, iterations) = solve_stop(&point.law, x0, free, compliance, dt, point.config, None).unwrap();
+    assert!(iterations > 0 && (reaction - force).abs() < 1e-5, "{reaction} after {iterations}");
+    // The stop's own check at the closure that reaction implies accepts it on the floor, not on the 1e-18 N.
+    let x = free - compliance*reaction;
+    let terms = Terms { scale: free.abs() + (compliance*reaction).abs(), count: 3 };
+    let (_, residual, tolerance) = point.check_counted(reaction, x, terms, dt, 1.0, iterations).unwrap();
+    assert!(residual.abs() > 1e-18 && residual.abs() <= tolerance, "{residual} against {tolerance}");
+}
+
 // Two opposed stops pinch the bowed coordinate with a finger-like preload (k times
 // 1e-5 m interference) and the violin stops' internal loss, at a declared relative
 // tolerance near the arithmetic floor, where predictions accepted at the edge often
 // miss at the actual endpoint.
-fn pinched(stiffness: f64, relative: f64) -> MultiFrictionModalSystem {
+fn pinched(stiffness: f64, relative: f64) -> MultiFrictionModalSystem { pinched_sweeps(stiffness, relative, 128) }
+fn pinched_sweeps(stiffness: f64, relative: f64, max_sweeps: usize) -> MultiFrictionModalSystem {
     let gate = CancelGate::new_clock_free();
     let stop = ModalContactConfig { max_iterations: 96, maximum_force_n: 50.0, maximum_penetration_m: 1e-4,
         force_absolute_tolerance_n: 1e-18, force_relative_tolerance: relative };
@@ -342,7 +444,7 @@ fn pinched(stiffness: f64, relative: f64) -> MultiFrictionModalSystem {
             .with_internal_loss(0.19).unwrap();
         (contact, stop)
     }).to_vec();
-    multi(friction(coupled_network())).with_obstacles(contacts, limits(), &gate).unwrap()
+    multi_sweeps(friction(coupled_network()), max_sweeps).with_obstacles(contacts, limits(), &gate).unwrap()
 }
 
 #[test]
@@ -365,15 +467,25 @@ fn a_stop_that_misses_at_its_actual_endpoint_is_solved_again_and_accepted() {
     assert_eq!(joint.obstacle_resolves(), resolved);
 }
 
-// The pinched pair, whose joint sweep misses the stops' 1e-13 relative tolerance,
-// goes to the coupled-stop rescue, and the walk runs out on a partition whose
-// stops refused at a trial traction (MagentaBadger 13023). The refusal must be
-// named `stops-unresolved` and sized by the root that refused: its ContactSolve
-// residual or its Budget value, read where the walk met it, never unbounded.
+// A stop whose root is not found refuses, and the coupled-stop rescue's walk runs
+// out on a partition whose stops refused at a trial traction (MagentaBadger 13023).
+// The refusal must be named `stops-unresolved` and sized by the root that refused:
+// its ContactSolve residual or its Budget value, read where the walk met it, never
+// unbounded. The pinched pair used to refuse like this at its 1e-13 relative
+// tolerance, a target below what the closure resolves; the stop gate accepts that
+// now, so the refusal is pinned on stops that a spent sweep budget leaves
+// unsettled: the two opposed stops are coupled, one coordinate sweep leaves each
+// off its root by far more than any floor, and so do two.
 #[test]
 fn the_pinched_pairs_stop_refusal_is_named_and_sized_by_the_root_that_refused() {
+    stops_refusal_is_named_and_sized(pinched_sweeps(5e5, 1e-13, 1));
+}
+#[test]
+fn a_second_sweep_that_still_leaves_the_coupled_stops_unsettled_is_named_and_sized_too() {
+    stops_refusal_is_named_and_sized(pinched_sweeps(5e5, 1e-13, 2));
+}
+fn stops_refusal_is_named_and_sized(mut joint: MultiFrictionModalSystem) {
     use super::super::active_set::{LAST_STOPS_REFUSAL, STOPS_UNRESOLVED};
-    let mut joint = pinched(5e5, 1e-13);
     for _ in 0..2000 {
         LAST_STOPS_REFUSAL.with(|last| last.set(None));
         let error = match joint.step(&[0.0, 0.0], &[FrictionDrive { speed_m_s: 0.05, normal_force_n: 0.2 }]) {
@@ -392,7 +504,7 @@ fn the_pinched_pairs_stop_refusal_is_named_and_sized_by_the_root_that_refused() 
         }
         return;
     }
-    panic!("the pinched pair no longer refuses in 2000 steps: this test pins that refusal and must be revisited");
+    panic!("the sweep-limited pinched pair no longer refuses in 2000 steps: this test pins that refusal and must be revisited");
 }
 
 // A static bow against a preloaded stop, with one joint sweep: the sweep solves
