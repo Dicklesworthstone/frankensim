@@ -27,6 +27,8 @@ pub mod reference;
 pub mod tension;
 /// Sourced tensile limits on the actual segment and tension-link stresses.
 pub mod strength;
+/// Fatigue histories at fixed material points on native rod load paths.
+pub mod fatigue;
 /// Frozen reference inertia and analytical force adapter for dynamic consumers.
 pub mod motion;
 mod derivatives;

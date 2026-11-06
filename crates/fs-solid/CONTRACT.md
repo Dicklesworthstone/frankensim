@@ -1569,6 +1569,49 @@ heat generation, crack topology, a sequence-dependent damage law or a qualified
 component service life. `examples/frame_fatigue.rs --demo` demonstrates the
 native plastic loading path with deliberately synthetic CMB parameters.
 
+## Fatigue at fixed material points in spatial rods
+
+`rod::material_field::fatigue::SpatialRodFatiguePath` observes chronological
+accepted native rod equilibria at fixed segment/layer/`[y,z]` material points.
+Each point retains its original concentric layer, material identity and typed
+absolute-temperature coordinate. Local axial/bending stress uses the original
+layer modulus and the native intrinsic-strain subtraction. Torsional shear uses
+the original layer shear modulus and signed circular-section stress field. The
+point remains attached to the material; it does not move to whichever surface
+point currently has the largest stress. Fixed thermal expansion is removed at
+each original layer, preserving residual stress from incompatible expansion.
+
+Signed normal-stress gauges feed the shared bounded S-N/rainflow owner with the
+declared mean-stress policy. Findley gauges retain the full local tensor and
+both shear-vector directions over an explicitly closed representative cycle.
+Findley reports a calibrated fatigue-limit utilization, not an invented cycle
+life. Its finite plane search and enclosing-circle work remain bounded by the
+original material owner. Axial/bending/torsion superposition does not supply a
+local transverse-force shear field: `Q/A` is not substituted for that missing
+field. Selected segments exceeding the caller's explicit unassessed transverse-
+force limit are refused, and the actual omitted forces remain inspectable.
+Zero requires vanishing transverse force; a nonzero limit is an explicit model
+applicability decision, not a bound on the missing local stress or fatigue error.
+
+The initial accepted state is sampled once. Explicit target-load blocks use the
+original native equilibrium solver; intermediate Newton and continuation trials
+are not fatigue samples. The caller must resolve physical extrema in the target
+history. Mechanics and all fatigue banks publish together, so a late gauge
+refusal or cancellation preserves the preceding accepted block. Unresolved
+rainflow reversals survive continuation, cloning and Findley-window restarts.
+Provisional endpoint evaluation leaves the live history available for further
+loading. Material/source temperature and stress-free geometry remain fixed;
+finite strain, plasticity, creep interaction, stiffness degradation and crack
+growth are outside this elastic rod consumer.
+
+`RodFatigueObservation::new_motion` instead starts at an explicitly supplied
+native motion pose, with no phantom sample from the source's initialization
+pose. It retains the immutable source owner, allowing constant-time admission
+of subsequent observations. Only selected segment strains are recovered through
+the original native kinematics. Source/temperature/geometry replacement refuses,
+and a failed observation restores every counter and last published tensor. A
+native time owner must join this observation to mechanical acceptance.
+
 ## Provisional observation of native fatigue histories
 
 The quasistatic and inertial elastic/J2 fatigue owners expose `preview_fatigue`

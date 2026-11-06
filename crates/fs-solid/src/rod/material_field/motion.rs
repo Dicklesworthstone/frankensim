@@ -22,6 +22,9 @@ pub use environment::RodBodyLoads;
 /// Temperature-only source updates retaining the original dynamic inventory.
 pub mod thermal;
 
+// Actual-pose fatigue shares the native kinematics and fixed source owner.
+mod fatigue;
+
 pub mod spatial {
 //! Reference centroid and full rotary tensor for eccentric rod attachments.
 //!

@@ -25,6 +25,8 @@ pub(super) struct ThermalField {
     limit: f64,
 }
 impl ThermalField {
+    pub(super) fn linear_strain_limit(&self) -> f64 { self.limit }
+
     pub(super) fn summary(&self, segment: usize, strain: f64) -> Result<(f64, f64), SpatialRodError> {
         Ok(self.sections[segment].axial_force_and_energy_at_strain(strain, self.limit)?)
     }
