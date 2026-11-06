@@ -75,7 +75,7 @@ impl<L: EquilibriumLattice3<Q> + ViscousLattice3<Q>, const Q: usize> OpenBoundar
     /// use the reservoir's zero-normal-velocity-gradient condition. At seams,
     /// tangential derivatives still retain the native halfway-wall model.
     ///
-    /// Material sources are queried once per fluid cell at sqrt(2 D:D)/dt.
+    /// Sources are queried once per fluid cell at sqrt(2 dev(D):dev(D))/dt.
     /// The same frozen source mu/rho0 sets the actual shear relaxation; bulk,
     /// higher-order, TRT and equilibrium choices retain native semantics.
     /// Sources own temperature/composition and must not advance external

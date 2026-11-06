@@ -52,15 +52,9 @@ pub(super) fn admit_source(
             );
         }
         let gradient = super::super::field_gradient(p, v)?;
-        // gamma_dot = sqrt(2 D:D), D = (grad(v) + grad(v)^T)/2.
-        // A rigid translation/rotation contributes no constitutive rate.
-        let mut rate = 0.0_f64;
-        for a in 0..3 {
-            for b in 0..3 {
-                let strain = 0.5 * gradient[a][b] + 0.5 * gradient[b][a];
-                rate = rate.hypot(core::f64::consts::SQRT_2 * strain);
-            }
-        }
+        // The same deviatoric invariant drives native viscosity after transfer;
+        // rigid motion and isotropic volume change are not shear-rate queries.
+        let rate = crate::kinematics::shear_rate_from_gradient3(gradient);
         if !rate.is_finite() {
             return Err(invalid("unrepresentable physical P1 shear rate").into());
         }

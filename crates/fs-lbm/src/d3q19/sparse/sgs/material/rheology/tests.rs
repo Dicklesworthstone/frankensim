@@ -164,8 +164,8 @@ fn resolved_shear_uses_physical_units_half_force_walls_and_live_source_feedback(
         "source feedback did not reach collision"
     );
 
-    // Native full-gradient queries cancel rigid rotation and retain diagonal
-    // strain. Check an interior cell so stationary walls do not add strain.
+    // Native source queries exclude both rigid rotation and isotropic
+    // dilation. Check an interior cell so stationary walls do not add strain.
     for dilation in [0.0, 0.002] {
         let mut spin = seeded(&[(0, 0, 0)]);
         for lane in 0..TILE_CELLS {
@@ -199,7 +199,7 @@ fn resolved_shear_uses_physical_units_half_force_walls_and_live_source_feedback(
             .iter()
             .find(|s| s.point.cell == [1, 1, 1])
             .unwrap();
-        assert!((s.point.shear_rate_per_s - 6.0_f64.sqrt() * dilation / 0.01).abs() < 2e-13);
+        assert!(s.point.shear_rate_per_s.abs() < 2e-13);
     }
 }
 

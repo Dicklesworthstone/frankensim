@@ -368,6 +368,16 @@ fn stress_numerator(
     cell: [usize; 3],
     gravity: [f64; 3],
 ) -> f64 {
+    stress_numerators(liquid, cell, gravity)[0]
+}
+
+// Independently retain the orthogonal spherical contribution for the native
+// BGK/TRT heat law, while source viscosity consumes only deviatoric shear.
+pub(super) fn stress_numerators(
+    liquid: &MaterialFreeSurfaceEnthalpy3<'_, '_>,
+    cell: [usize; 3],
+    gravity: [f64; 3],
+) -> [f64; 2] {
     let lattice = liquid.flow().lattice();
     let bits = lattice.grid().state_bits();
     let slot = (cell[0] / 4) | ((cell[1] / 4) << 1) | ((cell[2] / 4) << 2);
@@ -390,8 +400,13 @@ fn stress_numerator(
             tensor[a][b] += 0.5 * (state.velocity[a] * force[b] + state.velocity[b] * force[a]);
         }
     }
+    let trace = tensor[0][0] + tensor[1][1] + tensor[2][2];
+    for a in 0..3 {
+        tensor[a][a] -= trace / 3.0;
+    }
     let squared = tensor.iter().flatten().map(|x| x * x).sum::<f64>();
-    3.0 * (0.5 * squared).sqrt() / state.density
+    [3.0 * (0.5 * squared).sqrt() / state.density,
+        1.5_f64.sqrt() * trace.abs() / state.density]
 }
 
 fn independent_rate(
@@ -767,7 +782,8 @@ fn source_density_and_shear_viscosity_jointly_drive_native_motion_and_same_heat(
             let raw_density = 1000.0 - density_slope * (temperature - 400.0);
             near(material.density_kg_m3(), raw_density, 1e-12);
             let acceleration = [0.0, -0.2 * raw_density / 1000.0, 0.0];
-            let rate = independent_rate(stress_numerator(liquid, CELL, acceleration), temperature, 0.0002, shear_slope);
+            let [shear_numerator, volume_numerator] = stress_numerators(liquid, CELL, acceleration);
+            let rate = independent_rate(shear_numerator, temperature, 0.0002, shear_slope);
             assert!(rate > 0.0);
             near(liquid.rheology_at(CELL).unwrap().shear_rate_per_s, rate, 2e-10);
             near(coordinate(material, "rate"), rate, 2e-10);
@@ -780,7 +796,8 @@ fn source_density_and_shear_viscosity_jointly_drive_native_motion_and_same_heat(
             let applied = report.applied.iter().find(|s| s.coordinates == CELL).unwrap();
             near(applied.shear_rate_per_s, rate, 2e-10);
             near(applied.material.dynamic_viscosity_pa_s(), mu, 2e-12);
-            near(applied.heat_j, mu * rate * rate * applied.liquid_volume_m3 * 0.001, 4e-10);
+            let dilation = volume_numerator / ((0.5 + 3.0 * mu) * 0.001);
+            near(applied.heat_j, mu * (rate * rate + dilation * dilation) * applied.liquid_volume_m3 * 0.001, 4e-10);
             assert!(report.flow.viscous_heat_j > 0.0);
             assert_eq!(report.flow.external_heat_j, 0.0);
             near(report.flow.mass_after_kg, mass, 1e-12);

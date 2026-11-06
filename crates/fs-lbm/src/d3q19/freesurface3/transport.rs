@@ -215,6 +215,17 @@ impl FreeSurface3 {
         location: MassLocation3,
         tau: f64,
     ) -> Result<f64, FreeSurfaceError3> {
+        Ok(self.transport_strain_rates(location, tau)?[0])
+    }
+
+    /// Deviatoric shear and sqrt(2/3)|div(u)| in lattice units. The BGK/TRT
+    /// liquid collision ties bulk to shear relaxation; retain both rates so
+    /// molecular heating does not lose dilation when material queries use shear.
+    pub(crate) fn transport_strain_rates(
+        &self,
+        location: MassLocation3,
+        tau: f64,
+    ) -> Result<[f64; 2], FreeSurfaceError3> {
         let MassLocation3::Cell(key, lane) = location else {
             return Err(FreeSurfaceError3::Transport("carry has no resolved stress"));
         };
@@ -230,19 +241,20 @@ impl FreeSurface3 {
         }
         let force = self.force_at_lane(key, lane);
         let u = core::array::from_fn(|d| raw[d] + 0.5 * force[d] / rho);
-        let rate = crate::d3q19::force_corrected_shear_rate3(
+        let components = crate::d3q19::rheology_stress_components3(
             &self.grid.populations(slot, lane),
             rho,
             u,
             force,
-            tau,
+            crate::d3q19::CollisionModel3::Bgk { tau },
         );
-        if !rate.is_finite() || rate < 0.0 {
+        let rates = components.map(|numerator| numerator / tau);
+        if rates.iter().any(|rate| !rate.is_finite() || *rate < 0.0) {
             return Err(FreeSurfaceError3::Transport(
                 "unrepresentable liquid strain rate",
             ));
         }
-        Ok(rate)
+        Ok(rates)
     }
 
     pub(crate) fn mass_snapshot(&self) -> BTreeMap<MassLocation3, f64> {

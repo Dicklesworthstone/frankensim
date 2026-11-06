@@ -312,15 +312,21 @@ fn buoyancy_and_rheology_share_source_state_without_replacing_reference_inertia(
             let energy = liquid.total_enthalpy_j().unwrap();
             let mut heat = 0.0;
             for _ in 0..3 {
+                let original = liquid.clone();
                 let step = liquid.step_with_viscous_heating(&[], &gate).unwrap();
                 for sample in &step.applied {
                     let point = sample.material.material().query();
                     let mu =
                         0.1 - 0.0004 * (point.axes()["T"] - 300.0) + 0.02 * point.axes()["rate"];
                     close(sample.material.dynamic_viscosity_pa_s(), mu, 1e-11);
+                    let location = FreeSurface3::transport_location(sample.coordinates).unwrap();
+                    let tau = original.rheology_at(sample.coordinates).unwrap().collision_tau;
+                    let dilation = original.flow().lattice()
+                        .transport_strain_rates(location, tau).unwrap()[1] / 0.0005;
                     close(
                         sample.heat_j,
-                        mu * sample.shear_rate_per_s.powi(2) * sample.liquid_volume_m3 * 0.0005,
+                        mu * (sample.shear_rate_per_s.powi(2) + dilation * dilation)
+                            * sample.liquid_volume_m3 * 0.0005,
                         1e-14,
                     );
                 }

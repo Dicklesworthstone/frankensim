@@ -102,7 +102,7 @@ impl<R: FluidTransport + ?Sized> MaterialScaling<'_, R> {
     ///
     /// The force-centered velocity and stationary halfway-wall stencil are
     /// shared with sparse SGS. One full gradient supplies BOTH source shear
-    /// `sqrt(2 D:D) / dt` [1/s] and eddy viscosity; rigid rotation contributes
+    /// `sqrt(2 dev(D):dev(D)) / dt` [1/s] and eddy viscosity; rigid rotation contributes
     /// no source shear. The physical velocity and distance scales cancel dx.
     /// Each active cell is queried once, and its returned `FluidTransport` is
     /// read once. The existing material scaling converts its mu/rho0 into the
@@ -197,7 +197,7 @@ impl<R: FluidTransport + ?Sized> MaterialScaling<'_, R> {
                 origin[2] + lane / (TILE * TILE),
             ];
             let error = |source| SparseMaterialSgsError3::Source { cell, source };
-            let lattice_rate = strain_rate(gradient);
+            let lattice_rate = strain_rate(gradient).map_err(|source| error(source.into()))?;
             let rate = lattice_rate / self.timestep_s();
             if !rate.is_finite() || (lattice_rate != 0.0 && rate == 0.0) {
                 return Err(error(MaterialLbmError::Invalid(

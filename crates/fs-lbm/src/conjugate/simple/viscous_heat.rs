@@ -41,6 +41,52 @@ struct MolecularPower {
     molecular_heat_w: f64,
 }
 
+#[cfg(test)]
+mod strain_tests {
+    use super::*;
+
+    /// G0/G3: source observation removes spherical strain before squaring,
+    /// while the existing full-stress operator retains its volumetric power.
+    #[test]
+    fn native_mac_shear_query_excludes_volume_without_losing_stress_power() {
+        let domain = VoxelDomain::new(5, 5, 5, 1.0).unwrap();
+        let config = SimpleConfig::new([FvBoundary::Symmetry; 6]);
+        let fluid = FluidProperties {
+            density_kg_m3: 1.0,
+            specific_heat_j_kg_k: 1.0,
+            conductivity_w_m_k: 1.0,
+            kinematic_viscosity_m2_s: 1.0,
+        };
+        let gate = CancelGate::new_clock_free();
+        let mut sampler = material_solver(
+            &domain, &fluid, &[1.0; 125], None, None, &config, &gate,
+        ).unwrap();
+        for (gradient, expected) in [
+            ([[0.003, 0.0, 0.0], [0.0, 0.003, 0.0], [0.0, 0.0, 0.003]], 0.0),
+            ([[0.0, -0.004, 0.0], [0.004, 0.0, 0.0], [0.0, 0.0, 0.0]], 0.0),
+            ([[-0.002, 0.006, 0.0], [0.0, -0.002, 0.0], [0.0, 0.0, -0.002]], 0.006),
+            ([[0.004, 0.0, 0.0], [0.0, -0.002, 0.0], [0.0, 0.0, -0.002]], 0.004 * 3.0_f64.sqrt()),
+        ] {
+            for a in 0..3 {
+                for index in 0..sampler.vel[a].len() {
+                    let at = sampler.comps[a].coords(index);
+                    sampler.vel[a][index] = (0..3).map(|d| {
+                        gradient[a][d] * (at[d] as f64 + if a == d { 0.0 } else { 0.5 })
+                    }).sum();
+                }
+            }
+            // Interior quadrature is independent of the manufactured field's
+            // boundary trace; no pressure projection changes the observation.
+            let center = 2 + 5 * (2 + 5 * 2);
+            let rate = sampler.molecular_shear_rates(&gate).unwrap()[center];
+            assert!((rate - expected).abs() < 2e-14);
+            let full = sampler.sample_molecular_power::<false>(&gate).unwrap().heat[center];
+            let divergence = gradient[0][0] + gradient[1][1] + gradient[2][2];
+            assert!((full - expected * expected - (2.0 / 3.0) * divergence * divergence).abs() < 2e-14);
+        }
+    }
+}
+
 /// The checked value itself: the shared `finite` gate returns only the verdict.
 fn finite_value(field: &'static str, value: f64) -> Result<f64, ChtError> {
     finite(field, value)?;
@@ -532,7 +578,10 @@ impl Solver<'_> {
     // The stress/drag quadratures are shared by steady and inertial Stokes.
     // Only the caller owns the storage/time balance; no steady power equality
     // is imposed on an accelerating field.
-    fn sample_molecular_power(&self, gate: &CancelGate) -> Result<MolecularPower, ChtError> {
+    fn sample_molecular_power<const DEVIATORIC: bool>(
+        &self,
+        gate: &CancelGate,
+    ) -> Result<MolecularPower, ChtError> {
         let domain = self.domain;
         let mut heat = vec![0.0; domain.cell_count()];
         let mut quadrature_w = 0.0;
@@ -548,10 +597,23 @@ impl Solver<'_> {
                 continue;
             }
             let at = domain.coords(c);
-            for a in 0..3 {
-                let gradient = (self.vel[a][self.cell_face(a, at, true)]
+            let normal: [f64; 3] = core::array::from_fn(|a| {
+                (self.vel[a][self.cell_face(a, at, true)]
                     - self.vel[a][self.cell_face(a, at, false)])
-                    / domain.width(a, at[a]);
+                    / domain.width(a, at[a])
+            });
+            // Kinematic source observation removes volumetric strain before
+            // squaring. The physical stress-power path retains the original
+            // full-stress operator, including its prescribed bulk response.
+            let normal = if DEVIATORIC {
+                core::array::from_fn(|a| {
+                    (normal[a] - normal[(a + 1) % 3]) / 3.0
+                        + (normal[a] - normal[(a + 2) % 3]) / 3.0
+                })
+            } else {
+                normal
+            };
+            for gradient in normal {
                 let power = 2.0 * self.mu_eff(at) * domain.volume(c) * gradient * gradient;
                 add(cell_heat, power)?;
                 add(&mut quadrature_w, power)?;
@@ -685,7 +747,7 @@ impl Solver<'_> {
         })
     }
 
-    /// Root-mean-square sqrt(2 D:D) on the ORIGINAL symmetric-stress
+    /// Root-mean-square sqrt(2 dev(D):dev(D)) on the original symmetric-stress
     /// quadrature, including native half-cell walls and graded-cell edges.
     /// The observation must use a unit molecular coefficient, so its strain
     /// measure contains no viscosity, Darcy loss, pressure, forcing or LES.
@@ -699,7 +761,7 @@ impl Solver<'_> {
         {
             return Err(invalid_power("kinematic strain observation requires the unit molecular operator"));
         }
-        let power = self.sample_molecular_power(gate)?;
+        let power = self.sample_molecular_power::<true>(gate)?;
         power.heat.into_iter().enumerate().map(|(cell, integral)| {
             poll(gate)?;
             let square = finite_value("rheology.strain_square", integral / self.domain.volume(cell))?;
@@ -720,7 +782,7 @@ impl Solver<'_> {
         let domain = self.domain;
         let MolecularPower {
             mut heat, mut quadrature_w, wall_power_w, wall_tangential_force_n, molecular_heat_w,
-        } = self.sample_molecular_power(gate)?;
+        } = self.sample_molecular_power::<false>(gate)?;
         let add = |value: &mut f64, amount: f64| -> Result<(), ChtError> {
             *value = finite_value("viscous_heat.power", *value + amount)?;
             Ok(())

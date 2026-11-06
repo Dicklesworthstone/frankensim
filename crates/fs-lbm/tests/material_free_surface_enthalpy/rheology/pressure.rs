@@ -158,7 +158,8 @@ fn actual_pressure_and_shear_close_the_same_root_and_molecular_heat() {
         assert!((coordinate(material, "pressure") - pressure).abs() < 3e-11);
         assert!((pressure - REFERENCE).abs() > 1e-5);
         let a = 0.5 + 3.0 * (0.1 + 0.01 * (pressure - REFERENCE));
-        let rhs = stress_numerator(&liquid, CELL, [0.0; 3]) / 0.001;
+        let [shear_numerator, volume_numerator] = stress_numerators(&liquid, CELL, [0.0; 3]);
+        let rhs = shear_numerator / 0.001;
         let rate = 2.0 * rhs / (a + (a * a + 0.012 * rhs).sqrt());
         let mu = 0.1 + 0.01 * (pressure - REFERENCE) + 0.001 * rate;
         near(
@@ -180,9 +181,10 @@ fn actual_pressure_and_shear_close_the_same_root_and_molecular_heat() {
             .find(|s| s.coordinates == CELL)
             .unwrap();
         assert!((coordinate(&applied.material, "pressure") - pressure).abs() < 3e-11);
+        let dilation = volume_numerator / ((0.5 + 3.0 * mu) * 0.001);
         near(
             applied.heat_j,
-            mu * rate * rate * applied.liquid_volume_m3 * 0.001,
+            mu * (rate * rate + dilation * dilation) * applied.liquid_volume_m3 * 0.001,
             2e-8,
         );
         assert!(report.flow.viscous_heat_j > 0.0);

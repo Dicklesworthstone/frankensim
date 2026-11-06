@@ -238,6 +238,10 @@ fn numerator_with_force(
             tensor[a][b] += 0.5 * (sample.velocity[a] * force[b] + sample.velocity[b] * force[a]);
         }
     }
+    let mean = (tensor[0][0] + tensor[1][1] + tensor[2][2]) / 3.0;
+    for a in 0..3 {
+        tensor[a][a] -= mean;
+    }
     3.0 * (0.5 * tensor.iter().flatten().map(|v| v * v).sum::<f64>()).sqrt() / sample.density
 }
 

@@ -6,9 +6,26 @@
 //! geometry. No wall value is silently replaced by a zero-velocity solid node.
 
 use fs_exec::CancelGate;
+use fs_material::fluid_transport::viscous::DeformationRate;
 
 mod budget;
 pub use budget::VorticityBudget3;
+
+// Constitutive shear excludes rigid spin and isotropic volume change. Reuse
+// the material tensor's scaled norm so source rheology and physical viscous
+// stress observe the same invariant. Units follow the input (lattice or SI);
+// callers retain their existing finite/representability admission gates.
+pub(crate) fn shear_rate_from_gradient3(gradient: [[f64; 3]; 3]) -> f64 {
+    DeformationRate::from_velocity_gradient(gradient)
+        .map_or(f64::NAN, |rate| rate.shear_rate_per_s())
+}
+
+// Native LBM stress packing is xx/yy/zz/xy/xz/yz; material tensor Voigt uses
+// xx/yy/zz/xy/yz/zx. Shear entries are tensor components, not engineering rates.
+pub(crate) fn deviatoric_rate3([xx, yy, zz, xy, xz, yz]: [f64; 6]) -> f64 {
+    DeformationRate::from_tensor([xx, yy, zz, xy, yz, xz])
+        .map_or(f64::NAN, |rate| rate.shear_rate_per_s())
+}
 
 /// A full velocity gradient `gradient[velocity_component][spatial_axis]`.
 /// Native grids return lattice units. [`Self::to_physical`] converts a lattice

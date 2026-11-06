@@ -9,13 +9,13 @@ pub struct FreeSurfaceViscousFeedbackSample {
     pub coordinates: [usize; 3],
     /// Original pinned material response at this temperature and strain rate.
     pub material: ResolvedLiquidState,
-    /// Force-corrected sqrt(2 D:D) [1/s] reconstructed with this SAME viscosity.
+    /// Force-corrected sqrt(2 dev(D):dev(D)) [1/s], using this same viscosity.
     pub shear_rate_per_s: f64,
     /// Physical molecular collision coefficient used in that reconstruction.
     pub collision_tau: f64,
     /// Located original liquid mass / reference density [m3].
     pub liquid_volume_m3: f64,
-    /// mu(T,gamma) gamma^2 [W/m3], excluding numerical damping.
+    /// Shear plus tied bulk power `2 mu D:D` [W/m3], excluding numerical loss.
     pub power_w_m3: f64,
 }
 
@@ -35,8 +35,10 @@ struct StressCell {
     id: CellId,
     coordinates: [usize; 3],
     volume_m3: f64,
-    /// Original Guo-corrected gamma_lattice * tau, held during thermal splitting.
+    /// Guo-corrected deviatoric gamma_lattice * tau, held during thermal splitting.
     numerator: f64,
+    /// Independent spherical part of the held stress, with the same tied tau.
+    dilation_numerator: f64,
 }
 
 #[derive(Clone)]
@@ -85,8 +87,9 @@ impl ViscousFeedback {
             let coordinates = FreeSurface3::transport_coordinates(location).ok_or(
                 Error::Invalid("molecular power requires a located liquid cell"),
             )?;
-            let numerator = liquid.flow.lattice.transport_shear_rate(location, 1.0)?;
-            if !numerator.is_finite() || numerator < 0.0 {
+            let [numerator, dilation_numerator] =
+                liquid.flow.lattice.transport_strain_rates(location, 1.0)?;
+            if [numerator, dilation_numerator].iter().any(|value| !value.is_finite() || *value < 0.0) {
                 return Err(Error::Invalid("unrepresentable liquid stress numerator"));
             }
             cells.push(StressCell {
@@ -94,6 +97,7 @@ impl ViscousFeedback {
                 coordinates,
                 volume_m3: thermal.cells()[&id].geometry.volume_m3,
                 numerator,
+                dilation_numerator,
             });
         }
         Ok(Self {
@@ -150,13 +154,20 @@ impl Conduction<'_, '_> {
                 let rate = (cell.numerator / scaling.tau) / feedback.dt;
                 (material, rate, scaling.tau)
             };
-            let power = (material.dynamic_viscosity_pa_s() * rate) * rate;
+            let dilation = (cell.dilation_numerator / tau) / feedback.dt;
+            let mu = material.dynamic_viscosity_pa_s();
+            let shear_power = (mu * rate) * rate;
+            let bulk_power = (mu * dilation) * dilation;
+            let power = shear_power + bulk_power;
             if !rate.is_finite()
                 || rate < 0.0
                 || (cell.numerator != 0.0 && rate == 0.0)
+                || !dilation.is_finite()
+                || (cell.dilation_numerator != 0.0 && dilation == 0.0)
                 || !power.is_finite()
                 || power < 0.0
-                || (rate != 0.0 && power == 0.0)
+                || (rate != 0.0 && shear_power == 0.0)
+                || (dilation != 0.0 && bulk_power == 0.0)
             {
                 return Err(Error::Invalid(
                     "liquid molecular feedback power is unrepresentable",

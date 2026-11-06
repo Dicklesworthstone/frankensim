@@ -111,7 +111,7 @@ where
     /// Bind T/shear-dependent material response to the existing retained flow.
     ///
     /// Native symmetric-strain quadrature yields the cell-volume RMS
-    /// `sqrt(2 D:D)` in physical 1/s, including graded edges and no-slip wall
+    /// `sqrt(2 dev(D):dev(D))` in 1/s, including graded edges and no-slip wall
     /// half cells. It observes the exact retained face velocities; no
     /// cell-speed reconstruction or constitutive relaxation parameter enters.
     /// Source coefficients are frozen over each accepted interval. The SAME

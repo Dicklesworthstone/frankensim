@@ -300,7 +300,7 @@ impl<'m> IsothermalRheologyLaw<'m> {
 /// Actual physical constitutive coordinates at an accepted wet collision cell.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct IsothermalRheologySample {
-    /// `sqrt(2 D:D)` [1/s], inferred from the force-corrected native stress.
+    /// `sqrt(2 dev(D):dev(D))` [1/s], from force-corrected native stress.
     pub shear_rate_per_s: f64,
     /// Molecular `1/2 + 3 nu dt/dx^2`, used by the next collision.
     pub collision_tau: f64,

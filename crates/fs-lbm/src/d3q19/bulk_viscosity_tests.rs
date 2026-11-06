@@ -154,6 +154,53 @@ fn material_strain_reconstruction_separates_bulk_and_shear_under_force() {
     }
 }
 
+/// G0/G3: shear-calibrated viscosity observes the same deviatoric invariant
+/// under every collision selector, including a superposed volumetric mode.
+#[test]
+fn constitutive_shear_ignores_dilation_for_every_collision_family() {
+    let law = crate::rheology::Rheology::Carreau {
+        nu0: 0.08,
+        nu_inf: 0.01,
+        lambda: 100.0,
+        n: 0.5,
+    };
+    for (gradient, expected) in [
+        ([[0.003, 0.0, 0.0], [0.0, 0.003, 0.0], [0.0, 0.0, 0.003]], 0.0),
+        ([[0.0, -0.004, 0.0], [0.004, 0.0, 0.0], [0.0, 0.0, 0.0]], 0.0),
+        ([[-0.002, 0.006, 0.0], [0.0, -0.002, 0.0], [0.0, 0.0, -0.002]], 0.006),
+        ([[0.004, 0.0, 0.0], [0.0, -0.002, 0.0], [0.0, 0.0, -0.002]], 0.004 * 3.0_f64.sqrt()),
+    ] {
+        let shear_tau = 0.5 + 3.0 * law.viscosity(expected);
+        for model in [
+            CollisionModel3::Bgk { tau: shear_tau },
+            CollisionModel3::Trt { tau: shear_tau, magic: 0.19 },
+            CollisionModel3::CentralMoment { second_order_rate: 1.0 / shear_tau, higher_order_rate: 1.2 },
+            CollisionModel3::CentralMomentBulk { shear_rate: 1.0 / shear_tau, bulk_rate: 1.0 / 1.6, higher_order_rate: 1.2 },
+            CollisionModel3::ReducedCumulant { second_order_rate: 1.0 / shear_tau, third_order_rate: 1.2, fourth_order_rate: 1.1 },
+        ] {
+            let bulk_tau = match model {
+                CollisionModel3::CentralMomentBulk { bulk_rate, .. } => 1.0 / bulk_rate,
+                _ => shear_tau,
+            };
+            let rho = 1.3;
+            let velocity = [0.04, -0.03, 0.02];
+            let mean = (gradient[0][0] + gradient[1][1] + gradient[2][2]) / 3.0;
+            let stress = core::array::from_fn(|a| core::array::from_fn(|b| {
+                let spherical = if a == b { mean } else { 0.0 };
+                let symmetric = 0.5 * (gradient[a][b] + gradient[b][a]);
+                -2.0 * rho / 3.0 * (shear_tau * (symmetric - spherical) + bulk_tau * spherical)
+            }));
+            for force in [[0.0; 3], [0.001, -0.002, 0.0007]] {
+                let populations = state(rho, velocity, stress, force);
+                let [numerator, _] = rheology_stress_components3(&populations, rho, velocity, force, model);
+                let observed = numerator / shear_tau;
+                assert!((observed - expected).abs() < 8e-14, "{model:?}: {observed} != {expected}");
+                assert!((law.viscosity(observed) - law.viscosity(expected)).abs() < 8e-14);
+            }
+        }
+    }
+}
+
 #[test]
 fn every_collision_family_excludes_isotropic_stress_from_material_shear() {
     let rho = 1.3;

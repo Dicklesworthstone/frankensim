@@ -34,6 +34,7 @@ fn cell_mass(liquid: &MaterialFreeSurfaceEnthalpy3<'_, '_>, p: [usize; 3]) -> f6
 // molecular heat directly; subtracting a much larger authored heat would lose it.
 fn heat_ode(
     numerator: f64,
+    dilation_numerator: f64,
     initial_temperature: f64,
     temperature_slope: f64,
     shear_slope: f64,
@@ -42,7 +43,8 @@ fn heat_ode(
     let rhs = |t| {
         let gamma = independent_rate(numerator, t, temperature_slope, shear_slope);
         let mu = 0.1 + temperature_slope * (t - 400.0) + shear_slope * gamma;
-        let q = mu * gamma * gamma;
+        let dilation = dilation_numerator / ((0.5 + 3.0 * mu) * DT);
+        let q = mu * (gamma * gamma + dilation * dilation);
         [(authored_w_m3 + q) / (RHO * CP), q]
     };
     let dt = DT / 1024.0;
@@ -78,12 +80,14 @@ fn g1_nonlinear_temperature_and_shear_feedback_converges_to_independent_heat_ode
             let mut exact_heat = 0.0;
             let mut exact_cell_t = 0.0;
             let mut cell_numerator = 0.0;
+            let mut cell_dilation_numerator = 0.0;
             for p in cells() {
                 let mass = cell_mass(liquid, p);
-                let numerator = stress_numerator(liquid, p, gravity);
+                let [numerator, dilation_numerator] = stress_numerators(liquid, p, gravity);
                 let initial_t = coordinate(liquid.material_at(p).unwrap(), "T");
                 let (t, q_integral) = heat_ode(
                     numerator,
+                    dilation_numerator,
                     initial_t,
                     temperature_slope,
                     shear_slope,
@@ -97,6 +101,7 @@ fn g1_nonlinear_temperature_and_shear_feedback_converges_to_independent_heat_ode
                 if p == CELL {
                     exact_cell_t = t;
                     cell_numerator = numerator;
+                    cell_dilation_numerator = dilation_numerator;
                 }
             }
             assert!(exact_heat > 0.0);
@@ -138,9 +143,11 @@ fn g1_nonlinear_temperature_and_shear_feedback_converges_to_independent_heat_ode
                     independent_rate(cell_numerator, temperature, temperature_slope, shear_slope);
                 near(endpoint.shear_rate_per_s, expected_rate, 2e-10);
                 near(coordinate(&endpoint.material, "rate"), expected_rate, 2e-10);
+                let mu = endpoint.material.dynamic_viscosity_pa_s();
+                let dilation = cell_dilation_numerator / ((0.5 + 3.0 * mu) * DT);
                 near(
                     endpoint.power_w_m3,
-                    endpoint.material.dynamic_viscosity_pa_s() * expected_rate * expected_rate,
+                    mu * (expected_rate * expected_rate + dilation * dilation),
                     2e-9,
                 );
                 near(
@@ -214,11 +221,12 @@ fn g1_newtonian_feedback_uses_new_temperature_and_preserves_independent_conducti
             assert!(report.flow.balance_defect_j.abs() < 2e-8);
             assert_eq!(report.flow.viscous_heat_j, feedback.heat_j);
             for sample in &feedback.thermal_endpoint {
-                let n = stress_numerator(&before, sample.coordinates, [0.0; 3]);
+                let [n, volume] = stress_numerators(&before, sample.coordinates, [0.0; 3]);
                 let mu = sample.material.dynamic_viscosity_pa_s();
                 let rate = n / ((0.5 + 3.0 * mu) * DT);
+                let dilation = volume / ((0.5 + 3.0 * mu) * DT);
                 near(sample.shear_rate_per_s, rate, 2e-10);
-                near(sample.power_w_m3, mu * rate * rate, 2e-9);
+                near(sample.power_w_m3, mu * (rate * rate + dilation * dilation), 2e-9);
                 near(
                     sample.liquid_volume_m3,
                     cell_mass(&before, sample.coordinates) / RHO,

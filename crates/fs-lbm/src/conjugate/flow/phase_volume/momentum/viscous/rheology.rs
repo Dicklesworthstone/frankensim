@@ -11,7 +11,7 @@ use fs_material::phase::transport::ResolvedPhaseTransportState;
 #[derive(Clone, Debug, PartialEq)]
 pub struct ResolvedViscousThermalVolumeMomentumStep {
     pub evolution: ViscousThermalVolumeMomentumStep,
-    /// Cell RMS sqrt(2 D:D), in 1/s, on the original native stress quadrature.
+    /// Cell RMS sqrt(2 dev(D):dev(D)), in 1/s, on the native stress quadrature.
     /// Fixed-solid cells are zero; these are not endpoint rates.
     pub original_shear_rate_per_s: Vec<f64>,
     /// One original phase/material snapshot per mobile cell, None in fixed
@@ -24,7 +24,7 @@ impl FlowField {
     /// inventory, then advance its molecular heat and changing liquid density.
     ///
     /// `resolve` receives each mobile cell's ORIGINAL phase state and native
-    /// RMS sqrt(2 D:D) exactly once. Bind these coordinates through
+    /// RMS sqrt(2 dev(D):dev(D)) exactly once. Bind these coordinates through
     /// `fs_material::phase::transport::resolve_phase_transport_state_with_shear_for_volume_change`
     /// to retain source-selected density, viscosity, conductivity and auxiliary
     /// caloric receipts. The returned source must contain the exact supplied

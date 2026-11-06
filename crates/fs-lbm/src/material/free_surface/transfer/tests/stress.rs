@@ -3,10 +3,11 @@
 use super::*;
 
 #[test]
-fn g1_p1_translation_rotation_and_shear_retain_their_physical_strain() {
+fn g1_p1_motion_separates_shear_and_isotropic_dilation_after_transfer() {
     let material = liquid(800.0);
     let (points, tets, spin) = cube([0.0; 3]);
     let translation = vec![[0.01, -0.005, 0.002]; points.len()];
+    let dilation: Vec<_> = points.iter().map(|p| sub(*p, [0.004; 3])).collect();
     let shear: Vec<_> = points
         .iter()
         .map(|p| {
@@ -23,8 +24,9 @@ fn g1_p1_translation_rotation_and_shear_retain_their_physical_strain() {
         for gravity in [[0.0; 3], [0.3, -0.5, 0.7]] {
             let mut receiving = domain();
             receiving.gravity_m_s2 = gravity;
-            for (velocity, expected_rate) in
-                [(&translation, 0.0), (&spin, 0.0), (&shear, 8.25_f64.sqrt())]
+            for (velocity, expected_rate, expected_dilation) in
+                [(&translation, 0.0, 0.0), (&spin, 0.0, 0.0),
+                    (&dilation, 0.0, 6.0_f64.sqrt()), (&shear, 8.25_f64.sqrt(), 0.0)]
             {
                 let scaling =
                     plan_free_surface_from_material(&material, 0.001, 0.0005, 0.1).unwrap();
@@ -46,12 +48,13 @@ fn g1_p1_translation_rotation_and_shear_retain_their_physical_strain() {
                     if mass <= 0.0 {
                         continue;
                     }
-                    let rate = flow
+                    let rates = flow
                         .lattice
-                        .transport_shear_rate(location, scaling.flow.tau)
+                        .transport_strain_rates(location, scaling.flow.tau)
                         .unwrap()
-                        / scaling.timestep_s();
-                    close(rate, expected_rate, 5e-10);
+                        .map(|value| value / scaling.timestep_s());
+                    close(rates[0], expected_rate, 5e-10);
+                    close(rates[1], expected_dilation, 5e-10);
                     checked += 1;
                 }
                 assert_eq!(checked, report.wet_cells);

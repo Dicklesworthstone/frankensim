@@ -89,6 +89,7 @@ fn g1_molecular_stress_heats_finite_liquid_and_refreshes_source_viscosity() {
                 .material_at([3, 3, 3])
                 .unwrap()
                 .dynamic_viscosity_pa_s();
+            let before = liquid.clone();
             let report = liquid.step_with_viscous_heating(&[], gate).unwrap();
             assert!(report.flow.viscous_heat_j > 1e-12);
             assert_eq!(report.flow.external_heat_j, 0.0);
@@ -101,10 +102,14 @@ fn g1_molecular_stress_heats_finite_liquid_and_refreshes_source_viscosity() {
                         source.content_hash()
                     );
                     assert!(cell.liquid_volume_m3 > 0.0);
-                    cell.material.dynamic_viscosity_pa_s()
-                        * cell.shear_rate_per_s.powi(2)
-                        * cell.liquid_volume_m3
-                        * 0.001
+                    let [shear, dilation] =
+                        super::rheology::stress_numerators(&before, cell.coordinates, [0.0; 3]);
+                    let mu = cell.material.dynamic_viscosity_pa_s();
+                    let divisor = (0.5 + 3.0 * mu) * 0.001;
+                    near(cell.shear_rate_per_s, shear / divisor, 2e-10);
+                    let power = mu * ((shear / divisor).powi(2) + (dilation / divisor).powi(2));
+                    near(cell.power_w_m3, power, 2e-9);
+                    power * cell.liquid_volume_m3 * 0.001
                 })
                 .sum();
             near(report.flow.viscous_heat_j, independently_summed, 1e-12);

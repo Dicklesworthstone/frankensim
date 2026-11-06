@@ -1158,7 +1158,11 @@ mod tests {
                 [0.001, -0.002, 0.001],
                 [-0.002, 0.001, 0.002],
             ];
-            let rate = (2.0 * strain.iter().flatten().map(|s| s * s).sum::<f64>()).sqrt();
+            let mean = (strain[0][0] + strain[1][1] + strain[2][2]) / 3.0;
+            let deviator: [[f64; 3]; 3] = core::array::from_fn(|a| {
+                core::array::from_fn(|b| strain[a][b] - if a == b { mean } else { 0.0 })
+            });
+            let rate = (2.0 * deviator.iter().flatten().map(|s| s * s).sum::<f64>()).sqrt();
             max_rate = max_rate.max(rate);
             expected[i] = 0.5 + laws[i].viscosity(rate) / CS2;
             let mut populations = equilibrium3(rho, u);

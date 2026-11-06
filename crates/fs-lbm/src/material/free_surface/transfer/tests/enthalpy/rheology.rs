@@ -175,6 +175,7 @@ fn original_p1_shear_law_drives_receiving_motion_and_molecular_heat() {
             let mut heat = 0.0;
             let mut maximum_native_rate = 0.0_f64;
             for _ in 0..4 {
+                let original = thermal.clone();
                 let step = thermal.step_with_viscous_heating(&[], &gate).unwrap();
                 let mut expected_heat = 0.0;
                 for sample in &step.applied {
@@ -184,8 +185,13 @@ fn original_p1_shear_law_drives_receiving_motion_and_molecular_heat() {
                     close(query_rate, sample.shear_rate_per_s, 1e-7);
                     let mu = viscosity_at(temperature, query_rate, slope);
                     close(sample.material.dynamic_viscosity_pa_s(), mu, 1e-11);
+                    let location = FreeSurface3::transport_location(sample.coordinates).unwrap();
+                    let tau = original.rheology_at(sample.coordinates).unwrap().collision_tau;
+                    let dilation = original.flow().lattice()
+                        .transport_strain_rates(location, tau).unwrap()[1] / 0.0005;
                     expected_heat +=
-                        mu * sample.shear_rate_per_s.powi(2) * sample.liquid_volume_m3 * 0.0005;
+                        mu * (sample.shear_rate_per_s.powi(2) + dilation * dilation)
+                            * sample.liquid_volume_m3 * 0.0005;
                     maximum_native_rate = maximum_native_rate.max(sample.shear_rate_per_s);
                     assert_eq!(
                         sample.material.material().card_identity(),

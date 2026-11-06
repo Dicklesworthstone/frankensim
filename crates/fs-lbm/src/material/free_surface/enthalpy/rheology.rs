@@ -21,7 +21,7 @@ pub use crate::material::transport::rheology::RheologySolve;
 /// material tuple and its source receipts are available through `material_at`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FreeSurfaceRheologySample {
-    /// Source query `sqrt(2 D:D)` [1/s], not a lattice or cyclic frequency.
+    /// Source query `sqrt(2 dev(D):dev(D))` [1/s], not a cyclic frequency.
     pub shear_rate_per_s: f64,
     /// `1/2 + 3 (mu/rho0) dt/dx^2` from this SAME source state.
     pub collision_tau: f64,

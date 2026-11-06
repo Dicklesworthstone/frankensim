@@ -219,9 +219,7 @@ fn symmetric_strain(gradient: [[f64; 3]; 3]) -> [f64; 6] {
 }
 
 fn strain_rate(strain: [f64; 6]) -> f64 {
-    strain.into_iter().enumerate().fold(0.0_f64, |rate, (index, value)| {
-        rate.hypot(value * if index < 3 { core::f64::consts::SQRT_2 } else { 2.0 })
-    })
+    crate::kinematics::deviatoric_rate3(strain)
 }
 
 impl<'a> MaterialFreeSurfaceScaling<'a> {

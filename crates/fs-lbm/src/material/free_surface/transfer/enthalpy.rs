@@ -69,7 +69,7 @@ pub struct TetEnthalpyTransferReport {
     pub enthalpy_defect_j: f64,
     /// Actual source-node, caloric-knot, property-line and receiving-strain queries.
     pub source_queries: usize,
-    /// Original P1 `sqrt(2 D:D)` [1/s], in input tetrahedron order.
+    /// Original P1 `sqrt(2 dev(D):dev(D))` [1/s], in input tetrahedron order.
     /// Empty for frozen-viscosity ingress. These are source admission rates,
     /// not the receiving lattice's subsequently reconstructed native stress.
     pub source_shear_rates_per_s: Vec<f64>,
@@ -154,7 +154,7 @@ impl<'s> MaterialFreeSurfaceScaling<'s> {
     /// Carry the original T/shear material law through conservative tet-to-VOF ingress.
     ///
     /// Each source tetrahedron's actual affine velocity gradient supplies
-    /// `sqrt(2 D:D)`; no caller reference rate substitutes for that field.
+    /// `sqrt(2 dev(D):dev(D))`; no reference rate substitutes for that field.
     /// The SAME pinned source bundle is admitted over its complete P1
     /// temperature span at that rate, including source-property breakpoints.
     /// Density and caloric storage retain the original constant-density law.

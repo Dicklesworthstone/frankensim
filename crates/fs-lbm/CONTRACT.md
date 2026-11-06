@@ -2045,7 +2045,7 @@ it does not add solved-interface latent feedback or relax wetting restrictions.
   step. These fixtures establish plumbing and numerical identities, not
   measured non-Newtonian material accuracy.
 - `MaterialSlab::step_with_material_rheology_and_viscous_heating` (2-D and
-  3-D) explicitly adds `mu * rate^2 = 2 mu D:D` from those same cached
+  3-D) explicitly adds molecular `2 mu D:D` from those same cached
   initial material/shear samples to the existing source/transport step.
   Authored heat must exclude this molecular loss. Per-cell physical power,
   integrated viscous heat, authored heat and their checked source partition
@@ -2056,8 +2056,9 @@ it does not add solved-interface latent feedback or relax wetting restrictions.
   All conversion, temperature, accounting, endpoint and cancellation refusals
   precede publication. This remains fixed-density/Cp, incompressible,
   generalized-Newtonian, low-Mach BGK with explicitly frozen initial loss;
-  numerical momentum dissipation, pressure work, compressible/bulk-viscosity
-  heating and elastic storage are excluded. A sensible-heat balance is not
+  numerical momentum dissipation, pressure work, independently sourced bulk
+  heating and elastic storage are excluded. Tied BGK/TRT bulk work is retained.
+  A sensible-heat balance is not
   a transient total-energy conservation proof or an implicit-time claim.
   The material rheology tests compare both dimensions with independently
   prescribed shear power, check the exact zero-stress limit, exercise actual
@@ -7232,7 +7233,7 @@ explicit constitutive closure; the retained, time-lagged mode below is unchanged
 At fixed source-start enthalpy and temperature, each trial resolves the SAME
 source, rebuilds viscosity and viscosity-dependent mushy/porous resistance,
 and runs the original native Stokes and physical-power gates. Unit molecular
-quadrature observes actual cell-volume RMS `sqrt(2 D:D)` from the returned
+quadrature observes cell-volume RMS `sqrt(2 dev(D):dev(D))` from the returned
 MAC fluxes, including graded reciprocal shear, no-slip half cells and the
 pressure-work mouth half-edges. Darcy loss, forcing and numerical residuals
 are not kinematic strain. Re-querying the immutable material at this ACTUAL
@@ -7275,7 +7276,7 @@ sources to actual temperature and physical shear rate. It creates the existing
 thermal stepper. The general `with_native_rheology` attachment also composes
 with the existing phase-aware source callback and its original admission rules.
 
-The cell-volume RMS `sqrt(2 D:D)` is observed from the exact retained face
+The cell-volume RMS `sqrt(2 dev(D):dev(D))` is observed from the retained face
 velocities using the original symmetric-stress quadrature, including graded
 shear edges and no-slip half-cell walls. A unit molecular coefficient removes
 viscosity weighting from this kinematic observation. Darcy drag, LES losses,
@@ -7747,7 +7748,7 @@ regressions, not measured material or contact validation.
 `material::free_surface::rheology::IsothermalRheologyLaw::try_new` binds one immutable
 material card and complete resolved bundle to fixed temperature, pressure,
 composition and source environment. Only the explicitly named physical shear
-rate `sqrt(2 D:D)` changes. The dynamic/kinematic viscosity basis and sourced
+rate `sqrt(2 dev(D):dev(D))` changes. The dynamic/kinematic basis and sourced
 versus neglected capillarity are explicit. No caloric data is requested. The
 shared material admission permits temperature/rate source response and refuses
 unowned dynamic axes; density and surface tension must be shear-independent.
@@ -7886,7 +7887,7 @@ shear-dependent transport described by Bulíček, Málek and Rajagopal (2009),
 §2.1–2.2, DOI:10.1137/07069540X; its existence theorem is not a discrete claim.
 
 Molecular heating retains its original first-order source split: accepted-start
-mu and strain supply the held `mu*gamma_dot²` heat; heated material then refreshes
+mu and strain supply held shear-plus-tied-bulk heat; heated material then refreshes
 the collision viscosity before the single native step. Both use this same law
 and actual held pressure, at their distinct thermal epochs. No new viscosity
 fit, solver, numerical-loss heating or source-format extension is introduced.
@@ -7975,9 +7976,9 @@ energy conservation.
 
 ### Source rheology through conservative tetrahedral liquid transfer
 
-`free_surface3_from_tetrahedra_with_enthalpy_and_rheology` carries the original temperature/shear material law into the existing thermal VOF owner. Each source tetrahedron supplies its actual affine velocity gradient and `sqrt(2 D:D)`. Original pinned property-line admission covers that tetrahedron's complete P1 temperature span at its actual rate; a reference rate cannot conceal unsupported source shear. Shared vertices are admitted separately when adjacent tetrahedra have different strain. Source-query and original geometric budgets remain explicit.
+`free_surface3_from_tetrahedra_with_enthalpy_and_rheology` carries the original temperature/shear material law into the existing thermal VOF owner. Each source tetrahedron supplies its actual affine velocity gradient and `sqrt(2 dev(D):dev(D))`. Original pinned property-line admission covers that tetrahedron's complete P1 temperature span at its actual rate; a reference rate cannot conceal unsupported source shear. Shared vertices are admitted separately when adjacent tetrahedra have different strain. Source-query and original geometric budgets remain explicit.
 
-The original exact overlap, per-fragment mass, linear/angular momentum and enthalpy transfer remain authoritative. The receiving native owner resolves its own force-corrected shear and source viscosity, retaining the same law through continuing motion and molecular `mu*gamma_dot^2` heat. Source rates are reported separately from receiving constitutive samples. The receiving viscous stress is initialized from the overlap-projected symmetric P1 strain and the original source at the receiving enthalpy and rate. Nonlinear stress is evaluated at that projected state; an average of source stress tensors is not implied, and elastic memory remains outside this handoff. Kinetic/potential projection discrepancies remain numerical accounts, never heat. The existing `with_time_origin` preserves an explicitly supplied source clock before continuation.
+The original exact overlap, per-fragment mass, linear/angular momentum and enthalpy transfer remain authoritative. The receiving native owner resolves its own force-corrected shear and source viscosity, retaining the same law through continuing motion and molecular shear-plus-tied-bulk heat. Source rates are reported separately from receiving constitutive samples. The receiving viscous stress is initialized from the overlap-projected symmetric P1 strain and the original source at the receiving enthalpy and rate. Nonlinear stress is evaluated at that projected state; an average of source stress tensors is not implied, and elastic memory remains outside this handoff. Kinetic/potential projection discrepancies remain numerical accounts, never heat. The existing `with_time_origin` preserves an explicitly supplied source clock before continuation.
 
 Two synthetic regressions specify data-only rheology changes in actual native motion/dissipation, independent mass/enthalpy and both-momentum checks, source-versus-receiver rates, rigid-rotation objectivity, out-of-domain source shear, bounded admission, late receiver refusal and cancellation. Constant reference density, fully liquid source, absent stored elastic/plastic history and neglected capillary surface energy remain required. MR28, MR29 and MR69 remain open for their broader phase, stress-history and moving-geometry obligations.
 
@@ -11360,7 +11361,7 @@ and atomic late refusal. Compiler checks do not constitute numerical execution.
 ## Native shear and source rheology on evolving liquid density
 
 `FlowField::advance_piecewise_thermal_volume_momentum_with_source_rheology`
-and its pressure-profile variant observe the physical cell RMS `sqrt(2 D:D)`
+and its pressure-profile variant observe cell RMS `sqrt(2 dev(D):dev(D))`
 on the same original M/P reconstruction used by molecular viscosity. The
 existing unit-molecular-coefficient stress quadrature retains native graded
 edges, solid obstacles, walls and reservoir mouths. The observation solves
@@ -12775,6 +12776,23 @@ the reconstructed final payload and new tests remain uncompiled/unexecuted,
 and the tests have not passed a parser check. No measured nonlinear-flow
 accuracy, performance or arbitrary constitutive convergence claim is made.
 
+## Constitutive shear and volumetric strain
+
+Molecular shear-viscosity queries use `gamma=sqrt(2 dev(D):dev(D))`, with
+`D=sym(grad u)`. Three-dimensional gradient, population-stress, sparse,
+immersed, free-surface and tetrahedral-transfer paths use the same invariant
+as `fs-material::DeformationRate`. Isotropic dilation and rigid rotation have
+zero shear rate; extension retains its deviatoric contribution. D2Q9 retains
+its existing dimensional strain and bulk conventions, described below.
+Independent bulk collision and explicitly sourced bulk heat retain the trace.
+BGK/TRT liquid heating retains its tied `zeta=2mu/3` contribution. Source
+viscosity observes deviatoric shear while `2mu D:D` includes volume-change work;
+the thermal feedback cache retains both strain components in one stress pass.
+Native MAC rate observation removes spherical normal strain before squaring;
+its existing full-stress momentum/power operator retains its original response.
+Analytic regressions cover dilation, extension, shear, rotation, force-frame
+changes, source viscosity, and the separate nonzero heat of pure dilation.
+
 ## Source rheology on moving immersed bodies
 
 `MaterialScaling::step_moving_body_with_material_rheology` and
@@ -13246,7 +13264,7 @@ retry and native fluid refusal.
 step_sparse_with_material_rheology_and_sgs,
 step_sparse_pooled_with_material_rheology_and_sgs}` resample original
 `FluidTransport` responses at incoming resolved shear on the native sparse
-trajectory. Existing immersed source points/samples, robust `sqrt(2 D:D)/dt`,
+trajectory. Existing source points/samples, robust `sqrt(2 dev(D):dev(D))/dt`,
 momentum scaling and the force-centered wall-aware sparse gradient are shared.
 One reconstructed gradient supplies both rheology and SGS. Each response is
 read once per active cell; Morton coordinates decode once per tile.

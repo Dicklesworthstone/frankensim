@@ -10,12 +10,12 @@ pub struct FreeSurfaceViscousCell {
     pub coordinates: [usize; 3],
     /// Original source tuple at the accepted caloric temperature.
     pub material: ResolvedLiquidState,
-    /// Force-corrected sqrt(2 D:D) [1/s], using this source's collision tau.
+    /// Force-corrected sqrt(2 dev(D):dev(D)) [1/s], using this source's tau.
     pub shear_rate_per_s: f64,
     /// Located carrier mass divided by retained reference density [m3].
     /// Zero-mass interface ghosts and numerical carry get no cell heat.
     pub liquid_volume_m3: f64,
-    /// mu * shear_rate^2 [W/m3], held over one physical flow interval.
+    /// Shear plus tied bulk power, `2 mu D:D` [W/m3], held over one interval.
     pub power_w_m3: f64,
     /// The same power times liquid volume and physical timestep [J].
     pub heat_j: f64,
@@ -69,25 +69,32 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
                 continue;
             }
             let material = resolved.states[&location].clone();
-            let lattice_rate = self
+            let [lattice_rate, lattice_dilation] = self
                 .flow
                 .lattice
-                .transport_shear_rate(location, resolved.tau[&(key, lane)])?;
+                .transport_strain_rates(location, resolved.tau[&(key, lane)])?;
             let rate = lattice_rate / dt;
+            let dilation = lattice_dilation / dt;
             let mass = native_mass * mass_unit;
             let volume = mass / rho0;
-            let power = (material.dynamic_viscosity_pa_s() * rate) * rate;
+            let mu = material.dynamic_viscosity_pa_s();
+            let shear_power = (mu * rate) * rate;
+            let bulk_power = (mu * dilation) * dilation;
+            let power = shear_power + bulk_power;
             let heat = (power * volume) * dt;
             if !rate.is_finite()
                 || rate < 0.0
                 || (lattice_rate != 0.0 && rate == 0.0)
+                || !dilation.is_finite()
+                || (lattice_dilation != 0.0 && dilation == 0.0)
                 || !mass.is_finite()
                 || mass <= 0.0
                 || !volume.is_finite()
                 || volume <= 0.0
                 || !power.is_finite()
                 || power < 0.0
-                || (rate != 0.0 && power == 0.0)
+                || (rate != 0.0 && shear_power == 0.0)
+                || (dilation != 0.0 && bulk_power == 0.0)
                 || !heat.is_finite()
                 || heat < 0.0
                 || (power != 0.0 && heat == 0.0)
@@ -118,8 +125,9 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
     /// these are different epochs of a first-order source split. Strong
     /// thermal feedback requires refinement.
     ///
-    /// Authored heat must exclude molecular work owned here. No pressure work,
-    /// bulk-viscosity loss, surface energy or numerical damping is thermalized.
+    /// Authored heat excludes molecular work owned here. The collision's tied
+    /// `zeta=2mu/3` retains bulk heat; no independent bulk coefficient is added.
+    /// Pressure work, surface energy and numerical damping are not thermalized.
     /// This closes constitutive heat and extensive enthalpy, without asserting
     /// exact discrete kinetic-plus-thermal balance. Non-Newtonian memory and
     /// phase/volume change remain unsupported. Any refusal publishes nothing.

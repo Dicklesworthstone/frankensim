@@ -326,7 +326,7 @@ fn audit(
     let inertia = time.face_mass_kg.as_ref().expect("actual native inertia");
     let duration = Dd::from_f64(time.dt);
     let half = Dd::from_f64(0.5);
-    let power = solver.sample_molecular_power(gate)?;
+    let power = solver.sample_molecular_power::<false>(gate)?;
     let mut cell_heat = Vec::with_capacity(domain.cell_count());
     let mut heat = Dd::ZERO;
     for (c, watts) in power.heat.iter().copied().enumerate() {

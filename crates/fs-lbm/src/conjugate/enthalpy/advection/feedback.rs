@@ -125,7 +125,7 @@ pub struct FlowMaterialSample<F, T = FluidTransportState> {
 pub struct MaterialFlowEpoch<F, T = FluidTransportState> {
     pub time_s: f64,
     pub samples: Vec<FlowMaterialSample<F, T>>,
-    /// Cell-volume RMS sqrt(2 D:D) source coordinates [1/s]. Retained rheology
+    /// Cell-volume RMS sqrt(2 dev(D):dev(D)) source rates [1/s]. Retained rheology
     /// uses its accepted starting MAC state; quasisteady rheology closes these
     /// queries against the actual returned flow within explicit rate/transport
     /// tolerances. These rates queried the SAME coefficients used by momentum,
