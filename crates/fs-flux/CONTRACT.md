@@ -7171,3 +7171,22 @@ wall generation, and capped/cancelled/reused coupled observations. Native
 rustfmt and isolated Rust checks of the exact shared divergence/derivative
 kernels against independent stress fixtures passed. Full crate compilation
 and these native owner-level tests were unavailable when introduced.
+
+## Full-gradient closures in native planar flow
+
+`ns::sgs::PlanarSgs::with_model` admits explicit Smagorinsky, WALE or Vreman
+models. WALE and Vreman use the complete original BDM1 cell gradient, embedded
+with zero out-of-plane components, through the shared SGS kernels. One
+effective viscosity per triangle is prepared at each implicit BDF1/BDF2
+candidate; stress, convection and the independently reassembled acceptance
+residual share that candidate. Scalar rheology and Smagorinsky retain the
+original strain calculation through the same prepared-response solver seam.
+
+Filter widths are explicitly isotropic; molecular viscosities remain frozen
+native cell inputs. Zero coefficient retains the molecular constitutive law.
+The existing per-mass transfer and area-integral units are unchanged.
+This planar embedding supplies no general three-dimensional near-wall
+asymptote, turbulent cascade or transition validation. The native SGS
+regressions distinguish equal-strain gradients with different rotation, check
+the actual planar wall limits, and extend mixed-traction BDF1/BDF2 endpoint
+and disabled-closure comparisons across all three models.

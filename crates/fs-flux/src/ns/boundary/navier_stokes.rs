@@ -745,6 +745,45 @@ impl<'m> FluxSystem<'m> {
         controls: NavierStokesControls,
         source_is_valid: &dyn Fn() -> bool,
     ) -> Result<NavierStokesStep, StokesBoundaryError> {
+        self.bdf2_navier_stokes_mixed_prepared_rheology_step_checked(
+            params,
+            &|velocity| {
+                let rates = self.shear_rates(velocity);
+                if rates.iter().any(|rate| !rate.is_finite()) {
+                    return Err(StokesBoundaryError::InvalidInput("nonfinite shear rate"));
+                }
+                Ok(rates)
+            },
+            law,
+            force,
+            boundaries,
+            previous_velocity,
+            older_velocity,
+            timestep_s,
+            controls,
+            source_is_valid,
+        )
+    }
+
+    // Prepare one constitutive response per native cell at each candidate.
+    // Scalar rheology supplies strain; gradient closures supply viscosity.
+    // The spatial law consumes that response without repeated gradient work.
+    // History, boundary admission, nonlinear residuals and source checks remain
+    // owned by the same transactional mixed solver for both kinds of closure.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn bdf2_navier_stokes_mixed_prepared_rheology_step_checked(
+        &self,
+        params: FluxParams,
+        prepare: &dyn Fn(&[f64]) -> Result<Vec<f64>, StokesBoundaryError>,
+        law: &dyn Fn(usize, [f64; 2], f64) -> f64,
+        force: &dyn Fn([f64; 2]) -> [f64; 2],
+        boundaries: &[NavierStokesBoundary<'_>],
+        previous_velocity: &[f64],
+        older_velocity: Option<&[f64]>,
+        timestep_s: f64,
+        controls: NavierStokesControls,
+        source_is_valid: &dyn Fn() -> bool,
+    ) -> Result<NavierStokesStep, StokesBoundaryError> {
         // Reuse the original mass/history quadrature and its reaction rows.
         // Construct this load once; keep the real previous velocity as the
         // initial iterate so no material law sees an extrapolated strain.
@@ -792,13 +831,15 @@ impl<'m> FluxSystem<'m> {
             controls,
             0.0,
             &|admitted, velocity| {
-                let rates = self.shear_rates(velocity);
-                if rates.iter().any(|rate| !rate.is_finite()) {
-                    return Err(StokesBoundaryError::InvalidInput("nonfinite shear rate"));
+                let response = prepare(velocity)?;
+                if response.len() != self.mesh.tris.len() {
+                    return Err(StokesBoundaryError::InvalidInput(
+                        "one prepared rheology response per triangle required",
+                    ));
                 }
                 self.assemble_stokes_admitted_operator(
                     params,
-                    &|cell, point| law(cell, point, rates[cell]),
+                    &|cell, point| law(cell, point, response[cell]),
                     force,
                     admitted,
                     None,
