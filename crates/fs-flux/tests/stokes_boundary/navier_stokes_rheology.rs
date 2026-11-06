@@ -271,34 +271,100 @@ fn bdf2_quadratic_time_flow_closes_spatial_rheology_and_actual_history_strain() 
                 }
             })
             .collect();
-        first_rates.borrow_mut().fill(None);
-        let step = system
-            .bdf2_navier_stokes_mixed_rheology_step(
-                FluxParams::default(),
-                &law,
-                &force,
-                &boundaries,
-                &previous,
-                Some(&older),
-                dt,
-                NavierStokesControls {
-                    relative_tolerance: 1e-10,
-                    ..NavierStokesControls::default()
-                },
-            )
+        let controls = NavierStokesControls {
+            relative_tolerance: 1e-10,
+            ..NavierStokesControls::default()
+        };
+        let check = |step: &fs_flux::NavierStokesStep| {
+            let (error, divergence) = system.velocity_error(&step.solution.field.x, &target);
+            assert!(error < 3e-9 && divergence < 3e-9, "{error}, {divergence}");
+            assert!(step.nonlinear_residual <= 1e-10);
+            for (pressure, p) in step.solution.pressure.iter().zip(&mesh.centroids) {
+                assert!((pressure - (5.0 + 2.0 * p[0] - 3.0 * p[1])).abs() < 4e-8);
+            }
+        };
+        let mut equal_signature = None;
+        // Exercise the legacy entry, exact step doubling, equal-step parity,
+        // and a step reduction against the same differentiated PDE.
+        for (previous_dt, legacy) in [
+            (dt, true),
+            (0.5 * dt, false),
+            (dt, false),
+            (2.0 * dt, false),
+        ] {
+            let history = if previous_dt == dt {
+                older.clone()
+            } else {
+                moments(&mesh, &|p| velocity(time - dt - previous_dt, p))
+            };
+            let history_snapshot = history.clone();
+            first_rates.borrow_mut().fill(None);
+            let step = if legacy {
+                system.bdf2_navier_stokes_mixed_rheology_step(
+                    FluxParams::default(),
+                    &law,
+                    &force,
+                    &boundaries,
+                    &previous,
+                    Some(&history),
+                    dt,
+                    controls,
+                )
+            } else {
+                system.bdf2_navier_stokes_mixed_rheology_variable_step(
+                    FluxParams::default(),
+                    &law,
+                    &force,
+                    &boundaries,
+                    &previous,
+                    Some((&history, previous_dt)),
+                    dt,
+                    controls,
+                )
+            }
             .unwrap();
-        let (error, divergence) = system.velocity_error(&step.solution.field.x, &target);
-        assert!(error < 3e-9 && divergence < 3e-9, "{error}, {divergence}");
-        assert!(step.nonlinear_residual <= 1e-10);
-        for (pressure, p) in step.solution.pressure.iter().zip(&mesh.centroids) {
-            assert!((pressure - (5.0 + 2.0 * p[0] - 3.0 * p[1])).abs() < 4e-8);
-        }
-        for (initial, expected) in first_rates.borrow().iter().zip(&previous_rates) {
-            assert_eq!(
-                *initial,
-                Some(*expected),
-                "mass history is not an initial strain state"
+            check(&step);
+            for (initial, expected) in first_rates.borrow().iter().zip(&previous_rates) {
+                assert_eq!(
+                    *initial,
+                    Some(*expected),
+                    "mass history is not an initial strain state"
+                );
+            }
+            let signature = (
+                step.solution
+                    .field
+                    .x
+                    .iter()
+                    .map(|v| v.to_bits())
+                    .collect::<Vec<_>>(),
+                step.iterations,
+                step.relative_update.to_bits(),
+                step.nonlinear_residual.to_bits(),
             );
+            if legacy {
+                equal_signature = Some(signature);
+            } else if previous_dt == dt {
+                assert_eq!(&signature, equal_signature.as_ref().unwrap());
+            }
+            if previous_dt == 0.5 * dt && policy == OpenBoundaryPolicy::NaturalTraction {
+                let frozen =
+                    |_: usize, p: [f64; 2]| (0.7 + 0.12 * p[0] + 0.08 * p[1]) / denominator;
+                let step = system
+                    .bdf2_navier_stokes_mixed_variable_viscosity_variable_step(
+                        FluxParams::default(),
+                        &frozen,
+                        &force,
+                        &boundaries,
+                        &previous,
+                        Some((&history, previous_dt)),
+                        dt,
+                        controls,
+                    )
+                    .unwrap();
+                check(&step);
+            }
+            assert_eq!(history, history_snapshot);
         }
     }
     assert_eq!(previous, snapshots[0]);
@@ -410,6 +476,38 @@ fn bdf2_rheology_startup_is_bdf1_and_bad_histories_never_query_a_source() {
     assert_eq!(startup.solution.field.x, bdf1.solution.field.x);
     assert_eq!(startup.iterations, bdf1.iterations);
     assert_eq!(startup.nonlinear_residual, bdf1.nonlinear_residual);
+    let variable_startup = system
+        .bdf2_navier_stokes_mixed_rheology_variable_step(
+            FluxParams::default(),
+            &law,
+            &force,
+            &boundaries,
+            &previous,
+            None,
+            0.02,
+            NavierStokesControls::default(),
+        )
+        .unwrap();
+    assert_eq!(
+        variable_startup
+            .solution
+            .field
+            .x
+            .iter()
+            .map(|v| v.to_bits())
+            .collect::<Vec<_>>(),
+        bdf1.solution
+            .field
+            .x
+            .iter()
+            .map(|v| v.to_bits())
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(variable_startup.iterations, bdf1.iterations);
+    assert_eq!(
+        variable_startup.nonlinear_residual.to_bits(),
+        bdf1.nonlinear_residual.to_bits()
+    );
     for (recent, old, dt) in [
         (previous.clone(), vec![0.0; system.n_u - 1], 0.02),
         (previous.clone(), vec![f64::NAN; system.n_u], 0.02),
@@ -428,6 +526,30 @@ fn bdf2_rheology_startup_is_bdf1_and_bad_histories_never_query_a_source() {
             &recent,
             Some(&old),
             dt,
+            NavierStokesControls::default(),
+        );
+        assert!(matches!(result, Err(StokesBoundaryError::InvalidInput(_))));
+    }
+    let no_traction =
+        |_: [f64; 2], _: [f64; 2]| -> [f64; 2] { panic!("invalid interval queried traction") };
+    let unqueried = open(&mesh, &no_traction, OpenBoundaryPolicy::NaturalTraction);
+    for previous_dt in [
+        0.0,
+        -0.02,
+        f64::NAN,
+        f64::INFINITY,
+        f64::from_bits(1),
+        0.009,
+        1e308,
+    ] {
+        let result = system.bdf2_navier_stokes_mixed_rheology_variable_step(
+            FluxParams::default(),
+            &|_, _, _| panic!("invalid interval queried viscosity"),
+            &|_| panic!("invalid interval queried force"),
+            &unqueried,
+            &previous,
+            Some((&previous, previous_dt)),
+            0.02,
             NavierStokesControls::default(),
         );
         assert!(matches!(result, Err(StokesBoundaryError::InvalidInput(_))));

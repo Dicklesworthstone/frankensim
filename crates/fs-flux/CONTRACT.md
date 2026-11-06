@@ -539,9 +539,9 @@ geometry and must never be labelled as volts or discharge reach.
 - 3D (tets, BDM on faces), BDM2+/higher-order pressures, and curved
   boundaries — recorded successors on the same dof-Vandermonde
   surface (bead dcng's high-order FEEC would unblock them).
-- Projection/splitting time integrators, variable-step nonlinear BDF2 and
-  BDF3+ remain successors. Equal-step mixed-Stokes and generalized-Newtonian
-  mixed Navier–Stokes BDF2 are available below; IMEX convection remains BDF1.
+- Projection/splitting time integrators and BDF3+ remain successors.
+  Equal-step mixed-Stokes and fixed-mesh variable-step mixed Navier–Stokes
+  BDF2 are available below; IMEX convection remains BDF1.
 - Fine-mesh Ghia tables, Re=1000 cavity, cylinder benchmarks, and
   asymptotic-regime convergence confirmation — perf-lane scope,
   ledgered in invariants 2 and 4.
@@ -1722,8 +1722,26 @@ to second order, including the BDF1 startup at a fixed positive final time.
 Endpoint material owners, physical pressure and instantaneous `mu gamma²`
 heating retain their original meaning. The endpoint kinetic energy is not
 BDF2's two-history energy, and endpoint heating multiplied by dt is not a
-whole-step heat balance. There is no variable-step, ALE-history, thermal
+whole-step heat balance. This equal-step entry makes no ALE-history, thermal
 evolution or general nonlinear stability/passivity claim.
+
+The native `bdf2_navier_stokes_mixed_variable_step`,
+`bdf2_navier_stokes_mixed_variable_viscosity_variable_step` and
+`bdf2_navier_stokes_mixed_rheology_variable_step` accept an optional pair
+of older velocity and its actual interval to the previous velocity. For current
+interval h and previous interval k, r=h/k, the shared mass load is
+u_n + r²/(1+2r) * (u_n-u_(n-1)), with effective timestep
+h*(1+r)/(1+2r). Actual u_n still initializes the nonlinear solve. Equal
+intervals retain the original arithmetic; no older pair uses original BDF1.
+
+The explicit admission 0<r<=2 limits the parasitic zero-equation increment
+factor r²/(1+2r) to 4/5. This is a conservative history-stability margin,
+not a nonlinear flow energy guarantee or an automatic timestep controller.
+Intervals, histories and representable coefficients are checked before source
+or boundary callbacks. One history vector is formed per step, never inside
+the nonlinear loop; the frozen-viscosity entries perform no strain queries.
+The original mixed traction/slip/reservoir policies, endpoint residual checks
+and immutable-history refusal semantics remain authoritative.
 
 The focused `navier_stokes_rheology.rs` regressions under `tests/stokes_boundary`
 and `tests/material_flow` add an independently derived affine unsteady flow

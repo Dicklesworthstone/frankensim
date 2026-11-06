@@ -690,6 +690,132 @@ impl<'m> FluxSystem<'m> {
         )
     }
 
+    /// Variable-step BDF2 with constant viscosity. The older velocity and its
+    /// interval are supplied together; None selects the original BDF1 startup.
+    /// See [`Self::bdf2_navier_stokes_mixed_rheology_variable_step`] for the
+    /// coefficients, step-growth bound and endpoint acceptance.
+    ///
+    /// # Errors
+    /// Refuses invalid viscosity, histories, intervals and unconverged solves.
+    #[allow(clippy::too_many_arguments)]
+    pub fn bdf2_navier_stokes_mixed_variable_step(
+        &self,
+        params: FluxParams,
+        force: &dyn Fn([f64; 2]) -> [f64; 2],
+        boundaries: &[NavierStokesBoundary<'_>],
+        previous_velocity: &[f64],
+        older_history: Option<(&[f64], f64)>,
+        timestep_s: f64,
+        controls: NavierStokesControls,
+    ) -> Result<NavierStokesStep, StokesBoundaryError> {
+        if !params.nu.is_finite() || params.nu <= 0.0 {
+            return Err(StokesBoundaryError::InvalidInput(
+                "invalid Navier–Stokes viscosity",
+            ));
+        }
+        self.bdf2_navier_stokes_mixed_variable_viscosity_variable_step(
+            params,
+            &|_, _| params.nu,
+            force,
+            boundaries,
+            previous_velocity,
+            older_history,
+            timestep_s,
+            controls,
+        )
+    }
+
+    /// Variable-step BDF2 with a frozen positive spatial viscosity. Uses the
+    /// same history coefficients and nonlinear convection as the rheological
+    /// entry, without strain queries. `params.nu` is unused.
+    ///
+    /// # Errors
+    /// Inherits the history, boundary, coefficient and convergence refusals of
+    /// [`Self::bdf2_navier_stokes_mixed_rheology_variable_step`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn bdf2_navier_stokes_mixed_variable_viscosity_variable_step(
+        &self,
+        params: FluxParams,
+        viscosity: &dyn Fn(usize, [f64; 2]) -> f64,
+        force: &dyn Fn([f64; 2]) -> [f64; 2],
+        boundaries: &[NavierStokesBoundary<'_>],
+        previous_velocity: &[f64],
+        older_history: Option<(&[f64], f64)>,
+        timestep_s: f64,
+        controls: NavierStokesControls,
+    ) -> Result<NavierStokesStep, StokesBoundaryError> {
+        let (history, effective_timestep) =
+            self.mixed_bdf2_history(previous_velocity, older_history, timestep_s)?;
+        let mass_history = history.as_deref().unwrap_or(previous_velocity);
+        self.solve_navier_stokes_mixed_bdf1(
+            params,
+            boundaries,
+            previous_velocity,
+            effective_timestep,
+            controls,
+            0.0,
+            &|admitted, velocity| {
+                self.assemble_stokes_admitted_operator(
+                    params,
+                    viscosity,
+                    force,
+                    admitted,
+                    None,
+                    effective_timestep.recip(),
+                    Some(mass_history),
+                    Some(&velocity[..self.n_u]),
+                )
+            },
+            &|| true,
+        )
+    }
+
+    /// Variable-step BDF2 with endpoint viscosity and convection. For current
+    /// interval h=`timestep_s`, `older_history=Some((u_(n-1), k))` supplies the
+    /// actual preceding interval k; `previous_velocity` is u_n. With r=h/k,
+    /// the derivative is
+    /// `[(1+2r)/(1+r) u_new - (1+r) u_n + r²/(1+r) u_(n-1)] / h`.
+    ///
+    /// None is exact BDF1 startup. Equal intervals retain the existing BDF2
+    /// arithmetic. Otherwise the single mass load is
+    /// `u_n + r²/(1+2r) (u_n-u_(n-1))`, with effective mass timestep
+    /// `h*(1+r)/(1+2r)`. Only that load combines histories: the actual u_n
+    /// still initializes strain and convection. Mesh and density stay fixed.
+    ///
+    /// Requires a positive representable ratio r<=2 and representable history
+    /// coefficients. Step reductions are allowed. The growth cap bounds the
+    /// homogeneous history-increment multiplier r²/(1+2r) by 4/5; it is not a
+    /// nonlinear flow-stability or energy guarantee. No timestep is selected
+    /// automatically, and endpoint heating remains an instantaneous rate.
+    ///
+    /// # Errors
+    /// Refuses invalid histories/intervals, excessive growth or unrepresentable
+    /// coefficients before callbacks. Original nonlinear/source refusals remain.
+    #[allow(clippy::too_many_arguments)]
+    pub fn bdf2_navier_stokes_mixed_rheology_variable_step(
+        &self,
+        params: FluxParams,
+        law: &dyn Fn(usize, [f64; 2], f64) -> f64,
+        force: &dyn Fn([f64; 2]) -> [f64; 2],
+        boundaries: &[NavierStokesBoundary<'_>],
+        previous_velocity: &[f64],
+        older_history: Option<(&[f64], f64)>,
+        timestep_s: f64,
+        controls: NavierStokesControls,
+    ) -> Result<NavierStokesStep, StokesBoundaryError> {
+        self.bdf2_navier_stokes_mixed_rheology_variable_step_checked(
+            params,
+            law,
+            force,
+            boundaries,
+            previous_velocity,
+            older_history,
+            timestep_s,
+            controls,
+            &|| true,
+        )
+    }
+
     /// Advance equal-step BDF2 generalized-Newtonian Navier–Stokes with the
     /// SAME endpoint strain, viscosity and convection as the BDF1 owner.
     ///
@@ -709,8 +835,9 @@ impl<'m> FluxSystem<'m> {
     /// converged nonlinear solves. Its two-history energy is different from
     /// endpoint kinetic energy; endpoint viscous heating is an instantaneous
     /// rate, not an integrated heat or whole-step energy balance. This adds
-    /// neither variable-step integration, ALE history nor a general nonlinear
-    /// stability guarantee.
+    /// neither ALE history nor a general nonlinear stability guarantee. For
+    /// explicitly unequal intervals use
+    /// [`Self::bdf2_navier_stokes_mixed_rheology_variable_step`].
     ///
     /// # Errors
     /// Refuses invalid or unrepresentable histories/timestep before callbacks,
@@ -780,7 +907,33 @@ impl<'m> FluxSystem<'m> {
         controls: NavierStokesControls,
         source_is_valid: &dyn Fn() -> bool,
     ) -> Result<NavierStokesStep, StokesBoundaryError> {
-        self.bdf2_navier_stokes_mixed_prepared_rheology_step_checked(
+        self.bdf2_navier_stokes_mixed_rheology_variable_step_checked(
+            params,
+            law,
+            force,
+            boundaries,
+            previous_velocity,
+            older_velocity.map(|older| (older, timestep_s)),
+            timestep_s,
+            controls,
+            source_is_valid,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn bdf2_navier_stokes_mixed_rheology_variable_step_checked(
+        &self,
+        params: FluxParams,
+        law: &dyn Fn(usize, [f64; 2], f64) -> f64,
+        force: &dyn Fn([f64; 2]) -> [f64; 2],
+        boundaries: &[NavierStokesBoundary<'_>],
+        previous_velocity: &[f64],
+        older_history: Option<(&[f64], f64)>,
+        timestep_s: f64,
+        controls: NavierStokesControls,
+        source_is_valid: &dyn Fn() -> bool,
+    ) -> Result<NavierStokesStep, StokesBoundaryError> {
+        self.bdf2_navier_stokes_mixed_prepared_rheology_variable_step_checked(
             params,
             &|velocity| {
                 let rates = self.shear_rates(velocity);
@@ -793,7 +946,7 @@ impl<'m> FluxSystem<'m> {
             force,
             boundaries,
             previous_velocity,
-            older_velocity,
+            older_history,
             timestep_s,
             controls,
             source_is_valid,
@@ -819,45 +972,37 @@ impl<'m> FluxSystem<'m> {
         controls: NavierStokesControls,
         source_is_valid: &dyn Fn() -> bool,
     ) -> Result<NavierStokesStep, StokesBoundaryError> {
-        // Reuse the original mass/history quadrature and its reaction rows.
-        // Construct this load once; keep the real previous velocity as the
-        // initial iterate so no material law sees an extrapolated strain.
-        let history = if let Some(older) = older_velocity {
-            self.check_mixed_bdf1_history(previous_velocity, timestep_s)?;
-            if older.len() != self.n_u || older.iter().any(|value| !value.is_finite()) {
-                return Err(StokesBoundaryError::InvalidInput(
-                    "BDF2 needs two finite original velocity histories",
-                ));
-            }
-            Some(
-                previous_velocity
-                    .iter()
-                    .zip(older)
-                    .map(|(&recent, &old)| {
-                        // Preserve constant history exactly. Scale first only
-                        // when the otherwise finite difference would overflow.
-                        let difference = recent - old;
-                        let correction = if difference.is_finite() {
-                            difference / 3.0
-                        } else {
-                            recent / 3.0 - old / 3.0
-                        };
-                        recent + correction
-                    })
-                    .collect::<Vec<_>>(),
-            )
-        } else {
-            None
-        };
-        let effective_timestep = if history.is_some() {
-            (2.0 / 3.0) * timestep_s
-        } else {
-            timestep_s
-        };
+        self.bdf2_navier_stokes_mixed_prepared_rheology_variable_step_checked(
+            params,
+            prepare,
+            law,
+            force,
+            boundaries,
+            previous_velocity,
+            older_velocity.map(|older| (older, timestep_s)),
+            timestep_s,
+            controls,
+            source_is_valid,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn bdf2_navier_stokes_mixed_prepared_rheology_variable_step_checked(
+        &self,
+        params: FluxParams,
+        prepare: &dyn Fn(&[f64]) -> Result<Vec<f64>, StokesBoundaryError>,
+        law: &dyn Fn(usize, [f64; 2], f64) -> f64,
+        force: &dyn Fn([f64; 2]) -> [f64; 2],
+        boundaries: &[NavierStokesBoundary<'_>],
+        previous_velocity: &[f64],
+        older_history: Option<(&[f64], f64)>,
+        timestep_s: f64,
+        controls: NavierStokesControls,
+        source_is_valid: &dyn Fn() -> bool,
+    ) -> Result<NavierStokesStep, StokesBoundaryError> {
+        let (history, effective_timestep) =
+            self.mixed_bdf2_history(previous_velocity, older_history, timestep_s)?;
         let mass_history = history.as_deref().unwrap_or(previous_velocity);
-        if history.is_some() {
-            self.check_mixed_bdf1_history(mass_history, effective_timestep)?;
-        }
         self.solve_navier_stokes_mixed_bdf1(
             params,
             boundaries,
@@ -885,6 +1030,62 @@ impl<'m> FluxSystem<'m> {
             },
             source_is_valid,
         )
+    }
+
+    // One history owner for frozen, scalar and gradient constitutive closures.
+    // This only forms the mass load; the physical initial iterate remains u_n.
+    fn mixed_bdf2_history(
+        &self,
+        previous_velocity: &[f64],
+        older_history: Option<(&[f64], f64)>,
+        timestep_s: f64,
+    ) -> Result<(Option<Vec<f64>>, f64), StokesBoundaryError> {
+        let Some((older, previous_timestep_s)) = older_history else {
+            return Ok((None, timestep_s));
+        };
+        self.check_mixed_bdf1_history(previous_velocity, timestep_s)?;
+        self.check_mixed_bdf1_history(older, previous_timestep_s)?;
+        let ratio = timestep_s / previous_timestep_s;
+        if !ratio.is_finite() || ratio <= 0.0 || ratio > 2.0 {
+            return Err(StokesBoundaryError::InvalidInput(
+                "BDF2 needs a representable positive step ratio no greater than two",
+            ));
+        }
+        let equal_steps = timestep_s == previous_timestep_s;
+        let weight = ratio * ratio / (1.0 + 2.0 * ratio);
+        if !weight.is_finite() || weight <= 0.0 {
+            return Err(StokesBoundaryError::InvalidInput(
+                "BDF2 history coefficient is not representable",
+            ));
+        }
+        let effective_timestep = if equal_steps {
+            (2.0 / 3.0) * timestep_s
+        } else {
+            timestep_s * ((1.0 + ratio) / (1.0 + 2.0 * ratio))
+        };
+        let history = previous_velocity
+            .iter()
+            .zip(older)
+            .map(|(&recent, &old)| {
+                let difference = recent - old;
+                let correction = if equal_steps {
+                    // Retain the original equal-step bits, including its
+                    // overflow-safe difference and exact constant history.
+                    if difference.is_finite() {
+                        difference / 3.0
+                    } else {
+                        recent / 3.0 - old / 3.0
+                    }
+                } else if difference.is_finite() {
+                    weight * difference
+                } else {
+                    weight * recent - weight * old
+                };
+                recent + correction
+            })
+            .collect::<Vec<_>>();
+        self.check_mixed_bdf1_history(&history, effective_timestep)?;
+        Ok((Some(history), effective_timestep))
     }
 
     // Preserve one admission/reporting path without adding strain work to the
