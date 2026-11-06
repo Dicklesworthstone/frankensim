@@ -42,6 +42,7 @@ pub use force::{
     FULL_WAVE_LAYER_FORCE_SCOPE, FullWaveLayerForceDiagnostics, PreparedLayeredFullWaveForce,
 };
 mod quadrupole;
+pub use quadrupole::array::{LayerQuadrupoleField, PreparedLayeredFullWaveQuadrupoleObserver};
 pub use quadrupole::{
     FULL_WAVE_LAYER_QUADRUPOLE_SCOPE, FullWaveLayerQuadrupoleDiagnostics,
     PreparedLayeredFullWaveQuadrupole,

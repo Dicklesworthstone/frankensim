@@ -27,6 +27,8 @@ use crate::observation::HarmonicFieldLine;
 use core::f64::consts::{SQRT_2, TAU};
 use fs_math::{c64::C64, det};
 
+pub mod array;
+
 /// Physical and numerical scope retained by every coherent observation.
 pub const FULL_WAVE_LAYER_QUADRUPOLE_SCOPE: &str = "Prescribed stationary symmetric \
 3D Lighthill stress moment [N m] in the original incident fluid; coherent spherical \
@@ -55,8 +57,9 @@ pub struct FullWaveLayerQuadrupoleDiagnostics {
     pub velocity_quadrature_error_m_s_per_n_m: [f64; 10],
     pub pressure_tail_bound_pa_per_n_m: [f64; 4],
     pub velocity_tail_bound_m_s_per_n_m: [f64; 10],
-    /// Zero thickness or three identical fluids used the original interface
-    /// owner. An unequal-speed collapsed interface may still need quadrature.
+    /// An exact physical layer reduction used the original interface owner.
+    /// Each observation owner documents its reduction domain. Unequal original
+    /// speeds can still require quadrature after an interface reduction.
     pub reduced_to_single_interface: bool,
 }
 

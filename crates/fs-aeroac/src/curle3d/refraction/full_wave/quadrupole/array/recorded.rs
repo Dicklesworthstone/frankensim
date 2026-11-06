@@ -5,6 +5,35 @@ use crate::curle3d::quadrupole::recorded::RecordedQuadrupoleSpectrum;
 use fs_fft::welch::{WelchCrossSpectrum, WelchPeakBin};
 
 impl PreparedFullWaveQuadrupoleObserver {
+    /// Propagate original source-major [xx,yy,zz,xy,xz,yz] Welch factors.
+    /// The native peak-bin owner applies sqrt(2 df) once; output is a
+    /// bin-integrated second moment with coherent cells and tensor entries.
+    /// Recording-aware evaluation additionally binds the original geometry.
+    pub fn evaluate_welch_bin(
+        &self,
+        spectrum: &WelchCrossSpectrum,
+        bin: usize,
+        budget: CoherenceBudget,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<CompactFieldStatistics, AeroacError> {
+        self.view()
+            .evaluate_welch_bin(spectrum, bin, budget, cancelled)
+    }
+
+    /// Preserve the shared original factor reduction used by mixed sources.
+    pub(in crate::curle3d::refraction::full_wave) fn accumulate_welch_factor(
+        &self,
+        factor: &[fs_fft::C64],
+        measured: WelchPeakBin<'_>,
+        sums: &mut [ComplexSum; 4],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(), AeroacError> {
+        self.view()
+            .accumulate_welch_factor(factor, measured, sums, cancelled)
+    }
+}
+
+impl<D> ArrayField<'_, D> {
     /// Propagate one recorded interior Welch bin without losing cell coherence.
     ///
     /// Source-major channels are the original [xx,yy,zz,xy,xz,yz] stress moments
@@ -27,7 +56,7 @@ impl PreparedFullWaveQuadrupoleObserver {
         let measured = spectrum
             .peak_bin_hz(bin, self.frequency_hz)
             .map_err(AeroacError::Welch)?;
-        if self.source_count().checked_mul(6) != Some(measured.channel_count()) {
+        if self.transfers.len().checked_mul(6) != Some(measured.channel_count()) {
             return Err(invalid(
                 "refracted recorded stresses require six channels per cell",
             ));
@@ -41,7 +70,7 @@ impl PreparedFullWaveQuadrupoleObserver {
             statistics.add(sums.map(ComplexSum::value))?;
         }
         poll(&mut cancelled)?;
-        statistics.finish(self.scope())
+        statistics.finish(self.scope)
     }
 
     /// Apply one admitted original stress factor to the shared p/u reduction.

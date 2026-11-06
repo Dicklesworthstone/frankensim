@@ -67,10 +67,10 @@ pub struct FullWaveQuadrupoleSourceLimits {
 }
 
 #[derive(Clone, Debug)]
-struct Transfer {
-    source_m: [f64; 3],
-    field: [[C64; 6]; 4],
-    diagnostics: FullWaveQuadrupoleDiagnostics,
+pub(in crate::curle3d::refraction::full_wave) struct Transfer<D = FullWaveQuadrupoleDiagnostics> {
+    pub source_m: [f64; 3],
+    pub field: [[C64; 6]; 4],
+    pub diagnostics: D,
 }
 
 /// Prepared coherent observation of original stress cells across a fluid plane.
@@ -339,6 +339,75 @@ impl PreparedFullWaveQuadrupoleObserver {
     pub fn evaluate_independent(
         &self,
         sources: &[QuadrupolePhasor],
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<CompactFieldStatistics, AeroacError> {
+        self.view().evaluate_independent(sources, cancelled)
+    }
+
+    /// Low-rank source coherence factors expressed as peak stress moments.
+    /// Each mode retains all cell/tensor interference before quadratic reduction.
+    pub fn evaluate_coherence_modes(
+        &self,
+        modes: &[&[QuadrupolePhasor]],
+        budget: CoherenceBudget,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<CompactFieldStatistics, AeroacError> {
+        self.view()
+            .evaluate_coherence_modes(modes, budget, cancelled)
+    }
+
+    fn admit_count(&self, count: usize) -> Result<(), AeroacError> {
+        self.view().admit_count(count)
+    }
+
+    fn amplitudes(
+        &self,
+        sources: &[QuadrupolePhasor],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<[C64; 4], AeroacError> {
+        self.view().amplitudes(sources, cancelled)
+    }
+
+    fn view(&self) -> ArrayField<'_, FullWaveQuadrupoleDiagnostics> {
+        ArrayField {
+            transfers: &self.transfers,
+            frequency_hz: self.frequency_hz,
+            scope: self.scope(),
+        }
+    }
+}
+
+/// Borrow the same admitted stress transfers for all propagation geometries.
+/// Numerical reduction and source statistics are independent of the kernel
+/// that prepared each physical 4-by-6 map. Diagnostics stay with that kernel.
+pub(in crate::curle3d::refraction::full_wave) struct ArrayField<'a, D> {
+    pub transfers: &'a [Transfer<D>],
+    pub frequency_hz: f64,
+    pub scope: &'static str,
+}
+
+impl<D> ArrayField<'_, D> {
+    pub fn evaluate_cancellable(
+        &self,
+        sources: &[QuadrupolePhasor],
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<CoherentCompactField, AeroacError> {
+        field(self.amplitudes(sources, &mut cancelled)?, self.scope)
+    }
+
+    pub fn evaluate_harmonic_line(
+        &self,
+        sources: &[QuadrupolePhasor],
+    ) -> Result<HarmonicFieldLine<3>, AeroacError> {
+        Ok(line(
+            self.frequency_hz,
+            self.amplitudes(sources, &mut || false)?,
+        ))
+    }
+
+    pub fn evaluate_independent(
+        &self,
+        sources: &[QuadrupolePhasor],
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<CompactFieldStatistics, AeroacError> {
         poll(&mut cancelled)?;
@@ -353,11 +422,9 @@ impl PreparedFullWaveQuadrupoleObserver {
             statistics.add(sums.map(ComplexSum::value))?;
         }
         poll(&mut cancelled)?;
-        statistics.finish(self.scope())
+        statistics.finish(self.scope)
     }
 
-    /// Low-rank source coherence factors expressed as peak stress moments.
-    /// Each mode retains all cell/tensor interference before quadratic reduction.
     pub fn evaluate_coherence_modes(
         &self,
         modes: &[&[QuadrupolePhasor]],
@@ -366,7 +433,7 @@ impl PreparedFullWaveQuadrupoleObserver {
     ) -> Result<CompactFieldStatistics, AeroacError> {
         poll(&mut cancelled)?;
         self.admit_modes(modes.len(), budget)?;
-        if modes.iter().any(|mode| mode.len() != self.source_count()) {
+        if modes.iter().any(|mode| mode.len() != self.transfers.len()) {
             return Err(invalid("full-wave stress coherence factor source count"));
         }
         let mut statistics = StatisticsSum::default();
@@ -374,11 +441,11 @@ impl PreparedFullWaveQuadrupoleObserver {
             statistics.add(self.amplitudes(mode, &mut cancelled)?)?;
         }
         poll(&mut cancelled)?;
-        statistics.finish(self.scope())
+        statistics.finish(self.scope)
     }
 
-    fn admit_count(&self, count: usize) -> Result<(), AeroacError> {
-        if count != self.source_count() {
+    pub fn admit_count(&self, count: usize) -> Result<(), AeroacError> {
+        if count != self.transfers.len() {
             return Err(invalid(
                 "one physical stress moment is required per prepared cell",
             ));
@@ -386,10 +453,11 @@ impl PreparedFullWaveQuadrupoleObserver {
         Ok(())
     }
 
-    fn admit_modes(&self, modes: usize, budget: CoherenceBudget) -> Result<(), AeroacError> {
+    pub fn admit_modes(&self, modes: usize, budget: CoherenceBudget) -> Result<(), AeroacError> {
         if modes > budget.max_modes
             || self
-                .source_count()
+                .transfers
+                .len()
                 .checked_mul(modes)
                 .is_none_or(|work| work > budget.max_source_mode_pairs)
         {
@@ -421,8 +489,8 @@ impl PreparedFullWaveQuadrupoleObserver {
     }
 }
 
-fn add_source(
-    transfer: &Transfer,
+fn add_source<D>(
+    transfer: &Transfer<D>,
     source: &QuadrupolePhasor,
     sums: &mut [ComplexSum; 4],
 ) -> Result<(), AeroacError> {
