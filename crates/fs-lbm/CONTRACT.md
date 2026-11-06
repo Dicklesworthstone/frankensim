@@ -13837,8 +13837,9 @@ heat/work accounting, evolved stress-preserving rebinding, exact zero parity,
 and refused/cancelled characteristic publication. Native compilation and Rust
 execution remain outstanding; these definitions are not an executed
 qualification. Existing Mach, source/material, boundary and timestep limits
-remain. No hydrostatic well-balancing, exact discrete fluid-plus-potential
-energy conservation, self-gravity or measured performance is claimed.
+remain. The gravity binding alone claims no hydrostatic well-balancing,
+exact discrete fluid-plus-potential energy conservation, self-gravity or
+measured performance.
 
 ## Curved-wall local SGS on native D3Q19
 
@@ -13908,3 +13909,35 @@ a passive exterior. It does not supply nozzle/end conditions, gravity-induced
 stretching, variable surface tension, non-Newtonian stress, active gas dynamics
 or post-pinch topology. Reaching an authored neck/resolution limit is not a
 resolved breakup or a measured droplet-size prediction.
+
+## Isothermal hydrostatic initialization of compressible gas
+
+`NsfGrid3::new_isothermal_hydrostatic` creates a resting column with signed
+SI gravity along one declared grid axis. The reference pressure belongs to
+the declared reference cell's center. At the uniform reference temperature,
+adjacent densities obey
+`rho[j+1]/rho[j] = (1+b)/(1-b)`, `b = g_lattice/(2 theta0)`.
+Equivalently the pressure jump equals gravity times the trapezoidal density
+times the cell width. Combined with the existing full Guo half-source chart,
+this is a fixed point of the original D3Q27 collision, streaming and stationary
+halfway bounce-back operators up to floating-point roundoff. It approaches
+the ideal-gas barometric exponential with second-order spatial error.
+
+The gravity axis must be nonperiodic unless gravity is zero. Transverse
+periodicity, stationary domain walls and embedded solids are supported;
+thermal walls must be adiabatic or at the reference temperature. The ordinary
+grid admission and original gas/material pressure and temperature domains
+remain authoritative. Nonfinite gravity, nonpositive or overflowing profiles,
+and `|b| >= 1` refuse. No clipping or altered equation of state is introduced.
+The temporary layer profile adds no persistent field or step-time overhead.
+Zero gravity delegates to the original uniform constructor with identical
+state bits. Subsequent changes in gravity or boundary forcing evolve normally.
+
+Six regression definitions cover every axis and gravity sign, pressure datum
+and force balance, resting walls/solids and worker identity, second-order
+barometric convergence, release after gravity removal, source-gas pressure
+support, zero parity and invalid columns. Rust syntax/formatting checks and
+independent discrete algebra checks were run; full crate execution remains
+outstanding. This initialization is not a general well-balanced perturbation
+scheme for arbitrary gravity directions or nonuniform temperature, and it
+adds no fluid-plus-gravitational-potential energy conservation claim.

@@ -109,6 +109,7 @@ pub use open_boundary::{
 };
 mod characteristic_trial;
 mod gravity;
+mod hydrostatic;
 /// Unpublished original NSF interval for reciprocal characteristic coupling.
 pub use characteristic_trial::NsfCharacteristicTrial;
 
