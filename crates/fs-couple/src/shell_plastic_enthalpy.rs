@@ -1,10 +1,11 @@
-//! Reciprocal thermal plasticity on the original layered CST/DKT shell.
+//! Reciprocal thermal plasticity and creep on the original layered CST/DKT shell.
 //!
 //! One original enthalpy cell owns each physical layer of each reference facet.
 //! Temperature is uniform within that cell; all three surface points and every
-//! thickness point retain independent native plastic histories. The original
+//! thickness point retain independent native inelastic histories. The original
 //! source families supply thermal expansion, softening, hardening, viscosity
-//! and cyclic recovery. Their physical and reversible heat enters the existing
+//! and cyclic recovery, or standalone/joint primary and secondary creep. Their
+//! physical and reversible heat enters the existing
 //! thermal graph once. Numerical material loss and the retained reference
 //! drilling gauge never become heat.
 //!
@@ -24,10 +25,12 @@ use std::sync::Arc;
 use fs_exec::Cx;
 use fs_material::SmallStrainLaw;
 use fs_material::plastic::reduction::ReductionConfig;
+use fs_material::plastic::section::thermal::source::{
+    ThermalSectionSourceError, ThermalSectionSourceFamily,
+};
 use fs_material::plastic::section::thermal::{ThermoplasticSectionError, ThermoplasticSectionStep};
 use fs_material::plastic::section::{PlaneStressLayer, SectionBudget, ThicknessQuadrature};
-use fs_material::plastic::thermal::family::ThermoplasticSourceFamily;
-use fs_material::plastic::thermal::{FeedbackError, ThermoplasticSource};
+use fs_material::plastic::thermal::ThermoplasticSource;
 use fs_plate::shell::ShellMesh;
 use fs_solid::plastic_shell::drilling::{PlasticShellReferenceDrilling, ShellDrillingEnergy};
 use fs_solid::plastic_shell::dynamics::{
@@ -46,7 +49,7 @@ pub use feedback::{
     ShellLayerHeat, ShellThermoplasticCandidate, ShellThermoplasticMotion, ShellThermoplasticReport,
 };
 
-type History<'a, S> = <<S as ThermoplasticSourceFamily<'a>>::Material as SmallStrainLaw>::State;
+type History<'a, S> = <<S as ThermalSectionSourceFamily<'a>>::Material as SmallStrainLaw>::State;
 
 /// Original thermal identity and source-bound material layer, in increasing z.
 #[derive(Clone, Debug)]
@@ -72,7 +75,7 @@ pub struct ShellThermoplasticDiscretization {
 #[derive(Debug)]
 pub enum ShellThermoplasticError<E = Infallible> {
     Invalid(&'static str),
-    Material(FeedbackError),
+    Material(ThermalSectionSourceError),
     Section(ThermoplasticSectionError),
     Solid(SmallStrainTetError),
     Thermal(DepositionError),
@@ -116,7 +119,7 @@ struct Facet<S> {
 /// Accepted shell and immutable source/reference bindings. Native thermal
 /// inventory is checked against `accepted`; it is not independently evolved.
 #[derive(Clone, Debug)]
-pub struct ThermoplasticShell<'a, S: ThermoplasticSourceFamily<'a> = ThermoplasticSource<'a>> {
+pub struct ThermoplasticShell<'a, S: ThermalSectionSourceFamily<'a> = ThermoplasticSource<'a>> {
     mesh: &'a ShellMesh,
     facets: Arc<[Facet<S>]>,
     accepted: Vec<Vec<DepositedCell>>,
@@ -128,9 +131,10 @@ pub struct ThermoplasticShell<'a, S: ThermoplasticSourceFamily<'a> = Thermoplast
     time_s: f64,
 }
 
-impl<'a, S: ThermoplasticSourceFamily<'a>> ThermoplasticShell<'a, S> {
+impl<'a, S: ThermalSectionSourceFamily<'a>> ThermoplasticShell<'a, S> {
     /// Bind virgin, stress-free layers to their original active caloric objects.
-    /// Sources may select J2, Voce, Perzyna or complete native Chaboche families.
+    /// Sources may select J2, Voce, Perzyna, complete native Chaboche families,
+    /// or `CaloricCreepSource` with original Norton/joint/expansion histories.
     /// Layer cells must be unique; mass is sourced density times reference
     /// facet area and physical layer thickness. No density or chart is invented.
     pub fn try_new(
@@ -177,7 +181,7 @@ impl<'a, S: ThermoplasticSourceFamily<'a>> ThermoplasticShell<'a, S> {
                         .ok_or(ShellThermoplasticError::Invalid(
                             "inactive shell layer cell",
                         ))?;
-                let source = entry.layer.law.thermal_source();
+                let source = &entry.layer.law;
                 let volume = geometry.area_m2 * (entry.layer.top_z_m - entry.layer.bottom_z_m);
                 if !used.insert(entry.cell)
                     || !thermal.uses_material_law(
@@ -185,7 +189,7 @@ impl<'a, S: ThermoplasticSourceFamily<'a>> ThermoplasticShell<'a, S> {
                         source.caloric_source().curve() as &dyn ThermalLaw,
                     )
                     || !same_measure(cell.geometry.volume_m3, volume)
-                    || !same_measure(cell.mass_kg, source.density_kg_m3() * volume)
+                    || !same_measure(cell.mass_kg, source.reference_density_kg_m3() * volume)
                 {
                     return Err(ShellThermoplasticError::Invalid(
                         "unique original layer cells, caloric objects and sourced reference inventory required",
@@ -196,7 +200,7 @@ impl<'a, S: ThermoplasticSourceFamily<'a>> ThermoplasticShell<'a, S> {
                 let step = entry
                     .layer
                     .law
-                    .resolve_step(cell.specific_h_j_kg, cell.specific_h_j_kg, 1.0)
+                    .resolve_section_step(cell.specific_h_j_kg, cell.specific_h_j_kg, 1.0)
                     .map_err(|source| ThermoplasticSectionError::Source {
                         layer: cells.len(),
                         point: None,
@@ -339,7 +343,7 @@ impl<'a, S: ThermoplasticSourceFamily<'a>> ThermoplasticShell<'a, S> {
                 facet
                     .layers
                     .iter()
-                    .map(|layer| layer.law.thermal_source().density_kg_m3())
+                    .map(|layer| layer.law.reference_density_kg_m3())
                     .collect(),
             );
         }
@@ -391,7 +395,7 @@ impl<'a, S: ThermoplasticSourceFamily<'a>> ThermoplasticShell<'a, S> {
             .flat_map(|(facet, cells)| facet.layers.iter().zip(cells))
             .zip(conductivity)
             .map(|((layer, cell), selection)| {
-                let source = layer.law.thermal_source();
+                let source = &layer.law;
                 let conductivity = selection
                     .as_ref()
                     .map(|(key, policy)| {
@@ -429,7 +433,7 @@ impl<'a, S: ThermoplasticSourceFamily<'a>> ThermoplasticShell<'a, S> {
                     .ok_or(ShellThermoplasticError::Invalid(
                         "shell layer cell became inactive",
                     ))?;
-                let source = layer.law.thermal_source();
+                let source = &layer.law;
                 if cell.id != old.id
                     || cell.segment_id != old.segment_id
                     || cell.body_id != old.body_id
@@ -448,7 +452,7 @@ impl<'a, S: ThermoplasticSourceFamily<'a>> ThermoplasticShell<'a, S> {
                     ));
                 }
                 source
-                    .resolve_enthalpy(cell.specific_h_j_kg)
+                    .admit_section_enthalpy(cell.specific_h_j_kg)
                     .map_err(ShellThermoplasticError::Material)?;
                 h.push(cell.specific_h_j_kg);
             }
@@ -463,6 +467,8 @@ impl<'a, S: ThermoplasticSourceFamily<'a>> ThermoplasticShell<'a, S> {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ShellThermoplasticEnergy {
     pub physical_heat_j: f64,
+    /// Physical creep work, included exactly once in `physical_heat_j`.
+    pub creep_heat_j: f64,
     pub reversible_heat_j: f64,
     /// Free-energy change including the separately reported coefficient change.
     pub stored_change_j: f64,

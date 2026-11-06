@@ -196,6 +196,21 @@ where
         }
         Ok(())
     }
+    fn validate_accepted_temperature(
+        &self,
+        temperature_k: f64,
+        strain: &Voigt,
+        state: &ThermalCreepState<<S::Material as SmallStrainLaw>::State>,
+    ) -> Result<(), CreepSourceError> {
+        if state.temperature_k() != temperature_k {
+            return Err(CreepSourceError::Invalid(
+                "accepted creep history and caloric temperature must agree",
+            ));
+        }
+        self.at_temperature(temperature_k, 1.0)?
+            .validate_creep_history(strain, state)
+            .map_err(CreepSourceError::Mechanical)
+    }
 }
 
 /// Endpoint-temperature constitutive law. All Newton trials retain the old

@@ -3,7 +3,7 @@
 //! One prepared interval freezes each layer's source, old/new caloric enthalpy
 //! and physical duration. Its endpoint laws use the original return maps and
 //! transverse reduction. Auditing replays that same interval from the accepted
-//! OLD histories, including every native Chaboche branch when selected.
+//! OLD histories, including every native Chaboche branch or creep memory.
 //!
 //! Temperature is uniform within each declared layer. The original thickness
 //! quadrature integrates separate physical heat, reversible caloric exchange,
@@ -19,15 +19,20 @@ use super::{
 use crate::SmallStrainLaw;
 use crate::plastic::energy::EnergyTolerances;
 use crate::plastic::reduction::ReductionConfig;
-use crate::plastic::thermal::family::{ThermoplasticFamilyError, ThermoplasticSourceFamily};
 use core::marker::PhantomData;
+
+/// Native plasticity and creep sources sharing the original section owner.
+pub mod source;
+use source::{ThermalSectionSourceError, ThermalSectionSourceFamily};
 
 /// Exact integrated native account for one physical layer, or the complete
 /// section. All energies are per reference midsurface area, in J/m².
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct ThermoplasticLayerEnergy {
-    /// Native yield, viscous and recovery dissipation, with no numerical loss.
+    /// Native yield, creep, viscous and recovery heat, with no numerical loss.
     pub physical_heat_j_m2: f64,
+    /// Physical creep work, already included once in `physical_heat_j_m2`.
+    pub creep_heat_j_m2: f64,
     /// Signed reversible exchange into the original stress-free caloric chart.
     pub reversible_heat_j_m2: f64,
     /// Actual two-temperature elastic/hardening free-energy change, INCLUDING
@@ -76,9 +81,14 @@ impl ThermoplasticLayerEnergy {
             - self.thermoelastic_storage_change_j_m2
             - self.caloric_heat_j_m2()
             - self.numerical_loss_j_m2;
-        if [self.physical_heat_j_m2, self.numerical_loss_j_m2]
-            .iter()
-            .any(|x| !x.is_finite() || *x < 0.0)
+        if [
+            self.physical_heat_j_m2,
+            self.creep_heat_j_m2,
+            self.numerical_loss_j_m2,
+        ]
+        .iter()
+        .any(|x| !x.is_finite() || *x < 0.0)
+            || self.creep_heat_j_m2 > self.physical_heat_j_m2
             || [
                 self.reversible_heat_j_m2,
                 self.stored_change_j_m2,
@@ -130,7 +140,7 @@ pub enum ThermoplasticSectionError {
         /// Thickness point, or none during initial source resolution.
         point: Option<usize>,
         /// Unmodified native source or energy error.
-        source: ThermoplasticFamilyError,
+        source: ThermalSectionSourceError,
     },
     /// An alleged endpoint does not equal the original native update.
     State {
@@ -165,7 +175,7 @@ impl From<SectionError> for ThermoplasticSectionError {
 /// The source-bearing `PlaneStressLayer::law` is a native source FAMILY here;
 /// `section()` contains its resolved original mechanical laws.
 #[derive(Debug)]
-pub struct ThermoplasticSectionStep<'s, 'a, S: ThermoplasticSourceFamily<'a>> {
+pub struct ThermoplasticSectionStep<'s, 'a, S: ThermalSectionSourceFamily<'a>> {
     layers: &'s [PlaneStressLayer<S>],
     old_h_j_kg: &'s [f64],
     new_h_j_kg: &'s [f64],
@@ -175,7 +185,7 @@ pub struct ThermoplasticSectionStep<'s, 'a, S: ThermoplasticSourceFamily<'a>> {
     source_lifetime: PhantomData<&'a ()>,
 }
 
-impl<'s, 'a, S: ThermoplasticSourceFamily<'a>> ThermoplasticSectionStep<'s, 'a, S> {
+impl<'s, 'a, S: ThermalSectionSourceFamily<'a>> ThermoplasticSectionStep<'s, 'a, S> {
     /// Resolve once per physical layer. Geometry, quadrature and state ordering
     /// are admitted by the original section owner. No state is advanced here.
     #[allow(clippy::too_many_arguments)]
@@ -230,20 +240,11 @@ impl<'s, 'a, S: ThermoplasticSourceFamily<'a>> ThermoplasticSectionStep<'s, 'a, 
         let mut resolved = Vec::with_capacity(layers.len());
         let mut temperatures_k = Vec::with_capacity(layers.len());
         for (index, layer) in layers.iter().enumerate() {
-            // The original J2 family's resolution depends only on the new h;
-            // admit the old caloric endpoint explicitly for every family.
-            layer
-                .law
-                .thermal_source()
-                .resolve_enthalpy(old_h_j_kg[index])
-                .map_err(|source| ThermoplasticSectionError::Source {
-                    layer: index,
-                    point: None,
-                    source: source.into(),
-                })?;
+            // Each source admits both original caloric endpoints before
+            // preparing this physical interval's native constitutive law.
             let step = layer
                 .law
-                .resolve_step(old_h_j_kg[index], new_h_j_kg[index], duration_s)
+                .resolve_section_step(old_h_j_kg[index], new_h_j_kg[index], duration_s)
                 .map_err(|source| ThermoplasticSectionError::Source {
                     layer: index,
                     point: None,
@@ -317,16 +318,8 @@ impl<'s, 'a, S: ThermoplasticSourceFamily<'a>> ThermoplasticSectionStep<'s, 'a, 
                 point: Some(index),
                 source,
             };
-            source
-                .validate_accepted(
-                    self.old_h_j_kg[layer],
-                    &before.strain,
-                    &before.history,
-                    material.yield_pa,
-                )
-                .map_err(native_error)?;
             let increment = source
-                .checked_increment(
+                .section_increment(
                     self.old_h_j_kg[layer],
                     self.new_h_j_kg[layer],
                     &before.strain,
@@ -342,8 +335,7 @@ impl<'s, 'a, S: ThermoplasticSourceFamily<'a>> ThermoplasticSectionStep<'s, 'a, 
                     what: "accepted complete history differs from the original thermal increment",
                 });
             }
-            let thermal = increment.thermal;
-            let stress = thermal.mechanical.stress_pa;
+            let stress = increment.stress_pa;
             if stress.iter().any(|x| !x.is_finite())
                 || [stress[2], stress[4], stress[5]]
                     .iter()
@@ -359,17 +351,16 @@ impl<'s, 'a, S: ThermoplasticSourceFamily<'a>> ThermoplasticSectionStep<'s, 'a, 
                 + 2.0 * stress[5] * (after.strain[5] - before.strain[5]);
             for account in [&mut audit.layers[layer], &mut audit.total] {
                 let w = point.weight_m;
-                account.physical_heat_j_m2 +=
-                    w * thermal.mechanical.energy.physical_dissipation_j_m3;
-                account.reversible_heat_j_m2 += w * thermal.reversible_heat_j_m3;
-                account.stored_change_j_m2 += w * thermal.stored_change_j_m3();
+                account.physical_heat_j_m2 += w * increment.physical_heat_j_m3;
+                account.creep_heat_j_m2 += w * increment.creep_heat_j_m3;
+                account.reversible_heat_j_m2 += w * increment.reversible_heat_j_m3;
+                account.stored_change_j_m2 += w * increment.stored_change_j_m3;
                 account.coefficient_storage_change_j_m2 +=
-                    w * thermal.coefficient_storage_change_j_m3;
+                    w * increment.coefficient_storage_change_j_m3;
                 account.thermoelastic_storage_change_j_m2 +=
-                    w * thermal.thermoelastic_storage_change_j_m3;
-                account.numerical_loss_j_m2 +=
-                    w * thermal.mechanical.energy.numerical_dissipation_j_m3;
-                account.mechanical_work_j_m2 += w * thermal.mechanical_work_j_m3;
+                    w * increment.thermoelastic_storage_change_j_m3;
+                account.numerical_loss_j_m2 += w * increment.numerical_loss_j_m3;
+                account.mechanical_work_j_m2 += w * increment.mechanical_work_j_m3;
                 account.transverse_residual_work_j_m2 += w * transverse;
                 for (i, component) in [0, 1, 3].into_iter().enumerate() {
                     account.resultants[i] += w * stress[component];

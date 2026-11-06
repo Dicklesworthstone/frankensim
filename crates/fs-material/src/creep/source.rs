@@ -189,6 +189,19 @@ pub trait CreepSourceFamily<'a>: Clone + core::fmt::Debug {
     fn admit_stress_free_temperature(&self, _temperature_k: f64) -> Result<(), CreepSourceError> {
         Ok(())
     }
+    /// Inspect an accepted history at its actual caloric temperature, without
+    /// advancing physical time. Thermal histories additionally require that
+    /// their retained temperature agrees with this endpoint.
+    fn validate_accepted_temperature(
+        &self,
+        temperature_k: f64,
+        strain: &Voigt,
+        state: &<Self::Material as SmallStrainLaw>::State,
+    ) -> Result<(), CreepSourceError> {
+        self.at_temperature(temperature_k, 1.0)?
+            .validate_creep_history(strain, state)
+            .map_err(CreepSourceError::Mechanical)
+    }
     fn at_temperature(
         &self,
         temperature_k: f64,

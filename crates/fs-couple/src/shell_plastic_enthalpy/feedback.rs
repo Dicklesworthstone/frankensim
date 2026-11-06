@@ -11,6 +11,8 @@ use std::collections::BTreeMap;
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct ShellLayerHeat {
     pub physical_j: f64,
+    /// Creep work is a subaccount of `physical_j`, not additional heat.
+    pub creep_j: f64,
     pub reversible_j: f64,
 }
 impl ShellLayerHeat {
@@ -48,7 +50,7 @@ pub struct ShellThermoplasticCandidate<
     'm,
     't,
     O,
-    S: ThermoplasticSourceFamily<'m> = ThermoplasticSource<'m>,
+    S: ThermalSectionSourceFamily<'m> = ThermoplasticSource<'m>,
 > {
     shell: ThermoplasticShell<'m, S>,
     thermal: DepositionSimulation<'t>,
@@ -56,7 +58,7 @@ pub struct ShellThermoplasticCandidate<
     report: ShellThermoplasticReport,
     motion: Option<ShellThermoplasticMotion>,
 }
-impl<'m, 't, O, S: ThermoplasticSourceFamily<'m>> ShellThermoplasticCandidate<'m, 't, O, S> {
+impl<'m, 't, O, S: ThermalSectionSourceFamily<'m>> ShellThermoplasticCandidate<'m, 't, O, S> {
     pub const fn shell(&self) -> &ThermoplasticShell<'m, S> {
         &self.shell
     }
@@ -100,7 +102,7 @@ struct Mechanical<S> {
     motion: Option<ShellThermoplasticMotion>,
 }
 
-impl<'a, S: ThermoplasticSourceFamily<'a>> ThermoplasticShell<'a, S> {
+impl<'a, S: ThermalSectionSourceFamily<'a>> ThermoplasticShell<'a, S> {
     #[allow(clippy::too_many_arguments)]
     fn mechanics<E>(
         &self,
@@ -207,12 +209,14 @@ impl<'a, S: ThermoplasticSourceFamily<'a>> ThermoplasticShell<'a, S> {
                 for (layer, cell) in audit.layers.iter().zip(&self.accepted[e]) {
                     let entry = heat.entry(cell.id).or_insert(ShellLayerHeat::default());
                     entry.physical_j = finite(entry.physical_j + area * layer.physical_heat_j_m2)?;
+                    entry.creep_j = finite(entry.creep_j + area * layer.creep_heat_j_m2)?;
                     entry.reversible_j =
                         finite(entry.reversible_j + area * layer.reversible_heat_j_m2)?;
                 }
                 let a = audit.total;
                 energy.physical_heat_j =
                     finite(energy.physical_heat_j + area * a.physical_heat_j_m2)?;
+                energy.creep_heat_j = finite(energy.creep_heat_j + area * a.creep_heat_j_m2)?;
                 energy.reversible_heat_j =
                     finite(energy.reversible_heat_j + area * a.reversible_heat_j_m2)?;
                 energy.stored_change_j =
@@ -379,7 +383,7 @@ impl<'a, S: ThermoplasticSourceFamily<'a>> ThermoplasticShell<'a, S> {
                     || density
                         .iter()
                         .zip(&facet.layers)
-                        .any(|(&rho, layer)| rho != layer.law.thermal_source().density_kg_m3())
+                        .any(|(&rho, layer)| rho != layer.law.reference_density_kg_m3())
                 {
                     return Err(ShellThermoplasticError::Invalid(
                         "shell inertia must retain the original sourced density of every layer",
@@ -541,12 +545,12 @@ impl<'a, S: ThermoplasticSourceFamily<'a>> ThermoplasticShell<'a, S> {
 }
 
 #[derive(Clone)]
-struct LayerHeat<'s, 'a, 'cx, S: ThermoplasticSourceFamily<'a>> {
+struct LayerHeat<'s, 'a, 'cx, S: ThermalSectionSourceFamily<'a>> {
     shell: &'s ThermoplasticShell<'a, S>,
     rates: BTreeMap<CellId, f64>,
     cx: &'s Cx<'cx>,
 }
-impl<'a, S: ThermoplasticSourceFamily<'a>> DepositionObserver for LayerHeat<'_, 'a, '_, S> {
+impl<'a, S: ThermalSectionSourceFamily<'a>> DepositionObserver for LayerHeat<'_, 'a, '_, S> {
     type Error = ShellThermoplasticError;
     fn sources(
         &mut self,

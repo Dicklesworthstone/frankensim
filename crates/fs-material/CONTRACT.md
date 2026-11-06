@@ -18099,3 +18099,14 @@ refresh and unsupported data. These are manufactured G0/G1/G3 checks, not
 measured-material qualification. The criterion supplies no failure-mode
 decomposition, automatic stiffness loss, fracture energy, progressive damage,
 finite-strain stress conversion or experimental calibration.
+
+
+## Native creep in layered mechanical and thermal sections
+
+`NativeSectionEnergyLaw` admits `NortonCreep`, `NortonJ2` and their original source-resolved forms. The adapter invokes the native creep increment at its actual duration and preserves original physical and numerical losses. Pure primary resistance stores no energy. Joint creep/plasticity reconstructs elastic and isotropic-hardening storage through the original J2 energy owner using the shared elastic strain; creep accumulation is never substituted for plastic hardening history. The existing section quadrature, transverse reduction and work gates remain owners.
+
+`plastic::section::thermal::source::ThermalSectionSourceFamily` carries complete native histories and per-volume work without a plastic-history projection. Existing thermoplastic families retain their original resolution and energy arithmetic. `CaloricCreepSource` binds any native `CreepSourceFamily`, including explicitly expanded standalone or joint primary creep, to the original same-card caloric chart and reference density. Admission retains fixed conditions, pinned Cp/density claims, a fully solid supported temperature interval and positive combined caloric/mechanical heat capacity. Transport selections must be instantaneous and depend only on owned temperature and fixed external conditions. A retained thermal creep temperature must equal the actual accepted caloric temperature; inspection never advances creep.
+
+The thermal section integrates physical creep work as a subaccount of total physical heat. Native reciprocal expansion heat, free-energy change, mechanical entropy and numerical loss retain their separate meanings. One prepared interval resolves native laws per physical layer; each audited point replays the same old history and exact physical duration. Small-strain/rotation, fixed-reference geometry, thermal-domain and transverse-equilibrium limits remain in force. No tertiary damage, rupture, empirical calibration or finite-shell-forming claim is added.
+
+Two new section regressions and native shell/coupled consumers exercise independent primary/secondary axial returns, distinct creep/plastic storage, sustained loads, relaxation and thermal history. These tests were added but not executed in the implementation environment; formatting and source checks are not compilation or numerical execution.

@@ -2,6 +2,8 @@
 //! These authored material numbers exercise the model, not measured calibration.
 #[path = "shell/dynamics.rs"]
 mod dynamics;
+#[path = "shell/creep.rs"]
+mod creep;
 
 use super::*;
 use fs_couple::shell_plastic_enthalpy::{
