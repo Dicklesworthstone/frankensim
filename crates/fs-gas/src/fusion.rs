@@ -48,6 +48,7 @@ use fs_thermochem::fusion::plasma::{
 use fs_thermochem::fusion::{FusionErrorV1, FusionReactionV1};
 use fs_thermochem::plasma_radiation::{BremsstrahlungErrorV1, ElectronIonBremsstrahlungV1};
 
+mod emission;
 mod solve;
 mod thermal;
 

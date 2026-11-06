@@ -1,5 +1,22 @@
 # CONTRACT: fs-thermochem
 
+## Channel-resolved fusion-neutron emission
+
+`fusion::neutrons::FusionNeutronEmissionV1` retains the actual integrated
+neutron amounts and kinetic energies of D-T and D-D→He3+n separately, with
+their accepted interval duration. Each channel converts its amount using the
+exact SI Avogadro constant and exposes its mean particle energy only when it
+contains neutrons. Empty channels create no fictitious zero-energy particles.
+The fixed-size representation checks finite/nonnegative data, consistent
+number/energy pairs, positive duration for emission, and representable totals.
+
+This is a common L1 handoff for already accepted source accounts. It creates
+neither a neutron spectrum nor a temporal/angular emission profile, and it
+does not turn emitted kinetic energy into heat. Consumers must explicitly
+choose their projection, transport, deposition and validity assumptions.
+Focused G0/G3 regressions cover channel identity, SI count/energy conversion,
+empty intervals, invalid domains, arithmetic extremes and extensive scaling.
+
 ## Original-source isotropic test-ion energy drift and diffusion
 
 `coulomb::test_particle::TestParticleCoulombV1` binds a positive heavy projectile

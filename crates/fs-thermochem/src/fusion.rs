@@ -17,6 +17,8 @@ use fs_qty::Temperature;
 
 pub use crate::electron_collision::{BOLTZMANN_J_PER_K, ELECTRON_MASS_KG, ELECTRONVOLT_J};
 
+/// Channel-resolved neutron number and energy handoff to transport owners.
+pub mod neutrons;
 /// Explicit binding of a D–T plasma to its original gas thermodynamics.
 pub mod plasma;
 mod reactivity;
