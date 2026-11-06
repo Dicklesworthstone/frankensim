@@ -42,7 +42,9 @@
 //! sine); out-of-plane shape is whatever grid the caller samples.
 
 use fs_math::det;
-use fs_phs::{ContinuousStorageTangent, PhsError, PortHamiltonian, Storage};
+use fs_phs::{
+    ConstitutiveDiscreteGradient, ContinuousStorageTangent, PhsError, PortHamiltonian, Storage,
+};
 
 mod membrane;
 pub use membrane::{VkSampledPlateParams, von_karman_sampled_plate_with_membrane};
@@ -285,6 +287,33 @@ impl SosModalStorage {
         }
         acc
     }
+
+    // The public source permits roundoff-sized asymmetry in E. Its coded
+    // effort then differs from the exact energy gradient: retain Gonzalez for
+    // that case instead of advertising a constitutive rule with a false
+    // coincidence limit. Native string/plate constructors are exactly symmetric.
+    fn has_exact_symmetric_channels(&self) -> bool {
+        let n = self.n_modes();
+        let Some(square) = n.checked_mul(n) else {
+            return false;
+        };
+        self.channels.iter().all(|channel| {
+            channel.coupling.len() == square
+                && (0..n).all(|i| {
+                    (0..i).all(|j| channel.coupling[i * n + j] == channel.coupling[j * n + i])
+                })
+        })
+    }
+
+    fn valid_discrete_endpoints(&self, a: &[f64], b: &[f64], output_len: usize) -> bool {
+        self.n_modes().checked_mul(2).is_some_and(|dimension| {
+            a.len() == dimension
+                && b.len() == dimension
+                && output_len == dimension
+                && a.iter().chain(b).all(|value| value.is_finite())
+        }) && self.validate().is_ok()
+            && self.has_exact_symmetric_channels()
+    }
 }
 
 impl ContinuousStorageTangent for SosModalStorage {
@@ -298,40 +327,70 @@ impl Storage for SosModalStorage {
         Some(self)
     }
 
+    fn discrete_gradient_rule(&self) -> Option<&dyn ConstitutiveDiscreteGradient> {
+        self.has_exact_symmetric_channels()
+            .then_some(self as &dyn ConstitutiveDiscreteGradient)
+    }
+
     fn midpoint_energy_remainder(&self, a: &[f64], b: &[f64], midpoint: &[f64]) -> Option<f64> {
-        // The quadratic modal energies have zero midpoint remainder. For
-        // V(q) = c/4 (q^T E q)^2, write q = m +/- d/2. Factoring the
-        // endpoint difference gives exactly
-        // V(b)-V(a)-grad V(m).d = c/4 (d^T E d) (m^T E d).
-        // Evaluate these small quantities directly: subtracting total stored
-        // energies can erase one mode's force beside a much louder mode.
+        // Let d=b-a and o=(a-m)+(b-m), so the exact mean is m+o/2.
+        // For a symmetric channel define D=d.E.d, O=o.E.o, C=d.E.o,
+        // M=m.E.d, N=m.E.o, S=m.E.m. Its complete remainder is
+        // c*((M+C/2)*(N+(D+O)/4)+S*C/2). At an exact midpoint this
+        // reduces to c*D*M/4. Retain o: a represented midpoint can round
+        // to an endpoint, where even quadratic storage has a remainder.
         let n = self.n_modes();
         let mut remainder = 0.0;
+        for (k, omega) in self.omegas.iter().enumerate() {
+            let dq = b[2 * k] - a[2 * k];
+            let dp = b[2 * k + 1] - a[2 * k + 1];
+            let oq = (a[2 * k] - midpoint[2 * k]) + (b[2 * k] - midpoint[2 * k]);
+            let op = (a[2 * k + 1] - midpoint[2 * k + 1]) + (b[2 * k + 1] - midpoint[2 * k + 1]);
+            remainder += 0.5 * (omega * omega * dq * oq + dp * op);
+        }
         for ch in &self.channels {
             if ch.coefficient == 0.0 {
                 continue;
             }
             let mut delta_form = 0.0;
             let mut midpoint_delta_form = 0.0;
+            let mut offset_form = 0.0;
+            let mut delta_offset_form = 0.0;
+            let mut midpoint_offset_form = 0.0;
+            let mut midpoint_form = 0.0;
             let mut asymmetry_work = 0.0;
             for k in 0..n {
                 let dk = b[2 * k] - a[2 * k];
+                let ok = (a[2 * k] - midpoint[2 * k]) + (b[2 * k] - midpoint[2 * k]);
                 let diagonal = ch.coupling[k * n + k];
                 delta_form += diagonal * dk * dk;
                 midpoint_delta_form += diagonal * midpoint[2 * k] * dk;
+                offset_form += diagonal * ok * ok;
+                delta_offset_form += diagonal * dk * ok;
+                midpoint_offset_form += diagonal * midpoint[2 * k] * ok;
+                midpoint_form += diagonal * midpoint[2 * k] * midpoint[2 * k];
                 for j in 0..k {
                     let dj = b[2 * j] - a[2 * j];
+                    let oj = (a[2 * j] - midpoint[2 * j]) + (b[2 * j] - midpoint[2 * j]);
                     let forward = ch.coupling[k * n + j];
                     let reverse = ch.coupling[j * n + k];
                     let symmetric = f64::midpoint(forward, reverse);
                     delta_form += 2.0 * symmetric * dk * dj;
                     midpoint_delta_form +=
                         symmetric * (midpoint[2 * k] * dj + midpoint[2 * j] * dk);
+                    offset_form += 2.0 * symmetric * ok * oj;
+                    delta_offset_form += symmetric * (dk * oj + dj * ok);
+                    midpoint_offset_form +=
+                        symmetric * (midpoint[2 * k] * oj + midpoint[2 * j] * ok);
+                    midpoint_form += 2.0 * symmetric * midpoint[2 * k] * midpoint[2 * j];
                     asymmetry_work +=
                         (forward - reverse) * (midpoint[2 * k] * dj - midpoint[2 * j] * dk);
                 }
             }
-            remainder += 0.25 * ch.coefficient * delta_form * midpoint_delta_form;
+            remainder += ch.coefficient
+                * ((midpoint_delta_form + 0.5 * delta_offset_form)
+                    * (midpoint_offset_form + 0.25 * (delta_form + offset_form))
+                    + 0.5 * midpoint_form * delta_offset_form);
             // Admission allows roundoff-sized asymmetry. Account for the
             // coded gradient's corresponding mismatch without subtracting
             // nearly equal work terms; exactly symmetric channels skip it.
@@ -390,6 +449,134 @@ impl Storage for SosModalStorage {
                 out[2 * k] += ch.coefficient * s * row;
             }
         }
+    }
+}
+
+/// Exact average of the original cubic effort along the endpoint segment.
+/// Each stress channel keeps its own elastic work; no quartic correction is
+/// applied to momentum, a channel's null directions, or unrelated storage.
+/// Evaluation and the endpoint action use constant temporary memory and fixed
+/// matrix traversal, without numerical quadrature or finite differences.
+impl ConstitutiveDiscreteGradient for SosModalStorage {
+    fn evaluate(&self, a: &[f64], b: &[f64], midpoint: &[f64], out: &mut [f64]) {
+        if !self.valid_discrete_endpoints(a, b, out.len())
+            || midpoint.len() != a.len()
+            || midpoint.iter().any(|value| !value.is_finite())
+        {
+            out.fill(f64::NAN);
+            return;
+        }
+        if a == b {
+            self.gradient(a, out);
+            return;
+        }
+        let n = self.n_modes();
+        for (k, omega) in self.omegas.iter().enumerate() {
+            out[2 * k] = omega * omega * midpoint[2 * k];
+            out[2 * k + 1] = midpoint[2 * k + 1];
+        }
+        for channel in &self.channels {
+            if channel.coefficient == 0.0 {
+                continue;
+            }
+            let mut form = 0.0;
+            let mut delta_form = 0.0;
+            let mut mixed_form = 0.0;
+            for k in 0..n {
+                let mut em = 0.0;
+                let mut ed = 0.0;
+                for j in 0..n {
+                    let entry = channel.coupling[k * n + j];
+                    em += entry * midpoint[2 * j];
+                    ed += entry * (b[2 * j] - a[2 * j]);
+                }
+                form += midpoint[2 * k] * em;
+                delta_form += (b[2 * k] - a[2 * k]) * ed;
+                mixed_form += midpoint[2 * k] * ed;
+            }
+            // Integral_0^1 c (q(t).E.q(t)) E.q(t) dt, with q(t)=m+(t-1/2)d:
+            // c*((m.E.m+d.E.d/12) E.m + (m.E.d/6) E.d).
+            let mean_factor = channel.coefficient * (form + delta_form / 12.0);
+            let delta_factor = channel.coefficient * (mixed_form / 6.0);
+            for k in 0..n {
+                let mut em = 0.0;
+                let mut ed = 0.0;
+                for j in 0..n {
+                    let entry = channel.coupling[k * n + j];
+                    em += entry * midpoint[2 * j];
+                    ed += entry * (b[2 * j] - a[2 * j]);
+                }
+                out[2 * k] += mean_factor * em + delta_factor * ed;
+            }
+        }
+    }
+
+    fn end_jacobian_action(
+        &self,
+        a: &[f64],
+        b: &[f64],
+        direction: &[f64],
+        out: &mut [f64],
+    ) -> bool {
+        if !self.valid_discrete_endpoints(a, b, out.len())
+            || direction.len() != a.len()
+            || direction.iter().any(|value| !value.is_finite())
+        {
+            return false;
+        }
+        let n = self.n_modes();
+        for (k, omega) in self.omegas.iter().enumerate() {
+            out[2 * k] = 0.5 * omega * omega * direction[2 * k];
+            out[2 * k + 1] = 0.5 * direction[2 * k + 1];
+        }
+        for channel in &self.channels {
+            if channel.coefficient == 0.0 {
+                continue;
+            }
+            let mut form = 0.0;
+            let mut delta_form = 0.0;
+            let mut mixed_form = 0.0;
+            let mut mean_direction_form = 0.0;
+            let mut delta_direction_form = 0.0;
+            for k in 0..n {
+                let mut em = 0.0;
+                let mut ed = 0.0;
+                let mut ev = 0.0;
+                for j in 0..n {
+                    let entry = channel.coupling[k * n + j];
+                    em += entry * f64::midpoint(a[2 * j], b[2 * j]);
+                    ed += entry * (b[2 * j] - a[2 * j]);
+                    ev += entry * direction[2 * j];
+                }
+                let mk = f64::midpoint(a[2 * k], b[2 * k]);
+                let dk = b[2 * k] - a[2 * k];
+                form += mk * em;
+                delta_form += dk * ed;
+                mixed_form += mk * ed;
+                mean_direction_form += mk * ev;
+                delta_direction_form += dk * ev;
+            }
+            // D_b of the same polynomial, with D_b m[v]=v/2 and D_b d[v]=v.
+            // This is also Integral_0^1 t Hessian(V)(a+t*d)[v] dt;
+            // it is not the continuous tangent at a guessed midpoint.
+            let direction_factor = 0.5 * (form + delta_form / 12.0) + mixed_form / 6.0;
+            let mean_factor = mean_direction_form + delta_direction_form / 6.0;
+            let delta_factor = mean_direction_form / 6.0 + delta_direction_form / 12.0;
+            for k in 0..n {
+                let mut em = 0.0;
+                let mut ed = 0.0;
+                let mut ev = 0.0;
+                for j in 0..n {
+                    let entry = channel.coupling[k * n + j];
+                    em += entry * f64::midpoint(a[2 * j], b[2 * j]);
+                    ed += entry * (b[2 * j] - a[2 * j]);
+                    ev += entry * direction[2 * j];
+                }
+                out[2 * k] += channel.coefficient
+                    * (direction_factor * ev + mean_factor * em + delta_factor * ed);
+            }
+        }
+        out.iter().all(|value| value.is_finite())
     }
 }
 

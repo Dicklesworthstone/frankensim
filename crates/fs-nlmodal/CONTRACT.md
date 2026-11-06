@@ -18,15 +18,34 @@ the crash cascade with structurally exact energy accounting.
   fs-phs `modal_bank` (`[q, p]` interleaved).
   `validate()` owns frequency/channel admission for `assemble` and
   consumers that retain this storage inside multiport/full-viscosity systems.
-  Its Gonzalez midpoint energy remainder is evaluated directly as
-  `sum_j c_j/4 (d^T E_j d) (m^T E_j d)`, where `d = q1-q0` and
-  `m = (q1+q0)/2`; every quadratic term contributes exactly zero.
-  This retains small resolved restoring forces beside large stored modal
-  energy without subtracting total endpoint energies. It uses one triangle
-  traversal per symmetric stress channel and no per-evaluation allocation,
-  through the existing fs-phs residual and analytic-tangent interface.
-  Admission-sized coupling asymmetry retains its small energy-gradient
-  remainder as well.
+  Exactly symmetric channels own the complete average-vector-field discrete
+  gradient through the existing fs-phs constitutive interface. With
+  `d=q1-q0` and midpoint `m`, each quartic channel integrates its original
+  cubic force exactly as
+  `c [(m^T E m + d^T E d/12) E m + (m^T E d/6) E d]`.
+  The kinetic efforts stay equal to the mean momenta; a channel's null
+  directions and unrelated modes receive no artificial elastic correction.
+  The source also supplies the analytic endpoint action
+  `integral_0^1 t Hessian(H)(a+t(b-a)) v dt`, distinct from the continuous
+  tangent. Existing direct-sum composition and prepared analytic Newton use
+  this action without a separate model, numerical quadrature, finite
+  differences, dense Hessian construction, or evaluation allocation.
+  Both force and endpoint action cost O(stress count × mode count²) with
+  fixed traversal and constant temporary memory. Public model data and
+  endpoint extents are checked; invalid/nonfinite arithmetic refuses.
+  Admission-sized asymmetry retains the existing Gonzalez path, because
+  its coded effort is not exactly the Hamiltonian gradient. No source
+  coefficients are silently symmetrized to manufacture constitutive support.
+  Independent energy accounting retains the complete midpoint remainder.
+  Let `o=(q0-m)+(q1-m)`, `D=d^T E d`, `O=o^T E o`, `C=d^T E o`,
+  `M=m^T E d`, `N=m^T E o`, and `S=m^T E m`. Each symmetric quartic
+  channel contributes `c [(M+C/2)(N+(D+O)/4)+S C/2]`; quadratic modal
+  terms contribute their represented-midpoint offsets as well. At an exact
+  midpoint this reduces to `c D M/4`, with zero quadratic remainder.
+  This retains small resolved work beside large stored modal energy without
+  subtracting total endpoint energies. It uses one triangle traversal per
+  stress channel and no per-evaluation allocation. Admission-sized coupling
+  asymmetry retains its small energy-gradient remainder as well.
   `hessian_action(state, direction, out)` supplies the exact continuous
   directional derivative of this same effort law for harmonic-balance and
   variational solvers. Each symmetric channel contributes
@@ -375,9 +394,17 @@ checks, not experimental material-damping validation.
 
 The nonlinear modal battery also checks a resolved quartic force beside an
 unchanged high-energy mode against an independently factored scalar divided
-difference, and coupled-channel finite-step work against two-node Gauss
-integration of the ordinary cubic gradient, including time reversal and
-the zero-increment limit.
+difference, and every component of the coupled-channel finite-step effort
+against two-node Gauss integration of the ordinary cubic gradient, including
+time reversal and the zero-increment limit. Rank-one channels preserve their
+null directions, uncoupled modal forces and physical momentum efforts beside
+large kinetic storage. Five-point polynomial derivatives check the complete
+endpoint tangent; coincidence recovers half the continuous Hessian. Actual
+prepared analytic steps retain the kinematic velocity relation, independent
+source work and viscous heat without a fallback tangent. Adjacent-float
+midpoint tests pin both elastic and kinetic remainders. These G0/G1/G3 checks
+concern the retained model and stepping equations, not unrestricted timestep
+accuracy, convergence of the mode/stress truncation, or experimental fidelity.
 
 `src/longitudinal/relaxation.rs` tests compare original-arm heat to independent
 spatial integrals, retain identical ordinary updates, verify work/storage

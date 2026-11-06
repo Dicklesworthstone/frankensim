@@ -272,9 +272,8 @@ fn resolved_nonlinear_force_survives_unchanged_high_energy_modes() {
     }
 }
 
-#[test]
-fn coupled_quartic_discrete_work_matches_independent_gauss_integral() {
-    let storage = SosModalStorage {
+fn coupled_quartic_storage() -> SosModalStorage {
+    SosModalStorage {
         omegas: vec![2.0, 3.0, 5.0],
         channels: vec![
             StressChannel {
@@ -286,7 +285,12 @@ fn coupled_quartic_discrete_work_matches_independent_gauss_integral() {
                 coupling: vec![1.0, -0.5, 0.0, -0.5, 2.0, 0.25, 0.0, 0.25, 1.0],
             },
         ],
-    };
+    }
+}
+
+#[test]
+fn coupled_quartic_discrete_work_matches_independent_gauss_integral() {
+    let storage = coupled_quartic_storage();
     let a = [0.2, -0.3, -0.4, 0.7, 0.8, -0.2];
     let b = [-0.5, 0.1, 0.6, -0.4, 0.3, 0.9];
     let mut points = [[0.0; 6]; 2];
@@ -304,6 +308,15 @@ fn coupled_quartic_discrete_work_matches_independent_gauss_integral() {
         .map(|k| f64::midpoint(gradients[0][k], gradients[1][k]) * (b[k] - a[k]))
         .sum();
     let dg = fs_phs::discrete_gradient(&storage, &a, &b);
+    assert!(storage.discrete_gradient_rule().is_some());
+    for k in 0..a.len() {
+        let expected = f64::midpoint(gradients[0][k], gradients[1][k]);
+        assert!(
+            (dg[k] - expected).abs() < 3.0e-14 * (1.0 + expected.abs()),
+            "coordinate {k}: force integral {} versus {expected}",
+            dg[k]
+        );
+    }
     let discrete_work: f64 = (0..a.len()).map(|k| dg[k] * (b[k] - a[k])).sum();
     assert!((discrete_work - work).abs() < 2.0e-14 * work.abs());
     let reverse = fs_phs::discrete_gradient(&storage, &b, &a);
@@ -317,6 +330,160 @@ fn coupled_quartic_discrete_work_matches_independent_gauss_integral() {
 }
 
 #[test]
+fn channel_force_keeps_physical_velocities_and_null_modal_directions() {
+    // E = v*v^T, v=[1,-2,0]. Neither the third coordinate nor [2,1,0]
+    // stretches this channel. Vary all momenta and the uncoupled mode while
+    // changing the elastic deformation: no elastic work may enter those rows.
+    let storage = SosModalStorage {
+        omegas: vec![2.0, 3.0, 5.0],
+        channels: vec![StressChannel {
+            coefficient: 3.0,
+            coupling: vec![1.0, -2.0, 0.0, -2.0, 4.0, 0.0, 0.0, 0.0, 0.0],
+        }],
+    };
+    let a = [0.75, -0.3, -0.25, 0.7, 2.0, 1.0e9];
+    let b = [-0.5, 0.6, 0.125, -0.4, 2.2, 1.0e9 + 4.0];
+    let effort = fs_phs::discrete_gradient(&storage, &a, &b);
+    for k in 0..3 {
+        assert_eq!(effort[2 * k + 1], f64::midpoint(a[2 * k + 1], b[2 * k + 1]));
+    }
+    let elastic0 = effort[0] - 4.0 * f64::midpoint(a[0], b[0]);
+    let elastic1 = effort[2] - 9.0 * f64::midpoint(a[2], b[2]);
+    assert!((2.0 * elastic0 + elastic1).abs() < 2.0e-14);
+    assert_eq!(effort[4], 25.0 * f64::midpoint(a[4], b[4]));
+    // Independent scalar polarization of V=3*(q0-2*q1)^4/4.
+    let left = a[0] - 2.0 * a[2];
+    let right = b[0] - 2.0 * b[2];
+    let expected = 0.75 * (left + right) * (left * left + right * right);
+    assert!((elastic0 - expected).abs() < 2.0e-14);
+    let work = elastic0 * (b[0] - a[0]) + elastic1 * (b[2] - a[2]);
+    assert!((work - 0.75 * (right.powi(4) - left.powi(4))).abs() < 3.0e-14);
+}
+
+#[test]
+fn modal_endpoint_tangent_differentiates_the_channel_force_integral() {
+    let storage = coupled_quartic_storage();
+    let rule = storage.discrete_gradient_rule().unwrap();
+    let a = [0.2, -0.3, -0.4, 0.7, 0.8, -0.2];
+    let direction = [0.7, -0.2, -0.9, 0.3, 0.4, 0.1];
+    for b in [[-0.5, 0.1, 0.6, -0.4, 0.3, 0.9], a, a.map(|v| -v)] {
+        let mut action = [f64::NAN; 6];
+        assert!(rule.end_jacobian_action(&a, &b, &direction, &mut action));
+        // The owned effort is cubic in b. This independent five-point
+        // directional derivative has no polynomial truncation error.
+        let h = 0.001;
+        let probes: Vec<_> = [-2.0, -1.0, 1.0, 2.0]
+            .into_iter()
+            .map(|scale| {
+                let point = std::array::from_fn::<_, 6, _>(|k| b[k] + scale * h * direction[k]);
+                fs_phs::discrete_gradient(&storage, &a, &point)
+            })
+            .collect();
+        for k in 0..6 {
+            let expected = (probes[0][k] - 8.0 * probes[1][k] + 8.0 * probes[2][k] - probes[3][k])
+                / (12.0 * h);
+            assert!(
+                (action[k] - expected).abs() < 3.0e-11 * (1.0 + expected.abs()),
+                "coordinate {k}: endpoint tangent {} versus {expected}",
+                action[k]
+            );
+        }
+        if b == a {
+            let mut continuous = [0.0; 6];
+            storage
+                .hessian_action(&a, &direction, &mut continuous)
+                .unwrap();
+            for k in 0..6 {
+                assert!((action[k] - 0.5 * continuous[k]).abs() < 2.0e-13);
+            }
+        }
+    }
+    let mut out = [0.0; 6];
+    assert!(!rule.end_jacobian_action(&a[..5], &a, &direction, &mut out));
+    assert!(!rule.end_jacobian_action(&a, &a, &[f64::NAN; 6], &mut out));
+    assert!(!rule.end_jacobian_action(&a, &[1.0e200; 6], &direction, &mut out));
+}
+
+#[test]
+fn prepared_analytic_modal_steps_keep_kinematics_work_and_physical_heat() {
+    let source = coupled_quartic_storage();
+    let omegas = source.omegas.clone();
+    let zetas = [0.02, 0.01, 0.03];
+    let weights = [1.0, -0.5, 0.2];
+    let system = assemble(source, &zetas, &weights).unwrap();
+    let mut workspace = fs_phs::StepWorkspace::new(&system).unwrap();
+    workspace.set_iteration_limit(8).unwrap();
+    let (dt, force) = (0.005, 0.7);
+    let mut state = [0.2, -0.3, -0.4, 0.7, 0.8, -0.2];
+    for _ in 0..40 {
+        let (mut next, mut output) = ([0.0; 6], [0.0]);
+        let record = workspace
+            .step_into_analytic(
+                &system,
+                &state,
+                &[force],
+                dt,
+                &mut next,
+                &mut output,
+                &|_, _, _| panic!("modal source must supply its own endpoint tangent"),
+            )
+            .unwrap();
+        let ordinary = step(&system, &state, &[force], dt).unwrap();
+        for k in 0..6 {
+            assert!((next[k] - ordinary.x[k]).abs() < 3.0e-13);
+        }
+        let mut work = 0.0;
+        let mut heat = 0.0;
+        for k in 0..3 {
+            let velocity = f64::midpoint(state[2 * k + 1], next[2 * k + 1]);
+            assert!(((next[2 * k] - state[2 * k]) / dt - velocity).abs() < 2.0e-11);
+            work += force * weights[k] * (next[2 * k] - state[2 * k]);
+            heat += dt * 2.0 * zetas[k] * omegas[k] * velocity * velocity;
+        }
+        assert!((record.supplied - work).abs() < 2.0e-13);
+        assert!((record.dissipated - heat).abs() < 2.0e-13);
+        assert!((record.delta_h + heat - work).abs() < 2.0e-12);
+        assert!(record.newton_iters <= 8);
+        state = next;
+    }
+}
+
+#[test]
+fn modal_energy_remainder_retains_rounded_midpoint_offsets() {
+    let storage = SosModalStorage {
+        omegas: vec![2.0],
+        channels: vec![StressChannel {
+            coefficient: 3.0,
+            coupling: vec![1.0],
+        }],
+    };
+    let epsilon = f64::EPSILON;
+    let a = [1.0, 1.0];
+    let b = [1.0 + epsilon, 1.0 + epsilon];
+    let midpoint = [f64::midpoint(a[0], b[0]), f64::midpoint(a[1], b[1])];
+    assert_eq!(midpoint, a);
+    // Direct binomial expansion of p²/2+2q²+3q⁴/4 about q=p=1.
+    let expected = 7.0 * epsilon.powi(2) + 3.0 * epsilon.powi(3) + 0.75 * epsilon.powi(4);
+    let remainder = storage
+        .midpoint_energy_remainder(&a, &b, &midpoint)
+        .unwrap();
+    assert!((remainder - expected).abs() < 1.0e-45);
+    assert_eq!(
+        storage.midpoint_energy_remainder(&b, &a, &midpoint),
+        Some(-remainder)
+    );
+    let momentum = 9_007_199_254_740_992.0;
+    assert_eq!(
+        storage.midpoint_energy_remainder(
+            &[0.0, momentum],
+            &[0.0, momentum + 2.0],
+            &[0.0, momentum]
+        ),
+        Some(2.0)
+    );
+}
+
+#[test]
 fn admitted_roundoff_asymmetry_preserves_discrete_work() {
     let storage = SosModalStorage {
         omegas: vec![2.0, 3.0],
@@ -327,6 +494,7 @@ fn admitted_roundoff_asymmetry_preserves_discrete_work() {
     };
     let a = [0.2, -0.3, -0.4, 0.7];
     let b = [-0.5, 0.1, 0.6, -0.4];
+    assert!(storage.discrete_gradient_rule().is_none());
     let expected = storage.hamiltonian(&b) - storage.hamiltonian(&a);
     let dg = fs_phs::discrete_gradient(&storage, &a, &b);
     let work: f64 = dg.iter().enumerate().map(|(k, g)| g * (b[k] - a[k])).sum();
