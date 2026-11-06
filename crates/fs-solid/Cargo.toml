@@ -42,6 +42,7 @@ fs-sparse = { path = "../fs-sparse" }
 fs-time = { path = "../fs-time" }
 
 [dev-dependencies]
+fs-thermochem = { path = "../fs-thermochem" }
 fs-rand = { path = "../fs-rand" }
 fs-alloc = { path = "../fs-alloc" }
 fs-ivl = { path = "../fs-ivl" }

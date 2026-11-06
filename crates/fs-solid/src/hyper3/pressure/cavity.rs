@@ -29,10 +29,12 @@ use std::sync::Arc;
 use fs_exec::Cx;
 use fs_material::thermochemical_gas::energy::entropy::{GasEntropyError, GasEntropySolve};
 use fs_material::thermochemical_gas::energy::parcel::ClosedGasParcel;
+use fs_math::dd::Dd;
 
 mod tangent;
 pub use tangent::TetCavityGasTangent;
 pub(crate) mod equilibrium;
+pub use equilibrium::AdiabaticCavity;
 
 use super::{
     ClosedTetPressureSurface, HyperTetError, area_vector, checkpoint, cross, difference, dot,
@@ -51,6 +53,7 @@ pub struct ClosedTetCavity {
     nodes: Vec<usize>,
     // Gas-outward triangles, indexing nodes instead of the entire mesh.
     local_faces: Vec<[usize; 3]>,
+    reference_positions_m: Vec<[f64; 3]>,
     reference_volume_m3: f64,
 }
 
@@ -87,6 +90,9 @@ pub struct TetCavityGasLoad {
     pub force_tangent: TetCavityGasTangent,
     /// Delta U_gas + p_exterior Delta V [J] from the reference cavity state.
     pub potential_change_j: f64,
+    // Retain the already evaluated compact geometry for original-volume work
+    // between Newton trials. No second mesh admission or position copy is needed.
+    positions_m: Vec<[f64; 3]>,
 }
 
 impl ClosedTetCavity {
@@ -195,6 +201,7 @@ impl ClosedTetCavity {
             solid_face_indices,
             nodes,
             local_faces,
+            reference_positions_m: positions,
             reference_volume_m3,
         };
         checkpoint(cx)?;
@@ -233,15 +240,7 @@ impl ClosedTetCavity {
         displacement_m: &[f64],
         cx: &Cx<'_>,
     ) -> Result<TetCavityVolume<'_>, HyperTetError> {
-        let (positions, _) =
-            self.surface
-                .positions_and_volume_about(displacement_m, self.nodes[0], cx)?;
-        let mut positions_m = Vec::with_capacity(self.nodes.len());
-        for &node in &self.nodes {
-            checkpoint(cx)?;
-            positions_m.push(positions[node]);
-        }
-        let volume_m3 = enclosed_volume(&positions_m, &self.local_faces, cx)?;
+        let (positions_m, volume_m3) = self.positions_and_volume(displacement_m, cx)?;
         let mut gradient_m2 = vec![0.0; 3 * self.nodes.len()];
         for face in &self.local_faces {
             checkpoint(cx)?;
@@ -261,6 +260,54 @@ impl ClosedTetCavity {
             volume_m3,
             gradient_m2,
         })
+    }
+
+    fn positions_and_volume(
+        &self, displacement_m: &[f64], cx: &Cx<'_>,
+    ) -> Result<(Vec<[f64; 3]>, f64), HyperTetError> {
+        let (positions, _) = self.surface
+            .positions_and_volume_about(displacement_m, self.nodes[0], cx)?;
+        let mut compact = Vec::with_capacity(self.nodes.len());
+        for &node in &self.nodes {
+            checkpoint(cx)?;
+            compact.push(positions[node]);
+        }
+        let volume = enclosed_volume(&compact, &self.local_faces, cx)?;
+        Ok((compact, volume))
+    }
+
+    /// Original gas-volume change, retaining changes hidden by rounded totals.
+    ///
+    /// Both complete solid configurations and positive cavity volumes are
+    /// admitted first. Each oriented boundary cone then uses the same polarized
+    /// cubic determinant as the pressure owner. This is endpoint volume work,
+    /// not a sampled pressure-force integral or a material-volume difference.
+    pub fn volume_change_m3(
+        &self, before_m: &[f64], after_m: &[f64], cx: &Cx<'_>,
+    ) -> Result<f64, HyperTetError> {
+        let (before, _) = self.positions_and_volume(before_m, cx)?;
+        let (after, _) = self.positions_and_volume(after_m, cx)?;
+        finite(self.volume_increment(&before, &after, cx)?.to_f64())
+    }
+
+    fn volume_increment(
+        &self, before: &[[f64; 3]], after: &[[f64; 3]], cx: &Cx<'_>,
+    ) -> Result<Dd, HyperTetError> {
+        checkpoint(cx)?;
+        if before.len() != self.nodes.len() || after.len() != self.nodes.len() {
+            return Err(invalid("cavity volume increment has the wrong coordinate chart"));
+        }
+        let mut change = Dd::ZERO;
+        for &[a, b, c] in &self.local_faces {
+            checkpoint(cx)?;
+            change = change + super::signed_volume_increment(
+                [[0.0; 3], before[a], before[b], before[c]],
+                [[0.0; 3], after[a], after[b], after[c]],
+            )?;
+        }
+        finite(change.to_f64())?;
+        checkpoint(cx)?;
+        Ok(change)
     }
 
     /// Pull the original closed gas through this cavity's exact nonlinear volume.
@@ -343,10 +390,13 @@ impl ClosedTetCavity {
             load.pressure_response().pressure_volume_derivative_pa_m3,
             cx,
         )?;
-        let potential_change_j = finite(
-            volume_step.stored_energy_change_j
-                + exterior_pressure_pa * finite(geometry.volume_m3 - self.reference_volume_m3)?,
-        )?;
+        let exterior_work = if exterior_pressure_pa == 0.0 { Dd::ZERO } else {
+            Dd::from_f64(exterior_pressure_pa) * self.volume_increment(
+                &self.reference_positions_m, &geometry.positions_m, cx,
+            )?
+        };
+        let potential_change_j = finite((Dd::from_f64(volume_step.stored_energy_change_j)
+            + exterior_work).to_f64())?;
         let net_pressure_pa = load.net_pressure_pa();
         checkpoint(cx)?;
         Ok(TetCavityGasLoad {
@@ -356,6 +406,7 @@ impl ClosedTetCavity {
             force_n,
             force_tangent: tangent,
             potential_change_j,
+            positions_m: geometry.positions_m,
         })
     }
     /// Uniform differential gas pressure in canonical SOLID face order.
@@ -397,10 +448,10 @@ impl ClosedTetCavity {
     ) -> Result<f64, HyperTetError> {
         checkpoint(cx)?;
         finite(differential_pressure_pa)?;
-        let before = self.evaluate(before_m, cx)?.volume_m3();
-        let after = self.evaluate(after_m, cx)?.volume_m3();
-        checkpoint(cx)?;
-        finite(differential_pressure_pa * finite(after - before)?)
+        let (before, _) = self.positions_and_volume(before_m, cx)?;
+        let (after, _) = self.positions_and_volume(after_m, cx)?;
+        let change = self.volume_increment(&before, &after, cx)?;
+        finite((Dd::from_f64(differential_pressure_pa) * change).to_f64())
     }
 }
 

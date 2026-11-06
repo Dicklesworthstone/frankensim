@@ -9,6 +9,11 @@ use fs_solid::hyper3::pressure::{ClosedTetPressureSurface, TetPressure};
 use fs_solid::hyper3::{HyperTetError, HyperTetProblem, HyperTetSettings, HyperelasticLawField};
 use fs_solid::linear3::TetAssemblyBudget;
 
+#[path = "hyper3_cavity/gas_fixture.rs"]
+mod gas_fixture;
+#[path = "hyper3_cavity/composed_loads.rs"]
+mod composed_loads;
+
 fn with_cx<R>(f: impl FnOnce(&CancelGate, &Cx<'_>) -> R) -> R {
     let gate = CancelGate::new();
     ArenaPool::new(ArenaConfig::default()).scope(|arena| {
@@ -75,6 +80,16 @@ fn shell() -> (Vec<[f64; 3]>, Vec<[usize; 4]>) {
         tets.push([a + 4, b + 4, b, c]);
         tets.push([a + 4, a, b, c]);
     }
+    // Surface geometry permits either winding; the native solid reference
+    // chart requires every tetrahedron to have a positive determinant.
+    for tet in &mut tets {
+        let a = sub(nodes[tet[1]], nodes[tet[0]]);
+        let b = sub(nodes[tet[2]], nodes[tet[0]]);
+        let c = sub(nodes[tet[3]], nodes[tet[0]]);
+        if dot(a, cross(b, c)) < 0.0 {
+            tet.swap(0, 1);
+        }
+    }
     (nodes, tets)
 }
 
@@ -138,6 +153,32 @@ fn affine_displacement(nodes: &[[f64; 3]]) -> Vec<f64> {
 
 fn current_inner(nodes: &[[f64; 3]], u: &[f64]) -> [[f64; 3]; 4] {
     std::array::from_fn(|i| std::array::from_fn(|axis| nodes[4 + i][axis] + u[3 * (4 + i) + axis]))
+}
+
+#[test]
+fn g1_cavity_work_retains_quadratic_volume_change_below_endpoint_resolution() {
+    with_cx(|_, cx| {
+        let (nodes, tets) = shell();
+        let epsilon = 2.0_f64.powi(-27);
+        let mut after = vec![0.0; 24];
+        after[3 * 5 + 1] = epsilon;
+        after[3 * 6] = epsilon;
+        let before = vec![0.0; 24];
+        let pressure = 6.0 / (epsilon * epsilon);
+        // Independent inner determinant: det([[1,e,0],[e,1,0],[0,0,1]])
+        // changes by -e^2 although both scalar cavity volumes round alike.
+        for shift in [0.0, 2.0_f64.powi(40)] {
+            let translated: Vec<_> = nodes.iter().map(|x| x.map(|v| v + shift)).collect();
+            let cavity = cavity(&translated, &tets, cx);
+            assert_eq!(cavity.evaluate(&before, cx).unwrap().volume_m3(),
+                cavity.evaluate(&after, cx).unwrap().volume_m3());
+            let change = cavity.volume_change_m3(&before, &after, cx).unwrap();
+            near(change, -epsilon * epsilon / 6.0, 1e-31);
+            near(cavity.held_pressure_work_j(&before, &after, pressure, cx).unwrap(), -1.0, 2e-15);
+            near(cavity.held_pressure_work_j(&after, &before, pressure, cx).unwrap(), 1.0, 2e-15);
+            assert_eq!(cavity.volume_change_m3(&before, &before, cx).unwrap(), 0.0);
+        }
+    });
 }
 
 #[test]

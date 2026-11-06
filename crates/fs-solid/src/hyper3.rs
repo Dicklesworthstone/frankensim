@@ -1131,16 +1131,62 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
         controls: fs_material::thermochemical_gas::energy::entropy::GasEntropySolve,
         cx: &Cx<'_>,
     ) -> Result<HyperTetSolution, HyperTetError> {
+        let cavity = pressure::cavity::equilibrium::AdiabaticCavity {
+            cavity, reference: gas, exterior_pressure_pa, controls,
+        };
+        self.solve_with_adiabatic_cavity_loads(cavity, None, None, cx)
+    }
+
+    /// Equilibrate a sealed gas cavity, stationary gravity and boundary pressure.
+    ///
+    /// All loads act on the same current solid configuration and enter the
+    /// native force balance, tangent, load continuation and support reactions
+    /// exactly once. Gas calorics and volume work, material storage and an
+    /// available gravity-source increment share conservative globalization.
+    /// A per-face boundary pressure retains its nonsymmetric residual-based
+    /// globalization. The optional boundary pressure is an ADDITIONAL load;
+    /// the cavity already includes its declared exterior pressure.
+    ///
+    /// Gravity retains the original elementwise or nodal reference mass, and
+    /// every gas trial retains the original parcel's mass, composition, source
+    /// law and isentrope. No load is frozen at its reference configuration.
+    /// The borrowed source parcels and callback bindings remain unchanged.
+    ///
+    /// # Errors
+    /// A mismatched reference chart, invalid gas/density/pressure source,
+    /// source-domain exit, cancellation or native equilibrium refusal.
+    pub fn solve_with_adiabatic_cavity_loads(
+        &self,
+        cavity: pressure::cavity::AdiabaticCavity<'_>,
+        gravity: Option<(
+            gravity::ReferenceGravityDensity<'_>,
+            gravity::StationaryGravity3<'_>,
+        )>,
+        pressure: Option<(
+            &pressure::ClosedTetPressureSurface,
+            pressure::TetPressure<'_>,
+        )>,
+        cx: &Cx<'_>,
+    ) -> Result<HyperTetSolution, HyperTetError> {
         checkpoint(cx)?;
-        if !cavity.surface().matches_reference(self.nodes_m, self.tetrahedra) {
+        if !cavity.cavity.surface().matches_reference(self.nodes_m, self.tetrahedra) {
             return Err(HyperTetError::InvalidInput {
                 what: "sealed cavity requires the exact solid reference chart".into(),
             });
         }
-        let cavity = pressure::cavity::equilibrium::AdiabaticCavity {
-            cavity, reference: gas, exterior_pressure_pa, controls,
+        let pressure = if let Some((surface, applied)) = pressure {
+            if !surface.matches_reference(self.nodes_m, self.tetrahedra) {
+                return Err(HyperTetError::InvalidInput {
+                    what: "the exact reference pressure surface is required".into(),
+                });
+            }
+            (!surface.validate_pressure(applied, cx)?).then_some((surface, applied))
+        } else {
+            None
         };
-        self.solve_loaded_from_with_cavity(None, None, None, None, None, Some(cavity), cx)
+        self.solve_loaded_from_with_cavity(
+            None, None, pressure, gravity, None, Some(cavity), cx,
+        )
     }
 
     /// Solve dead loads and a stationary conservative gravity field.
@@ -1785,9 +1831,25 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
                                     Dd::from_f64(trial_gravity_potential)
                                         - Dd::from_f64(current_gravity_potential)
                                 });
-                            let cavity_change = Dd::from_f64(load)
-                                * (Dd::from_f64(trial_cavity.as_ref().map_or(0.0, |s| s.potential_change_j))
-                                    - Dd::from_f64(current_cavity.as_ref().map_or(0.0, |s| s.potential_change_j)));
+                            let cavity_change = if let Some(source) = cavity {
+                                match source.potential_increment(
+                                    current_cavity.as_ref().expect("bound cavity current load"),
+                                    trial_cavity.as_ref().expect("bound cavity trial load"),
+                                    cx,
+                                ) {
+                                    Ok(change) => Dd::from_f64(load) * change,
+                                    Err(HyperTetError::Cancelled) => {
+                                        return Err(HyperTetError::Cancelled);
+                                    }
+                                    Err(_) => {
+                                        alpha *= 0.5;
+                                        record.backtracks += 1;
+                                        continue;
+                                    }
+                                }
+                            } else {
+                                Dd::ZERO
+                            };
                             let change = (material_change + inertia_change - dead_work
                                 + Dd::from_f64(pressure_change) + gravity_change + cavity_change).to_f64();
                             let roundoff = 1e-12
@@ -1798,19 +1860,16 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
                                     .max(gravity_change.to_f64().abs())
                                     .max(cavity_change.to_f64().abs())
                                     .max((alpha * slope).abs());
-                            // A legacy gravity callback and cavity endpoint
-                            // potentials may still have unresolved subtraction.
-                            // Require actual residual decrease in that case;
-                            // direct source increments need no datum-sized bound.
-                            let mut endpoint_roundoff = if trial_gravity_increment.is_some() {
+                            // A legacy gravity callback may still have unresolved
+                            // endpoint subtraction. Require actual residual
+                            // decrease in that case; direct source increments
+                            // need no datum-sized bound.
+                            let endpoint_roundoff = if trial_gravity_increment.is_some() {
                                 0.0
                             } else {
                                 64.0 * f64::EPSILON * load
                                     * current_gravity_potential.abs().max(trial_gravity_potential.abs())
                             };
-                            endpoint_roundoff += 64.0 * f64::EPSILON * load
-                                * current_cavity.as_ref().map_or(0.0, |s| s.potential_change_j.abs())
-                                    .max(trial_cavity.as_ref().map_or(0.0, |s| s.potential_change_j.abs()));
                             let armijo_bound = 1e-4 * alpha * slope + roundoff;
                             // Elastic and gravity work can each be large while
                             // their NET decrement is tiny. The relevant scale

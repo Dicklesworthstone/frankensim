@@ -5045,9 +5045,10 @@ depends on the actual changes and work, so an additive material energy datum
 does not relax the decision. Uniform, affine, free-surface and stratified
 pressure all use their original pressure owner's direct work. A bound gravity
 source can supply its direct potential change in the trial load sweep. Legacy
-gravity callbacks and cavity sources still expose endpoint potentials here:
-when their subtraction cannot resolve the decision, an actual residual decrease
-is required. Custom material
+gravity callbacks still expose endpoint potentials here: when their subtraction
+cannot resolve the decision, an actual residual decrease is required. Sealed
+cavities use original gas caloric increments and polarized enclosed-volume work
+between their already admitted trial states. Custom material
 adapters that retain the default endpoint subtraction
 retain its precision limits. Force equilibrium and material/load admission are
 unchanged. Numerical solve regressions retain the same nonlinear path with a
@@ -7149,6 +7150,30 @@ O(surface nonzeros + solid coordinates) storage and application work. Entry
 access and `apply` include both terms; `apply_into` uses caller-owned output
 and scratch without heap allocation, and leaves output unchanged on refusal.
 The sparse `geometric_part` alone is not the complete gas stiffness.
+
+`ClosedTetCavity::volume_change_m3` and held-pressure work use compensated
+polarized boundary-cone determinants before subtracting any rounded volume
+totals. Both original solid configurations and positive gas volumes remain
+admitted. The gas load retains its already allocated compact boundary positions;
+static trials integrate `m Delta u + p_ext Delta V` between these cached
+endpoints. The original species calorics cancel common formation references,
+with complete source model, inventory and auxiliary-coordinate identity checked.
+This avoids both subtraction of reference-relative potentials and another
+entropy solve or complete mesh admission. Thermodynamic endpoint accuracy still
+depends on the declared source entropy controls.
+
+`AdiabaticCavity` is a borrowed binding for the original source and geometry.
+`solve_with_adiabatic_cavity_loads` composes it with stationary gravity and
+optional native boundary pressure in one Newton solve. All loads share the
+current displacement, stiffness, continuation factor and support reactions.
+The additional boundary pressure is explicit: applying ambient pressure to the
+complete material boundary together with cavity pressure minus that same ambient
+pressure leaves gas pressure acting once inside and ambient pressure once outside.
+The gas remains on its original reversible isentrope with fixed mass and
+composition; this static composition adds no gas transport or physical time step.
+Focused native regressions exercise original nonlinear calorics, direct volume
+and gas work, source refusal and a gas-filled hollow solid under ambient pressure
+and spatial gravity against independent equilibrium and gas-law balances.
 
 
 Preparation rejects duplicate, out-of-range, open, disconnected and outer-shell
