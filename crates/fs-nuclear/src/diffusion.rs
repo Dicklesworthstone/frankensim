@@ -32,6 +32,9 @@ use fs_la::decay::{
 use crate::irradiation::{GroupFlux, NeutronGroups};
 use crate::{Accumulator, FissionError, nonnegative, positive, sum};
 
+/// Composition-dependent neutron/depletion coupling on this same geometry.
+pub mod burnup;
+
 /// An explicitly identified stationary precursor family. Each disappearance
 /// emits one delayed neutron distributed over the supplied group spectrum.
 #[derive(Clone, Debug, PartialEq)]

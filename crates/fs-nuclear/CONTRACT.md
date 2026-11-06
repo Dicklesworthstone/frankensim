@@ -1157,3 +1157,59 @@ and upward defect export. The final merged actual-owner nuclear lane passed
 188 tests, including the separately integrated burnup/thermal paths and current
 uniform-production additions. Full workspace Cargo and evaluated reactor
 benchmarks remain separate validation gates.
+
+## Spatial neutrons, finite burnup and original material heat
+
+`diffusion::burnup::DiffusionBurnupState` binds every neutron-induced channel
+of each original `BurnupInventory` to one diffusion reaction per incident group.
+Grid and fission/capture identity must agree; missing or duplicate bindings
+refuse. Unbound diffusion channels are explicitly fixed background interactions
+whose target inventories are not tracked by this coupled owner.
+
+At the actual cell temperature, each bound channel uses the original fixed or
+tabulated microscopic data and `Sigma = mean_parent_population * sigma(T)/V`.
+A bounded relaxed Picard iteration alternates the same initial neutron history
+and the same initial product inventories: diffusion supplies integrated fluence,
+original burnup consumes its mean group flux, and integrated parent removals
+supply the next mean parent populations. Products born and transformed during
+the interval remain in the original burnup propagator. A candidate is accepted
+only when the sum of absolute neutron/burnup reaction-count mismatches fits the
+separate caller allowance. Failed iterations never become physical substeps.
+
+The mismatch comparison retains compensated low parts across incident groups,
+and positive per-cell/global defect exports round upward where necessary. A
+small group's reaction count therefore cannot disappear next to a much larger
+channel count. Nonconvergence, numerical/work refusal or cancellation publishes
+neither the neutron field nor any fuel/product history. This closes the discrete
+channel accounts within the supplied allowance; frozen material temperature,
+within-group shapes and mean within-step flux remain model approximations.
+Timestep refinement and suitable nuclear data remain necessary.
+
+`thermal::DiffusionCellSource::bind` maps the complete spatial cohort to distinct
+original thermal cells and materials. The shared `NuclearHeatSource::trial_sources`
+hook advances the neutron field once over the final interval selected by the
+original thermal owner. Its default preserves independent source laws. Cell
+handles share one immutable accepted cohort through Arc; a partial or mixed
+cohort refuses. Number-density volumes must match the original cell geometries.
+No second heat integrator, source clock, caloric law or bulk-mass update is used.
+
+The existing `NuclearHeating` transaction credits each cell's integrated
+locally deposited energy, keeps radiation and escaped channels separate, checks
+the prospective material-domain endpoints, and publishes all cell histories
+atomically. Source scheduling, current uniform-production/kinetic adapters and
+native thermal boundary/contact work retain their original owners. The spatial
+cohort currently tracks closed nuclear inventories; supplied-nuclide schedules
+remain available through the existing production source types.
+
+Six coupled-state regressions cover finite-fuel neutron multiplication and
+calorimetry, an independent nonlinear analytical solution under refinement,
+temperature-dependent capture and spatial current, full channel binding,
+nonconvergence/domain/cancellation rollback, and retained small-group mismatch.
+Three native thermal regressions cover one shared neutron history across cells
+in different index orders, additive boundary heat, unchanged mass and calorics,
+geometry/coverage refusal, and joint rollback. The final actual-owner run
+compiled production fs-nuclear with thermal support and the exact fs-couple
+fission facade, then passed all 188 nuclear tests, including concurrent
+uniform-production additions. The merged numerical owner separately passed all
+50 tests. Full workspace Cargo, large-scale transport performance and evaluated
+reactor benchmarks were not established by these focused source builds.

@@ -21,6 +21,9 @@ mod burnup_production_tests;
 #[path = "temperature_tests.rs"]
 mod temperature_tests;
 
+#[path = "diffusion/tests.rs"]
+mod diffusion_tests;
+
 // Manufactured caloric/source data isolate the coupling equations. These
 // coefficients are not nuclear isotope data or an empirical validation deck.
 struct LinearLaw {

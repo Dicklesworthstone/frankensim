@@ -8,8 +8,9 @@
 //! Prescribed-event sources and multigroup neutron irradiation share one clock,
 //! material binding and heat-credit transaction. Their authored transitions clip
 //! the native step exactly. Nuclear reservoirs advance over the FINAL accepted
-//! interval. Thermal transport retains its original explicit timestep and
-//! uniform-cell limitations; no neutron transport or criticality is inferred.
+//! interval. A spatial diffusion cohort advances one shared neutron field and
+//! its finite inventories before per-cell heat is credited. Thermal transport
+//! retains its original explicit timestep and uniform-cell limitations.
 
 use std::{collections::BTreeMap, sync::Arc};
 
@@ -21,6 +22,7 @@ use fs_thermal::enthalpy::{
 use crate::burnup::BurnupError;
 use crate::decay::DecayError;
 use crate::decay::activation::CaptureActivationError;
+use crate::diffusion::burnup::DiffusionBurnupError;
 use crate::kinetics::KineticsError;
 use crate::{EnergyChannels, FissionError, FissionState};
 
@@ -35,6 +37,9 @@ mod burnup;
 pub use burnup::{BurnupCellSource, BurnupHeating, BurnupHeatingBudget};
 mod burnup_production;
 pub use burnup_production::{BurnupProductionCellSource, BurnupProductionHeating};
+
+mod diffusion;
+pub use diffusion::{DiffusionCellSource, DiffusionCellStep, DiffusionHeating};
 
 mod production;
 pub use production::{DecayProductionCellSource, DecayProductionHeating};
@@ -179,6 +184,8 @@ pub enum FissionThermalError {
     Decay(DecayError),
     /// Original capture binding, coupled history or propagation refusal.
     Activation(CaptureActivationError),
+    /// Spatial neutron, finite-fuel or shared reaction-account refusal.
+    Diffusion(DiffusionBurnupError),
     /// Malformed schedule, duplicate owner or inconsistent hook sequence.
     Invalid(&'static str),
     /// A source names a cell that has not been activated.
@@ -254,6 +261,14 @@ impl From<BurnupError> for FissionThermalError {
         }
     }
 }
+impl From<DiffusionBurnupError> for FissionThermalError {
+    fn from(error: DiffusionBurnupError) -> Self {
+        match error {
+            DiffusionBurnupError::Fission(error) => Self::Fission(error),
+            other => Self::Diffusion(other),
+        }
+    }
+}
 impl std::fmt::Display for FissionThermalError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "fission/thermal coupling refused: {self:?}")
@@ -268,6 +283,7 @@ impl std::error::Error for FissionThermalError {
             Self::Burnup(error) => Some(error),
             Self::Decay(error) => Some(error),
             Self::Activation(error) => Some(error),
+            Self::Diffusion(error) => Some(error),
             _ => None,
         }
     }
@@ -341,6 +357,12 @@ impl<S: NuclearHeatSource> NuclearHeating<S> {
                     expected: source.material_id(),
                     actual: cell.material_id,
                 });
+            }
+            if source
+                .expected_volume_m3()
+                .is_some_and(|volume| volume != cell.geometry.volume_m3)
+            {
+                return Err(FissionThermalError::BindingChanged(id));
             }
             // The same kernel admits its work/tolerance budget, even when the
             // first requested thermal advance will have zero duration.
@@ -542,9 +564,8 @@ impl<S: NuclearHeatSource> DepositionObserver for NuclearHeating<S> {
                 "invalid nuclear/thermal interval",
             ));
         }
-        let mut states = Vec::with_capacity(self.sources.len());
-        let mut watts = BTreeMap::new();
-        let mut account = self.account.clone();
+        let mut source_refs = Vec::with_capacity(self.sources.len());
+        let mut temperatures = Vec::with_capacity(self.sources.len());
         for (&id, bound) in &self.sources {
             checkpoint()?;
             if bound
@@ -556,23 +577,42 @@ impl<S: NuclearHeatSource> DepositionObserver for NuclearHeating<S> {
                     "nuclear interval crosses a rate change",
                 ));
             }
-            let mut checkpoint_error = None;
-            let trial = bound.source.trial_source(
-                start_s,
-                duration_s,
-                thermal.temperature_k(id)?,
-                self.budget,
-                &mut || {
-                    checkpoint().map_err(|error| {
-                        checkpoint_error = Some(error);
-                        FissionError::Cancelled
-                    })
-                },
-            );
-            if let Some(error) = checkpoint_error {
-                return Err(error.into());
+            source_refs.push(&bound.source);
+            temperatures.push(thermal.temperature_k(id)?);
+        }
+        let mut checkpoint_error = None;
+        let trials = S::trial_sources(
+            &source_refs,
+            start_s,
+            duration_s,
+            &temperatures,
+            self.budget,
+            &mut || {
+                checkpoint().map_err(|error| {
+                    checkpoint_error = Some(error);
+                    FissionError::Cancelled
+                })
+            },
+        );
+        if let Some(error) = checkpoint_error {
+            return Err(error.into());
+        }
+        let trials = trials?;
+        if trials.len() != self.sources.len() {
+            return Err(FissionThermalError::Invalid(
+                "nuclear collection changed cell coverage",
+            ));
+        }
+        let mut states = Vec::with_capacity(self.sources.len());
+        let mut watts = BTreeMap::new();
+        let mut account = self.account.clone();
+        for ((&id, bound), (state, report)) in self.sources.iter().zip(trials) {
+            checkpoint()?;
+            if state.cell_id() != id || state.material_id() != bound.source.material_id() {
+                return Err(FissionThermalError::Invalid(
+                    "nuclear collection changed material correspondence",
+                ));
             }
-            let (state, report) = trial?;
             let power = finite(S::released(&report).deposited_j / duration_s)?;
             let credit = finite(power * duration_s)?;
             account.record::<S>(&report, credit)?;

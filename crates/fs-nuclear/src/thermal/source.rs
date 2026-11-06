@@ -25,6 +25,11 @@ pub trait NuclearHeatSource: sealed::Sealed + Clone + core::fmt::Debug {
     fn cell_id(&self) -> CellId;
     /// Original caloric material identity bound to the cell.
     fn material_id(&self) -> MaterialId;
+    /// A spatial nuclear model can bind its number-density volume to the
+    /// original thermal geometry. Local sources without geometry return None.
+    fn expected_volume_m3(&self) -> Option<f64> {
+        None
+    }
     /// Advance-wide allowance for noncancelling nuclear and coupling defects.
     fn energy_tolerance_j(budget: Self::Budget) -> f64;
     /// Optional advance-wide allowance for noncancelling population defects.
@@ -52,6 +57,31 @@ pub trait NuclearHeatSource: sealed::Sealed + Clone + core::fmt::Debug {
         budget: Self::Budget,
         checkpoint: &mut dyn FnMut() -> Result<(), FissionError>,
     ) -> Result<(Self, Self::Step), FissionThermalError>;
+    /// Prepare all cell sources over the same final thermal interval. The
+    /// default keeps independent local sources independent; a spatial source
+    /// overrides this once for its shared neutron field and inventories.
+    fn trial_sources(
+        sources: &[&Self],
+        time_s: f64,
+        duration_s: f64,
+        temperatures_k: &[f64],
+        budget: Self::Budget,
+        checkpoint: &mut dyn FnMut() -> Result<(), FissionError>,
+    ) -> Result<Vec<(Self, Self::Step)>, FissionThermalError> {
+        if sources.len() != temperatures_k.len() {
+            return Err(FissionThermalError::Invalid(
+                "one material temperature per nuclear source required",
+            ));
+        }
+        sources
+            .iter()
+            .zip(temperatures_k)
+            .map(|(source, &temperature)| {
+                checkpoint()?;
+                source.trial_source(time_s, duration_s, temperature, budget, checkpoint)
+            })
+            .collect()
+    }
     /// Actual source release over an accepted interval.
     fn released(step: &Self::Step) -> EnergyChannels;
     /// Noncancelling numerical energy-account defects over that interval.
