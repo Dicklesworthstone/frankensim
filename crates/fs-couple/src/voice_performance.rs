@@ -49,14 +49,22 @@
 //! constriction_noise <seed> <duct_radius_m>               (optional; Oldham and Ukpoho's printed constriction noise)
 //! pulse_shimmer <seed> <sd_rel>                           (optional; a per-cycle gain on the wave the tract receives)
 //! head_sphere <radius_m> <radius source without spaces>   (optional; the mouth as a cap on a rigid sphere)
+//! head_load cap                                           (optional, needs head_sphere and termination flanged; the lips see the sphere's load)
 //! ```
 //!
 //! `head_sphere` observes the mouth as a cap of its own area on a rigid sphere of that radius, centred `radius` behind
 //! the mouth plane, instead of a disk in an infinite baffle ([`crate::pcm_wav::baffled::head::HeadSphere`]: the
 //! baffled receiver's pressure through a causal FIR, `S / B`, blended to 1 above the microphone's resolved band). Only
 //! the observed pressure changes: the lips' radiation load is still the `termination` row's, which a page using it must
-//! state as a limit. The second field names where the radius is printed. The FIR's latency joins
-//! [`VoicePerformance::filter_delay_samples`].
+//! state as a limit, unless `head_load` is also present. The second field names where the radius is printed. The FIR's
+//! latency joins [`VoicePerformance::filter_delay_samples`].
+//!
+//! `head_load cap` puts the same cap's radiation load at the lips: the declared flanged load plus the cap's change on the
+//! sphere, `Z_flanged + (conj(Z_cap) - Z_piston)` ([`crate::pcm_wav::baffled::head::head_mouth_load`]), tabulated on the
+//! bins of the lines' finest rung with DC 0. The island's line, the mouth-flow line and the passive formants all read
+//! that one table. It needs the `head_sphere` row (the radius is that row's) and `termination flanged` (the table adds to
+//! that load). The receiver stays the head's `S / B` on the mouth flow, which now sees the sphere's load. Without the row
+//! every line takes exactly its old path.
 //!
 //! `constriction_noise` is an opt-in glottal source on the printed duct-constriction law of Oldham and Ukpoho (J. Sound Vib.
 //! 140(2), 1990; Guedel, AIVC Contributed Report 02, eq. 3 and Fig. 10; [`crate::turbulence_noise::ConstrictionNoise`]): a
@@ -156,9 +164,9 @@ use crate::acoustic_realize::AcousticRealizeError;
 use crate::driving_point::LineLadder;
 use crate::driving_point::outlet::mouth_flow_line;
 use crate::glottis::{
-    FoldBody, FoldCard, FoldCardSource, FoldMode, FoldRestGap, FoldShape, GlottalIsland,
+    FoldBody, FoldCard, FoldCardSource, FoldMode, FoldRestGap, FoldShape, GLOTTAL_LINE_MAX_TAPS, GlottalIsland,
 };
-use crate::pcm_wav::baffled::head::HeadSphere;
+use crate::pcm_wav::baffled::head::{HeadSphere, head_mouth_load};
 use crate::pcm_wav::baffled::{BaffledPressure, CircularOutletReceiver, RayleighMedium};
 use crate::pcm_wav::observation::PressureRenderer;
 use crate::render::RenderError;
@@ -167,7 +175,7 @@ use crate::turbulence_noise::{
     AspirationCard, ConstrictionNoise, ConstrictionNoiseCard, GlottalAspiration, GlottalJetNoise, JetNoiseCard,
     RE_CRIT_SONDHI_SCHROETER,
 };
-use fs_duct::Termination;
+use fs_duct::{MouthLoad, Termination};
 use fs_material::gas::GasState;
 use fs_material::gas_species::input::{GasRecord, ThermochemicalSources, read_gas_record};
 use fs_math::det;
@@ -177,6 +185,8 @@ use fs_vfit::discretize::DelayedFilter;
 
 /// First line of every voice performance file.
 pub const VOICE_PERFORMANCE_SCHEMA: &str = "frankensim-voice-performance-v1";
+const HEAD_LOAD_NEEDS_SPHERE: &str = "head_load needs the head_sphere row: the load is that sphere's";
+const HEAD_LOAD_NEEDS_FLANGED: &str = "head_load needs `termination flanged`: it adds the sphere's change to the flanged load";
 /// Largest accepted file.
 pub const MAX_VOICE_PERFORMANCE_BYTES: usize = 1 << 20;
 const MAX_SECTIONS: usize = 1024;
@@ -239,6 +249,8 @@ pub struct VoiceDescription {
     pub pulse_shimmer: Option<PulseShimmerCard>,
     /// Opt-in head: the mouth as a cap on a rigid sphere ([`HeadSphereCard`]); `None` keeps the infinite baffle.
     pub head_sphere: Option<HeadSphereCard>,
+    /// Opt-in `head_load cap`: the lips see that sphere's radiation load (module doc); `false` keeps the declared one.
+    pub head_load: bool,
 }
 
 /// A `head_sphere` row: the sphere's radius and where it is printed.
@@ -337,6 +349,7 @@ impl VoiceDescription {
         let mut constriction_noise = None;
         let mut pulse_shimmer = None;
         let mut head_sphere = None;
+        let mut head_load = None;
         let mut fold_mapping = None;
         let mut fold_shape = None;
         let mut fold_damping_upper = None;
@@ -577,6 +590,13 @@ impl VoiceDescription {
                     let card = HeadSphereCard { radius_m, source: rest[1].to_string() };
                     once(&mut head_sphere, card, key)?;
                 }
+                "head_load" => {
+                    arity(&rest, 1, key)?;
+                    if rest[0] != "cap" {
+                        return Err("head_load must be `cap`".into());
+                    }
+                    once(&mut head_load, (), key)?;
+                }
                 "fold_mapping" => {
                     arity(&rest, 1, key)?;
                     if rest[0] != "bilateral" {
@@ -653,6 +673,14 @@ impl VoiceDescription {
         if tension_flutter_second.is_some() && tension_flutter.is_none() {
             return Err("tension_flutter_second needs tension_flutter: it adds to that row".into());
         }
+        if head_load.is_some() {
+            if head_sphere.is_none() {
+                return Err(HEAD_LOAD_NEEDS_SPHERE.into());
+            }
+            if !matches!(termination, Some(Termination::FlangedOpen)) {
+                return Err(HEAD_LOAD_NEEDS_FLANGED.into());
+            }
+        }
         Ok(Self {
             output_rate_hz,
             samples,
@@ -678,6 +706,7 @@ impl VoiceDescription {
             constriction_noise,
             pulse_shimmer,
             head_sphere,
+            head_load: head_load.is_some(),
         })
     }
 
@@ -708,12 +737,26 @@ impl VoiceDescription {
         .map_err(|e| format!("tract chart refused: {e:?}"))?;
         let duct = chart.to_duct();
         let mechanics_rate = self.output_rate_hz * self.mechanics_per_output;
+        // `head_load`: one table on the finest rung's bins, read by the island's line, the mouth-flow line and the
+        // passive formants alike. Without the row each takes the declared termination exactly as before.
+        let head_load = match (self.head_load, &self.head_sphere) {
+            (false, _) => None,
+            (true, None) => return Err(HEAD_LOAD_NEEDS_SPHERE.into()),
+            (true, Some(_)) if !matches!(self.termination, Termination::FlangedOpen) => {
+                return Err(HEAD_LOAD_NEEDS_FLANGED.into());
+            }
+            (true, Some(card)) => Some(
+                head_mouth_load(card.radius_m, &duct, gas, mechanics_rate, GLOTTAL_LINE_MAX_TAPS)
+                    .map_err(|e| format!("head load refused: {e}"))?,
+            ),
+        };
+        let mouth_load = head_load.as_ref().map_or(MouthLoad::Analytic(self.termination), MouthLoad::Tabulated);
         let island = GlottalIsland::new_with_wall(
             self.fold,
             self.two_mass,
             &duct,
             gas,
-            self.termination,
+            mouth_load,
             mechanics_rate,
             self.wall.as_ref(),
         )
@@ -729,7 +772,7 @@ impl VoiceDescription {
         let (mouth, receipt) = mouth_flow_line(
             &duct,
             gas,
-            self.termination,
+            mouth_load,
             mechanics_rate,
             island.port_impedance(),
             self.wall.as_ref(),
@@ -756,9 +799,11 @@ impl VoiceDescription {
             ),
             None => None,
         };
-        let passive_formants_hz = chart
-            .tmm_formants_terminated(gas, self.wall.as_ref(), self.termination, 4)
-            .map_err(|e| format!("{e:?}"));
+        let passive_formants_hz = match &head_load {
+            Some(table) => chart.tmm_formants_tabulated(gas, self.wall.as_ref(), table, 4),
+            None => chart.tmm_formants_terminated(gas, self.wall.as_ref(), self.termination, 4),
+        }
+        .map_err(|e| format!("{e:?}"));
         let info = VoiceInfo {
             output_rate_hz: self.output_rate_hz,
             mechanics_rate_hz: mechanics_rate,
@@ -775,6 +820,7 @@ impl VoiceDescription {
             mouth_flow_rungs: receipt.rungs.len(),
             passive_formants_hz,
             head_sphere_radius_m: self.head_sphere.as_ref().map(|card| card.radius_m),
+            head_load: head_load.is_some(),
         };
         let aspiration = match self.aspiration_noise {
             Some(card) => Some(GlottalAspiration::new(card).map_err(str::to_string)?),
@@ -861,6 +907,8 @@ pub struct VoiceInfo {
     pub passive_formants_hz: Result<Vec<f64>, String>,
     /// The `head_sphere` row's radius [m]; `None` on an infinite baffle.
     pub head_sphere_radius_m: Option<f64>,
+    /// Whether the lips see the head sphere's radiation load (`head_load`) instead of the declared termination.
+    pub head_load: bool,
 }
 
 /// Source-side summaries over the physical substeps rendered so far.
@@ -2233,6 +2281,49 @@ mod tests {
         let small = VoiceDescription::from_bytes(fixture("head_sphere 0.005 src\n").as_bytes()).unwrap();
         let err = small.build().err().expect("refused");
         assert!(err.contains("smaller than the head"), "{err}");
+    }
+
+    #[test]
+    fn head_load_rows_are_refused_by_name() {
+        for (row, why) in [
+            ("head_load cap\n", "needs the head_sphere row"),
+            ("head_sphere 0.0875 src\nhead_load\n", "takes 1 fields"),
+            ("head_sphere 0.0875 src\nhead_load disk\n", "must be `cap`"),
+            ("head_sphere 0.0875 src\nhead_load cap\nhead_load cap\n", "only appear once"),
+        ] {
+            let err = VoiceDescription::from_bytes(fixture(row).as_bytes()).unwrap_err();
+            assert!(err.contains(why), "{row}: {err}");
+        }
+        let unflanged = fixture("head_sphere 0.0875 src\nhead_load cap\n").replace("termination flanged", "termination unflanged");
+        let err = VoiceDescription::from_bytes(unflanged.as_bytes()).unwrap_err();
+        assert!(err.contains("termination flanged"), "{err}");
+        // The fields are public, so `build` refuses the same combinations again.
+        let mut bare = VoiceDescription::from_bytes(fixture("").as_bytes()).unwrap();
+        bare.head_load = true;
+        let err = bare.build().err().expect("refused");
+        assert!(err.contains("needs the head_sphere row"), "{err}");
+    }
+
+    /// The head's load at the lips: the island's line, the mouth flow and the passive formants read it. The end
+    /// correction falls (mail 7212's prediction), so the first two formants rise by under 2 %, and the pressure moves.
+    #[test]
+    fn head_load_moves_the_lips_load() {
+        let headed = VoiceDescription::from_bytes(fixture("head_sphere 0.0875 brown-duda-1998\n").as_bytes()).unwrap();
+        let loaded =
+            VoiceDescription::from_bytes(fixture("head_sphere 0.0875 brown-duda-1998\nhead_load cap\n").as_bytes()).unwrap();
+        assert!(!headed.head_load && loaded.head_load);
+        let (a, b) = (headed.build().unwrap(), loaded.build().unwrap());
+        assert!(!a.info().head_load && b.info().head_load);
+        assert_eq!(b.filter_delay_samples(), a.filter_delay_samples());
+        let (fa, fb) = (a.info().passive_formants_hz.clone().unwrap(), b.info().passive_formants_hz.clone().unwrap());
+        assert_eq!(fa.len(), fb.len());
+        for (x, y) in fa.iter().zip(&fb).take(2) {
+            assert!(*y > *x && *y < 1.02 * *x, "formant {x} -> {y} Hz");
+        }
+        for (x, y) in fa.iter().zip(&fb) {
+            assert!((y / x - 1.0).abs() < 0.02, "formant {x} -> {y} Hz");
+        }
+        assert_ne!(pressure(&headed), pressure(&loaded));
     }
 
     #[test]

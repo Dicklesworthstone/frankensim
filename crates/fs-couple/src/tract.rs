@@ -227,13 +227,8 @@ impl TractChart {
         count: usize,
     ) -> Result<Vec<f64>, TractError> {
         let duct = self.to_duct();
-        let mut formants = Vec::new();
-        let mut prev2 = 0.0f64;
-        let mut prev1 = 0.0f64;
-        let mut f = 80.0f64;
-        while f < 4200.0 && formants.len() < count {
-            let omega = core::f64::consts::TAU * f;
-            let z = fs_duct::input_impedance_wall(
+        Self::impedance_peaks(count, |omega| {
+            Ok(fs_duct::input_impedance_wall(
                 &duct,
                 gas,
                 omega,
@@ -241,7 +236,43 @@ impl TractChart {
                 termination,
                 wall,
             )?
-            .impedance;
+            .impedance)
+        })
+    }
+
+    /// [`TractChart::tmm_formants_terminated`] under a tabulated mouth load (for
+    /// example the head's load at the lips), read on the same 2 Hz scan with
+    /// the table's rows linearly interpolated as the table defines.
+    ///
+    /// # Errors
+    /// TMM refusals, or a scan frequency outside the table.
+    pub fn tmm_formants_tabulated(
+        &self,
+        gas: &GasState,
+        wall: Option<&WallPin>,
+        table: &fs_duct::TabulatedLoad,
+        count: usize,
+    ) -> Result<Vec<f64>, TractError> {
+        let duct = self.to_duct();
+        Self::impedance_peaks(count, |omega| {
+            Ok(fs_duct::input_impedance_tabulated(&duct, gas, omega, fs_duct::LossModel::Bessel, table, wall)?
+                .impedance)
+        })
+    }
+
+    /// The first `count` peaks of `|Z_in|` on 80..4200 Hz in 2 Hz steps, each
+    /// refined by a parabola through the log magnitudes around it.
+    fn impedance_peaks(
+        count: usize,
+        mut impedance_at: impl FnMut(f64) -> Result<fs_math::c64::C64, TractError>,
+    ) -> Result<Vec<f64>, TractError> {
+        let mut formants = Vec::new();
+        let mut prev2 = 0.0f64;
+        let mut prev1 = 0.0f64;
+        let mut f = 80.0f64;
+        while f < 4200.0 && formants.len() < count {
+            let omega = core::f64::consts::TAU * f;
+            let z = impedance_at(omega)?;
             let mag = (z.re * z.re + z.im * z.im).sqrt();
             if prev1 > prev2 && prev1 > mag && prev2 > 0.0 {
                 // Parabolic refine on the log magnitude.

@@ -19,7 +19,7 @@ use super::{
     DrivingPointError, LineLadder, duct_axial_length, realize_reflectance_ir_from_positive_spectrum,
     validate_ladder,
 };
-use fs_duct::{Duct, LossModel, Termination, input_impedance_wall};
+use fs_duct::{Duct, LossModel, MouthLoad, Termination, WallModel, input_impedance_wall};
 use fs_material::gas::GasState;
 use fs_math::c64::C64;
 use fs_phs::WallPin;
@@ -91,6 +91,22 @@ pub fn mouth_flow_per_incident_pressure(
     Ok((response.u_mouth_over_u_in * C64::new(2.0, 0.0)) / denominator)
 }
 
+/// [`mouth_flow_per_incident_pressure`] against an explicit mouth load `Z_L` [Pa s/m^3] (a referenced table's row): the
+/// same chain the tabulated reflectance line samples ([`super::baked`]), so both lines read one load.
+fn mouth_flow_against_load(
+    physics: &Duct,
+    gas: &GasState,
+    omega: f64,
+    load: C64,
+    wall: Option<&WallPin>,
+    zc: f64,
+) -> Result<C64, DrivingPointError> {
+    let response = super::baked::response(physics, gas, omega, load, WallModel::from_pin(wall))
+        .map_err(DrivingPointError::Duct)?;
+    let denominator = C64::new(response.impedance.re + zc, response.impedance.im);
+    Ok((response.u_mouth_over_u_in * C64::new(2.0, 0.0)) / denominator)
+}
+
 /// Causal impulse response of [`mouth_flow_per_incident_pressure`], sized by a
 /// convergence ladder: the DFT length doubles until the wrap-around tail and
 /// the change of the shared taps between rungs are both below the ladder's
@@ -98,11 +114,13 @@ pub fn mouth_flow_per_incident_pressure(
 ///
 /// # Errors
 /// Empty geometry, non-positive rate or port impedance, TMM refusal, or
-/// non-convergence at `ladder.max_taps`.
-pub fn realize_mouth_flow_ir(
+/// non-convergence at `ladder.max_taps`. A tabulated mouth load must carry its
+/// mouth reference (plane, radius, gas) and cover the ladder's top rung; its DC
+/// bin is the duct against the table's declared static load, never a table row.
+pub fn realize_mouth_flow_ir<'a>(
     physics: &Duct,
     gas: &GasState,
-    termination: Termination,
+    termination: impl Into<MouthLoad<'a>>,
     sample_rate_hz: u32,
     zc: f64,
     wall: Option<&WallPin>,
@@ -116,10 +134,10 @@ pub fn realize_mouth_flow_ir(
 // The DC probe list is a parameter only so a test can rebuild the stepped-DC
 // variant beside the true-limit one and measure what the step costs.
 #[allow(clippy::too_many_arguments)]
-fn realize_with_dc_probes(
+fn realize_with_dc_probes<'a>(
     physics: &Duct,
     gas: &GasState,
-    termination: Termination,
+    termination: impl Into<MouthLoad<'a>>,
     sample_rate_hz: u32,
     zc: f64,
     wall: Option<&WallPin>,
@@ -155,10 +173,37 @@ fn realize_with_dc_probes(
         n_fft = n_fft.min(max_taps / 2).max(256);
     }
     let tap_tol = ladder.tail_tol.sqrt();
-    let response = |omega: f64| {
-        mouth_flow_per_incident_pressure(physics, gas, omega, termination, wall, zc)
+    let load = termination.into();
+    // A declared termination takes exactly its old path; a table plays only through its
+    // own mouth and must cover the top rung before any bin is sampled.
+    let static_load = match load {
+        MouthLoad::Analytic(_) => None,
+        MouthLoad::Tabulated(table) => {
+            let radius = physics
+                .segments
+                .last()
+                .ok_or(DrivingPointError::Duct(fs_duct::DuctError::EmptyDuct))?
+                .outlet_radius();
+            let mouth = table.validate_mouth(length, radius, gas).map_err(DrivingPointError::Duct)?;
+            super::baked::validate_band(table, sample_rate_hz, max_taps)?;
+            Some(C64::new(mouth.dc_impedance, 0.0))
+        }
+        MouthLoad::Matched => return Err(super::baked::matched_refusal()),
     };
-    let dc = dc_limit(&response, dc_probes)?;
+    let response = |omega: f64| match load {
+        MouthLoad::Tabulated(table) => {
+            let z = table.z_at(omega).map_err(DrivingPointError::Duct)?;
+            mouth_flow_against_load(physics, gas, omega, z, wall, zc)
+        }
+        MouthLoad::Analytic(termination) => {
+            mouth_flow_per_incident_pressure(physics, gas, omega, termination, wall, zc)
+        }
+        MouthLoad::Matched => Err(super::baked::matched_refusal()),
+    };
+    let dc = match static_load {
+        Some(z) => dc_limit(&|omega| mouth_flow_against_load(physics, gas, omega, z, wall, zc), dc_probes)?,
+        None => dc_limit(&response, dc_probes)?,
+    };
     let mut t_pos: Vec<C64> = Vec::new();
     let mut previous: Vec<f64> = Vec::new();
     let mut rungs: Vec<MouthFlowRung> = Vec::new();
@@ -219,10 +264,10 @@ fn realize_with_dc_probes(
 ///
 /// # Errors
 /// As [`realize_mouth_flow_ir`], plus filter construction.
-pub fn mouth_flow_line(
+pub fn mouth_flow_line<'a>(
     physics: &Duct,
     gas: &GasState,
-    termination: Termination,
+    termination: impl Into<MouthLoad<'a>>,
     sample_rate_hz: u32,
     zc: f64,
     wall: Option<&WallPin>,

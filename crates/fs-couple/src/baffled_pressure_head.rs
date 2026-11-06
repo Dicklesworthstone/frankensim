@@ -37,14 +37,52 @@
 //! from 50 Hz to the band (tested below).
 //!
 //! Limits, not hidden: the head is a rigid sphere (no torso, neck, nose, protruding lips or hair); the mouth is a curved
-//! cap of the disk's area, not the lips' shape; and the lips' radiation LOAD is not changed here (the tract card's
-//! termination still declares it), only the observed pressure.
+//! cap of the disk's area, not the lips' shape; and [`HeadSphere`] changes only the observed pressure. The lips'
+//! radiation LOAD changes only through the separate, opt-in [`head_mouth_load`] below.
+//!
+//! The lips' load ([`head_mouth_load`]): the same cap on the same sphere, seen from the tract. Its self-impedance per
+//! unit volume flow (the cap's mean pressure over its flow; Morse and Ingard sec. 7.2, `e^{+j w t}`, `h_n = h_n^(2)`) is
+//!
+//! ```text
+//! Z_cap = (rho c / A) sum_n w_n (-j h_n(k a) / h_n'(k a)),   A = pi b^2 = 2 pi a^2 (1 - cos al)
+//! w_n = (P_{n-1}(cos al) - P_{n+1}(cos al))^2 / (2 (2n+1) (1 - cos al)),   P_{-1} = 1,   sum_n w_n = 1
+//! ```
+//!
+//! with the same ratio recurrences as `S`. The whole sphere pulsating (`al = pi`) gives `rho c j k a / (1 + j k a) / A`;
+//! as `k a -> 0` the resistance tends to `rho c k^2 / (4 pi)`, HALF the baffled piston's, because the sphere radiates into
+//! the whole space; a large sphere at a fixed mouth gives the baffled piston, its difference falling like `1 / a`. The
+//! terms fall about as `n^-3` past `n = k a` (the cap's rim is a velocity edge): the tail after `N` terms is a mass
+//! reactance of about `k a / (pi al N^2)` in units of `rho c / A`, so the sums to `N` and `2 N` differ by `3/4` of it.
+//! Relative to the whole that is about `1 / (3.2 al^2 N^2)` at small `k a` and `0.75 k a / (pi al N^2)` once `Z_cap` is
+//! near `rho c / A`, which grows with `k a`. The sum runs to `N = max(2 k a + 20, 1000 a / b, 1000 sqrt(2 k a a / (pi
+//! b)))` and to `2 N` (`b / a <= al`), refuses if the two differ by more than `1e-6` relative, and refuses a geometry
+//! needing more than [`LOAD_MAX_ORDER`] terms. The lips' load is then
+//!
+//! ```text
+//! Z_L = Z_flanged + (conj(Z_cap) - Z_piston)          (fs-duct's e^{-i w t}; the conjugate carries Z_cap over)
+//! ```
+//!
+//! `Z_flanged` is the declared flanged pipe's own multimodal load (`fs_duct::compact_radiation_impedance`), `Z_piston`
+//! the closed-form baffled piston of the same radius (`fs_phs::baffled_piston_impedance`). Both added terms have uniform
+//! velocity, so their singular near fields cancel and what is added is the smooth change in the exterior: the
+//! flanged load's own velocity-profile part stays. As the sphere grows, `Z_L` returns to `Z_flanged`. The table's rows
+//! are exactly the bins of the finest line rung (`w_k = 2 pi k / (N_max dt)`, `k = 1..=N_max / 2`), so every rung of a
+//! characteristic or mouth-flow line reads its own bin and nothing is interpolated there; the DC limit is 0, as for any
+//! exterior load.
 
 use super::{BaffledPressure, CircularOutletReceiver, RayleighMedium};
+use fs_duct::{Duct, Segment, TabulatedLoad, TabulatedMouth, Termination};
+use fs_material::gas::GasState;
 use fs_math::det;
 
 /// Largest series order admitted; a geometry that needs more is refused, never truncated.
 pub const MAX_ORDER: usize = 4096;
+/// Largest order of the cap's self-impedance series ([`head_mouth_load`]): its terms fall only as `n^-3`, so it needs
+/// `2 max(1000 a / b, 1000 sqrt(2 k a a / (pi b)))` of them at the table's top; a mouth so small against the head, or a
+/// table so high, that it needs more is refused, never truncated.
+pub const LOAD_MAX_ORDER: usize = 1 << 16;
+/// Largest admitted change of the cap's self-impedance between `N` and `2 N` terms, relative.
+const LOAD_SERIES_TOL: f64 = 1.0e-6;
 /// Head FIR latency `ceil(rate / LATENCY_DIVISOR)` output samples (1.33 ms).
 const LATENCY_DIVISOR: u32 = 750;
 /// Largest admitted `|S / B|` inside the blended band; above it the baffle's directivity null is in the band.
@@ -344,6 +382,129 @@ impl HeadSphere {
     }
 }
 
+/// The cap's self-impedance series (module doc, "The lips' load"), prepared once per geometry.
+#[derive(Clone, Debug)]
+struct CapLoad {
+    a: f64,
+    sound_speed: f64,
+    /// `rho c / A` [Pa s/m^3].
+    scale: f64,
+    /// `1000 a / b`: the first sum's length never falls below it (the small-`k a` tail).
+    floor: f64,
+    /// `2 a / (pi b)`: the first sum runs to at least `1000 sqrt(edge k a)` (the large-`k a` tail).
+    edge: f64,
+    /// `w_0..=w_last`.
+    w: Vec<f64>,
+}
+
+impl CapLoad {
+    /// The first sum's length `N` at `x = k a` (module doc, "The lips' load"); the second runs to `2 N`.
+    fn orders(floor: f64, edge: f64, x: f64) -> f64 {
+        (2.0 * x + 20.0).max(floor).max(1000.0 * (edge * x).sqrt()).ceil()
+    }
+
+    /// A cap of the disk's area `pi b^2` on a sphere of radius `a`, for angular frequencies up to `omega_top`.
+    fn new(a: f64, b: f64, density: f64, sound_speed: f64, omega_top: f64) -> Result<Self, String> {
+        let one_minus_cos_al = b * b / (2.0 * a * a);
+        let floor = 1000.0 * a / b;
+        let edge = 2.0 * a / (core::f64::consts::PI * b);
+        let last = 2.0 * Self::orders(floor, edge, omega_top / sound_speed * a);
+        if !(last.is_finite() && last <= LOAD_MAX_ORDER as f64) {
+            return Err(format!(
+                "the head's load series needs more than {LOAD_MAX_ORDER} orders here (mouth radius {b} m on a head of {a} m)"
+            ));
+        }
+        let last = last as usize;
+        let p = legendre(1.0 - one_minus_cos_al, last + 1);
+        let mut w = Vec::with_capacity(last + 1);
+        w.push(0.5 * one_minus_cos_al);
+        for n in 1..=last {
+            let d = p[n - 1] - p[n + 1];
+            w.push(d * d / (2.0 * (2 * n + 1) as f64 * one_minus_cos_al));
+        }
+        let area = core::f64::consts::PI * b * b;
+        Ok(Self { a, sound_speed, scale: density * sound_speed / area, floor, edge, w })
+    }
+
+    /// `Z_cap` at `omega > 0` under `e^{+j w t}` [Pa s/m^3]: the sums to `N` and `2 N` terms, refused unless they agree
+    /// within [`LOAD_SERIES_TOL`].
+    fn impedance(&self, omega: f64) -> Result<Cx, String> {
+        let x = omega / self.sound_speed * self.a;
+        let n1 = Self::orders(self.floor, self.edge, x);
+        if !(x > 0.0 && 2.0 * n1 < self.w.len() as f64) {
+            return Err(format!("the head's load series was not prepared for {omega} rad/s"));
+        }
+        let n1 = n1 as usize;
+        let n2 = 2 * n1;
+        // rho_n = h_n / h_{n-1}, rho_1 = 1/x + j. Order 0: -j h_0 / h_0' = j h_0 / h_1 = j / rho_1.
+        let mut rho = Cx::new(1.0 / x, 1.0);
+        let inv = rho.recip();
+        let mut sum = Cx::new(-inv.im, inv.re).scale(self.w[0]);
+        let mut first = None;
+        for n in 1..=n2 {
+            let inv = rho.recip(); // h_{n-1} / h_n
+            let d = inv.sub(Cx::new((n + 1) as f64 / x, 0.0)); // h_n' / h_n
+            let t = d.recip();
+            sum = sum.add(Cx::new(t.im, -t.re).scale(self.w[n])); // -j h_n / h_n'
+            if n == n1 {
+                first = Some(sum);
+            }
+            rho = Cx::new((2 * n + 1) as f64 / x, 0.0).sub(inv); // rho_{n+1}
+        }
+        let first = first.ok_or("the head's load series has no first sum")?;
+        if !sum.finite() || first.sub(sum).abs() > LOAD_SERIES_TOL * sum.abs() {
+            return Err(format!("the head's load series did not converge at {omega} rad/s"));
+        }
+        Ok(sum.scale(self.scale))
+    }
+}
+
+/// The lips' radiation load with the head (module doc, "The lips' load"): `Z_flanged + (conj(Z_cap) - Z_piston)`
+/// [Pa s/m^3, `e^{-i w t}`] for a cap of the mouth's area on a rigid sphere of radius `radius_m`, on the bins
+/// `w_k = 2 pi k / (max_taps dt)`, `k = 1..=max_taps / 2`, of the finest rung of the lines that will read it, bound to
+/// the duct's own mouth plane, radius and gas with DC 0.
+///
+/// # Errors
+/// A non-physical head, an empty duct or a mouth not smaller than the head, a zero rate or a tap count that is not a
+/// power of two of at least 2, a series beyond [`LOAD_MAX_ORDER`] or not converged, a flanged or piston refusal, or a
+/// row the table refuses (not finite or not passive within 1e-12).
+pub fn head_mouth_load(radius_m: f64, duct: &Duct, gas: &GasState, sample_rate_hz: u32, max_taps: usize)
+    -> Result<TabulatedLoad, String> {
+    if !radius_m.is_finite() || radius_m <= 0.0 {
+        return Err("the head radius must be finite and positive".into());
+    }
+    let mouth = duct.segments.last().ok_or("the head's load needs a duct with segments")?.outlet_radius();
+    if !(mouth > 0.0 && mouth < radius_m) {
+        return Err("the mouth must be smaller than the head".into());
+    }
+    if sample_rate_hz == 0 || max_taps < 2 || !max_taps.is_power_of_two() {
+        return Err("the head's load needs a positive rate and a power-of-two tap count of at least 2".into());
+    }
+    let length: f64 = duct.segments.iter().map(Segment::axial_length).sum();
+    let dt = 1.0 / f64::from(sample_rate_hz);
+    // The lines' own bin expression, so each rung's query lands on its row bit for bit.
+    let omegas: Vec<f64> =
+        (1..=max_taps / 2).map(|k| core::f64::consts::TAU * k as f64 / (max_taps as f64 * dt)).collect();
+    let top = omegas[omegas.len() - 1];
+    let cap = CapLoad::new(radius_m, mouth, gas.density, gas.sound_speed, top)?;
+    let mut z = Vec::with_capacity(omegas.len());
+    for &omega in &omegas {
+        let flanged = fs_duct::compact_radiation_impedance(Termination::FlangedOpen, gas, mouth, omega)
+            .map_err(|e| format!("the flanged load refused at {omega} rad/s: {e:?}"))?;
+        let (r_piston, x_piston) = fs_phs::baffled_piston_impedance(gas.density, gas.sound_speed, mouth, omega)
+            .map_err(|e| format!("the baffled piston refused at {omega} rad/s: {e:?}"))?;
+        let c = cap.impedance(omega)?;
+        // conj(Z_cap) carries the series' e^{+j w t} over to fs-duct's e^{-i w t}.
+        z.push(fs_math::c64::C64::new(flanged.re + (c.re - r_piston), flanged.im + (-c.im - x_piston)));
+    }
+    let source = format!("head-cap-on-sphere a={radius_m:e} b={mouth:e} (morse-ingard-1968-7.2) + flanged - baffled piston");
+    TabulatedLoad::try_new(omegas, z, &source, 1.0e-12)
+        .and_then(|table| {
+            table.with_mouth(TabulatedMouth { axial_position_m: length, radius_m: mouth, gas: *gas, dc_impedance: 0.0 })
+        })
+        .map_err(|e| format!("the head's load table refused: {e:?}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -483,5 +644,152 @@ mod tests {
         (300.0, 6.273927074538665e+02, 9.111865394641030e+01),
         (1000.0, -2.569048431744369e+03, 9.166961093269957e+02),
         (3000.0, 9.514481124514730e+01, -9.554082937523743e+03),
+    ];
+
+    const TAU: f64 = core::f64::consts::TAU;
+
+    fn air_state() -> GasState {
+        GasState::try_new(&fs_material::gas::GasSpec::dry_air_ussa1976(), 293.15, 101_325.0).unwrap()
+    }
+
+    fn tube(radius: f64) -> Duct {
+        Duct { segments: vec![Segment::Cylinder { radius, length: 0.17 }] }
+    }
+
+    /// The cap's self-impedance against an independent Python evaluation of the same series, summed to 51672 orders,
+    /// whose terms match mpmath's exact spherical Hankel functions to 6e-16 and which reproduces Aarts and Janssen's
+    /// printed cap-on-sphere power curve (NAG-Journaal summary, Fig. 6, on its axial profile) within 0.02 dB median.
+    #[test]
+    fn the_load_series_matches_an_independent_evaluation() {
+        let cap = CapLoad::new(0.0875, 0.013_548, AIR.density, AIR.sound_speed, TAU * 3000.0).unwrap();
+        for (f, re, im) in GOLDEN_LOAD {
+            let z = cap.impedance(TAU * f).unwrap();
+            let want = Cx::new(re, im);
+            assert!(z.sub(want).abs() < 1e-6 * want.abs(), "{f} Hz: {z:?} vs {want:?}");
+        }
+    }
+
+    /// The whole sphere pulsating (a cap of area `4 pi a^2`, `b = 2 a`) is `rho c j k a / (1 + j k a)` over that area.
+    #[test]
+    fn the_whole_sphere_loads_as_the_pulsating_sphere() {
+        let a = 0.0875;
+        let cap = CapLoad::new(a, 2.0 * a, AIR.density, AIR.sound_speed, TAU * 10_000.0).unwrap();
+        for f in [50.0, 1000.0, 10_000.0] {
+            let x = TAU * f / AIR.sound_speed * a;
+            let area = 4.0 * core::f64::consts::PI * a * a;
+            let want = Cx::new(0.0, x).div(Cx::new(1.0, x)).scale(AIR.density * AIR.sound_speed / area);
+            let z = cap.impedance(TAU * f).unwrap();
+            assert!(z.sub(want).abs() < 1e-12 * want.abs(), "{f} Hz: {z:?} vs {want:?}");
+        }
+    }
+
+    /// As `k a -> 0` the cap radiates into the whole space: its resistance tends to `rho c k^2 / (4 pi)`, half the
+    /// baffled piston's (Python: 0.999985 at 5 Hz for a 1 cm mouth).
+    #[test]
+    fn the_low_frequency_load_is_half_the_baffled_pistons() {
+        let omega = TAU * 5.0;
+        let cap = CapLoad::new(0.0875, 0.01, AIR.density, AIR.sound_speed, omega).unwrap();
+        let k = omega / AIR.sound_speed;
+        let half = AIR.density * AIR.sound_speed * k * k / (4.0 * core::f64::consts::PI);
+        let on_sphere = cap.impedance(omega).unwrap().re / half;
+        let (r_piston, _) = fs_phs::baffled_piston_impedance(AIR.density, AIR.sound_speed, 0.01, omega).unwrap();
+        assert!((on_sphere - 1.0).abs() < 1e-4, "{on_sphere}");
+        assert!((r_piston / half - 2.0).abs() < 1e-6, "{}", r_piston / half);
+    }
+
+    /// A large head at a fixed mouth loads it as the baffle: `|conj(Z_cap) / Z_piston - 1|`, the largest over 200 and
+    /// 1000 Hz, falls like `1 / a` (Python: 9.81e-2, 5.27e-2 and 2.72e-2 at 0.4, 0.8 and 1.6 m, 5 cm mouth; the same
+    /// with 3000 Hz, whose deviation is smaller, but there the 1.6 m head needs 83k orders, past `LOAD_MAX_ORDER`).
+    #[test]
+    fn a_large_head_loads_the_lips_as_the_baffle() {
+        let off = |a: f64| -> f64 {
+            let cap = CapLoad::new(a, 0.05, AIR.density, AIR.sound_speed, TAU * 1000.0).unwrap();
+            [200.0, 1000.0]
+                .into_iter()
+                .map(|f| {
+                    let c = cap.impedance(TAU * f).unwrap();
+                    let (r, x) = fs_phs::baffled_piston_impedance(AIR.density, AIR.sound_speed, 0.05, TAU * f).unwrap();
+                    Cx::new(c.re, -c.im).div(Cx::new(r, x)).sub(Cx::ONE).abs()
+                })
+                .fold(0.0, f64::max)
+        };
+        let devs: Vec<f64> = [0.4, 0.8, 1.6].into_iter().map(off).collect();
+        assert!(devs.windows(2).all(|w| (0.45..0.6).contains(&(w[1] / w[0]))), "{devs:?}");
+        assert!(devs[2] < 0.03, "{devs:?}");
+    }
+
+    /// At the live table's top (96 kHz, k a 148) on the cards' smallest mouth (8.63 mm), and at k a 26, where the
+    /// series once refused under the `1000 a / b` rule alone, the sums to `N` and `2 N` agree; the reactance's tail
+    /// there grows with `k a` (module doc).
+    #[test]
+    fn the_load_series_converges_at_the_table_top() {
+        let cap = CapLoad::new(0.0875, 0.008_63, AIR.density, AIR.sound_speed, TAU * 96_000.0).unwrap();
+        for f in [16_242.0, 48_000.0, 96_000.0] {
+            let z = cap.impedance(TAU * f).unwrap();
+            assert!(z.re > 0.0 && (z.abs() / cap.scale - 1.0).abs() < 0.2, "{f} Hz: {z:?}");
+        }
+    }
+
+    /// A mouth so small against the head that the series would need more than `LOAD_MAX_ORDER` terms is refused.
+    #[test]
+    fn a_load_series_too_long_is_refused() {
+        let err = CapLoad::new(0.0875, 0.002, AIR.density, AIR.sound_speed, TAU * 1000.0).unwrap_err();
+        assert!(err.contains("more than"), "{err}");
+    }
+
+    /// The table: rows on the finest rung's bins, bound to the duct's mouth, passive; at 200 Hz less mass and less
+    /// resistance than the flanged load, an end correction of 0.69-0.76 radii against the flanged 0.82 (the stamped
+    /// prediction, mail 7212, read 0.71-0.74 for the card mouths); and a very large head gives the flanged load back.
+    #[test]
+    fn the_lips_load_is_the_flanged_load_plus_the_spheres_change() {
+        let gas = air_state();
+        let b = 0.013_548;
+        let table = head_mouth_load(0.0875, &tube(b), &gas, 48_000, 4096).unwrap();
+        let dt = 1.0 / 48_000.0;
+        assert_eq!(table.support(), (TAU * 1.0 / (4096.0 * dt), TAU * 2048.0 / (4096.0 * dt)));
+        table.validate_mouth(0.17, b, &gas).unwrap();
+        let omega = TAU * 17.0 / (4096.0 * dt);
+        let z = table.z_at(omega).unwrap();
+        let flanged = fs_duct::compact_radiation_impedance(Termination::FlangedOpen, &gas, b, omega).unwrap();
+        assert!(z.im > flanged.im, "less mass on the sphere: {z:?} vs {flanged:?}");
+        assert!(z.re > 0.0 && z.re < flanged.re, "less resistance on the sphere: {z:?} vs {flanged:?}");
+        let end = -z.im * core::f64::consts::PI * b * b / (gas.density * omega) / b;
+        assert!((0.69..0.76).contains(&end), "end correction {end} radii");
+        // At 2 kHz, so the 1.6 m head's table (top k a 29) stays within LOAD_MAX_ORDER; bin 120 is 937.5 Hz.
+        let back = |a: f64| -> f64 {
+            let far = head_mouth_load(a, &tube(0.05), &gas, 2_000, 256).unwrap();
+            let omega = TAU * 120.0 / (256.0 / 2_000.0);
+            let flanged = fs_duct::compact_radiation_impedance(Termination::FlangedOpen, &gas, 0.05, omega).unwrap();
+            let z = far.z_at(omega).unwrap();
+            Cx::new(z.re, z.im).div(Cx::new(flanged.re, flanged.im)).sub(Cx::ONE).abs()
+        };
+        let (near, far) = (back(0.4), back(1.6));
+        assert!(far < 0.03 && far < 0.4 * near, "1.6 m head {far}, 0.4 m head {near}");
+    }
+
+    #[test]
+    fn non_physical_lip_loads_are_refused() {
+        let gas = air_state();
+        for (a, r, rate, taps, why) in [
+            (0.0, 0.01, 48_000, 256, "finite and positive"),
+            (f64::NAN, 0.01, 48_000, 256, "finite and positive"),
+            (0.01, 0.01, 48_000, 256, "smaller than the head"),
+            (0.0875, 0.01, 0, 256, "power-of-two"),
+            (0.0875, 0.01, 48_000, 300, "power-of-two"),
+            (0.0875, 0.002, 48_000, 256, "more than"),
+        ] {
+            let err = head_mouth_load(a, &tube(r), &gas, rate, taps).unwrap_err();
+            assert!(err.contains(why), "{err}");
+        }
+        let err = head_mouth_load(0.0875, &Duct { segments: vec![] }, &gas, 48_000, 256).unwrap_err();
+        assert!(err.contains("segments"), "{err}");
+    }
+
+    /// `(f, Re Z_cap, Im Z_cap)` [Hz, Pa s/m^3, `e^{+j w t}`]: `voice-slow/hl/golden.py` (numpy, 51672 orders; the change
+    /// from half as many is 2e-8), head 8.75 cm, cap of radius 13.548 mm, rho 1.1336, c 356.53.
+    const GOLDEN_LOAD: [(f64, f64, f64); 3] = [
+        (300.0, 8.838839269047968e+02, 3.715138455023602e+04),
+        (1000.0, 1.305850074888683e+04, 1.256795001559119e+05),
+        (3000.0, 1.384121113452622e+05, 3.485720634727473e+05),
     ];
 }

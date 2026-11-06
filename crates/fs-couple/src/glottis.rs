@@ -162,7 +162,7 @@ use crate::driving_point::{
 };
 use crate::unilateral_contact::slit_contact_force;
 use fs_dcontact::{DContactError, Obstacle};
-use fs_duct::{Duct, Termination};
+use fs_duct::{Duct, MouthLoad, Termination};
 use fs_material::gas::GasState;
 use fs_math::det;
 use fs_phs::{PhsError, PortHamiltonian, WallPin, mass_spring_damper};
@@ -1417,16 +1417,19 @@ impl GlottalIsland {
 
     /// [`GlottalIsland::new`] with an optional yielding tract wall, so the
     /// characteristic line sees the same wall admittance as any other
-    /// observer of the tract (`None` is the rigid-wall line of `new`).
+    /// observer of the tract (`None` is the rigid-wall line of `new`). The
+    /// mouth load is a declared [`Termination`] or a referenced table
+    /// ([`MouthLoad::Tabulated`], e.g. the head's load at the lips); a
+    /// `Termination` takes exactly the path it took before.
     ///
     /// # Errors
     /// As [`GlottalIsland::new`].
-    pub fn new_with_wall(
+    pub fn new_with_wall<'a>(
         card: FoldCard,
         two_mass: bool,
         tract: &Duct,
         gas: &GasState,
-        termination: Termination,
+        termination: impl Into<MouthLoad<'a>>,
         sample_rate_hz: u32,
         wall: Option<&WallPin>,
     ) -> Result<Self, GlottisError> {

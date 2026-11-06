@@ -85,7 +85,16 @@ pub(super) fn run_with_gas_sources(
     });
     // Only a performance with the `head_sphere` row writes this block and the sphere's scope; without it the sidecar is byte
     // for byte what it was. `filter_delay_samples` is the microphone's whole filter latency, the head's FIR included.
+    // Only one with `head_load` as well names the lips' load inside the block and in the scope.
     let (head, scope) = match &description.head_sphere {
+        Some(card) if description.head_load => (
+            format!(
+                "\"head_sphere\":{{\"radius_m\":{:e},\"source\":{},\"filter_delay_samples\":{:e},\
+                 \"lips_load\":\"flanged + (cap on this sphere - baffled piston)\"}},",
+                card.radius_m, json_string(&card.source), performance.filter_delay_samples()
+            ),
+            "lumped fold pHS on a plane-wave series tract with TMM viscothermal loss; mouth flow observed as a cap of the opening's area on a rigid sphere (the baffled opening's pressure through the sphere's causal FIR, the baffle's image kept above the resolved band), and the lips' radiation load is the declared flanged load plus that cap's change on the same sphere; no torso, nasal branch or side cavity; the supraglottal pressure is never the output",
+        ),
         Some(card) => (
             format!(
                 "\"head_sphere\":{{\"radius_m\":{:e},\"source\":{},\"filter_delay_samples\":{:e}}},",
