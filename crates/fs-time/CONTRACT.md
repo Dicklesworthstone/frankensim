@@ -363,6 +363,41 @@ where claimed below.
   co-rotation, work extraction, parity and refusal. This is a prescribed source:
   finite bath inertia, changing bath laws, translational drag and thermal
   allocation are not inferred.
+- `lie::viscous::pair::ViscousPairStepper` couples two original finite
+  full-inertia rigid bodies through a damping tensor fixed in body 0's
+  material axes. At both actual endpoint configurations,
+  `r = omega0 - R0^-1 R1 omega1`; coupling torques are `-D r` and the
+  opposite spatial couple. Two implicit midpoint half-kicks surround both
+  original compensated free flows. Independently held body/space drives
+  transform at the actual endpoint attitudes. Both bodies recoil.
+  Inertia-scaled relative mobility `K = I0^-1 + Q I1^-1 Q^T` reduces each
+  kick to two native 3x3 Cholesky factors and one solve, with bounded native
+  factor storage and no damping inverse, iterative solve or per-step
+  eigensolve. The original compensated principal-minor owner admits PSD,
+  including rank-deficient, damping. Each actual configuration refuses
+  unresolved mobility or `s tr(K D) > 2` with a numerical margin.
+  Local actual-midpoint constitutive and per-body work checks precede return.
+  Equal/opposite coupling impulses share one public world receipt; each
+  body separately reports drive work, signed coupling transfer, kinetic
+  change, native free-flow energy defect and final public-state residual.
+  Shared nonnegative relative-slip heat has no assigned thermal destination.
+  The symmetric splitting is second order for resolved smooth linear drag.
+  Fixed inertias and body-0-attached damping are required; joints, translation,
+  changing laws, dry friction, internal rotors and adjoints are not supplied.
+  Extreme ill-conditioned mobility refuses instead of projecting. Six
+  G0/G1/G3/G4 groups in `tests/viscous_pair.rs` cover independent analytic
+  recoil/phase/work/heat and Euler/quaternion RK4 refinement, independent
+  material/world covariance, zero-drag parity, common-spin/passivity and
+  invalid or unresolved input.
+  The complete crate and first pair revision compiled with the pinned native
+  compiler and original cached dependencies. Five of six pair groups and all
+  five stationary-viscous regressions passed. The analytic driven group
+  exposed a component-relative constitutive refusal; the final check also
+  includes the local common-coupling vector scale for frame/solve arithmetic,
+  with the same numerical multiplier and no background-momentum or absolute
+  floor. Per-body work checks remain separate. Executor loss prevented
+  recompiling/rerunning this final correction, so final native acceptance and
+  a Cargo/DSR gate are not claimed.
 - `galpha::GeneralizedAlpha::new(m, c, k, n, h, rho_inf)` +
   `galpha_step(ga, q, v, a, f_next)` — Chung–Hulbert: αm = (2ρ−1)/(ρ+1),
   αf = ρ/(ρ+1), γ = ½ − αm + αf, β = ¼(1 − αm + αf)²; one prefactored

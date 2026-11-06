@@ -16,6 +16,10 @@ use fs_ga::{Mat3, So3, Vec3};
 use fs_la::factor::{Cholesky, cholesky};
 use fs_math::dd::Dd;
 
+/// Finite-inertia reciprocal coupling between two freely rotating bodies.
+#[path = "viscous/pair.rs"]
+pub mod pair;
+
 type Vector = [Dd; 3];
 
 /// A fixed full inertia, body-frame viscous tensor and positive time interval.
