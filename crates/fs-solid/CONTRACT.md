@@ -1312,6 +1312,18 @@ bulk penalty, extra stiffness or inferred bending model enters the solve.
 Dead-load equilibrium, current-area pressure and loaded small-vibration modes
 therefore share the same explicit material choice, supports and reference mass.
 
+Membrane kinematics retains the relative displacement gradient H before forming
+F=A+H in the cached material axes A. Engineering Green strain is evaluated from
+sym(A^t H)+H^t H/2, preserving small axial strain and quadratic transverse strain
+without subtracting nearly equal reference metrics. The undeformed reference
+has exactly zero total strain; any natural-reference stress still belongs to
+the original material. Elastic forces, matrix-free tangents, vibration admission,
+viscosity and current-density recovery share this kinematics and strain-domain
+admission. The `membrane` regressions check signed affine extension, quartic
+transverse energy and its force/tangent, and the absence of artificial transverse
+stiffness at rest. This is a numerical kinematics correction, not a new bending,
+wrinkling, material calibration or finite-strain constitutive model.
+
 The `hyperelastic_membrane` regressions differentiate the native assembled
 energy/force/tangent for both choices, including tilted fibres. An independent
 exact-incompressible Neo-Hookean pyramid potential supplies center displacement,

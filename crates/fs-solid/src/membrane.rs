@@ -6,8 +6,12 @@
 //! It is not an edge-spring surrogate or a t-cubed solid-plate conversion.
 //!
 //! With F a 3x2 surface deformation gradient in material axes,
-//! E = [(F1.F1-1)/2, (F2.F2-1)/2, F1.F2]. For work-conjugate resultants S,
-//! the residual is A B^t S. The tangent action differentiates BOTH B and S;
+//! E = [(F1.F1-1)/2, (F2.F2-1)/2, F1.F2]. Strain is evaluated from the
+//! displacement gradient before adding the reference axes, so small stretches
+//! and quadratic transverse strain survive
+//! cancellation against the unit reference metric.
+//! For work-conjugate resultants S, the residual is A B^t S.
+//! The tangent action differentiates BOTH B and S;
 //! the geometric-stiffness term is essential under transverse loading.
 //! No bending, self-contact, wrinkling relaxation, damage, moisture evolution
 //! or stability certificate is implied. A flat unstressed membrane has zero
@@ -74,8 +78,15 @@ struct Element {
     nodes: [usize; 3],
     // Reference shape gradients rotated ONCE into the material axes.
     gradients: [[f64; 2]; 3],
+    grain_sin_cos: [f64; 2],
     area: f64,
     law: MembraneLaw,
+}
+
+#[derive(Clone, Copy)]
+struct SurfaceKinematics {
+    gradient: [[f64; 3]; 2],
+    engineering_green_strain: [f64; 3],
 }
 
 /// Immutable reference geometry, per-element grain and complete source bundles.
@@ -173,7 +184,7 @@ impl MembranePatch {
             let law = sheets[index].membrane_law().map_err(|source| MembraneError::Material { element: index, source })?;
             for &i in &nodes { nodal_mass_kg[i] += mass/3.0; }
             reference_areal_density_kg_m2.push([sheets[index].areal_density_kg_m2(); 3]);
-            elements.push(Element { nodes, gradients, area, law });
+            elements.push(Element { nodes, gradients, grain_sin_cos: [sin, cos], area, law });
         }
         if nodal_mass_kg.iter().any(|m| !m.is_finite() || *m <= 0.0)
             || !nodal_mass_kg.iter().sum::<f64>().is_finite() {
@@ -203,26 +214,37 @@ impl MembranePatch {
     /// Conserved total reference mass, in kilograms.
     pub fn reference_mass_kg(&self) -> f64 { self.nodal_mass_kg.iter().sum() }
 
-    // Columns of the surface gradient. Displacement differences (rather than
-    // global current positions) make rigid translation drop out algebraically.
-    fn deformation(&self, e: &Element, u: &[[f64; 3]]) -> [[f64; 3]; 2] {
-        let mut f = [[0.0; 3]; 2];
+    // Compute H from relative displacements before forming F = A + H. Using
+    // sym(A^t H) + H^t H/2 avoids subtracting nearly equal unit metrics and
+    // gives the original undeformed reference exactly zero total strain. A
+    // contains the orthonormal material axes, cached independently of mesh roundoff.
+    fn kinematics(&self, e: &Element, u: &[[f64; 3]]) -> SurfaceKinematics {
+        let mut h = [[0.0; 3]; 2];
         let origin = e.nodes[0];
         for a in 1..3 {
             let node = e.nodes[a];
             for i in 0..3 {
-                let reference = if i < 2 { self.mesh.nodes[node][i]-self.mesh.nodes[origin][i] } else { 0.0 };
-                let edge = reference + (u[node][i]-u[origin][i]);
-                for (alpha, col) in f.iter_mut().enumerate() { col[i] += edge*e.gradients[a][alpha]; }
+                let du = u[node][i]-u[origin][i];
+                for (alpha, col) in h.iter_mut().enumerate() { col[i] += du*e.gradients[a][alpha]; }
             }
         }
-        f
+        let [sin, cos] = e.grain_sin_cos;
+        let reference = [[cos, sin, 0.0], [-sin, cos, 0.0]];
+        SurfaceKinematics {
+            gradient: core::array::from_fn(|alpha|
+                core::array::from_fn(|i| reference[alpha][i]+h[alpha][i])),
+            engineering_green_strain: [
+                dot(reference[0],h[0])+0.5*dot(h[0],h[0]),
+                dot(reference[1],h[1])+0.5*dot(h[1],h[1]),
+                dot(reference[0],h[1])+dot(reference[1],h[0])+dot(h[0],h[1]),
+            ],
+        }
     }
-    fn response(&self, index: usize, f: [[f64; 3]; 2]) -> Result<SheetResponse, MembraneError> {
-        let [a, b] = f;
+    fn response(&self, index: usize, kinematics: SurfaceKinematics) -> Result<SheetResponse, MembraneError> {
+        let [a, b] = kinematics.gradient;
         let cross = [a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]];
         let area_ratio = cross[0].hypot(cross[1]).hypot(cross[2]);
-        let strain = [0.5*(dot(a,a)-1.0), 0.5*(dot(b,b)-1.0), dot(a,b)];
+        let strain = kinematics.engineering_green_strain;
         if !area_ratio.is_finite() || area_ratio < self.domain.minimum_area_ratio
             || strain.iter().any(|e| !e.is_finite() || e.abs() > self.domain.maximum_abs_strain) {
             return Err(MembraneError::State { element: index, reason: "surface collapse or material strain outside declared operating envelope" });
@@ -239,8 +261,8 @@ impl MembranePatch {
         }
         for (index,e) in self.elements.iter().enumerate() {
             poll(&mut cancelled)?;
-            let [a,b]=self.deformation(e,displacement_m);
-            e.law.admit_linearization([0.5*(dot(a,a)-1.0),0.5*(dot(b,b)-1.0),dot(a,b)])
+            let kinematics=self.kinematics(e,displacement_m);
+            e.law.admit_linearization(kinematics.engineering_green_strain)
                 .map_err(|source|MembraneError::Material {element:index,source})?;
         }
         poll(&mut cancelled)
@@ -269,8 +291,9 @@ impl MembranePatch {
         let mut strain_energy_j = 0.0;
         for (index, e) in self.elements.iter().enumerate() {
             poll(cancelled)?;
-            let f = self.deformation(e, displacement_m);
-            let r = self.response(index, f)?;
+            let kinematics = self.kinematics(e, displacement_m);
+            let f = kinematics.gradient;
+            let r = self.response(index, kinematics)?;
             strain_energy_j += e.area*r.energy_j_m2;
             let [s11,s22,s12] = r.resultants_n_m;
             for (a, &node) in e.nodes.iter().enumerate() {
@@ -299,8 +322,9 @@ impl MembranePatch {
         let mut out = vec![[0.0;3];n];
         for (index,e) in self.elements.iter().enumerate() {
             poll(&mut cancelled)?;
-            let f = self.deformation(e,displacement_m);
-            let r = self.response(index,f)?;
+            let kinematics = self.kinematics(e,displacement_m);
+            let f = kinematics.gradient;
+            let r = self.response(index,kinematics)?;
             let mut df = [[0.0;3];2];
             for a in 1..3 { for i in 0..3 { for alpha in 0..2 {
                 df[alpha][i] += (direction_m[e.nodes[a]][i]-direction_m[e.nodes[0]][i])*e.gradients[a][alpha];

@@ -187,9 +187,9 @@ impl MembranePatch {
         let mut density = Vec::with_capacity(self.elements.len());
         for (index, element) in self.elements.iter().enumerate() {
             poll(&mut cancelled)?;
-            let f = self.deformation(element, displacement_m);
-            self.response(index, f)?;
-            let [a, b] = f;
+            let kinematics = self.kinematics(element, displacement_m);
+            self.response(index, kinematics)?;
+            let [a, b] = kinematics.gradient;
             let cross = [
                 a[1] * b[2] - a[2] * b[1],
                 a[2] * b[0] - a[0] * b[2],

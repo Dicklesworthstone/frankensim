@@ -355,8 +355,9 @@ impl<'a> MembraneViscosity<'a> {
         let mut power_w = 0.0;
         for (index, element) in self.patch.elements.iter().enumerate() {
             poll(cancelled)?;
-            let f = self.patch.deformation(element, displacement_m);
-            self.patch.response(index, f)?;
+            let kinematics = self.patch.kinematics(element, displacement_m);
+            let f = kinematics.gradient;
+            self.patch.response(index, kinematics)?;
             let local_velocity = element.nodes.map(|node| velocity_m_s[node]);
             let mut strain_rate = rate(element, f, local_velocity);
             if let Some(reference) = self.natural_references[index] {
@@ -414,8 +415,9 @@ impl<'a> MembraneViscosity<'a> {
         {
             return Err(invalid("complete locally finite membrane displacement required"));
         }
-        let f = self.patch.deformation(element, displacement_m);
-        self.patch.response(index, f)?;
+        let kinematics = self.patch.kinematics(element, displacement_m);
+        let f = kinematics.gradient;
+        self.patch.response(index, kinematics)?;
         let scale = self.volumes_m3[index].sqrt();
         let factor = &self.factors[index];
         let mut rows = [[[0.0; 3]; 3]; 6];
@@ -503,8 +505,9 @@ impl<'a> MembraneViscosity<'a> {
         let displacement = modes.linearization_displacement_m();
         for (element_index, element) in self.patch.elements.iter().enumerate() {
             poll(&mut cancelled)?;
-            let f = self.patch.deformation(element, displacement);
-            self.patch.response(element_index, f)?;
+            let kinematics = self.patch.kinematics(element, displacement);
+            let f = kinematics.gradient;
+            self.patch.response(element_index, kinematics)?;
             let scale = self.volumes_m3[element_index].sqrt();
             for (column, mode) in modes.modes().iter().enumerate() {
                 let local = element.nodes.map(|node| core::array::from_fn(|axis| {

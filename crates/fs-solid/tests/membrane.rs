@@ -74,6 +74,79 @@ fn finite_rigid_motion_has_no_membrane_strain_or_force() {
 }
 
 #[test]
+fn undeformed_irregular_membrane_has_exactly_zero_strain_and_transverse_stiffness() {
+    let mesh = Mesh2 {
+        nodes: vec![[0.13, -0.21], [0.37, 0.08], [-0.11, 0.42]],
+        elems: vec![vec![0, 1, 2]],
+        patches: vec![],
+    };
+    let p = MembranePatch::try_new(mesh, vec![sheet(8000.0, 2000.0, 500.0, 0.2)],
+        vec![0.37], domain(), budget(), || false).unwrap();
+    let zero = vec![[0.0; 3]; 3];
+    let result = p.evaluate(&zero, || false).unwrap();
+    assert_eq!(result.strain_energy_j, 0.0);
+    assert!(result.internal_gradient_n.iter().flatten().all(|value| *value == 0.0));
+    let transverse = vec![[0.0, 0.0, 0.7], [0.0, 0.0, -0.3], [0.0, 0.0, 0.2]];
+    assert!(p.tangent_apply(&zero, &transverse, || false).unwrap()
+        .iter().flatten().all(|value| *value == 0.0));
+}
+
+#[test]
+fn small_affine_extension_retains_strain_energy_force_and_tangent() {
+    let warp = 8000.0;
+    let p = patch(warp, 2000.0, 500.0, 0.2, 0.0);
+    let area: f64 = p.reference_triangle_areas_m2().sum();
+    let direction: Vec<_> = p.mesh().nodes.iter().map(|x| [x[0], 0.0, 0.0]).collect();
+    // The displacement gradient is represented even when adding it to one
+    // rounds back to one. Compression must retain its signed restoring force.
+    for extension in [-1e-18_f64, 1e-18, 1e-12, 1e-4] {
+        let u: Vec<_> = direction.iter().map(|v| v.map(|x| extension*x)).collect();
+        let strain = extension + 0.5*extension*extension;
+        let result = p.evaluate(&u, || false).unwrap();
+        close(result.strain_energy_j, 0.5*area*warp*strain*strain, 0.0, 2e-14);
+        let force: f64 = result.internal_gradient_n.iter().zip(&direction)
+            .map(|(f, v)| f[0]*v[0]).sum();
+        close(force, area*warp*strain*(1.0+extension), 0.0, 2e-14);
+        let tangent = p.tangent_apply(&u, &direction, || false).unwrap();
+        let stiffness: f64 = tangent.iter().zip(&direction).map(|(f, v)| f[0]*v[0]).sum();
+        close(stiffness, area*warp*((1.0+extension).powi(2)+strain), 0.0, 2e-14);
+    }
+}
+
+#[test]
+fn small_transverse_slope_retains_quartic_energy_and_geometric_stiffness() {
+    let warp = 8000.0;
+    let p = patch(warp, 2000.0, 500.0, 0.2, 0.0);
+    let area: f64 = p.reference_triangle_areas_m2().sum();
+    let direction: Vec<_> = p.mesh().nodes.iter().map(|x| [0.0, 0.0, x[0]]).collect();
+    // z = slope*x gives E11 = slope²/2 and U = A*K*slope⁴/8.
+    // Recovering E from F^t F-I loses the smallest of these physical strains.
+    for slope in [1e-9_f64, 1e-7, 1e-3] {
+        let u: Vec<_> = direction.iter().map(|v| v.map(|x| slope*x)).collect();
+        let result = p.evaluate(&u, || false).unwrap();
+        close(result.strain_energy_j, area*warp*slope.powi(4)/8.0, 0.0, 2e-14);
+        let force: f64 = result.internal_gradient_n.iter().zip(&direction)
+            .map(|(f, v)| f[2]*v[2]).sum();
+        close(force, 0.5*area*warp*slope.powi(3), 0.0, 2e-14);
+        let tangent = p.tangent_apply(&u, &direction, || false).unwrap();
+        let stiffness: f64 = tangent.iter().zip(&direction).map(|(f, v)| f[2]*v[2]).sum();
+        close(stiffness, 1.5*area*warp*slope*slope, 0.0, 2e-14);
+    }
+}
+
+#[test]
+fn small_representable_strain_is_checked_in_mechanics_and_density_recovery() {
+    let p = MembranePatch::try_new(mesh(), vec![sheet(8000.0, 2000.0, 500.0, 0.2); 4],
+        vec![0.0; 4], MembraneDomain { maximum_abs_strain: 5e-19, ..domain() },
+        budget(), || false).unwrap();
+    let u: Vec<_> = p.mesh().nodes.iter().map(|x| [1e-18*x[0], 0.0, 0.0]).collect();
+    assert!(matches!(p.evaluate(&u, || false), Err(MembraneError::State { .. })));
+    assert!(matches!(p.tangent_apply(&u, &u, || false), Err(MembraneError::State { .. })));
+    assert!(matches!(p.current_corner_areal_density_kg_m2(&u, || false),
+        Err(MembraneError::State { .. })));
+}
+
+#[test]
 fn energy_force_and_matrix_free_tangent_match_finite_differences() {
     let p=patch(8000.0,2000.0,500.0,0.2,0.37);
     let u=displaced(); let base=p.evaluate(&u,||false).unwrap(); let h=1e-7;
