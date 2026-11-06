@@ -30,6 +30,7 @@ fn walls(parity: usize, count: usize) -> Vec<IdealAcousticPlane> {
 
 fn reflection_budget() -> ReflectedTrajectoryBudget {
     ReflectedTrajectoryBudget {
+        maximum_payload_bytes: 1_000_000,
         maximum_bound_nodes: 16_384,
         maximum_subdivision_depth: 20,
     }
@@ -609,4 +610,52 @@ fn reflection_refuses_missing_history_and_cancelled_queries_without_changing_the
             )
             .is_err()
     );
+}
+
+#[test]
+fn reflected_doppler_uses_image_direction_when_direct_sound_is_receding() {
+    let microphone = observer([0.0, 200.0, 0.0], 300.0, 0.8, 0.01);
+    let original = UniformSourceMotion::new(
+        0.0, [0.0, 100.0, 0.0], [0.0, -120.0, 0.0],
+    ).unwrap();
+    let trajectory = prepare(
+        microphone,
+        &samples(&[-0.5, 0.5], |t| original.kinematics_at(t).unwrap()),
+    );
+    near(trajectory.maximum_source_time_rate(), 300.0 / 420.0, 2e-12, 1.0);
+    for boundary in [IdealPlaneBoundary::Rigid, IdealPlaneBoundary::PressureRelease] {
+        let plane = IdealAcousticPlane::new(
+            [0.0; 3], [0.0, 1.0, 0.0], boundary,
+        ).unwrap();
+        let images = IdealReflectionObserver::new(microphone, &[plane], 2).unwrap();
+        let reflected = PreparedReflectedSourceTrajectory::new(
+            &trajectory, &images, reflection_budget(), &mut || false,
+        ).unwrap();
+        let bound = reflected.maximum_source_time_rate_in_window(
+            [0.75, 0.95], 1e-12, &mut || false,
+        ).unwrap();
+        // The source moves away from the real microphone, but toward its
+        // image across the wall. Pressure parity cannot cancel that clock.
+        near(bound, 300.0 / 180.0, 2e-12, 1.0);
+        for path in 0..2 {
+            for i in 0..=16 {
+                let t = 0.75 + f64::from(i) / 80.0;
+                let sample = reflected.prepare_path(path, t, 1e-12, &mut || false).unwrap();
+                assert!(sample.source_time_rate() <= bound);
+                near(sample.source_time_rate(),
+                    if path == 0 { 300.0 / 420.0 } else { 300.0 / 180.0 },
+                    2e-12, 1.0,
+                );
+            }
+        }
+        assert!(PreparedReflectedSourceTrajectory::new(
+            &trajectory,
+            &images,
+            ReflectedTrajectoryBudget {
+                maximum_payload_bytes: 0,
+                ..reflection_budget()
+            },
+            &mut || false,
+        ).is_err());
+    }
 }

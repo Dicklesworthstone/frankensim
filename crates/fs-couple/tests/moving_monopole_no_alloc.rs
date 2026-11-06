@@ -99,6 +99,7 @@ fn reflected_field_and_audio_callbacks_allocate_nothing_after_preparation() {
         &trajectory,
         &walls,
         ReflectedTrajectoryBudget {
+            maximum_payload_bytes: 1_000_000,
             maximum_bound_nodes: 4096,
             maximum_subdivision_depth: 16,
         },

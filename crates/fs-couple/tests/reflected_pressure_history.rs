@@ -85,6 +85,7 @@ fn reflected<'a>(
         trajectory,
         walls,
         ReflectedTrajectoryBudget {
+            maximum_payload_bytes: 1_000_000,
             maximum_bound_nodes: 4096,
             maximum_subdivision_depth: 16,
         },

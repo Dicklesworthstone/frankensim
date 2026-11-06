@@ -18,8 +18,8 @@
 //! microphones use the same image law through [`moving`].
 
 use super::{
-    MAX_BOUND_DEPTH, PreparedSourceTrajectory, QuinticSegment, dot, enclose_dd, invalid, poll,
-    position_hull_clear, split_controls,
+    BoundNode, MAX_BOUND_DEPTH, PreparedSourceTrajectory, QuinticSegment, doppler, dot, enclose_dd,
+    invalid, poll, position_hull_clear, split_controls,
 };
 use crate::AeroacError;
 use crate::curle3d::IdealAcousticPlane;
@@ -282,16 +282,31 @@ fn admit_planes(
     Ok(path_count)
 }
 
-/// Additional whole-trajectory admission work. Source storage and root caps
-/// remain with the original trajectory. Only bounded image metadata is retained;
-/// the preparation stack has at most 33 six-control position hulls.
+/// Additional whole-trajectory admission work and retained image bounds.
+/// Source polynomials and root caps remain with the original trajectory.
+/// Each fixed-microphone source caches one rate per ORIGINAL span, taking the
+/// maximum over its image group rather than allocating a span-by-image matrix.
 #[derive(Clone, Copy, Debug)]
 pub struct ReflectedTrajectoryBudget {
+    /// Logical owner and owned arrays: image metadata, borrowed pair records or
+    /// fixed-microphone arrival/rate caches. Borrowed trajectories, allocator
+    /// metadata/rounding and fixed-depth preparation stacks are excluded.
+    pub maximum_payload_bytes: usize,
     /// Total Bernstein nodes across ALL original source spans. Each checks at
     /// most three half-spaces and the complete admitted virtual-microphone set.
     pub maximum_bound_nodes: usize,
     /// Maximum binary subdivision depth, inclusive, in 0..=32.
     pub maximum_subdivision_depth: usize,
+}
+
+impl ReflectedTrajectoryBudget {
+    fn admit_payload(self, bytes: Option<usize>) -> Result<(), AeroacError> {
+        let bytes = bytes.ok_or_else(|| invalid("reflected trajectory payload overflows"))?;
+        if bytes > self.maximum_payload_bytes {
+            return Err(invalid("reflected trajectory exceeds retained payload budget"));
+        }
+        Ok(())
+    }
 }
 
 /// One original finite C2 source observed through all admitted ideal-wall paths.
@@ -305,6 +320,8 @@ pub struct PreparedReflectedSourceTrajectory<'a> {
     trajectory: &'a PreparedSourceTrajectory,
     observer: &'a IdealReflectionObserver,
     arrival_intervals: Vec<[f64; 2]>,
+    span_maximum_rates: Vec<f64>,
+    maximum_source_time_rate: f64,
     receiver_interval: [f64; 2],
 }
 
@@ -330,8 +347,14 @@ impl<'a> PreparedReflectedSourceTrajectory<'a> {
                 "reflected trajectory observer, material or bound budget mismatch",
             ));
         }
-        let first = trajectory.segments[0].first;
-        let last = trajectory.segments[trajectory.segments.len() - 1].last;
+        budget.admit_payload(
+            observer.path_count().checked_mul(size_of::<[f64; 2]>())
+                .and_then(|bytes| trajectory.segment_count().checked_mul(size_of::<f64>())
+                    .and_then(|rates| bytes.checked_add(rates)))
+                .and_then(|bytes| bytes.checked_add(size_of::<Self>())),
+        )?;
+        let first = trajectory.segments[0].polynomial.first;
+        let last = trajectory.segments[trajectory.segments.len() - 1].polynomial.last;
         let mut arrival_intervals = Vec::new();
         arrival_intervals
             .try_reserve_exact(observer.path_count())
@@ -370,15 +393,30 @@ impl<'a> PreparedReflectedSourceTrajectory<'a> {
                 "retained trajectory has no complete reflected receiver window",
             ));
         }
+        let mut span_maximum_rates = Vec::new();
+        span_maximum_rates.try_reserve_exact(trajectory.segment_count())
+            .map_err(|_| invalid("reflected Doppler cache allocation exceeds available memory"))?;
         let mut visited = 0;
+        let mut maximum_source_time_rate = 0.0_f64;
         for segment in &trajectory.segments {
-            admit_span(observer, segment, budget, &mut visited, cancelled)?;
+            let rate = admit_span(
+                observer,
+                &segment.polynomial,
+                trajectory.maximum_mach,
+                budget,
+                &mut visited,
+                cancelled,
+            )?;
+            maximum_source_time_rate = maximum_source_time_rate.max(rate);
+            span_maximum_rates.push(rate);
         }
         poll(cancelled)?;
         Ok(Self {
             trajectory,
             observer,
             arrival_intervals,
+            span_maximum_rates,
+            maximum_source_time_rate,
             receiver_interval,
         })
     }
@@ -401,9 +439,53 @@ impl<'a> PreparedReflectedSourceTrajectory<'a> {
         self.observer.path(path)?;
         Ok(self.arrival_intervals[path])
     }
-    /// The original whole-path bound covers every virtual receiver direction.
+    /// Directional ceiling covering every ORIGINAL span and virtual receiver.
+    /// A direct-path redshift is never substituted for an image's direction.
     pub const fn maximum_source_time_rate(&self) -> f64 {
-        self.trajectory.maximum_source_time_rate()
+        self.maximum_source_time_rate
+    }
+
+    /// Directional ceiling for a finite receiver window shared by all images.
+    ///
+    /// Outward endpoint searches bracket the union of causally possible source
+    /// spans. One cached max-over-images value per original span bounds that
+    /// union without a span-by-image matrix. Partial spans keep their complete
+    /// bound. Work is O(paths * log N + retained spans), with no allocation.
+    pub fn maximum_source_time_rate_in_window(
+        &self,
+        receiver_time_interval_s: [f64; 2],
+        maximum_time_residual_s: f64,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<f64, AeroacError> {
+        poll(cancelled)?;
+        doppler::admit_window(
+            receiver_time_interval_s,
+            self.receiver_interval,
+            maximum_time_residual_s,
+        )?;
+        let mut first = self.trajectory.segment_count();
+        let mut last = 0;
+        for path in &self.observer.paths {
+            let range = doppler::source_spans(
+                self.trajectory,
+                &path.observer,
+                receiver_time_interval_s,
+                maximum_time_residual_s,
+                cancelled,
+            )?;
+            if !range.is_empty() {
+                first = first.min(range.start);
+                last = last.max(range.end);
+            }
+        }
+        let mut maximum = 0.0_f64;
+        if first < last {
+            for rate in &self.span_maximum_rates[first..last] {
+                poll(cancelled)?;
+                maximum = maximum.max(*rate);
+            }
+        }
+        Ok(if maximum > 0.0 { maximum } else { self.maximum_source_time_rate })
     }
     /// Per-path interior refinements. Complete work multiplies by path count.
     pub const fn maximum_root_iterations(&self) -> usize {
@@ -450,7 +532,7 @@ impl<'a> PreparedReflectedSourceTrajectory<'a> {
         while begin < end {
             poll(cancelled)?;
             let middle = begin + (end - begin) / 2;
-            let knot = self.trajectory.segments[middle].last;
+            let knot = self.trajectory.segments[middle].polynomial.last;
             let arrival = image
                 .observer
                 .prepare_emission(knot.source_time_s, knot.kinematics)?
@@ -461,7 +543,7 @@ impl<'a> PreparedReflectedSourceTrajectory<'a> {
                 end = middle;
             }
         }
-        let segment = &self.trajectory.segments[begin];
+        let segment = &self.trajectory.segments[begin].polynomial;
         let first_arrival = image
             .observer
             .prepare_emission(segment.first.source_time_s, segment.first.kinematics)?
@@ -604,12 +686,25 @@ struct PositionNode {
 fn admit_span(
     observer: &IdealReflectionObserver,
     segment: &QuinticSegment,
+    maximum_mach: f64,
     budget: ReflectedTrajectoryBudget,
     visited: &mut usize,
     cancelled: &mut impl FnMut() -> bool,
-) -> Result<(), AeroacError> {
+) -> Result<f64, AeroacError> {
     let zero = Interval::point(0.0);
     let mut controls = [[zero; 3]; 6];
+    let mut velocity = [[zero; 3]; 5];
+    for (control, original) in velocity.iter_mut().zip(segment.velocity) {
+        for axis in 0..3 {
+            control[axis] = enclose_dd(original[axis])?;
+        }
+    }
+    for axis in 0..3 {
+        velocity[0][axis] = velocity[0][axis]
+            .hull(Interval::point(segment.first.kinematics.velocity_m_s[axis]));
+        velocity[4][axis] = velocity[4][axis]
+            .hull(Interval::point(segment.last.kinematics.velocity_m_s[axis]));
+    }
     for (control, original) in controls.iter_mut().zip(segment.position) {
         for axis in 0..3 {
             control[axis] = enclose_dd(original[axis])?;
@@ -632,8 +727,9 @@ fn admit_span(
         }
     }
     let origin = segment.first.kinematics.position_m;
-    let mut stack = [PositionNode { controls, depth: 0 }; MAX_BOUND_DEPTH + 1];
+    let mut stack = [BoundNode { position: controls, velocity, depth: 0 }; MAX_BOUND_DEPTH + 1];
     let mut pending = 1;
+    let mut maximum_rate = 0.0_f64;
     while pending > 0 {
         poll(cancelled)?;
         if *visited >= budget.maximum_bound_nodes {
@@ -646,7 +742,7 @@ fn admit_span(
         pending -= 1;
         let node = stack[pending];
         let inside = observer.planes().iter().all(|plane| {
-            node.controls.iter().all(|control| {
+            node.position.iter().all(|control| {
                 let mut distance = zero;
                 for axis in 0..3 {
                     // Enclose the representable world position before taking
@@ -665,12 +761,17 @@ fn admit_span(
                 Interval::point(path.observer.observer_position_m()[i]) - Interval::point(origin[i])
             });
             position_hull_clear(
-                &node.controls,
+                &node.position,
                 relative,
                 observer.observer.limits().minimum_distance_m,
             )
         });
         if inside && clear {
+            for path in &observer.paths {
+                maximum_rate = maximum_rate.max(doppler::maximum_rate(
+                    &path.observer, origin, &node, maximum_mach,
+                ));
+            }
             continue;
         }
         if node.depth >= budget.maximum_subdivision_depth {
@@ -679,16 +780,19 @@ fn admit_span(
                 residual: 1.0,
             });
         }
-        let (left, right) = split_controls(node.controls);
-        stack[pending] = PositionNode {
-            controls: right,
+        let (left, right) = split_controls(node.position);
+        let (left_velocity, right_velocity) = split_controls(node.velocity);
+        stack[pending] = BoundNode {
+            position: right,
+            velocity: right_velocity,
             depth: node.depth + 1,
         };
-        stack[pending + 1] = PositionNode {
-            controls: left,
+        stack[pending + 1] = BoundNode {
+            position: left,
+            velocity: left_velocity,
             depth: node.depth + 1,
         };
         pending += 2;
     }
-    Ok(())
+    Ok(maximum_rate)
 }

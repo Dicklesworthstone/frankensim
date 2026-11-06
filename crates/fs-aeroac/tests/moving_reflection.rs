@@ -31,6 +31,7 @@ fn path_budget() -> TrajectoryBudget {
 }
 fn bounds() -> ReflectedTrajectoryBudget {
     ReflectedTrajectoryBudget {
+        maximum_payload_bytes: 1_000_000,
         maximum_bound_nodes: 16_384,
         maximum_subdivision_depth: 20,
     }

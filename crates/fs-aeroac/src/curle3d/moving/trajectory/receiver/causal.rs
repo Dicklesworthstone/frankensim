@@ -30,35 +30,42 @@ pub(super) fn source_spans(
     let c = Interval::point(owner.source.medium().sound_speed_m_s());
     let tolerance = owner.config.maximum_time_residual_s;
     let spans = &owner.source.segments;
+    source_span_range(
+        spans.len(),
+        tolerance,
+        |mid| knot_residual(spans[mid].polynomial.last, first_position, first_time, c),
+        |mid| knot_residual(spans[mid].polynomial.first, last_position, last_time, c),
+        cancelled,
+    )
+}
+
+// The endpoint residual providers preserve each owner's original receiver
+// geometry. Only decisive outward signs remove a prefix or suffix; uncertain
+// signs need not themselves form a monotone predicate.
+pub(in crate::curle3d::moving::trajectory) fn source_span_range(
+    count: usize,
+    tolerance: f64,
+    mut last_knot_at_first_receiver: impl FnMut(usize) -> Interval,
+    mut first_knot_at_last_receiver: impl FnMut(usize) -> Interval,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<core::ops::Range<usize>, AeroacError> {
     let mut lo = 0;
-    let mut hi = spans.len();
+    let mut hi = count;
     while lo < hi {
         poll(cancelled)?;
         let mid = lo + (hi - lo) / 2;
-        let residual = knot_residual(
-            spans[mid].polynomial.last,
-            first_position,
-            first_time,
-            c,
-        );
-        if residual.hi() < -tolerance {
+        if last_knot_at_first_receiver(mid).hi() < -tolerance {
             lo = mid + 1;
         } else {
             hi = mid;
         }
     }
     let first = lo;
-    hi = spans.len();
+    hi = count;
     while lo < hi {
         poll(cancelled)?;
         let mid = lo + (hi - lo) / 2;
-        let residual = knot_residual(
-            spans[mid].polynomial.first,
-            last_position,
-            last_time,
-            c,
-        );
-        if residual.lo() > tolerance {
+        if first_knot_at_last_receiver(mid).lo() > tolerance {
             hi = mid;
         } else {
             lo = mid + 1;
@@ -67,7 +74,7 @@ pub(super) fn source_spans(
     Ok(first..lo)
 }
 
-fn knot_residual(
+pub(in crate::curle3d::moving::trajectory) fn knot_residual(
     source: TimedSourceKinematics,
     receiver_position: [Interval; 3],
     receiver_time: f64,

@@ -117,11 +117,13 @@ pub trait CompactMotion: sealed::Sealed + Copy {
         self.prepare_endpoint(observer, source_time_s, receiver_time_s)
     }
     /// Admit continuous geometry and return a whole-window Doppler-rate bound.
+    /// The residual tolerance is the original receiver-clock policy.
     fn admit_window<Cancel: FnMut() -> bool>(
         self,
         observer: &Self::Observer,
         first: &PreparedMovingCompactSample,
         last: &PreparedMovingCompactSample,
+        maximum_time_residual_s: f64,
         cancelled: &mut Cancel,
     ) -> Result<f64, RenderError>;
 }
@@ -163,6 +165,7 @@ impl CompactMotion for UniformSourceMotion {
         observer: &MovingCompactObserver,
         first: &PreparedMovingCompactSample,
         last: &PreparedMovingCompactSample,
+        _maximum_time_residual_s: f64,
         cancelled: &mut Cancel,
     ) -> Result<f64, RenderError> {
         check_cancel(cancelled)?;
@@ -218,6 +221,7 @@ impl CompactMotion for &PreparedSourceTrajectory {
         observer: &MovingCompactObserver,
         first: &PreparedMovingCompactSample,
         last: &PreparedMovingCompactSample,
+        maximum_time_residual_s: f64,
         cancelled: &mut Cancel,
     ) -> Result<f64, RenderError> {
         check_cancel(cancelled)?;
@@ -231,10 +235,13 @@ impl CompactMotion for &PreparedSourceTrajectory {
                 "receiver window exceeds the retained curved trajectory",
             ));
         }
-        // Curved paths can turn toward the observer later in the window.
-        // Their original whole-domain speed bound must replace the uniform
-        // path's first-sample radial-Mach shortcut.
-        Ok(self.maximum_source_time_rate())
+        // The same accepted continuous span bounds retain recession without
+        // letting causally unrelated future motion inflate this output band.
+        self.maximum_source_time_rate_in_window(
+            [first.receiver_time_s(), last.receiver_time_s()],
+            maximum_time_residual_s,
+            cancelled,
+        ).map_err(acoustic)
     }
 }
 
@@ -310,11 +317,14 @@ impl CompactMotion for CompactSourceMotion<'_> {
         observer: &MovingCompactObserver,
         first: &PreparedMovingCompactSample,
         last: &PreparedMovingCompactSample,
+        maximum_time_residual_s: f64,
         cancelled: &mut Cancel,
     ) -> Result<f64, RenderError> {
         match self {
-            Self::Uniform(m) => m.admit_window(observer, first, last, cancelled),
-            Self::Trajectory(m) => m.admit_window(observer, first, last, cancelled),
+            Self::Uniform(m) =>
+                m.admit_window(observer, first, last, maximum_time_residual_s, cancelled),
+            Self::Trajectory(m) =>
+                m.admit_window(observer, first, last, maximum_time_residual_s, cancelled),
         }
     }
 }

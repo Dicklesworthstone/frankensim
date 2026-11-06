@@ -110,6 +110,7 @@ impl<'path> CompactMotion for &PreparedReflectedSourceTrajectory<'path> {
         observer: &Self::Observer,
         first: &PreparedMovingCompactSample,
         last: &PreparedMovingCompactSample,
+        maximum_time_residual_s: f64,
         cancelled: &mut Cancel,
     ) -> Result<f64, RenderError> {
         check_cancel(cancelled)?;
@@ -124,7 +125,11 @@ impl<'path> CompactMotion for &PreparedReflectedSourceTrajectory<'path> {
                 "reflected source window exceeds the original trajectory",
             ));
         }
-        Ok(self.maximum_source_time_rate())
+        self.maximum_source_time_rate_in_window(
+            [first.receiver_time_s(), last.receiver_time_s()],
+            maximum_time_residual_s,
+            cancelled,
+        ).map_err(acoustic)
     }
 }
 

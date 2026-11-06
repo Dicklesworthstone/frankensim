@@ -60,7 +60,7 @@ pub(super) fn maximum_rate(
 // A directional refinement on ONE causally possible clearance leaf. The
 // velocity hulls enclose the complete original source/receiver spans, not
 // simultaneous samples. Geometry and velocity remain independent enclosures.
-pub(super) fn directional_maximum_rate(
+pub(in crate::curle3d::moving::trajectory) fn directional_maximum_rate(
     displacement: [Interval; 3],
     distance: Interval,
     source_velocity: [Interval; 3],

@@ -106,6 +106,7 @@ impl<'path> CompactMotion for &PreparedReflectedMovingReceiverSource<'path> {
         observer: &Self::Observer,
         first: &PreparedMovingCompactSample,
         last: &PreparedMovingCompactSample,
+        _maximum_time_residual_s: f64,
         cancelled: &mut Cancel,
     ) -> Result<f64, RenderError> {
         check_cancel(cancelled)?;

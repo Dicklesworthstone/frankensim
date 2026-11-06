@@ -91,6 +91,10 @@ impl<'a> MovingReflectionObserver<'a> {
         budget: ReflectedTrajectoryBudget,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Self, AeroacError> {
+        budget.admit_payload(
+            path_count.checked_mul(size_of::<f64>())
+                .and_then(|bytes| bytes.checked_add(size_of::<Self>())),
+        )?;
         admit_halfspaces(receiver, planes, false, budget, cancelled)?;
         let mut retained = [planes[0]; 3];
         retained[..planes.len()].copy_from_slice(planes);
@@ -172,6 +176,10 @@ impl<'a> MovingReflectionObserver<'a> {
         budget: ReflectedTrajectoryBudget,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Self, AeroacError> {
+        budget.admit_payload(
+            images.path_count().checked_mul(size_of::<f64>() + size_of::<WedgeReceiverImage>())
+                .and_then(|bytes| bytes.checked_add(size_of::<Self>())),
+        )?;
         admit_halfspaces(receiver, &planes, false, budget, cancelled)?;
         let mut signs = Vec::new();
         let mut wedge_images = Vec::new();
@@ -290,6 +298,10 @@ impl<'a> PreparedReflectedMovingReceiverSource<'a> {
                 "reflected source and microphone must share their original fluid frame",
             ));
         }
+        source_bounds.admit_payload(
+            observer.path_count().checked_mul(size_of::<PreparedMovingReceiverSource<'a>>())
+                .and_then(|bytes| bytes.checked_add(size_of::<Self>())),
+        )?;
         admit_halfspaces(source, observer.planes(), true, source_bounds, cancelled)?;
         let mut work = ReceiverPreparationWork::default();
         let direct = PreparedMovingReceiverSource::new_image(

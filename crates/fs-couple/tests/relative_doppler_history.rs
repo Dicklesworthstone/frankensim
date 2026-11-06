@@ -3,10 +3,15 @@
 
 use fs_aeroac::curle3d::moving::flow::UniformFlowFrame;
 use fs_aeroac::curle3d::moving::trajectory::{
-    MovingReceiverBudget, MovingReceiverConfig, PreparedKinematicTrajectory,
-    PreparedMovingReceiverSource, TimedSourceKinematics, TrajectoryBudget,
+    IdealReflectionObserver, MovingReceiverBudget, MovingReceiverConfig, PreparedKinematicTrajectory,
+    PreparedMovingReceiverSource, PreparedReflectedSourceTrajectory, PreparedSourceTrajectory,
+    ReflectedTrajectoryBudget, TimedSourceKinematics, TrajectoryBudget,
 };
-use fs_aeroac::curle3d::moving::{CompactSourceStrength, SourceKinematics, TimedCompactSource};
+use fs_aeroac::curle3d::moving::{
+    CompactSourceStrength, MovingCompactLimits, MovingCompactObserver, SourceKinematics,
+    TimedCompactSource, UniformSourceMotion,
+};
+use fs_aeroac::curle3d::{IdealAcousticPlane, IdealPlaneBoundary};
 use fs_couple::pcm_wav::observation::moving::{
     CompactSourceHistory, MovingCompactRenderer, MovingPressureBudget, MovingPressureConfig,
 };
@@ -259,4 +264,181 @@ fn receding_native_history_renders_at_its_contracted_receiver_bandwidth() {
     assert!(MovingCompactRenderer::with_moving_receiver(
         &sources, unresolved, budget(), &mut || false,
     ).is_err());
+}
+
+fn fixed_path_with_later_approach(
+    observer: MovingCompactObserver,
+    source_y: f64,
+) -> PreparedSourceTrajectory {
+    // The first span recedes at 120 m/s. The next turns smoothly and ends
+    // approaching at 120 m/s, but none of its emissions reaches this window.
+    let knots = [(-0.5, 60.0, -120.0), (0.0, 0.0, -120.0), (1.0, 0.0, 120.0)].map(
+        |(source_time_s, x, speed)| TimedSourceKinematics {
+            source_time_s,
+            kinematics: SourceKinematics {
+                position_m: [x, source_y, 0.0],
+                velocity_m_s: [speed, 0.0, 0.0],
+                acceleration_m_s2: [0.0; 3],
+            },
+        },
+    );
+    PreparedSourceTrajectory::new(
+        observer,
+        &knots,
+        TrajectoryBudget {
+            maximum_segments: 4,
+            maximum_payload_bytes: 131_072,
+            maximum_bound_nodes: 4096,
+            maximum_subdivision_depth: 20,
+            maximum_root_iterations: 96,
+        },
+        &mut || false,
+    )
+    .unwrap()
+}
+
+#[test]
+fn fixed_curved_history_admits_only_the_requested_receding_window() {
+    let observer = MovingCompactObserver::new(
+        FluidAcousticState::try_new(1.2, 300.0).unwrap(),
+        [100.0, 0.0, 0.0],
+        MovingCompactLimits {
+            maximum_mach: 0.8,
+            minimum_distance_m: 0.01,
+        },
+    )
+    .unwrap();
+    let motion = fixed_path_with_later_approach(observer, 0.0);
+    assert!(motion.maximum_source_time_rate() > 1.0);
+    let accepted = history(-256, 512);
+    let sources = [CompactSourceHistory {
+        motion: &motion,
+        samples: &accepted,
+        source_bandwidth_hz: 40.0,
+    }];
+    let config = MovingPressureConfig {
+        receiver_bandwidth_hz: 29.0,
+        ..config()
+    };
+    let build =
+        || MovingCompactRenderer::new(observer, &sources, config, budget(), &mut || false).unwrap();
+    let mut renderer = build();
+    let mut actual = [0.0; 65];
+    renderer.block(&mut actual).unwrap();
+
+    // An independent analytic retarded inversion of the same straight first
+    // span must produce the same physical pressure; later motion is irrelevant.
+    let uniform = UniformSourceMotion::new(0.0, [0.0; 3], [-120.0, 0.0, 0.0]).unwrap();
+    let reference_sources = [CompactSourceHistory {
+        motion: uniform,
+        samples: &accepted,
+        source_bandwidth_hz: 40.0,
+    }];
+    let mut reference =
+        MovingCompactRenderer::new(observer, &reference_sources, config, budget(), &mut || {
+            false
+        })
+        .unwrap();
+    let mut expected = [0.0; 65];
+    reference.block(&mut expected).unwrap();
+    for (actual, expected) in actual.iter().zip(expected) {
+        assert!(
+            (actual - expected).abs() < 1e-10,
+            "{actual:e} vs {expected:e}"
+        );
+    }
+    let mut partitioned = build();
+    let mut chunks = [0.0; 65];
+    for chunk in chunks.chunks_mut(7) {
+        partitioned.block(chunk).unwrap();
+    }
+    assert_eq!(actual.map(f64::to_bits), chunks.map(f64::to_bits));
+    let insufficient = MovingPressureConfig {
+        receiver_bandwidth_hz: 28.0,
+        ..config
+    };
+    assert!(
+        MovingCompactRenderer::new(observer, &sources, insufficient, budget(), &mut || false,)
+            .is_err()
+    );
+}
+
+#[test]
+fn fixed_reflected_history_keeps_each_receding_delay_and_wall_sign() {
+    let medium = FluidAcousticState::try_new(1.2, 300.0).unwrap();
+    let limits = MovingCompactLimits {
+        maximum_mach: 0.8,
+        minimum_distance_m: 0.01,
+    };
+    let observer = MovingCompactObserver::new(medium, [100.0, 10.0, 0.0], limits).unwrap();
+    let trajectory = fixed_path_with_later_approach(observer, 10.0);
+    let accepted = history(-256, 512);
+    let uniform = UniformSourceMotion::new(0.0, [0.0, 10.0, 0.0], [-120.0, 0.0, 0.0]).unwrap();
+    let reference_sources = [CompactSourceHistory {
+        motion: uniform,
+        samples: &accepted,
+        source_bandwidth_hz: 40.0,
+    }];
+    let config = MovingPressureConfig {
+        receiver_bandwidth_hz: 31.0,
+        ..config()
+    };
+    for (boundary, sign) in [
+        (IdealPlaneBoundary::Rigid, 1.0),
+        (IdealPlaneBoundary::PressureRelease, -1.0),
+    ] {
+        let plane = IdealAcousticPlane::new([0.0; 3], [0.0, 1.0, 0.0], boundary).unwrap();
+        let images = IdealReflectionObserver::new(observer, &[plane], 2).unwrap();
+        let reflected = PreparedReflectedSourceTrajectory::new(
+            &trajectory,
+            &images,
+            ReflectedTrajectoryBudget {
+                maximum_payload_bytes: 131_072,
+                maximum_bound_nodes: 4096,
+                maximum_subdivision_depth: 20,
+            },
+            &mut || false,
+        )
+        .unwrap();
+        let sources = [CompactSourceHistory {
+            motion: &reflected,
+            samples: &accepted,
+            source_bandwidth_hz: 40.0,
+        }];
+        let mut renderer =
+            MovingCompactRenderer::with_ideal_reflections(&sources, config, budget(), &mut || {
+                false
+            })
+            .unwrap();
+        let mut actual = [0.0; 65];
+        renderer.block(&mut actual).unwrap();
+
+        let virtual_observer =
+            MovingCompactObserver::new(medium, [100.0, -10.0, 0.0], limits).unwrap();
+        let mut direct =
+            MovingCompactRenderer::new(observer, &reference_sources, config, budget(), &mut || {
+                false
+            })
+            .unwrap();
+        let mut image = MovingCompactRenderer::new(
+            virtual_observer,
+            &reference_sources,
+            config,
+            budget(),
+            &mut || false,
+        )
+        .unwrap();
+        let mut direct_pressure = [0.0; 65];
+        let mut image_pressure = [0.0; 65];
+        direct.block(&mut direct_pressure).unwrap();
+        image.block(&mut image_pressure).unwrap();
+        for i in 0..65 {
+            let expected = direct_pressure[i] + sign * image_pressure[i];
+            assert!(
+                (actual[i] - expected).abs() < 1e-10,
+                "image sign {sign}: {} vs {expected}",
+                actual[i]
+            );
+        }
+    }
 }

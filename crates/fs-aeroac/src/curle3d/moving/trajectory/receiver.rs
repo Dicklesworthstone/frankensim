@@ -18,8 +18,8 @@ use crate::curle3d::moving::MovingCompactLimits;
 use fs_ivl::Interval;
 use fs_math::dd::Dd;
 
-mod causal;
-mod doppler;
+pub(super) mod causal;
+pub(super) mod doppler;
 
 /// The finite observation window and its physical error limits.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -819,7 +819,7 @@ fn displacement_hull(node: &PairNode, origin_delta: [Interval; 3]) -> [Interval;
     })
 }
 
-fn distance_hull(displacement: [Interval; 3]) -> Interval {
+pub(super) fn distance_hull(displacement: [Interval; 3]) -> Interval {
     let components = displacement.map(Interval::abs);
     let scale = components.iter().fold(0.0_f64, |a, b| a.max(b.hi()));
     if !scale.is_finite() {

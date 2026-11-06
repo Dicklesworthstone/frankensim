@@ -212,6 +212,7 @@ fn moving_reflected_histories_preserve_rigid_and_pressure_release_vector_boundar
             &trajectory,
             &walls,
             ReflectedTrajectoryBudget {
+                maximum_payload_bytes: 1_000_000,
                 maximum_bound_nodes: 4096,
                 maximum_subdivision_depth: 16,
             },

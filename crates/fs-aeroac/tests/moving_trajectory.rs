@@ -240,7 +240,15 @@ fn zero_endpoint_speeds_cannot_hide_an_interior_sonic_excursion() {
         2e-12,
         1.0,
     );
-    assert!(admitted.maximum_source_time_rate() >= 1.0 / (1.0 - 1.875 / 4.0));
+    // This microphone sees transverse/receding motion: the interior SPEED
+    // maximum must remain admitted, but it is not an approaching radial Mach.
+    assert!(admitted.maximum_source_time_rate() < 1.0 + 1e-10);
+    for i in 0..=32 {
+        let tau = f64::from(i) / 32.0;
+        let state = admitted.kinematics_at(tau).unwrap();
+        let exact = microphone.prepare_emission(tau, state).unwrap();
+        assert!(exact.source_time_rate() <= admitted.maximum_source_time_rate());
+    }
 }
 
 fn parabola(t: f64, impact: f64) -> SourceKinematics {
@@ -538,4 +546,85 @@ fn large_epoch_inversion_uses_the_same_public_source_time_for_all_kinematics() {
     assert_eq!(actual.distance_m.to_bits(), direct.distance_m.to_bits());
     assert_eq!(actual.receiver_time_s, arrival);
     assert!(actual.retarded_time_residual_s <= 1e-4);
+}
+
+#[test]
+fn fixed_microphone_directional_bounds_preserve_recession_on_every_axis() {
+    for axis in 0..3 {
+        for sign in [-1.0, 1.0] {
+            let mut microphone_position = [0.0; 3];
+            microphone_position[axis] = sign * 100.0;
+            let mut velocity = [0.0; 3];
+            velocity[axis] = -sign * 120.0;
+            let microphone = observer(microphone_position, 300.0, 0.8, 0.01);
+            let uniform = UniformSourceMotion::new(0.0, [0.0; 3], velocity).unwrap();
+            let path = prepare(
+                microphone,
+                &samples(&[-0.5, 0.5], |t| uniform.kinematics_at(t).unwrap()),
+            );
+            let bound = path.maximum_source_time_rate_in_window(
+                [0.0, 0.125], 1e-12, &mut || false,
+            ).unwrap();
+            near(bound, 300.0 / 420.0, 2e-12, 1.0);
+            near(path.maximum_source_time_rate(), bound, 2e-12, 1.0);
+            for i in 0..=32 {
+                let t = f64::from(i) / 256.0;
+                let sample = path.prepare_receiver(t, 1e-12, &mut || false).unwrap();
+                assert!(sample.source_time_rate() <= bound);
+            }
+        }
+    }
+}
+
+#[test]
+fn fixed_microphone_window_excludes_future_approach_but_retains_tolerance_edges() {
+    let microphone = observer([100.0, 0.0, 0.0], 300.0, 0.8, 0.01);
+    let knots = [
+        TimedSourceKinematics {
+            source_time_s: -0.5,
+            kinematics: SourceKinematics {
+                position_m: [60.0, 0.0, 0.0],
+                velocity_m_s: [-120.0, 0.0, 0.0],
+                acceleration_m_s2: [0.0; 3],
+            },
+        },
+        TimedSourceKinematics {
+            source_time_s: 0.0,
+            kinematics: SourceKinematics {
+                position_m: [0.0; 3],
+                velocity_m_s: [-120.0, 0.0, 0.0],
+                acceleration_m_s2: [0.0; 3],
+            },
+        },
+        TimedSourceKinematics {
+            source_time_s: 1.0,
+            kinematics: SourceKinematics {
+                position_m: [0.0; 3],
+                velocity_m_s: [120.0, 0.0, 0.0],
+                acceleration_m_s2: [0.0; 3],
+            },
+        },
+    ];
+    let path = prepare(microphone, &knots);
+    assert!(path.maximum_source_time_rate() > 1.0);
+    let bound = path.maximum_source_time_rate_in_window(
+        [0.0, 0.125], 1e-12, &mut || false,
+    ).unwrap();
+    near(bound, 300.0 / 420.0, 2e-12, 1.0);
+    let first_future_arrival = microphone
+        .prepare_emission(knots[1].source_time_s, knots[1].kinematics)
+        .unwrap().receiver_time_s();
+    // The tolerance reaches the next span even though this rounded window
+    // ends just before its first nominal arrival.
+    let edge = [first_future_arrival - 1e-9, first_future_arrival - 5e-13];
+    assert!(path.maximum_source_time_rate_in_window(
+        edge, 1e-12, &mut || false,
+    ).unwrap() > 1.0);
+    assert!(path.maximum_source_time_rate_in_window(
+        [-1.0, 0.0], 1e-12, &mut || false,
+    ).is_err());
+    assert!(matches!(
+        path.maximum_source_time_rate_in_window([0.0, 0.125], 1e-12, &mut || true),
+        Err(AeroacError::Cancelled { .. })
+    ));
 }

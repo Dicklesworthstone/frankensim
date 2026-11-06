@@ -301,7 +301,13 @@ impl<'a, M: CompactMotion> MovingCompactRenderer<'a, M> {
                 // Doppler bound valid over its complete observation window.
                 let maximum_doppler = source
                     .motion
-                    .admit_window(&observer, &first, &last, cancelled)?;
+                    .admit_window(
+                        &observer,
+                        &first,
+                        &last,
+                        config.maximum_time_residual_s,
+                        cancelled,
+                    )?;
                 if source.source_bandwidth_hz * maximum_doppler > config.receiver_bandwidth_hz {
                     return Err(sizing(
                         "declared receiver bandwidth does not include source Doppler expansion",

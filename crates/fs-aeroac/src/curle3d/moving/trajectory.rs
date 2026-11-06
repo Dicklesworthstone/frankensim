@@ -19,6 +19,8 @@ use crate::AeroacError;
 use fs_ivl::Interval;
 use fs_math::dd::Dd;
 
+mod doppler;
+
 /// Shared, observer-independent C2 path preparation.
 pub mod path;
 /// Causal observation of two independently moving, accepted paths.
@@ -78,6 +80,12 @@ struct QuinticSegment {
     last_arrival: f64,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct PreparedSourceSpan {
+    polynomial: QuinticSegment,
+    maximum_source_time_rate: f64,
+}
+
 #[derive(Clone, Copy)]
 struct BoundNode {
     position: [[Interval; 3]; 6],
@@ -95,7 +103,8 @@ struct BoundNode {
 #[derive(Debug)]
 pub struct PreparedSourceTrajectory {
     observer: MovingCompactObserver,
-    segments: Vec<QuinticSegment>,
+    segments: Vec<PreparedSourceSpan>,
+    maximum_mach: f64,
     maximum_source_time_rate: f64,
     maximum_root_iterations: usize,
 }
@@ -123,7 +132,7 @@ impl PreparedSourceTrajectory {
             return Err(invalid("finite trajectory segment, bound and root budgets"));
         }
         let bytes = count
-            .checked_mul(size_of::<QuinticSegment>())
+            .checked_mul(size_of::<PreparedSourceSpan>())
             .and_then(|n| n.checked_add(size_of::<Self>()))
             .ok_or_else(|| invalid("trajectory retained payload overflow"))?;
         if bytes > budget.maximum_payload_bytes {
@@ -137,6 +146,7 @@ impl PreparedSourceTrajectory {
             .map_err(|_| invalid("cannot reserve trajectory segments"))?;
         let mut visited = 0_usize;
         let mut maximum_mach = 0.0_f64;
+        let mut maximum_source_time_rate = 0.0_f64;
         for pair in samples.windows(2) {
             poll(cancelled)?;
             if !pair[1].source_time_s.is_finite() || pair[1].source_time_s <= pair[0].source_time_s
@@ -153,7 +163,7 @@ impl PreparedSourceTrajectory {
             }
             let (segment, bounds, stationary) =
                 QuinticSegment::compile(pair[0], pair[1], arrival, end.receiver_time_s())?;
-            let admitted_mach = admit_segment(
+            let (admitted_mach, maximum_rate) = admit_segment(
                 &observer,
                 &segment,
                 bounds,
@@ -163,14 +173,13 @@ impl PreparedSourceTrajectory {
                 cancelled,
             )?;
             maximum_mach = maximum_mach.max(admitted_mach);
+            maximum_source_time_rate = maximum_source_time_rate.max(maximum_rate);
             arrival = end.receiver_time_s();
-            segments.push(segment);
+            segments.push(PreparedSourceSpan {
+                polynomial: segment,
+                maximum_source_time_rate: maximum_rate,
+            });
         }
-        let maximum_source_time_rate = if maximum_mach == 0.0 {
-            1.0
-        } else {
-            (Interval::point(1.0) / (Interval::point(1.0) - Interval::point(maximum_mach))).hi()
-        };
         if !maximum_source_time_rate.is_finite() || maximum_source_time_rate <= 0.0 {
             return Err(invalid("trajectory Doppler bound is unrepresentable"));
         }
@@ -178,6 +187,7 @@ impl PreparedSourceTrajectory {
         Ok(Self {
             observer,
             segments,
+            maximum_mach,
             maximum_source_time_rate,
             maximum_root_iterations: budget.maximum_root_iterations,
         })
@@ -190,15 +200,15 @@ impl PreparedSourceTrajectory {
     /// Complete retained source-time domain [s], inclusive.
     pub fn source_time_interval_s(&self) -> [f64; 2] {
         [
-            self.segments[0].first.source_time_s,
-            self.segments[self.segments.len() - 1].last.source_time_s,
+            self.segments[0].polynomial.first.source_time_s,
+            self.segments[self.segments.len() - 1].polynomial.last.source_time_s,
         ]
     }
     /// Rounded arrivals of the first and last retained events [s], inclusive.
     pub fn receiver_time_interval_s(&self) -> [f64; 2] {
         [
-            self.segments[0].first_arrival,
-            self.segments[self.segments.len() - 1].last_arrival,
+            self.segments[0].polynomial.first_arrival,
+            self.segments[self.segments.len() - 1].polynomial.last_arrival,
         ]
     }
     /// Conservative whole-trajectory upper bound on d tau/d t.
@@ -206,6 +216,42 @@ impl PreparedSourceTrajectory {
     pub const fn maximum_source_time_rate(&self) -> f64 {
         self.maximum_source_time_rate
     }
+    /// Directional ceiling for a finite part of the original receiver clock.
+    ///
+    /// Two outward knot-residual searches exclude causally impossible source
+    /// spans. Each retained span contributes the bound from its ORIGINAL
+    /// accepted speed/clearance leaves, including all interior velocity extrema.
+    /// Partial spans keep their complete bound. This allocates nothing and
+    /// costs O(log N + retained spans); every bounded step polls cancellation.
+    pub fn maximum_source_time_rate_in_window(
+        &self,
+        receiver_time_interval_s: [f64; 2],
+        maximum_time_residual_s: f64,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<f64, AeroacError> {
+        poll(cancelled)?;
+        doppler::admit_window(
+            receiver_time_interval_s,
+            self.receiver_time_interval_s(),
+            maximum_time_residual_s,
+        )?;
+        let range = doppler::source_spans(
+            self,
+            &self.observer,
+            receiver_time_interval_s,
+            maximum_time_residual_s,
+            cancelled,
+        )?;
+        let mut maximum = 0.0_f64;
+        for span in &self.segments[range] {
+            poll(cancelled)?;
+            maximum = maximum.max(span.maximum_source_time_rate);
+        }
+        // Rounded coverage endpoints can leave no provable causal span at
+        // zero tolerance. Preserve the already admitted whole-domain bound.
+        Ok(if maximum > 0.0 { maximum } else { self.maximum_source_time_rate })
+    }
+
     /// Per-query interior refinement cap retained from construction.
     pub const fn maximum_root_iterations(&self) -> usize {
         self.maximum_root_iterations
@@ -224,8 +270,8 @@ impl PreparedSourceTrajectory {
         }
         let index = self
             .segments
-            .partition_point(|segment| segment.last.source_time_s < source_time);
-        self.segments[index].evaluate(source_time, true)
+            .partition_point(|segment| segment.polynomial.last.source_time_s < source_time);
+        self.segments[index].polynomial.evaluate(source_time, true)
     }
 
     /// Invert the monotone arrival map and prepare the original pressure law.
@@ -254,8 +300,8 @@ impl PreparedSourceTrajectory {
         }
         let index = self
             .segments
-            .partition_point(|segment| segment.last_arrival < receiver_time);
-        let segment = &self.segments[index];
+            .partition_point(|segment| segment.polynomial.last_arrival < receiver_time);
+        let segment = &self.segments[index].polynomial;
         self.prepare_segment(
             &self.observer,
             segment,
@@ -505,6 +551,14 @@ impl QuinticSegment {
                 }
             }
         }
+        // Queries return accepted knot velocities verbatim. Enclose those
+        // exact values as well as the differentiated interior polynomial.
+        for axis in 0..3 {
+            bounds.velocity[0][axis] = bounds.velocity[0][axis]
+                .hull(Interval::point(first.kinematics.velocity_m_s[axis]));
+            bounds.velocity[4][axis] = bounds.velocity[4][axis]
+                .hull(Interval::point(last.kinematics.velocity_m_s[axis]));
+        }
         if position
             .iter()
             .chain(velocity.iter())
@@ -580,7 +634,7 @@ fn admit_segment(
     budget: TrajectoryBudget,
     visited: &mut usize,
     cancelled: &mut impl FnMut() -> bool,
-) -> Result<f64, AeroacError> {
+) -> Result<(f64, f64), AeroacError> {
     let relative_receiver = core::array::from_fn(|i| {
         Interval::point(observer.observer_m[i])
             - Interval::point(segment.first.kinematics.position_m[i])
@@ -588,6 +642,7 @@ fn admit_segment(
     let mut stack = [initial; MAX_BOUND_DEPTH + 1];
     let mut pending = 1_usize;
     let mut maximum_mach = 0.0_f64;
+    let mut maximum_rate = 0.0_f64;
     while pending > 0 {
         poll(cancelled)?;
         if *visited >= budget.maximum_bound_nodes {
@@ -611,6 +666,12 @@ fn admit_segment(
         );
         if mach.is_finite() && mach <= observer.limits.maximum_mach && clear {
             maximum_mach = maximum_mach.max(mach);
+            maximum_rate = maximum_rate.max(doppler::maximum_rate(
+                observer,
+                segment.first.kinematics.position_m,
+                &node,
+                mach,
+            ));
             continue;
         }
         if node.depth >= budget.maximum_subdivision_depth {
@@ -637,7 +698,7 @@ fn admit_segment(
         };
         pending += 2;
     }
-    Ok(maximum_mach)
+    Ok((maximum_mach, maximum_rate))
 }
 
 fn velocity_hull_mach(controls: &[[Interval; 3]; 5], sound_speed: f64) -> f64 {
