@@ -1478,7 +1478,8 @@ pub fn attach_baffled_vent_radiation(piece: &mut Piece) -> Result<String, String
 /// Opt-in (ALL-IN, MB 14741): the drum's enclosed air as the rigid cylinder's acoustic modes below `f_max`
 /// (`cylinder_air_modes`), beside the lumped cavity, coupling both heads (`AirModes`). Values: the gas record's
 /// density and sound speed and the drum's radius and depth; `f_max` is a declared truncation. The shell is
-/// rigid and the air lossless here. Returns the receipt line.
+/// rigid and the air lossless here. Attach each drum's pressure basis once, before the first integration
+/// step, whether its cavity is sealed or vented. Returns the receipt line.
 pub fn attach_cavity_modes(p: &mut Piece, spec: &DrumSpec, f_max: f64) -> Result<String, String> {
     attach_cavity_modes_with(p, spec, f_max, false)
 }
@@ -1499,10 +1500,20 @@ pub fn attach_cavity_modes_with(p: &mut Piece, spec: &DrumSpec, f_max: f64, wall
     if !(f_max.is_finite() && f_max > 0.0) {
         return Err(format!("cavity modes: f_max {f_max} Hz must be positive"));
     }
+    if p.instrument.step_index != 0 {
+        return Err("cavity modes: attach the pressure basis before the first integration step".into());
+    }
     let find = |head: &str| p.instrument.bodies.iter().position(|b| b.name == format!("{} {head}", spec.name));
     let (Some(batter), Some(resonant)) = (find("batter"), find("resonant")) else {
         return Err(format!("cavity modes: {} has no batter and resonant head bodies", spec.name));
     };
+    // Sealed cavities have no vent identity; the head pair owns its pressure basis.
+    if p.instrument.air_modes.iter().any(|air| {
+        air.heads.iter().any(|(body, _, _)| *body == batter)
+            && air.heads.iter().any(|(body, _, _)| *body == resonant)
+    }) {
+        return Err("cavity modes: attach a drum's pressure basis only once".into());
+    }
     let (rho, c) = (p.instrument.gas.density, p.instrument.gas.sound_speed);
     let (a, l) = (spec.radius, spec.depth);
     let volume = PI * a * a * l;
@@ -1528,7 +1539,7 @@ pub fn attach_cavity_modes_with(p: &mut Piece, spec: &DrumSpec, f_max: f64, wall
                 || port.pos[0].hypot(port.pos[1]) + (port.area / PI).sqrt() > a {
                 return Err("cavity modes: a circular vent must fit inside the resonant head and have finite positive area and inertance length".into());
             }
-            if p.instrument.step_index != 0 || p.instrument.air_modes.iter().any(|air| air.ports.iter().any(|(cavity, _)| *cavity == index)) {
+            if p.instrument.air_modes.iter().any(|air| air.ports.iter().any(|(cavity, _)| *cavity == index)) {
                 return Err("cavity modes: attach a vent's pressure basis once, before the first integration step".into());
             }
             let shape: Vec<f64> = modes.iter().map(|mode| cylinder_port_shape(mode, a, port)).collect();
@@ -2051,6 +2062,81 @@ mod air_mode_tests {
     }
 
     #[test]
+    fn cavity_attachment_refusals_preserve_sealed_and_vented_continuations() {
+        fn displaced(spec: &DrumSpec) -> Piece {
+            let mut piece = drum(spec, &[]).unwrap();
+            let head = &mut piece.instrument.bodies[0];
+            for i in 0..head.n {
+                let [x, y] = head.xy[i];
+                let displacement = 1e-6 * (1.0 - (x * x + y * y) / spec.radius.powi(2)).max(0.0);
+                head.w[i] = displacement;
+                head.wp[i] = displacement;
+            }
+            piece
+        }
+        fn same_continuation(actual: &mut Instrument, mut reference: Instrument) {
+            assert_eq!(actual.step_index, reference.step_index);
+            assert_eq!(actual.air_modes.len(), reference.air_modes.len());
+            let mut output = vec![0.0; actual.mics.len()];
+            let mut expected = output.clone();
+            let mut peak = 0.0_f64;
+            for _ in 0..64 {
+                actual.try_step(&mut output).unwrap();
+                reference.try_step(&mut expected).unwrap();
+                for (&a, &b) in output.iter().zip(&expected) {
+                    assert!(a.is_finite());
+                    assert_eq!(a.to_bits(), b.to_bits(), "refusal changed the pressure continuation");
+                    peak = peak.max(a.abs());
+                }
+            }
+            assert!(peak > 0.0, "the continuation must exercise a moving, audible head");
+            for (a, b) in actual.bodies.iter().zip(&reference.bodies) {
+                assert_eq!(a.w, b.w);
+                assert_eq!(a.wp, b.wp);
+            }
+            for (a, b) in actual.air_modes.iter().zip(&reference.air_modes) {
+                assert_eq!(a.x, b.x);
+                assert_eq!(a.xp, b.xp);
+            }
+            assert_eq!(actual.cavities[0].port.is_some(), reference.cavities[0].port.is_some());
+            if let (Some(a), Some(b)) = (&actual.cavities[0].port, &reference.cavities[0].port) {
+                assert_eq!(
+                    (a.length, a.interior_end_correction, a.x, a.u),
+                    (b.length, b.interior_end_correction, b.x, b.u),
+                );
+            }
+        }
+        for port in [None, Some(0.025)] {
+            let mut spec = snare();
+            spec.wires = None;
+            spec.grid = 0.02;
+            spec.port = port;
+            spec.mic = [0.0, 0.0, 0.05];
+            spec.floor = None;
+            for (f_max, wall_loss) in [(2500.0, false), (3000.0, true)] {
+                let mut duplicate = displaced(&spec);
+                attach_cavity_modes_with(&mut duplicate, &spec, f_max, wall_loss).unwrap();
+                let reference = duplicate.instrument.clone();
+                let error = attach_cavity_modes_with(
+                    &mut duplicate, &spec, f_max + 500.0, !wall_loss,
+                ).unwrap_err();
+                assert!(error.contains("once"), "{error}");
+                same_continuation(&mut duplicate.instrument, reference);
+
+                let mut late = displaced(&spec);
+                let mut output = vec![0.0; late.instrument.mics.len()];
+                late.instrument.try_step(&mut output).unwrap();
+                let reference = late.instrument.clone();
+                let error = attach_cavity_modes_with(
+                    &mut late, &spec, f_max, wall_loss,
+                ).unwrap_err();
+                assert!(error.contains("before the first integration step"), "{error}");
+                same_continuation(&mut late.instrument, reference);
+            }
+        }
+    }
+
+    #[test]
     fn drum_builder_projects_the_actual_vent_and_refuses_an_outside_aperture() {
         let mut spec = snare();
         spec.wires = None;
@@ -2081,9 +2167,10 @@ mod air_mode_tests {
         assert!((port.length - spec.reso.thickness).abs() < 1e-15,
             "cavity modes and radiation each replace their own end correction");
         assert!(attach_baffled_vent_radiation(&mut piece).is_err());
-        piece.instrument.cavities[0].port.as_mut().unwrap().pos[0] = spec.radius;
-        assert!(attach_cavity_modes(&mut piece, &spec, 2500.0).is_err());
-        assert_eq!(piece.instrument.air_modes.len(), 1, "rejected attachment must be atomic");
+        let mut outside = drum(&spec, &[]).unwrap();
+        outside.instrument.cavities[0].port.as_mut().unwrap().pos[0] = spec.radius;
+        assert!(attach_cavity_modes(&mut outside, &spec, 2500.0).is_err());
+        assert!(outside.instrument.air_modes.is_empty(), "rejected attachment must be atomic");
         spec.port = None;
         assert!(drum(&spec, &[]).is_err(), "a loss coefficient without a vent must refuse");
         spec.port = Some(spec.radius);
