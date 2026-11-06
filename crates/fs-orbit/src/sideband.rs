@@ -143,6 +143,11 @@ pub enum SidebandError {
         /// Last independently assessed solve; no partial response is returned.
         last: refinement::SidebandRefinementCheck,
     },
+    /// Response and carrier derivative did not jointly resolve at the last order.
+    CarrierHarmonicsUnresolved {
+        /// Last full original-equation and actual inter-order measurements.
+        last: sensitivity::refinement::SidebandCarrierRefinementCheck,
+    },
     /// Cancellation observed before publication.
     Cancelled,
 }
@@ -193,6 +198,7 @@ fn bound(quantity: &'static str, requested: u128, cap: u128) -> Result<()> {
 /// The source must remain deterministic and unchanged for this borrow's lifetime.
 pub struct PreparedPeriodicLinearization<'a, P> {
     problem: &'a P,
+    orbit: HbOrbit,
     dimension: usize,
     omega: f64,
     controls: SidebandControls,
@@ -261,6 +267,17 @@ impl<'a, P: OrbitProblem> PreparedPeriodicLinearization<'a, P> {
         poll(&mut cancelled)?;
         Ok(Self {
             problem,
+            // Freeze only the physical base waveform used by later equation
+            // assessments. Diagnostic history can be unbounded and is neither
+            // needed nor trusted. Its absence does not change the source orbit.
+            orbit: HbOrbit {
+                omega: orbit.omega,
+                coeffs: orbit.coeffs.clone(),
+                residual_trace: Vec::new(),
+                residual: orbit.residual,
+                aft_samples: orbit.aft_samples,
+                sampling_defect: orbit.sampling_defect,
+            },
             dimension: d,
             omega: orbit.omega,
             controls,
@@ -291,14 +308,43 @@ impl<'a, P: OrbitProblem> PreparedPeriodicLinearization<'a, P> {
     pub fn factor(
         &self,
         carrier_angular_frequency: f64,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<PreparedSidebandResponse<'_>> {
+        self.factor_at_order(self.harmonics(), carrier_angular_frequency, cancelled)
+    }
+
+    /// Factor an actually smaller retained system from this SAME resolved tangent.
+    ///
+    /// The cached Fourier coefficients and original base quadrature stay fixed;
+    /// only the retained unknown/equation indices change. This solves the lower
+    /// system independently, rather than truncating a higher-order solution.
+    /// Its finite omitted-band checks retain the requested lower order. This is
+    /// useful for comparing two orders at every frequency of a resonance search
+    /// without preparing two copies of the original tangent. The preparation's
+    /// payload/work bounds cover any one such factor/solve; caller-retained
+    /// factors or responses remain additional storage.
+    ///
+    /// # Errors
+    /// An order larger than this preparation, or the original factor refusals.
+    pub fn factor_at_order(
+        &self,
+        harmonics: usize,
+        carrier_angular_frequency: f64,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<PreparedSidebandResponse<'_>> {
         poll(&mut cancelled)?;
+        if harmonics > self.harmonics() {
+            return Err(invalid("retained order exceeds the prepared tangent"));
+        }
         if !carrier_angular_frequency.is_finite() {
             return Err(invalid("finite signed carrier angular frequency required"));
         }
         let d = self.dimension;
-        let h = self.controls.harmonics;
+        let h = harmonics;
+        let controls = SidebandControls {
+            harmonics,
+            ..self.controls
+        };
         let n = d * (2 * h + 1);
         let mut operator = vec![C64::ZERO; n * n];
         for band in 0..2 * h + 1 {
@@ -348,7 +394,7 @@ impl<'a, P: OrbitProblem> PreparedPeriodicLinearization<'a, P> {
             dimension: d,
             omega: self.omega,
             carrier: carrier_angular_frequency,
-            controls: self.controls,
+            controls,
             scales: &self.scales,
             tangent: &self.tangent,
             operator,
@@ -628,9 +674,9 @@ fn resource_costs(d: usize, width: usize, c: SidebandControls) -> (u128, u128) {
     // Includes both Fourier grids, their compensated sums, original callbacks,
     // retained operator/factor, LU tile descriptors, solve and residual scratch.
     let payload = 80 * entries
-        + 96 * base
+        + 112 * base
         + 128 * dimension * dimension
-        + 128 * dimension
+        + 152 * dimension
         + 96 * n * n
         + 576 * n
         + 32 * width.max(3 * c.harmonics + 3) as u128;

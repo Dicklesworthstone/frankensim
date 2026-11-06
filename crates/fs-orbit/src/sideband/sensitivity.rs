@@ -6,6 +6,8 @@ use super::{
 };
 use fs_math::{c64::C64, dd::Dd};
 
+pub mod refinement;
+
 /// Additional limits for a prepared carrier derivative and each sensitivity solve.
 #[derive(Clone, Copy, Debug)]
 pub struct SidebandCarrierDerivativeControls {
@@ -48,6 +50,9 @@ pub struct SidebandCarrierDerivativeResponse {
 pub struct PreparedSidebandCarrierDerivative<'factor, 'prepared> {
     factor: &'factor PreparedSidebandResponse<'prepared>,
     derivative: Vec<C64>,
+    // Original entries support a separate physical-tolerance assessment without
+    // rescaling the rounded numerical chart or repeating derivative callbacks.
+    original_derivative: Vec<C64>,
     controls: SidebandCarrierDerivativeControls,
 }
 
@@ -85,9 +90,8 @@ impl<'prepared> PreparedSidebandResponse<'prepared> {
         }
         let d = self.dimension;
         let h = self.controls.harmonics;
-        let n = (d * (2 * h + 1)) as u128;
-        let entries = n * d as u128;
-        let payload = 32 * entries + 256 * n + 64 * (d as u128) * (d as u128) + 512;
+        let entries = d * d * (2 * h + 1);
+        let (payload, work) = resource_costs(d, h);
         bound(
             "carrier derivative payload bytes",
             payload,
@@ -96,13 +100,13 @@ impl<'prepared> PreparedSidebandResponse<'prepared> {
         // The native correction owner permits up to five residual evaluations
         // and five triangular solves. Include both original derivative products
         // and the finite omitted-band contraction with double-double sums.
-        let work = 768 * entries + 4096 * n * n + 1024 * n;
         bound(
             "carrier derivative work",
             work,
             controls.maximum_work as u128,
         )?;
-        let mut blocks = vec![C64::ZERO; entries as usize];
+        let mut blocks = vec![C64::ZERO; entries];
+        let mut original_derivative = vec![C64::ZERO; entries];
         let mut port = vec![C64::ZERO; d * d];
         for band in 0..2 * h + 1 {
             poll(&mut cancelled)?;
@@ -116,6 +120,7 @@ impl<'prepared> PreparedSidebandResponse<'prepared> {
                 });
             }
             poll(&mut cancelled)?;
+            original_derivative[band * d * d..(band + 1) * d * d].copy_from_slice(&port);
             for row in 0..d {
                 poll(&mut cancelled)?;
                 for col in 0..d {
@@ -128,6 +133,7 @@ impl<'prepared> PreparedSidebandResponse<'prepared> {
         Ok(PreparedSidebandCarrierDerivative {
             factor: self,
             derivative: blocks,
+            original_derivative,
             controls,
         })
     }
@@ -176,6 +182,16 @@ impl PreparedSidebandCarrierDerivative<'_, '_> {
         &self,
         forcing: &[C64],
         forcing_angular_derivative: &[C64],
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<SidebandCarrierDerivativeResponse> {
+        self.solve_candidate(forcing, forcing_angular_derivative, true, cancelled)
+    }
+
+    fn solve_candidate(
+        &self,
+        forcing: &[C64],
+        forcing_angular_derivative: &[C64],
+        require_omitted_resolution: bool,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<SidebandCarrierDerivativeResponse> {
         poll(&mut cancelled)?;
@@ -192,7 +208,9 @@ impl PreparedSidebandCarrierDerivative<'_, '_> {
                 "complete finite original forcing and carrier derivative required",
             ));
         }
-        let response = self.factor.solve(forcing, &mut cancelled)?;
+        let response =
+            self.factor
+                .solve_candidate(forcing, require_omitted_resolution, &mut cancelled)?;
         let mut primal = Vec::with_capacity(n);
         let mut input = Vec::with_capacity(n);
         for i in 0..n {
@@ -220,7 +238,7 @@ impl PreparedSidebandCarrierDerivative<'_, '_> {
         let mut angular_derivative = self.factor.solve_normalized(
             rhs,
             self.controls.maximum_relative_residual,
-            Some(self.controls.maximum_omitted_residual),
+            require_omitted_resolution.then_some(self.controls.maximum_omitted_residual),
             &mut cancelled,
         )?;
         let mut slope = Vec::with_capacity(n);
@@ -241,6 +259,16 @@ impl PreparedSidebandCarrierDerivative<'_, '_> {
             angular_derivative,
         })
     }
+}
+
+fn resource_costs(dimension: usize, harmonics: usize) -> (u128, u128) {
+    let d = dimension as u128;
+    let n = d * (2 * harmonics + 1) as u128;
+    let entries = n * d;
+    (
+        48 * entries + 256 * n + 64 * d * d + 512,
+        768 * entries + 4096 * n * n + 1024 * n,
+    )
 }
 
 fn normalize(value: C64, scale: f64) -> Result<C64> {

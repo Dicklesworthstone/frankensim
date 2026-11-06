@@ -649,6 +649,32 @@ frequency-dependent forcing against closed two-coordinate inverse derivatives,
 phase-dependent periodic conversion against exact rational derivatives, and
 independent derivative truncation, budget, source and cancellation refusals.
 
+`sideband::sensitivity::refinement::solve_sideband_carrier_derivative_adaptive`
+now resolves the response AND its carrier derivative. Physical equation and
+state-change allowances for the derivative are independent and carry units per
+angular frequency. Each actual order solves both retained systems with one LU,
+then releases that factor before streaming both full original equations through
+the same shifted `2*M+1` and `4*M+3` assessment grids. The derivative assessment
+includes `P_nu X - F_nu` from cached ORIGINAL port-derivative entries, rather than
+trusting only the rounded derivative RHS. Each tangent sample serves both
+fields. Neither a low-order response plateau nor a small primal defect can
+stand in for derivative convergence. The core and added derivative work caps
+separately accumulate across all attempted orders; their live payload caps add.
+
+`PreparedPeriodicLinearization::factor_at_order` factors an actual smaller
+retained system from the same checked tangent, without resampling that tangent
+or truncating a larger solution. The prepared owner freezes only the physical
+base coefficients and clock in an explicitly budgeted snapshot, preserving the
+existing constructor lifetime contract and excluding diagnostic history.
+`solve_carrier_derivative_assessed_at_order` supplies candidate pairs with full
+equation measurements and deferred omitted-band acceptance. Consumers must
+inspect the checks and compare actual solves with `compare_with` before claiming
+resolution. This supports low/high comparisons at every queried resonance
+frequency with one common tangent and at most one live LU. Common quadrature
+comparisons measure retained-order convergence; base and sampling adequacy
+remain separately required. The finite measurements are not an infinite-tail,
+forward-sensitivity or stability enclosure.
+
 `tests/sideband_response.rs` checks a phase-shifted nonlinear cascade against
 analytic converted sidebands, a parametrically driven oscillator against
 independent real-time integration and order refinement, and full coupled

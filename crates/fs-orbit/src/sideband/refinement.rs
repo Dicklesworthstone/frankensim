@@ -242,7 +242,13 @@ pub fn solve_sideband_adaptive<P: OrbitProblem>(
     }
 }
 
-fn state_change(old: &[C64], old_h: usize, new: &[C64], new_h: usize, tolerances: &[f64]) -> f64 {
+pub(super) fn state_change(
+    old: &[C64],
+    old_h: usize,
+    new: &[C64],
+    new_h: usize,
+    tolerances: &[f64],
+) -> f64 {
     let d = tolerances.len();
     let offset = (new_h - old_h) * d;
     let mut worst = 0.0_f64;
@@ -267,6 +273,22 @@ fn state_change(old: &[C64], old_h: usize, new: &[C64], new_h: usize, tolerances
     worst
 }
 
+/// One complete original equation envelope, with an optional linear chain rule.
+pub(super) struct EquationAssessment<'a> {
+    pub forcing: &'a [C64],
+    pub response: &'a SidebandResponse,
+    pub tolerances: &'a [f64],
+    // Raw original dP/dnu blocks and the primal coefficients. The derivative
+    // equation includes +P_nu X, independently of the rounded solve RHS.
+    pub additional_port: Option<(&'a [C64], &'a [C64])>,
+}
+
+struct EquationEnvelope {
+    normalized: Vec<C64>,
+    linear: Vec<C64>,
+    chart: SidebandScales,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn assess<P: OrbitProblem>(
     problem: &P,
@@ -280,19 +302,72 @@ fn assess<P: OrbitProblem>(
     tolerances: &[f64],
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(f64, f64)> {
+    Ok(assess_equations(
+        problem,
+        callback,
+        orbit,
+        carrier,
+        controls,
+        scales,
+        &[EquationAssessment {
+            forcing,
+            response,
+            tolerances,
+            additional_port: None,
+        }],
+        cancelled,
+    )?[0])
+}
+
+/// Stream several envelopes through the SAME original tangent samples. In
+/// particular the response and its derivative do not double physical Hessian
+/// callbacks or retain a samples-by-state/matrix history.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn assess_equations<P: OrbitProblem>(
+    problem: &P,
+    callback: IslandStateJacobian<P>,
+    orbit: &HbOrbit,
+    carrier: f64,
+    controls: SidebandControls,
+    scales: &SidebandScales,
+    fields: &[EquationAssessment<'_>],
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<Vec<(f64, f64)>> {
     let d = problem.dim();
     let h = controls.harmonics;
-    // Scale by the physical tolerances BEFORE taking norms, so tiny row units
-    // cannot disappear through squaring. This chart does not change the solve.
-    let chart = SidebandScales {
-        states: scales.states.clone(),
-        equations: tolerances.to_vec(),
-    };
-    let mut normalized = Vec::with_capacity(response.coefficients.len());
-    for (index, &value) in response.coefficients.iter().enumerate() {
-        normalized.push(divide(value, scales.states[index % d])?);
+    let n = d * (2 * h + 1);
+    let mut envelopes = Vec::with_capacity(fields.len());
+    let mut additional = Vec::with_capacity(fields.len());
+    for field in fields {
+        // Divide by physical tolerances BEFORE norms: squaring tiny original
+        // equation units must not make a nonzero defect disappear.
+        let chart = SidebandScales {
+            states: scales.states.clone(),
+            equations: field.tolerances.to_vec(),
+        };
+        let normalized = field
+            .response
+            .coefficients
+            .iter()
+            .enumerate()
+            .map(|(i, &z)| divide(z, scales.states[i % d]))
+            .collect::<Result<Vec<_>>>()?;
+        additional.push(match field.additional_port {
+            Some((_, primal)) => Some(
+                primal
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &z)| divide(z, scales.states[i % d]))
+                    .collect::<Result<Vec<_>>>()?,
+            ),
+            None => None,
+        });
+        envelopes.push(EquationEnvelope {
+            normalized,
+            linear: vec![C64::ZERO; n],
+            chart,
+        });
     }
-    let mut linear = vec![C64::ZERO; normalized.len()];
     for band in 0..2 * h + 1 {
         poll(cancelled)?;
         let frequency = (band as f64 - h as f64).mul_add(orbit.omega, carrier);
@@ -302,54 +377,70 @@ fn assess<P: OrbitProblem>(
         let port = problem.port(C64::new(0.0, frequency));
         poll(cancelled)?;
         check_port(&port, d)?;
-        for row in 0..d {
-            let mut sum = ComplexSum::new();
-            for col in 0..d {
-                sum.product(
-                    scale_entry(port[row * d + col], row, col, &chart)?,
-                    normalized[band * d + col],
-                );
+        for (index, (field, envelope)) in fields.iter().zip(&mut envelopes).enumerate() {
+            for row in 0..d {
+                poll(cancelled)?;
+                let mut sum = ComplexSum::new();
+                for col in 0..d {
+                    sum.product(
+                        scale_entry(port[row * d + col], row, col, &envelope.chart)?,
+                        envelope.normalized[band * d + col],
+                    );
+                    if let Some((blocks, _)) = field.additional_port {
+                        sum.product(
+                            scale_entry(
+                                blocks[(band * d + row) * d + col],
+                                row,
+                                col,
+                                &envelope.chart,
+                            )?,
+                            additional[index].as_ref().unwrap()[band * d + col],
+                        );
+                    }
+                }
+                let input = divide(field.forcing[band * d + row], field.tolerances[row])?;
+                sum.re = sum.re - Dd::from_f64(input.re);
+                sum.im = sum.im - Dd::from_f64(input.im);
+                let value = sum.value();
+                if !finite(value) {
+                    return Err(invalid("linear perturbation envelope is not representable"));
+                }
+                envelope.linear[band * d + row] = value;
             }
-            let input = divide(forcing[band * d + row], tolerances[row])?;
-            sum.re = sum.re - Dd::from_f64(input.re);
-            sum.im = sum.im - Dd::from_f64(input.im);
-            linear[band * d + row] = sum.value();
         }
     }
-    if linear.iter().any(|&z| !finite(z)) {
-        return Err(invalid("linear perturbation envelope is not representable"));
-    }
-    let coarse = sample_equation(
+    drop(additional);
+    let coarse = sample_equations(
         problem,
         callback,
         orbit,
         h,
-        &normalized,
-        &linear,
-        &chart,
+        &envelopes,
         2 * controls.samples_per_period + 1,
         0.25,
         cancelled,
     )?;
-    let fine = sample_equation(
+    let fine = sample_equations(
         problem,
         callback,
         orbit,
         h,
-        &normalized,
-        &linear,
-        &chart,
+        &envelopes,
         4 * controls.samples_per_period + 3,
         0.5,
         cancelled,
     )?;
-    let mut total = 0.0_f64;
-    let mut sampling = 0.0_f64;
-    for (&a, &b) in coarse.iter().zip(&fine) {
-        total = total.max(a).max(b);
-        sampling = sampling.max((a - b).abs());
+    let mut measurements = Vec::with_capacity(fields.len());
+    for (coarse_rows, fine_rows) in coarse.chunks_exact(d).zip(fine.chunks_exact(d)) {
+        let mut total = 0.0_f64;
+        let mut sampling = 0.0_f64;
+        for (&a, &b) in coarse_rows.iter().zip(fine_rows) {
+            total = total.max(a).max(b);
+            sampling = sampling.max((a - b).abs());
+        }
+        measurements.push((total, sampling));
     }
-    Ok((total, sampling))
+    Ok(measurements)
 }
 
 fn divide(value: C64, scale: f64) -> Result<C64> {
@@ -366,14 +457,12 @@ fn divide(value: C64, scale: f64) -> Result<C64> {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn sample_equation<P: OrbitProblem>(
+fn sample_equations<P: OrbitProblem>(
     problem: &P,
     callback: IslandStateJacobian<P>,
     orbit: &HbOrbit,
     h: usize,
-    response: &[C64],
-    linear: &[C64],
-    chart: &SidebandScales,
+    fields: &[EquationEnvelope],
     samples: usize,
     shift: f64,
     cancelled: &mut impl FnMut() -> bool,
@@ -384,7 +473,7 @@ fn sample_equation<P: OrbitProblem>(
     let mut base = vec![0.0; d];
     let mut envelope = vec![C64::ZERO; d];
     let mut jacobian = vec![0.0; d * d];
-    let mut norms = vec![0.0; d];
+    let mut norms = vec![0.0; d * fields.len()];
     let weight = 1.0 / det::sqrt(samples as f64);
     let period = TAU / orbit.omega;
     for sample in 0..samples {
@@ -401,19 +490,8 @@ fn sample_equation<P: OrbitProblem>(
                 sum.add(2.0 * (value.re * phases[order].re - value.im * phases[order].im));
             }
             base[row] = sum.total();
-            let mut state = ComplexSum::new();
-            for band in 0..2 * h + 1 {
-                let k = band as isize - h as isize;
-                let p = if k < 0 {
-                    phases[k.unsigned_abs()].conj()
-                } else {
-                    phases[k as usize]
-                };
-                state.product(response[band * d + row], p);
-            }
-            envelope[row] = state.value();
         }
-        if base.iter().any(|v| !v.is_finite()) || envelope.iter().any(|&z| !finite(z)) {
+        if base.iter().any(|v| !v.is_finite()) {
             return Err(invalid(
                 "perturbation assessment waveform is not representable",
             ));
@@ -425,32 +503,55 @@ fn sample_equation<P: OrbitProblem>(
             return Err(SidebandError::TangentRefused { sample, samples });
         }
         poll(cancelled)?;
-        for row in 0..d {
-            poll(cancelled)?;
-            let mut balance = ComplexSum::new();
-            for band in 0..2 * h + 1 {
-                let k = band as isize - h as isize;
-                let p = if k < 0 {
-                    phases[k.unsigned_abs()].conj()
-                } else {
-                    phases[k as usize]
-                };
-                balance.product(linear[band * d + row], p);
+        for (field_index, field) in fields.iter().enumerate() {
+            for row in 0..d {
+                let mut state = ComplexSum::new();
+                for band in 0..2 * h + 1 {
+                    let k = band as isize - h as isize;
+                    let p = if k < 0 {
+                        phases[k.unsigned_abs()].conj()
+                    } else {
+                        phases[k as usize]
+                    };
+                    state.product(field.normalized[band * d + row], p);
+                }
+                envelope[row] = state.value();
             }
-            for col in 0..d {
-                let entry = scale_entry(C64::from_re(jacobian[row * d + col]), row, col, chart)?;
-                balance.product(-entry, envelope[col]);
+            if envelope.iter().any(|&z| !finite(z)) {
+                return Err(invalid(
+                    "perturbation assessment waveform is not representable",
+                ));
             }
-            let defect = balance.value();
-            if !finite(defect) {
-                return Err(invalid("full perturbation equation is not representable"));
-            }
-            norms[row] = det::hypot(
-                det::hypot(norms[row], weight * defect.re),
-                weight * defect.im,
-            );
-            if !norms[row].is_finite() {
-                return Err(invalid("full perturbation norm is not representable"));
+            for row in 0..d {
+                poll(cancelled)?;
+                let mut balance = ComplexSum::new();
+                for band in 0..2 * h + 1 {
+                    let k = band as isize - h as isize;
+                    let p = if k < 0 {
+                        phases[k.unsigned_abs()].conj()
+                    } else {
+                        phases[k as usize]
+                    };
+                    balance.product(field.linear[band * d + row], p);
+                }
+                for col in 0..d {
+                    let entry = scale_entry(
+                        C64::from_re(jacobian[row * d + col]),
+                        row,
+                        col,
+                        &field.chart,
+                    )?;
+                    balance.product(-entry, envelope[col]);
+                }
+                let defect = balance.value();
+                if !finite(defect) {
+                    return Err(invalid("full perturbation equation is not representable"));
+                }
+                let norm = &mut norms[field_index * d + row];
+                *norm = det::hypot(det::hypot(*norm, weight * defect.re), weight * defect.im);
+                if !norm.is_finite() {
+                    return Err(invalid("full perturbation norm is not representable"));
+                }
             }
         }
     }
