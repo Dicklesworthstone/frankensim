@@ -23,6 +23,16 @@ fn invalid(what: &str) -> MaterialError {
 fn dot(a: &[f64; 9], b: &[f64; 9]) -> f64 {
     a.iter().zip(b).fold(0.0, |s, (x, y)| x.mul_add(*y, s))
 }
+fn dot_dd(a: &[Dd; 9], b: &[Dd; 9]) -> Dd {
+    a.iter().zip(b).fold(Dd::ZERO, |sum, (x, y)| sum + *x * *y)
+}
+fn product_dd(a: &[Dd; 9], b: &[Dd; 9]) -> [Dd; 9] {
+    core::array::from_fn(|ij| {
+        (0..3).fold(Dd::ZERO, |sum, k| {
+            sum + a[3 * (ij / 3) + k] * b[3 * k + ij % 3]
+        })
+    })
+}
 fn transpose(a: &[f64; 9]) -> [f64; 9] {
     core::array::from_fn(|ij| a[3 * (ij % 3) + ij / 3])
 }
@@ -77,7 +87,7 @@ pub(super) fn evaluate<L: HyperelasticMaterial>(
     tangent: bool,
 ) -> Result<AlgorithmicStress, MaterialError> {
     evaluate_with_increment(material, before, after, tangent, || {
-        material.energy_density(after) - material.energy_density(before)
+        material.energy_density_increment(before, after)
     })
 }
 
@@ -96,15 +106,29 @@ fn evaluate_with_increment<L: HyperelasticMaterial>(
     material.first_piola(before)?;
     let p_after = material.first_piola(after)?;
     let energy_change = increment();
-    let midpoint = core::array::from_fn(|i| 0.5 * before[i] + 0.5 * after[i]);
-    let delta_f = core::array::from_fn(|i| after[i] - before[i]);
+    let midpoint = core::array::from_fn(|i| {
+        Dd::from_f64(0.5) * (Dd::from_f64(before[i]) + Dd::from_f64(after[i]))
+    });
+    let delta_f: [Dd; 9] =
+        core::array::from_fn(|i| Dd::from_f64(after[i]) - Dd::from_f64(before[i]));
     let c0 = product(&transpose(before), before);
     let c1 = product(&transpose(after), after);
     let cbar = core::array::from_fn(|i| 0.5 * c0[i] + 0.5 * c1[i]);
-    // Bilinear identity avoids subtracting two nearly equal absolute metrics.
-    let half_delta = product(&transpose(&midpoint), &delta_f);
-    let delta_c = core::array::from_fn(|ij| half_delta[ij] + half_delta[3 * (ij % 3) + ij / 3]);
-    if !energy_change.is_finite() || cbar.iter().chain(&delta_c).any(|v| !v.is_finite()) {
+    // Keep the bilinear metric increment and midpoint tails through the work
+    // correction AND pullback. A large hydrostatic stress otherwise cancels
+    // weak isochoric work even when the material's energy increment is exact.
+    let delta_c = core::array::from_fn(|ij| {
+        let (row, column) = (ij / 3, ij % 3);
+        let (i, j) = (row.min(column), row.max(column));
+        (0..3).fold(Dd::ZERO, |sum, k| {
+            sum + midpoint[3 * k + i] * delta_f[3 * k + j]
+                + delta_f[3 * k + i] * midpoint[3 * k + j]
+        })
+    });
+    if !energy_change.is_finite()
+        || cbar.iter().any(|v| !v.is_finite())
+        || delta_c.iter().any(|v| !v.to_f64().is_finite())
+    {
         return Err(invalid(
             "unrepresentable discrete-gradient metric or energy",
         ));
@@ -117,21 +141,25 @@ fn evaluate_with_increment<L: HyperelasticMaterial>(
     let p = material.first_piola(&representative)?;
     let raw_s = left_solve(&inverse, &p);
     let s = symmetric(&raw_s);
-    let denominator = dot(&delta_c, &delta_c);
+    let denominator = dot_dd(&delta_c, &delta_c);
     let metric_norm = dot(&cbar, &cbar);
-    if !denominator.is_finite() || !metric_norm.is_finite() || s.iter().any(|v| !v.is_finite()) {
+    if !denominator.to_f64().is_finite()
+        || !metric_norm.is_finite()
+        || s.iter().any(|v| !v.is_finite())
+    {
         return Err(invalid("unrepresentable discrete-gradient stress"));
     }
     // Below this relative strain threshold the energy quotient loses digits.
     // Use its continuous limit; the caller still gates measured energy error.
-    let resolved = denominator > 64.0 * f64::EPSILON * metric_norm;
+    let resolved = denominator.to_f64() > 64.0 * f64::EPSILON * metric_norm;
+    let s_dd = s.map(Dd::from_f64);
     let correction = if resolved {
-        (2.0 * energy_change - dot(&s, &delta_c)) / denominator
+        (Dd::from_f64(2.0) * Dd::from_f64(energy_change) - dot_dd(&s_dd, &delta_c)) / denominator
     } else {
-        0.0
+        Dd::ZERO
     };
-    let algorithmic_s = core::array::from_fn(|i| correction.mul_add(delta_c[i], s[i]));
-    let piola = product(&midpoint, &algorithmic_s);
+    let algorithmic_s = core::array::from_fn(|i| correction * delta_c[i] + s_dd[i]);
+    let piola = product_dd(&midpoint, &algorithmic_s).map(Dd::to_f64);
     if piola.iter().any(|v| !v.is_finite()) {
         return Err(invalid("unrepresentable algorithmic Piola stress"));
     }
@@ -150,19 +178,24 @@ fn evaluate_with_increment<L: HyperelasticMaterial>(
             let frame_term = product(&d_representative, &raw_s);
             let d_raw_s = left_solve(&inverse, &core::array::from_fn(|i| d_p[i] - frame_term[i]));
             let d_s = symmetric(&d_raw_s);
+            let d_s_dd = d_s.map(Dd::from_f64);
+            let d_delta_c_dd = d_delta_c.map(Dd::from_f64);
             let d_correction = if resolved {
-                let numerator = 2.0 * p_after[column] - dot(&d_s, &delta_c) - dot(&s, &d_delta_c);
-                (numerator - correction * 2.0 * dot(&delta_c, &d_delta_c)) / denominator
+                let numerator = Dd::from_f64(2.0) * Dd::from_f64(p_after[column])
+                    - dot_dd(&d_s_dd, &delta_c)
+                    - dot_dd(&s_dd, &d_delta_c_dd);
+                (numerator - correction * Dd::from_f64(2.0) * dot_dd(&delta_c, &d_delta_c_dd))
+                    / denominator
             } else {
-                0.0
+                Dd::ZERO
             };
             let d_algorithmic_s = core::array::from_fn(|i| {
-                d_correction.mul_add(delta_c[i], correction.mul_add(d_delta_c[i], d_s[i]))
+                d_correction * delta_c[i] + correction * d_delta_c_dd[i] + d_s_dd[i]
             });
-            let first = product(&direction, &algorithmic_s);
-            let second = product(&midpoint, &d_algorithmic_s);
+            let first = product_dd(&direction.map(Dd::from_f64), &algorithmic_s);
+            let second = product_dd(&midpoint, &d_algorithmic_s);
             for row in 0..9 {
-                result[row][column] = 0.5 * first[row] + second[row];
+                result[row][column] = (Dd::from_f64(0.5) * first[row] + second[row]).to_f64();
             }
         }
         if result.iter().flatten().any(|v| !v.is_finite()) {
@@ -206,7 +239,7 @@ pub(super) fn evaluate_with_uniform_pressure<L: HyperelasticMaterial>(
         after,
         tangent,
         || {
-            let material_change = material.energy_density(after) - material.energy_density(before);
+            let material_change = material.energy_density_increment(before, after);
             let pressure_change = Dd::from_f64(pressure_pa) * determinant_increment(before, after);
             (Dd::from_f64(material_change) + pressure_change).to_f64()
         },

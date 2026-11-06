@@ -112,6 +112,8 @@ pub struct FiniteSolidContactDrift {
     pub kinetic_change_j: f64,
     pub strain_before_j: f64,
     pub strain_after_j: f64,
+    /// Original per-cell potential changes accumulated before rounding totals.
+    pub strain_change_j: f64,
     /// Held-load work, uniform-pressure -p Delta V and native gravity potential work.
     pub source_displacement_work_j: f64,
     /// Original closed-pressure work, already included in total source work.
@@ -491,7 +493,9 @@ impl<'a> FiniteSolidBody<'a> {
             &mut || cx.checkpoint().is_err(),
         )?;
         let after_u = inflate(&candidate.state.q, &self.free, &self.fixed);
-        let strain_after_j = self.prepared.stored_energy_j(&after_u, cx)?;
+        let strain = self
+            .prepared
+            .stored_energy_interval_j(&before_u, &after_u, cx)?;
         let forcing: Vec<f64> = self
             .free
             .iter()
@@ -626,8 +630,9 @@ impl<'a> FiniteSolidBody<'a> {
             source_displacement_work_j += gravity_work_j;
             source_splitting_work_j += gravity_splitting_work_j;
         }
-        let elastic_splitting_work_j =
-            (strain_after_j - binding.strain_before_j) + binding.internal_work_j;
+        let elastic_splitting_work_j = (fs_math::dd::Dd::from_f64(strain.change_j)
+            + fs_math::dd::Dd::from_f64(binding.internal_work_j))
+        .to_f64();
         let integration_defect_j = source_splitting_work_j
             + elastic_splitting_work_j
             + binding.kick_work_residual_j
@@ -671,7 +676,8 @@ impl<'a> FiniteSolidBody<'a> {
             kinetic_after_j: candidate.kinetic_energy_j()?,
             kinetic_change_j,
             strain_before_j: binding.strain_before_j,
-            strain_after_j,
+            strain_after_j: strain.after_j,
+            strain_change_j: strain.change_j,
             source_displacement_work_j,
             pressure_work_j,
             gravity_work_j,

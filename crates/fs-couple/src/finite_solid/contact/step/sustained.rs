@@ -1028,7 +1028,7 @@ fn accumulate<R: ImpactResponse, A>(
     let d = &s.solid_drift;
     let native = &k.impulse;
     r.kinetic_change_j += native.kinetic_change_j + d.kinetic_change_j;
-    r.strain_change_j += d.strain_after_j - d.strain_before_j;
+    r.strain_change_j += d.strain_change_j;
     r.source_work_j += d.source_displacement_work_j;
     r.solid_source_splitting_work_j += d.source_splitting_work_j;
     r.solid_elastic_splitting_work_j += d.elastic_splitting_work_j;

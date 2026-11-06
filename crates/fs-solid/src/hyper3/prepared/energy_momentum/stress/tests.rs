@@ -144,6 +144,87 @@ fn continuous_limit_and_original_material_domain_are_retained() {
     assert!(evaluate(&material, &a, &huge, false).is_err());
 }
 
+#[test]
+fn original_material_increment_survives_an_arbitrary_storage_datum() {
+    struct Shifted(Hyperelastic);
+    impl HyperelasticMaterial for Shifted {
+        fn hyperelastic(&self) -> &Hyperelastic {
+            &self.0
+        }
+        fn energy_density(&self, f: &[f64; 9]) -> f64 {
+            1e30 + self.0.energy(f)
+        }
+        fn energy_density_increment(&self, before: &[f64; 9], after: &[f64; 9]) -> f64 {
+            self.0.energy_increment(before, after)
+        }
+    }
+    let material = Shifted(law());
+    let (before, after) = states();
+    assert_eq!(
+        material.energy_density(&before),
+        material.energy_density(&after)
+    );
+    let response = evaluate(&material, &before, &after, true).unwrap();
+    let work = (0..9)
+        .map(|i| response.piola[i] * (after[i] - before[i]))
+        .sum::<f64>();
+    // The independent original Mooney-Rivlin expression has no arbitrary datum.
+    near(work, energy(&after) - energy(&before), 2e-13);
+    let native = evaluate(&material.0, &before, &after, true).unwrap();
+    assert_eq!(response.piola, native.piola);
+    assert_eq!(response.tangent_after, native.tangent_after);
+    let pressure = 7.5;
+    let loaded =
+        evaluate_with_uniform_pressure(&material, &before, &after, pressure, true).unwrap();
+    let native_loaded =
+        evaluate_with_uniform_pressure(&material.0, &before, &after, pressure, true).unwrap();
+    assert_eq!(loaded.piola, native_loaded.piola);
+    assert_eq!(loaded.tangent_after, native_loaded.tangent_after);
+}
+
+#[test]
+fn weak_isochoric_work_and_tangent_survive_large_bulk_storage() {
+    let material = Hyperelastic::new(
+        HyperelasticModel::MooneyRivlin {
+            c10: 900.0,
+            c01: 600.0,
+            kappa: 1e12,
+        },
+        4.0,
+    )
+    .unwrap();
+    let before = [2.0, 0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 2.0];
+    for shear in [4e-7, 8e-7] {
+        let mut after = before;
+        after[1] = shear;
+        // J=8 at both endpoints. The independent reduced invariants give
+        // Delta I1_bar=Delta I2_bar=shear²/4; bulk does no work at all.
+        // Absolute storage is 2.45e13 Pa, while shear work is only 6e-11 Pa
+        // at the first rung. These increments are in the resolved DG branch.
+        let expected = 375.0 * shear * shear;
+        assert_eq!(material.energy(&before), material.energy(&after));
+        let response = evaluate(&material, &before, &after, true).unwrap();
+        near(response.piola[1] * shear, expected, 2e-14 * expected);
+        near(response.tangent_after.unwrap()[1][1], 375.0, 2e-11);
+        let reversed = evaluate(&material, &after, &before, false).unwrap();
+        assert_eq!(response.piola, reversed.piola);
+
+        // Symmetric algorithmic S retains zero midpoint torque. Check the
+        // returned f64 stress through compensated products, with an allowance
+        // for rounding its opposing ~1e6 Pa shear/normal contributions.
+        let midpoint: [Dd; 9] = core::array::from_fn(|i| {
+            Dd::from_f64(0.5) * (Dd::from_f64(before[i]) + Dd::from_f64(after[i]))
+        });
+        let spatial = product_dd(
+            &response.piola.map(Dd::from_f64),
+            &core::array::from_fn(|ij| midpoint[3 * (ij % 3) + ij / 3]),
+        );
+        for (i, j) in [(1, 3), (2, 6), (5, 7)] {
+            near((spatial[i] - spatial[j]).to_f64(), 0.0, 3e-9);
+        }
+    }
+}
+
 fn pressure_states() -> ([f64; 9], [f64; 9]) {
     let before = [1.30, 0.18, -0.08, 0.06, 0.87, 0.12, 0.04, -0.09, 1.08];
     let increment = [0.16, -0.23, 0.09, 0.15, -0.08, 0.21, -0.17, 0.11, 0.07];

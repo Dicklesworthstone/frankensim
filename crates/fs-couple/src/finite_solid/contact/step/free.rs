@@ -10,6 +10,7 @@ use crate::finite_solid::{
     FiniteSolidBody, FiniteSolidControls, FiniteSolidError, FiniteSolidStep,
 };
 use fs_exec::Cx;
+use fs_math::dd::Dd;
 use fs_mbd::gravity::{GravityError, RigidGravityField, step_in_field_with_loads};
 use fs_mbd::{
     DynamicsError, Gravity, MassProperties, RigidBodyIntegrator, RigidBodyState, StepReceipt,
@@ -357,7 +358,7 @@ impl<'a> FiniteSolidBody<'a> {
         let mut average_p = vec![0.0; force.len()];
         self.mass.spmv(&delta_v, &mut delta_p);
         self.mass.spmv(&average_v, &mut average_p);
-        let mut kinetic_change_j = 0.0;
+        let mut kinetic_change_j = Dd::ZERO;
         let mut linear_change = Vec3::ZERO;
         let mut angular_change = Vec3::ZERO;
         let mut applied = Vec3::ZERO;
@@ -379,7 +380,8 @@ impl<'a> FiniteSolidBody<'a> {
             applied_angular = applied_angular.add(r.cross(impulse));
             for c in 0..3 {
                 let dof = 3 * node + c;
-                kinetic_change_j = average_v[dof].mul_add(delta_p[dof], kinetic_change_j);
+                kinetic_change_j =
+                    kinetic_change_j + Dd::from_f64(average_v[dof]) * Dd::from_f64(delta_p[dof]);
             }
         }
         let mut support = Vec3::ZERO;
@@ -393,14 +395,16 @@ impl<'a> FiniteSolidBody<'a> {
             support_angular = support_angular
                 .add(midpoint_arm(before_x[dof / 3], after_x[dof / 3], origin).cross(impulse));
         }
-        let strain_change_j = solid.strain_after_j - solid.strain_before_j;
-        let solid_defect = kinetic_change_j + strain_change_j - solid.source_work_j;
-        let mut source_work_j = solid.source_work_j;
+        let strain_change_j = solid.strain_change_j;
+        let solid_defect = (kinetic_change_j + Dd::from_f64(strain_change_j)
+            - Dd::from_f64(solid.source_work_j))
+        .to_f64();
+        let mut source_work_j = Dd::from_f64(solid.source_work_j);
         let mut rigid_held_work_j = 0.0;
         let mut rigid_gravity_work_j = 0.0;
-        let mut drift_defect = 0.0;
-        let mut gravity_defect = 0.0;
-        let mut held_force_defect = 0.0;
+        let mut drift_defect = Dd::ZERO;
+        let mut gravity_defect = Dd::ZERO;
+        let mut held_force_defect = Dd::ZERO;
         let mut absolute_defect = solid_defect.abs();
         let mut absolute_linear_residual = magnitude(linear_change.sub(applied).sub(support));
         let mut absolute_angular_residual =
@@ -417,13 +421,13 @@ impl<'a> FiniteSolidBody<'a> {
                     old, property, wrench, gravity, duration_s, origin, cx,
                 )?,
             };
-            kinetic_change_j += flight.kinetic_change_j;
-            source_work_j += flight.source_work_j;
+            kinetic_change_j = kinetic_change_j + Dd::from_f64(flight.kinetic_change_j);
+            source_work_j = source_work_j + Dd::from_f64(flight.source_work_j);
             rigid_held_work_j += flight.held_work_j;
             rigid_gravity_work_j += flight.gravity_work_j;
-            drift_defect += flight.drift_defect_j;
-            gravity_defect += flight.gravity_defect_j;
-            held_force_defect += flight.held_force_defect_j;
+            drift_defect = drift_defect + Dd::from_f64(flight.drift_defect_j);
+            gravity_defect = gravity_defect + Dd::from_f64(flight.gravity_defect_j);
+            held_force_defect = held_force_defect + Dd::from_f64(flight.held_force_defect_j);
             absolute_defect += flight.drift_defect_j.abs()
                 + flight.gravity_defect_j.abs()
                 + flight.held_force_defect_j.abs();
@@ -437,25 +441,27 @@ impl<'a> FiniteSolidBody<'a> {
             rigid_next.push(flight.receipt.state_after);
             rigid.push(flight.receipt);
         }
-        let integration_defect_j = solid_defect + drift_defect + gravity_defect + held_force_defect;
+        let integration_defect_j =
+            Dd::from_f64(solid_defect) + drift_defect + gravity_defect + held_force_defect;
         let report = FreeFlightReport {
             duration_s,
             solid,
             rigid,
-            kinetic_change_j,
+            kinetic_change_j: kinetic_change_j.to_f64(),
             strain_change_j,
-            source_work_j,
+            source_work_j: source_work_j.to_f64(),
             rigid_held_work_j,
             rigid_gravity_work_j,
             solid_integration_defect_j: solid_defect,
-            rigid_drift_energy_defect_j: drift_defect,
-            rigid_gravity_work_defect_j: gravity_defect,
-            rigid_held_force_work_defect_j: held_force_defect,
-            integration_defect_j,
+            rigid_drift_energy_defect_j: drift_defect.to_f64(),
+            rigid_gravity_work_defect_j: gravity_defect.to_f64(),
+            rigid_held_force_work_defect_j: held_force_defect.to_f64(),
+            integration_defect_j: integration_defect_j.to_f64(),
             absolute_integration_defect_j: absolute_defect,
-            work_energy_residual_j: kinetic_change_j + strain_change_j
+            work_energy_residual_j: (kinetic_change_j + Dd::from_f64(strain_change_j)
                 - source_work_j
-                - integration_defect_j,
+                - integration_defect_j)
+                .to_f64(),
             linear_momentum_change_kg_m_s: linear_change,
             angular_momentum_change_kg_m2_s: angular_change,
             external_impulse_kg_m_s: applied,

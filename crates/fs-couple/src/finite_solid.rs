@@ -169,6 +169,19 @@ impl HyperelasticMaterial for FiniteSolidMaterial {
         }
     }
 
+    fn energy_density_increment(&self, before: &[f64; 9], after: &[f64; 9]) -> f64 {
+        match &self.thermal {
+            None => self.law.law().energy_increment(before, after),
+            Some(thermal) => {
+                thermal.volume_ratio()
+                    * self.law.law().energy_increment(
+                        &thermal.elastic_deformation(before),
+                        &thermal.elastic_deformation(after),
+                    )
+            }
+        }
+    }
+
     fn first_piola(&self, deformation: &[f64; 9]) -> Result<[f64; 9], fs_material::MaterialError> {
         match &self.thermal {
             None => self.law.law().piola(deformation),
@@ -310,6 +323,8 @@ pub struct FiniteSolidStep {
     pub kinetic_after_j: f64,
     pub strain_before_j: f64,
     pub strain_after_j: f64,
+    /// Direct original material-potential change, before rounded mesh totals.
+    pub strain_change_j: f64,
     /// Held referential load work, pressure work and native gravity potential work.
     pub source_work_j: f64,
     /// The retained field's potential and actual midpoint force/work, when bound.
@@ -940,7 +955,6 @@ impl<'a> FiniteSolidBody<'a> {
             .external_force_n(nodal_forces_n, body_force_n_m3, cx)?;
         let forcing: Vec<f64> = self.free.iter().map(|&dof| force[dof]).collect();
         let before_u = inflate(&self.state.q, &self.free, &self.fixed);
-        let strain_before_j = self.prepared.stored_energy_j(&before_u, cx)?;
         let kinetic_before_j = self.kinetic_energy_j()?;
         let mut operator = DynamicOperator::new(
             &self.prepared,
@@ -965,7 +979,9 @@ impl<'a> FiniteSolidBody<'a> {
         }
         let time = result?;
         let after_u = inflate(&candidate.state.q, &self.free, &self.fixed);
-        let strain_after_j = self.prepared.stored_energy_j(&after_u, cx)?;
+        let strain = self
+            .prepared
+            .stored_energy_interval_j(&before_u, &after_u, cx)?;
         let kinetic_after_j = candidate.kinetic_energy_j()?;
         let mut source_work_j = 0.0;
         for (dof, ((before, after), load)) in before_u.iter().zip(&after_u).zip(&force).enumerate()
@@ -1014,14 +1030,11 @@ impl<'a> FiniteSolidBody<'a> {
         } else {
             kinetic_after_j - kinetic_before_j
         };
-        let integration_defect_j = if gravity.is_some() {
+        let integration_defect_j = {
             use fs_math::dd::Dd;
-            (Dd::from_f64(kinetic_change_j)
-                + (Dd::from_f64(strain_after_j) - Dd::from_f64(strain_before_j))
+            (Dd::from_f64(kinetic_change_j) + Dd::from_f64(strain.change_j)
                 - Dd::from_f64(source_work_j))
             .to_f64()
-        } else {
-            kinetic_change_j + (strain_after_j - strain_before_j) - source_work_j
         };
         if !source_work_j.is_finite() || !integration_defect_j.is_finite() {
             return Err(FiniteSolidError::Invalid(
@@ -1083,8 +1096,9 @@ impl<'a> FiniteSolidBody<'a> {
                 time,
                 kinetic_before_j,
                 kinetic_after_j,
-                strain_before_j,
-                strain_after_j,
+                strain_before_j: strain.before_j,
+                strain_after_j: strain.after_j,
+                strain_change_j: strain.change_j,
                 source_work_j,
                 gravity,
                 pressure_work_j,

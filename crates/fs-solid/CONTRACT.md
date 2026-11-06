@@ -2526,6 +2526,15 @@ candidate steps. G0/G1 checks cover changing finite stretches against closed-for
 Neo-Hookean energy/force/tangent, exact native assembly, new load admission,
 inversion, invalid dimensions, budgets and cancellation.
 
+`stored_energy_interval_j` streams the original heterogeneous material field
+and cached reference volumes once, admitting both total deformations and each
+original endpoint stress/potential. It accumulates endpoint storage and the
+source-owned potential increment separately with compensated products and
+sums, without allocating a force vector or tangent. `stored_energy_change_j`
+exposes that direct change. Custom and frozen inelastic adapters retain their
+own potential semantics and default endpoint difference unless they supply an
+increment capability; a generic stable-increment claim is not inferred.
+
 ### Objective energy/momentum force on the prepared mesh
 
 `PreparedHyperTetProblem::energy_momentum_internal_force` and
@@ -2533,7 +2542,7 @@ inversion, invalid dimensions, budgets and cancellation.
 between two configurations on the original P1 mesh. The mean right
 Cauchy--Green metric is `Cbar=(C0+C1)/2`, represented by
 `F*=chol(Cbar)^T`; it is not the metric of the mean deformation gradient.
-The original material supplies energy, Piola stress, tangent and endpoint-domain
+The original material supplies its direct energy increment, Piola stress, tangent and endpoint-domain
 admission. A symmetric second-Piola work correction, multiplied by midpoint F,
 retains partition-of-unity force balance, midpoint internal torque balance and
 the potential-work identity. No physical damping or constitutive replacement
@@ -2545,6 +2554,13 @@ using midpoint displacement must multiply its action by two. Near
 `||Delta C||^2 <= 64 epsilon ||Cbar||^2`, the stress takes the continuous limit;
 measured nonlinear and energy tolerances remain authoritative. Original
 reference geometry, material/reference adapters and consistent mass are retained.
+
+Endpoint metric increments, the original potential-work correction and the
+force/tangent pullback retain compensated arithmetic through final rounding.
+The stiff-bulk regression resolves a 6e-11 Pa isochoric work increment and its
+375 Pa shear tangent beside 1e12 Pa bulk stiffness, while preserving endpoint
+reversal and midpoint torque. The original continuous-limit cutoff and
+material/source domain gates remain unchanged.
 
 Four exact native stress/tangent tests pass, covering work, internal force and
 torque, all nine tangent directions, objectivity, endpoint reversal, the
@@ -2571,8 +2587,9 @@ ambient pressure. The shared cubic determinant increment evaluates
 `cof(M):D + det(D)/4` with compensated endpoint means and differences, retaining
 the tails lost by a rounded midpoint. Its endpoint derivative remains the
 original material stress plus `p cof(F_after)`; the pressure-coefficient force
-uses the same volume increment. No generic material energy-datum capability is
-inferred from this pressure decomposition.
+uses the same volume increment. The material's separate increment capability
+retains its source and reference adapter; the pressure decomposition does not
+override the material's potential or its cancellation guarantees.
 
 Uniform closed-surface pressure work accumulates oriented element volume
 increments before applying pressure. Affine, free-surface and stratified work

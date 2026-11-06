@@ -190,6 +190,22 @@ strictly monotone terminal laws with independent quadratic midpoint solutions;
 the coupled regression deposits their original Joule heat once in a finite
 body with source-dependent heat capacity and checks the original enthalpy.
 
+## Finite-solid material potential work
+
+The finite-solid material binding forwards direct elastic energy increments
+through the same held natural reference as its energy, stress and tangent,
+including the original reference-volume scale. Midpoint candidates use the
+prepared solid's single-pass material interval for endpoint storage and its
+separately accumulated change. Force-kick/contact drift, mixed free flight and
+sustained-contact accounting carry that direct `strain_change_j` into their
+original balance equations instead of reconstructing it from rounded totals.
+Mixed free-flight kinetic/source/defect sums remain compensated through their
+final residual, retaining small work that rounded aggregate totals would lose.
+Each original material and total deformation still admits both endpoints.
+The change introduces no new constitutive potential, damping, heat or
+time-integration scheme; temporal and nonlinear-solve errors remain measured
+against the existing physical tolerances.
+
 ## Stationary gravitational potential work
 
 `solid_gravity::bind_potential_increment` transports the original native point

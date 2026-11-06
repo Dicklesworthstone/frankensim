@@ -105,6 +105,84 @@ fn prepared_evaluations_follow_each_current_stretch_and_exact_native_assembly() 
 }
 
 #[test]
+fn prepared_material_interval_retains_small_work_and_original_endpoint_admission() {
+    use fs_material::hyper::cards::HyperelasticMaterial;
+
+    struct Shifted(Hyperelastic);
+    impl HyperelasticMaterial for Shifted {
+        fn hyperelastic(&self) -> &Hyperelastic {
+            &self.0
+        }
+        fn energy_density(&self, f: &[f64; 9]) -> f64 {
+            1e30 + self.0.energy(f)
+        }
+        fn energy_density_increment(&self, before: &[f64; 9], after: &[f64; 9]) -> f64 {
+            self.0.energy_increment(before, after)
+        }
+    }
+    with_cx(|gate, cx| {
+        let law = Shifted(material());
+        let p = HyperTetProblem {
+            nodes_m: &NODES,
+            tetrahedra: &TETS,
+            material: HyperelasticLawField::Uniform(&law),
+            prescribed_m: &[],
+            nodal_forces_n: &[],
+            body_force_n_m3: [0.0; 3],
+            budget: TetAssemblyBudget::standard(),
+            settings: HyperTetSettings::default(),
+        };
+        let prepared = p.prepare(cx).unwrap();
+        let mut before = [0.0; 12];
+        let mut after = [0.0; 12];
+        before[6] = 0.25;
+        after[6] = 0.5;
+        let interval = prepared
+            .stored_energy_interval_j(&before, &after, cx)
+            .unwrap();
+        assert_eq!(interval.before_j, interval.after_j);
+        // det(F)=1 in simple shear, so Delta W = mu/2 (gamma1^2-gamma0^2).
+        near(
+            interval.change_j,
+            (0.5_f64.powi(2) - 0.25_f64.powi(2)) / 6.0,
+        );
+        near(
+            prepared
+                .stored_energy_change_j(&after, &before, cx)
+                .unwrap(),
+            -interval.change_j,
+        );
+        assert_eq!(
+            prepared
+                .stored_energy_change_j(&before, &before, cx)
+                .unwrap(),
+            0.0
+        );
+        let mut invalid = before;
+        invalid[3] = -2.0;
+        assert!(matches!(
+            prepared.stored_energy_interval_j(&invalid, &invalid, cx),
+            Err(HyperTetError::MaterialRefused { element: 0, .. })
+        ));
+        invalid[3] = 9.0;
+        assert!(matches!(
+            prepared.stored_energy_interval_j(&before, &invalid, cx),
+            Err(HyperTetError::MaterialRefused { element: 0, .. })
+        ));
+        assert!(
+            prepared
+                .stored_energy_interval_j(&before[..9], &after, cx)
+                .is_err()
+        );
+        gate.request();
+        assert!(matches!(
+            prepared.stored_energy_interval_j(&before, &after, cx),
+            Err(HyperTetError::Cancelled)
+        ));
+    });
+}
+
+#[test]
 fn sparse_total_deformation_uses_only_original_nodes_and_admits_native_geometry() {
     with_cx(|gate, cx| {
         let law = material();

@@ -28,6 +28,19 @@ pub struct PreparedHyperTetProblem<'a, L: FiniteStrainPotential = Hyperelastic> 
     elements: Vec<Element>,
 }
 
+/// Original material storage at two configurations and its direct change [J].
+///
+/// `change_j` is accumulated from each law's own potential increment, not from
+/// the difference of the rounded totals. Frozen inelastic adapters retain their
+/// original incremental-potential semantics; this does not relabel dissipation
+/// as stored elastic energy.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HyperTetEnergyInterval {
+    pub before_j: f64,
+    pub after_j: f64,
+    pub change_j: f64,
+}
+
 /// Exact material tangent at one fixed displacement and constitutive history.
 ///
 /// Borrows the original prepared reference geometry and retains one 9-by-9
@@ -257,6 +270,100 @@ impl<L: FiniteStrainPotential> PreparedHyperTetProblem<'_, L> {
         cx: &Cx<'_>,
     ) -> Result<f64, HyperTetError> {
         Ok(self.evaluate(displacement_m, cx)?.energy)
+    }
+
+    /// Evaluate both original material potentials and their direct change [J].
+    ///
+    /// Streams the cached reference cells once in connectivity order, retaining
+    /// each heterogeneous law and reference volume. Compensated products and
+    /// sums preserve small local work beside large stored-energy baselines.
+    /// Both total deformations and material endpoints are admitted before the
+    /// source-owned increment is used. No force vector or tangent is allocated.
+    /// Custom laws without an increment override retain their own endpoint
+    /// difference; no stronger cancellation guarantee is inferred for them.
+    ///
+    /// # Errors
+    /// Malformed displacement, invalid total deformation, original material
+    /// refusal, nonfinite stress/potential/increment, overflow or cancellation.
+    pub fn stored_energy_interval_j(
+        &self,
+        before_displacement_m: &[f64],
+        after_displacement_m: &[f64],
+        cx: &Cx<'_>,
+    ) -> Result<HyperTetEnergyInterval, HyperTetError> {
+        use fs_math::dd::Dd;
+
+        checkpoint(cx)?;
+        self.problem.check_len(before_displacement_m)?;
+        self.problem.check_len(after_displacement_m)?;
+        let mut total = [Dd::from_f64(0.0); 3];
+        for (index, element) in self.elements.iter().enumerate() {
+            if index % 4096 == 0 {
+                checkpoint(cx)?;
+            }
+            let before = HyperTetProblem::<L>::deformation_gradient(element, before_displacement_m);
+            let after = HyperTetProblem::<L>::deformation_gradient(element, after_displacement_m);
+            let refused = |what| HyperTetError::MaterialRefused {
+                element: index,
+                what,
+            };
+            HyperTetProblem::<L>::deformation_jacobian(&before).map_err(refused)?;
+            HyperTetProblem::<L>::deformation_jacobian(&after).map_err(refused)?;
+            let material = self.problem.material.at(index);
+            let (stress_before, energy_before) = material
+                .stress_and_potential(&before)
+                .map_err(|error| refused(error.to_string()))?;
+            let (stress_after, energy_after) = material
+                .stress_and_potential(&after)
+                .map_err(|error| refused(error.to_string()))?;
+            if stress_before
+                .iter()
+                .chain(&stress_after)
+                .any(|v| !v.is_finite())
+                || !energy_before.is_finite()
+                || !energy_after.is_finite()
+            {
+                return Err(refused(
+                    "nonfinite material endpoint stress or potential".into(),
+                ));
+            }
+            let change = material.energy_density_increment(&before, &after);
+            if !change.is_finite() {
+                return Err(refused("nonfinite material potential increment".into()));
+            }
+            let volume = Dd::from_f64(element.volume);
+            for (sum, value) in total.iter_mut().zip([energy_before, energy_after, change]) {
+                *sum = *sum + volume * Dd::from_f64(value);
+            }
+        }
+        let [before_j, after_j, change_j] = total.map(Dd::to_f64);
+        if [before_j, after_j, change_j].iter().any(|v| !v.is_finite()) {
+            return Err(HyperTetError::InvalidInput {
+                what: "material potential interval is not finite".into(),
+            });
+        }
+        checkpoint(cx)?;
+        Ok(HyperTetEnergyInterval {
+            before_j,
+            after_j,
+            change_j,
+        })
+    }
+
+    /// Direct change in the original material potential, with both endpoints admitted.
+    ///
+    /// # Errors
+    /// The same geometry, material, arithmetic and cancellation refusals as
+    /// [`Self::stored_energy_interval_j`].
+    pub fn stored_energy_change_j(
+        &self,
+        before_displacement_m: &[f64],
+        after_displacement_m: &[f64],
+        cx: &Cx<'_>,
+    ) -> Result<f64, HyperTetError> {
+        Ok(self
+            .stored_energy_interval_j(before_displacement_m, after_displacement_m, cx)?
+            .change_j)
     }
 
     /// Native consistent tangent at the current displacement.
@@ -495,6 +602,8 @@ impl<L: FiniteStrainPotential> PreparedHyperTetProblem<'_, L> {
     /// arbitrary potential datums before rounding; subtracting two independently
     /// rounded total energies cannot recover small physical work. Both cellwise
     /// and positive nodal P1 inventories retain their original quadrature.
+    /// Explicit endpoint source snapshots may include reciprocal source motion;
+    /// their original field parameters and domains belong to the callback owner.
     /// This evaluates storage, not a midpoint-force approximation to work, and
     /// allocates neither a nodal force vector nor a Newton tangent.
     ///
