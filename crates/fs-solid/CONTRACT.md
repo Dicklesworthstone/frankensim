@@ -1,5 +1,50 @@
 # fs-solid CONTRACT
 
+## Complete brittle-fragment time intervals through impact
+
+`BrittleTetMotion::advance_released_face_time` composes the original native
+midpoint, bounded released-face approach and simultaneous consistent-mass
+impact owners over a complete requested physical duration. Each accepted
+motion prefix retains its actual material history, physical endpoint state and
+cached reference mass. Every instantaneous event gathers all active paired
+rows, retains the native coupled contact determinacy, and consumes no physical
+timestep. Only a complete duration returns its final motion; a late refusal
+cannot publish internal partial progress.
+
+Affine nodal forces are resampled from the original global interval at every
+actual prefix and remainder. Affine support paths retain the caller's absolute
+endpoint; their initial velocities must match the prescribed slope within the
+explicit velocity allowance. The same support DOFs retain their current
+velocities through impact, with the native signed reaction work included.
+Motion, impact, native-trial and contact-row budgets remain explicit. Repeated
+events separated by no more than the localization-time allowance refuse as
+unresolved, rather than manufacturing a persistent-contact impulse sequence.
+
+Compact records retain each accepted midpoint work receipt and each original
+contact/body-impulse receipt. Compensated whole-duration sums retain material
+work, fracture loss, applied/support mean work, signed impulse-support work,
+native polarized kinetic increments and separate impact loss. Complete signed
+work balance and the sum of absolute local work defects must both fit their
+whole-duration gate; mean-stress and cumulative-fracture accounts are checked
+again. Contact loss is mechanical dissipation, not inferred heat. Native
+midpoint numerical kinetic loss remains zero.
+
+The maximum free-flight interval is an explicit caller-selected temporal
+resolution, not an adaptive error estimate. The approach owner's guarantee is
+the nonpenetrating native affine-displacement trace and sampled endpoint
+bracket, not global continuous collision detection or a convergence-order
+claim through impacts. Fixed matching material faces and small-strain source
+admission remain in force. Persistent contact forces, finite sliding,
+friction, new fragment pairs and automatic heat allocation are not supplied.
+
+G1/G3 regressions in `tests/brittle_tet_fragment_contact/time.rs` exercise a
+complete ballistic collision and remainder against independent consistent-mass
+impulse, momentum and energy oracles; original-global-time affine-force means
+across multiple native intervals; moving-support reaction work; and late
+budget/persistent-contact/cancellation refusal with immutable deterministic
+retry. The original four simultaneous-impact tests and three approach tests
+are retained as the same focused native integration lane.
+
 ## Native brittle-fragment contact localization
 
 `brittle::solid::dynamics::fracture::contact::approach` advances an original

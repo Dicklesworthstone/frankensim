@@ -11,6 +11,9 @@
 /// Bounded native midpoint prefixes locating approaching released-face events.
 pub mod approach;
 
+/// Complete native physical intervals through simultaneous released-face impacts.
+pub mod time;
+
 use std::sync::Arc;
 
 use fs_contact::multicontact::{
