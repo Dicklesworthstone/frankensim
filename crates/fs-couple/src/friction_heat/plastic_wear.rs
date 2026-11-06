@@ -19,10 +19,13 @@
 //! this small-removal approximation; removed material carries no modeled mass,
 //! enthalpy, or debris transport. Zero permitted removal gives a no-wear rung.
 //!
-//! Only native friction dissipation heats the interface. Normal plastic work
-//! and signed temperature/geometry parameter work remain separate accounts,
-//! with an explicit bound on the SUM of absolute parameter-work supplies.
-//! There is no reciprocal thermoelastic free-energy model or plastic heat law.
+//! Native friction dissipation heats the interface. An optional explicit
+//! plastic-work partition deposits heat directly into the two original bodies;
+//! the unconverted work remains a separate nonthermal account. No universal
+//! Taylor--Quinney fraction or assignment of relative indentation to either
+//! material is inferred. Signed temperature/geometry parameter work remains
+//! separate, with a bound on the SUM of absolute parameter-work supplies.
+//! There is no reciprocal thermoelastic free-energy model.
 //! Caller-owned tangent compliance supplies no body storage here: local contact
 //! identities and the fixed-inventory thermal balance do not establish a full
 //! body-energy, entropy, or passivity theorem.
@@ -69,6 +72,50 @@ pub struct PlasticSlidingHeatLimits {
     /// Sum of absolute temperature and recession parameter work per step [J].
     /// These are explicit external work accounts, never friction heat sources.
     pub maximum_absolute_parameter_work_j: f64,
+}
+
+/// Declared fractions of incremental normal plastic work heating bodies A/B.
+///
+/// Fractions are nonnegative and sum to at most one. Their remainder represents
+/// nonthermal plastic work, not heat or numerical damping. This is an explicit
+/// constitutive/partition assumption, not an inference from hardness, a material
+/// calibration, or a resolved subsurface plastic-zone temperature model.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct PlasticWorkHeatPartition {
+    body_fractions: [f64; 2],
+}
+
+impl PlasticWorkHeatPartition {
+    /// Declare both receiving-body fractions. The default converts no work.
+    pub fn new(body_fractions: [f64; 2]) -> Result<Self, PlasticSlidingHeatError> {
+        if body_fractions
+            .iter()
+            .any(|fraction| !fraction.is_finite() || !(0.0..=1.0).contains(fraction))
+            || body_fractions[0] + body_fractions[1] > 1.0
+        {
+            return Err(PlasticSlidingHeatError::Invalid(
+                "plastic heat fractions must be finite, nonnegative and sum to at most one",
+            ));
+        }
+        Ok(Self { body_fractions })
+    }
+
+    /// Fractions in the original ordered material/body roles.
+    #[must_use]
+    pub const fn body_fractions(self) -> [f64; 2] {
+        self.body_fractions
+    }
+
+    fn split<E>(self, work_j: f64) -> Result<([f64; 2], f64), PlasticSlidingHeatError<E>> {
+        if !work_j.is_finite() || work_j < 0.0 {
+            return Err(PlasticSlidingHeatError::Invalid(
+                "only finite nonnegative incremental plastic work can supply heat",
+            ));
+        }
+        let heat_j = self.body_fractions.map(|fraction| fraction * work_j);
+        let nonthermal_j = (1.0 - (self.body_fractions[0] + self.body_fractions[1])) * work_j;
+        Ok((heat_j, nonthermal_j))
+    }
 }
 
 /// Normal boundary retained during both temperature refresh and sliding/removal.
@@ -118,7 +165,8 @@ pub struct PlasticSlidingHeatSource<P> {
     /// The callback must retain its actual query/selection evidence in `payload`;
     /// this adapter neither infers conductivity from hardness nor selects claims.
     pub conductivity_w_m_k: [f64; 2],
-    /// Excludes friction heat and the original route's direct conductance.
+    /// Excludes friction heat, the configured normal plastic heat, and the
+    /// original route's direct conductance. Each physical source is supplied once.
     pub transport: StepCoefficients<P>,
 }
 
@@ -226,6 +274,7 @@ pub struct PlasticSlidingHeatContact<'a> {
     active_cells: Vec<bool>,
     footprint: PlasticSlidingHeatFootprint,
     limits: PlasticSlidingHeatLimits,
+    plastic_work_heat: PlasticWorkHeatPartition,
     time_s: f64,
 }
 
@@ -249,8 +298,18 @@ pub struct PlasticSlidingHeatReport<P> {
     pub frictional_work_j: f64,
     pub temperature_parameter_work_j: f64,
     pub wear_parameter_work_j: f64,
-    /// Incremental normal plastic work, deliberately not supplied as heat [J].
+    /// Incremental normal plastic work, before its explicit heat partition [J].
     pub normal_plastic_work_j: f64,
+    /// Incremental plastic heat deposited directly into original bodies A/B [J].
+    /// Friction remains at the interface; these body sources are not added to
+    /// `heat.dissipated_j` or `heat.body_heat_j` a second time.
+    pub normal_plastic_heat_j: [f64; 2],
+    /// Plastic work left outside the caloric model by the declared partition [J].
+    pub nonthermal_plastic_work_j: f64,
+    /// Authored/environment heat excluding BOTH friction and normal plastic heat.
+    /// The lower-level `heat.external_heat_j` includes the direct plastic sources
+    /// because they are external to that thermal-only accounting boundary.
+    pub other_heat_j: f64,
     /// Normal boundary work into contact, including both native operations [J].
     pub normal_work_j: f64,
     /// Cumulative original A/B removed volumes, with no thermal mass export [m^3].
@@ -292,6 +351,8 @@ struct PreparedMechanics {
     removed_volume_fraction: [f64; 2],
     refreshed_contact_area_m2: f64,
     endpoint_contact_area_m2: f64,
+    normal_plastic_heat_j: [f64; 2],
+    nonthermal_plastic_work_j: f64,
 }
 
 struct Staged<P> {
@@ -511,6 +572,7 @@ impl<'a> PlasticSlidingHeatContact<'a> {
             active_cells,
             footprint,
             limits,
+            plastic_work_heat: PlasticWorkHeatPartition::default(),
             time_s: thermal.time_s(),
         };
         bound.admit_footprint_support()?;
@@ -536,6 +598,22 @@ impl<'a> PlasticSlidingHeatContact<'a> {
     }
     pub const fn footprint(&self) -> PlasticSlidingHeatFootprint {
         self.footprint
+    }
+
+    /// Configure conversion of FUTURE incremental indentation work into heat.
+    ///
+    /// Accepted cumulative work is never reheated. The same fractions apply to
+    /// every thermal trial and survive accepted steps. No plastic depth is
+    /// assigned to a body: the caller explicitly owns this energy partition.
+    #[must_use]
+    pub fn with_plastic_work_heat(mut self, partition: PlasticWorkHeatPartition) -> Self {
+        self.plastic_work_heat = partition;
+        self
+    }
+
+    /// Configured conversion/partition of future normal plastic work.
+    pub const fn plastic_work_heat(&self) -> PlasticWorkHeatPartition {
+        self.plastic_work_heat
     }
 
     /// Propose one heat/contact interval from the exact accepted histories.
@@ -637,9 +715,16 @@ impl<'a> PlasticSlidingHeatContact<'a> {
                     mechanics.admit_work(controls.contact_work_tolerance_j, cx)?;
                 let removed_volume_fraction = self.admit_removal(mechanics.candidate())?;
                 let [refreshed_contact_area_m2, endpoint_contact_area_m2] = contact_areas;
+                let plastic_work_j = finite(
+                    mechanics.temperature_normal().response.plastic_work_j
+                        + mechanics.wear_normal().response.plastic_work_j,
+                )?;
+                let (normal_plastic_heat_j, nonthermal_plastic_work_j) =
+                    self.plastic_work_heat.split(plastic_work_j)?;
                 Ok((endpoint_contact_area_m2, PreparedMechanics {
                     source, mechanics, contact_work_residual_j, removed_volume_fraction,
                     refreshed_contact_area_m2, endpoint_contact_area_m2,
+                    normal_plastic_heat_j, nonthermal_plastic_work_j,
                 }))
             };
                 let heat_input = |endpoint: &DepositionSimulation<'t>,
@@ -655,13 +740,25 @@ impl<'a> PlasticSlidingHeatContact<'a> {
                     } = resolve(endpoint, interface_temperature)
                         .map_err(PlasticSlidingHeatError::Source)?;
                     let StepCoefficients {
-                        sources_w,
+                        mut sources_w,
                         conductances_w_k,
                         payload,
                     } = transport;
+                    for (side, cell) in self.route.cells().into_iter().enumerate() {
+                        let heat_j = prepared.normal_plastic_heat_j[side];
+                        if heat_j > 0.0 {
+                            let power_w = finite(heat_j / duration_s)?;
+                            if power_w == 0.0 {
+                                return Err(DepositionError::Arithmetic.into());
+                            }
+                            let source_w = sources_w.entry(cell).or_insert(0.0);
+                            *source_w = finite(*source_w + power_w)?;
+                        }
+                    }
                     Ok(FrictionHeatInput {
-                        // Neither normal plastic work nor signed parameter work is
-                        // supplied as heat. The original route exports friction once.
+                        // Plastic heat enters its declared bulk receiver above;
+                        // the interface receives friction once. Parameter work
+                        // is never silently included in either heat source.
                         dissipated_j: prepared.mechanics.frictional_work_j(),
                         conductivity_w_m_k,
                         transport: StepCoefficients {
@@ -740,6 +837,8 @@ impl<'a> PlasticSlidingHeatContact<'a> {
             removed_volume_fraction,
             refreshed_contact_area_m2,
             endpoint_contact_area_m2,
+            normal_plastic_heat_j,
+            nonthermal_plastic_work_j,
         } = prepared;
         let t = mechanics.temperature_normal();
         let w = mechanics.wear_normal();
@@ -749,6 +848,8 @@ impl<'a> PlasticSlidingHeatContact<'a> {
         let normal_work_j = finite(t.normal_work_j + w.normal_work_j)?;
         let removed_volume_m3 = mechanics.candidate().wear_state().volumes_m3();
         let frictional_work_j = mechanics.frictional_work_j();
+        let other_heat_j =
+            finite(heat.external_heat_j - normal_plastic_heat_j[0] - normal_plastic_heat_j[1])?;
         let mut active_cells = Vec::with_capacity(self.active_cells.len());
         for (i, p) in mechanics
             .candidate()
@@ -777,6 +878,7 @@ impl<'a> PlasticSlidingHeatContact<'a> {
             active_cells,
             footprint: self.footprint,
             limits: self.limits,
+            plastic_work_heat: self.plastic_work_heat,
             time_s: target_s,
         };
         check()?;
@@ -798,6 +900,9 @@ impl<'a> PlasticSlidingHeatContact<'a> {
                 temperature_parameter_work_j,
                 wear_parameter_work_j,
                 normal_plastic_work_j,
+                normal_plastic_heat_j,
+                nonthermal_plastic_work_j,
+                other_heat_j,
                 normal_work_j,
                 removed_volume_m3,
                 removed_volume_fraction,

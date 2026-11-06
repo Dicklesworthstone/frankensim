@@ -595,6 +595,201 @@ fn coupled_temperature_hardness_and_friction_match_independent_quadratic_and_wea
 }
 
 #[test]
+fn g0_plastic_heat_partition_requires_a_nonnegative_conservative_split() {
+    assert_eq!(
+        PlasticWorkHeatPartition::default().body_fractions(),
+        [0.0; 2]
+    );
+    for fractions in [[1.0, 0.0], [0.0, 1.0], [0.9, 0.1], [0.1, 0.9], [0.4; 2]] {
+        assert_eq!(
+            PlasticWorkHeatPartition::new(fractions)
+                .unwrap()
+                .body_fractions(),
+            fractions
+        );
+    }
+    for fractions in [
+        [-0.1, 0.0],
+        [0.0, -0.1],
+        [0.6, 0.5],
+        [1.1, 0.0],
+        [f64::NAN, 0.0],
+        [0.0, f64::INFINITY],
+    ] {
+        assert!(PlasticWorkHeatPartition::new(fractions).is_err());
+    }
+}
+
+#[test]
+fn g1_plastic_heat_enters_original_bodies_and_closes_the_full_work_partition() {
+    with_cx(|cx, _| {
+        let data = fixture(cx);
+        let thermal = network(&data.caloric, T0);
+        let route = FrictionHeatRoute::from_link(&thermal, LINK, [CONDUCTIVITY; 2]).unwrap();
+        let original_state = loaded(&data, cx);
+        let capacity = RHO * AREA * LENGTH * CP;
+        let dt = 0.1;
+        let half_g = CONDUCTIVITY * AREA / (0.5 * LENGTH);
+        for fractions in [[0.75, 0.0], [0.0, 0.75], [0.4, 0.4], [0.9, 0.1]] {
+            let partition = PlasticWorkHeatPartition::new(fractions).unwrap();
+            let contact = bind(
+                &data,
+                &thermal,
+                &route,
+                original_state.clone(),
+                limits(),
+                cx,
+            )
+            .with_plastic_work_heat(partition);
+            // Authored heat shares the body source map with plastic heat. Its
+            // separately known amount must survive source composition exactly once.
+            let other_power = 1e-6;
+            let source = |state: &DepositionSimulation<'_>, interface_k| {
+                let mut input = transport(state, interface_k)?;
+                input.transport.sources_w.insert(CELLS[0], other_power);
+                Ok::<_, DepositionError>(input)
+            };
+            let step = contact
+                .step_candidate(
+                    &thermal,
+                    dt,
+                    &motion(0.01),
+                    PlasticSlidingHeatBoundary::HeldApproach,
+                    controls(),
+                    &[0.0; 2],
+                    T0,
+                    source,
+                    cx,
+                )
+                .unwrap();
+            let report = step.report();
+            let temperatures = CELLS.map(|id| step.thermal().temperature_k(id).unwrap());
+            assert!(report.normal_plastic_work_j > 0.0);
+            for side in 0..2 {
+                close(
+                    report.normal_plastic_heat_j[side],
+                    fractions[side] * report.normal_plastic_work_j,
+                    1e-12,
+                    1e-20,
+                );
+            }
+            close(
+                report.nonthermal_plastic_work_j,
+                (1.0 - (fractions[0] + fractions[1])) * report.normal_plastic_work_j,
+                1e-12,
+                1e-20,
+            );
+            let plastic_heat = report.normal_plastic_heat_j.iter().sum::<f64>();
+            close(
+                plastic_heat + report.nonthermal_plastic_work_j,
+                report.normal_plastic_work_j,
+                1e-12,
+                1e-20,
+            );
+            close(report.other_heat_j, dt * other_power, 1e-12, 1e-18);
+            close(
+                report.heat.external_heat_j,
+                dt * other_power + plastic_heat,
+                1e-12,
+                1e-18,
+            );
+            assert_eq!(report.heat.dissipated_j, report.frictional_work_j);
+            close(
+                report.heat.body_heat_j.iter().sum(),
+                report.frictional_work_j,
+                0.0,
+                3e-11,
+            );
+            // Independent two-cell backward-Euler balances: subtracting the
+            // bodies eliminates the unknown massless-interface temperature.
+            close(
+                temperatures[0] - temperatures[1],
+                (report.normal_plastic_heat_j[0] - report.normal_plastic_heat_j[1]
+                    + dt * other_power)
+                    / (capacity + dt * half_g),
+                1e-6,
+                1e-8,
+            );
+            close(
+                capacity * (temperatures[0] + temperatures[1] - 2.0 * T0),
+                report.frictional_work_j + plastic_heat + dt * other_power,
+                1e-9,
+                3e-11,
+            );
+            let normals = [
+                report.mechanics.temperature_normal(),
+                report.mechanics.wear_normal(),
+            ];
+            let elastic_change = normals
+                .iter()
+                .map(|r| r.elastic_energy_change_j)
+                .sum::<f64>();
+            // Combined contact/thermal balance retains nonthermal plastic work
+            // and the independently supplied temperature/recession parameter work.
+            close(
+                elastic_change
+                    + report.heat.thermal.stored_energy_change_j
+                    + report.nonthermal_plastic_work_j,
+                report.normal_work_j
+                    + report.temperature_parameter_work_j
+                    + report.wear_parameter_work_j
+                    + report.frictional_work_j
+                    + report.other_heat_j,
+                1e-9,
+                3e-11,
+            );
+            assert_eq!(contact.state(), &original_state);
+            assert_eq!(thermal.time_s(), 0.0);
+            assert_eq!(step.contact().plastic_work_heat(), partition);
+        }
+    });
+}
+
+#[test]
+fn g3_plastic_heat_never_reheats_accepted_cumulative_indentation_work() {
+    with_cx(|cx, _| {
+        let data = fixture(cx);
+        let thermal = network(&data.caloric, T0);
+        let route = FrictionHeatRoute::from_link(&thermal, LINK, [CONDUCTIVITY; 2]).unwrap();
+        let state = loaded(&data, cx);
+        assert!(
+            state
+                .wear_state()
+                .contact_state()
+                .contact_state()
+                .cumulative_plastic_work_j()
+                > 0.0
+        );
+        let partition = PlasticWorkHeatPartition::new([0.5; 2]).unwrap();
+        let contact = bind(&data, &thermal, &route, state.clone(), limits(), cx)
+            .with_plastic_work_heat(partition);
+        let step = contact
+            .step_candidate(
+                &thermal,
+                0.1,
+                &motion(0.0),
+                PlasticSlidingHeatBoundary::HeldApproach,
+                controls(),
+                &[0.0; 2],
+                T0,
+                transport,
+                cx,
+            )
+            .unwrap();
+        assert_eq!(step.report().normal_plastic_work_j, 0.0);
+        assert_eq!(step.report().normal_plastic_heat_j, [0.0; 2]);
+        assert_eq!(step.report().nonthermal_plastic_work_j, 0.0);
+        assert_eq!(step.report().frictional_work_j, 0.0);
+        for id in CELLS {
+            close(step.thermal().temperature_k(id).unwrap(), T0, 0.0, 1e-12);
+        }
+        assert_eq!(step.contact().state(), &state);
+        assert_eq!(step.contact().plastic_work_heat(), partition);
+        assert_eq!(contact.state(), &state);
+    });
+}
+
+#[test]
 fn maintained_load_and_fixed_drive_retain_accepted_shear_wear_and_clock() {
     with_cx(|cx, _| {
         let data = fixture(cx);

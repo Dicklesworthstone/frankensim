@@ -122,15 +122,42 @@ re-equilibration. Thermal coefficients are endpoint values; wear remains the
 native beginning-pressure split, requiring physical time/motion refinement.
 
 The original finite-cell geometry and endpoint conductivities determine signed
-heat into both bodies and a solved common interface temperature. No prescribed
-heat fraction or arithmetic temperature mean is inserted. The source callback
+friction-interface heat into both bodies and a solved common interface temperature.
+No prescribed friction-heat fraction or arithmetic temperature mean is inserted. The source callback
 owns original conductivity claims and other transport, retaining its query and
 selection evidence in the returned payload. The route excludes its old direct
 link to avoid duplicate conduction. Only actual native Coulomb dissipation
-enters this heat source. Normal plastic work and signed temperature/recession
-parameter work remain separate; their explicit external-work budget is the sum
+enters the interface heat source. Signed temperature/recession parameter work
+remains separate; its explicit external-work budget is the sum
 of absolute parameter contributions. Native contact identities and the thermal
 cell, interface and aggregate balances have independent acceptance tolerances.
+
+`with_plastic_work_heat(PlasticWorkHeatPartition)` optionally converts declared
+fractions `f_A, f_B >= 0`, `f_A + f_B <= 1` of the two native normal plastic-work
+increments into heat in the original receiving bodies. The same coupled trial
+uses `Q_A = f_A*delta_Wp` and `Q_B = f_B*delta_Wp`; its endpoint temperatures
+therefore feed back into original hardness and pressure. These are direct bulk
+sources, never extra friction-interface heat. Accepted cumulative plastic work
+is not reheated. The callback must exclude both exported friction and configured
+plastic heat, while other authored heat at the same cell is retained.
+The default remains zero conversion. Fractions are explicit reduced-model
+assumptions, not a universal Taylor--Quinney constant, a calibrated material law,
+or an inferred split of relative indentation between the two solids. See
+Knysh and Korkolis, *Mechanics of Materials* 86 (2015), 71--80,
+<https://doi.org/10.1016/j.mechmat.2015.03.006>.
+
+The report separates total incremental normal plastic work, per-body plastic
+heat, its nonthermal remainder, and other external heat. The remainder is not
+claimed to be recoverable storage. The lower-level thermal report counts direct
+plastic sources as external to its thermal-only boundary; `other_heat_j`
+removes those sources from the coupled report's external heat. The combined
+local identity is `delta_Ucontact + delta_Uthermal + Wp_nonthermal = Wnormal
++ Wparameter_temperature + Wparameter_recession + Wfriction + Qother`.
+This retains the externally supplied material-parameter work of a thermal
+refresh; its conversion does not establish reciprocal thermoelastic closure.
+Focused G0/G1/G3 regressions cover conservative partition admission, asymmetric
+body heating, additive authored heat, independent two-cell balances and no
+reheating of accepted indentation history.
 
 Admission retains the original receiving body IDs, cell geometry, material IDs,
 masses, caloric objects and clock. Original caloric and normal sources must share
@@ -145,7 +172,7 @@ Cumulative removed volume is bounded against each ORIGINAL receiving cell
 volume, never a renewed per-step denominator; zero permitted removal is valid.
 The fraction bounds an omitted effect, not its thermal error or experimental
 validity. Removed material has no modeled mass, enthalpy or debris export.
-Reciprocal thermoelastic free energy, conversion of normal plastic work to heat,
+Reciprocal thermoelastic free energy, a resolved subsurface plastic heat field,
 moving contact coverage and storage in caller-supplied tangential body response
 are not closed by this owner. Its local contact identities and fixed-inventory
 heat balance imply no complete body-energy, entropy or passivity theorem.
