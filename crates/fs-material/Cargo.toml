@@ -26,5 +26,9 @@ fs-thermochem = { path = "../fs-thermochem" }
 [dev-dependencies]
 fs-rand = { path = "../fs-rand" }
 
+[features]
+# Explicit fitted polarization memory; no microscopic or measured-data claim.
+experimental-dielectric-hysteresis = []
+
 [lints]
 workspace = true

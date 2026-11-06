@@ -4011,6 +4011,12 @@ homogenization, the P2 milestone.
   mirrored cyclic stresses and consistent tangents. The shared steel-section
   regression checks reflected axial and bending histories. This adds neither
   a stored-energy potential, fatigue law nor material calibration.
+  Reversals retain separate tensile/compressive extrema, seeded at ±yield
+  strain. Curvature uses the new asymptote intersection and the prior extremum
+  in the new loading direction; `xi_max` is only a diagnostic maximum.
+  Subyield unloading therefore retains the near-elastic knee, while nested
+  loops recover their directional curvature. Independent no-isotropic-shift
+  Steel02 values check stress, tangent and the native section response.
 - `calibrate_bilinear`: segmented least squares recovering (E, σ_y, H)
   from monotonic data with standard-error envelopes and RMS residual.
 - `evidence_stress`: wraps any law's stress in `Evidence` with the card
@@ -7118,6 +7124,33 @@ they do not evolve condensation or change a downstream acoustic standard's
 humidity convention. Seven native shared-mixture regressions passed, including
 four new reference/domain cases. The source-resolution wrapper was syntax
 checked and reviewed, but was outside that native numerical closure.
+
+### Opt-in dielectric switching and uniform-capacitor history
+
+With `experimental-dielectric-hysteresis`,
+`field_storage::dielectric::hysteresis` exposes a fixed-condition uniaxial
+polarization play model in electric SI quantities. It reuses the scalar return
+map and inverse of the existing magnetic numerical owner, with
+`D=epsilon_b E+sum(P)`, `W=epsilon_b E²/2+sum(P²/(2chi))`, and physical
+switching heat `Q=sum(Ec |delta P|)`. Exact monotone-segment work includes pinning
+and saturation crossings. Each reversal must be supplied explicitly; states
+retain remanence and minor-loop memory, and trials do not publish history.
+
+`UniformHystereticCapacitor` supplies `q=A D`, `V=d E`, incremental capacitance,
+work-conjugate mean voltage, and volume-scaled storage and heat. The source
+adapter retains explicit scalar coefficient roles, complete original material
+selection and source support. Relative permittivity, changing coefficients and
+unowned frequency/field/history applicability cannot be frozen into this law.
+The linear/zero-loss limits, analytic loop area, subdivision invariance,
+charge inverse, tangent, geometry, source refresh and atomic refusal have
+focused regressions in `tests/dielectric_hysteresis.rs`.
+
+This is an explicitly fitted quadratic-potential specialization of an
+energy-based dry-friction model, not measured ferroelectric qualification,
+microscopic domain dynamics, breakdown, aging, electromechanical strain,
+temperature-dependent switching or a spatial electric-field solve. Its circuit
+consumer owns time integration. The broader ferroelectric/fractional/nonlocal
+bead remains incomplete and this capability is default-off.
 
 ### Scalar magnetic hysteresis and uniform-core constitutive coupling
 
