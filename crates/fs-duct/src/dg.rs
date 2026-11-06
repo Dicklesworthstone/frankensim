@@ -86,6 +86,7 @@ mod fluid;
 pub use fluid::{DgFluidMaterial, DgFluidRegion, DgMedium, DgRegionalFluid};
 use fs_material::gas_field::AxialGasField;
 use fs_math::det;
+use std::sync::Arc;
 
 pub mod continuous;
 pub use continuous::{
@@ -102,7 +103,7 @@ mod compliant_wall;
 pub use compliant_wall::DgCompliantWallHeat;
 pub use compliant_wall::{DgCompliantWallState, DgWallMaterialUpdate, DgWallRelaxationTransfer};
 mod port_response;
-pub use port_response::{DgMultiportResponse, DgPortResponse};
+pub use port_response::{DgDenseResponseReport, DgMultiportResponse, DgPortResponse};
 mod krylov;
 pub use krylov::DgKrylovReport;
 mod boundary_power;
@@ -1524,6 +1525,7 @@ impl<M: DgMedium> DgDuct<M> {
             cumulative_dissipated_j: 0.0,
             nodal_dirty: false,
             solve_cache: krylov::SolveCache::default(),
+            integral_cache: port_response::IntegralCache::default(),
         }
     }
 
@@ -1553,6 +1555,7 @@ impl<M: DgMedium> DgDuct<M> {
             cumulative_dissipated_j: 0.0,
             nodal_dirty: false,
             solve_cache: krylov::SolveCache::default(),
+            integral_cache: port_response::IntegralCache::default(),
         }
     }
 
@@ -1816,6 +1819,21 @@ impl<M: DgMedium> DgDuct<M> {
             port_cols_phi2.push(c2);
         }
 
+        // The port-pair impedance does not depend on the state: the response used to re-form it on
+        // every call, with these same loops in this same order.
+        let count = self.ports.len();
+        let mut impedance = vec![0.0; count * count];
+        for (row, (_, b)) in self.ports.iter().enumerate() {
+            for i in 0..n {
+                for col in 0..count {
+                    impedance[row * count + col] += b[i] * port_cols_phi2[col][i];
+                }
+            }
+            for col in 0..count {
+                impedance[row * count + col] /= dt;
+            }
+        }
+
         Ok(DgPropagator {
             operator_identity: self.operator_identity,
             dt,
@@ -1831,6 +1849,8 @@ impl<M: DgMedium> DgDuct<M> {
                 port_cols_phi1,
                 port_cols_phi2,
                 ports: self.ports.clone(),
+                impedance,
+                stats: Arc::new(port_response::DenseStats::default()),
             },
         })
     }
@@ -2063,6 +2083,11 @@ enum PropagatorKernel {
         port_cols_phi1: Vec<Vec<f64>>,
         port_cols_phi2: Vec<Vec<f64>>,
         ports: Vec<(PortId, Vec<f64>)>,
+        /// The state-independent mean-pressure impedance of every port pair, row-major,
+        /// `sum_i b_row[i] port_cols_phi2[col][i] / dt`, formed once at build.
+        impedance: Vec<f64>,
+        /// Calls and matrix products of the state-keyed `dt_phi1 x` cache; shared by clones.
+        stats: Arc<port_response::DenseStats>,
     },
     /// Sparse Krylov exp-action above the dense cap (opt-in, [`DgDuct::with_dof_cap`]).
     Krylov(krylov::KrylovKernel),
@@ -2089,6 +2114,9 @@ pub struct DgState {
     /// One solve of the Krylov kernel for this exact state; empty on the dense and skew kernels.
     /// Never part of equality.
     solve_cache: krylov::SolveCache,
+    /// The dense kernel's product `dt_phi1 x` for this exact state; empty on the Krylov and
+    /// skew kernels. Never part of equality, and never read by the Krylov kernel.
+    integral_cache: port_response::IntegralCache,
 }
 
 impl DgState {
@@ -2263,6 +2291,8 @@ impl DgPropagator {
                 port_cols_phi1,
                 port_cols_phi2,
                 ports,
+                stats,
+                ..
             } => self.step_series(
                 state,
                 port_inputs,
@@ -2271,6 +2301,7 @@ impl DgPropagator {
                 port_cols_phi1,
                 port_cols_phi2,
                 ports,
+                stats,
             ),
             PropagatorKernel::Krylov(kernel) => self.step_krylov(state, port_inputs, kernel),
         }
@@ -2408,6 +2439,7 @@ impl DgPropagator {
         port_cols_phi1: &[Vec<f64>],
         port_cols_phi2: &[Vec<f64>],
         ports: &[(PortId, Vec<f64>)],
+        stats: &port_response::DenseStats,
     ) -> Result<DgStepOutput, DuctError> {
         let n = self.total_dofs;
         let ids: Vec<PortId> = ports.iter().map(|p| p.0).collect();
@@ -2415,13 +2447,15 @@ impl DgPropagator {
         let e_prev = state.stored_energy_j();
         let mut next_tilde = vec![0.0; n];
         let mut int_tilde = vec![0.0; n];
+        // The state part of the step integral, `sum_j dt_phi1[i, j] x[j]` in the order it was always
+        // summed, is the product the responses of this state already formed (or forms here once).
+        let integral = self.dense_integral(dt_phi1, stats, state);
         for i in 0..n {
             let mut acc_next = 0.0;
-            let mut acc_int = 0.0;
             for j in 0..n {
                 acc_next += phi0[i * n + j] * state.tilde[j];
-                acc_int += dt_phi1[i * n + j] * state.tilde[j];
             }
+            let mut acc_int = integral.int[i];
             for (slot, &u) in efforts.iter().enumerate() {
                 acc_next += port_cols_phi1[slot][i] * u;
                 acc_int += port_cols_phi2[slot][i] * u;

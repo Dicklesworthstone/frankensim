@@ -181,3 +181,188 @@ fn multiport_refuses_foreign_material_state_and_handles_no_ports() {
         assert_eq!(state.step_count(), 0);
     }
 }
+
+fn bits(values: &[f64]) -> Vec<u64> {
+    values.iter().map(|v| v.to_bits()).collect()
+}
+
+/// The dense response exactly as it was before the cache: the product re-summed, the impedance
+/// re-formed from the retained port columns, on every call.
+fn reference_multiport(stepper: &DgPropagator, state: &DgState) -> (Vec<f64>, Vec<f64>) {
+    let PropagatorKernel::DenseSeries { dt_phi1, port_cols_phi2, ports, .. } = &stepper.kernel else {
+        panic!("a dense kernel");
+    };
+    let n = stepper.total_dofs;
+    let count = ports.len();
+    let mut integral = vec![0.0; n];
+    for i in 0..n {
+        for j in 0..n {
+            integral[i] += dt_phi1[i * n + j] * state.tilde[j];
+        }
+    }
+    let mut history = vec![0.0; count];
+    let mut impedance = vec![0.0; count * count];
+    for (row, (_, b)) in ports.iter().enumerate() {
+        for i in 0..n {
+            history[row] += b[i] * integral[i];
+            for col in 0..count {
+                impedance[row * count + col] += b[i] * port_cols_phi2[col][i];
+            }
+        }
+        history[row] /= stepper.dt;
+        for col in 0..count {
+            impedance[row * count + col] /= stepper.dt;
+        }
+    }
+    (history, impedance)
+}
+
+/// The dense step as it was before the cache: one fused loop over the two matrices.
+fn reference_step(stepper: &DgPropagator, state: &DgState, efforts: &[f64]) -> (Vec<f64>, Vec<f64>) {
+    let PropagatorKernel::DenseSeries { phi0, dt_phi1, port_cols_phi1, port_cols_phi2, .. } =
+        &stepper.kernel
+    else {
+        panic!("a dense kernel");
+    };
+    let n = stepper.total_dofs;
+    let mut next = vec![0.0; n];
+    let mut int = vec![0.0; n];
+    for i in 0..n {
+        let mut acc_next = 0.0;
+        let mut acc_int = 0.0;
+        for j in 0..n {
+            acc_next += phi0[i * n + j] * state.tilde[j];
+            acc_int += dt_phi1[i * n + j] * state.tilde[j];
+        }
+        for (slot, &u) in efforts.iter().enumerate() {
+            acc_next += port_cols_phi1[slot][i] * u;
+            acc_int += port_cols_phi2[slot][i] * u;
+        }
+        next[i] = acc_next;
+        int[i] = acc_int;
+    }
+    (next, int)
+}
+
+#[test]
+fn the_dense_response_cache_delivers_the_uncached_bits_and_sums_each_state_once() {
+    let duct = two_port_duct(true, 101325.0);
+    let stepper = duct.propagator(1e-5, 1e-11).unwrap();
+    assert!(matches!(stepper.kernel, PropagatorKernel::DenseSeries { .. }), "walls make it dense");
+    let mut state = duct.project_initial_state(
+        |x| 0.3 * det::cos(30.0 * x),
+        |x| 1e-9 * det::sin(20.0 * x),
+    );
+    let ids = [PortId(7), PortId(3)];
+    let flows = [[1e-8, 0.0], [0.0, -2e-8], [2e-8, -3e-8], [-1e-8, -2e-8], [0.0, 0.0], [3e-8, 1e-8]];
+    assert_eq!(
+        stepper.dense_response_report(),
+        Some(DgDenseResponseReport { calls: 0, products: 0 })
+    );
+    let steps = 24usize;
+    for k in 0..steps {
+        let flow = flows[k % flows.len()];
+        let inputs = [
+            PortInput { id: PortId(7), effort: flow[0] },
+            PortInput { id: PortId(3), effort: flow[1] },
+        ];
+        let (history_ref, impedance_ref) = reference_multiport(&stepper, &state);
+        if k % 2 == 0 {
+            // A valve iterating on one step: every response, repeatedly, then a trial step.
+            for _ in 0..3 {
+                let response = stepper.multiport_response(&state).unwrap();
+                assert_eq!(bits(&response.history_pressure_pa), bits(&history_ref));
+                assert_eq!(bits(&response.impedance_pa_s_m3), bits(&impedance_ref));
+            }
+            for (row, id) in ids.iter().enumerate() {
+                let scalar = stepper.port_response(&state, *id).unwrap();
+                assert_eq!(scalar.history_pressure_pa.to_bits(), history_ref[row].to_bits());
+                assert_eq!(scalar.impedance_pa_s_m3.to_bits(), impedance_ref[2 * row + row].to_bits());
+            }
+            let mut trial = state.clone();
+            stepper.step(&mut trial, &inputs).unwrap();
+        }
+        // Odd steps arrive cold: no response was asked for first.
+        let (next_ref, int_ref) = reference_step(&stepper, &state, &flow);
+        let output = stepper.step(&mut state, &inputs).unwrap();
+        assert_eq!(bits(&state.tilde), bits(&next_ref), "step {k}");
+        let PropagatorKernel::DenseSeries { ports, .. } = &stepper.kernel else { unreachable!() };
+        for (slot, (_, b)) in ports.iter().enumerate() {
+            let mut delta_x = 0.0;
+            for i in 0..stepper.total_dofs {
+                delta_x += b[i] * int_ref[i];
+            }
+            assert_eq!(output.port_outputs[slot].delta_x.to_bits(), delta_x.to_bits(), "step {k}");
+        }
+    }
+    // One product per distinct state, however many times it was asked for: even steps ask 3 + 2 + 1
+    // times before the real step, odd steps only at the step.
+    let report = stepper.dense_response_report().unwrap();
+    assert_eq!(report.products, steps as u64);
+    assert_eq!(report.calls, 12 * 7 + 12);
+    println!("DENSE-CACHE-MEASURE {steps} states: {report:?}");
+
+    // A different dt is a different product, and a state last used at one dt is not served at another.
+    let slow = duct.propagator(2e-5, 1e-11).unwrap();
+    let first = stepper.multiport_response(&state).unwrap();
+    let (history_fast, impedance_fast) = reference_multiport(&stepper, &state);
+    assert_eq!(bits(&first.history_pressure_pa), bits(&history_fast));
+    let on_slow = slow.multiport_response(&state).unwrap();
+    let (history_slow, impedance_slow) = reference_multiport(&slow, &state);
+    assert_eq!(bits(&on_slow.history_pressure_pa), bits(&history_slow));
+    assert_eq!(bits(&on_slow.impedance_pa_s_m3), bits(&impedance_slow));
+    assert_eq!(slow.dense_response_report().unwrap().products, 1);
+    let again = stepper.multiport_response(&state).unwrap();
+    assert_eq!(bits(&again.history_pressure_pa), bits(&history_fast));
+    assert_eq!(bits(&again.impedance_pa_s_m3), bits(&impedance_fast));
+    assert_eq!(stepper.dense_response_report().unwrap().products, steps as u64 + 2);
+}
+
+#[test]
+fn the_sparse_response_forms_its_impedance_once_and_the_dense_cache_never_reaches_it() {
+    let duct = two_port_duct(true, 101325.0);
+    let dense = duct.propagator(1e-5, 1e-11).unwrap();
+    // Two fresh sparse propagators: one solve of a propagator starts its convergence check from the
+    // dimension of the previous solve, so only first solves are bit-comparable.
+    let sparse_a = duct.build_krylov_propagator(1e-5, 1e-11).unwrap();
+    let sparse_b = duct.build_krylov_propagator(1e-5, 1e-11).unwrap();
+    let make = || duct.project_initial_state(|x| 0.3 * det::cos(30.0 * x), |x| 1e-9 * det::sin(20.0 * x));
+    let warm = make();
+    let cold = make();
+    // The dense kernel fills the dense cache of `warm` and not that of `cold`.
+    dense.multiport_response(&warm).unwrap();
+    let on_warm = sparse_a.multiport_response(&warm).unwrap();
+    let on_cold = sparse_b.multiport_response(&cold).unwrap();
+    assert_eq!(bits(&on_warm.history_pressure_pa), bits(&on_cold.history_pressure_pa));
+    assert_eq!(bits(&on_warm.impedance_pa_s_m3), bits(&on_cold.impedance_pa_s_m3));
+    assert_eq!(sparse_a.dense_response_report(), None);
+    assert_eq!(dense.dense_response_report().unwrap().products, 1);
+
+    // The sparse response as it was before the build-time matrix: the impedance re-formed from the
+    // retained port columns on every call, the history from the solve this state already holds.
+    let PropagatorKernel::Krylov(kernel) = &sparse_a.kernel else { panic!("a sparse kernel") };
+    let solved = kernel.solve_cached(sparse_a.dt, &warm).unwrap();
+    let n = sparse_a.total_dofs;
+    let count = kernel.ports.len();
+    let mut history = vec![0.0; count];
+    let mut impedance = vec![0.0; count * count];
+    for (row, (_, b)) in kernel.ports.iter().enumerate() {
+        for i in 0..n {
+            history[row] += b[i] * solved.int[i];
+            for col in 0..count {
+                impedance[row * count + col] += b[i] * kernel.port_cols_phi2[col][i];
+            }
+        }
+        history[row] /= sparse_a.dt;
+        for col in 0..count {
+            impedance[row * count + col] /= sparse_a.dt;
+        }
+    }
+    assert_eq!(bits(&on_warm.history_pressure_pa), bits(&history));
+    assert_eq!(bits(&on_warm.impedance_pa_s_m3), bits(&impedance));
+    for (row, id) in [PortId(7), PortId(3)].iter().enumerate() {
+        let scalar = sparse_a.port_response(&warm, *id).unwrap();
+        assert_eq!(scalar.history_pressure_pa.to_bits(), history[row].to_bits());
+        assert_eq!(scalar.impedance_pa_s_m3.to_bits(), impedance[2 * row + row].to_bits());
+    }
+}

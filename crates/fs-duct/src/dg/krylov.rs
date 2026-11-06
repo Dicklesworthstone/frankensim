@@ -183,6 +183,9 @@ pub(super) struct KrylovKernel {
     pub(super) ports: Vec<(PortId, Vec<f64>)>,
     pub(super) port_cols_phi1: Vec<Vec<f64>>,
     pub(super) port_cols_phi2: Vec<Vec<f64>>,
+    /// The state-independent mean-pressure impedance of every port pair, row-major,
+    /// `sum_i b_row[i] port_cols_phi2[col][i] / dt`, formed once at build.
+    pub(super) impedance: Vec<f64>,
     build_estimate: f64,
     stats: Arc<KrylovStats>,
     scratch: Scratch,
@@ -452,6 +455,7 @@ impl<M: DgMedium> DgDuct<M> {
             ports: self.ports.clone(),
             port_cols_phi1: Vec::new(),
             port_cols_phi2: Vec::new(),
+            impedance: Vec::new(),
             build_estimate: 0.0,
             stats: Arc::new(KrylovStats::default()),
             scratch: Scratch::default(),
@@ -519,6 +523,21 @@ impl<M: DgMedium> DgDuct<M> {
         }
         kernel.port_cols_phi1 = cols1;
         kernel.port_cols_phi2 = cols2;
+        // The port-pair impedance does not depend on the state: the responses used to re-form it on
+        // every call (`count^2 n` multiply-adds), with these same loops in this same order.
+        let count = self.ports.len();
+        let mut impedance = vec![0.0; count * count];
+        for (row, (_, b)) in self.ports.iter().enumerate() {
+            for i in 0..n {
+                for col in 0..count {
+                    impedance[row * count + col] += b[i] * kernel.port_cols_phi2[col][i];
+                }
+            }
+            for col in 0..count {
+                impedance[row * count + col] /= dt;
+            }
+        }
+        kernel.impedance = impedance;
         kernel.build_estimate = certificate;
         if !(certificate <= tol) {
             return Err(DuctError::PropagatorCertificate {

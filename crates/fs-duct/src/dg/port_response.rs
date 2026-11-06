@@ -1,6 +1,57 @@
 //! Same-step boundary relation from the retained exact exponential.
 
 use super::*;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, PoisonError};
+
+/// `dt_phi1 x` of the dense kernel for one exact state: the state part of the step integral of the
+/// energy coordinates, summed as `sum_j dt_phi1[i, j] x[j]` for `j` ascending.
+#[derive(Debug)]
+pub(super) struct DenseIntegral {
+    dt_bits: u64,
+    tilde: Vec<f64>,
+    pub(super) int: Vec<f64>,
+}
+
+/// A one-entry cache of the last dense product, keyed on the dt and the bits of the state. It is
+/// shared by clones of a state (so a trial step on a clone reuses the response's product), is never
+/// part of equality, and is separate from the Krylov kernel's cache so that the two kernels cannot
+/// read each other's entry. The matrix is a deterministic function of the operator identity (which
+/// `validate_state` has already checked) and the dt, so the key needs nothing more.
+#[derive(Debug, Default)]
+pub(super) struct IntegralCache(Mutex<Option<Arc<DenseIntegral>>>);
+
+impl Clone for IntegralCache {
+    fn clone(&self) -> Self {
+        let held = self.0.lock().unwrap_or_else(PoisonError::into_inner).clone();
+        Self(Mutex::new(held))
+    }
+}
+
+impl PartialEq for IntegralCache {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+/// Use of the dense response cache, shared by clones of one propagator.
+#[derive(Debug, Default)]
+pub(super) struct DenseStats {
+    calls: AtomicU64,
+    products: AtomicU64,
+}
+
+/// How often the dense kernel asked for `dt_phi1 x` and how often it had to form it: `calls` counts
+/// every [`DgPropagator::multiport_response`], [`DgPropagator::port_response`] and
+/// [`DgPropagator::step`] on a dense kernel; `products` the `n x n` products actually summed. A
+/// state evaluated repeatedly (a valve iterating on one step) costs one product.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DgDenseResponseReport {
+    /// Requests for the state's product.
+    pub calls: u64,
+    /// Products formed (cache misses).
+    pub products: u64,
+}
 
 /// Affine step-mean response at one held-flow port, with all other port inputs
 /// zero for this step: `mean_pressure = history_pressure + impedance * flow`.
@@ -36,6 +87,58 @@ pub struct DgMultiportResponse {
 }
 
 impl DgPropagator {
+    /// `dt_phi1 x` for `state`, reusing the cached product when the dt and every bit of the state
+    /// match. The loop is the one the responses and the step ran on every call, in the same order,
+    /// so a hit and a miss deliver the same bits.
+    pub(super) fn dense_integral(
+        &self,
+        dt_phi1: &[f64],
+        stats: &DenseStats,
+        state: &DgState,
+    ) -> Arc<DenseIntegral> {
+        stats.calls.fetch_add(1, Ordering::Relaxed);
+        {
+            let held = state.integral_cache.0.lock().unwrap_or_else(PoisonError::into_inner);
+            if let Some(hit) = held.as_ref() {
+                if hit.dt_bits == self.dt.to_bits()
+                    && hit.tilde.len() == state.tilde.len()
+                    && hit.tilde.iter().zip(&state.tilde).all(|(a, b)| a.to_bits() == b.to_bits())
+                {
+                    return Arc::clone(hit);
+                }
+            }
+        }
+        let n = self.total_dofs;
+        let mut int = vec![0.0; n];
+        for i in 0..n {
+            for j in 0..n {
+                int[i] += dt_phi1[i * n + j] * state.tilde[j];
+            }
+        }
+        stats.products.fetch_add(1, Ordering::Relaxed);
+        let product = Arc::new(DenseIntegral {
+            dt_bits: self.dt.to_bits(),
+            tilde: state.tilde.clone(),
+            int,
+        });
+        *state.integral_cache.0.lock().unwrap_or_else(PoisonError::into_inner) =
+            Some(Arc::clone(&product));
+        product
+    }
+
+    /// Use of the dense response cache since this propagator (or the one it was cloned from) was
+    /// built; `None` on the lossless and sparse kernels.
+    #[must_use]
+    pub fn dense_response_report(&self) -> Option<DgDenseResponseReport> {
+        match &self.kernel {
+            PropagatorKernel::DenseSeries { stats, .. } => Some(DgDenseResponseReport {
+                calls: stats.calls.load(Ordering::Relaxed),
+                products: stats.products.load(Ordering::Relaxed),
+            }),
+            _ => None,
+        }
+    }
+
     /// Read the full affine mean-pressure law used by Self::step, without
     /// advancing any acoustic state, wall memory, modal anchor, or clock.
     ///
@@ -57,62 +160,45 @@ impl DgPropagator {
         let response = match &self.kernel {
             PropagatorKernel::DenseSeries {
                 dt_phi1,
-                port_cols_phi2,
                 ports,
+                impedance,
+                stats,
                 ..
             } => {
                 let n = self.total_dofs;
                 let count = ports.len();
-                let mut integral = vec![0.0; n];
-                for i in 0..n {
-                    for j in 0..n {
-                        integral[i] += dt_phi1[i * n + j] * state.tilde[j];
-                    }
-                }
+                // The product of this exact state is formed once; the impedance was formed at build.
+                let integral = self.dense_integral(dt_phi1, stats, state);
                 let mut history = vec![0.0; count];
-                let mut impedance = vec![0.0; count * count];
                 for (row, (_, b)) in ports.iter().enumerate() {
                     for i in 0..n {
-                        history[row] += b[i] * integral[i];
-                        for col in 0..count {
-                            impedance[row * count + col] += b[i] * port_cols_phi2[col][i];
-                        }
+                        history[row] += b[i] * integral.int[i];
                     }
                     history[row] /= self.dt;
-                    for col in 0..count {
-                        impedance[row * count + col] /= self.dt;
-                    }
                 }
                 DgMultiportResponse {
                     ports: ports.iter().map(|(id, _)| *id).collect(),
                     history_pressure_pa: history,
-                    impedance_pa_s_m3: impedance,
+                    impedance_pa_s_m3: impedance.clone(),
                 }
             }
             PropagatorKernel::Krylov(kernel) => {
                 // The same affine law from the sparse kernel: history from the cached step integral,
-                // impedance from the state-independent port columns.
+                // impedance from the state-independent matrix formed at build.
                 let n = self.total_dofs;
                 let solved = kernel.solve_cached(self.dt, state)?;
                 let count = kernel.ports.len();
                 let mut history = vec![0.0; count];
-                let mut impedance = vec![0.0; count * count];
                 for (row, (_, b)) in kernel.ports.iter().enumerate() {
                     for i in 0..n {
                         history[row] += b[i] * solved.int[i];
-                        for col in 0..count {
-                            impedance[row * count + col] += b[i] * kernel.port_cols_phi2[col][i];
-                        }
                     }
                     history[row] /= self.dt;
-                    for col in 0..count {
-                        impedance[row * count + col] /= self.dt;
-                    }
                 }
                 DgMultiportResponse {
                     ports: kernel.ports.iter().map(|(id, _)| *id).collect(),
                     history_pressure_pa: history,
-                    impedance_pa_s_m3: impedance,
+                    impedance_pa_s_m3: kernel.impedance.clone(),
                 }
             }
             PropagatorKernel::SkewModal {
@@ -205,8 +291,9 @@ impl DgPropagator {
         let (history, impedance) = match &self.kernel {
             PropagatorKernel::DenseSeries {
                 dt_phi1,
-                port_cols_phi2,
                 ports,
+                impedance,
+                stats,
                 ..
             } => {
                 let slot = ports
@@ -215,17 +302,14 @@ impl DgPropagator {
                     .ok_or_else(missing)?;
                 let b = &ports[slot].1;
                 let n = self.total_dofs;
+                let integral = self.dense_integral(dt_phi1, stats, state);
                 let mut history = 0.0;
-                let mut impedance = 0.0;
                 for i in 0..n {
-                    let mut integral = 0.0;
-                    for j in 0..n {
-                        integral += dt_phi1[i * n + j] * state.tilde[j];
-                    }
-                    history += b[i] * integral;
-                    impedance += b[i] * port_cols_phi2[slot][i];
+                    history += b[i] * integral.int[i];
                 }
-                (history / self.dt, impedance / self.dt)
+                // The diagonal of the build-time matrix is this port's impedance, summed and divided
+                // exactly as it was here.
+                (history / self.dt, impedance[slot * ports.len() + slot])
             }
             PropagatorKernel::Krylov(kernel) => {
                 let slot = kernel
@@ -236,12 +320,11 @@ impl DgPropagator {
                 let b = &kernel.ports[slot].1;
                 let solved = kernel.solve_cached(self.dt, state)?;
                 let mut history = 0.0;
-                let mut impedance = 0.0;
                 for i in 0..self.total_dofs {
                     history += b[i] * solved.int[i];
-                    impedance += b[i] * kernel.port_cols_phi2[slot][i];
                 }
-                (history / self.dt, impedance / self.dt)
+                // The diagonal of the build-time matrix, summed and divided as it was here.
+                (history / self.dt, kernel.impedance[slot * kernel.ports.len() + slot])
             }
             PropagatorKernel::SkewModal {
                 sigmas,
