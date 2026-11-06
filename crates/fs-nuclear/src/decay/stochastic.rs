@@ -33,6 +33,7 @@ use super::{
 use crate::{EnergyChannels, channel_values};
 
 pub mod production;
+pub mod transport;
 
 /// Largest admitted total integer population, exactly representable in binary64.
 /// Larger macroscopic inventories belong to the deterministic expectation owner.

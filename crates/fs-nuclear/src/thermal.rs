@@ -70,6 +70,17 @@ pub use activation::{CaptureActivationCellSource, CaptureActivationHeating};
 mod stochastic;
 pub use stochastic::{StochasticDecayCellSource, StochasticDecayHeating};
 
+mod stochastic_production;
+pub use stochastic_production::{
+    StochasticDecayProductionCellSource, StochasticDecayProductionHeating,
+};
+
+mod stochastic_transport;
+pub use stochastic_transport::{
+    StochasticDecayTransportCellSource, StochasticDecayTransportCellStep,
+    StochasticDecayTransportHeating,
+};
+
 mod kinetics;
 pub use kinetics::{
     KineticCellSource, KineticCellStep, KineticHeating, KineticHeatingBudget, KineticsControl,

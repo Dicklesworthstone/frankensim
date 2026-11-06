@@ -368,8 +368,55 @@ and partitioned observations and full-owner clone/restart preserve the sampled
 history on the original ISA/toolchain; an all-zero schedule preserves the closed
 inventory's trajectory exactly. There are no per-event allocations.
 
+`thermal::StochasticDecayProductionHeating` binds these histories to the existing
+material transaction. Births, source changes and transformations clip its native
+clock; births alone deposit no heat. Only original branch emissions are credited,
+using the original absolute thermal endpoint and separate energy destinations.
+The existing optional radiation response can distribute the outward channel.
 The example `cargo run -p fs-nuclear --example stochastic_production` demonstrates
 explicit manufactured source pulses, shutdown decay and complete restart.
+
+## Stochastic transport and event-local radioactive heat
+
+`decay::stochastic::transport::StochasticDecayTransportState` advances a complete
+cohort of integer radioactive inventories using the existing `NuclideTransport`
+description. Each directed path's constant coefficient is an authored per-nucleus
+hazard in 1/s; the donor's current integer population determines the actual event
+intensity. All cells share the exact original model Arc and absolute time, with
+distinct logical decay streams and a separate explicit movement stream. This
+owner models finite-inventory, well-mixed movement, without inferring geometry,
+bulk carrier flow, sensible/latent enthalpy or external supply.
+
+Original decay clocks and per-path, per-nuclide movement clocks compete at their
+compensated event times. A nucleus can transfer, decay into a daughter, transfer
+again or leave through an outflow within one observation interval. A change in
+donor population resamples only the affected hazards at that actual event time.
+Observation boundaries consume no randomness. Exact ties retain original
+compartment/node order before authored path order. Whole/split observations and
+cloned restarts retain complete population, clock, RNG and lifetime-account bits.
+
+Transfers preserve the nuclide and integer cohort total. Outflows remove that
+nuclide and explicitly count its departure; subsequent exterior decay belongs
+outside the retained model. Movement releases no nuclear energy. Each original
+branch's deposited, radiation and escaped channels remain at the compartment
+where the decay actually occurred, including emissions before a later transfer.
+The initial cohort is bounded by 2^53 nuclei; constructor bounds also cover
+compartments, rate coefficients and clock storage. Separate trial budgets bound
+whole-cohort decays, movements and clock scanning/rescheduling. Original per-cell
+emission defects are rounded outward into one cohort energy allowance. Rejected
+work, arithmetic, accounting or cancellation leaves the complete cohort intact.
+Trial storage is allocated before event processing; events allocate nothing.
+
+`thermal::StochasticDecayTransportCellSource::bind` creates one handle for every
+original thermal cell. `StochasticDecayTransportHeating` requires that complete
+cohort and advances it exactly once per grouped material trial, independent of
+cell ordering. Handles share the accepted state and report; a single designated
+handle advertises the cohort's next event without redundant all-clock scans.
+Event-local emissions enter the original atomic material/radiation transaction,
+so transfer alone produces no temperature change and rejected material updates
+publish neither movement nor decay history. The separately supplied stochastic
+production owner and this constant-rate transport owner are distinct surfaces;
+simultaneous stochastic external production plus transport is not yet composed.
 
 ## Stochastic decay events on the shared thermal timeline
 
