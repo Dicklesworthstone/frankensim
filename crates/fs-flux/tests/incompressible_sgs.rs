@@ -7,6 +7,9 @@ use fs_flux::ns::sgs::{PlanarSgs, PlanarSgsError, PlanarSmagorinsky, SgsModel};
 use fs_flux::{FluxParams, FluxSystem, TriMesh};
 use fs_solid::Mesh2;
 
+#[path = "incompressible_sgs/steady.rs"]
+mod steady;
+
 fn moments(mesh: &TriMesh, velocity: &dyn Fn([f64; 2]) -> [f64; 2]) -> Vec<f64> {
     let mut values = Vec::with_capacity(2 * mesh.edges.len());
     for edge in &mesh.edges {

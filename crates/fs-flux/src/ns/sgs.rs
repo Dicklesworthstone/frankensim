@@ -91,7 +91,7 @@ pub struct PlanarSgsField {
     pub integrated_dissipation_m4_s3: f64,
 }
 
-/// An accepted implicit momentum step and its own endpoint SGS diagnostics.
+/// An accepted steady or implicit flow and its own endpoint SGS diagnostics.
 pub struct PlanarSgsStep {
     /// Original accepted field, pressure datums, boundary policies and residuals.
     pub step: NavierStokesStep,
@@ -237,6 +237,35 @@ impl<'s, 'm> PlanarSgs<'s, 'm> {
         Ok((kinematics.shear_rate(), eddy, effective))
     }
 
+    // Prepare each cell once for an assembly. The same typed error channel
+    // serves steady flow and the full-gradient transient closures; a refused
+    // response cannot reach a linear solve or publish a partial endpoint.
+    fn prepared_viscosities(
+        &self,
+        velocity: &[f64],
+        source_error: &RefCell<Option<PlanarSgsError>>,
+    ) -> Result<Vec<f64>, StokesBoundaryError> {
+        let rates = matches!(self.model, SgsModel::Smagorinsky { .. })
+            .then(|| self.system.shear_rates(velocity));
+        (0..self.system.mesh.tris.len())
+            .map(|cell| {
+                let response = if let Some(rates) = &rates {
+                    self.viscosities(cell, rates[cell])
+                        .map(|(_, effective)| effective)
+                } else {
+                    self.gradient_response(cell, velocity)
+                        .map(|(_, _, effective)| effective)
+                };
+                response.map_err(|error| {
+                    if source_error.borrow().is_none() {
+                        *source_error.borrow_mut() = Some(error);
+                    }
+                    StokesBoundaryError::InvalidInput("invalid planar SGS transport")
+                })
+            })
+            .collect()
+    }
+
     /// Evaluate the modeled transport and transfer on original velocity DOFs.
     /// Supply exactly n_u coefficients; pressure entries are not velocity.
     ///
@@ -282,6 +311,55 @@ impl<'s, 'm> PlanarSgs<'s, 'm> {
             cells,
             integrated_dissipation_m4_s3: integrated,
         })
+    }
+
+    /// Solve the true steady momentum equations with SGS stress and convection
+    /// evaluated at the same accepted velocity.
+    ///
+    /// The initial velocity is a nonlinear guess only; no timestep, history or
+    /// artificial inertia enters the operator. All three closures prepare one
+    /// viscosity per triangle per assembly. The original steady solver retains
+    /// mixed velocity/total-traction/Navier-slip boundaries, reservoir momentum,
+    /// explicit backflow policy, harmonic SIP stress and physical reactions.
+    /// Its unrelaxed correction and independently reassembled endpoint residual
+    /// must both converge. The returned SGS diagnostics use that endpoint.
+    ///
+    /// params.nu is unused: the prepared molecular cell field is authoritative.
+    /// Force and boundary callbacks must be pure and fixed throughout the solve.
+    /// A steady algebraic closure does not model turbulent fluctuations, prove
+    /// uniqueness or supply a Reynolds-averaged calibration.
+    ///
+    /// # Errors
+    /// Refuses malformed guesses/controls, unanchored steady components,
+    /// inadmissible boundaries, unrepresentable transport/diagnostics and failed
+    /// linear or nonlinear solves. The supplied initial guess is never modified.
+    pub fn solve_steady(
+        &self,
+        params: FluxParams,
+        force: &dyn Fn([f64; 2]) -> [f64; 2],
+        boundaries: &[NavierStokesBoundary<'_>],
+        initial_velocity: &[f64],
+        controls: NavierStokesControls,
+    ) -> Result<PlanarSgsStep, PlanarSgsError> {
+        let source_error = RefCell::new(None);
+        let result = self
+            .system
+            .solve_navier_stokes_mixed_prepared_rheology_checked(
+                params,
+                &|velocity| self.prepared_viscosities(velocity, &source_error),
+                &|_, _, effective| effective,
+                force,
+                boundaries,
+                initial_velocity,
+                controls,
+                &|| source_error.borrow().is_none(),
+            );
+        if let Some(error) = source_error.into_inner() {
+            return Err(error);
+        }
+        let step = result?;
+        let sgs = self.field(&step.solution.field.x[..self.system.n_u])?;
+        Ok(PlanarSgsStep { step, sgs })
     }
 
     /// Advance BDF1 with implicit SGS stress and convection at the same endpoint.
@@ -363,22 +441,7 @@ impl<'s, 'm> PlanarSgs<'s, 'm> {
             self.system
                 .bdf2_navier_stokes_mixed_prepared_rheology_step_checked(
                     params,
-                    &|velocity| {
-                        (0..self.system.mesh.tris.len())
-                            .map(|cell| {
-                                self.gradient_response(cell, velocity)
-                                    .map(|(_, _, effective)| effective)
-                                    .map_err(|error| {
-                                        if source_error.borrow().is_none() {
-                                            *source_error.borrow_mut() = Some(error);
-                                        }
-                                        StokesBoundaryError::InvalidInput(
-                                            "invalid planar SGS transport",
-                                        )
-                                    })
-                            })
-                            .collect()
-                    },
+                    &|velocity| self.prepared_viscosities(velocity, &source_error),
                     &|_, _, effective| effective,
                     force,
                     boundaries,

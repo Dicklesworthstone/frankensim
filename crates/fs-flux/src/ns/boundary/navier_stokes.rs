@@ -229,6 +229,39 @@ impl<'m> FluxSystem<'m> {
         controls: NavierStokesControls,
         source_is_valid: &dyn Fn() -> bool,
     ) -> Result<NavierStokesStep, StokesBoundaryError> {
+        self.solve_navier_stokes_mixed_prepared_rheology_checked(
+            params,
+            &|velocity| {
+                let rates = self.shear_rates(velocity);
+                if rates.iter().any(|rate| !rate.is_finite()) {
+                    return Err(StokesBoundaryError::InvalidInput("nonfinite shear rate"));
+                }
+                Ok(rates)
+            },
+            law,
+            force,
+            boundaries,
+            initial_velocity,
+            controls,
+            source_is_valid,
+        )
+    }
+
+    // One candidate-dependent response per cell, shared by scalar rheology and
+    // full-gradient closures. The original steady owner admits physical anchors,
+    // uses no mass/history, and recomputes the response for endpoint acceptance.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn solve_navier_stokes_mixed_prepared_rheology_checked(
+        &self,
+        params: FluxParams,
+        prepare: &dyn Fn(&[f64]) -> Result<Vec<f64>, StokesBoundaryError>,
+        law: &dyn Fn(usize, [f64; 2], f64) -> f64,
+        force: &dyn Fn([f64; 2]) -> [f64; 2],
+        boundaries: &[NavierStokesBoundary<'_>],
+        initial_velocity: &[f64],
+        controls: NavierStokesControls,
+        source_is_valid: &dyn Fn() -> bool,
+    ) -> Result<NavierStokesStep, StokesBoundaryError> {
         self.solve_navier_stokes_mixed_endpoint(
             params,
             boundaries,
@@ -237,13 +270,15 @@ impl<'m> FluxSystem<'m> {
             0.0,
             &[],
             &|admitted, velocity| {
-                let rates = self.shear_rates(velocity);
-                if rates.iter().any(|rate| !rate.is_finite()) {
-                    return Err(StokesBoundaryError::InvalidInput("nonfinite shear rate"));
+                let response = prepare(velocity)?;
+                if response.len() != self.mesh.tris.len() {
+                    return Err(StokesBoundaryError::InvalidInput(
+                        "one prepared rheology response per triangle required",
+                    ));
                 }
                 self.assemble_stokes_admitted_operator(
                     params,
-                    &|cell, point| law(cell, point, rates[cell]),
+                    &|cell, point| law(cell, point, response[cell]),
                     force,
                     admitted,
                     None,

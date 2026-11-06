@@ -7248,3 +7248,22 @@ energy, shock closure, adaptive memory calibration, or benchmark validation.
 Validation in this change is limited to rustfmt parsing/formatting and focused
 source review; the added Rust regressions have not been compiled or executed in
 this environment.
+
+### True steady native SGS flow
+
+With continuum and experimental-sgs, PlanarSgs::solve_steady connects the
+existing Smagorinsky, WALE and Vreman closures to the original steady mixed
+Navier--Stokes owner. The initial velocity is only a nonlinear guess: the
+operator has zero mass coefficient and no time history. One transport response
+is prepared per triangle per assembly, and acceptance checks convection and
+SGS viscosity at the same endpoint using the original correction and nonlinear
+residual gates. Velocity/total-traction/Navier-slip boundaries, backflow policy,
+pressure datums, harmonic SIP stress and physical reactions retain their native
+semantics. Original scalar rheology uses the same private prepared-response seam.
+
+Three focused regression groups cover full-gradient affine flow with mixed
+traction/slip and different guesses, exact-zero molecular equivalence, and
+source/anchor/nonlinear refusals. Rustfmt parsing/formatting and bounded source
+review completed; these Rust tests were not compiled or executed here. This
+remains an exploratory frozen-material planar algebraic screen, without a
+three-dimensional turbulent cascade or Reynolds-averaged calibration.
