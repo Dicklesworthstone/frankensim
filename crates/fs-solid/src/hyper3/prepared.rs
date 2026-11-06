@@ -234,7 +234,7 @@ impl<L: FiniteStrainPotential> PreparedHyperTetProblem<'_, L> {
         self.problem.check_len(displacement_m)?;
         let state = self
             .problem
-            .evaluate(&self.elements, displacement_m, cx)?
+            .evaluate(&self.elements, displacement_m, None, cx)?
             .map_err(|(element, what)| HyperTetError::MaterialRefused { element, what })?;
         if !state.energy.is_finite() || state.internal.iter().any(|value| !value.is_finite()) {
             return Err(HyperTetError::InvalidInput {

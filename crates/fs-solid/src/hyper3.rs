@@ -40,7 +40,12 @@
 //! pending the first admissible step is taken; once the boundary data are
 //! fully applied an Armijo condition on the potential is enforced (or, on a
 //! non-descent direction near a limit point, a decrease of the residual
-//! norm). Static convergence uses `||r_f|| <= relative_tolerance *
+//! norm). Material work uses each original law's direct potential increment,
+//! accumulated in the same cell sweep as trial forces; an arbitrary material
+//! energy datum does not set the Armijo tolerance. Custom laws that retain
+//! endpoint subtraction retain its precision limits. Conservative pressure
+//! work comes from the original pressure owner for every pressure profile.
+//! Static convergence uses `||r_f|| <= relative_tolerance *
 //! max(||f_int,f||, ||f_ext,f||, ||s_f||)`, with all norms restricted to free
 //! equations and no pending boundary increment. The connected deformation
 //! force scale is `s_i = sum_j |K_ij| |u_j - u_(3 floor(i/3) + j%3)|`.
@@ -72,6 +77,7 @@
 use fs_exec::Cx;
 use fs_material::hyper::Hyperelastic;
 use fs_material::hyper::cards::FiniteStrainPotential;
+use fs_math::dd::Dd;
 use fs_solver::krylov::{PminresState, StallDiagnosis};
 use fs_solver::nonlinear::{FgmresState, SolverRunProgress};
 use fs_solver::op::{CsrOp, LinearOp};
@@ -343,6 +349,8 @@ struct Element {
 struct Evaluated {
     internal: Vec<f64>,
     energy: f64,
+    /// Present only for a trial paired with an already admitted configuration.
+    energy_change: Option<Dd>,
     min_det_f: f64,
 }
 
@@ -592,16 +600,20 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
         f
     }
 
-    /// Internal force (all DOFs) and material potential; `Err(element)` when the
-    /// card refuses a state.
+    /// Internal force (all DOFs), material potential, and optionally its direct
+    /// change from an already admitted configuration. The paired evaluation
+    /// adds no force/tangent storage or second mesh sweep.
+    /// `Err(element)` when the card refuses a state or its own increment.
     fn evaluate(
         &self,
         elements: &[Element],
         u: &[f64],
+        before: Option<&[f64]>,
         cx: &Cx<'_>,
     ) -> Result<Result<Evaluated, (usize, String)>, HyperTetError> {
         let mut internal = vec![0.0f64; u.len()];
         let mut energy = 0.0f64;
+        let mut energy_change = before.map(|_| Dd::ZERO);
         let mut min_det_f = f64::INFINITY;
         for (index, element) in elements.iter().enumerate() {
             if index % 4096 == 0 {
@@ -625,6 +637,18 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
                 )));
             }
             energy = element.volume.mul_add(w, energy);
+            if let Some(before) = before {
+                let f_before = Self::deformation_gradient(element, before);
+                let change = material.energy_density_increment(&f_before, &f);
+                let sum = energy_change.as_mut().expect("paired material evaluation");
+                *sum = *sum + Dd::from_f64(element.volume) * Dd::from_f64(change);
+                if !change.is_finite() || !sum.to_f64().is_finite() {
+                    return Ok(Err((
+                        index,
+                        "non-finite original material potential increment".into(),
+                    )));
+                }
+            }
             for (a, &node) in element.nodes.iter().enumerate() {
                 for i in 0..3 {
                     let mut s = 0.0;
@@ -638,6 +662,7 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
         Ok(Ok(Evaluated {
             internal,
             energy,
+            energy_change,
             min_det_f,
         }))
     }
@@ -730,7 +755,7 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
     ) -> Result<Vec<f64>, HyperTetError> {
         let elements = self.validate()?;
         self.check_len(displacement_m)?;
-        match self.evaluate(&elements, displacement_m, cx)? {
+        match self.evaluate(&elements, displacement_m, None, cx)? {
             Ok(evaluated) => Ok(evaluated.internal),
             Err((element, what)) => Err(HyperTetError::MaterialRefused { element, what }),
         }
@@ -936,7 +961,7 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
         let elements = self.validate()?;
         self.check_len(displacement_m)?;
         let evaluated = self
-            .evaluate(&elements, displacement_m, cx)?
+            .evaluate(&elements, displacement_m, None, cx)?
             .map_err(|(element, what)| HyperTetError::MaterialRefused { element, what })?;
         if !evaluated.energy.is_finite()
             || evaluated.internal.iter().any(|value| !value.is_finite())
@@ -1274,8 +1299,14 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
         &self,
         initial_displacement: Option<&[f64]>,
         prepared_elements: Option<&[Element]>,
-        pressure: Option<(&pressure::ClosedTetPressureSurface, pressure::TetPressure<'_>)>,
-        gravity: Option<(gravity::ReferenceGravityDensity<'_>, &gravity::GravityField3<'_>)>,
+        pressure: Option<(
+            &pressure::ClosedTetPressureSurface,
+            pressure::TetPressure<'_>,
+        )>,
+        gravity: Option<(
+            gravity::ReferenceGravityDensity<'_>,
+            &gravity::GravityField3<'_>,
+        )>,
         inertia: Option<&crate::inertia::BackwardEulerInertia<'_>>,
         cavity: Option<pressure::cavity::equilibrium::AdiabaticCavity<'_>>,
         cx: &Cx<'_>,
@@ -1331,7 +1362,7 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
         let mut steps = Vec::with_capacity(self.settings.load_steps);
         let refused =
             |(element, what): (usize, String)| HyperTetError::MaterialRefused { element, what };
-        let mut state = self.evaluate(elements, &u, cx)?.map_err(refused)?;
+        let mut state = self.evaluate(elements, &u, None, cx)?.map_err(refused)?;
         if !state.energy.is_finite() || state.internal.iter().any(|value| !value.is_finite()) {
             return Err(HyperTetError::InvalidInput {
                 what: "initial solid energy or internal force is not representable".into(),
@@ -1398,10 +1429,10 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
                 (surface, values)
             });
             // Accepted and trial states share one current-area load owner.
-            // Retain its volume for direct pressure-work increments without
-            // rebuilding the same current geometry for a separate volume call.
+            // Its geometry admits the current volume together with the force;
+            // interval pressure work is evaluated by that same owner below.
             let loaded = |displacement: &[f64]| -> Result<
-                (Vec<f64>, f64, f64, Option<pressure::cavity::TetCavityGasLoad>), HyperTetError,
+                (Vec<f64>, f64, Option<pressure::cavity::TetCavityGasLoad>), HyperTetError,
             > {
                 let mut force = f_dead.clone();
                 let mut volume = 0.0;
@@ -1446,9 +1477,9 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
                             .into(),
                     });
                 }
-                Ok((force, volume, gravity_potential, cavity_load))
+                Ok((force, gravity_potential, cavity_load))
             };
-            let (mut f_ext, mut current_volume, mut current_gravity_potential, mut current_cavity) = loaded(&u)?;
+            let (mut f_ext, mut current_gravity_potential, mut current_cavity) = loaded(&u)?;
             let target: Vec<(usize, f64)> = self
                 .prescribed_m
                 .iter()
@@ -1615,6 +1646,7 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
                 record.indefinite_fallbacks += usize::from(fallback);
                 // Line search on the joint (free, prescribed) update.
                 let slope = dot(&residual, &direction);
+                let energy_globalization = !pending_any && !nonsymmetric && slope < 0.0;
                 let mut alpha = 1.0f64;
                 let mut accepted = None;
                 for _ in 0..=self.settings.max_backtracks {
@@ -1625,7 +1657,9 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
                     for &(dof, dp) in &pending {
                         trial[dof] = alpha.mul_add(dp, trial[dof]);
                     }
-                    if let Ok(mut evaluated) = self.evaluate(elements, &trial, cx)?
+                    if let Ok(mut evaluated) = self.evaluate(
+                        elements, &trial, energy_globalization.then_some(u.as_slice()), cx,
+                    )?
                         && evaluated.energy.is_finite()
                         && evaluated.internal.iter().all(|value| value.is_finite())
                     {
@@ -1650,7 +1684,7 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
                         } else {
                             0.0
                         };
-                        let (trial_ext, trial_volume, trial_gravity_potential, trial_cavity) =
+                        let (trial_ext, trial_gravity_potential, trial_cavity) =
                             match loaded(&trial) {
                                 Ok(value) => value,
                                 Err(HyperTetError::Cancelled) => {
@@ -1664,27 +1698,26 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
                             };
                         let mut acceptable = if pending_any {
                             true
-                        } else if !nonsymmetric && slope < 0.0 {
+                        } else if energy_globalization {
                             // Compare work increments rather than subtracting
-                            // large absolute potentials after rigid drift.
+                            // large absolute potentials. The original material
+                            // increment was formed in the trial force sweep.
                             let dead_work = f_dead
                                 .iter()
                                 .zip(trial.iter().zip(&u))
-                                .fold(0.0, |sum, (force, (after, before))| {
-                                    force.mul_add(after - before, sum)
+                                .fold(Dd::ZERO, |sum, (&force, (&after, &before))| {
+                                    sum + Dd::from_f64(force)
+                                        * (Dd::from_f64(after) - Dd::from_f64(before))
                                 });
-                            let mut energy_change = evaluated.energy - state.energy;
-                            if inertia.is_some() {
-                                energy_change +=
-                                    trial_inertia_potential - current_inertia_potential;
-                            }
+                            let material_change = evaluated.energy_change
+                                .expect("Armijo trial has an original potential increment");
+                            let inertia_change = Dd::from_f64(trial_inertia_potential)
+                                - Dd::from_f64(current_inertia_potential);
                             let pressure_change = match applied_pressure {
-                                Some((_, pressure::TetPressure::Uniform(value))) => {
-                                    value * (trial_volume - current_volume)
-                                }
                                 Some((
                                     surface,
-                                    value @ (pressure::TetPressure::Affine { .. }
+                                    value @ (pressure::TetPressure::Uniform(_)
+                                    | pressure::TetPressure::Affine { .. }
                                     | pressure::TetPressure::FreeSurface { .. }
                                     | pressure::TetPressure::Stratified { .. }),
                                 )) => match surface.work_j(&u, &trial, value, cx) {
@@ -1700,48 +1733,45 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
                                 },
                                 _ => 0.0,
                             };
-                            let gravity_change =
-                                load * (trial_gravity_potential - current_gravity_potential);
-                            let cavity_change = load * (trial_cavity.as_ref().map_or(0.0, |s| s.potential_change_j)
-                                - current_cavity.as_ref().map_or(0.0, |s| s.potential_change_j));
-                            let change =
-                                energy_change - dead_work + pressure_change + gravity_change + cavity_change;
-                            let mut roundoff = 1e-12
-                                * state
-                                    .energy
-                                    .abs()
-                                    .max(evaluated.energy.abs())
-                                    .max(dead_work.abs())
+                            let gravity_change = Dd::from_f64(load)
+                                * (Dd::from_f64(trial_gravity_potential)
+                                    - Dd::from_f64(current_gravity_potential));
+                            let cavity_change = Dd::from_f64(load)
+                                * (Dd::from_f64(trial_cavity.as_ref().map_or(0.0, |s| s.potential_change_j))
+                                    - Dd::from_f64(current_cavity.as_ref().map_or(0.0, |s| s.potential_change_j)));
+                            let change = (material_change + inertia_change - dead_work
+                                + Dd::from_f64(pressure_change) + gravity_change + cavity_change).to_f64();
+                            let roundoff = 1e-12
+                                * material_change.to_f64().abs()
+                                    .max(inertia_change.to_f64().abs())
+                                    .max(dead_work.to_f64().abs())
                                     .max(pressure_change.abs())
-                                    .max(gravity_change.abs())
-                                    .max(cavity_change.abs());
-                            if inertia.is_some() {
-                                roundoff = roundoff.max(
-                                    1e-12
-                                        * current_inertia_potential
-                                            .abs()
-                                            .max(trial_inertia_potential.abs()),
-                                );
-                            }
-                            // A field may use a large absolute potential datum
-                            // (e.g. zero at infinity). If endpoint subtraction
-                            // loses the step's energy change, require an actual
-                            // residual decrease rather than loosening equilibrium.
-                            let mut gravity_roundoff = 64.0
+                                    .max(gravity_change.to_f64().abs())
+                                    .max(cavity_change.to_f64().abs())
+                                    .max((alpha * slope).abs());
+                            // These owners still supply endpoint potentials.
+                            // An unresolved subtraction must require actual
+                            // residual decrease, never a tolerance set by a
+                            // large datum. The true equilibrium gate is unchanged.
+                            let mut endpoint_roundoff = 64.0
                                 * f64::EPSILON
                                 * load
                                 * current_gravity_potential
                                     .abs()
                                     .max(trial_gravity_potential.abs());
-                            gravity_roundoff += 64.0 * f64::EPSILON * load
+                            endpoint_roundoff += 64.0 * f64::EPSILON * load
                                 * current_cavity.as_ref().map_or(0.0, |s| s.potential_change_j.abs())
                                     .max(trial_cavity.as_ref().map_or(0.0, |s| s.potential_change_j.abs()));
+                            if inertia.is_some() {
+                                endpoint_roundoff += 64.0 * f64::EPSILON
+                                    * current_inertia_potential.abs().max(trial_inertia_potential.abs());
+                            }
                             let armijo_bound = 1e-4 * alpha * slope + roundoff;
                             // Elastic and gravity work can each be large while
                             // their NET decrement is tiny. The relevant scale
                             // is distance to the Armijo decision boundary, not
                             // the sum of the cancelling component magnitudes.
-                            if gravity_roundoff > (change - armijo_bound).abs() {
+                            if endpoint_roundoff > (change - armijo_bound).abs() {
                                 let trial_residual: Vec<f64> = free
                                     .iter()
                                     .map(|&d| evaluated.internal[d] - trial_ext[d])
@@ -1795,7 +1825,6 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
                                 trial,
                                 evaluated,
                                 trial_ext,
-                                trial_volume,
                                 trial_gravity_potential,
                                 trial_cavity,
                                 trial_material_free_norm,
@@ -1811,7 +1840,6 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
                     trial,
                     evaluated,
                     trial_ext,
-                    trial_volume,
                     trial_gravity_potential,
                     trial_cavity,
                     trial_material_free_norm,
@@ -1826,7 +1854,6 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
                 u = trial;
                 state = evaluated;
                 f_ext = trial_ext;
-                current_volume = trial_volume;
                 current_gravity_potential = trial_gravity_potential;
                 current_cavity = trial_cavity;
                 material_free_norm = trial_material_free_norm;

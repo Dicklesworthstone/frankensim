@@ -93,6 +93,135 @@ fn neo_hookean(mu: f64, lambda: f64) -> Hyperelastic {
     Hyperelastic::new(HyperelasticModel::NeoHookean { mu, lambda }, 5.0).unwrap()
 }
 
+/// G3: an arbitrary additive material datum cannot turn a rejected Newton
+/// overshoot into an accepted step. For this original alpha=4 Ogden source,
+/// simple shear has W(gamma)=gamma²+gamma⁴/4 and P01=2 gamma+gamma³.
+#[test]
+fn g3_material_energy_datum_preserves_nonlinear_armijo_path() {
+    use fs_material::hyper::cards::HyperelasticMaterial;
+    use fs_material::hyper::{OgdenTerm, Volumetric};
+    use std::cell::Cell;
+
+    #[derive(Debug)]
+    struct DatumLaw<'a> {
+        native: &'a Hyperelastic,
+        datum_pa: f64,
+        interval_calls: Cell<usize>,
+    }
+    impl HyperelasticMaterial for DatumLaw<'_> {
+        fn hyperelastic(&self) -> &Hyperelastic {
+            self.native
+        }
+        fn energy_density(&self, f: &[f64; 9]) -> f64 {
+            self.datum_pa + self.native.energy(f)
+        }
+        fn energy_density_increment(&self, before: &[f64; 9], after: &[f64; 9]) -> f64 {
+            self.interval_calls.set(self.interval_calls.get() + 1);
+            self.native.energy_increment(before, after)
+        }
+    }
+
+    let native = Hyperelastic::new(
+        HyperelasticModel::Ogden {
+            terms: vec![OgdenTerm {
+                mu_pa: 1.0,
+                alpha: 4.0,
+            }],
+            volumetric: Volumetric::Quadratic { kappa: 100.0 },
+        },
+        20.0,
+    )
+    .unwrap();
+    let nodes = [[0.0; 3], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+    let tets = [[0, 1, 2, 3]];
+    let fixed: Vec<_> = (0..12)
+        .filter(|&dof| dof != 6)
+        .map(|dof| (dof, 0.0))
+        .collect();
+    // Reference volume 1/6 gives nodal force (2*2+2³)/6 = 2 N.
+    let forces = [(6, 2.0)];
+    let mut solved = Vec::new();
+    with_cx(|cx| {
+        for datum_pa in [0.0, 1e20] {
+            let material = DatumLaw {
+                native: &native,
+                datum_pa,
+                interval_calls: Cell::new(0),
+            };
+            let problem = HyperTetProblem {
+                nodes_m: &nodes,
+                tetrahedra: &tets,
+                material: HyperelasticLawField::Uniform(&material),
+                prescribed_m: &fixed,
+                nodal_forces_n: &forces,
+                body_force_n_m3: [0.0; 3],
+                budget: TetAssemblyBudget::standard(),
+                settings: HyperTetSettings {
+                    max_newton_iterations: 12,
+                    ..HyperTetSettings::default()
+                },
+            };
+            let solution = problem.solve(cx).unwrap();
+            assert!((solution.displacement_m[2][0] - 2.0).abs() < 2e-10);
+            assert!(
+                solution.steps[0].backtracks > 0,
+                "the first Newton overshoot must be rejected"
+            );
+            assert!(
+                material.interval_calls.get() > 0,
+                "globalization must consume the source interval"
+            );
+            solved.push(solution);
+        }
+    });
+    assert_eq!(solved[0].displacement_m, solved[1].displacement_m);
+    assert_eq!(solved[0].reactions_n, solved[1].reactions_n);
+    assert_eq!(solved[0].steps, solved[1].steps);
+}
+
+/// G1/G3: an immobile, disconnected volume cannot hide the pressure work on a
+/// deforming cell. Its enormous volume rounds both diagnostic totals to the
+/// same number; the original local pressure-potential change remains finite.
+#[test]
+fn g1_uniform_pressure_globalization_retains_local_volume_work() {
+    let nodes = [
+        [0.0; 3],
+        [1.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        [0.0, 0.0, 1.0],
+        [2e7, 0.0, 0.0],
+        [3e7, 0.0, 0.0],
+        [2e7, 1e7, 0.0],
+        [2e7, 0.0, 1e7],
+    ];
+    let tets = [[0, 1, 2, 3], [4, 5, 6, 7]];
+    let fixed: Vec<_> = (0..24)
+        .filter(|&dof| dof != 3)
+        .map(|dof| (dof, 0.0))
+        .collect();
+    let material = neo_hookean(3.0, 8.0);
+    let stretch = 0.8_f64;
+    // Independent P00 at F=diag(stretch,1,1), balancing inward pressure.
+    let pressure = -(3.0 * stretch + (8.0 * stretch.ln() - 3.0) / stretch);
+    with_cx(|cx| {
+        let surface =
+            ClosedTetPressureSurface::new(&nodes, &tets, TetAssemblyBudget::standard(), 4096, cx)
+                .unwrap();
+        let problem = problem(&nodes, &tets, &material, &fixed, &[], 1);
+        let solution = problem.solve_with_pressure(&surface, pressure, cx).unwrap();
+        assert!((solution.displacement_m[1][0] - (stretch - 1.0)).abs() < 2e-10);
+        let initial = vec![0.0; 24];
+        let final_u: Vec<_> = solution.displacement_m.iter().flatten().copied().collect();
+        assert_eq!(
+            surface.volume_m3(&initial, cx).unwrap(),
+            surface.volume_m3(&final_u, cx).unwrap(),
+        );
+        let work = surface.work_j(&initial, &final_u, pressure, cx).unwrap();
+        let exact = pressure * (1.0 - stretch) / 6.0;
+        assert!((work - exact).abs() < 2e-10 * exact);
+    });
+}
+
 fn problem<'a>(
     nodes: &'a [[f64; 3]],
     tets: &'a [[usize; 4]],

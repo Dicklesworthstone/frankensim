@@ -4937,6 +4937,20 @@ admitted against `TetAssemblyBudget`; refusals are `HyperTetError`
 (`InvalidInput`, `DegenerateElement`, `MaterialRefused`, `NewtonStalled`,
 `LinearSolveFailed`, `Cancelled`).
 
+Conservative static globalization integrates each material's direct finite
+potential change in the existing trial force sweep. Dead-load work and the
+combined potential difference use compensated arithmetic; the Armijo tolerance
+depends on the actual changes and work, so an additive material energy datum
+does not relax the decision. Uniform, affine, free-surface and stratified
+pressure all use their original pressure owner's direct work. Gravity, cavity
+and backward-Euler inertia still expose endpoint potentials here: when their
+subtraction cannot resolve the decision, an actual residual decrease is
+required. Custom material adapters that retain the default endpoint subtraction
+retain its precision limits. Force equilibrium and material/load admission are
+unchanged. Numerical solve regressions retain the same nonlinear path with a
+`1e20 Pa` material energy offset and resolve a pressure-loaded small cell beside
+an immobile `1e21 m3` cell whose rounded global volume does not change.
+
 `HyperelasticLawField::Uniform` and `PerElement` use this same owner. A
 per-element field follows tetrahedron connectivity order and must cover the
 mesh exactly (`LawCountMismatch` otherwise). Each local law supplies every
