@@ -9,7 +9,14 @@ use fs_matdb::{
     ClaimSet, InterpolationPolicy, MaterialCard, MaterialStateId, PropertyClaim, PropertyKey,
     PropertyValue, Provenance, SelectionPolicy, UncertaintyModel,
 };
-use fs_qty::{Area, Length};
+
+use super::super::soot::{RayleighSoot, SootOpticalDomain};
+use super::super::spectral::{
+    BandSurfaceEmissivity, SootPopulation, SpectralBand, SpectralOptics, SpectralSolve,
+};
+use fs_conduction::radiation::BlackbodyBand;
+
+use fs_qty::{Area, Density, Length};
 
 fn emissivity(value: f64) -> SurfaceEmissivity {
     let mut claims = ClaimSet::new();
@@ -363,4 +370,316 @@ fn lossless_transmitting_or_reflecting_cycle_refuses() {
             ))
         ));
     }
+}
+
+#[test]
+fn transmission_uses_the_opposite_faces_implicit_self_return() {
+    let s = 0.25;
+    let factors = vec![
+        vec![s, 1.0 - s, 0.0, 0.0],
+        vec![1.0 - s, s, 0.0, 0.0],
+        vec![0.0, 0.0, s, 1.0 - s],
+        vec![0.0, 0.0, 1.0 - s, s],
+    ];
+    let matrix = ViewFactorMatrix::admit(
+        vec![1.0; 4],
+        factors,
+        ViewFactorEvidence::Analytic {
+            geometry: "paired diffuse surfaces with explicit self view".into(),
+        },
+        ViewFactorTolerance::default(),
+    )
+    .unwrap();
+    let mut paths: Vec<_> = (0..4)
+        .map(|i| OpticalPath {
+            surfaces: [i, i],
+            exchange_area: Area::new(0.5 * s),
+            segments: Vec::new(),
+        })
+        .collect();
+    for surfaces in [[0, 1], [2, 3]] {
+        paths.push(OpticalPath {
+            surfaces,
+            exchange_area: Area::new(1.0 - s),
+            segments: Vec::new(),
+        });
+    }
+    let model =
+        ParticipatingEnclosure::new(matrix, paths, "declared self-return chords", 1e-12, || {
+            false
+        })
+        .unwrap();
+    let report = run(&model, sheet([0.0; 2], 1.0), [900.0, 500.0, 500.0, 300.0]);
+    let hot = blackbody(900.0);
+    let cold = blackbody(300.0);
+    close(
+        report.surface_radiosity_w_m2[1],
+        (s * hot + cold) / (1.0 + s),
+    );
+    close(
+        report.surface_radiosity_w_m2[2],
+        (hot + s * cold) / (1.0 + s),
+    );
+    let heat = (1.0 - s) / (1.0 + s) * (hot - cold);
+    close(report.surface_heat_power[0].value(), -heat);
+    close(report.surface_heat_power[3].value(), heat);
+    assert_eq!(report.surface_heat_power[1].value(), 0.0);
+    assert_eq!(report.surface_heat_power[2].value(), 0.0);
+    conserved(&report);
+}
+fn band_source(value: f64) -> BandSurfaceEmissivity {
+    BandSurfaceEmissivity::new(
+        value,
+        [200.0, 1500.0].map(Temperature::new),
+        "analytic constant spectral absorptance",
+    )
+    .unwrap()
+}
+
+fn band(lo: f64, hi: f64, k: [f64; 2]) -> SpectralBand {
+    SpectralBand {
+        wavelengths: [lo, hi].map(Length::new),
+        absorption: absorption(k),
+    }
+}
+
+#[test]
+fn selective_spectral_sheet_uses_one_solve_per_band_and_retains_sources() {
+    let model = geometry([1.7; 2], false);
+    let pairs = vec![vec![sheet([0.0; 2], 1.0)], vec![sheet([0.4, 0.2], 0.1)]];
+    let optics = SpectralOptics::new_with_sheet_bands(
+        vec![band(1e-7, 5e-6, [0.0; 2]), band(5e-6, 1e-3, [0.0; 2])],
+        [None; 2],
+        vec![
+            vec![1.0, 0.0, 0.0, 1.0]
+                .into_iter()
+                .map(band_source)
+                .collect(),
+            vec![1.0, 0.4, 0.2, 1.0]
+                .into_iter()
+                .map(band_source)
+                .collect(),
+        ],
+        pairs.clone(),
+    )
+    .unwrap();
+    let report = model
+        .evaluate_spectral(
+            &[900.0, 500.0, 500.0, 300.0].map(Temperature::new),
+            &[],
+            [Temperature::new(300.0); 2],
+            &optics,
+            SpectralSolve {
+                maximum_evaluations: 0,
+                ..SpectralSolve::default()
+            },
+            &mut model.spectral_workspace().unwrap(),
+            || false,
+        )
+        .unwrap();
+    let mut heat = [0.0; 4];
+    let mut radiosity = [0.0; 4];
+    for (i, interval) in [[1e-7, 5e-6], [5e-6, 1e-3]].into_iter().enumerate() {
+        let window = BlackbodyBand::new(interval[0], interval[1]).unwrap();
+        let [hot, wall, cold] =
+            [900.0, 500.0, 300.0].map(|t| window.evaluate(t).unwrap().power_w_m2);
+        let source = &pairs[i][0].optics;
+        let a = source.absorptance();
+        let r = source.reflectance();
+        let t = source.transmittance();
+        let j = [
+            a[0] * wall + r[0] * hot + t * cold,
+            a[1] * wall + r[1] * cold + t * hot,
+        ];
+        for (total, value) in radiosity.iter_mut().zip([hot, j[0], j[1], cold]) {
+            *total += value;
+        }
+        for (total, value) in heat.iter_mut().zip([
+            1.7 * (j[0] - hot),
+            1.7 * a[0] * (hot - wall),
+            1.7 * a[1] * (cold - wall),
+            1.7 * (j[1] - cold),
+        ]) {
+            *total += value;
+        }
+    }
+    for (actual, expected) in report.surface_heat_power.iter().zip(heat) {
+        close(actual.value(), expected);
+    }
+    for (&actual, expected) in report.surface_radiosity_w_m2.iter().zip(radiosity) {
+        close(actual, expected);
+    }
+    assert_eq!(report.factorizations, 2);
+    assert_eq!(report.wavelength_evaluations, 0);
+    assert_eq!(report.accepted_panels, 0);
+    assert_eq!(report.optics.sheet_bands().unwrap(), pairs.as_slice());
+    assert!(report.surface_emissivities.is_empty());
+    assert!(report.energy_residual_w.abs() < 1e-7);
+}
+
+#[test]
+fn spectral_sheet_rejects_conflicting_absorptance_and_changing_pair_axis() {
+    let bands = vec![band(1e-7, 5e-6, [0.0; 2]), band(5e-6, 1e-3, [0.0; 2])];
+    let sources = vec![
+        vec![1.0, 0.2, 0.4, 1.0]
+            .into_iter()
+            .map(band_source)
+            .collect();
+        2
+    ];
+    let pairs = vec![vec![sheet([0.2, 0.4], 0.1)]; 2];
+    let mut conflicting = pairs.clone();
+    conflicting[1][0].optics = sheet([0.3, 0.4], 0.1).optics;
+    assert!(
+        SpectralOptics::new_with_sheet_bands(
+            bands.clone(),
+            [None; 2],
+            sources.clone(),
+            conflicting,
+        )
+        .is_err()
+    );
+    let mut changed = pairs.clone();
+    changed[1][0].surfaces = [2, 1];
+    assert!(matches!(
+        SpectralOptics::new_with_sheet_bands(bands, [None; 2], sources, changed,),
+        Err(RadiationError::Invalid(
+            "spectral sheet pairing and side order must be identical in every band"
+        ))
+    ));
+}
+
+#[test]
+fn spectral_sheet_checks_actual_isothermal_source_temperature() {
+    let model = geometry([1.0; 2], false);
+    let mut pair = sheet([0.2, 0.4], 0.1);
+    pair.optics =
+        ReciprocalSheetOptics::new([0.2, 0.4], 0.1, [600.0, 800.0], "limited-temperature sheet")
+            .unwrap();
+    let optics = SpectralOptics::new_with_sheet_bands(
+        vec![band(1e-7, 1e-3, [0.0; 2])],
+        [None; 2],
+        vec![
+            vec![1.0, 0.2, 0.4, 1.0]
+                .into_iter()
+                .map(band_source)
+                .collect(),
+        ],
+        vec![vec![pair]],
+    )
+    .unwrap();
+    assert!(matches!(
+        model.evaluate_spectral(
+            &[900.0, 500.0, 500.0, 300.0].map(Temperature::new),
+            &[],
+            [Temperature::new(300.0); 2],
+            &optics,
+            SpectralSolve::default(),
+            &mut model.spectral_workspace().unwrap(),
+            || false,
+        ),
+        Err(RadiationError::Invalid(
+            "sheet temperature is outside original optical support"
+        ))
+    ));
+}
+
+#[test]
+fn soot_quadrature_across_a_transparent_sheet_matches_the_original_two_segment_path() {
+    let model = geometry([1.3; 2], true);
+    let soot = RayleighSoot::new(
+        1.75,
+        1.03,
+        Density::new(1800.0),
+        SootOpticalDomain {
+            spectral_temperature: [200.0, 1500.0].map(Temperature::new),
+            maximum_volume_fraction: 0.001,
+        },
+        "explicit analytic constant-index soot",
+    )
+    .unwrap();
+    let population = [
+        Some(SootPopulation {
+            model: &soot,
+            volume_fraction: 1e-6,
+        }),
+        None,
+    ];
+    let bands = vec![band(1e-7, 1e-3, [0.1, 0.8])];
+    let optics = SpectralOptics::new_with_sheet_bands(
+        bands.clone(),
+        population,
+        vec![
+            vec![1.0, 0.0, 0.0, 1.0]
+                .into_iter()
+                .map(band_source)
+                .collect(),
+        ],
+        vec![vec![sheet([0.0; 2], 1.0)]],
+    )
+    .unwrap();
+    let unsplit = ParticipatingEnclosure::new(
+        ViewFactorMatrix::infinite_parallel_plates(1.3).unwrap(),
+        vec![OpticalPath {
+            surfaces: [0, 1],
+            exchange_area: Area::new(1.3),
+            segments: vec![
+                OpticalSegment {
+                    layer: Layer::Lower,
+                    length: Length::new(1.0),
+                },
+                OpticalSegment {
+                    layer: Layer::Upper,
+                    length: Length::new(2.0),
+                },
+            ],
+        }],
+        "the same two gas segments with no intermediate boundary",
+        1e-12,
+        || false,
+    )
+    .unwrap();
+    let original =
+        SpectralOptics::new_with_surface_bands(bands, population, vec![vec![band_source(1.0); 2]])
+            .unwrap();
+    let controls = SpectralSolve {
+        heat_tolerance_w: 1e-7,
+        radiosity_tolerance_w_m2: 1e-7,
+        ..SpectralSolve::default()
+    };
+    let gas = [600.0, 350.0].map(Temperature::new);
+    let report = model
+        .evaluate_spectral(
+            &[900.0, 500.0, 500.0, 300.0].map(Temperature::new),
+            &[],
+            gas,
+            &optics,
+            controls,
+            &mut model.spectral_workspace().unwrap(),
+            || false,
+        )
+        .unwrap();
+    let old = unsplit
+        .evaluate_spectral(
+            &[900.0, 300.0].map(Temperature::new),
+            &[],
+            gas,
+            &original,
+            controls,
+            &mut unsplit.spectral_workspace().unwrap(),
+            || false,
+        )
+        .unwrap();
+    for (actual, expected) in [report.surface_heat_power[0], report.surface_heat_power[3]]
+        .iter()
+        .zip(&old.surface_heat_power)
+        .chain(report.gas_heat_power.iter().zip(&old.gas_heat_power))
+    {
+        assert!((actual.value() - expected.value()).abs() < 1e-6);
+    }
+    assert_eq!(report.surface_heat_power[1].value(), 0.0);
+    assert_eq!(report.surface_heat_power[2].value(), 0.0);
+    assert!(report.wavelength_evaluations > 0);
+    assert_eq!(report.factorizations, report.wavelength_evaluations);
+    assert!(report.energy_residual_w.abs() < 1e-7);
 }

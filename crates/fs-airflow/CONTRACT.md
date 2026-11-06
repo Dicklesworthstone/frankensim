@@ -4156,3 +4156,22 @@ unequal physical areas or temperatures and unsupported optical temperatures
 refuse. The no-sheet path retains the original opaque assembly and arithmetic.
 This is an isothermal diffuse, same-exterior-index model; specular windows and
 through-thickness temperature gradients require their own transfer model.
+
+### Wavelength-selective reciprocal sheet boundaries
+
+`SpectralOptics::new_with_sheet_bands` binds one sourced sheet partition to
+each existing gas/surface wavelength band. Every band must retain the same
+ordered face pairs. Its original full-axis surface absorptance must match the
+paired sheet source exactly; conflicting sources refuse. Both temperature
+domains and the enclosure's equal-area/isothermal pairing admission apply at
+every evaluation.
+
+Band-constant optics use the original integrated Planck emission differences
+and one matrix factorization/solve per band per evaluation; a zero point-wavelength
+sampling budget is valid for this exact-band path. Wavelength-varying
+soot uses the original bounded adaptive quadrature and the same generalized
+sheet operator at each sample. No duplicate spectral integrator or inferred
+gray spectrum is introduced. Finite-window coverage remains explicit and
+unrenormalized; nonabsorbing faces create no fictitious emission source.
+Original sheet sources, gas sources, numerical work, spectral diagnostics and
+actual material/gas heat remain in the returned report.

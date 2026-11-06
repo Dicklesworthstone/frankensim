@@ -37,6 +37,7 @@
 //! Booking soot emission into a gas layer's thermal account assumes that its
 //! particles and gas share the supplied layer temperature.
 
+use super::sheets::{SheetPair, admit_axis};
 use super::soot::RayleighSoot;
 use super::{
     LayerAbsorption, MAX_RADIATION_SURFACES, ParticipatingEnclosure, RadiationError,
@@ -64,9 +65,10 @@ pub struct SpectralBand {
     pub absorption: [LayerAbsorption; 2],
 }
 
-/// Source-supplied diffuse, opaque spectral emissivity, constant within one
-/// enclosing wavelength band and the declared surface-temperature range.
-/// This is distinct from a material card's hemispherical TOTAL emissivity.
+/// Source-supplied diffuse spectral emissivity/absorptivity, constant within
+/// one enclosing wavelength band and the declared surface-temperature range.
+/// The boundary is opaque unless a consistent paired sheet source supplies
+/// transmission. This is distinct from hemispherical TOTAL emissivity.
 #[derive(Clone, Debug, PartialEq)]
 pub struct BandSurfaceEmissivity {
     value: f64,
@@ -75,9 +77,9 @@ pub struct BandSurfaceEmissivity {
 }
 impl BandSurfaceEmissivity {
     /// Bind the band value to its measured/model source and temperature domain.
-    /// Zero explicitly denotes a perfect reflector in this band. Each connected
-    /// optical component must still reach an emitting surface or absorbing gas
-    /// when evaluated, so its reflected radiation has a unique thermal anchor.
+    /// Zero denotes no absorption/emission in this band; an unpaired face is
+    /// then a perfect reflector. Every reflected/transmitted dependency must
+    /// reach an emitting surface or absorbing gas for a unique thermal state.
     pub fn new(
         value: f64,
         temperature_range: [Temperature; 2],
@@ -102,7 +104,7 @@ impl BandSurfaceEmissivity {
             source,
         })
     }
-    /// Both emissivity and absorptivity within this opaque diffuse band.
+    /// Both emissivity and absorptivity within this diffuse band.
     pub const fn value(&self) -> f64 {
         self.value
     }
@@ -135,6 +137,7 @@ pub struct SpectralOptics<'a> {
     // Immutable source bank is shared by reports and nonlinear wall trials;
     // copying a report must not reallocate every band's per-surface strings.
     surface_bands: Option<Arc<[Vec<BandSurfaceEmissivity>]>>,
+    sheet_bands: Option<Arc<[Vec<SheetPair>]>>,
     varying: bool,
 }
 impl<'a> SpectralOptics<'a> {
@@ -158,6 +161,7 @@ impl<'a> SpectralOptics<'a> {
             soot,
             gray_surface_assumption,
             surface_bands: None,
+            sheet_bands: None,
             varying,
         })
     }
@@ -187,8 +191,58 @@ impl<'a> SpectralOptics<'a> {
             soot,
             gray_surface_assumption: String::new(),
             surface_bands: Some(surface_bands.into()),
+            sheet_bands: None,
             varying,
         })
+    }
+
+    /// Admit reciprocal diffuse sheets on the same gas/surface band partition.
+    ///
+    /// Every band's pairs have the same ordered face axis. The full surface
+    /// emissivity array must equal each sheet source's per-side absorptance;
+    /// conflicting sources refuse instead of silently overriding a boundary.
+    /// Each sheet coefficient is constant within its enclosing band, with the
+    /// original source retained. Actual paired areas and temperatures are
+    /// checked by the enclosure on every evaluation.
+    pub fn new_with_sheet_bands(
+        bands: Vec<SpectralBand>,
+        soot: [Option<SootPopulation<'a>>; 2],
+        surface_bands: Vec<Vec<BandSurfaceEmissivity>>,
+        sheet_bands: Vec<Vec<SheetPair>>,
+    ) -> Result<Self, RadiationError> {
+        let mut optics = Self::new_with_surface_bands(bands, soot, surface_bands)?;
+        if sheet_bands.len() != optics.bands.len() || sheet_bands.first().is_none_or(Vec::is_empty)
+        {
+            return Err(RadiationError::Invalid(
+                "provide nonempty sheet pairs on every common spectral band",
+            ));
+        }
+        let sources = optics
+            .surface_bands
+            .as_ref()
+            .ok_or(RadiationError::Invalid(
+                "spectral sheets require original band surface sources",
+            ))?;
+        let n = sources[0].len();
+        for (band, pairs) in sheet_bands.iter().enumerate() {
+            if pairs.len() != sheet_bands[0].len()
+                || pairs
+                    .iter()
+                    .zip(&sheet_bands[0])
+                    .any(|(a, b)| a.surfaces != b.surfaces)
+            {
+                return Err(RadiationError::Invalid(
+                    "spectral sheet pairing and side order must be identical in every band",
+                ));
+            }
+            let mut values = [0.0; MAX_RADIATION_SURFACES];
+            for (value, source) in values.iter_mut().zip(&sources[band]) {
+                *value = source.value;
+            }
+            admit_axis(n, Some(&values[..n]), pairs)?;
+        }
+        optics.sheet_bands = Some(sheet_bands.into());
+        Ok(optics)
     }
 
     fn admit_bands(
@@ -247,6 +301,12 @@ impl<'a> SpectralOptics<'a> {
         self.surface_bands.as_deref()
     }
 
+    /// Original reciprocal sheet sources in band-then-pair order, if selected.
+    /// The same ordered face pairs are retained across every band.
+    pub fn sheet_bands(&self) -> Option<&[Vec<SheetPair>]> {
+        self.sheet_bands.as_deref()
+    }
+
     /// Whether the optical transfer operator changes within a declared band
     /// and therefore requires point-wavelength sampling. Fixed molecular bands
     /// and band-constant surface emissivities return false; active Rayleigh soot
@@ -295,7 +355,9 @@ pub struct SpectralSolve {
     /// Largest allowed omitted blackbody fraction for any participating node.
     /// This gates spectral coverage, not the unknown omitted net heat exchange.
     pub maximum_omitted_blackbody_fraction: f64,
-    /// Actual evaluation ceiling, including rejected quadrature panels.
+    /// Point-wavelength evaluation ceiling, including rejected quadrature panels.
+    /// Zero is allowed for fixed-band Planck solves, which need no point samples;
+    /// wavelength-varying optics require at least one 24-sample quadrature pair.
     pub maximum_evaluations: usize,
 }
 impl Default for SpectralSolve {
@@ -474,7 +536,8 @@ impl ParticipatingEnclosure {
             || !positive(controls.radiosity_tolerance_w_m2)
             || !nonnegative(controls.maximum_omitted_blackbody_fraction)
             || controls.maximum_omitted_blackbody_fraction > 1.0
-            || !(24..=MAX_SPECTRAL_EVALUATIONS).contains(&controls.maximum_evaluations)
+            || controls.maximum_evaluations > MAX_SPECTRAL_EVALUATIONS
+            || (optics.requires_wavelength_sampling() && controls.maximum_evaluations < 24)
         {
             return Err(RadiationError::Invalid("invalid spectral solve controls"));
         }
@@ -496,6 +559,11 @@ impl ParticipatingEnclosure {
                         ));
                     }
                 }
+            }
+        }
+        if let Some(bands) = &optics.sheet_bands {
+            for sheets in bands.iter() {
+                self.admit_sheet_state(sheets, surface_temperatures, None, &mut cancelled)?;
             }
         }
         let channels = m + n + 1;
@@ -566,11 +634,15 @@ impl ParticipatingEnclosure {
                     *value = source.value();
                 }
             }
+            let sheets = optics
+                .sheet_bands()
+                .map_or(&[] as &[SheetPair], |bands| bands[band].as_slice());
             let begin = source.wavelengths[0].value().ln();
             let end = source.wavelengths[1].value().ln();
             if !optics.requires_wavelength_sampling() {
-                self.prepare_optics(
+                self.prepare_sheet_optics(
                     &values[..n],
+                    sheets,
                     optics.coefficients(band, source.wavelengths[0])?,
                     &mut work.radiation,
                     &mut cancelled,
@@ -589,7 +661,9 @@ impl ParticipatingEnclosure {
                 .map_err(|_| RadiationError::Invalid("shared blackbody spectral window refused"))?;
                 let reference_emission = blackbody
                     .evaluate(reference)
-                    .map_err(|_| RadiationError::Invalid("shared blackbody band evaluation refused"))?
+                    .map_err(|_| {
+                        RadiationError::Invalid("shared blackbody band evaluation refused")
+                    })?
                     .power_w_m2;
                 for (i, (value, &temperature)) in work
                     .radiation
@@ -601,13 +675,14 @@ impl ParticipatingEnclosure {
                     *value = if i < n && values[i] == 0.0 {
                         0.0
                     } else {
-                        blackbody
-                            .difference(temperature, reference)
-                            .map_err(|_| RadiationError::Invalid("shared blackbody band evaluation refused"))?
+                        blackbody.difference(temperature, reference).map_err(|_| {
+                            RadiationError::Invalid("shared blackbody band evaluation refused")
+                        })?
                     };
                 }
-                let (residual, _) = self.solve_emission(
+                let (residual, _) = self.solve_sheet_emission(
                     &values[..n],
+                    sheets,
                     controls.algebraic,
                     &mut work.radiation,
                     &mut cancelled,
@@ -635,6 +710,7 @@ impl ParticipatingEnclosure {
             let mut sample = SpectralSample {
                 enclosure: self,
                 emissivities: &values[..n],
+                sheets,
                 optics,
                 temperatures: &temperatures[..m],
                 reference,
@@ -760,6 +836,7 @@ impl ParticipatingEnclosure {
 struct SpectralSample<'a, 'b> {
     enclosure: &'a ParticipatingEnclosure,
     emissivities: &'a [f64],
+    sheets: &'a [SheetPair],
     optics: &'a SpectralOptics<'b>,
     temperatures: &'a [f64],
     reference: f64,
@@ -787,8 +864,9 @@ impl SpectralSample<'_, '_> {
                 checkpoint(cancelled)?;
                 let wavelength = finite((midpoint + sign * half * node).exp())?;
                 if self.optics.requires_wavelength_sampling() {
-                    self.enclosure.prepare_optics(
+                    self.enclosure.prepare_sheet_optics(
                         self.emissivities,
+                        self.sheets,
                         self.optics.coefficients(band, Length::new(wavelength))?,
                         work,
                         cancelled,
@@ -805,8 +883,9 @@ impl SpectralSample<'_, '_> {
                         planck_log_difference(wavelength, temperature, self.reference)?
                     };
                 }
-                let (residual, _) = self.enclosure.solve_emission(
+                let (residual, _) = self.enclosure.solve_sheet_emission(
                     self.emissivities,
+                    self.sheets,
                     self.controls,
                     work,
                     cancelled,
