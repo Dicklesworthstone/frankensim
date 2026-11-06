@@ -135,29 +135,33 @@ impl VectorHysteresisStep {
     /// The positive background supplies invertibility even while branches are
     /// pinned or saturated. Kinks retain the original selected active set.
     pub fn incremental_reluctivity_m_h(&self) -> Result<Matrix> {
-        let flat: [f64; 9] =
-            std::array::from_fn(|k| self.incremental_permeability_h_m[k / 3][k % 3]);
-        let factor = cholesky(&flat, 3)
-            .map_err(|_| invalid("vector incremental permeability is not representably SPD"))?;
-        let mut inverse = [[0.0; 3]; 3];
-        for column in 0..3 {
-            let mut unit = [0.0; 3];
-            unit[column] = 1.0;
-            factor.solve(&mut unit);
-            for row in 0..3 {
-                inverse[row][column] = finite(unit[row])?;
-            }
-        }
-        // The exact Hessian is symmetric; erase only triangular-solve roundoff.
-        for row in 0..3 {
-            for column in 0..row {
-                let value = f64::midpoint(inverse[row][column], inverse[column][row]);
-                inverse[row][column] = value;
-                inverse[column][row] = value;
-            }
-        }
-        Ok(inverse)
+        inverse_tangent(self.incremental_permeability_h_m)
     }
+}
+
+/// One native SPD inverse for magnetic and electric constitutive facades.
+pub(crate) fn inverse_tangent(tangent: Matrix) -> Result<Matrix> {
+    let flat: [f64; 9] = std::array::from_fn(|k| tangent[k / 3][k % 3]);
+    let factor = cholesky(&flat, 3)
+        .map_err(|_| invalid("vector incremental permeability is not representably SPD"))?;
+    let mut inverse = [[0.0; 3]; 3];
+    for column in 0..3 {
+        let mut unit = [0.0; 3];
+        unit[column] = 1.0;
+        factor.solve(&mut unit);
+        for row in 0..3 {
+            inverse[row][column] = finite(unit[row])?;
+        }
+    }
+    // The exact Hessian is symmetric; erase only triangular-solve roundoff.
+    for row in 0..3 {
+        for column in 0..row {
+            let value = f64::midpoint(inverse[row][column], inverse[column][row]);
+            inverse[row][column] = value;
+            inverse[column][row] = value;
+        }
+    }
+    Ok(inverse)
 }
 
 fn invalid(s: &'static str) -> VectorHysteresisError {
@@ -420,6 +424,11 @@ impl VectorHysteresis {
         self.parameters.background_permeability_h_m
     }
 
+    /// Original rotationally invariant field-magnitude support.
+    pub(crate) fn field_limit_a_m(&self) -> f64 {
+        self.parameters.field_limit_a_m
+    }
+
     /// Reuse the scalar owner's parameter meanings and at-most-1024-branch
     /// admission. All three spatial components share each branch and norm.
     pub fn new(
@@ -433,7 +442,7 @@ impl VectorHysteresis {
 
     // The source adapter explicitly selects isotropy. Sharing the original
     // immutable parameters preserves exact coefficient and state identity.
-    pub(super) fn from_isotropic_scalar(law: &ScalarHysteresis) -> Result<Self> {
+    pub(crate) fn from_isotropic_scalar(law: &ScalarHysteresis) -> Result<Self> {
         if law
             .parameters
             .branches
@@ -457,8 +466,7 @@ impl VectorHysteresis {
             stored_energy_j_m3: 0.0,
         }
     }
-    fn admit(&self, previous: &VectorHysteresisState, c: VectorHysteresisControls) -> Result<()> {
-        admit_controls(c)?;
+    fn admit_history(&self, previous: &VectorHysteresisState) -> Result<()> {
         if !Arc::ptr_eq(&self.parameters, &previous.parameters)
             && self.parameters != previous.parameters
         {
@@ -467,6 +475,73 @@ impl VectorHysteresis {
             ));
         }
         Ok(())
+    }
+    fn admit(&self, previous: &VectorHysteresisState, c: VectorHysteresisControls) -> Result<()> {
+        admit_controls(c)?;
+        self.admit_history(previous)
+    }
+
+    /// Stable difference of the frozen-history H-controlled coenergy
+    /// `mu_b |H|²/2 + sum(H.z - |z|²/(2chi) - hc|z-z_old|)`.
+    /// `from` and `to` are candidate states evaluated from the SAME `previous`;
+    /// this function never rebases their pinning norm to a Newton trial.
+    /// The field solver owns candidate stationarity. This is a variational
+    /// objective difference, not a physical work or heat increment.
+    pub(crate) fn coenergy_difference_j_m3(
+        &self,
+        previous: &VectorHysteresisState,
+        from: &VectorHysteresisState,
+        to: &VectorHysteresisState,
+    ) -> Result<f64> {
+        self.admit_history(previous)?;
+        self.admit_history(from)?;
+        self.admit_history(to)?;
+        let dh = sub(to.field_a_m, from.field_a_m);
+        let hm = std::array::from_fn(|i| f64::midpoint(to.field_a_m[i], from.field_a_m[i]));
+        let mut change = finite(self.parameters.background_permeability_h_m * dot(dh, hm))?;
+        let mut correction = 0.0;
+        for (index, branch) in self.parameters.branches.iter().enumerate() {
+            let a = from.polarizations_t[index];
+            let b = to.polarizations_t[index];
+            let old = previous.polarizations_t[index];
+            let dz = sub(b, a);
+            let zm = std::array::from_fn(|i| f64::midpoint(a[i], b[i]));
+            let da = sub(a, old);
+            let db = sub(b, old);
+            let na = finite(norm(da))?;
+            let nb = finite(norm(db))?;
+            let scale = na.max(nb);
+            // Factored norm difference; scaling avoids overflow in na+nb and
+            // preserves tiny changes beneath a large common pinning distance.
+            let distance_change = if scale == 0.0 {
+                0.0
+            } else {
+                let denominator = na / scale + nb / scale;
+                dot(
+                    dz,
+                    std::array::from_fn(|i| (da[i] / scale + db[i] / scale) / denominator),
+                )
+            };
+            let value = finite(
+                dot(dh, zm)
+                    + dot(
+                        dz,
+                        std::array::from_fn(|i| hm[i] - zm[i] / branch.susceptibility_h_m),
+                    )
+                    - branch.pinning_field_a_m * distance_change,
+            )?;
+            let next = finite(change + value)?;
+            correction = finite(
+                correction
+                    + if change.abs() >= value.abs() {
+                        (change - next) + value
+                    } else {
+                        (value - next) + change
+                    },
+            )?;
+            change = next;
+        }
+        finite(change + correction)
     }
     fn response(
         &self,

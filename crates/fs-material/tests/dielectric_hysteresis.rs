@@ -291,6 +291,42 @@ mod sources {
             0.012,
             1e-15,
         );
+        let refreshed = capacitor.at_source_query(&point(400.0)).unwrap();
+        assert_eq!(refreshed.area_m2(), capacitor.area_m2());
+        assert_eq!(refreshed.gap_m(), capacitor.gap_m());
+        assert_eq!(refreshed.source().unwrap().material().query(), point(400.0));
+        assert_eq!(
+            refreshed.candidate_voltage(&state, 0.0).unwrap(),
+            capacitor.candidate_voltage(&state, 0.0).unwrap()
+        );
+        assert!(capacitor.at_source_query(&point(601.0)).is_err());
+    }
+
+    #[test]
+    fn thermal_ownership_requires_explicit_coverage_for_every_constant_coefficient() {
+        let fit = resolve(card(|_| {}), roles()).unwrap();
+        fit.admit_temperature_interval("T", [250.0, 600.0]).unwrap();
+        for interval in [[249.0, 600.0], [250.0, 601.0], [300.0, 300.0], [0.0, 600.0]] {
+            assert!(fit.admit_temperature_interval("T", interval).is_err());
+        }
+        assert!(
+            fit.admit_temperature_interval("frequency", [250.0, 600.0])
+                .is_err()
+        );
+        let missing = resolve(
+            card(|claim| {
+                if claim.key.name() == "pinning" {
+                    claim.validity = ValidityDomain::unconstrained();
+                }
+            }),
+            roles(),
+        )
+        .unwrap();
+        assert!(
+            missing
+                .admit_temperature_interval("T", [290.0, 310.0])
+                .is_err()
+        );
     }
 
     #[test]

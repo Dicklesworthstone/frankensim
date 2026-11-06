@@ -29,6 +29,8 @@ use crate::field_storage::{
 
 /// Original material-card roles and source-bound fitted coefficients.
 pub mod source;
+/// Opt-in isotropic vector polarization, with the original coupled return map.
+pub mod vector;
 
 /// One explicitly fitted polarization contribution, with no hidden weights.
 #[derive(Clone, Copy, Debug, PartialEq)]

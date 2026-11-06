@@ -17878,3 +17878,39 @@ clock. This metadata performs no material retiming or temperature evolution.
 `plastic::section::thermal::ThermoplasticSectionStep` freezes each original physical layer's source, old/new caloric enthalpy and actual duration, then resolves its native law once per layer. The original plane-stress reduction supplies total tensor strains, complete J2/Voce/Perzyna/Chaboche histories and consistent tangents. The exact native thermal increment is audited at every retained point; coefficient-dependent free energy and the change in mechanical entropy times temperature remain separate from physical/reversible heat and numerical loss. Original thickness weights produce per-layer and total reference-area accounts. Generalized work plus signed transverse constraint-residual work must close the first law, and full returned histories must match the accepted section. Consumers compare the reported resultants against their equilibrium endpoint.
 
 Temperature is uniform within each physical layer; original geometry/density remain fixed and the source family's fully-solid and small-strain bounds apply. Thermal transport and atomic coupled publication stay with their existing owners. No melting, finite forming, evolving thickness or layer separation is inferred. Four focused synthetic regressions cover analytical thermal moments and reversal, yielded thermal histories with coefficient/entropy accounting, timed multi-branch relaxation and invalid bindings. These checks do not establish experimental material calibration or quadrature/time accuracy.
+
+
+### Vector dielectric switching and temperature source continuity
+
+The default-off `experimental-dielectric-hysteresis` feature exposes
+`dielectric::hysteresis::vector::{VectorDielectricHysteresis,
+ResolvedVectorDielectricHysteresis}`. Explicit isotropic quadratic branch fits
+reuse the native coupled Euclidean play/spherical saturation solver and shared
+immutable parameters. Electric-field and displacement-controlled candidates
+retain three-dimensional polarization, consistent `dD/dE`, its native SPD
+inverse, physical SI residuals, bounded work and cancellation. Original scalar
+source receipts survive; they do not become rotating-field calibration evidence.
+
+Physical switching heat is `sum(Ec |delta P|)`. Endpoint electrical work closes
+with stored-energy change, this heat and a separately retained nonnegative
+numerical remainder. Frozen-history `Phi(E;P0) = E.D - W - Q` has gradient `D`
+and Hessian `dD/dE`; its displacement-controlled dual is `W + Q`. These are
+incremental Newton objectives, not extra stored energy. Allocation-free,
+factored pairwise differences retain the SAME accepted `P0`, preserving small
+trial changes beneath large unrelated field energy. Active-set corners retain
+the native selected tangent; turns and reversals require path refinement.
+The fixed isotropic fit supplies no anisotropy, domain kinetics, breakdown,
+strain or temperature-dependent switching law.
+
+The scalar source adapter admits an owned absolute-temperature interval only
+when every original constant fitted coefficient explicitly covers that complete
+interval. `UniformHystereticCapacitor::at_source_query` rechecks the same selected
+fit and fixed geometry without creating or resetting polarization history.
+Temperature may change source-resolved transport and the resulting trajectory;
+it does not change these fitted coefficients or imply electrocaloric heating.
+
+`tests/dielectric_vector_hysteresis.rs` exercises scalar and linear limits,
+coupled spherical stationarity, rotation covariance, inverse and variational
+tangents, tiny trial changes about a large bias, cycling/refinement and source
+continuation/refusal. `tests/dielectric_hysteresis.rs` also exercises explicit
+temperature coverage and history-preserving source refresh.

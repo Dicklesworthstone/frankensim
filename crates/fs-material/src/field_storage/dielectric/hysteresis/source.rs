@@ -18,7 +18,10 @@ use crate::state_point::{
     ScalarPropertyRequirement, resolve_material_state_point,
 };
 use fs_matdb::{EvaluationDecision, MaterialCard, PropertyKey, QueryPoint};
-use fs_qty::{Dims, QuantitySpec};
+use fs_qty::{
+    Dims, QuantitySpec, Temperature,
+    semantic::{QuantityKind, ValueForm},
+};
 use std::sync::Arc;
 
 /// Exact source property keys for one branch; repeated keys may share a fit.
@@ -159,6 +162,65 @@ impl ResolvedDielectricHysteresis {
         &self.law
     }
 
+    /// Admit one owned absolute-temperature coordinate without inventing a
+    /// temperature-dependent switching law. Every selected coefficient must
+    /// explicitly cover the complete interval and remain the same constant fit.
+    pub fn admit_temperature_interval(
+        &self,
+        axis: &str,
+        interval_k: [f64; 2],
+    ) -> Result<(), FieldStorageError> {
+        let [low, high] = interval_k;
+        let quantity = self.material.axis_quantities().get(axis).copied();
+        let absolute_temperature =
+            quantity
+                .and_then(QuantitySpec::semantic_type)
+                .is_some_and(|ty| {
+                    ty.kind() == QuantityKind::AbsoluteTemperature && ty.form() == ValueForm::Static
+                })
+                || axis == "T"
+                    && quantity.is_none_or(|q| q == QuantitySpec::dimensional(Temperature::DIMS));
+        if !low.is_finite()
+            || !high.is_finite()
+            || low <= 0.0
+            || high <= low
+            || !absolute_temperature
+            || !self
+                .material
+                .query_point()
+                .iter()
+                .any(|(name, _)| name == axis)
+        {
+            return Err(invalid(
+                "dielectric switching needs one owned positive absolute-temperature interval",
+            ));
+        }
+        for property in self.material.properties() {
+            if !property.has_only_fixed_external_conditions(Some(axis), false)
+                || !property
+                    .answer()
+                    .evidence
+                    .model
+                    .validity
+                    .bounds()
+                    .contains_key(axis)
+            {
+                return Err(invalid(
+                    "every dielectric coefficient needs the same explicitly source-bounded temperature",
+                ));
+            }
+        }
+        for temperature in interval_k {
+            let point = self
+                .material
+                .query()
+                .with(axis, temperature)
+                .map_err(|_| invalid("dielectric temperature query is invalid"))?;
+            self.at_query_point(&point)?;
+        }
+        Ok(())
+    }
+
     /// Recheck the same selected constant fit without resetting switching memory.
     pub fn at_query_point(&self, point: &QueryPoint) -> Result<Self, FieldStorageError> {
         let material = self.material.at_query_point(&self.card, point)?;
@@ -195,5 +257,20 @@ impl UniformHystereticCapacitor {
     /// Original fit and source receipts; None denotes an explicitly authored fit.
     pub const fn source(&self) -> Option<&ResolvedDielectricHysteresis> {
         self.source.as_ref()
+    }
+
+    /// Recheck the original constant fit at an explicitly owned source query.
+    /// Geometry and the constitutive law remain unchanged; accepted electrical
+    /// history belongs to the caller and must not be reinitialized on refresh.
+    pub fn at_source_query(&self, point: &QueryPoint) -> Result<Self, FieldStorageError> {
+        let source = self
+            .source
+            .as_ref()
+            .ok_or_else(|| invalid("authored dielectric capacitor has no source query"))?
+            .at_query_point(point)?;
+        Ok(Self {
+            source: Some(source),
+            ..self.clone()
+        })
     }
 }
