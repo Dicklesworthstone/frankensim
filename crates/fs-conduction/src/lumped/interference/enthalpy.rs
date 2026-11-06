@@ -25,7 +25,8 @@ use fs_math::dd::Dd;
 
 use super::super::{
     BiotGate, LumpedEnthalpyBody, LumpedEnthalpyMarchConfig, MAX_LUMPED_ENTHALPY_STEPS,
-    bisect_enthalpy_step, enthalpy_power, lumped_error, phase_state, validate_enthalpy_config,
+    bisect_enthalpy_step, enthalpy_power, lumped_error, monotone_enthalpy_step_limit_s, phase_state,
+    validate_enthalpy_config,
 };
 use crate::ConductionError;
 
@@ -256,7 +257,9 @@ pub fn solve_lumped_enthalpy_spectrum<'a>(
 ///
 /// Ripple admission refines one maximum step, independent of source phase.
 /// Its analytic bound is monotone in duration, so all smaller accepted steps
-/// inherit it without repeating a full spectral bound traversal. Thermal
+/// inherit it without repeating a full spectral bound traversal. The original
+/// emissivity/caloric feedback bound also limits the step to keep the implicit
+/// root unique; every subdivision retains the actual source integral. Thermal
 /// backward-Euler error remains controlled separately by maximum_step_s;
 /// an energy residual alone does not certify nonlinear temporal accuracy.
 ///
@@ -362,6 +365,18 @@ pub fn solve_lumped_enthalpy_spectrum_from_clock_dd_cancellable<'a>(
     let mut admitted_step = config.maximum_step_s.min(config.duration_s);
     let mut ripple_j = 0.0;
     if config.duration_s > 0.0 {
+        let feedback_step = monotone_enthalpy_step_limit_s(
+            body,
+            config.radiation_temperature_k,
+            || poll(&mut cancelled, attempts),
+        )?;
+        admitted_step = admitted_step.min(feedback_step);
+        if admitted_step < controls.minimum_step_s.min(config.duration_s) {
+            return Err(lumped_error(
+                &body.name,
+                "radiative feedback requires a step below the admitted minimum step".to_owned(),
+            ));
+        }
         loop {
             poll(&mut cancelled, attempts)?;
             charge_attempt(body, &mut attempts, controls)?;

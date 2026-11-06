@@ -1583,3 +1583,264 @@ fn g0_enthalpy_march_refuses_invalid_fidelity_or_missing_phase_domain() {
         .is_err()
     );
 }
+
+
+// Synthetic source curve with a sharp emissivity decrease. C = m*cp = 100 J/K,
+// A = 1 m2 and V/A = 1 mm independently admit the uniform-body approximation.
+fn radiative_feedback_fixture(
+    emissivity: &[(f64, f64)],
+) -> (EquilibriumEnthalpyPhaseCurve, LumpedThermalTransport) {
+    let mut claims = ClaimSet::new();
+    for (name, dims, knots) in [
+        (
+            "thermal_conductivity",
+            CONDUCTIVITY_DIMS,
+            vec![(300.0, 100.0), (1200.0, 100.0)],
+        ),
+        (SURFACE_EMISSIVITY_PROPERTY, Dims::NONE, emissivity.to_vec()),
+    ] {
+        claims.insert_claim(PropertyClaim {
+            key: PropertyKey::new(name, dims),
+            value: PropertyValue::Curve {
+                abscissa: "T".to_owned(),
+                abscissa_dims: Dims([0, 0, 0, 1, 0, 0]),
+                knots,
+                dims,
+            },
+            validity: ValidityDomain::unconstrained().with("T", 300.0, 1200.0),
+            uncertainty: UncertaintyModel::Unstated,
+            interpolation: InterpolationPolicy::LinearInside,
+            observations: Vec::new(),
+            provenance: Provenance {
+                source: "synthetic radiative-feedback regression".to_owned(),
+                license: "CC0-1.0".to_owned(),
+                artifact: None,
+            },
+        }).unwrap();
+    }
+    let card = MaterialCard::assemble(
+        MaterialStateId {
+            chemistry: "synthetic radiative-feedback specimen".to_owned(),
+            phase: "solid".to_owned(),
+            process: "declared regression".to_owned(),
+            revision: 0,
+        },
+        claims,
+        Vec::new(),
+    ).unwrap();
+    let curve = EquilibriumEnthalpyPhaseCurve::try_single_phase(
+        card.content_hash(),
+        SolidLiquidPhase::Solid,
+        [300.0, 1200.0].into_iter().map(|temperature_k| EnthalpyPhaseKnot {
+            specific_enthalpy_j_kg: 100.0 * (temperature_k - 300.0),
+            temperature_k,
+            liquid_mass_fraction: 0.0,
+            bulk_density_kg_m3: 1000.0,
+        }).collect(),
+    ).unwrap();
+    // Deliberately omit source-interior knots from the requested grid.
+    let transport = LumpedThermalTransport::from_material_card(
+        &card, "thermal_conductivity", &[300.0, 1200.0], SelectionPolicy::SingleClaimOnly,
+    ).unwrap();
+    (curve, transport)
+}
+
+fn radiative_feedback_body(
+    curve: &EquilibriumEnthalpyPhaseCurve,
+    transport: LumpedThermalTransport,
+) -> LumpedEnthalpyBody<'_> {
+    LumpedEnthalpyBody::try_new_with_transport(
+        "radiative feedback", 1.0, 1.0, 0.0, 0.001, transport, curve,
+    ).unwrap()
+}
+
+fn radiative_feedback_config() -> LumpedEnthalpyMarchConfig {
+    LumpedEnthalpyMarchConfig {
+        initial_specific_enthalpy_j_kg: 5000.0, // 350 K
+        ambient_temperature_k: 300.0,
+        radiation_temperature_k: 300.0,
+        internal_power_w: 600.0,
+        duration_s: 100.0,
+        maximum_step_s: 100.0,
+        maximum_steps: 1000,
+        enthalpy_tolerance_j_kg: 1e-9,
+    }
+}
+
+const FALLING_EMISSIVITY: [(f64, f64); 4] =
+    [(300.0, 0.9), (400.0, 0.9), (500.0, 0.01), (1200.0, 0.01)];
+
+#[test]
+fn g1_radiative_feedback_cannot_jump_across_a_stable_thermal_equilibrium() {
+    let (curve, transport) = radiative_feedback_fixture(&FALLING_EMISSIVITY);
+    let body = radiative_feedback_body(&curve, transport);
+    let sigma = 5.670_374_419e-8;
+    let equilibrium = (600.0 / (0.9 * sigma) + 300.0_f64.powi(4)).sqrt().sqrt();
+    let residual = |temperature: f64| {
+        let emissivity = if temperature <= 400.0 { 0.9 } else if temperature < 500.0 {
+            0.9 - 0.0089 * (temperature - 400.0)
+        } else { 0.01 };
+        100.0 * (temperature - 350.0)
+            - 100.0 * (600.0 - emissivity * sigma * (temperature.powi(4) - 300.0_f64.powi(4)))
+    };
+    // The unqualified 100 s implicit balance has THREE roots. The old global
+    // bracket chose the last, although the continuous trajectory cannot cross
+    // the first stable equilibrium at 375.38635 K. Energy closure alone passes.
+    for (left, right) in [(370.0, 380.0), (450.0, 490.0), (750.0, 780.0)] {
+        assert!(residual(left) * residual(right) < 0.0);
+    }
+    assert!(residual(762.707_139_047_554_8).abs() < 1e-7);
+
+    let coarse = with_cx(|cx| {
+        solve_lumped_enthalpy(cx, &body, BiotGate::corpus_default(), radiative_feedback_config())
+            .unwrap()
+    });
+    assert!(coarse.samples().len() > 2);
+    assert_eq!(coarse.samples().last().unwrap().time_s, 100.0);
+    let mut supplied_j = 0.0;
+    for pair in coarse.samples().windows(2) {
+        let dt = pair[1].time_s - pair[0].time_s;
+        let before = pair[0].phase_state.temperature_k();
+        let after = pair[1].phase_state.temperature_k();
+        assert!(dt > 0.0 && dt < 2.0);
+        assert!(after >= before && after < equilibrium);
+        supplied_j += dt * pair[1].net_power_into_body_w;
+    }
+    let end = coarse.samples().last().unwrap();
+    assert!((end.phase_state.specific_enthalpy_j_kg() - 5000.0 - supplied_j).abs() < 1e-6);
+
+    // Independently integrate the low-temperature branch with explicit RK4;
+    // two fine grids agree before comparison.
+    let reference = |steps: usize| {
+        let dt = 100.0 / steps as f64;
+        let rate = |t: f64| (600.0 - 0.9 * sigma * (t.powi(4) - 300.0_f64.powi(4))) / 100.0;
+        let mut t = 350.0;
+        for _ in 0..steps {
+            let a = rate(t);
+            let b = rate(t + 0.5 * dt * a);
+            let c = rate(t + 0.5 * dt * b);
+            let d = rate(t + dt * c);
+            t += dt * (a + 2.0 * b + 2.0 * c + d) / 6.0;
+        }
+        t
+    };
+    let truth = reference(2048);
+    assert!((truth - reference(1024)).abs() < 1e-10);
+    let fine = with_cx(|cx| {
+        solve_lumped_enthalpy(cx, &body, BiotGate::corpus_default(),
+            LumpedEnthalpyMarchConfig { maximum_step_s: 0.25, ..radiative_feedback_config() })
+            .unwrap()
+    });
+    let coarse_error = (end.phase_state.temperature_k() - truth).abs();
+    let fine_error = (fine.samples().last().unwrap().phase_state.temperature_k() - truth).abs();
+    assert!(coarse_error < 0.002 && fine_error < coarse_error / 4.0);
+}
+
+#[test]
+fn g4_radiative_feedback_refinement_respects_step_budget_and_cancellation() {
+    let (curve, transport) = radiative_feedback_fixture(&FALLING_EMISSIVITY);
+    let body = radiative_feedback_body(&curve, transport);
+    let limited = LumpedEnthalpyMarchConfig { maximum_steps: 1, ..radiative_feedback_config() };
+    assert!(with_cx(|cx| {
+        solve_lumped_enthalpy(cx, &body, BiotGate::corpus_default(), limited)
+    }).unwrap_err().to_string().contains("steps"));
+    support::with_cancelled_cx(|cx| {
+        assert!(matches!(
+            solve_lumped_enthalpy(cx, &body, BiotGate::corpus_default(), radiative_feedback_config()),
+            Err(ConductionError::Cancelled { .. })
+        ));
+    });
+}
+
+#[test]
+fn g3_feedback_free_emissivity_retains_the_original_implicit_step() {
+    for emissivity in [
+        [(300.0, 0.9), (1200.0, 0.9)],
+        [(300.0, 0.3), (1200.0, 0.9)],
+    ] {
+        let (curve, transport) = radiative_feedback_fixture(&emissivity);
+        let body = radiative_feedback_body(&curve, transport);
+        let config = LumpedEnthalpyMarchConfig { maximum_steps: 1, ..radiative_feedback_config() };
+        let march = with_cx(|cx| {
+            solve_lumped_enthalpy(cx, &body, BiotGate::corpus_default(), config).unwrap()
+        });
+        assert_eq!(march.samples().len(), 2);
+        assert_eq!(march.samples()[1].time_s, 100.0);
+        if emissivity[0].1 == emissivity[1].1 {
+            let declared = LumpedEnthalpyBody::try_new(
+                "same constant", 1.0, 1.0, 0.0, 0.9, 0.001, 100.0, &curve,
+            ).unwrap();
+            let original = with_cx(|cx| {
+                solve_lumped_enthalpy(cx, &declared, BiotGate::corpus_default(), config).unwrap()
+            });
+            assert_eq!(march.samples(), original.samples());
+        }
+    }
+}
+
+#[test]
+fn g1_spectral_heating_shares_feedback_admission_and_exact_source_energy() {
+    use fs_conduction::lumped::interference::enthalpy::{
+        LumpedEnthalpyPowerBinding, LumpedEnthalpySpectrumControls,
+        solve_lumped_enthalpy_spectrum_cancellable,
+    };
+    use fs_fft::harmonic_window::{
+        HarmonicProductInput, HarmonicProductLaw, HarmonicProductSpectrumLimits,
+        PreparedHarmonicProductSpectrum,
+    };
+    use fs_math::dd::Dd;
+
+    let (curve, transport) = radiative_feedback_fixture(&FALLING_EMISSIVITY);
+    let body = radiative_feedback_body(&curve, transport);
+    let source = PreparedHarmonicProductSpectrum::new(
+        vec![HarmonicProductInput {
+            left_frequency_hz: 0.0,
+            right_frequency_hz: 0.0,
+            left_amplitude: [Dd::from_f64(600.0), Dd::ZERO],
+            right_amplitude: [Dd::ONE, Dd::ZERO],
+            law: HarmonicProductLaw::Real,
+        }],
+        HarmonicProductSpectrumLimits {
+            maximum_products: 1, maximum_generated_terms: 2, maximum_workspace_bytes: 64 * 1024,
+        },
+    ).unwrap();
+    let binding = LumpedEnthalpyPowerBinding {
+        body: &body, spectrum: &source, input_unit: "W", watts_per_spectrum_unit: 1.0,
+        source_clock: "radiative-feedback regression",
+    };
+    let config = LumpedEnthalpyMarchConfig {
+        internal_power_w: 0.0, ..radiative_feedback_config()
+    };
+    let controls = LumpedEnthalpySpectrumControls {
+        start_s: 0.0, minimum_step_s: 1e-9, source_ripple_tolerance_j: 0.0,
+        maximum_step_energy_residual_j: 1e-7, maximum_attempts: 2000,
+        maximum_spectral_work: 1_000_000, maximum_output_samples: 1001,
+        maximum_workspace_bytes: 8 * 1024 * 1024,
+    };
+    let run = solve_lumped_enthalpy_spectrum_cancellable(
+        binding, BiotGate::corpus_default(), config, controls, || false,
+    ).unwrap();
+    assert!(run.samples().len() > 2);
+    assert!(run.admitted_maximum_step_s() < 2.0);
+    let endpoint = run.samples().last().unwrap();
+    assert_eq!(endpoint.elapsed_s_dd().to_f64(), 100.0);
+    assert!((endpoint.phase_state().temperature_k() - 375.385_777_894_759).abs() < 0.002);
+    assert!((run.energy().source_input_j_dd().to_f64() - 60_000.0).abs() < 1e-9);
+    assert!(run.energy().residual_j_dd().to_f64().abs() < 1e-5);
+    for sample in run.samples() {
+        assert_eq!(sample.source_ripple_bound_j(), 0.0);
+    }
+    let too_large_minimum = LumpedEnthalpySpectrumControls { minimum_step_s: 2.0, ..controls };
+    assert!(solve_lumped_enthalpy_spectrum_cancellable(
+        binding, BiotGate::corpus_default(), config, too_large_minimum, || false,
+    ).unwrap_err().to_string().contains("minimum step"));
+    assert!(solve_lumped_enthalpy_spectrum_cancellable(
+        binding, BiotGate::corpus_default(),
+        LumpedEnthalpyMarchConfig { maximum_steps: 1, ..config }, controls, || false,
+    ).is_err());
+    let mut polls = 0;
+    assert!(matches!(solve_lumped_enthalpy_spectrum_cancellable(
+        binding, BiotGate::corpus_default(), config, controls,
+        || { polls += 1; polls == 20 },
+    ), Err(ConductionError::Cancelled { .. })));
+}

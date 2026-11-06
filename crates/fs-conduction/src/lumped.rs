@@ -580,6 +580,9 @@ pub struct LumpedEnthalpyMarchConfig {
     /// Requested physical horizon [s].
     pub duration_s: f64,
     /// Maximum backward-Euler step [s]; the final step is shortened exactly.
+    /// Temperature-dependent radiative feedback can require smaller steps to
+    /// keep each implicit balance single-valued. Every subdivision counts
+    /// against maximum_steps; this admission is not temporal error control.
     pub maximum_step_s: f64,
     /// Maximum accepted step count.
     pub maximum_steps: usize,
@@ -660,9 +663,13 @@ impl LumpedEnthalpyMarch {
 
 /// March a Biot-admitted isothermal body in specific enthalpy.
 ///
-/// Each step solves the monotone backward-Euler balance by deterministic
-/// bisection over the phase curve's admitted enthalpy interval. Exhausting
-/// that interval refuses rather than extrapolating a solid or liquid law.
+/// Each step solves a monotone backward-Euler balance by deterministic
+/// bisection over the phase curve's admitted enthalpy interval. Temperature-
+/// dependent emissivity can introduce positive feedback, so the maximum step
+/// is reduced using the original source segments and caloric slopes before
+/// marching. This prevents selecting a distant root across thermal equilibria;
+/// it does not replace a temporal refinement study. Exhausting the phase domain
+/// or the caller's step budget refuses without publishing a partial trajectory.
 pub fn solve_lumped_enthalpy(
     cx: &Cx<'_>,
     body: &LumpedEnthalpyBody<'_>,
@@ -680,7 +687,25 @@ pub fn solve_lumped_enthalpy(
             ),
         ));
     }
-    let requested_steps_f64 = (config.duration_s / config.maximum_step_s).ceil();
+    let admitted_step_s = if config.duration_s == 0.0 {
+        config.maximum_step_s
+    } else {
+        config.maximum_step_s.min(monotone_enthalpy_step_limit_s(
+            body,
+            config.radiation_temperature_k,
+            || {
+                cx.checkpoint().map_err(|_| ConductionError::Cancelled {
+                    stage: "lumped-enthalpy-feedback",
+                    at: 0,
+                })
+            },
+        )?)
+    };
+    let requested_steps_f64 = if config.duration_s == 0.0 {
+        0.0
+    } else {
+        (config.duration_s / admitted_step_s).ceil().max(1.0)
+    };
     if !requested_steps_f64.is_finite()
         || requested_steps_f64 > config.maximum_steps as f64
         || requested_steps_f64 > MAX_LUMPED_ENTHALPY_STEPS as f64
@@ -718,7 +743,25 @@ pub fn solve_lumped_enthalpy(
             stage: "lumped-enthalpy",
             at: step,
         })?;
-        let dt_s = config.maximum_step_s.min(config.duration_s - time_s);
+        // The final interval uses the actual remainder, rather than leaving
+        // an accumulated floating-point clock error beyond the requested end.
+        let final_step = step + 1 == requested_steps;
+        let dt_s = if final_step {
+            config.duration_s - time_s
+        } else {
+            admitted_step_s.min(config.duration_s - time_s)
+        };
+        let next_time_s = if final_step {
+            config.duration_s
+        } else {
+            time_s + dt_s
+        };
+        if !(dt_s.is_finite() && dt_s > 0.0 && next_time_s > time_s) {
+            return Err(lumped_error(
+                &body.name,
+                "enthalpy timestep cannot make representable clock progress".to_owned(),
+            ));
+        }
         let next = solve_enthalpy_step(body, config, specific_enthalpy, dt_s)?;
         let state = phase_state(body, next)?;
         let (convection, radiation, net) = enthalpy_power(body, config, state.temperature_k())?;
@@ -730,7 +773,7 @@ pub fn solve_lumped_enthalpy(
                 "enthalpy energy accounting is not representable".to_owned(),
             ));
         }
-        time_s += dt_s;
+        time_s = next_time_s;
         specific_enthalpy = next;
         samples.push(LumpedEnthalpySample {
             time_s,
@@ -1126,6 +1169,111 @@ fn validate_enthalpy_config(
         ));
     }
     Ok(())
+}
+
+/// Sufficient timestep for a unique implicit balance on the WHOLE chart.
+///
+/// With held convection and prescribed source power,
+/// P'(T) = -htc*A + sigma*A*(epsilon'(T)*(Tr^4-T^4) - 4*epsilon(T)*T^3).
+/// Dropping the two nonpositive terms bounds positive feedback. On each
+/// original linear emissivity segment, epsilon' is constant and Tr^4-T^4
+/// decreases with T, so its relevant endpoint supplies an upper bound.
+/// Multiplication by the chart's maximum dT/dh then bounds positive P'(h).
+/// Taking dt <= mass/(2*bound) leaves R'(h) >= mass/2 in exact arithmetic.
+///
+/// This is a sufficient source-law admission, not an optimal step, a thermal
+/// accuracy certificate or permission to change source data. It visits each
+/// source/caloric segment once and allocates nothing. Constant emissivity and
+/// feedback-free temperature ranges retain an unbounded implicit step.
+fn monotone_enthalpy_step_limit_s(
+    body: &LumpedEnthalpyBody<'_>,
+    radiation_temperature_k: f64,
+    mut checkpoint: impl FnMut() -> Result<(), ConductionError>,
+) -> Result<f64, ConductionError> {
+    let LumpedEmissivityModel::MaterialCard(samples) = &body.transport.emissivity else {
+        return Ok(f64::INFINITY);
+    };
+    let knots = body.phase_curve.knots();
+    let minimum_temperature_k = knots[0].temperature_k;
+    let maximum_temperature_k = knots[knots.len() - 1].temperature_k;
+    let invalid = || {
+        lumped_error(
+            &body.name,
+            "radiative-feedback timestep bound is not representable".to_owned(),
+        )
+    };
+    let mut maximum_feedback_w_k = 0.0_f64;
+    for (index, pair) in samples.windows(2).enumerate() {
+        if index % 256 == 0 {
+            checkpoint()?;
+        }
+        let lower = pair[0].temperature_k().max(minimum_temperature_k);
+        let upper = pair[1].temperature_k().min(maximum_temperature_k);
+        let emissivity_change = pair[1].value() - pair[0].value();
+        if upper <= lower || emissivity_change == 0.0 {
+            continue;
+        }
+        let temperature = if emissivity_change > 0.0 { lower } else { upper };
+        let contrast = if emissivity_change > 0.0 {
+            radiation_temperature_k - temperature
+        } else {
+            temperature - radiation_temperature_k
+        };
+        if contrast <= 0.0 {
+            continue;
+        }
+        let emissivity_slope = (emissivity_change.abs()
+            / (pair[1].temperature_k() - pair[0].temperature_k()))
+            .next_up();
+        // Factor the fourth-power difference, as the original power owner
+        // does. No radiative energy is approximated or added by this bound.
+        let feedback = STEFAN_BOLTZMANN_W_M2_K4
+            * body.surface_area_m2
+            * emissivity_slope
+            * contrast
+            * (radiation_temperature_k + temperature)
+            * (radiation_temperature_k * radiation_temperature_k
+                + temperature * temperature);
+        if !feedback.is_finite() || feedback <= 0.0 {
+            return Err(invalid());
+        }
+        maximum_feedback_w_k = maximum_feedback_w_k.max(feedback.next_up());
+    }
+    if maximum_feedback_w_k == 0.0 {
+        return Ok(f64::INFINITY);
+    }
+    let mut maximum_temperature_slope = 0.0_f64;
+    for (index, pair) in knots.windows(2).enumerate() {
+        if index % 256 == 0 {
+            checkpoint()?;
+        }
+        let temperature_change = pair[1].temperature_k - pair[0].temperature_k;
+        if temperature_change == 0.0 {
+            continue;
+        }
+        let slope = (temperature_change
+            / (pair[1].specific_enthalpy_j_kg - pair[0].specific_enthalpy_j_kg))
+            .next_up();
+        if !slope.is_finite() || slope <= 0.0 {
+            return Err(invalid());
+        }
+        maximum_temperature_slope = maximum_temperature_slope.max(slope);
+    }
+    if maximum_temperature_slope == 0.0 {
+        return Ok(f64::INFINITY);
+    }
+    let rate = ((maximum_feedback_w_k * maximum_temperature_slope).next_up()
+        / body.mass_kg)
+        .next_up();
+    if !rate.is_finite() || rate <= 0.0 {
+        return Err(invalid());
+    }
+    let limit = (0.5 / rate).next_down();
+    if limit <= 0.0 {
+        return Err(invalid());
+    }
+    checkpoint()?;
+    Ok(limit)
 }
 
 fn solve_enthalpy_step(
