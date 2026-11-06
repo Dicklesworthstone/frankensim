@@ -3,10 +3,30 @@
 use super::*;
 use crate::d3q19::freesurface3::{PlanarWallFieldControls3, PlanarWallVelocityField3};
 use crate::material::free_surface::{
-    MaterialPlanarWallFieldReport3, MaterialPlanarWallVelocityField3, MaterialRigidFrame3,
+    MaterialCoriolis3, MaterialPlanarWallFieldReport3, MaterialPlanarWallVelocityField3,
+    MaterialRigidFrame3,
 };
 
 impl MaterialFreeSurfaceRheology3<'_, '_> {
+    /// Advance the source-resolved isothermal liquid with local Coriolis forcing.
+    ///
+    /// Spin and effective acceleration are supplied in SI, using the original
+    /// material dx/dt. The source preserves initial physical strain; the same
+    /// native collision and endpoint constitutive solve admit the complete
+    /// candidate. Invalid units, source refusal or cancellation publish nothing.
+    /// This is a local model with no centrifugal/Euler terms or added heating.
+    pub fn step_with_coriolis_si(
+        &mut self,
+        rotation: MaterialCoriolis3,
+        effective_acceleration_m_s2: [f64; 3],
+        gate: &CancelGate,
+    ) -> Result<(), Error> {
+        poll(gate)?;
+        let (native, acceleration) =
+            rotation.lattice_forcing(&self.flow.scaling, effective_acceleration_m_s2)?;
+        self.step_inner_with_source::<true>(gate, None, Some((native.frame(), acceleration)))
+    }
+
     /// Advance source-resolved viscosity in a prescribed accelerating vessel.
     ///
     /// Motion coefficients are supplied at the interval midpoint in SI and

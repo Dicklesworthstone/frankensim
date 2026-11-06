@@ -1,14 +1,14 @@
 //! Held local forces in the original Guo population frame.
 
 use super::*;
-use crate::d3q19::{RigidFrame3, W3, guo_projection3};
+use crate::d3q19::{Coriolis3, RigidFrame3, W3, guo_projection3};
 
 /// Prescribed acceleration in the fixed Cartesian lattice coordinates.
 ///
 /// Every wet cell uses its own density in `F = rho * a(x)`. The descriptor
 /// covers the whole domain, including cells activated by advancing liquid,
 /// without a dense field or a wet-only map. It is independent of velocity:
-/// Coriolis and a complete rotating-frame model remain owned by `RigidFrame3`.
+/// Velocity-dependent rotation uses `Coriolis3` or the complete `RigidFrame3`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum BodyAccelerationField3 {
     /// Spatially uniform acceleration [dx/dt²]; preserves the scalar arithmetic.
@@ -80,6 +80,61 @@ impl BodyAccelerationField3 {
     }
 }
 
+impl Coriolis3 {
+    /// Prepare local rotating-flow forcing on the original sparse wet cells.
+    ///
+    /// The source is `acceleration - 2*omega cross u`, with centrifugal
+    /// potential already absorbed into effective acceleration. All quantities
+    /// use lattice units and the existing relative velocity axes. Refresh
+    /// before each native step, including after wet-cell conversion.
+    ///
+    /// Replaces the complete held force, without an instantaneous impulse.
+    /// Canonical density, fill, tracked mass, physical velocity and corrected
+    /// stress retain the same guarantees as [`RigidFrame3::prepare_free_surface_step`].
+    /// Historical replay and independent body-acceleration ownership refuse.
+    pub fn prepare_free_surface_step(
+        self,
+        surface: &mut FreeSurface3,
+        acceleration: [f64; 3],
+        gate: &CancelGate,
+    ) -> Result<(), FreeSurfaceError3> {
+        self.prepare_free_surface_step_with_acceleration(
+            surface,
+            acceleration,
+            |_, _, _| Ok(acceleration),
+            gate,
+        )
+    }
+
+    pub(crate) fn prepare_free_surface_step_with_acceleration<E>(
+        self,
+        surface: &mut FreeSurface3,
+        nominal_acceleration: [f64; 3],
+        acceleration_at: impl FnMut(u64, usize, f64) -> Result<[f64; 3], E>,
+        gate: &CancelGate,
+    ) -> Result<(), E>
+    where
+        E: From<FreeSurfaceError3>,
+    {
+        self.frame().prepare_free_surface_source::<true, E>(
+            surface,
+            nominal_acceleration,
+            acceleration_at,
+            gate,
+        )
+    }
+
+    pub(crate) fn step_free_surface(
+        self,
+        surface: &mut FreeSurface3,
+        acceleration: [f64; 3],
+        gate: &CancelGate,
+    ) -> Result<(), FreeSurfaceError3> {
+        self.frame()
+            .step_free_surface_source::<true>(surface, acceleration, gate)
+    }
+}
+
 impl RigidFrame3 {
     /// Prepare the original sparse VOF owner for one prescribed rigid-frame step.
     ///
@@ -134,6 +189,24 @@ impl RigidFrame3 {
         self,
         surface: &mut FreeSurface3,
         nominal_acceleration: [f64; 3],
+        acceleration_at: impl FnMut(u64, usize, f64) -> Result<[f64; 3], E>,
+        gate: &CancelGate,
+    ) -> Result<(), E>
+    where
+        E: From<FreeSurfaceError3>,
+    {
+        self.prepare_free_surface_source::<false, E>(
+            surface,
+            nominal_acceleration,
+            acceleration_at,
+            gate,
+        )
+    }
+
+    fn prepare_free_surface_source<const CORIOLIS_ONLY: bool, E>(
+        self,
+        surface: &mut FreeSurface3,
+        nominal_acceleration: [f64; 3],
         mut acceleration_at: impl FnMut(u64, usize, f64) -> Result<[f64; 3], E>,
         gate: &CancelGate,
     ) -> Result<(), E>
@@ -176,8 +249,12 @@ impl RigidFrame3 {
                 let (x, y, z) = FreeSurface3::global_of(key, lane);
                 let position = [x, y, z].map(|coordinate| coordinate as f64 + 0.5);
                 let acceleration = acceleration_at(key, lane, rho)?;
-                let effective =
-                    self.effective_acceleration(position, velocity, acceleration, denominator);
+                let effective = self.source_acceleration::<CORIOLIS_ONLY>(
+                    position,
+                    velocity,
+                    acceleration,
+                    denominator,
+                );
                 let next = effective.map(|value| rho * value);
                 if !rho.is_finite()
                     || rho <= 0.0
@@ -208,9 +285,23 @@ impl RigidFrame3 {
         acceleration: [f64; 3],
         gate: &CancelGate,
     ) -> Result<(), FreeSurfaceError3> {
+        self.step_free_surface_source::<false>(surface, acceleration, gate)
+    }
+
+    fn step_free_surface_source<const CORIOLIS_ONLY: bool>(
+        self,
+        surface: &mut FreeSurface3,
+        acceleration: [f64; 3],
+        gate: &CancelGate,
+    ) -> Result<(), FreeSurfaceError3> {
         check_cancel(gate)?;
         let mut candidate = surface.clone();
-        self.prepare_free_surface_step(&mut candidate, acceleration, gate)?;
+        self.prepare_free_surface_source::<CORIOLIS_ONLY, FreeSurfaceError3>(
+            &mut candidate,
+            acceleration,
+            |_, _, _| Ok(acceleration),
+            gate,
+        )?;
         candidate.step_inner(gate, None, None, None)?;
         check_cancel(gate)?;
         *surface = candidate;

@@ -11679,6 +11679,29 @@ collision/streaming in all four admitted D3Q19 collision models, independent
 Rodrigues phase, geostrophic balance, current-velocity preservation, full-frame
 periodicity refusal, closed/open faces, invalid cells and cancellation.
 
+### Local Coriolis on sparse and material liquid trajectories
+
+`Coriolis3::prepare_free_surface_step` uses that same source on active sparse
+wet cells, including newly created interfaces on the next refresh. It retains
+canonical density, tracked mass/fill and the original Guo velocity/stress
+representation. Historical replay and independent body-acceleration ownership
+keep the full-frame owner's explicit refusal. Source specialization shares
+one sparse traversal/rebind with the existing rigid-frame path.
+
+`MaterialCoriolis3` and `MaterialFreeSurface3::step_with_coriolis_si` convert
+spin by the original dt and effective acceleration by dt²/dx. Unrepresentable
+nonzero conversions refuse. Source preparation and the native timestep share
+one private candidate and atomic publication; source identity, pressure,
+capillarity, topology and mass stay with the original material owner.
+
+`FreeSurfaceRheology3::step_with_coriolis` and
+`MaterialFreeSurfaceRheology3::step_with_coriolis_si` apply the same force while
+retaining the original local relaxation and endpoint constitutive admission.
+Coriolis does not become shear heating or a new constitutive source. These
+isothermal entries add no thermal coupling or finite-inertia vessel dynamics.
+The native force/mass/moment, new-interface, SI conversion, constitutive and
+cancellation regression definitions accompany the implementations.
+
 ### Acceleration of sparse free surfaces and material-owned vessels
 
 `RigidFrame3::prepare_free_surface_step` applies the SAME admitted rigid-frame

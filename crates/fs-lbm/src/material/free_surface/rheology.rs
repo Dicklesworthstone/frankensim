@@ -615,11 +615,25 @@ impl<'s, 'm> MaterialFreeSurfaceRheology3<'s, 'm> {
         gas_pressure: Option<(f64, GasPressureField3<'_>)>,
         frame: Option<(RigidFrame3, [f64; 3])>,
     ) -> Result<(), Error> {
+        self.step_inner_with_source::<false>(gate, gas_pressure, frame)
+    }
+
+    fn step_inner_with_source<const CORIOLIS_ONLY: bool>(
+        &mut self,
+        gate: &CancelGate,
+        gas_pressure: Option<(f64, GasPressureField3<'_>)>,
+        frame: Option<(RigidFrame3, [f64; 3])>,
+    ) -> Result<(), Error> {
         poll(gate)?;
         let tau = self.local_relaxation(gate)?;
         let mut lattice = self.flow.lattice.clone();
         if let Some((frame, acceleration)) = frame {
-            frame.prepare_free_surface_step(&mut lattice, acceleration, gate)?;
+            if CORIOLIS_ONLY {
+                crate::d3q19::Coriolis3 { angular_velocity: frame.angular_velocity }
+                    .prepare_free_surface_step(&mut lattice, acceleration, gate)?;
+            } else {
+                frame.prepare_free_surface_step(&mut lattice, acceleration, gate)?;
+            }
         }
         lattice.step_with_material_relaxation_and_pressure(gate, &tau, gas_pressure)?;
         let samples = self.sample_lattice(&lattice, gate)?;

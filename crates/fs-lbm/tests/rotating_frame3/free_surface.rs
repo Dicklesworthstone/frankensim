@@ -327,3 +327,141 @@ fn invalid_frame_sources_and_cancellation_leave_sparse_state_unchanged() {
     assert_eq!(surface.grid().state_bits(), before);
     assert_eq!(surface.force_density_at(1, 2, 3), force);
 }
+
+#[test]
+fn local_coriolis_has_no_position_force_and_preserves_sparse_physical_moments() {
+    let gate = CancelGate::new_clock_free();
+    let velocity = [0.023, -0.017, 0.011];
+    let mut initial = uniform([4; 3], 1.3, velocity);
+    initial[17].fill_fraction = 0.6;
+    let mut surface = seed([4; 3], [0.0002, -0.0001, 0.0003], initial);
+    let before = surface.clone();
+    let mass = surface.ledger_mass();
+    let omega = [0.04, -0.03, 0.02];
+    fs_lbm::d3q19::Coriolis3 { angular_velocity: omega }
+        .prepare_free_surface_step(&mut surface, [0.0; 3], &gate)
+        .unwrap();
+    assert_eq!(surface.ledger_mass(), mass);
+    let magnitude = dot(omega, omega).sqrt();
+    let axis = omega.map(|w| w / magnitude);
+    let angle = 2.0 * magnitude.atan();
+    for z in 0..4 {
+        for y in 0..4 {
+            for x in 0..4 {
+                let cell = [x, y, z];
+                let old = before.sample_at(x, y, z).unwrap();
+                let new = surface.sample_at(x, y, z).unwrap();
+                assert_eq!(new.density, old.density);
+                assert_eq!(new.fill_fraction, old.fill_fraction);
+                let force = surface.force_density_at(x, y, z).unwrap();
+                let old_moments = moments(
+                    single_tile_populations(&before, cell),
+                    before.force_density_at(x, y, z).unwrap(),
+                );
+                let preserved = moments(single_tile_populations(&surface, cell), force);
+                let post = collide_cell3(
+                    single_tile_populations(&surface, cell),
+                    surface.collision_model(),
+                    force,
+                ).unwrap();
+                let m = moments(post, force);
+                let next = m.1.map(|p| p / m.0);
+                let parallel = dot(axis, old.velocity);
+                let turn = cross(axis, old.velocity);
+                for d in 0..3 {
+                    near(new.velocity[d], old.velocity[d], 4e-15);
+                    near(preserved.1[d], old_moments.1[d], 4e-15);
+                    for e in 0..3 {
+                        near(preserved.2[d][e], old_moments.2[d][e], 4e-15);
+                    }
+                    let expected = axis[d] * parallel
+                        + angle.cos() * (old.velocity[d] - axis[d] * parallel)
+                        - angle.sin() * turn[d];
+                    near(next[d], expected, 5e-15);
+                    near(force[d], surface.force_density_at(0, 0, 0).unwrap()[d], 4e-15);
+                }
+                near(dot(next, next), dot(old.velocity, old.velocity), 5e-16);
+            }
+        }
+    }
+}
+
+#[test]
+fn local_coriolis_refreshes_new_wet_cells_and_refuses_independent_source_ownership() {
+    let gate = CancelGate::new_clock_free();
+    let initial = uniform([4; 3], 1.0, [0.04, 0.0, 0.0])
+        .into_iter()
+        .map(|mut cell| {
+            cell.coordinates = cell.coordinates.map(|coordinate| coordinate + 4);
+            cell
+        })
+        .collect();
+    let mut surface = seed([12; 3], [0.0; 3], initial);
+    let source = fs_lbm::d3q19::Coriolis3 { angular_velocity: [0.001, -0.002, 0.003] };
+    let acceleration = [0.0002, -0.0001, 0.00005];
+    source.prepare_free_surface_step(&mut surface, acceleration, &gate).unwrap();
+    surface.step_with_gate(&gate).unwrap();
+    assert!(surface.conversions().gas_to_interface > 0);
+    let mass = surface.ledger_mass();
+    source.prepare_free_surface_step(&mut surface, acceleration, &gate).unwrap();
+    assert_eq!(surface.ledger_mass(), mass);
+    for z in 0..12 {
+        for y in 0..12 {
+            for x in 0..12 {
+                if let Some(sample) = surface.sample_at(x, y, z) {
+                    let force = surface.force_density_at(x, y, z).unwrap();
+                    let effective = force.map(|f| f / sample.density);
+                    let midpoint = core::array::from_fn(|d| sample.velocity[d] + 0.5 * effective[d]);
+                    let rotation = cross(source.angular_velocity, midpoint);
+                    for d in 0..3 {
+                        near(effective[d] + 2.0 * rotation[d], acceleration[d], 3e-16);
+                    }
+                }
+            }
+        }
+    }
+    surface.rebind_body_acceleration([0.0; 3], &gate).unwrap();
+    let bits = surface.grid().state_bits();
+    let force = surface.force_density_at(5, 5, 5);
+    assert!(source.prepare_free_surface_step(&mut surface, acceleration, &gate).is_err());
+    assert_eq!(surface.grid().state_bits(), bits);
+    assert_eq!(surface.force_density_at(5, 5, 5), force);
+    gate.request();
+    assert_eq!(
+        source.prepare_free_surface_step(&mut surface, acceleration, &gate),
+        Err(FreeSurfaceError3::Cancelled),
+    );
+    assert_eq!(surface.grid().state_bits(), bits);
+}
+
+#[test]
+fn local_coriolis_reuses_native_rheology_without_a_second_flow_update() {
+    use fs_lbm::d3q19::freesurface3::rheology::FreeSurfaceRheology3;
+
+    let gate = CancelGate::new_clock_free();
+    let mut native = seed([12; 3], [0.0; 3], uniform([12; 3], 1.0, [0.02, -0.01, 0.015]));
+    let mut rheology = FreeSurfaceRheology3::uniform(
+        native.clone(), fs_lbm::Rheology::Newtonian { nu: (0.9 - 0.5) / 3.0 }, &gate,
+    ).unwrap();
+    let source = fs_lbm::d3q19::Coriolis3 { angular_velocity: [0.01, -0.02, 0.03] };
+    for _ in 0..3 {
+        source.prepare_free_surface_step(&mut native, [0.0; 3], &gate).unwrap();
+        native.step_with_gate(&gate).unwrap();
+        rheology.step_with_coriolis(source, [0.0; 3], &gate).unwrap();
+        let expected = native.sample_at(6, 6, 6).unwrap();
+        let actual = rheology.lattice().sample_at(6, 6, 6).unwrap();
+        near(actual.density, expected.density, 3e-15);
+        for d in 0..3 {
+            near(actual.velocity[d], expected.velocity[d], 3e-15);
+        }
+        near(rheology.relaxation_at([6, 6, 6]).unwrap(), 0.9, 2e-15);
+    }
+    let bits = rheology.lattice().grid().state_bits();
+    let stats = rheology.stats();
+    gate.request();
+    assert!(rheology.step_with_coriolis(source, [0.0; 3], &gate).is_err());
+    assert_eq!(rheology.lattice().grid().state_bits(), bits);
+    let after = rheology.stats();
+    assert_eq!((after.floored, after.capped, after.max_shear, after.tau_range),
+        (stats.floored, stats.capped, stats.max_shear, stats.tau_range));
+}

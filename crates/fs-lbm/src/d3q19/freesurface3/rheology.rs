@@ -11,7 +11,7 @@ use fs_exec::CancelGate;
 
 use super::transport::MassLocation3;
 use super::{Cell3, FreeSurface3, FreeSurfaceError3, TILE, TILE_CELLS, check_cancel};
-use crate::d3q19::{CollisionModel3, RigidFrame3};
+use crate::d3q19::{CollisionModel3, Coriolis3, RigidFrame3};
 use crate::lattice3::{D3q19, ViscousLattice3};
 use crate::rheology::{
     PreparedRheology, Rheology, RheologyField, RheologyFieldError, RheologyStats,
@@ -257,7 +257,29 @@ impl FreeSurfaceRheology3 {
         self.step_with_frame(Some((frame, acceleration)), gate)
     }
 
+    /// Advance local Coriolis flow with the original cellwise constitutive law.
+    ///
+    /// Effective acceleration and spin use lattice units. The force reframe
+    /// preserves physical strain, and endpoint rheology is admitted before
+    /// either flow or relaxation state publishes. This adds no heat source.
+    pub fn step_with_coriolis(
+        &mut self,
+        rotation: Coriolis3,
+        acceleration: [f64; 3],
+        gate: &CancelGate,
+    ) -> Result<RheologyStats, FreeSurfaceRheologyError3> {
+        self.step_with_source::<true>(Some((rotation.frame(), acceleration)), gate)
+    }
+
     fn step_with_frame(
+        &mut self,
+        frame: Option<(RigidFrame3, [f64; 3])>,
+        gate: &CancelGate,
+    ) -> Result<RheologyStats, FreeSurfaceRheologyError3> {
+        self.step_with_source::<false>(frame, gate)
+    }
+
+    fn step_with_source<const CORIOLIS_ONLY: bool>(
         &mut self,
         frame: Option<(RigidFrame3, [f64; 3])>,
         gate: &CancelGate,
@@ -265,7 +287,12 @@ impl FreeSurfaceRheology3 {
         check_cancel(gate)?;
         let mut candidate = self.lattice.clone();
         if let Some((frame, acceleration)) = frame {
-            frame.prepare_free_surface_step(&mut candidate, acceleration, gate)?;
+            if CORIOLIS_ONLY {
+                Coriolis3 { angular_velocity: frame.angular_velocity }
+                    .prepare_free_surface_step(&mut candidate, acceleration, gate)?;
+            } else {
+                frame.prepare_free_surface_step(&mut candidate, acceleration, gate)?;
+            }
         }
         candidate.step_with_material_relaxation_and_pressure(gate, &self.tau, None)?;
         self.accept_candidate(candidate, gate)

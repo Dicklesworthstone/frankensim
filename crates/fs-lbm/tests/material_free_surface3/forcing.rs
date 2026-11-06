@@ -135,3 +135,41 @@ fn si_conversion_refusal_and_cancellation_preserve_the_complete_accepted_state()
     assert_eq!(fluid.lattice().grid().state_bits(), before);
     assert_eq!(fluid.lattice().force_density_at(4, 4, 3), force);
 }
+
+#[test]
+fn si_local_coriolis_uses_original_units_and_one_native_sparse_transaction() {
+    use fs_lbm::d3q19::Coriolis3;
+    use fs_lbm::material::free_surface::MaterialCoriolis3;
+
+    let source = liquid(0, 300.0, None);
+    let gate = CancelGate::new_clock_free();
+    for (dx, dt) in [(0.001, 0.0002), (0.002, 0.0004)] {
+        let setup = plan_free_surface_from_material(&source, dx, dt, 0.1).unwrap();
+        let mut fluid = setup.free_surface3(domain(), |_, _, z| z < 6).unwrap();
+        let mut native = fluid.lattice().clone();
+        let rotation = MaterialCoriolis3 { angular_velocity_rad_s: [2.0, -3.0, 1.0] };
+        for acceleration in [[0.3, -0.1, -0.5], [-0.2, 0.4, 0.1]] {
+            Coriolis3 { angular_velocity: rotation.angular_velocity_rad_s.map(|v| v * dt) }
+                .prepare_free_surface_step(
+                    &mut native,
+                    acceleration.map(|v| (v * dt) / (dx / dt)),
+                    &gate,
+                ).unwrap();
+            native.step_with_gate(&gate).unwrap();
+            fluid.step_with_coriolis_si(rotation, acceleration, &gate).unwrap();
+            assert_eq!(fluid.lattice().grid().state_bits(), native.grid().state_bits());
+            assert_eq!(fluid.lattice().ledger_mass(), native.ledger_mass());
+            assert!(std::ptr::eq(fluid.scaling().material(), &source));
+        }
+        let bits = fluid.lattice().grid().state_bits();
+        let mass = fluid.lattice().ledger_mass();
+        for spin in [f64::NAN, f64::MAX, f64::from_bits(1)] {
+            assert!(fluid.step_with_coriolis_si(
+                MaterialCoriolis3 { angular_velocity_rad_s: [spin, 0.0, 0.0] },
+                [0.0; 3], &gate,
+            ).is_err());
+            assert_eq!(fluid.lattice().grid().state_bits(), bits);
+            assert_eq!(fluid.lattice().ledger_mass(), mass);
+        }
+    }
+}

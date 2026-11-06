@@ -1,7 +1,7 @@
 //! Prescribed acceleration fields and vessel motion on the sourced VOF trajectory.
 
 use super::*;
-use crate::d3q19::RigidFrame3;
+use crate::d3q19::{Coriolis3, RigidFrame3};
 use crate::d3q19::freesurface3::BodyAccelerationField3;
 
 /// Prescribed affine body acceleration in the fixed physical grid axes.
@@ -96,7 +96,62 @@ impl MaterialRigidFrame3 {
     }
 }
 
+/// Uniform local Coriolis model in the original material trajectory's SI units.
+///
+/// Effective gravity already includes the background centrifugal potential.
+/// This is not complete vessel kinematics and does not transform initial data.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct MaterialCoriolis3 {
+    /// Right-handed angular velocity [rad/s] in the grid's velocity axes.
+    pub angular_velocity_rad_s: [f64; 3],
+}
+
+impl MaterialCoriolis3 {
+    pub(super) fn lattice_forcing(
+        self,
+        scale: &MaterialFreeSurfaceScaling<'_>,
+        effective_acceleration_m_s2: [f64; 3],
+    ) -> Result<(Coriolis3, [f64; 3]), MaterialLbmError> {
+        let mut native = Coriolis3::default();
+        let mut acceleration = [0.0; 3];
+        for axis in 0..3 {
+            native.angular_velocity[axis] = converted(
+                self.angular_velocity_rad_s[axis],
+                self.angular_velocity_rad_s[axis] * scale.timestep_s,
+            )?;
+            acceleration[axis] = converted(
+                effective_acceleration_m_s2[axis],
+                scale.gravity_lattice(effective_acceleration_m_s2[axis])?,
+            )?;
+        }
+        Ok((native, acceleration))
+    }
+}
+
 impl MaterialFreeSurface3<'_> {
+    /// Advance one SI timestep with local Coriolis and effective acceleration.
+    ///
+    /// The native skew midpoint source uses `omega_SI * dt` and
+    /// `a_SI * dt²/dx`, with the same original material/scaling identity.
+    /// Preparation and the native VOF step publish as one transaction; invalid
+    /// conversion, cell admission or cancellation leaves accepted flow intact.
+    /// Refresh the source every tick. This replaces initial held gravity and
+    /// adds no thermal source or independent body-acceleration owner.
+    pub fn step_with_coriolis_si(
+        &mut self,
+        rotation: MaterialCoriolis3,
+        effective_acceleration_m_s2: [f64; 3],
+        gate: &CancelGate,
+    ) -> Result<(), MaterialLbmError> {
+        if gate.is_requested() {
+            return Err(crate::d3q19::freesurface3::FreeSurfaceError3::Cancelled.into());
+        }
+        let (native, acceleration) =
+            rotation.lattice_forcing(&self.scaling, effective_acceleration_m_s2)?;
+        native.step_free_surface(&mut self.lattice, acceleration, gate)?;
+        Ok(())
+    }
+
     /// Bind a fixed-grid affine acceleration without advancing time or applying
     /// an impulse. Density, mass, physical velocity and force-corrected stress
     /// retain the same source/Guo conventions as [`Self::rebind_gravity`].

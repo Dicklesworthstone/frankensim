@@ -251,3 +251,45 @@ fn frame_source_or_late_constitutive_refusal_preserves_all_accepted_state() {
         }
     });
 }
+
+#[test]
+fn local_coriolis_retains_source_viscosity_and_supplies_no_midpoint_work() {
+    use fs_lbm::material::free_surface::MaterialCoriolis3;
+
+    let gate = CancelGate::new_clock_free();
+    let source = card(0.003, 1000.0, 0.001);
+    let binding = law(&source);
+    with_cx(&gate, |cx| {
+        let mut flow = MaterialFreeSurfaceRheology3::from_cells(
+            &binding, DX, DT, 0.1, domain([0.0; 3]), &initial(true), solve(), cx, &gate,
+        ).unwrap();
+        let rotation = MaterialCoriolis3 { angular_velocity_rad_s: [1.5, -2.0, 4.0] };
+        for _ in 0..3 {
+            let before = flow.lattice().sample_at(CELL[0], CELL[1], CELL[2]).unwrap();
+            flow.step_with_coriolis_si(rotation, [0.0; 3], &gate).unwrap();
+            let force = flow.lattice().force_density_at(CELL[0], CELL[1], CELL[2]).unwrap();
+            let acceleration = force.map(|f| f / before.density * DX / (DT * DT));
+            let midpoint = core::array::from_fn(|d| {
+                before.velocity[d] * DX / DT + 0.5 * DT * acceleration[d]
+            });
+            let spin = cross(rotation.angular_velocity_rad_s, midpoint);
+            for d in 0..3 {
+                near(acceleration[d] + 2.0 * spin[d], 0.0, 2e-11);
+            }
+            let work_rate: f64 = acceleration.into_iter().zip(midpoint).map(|(a, u)| a * u).sum();
+            near(work_rate, 0.0, 2e-12);
+            let rhs = numerator_with_force(&flow, force, CELL) / DT;
+            let rate = 2.0 * rhs / (0.8 + (0.64 + 0.036 * rhs).sqrt());
+            let actual = flow.rheology_at(CELL).unwrap();
+            near(actual.shear_rate_per_s, rate, 2e-9);
+            near(actual.collision_tau, 0.8 + 0.009 * rate, 2e-11);
+            assert_eq!(flow.material_at(CELL).unwrap().card_identity(), source.content_hash());
+        }
+        let bits = flow.lattice().grid().state_bits();
+        let sample = *flow.rheology_at(CELL).unwrap();
+        gate.request();
+        assert!(flow.step_with_coriolis_si(rotation, [0.0; 3], &gate).is_err());
+        assert_eq!(flow.lattice().grid().state_bits(), bits);
+        assert_eq!(*flow.rheology_at(CELL).unwrap(), sample);
+    });
+}
