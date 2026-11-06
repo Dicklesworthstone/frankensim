@@ -32,6 +32,8 @@ use fs_math::det;
 pub mod combined;
 /// Explicit threshold-free Norton creep on the shared finite return owner.
 pub mod creep;
+/// Progressive ductile attenuation on this original finite return and tangent owner.
+pub mod ductile;
 /// Traction-free thickness/shear relaxation of the original finite return map.
 pub mod plane_stress;
 /// Pressure-sensitive finite deformation with retained plastic volume.
@@ -718,6 +720,19 @@ impl FiniteJ2 {
         old: &FiniteJ2State,
         returned: &ReturnMap,
     ) -> Result<[[f64; 9]; 9], FiniteJ2Error> {
+        self.return_derivatives(f, old, returned, None)
+    }
+
+    /// The same logarithm/return derivative optionally supplies the spatial
+    /// stress and trial-radius sensitivities needed by coupled internal laws.
+    /// Ordinary native responses retain their original tangent-only path.
+    fn return_derivatives(
+        &self,
+        f: &[f64; 9],
+        old: &FiniteJ2State,
+        returned: &ReturnMap,
+        mut sensitivities: Option<&mut ReturnSensitivities>,
+    ) -> Result<[[f64; 9]; 9], FiniteJ2Error> {
         let p = &self.parameters;
         let trial = &returned.trial;
         let inverse_transpose = &returned.inverse_transpose;
@@ -740,18 +755,30 @@ impl FiniteJ2 {
             let dlog = trial.spectrum.frechet(&db, &log_derivative);
             let dtrial = deviator(&dlog).map(|x| p.shear_modulus_pa * x);
             let mut dtau = dtrial.map(|x| scale * x);
-            if returned.tangent_correction != 0.0 {
+            if returned.tangent_correction != 0.0
+                || (sensitivities.is_some() && (returned.dgamma > 0.0 || returned.dcreep > 0.0))
+            {
                 // The scalar owner supplies dq_return/dq_trial - q_return/q_trial.
                 // Reuse the exact same tensor/logarithm derivative for every flow.
                 let direction = trial_stress.map(|x| x / q_trial);
                 let dq = 1.5 * dot(&direction, &dtrial);
-                let coefficient = returned.tangent_correction * dq;
-                for i in 0..9 {
-                    dtau[i] += coefficient * direction[i];
+                if let Some(sensitivity) = sensitivities.as_deref_mut() {
+                    sensitivity.trial_equivalent[column] = dq;
+                }
+                if returned.tangent_correction != 0.0 {
+                    let coefficient = returned.tangent_correction * dq;
+                    for i in 0..9 {
+                        dtau[i] += coefficient * direction[i];
+                    }
                 }
             }
             for i in [0, 4, 8] {
                 dtau[i] += p.bulk_modulus_pa * inverse_transpose[column];
+            }
+            if let Some(sensitivity) = sensitivities.as_deref_mut() {
+                for ij in 0..9 {
+                    sensitivity.kirchhoff[ij][column] = dtau[ij];
+                }
             }
             let dp = multiply(&dtau, inverse_transpose);
             for ij in 0..9 {
@@ -892,6 +919,13 @@ struct ReturnMap {
     potential: f64,
     flow_potential: f64,
     tangent_correction: f64,
+}
+
+/// Optional fixed-size derivatives from the original tensor/logarithm owner.
+#[derive(Default)]
+struct ReturnSensitivities {
+    kirchhoff: [[f64; 9]; 9],
+    trial_equivalent: [f64; 9],
 }
 
 /// Scalar physics supplied to the common tensor and history completion.

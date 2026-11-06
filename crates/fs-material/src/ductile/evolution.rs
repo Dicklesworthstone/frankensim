@@ -783,12 +783,12 @@ impl<'a, L: DifferentiableDuctileInitiationLaw + Clone + Debug + PartialEq> Smal
 // U = s/q, d(xi) = [27/2 dev(U^2) - 9/2 xi U] : d(sigma) / q. This polynomial
 // derivative remains regular at xi=+/-1; no acos/sin Lode-angle singularity is
 // introduced. Voigt shears receive their contraction weight exactly once.
-fn locus_stress_gradient(
+pub(crate) fn locus_stress_gradient<const N: usize>(
     stress: &Voigt,
-    tangent: &Tangent6,
+    tangent: &[[f64; N]; 6],
     state: DuctileStressState,
     locus: DuctileLocusGradient,
-) -> Result<Voigt, DuctileEvolutionError> {
+) -> Result<[f64; N], DuctileEvolutionError> {
     let scale = positive(stress.iter().fold(0.0_f64, |a, b| a.max(b.abs())))?;
     let s = stress.map(|x| x / scale);
     let differences = [s[0] - s[1], s[1] - s[2], s[2] - s[0]];
@@ -826,8 +826,8 @@ fn locus_stress_gradient(
                 - 4.5 * state.lode_parameter * unit[i]
         })
     };
-    let mut gradient = [0.0; 6];
-    for j in 0..6 {
+    let mut gradient = [0.0; N];
+    for j in 0..N {
         let mut derivative = 0.0;
         if locus.triaxiality != 0.0 {
             let mean_gradient = tangent[0][j] / 3.0 + tangent[1][j] / 3.0 + tangent[2][j] / 3.0;

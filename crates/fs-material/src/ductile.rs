@@ -50,7 +50,7 @@ pub struct DuctileDomain {
 }
 
 impl DuctileDomain {
-    fn validate(&self) -> Result<(), DuctileError> {
+    pub(crate) fn validate(&self) -> Result<(), DuctileError> {
         if !ordered(self.triaxiality)
             || !ordered(self.strain_rate_s_inv)
             || self.strain_rate_s_inv[0] <= 0.0
@@ -64,7 +64,7 @@ impl DuctileDomain {
         Ok(())
     }
 
-    fn check_temperature(&self, temperature_k: f64) -> Result<(), DuctileError> {
+    pub(crate) fn check_temperature(&self, temperature_k: f64) -> Result<(), DuctileError> {
         in_domain("temperature_k", temperature_k, self.temperature_k)
     }
 

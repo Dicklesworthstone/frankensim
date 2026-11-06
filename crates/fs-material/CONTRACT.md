@@ -17368,6 +17368,65 @@ and genuine dependencies. Two assembled source-bound tetrahedron regressions
 also pass through the original J2, history and source-binding owners. These
 tests do not qualify an alloy or supply experimentally measured Lode calibration.
 
+## Finite ductile softening with original multiplicative plastic history
+
+`plastic::finite::ductile::FiniteDuctileJ2` retains the ORIGINAL `FiniteJ2`
+inverse plastic metric, Kirchhoff return, linear/Voce hardening, logarithmic
+derivatives and explicit native domains. Shared initiation receives the actual
+undegraded Kirchhoff triaxiality, Lode parameter and plastic rate. After onset,
+`g = exp[-h/Gp * integral R(alpha) d(alpha)]`, where
+`R(alpha) = Y + H*alpha + Q*(1-exp(-b*alpha))`. The Voce term uses the original
+stable translated hardening primitive. The reference band width h stays fixed;
+Gp is equivalent KIRCHHOFF plastic work per REFERENCE area after initiation.
+`Gp*(1-g)` is a diagnostic, not an additional physical dissipation term.
+
+With `psi_c = K/2 * min(log(J),0)^2`, storage is
+`psi = g*psi_native + (1-g)*psi_c` and physical first Piola stress is
+`P = g*P_native + (1-g)*P_c`. Compressive bulk strength remains intact.
+The full analytical 9-by-9 `dP/dF` includes the native return, moving initiation
+and the complete stress-invariant/rate damage chain. Its generally nonsymmetric
+tangent is NOT a scalar-potential Hessian: this law implements no
+`FiniteStrainPotential`. The stress-only residual path omits tangent assembly.
+
+All energy accounts refer to original volume. Physical plastic loss is
+`g_new*D_native`; damage release is
+`(g_old-g_new)*(psi_native_old-psi_c_old)`, evaluated from positive active
+storage. Both stay nonnegative. Independently assembled endpoint work closes as
+`P:delta(F) = delta(psi) + plastic_loss + damage_release + endpoint_defect`.
+The endpoint defect is SIGNED, including finite rotation of a prestressed body;
+it is not heat, fracture dissipation or an assumed nonnegative numerical loss.
+Consumers must bound its absolute magnitude and refine the physical path.
+Exact holds preserve accepted history and all work accounts bit-for-bit.
+Foreign owners, unsupported domains, excessive damage increments, nonfinite
+results and unresolved integrity/history increments refuse without mutation or
+clipping. Initiation freezes after its first accepted crossing; native plastic
+history continues. No stiffness floor or element deletion is introduced.
+
+`plastic::finite::ductile::source::ResolvedFiniteDuctileJ2` retains the original
+`ResolvedFiniteJ2`, work bundle and `ResolvedDuctileLocus`. The finite model must
+be an actual member of the same immutable `MaterialCard`; equal coefficients
+or source names do not prove membership. Complete fixed typed contexts agree.
+The exact positive scalar J/m2 property is
+`finite_ductile_post_initiation_equivalent_kirchhoff_plastic_work_per_reference_area`.
+Small-strain Gp, current-area work, cohesive Gc and total fracture energy cannot
+alias this ordinate. Original claims, observations and usage receipts remain
+attached; prepared trials perform no source query or calibration substitution.
+
+FACT (bounded actual-source execution): seven new numerical tests and four new
+source tests pass in `tests/plastic_finite_ductile.rs` and
+`tests/plastic_finite_ductile_source.rs`. They cover intact native equivalence,
+independent linear/Voce work, all 81 tangent entries through Lode/rate onset and
+active compressed flow, objectivity, signed rotation work, retained bulk
+strength, irreversibility, exact holds, refinement and transactional/source
+refusals. Eight original finite tests and 20 shared ductile core tests also
+pass with the reused derivative owners. Execution selects original source
+modules with genuine dependencies; it is not a full Cargo crate/workspace gate
+or experimental material qualification. Structural execution has its own
+fs-solid contract. The native backbone is fixed-temperature rate-independent
+plasticity; initiation may depend on actual rate and temperature. Native creep
+backbones, finite thermomechanical feedback, crack topology, separated-surface
+contact, fragments and history transfer are outside this owner.
+
 ## Source-bound tensile initiation and elastic handoff
 
 `brittle::source::initiation` binds the native tensile detector and onset to the
