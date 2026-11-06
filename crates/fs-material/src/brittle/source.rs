@@ -19,6 +19,9 @@ pub mod initiation;
 /// Original density and fracture coefficients for reference-mass dynamics.
 pub mod dynamics;
 
+/// Source-integrated thermal eigenstrain with the original fracture history.
+pub mod expansion;
+
 use super::{
     BrittleCrackBand, BrittleCrackBandParameters, BrittleCrackBandSettings, BrittleError,
     BrittleSmallStrain,

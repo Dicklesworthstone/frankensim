@@ -878,3 +878,6 @@ mod initiation;
 
 #[path = "brittle_tet_solid/dynamics.rs"]
 mod dynamics;
+
+#[path = "brittle_tet_solid/expansion.rs"]
+mod expansion;

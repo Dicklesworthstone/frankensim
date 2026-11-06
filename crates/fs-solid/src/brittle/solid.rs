@@ -27,6 +27,9 @@ pub mod initiation;
 /// Source-bound reference mass and retained physical-time brittle motion.
 pub mod dynamics;
 
+/// Joint sourced thermal eigenstrain and native mechanical equilibrium.
+pub mod expansion;
+
 use std::sync::Arc;
 
 use fs_exec::Cx;

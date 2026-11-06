@@ -16197,3 +16197,14 @@ surface balances, the original constant-k gray link, exact radiation-disabled
 contact recovery, reversed ordered materials, full flux tangents, and a
 manufactured original-source chain/graph endpoint with conserved heat. Source,
 ownership, nonlinear work and cancellation refusals retain the original state.
+
+
+## Source-integrated thermal eigenstrain in native tensile fracture
+
+`brittle::source::expansion::ResolvedThermalBrittle` binds the original brittle source bundle to the original integrated isotropic thermal-expansion source. Its resolver selects the fracture, elastic and instantaneous alpha(T) claims together at one fixed reference, then retains those claims and integrates the selected expansion through every supported temperature cell. Missing path support, different evidence, coordinate conventions, source context or reference refuses. Negative and zero expansion coefficients are admissible; alpha is never replaced by an endpoint secant approximation.
+
+The borrowed total-strain law supplies mechanical strain equal to total tensor strain minus the integrated free strain times the identity. Both total and mechanical Frobenius bounds are checked. Tensor shear values, native tangent conventions, fixed plane/width, cohesive history and original fracture-energy matching are retained. No independent damage model or thermal history copy is introduced.
+
+A coefficient-only preparation transfers the original mechanical history to the admitted successor source. A solid consumer then solves total displacement and the new eigenstrain together; it must not precommit a fully restrained damage trial before free expansion equilibrates. A distinct optional held-total-strain operation represents actual restraint: it orders coefficient work before the native mechanical-strain change and uses the original exact mean stress for eigenstrain work. Signed coefficient/eigenstrain work, coefficient-induced and strain-induced fracture, storage change and checked work defects remain separate. Cooling, reheating and increased toughness do not erase original damage or cumulative fracture work.
+
+Six focused regression definitions cover exact multi-knot expansion integration, free versus restrained cooling and reheating, separate signed coefficient/eigenstrain work and native stress/tangent/shear equivalence, negative expansion, source/reference/context/strain-domain refusals, and rejection of numerically identical expansion from different selected evidence. Pinned Rustfmt parsing and bounded API/physics review completed; native compilation and runtime execution remain unperformed in the full-filesystem environment. This is an explicitly resolved, coefficient-first small-strain model: it does not supply finite thermal stretches, evolving crack planes, thermal-cycle integration, a caloric equation, inferred fracture heat or entropy production.

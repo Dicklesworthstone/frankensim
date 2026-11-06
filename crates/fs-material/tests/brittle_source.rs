@@ -321,3 +321,6 @@ mod initiation;
 
 #[path = "brittle_source/dynamics.rs"]
 mod dynamics;
+
+#[path = "brittle_source/expansion.rs"]
+mod expansion;
