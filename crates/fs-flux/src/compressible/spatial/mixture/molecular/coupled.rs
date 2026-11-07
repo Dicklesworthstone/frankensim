@@ -216,7 +216,11 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
                 "coupled spatial mixture molecular binding differs",
             ));
         }
-        reservoir::admit(flow.boundaries, &flow.reservoirs)?;
+        reservoir::admit(
+            flow.boundaries,
+            &flow.reservoirs,
+            molecular.pressure_outlets,
+        )?;
         let required = Self::required_workspace_bytes(&flow, &molecular)?;
         admit_workspace(required, maximum_workspace_bytes)?;
         let mut states = allocated(flow.states.len(), 0.0)?;

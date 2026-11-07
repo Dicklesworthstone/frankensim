@@ -38,12 +38,15 @@ impl<'a> View<'a> {
 pub(super) fn admit(
     boundaries: Boundaries3d,
     reservoirs: &Reservoirs,
+    pressure_outlets: PressureOutletPolicy,
 ) -> Result<(), DissipationError> {
     for side in BoundarySide::ALL {
         match physical_condition(boundaries, side) {
             None | Some(BoundaryCondition::Reflecting) => {}
             Some(BoundaryCondition::Transmissive)
                 if reservoirs.primitive_face(side, 0).is_some() => {}
+            Some(BoundaryCondition::PressureOutlet { .. })
+                if pressure_outlets == PressureOutletPolicy::ZeroDiffusiveFlux => {}
             _ => {
                 return Err(DissipationError::Invalid(
                     "open molecular sides require complete source-owned reservoir traces",

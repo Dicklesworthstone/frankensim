@@ -131,6 +131,7 @@ fn stage<L: TransportLaw>(op: &mut MolecularTransport3d<L>, flow: &MixtureEuler3
         &mut op.source,
         &op.grid,
         op.boundaries,
+        op.pressure_outlets,
         &flow.reservoirs,
         &op.walls,
         flow.states(),

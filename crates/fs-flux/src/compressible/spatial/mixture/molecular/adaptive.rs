@@ -103,6 +103,7 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
                     &mut self.source,
                     &self.grid,
                     self.boundaries,
+                    self.pressure_outlets,
                     &flow.reservoirs,
                     &self.walls,
                     &self.work.current,

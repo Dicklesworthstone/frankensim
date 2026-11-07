@@ -107,6 +107,7 @@ fn faces(op: &mut MolecularTransport3d<ConstantTransport>, flow: &MixtureEuler3d
         &mut op.source,
         &op.grid,
         op.boundaries,
+        op.pressure_outlets,
         &flow.reservoirs,
         &op.walls,
         flow.states(),

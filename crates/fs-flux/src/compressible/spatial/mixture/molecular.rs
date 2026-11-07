@@ -52,6 +52,23 @@ use sgs::SubgridTransport;
 /// The original public path retains the shared planar/spatial wall condition.
 pub type MolecularWall3d = crate::compressible::molecular::MolecularWall<3>;
 
+/// Explicit molecular closure on source-owned Euler pressure outlets.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum PressureOutletPolicy {
+    /// Pressure alone does not specify molecular exchange; refuse the outlet.
+    #[default]
+    Refuse,
+    /// Set every species, viscous momentum and diffusive energy flux to zero
+    /// on the outlet face. Interior molecular transport remains active.
+    ///
+    /// This assumes zero normal species diffusion, viscous traction and heat
+    /// transfer at the selected truncation boundary. Advective species,
+    /// pressure/momentum and enthalpy still use the original Euler outlet.
+    /// No bath is inferred, no incoming composition is supplied, and no general
+    /// nonreflecting or backflow-stable boundary claim follows.
+    ZeroDiffusiveFlux,
+}
+
 /// Complete molecular interval; physical time remains with its composing owner.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MolecularReport {
@@ -106,12 +123,15 @@ struct Workspace {
 /// species diffusion, heat and stress use the physical half-cell distance and
 /// the bath's enthalpy/velocity for boundary energy transfer. Uniform and
 /// face-resolved reservoirs remain held throughout the requested interval.
-/// Unbound open ends and pressure-only outlets refuse. All successful field
-/// stages reuse flat buffers; no independent reservoir inventory is introduced.
+/// Unbound open ends refuse. Pressure-only outlets also refuse unless the
+/// caller explicitly selects [`PressureOutletPolicy::ZeroDiffusiveFlux`]. All
+/// successful field stages reuse flat buffers; no independent reservoir
+/// inventory is introduced.
 pub struct MolecularTransport3d<L: TransportLaw> {
     source: SpatialTransport<L>,
     grid: CartesianGrid,
     boundaries: Boundaries3d,
+    pressure_outlets: PressureOutletPolicy,
     walls: [MolecularWall3d; 6],
     inertia: Option<WallInertia>,
     bound_flow_workspace_bytes: usize,
@@ -164,10 +184,35 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
     }
 
     /// Bind identical original source/domain, physical grid and boundaries.
-    /// The limit covers this operator together with the supplied flow.
+    /// The limit covers this operator together with the supplied flow. Pressure
+    /// outlets retain the strict [`PressureOutletPolicy::Refuse`] default.
     pub fn new(
         flow: &MixtureEuler3d,
         source: SpatialTransport<L>,
+        maximum_workspace_bytes: usize,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, DissipationError> {
+        Self::new_with_pressure_outlet_policy(
+            flow,
+            source,
+            PressureOutletPolicy::Refuse,
+            maximum_workspace_bytes,
+            cancelled,
+        )
+    }
+
+    /// Prepare the original molecular operator with an explicit outlet closure.
+    ///
+    /// The policy applies only to `BoundaryCondition::PressureOutlet` faces.
+    /// Transmissive faces still require complete source-owned bath traces;
+    /// periodic and reflecting faces retain their existing laws. The selected
+    /// closure follows every SSP/RKL stage, retry and coupled composition.
+    /// It adds no field storage and does not change Euler outlet admission,
+    /// acoustic bounds, backflow refusal or conservative advective transfer.
+    pub fn new_with_pressure_outlet_policy(
+        flow: &MixtureEuler3d,
+        source: SpatialTransport<L>,
+        pressure_outlets: PressureOutletPolicy,
         maximum_workspace_bytes: usize,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<Self, DissipationError> {
@@ -177,7 +222,7 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
                 "volumetric molecular source or caloric path differs",
             ));
         }
-        reservoir::admit(flow.boundaries, &flow.reservoirs)?;
+        reservoir::admit(flow.boundaries, &flow.reservoirs, pressure_outlets)?;
         admit_workspace(
             Self::required_workspace_bytes(flow, &source)?,
             maximum_workspace_bytes,
@@ -190,6 +235,7 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
             source,
             grid,
             boundaries: flow.boundaries,
+            pressure_outlets,
             walls: [MolecularWall3d::SlipAdiabatic; 6],
             inertia: None,
             bound_flow_workspace_bytes: flow.workspace_bytes(),
@@ -222,6 +268,11 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
         )?;
         poll(&mut cancelled)?;
         Ok(result)
+    }
+
+    /// Declared molecular closure on this owner's Euler pressure outlets.
+    pub const fn pressure_outlet_policy(&self) -> PressureOutletPolicy {
+        self.pressure_outlets
     }
     /// Configure one physical reflecting side. Periodic axes have no wall.
     /// Normal wall motion is refused until conservative moving geometry exists.
@@ -519,6 +570,7 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
                                 &mut self.source,
                                 &self.grid,
                                 self.boundaries,
+                                self.pressure_outlets,
                                 trace,
                                 &walls,
                                 &self.work.current,
@@ -618,7 +670,7 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
                 "volumetric molecular field ownership differs",
             ));
         }
-        reservoir::admit(flow.boundaries, &flow.reservoirs)?;
+        reservoir::admit(flow.boundaries, &flow.reservoirs, self.pressure_outlets)?;
         let bytes = self
             .workspace_bytes()
             .checked_add(flow.workspace_bytes())
@@ -770,6 +822,7 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
                 &mut self.source,
                 &self.grid,
                 self.boundaries,
+                self.pressure_outlets,
                 trace,
                 &walls,
                 &self.work.current,
@@ -813,6 +866,7 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
             &mut self.source,
             &self.grid,
             self.boundaries,
+            self.pressure_outlets,
             trace,
             &walls,
             &self.work.stage,
@@ -855,6 +909,7 @@ fn spatial<'a, L: TransportLaw>(
     source: &mut SpatialTransport<L>,
     grid: &CartesianGrid,
     boundaries: Boundaries3d,
+    pressure_outlets: PressureOutletPolicy,
     reservoirs: impl Into<reservoir::View<'a>>,
     walls: &[MolecularWall3d; 6],
     states: &[f64],
@@ -1092,9 +1147,18 @@ fn spatial<'a, L: TransportLaw>(
                 condition: BoundaryCondition::PressureOutlet { .. },
                 ..
             } => {
-                return Err(DissipationError::Invalid(
-                    "pressure alone does not define a species/thermal molecular reservoir",
-                ));
+                if pressure_outlets != PressureOutletPolicy::ZeroDiffusiveFlux {
+                    return Err(DissipationError::Invalid(
+                        "pressure alone does not define a species/thermal molecular reservoir",
+                    ));
+                }
+                // This is the declared physical diffusive boundary flux,
+                // including stress work and species enthalpy. Copying the
+                // interior velocity supplies the existing normal gradient
+                // extrapolation; no bath or additional wall source is created.
+                // Euler separately owns all advective outlet transfer.
+                output.fill(0.0);
+                return Ok(());
             }
             cartesian::FaceKind::PeriodicCopy { .. } => unreachable!(),
         };

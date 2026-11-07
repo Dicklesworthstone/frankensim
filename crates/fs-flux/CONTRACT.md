@@ -7636,3 +7636,38 @@ exact uniform molecular limit. Rustfmt and independent bounded source review
 completed; these gas integration tests were not compiled or executed here.
 Periodic-domain, smooth-field, exploration-only and unqualified turbulence/model
 boundaries remain; no wall/inflow memory or compressible SGS-energy model is added.
+
+### Explicit diffusive closure for evolving-mixture pressure outlets
+
+The spatial mixture `MolecularTransport3d` accepts an explicitly authored
+`PressureOutletPolicy::ZeroDiffusiveFlux` through
+`new_with_pressure_outlet_policy`. The existing `new` constructor and the
+policy default retain `Refuse`: pressure alone does not define a molecular
+bath. The selected closure sets the complete outlet face vector to zero,
+including every species diffusion flux, viscous momentum flux, stress work,
+Fourier/Dufour heat and referenced species-enthalpy transport. Interior original
+Maxwell--Stefan, thermal and full-gradient viscous transport remain active.
+
+This is an explicit zero-normal-diffusive-transfer truncation assumption.
+The existing interior-velocity extrapolation supplies nearby gradient samples;
+no incoming composition or temperature is inferred. It is not a general
+nonreflecting or backflow-stable outflow treatment. Original Euler pressure,
+choking, backflow refusal, acoustic bounds and conservative advective species,
+both shear momenta and energy remain with the source-owned pressure outlet.
+Unbound transmissive ends still refuse, complete reservoirs retain their bath
+exchange, and periodic and reflecting boundaries retain their native laws.
+
+The stored policy follows standalone SSP, stabilized RKL, adaptive RKL and
+coupled molecular/advection stages, retries and boundary accounting. It adds no
+numerical field storage. The coupled owner admits the prepared operator's
+policy and retains its transactional publication and cancellation behavior.
+Existing SGS factories continue to use their original strict constructor;
+this extension does not add an outlet SGS calibration or boundary model.
+
+Five focused regression groups cover strict/default admission and unchanged
+wall/periodic trajectories, independent homogeneous-Neumann species/shear decay
+and its vorticity, uniform stabilized/adaptive stages, all-six-face original
+advective fluxes with a complete opposite bath, and nonuniform draining species
+with conservative energy accounting and final cancellation/replay. Rustfmt
+parsing/formatting and bounded source review completed; these Rust integration
+tests were not compiled or executed in this constrained environment.
