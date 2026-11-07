@@ -74,6 +74,37 @@ fn g1_molecular_predictions_keep_static_receipts_and_drive_native_wetting() {
 }
 
 #[test]
+fn g3_activated_molecular_wetting_changes_native_capillary_momentum() {
+    let bulk = liquid(0, 300.0, Some(0.05));
+    let source = static_card(&bulk, 1.2);
+    let gate = CancelGate::new_clock_free();
+    let fixed_law = molecular_law(100.0);
+    let activated_law = MolecularKineticLaw::try_new_arrhenius(
+        *fixed_law.controls(), 400.0, 2000.0 * 1.380_649e-23,
+    ).unwrap();
+    let make = || flow2(&bulk, &source, PlanarWall2::YMin, 0.00002);
+    let mut fixed = make().with_molecular_kinetic(fixed_law, "T", &gate).unwrap();
+    let mut activated = make().with_molecular_kinetic(activated_law, "T", &gate).unwrap();
+    let mass = activated.flow().ledger_mass_kg_per_m().unwrap();
+    fixed.step_with_gate(&gate).unwrap();
+    activated.step_with_gate(&gate).unwrap();
+    same_state(fixed.flow().lattice(), activated.flow().lattice());
+    assert!(activated.samples().iter().any(|(position, sample)| {
+        sample.applied_angle_radians != fixed.samples()[position].applied_angle_radians
+    }));
+    let expected_frequency = 1e9 * (2000.0_f64 * (1.0 / 400.0 - 1.0 / 300.0)).exp();
+    for (position, sample) in activated.samples() {
+        assert_eq!(sample.material, fixed.samples()[position].material);
+        let actual = sample.molecular_kinetic.unwrap().equilibrium_jump_frequency_per_s;
+        assert!((actual / expected_frequency - 1.0).abs() < 2e-14);
+    }
+    fixed.step_with_gate(&gate).unwrap();
+    activated.step_with_gate(&gate).unwrap();
+    assert_ne!(fixed.flow().lattice().grid.f, activated.flow().lattice().grid.f);
+    assert!((activated.flow().ledger_mass_kg_per_m().unwrap() - mass).abs() < mass * 1e-10);
+}
+
+#[test]
 fn g4_molecular_model_rejects_double_rates_and_rolls_back_domain_exit() {
     let bulk = liquid(0, 300.0, Some(0.05));
     let source = static_card(&bulk, 1.2);

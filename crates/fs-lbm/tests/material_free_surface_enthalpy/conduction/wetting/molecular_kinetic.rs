@@ -19,7 +19,9 @@ fn g1_g4_heated_molecular_wetting_uses_source_temperature_and_refuses_atomically
     let chart = caloric(&liquid);
     let gate = CancelGate::new_clock_free();
 
-    for maximum_temperature_k in [500.0, 410.0] {
+    for (maximum_temperature_k, activation_temperature_k) in
+        [(500.0, 0.0), (410.0, 0.0), (500.0, 2000.0), (410.0, 2000.0)]
+    {
         with_cx(&gate, |cx| {
             let initial = cells().into_iter().map(|mut cell| {
                 cell.velocity_m_s = [0.0; 3];
@@ -29,7 +31,7 @@ fn g1_g4_heated_molecular_wetting_uses_source_temperature_and_refuses_atomically
                 .unwrap()
                 .free_surface3_from_cells(domain(), &initial, cx)
                 .unwrap();
-            let model = MolecularKineticLaw::try_new(MolecularKineticControls {
+            let controls = MolecularKineticControls {
                 // Synthetic model calibration, deliberately separate from the
                 // material card and the static contact-angle measurements.
                 jump_length_m: 5e-10,
@@ -39,7 +41,14 @@ fn g1_g4_heated_molecular_wetting_uses_source_temperature_and_refuses_atomically
                 maximum_speed_m_s: 100.0,
                 minimum_angle_radians: 0.01,
                 maximum_angle_radians: 3.0,
-            }).unwrap();
+            };
+            let model = if activation_temperature_k == 0.0 {
+                MolecularKineticLaw::try_new(controls)
+            } else {
+                MolecularKineticLaw::try_new_arrhenius(
+                    controls, 400.0, activation_temperature_k * 1.380_649e-23,
+                )
+            }.unwrap();
             let mut thermal = flow.with_enthalpy(
                 &law, &chart, FreeSurfaceEnthalpyControls::default(),
                 |_| 200000.0, &gate,
@@ -100,8 +109,12 @@ fn g1_g4_heated_molecular_wetting_uses_source_temperature_and_refuses_atomically
                 } else {
                     assert_eq!(prediction.temperature_k, 400.0);
                 }
+                let frequency_ratio = (activation_temperature_k
+                    * (1.0 / 400.0 - 1.0 / prediction.temperature_k)).exp();
+                near(prediction.equilibrium_jump_frequency_per_s, 1e9 * frequency_ratio, 2e-12);
                 let expected_force = 2.0 * 1.380_649e-23 * prediction.temperature_k
-                    / 5e-10_f64.powi(2) * prediction.signed_speed_m_s.asinh();
+                    / 5e-10_f64.powi(2)
+                    * (prediction.signed_speed_m_s / frequency_ratio).asinh();
                 near(prediction.driving_force_per_length_n_m, expected_force, 2e-12);
                 assert_eq!(prediction.applied_angle_radians, sample.applied_angle_radians);
                 assert!(prediction.dissipation_per_length_w_m >= 0.0);

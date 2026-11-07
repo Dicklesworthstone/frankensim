@@ -7,3 +7,24 @@
 `MaterialFreeSurface3::prepare_native_impulse_stencil` reuses original physical impulse admission and scenario speed, while explicitly returning native-unit staging for a composing owner’s SI transaction. It does not silently reinterpret lattice readback as physical units.
 
 The native stencil's three focused tests execute actual retained populations, force-frame stress, readback and transactional refusal. A further native refinement regression checks retained solid keys outside the physical domain and beyond representable child Morton coordinates: refinement refuses before allocation, preserving source mass, geometry and populations. All six native refinement cases pass after this guard. The prior three SI receipt checks remain unchanged; full streaming/material integration was not executed.
+
+## Temperature-activated molecular wetting
+
+`MolecularKineticLaw::try_new_arrhenius` optionally evolves the equilibrium jump
+frequency as `K(T)=K_ref exp[(E_a/k_B)(1/T_ref-1/T)]` inside the original calibrated
+temperature domain. Activation energy is explicit joules per molecular event;
+the frequency in `MolecularKineticControls` is its value at the declared reference
+temperature. This constant-prefactor Arrhenius closure adds no inferred adhesion
+measurement, Eyring prefactor, extrapolation or activation-heat source. The
+original constructor still selects constant frequency. Reference-temperature and
+zero-activation responses preserve that original model exactly.
+
+The same law feeds the existing dense, sparse and enthalpy wall-angle owners,
+retaining original interface claims and actual local temperature. Accepted samples
+report the local jump frequency separately from static material measurements.
+The rate and velocity scales must be finite and positive across both temperature
+bounds; thermal domain refusal retains native flow, enthalpy and wetting history.
+Per-length molecular loss remains diagnostic, without claiming a resolved line
+measure, a global surface-energy balance or heat deposition. G1/G3 unit cases
+check independent forward kinetics, low-speed friction and constant-model limits;
+the existing thermal integration case also exercises activated rates and rollback.
