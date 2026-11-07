@@ -136,14 +136,17 @@ impl Clone for Scratch {
 #[derive(Debug)]
 pub(super) struct Solved {
     dt_bits: u64,
+    tol_bits: u64,
+    substeps: u32,
     tilde: Vec<f64>,
     pub(super) next: Vec<f64>,
     pub(super) int: Vec<f64>,
 }
 
-/// A one-entry cache of the last solve, keyed on the dt and the bits of the state. It is shared
-/// by clones of a state (so a trial step on a clone reuses the response solve) and is never part
-/// of equality.
+/// A one-entry cache of the last solve, keyed on dt, the accuracy settings and the bits of the
+/// state. It is shared by clones of a state (so a trial step on a clone reuses the response
+/// solve) and is never part of equality. State admission already checks the physical operator;
+/// that operator can have propagators with different numerical accuracy settings.
 #[derive(Debug, Default)]
 pub(super) struct SolveCache(Mutex<Option<Arc<Solved>>>);
 
@@ -378,12 +381,16 @@ impl KrylovKernel {
         Ok((cur, int, worst))
     }
 
-    /// The solve for `state`, reusing the cached one when the dt and every bit of the state match.
+    /// The solve for `state`, reusing the cached one only for the same dt, accuracy settings and
+    /// every bit of the state. In particular, a loose response solve cannot satisfy a later
+    /// propagator's tighter tolerance just because both propagate the same physical operator.
     pub(super) fn solve_cached(&self, dt: f64, state: &DgState) -> Result<Arc<Solved>, DuctError> {
         {
             let held = state.solve_cache.0.lock().unwrap_or_else(PoisonError::into_inner);
             if let Some(hit) = held.as_ref() {
                 if hit.dt_bits == dt.to_bits()
+                    && hit.tol_bits == self.tol.to_bits()
+                    && hit.substeps == self.substeps
                     && hit.tilde.len() == state.tilde.len()
                     && hit.tilde.iter().zip(&state.tilde).all(|(a, b)| a.to_bits() == b.to_bits())
                 {
@@ -394,6 +401,8 @@ impl KrylovKernel {
         let (next, int, _) = self.solve_with(&state.tilde, self.substeps)?;
         let solved = Arc::new(Solved {
             dt_bits: dt.to_bits(),
+            tol_bits: self.tol.to_bits(),
+            substeps: self.substeps,
             tilde: state.tilde.clone(),
             next,
             int,
@@ -487,12 +496,12 @@ impl<M: DgMedium> DgDuct<M> {
                     (Err(e), _) | (_, Err(e)) => return Err(e),
                 }
             }
-            if !failed {
+            if !failed && certificate <= tol {
                 break;
             }
             if substeps >= MAX_SUBSTEPS {
                 return Err(DuctError::PropagatorCertificate {
-                    residual: f64::INFINITY,
+                    residual: if failed { f64::INFINITY } else { certificate },
                     tol,
                 });
             }

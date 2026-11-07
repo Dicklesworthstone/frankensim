@@ -203,6 +203,62 @@ fn a_zero_state_solves_to_zero_and_a_nonfinite_state_refuses() {
 }
 
 #[test]
+fn a_cached_response_cannot_bypass_a_tighter_propagator_tolerance() {
+    let duct = bore(0.001, 3, 3, 10, 4, MAX_DG_PROPAGATOR_DOFS);
+    let loose = duct.build_krylov_propagator(DT, 1e-3).unwrap();
+    let tight = duct.build_krylov_propagator(DT, TOL).unwrap();
+    let state = duct.project_initial_state(|x| (73.0 * x).sin(), |x| 1e-7 * (97.0 * x).cos());
+
+    loose.multiport_response(&state).unwrap();
+    assert_eq!(kernel_of(&loose).report().solves, 1);
+    let response = tight.multiport_response(&state).unwrap();
+    assert_eq!(kernel_of(&tight).report().solves, 1, "the tighter response must solve under its own accuracy budget");
+
+    // An uncached state with the same physical fields is an independent reference. A stale
+    // loose response must not change either the promised pressure or the actual tight step.
+    let mut fresh = state.clone();
+    fresh.solve_cache = SolveCache::default();
+    let expected = tight.multiport_response(&fresh).unwrap();
+    let scale = expected.history_pressure_pa[0].abs().max(1e-30);
+    assert!((response.history_pressure_pa[0] - expected.history_pressure_pa[0]).abs() < 10.0 * TOL * scale);
+    let before = kernel_of(&tight).report().solves;
+    let mut trial = state.clone();
+    let actual_step = tight.step(&mut trial, &input(1e-7)).unwrap();
+    let expected_step = tight.step(&mut fresh, &input(1e-7)).unwrap();
+    assert_eq!(kernel_of(&tight).report().solves, before, "the accepted tight solve remains reusable by a trial state");
+    let diff: Vec<_> = trial.tilde.iter().zip(&fresh.tilde).map(|(a, b)| a - b).collect();
+    assert!(norm(&diff) <= 10.0 * TOL * norm(&fresh.tilde));
+    let actual = actual_step.port_outputs[0].conjugate_rate;
+    let expected = expected_step.port_outputs[0].conjugate_rate;
+    assert!((actual - expected).abs() <= 10.0 * TOL * expected.abs());
+}
+
+#[test]
+fn a_cached_response_is_bound_to_the_accepted_substep_count() {
+    let duct = bore(0.001, 3, 3, 10, 4, MAX_DG_PROPAGATOR_DOFS);
+    let propagator = duct.build_krylov_propagator(DT, TOL).unwrap();
+    let state = duct.project_initial_state(|x| (73.0 * x).sin(), |_| 0.0);
+    propagator.multiport_response(&state).unwrap();
+
+    // Re-evaluate the same operator, dt and tolerance using the independent refined action
+    // that the builder uses for its certificate. That action must not read the coarse cache.
+    let mut refined = propagator.clone();
+    let PropagatorKernel::Krylov(ref mut kernel) = refined.kernel else {
+        unreachable!();
+    };
+    kernel.substeps *= 2;
+    kernel.stats = Arc::new(KrylovStats::default());
+    let expected = kernel.solve_with(&state.tilde, kernel.substeps).unwrap();
+    let before = kernel.report().solves;
+    let solved = kernel.solve_cached(DT, &state).unwrap();
+    assert_eq!(kernel.report().solves, before + 1, "a different accepted substep count needs its own solve");
+    let diff: Vec<_> = solved.next.iter().zip(&expected.0).map(|(a, b)| a - b).collect();
+    assert!(norm(&diff) <= 10.0 * TOL * norm(&expected.0));
+    assert!(Arc::ptr_eq(&solved, &kernel.solve_cached(DT, &state).unwrap()));
+    assert_eq!(kernel.report().solves, before + 1, "unchanged accuracy settings still reuse the cached action");
+}
+
+#[test]
 fn an_oboe_sized_bore_certifies_and_steps_on_the_krylov_kernel() {
     // The target configuration of the sparse kernel: a reed tube, a long cone and a bell, 39 elements, order 1,
     // 2 wall points, 40 poles: 2*39*2 + 2*39*2*40 = 6396 DOFs (three times the dense cap).
