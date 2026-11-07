@@ -32,7 +32,11 @@ pub use array::{
     PreparedImpedanceWallCompactSourceObserver,
 };
 pub use force::{ImpedanceWallForceDiagnostics, PreparedImpedanceWallForce};
-pub use quadrupole::{ImpedanceWallQuadrupoleDiagnostics, PreparedImpedanceWallQuadrupole};
+pub use quadrupole::{
+    IMPEDANCE_WALL_REFLECTED_QUADRUPOLE_ARRAY_SCOPE, IMPEDANCE_WALL_TOTAL_QUADRUPOLE_ARRAY_SCOPE,
+    ImpedanceWallQuadrupoleDiagnostics, PreparedImpedanceWallQuadrupole,
+    PreparedImpedanceWallQuadrupoleObserver,
+};
 
 const SCOPE: &str = "Prescribed stationary compact 3D volume source in one homogeneous \
 lossless fluid, spherical reflection from an infinite passive locally reacting impedance \

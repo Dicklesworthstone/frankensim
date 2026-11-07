@@ -93,6 +93,22 @@ for a narrow lossy surface mode including axial pressure-null shear velocity.
 This remains a prescribed compact moment, without finite-source resolution,
 unresolved subgrid sound, source loading, finite edges or bulk propagation loss.
 
+`PreparedImpedanceWallQuadrupoleObserver` extends the same native wall kernel
+to original volume-stress cell assemblies, with reflected-only and coherent
+total views. One cached physical 4-by-6 map per cell feeds the existing generic
+stress-array reducer: tensor entries, trace and both shear contractions remain
+coherent, and explicitly independent cells still retain their own direct/returned
+cross terms. Caller-supplied low-rank factors retain inter-cell phase before
+forming pressure power, full velocity covariance and signed active/reactive
+intensity. Original-clock harmonic lines add no delay. A shared preparation
+budget bounds all cell quadrature, retaining native per-cell diagnostics;
+warm application allocates nothing and performs no spectral integration.
+Reflected self-fields and wall receivers are admitted; singular total self-fields,
+invalid source counts, exhausted budgets and cancellation refuse atomically.
+`impedance_wall_quadrupole_array` exercises native-cell superposition, finite-wall
+Robin absorption, destructive and partial coherence, ideal-wall path cross terms,
+aggregate work, cancellation and self-field admission.
+
 `PreparedImpedanceWallCompactSourceObserver` prepares complete physical Q/F
 source assemblies for reflected-only or coherent total observation, including
 receivers on the wall. One 4-by-4 Cartesian transfer per original source feeds

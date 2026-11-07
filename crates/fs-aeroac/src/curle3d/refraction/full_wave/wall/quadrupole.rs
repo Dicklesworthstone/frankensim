@@ -21,6 +21,12 @@ use crate::observation::HarmonicFieldLine;
 use core::f64::consts::{PI, SQRT_2};
 use fs_math::{c64::C64, det};
 
+mod array;
+pub use array::{
+    IMPEDANCE_WALL_REFLECTED_QUADRUPOLE_ARRAY_SCOPE, IMPEDANCE_WALL_TOTAL_QUADRUPOLE_ARRAY_SCOPE,
+    PreparedImpedanceWallQuadrupoleObserver,
+};
+
 const REFLECTED_SCOPE: &str = "Prescribed stationary symmetric 3D Lighthill stress \
 moment [N m]; reflected spherical-wave pressure and vector velocity in one homogeneous \
 lossless fluid at an infinite passive locally reacting impedance wall. Full trace, \
