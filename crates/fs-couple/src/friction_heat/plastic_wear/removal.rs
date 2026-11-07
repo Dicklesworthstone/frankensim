@@ -15,6 +15,7 @@
 //! mechanical work needed to move the thermal control volumes are not modeled.
 
 use fs_exec::Cx;
+use fs_material::phase::ResolvedHeatCapacityCurve;
 use fs_thermal::enthalpy::removal::{
     MaterialRemoval, MaterialRemovalAudit, MaterialRemovalTolerances,
 };
@@ -100,51 +101,18 @@ impl<'a> PlasticSlidingHeatContact<'a> {
         self.admit_thermal(thermal)?;
         let area = self.admit_footprint(&self.state, cx)?;
         let volumes = self.unexported_wear_volume_m3();
-        if volumes.iter().any(|volume| !volume.is_finite() || *volume < 0.0) {
-            return Err(PlasticSlidingHeatError::Invalid(
-                "thermal wear checkpoint exceeds the accepted original wear history",
-            ));
-        }
-        let cells = self.route.cells();
-        let mut removals = Vec::with_capacity(2);
-        for side in 0..2 {
-            let expected = thermal.cells()[&cells[side]].clone();
-            let curve = self.caloric[side].curve();
-            let values = curve.values_at_specific_enthalpy(expected.specific_h_j_kg)?;
-            let caloric_identity = thermal
-                .material_caloric_identity(expected.material_id)?
-                .ok_or(PlasticSlidingHeatError::Invalid(
-                    "wear export requires the original caloric identity",
-                ))?;
-            removals.push(MaterialRemoval {
-                expected,
-                removed_volume_m3: volumes[side],
-                density_kg_m3: values.bulk_density_kg_m3,
-                replacement_geometry: replacement_geometry[side],
-                caloric_identity,
-            });
-        }
-        let (thermal, report) = thermal.remove_material_before_pending_events(
-            &removals,
+        let (thermal, route, report) = export_original_receivers(
+            thermal,
+            &self.route,
+            self.caloric,
+            volumes,
+            area,
+            replacement_geometry,
             patches,
-            tolerances,
-            || checkpoint(cx),
-        )?;
-        let route = FrictionHeatRoute::from_link_with_resistance(
-            &thermal,
-            self.route.link_id(),
             conductivity_w_m_k,
-            self.route.area_resistance_m2_k_w(),
+            tolerances,
+            cx,
         )?;
-        if route.cells() != cells
-            || (route.contact_area_m2() - area).abs()
-                > 64.0 * f64::EPSILON * route.contact_area_m2().max(area)
-        {
-            return Err(PlasticSlidingHeatError::Invalid(
-                "wear export must retain ordered original cells and actual loaded area",
-            ));
-        }
-        admit_registration(&self.route, &route)?;
         let mut contact = self.clone();
         contact.route = route;
         contact.thermal_wear_checkpoint_m3 = self.state.wear_state().volumes_m3();
@@ -156,6 +124,78 @@ impl<'a> PlasticSlidingHeatContact<'a> {
             report,
         })
     }
+}
+
+/// Both concrete contact owners admit their original thermal checkpoint first.
+/// Inventory removal, caloric transport and prismatic registration then have one
+/// native path, independent of how the contact obtained its hardness field.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn export_original_receivers<'t>(
+    thermal: &DepositionSimulation<'t>,
+    original_route: &FrictionHeatRoute,
+    caloric: [&ResolvedHeatCapacityCurve; 2],
+    volumes: [f64; 2],
+    area: f64,
+    replacement_geometry: [CellGeometry; 2],
+    patches: &[ContactPatchUpdate],
+    conductivity_w_m_k: [f64; 2],
+    tolerances: MaterialRemovalTolerances,
+    cx: &Cx<'_>,
+) -> Result<
+    (
+        DepositionSimulation<'t>,
+        FrictionHeatRoute,
+        MaterialRemovalAudit,
+    ),
+    PlasticSlidingHeatError,
+> {
+    if volumes
+        .iter()
+        .any(|volume| !volume.is_finite() || *volume < 0.0)
+    {
+        return Err(PlasticSlidingHeatError::Invalid(
+            "thermal wear checkpoint exceeds the accepted original wear history",
+        ));
+    }
+    let cells = original_route.cells();
+    let mut removals = Vec::with_capacity(2);
+    for side in 0..2 {
+        let expected = thermal.cells()[&cells[side]].clone();
+        let curve = caloric[side].curve();
+        let values = curve.values_at_specific_enthalpy(expected.specific_h_j_kg)?;
+        let caloric_identity = thermal
+            .material_caloric_identity(expected.material_id)?
+            .ok_or(PlasticSlidingHeatError::Invalid(
+                "wear export requires the original caloric identity",
+            ))?;
+        removals.push(MaterialRemoval {
+            expected,
+            removed_volume_m3: volumes[side],
+            density_kg_m3: values.bulk_density_kg_m3,
+            replacement_geometry: replacement_geometry[side],
+            caloric_identity,
+        });
+    }
+    let (thermal, report) =
+        thermal.remove_material_before_pending_events(&removals, patches, tolerances, || {
+            checkpoint(cx)
+        })?;
+    let route = FrictionHeatRoute::from_link_with_resistance(
+        &thermal,
+        original_route.link_id(),
+        conductivity_w_m_k,
+        original_route.area_resistance_m2_k_w(),
+    )?;
+    if route.cells() != cells
+        || (route.contact_area_m2() - area).abs()
+            > 64.0 * f64::EPSILON * route.contact_area_m2().max(area)
+    {
+        return Err(PlasticSlidingHeatError::Invalid(
+            "wear export must retain ordered original cells and actual loaded area",
+        ));
+    }
+    admit_registration(original_route, &route)?;
+    Ok((thermal, route, report))
 }
 
 // Both routes have already passed the native opposing-prism admission.
@@ -209,9 +249,7 @@ fn admit_registration(
         projection = finite(projection + shift[axis] * normal[axis])?;
     }
     for axis in 0..3 {
-        if finite(shift[axis] - projection * normal[axis])?.abs()
-            > 256.0 * f64::EPSILON * scale
-        {
+        if finite(shift[axis] - projection * normal[axis])?.abs() > 256.0 * f64::EPSILON * scale {
             return Err(PlasticSlidingHeatError::Invalid(
                 "wear export cannot translate the original grid tangentially",
             ));
@@ -220,14 +258,15 @@ fn admit_registration(
     for side in 0..2 {
         let old_direction = inward_direction(before, side, old_face)?;
         let new_direction = inward_direction(after, side, new_face)?;
-        if (0..3).any(|axis| {
-            (old_direction[axis] - new_direction[axis]).abs() > 256.0 * f64::EPSILON
-        }) {
+        if (0..3)
+            .any(|axis| (old_direction[axis] - new_direction[axis]).abs() > 256.0 * f64::EPSILON)
+        {
             return Err(PlasticSlidingHeatError::Invalid(
                 "wear export cannot rotate the original material/grid registration",
             ));
         }
-        let old_area = finite(before.geometry[side].volume_m3 / (2.0 * before.distances_m()[side]))?;
+        let old_area =
+            finite(before.geometry[side].volume_m3 / (2.0 * before.distances_m()[side]))?;
         let new_area = finite(after.geometry[side].volume_m3 / (2.0 * after.distances_m()[side]))?;
         if (old_area - new_area).abs() > 128.0 * f64::EPSILON * old_area.max(new_area) {
             return Err(PlasticSlidingHeatError::Invalid(

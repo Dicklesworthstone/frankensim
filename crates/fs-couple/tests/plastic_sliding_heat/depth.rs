@@ -1,5 +1,8 @@
 //! Live finite-cell heat, original H(T,z), actual slip and three normal accounts.
 
+#[path = "depth/removal.rs"]
+mod removal;
+
 use super::*;
 use fs_contact::normal_patch::FiniteGapPlasticLinearSolver;
 use fs_contact::normal_patch::plastic_source::depth_wear::SourceDepthHardnessWear;

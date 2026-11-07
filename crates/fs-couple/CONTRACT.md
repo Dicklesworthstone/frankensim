@@ -1182,6 +1182,28 @@ actual reversal under force and spring control, all three work accounts and
 transactional source, removal, iteration and cancellation refusal. Native Rust
 compilation and test execution were unavailable during this implementation.
 
+### Conservative export after depth-hardness sliding
+
+`DepthSlidingHeatContact::export_wear_candidate` removes newly worn material
+through the same native receiver-export path as ordinary hardness-limited
+sliding. Original sourced density sets removed mass, and the thermal inventory
+owner carries the material's current signed enthalpy out with that mass.
+Remaining specific enthalpy and temperature stay unchanged, including for a
+negative enthalpy datum. This material outflow is never deposited again as heat.
+
+The export checkpoint excludes wear already present at binding and prevents a
+second export of the same volume. Original cumulative removal limits survive
+export. Explicit shortened prismatic geometry and affected contact patches
+retain the ordered bodies, cross sections, contact area and tangent registration;
+subsequent heat steps use the remaining masses and new conduction distances.
+Hardness profiles, actual recession, indentation and shear history remain with
+the original contact owner. Geometry, inventory or cancellation refusal returns
+no partial state. Debris evolution and resolved remeshing remain outside this
+bounded heat-then-export approximation. Three additional regression definitions
+cover signed enthalpy, the next finite-capacity heat balance, repeated/prebinding
+export, the cumulative envelope and transactional refusal; native execution
+remains unverified because the runtime was unavailable.
+
 ## Static breakaway and kinetic sliding through joint heat and motion
 
 Existing joint-friction thermal source callbacks now accept explicitly authored

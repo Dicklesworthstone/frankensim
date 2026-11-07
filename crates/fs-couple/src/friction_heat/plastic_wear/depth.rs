@@ -17,6 +17,9 @@
 //! Geometry and thermal mass stay fixed during an interval; cumulative removal
 //! is constrained against the original receiving volumes.
 
+/// Conservative export of newly worn mass and its current signed enthalpy.
+pub mod removal;
+
 use fs_contact::normal_patch::plastic_source::wear::sliding::hardness::{
     HardnessSlidingAdvance, HardnessSlidingContinuation, HardnessSlidingControl,
     SourceDepthSlidingWear,
