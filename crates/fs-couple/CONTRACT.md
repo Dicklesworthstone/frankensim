@@ -5130,3 +5130,30 @@ variable-conductivity/cancellation refusal followed by replay. They are not
 claimed executed without the full fs-couple dependency closure. Carrier
 transport, temperature-dependent resonant/conductive coefficient work and
 induction remain outside this fixed-source bridge.
+
+## Combined Kelvin-Maxwell constrained shell image
+
+`PlaneStressPoint::viscoelastic_image` preserves the complete source Kelvin
+matrix together with every Maxwell history. The existing `relaxation_image`
+keeps its pure-Maxwell refusal and zero-Kelvin arithmetic. At most one retained
+viscous normal coordinate is admitted by the combined image; the full body and
+descriptor remain the owners for multiple coupled viscous normal histories.
+
+With `L = D_nn^-1 D_nu`, the coordinate `y = sqrt(V) (n + L q)` removes the
+normal/velocity skew coupling. The original positive normal mobility and
+Maxwell rates enter the same symmetric relaxation transform. Its channels
+include thickness-normal Kelvin relaxation, even for a source with no Maxwell
+branches. `feedthrough_viscosity` retains the complete remaining matrix
+`D_uu - D_un D_nn^-1 D_nu`, evaluated by the original factor-congruence owner.
+Its velocity power and the relaxation-channel power must both be included
+exactly once; no diagonal decay substitution or extra loss fit is implied.
+
+`original_memory_at(q, z)` reconstructs original Maxwell coordinates and the
+physical normal strain, including the `-L q` contribution. The displacement-free
+observation refuses when that contribution is required. Stress observations
+accept actual velocity and retain physical transverse shear. Unit-volume
+`project_shell` continues to reuse identical rates; Maxwell history-map rows
+remain unchanged, while physical normal-strain rows scale by `1/sqrt(V)` and
+their displacement offset follows the same strain-column map. Complete physical
+energy reconstruction, passivity, source domain and work-capacity gates remain
+binding. No new constitutive law, eigensolver or time integrator is introduced.

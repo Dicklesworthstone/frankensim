@@ -1,5 +1,6 @@
-//! Exact coordinates for the complete condensed Maxwell energy, not a fit.
+//! Exact coordinates for complete constrained material energy, not a fit.
 use super::*;
+use fs_math::dd::Dd;
 
 /// Exact independent relaxation coordinates of one original plane-stress point.
 /// The source still owns normal-strain elimination, its full 3D law and strain
@@ -14,6 +15,16 @@ pub struct PlaneStressRelaxation {
     rows: Vec<Vec<f64>>,
     rates: Vec<f64>,
     original_from_memory: Vec<f64>,
+    // A retained viscous normal strain also depends on displacement: n=y-L*q.
+    // Empty for the original pure-Maxwell image, whose arithmetic is unchanged.
+    original_from_displacement: Vec<f64>,
+}
+
+struct RelaxationChange {
+    energy: Vec<f64>,
+    rates: Vec<f64>,
+    original_memory_scale: Vec<f64>,
+    original_from_displacement: Vec<f64>,
 }
 
 impl PlaneStressPoint {
@@ -36,9 +47,118 @@ impl PlaneStressPoint {
                 "Kelvin plane-stress viscosity is not a pure Maxwell relaxation image",
             ));
         }
+        self.relaxation_coordinates(max_scalar_terms, gate, None)
+    }
+
+    /// Express complete Kelvin-Maxwell material as passive relaxation channels
+    /// PLUS its full, instantaneous Kelvin feedthrough. Nothing is fitted or
+    /// discarded. The original pure-Maxwell entry and its refusal are unchanged.
+    ///
+    /// At most one retained viscous normal coordinate is supported, as in the
+    /// five-strain shell. With L=D_nn^-1 D_nu, y=sqrt(V)*(n+L*q) removes the
+    /// normal/velocity skew coupling. Its positive mobility is V*D_nn^-1; the
+    /// existing symmetric relaxation transform then applies to [a,y]. The
+    /// original factor-congruence owner supplies D_uu-D_un D_nn^-1 D_nu.
+    /// Multiple coupled viscous normal histories require the complete body or
+    /// descriptor and are explicitly refused by this coordinate image.
+    pub fn viscoelastic_image(
+        self,
+        max_scalar_terms: usize,
+        gate: &CancelGate,
+    ) -> Result<PlaneStressRelaxation> {
+        poll(gate)?;
+        if self.source.viscosity_matrix().iter().all(|v| *v == 0.0) {
+            return self.relaxation_image(max_scalar_terms, gate);
+        }
+        let Some(normal) = &self.normal_viscosity else {
+            return self.relaxation_coordinates(max_scalar_terms, gate, None);
+        };
+        if normal.indices.len() != 1 {
+            return Err(bad(
+                "Kelvin-Maxwell image supports at most one retained viscous normal strain",
+            ));
+        }
         let n = self.coordinates;
         let r = self.memory_coordinates();
         let m = n + r;
+        let last = m - 1;
+        let extra = 32 * (m as u128).pow(2) + 8 * r as u128 * n as u128 + 128;
+        if extra > max_scalar_terms as u128 {
+            return Err(bad(
+                "Kelvin-Maxwell coordinate change exceeds scalar-work budget",
+            ));
+        }
+        let root = det::sqrt(self.source.volume_m3());
+        let inverse_root = root.recip();
+        let mobility = self.source.volume_m3() * normal.mobility[0];
+        if !inverse_root.is_finite() || !mobility.is_finite() || mobility <= 0.0 {
+            return Err(bad("normalized Kelvin normal mobility is unrepresentable"));
+        }
+        // Original [q,a,n] = [q,a,y/sqrt(V)-L*q]. This sparse congruence
+        // uses the existing compensated scalar owner for its signed work sums.
+        // Maxwell history-history entries are copied without new arithmetic.
+        let mut energy = self.energy.clone();
+        for i in 0..m {
+            poll(gate)?;
+            let left = if i < n { -normal.coupling[i] } else { 0.0 };
+            for j in i..m {
+                let right = if j < n { -normal.coupling[j] } else { 0.0 };
+                let value = if i == last {
+                    self.energy[last * m + last] / root / root
+                } else if j == last {
+                    (Dd::from_f64(self.energy[i * m + last])
+                        + Dd::from_f64(left) * Dd::from_f64(self.energy[last * m + last]))
+                    .to_f64()
+                        / root
+                } else if i < n || j < n {
+                    (Dd::from_f64(self.energy[i * m + j])
+                        + Dd::from_f64(left) * Dd::from_f64(self.energy[last * m + j])
+                        + Dd::from_f64(right) * Dd::from_f64(self.energy[i * m + last])
+                        + (Dd::from_f64(left) * Dd::from_f64(right))
+                            * Dd::from_f64(self.energy[last * m + last]))
+                    .to_f64()
+                } else {
+                    self.energy[i * m + j]
+                };
+                energy[i * m + j] = value;
+                energy[j * m + i] = value;
+            }
+        }
+        if !finite(&energy) {
+            return Err(bad("Kelvin-Maxwell energy coordinate change overflow"));
+        }
+        let mut rates = self.rates.clone();
+        rates.push(mobility);
+        let mut original_memory_scale = vec![1.0; r];
+        original_memory_scale[r - 1] = inverse_root;
+        let mut original_from_displacement = vec![0.0; r * n];
+        for i in 0..n {
+            original_from_displacement[(r - 1) * n + i] = -normal.coupling[i];
+        }
+        self.relaxation_coordinates(
+            max_scalar_terms - extra as usize,
+            gate,
+            Some(RelaxationChange {
+                energy,
+                rates,
+                original_memory_scale,
+                original_from_displacement,
+            }),
+        )
+    }
+
+    fn relaxation_coordinates(
+        self,
+        max_scalar_terms: usize,
+        gate: &CancelGate,
+        change: Option<RelaxationChange>,
+    ) -> Result<PlaneStressRelaxation> {
+        poll(gate)?;
+        let n = self.coordinates;
+        let r = self.memory_coordinates();
+        let m = n + r;
+        let energy = change.as_ref().map_or(&self.energy, |c| &c.energy);
+        let internal_rates = change.as_ref().map_or(&self.rates, |c| &c.rates);
         let constrained = self.normal_map.len();
         let d = n + constrained;
         let work = 512 * (r as u128).pow(3)
@@ -87,6 +207,7 @@ impl PlaneStressPoint {
                 rows: Vec::new(),
                 rates: Vec::new(),
                 original_from_memory: Vec::new(),
+                original_from_displacement: Vec::new(),
             });
         }
         // H=[q,a]^T[A B; B^T D][q,a]/2, a'=-R(B^T q+D a).
@@ -94,15 +215,18 @@ impl PlaneStressPoint {
         // z=sqrt(Lambda) U^T R^-1/2 a,
         // c=-B sqrt(R) U Lambda^-1/2.
         // Therefore H=q^T K_eq q/2+|c^T q-z|^2/2 and z'=Lambda(c^T q-z).
-        let scale = self.rates.iter().copied().fold(0.0_f64, f64::max);
-        let roots: Vec<_> = self.rates.iter().map(|v| det::sqrt(v / scale)).collect();
+        let scale = internal_rates.iter().copied().fold(0.0_f64, f64::max);
+        let roots: Vec<_> = internal_rates
+            .iter()
+            .map(|v| det::sqrt(v / scale))
+            .collect();
         if roots.iter().any(|v| !v.is_finite() || *v <= 0.0) {
             return Err(bad(
                 "plane-stress memory rates are unresolved under common scaling",
             ));
         }
         let matrix: Vec<_> = (0..r * r)
-            .map(|k| roots[k / r] * self.energy[(n + k / r) * m + n + k % r] * roots[k % r])
+            .map(|k| roots[k / r] * energy[(n + k / r) * m + n + k % r] * roots[k % r])
             .collect();
         if !finite(&matrix) {
             return Err(bad("plane-stress rate matrix overflow"));
@@ -151,9 +275,7 @@ impl PlaneStressPoint {
                 (0..n)
                     .map(|i| {
                         -(0..r)
-                            .map(|j| {
-                                self.energy[i * m + n + j] * original_from_memory[j * r + channel]
-                            })
+                            .map(|j| energy[i * m + n + j] * original_from_memory[j * r + channel])
                             .sum::<f64>()
                     })
                     .collect()
@@ -191,12 +313,10 @@ impl PlaneStressPoint {
                     };
                     value += a * b;
                 }
-                let diagonal =
-                    det::sqrt(self.energy[i * m + i]) * det::sqrt(self.energy[j * m + j]);
+                let diagonal = det::sqrt(energy[i * m + i]) * det::sqrt(energy[j * m + j]);
                 if !value.is_finite()
                     || !diagonal.is_finite()
-                    || (value - self.energy[i * m + j]).abs()
-                        > 1e-9 * diagonal.max(f64::MIN_POSITIVE)
+                    || (value - energy[i * m + j]).abs() > 1e-9 * diagonal.max(f64::MIN_POSITIVE)
                 {
                     return Err(bad(
                         "plane-stress channels do not reconstruct the complete original energy",
@@ -204,6 +324,23 @@ impl PlaneStressPoint {
                 }
             }
         }
+        let original_from_displacement = if let Some(change) = change {
+            for i in 0..r {
+                for j in 0..r {
+                    let value = original_from_memory[i * r + j];
+                    let scaled = value * change.original_memory_scale[i];
+                    if !scaled.is_finite() || (value != 0.0 && scaled == 0.0) {
+                        return Err(bad(
+                            "original Kelvin-Maxwell history scale is unrepresentable",
+                        ));
+                    }
+                    original_from_memory[i * r + j] = scaled;
+                }
+            }
+            change.original_from_displacement
+        } else {
+            Vec::new()
+        };
         poll(gate)?;
         Ok(PlaneStressRelaxation {
             point: self,
@@ -211,6 +348,7 @@ impl PlaneStressPoint {
             rows,
             rates,
             original_from_memory,
+            original_from_displacement,
         })
     }
 }
@@ -220,7 +358,8 @@ impl PlaneStressRelaxation {
     /// columns and quadrature volume, without another constitutive eigensolve.
     /// Prepare `self` with `new_shell` on the five identity engineering-strain
     /// columns at volume 1. Every rate and original-history transformation is
-    /// reused exactly; only strain rows and equilibrium work are projected.
+    /// reused exactly; only strain rows, physical-history scales and work are
+    /// projected. Retained viscous normal strains keep their physical units.
     ///
     /// The underlying full-law point is prepared by the same `new_shell` owner,
     /// so source strain limits, physical stresses and normal reconstruction stay
@@ -300,10 +439,12 @@ impl PlaneStressRelaxation {
         if !finite(&equilibrium) || rows.iter().flatten().any(|v| !v.is_finite()) {
             return Err(bad("shell image projection overflow"));
         }
-        // a_global=sqrt(V)*a_unit and z_global=sqrt(V)*z_unit, hence the
-        // original-from-image memory matrix is UNCHANGED. Check the original
-        // complete Q under [q_unit,a_unit]=[S*q,a_global/sqrt(V)].
+        // Maxwell factor histories and image histories scale by sqrt(V), but
+        // original normal strain does not. Check the full physical Q under
+        // q_unit=S*q, a_unit=a_global/sqrt(V), n_unit=n_global.
         let original = 5 + r;
+        let maxwell = self.point.rates.len();
+        let physical_scale = |index: usize| if index < maxwell { 1.0 } else { root };
         for i in 0..m {
             poll(gate)?;
             for j in i..m {
@@ -320,9 +461,11 @@ impl PlaneStressRelaxation {
                 } else if i < n {
                     (0..5).fold(0.0, |s, k| {
                         s + root * columns[i][k] * self.point.energy[k * original + 5 + j - n]
-                    })
+                    }) * physical_scale(j - n)
                 } else {
-                    self.point.energy[(5 + i - n) * original + 5 + j - n]
+                    physical_scale(i - n)
+                        * self.point.energy[(5 + i - n) * original + 5 + j - n]
+                        * physical_scale(j - n)
                 };
                 let scale = det::sqrt(point.energy[i * m + i]) * det::sqrt(point.energy[j * m + j]);
                 if !expected.is_finite()
@@ -336,13 +479,41 @@ impl PlaneStressRelaxation {
                 }
             }
         }
+        let mut original_from_memory = self.original_from_memory.clone();
+        for i in maxwell..r {
+            for j in 0..r {
+                let value = original_from_memory[i * r + j];
+                let scaled = value / root;
+                if !scaled.is_finite() || (value != 0.0 && scaled == 0.0) {
+                    return Err(bad("projected physical normal history is unrepresentable"));
+                }
+                original_from_memory[i * r + j] = scaled;
+            }
+        }
+        let original_from_displacement = if self.original_from_displacement.is_empty() {
+            Vec::new()
+        } else {
+            (0..r * n)
+                .map(|k| {
+                    (0..5).fold(0.0, |s, j| {
+                        s + self.original_from_displacement[(k / n) * 5 + j] * columns[k % n][j]
+                    })
+                })
+                .collect()
+        };
+        if !finite(&original_from_displacement) {
+            return Err(bad(
+                "projected normal displacement history is unrepresentable",
+            ));
+        }
         poll(gate)?;
         Ok(Self {
             point,
             equilibrium,
             rows,
             rates: self.rates.clone(),
-            original_from_memory: self.original_from_memory.clone(),
+            original_from_memory,
+            original_from_displacement,
         })
     }
 
@@ -354,6 +525,14 @@ impl PlaneStressRelaxation {
     pub fn equilibrium_stiffness(&self) -> &[f64] {
         &self.equilibrium
     }
+    /// Complete instantaneous Kelvin matrix in the original point coordinates.
+    /// Its power is v^T C v; every off-diagonal term remains. Physical displacement
+    /// columns give [N s/m], mass-normalized modal columns give [1/s]. It is zero
+    /// for a pure-Maxwell image. Use this PLUS the relaxation channels exactly
+    /// once; the constrained normal Kelvin loss is already in those channels.
+    pub fn feedthrough_viscosity(&self) -> &[f64] {
+        &self.point.viscosity
+    }
     /// Exact strain rows c_j; zero/dependent channels are retained too.
     pub fn coupling_rows(&self) -> &[Vec<f64>] {
         &self.rows
@@ -362,8 +541,18 @@ impl PlaneStressRelaxation {
     pub fn relaxation_rates_per_s(&self) -> &[f64] {
         &self.rates
     }
-    /// Recover all source viscous factor coordinates for observation/admission.
+    /// Recover original history when it is independent of displacement.
+    /// A retained Kelvin normal offset requires `original_memory_at` instead.
     pub fn original_memory(&self, memory: &[f64]) -> Result<Vec<f64>> {
+        if self.original_from_displacement.iter().any(|v| *v != 0.0) {
+            return Err(bad(
+                "Kelvin normal history reconstruction requires the actual displacement",
+            ));
+        }
+        self.memory_contribution(memory)
+    }
+
+    fn memory_contribution(&self, memory: &[f64]) -> Result<Vec<f64>> {
         let r = self.rates.len();
         if memory.len() != r || !finite(memory) {
             return Err(bad("complete finite plane-stress memory required"));
@@ -378,21 +567,74 @@ impl PlaneStressRelaxation {
         }
         Ok(original)
     }
+    /// Recover original Maxwell factor histories followed by retained physical
+    /// normal strain, including the exact n=y-L*q displacement contribution.
+    pub fn original_memory_at(&self, displacement: &[f64], memory: &[f64]) -> Result<Vec<f64>> {
+        let n = self.point.coordinates();
+        if displacement.len() != n || !finite(displacement) {
+            return Err(bad(
+                "original material history requires matching finite displacement",
+            ));
+        }
+        let mut original = self.memory_contribution(memory)?;
+        if !self.original_from_displacement.is_empty() {
+            for (i, value) in original.iter_mut().enumerate() {
+                *value += (0..n).fold(0.0, |s, j| {
+                    s + self.original_from_displacement[i * n + j] * displacement[j]
+                });
+            }
+        }
+        if !finite(&original) {
+            return Err(bad("original displacement-dependent history overflow"));
+        }
+        Ok(original)
+    }
     /// Reconstruct the full original strain and enforce its material domain.
     pub fn strain(&self, displacement: &[f64], memory: &[f64]) -> Result<Voigt> {
-        self.point
-            .strain(displacement, &self.original_memory(memory)?)
+        self.point.strain(
+            displacement,
+            &self.original_memory_at(displacement, memory)?,
+        )
     }
     /// Independently recompute normal traction from the original 3D law.
     pub fn normal_stress_pa(&self, displacement: &[f64], memory: &[f64]) -> Result<[f64; 3]> {
-        self.point
-            .normal_stress_pa(displacement, &self.original_memory(memory)?)
+        self.point.normal_stress_pa(
+            displacement,
+            &self.original_memory_at(displacement, memory)?,
+        )
+    }
+
+    /// Original physical normal/shear traction including the actual Kelvin
+    /// rates. Shell sigma_yz and sigma_zx remain generally nonzero.
+    pub fn normal_stress_pa_with_velocity(
+        &self,
+        displacement: &[f64],
+        velocity: &[f64],
+        memory: &[f64],
+    ) -> Result<[f64; 3]> {
+        self.point.normal_stress_pa_with_velocity(
+            displacement,
+            velocity,
+            &self.original_memory_at(displacement, memory)?,
+        )
     }
 
     /// Original thickness-normal traction. Shell transverse shear remains
     /// physical and is not included in the zero-traction constraint.
     pub fn thickness_normal_stress_pa(&self, displacement: &[f64], memory: &[f64]) -> Result<f64> {
-        self.point
-            .thickness_normal_stress_pa(displacement, &self.original_memory(memory)?)
+        self.point.thickness_normal_stress_pa(
+            displacement,
+            &self.original_memory_at(displacement, memory)?,
+        )
+    }
+
+    /// Thickness-normal traction from the same complete velocity-aware law.
+    pub fn thickness_normal_stress_pa_with_velocity(
+        &self,
+        displacement: &[f64],
+        velocity: &[f64],
+        memory: &[f64],
+    ) -> Result<f64> {
+        Ok(self.normal_stress_pa_with_velocity(displacement, velocity, memory)?[0])
     }
 }

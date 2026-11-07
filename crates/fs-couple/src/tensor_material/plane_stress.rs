@@ -513,3 +513,5 @@ impl TensorMaterialHistory<'_> {
 mod tests;
 #[cfg(test)]
 mod shear_constraints;
+#[cfg(test)]
+mod kelvin_image;
