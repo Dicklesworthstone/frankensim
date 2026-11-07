@@ -19,8 +19,11 @@
 
 /// Original equilibrium calorics with explicitly declared bulk conductivity.
 pub mod conduction;
+/// Original species and enthalpy/entropy references on stationary mass flow.
+pub mod stream;
 
 use super::super::storage::minimum_heat_capacity_j_per_k;
+use super::super::storage::stream::StreamBinding;
 use super::{
     IsobaricHeatCapacityLaw, MulticomponentEquilibriumCaloricSolveV1,
     MulticomponentEquilibriumCaloricStateV1, MulticomponentLiquidCaloricError,
@@ -37,9 +40,11 @@ pub struct MulticomponentLiquidEquilibriumThermalStorage {
     owner: Arc<SourceOwner>,
     endpoints: [MulticomponentEquilibriumCaloricStateV1; 2],
     mass_kg: f64,
+    lower_specific_h_j_kg: f64,
     upper_specific_h_j_kg: f64,
     maximum_slope: f64,
     controls: MulticomponentEquilibriumCaloricSolveV1,
+    stream: Option<StreamBinding>,
 }
 
 impl MulticomponentLiquidCaloricLaw<'_, '_> {
@@ -96,9 +101,11 @@ impl MulticomponentLiquidCaloricLaw<'_, '_> {
             owner: Arc::clone(&self.owner),
             endpoints: [cold, hot],
             mass_kg,
+            lower_specific_h_j_kg: 0.0,
             upper_specific_h_j_kg: span,
             maximum_slope,
             controls,
+            stream: None,
         })
     }
 }
@@ -107,9 +114,10 @@ impl MulticomponentLiquidEquilibriumThermalStorage {
     pub const fn temperature_domain(&self) -> [Temperature; 2] {
         self.controls.thermal.temperature_bracket
     }
-    /// Inclusive specific enthalpy interval [J/kg], with zero at the cold endpoint.
+    /// Inclusive specific enthalpy interval [J/kg]. Closed storage is zero at
+    /// the cold endpoint; stream storage retains the common pure-source datum.
     pub const fn specific_enthalpy_domain_j_kg(&self) -> [f64; 2] {
-        [0.0, self.upper_specific_h_j_kg]
+        [self.lower_specific_h_j_kg, self.upper_specific_h_j_kg]
     }
     /// Mass of the original normalization inventory, not a constraint on cell mass.
     pub const fn mass_kg(&self) -> f64 {
@@ -138,8 +146,9 @@ impl MulticomponentLiquidEquilibriumThermalStorage {
         Ok(cp)
     }
 
-    /// Direct sensible-plus-redistribution increment from the cold endpoint.
-    /// Original enthalpy datums cancel before arithmetic.
+    /// Direct sensible-plus-redistribution increment from the cold endpoint,
+    /// plus the prepared datum. Original source constants cancel before the
+    /// increment is evaluated; only stream storage restores the shared datum.
     pub fn specific_enthalpy_j_kg(
         &self,
         temperature: Temperature,
@@ -147,17 +156,22 @@ impl MulticomponentLiquidEquilibriumThermalStorage {
     ) -> Result<f64> {
         let state = self.caloric_state_at_temperature(temperature, cancelled)?;
         if temperature == self.temperature_domain()[0] {
-            return Ok(0.0);
+            return Ok(self.lower_specific_h_j_kg);
         }
         if temperature == self.temperature_domain()[1] {
             return Ok(self.upper_specific_h_j_kg);
         }
-        let h = self
+        let increment = self
             .owner
             .model
             .equilibrium_enthalpy_change_j(&self.endpoints[0], &state)?
             / self.mass_kg;
-        if !positive(h) || h >= self.upper_specific_h_j_kg {
+        let h = self.lower_specific_h_j_kg + increment;
+        if !positive(increment)
+            || !h.is_finite()
+            || h <= self.lower_specific_h_j_kg
+            || h >= self.upper_specific_h_j_kg
+        {
             return Err(MulticomponentLiquidCaloricError::Invalid(
                 "interior equilibrium storage enthalpy is unrepresentable",
             ));
@@ -174,13 +188,13 @@ impl MulticomponentLiquidEquilibriumThermalStorage {
     ) -> Result<MulticomponentEquilibriumCaloricStateV1> {
         poll(&mut cancelled)?;
         self.admit_enthalpy(h)?;
-        if h == 0.0 {
+        if h == self.lower_specific_h_j_kg {
             return Ok(self.endpoints[0].clone());
         }
         if h == self.upper_specific_h_j_kg {
             return Ok(self.endpoints[1].clone());
         }
-        let heat = h * self.mass_kg;
+        let heat = (h - self.lower_specific_h_j_kg) * self.mass_kg;
         if !positive(heat) {
             return Err(MulticomponentLiquidCaloricError::Invalid(
                 "positive equilibrium storage heat is unrepresentable",
@@ -228,7 +242,7 @@ impl MulticomponentLiquidEquilibriumThermalStorage {
     }
 
     fn admit_enthalpy(&self, h: f64) -> Result<()> {
-        if !h.is_finite() || h < 0.0 || h > self.upper_specific_h_j_kg {
+        if !h.is_finite() || h < self.lower_specific_h_j_kg || h > self.upper_specific_h_j_kg {
             return Err(MulticomponentLiquidCaloricError::Invalid(
                 "enthalpy outside equilibrium storage domain",
             ));
@@ -238,6 +252,19 @@ impl MulticomponentLiquidEquilibriumThermalStorage {
 }
 
 impl ThermalLaw for MulticomponentLiquidEquilibriumThermalStorage {
+    fn caloric_identity(&self) -> Option<[u8; 32]> {
+        self.stream.as_ref().map(StreamBinding::caloric_identity)
+    }
+    fn advected_composition(
+        &self,
+    ) -> Option<fs_thermal::enthalpy::advection::species::CaloricComposition<'_>> {
+        self.stream.as_ref().map(StreamBinding::composition)
+    }
+    fn advected_entropy_anchor(
+        &self,
+    ) -> Option<fs_thermal::enthalpy::advection::species::CaloricEntropyAnchor<'_>> {
+        self.stream.as_ref().map(StreamBinding::entropy_anchor)
+    }
     fn temperature_k(&self, h: f64) -> core::result::Result<f64, DepositionError> {
         self.caloric_state_at_specific_enthalpy(h, || false)
             .map(|state| state.temperature().value())

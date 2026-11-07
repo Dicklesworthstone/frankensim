@@ -6,6 +6,8 @@ use fs_thermal::enthalpy::ThermalLaw;
 
 #[path = "storage/conduction.rs"]
 mod conduction;
+#[path = "storage/stream.rs"]
+mod stream;
 
 fn initial(
     caloric: &MulticomponentLiquidCaloricLaw<'_, '_>,

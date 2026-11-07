@@ -18599,6 +18599,43 @@ calculations while phase inventories redistribute across Cp/conductivity knots;
 it also checks the analytic tangent, conservation and cancellation. No
 phase-selective mass flow or separate interphase temperature is inferred.
 
+### Stationary flow into redistributing liquid phases
+
+`equilibrium_stream_storage_from_mass_fractions` binds an actual resolved
+equilibrium inventory to the existing stationary-species, implicit advection
+and accepted-stage entropy owners. Exact-unit-sum canonical mass fractions
+must match the original species inventory to relative arithmetic roundoff;
+positive traces and exact absences remain intact. Homogeneous and separated
+streams share the same complete pure-source enthalpy and reduced-entropy
+reference, independent of composition, prepared bracket and phase topology.
+A separate local caloric identity retains the actual cold phase allocations.
+
+Each receiving cell uses its original equilibrium enthalpy inverse and full
+redistribution Cp. Actual incoming mixing enthalpy and each retained phase's
+mixing entropy enter once through the existing flow balance. Equal-temperature
+inlets can therefore change the receiver temperature when they mix. There is
+no extra heat-of-mixing source, averaged phase conductivity or homogeneous
+substitute for the separated receiver. Closed storage keeps its zero datum;
+only stream storage restores the common source datum, and unrepresentable
+interior enthalpies refuse.
+
+The prepared local phase count/support, stationary overall composition, fixed
+pressure and reference geometry remain explicit. Phase-selective flow,
+transient species storage, changing morphology and finite-rate interphase
+heat transfer are outside this owner. Original continuation and source bounds
+apply to every caloric query; cancellation publishes no partial stream law.
+
+Two added native integration tests compare actual phase entropy and native
+backward-Euler/SDIRK mixing against independent ternary common-tangent H/S
+calculations, including source-Cp-knot crossing and equal-temperature heat of
+mixing. They check common references across brackets and compositions, source
+and inventory refusal, accepted-stage entropy balances and bit-identical
+thermal evolution with the optional entropy audit enabled or disabled. The
+whole equilibrium and homogeneous integration roots pass 28 and 15 tests
+respectively against rebuilt original material/thermochemical sources and
+real native dependencies. These are focused native checks, not a full
+workspace build or measured-material calibration.
+
 ### Source-bound conserved phase relaxation and mixing
 
 `MulticomponentLiquidCaloricLaw::relax_homogeneous` and `mix_equilibrium` extend

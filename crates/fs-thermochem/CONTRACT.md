@@ -686,6 +686,16 @@ an external heat source, a globally stable Gibbs envelope or a latent interval.
 Material thermal consumers retain the original pure-source capacity minimum
 and analytic redistribution response rather than sampling another caloric law.
 
+`MulticomponentEquilibriumCaloricStateV1::reduced_entropy_j_per_k` exposes
+the same pure-species entropy convention as the homogeneous owner. Conserved
+pure Cp/T integrals are combined with each actual phase's mixing entropy and
+actual phase amount. A homogeneous feed's mixing entropy never substitutes for
+that separated inventory. Stationary species balance cancels the omitted
+common linear species constants, permitting native open-flow entropy accounts
+across homogeneous and separated states without an absolute-entropy claim.
+Small same-inventory changes continue to use the direct original H/S increment
+methods, avoiding subtraction of anchored totals.
+
 ### Conserved mixing and relaxation into local liquid phase branches
 
 `solution::multicomponent::caloric::equilibrium::transactions` extends the SAME

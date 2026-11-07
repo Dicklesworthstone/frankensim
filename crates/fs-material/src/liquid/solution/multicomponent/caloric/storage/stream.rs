@@ -12,10 +12,11 @@ use super::{
     MulticomponentLiquidThermalStorage, Result, SourceOwner, poll,
 };
 use fs_blake3::ContentHash;
+use fs_qty::Temperature;
 use fs_thermal::enthalpy::advection::species::{CaloricComposition, CaloricEntropyAnchor};
 
 #[derive(Clone, Debug, PartialEq)]
-pub(super) struct StreamBinding {
+pub(in crate::liquid::solution::multicomponent::caloric) struct StreamBinding {
     species: Box<[String]>,
     mass_fractions: Box<[f64]>,
     enthalpy_reference: String,
@@ -25,17 +26,69 @@ pub(super) struct StreamBinding {
     caloric_identity: [u8; 32],
 }
 impl StreamBinding {
-    pub(super) fn composition(&self) -> CaloricComposition<'_> {
+    // Both homogeneous and separated liquid states share the original pure
+    // source datum. The separate branch bytes bind the local storage identity,
+    // without making source compatibility depend on a cell's phase topology.
+    pub(in crate::liquid::solution::multicomponent::caloric) fn new(
+        owner: &SourceOwner,
+        mass_fractions: &[f64],
+        temperature_domain: [Temperature; 2],
+        entropy_anchor: [f64; 2],
+        branch: &[u8],
+    ) -> Self {
+        let reference = common_reference(owner);
+        let mut identity = Vec::with_capacity(40 + 8 * (mass_fractions.len() + 2) + branch.len());
+        identity.extend_from_slice(reference.as_bytes());
+        for value in mass_fractions
+            .iter()
+            .copied()
+            .chain(temperature_domain.map(|t| t.value()))
+        {
+            identity.extend_from_slice(&value.to_bits().to_le_bytes());
+        }
+        identity.extend_from_slice(&(branch.len() as u64).to_le_bytes());
+        identity.extend_from_slice(branch);
+        Self {
+            species: owner
+                .model
+                .thermodynamics()
+                .species()
+                .iter()
+                .map(ToString::to_string)
+                .collect(),
+            mass_fractions: mass_fractions.into(),
+            enthalpy_reference: format!("multicomponent-liquid-isobaric-v1:{}", reference.to_hex()),
+            entropy_reference: format!(
+                "multicomponent-liquid-reduced-entropy-v1:{}",
+                reference.to_hex()
+            ),
+            entropy_anchor_h_j_kg: entropy_anchor[0],
+            reduced_entropy_anchor_j_kg_k: entropy_anchor[1],
+            caloric_identity: *fs_blake3::hash_domain(
+                "org.frankensim.fs-material.multicomponent-liquid-stream.v1",
+                &identity,
+            )
+            .as_bytes(),
+        }
+    }
+
+    pub(in crate::liquid::solution::multicomponent::caloric) fn composition(
+        &self,
+    ) -> CaloricComposition<'_> {
         CaloricComposition {
             species: &self.species,
             mass_fractions: &self.mass_fractions,
             enthalpy_reference: &self.enthalpy_reference,
         }
     }
-    pub(super) const fn caloric_identity(&self) -> [u8; 32] {
+    pub(in crate::liquid::solution::multicomponent::caloric) const fn caloric_identity(
+        &self,
+    ) -> [u8; 32] {
         self.caloric_identity
     }
-    pub(super) fn entropy_anchor(&self) -> CaloricEntropyAnchor<'_> {
+    pub(in crate::liquid::solution::multicomponent::caloric) fn entropy_anchor(
+        &self,
+    ) -> CaloricEntropyAnchor<'_> {
         CaloricEntropyAnchor {
             specific_h_j_kg: self.entropy_anchor_h_j_kg,
             reduced_specific_entropy_j_kg_k: self.reduced_entropy_anchor_j_kg_k,
@@ -103,43 +156,15 @@ impl MulticomponentLiquidCaloricLaw<'_, '_> {
                 "stream enthalpy or entropy is unrepresentable in the original datum",
             ));
         }
-        let reference = common_reference(&self.owner);
-        let mut identity = Vec::with_capacity(32 + 8 * (mass_fractions.len() + 2));
-        identity.extend_from_slice(reference.as_bytes());
-        for value in mass_fractions
-            .iter()
-            .copied()
-            .chain(controls.temperature_bracket.map(|t| t.value()))
-        {
-            identity.extend_from_slice(&value.to_bits().to_le_bytes());
-        }
         storage.lower_specific_h_j_kg = lower;
         storage.upper_specific_h_j_kg = upper;
-        storage.stream = Some(StreamBinding {
-            species: self
-                .model()
-                .thermodynamics()
-                .species()
-                .iter()
-                .map(ToString::to_string)
-                .collect(),
-            mass_fractions: mass_fractions.into(),
-            enthalpy_reference: format!(
-                "homogeneous-multicomponent-liquid-isobaric-v1:{}",
-                reference.to_hex()
-            ),
-            entropy_reference: format!(
-                "homogeneous-multicomponent-liquid-reduced-entropy-v1:{}",
-                reference.to_hex()
-            ),
-            entropy_anchor_h_j_kg: lower,
-            reduced_entropy_anchor_j_kg_k,
-            caloric_identity: *fs_blake3::hash_domain(
-                "org.frankensim.fs-material.homogeneous-multicomponent-liquid-stream.v1",
-                &identity,
-            )
-            .as_bytes(),
-        });
+        storage.stream = Some(StreamBinding::new(
+            &self.owner,
+            mass_fractions,
+            controls.temperature_bracket,
+            [lower, reduced_entropy_anchor_j_kg_k],
+            b"homogeneous",
+        ));
         poll(&mut cancelled)?;
         Ok(storage)
     }
@@ -175,7 +200,7 @@ fn common_reference(owner: &SourceOwner) -> ContentHash {
         bytes.extend_from_slice(&value.to_bits().to_le_bytes());
     }
     fs_blake3::hash_domain(
-        "org.frankensim.fs-material.homogeneous-multicomponent-liquid-reference.v1",
+        "org.frankensim.fs-material.multicomponent-liquid-reference.v1",
         &bytes,
     )
 }
