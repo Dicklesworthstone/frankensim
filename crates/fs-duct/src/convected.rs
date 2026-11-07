@@ -31,12 +31,17 @@
 //! and uniform-flow assumptions and the original material's source limits.
 //! No stationary [`crate::compose::TwoPort`] is exported for these moving-
 //! medium fields. In particular, a sealed end cannot sustain the prescribed
-//! nonzero through-flow; boundary conditions are supplied as incident waves.
+//! nonzero through-flow. Prescribed incident waves remain available, while
+//! [`termination`] supplies conjugate enthalpy/mass-flow end loads, coherent
+//! sources and their exact multiple-reflection solution in the maintained flow.
 
 use crate::fluid::FluidDuctError;
 use crate::{DuctError, Segment};
 use fs_material::fluid_acoustics::{FluidAcousticState, FluidAcoustics};
 use fs_math::{c64::C64, det};
+
+/// Conjugate end loads, coherent driving and complete reflected fields.
+pub mod termination;
 
 /// First positive zero of J1', the first non-plane circular hard-wall mode.
 const FIRST_TRANSVERSE_ROOT: f64 = 1.841_183_781_340_659_3;

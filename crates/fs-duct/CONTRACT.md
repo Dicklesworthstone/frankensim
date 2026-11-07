@@ -4267,3 +4267,42 @@ The physical boundary pairing is mass-flow perturbation `m' = A*(rho*u' + U0*p'/
 Admission requires finite positive geometry/frequency, strictly subsonic `|U0| < c`, representable propagation/power coefficients and `omega < j'11*c*sqrt(1-M²)/radius`, with `j'11 = 1.8411837813406593`. This first transverse cut-on includes nonaxisymmetric modes. The caller must justify small perturbations, homogeneous irrotational mean flow and negligible evanescent transverse fields at the source/observation sections. Cones, profiles and holes refuse. Nonuniform flow, shear, swirl, entropy waves, viscosity, wall/bulk absorption, compliant walls, exit radiation and vortex shedding are outside this owner. Boundary waves do not imply a sealed end can sustain nonzero mean through-flow. The signed incoming-minus-outgoing power residual is a numerical conservation diagnostic, never an absorbed-heat source.
 
 Physics regressions cover zero-flow agreement with the original cylinder basis and scattering owner; both directions' `(1±M)²` power and transit times; finite-difference linearized Euler residuals; direct physical mass-flow/enthalpy and energy identities under coherent counter-propagating excitation; flow reversal; source retention and one-time material evaluation; and sonic, transverse-cut-on, geometry, nonfinite and out-of-domain refusals. No speedup or extension to unmodeled flow classes is claimed.
+
+### Driven conjugate end loads in maintained mean flow
+
+`convected::termination` supplies finite passive harmonic end impedances and
+the complete two-ended reflected solution on the original cylinder. The typed
+`FlowImpedance` is stagnation enthalpy divided by OUTWARD perturbation mass flow,
+`Z_Hm` [J s/kg²], with `Re(Z_Hm) >= 0`. Each end obeys
+`H' = Z_Hm m_out' + H_drive'`. This is not a pressure/volume-flow load: only at
+zero mean flow is `Z_Hm = Z_pQ/rho²`. No automatic conversion of stationary
+radiation, sealed-cap, or jet/vortex-shedding laws is provided.
+
+The characteristic reference is `R_Hm = c/(rho A)`. Incoming/outgoing enthalpy
+characteristics obey `H'=a+b` and `m_out'=(b-a)/R_Hm`, giving
+`a=(Z_Hm-R_Hm)/(Z_Hm+R_Hm) b + R_Hm/(Z_Hm+R_Hm) H_drive'` at either end.
+`prepare_terminations` resolves both directions' actual propagation phases and
+all multiple reflections in a fixed 2x2 solve. Its declared condition ceiling
+bounds the local cancellation estimate in `1-r_left*r_right*t_plus*t_minus`;
+an undamped resonance or excessive cancellation refuses with `DuctError::Singular`.
+No damping floor, growing propagation exponential or truncated reflection series
+is introduced. Scaled impedance arithmetic avoids overflowing `Z_Hm+R_Hm`.
+
+Warm coherent drives reuse four complex source-to-pressure coefficients without
+allocation, iteration or material re-query. Original pressure/velocity fields
+provide the independently reported terminal law residuals, physical outward
+flux, absorbed disturbance power `Re(Z_Hm)|m_out'|²/2`, and signed source work
+`-Re(H_drive' conj(m_out'))/2`. Absorption is evaluated by scaling before squaring,
+so a small mass perturbation through a large finite resistance is not silently
+zeroed by squaring first. Source work minus load absorption and the sum of the
+two physical end fluxes remain separate residuals; neither residual is heat.
+
+Seven focused regressions cover the original stationary ABCD limit with coherent
+drives; independent physical end laws and energy for both flow directions;
+pressure reflection above unity with passive disturbance-power reflection;
+source interference; flow/end reversal; the shifted round-trip resonance and
+condition refusal; and original material retention plus invalid sources/loads.
+The original cylinder's plane-wave, homogeneous, inviscid and small-signal scope
+still applies. These are declared perturbation loads in an externally maintained
+mean flow; no steady supply model, nonuniform nozzle closure, causal broadband
+load realization, or experimental validation is inferred.
