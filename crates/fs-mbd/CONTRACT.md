@@ -3938,10 +3938,18 @@ gates. The native static capacity bounds the required traction at initial,
 midpoint and endpoint states. An infeasible reaction refuses instead of forcing
 rolling or substituting an independently saturated friction component.
 
-The material coefficient remains owned by the original card. Each analytic
-two-axis midpoint solve uses its native moment and native heat. The user sets
-the time-resolution ceiling; an additional derived limit
-`c * lambda_max * h <= 1` keeps every rolling eigenmode's decay factor
+The material coefficient remains owned by the original card. When the native
+constrained response is exactly isotropic (`K = kappa I`), its rolling direction
+is held and the original material-owned exponential path advances both tangent
+components exactly. The signed rate integral supplies the couple impulse; the
+squared-rate integral supplies physical heat. Static traction decays with the
+same scalar factor, so its initial value bounds the complete path. No damping
+stiffness substeps or timestep-dependent decay remain in this case. A nearby
+anisotropic matrix is never rounded into an isotropic one.
+For anisotropic response each analytic two-axis midpoint solve uses its native
+moment and native heat. The user sets the time-resolution ceiling in both
+paths; only midpoint evolution also applies the derived limit
+`c * lambda_max * h <= 1` to keep every rolling eigenmode's decay factor
 nonnegative. Work is bounded by an explicit substep cap. Viscous arrest remains
 asymptotic; zero rate, zero viscosity and zero load give exact zero loss without
 snapping or a velocity regularizer. Only the sphere generates bulk heat. The
@@ -3973,7 +3981,11 @@ owner still advances poses and normal contact. It does not solve contact
 discovery, lift-off, externally driven no-slip constraints, simultaneous
 microslip/spin, multiple patches, or arbitrary-speed viscoelastic rolling. A
 second shear reaction cannot be superposed on this same phase. Frozen-geometry
-time accuracy is second order; this does not certify a complete trajectory.
+decay is exact for isotropic response and second order otherwise; this does not
+certify a complete trajectory. The isotropic native regression compares both
+body momenta and material heat to independent constrained mechanics at a decay
+step above the midpoint sign-reversal threshold, with a one-step work budget,
+and checks continuation across split caller intervals.
 G1/G3/G4 groups in `tests/rolling_friction.rs` use independently eliminated
 principal-direction mechanics for both-body recoil, a three-rung exponential
 motion/heat refinement ladder, nonreversing decay, exact zero limits, world and

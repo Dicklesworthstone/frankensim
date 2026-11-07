@@ -536,6 +536,67 @@ fn automatic_substeps_prevent_reversal_and_exact_zero_limits_do_not_snap() {
     }
 }
 
+#[test]
+fn isotropic_two_axis_rolling_has_exact_decay_and_heat_with_one_material_step() {
+    let mut f = fixture(TAU, INITIAL_RATE, 0.001);
+    f.properties[1] =
+        MassProperties::new(7.0, Vec3::ZERO, Vec3::new(0.13, 0.13, 0.18)).unwrap();
+    let omega = Vec3::new(INITIAL_RATE[0], INITIAL_RATE[1], 0.0);
+    f.bodies[0] = RigidBodyState::new(
+        f.bodies[0].pose(),
+        z_cross(omega).scale(-f.properties[0].mass() * R),
+        omega.scale(f.properties[0].principal_inertia_body().x),
+    )
+    .unwrap();
+    f.bodies[1] = RigidBodyState::new(
+        Pose::new(Vec3::new(0.0, 0.0, -D), UnitQuaternion::IDENTITY).unwrap(),
+        Vec3::ZERO,
+        Vec3::ZERO,
+    )
+    .unwrap();
+    let duration = 20.0;
+    let (expected, heat, kappa) = reference(&f, duration, None, INITIAL_RATE);
+    let damping = TAU * f.patch.normal_load_n() * R;
+    assert!(duration * damping * kappa[0] > 2.0);
+    let mut bounded = controls(duration);
+    bounded.maximum_substeps = 1;
+    let mut bodies = f.bodies;
+    let mut history = RigidRollingHistory::new();
+    let report = advance(&f, &mut bodies, &mut history, duration, bounded);
+    assert_eq!(report.substeps, 1);
+    assert_eq!(report.rolling_mobility[0][1], 0.0);
+    assert_eq!(report.rolling_mobility[0][0], report.rolling_mobility[1][1]);
+    for i in 0..2 {
+        close_vec(bodies[i].linear_momentum_world(), expected[i].linear_momentum_world(), 2e-16);
+        close_vec(bodies[i].angular_momentum_body(), expected[i].angular_momentum_body(), 2e-17);
+        let expected_rate = INITIAL_RATE[i] * (-duration * damping * kappa[i]).exp();
+        close(report.rolling_rate_after_rad_s[i], expected_rate, 2e-17);
+        assert!(report.rolling_rate_after_rad_s[i] * INITIAL_RATE[i] > 0.0);
+    }
+    close(report.dissipated_heat_j, heat, 2e-18);
+    close(history.state().cumulative_heat_j(), heat, 2e-18);
+    close(report.kinetic_energy_change_j, -heat, 2e-18);
+    close(report.static_reaction_work_j, 0.0, 2e-18);
+    close(
+        report.final_step.wrench.rolling_moment_nm,
+        -damping * report.rolling_rate_after_rad_s[0].hypot(report.rolling_rate_after_rad_s[1]),
+        2e-18,
+    );
+
+    // The same original source history can continue across caller intervals;
+    // endpoint motion, material heat and recoil have the exponential semigroup.
+    let mut split = f.bodies;
+    let mut split_history = RigidRollingHistory::new();
+    advance(&f, &mut split, &mut split_history, 0.4 * duration, bounded);
+    let tail = advance(&f, &mut split, &mut split_history, 0.6 * duration, bounded);
+    for i in 0..2 {
+        close_vec(split[i].linear_momentum_world(), bodies[i].linear_momentum_world(), 2e-16);
+        close_vec(split[i].angular_momentum_body(), bodies[i].angular_momentum_body(), 2e-17);
+        close(tail.rolling_rate_after_rad_s[i], report.rolling_rate_after_rad_s[i], 2e-17);
+    }
+    close(split_history.state().cumulative_heat_j(), heat, 2e-18);
+}
+
 fn compose(q: UnitQuaternion, r: UnitQuaternion) -> UnitQuaternion {
     let [a, b, c, d] = q.components();
     let [e, f, g, h] = r.components();

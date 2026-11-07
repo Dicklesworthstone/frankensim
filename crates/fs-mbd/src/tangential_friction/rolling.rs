@@ -25,6 +25,7 @@ use crate::{DynamicsError, MassProperties, PointKinematics, RigidBodyState, Vec3
 use fs_exec::CancelGate;
 use fs_tribo::partial_slip::TangentFrame;
 use fs_tribo::rolling_loss::viscoelastic::DeformingSphereSurface;
+use fs_tribo::rolling_loss::viscoelastic::path::{ExponentialPathError, ExponentialRatePath};
 use fs_tribo::rolling_loss::{
     RollingKinematics, RollingLossCheckpoint, RollingLossError, RollingLossLaw, RollingLossState,
     RollingLossStep, RollingPatchReceipt, RollingWorkOwnership,
@@ -104,10 +105,11 @@ impl RigidRollingHistory {
 #[derive(Debug, Clone, Copy)]
 pub struct RigidRollingControls {
     pub maximum_bodies: usize,
-    /// At most one million midpoint substeps; exhaustion refuses before mutation.
+    /// At most one million constitutive substeps; exhaustion refuses before mutation.
     pub maximum_substeps: usize,
-    /// User time-resolution ceiling [s]. A stricter monotone-decay bound is
-    /// derived from the actual rolling mobility and original material law.
+    /// User time-resolution ceiling [s]. Anisotropic midpoint evolution also
+    /// applies a monotone-decay bound from the original mobility/material law.
+    /// Isotropic rolling uses the exact material-owned exponential path.
     pub maximum_step_s: f64,
     pub geometry_tolerance_m: f64,
     pub velocity_tolerance_m_s: f64,
@@ -164,6 +166,7 @@ pub struct RigidRollingReport {
 pub enum RigidRollingError {
     Invalid(&'static str),
     Native(RollingLossError),
+    Path(ExponentialPathError),
     Friction(TriboError),
     Rigid(RigidFrictionError),
     Dynamics(DynamicsError),
@@ -182,6 +185,11 @@ pub enum RigidRollingError {
 impl From<RollingLossError> for RigidRollingError {
     fn from(e: RollingLossError) -> Self {
         Self::Native(e)
+    }
+}
+impl From<ExponentialPathError> for RigidRollingError {
+    fn from(e: ExponentialPathError) -> Self {
+        Self::Path(e)
     }
 }
 impl From<TriboError> for RigidRollingError {
@@ -209,12 +217,15 @@ impl std::error::Error for RigidRollingError {}
 /// Advance both bodies and the original rolling-loss state atomically.
 ///
 /// The original Hertz owner verifies patch load/area/radius/material agreement.
-/// Native midpoint moment work is exactly the exported physical heat, up to the
-/// independently checked arithmetic gates. No numerical damping is deposited.
-/// Every eigenmode of the constrained viscous response has a nonnegative
-/// midpoint decay factor: automatic substeps enforce `c lambda_max h <= 1`.
+/// Native impulse work is exactly the exported physical heat, up to the
+/// independently checked arithmetic gates. Isotropic constrained mobility uses
+/// the original material owner's exact exponential path, including its signed
+/// moment impulse and squared-rate heat integral. Anisotropic response uses
+/// midpoint evolution with automatic substeps enforcing `c lambda_max h <= 1`.
+/// No numerical damping is deposited in either path.
 /// Viscous arrest is asymptotic; zero speed stays zero without a cutoff or snap.
-/// Accuracy at frozen geometry is second order under timestep refinement.
+/// Isotropic decay is exact at frozen geometry; anisotropic decay is second
+/// order under timestep refinement.
 /// Only the bound pair is staged and audited, so unrelated kinetic energy
 /// cannot hide its energy change. Every other original body stays untouched.
 ///
@@ -336,7 +347,12 @@ pub fn apply_rigid_rolling(
     )?;
     let active = c > 0.0 && norm(q_before) > 0.0;
     let decay_rate = if active { finite(c * largest)? } else { 0.0 };
-    let limit = if decay_rate > 0.0 {
+    // Exact equality is deliberate: a nearby anisotropic response must not be
+    // rounded into an isotropic physical model. K=kappa*I preserves every
+    // rolling direction, so the original scalar exponential owner applies.
+    let exponential =
+        active && rolling_mobility[0][1] == 0.0 && rolling_mobility[0][0] == rolling_mobility[1][1];
+    let limit = if decay_rate > 0.0 && !exponential {
         controls.maximum_step_s.min(decay_rate.recip())
     } else {
         controls.maximum_step_s
@@ -357,7 +373,11 @@ pub fn apply_rigid_rolling(
     if !h.is_finite() || h <= 0.0 {
         return Err(invalid("unrepresentable rolling substep duration"));
     }
-    let half_damping = if active { 0.5 * h * c } else { 0.0 };
+    let half_damping = if active && !exponential {
+        0.5 * h * c
+    } else {
+        0.0
+    };
     let midpoint_matrix = [
         [
             1.0 + half_damping * rolling_mobility[0][0],
@@ -388,16 +408,42 @@ pub fn apply_rigid_rolling(
         poll(gate)?;
         let old_points = points(&next, &pair_properties, pair_binding)?;
         let q = tangent(relative_spin(old_points), axes);
-        let q_mid = solve_spd(midpoint_matrix, q)?;
-        let rate = norm(q_mid);
-        let step = contact.law.advance(
-            contact.patch,
-            contact.interface,
-            kinematics(rate, h)?,
-            contact.work,
-            &next_history.state,
-        )?;
-        let moment = along(q_mid, step.wrench.rolling_moment_nm);
+        let (step, moment, moment_impulse, predicted_endpoint) = if exponential {
+            let path =
+                ExponentialRatePath::new(norm(q), 0.0, decay_rate, h, || gate.is_requested())?;
+            let native = contact.law.advance_exponential_sphere_path(
+                contact.patch,
+                contact.interface,
+                &path,
+                0.0,
+                contact.temperature_k,
+                contact.excitation_frequency_hz,
+                contact.work,
+                &next_history.state,
+                || gate.is_requested(),
+            )?;
+            // The reaction has the same decaying scalar factor throughout the
+            // path. Its initial value is its exact maximum; the impulse uses
+            // the signed rate integral, while heat uses the squared-rate one.
+            let moment = along(q, native.response_before.rolling_moment_nm);
+            let impulse = along(q, native.rolling_moment_impulse_nms);
+            let endpoint = along(q, path.endpoint_rate());
+            (native.rolling, moment, impulse, endpoint)
+        } else {
+            let q_mid = solve_spd(midpoint_matrix, q)?;
+            let step = contact.law.advance(
+                contact.patch,
+                contact.interface,
+                kinematics(norm(q_mid), h)?,
+                contact.work,
+                &next_history.state,
+            )?;
+            let moment = along(q_mid, step.wrench.rolling_moment_nm);
+            let impulse = moment.map(|v| h * v);
+            let change = mul(rolling_mobility, impulse);
+            let endpoint = [q[0] + change[0], q[1] + change[1]];
+            (step, moment, impulse, endpoint)
+        };
         let force = mul(reaction, moment);
         let demand = norm(force);
         if !demand.is_finite() || demand > capacity {
@@ -407,8 +453,8 @@ pub fn apply_rigid_rolling(
             });
         }
         maximum_force = maximum_force.max(demand);
-        let impulse = world(force, axes).scale(h);
-        let couple = world(moment, axes).scale(h);
+        let impulse = world(mul(reaction, moment_impulse), axes);
+        let couple = world(moment_impulse, axes);
         for (body, arm, sign) in [
             (pair_binding.body_a, pair_binding.arm_a_body, 1.0),
             (pair_binding.body_b, pair_binding.arm_b_body, -1.0),
@@ -428,10 +474,9 @@ pub fn apply_rigid_rolling(
         }
         let new_points = points(&next, &pair_properties, pair_binding)?;
         let q_after = tangent(relative_spin(new_points), axes);
-        let predicted = mul(rolling_mobility, moment);
         for axis in 0..2 {
             endpoint_residual =
-                endpoint_residual.max((q_after[axis] - q[axis] - h * predicted[axis]).abs());
+                endpoint_residual.max((q_after[axis] - predicted_endpoint[axis]).abs());
         }
         maximum_point_speed = maximum_point_speed.max(magnitude(relative_point(new_points)));
         maximum_spin = maximum_spin.max(relative_spin(new_points).dot(normal).abs());
