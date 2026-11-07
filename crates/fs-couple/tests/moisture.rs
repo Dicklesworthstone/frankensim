@@ -38,6 +38,8 @@ mod kirchhoff;
 mod cartesian;
 #[path = "moisture/layered.rs"]
 mod layered;
+#[path = "moisture/radial.rs"]
+mod radial;
 #[path = "moisture/adaptive.rs"]
 mod adaptive;
 #[path = "moisture/temperature.rs"]

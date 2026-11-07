@@ -3118,6 +3118,23 @@ source path, fixed-patch refusal and late source rollback. Isolated execution of
 the production work-account function with metadata fixtures validates its heat,
 export and remainder partition, not the complete native multiphysics solve.
 
+## Cylindrical and spherical moisture diffusion
+
+`moisture::radial::MoistureRadial` advances bound-water diffusion on nonuniform
+cylindrical or spherical shells using their actual dry-skeleton storage volumes
+and exact radial face resistances. Original source-integrated Kirchhoff laws
+retain moisture-dependent and degenerate dry-front transport; finite sourced
+surface exchange uses each boundary's curved area. Conservative backward Euler
+uses a reusable native tridiagonal workspace, bounded nonlinear iteration and
+independent endpoint residual/water-balance checks before publication. A solid
+center is sealed. This is a fixed, homogeneous, isothermal radial reduction;
+axial/angular gradients, arbitrary tensor orientation, swelling feedback and
+finite exterior reservoirs require their respective spatial/coupling owners.
+Analytic cylindrical/spherical steady potentials, a spherical transient
+eigenmode, nonlinear dry-front balance and finite surface flux define the focused
+verification in `tests/moisture/radial.rs`; they are not measured validation or
+a continuum-error certificate for an arbitrary mesh or time step.
+
 ## Coating strain about a supplied static modal offset
 
 `MaterialShellImage::prepare_coating_strain_with_offset` and the corresponding

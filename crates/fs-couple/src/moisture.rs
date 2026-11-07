@@ -44,6 +44,8 @@ pub use sdirk::MoistureSdirk2Report;
 mod kirchhoff;
 /// Conservative unlike-material layers with source-owned activity partitioning.
 pub mod layered;
+/// Conservative cylindrical and spherical diffusion on radial finite volumes.
+pub mod radial;
 mod reservoir;
 pub mod plate;
 /// Directional swelling, compatible shape, stress and native vibration tangent.
