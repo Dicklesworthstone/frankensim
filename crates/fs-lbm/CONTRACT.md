@@ -5877,6 +5877,34 @@ properties. `EnergySolution::conductivity` reports the per-axis values.
 
 ### Temperature-dependent conductivity (`SolidMaterial::conductivity_table`)
 
+`SolidMaterial::axis_conductivity_tables` and `with_axis_conductivity_tables`
+declare independent absolute `kx(T), ky(T), kz(T)` in W/(m K), on the fixed
+grid axes. All three tables are nonempty, positive and strictly ordered in
+temperature; a one-knot table is constant. Each axis owns its own knots and
+constant endpoint extensions. The legacy scalar table retains its common-factor
+semantics; declaring both forms refuses, as does combining either with an
+independently resolved molecular/source conductivity field. No coordinate
+rotation or off-diagonal tensor component is inferred.
+
+The selected axis law supplies the same exact Kirchhoff mean, nonlinear Robin
+half cell, two-material/contact common flux, source-contact surface recovery
+and compact-component link. Cell reports and native buoyancy endpoint
+coefficients evaluate all three laws at the actual local temperature. Initial
+frozen coefficients retain their original temperature epoch; later nonlinear
+proposals and endpoint probes borrow one candidate temperature field for
+conductivity and reconstruction, without a separate per-cell factor buffer.
+Existing source ownership, storage history and residual acceptance remain
+authoritative.
+
+The `cooling-cht` material JSON accepts
+`axis_conductivity_tables: [kx_points, ky_points, kz_points]`, where each points
+array contains `[temperature_k, conductivity_w_m_k]` pairs. Authored axis
+tables cannot override a source-derived material. Six direct actual-production
+numerical tests passed, including independent directional integrals and Robin
+heating/cooling; native regression definitions cover graded profiles, contact
+jumps, Robin/transient heat closure and invalid/competing laws. Full native/CLI
+integration execution remains pending the complete dependency build.
+
 A solid may declare `k(T)` as a piecewise-linear table; every axis
 conductivity scales by `k(T) / conductivity_w_m_k` at the cell's
 temperature. Within one continuous material with zero contact resistance,

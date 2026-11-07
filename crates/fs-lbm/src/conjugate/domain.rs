@@ -5,7 +5,8 @@
 //! on a graded one ([`VoxelDomain::graded`]: a non-uniform Cartesian grid,
 //! fine where the geometry or the boundary layers need it).
 
-use super::{ChtError, finite_positive};
+use super::{ChtError, finite, finite_positive};
+use super::conductance::ConductivityCurve;
 
 /// Occupancy of one voxel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -434,6 +435,14 @@ pub struct SolidMaterial {
     /// integrated half-cell laws and the declared interface resistance.
     /// The energy solve iterates to consistency.
     pub conductivity_table: Vec<(f64, f64)>,
+    /// Independent absolute conductivities along the fixed grid axes x/y/z,
+    /// each as [(temperature K, conductivity W/(m K)), ...]. All three tables
+    /// must be nonempty, positive and ordered; a one-knot table is constant.
+    /// Knots may differ between axes and retain constant endpoint extensions.
+    /// These replace the reference axis values without a common scale factor
+    /// and are mutually exclusive with conductivity_table. No rotation or
+    /// off-diagonal tensor component is inferred.
+    pub axis_conductivity_tables: Option<[Vec<(f64, f64)>; 3]>,
 }
 
 impl SolidMaterial {
@@ -446,6 +455,7 @@ impl SolidMaterial {
             orthotropic_w_m_k: None,
             volumetric_heat_capacity_j_m3_k: None,
             conductivity_table: Vec::new(),
+            axis_conductivity_tables: None,
         }
     }
 
@@ -457,7 +467,84 @@ impl SolidMaterial {
         self
     }
 
-    /// `k(T) / conductivity_w_m_k`: the factor scaling every axis
+    /// Declare independent absolute kx(T), ky(T), kz(T) on the grid axes.
+    /// Each table has its own knots and endpoint extensions. This does not
+    /// multiply by the reference conductivity or a second scalar table.
+    #[must_use]
+    pub fn with_axis_conductivity_tables(mut self, tables: [&[(f64, f64)]; 3]) -> Self {
+        self.axis_conductivity_tables = Some(tables.map(<[(f64, f64)]>::to_vec));
+        self
+    }
+
+    /// Whether a native temperature-dependent conductivity law is authored.
+    #[must_use]
+    pub fn has_temperature_dependent_conductivity(&self) -> bool {
+        !self.conductivity_table.is_empty() || self.axis_conductivity_tables.is_some()
+    }
+
+    /// Absolute conductivity along each grid axis at the supplied temperature.
+    /// The scalar-table path retains its original common-factor semantics.
+    #[must_use]
+    pub fn axis_conductivity_at(&self, temperature: f64) -> [f64; 3] {
+        if self.axis_conductivity_tables.is_some() {
+            std::array::from_fn(|axis| self.conductivity_curve(axis).at(temperature))
+        } else {
+            let factor = self.conductivity_factor(temperature);
+            self.axis_conductivity().map(|k| k * factor)
+        }
+    }
+
+    pub(crate) fn conductivity_curve(&self, axis: usize) -> ConductivityCurve<'_> {
+        if let Some(tables) = &self.axis_conductivity_tables {
+            ConductivityCurve::tabulated(1.0, 1.0, &tables[axis])
+        } else if self.conductivity_table.is_empty() {
+            ConductivityCurve::constant(self.axis_conductivity()[axis])
+        } else {
+            ConductivityCurve::tabulated(self.conductivity_w_m_k,
+                self.axis_conductivity()[axis], &self.conductivity_table)
+        }
+    }
+
+    pub(crate) fn validate_conductivity_tables(&self) -> Result<(), ChtError> {
+        if self.axis_conductivity_tables.is_some() && !self.conductivity_table.is_empty() {
+            return Err(ChtError::InvalidInput {
+                field: "solid.axis_conductivity_tables",
+                reason: "axis tables and a common conductivity table are competing laws".into(),
+            });
+        }
+        let check = |table: &[(f64, f64)], fields: [&'static str; 3]| {
+            for (i, &(t, k)) in table.iter().enumerate() {
+                finite(fields[1], t)?;
+                finite_positive(fields[2], k)?;
+                if i > 0 && t <= table[i - 1].0 {
+                    return Err(ChtError::InvalidInput {
+                        field: fields[0],
+                        reason: format!("temperatures must increase ({})", self.label),
+                    });
+                }
+            }
+            Ok(())
+        };
+        check(&self.conductivity_table, ["solid.conductivity_table",
+            "solid.conductivity_table.temperature", "solid.conductivity_table.conductivity"])?;
+        if let Some(tables) = &self.axis_conductivity_tables {
+            for (axis, table) in tables.iter().enumerate() {
+                if table.is_empty() {
+                    return Err(ChtError::InvalidInput {
+                        field: "solid.axis_conductivity_tables",
+                        reason: format!("axis {axis} requires a nonempty absolute conductivity table"),
+                    });
+                }
+                check(table, ["solid.axis_conductivity_tables",
+                    "solid.axis_conductivity_tables.temperature",
+                    "solid.axis_conductivity_tables.conductivity"])?;
+            }
+        }
+        Ok(())
+    }
+
+    /// `k(T) / conductivity_w_m_k`: the legacy common factor (use
+    /// axis_conductivity_at for independent axis tables), scaling every axis
     /// conductivity at temperature `t` (1 without a table).
     #[must_use]
     pub fn conductivity_factor(&self, t: f64) -> f64 {
@@ -477,149 +564,6 @@ impl SolidMaterial {
         k / self.conductivity_w_m_k
     }
 
-    /// Mean of the declared conductivity factor over a temperature interval.
-    /// Integrating each crossed linear piece exactly avoids subtracting large
-    /// Kirchhoff potentials when the two temperatures are nearly equal. The
-    /// table retains its declared constant extensions beyond the end knots.
-    pub(super) fn conductivity_secant_factor(&self, a: f64, b: f64) -> f64 {
-        if a == b || self.conductivity_table.is_empty() {
-            return self.conductivity_factor(a);
-        }
-        let (lo, hi) = (a.min(b), a.max(b));
-        let span = hi - lo;
-        let mut left = lo;
-        let mut left_factor = self.conductivity_factor(left);
-        let mut mean = 0.0;
-        let first = self
-            .conductivity_table
-            .partition_point(|&(temperature, _)| temperature <= lo);
-        for &(temperature, conductivity) in &self.conductivity_table[first..] {
-            if temperature >= hi {
-                break;
-            }
-            let right_factor = conductivity / self.conductivity_w_m_k;
-            mean += (temperature - left) / span * (0.5 * left_factor + 0.5 * right_factor);
-            left = temperature;
-            left_factor = right_factor;
-        }
-        mean + (hi - left) / span * (0.5 * left_factor + 0.5 * self.conductivity_factor(hi))
-    }
-
-    /// Conductivity factor averaged from a cell to its solved Robin surface.
-    /// With z the temperature drop from cell toward ambient, the unique root
-    /// satisfies integral(0..z, k + d*h) = d*h*abs(Tcell-Tambient). Each table
-    /// piece gives a quadratic with a positive derivative. Resistance scaling
-    /// keeps its coefficients bounded, and the rationalized root avoids
-    /// subtracting nearly equal roots. NaN refuses unrepresentable input via
-    /// the energy assembly's existing finite-coefficient check.
-    pub(super) fn film_conductivity_factor(
-        &self,
-        cell: f64,
-        ambient: f64,
-        axis_k: f64,
-        distance: f64,
-        h: f64,
-    ) -> f64 {
-        if cell == ambient || self.conductivity_table.is_empty() {
-            return self.conductivity_factor(cell);
-        }
-        let (lo, hi) = (cell.min(ambient), cell.max(ambient));
-        let span = hi - lo;
-        let table = &self.conductivity_table;
-        let first = table.partition_point(|&(temperature, _)| temperature <= lo);
-        let end = table.partition_point(|&(temperature, _)| temperature < hi);
-        let cell_factor = self.conductivity_factor(cell);
-        let ambient_factor = self.conductivity_factor(ambient);
-        let mut maximum = cell_factor.max(ambient_factor);
-        for &(_, k) in &table[first..end] {
-            maximum = maximum.max(k / self.conductivity_w_m_k);
-        }
-        let maximum_k = axis_k * maximum;
-        let bulk = distance / maximum_k;
-        let film = 1.0 / h;
-        let resistance_scale = bulk.max(film);
-        if !span.is_finite()
-            || !maximum_k.is_finite()
-            || maximum_k <= 0.0
-            || !resistance_scale.is_finite()
-            || resistance_scale <= 0.0
-        {
-            return f64::NAN;
-        }
-        // alpha*k/kmax + beta is (k+d*h) divided by a common scale.
-        let alpha = film / resistance_scale;
-        let beta = bulk / resistance_scale;
-        if beta == 0.0 {
-            return cell_factor;
-        }
-        let mut remaining = beta;
-        let mut start = cell;
-        let mut k_start = cell_factor / maximum;
-        let mut covered = 0.0;
-        let mut mean = 0.0;
-        let knots = end - first;
-        for piece in 0..=knots {
-            let (finish, k_finish) = if piece == knots {
-                (ambient, ambient_factor / maximum)
-            } else {
-                let index = if cell < ambient {
-                    first + piece
-                } else {
-                    end - 1 - piece
-                };
-                let (temperature, conductivity) = table[index];
-                (
-                    temperature,
-                    conductivity / self.conductivity_w_m_k / maximum,
-                )
-            };
-            let fraction = (finish - start).abs() / span;
-            let a = beta + alpha * k_start;
-            let b = 0.5 * alpha * (k_finish - k_start);
-            let average = beta + 0.5 * alpha * (k_start + k_finish);
-            let integral = fraction * average;
-            if remaining <= integral || piece == knots {
-                // Positive conductivity places the exact root in the closed
-                // interval. Clamp only accumulated endpoint roundoff when the
-                // film tends to an imposed surface temperature.
-                let y = (remaining / fraction).min(average);
-                let discriminant = if b < 0.0 {
-                    // Equivalent to a*a+4*b*y, but all terms are positive
-                    // even when the endpoint slope is much smaller than a.
-                    let endpoint = beta + alpha * k_finish;
-                    endpoint * endpoint + (-4.0 * b) * (average - y).max(0.0)
-                } else {
-                    a * a + 4.0 * b * y
-                };
-                let position = 2.0 * y / (a + discriminant.sqrt());
-                if !position.is_finite() {
-                    return f64::NAN;
-                }
-                let position = position.clamp(0.0, 1.0);
-                let used = fraction * position;
-                let local_mean = k_start + 0.5 * position * (k_finish - k_start);
-                // Retain the fractional drop: an absolute surface temperature
-                // can round back to the cell even when its mean k differs.
-                return maximum
-                    * if covered == 0.0 {
-                        local_mean
-                    } else {
-                        let total = covered + used;
-                        covered / total * mean + used / total * local_mean
-                    };
-            }
-            if fraction > 0.0 {
-                let total = covered + fraction;
-                mean = covered / total * mean + fraction / total * (0.5 * k_start + 0.5 * k_finish);
-                covered = total;
-            }
-            remaining -= integral;
-            start = finish;
-            k_start = k_finish;
-        }
-        f64::NAN
-    }
-
     /// Declare grid-aligned principal conductivities `[k_x, k_y, k_z]`,
     /// W/(m K).
     #[must_use]
@@ -628,7 +572,8 @@ impl SolidMaterial {
         self
     }
 
-    /// Conductivity along each grid axis, W/(m K).
+    /// Reference conductivity along each grid axis, W/(m K). Use
+    /// axis_conductivity_at to evaluate an authored temperature-dependent law.
     #[must_use]
     pub fn axis_conductivity(&self) -> [f64; 3] {
         self.orthotropic_w_m_k

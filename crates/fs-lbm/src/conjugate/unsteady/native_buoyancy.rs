@@ -128,6 +128,7 @@ fn march_with_sgs(
     }
     fluid.validate()?;
     domain.check_materials(solids.len())?;
+    for solid in solids { solid.validate_conductivity_tables()?; }
     if config.turbulence != Turbulence::Laminar || !setup.eddy_conductivity_w_m_k.is_empty() {
         return Err(ChtError::InvalidInput {
             field: "unsteady.implicit_buoyancy",
@@ -214,8 +215,7 @@ fn refresh_native(
             }
             Voxel::Solid(material) => {
                 let solid = &solids[usize::from(material)];
-                let factor = solid.conductivity_factor(temperature);
-                let axes = solid.axis_conductivity().map(|k| k * factor);
+                let axes = solid.axis_conductivity_at(temperature);
                 for k in axes {
                     finite_positive("solid.endpoint_conductivity_w_m_k", k)?;
                 }

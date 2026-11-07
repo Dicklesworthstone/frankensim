@@ -189,9 +189,8 @@ pub(super) fn solve(
             let curve = |cell: usize| {
                 if native_tables && let Voxel::Solid(m) = domain.voxel_at(cell) {
                     let material = &solids[usize::from(m)];
-                    if !material.conductivity_table.is_empty() {
-                        return ConductivityCurve::tabulated(material.conductivity_w_m_k,
-                            material.axis_conductivity()[axis], &material.conductivity_table);
+                    if material.has_temperature_dependent_conductivity() {
+                        return material.conductivity_curve(axis);
                     }
                 }
                 ConductivityCurve::constant(next.wall_conductivity()[cell][axis])

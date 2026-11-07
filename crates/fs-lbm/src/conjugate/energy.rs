@@ -552,12 +552,8 @@ impl Context<'_> {
             && let Voxel::Solid(m) = self.domain.voxel_at(c)
         {
             let material = &self.solids[usize::from(m)];
-            if !material.conductivity_table.is_empty() {
-                return ConductivityCurve::tabulated(
-                    material.conductivity_w_m_k,
-                    material.axis_conductivity()[axis],
-                    &material.conductivity_table,
-                );
+            if material.has_temperature_dependent_conductivity() {
+                return material.conductivity_curve(axis);
             }
         }
         // Resolved molecular fields and fluid eddy conductivity are already
@@ -575,7 +571,7 @@ impl Context<'_> {
             || self.face_contacts.contains_key(&(c.min(n), c.max(n)));
         let k = if wall { self.wall_conductivity() } else { &self.k };
         let has_curve = |cell| match self.domain.voxel_at(cell) {
-            Voxel::Solid(m) => !self.solids[usize::from(m)].conductivity_table.is_empty(),
+            Voxel::Solid(m) => self.solids[usize::from(m)].has_temperature_dependent_conductivity(),
             Voxel::Fluid => false,
         };
         let d = if let Some(t) = self.conductivity_temperature
@@ -587,8 +583,7 @@ impl Context<'_> {
             {
                 // One continuous curve has a direct Kirchhoff secant.
                 let solid = &self.solids[usize::from(a)];
-                area * solid.axis_conductivity()[axis]
-                    * solid.conductivity_secant_factor(t[c], t[n])
+                area * solid.conductivity_curve(axis).mean(t[c], t[n])
                     / (half_c + half_n)
             } else {
                 // Both rows use exactly the same ordering and positive
@@ -690,9 +685,7 @@ impl Context<'_> {
                     && let Voxel::Solid(m) = self.domain.voxel_at(c)
                 {
                     let material = &self.solids[usize::from(m)];
-                    area * material.axis_conductivity()[axis]
-                        * material.conductivity_secant_factor(previous[c], t)
-                        / half_c
+                    area * material.conductivity_curve(axis).mean(previous[c], t) / half_c
                 } else {
                     half
                 };
@@ -714,9 +707,7 @@ impl Context<'_> {
                     && let Voxel::Solid(m) = self.domain.voxel_at(c)
                 {
                     let material = &self.solids[usize::from(m)];
-                    let axis_k = material.axis_conductivity()[axis];
-                    axis_k
-                        * material.film_conductivity_factor(previous[c], ambient, axis_k, half_c, h)
+                    material.conductivity_curve(axis).film_mean(previous[c], ambient, half_c, h)
                 } else {
                     kc
                 };
@@ -836,46 +827,25 @@ pub(crate) fn solve_energy_inner(
             solve_energy_inner(domain, fluid, solids, flow, fixed, config, step, gate)
         });
     }
-    if solids.iter().all(|s| s.conductivity_table.is_empty()) {
+    if solids.iter().all(|s| !s.has_temperature_dependent_conductivity()) {
         return solve_energy_once(domain, fluid, solids, flow, setup, config, step, None, gate);
     }
     for solid in solids {
-        for (i, &(t, k)) in solid.conductivity_table.iter().enumerate() {
-            finite("solid.conductivity_table.temperature", t)?;
-            finite_positive("solid.conductivity_table.conductivity", k)?;
-            if i > 0 && t <= solid.conductivity_table[i - 1].0 {
-                return Err(ChtError::InvalidInput {
-                    field: "solid.conductivity_table",
-                    reason: format!("temperatures must increase ({})", solid.label),
-                });
-            }
-        }
+        solid.validate_conductivity_tables()?;
     }
     domain.check_materials(solids.len())?;
-    let scales = |temperature: &[f64]| -> Vec<f64> {
-        (0..domain.cell_count())
-            .map(|c| match domain.voxel_at(c) {
-                Voxel::Fluid => 1.0,
-                Voxel::Solid(m) => solids[usize::from(m)].conductivity_factor(temperature[c]),
-            })
-            .collect()
-    };
-    // First pass: every solid at its table's value for the first declared
-    // face, fixed or step temperature (or its reference conductivity).
-    let start = match step {
-        Some(step) => scales(step.previous),
-        None => {
-            let reference = setup.faces.iter().find_map(|rule| match *rule {
-                ThermalFace::Temperature(t) | ThermalFace::Inflow { temperature: t } => Some(t),
-                ThermalFace::Convective { ambient, .. } => Some(ambient),
-                _ => None,
-            });
-            match reference {
-                Some(t) => scales(&vec![t; domain.cell_count()]),
-                None => vec![1.0; domain.cell_count()],
-            }
-        }
-    };
+    // Reuse the physical temperature epoch instead of allocating a second
+    // per-cell conductivity field. The existing assembly buffer evaluates
+    // each axis directly from its own law; absolute axis tables are never
+    // divided by an arbitrary reference conductivity.
+    let uniform_start = if step.is_none() {
+        setup.faces.iter().find_map(|rule| match *rule {
+            ThermalFace::Temperature(t) | ThermalFace::Inflow { temperature: t } => Some(t),
+            ThermalFace::Convective { ambient, .. } => Some(ambient),
+            _ => None,
+        }).map(|t| vec![t; domain.cell_count()])
+    } else { None };
+    let start = step.map(|step| step.previous).or(uniform_start.as_deref());
     // Authored k(T) and limited convection share ONE nonlinear owner. Seed
     // without a reconstruction using upwind, then freeze both laws once per
     // outer proposal. A nested limited-convection solve would refresh k(T)
@@ -896,12 +866,13 @@ pub(crate) fn solve_energy_inner(
         setup,
         &seed_config,
         step,
-        Some((&start, None)),
+        start.map(|temperature| (temperature, None)),
         None,
         None,
         false,
         gate,
     )?;
+    drop(uniform_start);
     let mut iterations = seed.report.iterations;
     // A probe uses the same admitted assembly, reconstructed convection and
     // local heat accounting as an endpoint check, but returns BOTH residuals
@@ -911,7 +882,7 @@ pub(crate) fn solve_energy_inner(
         let mut residual = 0.0;
         let evaluated = solve_energy_field_kernel(
             domain, fluid, solids, flow, setup, config, step,
-            Some((&scales(temperature), Some(temperature))),
+            Some((temperature, Some(temperature))),
             None, None, true, Some(&mut residual), gate,
         )?;
         Ok((evaluated, residual))
@@ -934,7 +905,7 @@ pub(crate) fn solve_energy_inner(
             setup,
             &linear_config,
             step,
-            Some((&scales(&solution.temperature), Some(&solution.temperature))),
+            Some((&solution.temperature, Some(&solution.temperature))),
             None,
             None,
             false,
@@ -984,8 +955,10 @@ pub(crate) fn solve_energy_inner(
     })
 }
 
-/// One linear energy solve; `nonlinear` carries per-cell solid conductivity
-/// factors and an optional warm start (the previous Picard pass).
+/// One linear energy solve; `nonlinear` carries the point-conductivity
+/// temperature epoch and optional warm/interface/reconstruction temperature.
+/// The initial seed freezes its point values; later passes borrow one field
+/// for both epochs without a separate per-cell conductivity-factor buffer.
 #[allow(clippy::too_many_arguments)]
 fn solve_energy_once(
     domain: &VoxelDomain,
@@ -1216,10 +1189,11 @@ fn solve_energy_field_kernel(
             .map(|c| match domain.voxel_at(c) {
                 Voxel::Fluid => [fluid.conductivity_w_m_k + eddy(c); 3],
                 Voxel::Solid(m) => {
-                    let scale = nonlinear.map_or(1.0, |(scales, _)| scales[c]);
-                    solids[usize::from(m)]
-                        .axis_conductivity()
-                        .map(|k| k * scale)
+                    let solid = &solids[usize::from(m)];
+                    nonlinear.map_or_else(
+                        || solid.axis_conductivity(),
+                        |(temperature, _)| solid.axis_conductivity_at(temperature[c]),
+                    )
                 }
             })
             .collect()
@@ -2044,11 +2018,9 @@ fn compact_link_conductance(
         && let Voxel::Solid(material) = domain.voxel_at(outside)
     {
         let solid = &solids[usize::from(material)];
-        if !solid.conductivity_table.is_empty() {
-            let axis_k = solid.axis_conductivity()[axis];
-            conductivity = axis_k * solid.film_conductivity_factor(
-                previous[outside], previous[junction], axis_k, half,
-                1.0 / resistance_m2_k_w,
+        if solid.has_temperature_dependent_conductivity() {
+            conductivity = solid.conductivity_curve(axis).film_mean(
+                previous[outside], previous[junction], half, 1.0 / resistance_m2_k_w,
             );
         }
     }

@@ -464,3 +464,181 @@ fn heterogeneous_graded_face_peclet_matches_the_actual_series_resistance() {
         }
     }
 }
+
+
+fn directional_material() -> SolidMaterial {
+    // Deliberately unrelated reference values prove these are absolute laws,
+    // not three copies of a common scalar/reference multiplier.
+    SolidMaterial::new("independent axis laws", 7.0)
+        .with_orthotropic([19.0, 29.0, 39.0])
+        .with_axis_conductivity_tables([
+            &[(300.0, 1.0), (350.0, 2.0), (400.0, 3.0)],
+            &[(300.0, 8.0), (340.0, 5.6), (400.0, 2.0)],
+            &[(325.0, 4.0)],
+        ])
+        .with_heat_capacity(2.0)
+}
+
+fn axis_law(axis: usize) -> (f64, f64) {
+    [(1.0, 0.02), (8.0, -0.06), (4.0, 0.0)][axis]
+}
+
+fn axis_potential(axis: usize, t: f64) -> f64 {
+    let (a, b) = axis_law(axis);
+    let x = t - 300.0;
+    a * x + 0.5 * b * x * x
+}
+
+fn axis_temperature(axis: usize, potential: f64) -> f64 {
+    let (a, b) = axis_law(axis);
+    300.0 + 2.0 * potential / (a + (a * a + 2.0 * b * potential).sqrt())
+}
+
+#[test]
+fn independent_axis_tables_match_graded_kirchhoff_profiles_and_local_values() {
+    let material = directional_material();
+    assert!(material.has_temperature_dependent_conductivity());
+    for axis in 0..3 {
+        for reversed in [false, true] {
+            let mut widths = [vec![0.2], vec![0.3], vec![0.4]];
+            widths[axis] = vec![0.2, 0.5, 0.3];
+            let domain = VoxelDomain::graded_from_fn(widths, |_| Voxel::Solid(0)).unwrap();
+            let mut faces = [ThermalFace::Adiabatic; 6];
+            let (left, right) = if reversed { (300.0, 400.0) } else { (400.0, 300.0) };
+            faces[2 * axis] = ThermalFace::Temperature(left);
+            faces[2 * axis + 1] = ThermalFace::Temperature(right);
+            let solution = solve_energy(
+                &domain, &unit_fluid(), std::slice::from_ref(&material),
+                &FlowField::quiescent(&domain), &ThermalSetup::new(faces),
+                &EnergyConfig::default(), &CancelGate::new(),
+            ).unwrap();
+            let flux = axis_potential(axis, left) - axis_potential(axis, right);
+            for c in 0..domain.cell_count() {
+                let [x, y, z] = domain.coords(c);
+                let position = domain.center(x, y, z)[axis];
+                let expected = axis_temperature(axis, axis_potential(axis, left) - flux * position);
+                let actual = solution.temperature[c];
+                assert!((actual - expected).abs() < 1e-7, "axis={axis}, reversed={reversed}: {solution:?}");
+                for component in 0..3 {
+                    let (a, b) = axis_law(component);
+                    let expected_k = a + b * (actual - 300.0);
+                    assert!((solution.conductivity[c][component] - expected_k).abs() < 2e-13 * expected_k);
+                }
+            }
+            let incoming = (axis_potential(axis, left) - axis_potential(axis, solution.temperature[0])) / 0.1;
+            let outgoing = (axis_potential(axis, solution.temperature[2]) - axis_potential(axis, right)) / 0.15;
+            assert!((incoming - flux).abs() < 1e-6);
+            assert!((outgoing - flux).abs() < 1e-6);
+            assert!(solution.report.balance.relative_residual < 1e-9);
+        }
+    }
+}
+
+#[test]
+fn independent_axis_tables_close_material_contact_surface_fluxes() {
+    let backing_k = [2.0, 7.0, 5.0];
+    let materials = [
+        directional_material(),
+        SolidMaterial::new("backing", 2.0).with_orthotropic(backing_k),
+    ];
+    let (flux, surface_a, resistance, wa, wb) = (50.0, 340.0, 0.3, 0.4, 0.7);
+    let surface_b = surface_a - resistance * flux;
+    for axis in 0..3 {
+        let wall_a = axis_temperature(axis, axis_potential(axis, surface_a) + flux * wa);
+        let cell_a = axis_temperature(axis, axis_potential(axis, surface_a) + flux * wa * 0.5);
+        let cell_b = surface_b - flux * wb * 0.5 / backing_k[axis];
+        let wall_b = surface_b - flux * wb / backing_k[axis];
+        let mut widths = [vec![0.2], vec![0.3], vec![0.4]];
+        widths[axis] = vec![wa, wb];
+        let domain = VoxelDomain::graded_from_fn(widths, |p| {
+            Voxel::Solid(u16::from(p[axis] >= wa))
+        }).unwrap();
+        let mut faces = [ThermalFace::Adiabatic; 6];
+        faces[2 * axis] = ThermalFace::Temperature(wall_a);
+        faces[2 * axis + 1] = ThermalFace::Temperature(wall_b);
+        let mut setup = ThermalSetup::new(faces);
+        setup.contacts.push(ContactResistance {
+            materials: (0, 1), resistance_m2_k_w: resistance,
+        });
+        let solution = solve_energy(
+            &domain, &unit_fluid(), &materials, &FlowField::quiescent(&domain),
+            &setup, &EnergyConfig::default(), &CancelGate::new(),
+        ).unwrap();
+        assert!((solution.temperature[0] - cell_a).abs() < 1e-7, "{solution:?}");
+        assert!((solution.temperature[1] - cell_b).abs() < 1e-7, "{solution:?}");
+        let q = backing_k[axis] * (solution.temperature[1] - wall_b) / (0.5 * wb);
+        let recovered_a = axis_temperature(axis,
+            axis_potential(axis, solution.temperature[0]) - q * 0.5 * wa);
+        let recovered_b = solution.temperature[1] + q * 0.5 * wb / backing_k[axis];
+        assert!((q - flux).abs() < 1e-7);
+        assert!((recovered_a - recovered_b - resistance * q).abs() < 1e-7);
+        assert!(solution.report.balance.relative_residual < 1e-9);
+    }
+}
+
+#[test]
+fn independent_axis_tables_integrate_robin_surfaces_and_original_time_storage() {
+    let material = directional_material();
+    let domain = VoxelDomain::from_fn(1, 1, 1, 1.0, |_| Voxel::Solid(0)).unwrap();
+    let flow = FlowField::quiescent(&domain);
+    let (cell, surface, ambient, dt) = (350.0, 340.0, 300.0, 0.25);
+    for axis in 0..3 {
+        let heat = (axis_potential(axis, cell) - axis_potential(axis, surface)) / 0.5;
+        let h = heat / (surface - ambient);
+        let mut faces = [ThermalFace::Adiabatic; 6];
+        faces[2 * axis + 1] = ThermalFace::Convective { h, ambient };
+        let mut setup = ThermalSetup::new(faces);
+        setup.power_w = vec![heat];
+        let solution = solve_energy(
+            &domain, &unit_fluid(), std::slice::from_ref(&material), &flow,
+            &setup, &EnergyConfig::default(), &CancelGate::new(),
+        ).unwrap();
+        assert!((solution.temperature[0] - cell).abs() < 1e-7, "{solution:?}");
+        assert!((solution.report.balance.boundary_outflow_w - heat).abs() < 1e-7);
+        let stored = 2.0 * (cell - ambient);
+        setup.power_w[0] += stored / dt;
+        let result = march_energy(
+            &domain, &unit_fluid(), std::slice::from_ref(&material), &flow,
+            &setup, &[ambient], |_| 1.0,
+            &TransientConfig { time_step_s: dt, steps: 1, energy: EnergyConfig::default() },
+            None, &CancelGate::new(),
+        ).unwrap();
+        assert!((result.temperature[0] - cell).abs() < 1e-7, "{result:?}");
+        let record = result.records[0];
+        assert!((record.stored_energy_change_j - stored).abs() < 1e-7);
+        assert!((record.boundary_outflow_j - dt * heat).abs() < 1e-7);
+        assert!(record.closure_j.abs() < 1e-7);
+    }
+}
+
+#[test]
+fn independent_axis_tables_refuse_incomplete_invalid_and_competing_laws() {
+    let domain = VoxelDomain::from_fn(1, 1, 1, 1.0, |_| Voxel::Solid(0)).unwrap();
+    let flow = FlowField::quiescent(&domain);
+    let setup = ThermalSetup::new([ThermalFace::Temperature(350.0); 6]);
+    let good = [(300.0, 1.0), (400.0, 2.0)];
+    let invalid = [
+        SolidMaterial::new("incomplete", 1.0).with_axis_conductivity_tables([&good, &good, &[]]),
+        SolidMaterial::new("unordered", 1.0)
+            .with_axis_conductivity_tables([&good, &[(300.0, 1.0), (299.0, 2.0)], &good]),
+        SolidMaterial::new("nonpositive", 1.0)
+            .with_axis_conductivity_tables([&good, &good, &[(300.0, 0.0)]]),
+        SolidMaterial::new("nonfinite", 1.0)
+            .with_axis_conductivity_tables([&[(f64::NAN, 1.0)], &good, &good]),
+        directional_material().with_conductivity_table(&good),
+    ];
+    for material in invalid {
+        let result = solve_energy(
+            &domain, &unit_fluid(), &[material], &flow, &setup,
+            &EnergyConfig::default(), &CancelGate::new(),
+        );
+        assert!(matches!(result, Err(ChtError::InvalidInput { .. })), "{result:?}");
+    }
+    let conflict = EnergyConfig::default().solve_with_conductivity(
+        &domain, &unit_fluid(), &[directional_material()], &flow, &setup,
+        &[[2.0, 5.0, 4.0]], &CancelGate::new(),
+    );
+    assert!(matches!(conflict, Err(ChtError::InvalidInput {
+        field: "thermal.molecular_conductivity", ..
+    })), "{conflict:?}");
+}

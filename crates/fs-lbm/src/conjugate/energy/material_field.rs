@@ -551,7 +551,7 @@ fn admit_molecular_field(
             });
         }
     }
-    if solids.iter().any(|s| !s.conductivity_table.is_empty()) {
+    if solids.iter().any(|s| s.has_temperature_dependent_conductivity()) {
         return Err(ChtError::InvalidInput {
             field: "thermal.molecular_conductivity",
             reason: "explicit resolved field cannot also use authored conductivity tables".into(),

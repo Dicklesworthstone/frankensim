@@ -53,8 +53,6 @@ pub(super) fn solve(
         molecular_conductivity, None, false, gate,
     )?;
     let mut iterations = solution.report.iterations;
-    let unit_scales = vec![1.0; domain.cell_count()];
-    let scales = nonlinear.map_or(unit_scales.as_slice(), |(scales, _)| scales);
     let mut linear_config = *config;
     let mut endpoint_residual = f64::INFINITY;
 
@@ -62,7 +60,7 @@ pub(super) fn solve(
         super::super::poll(gate)?;
         let next = solve_energy_field_once(
             domain, fluid, solids, flow, setup, &linear_config, step,
-            Some((scales, Some(&solution.temperature))), molecular_conductivity,
+            Some((&solution.temperature, Some(&solution.temperature))), molecular_conductivity,
             None, false, gate,
         )?;
         iterations = iterations.saturating_add(next.report.iterations);
@@ -85,7 +83,7 @@ pub(super) fn solve(
         // satisfy the caller's tolerance; small iterate changes alone do not.
         match solve_energy_field_once(
             domain, fluid, solids, flow, setup, config, step,
-            Some((scales, Some(&solution.temperature))), molecular_conductivity,
+            Some((&solution.temperature, Some(&solution.temperature))), molecular_conductivity,
             None, true, gate,
         ) {
             Ok(mut accepted) => {

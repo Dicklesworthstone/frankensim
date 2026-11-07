@@ -47,7 +47,7 @@ const MAX_STL_BYTES: u64 = 256 * 1024 * 1024;
 const SCHEMA: &str = "frankensim.cooling-cht.v1";
 const RESULT_SCHEMA: &str = "frankensim.cooling-cht.result.v1";
 const NO_CLAIM: &str = "constant-property incompressible flow (steady, or marched when declared) on a staircase voxel grid, uniform or graded, at one declared resolution (no mesh-convergence claim; a grid_convergence block measures one); Boussinesq buoyancy only when gravity is declared; turbulence through optional equilibrium LVEL or explicit transient Smagorinsky/WALE (exploration only; no resolved turbulent spectrum, transition or turbulent DNS qualification); temperature dependence through declared solid conductivity tables and compact junction heat-capacity tables (fluid properties constant); compact models use one junction temperature and require an explicit total heat_capacity_j_k or bounded heat_capacity_table_j_k for energy marches; tabulated storage integrates the declared heat capacity without extrapolation (occupied cells add no separate volumetric storage); radiation only between gray diffuse exposed solid faces and to the surroundings seen through openings, inlets and fans (Monte Carlo exchange factors on face patches; walls and non-emitting solids reflect perfectly; transparent air); selected spatial convection schemes do not change temporal order or establish general multidimensional accuracy; Estimated numerical evidence, not validated hardware or a ledger-backed .fsim run";
-const HELP: &str = "Usage: frankensim [--json] cooling-cht <scene.json>\n\nSolve steady voxel conjugate heat transfer: finite-volume SIMPLEC airflow\n(forced, or natural/mixed with the Boussinesq force when gravity_m_s2 is\ndeclared) and one conservative energy equation over fluid and solid cells.\nThe scene declares size_m and voxel_m, a fluid (\"dry-air-300k\" or explicit\nproperties), materials (isotropic k or [kx, ky, kz]), contacts (interface\nresistance_m2_k_w between two materials), solids (boxes, or closed STL meshes placed by\nscale and offset_m; later solids override earlier ones),\nheat-source boxes (power spread over the solid cells they cover), and one\nrule per face x-, x+, y-, y+, z-, z+: inlet (velocity_m_s, temperature_k),\nfan (curve [[flow_m3_s, pressure_pa], ...], temperature_k; the flow is the\noperating point against the system), opening (ambient_k, optional signed\nstatic gauge pressure_pa defaulting to zero; flow either way), symmetry, or wall\n(adiabatic, or temperature_k, heat_flux_w_m2, or htc_w_m2_k with ambient_k).\nOpening pressures share one reference, relative to reference hydrostatics\nwhen buoyancy is enabled; they do not set absolute gas pressure or density.\nMissing faces are adiabatic walls. A material emissivity enables gray\nsurface radiation between emitting faces and to the surroundings seen\nthrough openings, inlets and fans (Monte Carlo exchange factors; walls\nand non-emitting solids reflect; radiation {rays_per_face, seed,\nsurface_exchange (default true), patch_size (default 4)}).\nsolver.turbulence \"lvel\" adds the LVEL algebraic eddy viscosity (and its\nturbulent conductivity) for transitional/turbulent fan-driven flow.\ninternal_fans (axis, at_m on an interior voxel face, direction \"+\"/\"-\",\nmin_m/max_m transverse extent, curve) raise the pressure across a plane;\nresistances are grilles (axis, at_m, min_m/max_m, loss_coefficient or\nfree_area_ratio) or porous blocks (min_m/max_m, permeability_m2 and\ninertial_per_m, scalar or per axis).\nA solid may be a plate-fin heatsink (heatsink {base_min_m, base_size_m,\nfin_count, fin_thickness_m, fin_height_m, fins_along}). A study block\n(parameters [{name, path, values}], objective {minimize}, constraints\n[{quantity, min, max}]) evaluates every combination of the values and ranks\nthe variants; quantities are max_solid_temperature_k, source:<name>,\ncomponent:<name>, internal_fan:<name>, fan_flow_m3_s and inflow_m3_s.\nA grid_convergence block {splits: [a, b, c]} solves the scene with every\ncell split a, b and c ways per axis and reports each quantity's observed\norder, Richardson extrapolation and GCI band.\ncomponents are JEDEC two-resistor compact models (min_m/max_m box,\nboard_side, power_w, junction_to_case_k_w, junction_to_board_k_w): the box\nblocks flow and the junction reaches the case top and board through the\ntwo resistors. Transient energy marches require either positive total\nheat_capacity_j_k or heat_capacity_table_j_k, never both. The table declares\n2..4096 [temperature_k, capacity_j_k] pairs with positive finite values and\nincreasing temperatures. Its exact integral owns junction storage only\nwithin the declared temperature span; extrapolation refuses. Without either\ncapacity declaration the model is steady-only.\nOptional transient (time_step_s, steps,\npower_schedule [[time_s, scale], ...], initial_temperature_k) marches the\nenergy equation over the steady forced flow (resolved solid materials\nthen need volumetric_heat_capacity_j_m3_k; compact boxes use their\njunction heat capacity); with flow \"unsteady\" (scheme \"bdf2\" or\n\"backward-euler\", inner_iterations, inner_tolerance, inlet_schedule) the\nflow marches with it from rest, buoyant when gravity is declared; energy\n\"steady-on-mean-flow\" instead solves the steady energy equation (with any\nradiation) on the march's time-averaged fluxes. Request schema: frankensim.cooling-cht.v1.\nResults are Estimated single-resolution numerical evidence.\n";
+const HELP: &str = "Usage: frankensim [--json] cooling-cht <scene.json>\n\nSolve steady voxel conjugate heat transfer: finite-volume SIMPLEC airflow\n(forced, or natural/mixed with the Boussinesq force when gravity_m_s2 is\ndeclared) and one conservative energy equation over fluid and solid cells.\nThe scene declares size_m and voxel_m, a fluid (\"dry-air-300k\" or explicit\nproperties), materials (isotropic k or [kx, ky, kz], optionally with one\nconductivity_table or three absolute x/y/z axis_conductivity_tables), contacts (interface\nresistance_m2_k_w between two materials), solids (boxes, or closed STL meshes placed by\nscale and offset_m; later solids override earlier ones),\nheat-source boxes (power spread over the solid cells they cover), and one\nrule per face x-, x+, y-, y+, z-, z+: inlet (velocity_m_s, temperature_k),\nfan (curve [[flow_m3_s, pressure_pa], ...], temperature_k; the flow is the\noperating point against the system), opening (ambient_k, optional signed\nstatic gauge pressure_pa defaulting to zero; flow either way), symmetry, or wall\n(adiabatic, or temperature_k, heat_flux_w_m2, or htc_w_m2_k with ambient_k).\nOpening pressures share one reference, relative to reference hydrostatics\nwhen buoyancy is enabled; they do not set absolute gas pressure or density.\nMissing faces are adiabatic walls. A material emissivity enables gray\nsurface radiation between emitting faces and to the surroundings seen\nthrough openings, inlets and fans (Monte Carlo exchange factors; walls\nand non-emitting solids reflect; radiation {rays_per_face, seed,\nsurface_exchange (default true), patch_size (default 4)}).\nsolver.turbulence \"lvel\" adds the LVEL algebraic eddy viscosity (and its\nturbulent conductivity) for transitional/turbulent fan-driven flow.\ninternal_fans (axis, at_m on an interior voxel face, direction \"+\"/\"-\",\nmin_m/max_m transverse extent, curve) raise the pressure across a plane;\nresistances are grilles (axis, at_m, min_m/max_m, loss_coefficient or\nfree_area_ratio) or porous blocks (min_m/max_m, permeability_m2 and\ninertial_per_m, scalar or per axis).\nA solid may be a plate-fin heatsink (heatsink {base_min_m, base_size_m,\nfin_count, fin_thickness_m, fin_height_m, fins_along}). A study block\n(parameters [{name, path, values}], objective {minimize}, constraints\n[{quantity, min, max}]) evaluates every combination of the values and ranks\nthe variants; quantities are max_solid_temperature_k, source:<name>,\ncomponent:<name>, internal_fan:<name>, fan_flow_m3_s and inflow_m3_s.\nA grid_convergence block {splits: [a, b, c]} solves the scene with every\ncell split a, b and c ways per axis and reports each quantity's observed\norder, Richardson extrapolation and GCI band.\ncomponents are JEDEC two-resistor compact models (min_m/max_m box,\nboard_side, power_w, junction_to_case_k_w, junction_to_board_k_w): the box\nblocks flow and the junction reaches the case top and board through the\ntwo resistors. Transient energy marches require either positive total\nheat_capacity_j_k or heat_capacity_table_j_k, never both. The table declares\n2..4096 [temperature_k, capacity_j_k] pairs with positive finite values and\nincreasing temperatures. Its exact integral owns junction storage only\nwithin the declared temperature span; extrapolation refuses. Without either\ncapacity declaration the model is steady-only.\nOptional transient (time_step_s, steps,\npower_schedule [[time_s, scale], ...], initial_temperature_k) marches the\nenergy equation over the steady forced flow (resolved solid materials\nthen need volumetric_heat_capacity_j_m3_k; compact boxes use their\njunction heat capacity); with flow \"unsteady\" (scheme \"bdf2\" or\n\"backward-euler\", inner_iterations, inner_tolerance, inlet_schedule) the\nflow marches with it from rest, buoyant when gravity is declared; energy\n\"steady-on-mean-flow\" instead solves the steady energy equation (with any\nradiation) on the march's time-averaged fluxes. Request schema: frankensim.cooling-cht.v1.\nResults are Estimated single-resolution numerical evidence.\n";
 
 type Result<T> = std::result::Result<T, Failure>;
 
@@ -893,6 +893,24 @@ const FACE_KEYS: [&str; 6] = ["x-", "x+", "y-", "y+", "z-", "z+"];
 /// their conduction is the compact model's).
 const COMPACT_MATERIAL: &str = "compact-model";
 
+/// Native scalar and directional tables share one input/units contract.
+fn parse_conductivity_table(table: &J, at: &str) -> Result<Vec<(f64, f64)>> {
+    let points = table.as_array().filter(|points| !points.is_empty())
+        .ok_or_else(|| bad(format!("{at} must be [[temperature_k, k], ...]")))?
+        .iter()
+        .map(|point| {
+            point.as_array().filter(|pair| pair.len() == 2)
+                .and_then(|pair| Some((pair[0].as_f64()?, pair[1].as_f64()?)))
+                .filter(|&(t, k)| t.is_finite() && k.is_finite() && k > 0.0)
+                .ok_or_else(|| bad(format!("{at} entries must be [temperature_k, k > 0]")))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    if points.windows(2).any(|w| w[1].0 <= w[0].0) {
+        return Err(bad(format!("{at} temperatures must increase")));
+    }
+    Ok(points)
+}
+
 impl Scene {
     fn temperature_dependent(&self) -> bool {
         self.fluid_source
@@ -1038,6 +1056,7 @@ impl Scene {
                     "conductivity_w_m_k",
                     "volumetric_heat_capacity_j_m3_k",
                     "conductivity_table",
+                    "axis_conductivity_tables",
                 ]
                 .iter()
                 .any(|key| item.get(key).is_some())
@@ -1062,38 +1081,34 @@ impl Scene {
                 Some(rho_c) => material.with_heat_capacity(rho_c),
                 None => material,
             };
-            // Optional k(T): [[T K, k W/(m K)], ...], scaling every axis.
+            // A common multiplier or three absolute grid-axis laws.
+            if item.get("conductivity_table").is_some()
+                && item.get("axis_conductivity_tables").is_some()
+            {
+                return Err(bad(format!("{at}: common and axis conductivity tables are competing laws")));
+            }
             let material = match item.get("conductivity_table") {
                 None => material,
-                Some(table) => {
-                    let points = table
-                        .as_array()
-                        .filter(|points| !points.is_empty())
-                        .ok_or_else(|| {
-                            bad(format!(
-                                "{at}.conductivity_table must be [[temperature_k, k], ...]"
-                            ))
-                        })?
-                        .iter()
-                        .map(|point| {
-                            point
-                                .as_array()
-                                .filter(|pair| pair.len() == 2)
-                                .and_then(|pair| Some((pair[0].as_f64()?, pair[1].as_f64()?)))
-                                .filter(|&(t, k)| t.is_finite() && k.is_finite() && k > 0.0)
-                                .ok_or_else(|| {
-                                    bad(format!(
-                                        "{at}.conductivity_table entries must be [temperature_k, k > 0]"
-                                    ))
-                                })
-                        })
-                        .collect::<Result<Vec<_>>>()?;
-                    if points.windows(2).any(|w| w[1].0 <= w[0].0) {
-                        return Err(bad(format!(
-                            "{at}.conductivity_table temperatures must increase"
-                        )));
+                Some(table) => material.with_conductivity_table(
+                    &parse_conductivity_table(table, &format!("{at}.conductivity_table"))?,
+                ),
+            };
+            let material = match item.get("axis_conductivity_tables") {
+                None => material,
+                Some(value) => {
+                    let axes = value.as_array().filter(|axes| axes.len() == 3)
+                        .ok_or_else(|| bad(format!(
+                            "{at}.axis_conductivity_tables requires exactly three x/y/z tables"
+                        )))?;
+                    let mut tables = std::array::from_fn(|_| Vec::new());
+                    for (axis, table) in axes.iter().enumerate() {
+                        tables[axis] = parse_conductivity_table(
+                            table, &format!("{at}.axis_conductivity_tables[{axis}]"),
+                        )?;
                     }
-                    material.with_conductivity_table(&points)
+                    let mut material = material;
+                    material.axis_conductivity_tables = Some(tables);
+                    material
                 }
             };
             let emissivity = optional_number(item, "emissivity", &at)?.unwrap_or(0.0);
@@ -1472,9 +1487,9 @@ impl Scene {
                         ));
                     }
                 }
-                if materials.iter().any(|solid| !solid.conductivity_table.is_empty()) {
+                if materials.iter().any(SolidMaterial::has_temperature_dependent_conductivity) {
                     return Err(bad(
-                        "unsteady material CHT requires fixed solid conductivity; conductivity_table is unsupported",
+                        "unsteady material CHT requires fixed solid conductivity; authored conductivity tables are unsupported",
                     ));
                 }
             } else if solid_sources.len() != materials.len()

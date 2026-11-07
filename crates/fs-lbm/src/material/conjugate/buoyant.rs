@@ -463,7 +463,7 @@ impl<F: FluidTransport + ?Sized> MaterialChtFluid<'_, F> {
         }
         if flow_config.turbulence != Turbulence::Laminar
             || !thermal.eddy_conductivity_w_m_k.is_empty()
-            || solids.iter().any(|s| !s.conductivity_table.is_empty())
+            || solids.iter().any(|s| s.has_temperature_dependent_conductivity())
         {
             return Err(MaterialBuoyancyError::Invalid(
                 "material steady feedback requires laminar flow and no independently authored eddy or solid conductivity tables",

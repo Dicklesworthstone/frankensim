@@ -353,7 +353,7 @@ impl<F: FluidTransport + ?Sized> MaterialChtFluid<'_, F> {
             || !thermal.eddy_conductivity_w_m_k.is_empty()
             || solids
                 .iter()
-                .any(|solid| !solid.conductivity_table.is_empty())
+                .any(|solid| solid.has_temperature_dependent_conductivity())
         {
             return Err(MaterialBuoyancyError::Invalid(
                 "material transient feedback requires laminar flow without a second conductivity owner",

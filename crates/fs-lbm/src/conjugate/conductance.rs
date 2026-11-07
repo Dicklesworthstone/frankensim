@@ -48,8 +48,113 @@ impl<'a> ConductivityCurve<'a> {
         (1.0 - fraction) * ka + fraction * kb
     }
 
-    fn at(self, temperature: f64) -> f64 {
+    pub(crate) fn at(self, temperature: f64) -> f64 {
         self.axis * (self.raw(temperature) / self.reference)
+    }
+
+    /// Exact Kirchhoff mean across every crossed linear piece and the
+    /// declared constant extensions, without subtracting large potentials.
+    pub(crate) fn mean(self, a: f64, b: f64) -> f64 {
+        if a == b || self.table.is_empty() { return self.at(a); }
+        let (lo, hi) = (a.min(b), a.max(b));
+        let span = hi - lo;
+        let mut left = lo;
+        let mut left_factor = self.raw(left) / self.reference;
+        let mut mean = 0.0;
+        let first = self.table.partition_point(|&(temperature, _)| temperature <= lo);
+        for &(temperature, conductivity) in &self.table[first..] {
+            if temperature >= hi { break; }
+            let right_factor = conductivity / self.reference;
+            mean += (temperature - left) / span * (0.5 * left_factor + 0.5 * right_factor);
+            left = temperature;
+            left_factor = right_factor;
+        }
+        self.axis * (mean + (hi - left) / span
+            * (0.5 * left_factor + 0.5 * self.raw(hi) / self.reference))
+    }
+
+    /// Conductivity averaged from a cell to its solved Robin surface.
+    /// Integrate k+d*h on each table piece and invert its positive quadratic;
+    /// no frozen cell conductivity substitutes for the boundary half cell.
+    pub(crate) fn film_mean(self, cell: f64, ambient: f64, distance: f64, h: f64) -> f64 {
+        if cell == ambient || self.table.is_empty() { return self.at(cell); }
+        let (lo, hi) = (cell.min(ambient), cell.max(ambient));
+        let span = hi - lo;
+        let table = self.table;
+        let first = table.partition_point(|&(temperature, _)| temperature <= lo);
+        let end = table.partition_point(|&(temperature, _)| temperature < hi);
+        let cell_factor = self.raw(cell) / self.reference;
+        let ambient_factor = self.raw(ambient) / self.reference;
+        let mut maximum = cell_factor.max(ambient_factor);
+        for &(_, k) in &table[first..end] {
+            maximum = maximum.max(k / self.reference);
+        }
+        let maximum_k = self.axis * maximum;
+        let bulk = distance / maximum_k;
+        let film = 1.0 / h;
+        let resistance_scale = bulk.max(film);
+        if !span.is_finite() || !maximum_k.is_finite() || maximum_k <= 0.0
+            || !resistance_scale.is_finite() || resistance_scale <= 0.0
+        {
+            return f64::NAN;
+        }
+        let alpha = film / resistance_scale;
+        let beta = bulk / resistance_scale;
+        if beta == 0.0 { return self.at(cell); }
+        let mut remaining = beta;
+        let mut start = cell;
+        let mut k_start = cell_factor / maximum;
+        let mut covered = 0.0;
+        let mut mean = 0.0;
+        let knots = end - first;
+        for piece in 0..=knots {
+            let (finish, k_finish) = if piece == knots {
+                (ambient, ambient_factor / maximum)
+            } else {
+                let index = if cell < ambient { first + piece } else { end - 1 - piece };
+                let (temperature, conductivity) = table[index];
+                (temperature, conductivity / self.reference / maximum)
+            };
+            let fraction = (finish - start).abs() / span;
+            let a = beta + alpha * k_start;
+            let b = 0.5 * alpha * (k_finish - k_start);
+            let average = beta + 0.5 * alpha * (k_start + k_finish);
+            let integral = fraction * average;
+            if remaining <= integral || piece == knots {
+                // Clamp only accumulated endpoint roundoff when the film
+                // tends to an imposed surface temperature.
+                let y = (remaining / fraction).min(average);
+                let discriminant = if b < 0.0 {
+                    let endpoint = beta + alpha * k_finish;
+                    endpoint * endpoint + (-4.0 * b) * (average - y).max(0.0)
+                } else {
+                    a * a + 4.0 * b * y
+                };
+                let position = 2.0 * y / (a + discriminant.sqrt());
+                if !position.is_finite() { return f64::NAN; }
+                let position = position.clamp(0.0, 1.0);
+                let used = fraction * position;
+                let local_mean = k_start + 0.5 * position * (k_finish - k_start);
+                // Retain the fractional drop even if the absolute surface
+                // temperature would round back to the cell temperature.
+                return maximum_k * if covered == 0.0 {
+                    local_mean
+                } else {
+                    let total = covered + used;
+                    covered / total * mean + used / total * local_mean
+                };
+            }
+            if fraction > 0.0 {
+                let total = covered + fraction;
+                mean = covered / total * mean
+                    + fraction / total * (0.5 * k_start + 0.5 * k_finish);
+                covered = total;
+            }
+            remaining -= integral;
+            start = finish;
+            k_start = k_finish;
+        }
+        f64::NAN
     }
 }
 
@@ -487,4 +592,48 @@ mod tests {
         let invalid = ConductivityCurve::constant(0.0);
         assert!(interface_conductance(invalid, 700.0, 0.2, b, 200.0, 0.7, 0.4).is_none());
     }
+
+    #[test]
+    fn independent_directional_curves_integrate_their_own_knots_and_end_extensions() {
+        let tables: [&[(f64, f64)]; 3] = [
+            &[(300.0, 1.0), (350.0, 2.0), (400.0, 3.0)],
+            &[(300.0, 8.0), (340.0, 5.6), (400.0, 2.0)],
+            &[(325.0, 4.0)],
+        ];
+        let midpoint = [2.0, 5.0, 4.0];
+        for axis in 0..3 {
+            let curve = ConductivityCurve::tabulated(1.0, 1.0, tables[axis]);
+            close(curve.at(350.0), midpoint[axis]);
+            close(curve.mean(300.0, 400.0), midpoint[axis]);
+            close(curve.mean(400.0, 300.0), midpoint[axis]);
+            close(curve.mean(250.0, 450.0), midpoint[axis]);
+            close(curve.mean(350.0, 350.0), midpoint[axis]);
+        }
+        // The legacy scalar factor still multiplies its independent axis value.
+        let legacy = ConductivityCurve::tabulated(2.0, 9.0, tables[0]);
+        close(legacy.mean(300.0, 400.0), 9.0);
+        close(legacy.at(400.0), 13.5);
+    }
+
+    #[test]
+    fn directional_films_close_independent_heating_and_cooling_integrals() {
+        for (a, b) in [(1.0, 0.02), (8.0, -0.06), (4.0, 0.0)] {
+            let table = [(300.0, a), (340.0, a + 40.0 * b), (400.0, a + 100.0 * b)];
+            let curve = ConductivityCurve::tabulated(1.0, 1.0, &table);
+            let potential = |t| {
+                let x = t - 300.0;
+                a * x + 0.5 * b * x * x
+            };
+            for (cell, surface, ambient) in [(360.0, 340.0, 310.0), (320.0, 340.0, 390.0)] {
+                let half = 0.25;
+                let flux = (potential(cell) - potential(surface)) / half;
+                let h = flux / (surface - ambient);
+                let mean = curve.film_mean(cell, ambient, half, h);
+                let conductance = 1.0 / (half / mean + 1.0 / h);
+                close(conductance * (cell - ambient), flux);
+                close(mean, (potential(cell) - potential(surface)) / (cell - surface));
+            }
+        }
+    }
+
 }
