@@ -5,13 +5,17 @@
 //! plastic indentation is never split between the bodies. The local pressure
 //! cap is min(H_A, H_B) on the original native contact grid.
 //!
-//! This first-order step holds beginning pressure, k and local H during removal,
-//! then uses the original native recession and hardness-refresh operations.
-//! Both work receipts are returned; signed parameter work is not heat. Only the
-//! complete successor is publishable. Refine physical slip increments when
-//! pressure or hardness changes appreciably. No layered elastic kernel, coating
-//! failure, debris transport, hardness-to-yield conversion, or annealing is
-//! inferred. Elasticity and external conditions remain homogeneous and fixed.
+//! `advance_wear` holds beginning pressure, k and local H during removal. The
+//! integrated variants instead solve integral H(z) dz = k p ds through the
+//! original depth profile, still at beginning pressure and fixed k. Recession
+//! and cap exposure then use the original native held-approach, maintained-force
+//! or finite loading-spring boundary. Both work receipts are returned; signed
+//! parameter work is not heat. Only the complete successor is publishable.
+//! Refine physical slip increments when pressure changes appreciably: exact
+//! depth integration alone does not integrate pressure/cap feedback. No layered
+//! elastic kernel, coating failure, debris transport, hardness-to-yield
+//! conversion, or annealing is inferred. Elasticity and external conditions
+//! remain homogeneous and fixed.
 
 use std::sync::Arc;
 
@@ -32,7 +36,16 @@ use super::{
     SourcePlasticContactError, admit_native_candidate, validate_envelope, validate_fixed_normal,
     within,
 };
-use crate::normal_patch::{FiniteGapContactError, FiniteGapPlasticContinuationReceipt};
+use crate::normal_patch::{
+    FiniteGapContactError, FiniteGapPlasticContinuation, FiniteGapPlasticContinuationReceipt,
+    FiniteGapPlasticDriveError, FiniteGapPlasticLoadError,
+};
+
+mod control;
+pub use control::{
+    DepthHardnessNormalDriveAdvance, DepthHardnessNormalLoadAdvance, DepthHardnessWearDriveAdvance,
+    DepthHardnessWearLoadAdvance,
+};
 
 #[derive(Clone, Debug, PartialEq)]
 struct Sources {
@@ -76,7 +89,7 @@ pub struct DepthHardnessWearAdvance {
     pub wear: [WearAdvance; 2],
     /// Representable actual material removal at each original body/grid cell [m].
     pub recession_increment_m: [Vec<f64>; 2],
-    /// Recession at the interval's original pressure caps and held approach.
+    /// Recession at the interval's original caps and requested normal boundary.
     pub recession: FiniteGapPlasticContinuationReceipt,
     /// Subsequent native cap refresh at the newly exposed material depths.
     pub hardness: FiniteGapPlasticContinuationReceipt,
@@ -91,6 +104,10 @@ pub enum DepthHardnessWearError {
     Contact(SourcePlasticContactError),
     /// Original Archard inventory admission failed.
     Tribology(TriboError),
+    /// Prescribed force is unattainable, ambiguous, mismatched or unresolved.
+    Load(FiniteGapPlasticLoadError),
+    /// Finite loading-spring equilibrium or predecessor balance was refused.
+    Drive(FiniteGapPlasticDriveError),
     /// A source ownership, physical or arithmetic requirement was not met.
     Invalid(&'static str),
 }
@@ -120,6 +137,21 @@ impl core::fmt::Display for DepthHardnessWearError {
     }
 }
 impl std::error::Error for DepthHardnessWearError {}
+
+struct PreparedWear {
+    recession_m: [Vec<f64>; 2],
+    increment_m: [Vec<f64>; 2],
+    relative_increment_m: Vec<f64>,
+    next_caps_pa: Vec<f64>,
+    volumes: [WearState; 2],
+    wear: [WearAdvance; 2],
+}
+
+#[derive(Clone, Copy)]
+enum RemovalRule {
+    BeginningHardness,
+    IntegratedProfile,
+}
 
 impl SourceDepthHardnessWear {
     /// Bind original dry interface, homogeneous elasticity, separate measured
@@ -335,12 +367,53 @@ impl SourceDepthHardnessWear {
     /// re-equilibrate at the same approach. All candidates start from this
     /// accepted history; a source/geometry/arithmetic/cancellation refusal leaves
     /// both bodies and every original mechanical history untouched.
-    #[allow(clippy::too_many_lines)]
     pub fn advance_wear(
         &self,
         actual_unsigned_slip_m: &[f64],
         cx: &Cx<'_>,
     ) -> Result<DepthHardnessWearAdvance, DepthHardnessWearError> {
+        self.advance_wear_at_approach(actual_unsigned_slip_m, RemovalRule::BeginningHardness, cx)
+    }
+
+    /// Integrate each original H(depth) profile through the removed material,
+    /// then equilibrate recession and exposed hardness at the held approach.
+    ///
+    /// Each cell solves `integral H(z) dz = k * p_begin * |ds|`, including all
+    /// crossed original affine segments. The interval mean of that same profile
+    /// supplies the original Archard inventory kernel. Beginning pressure and k
+    /// remain held, so slip refinement is still required for pressure feedback.
+    /// Source support, actual depth/volume resolution and all mechanical bounds
+    /// must admit the complete result before any successor can be published.
+    pub fn advance_wear_integrated(
+        &self,
+        actual_unsigned_slip_m: &[f64],
+        cx: &Cx<'_>,
+    ) -> Result<DepthHardnessWearAdvance, DepthHardnessWearError> {
+        self.advance_wear_at_approach(actual_unsigned_slip_m, RemovalRule::IntegratedProfile, cx)
+    }
+
+    fn advance_wear_at_approach(
+        &self,
+        actual_unsigned_slip_m: &[f64],
+        rule: RemovalRule,
+        cx: &Cx<'_>,
+    ) -> Result<DepthHardnessWearAdvance, DepthHardnessWearError> {
+        let mut prepared = self.prepare_wear(actual_unsigned_slip_m, rule, cx)?;
+        let removed = self
+            .model
+            .recede(&self.contact, &prepared.relative_increment_m, cx)?;
+        let model = self.model_after_removal(&mut prepared, &removed, cx)?;
+        let refreshed = model.refresh_from(&self.model, &removed.candidate, cx)?;
+        self.finish_wear(prepared, model, removed, refreshed, cx)
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn prepare_wear(
+        &self,
+        actual_unsigned_slip_m: &[f64],
+        rule: RemovalRule,
+        cx: &Cx<'_>,
+    ) -> Result<PreparedWear, DepthHardnessWearError> {
         checkpoint(cx)?;
         let pressure = self.contact.pressure_pa();
         if actual_unsigned_slip_m.len() != pressure.len()
@@ -374,9 +447,30 @@ impl SourceDepthHardnessWear {
             let mut next_h = [0.0; 2];
             for side in 0..2 {
                 let old = self.recession_m[side][i];
-                hardness[i][side] = self.sources.hardness[side].hardness_pa_at(old)?;
-                let depth = (self.sources.k[side] * (p / hardness[i][side])) * slip;
-                let total = old + depth;
+                let profile = &self.sources.hardness[side];
+                let (total, depth) = match rule {
+                    RemovalRule::BeginningHardness => {
+                        hardness[i][side] = profile.hardness_pa_at(old)?;
+                        let depth = (self.sources.k[side] * (p / hardness[i][side])) * slip;
+                        (old + depth, depth)
+                    }
+                    RemovalRule::IntegratedProfile => {
+                        let active = self.sources.k[side] > 0.0 && p > 0.0 && slip > 0.0;
+                        let integral = if active {
+                            (self.sources.k[side] * p) * slip
+                        } else {
+                            0.0
+                        };
+                        if !integral.is_finite() || (active && integral == 0.0) {
+                            return Err(invalid(
+                                "depth-hardness integral lies outside arithmetic resolution",
+                            ));
+                        }
+                        let advance = profile.advance_by_integral(old, integral)?;
+                        hardness[i][side] = advance.path_mean_hardness_pa;
+                        (advance.depth_m, advance.increment_m)
+                    }
+                };
                 let retained = total - old;
                 if !depth.is_finite() || !total.is_finite() || (depth > 0.0 && retained == 0.0) {
                     return Err(invalid(
@@ -453,26 +547,50 @@ impl SourceDepthHardnessWear {
                 ));
             }
         }
-        let removed = self.model.recede(&self.contact, &relative, cx)?;
-        self.admit(&self.model, &removed.candidate, &recession, cx)?;
-        let model = self.model.with_material_properties(
+        Ok(PreparedWear {
+            recession_m: recession,
+            increment_m: increment,
+            relative_increment_m: relative,
+            next_caps_pa: next_caps,
+            volumes,
+            wear,
+        })
+    }
+
+    fn model_after_removal(
+        &self,
+        prepared: &mut PreparedWear,
+        removed: &FiniteGapPlasticContinuation,
+        cx: &Cx<'_>,
+    ) -> Result<FiniteGapPlasticModel, DepthHardnessWearError> {
+        self.admit(&self.model, &removed.candidate, &prepared.recession_m, cx)?;
+        Ok(self.model.with_material_properties(
             self.model.config().reduced_modulus_pa,
-            next_caps,
+            std::mem::take(&mut prepared.next_caps_pa),
             cx,
-        )?;
-        let refreshed = model.refresh_from(&self.model, &removed.candidate, cx)?;
-        self.admit(&model, &refreshed.candidate, &recession, cx)?;
+        )?)
+    }
+
+    fn finish_wear(
+        &self,
+        prepared: PreparedWear,
+        model: FiniteGapPlasticModel,
+        removed: FiniteGapPlasticContinuation,
+        refreshed: FiniteGapPlasticContinuation,
+        cx: &Cx<'_>,
+    ) -> Result<DepthHardnessWearAdvance, DepthHardnessWearError> {
+        self.admit(&model, &refreshed.candidate, &prepared.recession_m, cx)?;
         checkpoint(cx)?;
         Ok(DepthHardnessWearAdvance {
             candidate: Self {
                 sources: Arc::clone(&self.sources),
                 model,
                 contact: refreshed.candidate,
-                volumes,
-                recession_m: recession,
+                volumes: prepared.volumes,
+                recession_m: prepared.recession_m,
             },
-            wear,
-            recession_increment_m: increment,
+            wear: prepared.wear,
+            recession_increment_m: prepared.increment_m,
             recession: removed.receipt,
             hardness: refreshed.receipt,
         })

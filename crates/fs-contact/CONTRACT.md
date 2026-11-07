@@ -3538,3 +3538,25 @@ first-order refinement, separate local denominators, both native work accounts,
 constant-profile equivalence in Dense/MatrixFree/FFT lanes and exact no-op
 histories. G0/G4 checks cover original claim/test ownership, interior support
 holes, negative hardness, actual body-depth limits and late refusal atomicity.
+
+`advance_wear_integrated`, `advance_wear_integrated_at_load` and
+`advance_wear_integrated_with_drive` instead solve each original profile's
+`integral H(z) dz = k_i * p_begin * abs(ds)` across the exposed affine segments.
+The actual path mean H supplies the existing native Archard inventory kernel;
+retained per-body recession and volume must still close within arithmetic
+resolution. This integrates hardness through the removed material without
+requiring slip subdivision solely to resolve that original depth profile.
+Beginning pressure and k remain fixed over removal. Pressure redistribution,
+yielding and force relaxation still require physical slip refinement.
+
+The force and finite-spring paths apply their requested native boundary at
+both recession and newly exposed cap refresh. They retain both control receipts
+and both original mechanical work accounts, with no held-approach trial dent.
+Maintained-force work is force times total approach change; fixed-drive work is
+the spring's released storage. New normal-control methods change the force or
+drive while retaining all exposed depths and inventories. An unsupported depth,
+unrepresentable removal, mismatched predecessor, unattainable softened load or
+late physical refusal publishes no partial successor. Numerical regressions
+cover affine-profile force integration, spring relaxation and plastic softening,
+work/storage closure, constant-profile native equivalence in all three solver
+lanes, zero slip and atomic final-cap refusal.
