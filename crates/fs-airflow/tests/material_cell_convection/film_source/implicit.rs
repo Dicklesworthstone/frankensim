@@ -5,6 +5,8 @@ use super::*;
 mod sections;
 #[path = "implicit/gas.rs"]
 mod gas;
+#[path = "implicit/mass_flow.rs"]
+mod mass_flow;
 use fs_airflow::graph::thermal::medium::convection::{
     AidingVerticalPlateSettings, HorizontalPlateFacing, NaturalConvectionGeometry,
     evaluate_aiding_vertical_plate_from_material, evaluate_natural_from_material,

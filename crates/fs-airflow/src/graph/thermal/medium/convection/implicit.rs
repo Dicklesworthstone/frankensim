@@ -12,6 +12,10 @@ mod evaluator;
 pub mod gas;
 pub use gas::ImplicitGasConvection;
 
+/// Prescribed mass flow resolved with the original actual bulk-fluid density.
+pub mod mass_flow;
+pub use mass_flow::{MassFlowConvectionResponse, PrescribedMassFlowConvection};
+
 use super::deposition::{
     ConvectionSourceError,
     source::{ConvectionPropertyTemperature, SourceCellConvectionLaw},

@@ -655,7 +655,7 @@ closure and have not been executed in this environment.
 
 ## Analytic finite-section heat-transfer tangents
 
-Flat-plate and developing turbulent circular-tube sections expose
+Flat-plate and developing laminar/turbulent circular-tube sections expose
 `heat_transfer_coefficient_with_sensitivities` for their actual section
 coefficient. Absolute Re, Pr, conductivity (`k`) and dimensional conversion
 (`L`) partials use the existing evidence convention. Plate Re is the
@@ -673,3 +673,14 @@ strip retains the original corrected-mean derivative. Analytic derivatives
 preserve the section's existing numerical estimate and unbounded positive-start
 model discrepancy. They do not establish local experimental accuracy or a
 whole-solver adjoint.
+
+The laminar Hausen section differentiates its stable cumulative-transfer
+difference directly. With `P=Re Pr`, the entrance contribution uses its analytic
+logarithmic P derivative; nearby cumulative derivatives are never subtracted.
+The first section retains the original whole-length derivative, while positive
+and very short downstream sections retain their own coefficient response.
+`tests/laminar_section_sensitivities.rs` specifies Re/Pr finite-difference
+comparisons, derivative additivity under subdivision, the original first-section
+limit, dimensional k/L partials, short sections and selective endpoint refusal.
+These regressions were parsed and API reviewed; native execution remains pending
+the resource-blocked constellation build.

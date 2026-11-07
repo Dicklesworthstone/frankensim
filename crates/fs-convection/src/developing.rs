@@ -23,7 +23,7 @@ pub(super) use turbulent::{
     mean_nusselt as turbulent_mean_nusselt,
 };
 
-// Re and Pr are independent source-domain axes for these two smooth section
+// Re and Pr are independent source-domain axes for these smooth section
 // models. Both retained endpoints must admit a two-sided input perturbation;
 // a boundary in another, held-fixed axis does not suppress this derivative.
 fn section_input_is_interior(evaluation: &NusseltEvaluation, axis: &str) -> bool {
@@ -520,6 +520,48 @@ impl CircularDuctSection {
             ProvenanceHash::of_bytes(&values),
         ]);
         Ok(evidence)
+    }
+
+    /// Actual Hausen SECTION coefficient with analytic Re, Pr, conductivity
+    /// (`k`) and diameter (`L`) partials in `sensitivity.d_qoi`. These are
+    /// absolute local derivatives at fixed inlet-distance/diameter ratios and
+    /// other independent inputs, not derivatives of the downstream mean.
+    /// Both cumulative endpoints must admit the differentiated source axis.
+    /// The positive-start section retains its unbounded model discrepancy.
+    ///
+    /// With P = Re Pr and w = 0.04 P^(2/3), the stable section entrance term
+    /// has logarithmic P derivative
+    /// `5/3 - (2/3)[w/(a^(2/3)+w) + w/(b^(2/3)+w)]`.
+    /// This avoids subtracting nearby cumulative derivatives for short cells.
+    /// At a=0 the same expression is the original whole-length derivative.
+    pub fn heat_transfer_coefficient_with_sensitivities(
+        &self,
+        conductivity: ThermalConductivity,
+        diameter: Length,
+    ) -> Result<Evidence<HeatTransferCoefficient>, CorrelationError> {
+        let mut coefficient = self.heat_transfer_coefficient(conductivity, diameter)?;
+        let peclet = self.downstream.groups()["Re"] * self.downstream.groups()["Pr"];
+        let a = det::pow(self.start_over_diameter, 1.0 / 3.0);
+        let b = det::pow(self.end_over_diameter, 1.0 / 3.0);
+        let w = DENOMINATOR * det::pow(peclet, 2.0 / 3.0);
+        let entrance = if self.upstream.is_none() {
+            let graetz = self.downstream.groups()["Gz"];
+            ENTRANCE * graetz / (1.0 + DENOMINATOR * det::pow(graetz, 2.0 / 3.0))
+        } else {
+            let slope = (a + b) / (a * a + a * b + b * b);
+            ENTRANCE * peclet * (w / (a * a + w)) * (slope / (b * b + w))
+        };
+        let elasticity = entrance / self.nusselt
+            * (5.0 / 3.0 - (2.0 / 3.0) * (w / (a * a + w) + w / (b * b + w)));
+        attach_section_sensitivities(
+            &mut coefficient,
+            self.nusselt,
+            conductivity,
+            diameter,
+            (self.upstream.as_ref(), &self.downstream),
+            [elasticity; 2],
+        )?;
+        Ok(coefficient)
     }
 
     /// Apply the actual section coefficient to the existing conduction Robin

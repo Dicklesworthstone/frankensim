@@ -4953,3 +4953,42 @@ counterflow pinch, both source-domain limits, zero transfer and explicit
 saturation, bounded work, nonconvergence and cancellation. The three Rust
 sources were parsed with the pinned formatter. Native Cargo compilation and
 test execution were not available in this resource-exhausted session.
+
+## Prescribed mass-flow convection on native conducting surfaces
+
+`implicit::PrescribedMassFlowConvection` borrows an original prepared gas or
+liquid exterior owner and accepts a nonnegative prescribed mass-rate magnitude
+plus the stream's positive cross section. Every actual bath-temperature query
+resolves the SAME source at that bulk temperature and uses
+`U=mdot/(rho_bulk A_flow)`. Film conventions still use the original film density,
+viscosity, conductivity and Cp in Re/Pr/h; film density never determines the
+bulk stream velocity. The flow cross section is distinct from the native
+heated area. Bulk-held laws reuse the already queried snapshot.
+
+Existing forced pointwise, sphere, plate-strip and laminar/turbulent circular
+section laws retain their exact geometry, entrances, source support, thermal
+direction, wall-viscosity correction and empirical domain. Negative rates and
+natural/mixed geometry refuse; zero flow gets no speed or convection floor.
+The magnitude does not infer a reversed leading edge. The bath, mass rate and
+flow area remain fixed in the native surface derivative, so dU/dTs=0 and the
+existing source-owned film/wall chain is retained. No bath or hydraulic-network
+Jacobian, pressure solve, fan power, material replacement, finite fluid store or
+new heat integrator is introduced.
+
+The diagnostic response includes the actual bulk snapshot, speed, original
+coefficient evidence/surface tangent and optional analytic dh/dmdot at fixed
+temperatures and geometry. An unavailable original Re derivative remains
+`None`, including source-domain endpoints, without blocking an independently
+valid held-rate surface solve. Finite sections use their own coefficient
+partial; Hausen uses the original correlation owner's stable section tangent.
+The native conducting surface continues to own solid/coating resistance,
+radiation, caloric identity, cancellation and surface balance.
+
+Four focused regression definitions cover bulk/film separation, actual
+bulk-temperature updates, ideal-gas pressure cancellation at fixed mass flux,
+gas/liquid surface tangents, all forced geometry rate partials, source/geometry
+and zero-flow refusal, unavailable rate derivatives at a fixed regime endpoint,
+and an original conducting two-bath surface against an independent integrated
+conductivity/plate balance. The new Rust files were formatted and the touched
+modules parsed; native compilation and execution remain blocked by the exhausted
+8 GiB build environment. No executed test pass is claimed.
