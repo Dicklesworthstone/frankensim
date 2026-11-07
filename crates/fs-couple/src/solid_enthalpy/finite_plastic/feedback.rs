@@ -8,6 +8,7 @@ use std::collections::BTreeMap;
 
 use crate::iqn_ils::{IqnIls, driver::CouplingMethod};
 use fs_exec::Cx;
+use fs_material::phase::{EquilibriumPhaseState, PhaseStateError, ResolvedHeatCapacityCurve};
 use fs_solid::hyper3::plastic::FinitePlasticLawField;
 use fs_solid::hyper3::plastic::thermal::FiniteThermoplasticTetEnergy;
 use fs_solid::plastic3::dynamics::InertialEnergy;
@@ -21,14 +22,41 @@ use super::{
     FiniteThermoplasticReport, finite, poll, positive,
 };
 
-/// Exact original cell/material pairing, independent of mechanical dimension.
-#[derive(Clone, Copy)]
-pub(super) struct ThermalBinding<'b, 'm, 's> {
-    pub(super) cells: &'b [DepositedCell],
-    pub(super) materials: FinitePlasticLawField<'m, FiniteThermoplasticMaterial<'s>>,
+/// Caloric ownership shared by native finite constitutive families. Mechanical
+/// history remains entirely inside each original solid proposal.
+pub(super) trait CaloricMaterial {
+    fn caloric_source(&self) -> &ResolvedHeatCapacityCurve;
+    fn state_at_specific_enthalpy(&self, h: f64) -> Result<EquilibriumPhaseState, PhaseStateError> {
+        self.caloric_source().curve().state_at_specific_enthalpy(h)
+    }
 }
 
-impl ThermalBinding<'_, '_, '_> {
+impl CaloricMaterial for FiniteThermoplasticMaterial<'_> {
+    fn caloric_source(&self) -> &ResolvedHeatCapacityCurve {
+        FiniteThermoplasticMaterial::caloric_source(self)
+    }
+}
+
+impl CaloricMaterial for super::porous::material::FiniteThermalPorousMaterialBinding<'_> {
+    fn caloric_source(&self) -> &ResolvedHeatCapacityCurve {
+        super::porous::material::FiniteThermalPorousMaterialBinding::caloric_source(self)
+    }
+}
+
+/// Exact original cell/material pairing, independent of mechanical dimension.
+pub(super) struct ThermalBinding<'b, 'm, M> {
+    pub(super) cells: &'b [DepositedCell],
+    pub(super) materials: FinitePlasticLawField<'m, M>,
+}
+
+impl<M> Copy for ThermalBinding<'_, '_, M> {}
+impl<M> Clone for ThermalBinding<'_, '_, M> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<M: CaloricMaterial> ThermalBinding<'_, '_, M> {
     fn validate_count<E>(&self) -> Result<(), FiniteThermoplasticError<E>> {
         if let FinitePlasticLawField::PerElement(materials) = self.materials
             && materials.len() != self.cells.len()
@@ -40,7 +68,7 @@ impl ThermalBinding<'_, '_, '_> {
         Ok(())
     }
 
-    fn material(&self, element: usize) -> &FiniteThermoplasticMaterial<'_> {
+    fn material(&self, element: usize) -> &M {
         match self.materials {
             FinitePlasticLawField::Uniform(material) => material,
             FinitePlasticLawField::PerElement(materials) => &materials[element],
@@ -139,8 +167,8 @@ fn admit_heat<E>(heat_j: &[f64], cells: usize) -> Result<(), FiniteThermoplastic
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn advance<'t, S, E, O: DepositionObserver>(
-    binding: ThermalBinding<'_, '_, '_>,
+pub(super) fn advance<'t, M: CaloricMaterial, S, E, O: DepositionObserver>(
+    binding: ThermalBinding<'_, '_, M>,
     time_s: f64,
     thermal: &DepositionSimulation<'t>,
     observer: &O,
@@ -151,8 +179,7 @@ pub(super) fn advance<'t, S, E, O: DepositionObserver>(
     mechanics: impl FnMut(
         &[f64],
         f64,
-    )
-        -> Result<MechanicalProposal<S, E>, FiniteThermoplasticError<O::Error>>,
+    ) -> Result<MechanicalProposal<S, E>, FiniteThermoplasticError<O::Error>>,
 ) -> Result<FeedbackCandidate<'t, S, E, O>, FiniteThermoplasticError<O::Error>> {
     advance_with_coupling(
         binding,
@@ -169,8 +196,8 @@ pub(super) fn advance<'t, S, E, O: DepositionObserver>(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn advance_with_coupling<'t, S, E, O: DepositionObserver>(
-    binding: ThermalBinding<'_, '_, '_>,
+pub(super) fn advance_with_coupling<'t, M: CaloricMaterial, S, E, O: DepositionObserver>(
+    binding: ThermalBinding<'_, '_, M>,
     time_s: f64,
     thermal: &DepositionSimulation<'t>,
     observer: &O,
@@ -210,8 +237,7 @@ pub(super) fn advance_with_coupling<'t, S, E, O: DepositionObserver>(
     let mut accelerator = match method {
         CouplingMethod::RelaxedPicard => None,
         CouplingMethod::IqnIls(policy) => Some(
-            IqnIls::new(enthalpies.len(), policy)
-                .map_err(FiniteThermoplasticError::Accelerator)?,
+            IqnIls::new(enthalpies.len(), policy).map_err(FiniteThermoplasticError::Accelerator)?,
         ),
     };
     let mut defects = [f64::INFINITY; 4];
@@ -363,14 +389,25 @@ pub(super) fn advance_with_coupling<'t, S, E, O: DepositionObserver>(
     })
 }
 
-#[derive(Clone)]
-struct FiniteHeat<'b, 'm, 's, 'cx, O> {
-    binding: ThermalBinding<'b, 'm, 's>,
+struct FiniteHeat<'b, 'm, 'cx, M, O> {
+    binding: ThermalBinding<'b, 'm, M>,
     inner: O,
     cx: &'b Cx<'cx>,
     watts: BTreeMap<CellId, f64>,
 }
-impl<O: DepositionObserver> DepositionObserver for FiniteHeat<'_, '_, '_, '_, O> {
+impl<M, O: Clone> Clone for FiniteHeat<'_, '_, '_, M, O> {
+    fn clone(&self) -> Self {
+        Self {
+            binding: self.binding,
+            inner: self.inner.clone(),
+            cx: self.cx,
+            watts: self.watts.clone(),
+        }
+    }
+}
+impl<M: CaloricMaterial, O: DepositionObserver> DepositionObserver
+    for FiniteHeat<'_, '_, '_, M, O>
+{
     type Error = FiniteThermoplasticError<O::Error>;
     fn begin(&mut self) -> Result<(), Self::Error> {
         self.inner

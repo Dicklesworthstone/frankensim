@@ -1,3 +1,15 @@
+## Reciprocal heat and finite porous compaction
+
+`solid_enthalpy::finite_plastic::porous::FiniteThermalPorousSolid` couples retained non-isochoric plastic history to the original `DepositionSimulation` caloric and transport owner. A native finite porous tetrahedral equilibrium is solved at each proposed endpoint temperature; original yield heat plus signed reversible caloric exchange enters the thermal timeline exactly once. Every mechanical and thermal proposal starts from the same accepted endpoint. The complete thermal, structural and observer candidate is accepted together, after the existing temperature, per-cell heat, thermal-energy and combined-energy gates. The original bounded Picard/IQN-ILS driver is shared with dense finite plasticity and sheet forming.
+
+`FiniteThermalPorousMaterialBinding` resolves the complete source-bound thermal porous family and preserves the exact original caloric chart, typed context, pinned Cp/density receipts and same material-card identity. Common caloric admission is shared with the original J2 owner: an explicitly selected fully solid, stress-free zero-pressure reference chart, its complete temperature interval, and a positive conservative lower bound on caloric plus mechanical heat capacity. The bound is a constitutive admission check, not proof that the nonlinear coupled return has a unique solution.
+
+The original reference tetrahedral volume and source density fix thermal inventory and optional consistent inertial mass. Actual density uses `rho0/det(F)`, with retained plastic volume available separately. Caloric density metadata at hot states does not replace original mass. Shared mechanical reports retain physical yield heat, signed reversible exchange, internal/free-energy changes, coefficient storage and signed endpoint-work defects. Kinetic change and backward-Euler loss are accounted independently; neither numerical defect nor kinetic loss is deposited as heat.
+
+Thermal cells and conductances remain a supplied reference network, retaining the original observer sources, transport, events and histories. No moving-area Fourier operator, pore-fluid pressure, phase flash, damage, rate dependence or calibration is inferred. The native dry associated law, affine thermal envelope, P1 locking and physical interval/refinement limits remain explicit.
+
+The four `finite_porous_enthalpy` regressions specify a loaded adiabatic crush against an independent hydrostatic/Voce/caloric oracle, two-cell physical heat redistribution, retained hot inertial history through late refusal/retry, and original source/chart/capacity/inventory admission. Native execution remains a separate verification requirement.
+
 ## Native electrode circuits and coupled finite-temperature feedback
 
 `spatial_induction::terminals::circuit::SpatialTerminalCircuitThermalNetwork`

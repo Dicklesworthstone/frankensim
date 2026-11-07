@@ -28,6 +28,8 @@
 mod feedback;
 pub mod impact;
 pub mod material;
+/// Retained thermal porous compaction on the same conservative heat timeline.
+pub mod porous;
 /// Reciprocal finite sheet forming and native caloric transport.
 pub mod sheet;
 pub use impact::{
@@ -64,6 +66,7 @@ pub enum FiniteThermoplasticError<E = Infallible> {
     Caloric(PhaseStateError),
     Solid(FiniteThermoplasticTetError),
     Sheet(FiniteThermoplasticSheetError),
+    Porous(fs_solid::hyper3::plastic::porous::thermal::FiniteThermalPorousTetError),
     Thermal(DepositionError),
     /// Original IQN-ILS policy or arithmetic refusal.
     Accelerator(IqnIlsError),
@@ -241,7 +244,7 @@ impl<'a> FiniteThermoplasticSolid<'a> {
         self.binding().enthalpies(thermal, accepted, cx)
     }
 
-    fn binding(&self) -> feedback::ThermalBinding<'_, '_, 'a> {
+    fn binding(&self) -> feedback::ThermalBinding<'_, '_, FiniteThermoplasticMaterial<'a>> {
         feedback::ThermalBinding {
             cells: &self.cells,
             materials: FinitePlasticLawField::PerElement(self.solid.families()),
