@@ -2853,3 +2853,35 @@ motion. Distinct original layer moduli and source identities reach the same
 S-N and Findley tensor histories. The wrapper retains the existing mechanical
 trajectory, accepted-pose observer, work and rollback owners; it supplies no
 new integrator, averaged material law or additional mechanical energy.
+
+### Native sustained finite-solid friction heat with source feedback
+
+`friction_heat::finite_solid::propose_finite_solid_contact_heat` closes endpoint
+body/common/declared-mean source temperatures, the original sourced sustained
+sphere/finite-solid trajectory and the existing finite enthalpy network together.
+Each original feature retains its source binding, ordered materials, caloric
+objects and bounded reference thermal patch. Only unique loaded, nonopening,
+passive midpoint tangential impulse work is eligible for declared heat
+conversion. Exported tangential work, signed normal/contact remainder and native
+integration defect stay separate in the combined first-law balance; no residual
+or normal loss is deposited as friction heat.
+
+Every trial restarts the accepted solid, rigid bodies and original source history.
+Exact repeated full source queries reuse one bounded mechanical result while
+transport refreshes; common interface temperature alone is never a cache key.
+Source, geometry, authority, thermal, clock or balance refusal returns no partial
+accepted state. Fixed witness neighborhoods and ordered face normals are checked
+at native source evaluations and the final endpoint. This does not add a swept
+thermal-footprint certificate. The joint candidate retains original synchronous
+endpoint times and all mechanical/history/thermal reports.
+
+This is fixed-reference-patch interface temperature feedback with frozen bulk
+hyperelasticity. Pressure-dependent source coordinates, moving footprints, bulk
+expansion and impact heating remain outside the model. The existing trajectory
+and thermal interval still need time refinement; nonlinear convergence is not
+time-accuracy evidence. The native regression definition in
+`tests/finite_solid/contact/step/sustained/source/heat.rs` compares an independent
+body-temperature-dependent friction/impulse/caloric solution, zero conversion,
+source path, fixed-patch refusal and late source rollback. Isolated execution of
+the production work-account function with metadata fixtures validates its heat,
+export and remainder partition, not the complete native multiphysics solve.

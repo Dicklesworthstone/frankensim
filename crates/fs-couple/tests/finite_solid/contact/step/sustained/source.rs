@@ -1,4 +1,6 @@
 //! Native source travel, retry rollback, retained feature identity and texture.
+#[path = "source/heat.rs"]
+mod heat;
 use super::super::super::elliptic::{conditions, source as interface_source};
 use super::*;
 use fs_contact::interface_binding::thermal_friction::elliptic::history::SourcePostcontactMotionError;

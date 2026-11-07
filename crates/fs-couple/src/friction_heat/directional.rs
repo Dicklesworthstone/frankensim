@@ -434,7 +434,7 @@ pub fn apply_source_directional_heat<'m, P, E>(
 }
 
 impl DirectionalHeatMaterial<'_> {
-    fn validate<E>(
+    pub(super) fn validate<E>(
         &self,
         law: &SourceThermalEllipticCoulomb,
     ) -> Result<(), DirectionalHeatError<E>> {
@@ -481,7 +481,7 @@ impl DirectionalHeatMaterial<'_> {
         Ok(())
     }
 
-    fn sample<E>(
+    pub(super) fn sample<E>(
         &self,
         thermal: &DepositionSimulation<'_>,
         route: &FrictionHeatRoute,
