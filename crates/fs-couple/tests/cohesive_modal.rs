@@ -24,6 +24,9 @@ mod patch;
 #[path = "cohesive_modal/temperature.rs"]
 mod temperature;
 
+#[path = "cohesive_modal/relaxation.rs"]
+mod relaxation;
+
 fn law() -> BilinearCohesive {
     BilinearCohesive::new_mixed_mode(
         MixedModeParameters {

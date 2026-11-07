@@ -5157,3 +5157,30 @@ remain unchanged, while physical normal-strain rows scale by `1/sqrt(V)` and
 their displacement offset follows the same strain-column map. Complete physical
 energy reconstruction, passivity, source domain and work-capacity gates remain
 binding. No new constitutive law, eigensolver or time integrator is introduced.
+
+
+## Native sourced intact adhesive relaxation (G2)
+
+`render::schedule::force::coupled::contact::cohesive::relaxation::ViscoelasticBondModalSystem`
+retains the original ordered interface thickness, independent normal/shear
+Prony spectra, and original native mechanical owner. The explicitly bonded
+sample-zero configuration has zero separation and branch strain; initial body
+velocities remain physical input. Complete work columns and their transpose
+include every body mode and the full three-by-three native response, including
+cross-axis coupling.
+
+Cached exact ramp coefficients and the existing LU workspace solve the affine
+mean-traction load line once per step. An independent constitutive replay uses
+the actual propagated coordinates. Two material evaluations, original material
+jump/rate/time bounds, native limits, force compatibility, transpose work and a
+bond-sized increment energy gate must pass before body and branch history
+publish together. Receiver refusal or late cancellation retains accepted motion,
+elapsed time and the last frame. Relaxation heat, other physical losses and
+native numerical dissipation are separate accounts.
+
+This is a small-strain, massless, intact layer in a fixed local frame with a
+straight constitutive jump ramp. It does not infer damage, thermal strain,
+rebonding or a heat destination. Refine the physical timestep for trajectory
+convergence. G2 regressions in `tests/cohesive_modal/relaxation.rs` exercise
+original two-body motion, independent normal/shear memory, complete cross-axis
+response, energy/momentum and rejection/replay.

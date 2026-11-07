@@ -37,6 +37,9 @@ pub mod frictional_damage;
 /// Explicit original-source temperature changes at fixed native state.
 pub mod temperature;
 
+/// Intact source-bound adhesive relaxation on actual native body motion.
+pub mod relaxation;
+
 /// Bounded constitutive solve plus the independent actual-body force gate.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CohesiveModalConfig {
