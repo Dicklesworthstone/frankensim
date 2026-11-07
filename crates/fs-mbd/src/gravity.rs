@@ -21,6 +21,9 @@ use fs_math::dd::Dd;
 /// Closed, recoiling systems with explicitly bounded direct Newtonian interactions.
 pub mod mutual;
 
+mod superposition;
+pub use superposition::SuperposedGravity;
+
 /// Invalid field/frame, inadmissible finite-body approximation, or native failure.
 #[derive(Clone, Debug, PartialEq)]
 pub enum GravityError {

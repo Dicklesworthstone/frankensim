@@ -762,6 +762,30 @@ trace, rotations, the native rigid mass owner, frame/domain refusals and extreme
 radius arithmetic. The derivative API refuses unrepresentable gradients without
 changing the legacy acceleration-only admission domain.
 
+`gravity::SuperposedGravity` borrows a caller-bounded list of stationary sources
+in one declared inertial frame. It implements the existing point and/or rigid
+field traits, including heterogeneous trait-object lists, so native rigid,
+articulated and deforming-solid consumers retain their original mass, pose,
+quadrature and integration owners. Each component's potential, force, body
+torque and analytic acceleration gradient are accumulated in deterministic
+source order with double-double arithmetic. Sampling allocates nothing and
+performs O(source count) work; existing consumers poll cancellation around these
+bounded queries. Nested lists retain their own child budgets. Empty lists are
+zero fields but still check frame, position and native mass admission.
+
+Direct potential increments are combined before rounding the total. A custom
+component without this optional capability is resampled at its two endpoints
+for its own fallback difference, without discarding accurate work from the
+other components. Callbacks must remain repeatable and side-effect-free;
+fallback accuracy remains limited by the component's endpoint potentials.
+Component refusals propagate without a partial load or candidate state. These
+are prescribed stationary sources, not a self-consistent recoiling system or a
+path-clearance guarantee. `tests/gravity_superposition.rs` checks potential/
+force/tangent consistency, compensated balanced forces, mixed direct/fallback
+work, native ballistics and cancellation, tidal torque, and frame/domain/budget
+admission. `fs-couple/tests/solid_gravity.rs` exercises combined source forces,
+Newton tangents and datum-independent work on original solid quadrature.
+
 The optional `PointGravityField::specific_potential_increment` and
 `RigidGravityField::potential_energy_increment` evaluate the same stationary
 potential's endpoint change directly. Uniform fields cancel the reference

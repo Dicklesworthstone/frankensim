@@ -3,7 +3,7 @@ use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_couple::solid_gravity::{bind_field, bind_potential_increment};
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_material::hyper::{Hyperelastic, HyperelasticModel};
-use fs_mbd::gravity::{CentralGravity, UniformGravity};
+use fs_mbd::gravity::{CentralGravity, PointGravityField, SuperposedGravity, UniformGravity};
 use fs_mbd::{Gravity, Vec3};
 use fs_solid::hyper3::gravity::ReferenceGravityDensity;
 use fs_solid::{HyperTetError, HyperTetProblem, HyperTetSettings, HyperelasticLawField};
@@ -182,6 +182,122 @@ fn source_owned_potential_increment_survives_a_large_uniform_datum() {
                 near(change, 1.0, 2e-14);
             }
             assert!(bind_potential_increment(&source, FRAME + 1)(NODES[0], NODES[1]).is_err());
+        }
+    });
+}
+
+#[test]
+fn superposed_sources_preserve_solid_tangent_and_work_below_the_potential_datum() {
+    let first = CentralGravity::new(FRAME, Vec3::ZERO, 20.0).unwrap();
+    let second = CentralGravity::new(FRAME, Vec3::new(8.0, -1.0, 2.0), 30.0).unwrap();
+    let acceleration = Gravity::new(Vec3::new(0.0, -8.0, 0.0)).unwrap();
+    let uniform = UniformGravity::new(FRAME, acceleration, Vec3::ZERO).unwrap();
+    let shifted_uniform =
+        UniformGravity::new(FRAME, acceleration, Vec3::new(0.0, 1e20, 0.0)).unwrap();
+    let sources: [&dyn PointGravityField; 3] = [&first, &second, &uniform];
+    let shifted_sources: [&dyn PointGravityField; 3] = [&first, &second, &shifted_uniform];
+    let source = SuperposedGravity::new(FRAME, &sources, sources.len()).unwrap();
+    let shifted_source =
+        SuperposedGravity::new(FRAME, &shifted_sources, shifted_sources.len()).unwrap();
+    let field = bind_field(&source, FRAME);
+    let shifted_field = bind_field(&shifted_source, FRAME);
+    let increment = bind_potential_increment(&source, FRAME);
+    let shifted_increment = bind_potential_increment(&shifted_source, FRAME);
+    let law = material();
+    let p = problem(&law, &[]);
+    let u = [
+        0.1, -0.2, 0.3, 0.25, -0.15, 0.2, 0.2, -0.05, 0.25, 0.0, -0.1, 0.4,
+    ];
+    let direction = [
+        0.3, -0.2, 0.1, -0.4, 0.5, 0.2, 0.1, 0.3, -0.2, 0.2, -0.1, 0.4,
+    ];
+    with_cx(|cx| {
+        let prepared = p.prepare(cx).unwrap();
+        let load = prepared.gravity_load(&[6.0], &u, &field, cx).unwrap();
+        let shifted = prepared
+            .gravity_load(&[6.0], &u, &shifted_field, cx)
+            .unwrap();
+        // The same reference mass and current solid geometry consume all three
+        // original sources, including opposing central forces and their Hessians.
+        let separate: Vec<_> = sources
+            .iter()
+            .map(|&source| {
+                prepared
+                    .gravity_load(&[6.0], &u, &bind_field(source, FRAME), cx)
+                    .unwrap()
+            })
+            .collect();
+        near(
+            load.potential_energy_j,
+            separate.iter().map(|part| part.potential_energy_j).sum(),
+            2e-13,
+        );
+        assert_eq!(load.force_n, shifted.force_n);
+        for row in 0..12 {
+            near(
+                load.force_n[row],
+                separate.iter().map(|part| part.force_n[row]).sum(),
+                2e-14,
+            );
+            for column in 0..12 {
+                let tangent = load.force_tangent_n_m.get(row, column);
+                near(
+                    tangent,
+                    separate
+                        .iter()
+                        .map(|part| part.force_tangent_n_m.get(row, column))
+                        .sum(),
+                    2e-14,
+                );
+                assert_eq!(tangent, shifted.force_tangent_n_m.get(row, column));
+            }
+        }
+
+        // A directional virtual displacement probes force = -dU/du and the
+        // assembled Newton tangent. The huge datum erases endpoint subtraction,
+        // but the original per-source increments must still resolve the work.
+        let h = 1e-5;
+        let plus = std::array::from_fn::<_, 12, _>(|dof| u[dof] + h * direction[dof]);
+        let minus = std::array::from_fn::<_, 12, _>(|dof| u[dof] - h * direction[dof]);
+        let a = prepared
+            .gravity_load(&[6.0], &plus, &shifted_field, cx)
+            .unwrap();
+        let b = prepared
+            .gravity_load(&[6.0], &minus, &shifted_field, cx)
+            .unwrap();
+        assert_eq!(a.potential_energy_j, b.potential_energy_j);
+        let change = prepared
+            .gravity_potential_energy_change(
+                ReferenceGravityDensity::PerElement(&[6.0]),
+                &minus,
+                &plus,
+                &shifted_increment,
+                cx,
+            )
+            .unwrap();
+        let original_change = prepared
+            .gravity_potential_energy_change(
+                ReferenceGravityDensity::PerElement(&[6.0]),
+                &minus,
+                &plus,
+                &increment,
+                cx,
+            )
+            .unwrap();
+        assert_eq!(change, original_change);
+        near(
+            -change / (2.0 * h),
+            (0..12).map(|dof| load.force_n[dof] * direction[dof]).sum(),
+            3e-10,
+        );
+        for row in 0..12 {
+            near(
+                (a.force_n[row] - b.force_n[row]) / (2.0 * h),
+                (0..12)
+                    .map(|column| load.force_tangent_n_m.get(row, column) * direction[column])
+                    .sum(),
+                5e-11,
+            );
         }
     });
 }
