@@ -14,10 +14,13 @@
 //! Each step checks the original equations, physical limits and energy balance
 //! before publishing. Cancellation polls are bounded by 128 cells.
 //!
-//! Explicit section-mean mutual friction uses exact material updates in a
-//! symmetric split. Optional normal-fluid wall viscosity uses an exponentially
-//! fitted wave/source step, retaining the clamped-normal fourth-sound limit
-//! without resolving the fast wall-relaxation time. A circular/slit Stokes
+//! Linear section-mean mutual friction shares an exponentially fitted wave/source
+//! step when no wall/profile operator is active. This preserves driven steady
+//! counterflow even when its relaxation is stiff. Nonlinear friction and mixed
+//! wall/friction dynamics use exact material updates in a symmetric split.
+//! Optional normal-fluid wall viscosity uses the same fitted wave/source step,
+//! retaining the clamped-normal fourth-sound limit without resolving the fast
+//! wall-relaxation time. A circular/slit Stokes
 //! spectrum can retain unsteady transverse normal-profile memory and its
 //! additional kinetic energy. Both losses are exported as heat
 //! once; they are not injected into the linear temperature perturbation.
@@ -282,7 +285,7 @@ struct SolveWorkspace {
     off_diagonal: Vec<f64>,
     rhs: Vec<f64>,
     factor: TridiagonalWorkspace,
-    factor_step: Option<f64>,
+    factor_step: Option<(f64, f64)>,
     boundary_inverse: [Option<[f64; 2]>; 2],
 }
 impl SolveWorkspace {

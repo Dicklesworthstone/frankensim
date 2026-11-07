@@ -417,6 +417,33 @@ The need to couple evolving lines to thermodynamics is discussed by
 [Sciacca](https://arxiv.org/abs/1008.4390); the restricted effective-energy
 closure and coefficient inequality above specify this implementation.
 
+## Stiff linear mutual friction and driven second sound
+
+With no active normal-wall or configured transverse-profile operator, positive
+`MutualFriction::Linear` and its frozen `IsotropicVortexTangle` equivalent now
+share the original exponentially fitted wave solve. A uniform counterflow
+driven by opposite component forces retains `gamma*w = F_n` even when the
+friction time is much shorter than the wave step. Its endpoint velocity,
+interval-mean transport, body-force work and positive friction heat come from
+the same exact held-gradient evolution. The caller's wave Courant and amplitude
+limits remain in force; there is no additional friction substep loop or spatial
+allocation. Factors and endpoint responses are invalidated when the friction
+coefficient changes, including changes at the same timestep.
+
+This resolves the strong-drag failure of separately applying friction half
+steps around an undamped force/wave step. For the homogeneous forced problem
+that split has the stationary-flow ratio `x/(2*sinh(x/2))`, where
+`x=gamma*dt/(rho*f_s*f_n)`, which tends to zero instead of one as drag stiffens.
+The fitted path retains the physical stationary solution and the correct
+transient relaxation and dissipated work.
+
+Nonlinear Gorter-Mellink/evolving-Vinen friction and friction combined with
+wall/profile dynamics still use the original symmetric split. Their competing
+source and wave errors require timestep refinement; the exact linear-path
+claim does not extend to those mixed or nonlinear cases. The existing heat,
+counterflow and piston compositions automatically use the corrected native
+path whenever its conditions apply.
+
 ## Discrete sourced helium reference temperatures
 
 `HeliumSvpReference::at_temperature_k` now admits exactly 1.4, 1.6, 1.8 and

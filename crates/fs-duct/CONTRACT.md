@@ -3833,13 +3833,28 @@ wave work are reported separately. Boundary wave power is
 `area*(p'*v + T'*q/T0)`. Reported storage is small-signal wave availability,
 not absolute thermal energy.
 
-Explicit linear or Gorter-Mellink mutual friction is integrated by exact
-frozen-state material updates in a symmetric split. Equal/opposite component
-impulses remove only relative kinetic energy. One per-cell heat array and its
-cumulative account export that loss to an external thermal owner. This
-first-order model does not also inject the same heat into its temperature
-perturbation. Bounded cancellation checkpoints and all numerical/physical
-refusals preserve accepted fields, time and heat accounts.
+Positive linear mutual friction (including the frozen isotropic-vortex
+projection) without an active normal-wall or configured transverse-profile
+operator shares the exponentially fitted wave/source solve. It damps the
+relative energy coordinate while preserving barycentric momentum. Exact
+held-gradient face evolution supplies both endpoint and interval-mean currents,
+so strong drag retains driven equilibrium, wave transport and force work
+without resolving the friction relaxation time. A positive two-square integral
+exports the dissipated heat once. The two original scalar tridiagonal factors
+and endpoint columns are keyed by duration AND operator coefficient, so changing
+friction at unchanged dt cannot reuse another source's response.
+
+Gorter-Mellink/evolving-Vinen friction and mutual friction combined with
+normal-wall/profile dynamics retain exact frozen-state source updates in a
+symmetric split. That split still requires timestep refinement when competing
+sources are stiff; no uniformly accurate mixed-source limit is claimed.
+Equal/opposite component impulses remove only relative kinetic energy. One
+per-cell heat array and its cumulative account export that loss to an external
+thermal owner. The linear temperature perturbation does not receive the same
+heat again. Bounded cancellation checkpoints and all numerical/physical refusals
+preserve accepted fields, time and heat accounts. Focused regressions include
+driven equilibrium, independent forced transients and heat, damped second-sound
+temporal refinement, and source-switch/endpoint-response cache consistency.
 
 The `superfluid_second_sound` example uses the source-backed 1.8 K SVP helium
 reference; its domain, commands and limits are in

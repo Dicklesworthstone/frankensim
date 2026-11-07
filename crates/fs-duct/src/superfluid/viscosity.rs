@@ -1,11 +1,13 @@
-//! Exponentially fitted normal-wall dynamics on the original staggered wave owner.
+//! Exponentially fitted linear dissipation on the original staggered wave owner.
 //!
 //! In energy coordinates, x' = -C div(y), y' = -C grad(x) - R y + f.
-//! R damps only the normal component. Freeze the gradient at midpoint x,
-//! integrate each face exactly, and use its interval mean in the cell equation.
-//! Eliminating faces leaves two scalar tridiagonals after a 2x2 rotation.
-//! This retains the clamped-normal fourth-sound limit without a drag time-step
-//! restriction. Scalar Darcy drag assumes a quasisteady transverse profile.
+//! R damps one kinetic coordinate: normal motion for stationary walls, or
+//! counterflow for linear mutual friction when no wall/profile is active.
+//! Freeze the gradient at midpoint x, integrate each face exactly, and use its
+//! interval mean in the cell equation. A 2x2 rotation leaves two scalar
+//! tridiagonals. This preserves driven equilibrium at arbitrary drag stiffness
+//! and the clamped-normal fourth-sound limit. Scalar Darcy drag assumes a
+//! quasisteady transverse profile.
 //! The optional Stokes spectrum instead stores positive-weight normal modes;
 //! their weighted phi2 changes only the same 2x2 cell operator, while their
 //! history and extra kinetic energy remain in the original channel owner.
@@ -13,6 +15,7 @@
 use super::*;
 use fs_material::superfluid::{
     NormalViscousFactors, NormalViscousSpectrum, PreparedNormalViscousSpectrum,
+    VortexMutualFriction,
 };
 
 /// Interior-face transverse velocities, scaled by sqrt(rho_n). The original
@@ -350,7 +353,7 @@ impl NormalProfileMemory {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub(super) struct ViscousWaveChange {
+pub(super) struct DissipativeWaveChange {
     pub body_work_j: f64,
     /// Signed wall impulse on the fluid and sum of absolute local impulses.
     pub wall_impulse_n_s: [f64; 2],
@@ -358,17 +361,19 @@ pub(super) struct ViscousWaveChange {
 }
 
 #[derive(Clone, Copy, Debug)]
-struct ViscousOperator {
-    normal: [f64; 2],
-    superfluid: [f64; 2],
+struct LinearWaveOperator {
+    damped: [f64; 2],
+    free: [f64; 2],
+    counterflow: bool,
+    material: TwoFluidState,
     // Lambda = C*dt/dx; these columns map component velocities to cell fluxes.
-    normal_flux: [f64; 2],
-    superfluid_flux: [f64; 2],
+    damped_flux: [f64; 2],
+    free_flux: [f64; 2],
     lambda: [f64; 2],
     // Orthonormal rows diagonalizing Lambda*phi2(-dt*R)*Lambda.
     cell_rows: [[f64; 2]; 2],
-    normal_rotated_flux: [f64; 2],
-    superfluid_rotated_flux: [f64; 2],
+    damped_rotated_flux: [f64; 2],
+    free_rotated_flux: [f64; 2],
     r: [f64; 2],
     density: [f64; 2],
     density_root: [f64; 2],
@@ -382,26 +387,45 @@ struct ViscousOperator {
     heat_forced_root: f64,
 }
 
-impl ViscousOperator {
-    fn new(channel: &TwoFluidChannel, dt: f64) -> Result<Self, ChannelError> {
-        let density = [
-            channel.material.normal_density_kg_m3(),
-            channel.material.superfluid_density_kg_m3(),
-        ];
+impl LinearWaveOperator {
+    fn new(
+        channel: &TwoFluidChannel,
+        dt: f64,
+        counterflow_rate_s_inv: Option<f64>,
+    ) -> Result<Self, ChannelError> {
+        let counterflow = counterflow_rate_s_inv.is_some();
+        let density = if counterflow {
+            [
+                channel.material.reduced_density_kg_m3(),
+                channel.material.density_kg_m3(),
+            ]
+        } else {
+            [
+                channel.material.normal_density_kg_m3(),
+                channel.material.superfluid_density_kg_m3(),
+            ]
+        };
         let density_root = density.map(f64::sqrt);
-        let normal = channel.modes.face_to_modes(
-            channel.material.normal_fraction() / density_root[0],
-            1.0 / density_root[0],
-        );
-        let norm = normal[0].hypot(normal[1]);
-        let normal = normal.map(|value| value / norm);
-        // The modal kinetic rotation has positive determinant. This second
-        // column therefore points along positive superfluid velocity.
-        let superfluid = [normal[1], -normal[0]];
+        let damped = if counterflow {
+            channel.modes.face_to_modes(0.0, 1.0 / density_root[0])
+        } else {
+            channel.modes.face_to_modes(
+                channel.material.normal_fraction() / density_root[0],
+                1.0 / density_root[0],
+            )
+        };
+        let norm = damped[0].hypot(damped[1]);
+        let damped = damped.map(|value| value / norm);
+        // The perpendicular column points along positive bulk velocity for
+        // counterflow drag, or positive superfluid velocity for normal walls.
+        let free = [damped[1], -damped[0]];
         let lambda = channel.modes.speed.map(|c| c * dt / channel.dx);
-        let normal_flux = [lambda[0] * normal[0], lambda[1] * normal[1]];
-        let superfluid_flux = [lambda[0] * superfluid[0], lambda[1] * superfluid[1]];
-        let factors = NormalViscousFactors::try_new(channel.normal_wall_rate_s_inv, dt)?;
+        let damped_flux = [lambda[0] * damped[0], lambda[1] * damped[1]];
+        let free_flux = [lambda[0] * free[0], lambda[1] * free[1]];
+        let factors = NormalViscousFactors::try_new(
+            counterflow_rate_s_inv.unwrap_or(channel.normal_wall_rate_s_inv),
+            dt,
+        )?;
         let decay = factors.decay;
         let loss = factors.loss;
         let phi1 = factors.phi1;
@@ -417,11 +441,10 @@ impl ViscousOperator {
         // This dimensionless matrix is bounded by the admitted Courant step;
         // physical sound speeds need not be squared to find its rotation.
         let diagonal = [
-            phi2 * normal_flux[0] * normal_flux[0] + 0.5 * superfluid_flux[0] * superfluid_flux[0],
-            phi2 * normal_flux[1] * normal_flux[1] + 0.5 * superfluid_flux[1] * superfluid_flux[1],
+            phi2 * damped_flux[0] * damped_flux[0] + 0.5 * free_flux[0] * free_flux[0],
+            phi2 * damped_flux[1] * damped_flux[1] + 0.5 * free_flux[1] * free_flux[1],
         ];
-        let off =
-            phi2 * normal_flux[0] * normal_flux[1] + 0.5 * superfluid_flux[0] * superfluid_flux[1];
+        let off = phi2 * damped_flux[0] * damped_flux[1] + 0.5 * free_flux[0] * free_flux[1];
         let difference = diagonal[0] - diagonal[1];
         let (cos, sin) = if off == 0.0 {
             if difference >= 0.0 {
@@ -442,14 +465,14 @@ impl ViscousOperator {
         let rotation_norm = cos.hypot(sin);
         let row = [cos / rotation_norm, sin / rotation_norm];
         let cell_rows = [row, [-row[1], row[0]]];
-        let normal_rotated_flux = cell_rows.map(|q| dot(q, normal_flux));
-        let superfluid_rotated_flux = cell_rows.map(|q| dot(q, superfluid_flux));
+        let damped_rotated_flux = cell_rows.map(|q| dot(q, damped_flux));
+        let free_rotated_flux = cell_rows.map(|q| dot(q, free_flux));
         let r = [0, 1].map(|i| {
-            0.5 * (phi2 * normal_rotated_flux[i] * normal_rotated_flux[i]
-                + 0.5 * superfluid_rotated_flux[i] * superfluid_rotated_flux[i])
+            0.5 * (phi2 * damped_rotated_flux[i] * damped_rotated_flux[i]
+                + 0.5 * free_rotated_flux[i] * free_rotated_flux[i])
         });
-        let cross = phi2 * normal_rotated_flux[0] * normal_rotated_flux[1]
-            + 0.5 * superfluid_rotated_flux[0] * superfluid_rotated_flux[1];
+        let cross = phi2 * damped_rotated_flux[0] * damped_rotated_flux[1]
+            + 0.5 * free_rotated_flux[0] * free_rotated_flux[1];
         if !positive(norm)
             || !positive(rotation_norm)
             || ![
@@ -472,18 +495,20 @@ impl ViscousOperator {
             || cross.abs() > 1024.0 * f64::EPSILON * (diagonal[0] + diagonal[1])
         {
             return Err(ChannelError::Invalid(
-                "normal-wall exponential wave operator is not representable",
+                "linear-drag exponential wave operator is not representable",
             ));
         }
         Ok(Self {
-            normal,
-            superfluid,
-            normal_flux,
-            superfluid_flux,
+            damped,
+            free,
+            counterflow,
+            material: channel.material,
+            damped_flux,
+            free_flux,
             lambda,
             cell_rows,
-            normal_rotated_flux,
-            superfluid_rotated_flux,
+            damped_rotated_flux,
+            free_rotated_flux,
             r,
             density,
             density_root,
@@ -499,12 +524,19 @@ impl ViscousOperator {
     }
 
     fn components(&self, y: [f64; 2]) -> [f64; 2] {
-        [dot(self.normal, y), dot(self.superfluid, y)]
+        [dot(self.damped, y), dot(self.free, y)]
     }
 
     // Direct component forces avoid manufacturing an undamped superfluid force
     // by subtracting large barycentric/relative normal-force contributions.
     fn force_increment(&self, force: BodyForce<'_>, face: usize, dt: f64) -> [f64; 2] {
+        if self.counterflow {
+            let (bulk, relative, _) = force.components(face, &self.material);
+            return [
+                self.density_root[0] * (relative * dt),
+                self.density_root[1] * (bulk * dt),
+            ];
+        }
         let value = match force {
             BodyForce::None => return [0.0; 2],
             BodyForce::Acceleration(a) => {
@@ -541,17 +573,71 @@ impl ViscousOperator {
             Some(profile) => profile.mean_history[face - 1],
             None => self.phi1 * old[0],
         };
-        self.normal_rotated_flux[mode] * (normal_history + self.phi2 * body[0])
-            + self.superfluid_rotated_flux[mode] * (old[1] + 0.5 * body[1])
+        self.damped_rotated_flux[mode] * (normal_history + self.phi2 * body[0])
+            + self.free_rotated_flux[mode] * (old[1] + 0.5 * body[1])
     }
 }
 
 impl TwoFluidChannel {
-    pub(super) fn wave_cell_rotation(&self, dt: f64) -> Result<[[f64; 2]; 2], ChannelError> {
-        if !self.uses_viscous_wave_operator() {
+    pub(super) fn uses_fitted_wave_operator(&self, friction: MutualFriction) -> bool {
+        self.uses_viscous_wave_operator()
+            || match self.fitted_counterflow_rate_s_inv(friction) {
+                Ok(rate) => rate.is_some(),
+                // The fitted path will propagate the original admission error.
+                Err(_) => true,
+            }
+    }
+
+    pub(super) fn fitted_counterflow_rate_s_inv(
+        &self,
+        friction: MutualFriction,
+    ) -> Result<Option<f64>, ChannelError> {
+        // Simultaneous wall and mutual drag act in noncommuting coordinates.
+        // Retain the existing symmetric split for that model combination.
+        if self.uses_viscous_wave_operator() {
+            return Ok(None);
+        }
+        let gamma = match friction {
+            MutualFriction::Linear { gamma_kg_m3_s } => gamma_kg_m3_s,
+            MutualFriction::IsotropicVortexTangle {
+                circulation_quantum_m2_s,
+                line_density_per_m2,
+                dissipative_b,
+            } => {
+                let vortices = VortexMutualFriction::try_new(
+                    circulation_quantum_m2_s,
+                    line_density_per_m2,
+                    dissipative_b,
+                    0.0,
+                )?;
+                self.material.isotropic_vortex_drag_kg_m3_s(vortices)?
+            }
+            _ => return Ok(None),
+        };
+        if gamma == 0.0 {
+            return Ok(None);
+        }
+        let rate = gamma / self.material.reduced_density_kg_m3();
+        if !positive(rate) {
+            return Err(ChannelError::Invalid(
+                "linear counterflow relaxation rate is not representable",
+            ));
+        }
+        Ok(Some(rate))
+    }
+
+    pub(super) fn wave_cell_rotation(
+        &self,
+        dt: f64,
+        friction: MutualFriction,
+    ) -> Result<[[f64; 2]; 2], ChannelError> {
+        if !self.uses_fitted_wave_operator(friction) {
             Ok([[1.0, 0.0], [0.0, 1.0]])
         } else {
-            Ok(ViscousOperator::new(self, dt)?.cell_rows)
+            Ok(
+                LinearWaveOperator::new(self, dt, self.fitted_counterflow_rate_s_inv(friction)?)?
+                    .cell_rows,
+            )
         }
     }
 
@@ -559,13 +645,15 @@ impl TwoFluidChannel {
         &mut self,
         dt: f64,
         force: BodyForce<'_>,
+        friction: MutualFriction,
         cancelled: &mut impl FnMut() -> bool,
-    ) -> Result<ViscousWaveChange, ChannelError> {
+    ) -> Result<DissipativeWaveChange, ChannelError> {
         if let Some(profile) = &mut self.normal_profile {
             profile.prepare(dt)?;
             profile.prepare_history(cancelled)?;
         }
-        let operator = ViscousOperator::new(self, dt)?;
+        let operator =
+            LinearWaveOperator::new(self, dt, self.fitted_counterflow_rate_s_inv(friction)?)?;
         let n = self.cells();
         let mut residual: f64 = 0.0;
         for mode in 0..2 {
@@ -633,7 +721,7 @@ impl TwoFluidChannel {
             let relative = if scale == 0.0 { error } else { error / scale };
             if !relative.is_finite() || relative > 4096.0 * f64::EPSILON {
                 return Err(ChannelError::Invalid(
-                    "normal-wall wave solve has an unresolved residual",
+                    "linear-drag wave solve has an unresolved residual",
                 ));
             }
             residual = residual.max(relative);
@@ -665,8 +753,8 @@ impl TwoFluidChannel {
             });
             let body = operator.force_increment(force, i, dt);
             let increment = [
-                body[0] - dot(operator.normal_flux, gradient),
-                body[1] - dot(operator.superfluid_flux, gradient),
+                body[0] - dot(operator.damped_flux, gradient),
+                body[1] - dot(operator.free_flux, gradient),
             ];
             let normal = if let Some(profile) = &mut self.normal_profile {
                 profile.advance_face(i, increment[0])?
@@ -688,26 +776,37 @@ impl TwoFluidChannel {
             };
             let next = [normal[0], old[1] + increment[1]];
             let mean = [normal[1], old[1] + 0.5 * increment[1]];
-            let y = [0, 1].map(|m| operator.normal[m] * next[0] + operator.superfluid[m] * next[1]);
+            let y = [0, 1].map(|m| operator.damped[m] * next[0] + operator.free[m] * next[1]);
             let heat = self.cell_volume * normal[2];
             let work = self.cell_volume * dot(body, mean);
-            let impulse = -self.cell_volume * operator.density_root[0] * normal[3];
+            let impulse = if operator.counterflow {
+                0.0
+            } else {
+                -self.cell_volume * operator.density_root[0] * normal[3]
+            };
             if ![y[0], y[1], heat, work, impulse]
                 .into_iter()
                 .all(f64::is_finite)
             {
                 return Err(ChannelError::Domain {
-                    field: "normal-wall wave/source update",
+                    field: "linear-drag wave/source update",
                     index: i,
                 });
             }
             self.pending[0].faces[i] = y[0];
             self.pending[1].faces[i] = y[1];
-            self.pending_viscous_heat_j[i - 1] += 0.5 * heat;
-            self.pending_viscous_heat_j[i] += 0.5 * heat;
+            let heat_field = if operator.counterflow {
+                &mut self.pending_heat_j
+            } else {
+                &mut self.pending_viscous_heat_j
+            };
+            heat_field[i - 1] += 0.5 * heat;
+            heat_field[i] += 0.5 * heat;
             accumulate(&mut body_work, &mut work_correction, work);
             accumulate(&mut wall_impulse, &mut impulse_correction, impulse);
-            impulse_scale += self.cell_volume * operator.density_root[0] * normal[4];
+            if !operator.counterflow {
+                impulse_scale += self.cell_volume * operator.density_root[0] * normal[4];
+            }
         }
         poll(cancelled)?;
         if ![body_work, wall_impulse, impulse_scale]
@@ -715,10 +814,10 @@ impl TwoFluidChannel {
             .all(f64::is_finite)
         {
             return Err(ChannelError::Invalid(
-                "normal-wall work or impulse is not representable",
+                "linear-drag work or impulse is not representable",
             ));
         }
-        Ok(ViscousWaveChange {
+        Ok(DissipativeWaveChange {
             body_work_j: body_work,
             wall_impulse_n_s: [wall_impulse, impulse_scale],
             relative_residual: residual,

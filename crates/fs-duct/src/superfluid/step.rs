@@ -119,12 +119,17 @@ impl TwoFluidChannel {
             tangle.copy_pending(cancelled)?;
         }
         let mut vortex_transport = self.transport_vortex_half_step(dt / 2.0, cancelled)?;
-        self.friction_half_step(friction, dt / 2.0, cancelled)?;
-        let (source_work, residual, wall_impulse) = if self.uses_viscous_wave_operator() {
-            // Normal drag, authored force and the midpoint wave gradient share
-            // one exact face evolution. Splitting large force kicks around
-            // stiff wall drag would destroy forced equilibrium/fourth sound.
-            let change = self.viscous_wave_step(dt, force, cancelled)?;
+        let split_friction = if self.fitted_counterflow_rate_s_inv(friction)?.is_some() {
+            MutualFriction::None
+        } else {
+            friction
+        };
+        self.friction_half_step(split_friction, dt / 2.0, cancelled)?;
+        let (source_work, residual, wall_impulse) = if self.uses_fitted_wave_operator(friction) {
+            // Linear drag, authored force and the midpoint wave gradient share
+            // one exact face evolution. A split stiff relaxation would destroy
+            // forced equilibrium even while passing the energy audit.
+            let change = self.viscous_wave_step(dt, force, friction, cancelled)?;
             (
                 change.body_work_j,
                 change.relative_residual,
@@ -161,7 +166,7 @@ impl TwoFluidChannel {
         if force != BodyForce::None {
             self.validate_pending_with_limits(physical_limits, cancelled)?;
         }
-        self.friction_half_step(friction, dt / 2.0, cancelled)?;
+        self.friction_half_step(split_friction, dt / 2.0, cancelled)?;
         vortex_transport.add(self.transport_vortex_half_step(dt / 2.0, cancelled)?)?;
         self.validate_pending_with_limits(physical_limits, cancelled)?;
         let after = self.energy_with_profile(true, cancelled)?;
@@ -455,8 +460,8 @@ fn midpoint(
     Ok(relative)
 }
 
-/// Factor the shared no-flux-end scalar operator. A channel's frozen wall and
-/// material make each modal coefficient a deterministic function of dt.
+/// Factor the shared no-flux-end scalar operator. The coefficient also depends
+/// on the selected linear friction, which may change at a fixed time step.
 pub(super) fn factor_midpoint(
     work: &mut SolveWorkspace,
     r: f64,
@@ -464,7 +469,7 @@ pub(super) fn factor_midpoint(
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(), ChannelError> {
     let n = work.diagonal.len();
-    if work.factor_step != Some(dt) {
+    if work.factor_step != Some((dt, r)) {
         work.factor_step = None;
         work.boundary_inverse = [None; 2];
         for i in 0..n {
@@ -482,7 +487,7 @@ pub(super) fn factor_midpoint(
             &work.off_diagonal,
             &mut *cancelled,
         )?;
-        work.factor_step = Some(dt);
+        work.factor_step = Some((dt, r));
     }
     Ok(())
 }

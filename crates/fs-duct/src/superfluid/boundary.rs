@@ -129,7 +129,7 @@ impl TwoFluidChannel {
             .face_to_modes(0.0, 1.0 / self.counterflow_heat_per_speed()?);
         let mut resistance = [[0.0; 2]; 2];
         let last = self.cells() - 1;
-        let rotation = self.wave_cell_rotation(dt_s)?;
+        let rotation = self.wave_cell_rotation(dt_s, friction)?;
         for mode in 0..2 {
             let temperature_column = self
                 .modes
@@ -138,7 +138,7 @@ impl TwoFluidChannel {
             // Prescribing outward Q subtracts lambda*k_Q*Q from the cell
             // RHS. Midpoint temperature contributes half the solved response.
             // Energy conjugacy makes k_Q*temperature_column nonnegative.
-            let multiplier = if self.uses_viscous_wave_operator() {
+            let multiplier = if self.uses_fitted_wave_operator(friction) {
                 // The wall rotates the cell operators. Energy conjugacy in
                 // ANY orthonormal cell basis gives C*k_Q = theta/(A*T0), so
                 // the response is a positive square with the same factors
@@ -278,7 +278,7 @@ impl TwoFluidChannel {
             pressure[slot] =
                 0.5 * old.pressure_perturbation_pa + 0.5 * new.pressure_perturbation_pa;
         }
-        let multipliers = self.impermeable_response_multipliers(dt_s)?;
+        let multipliers = self.impermeable_response_multipliers(dt_s, friction)?;
         let mut resistance = [[0.0; 2]; 2];
         let last = self.cells() - 1;
         for mode in 0..2 {
@@ -367,7 +367,7 @@ impl TwoFluidChannel {
             ],
         );
         let pressure = 0.5 * old.pressure_perturbation_pa + 0.5 * new.pressure_perturbation_pa;
-        let multipliers = self.impermeable_response_multipliers(dt_s)?;
+        let multipliers = self.impermeable_response_multipliers(dt_s, friction)?;
         let mut resistance = 0.0;
         for mode in 0..2 {
             let inverse = endpoint_inverse(
@@ -392,9 +392,13 @@ impl TwoFluidChannel {
         })
     }
 
-    fn impermeable_response_multipliers(&self, dt: f64) -> Result<[f64; 2], ChannelError> {
+    fn impermeable_response_multipliers(
+        &self,
+        dt: f64,
+        friction: MutualFriction,
+    ) -> Result<[f64; 2], ChannelError> {
         let bulk = self.modes.face_to_modes(1.0, 0.0);
-        if !self.uses_viscous_wave_operator() {
+        if !self.uses_fitted_wave_operator(friction) {
             // Retain the original zero-wall response arithmetic.
             return Ok([0, 1].map(|m| {
                 let c = self.modes.speed[m];
@@ -406,7 +410,7 @@ impl TwoFluidChannel {
         // rotation changes this column, while the endpoint Schur complement
         // still contributes half the solved cell change to midpoint pressure.
         let pressure = [self.modes.speed[0] * bulk[0], self.modes.speed[1] * bulk[1]];
-        Ok(self.wave_cell_rotation(dt)?.map(|row| {
+        Ok(self.wave_cell_rotation(dt, friction)?.map(|row| {
             let column = row[0] * pressure[0] + row[1] * pressure[1];
             (0.5 * dt / self.dx * column) * column
         }))

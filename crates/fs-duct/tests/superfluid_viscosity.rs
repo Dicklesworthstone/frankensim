@@ -1,4 +1,4 @@
-//! Normal-fluid wall viscosity: exact sources, stiff waves and reciprocal ports.
+//! Linear dissipation: exact sources, stiff waves and reciprocal ports.
 
 use std::cell::Cell;
 
@@ -186,6 +186,273 @@ fn steady_normal_force_balances_wall_drag_without_stiff_kick_error() {
         report.wave_energy_before_j,
         1e-19,
     );
+}
+
+#[test]
+fn linear_mutual_friction_preserves_driven_equilibrium_at_arbitrary_stiffness() {
+    let n = 8;
+    let dt = 0.005;
+    let bulk = 0.0002;
+    let relative = 0.001;
+    let resolved_volume = 0.01 * (n - 1) as f64 / n as f64;
+    for alpha in [0.0, -0.2] {
+        let source = material(alpha, 0.03);
+        let normal = bulk + source.superfluid_fraction() * relative;
+        let superfluid = bulk - source.normal_fraction() * relative;
+        for a in [1e-6_f64, 0.1, 1.0, 1e4] {
+            let gamma = source.reduced_density_kg_m3() * a / dt;
+            let mut duct = channel(n, source, None);
+            uniform(&mut duct, normal, superfluid);
+            let report = duct
+                .step_forced(
+                    dt,
+                    equal_ports(normal, superfluid),
+                    BodyForce::Uniform(ComponentForceDensity {
+                        normal_n_m3: gamma * relative,
+                        superfluid_n_m3: -gamma * relative,
+                    }),
+                    MutualFriction::Linear {
+                        gamma_kg_m3_s: gamma,
+                    },
+                    || false,
+                )
+                .unwrap();
+            for i in 1..n {
+                let face = duct.face(i).unwrap();
+                near(face.normal_velocity_m_s, normal, 5e-15);
+                near(face.superfluid_velocity_m_s, superfluid, 5e-15);
+                near(face.barycentric_velocity_m_s, bulk, 5e-15);
+            }
+            for i in 0..n {
+                near(duct.cell(i).unwrap().pressure_perturbation_pa, 0.0, 3e-13);
+                near(duct.cell(i).unwrap().temperature_perturbation_k, 0.0, 3e-15);
+            }
+            let heat = resolved_volume * dt * gamma * relative * relative;
+            near(report.mutual_friction_heat_j, heat, 2e-11 * heat + 1e-24);
+            near(report.body_force_work_j, heat, 2e-11 * heat + 1e-24);
+            near(
+                duct.last_mutual_friction_heat_j().iter().sum(),
+                heat,
+                2e-11 * heat + 1e-24,
+            );
+            assert_eq!(report.normal_viscous_heat_j, 0.0);
+            assert_eq!(report.interior_wall_impulse_n_s, 0.0);
+            near(
+                report.resolved_momentum_after_kg_m_s,
+                report.resolved_momentum_before_kg_m_s,
+                1e-18,
+            );
+            near(
+                report.wave_energy_after_j,
+                report.wave_energy_before_j,
+                1e-18,
+            );
+        }
+    }
+}
+
+#[test]
+fn forced_linear_counterflow_matches_independent_transient_flux_work_and_heat() {
+    let n = 8;
+    let dt = 0.005;
+    let source = material(-0.2, 0.03);
+    let mu = source.reduced_density_kg_m3();
+    let rho = source.density_kg_m3();
+    let bulk = 0.0001;
+    let bulk_acceleration = 0.003;
+    let relative = 0.002;
+    let equilibrium = -0.0007;
+    let difference = relative - equilibrium;
+    let resolved_volume = 0.01 * (n - 1) as f64 / n as f64;
+    for a in [1e-6_f64, 0.1, 1.0, 1000.0] {
+        let rate = a / dt;
+        let gamma = mu * rate;
+        let relative_acceleration = rate * equilibrium;
+        let mean_relative = equilibrium + difference * (-(-a).exp_m1()) / a;
+        let final_relative = equilibrium + difference * (-a).exp();
+        let mean_bulk = bulk + 0.5 * bulk_acceleration * dt;
+        let final_bulk = bulk + bulk_acceleration * dt;
+        let mut duct = channel(n, source, None);
+        uniform(
+            &mut duct,
+            bulk + source.superfluid_fraction() * relative,
+            bulk - source.normal_fraction() * relative,
+        );
+        let report = duct
+            .step_forced(
+                dt,
+                equal_ports(
+                    mean_bulk + source.superfluid_fraction() * mean_relative,
+                    mean_bulk - source.normal_fraction() * mean_relative,
+                ),
+                BodyForce::Uniform(ComponentForceDensity {
+                    normal_n_m3: source.normal_density_kg_m3()
+                        * (bulk_acceleration
+                            + source.superfluid_fraction() * relative_acceleration),
+                    superfluid_n_m3: source.superfluid_density_kg_m3()
+                        * (bulk_acceleration - source.normal_fraction() * relative_acceleration),
+                }),
+                MutualFriction::Linear {
+                    gamma_kg_m3_s: gamma,
+                },
+                || false,
+            )
+            .unwrap();
+        for i in 1..n {
+            let face = duct.face(i).unwrap();
+            near(face.barycentric_velocity_m_s, final_bulk, 3e-15);
+            near(face.counterflow_velocity_m_s, final_relative, 3e-15);
+        }
+        for i in 0..n {
+            near(duct.cell(i).unwrap().pressure_perturbation_pa, 0.0, 3e-13);
+            near(duct.cell(i).unwrap().temperature_perturbation_k, 0.0, 3e-15);
+        }
+        // Independent integral of gamma * (w_eq + delta * exp(-rate*t))^2.
+        // exp_m1 retains the weak-drag limit without kinetic-store subtraction.
+        let heat = resolved_volume
+            * mu
+            * (a * equilibrium * equilibrium
+                + 2.0 * equilibrium * difference * (-(-a).exp_m1())
+                + 0.5 * difference * difference * (-(-2.0 * a).exp_m1()));
+        let work = resolved_volume
+            * dt
+            * (rho * bulk_acceleration * mean_bulk + gamma * equilibrium * mean_relative);
+        near(report.mutual_friction_heat_j, heat, 2e-10 * heat + 1e-24);
+        near(report.body_force_work_j, work, 2e-10 * work.abs() + 1e-24);
+        near(
+            report.wave_energy_after_j - report.wave_energy_before_j,
+            work - heat,
+            1e-18,
+        );
+        assert_eq!(report.normal_viscous_heat_j, 0.0);
+        assert_eq!(report.interior_wall_impulse_n_s, 0.0);
+        assert!(
+            duct.last_mutual_friction_heat_j()
+                .iter()
+                .all(|heat| *heat >= 0.0)
+        );
+    }
+}
+
+#[test]
+fn fitted_mutual_friction_has_second_order_damped_second_sound_dynamics() {
+    let n = 16;
+    let rate = 5.0;
+    let duration = 0.17;
+    let amplitude = 0.003;
+    let source = material(0.0, 0.03);
+    let shape: Vec<_> = (0..n)
+        .map(|i| (core::f64::consts::PI * (i as f64 + 0.5) / n as f64).cos())
+        .collect();
+    // Use the exact eigenvalue of the staggered spatial operator, isolating
+    // temporal accuracy from spatial dispersion. At alpha=0, c2^2 is 6 m2/s2.
+    let wave_number = 2.0 * n as f64 * (core::f64::consts::PI / (2.0 * n as f64)).sin();
+    let frequency = (6.0 * wave_number * wave_number - 0.25 * rate * rate).sqrt();
+    let exact_amplitude = amplitude
+        * (-0.5 * rate * duration).exp()
+        * ((frequency * duration).cos() + 0.5 * rate / frequency * (frequency * duration).sin());
+    let mut errors = Vec::new();
+    for steps in [32, 64, 128] {
+        let mut duct = channel(n, source, None);
+        duct.initialize(
+            &vec![0.0; n],
+            &shape.iter().map(|x| amplitude * x).collect::<Vec<_>>(),
+            &vec![0.0; n + 1],
+            &vec![0.0; n + 1],
+            || false,
+        )
+        .unwrap();
+        let initial_energy = duct.wave_energy_j().unwrap();
+        for _ in 0..steps {
+            let report = duct
+                .step(
+                    duration / steps as f64,
+                    BoundaryVelocities::CLOSED,
+                    MutualFriction::Linear {
+                        gamma_kg_m3_s: source.reduced_density_kg_m3() * rate,
+                    },
+                    || false,
+                )
+                .unwrap();
+            assert!(report.mutual_friction_heat_j >= 0.0);
+        }
+        errors.push(
+            (shape
+                .iter()
+                .enumerate()
+                .map(|(i, x)| {
+                    (duct.cell(i).unwrap().temperature_perturbation_k - exact_amplitude * x).powi(2)
+                })
+                .sum::<f64>()
+                / n as f64)
+                .sqrt(),
+        );
+        near(
+            duct.wave_energy_j().unwrap() + duct.cumulative_mutual_friction_heat_j(),
+            initial_energy,
+            2e-11 * initial_energy,
+        );
+    }
+    assert!(errors[1] < 0.27 * errors[0], "{errors:?}");
+    assert!(errors[2] < 0.27 * errors[1], "{errors:?}");
+    assert!(errors[2] < 6e-8, "{errors:?}");
+}
+
+#[test]
+fn changing_friction_at_fixed_dt_refactors_wave_and_endpoint_response() {
+    let n = 17;
+    let dt = 0.005;
+    let source = material(-0.2, 0.03);
+    let force = BodyForce::Acceleration(0.001);
+    let reference = [0.0003, -0.0001];
+    let actual = [-0.0001, 0.0002];
+    let mut cached = channel(n, source, None);
+    uniform(&mut cached, 0.001, -0.0004);
+    let before = snapshot(&cached);
+    for friction in [
+        MutualFriction::Linear { gamma_kg_m3_s: 1e5 },
+        MutualFriction::Linear {
+            gamma_kg_m3_s: 0.25,
+        },
+        MutualFriction::None,
+        MutualFriction::IsotropicVortexTangle {
+            circulation_quantum_m2_s: 0.03,
+            line_density_per_m2: 1e6,
+            dissipative_b: 1.0,
+        },
+        MutualFriction::Linear {
+            gamma_kg_m3_s: 1000.0,
+        },
+    ] {
+        let response = cached
+            .counterflow_ends_response(dt, reference, force, friction, || false)
+            .unwrap();
+        let mut fresh = channel(n, source, None);
+        uniform(&mut fresh, 0.001, -0.0004);
+        assert_eq!(
+            response,
+            fresh
+                .counterflow_ends_response(dt, reference, force, friction, || false)
+                .unwrap()
+        );
+        assert_eq!(snapshot(&cached), before);
+        let boundary = fresh.counterflow_boundary_velocities(actual).unwrap();
+        fresh
+            .step_forced(dt, boundary, force, friction, || false)
+            .unwrap();
+        let impedance = response.temperature_heat_impedance_k_w;
+        assert_eq!(impedance[0][1], impedance[1][0]);
+        for (end, cell) in [0, n - 1].into_iter().enumerate() {
+            let prediction = response.reference_temperature_perturbation_k[end]
+                - impedance[end][0] * (actual[0] - reference[0])
+                - impedance[end][1] * (actual[1] - reference[1]);
+            near(
+                0.5 * fresh.cell(cell).unwrap().temperature_perturbation_k,
+                prediction,
+                2e-13,
+            );
+        }
+    }
 }
 
 #[test]
