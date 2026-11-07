@@ -1,3 +1,40 @@
+## Native three-dimensional induction with finite rotor inertia
+
+`spatial_induction::SpatialInductionRotor` closes the original Whitney A–phi
+field against one native centered, axisymmetric revolute-z body. A bounded
+implicit iteration uses the same accepted field and momentum on every trial;
+its converged speed supplies `v = omega cross (x - axis)` and its original
+current supplies both conductor-frame Joule heat and the full Lorentz wrench.
+Three-dimensional charge continuity and end effects remain in the native field.
+
+The `induction_rotor` stage is shared with the original planar rotor. It calls
+the original articulated forward kinematics and constrained inverse-inertia
+map, retaining shaft input, full body force/torque and ideal-bearing reaction.
+Actual load work, kinetic work, linear/angular impulse and combined field/rotor
+energy must pass before the joint candidate publishes. Coupling exhaustion or
+cancellation leaves the accepted cochains, source, angle, speed and time intact.
+Geometry bindings and the mechanical model are shared across accepted steps;
+a single velocity buffer serves every speed trial of an interval.
+
+Admission requires homogeneous scalar conductivity, uniform scalar induced-
+linear permeability throughout the field domain, and no impressed current in
+the rotor. The original fixed tetrahedra approximate a complete circular
+cylinder or coaxial tube whose analytic occupancy is rotation-invariant.
+Constructor checks include connected oriented cells, closed manifold boundary,
+full facet/cell radial bounds, end coverage and bounded chord error. They do
+not certify arbitrary intersections or field convergence. Noncircular moving
+interfaces, anisotropic rotating material, hysteretic-memory transport and
+magnetization-interface loads require additional owners.
+
+Three focused G0/G3/G4 regression definitions cover transverse braking in both
+directions, independently integrated P1 force/torque/Joule and magnetic energy,
+shaft drive followed by coasting, bearing reactions and transactional refusal.
+The fixture uses real material-resolved spatial fields and native inertia;
+synthetic coefficients do not establish experimental machine validation.
+Pinned formatting/syntax and whitespace checks pass. Native compilation and
+regression execution remain unverified while the seven constellation sibling
+repositories are absent.
+
 ## Reciprocal heat and finite porous compaction
 
 `solid_enthalpy::finite_plastic::porous::FiniteThermalPorousSolid` couples retained non-isochoric plastic history to the original `DepositionSimulation` caloric and transport owner. A native finite porous tetrahedral equilibrium is solved at each proposed endpoint temperature; original yield heat plus signed reversible caloric exchange enters the thermal timeline exactly once. Every mechanical and thermal proposal starts from the same accepted endpoint. The complete thermal, structural and observer candidate is accepted together, after the existing temperature, per-cell heat, thermal-energy and combined-energy gates. The original bounded Picard/IQN-ILS driver is shared with dense finite plasticity and sheet forming.

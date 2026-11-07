@@ -140,6 +140,10 @@ pub mod gesture_path;
 mod gas_field_input;
 pub mod glottis;
 pub mod iqn_ils;
+/// Shared native impulse and work stage for finite-inertia induction rotors.
+pub mod induction_rotor;
+/// Reciprocal three-dimensional eddy-current and finite rotor-inertia feedback.
+pub mod spatial_induction;
 /// Implicit guided-body motion driven by original material Stokes reactions.
 #[cfg(feature = "experimental-stokes-motion")]
 pub mod stokes_motion;

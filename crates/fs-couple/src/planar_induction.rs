@@ -12,6 +12,8 @@
 //! trial advances history. Joule heat, shaft work, support impulse and numerical
 //! work defects remain distinct; no state or energy account is repaired.
 
+use crate::induction_rotor::{self, RotorStageError};
+pub use crate::induction_rotor::{RotorBalance, RotorControls};
 use fs_em::planar::eddy::{
     EddyError, PlanarEddy,
     moving::{
@@ -19,12 +21,9 @@ use fs_em::planar::eddy::{
         mechanical::{PlanarLorentzLoadError, PlanarLorentzLoadLimits},
     },
 };
-use fs_ga::{GaError, Se3, So3, Twist, Vec3, Wrench};
+use fs_ga::{GaError, Vec3};
 use fs_math::{dd::Dd, det};
-use fs_mbd::articulated::{
-    ArticulatedError, ArticulatedModel, BaseState, JointKind, PrescribedBaseImpulseResponse,
-    apply_prescribed_base_impulses, forward_kinematics,
-};
+use fs_mbd::articulated::{ArticulatedError, ArticulatedModel, PrescribedBaseImpulseResponse};
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::Arc,
@@ -40,18 +39,6 @@ pub struct CircularConductor {
     /// Maximum radial departure of every boundary chord from its circle [m].
     /// This is geometry admission, not a field-error or convergence certificate.
     pub maximum_boundary_error_m: f64,
-}
-
-/// Coupling convergence and physical-accounting allowances, independent of the
-/// existing field Krylov/energy/Peclet controls.
-#[derive(Clone, Copy, Debug)]
-pub struct RotorControls {
-    pub maximum_iterations: usize,
-    pub relaxation: f64,
-    pub angular_velocity_tolerance_rad_s: f64,
-    pub energy_tolerance_j: f64,
-    pub angular_impulse_tolerance_nms: f64,
-    pub linear_impulse_tolerance_ns: f64,
 }
 
 #[derive(Debug)]
@@ -94,6 +81,18 @@ impl From<GaError> for RotorError {
         Self::Geometry(value)
     }
 }
+impl From<RotorStageError> for RotorError {
+    fn from(error: RotorStageError) -> Self {
+        match error {
+            RotorStageError::Invalid(message) => Self::Invalid(message),
+            RotorStageError::Cancelled => Self::Cancelled,
+            RotorStageError::Mechanical(error) => Self::Mechanical(error),
+            RotorStageError::Load(error) => Self::Load(error),
+            RotorStageError::Geometry(error) => Self::Geometry(error),
+            RotorStageError::Balance(message) => Self::Balance(message),
+        }
+    }
+}
 type Result<T> = core::result::Result<T, RotorError>;
 
 /// One accepted field/mechanical history. The original model and field owner
@@ -113,24 +112,6 @@ struct RotorBinding {
     unit_velocity: Vec<[f64; 2]>,
     load_limits: PlanarLorentzLoadLimits,
     boundary_error_m: f64,
-}
-
-/// Diagnostics of the actual accepted joint/field midpoint, never predictor loads.
-#[derive(Clone, Copy, Debug)]
-pub struct RotorBalance {
-    pub iterations: usize,
-    pub field_angular_velocity_rad_s: f64,
-    pub mechanical_midpoint_velocity_rad_s: f64,
-    pub velocity_residual_rad_s: f64,
-    pub electromagnetic_torque_nm: f64,
-    /// Actual midpoint speed times the held applied shaft torque and duration.
-    pub shaft_work_j: f64,
-    /// Native P1 field work minus duration * field speed * integrated torque.
-    pub load_work_residual_j: f64,
-    /// Actual kinetic increment minus native Lorentz work and shaft work.
-    pub mechanical_work_residual_j: f64,
-    /// Magnetic + kinetic change + heat - field source work - shaft work.
-    pub total_energy_residual_j: f64,
 }
 
 pub struct RotorCandidate<'m> {
@@ -163,10 +144,6 @@ fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<()> {
         Ok(())
     }
 }
-fn base() -> BaseState {
-    BaseState::stationary(Se3::identity())
-}
-
 impl<'m> PlanarInductionRotor<'m> {
     /// Bind one original revolute-z root link and every conducting cell to a
     /// homogeneous circular rotor. The link origin is the circle axis at the
@@ -201,28 +178,17 @@ impl<'m> PlanarInductionRotor<'m> {
                 "one bounded native rotor and nonempty conductor required",
             ));
         }
-        let link = &model.links()[0];
-        let axis = link.joint().motion_subspace();
-        let origin = link.parent_from_child_zero().translation();
+        let origin =
+            induction_rotor::admit_model(&model, angle_rad, angular_velocity_rad_s, cancelled)?;
         let depth = match mesh.metric() {
             fs_rep_mesh::Metric2::Planar { thickness } => thickness,
             _ => return Err(RotorError::Invalid("planar extrusion required")),
         };
-        let inertia = link.inertia();
-        let tensor = inertia.inertia_com().m;
-        if link.joint().kind() != JointKind::Revolute
-            || axis != Twist::new(Vec3::new(0.0, 0.0, 1.0), Vec3::default())
-            || link.parent_from_child_zero().rotation() != So3::identity()
-            || origin.z != 0.5 * depth
-            || inertia.center_of_mass() != Vec3::default()
-            || tensor[0] != tensor[4]
-            || [1, 2, 3, 5, 6, 7].into_iter().any(|i| tensor[i] != 0.0)
-        {
+        if origin.z != 0.5 * depth {
             return Err(RotorError::Invalid(
-                "centered axisymmetric native inertia and aligned revolute-z root required",
+                "native rotor axis origin must lie at the planar extrusion mid-depth",
             ));
         }
-        forward_kinematics(&model, base(), &[angle_rad], &[angular_velocity_rad_s])?;
         let first = &field.conductors()[0];
         let mu = problem.permeability_h_m()[first.triangle];
         if problem.permeability_h_m().iter().any(|value| *value != mu)
@@ -296,21 +262,8 @@ impl<'m> PlanarInductionRotor<'m> {
     ) -> Result<RotorCandidate<'m>> {
         poll(cancelled)?;
         let duration = finite(target_s - self.field.time_s())?;
-        if duration <= 0.0
-            || !shaft_torque_nm.is_finite()
-            || !(1..=256).contains(&controls.maximum_iterations)
-            || !controls.relaxation.is_finite()
-            || controls.relaxation <= 0.0
-            || controls.relaxation > 1.0
-            || [
-                controls.angular_velocity_tolerance_rad_s,
-                controls.energy_tolerance_j,
-                controls.angular_impulse_tolerance_nms,
-                controls.linear_impulse_tolerance_ns,
-            ]
-            .into_iter()
-            .any(|x| !x.is_finite() || x <= 0.0)
-            || impressed_jz_a_m2.len() != self.field.problem().mesh().faces().len()
+        induction_rotor::admit_controls(duration, shaft_torque_nm, controls)?;
+        if impressed_jz_a_m2.len() != self.field.problem().mesh().faces().len()
             || self
                 .binding
                 .triangles
@@ -325,9 +278,6 @@ impl<'m> PlanarInductionRotor<'m> {
             .model
             .validate_applied_effort(&[shaft_torque_nm])?;
         let old_speed = self.angular_velocity_rad_s;
-        let origin = self.binding.model.links()[0]
-            .parent_from_child_zero()
-            .translation();
         let mut speed = old_speed;
         let mut velocity = vec![[0.0; 2]; self.binding.unit_velocity.len()];
         let mut last_residual = f64::INFINITY;
@@ -355,96 +305,42 @@ impl<'m> PlanarInductionRotor<'m> {
                 self.binding.load_limits,
                 cancelled,
             )?;
-            let world = loads.wrench(&Se3::identity(), [origin.x, origin.y, origin.z])?;
-            let midpoint_angle = finite(self.angle_rad + 0.5 * duration * speed)?;
-            let kinematics =
-                forward_kinematics(&self.binding.model, base(), &[midpoint_angle], &[speed])?;
-            let body = loads.wrench(&kinematics.world_from_link[0].inverse()?, [0.0; 3])?;
-            let response = apply_prescribed_base_impulses(
+            let stage = induction_rotor::stage(
                 &self.binding.model,
-                base(),
-                &[midpoint_angle],
-                &[old_speed],
-                &[finite(duration * shaft_torque_nm)?],
-                &[Wrench::new(
-                    body.torque.scale(duration),
-                    body.force.scale(duration),
-                )],
+                self.angle_rad,
+                old_speed,
+                speed,
+                duration,
+                shaft_torque_nm,
+                &loads,
+                field.step().mechanical_work_j,
+                field.step().energy_residual_j,
+                iteration,
+                controls,
+                cancelled,
             )?;
-            poll(cancelled)?;
-            let endpoint_speed = response.joint_velocity_after[0];
-            let actual_midpoint = f64::midpoint(old_speed, endpoint_speed);
-            last_residual = finite(actual_midpoint - speed)?.abs();
-            let shaft_work_j = finite(duration * shaft_torque_nm * actual_midpoint)?;
-            let load_work_residual_j = finite(
-                (Dd::from_f64(field.step().mechanical_work_j)
-                    - Dd::from_f64(duration) * Dd::from_f64(speed) * Dd::from_f64(world.torque.z))
-                .to_f64(),
-            )?;
-            let mechanical_work_residual_j = finite(
-                (Dd::from_f64(response.kinetic_energy_change)
-                    - Dd::from_f64(field.step().mechanical_work_j)
-                    - Dd::from_f64(shaft_work_j))
-                .to_f64(),
-            )?;
-            let total_energy_residual_j = finite(
-                (Dd::from_f64(field.step().energy_residual_j)
-                    + Dd::from_f64(mechanical_work_residual_j))
-                .to_f64(),
-            )?;
-            if load_work_residual_j.abs() > controls.energy_tolerance_j {
-                return Err(RotorError::Balance(
-                    "native Lorentz torque and native field work disagree",
-                ));
-            }
-            if last_residual <= controls.angular_velocity_tolerance_rad_s
-                && mechanical_work_residual_j.abs() <= controls.energy_tolerance_j
-                && total_energy_residual_j.abs() <= controls.energy_tolerance_j
-            {
-                if response.angular_momentum_residual_world.norm()
-                    > controls.angular_impulse_tolerance_nms
-                    || response.linear_momentum_residual_world.norm()
-                        > controls.linear_impulse_tolerance_ns
-                    || response.kinetic_work_residual.abs() > controls.energy_tolerance_j
-                {
-                    return Err(RotorError::Balance(
-                        "native mechanical impulse/work residual exceeds coupling budget",
-                    ));
-                }
-                let angle = finite(self.angle_rad + duration * actual_midpoint)?;
-                if duration * actual_midpoint != 0.0 && angle == self.angle_rad {
-                    return Err(RotorError::Invalid(
-                        "rotor angle increment disappeared in endpoint",
-                    ));
-                }
-                forward_kinematics(&self.binding.model, base(), &[angle], &[endpoint_speed])?;
-                let balance = RotorBalance {
-                    iterations: iteration,
-                    field_angular_velocity_rad_s: speed,
-                    mechanical_midpoint_velocity_rad_s: actual_midpoint,
-                    velocity_residual_rad_s: last_residual,
-                    electromagnetic_torque_nm: world.torque.z,
-                    shaft_work_j,
-                    load_work_residual_j,
-                    mechanical_work_residual_j,
-                    total_energy_residual_j,
-                };
+            last_residual = stage.balance.velocity_residual_rad_s;
+            if let Some(endpoint) = stage.endpoint {
                 let (field, induction) = field.into_parts();
                 let state = Self {
                     field,
                     binding: Arc::clone(&self.binding),
-                    angle_rad: angle,
-                    angular_velocity_rad_s: endpoint_speed,
+                    angle_rad: endpoint.angle_rad,
+                    angular_velocity_rad_s: endpoint.angular_velocity_rad_s,
                 };
                 poll(cancelled)?;
                 return Ok(RotorCandidate {
                     state,
                     induction,
-                    mechanics: response,
-                    balance,
+                    mechanics: stage.mechanics,
+                    balance: stage.balance,
                 });
             }
-            let next = finite(speed + controls.relaxation * (actual_midpoint - speed))?;
+            let next = finite(
+                speed
+                    + controls.relaxation
+                        * (stage.balance.mechanical_midpoint_velocity_rad_s - speed),
+            )?;
             if next == speed {
                 return Err(RotorError::Balance(
                     "coupled midpoint stalled before work/velocity acceptance",
