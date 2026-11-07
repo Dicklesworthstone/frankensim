@@ -11333,3 +11333,31 @@ and nonclosure under isotropic hardening, source/G/yield binding, aggregate caps
 restart equivalence and late append/finalization rollback. They remain synthetic
 implementation checks on the existing scalar-factor load path, with no new
 independent multiaxis excitation or validated component-life claim.
+
+## Native finite-deformation motion and stress power
+
+`hyper3::response::HyperTetElementMotionResponse` observes supplied displacement
+and velocity on the same original P1 tetrahedra and combined material response.
+It reports reference velocity gradient, spatial velocity gradient, spatial
+symmetric strain rate, Green-Lagrange strain rate, Jacobian and current-volume
+rates, and both reference and spatial stress power. The reference contraction
+is `V0 P : Fdot`; the spatial contraction is `V sigma : L`, retaining the full
+stress tensor even for an explicitly supplied nonobjective material.
+
+The problem and prepared problem expose bulk observations in original element
+order. The prepared single-element callback is evaluated once per original
+node, with fixed-size scratch and no mesh-sized displacement or velocity copy.
+Velocity gradients use relative nodal velocities directly, preserving tiny
+rates and exact uniform-velocity cancellation. Observation reuses the original
+deformation-gradient/material owner, requests no tangent, advances no history,
+and rejects nonfinite inputs/results and cancellation without publishing a
+partial response. These are total geometric rates; they do not infer an
+elastic/plastic/thermal split or heat production.
+
+Eight independent component oracle cases passed for affine/noncoaxial motion,
+time-dependent rotation, rigid spin, tiny rates, translated motion,
+nonsymmetric stress and uniform velocity, with additional boundary refusals.
+Five public integration tests also exercise original assembled-force power,
+prepared/callback equivalence and cancellation; those complete tests remain
+unexecuted in the available dependency environment. Component execution does
+not claim validation of the complete material/assembly/runtime closure.

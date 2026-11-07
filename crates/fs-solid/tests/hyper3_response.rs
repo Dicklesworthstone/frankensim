@@ -97,6 +97,17 @@ fn transpose(a: &[f64; 9]) -> [f64; 9] {
     core::array::from_fn(|ij| a[3 * (ij % 3) + ij / 3])
 }
 
+fn affine_velocity(nodes: &[[f64; 3]], rate: &[f64; 9], translation: [f64; 3]) -> Vec<f64> {
+    nodes
+        .iter()
+        .flat_map(|x| {
+            core::array::from_fn::<_, 3, _>(|i| {
+                (0..3).fold(translation[i], |v, j| rate[3 * i + j].mul_add(x[j], v))
+            })
+        })
+        .collect()
+}
+
 #[test]
 fn heterogeneous_fields_match_closed_form_stress_and_original_nodal_forces() {
     with_cx(|_, cx| {
@@ -483,5 +494,331 @@ fn recovery_refuses_invalid_states_nonfinite_material_fields_and_cancellation() 
             ),
             Err(HyperTetError::Cancelled)
         ));
+    });
+}
+
+#[test]
+fn native_motion_rates_match_affine_kinematics_and_assembled_internal_work() {
+    with_cx(|_, cx| {
+        let materials = [nh(2.0, 3.0, 4.0), nh(7.0, 5.0, 4.0)];
+        let p = problem(&NODES, &TETS, HyperelasticLawField::PerElement(&materials));
+        let prepared = p.prepare(cx).unwrap();
+        let stretches = [1.25, 0.8, 1.1];
+        let rates = [0.125, -0.16, 0.033];
+        let f = core::array::from_fn(|ij| {
+            if ij / 3 == ij % 3 {
+                stretches[ij / 3]
+            } else {
+                0.0
+            }
+        });
+        let rate = core::array::from_fn(|ij| if ij / 3 == ij % 3 { rates[ij / 3] } else { 0.0 });
+        let u = affine(&NODES, f, [7.0, -11.0, 5.0]);
+        let velocity = affine_velocity(&NODES, &rate, [3.0, -2.0, 1.0]);
+        let responses = prepared
+            .element_motion_responses(&u, &velocity, cx)
+            .unwrap();
+        assert_eq!(
+            responses,
+            p.element_motion_responses(&u, &velocity, cx).unwrap()
+        );
+        let j: f64 = stretches.iter().product();
+        let dilation: f64 = (0..3).map(|i| rates[i] / stretches[i]).sum();
+        for response in &responses {
+            for ij in 0..9 {
+                let (i, k) = (ij / 3, ij % 3);
+                let spatial = if i == k { rates[i] / stretches[i] } else { 0.0 };
+                let material = if i == k { rates[i] * stretches[i] } else { 0.0 };
+                near(response.deformation_gradient_rate_per_s[ij], rate[ij], 1.0);
+                near(response.spatial_velocity_gradient_per_s[ij], spatial, 1.0);
+                near(response.spatial_strain_rate_per_s[ij], spatial, 1.0);
+                near(response.green_lagrange_strain_rate_per_s[ij], material, 1.0);
+            }
+            near(response.jacobian_rate_per_s, j * dilation, 1.0);
+            near(response.current_volume_rate_m3_s, j * dilation / 6.0, 1.0);
+            near(
+                response.reference_stress_power_w,
+                response.spatial_stress_power_w,
+                10.0,
+            );
+        }
+        // This independently exercises the original FE force assembly, rather
+        // than only comparing two contractions of the recovered stress.
+        let force = prepared.internal_force(&u, cx).unwrap();
+        let native_power: f64 = force.iter().zip(&velocity).map(|(f, v)| f * v).sum();
+        near(
+            responses.iter().map(|r| r.reference_stress_power_w).sum(),
+            native_power,
+            10.0,
+        );
+        near(
+            responses.iter().map(|r| r.spatial_stress_power_w).sum(),
+            native_power,
+            10.0,
+        );
+    });
+}
+
+#[test]
+fn motion_rates_are_objective_under_time_dependent_superposed_rotation() {
+    with_cx(|_, cx| {
+        let material = nh(2.0, 3.0, 4.0);
+        let p = problem(
+            &NODES[..4],
+            &TETS[..1],
+            HyperelasticLawField::Uniform(&material),
+        );
+        let prepared = p.prepare(cx).unwrap();
+        let f = [1.25, 0.125, 0.0, 0.0625, 0.875, 0.125, 0.0, 0.03125, 1.125];
+        let rate = [
+            0.25, -0.375, 0.125, 0.0625, 0.125, -0.0625, -0.125, 0.0625, 0.1875,
+        ];
+        let q = [0.0, -1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0];
+        let spin = [0.0, -0.5, 0.25, 0.5, 0.0, -0.125, -0.25, 0.125, 0.0];
+        let rotated_f = product(&q, &f);
+        let rotated_rate = product(&q, &rate);
+        let frame_rate = product(&spin, &rotated_f);
+        let total_rate = core::array::from_fn(|ij| rotated_rate[ij] + frame_rate[ij]);
+        let observe = |f, rate| {
+            prepared
+                .element_motion_responses(
+                    &affine(&NODES[..4], f, [0.0; 3]),
+                    &affine_velocity(&NODES[..4], &rate, [0.0; 3]),
+                    cx,
+                )
+                .unwrap()
+                .remove(0)
+        };
+        let original = observe(f, rate);
+        let rotated = observe(rotated_f, total_rate);
+        let expected_d = product(
+            &product(&q, &original.spatial_strain_rate_per_s),
+            &transpose(&q),
+        );
+        let rotated_l = product(
+            &product(&q, &original.spatial_velocity_gradient_per_s),
+            &transpose(&q),
+        );
+        for ij in 0..9 {
+            near(rotated.spatial_strain_rate_per_s[ij], expected_d[ij], 1.0);
+            near(
+                rotated.spatial_velocity_gradient_per_s[ij],
+                rotated_l[ij] + spin[ij],
+                1.0,
+            );
+            near(
+                rotated.green_lagrange_strain_rate_per_s[ij],
+                original.green_lagrange_strain_rate_per_s[ij],
+                1.0,
+            );
+        }
+        near(
+            rotated.current_volume_rate_m3_s,
+            original.current_volume_rate_m3_s,
+            1.0,
+        );
+        near(
+            rotated.reference_stress_power_w,
+            original.reference_stress_power_w,
+            10.0,
+        );
+        near(
+            rotated.spatial_stress_power_w,
+            original.spatial_stress_power_w,
+            10.0,
+        );
+        let rigid = observe(rotated_f, frame_rate);
+        for value in rigid
+            .spatial_strain_rate_per_s
+            .iter()
+            .chain(&rigid.green_lagrange_strain_rate_per_s)
+        {
+            near(*value, 0.0, 1.0);
+        }
+        near(rigid.jacobian_rate_per_s, 0.0, 1.0);
+        near(rigid.reference_stress_power_w, 0.0, 10.0);
+        near(rigid.spatial_stress_power_w, 0.0, 10.0);
+    });
+}
+
+#[test]
+fn motion_recovery_preserves_tiny_rates_and_common_motion_invariance() {
+    with_cx(|_, cx| {
+        let material = nh(2.0, 3.0, 4.0);
+        let p = problem(
+            &NODES[..4],
+            &TETS[..1],
+            HyperelasticLawField::Uniform(&material),
+        );
+        let prepared = p.prepare(cx).unwrap();
+        let tiny = 2.0_f64.powi(-90);
+        let mut rate = [0.0; 9];
+        rate[0] = tiny;
+        let small = prepared
+            .element_motion_responses(
+                &[0.0; 12],
+                &affine_velocity(&NODES[..4], &rate, [0.0; 3]),
+                cx,
+            )
+            .unwrap()
+            .remove(0);
+        assert_eq!(small.deformation_gradient_rate_per_s[0], tiny);
+        assert_eq!(small.spatial_strain_rate_per_s[0], tiny);
+        assert_eq!(small.green_lagrange_strain_rate_per_s[0], tiny);
+        assert_eq!(small.jacobian_rate_per_s, tiny);
+
+        let f = [1.25, 0.125, 0.0, 0.0, 1.125, 0.0625, 0.0, 0.0, 0.875];
+        let rate = [0.125, -0.25, 0.0, 0.0625, 0.125, 0.0, 0.0, 0.0, -0.0625];
+        let observe = |translation, velocity_translation| {
+            prepared
+                .element_motion_responses(
+                    &affine(&NODES[..4], f, translation),
+                    &affine_velocity(&NODES[..4], &rate, velocity_translation),
+                    cx,
+                )
+                .unwrap()
+                .remove(0)
+        };
+        // Dyadic physical increments remain exactly represented at these
+        // translations; the observer must not manufacture strain or power.
+        let position = 2.0_f64.powi(40);
+        let velocity = 2.0_f64.powi(35);
+        assert_eq!(
+            observe([0.0; 3], [0.0; 3]),
+            observe(
+                [position, -position, position],
+                [-velocity, velocity, velocity]
+            ),
+        );
+    });
+}
+
+#[test]
+fn sparse_motion_observation_is_single_pass_and_refuses_before_material_evaluation() {
+    with_cx(|gate, cx| {
+        let materials = [
+            CombinedPotential::new(-3.0, false),
+            CombinedPotential::new(-7.0, false),
+        ];
+        let p = problem(&NODES, &TETS, HyperelasticLawField::PerElement(&materials));
+        let prepared = p.prepare(cx).unwrap();
+        let u = affine(
+            &NODES,
+            [1.125, 0.125, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+            [0.0; 3],
+        );
+        let velocity = affine_velocity(&NODES, &[0.125; 9], [1.0, 2.0, 3.0]);
+        let mut sampled = Vec::new();
+        let sparse = prepared
+            .element_motion_response_with(
+                1,
+                |node| {
+                    sampled.push(node);
+                    (
+                        core::array::from_fn(|i| u[3 * node + i]),
+                        core::array::from_fn(|i| velocity[3 * node + i]),
+                    )
+                },
+                cx,
+            )
+            .unwrap();
+        assert_eq!(sampled, TETS[1]);
+        assert_eq!(materials[0].calls.get(), 0);
+        assert_eq!(materials[1].calls.get(), 1);
+        assert_eq!(
+            sparse,
+            prepared
+                .element_motion_responses(&u, &velocity, cx)
+                .unwrap()[1]
+        );
+        assert_eq!(materials[0].calls.get(), 1);
+        assert_eq!(materials[1].calls.get(), 2);
+        assert!(
+            prepared
+                .element_motion_responses(&u, &[0.0; 14], cx)
+                .is_err()
+        );
+        assert!(
+            prepared
+                .element_motion_responses(&u, &[f64::NAN; 15], cx)
+                .is_err()
+        );
+        assert!(
+            prepared
+                .element_motion_response_with(2, |_| panic!("missing element"), cx)
+                .is_err()
+        );
+        assert!(
+            prepared
+                .element_motion_response_with(0, |_| ([0.0; 3], [f64::INFINITY; 3]), cx)
+                .is_err()
+        );
+        let inverted = affine(
+            &NODES,
+            [-1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+            [0.0; 3],
+        );
+        assert!(
+            prepared
+                .element_motion_responses(&inverted, &velocity, cx)
+                .is_err()
+        );
+        assert_eq!(materials[0].calls.get(), 1);
+        assert_eq!(materials[1].calls.get(), 2);
+        assert!(matches!(
+            prepared.element_motion_response_with(
+                0,
+                |_| {
+                    gate.request();
+                    ([0.0; 3], [0.0; 3])
+                },
+                cx
+            ),
+            Err(HyperTetError::Cancelled)
+        ));
+        assert_eq!(materials[0].calls.get(), 1);
+        assert!(matches!(
+            prepared.element_motion_response_with(0, |_| panic!("cancelled"), cx),
+            Err(HyperTetError::Cancelled)
+        ));
+    });
+}
+
+#[test]
+fn motion_power_retains_the_full_original_stress_and_spin() {
+    // Deliberately nonobjective potential: recovery must expose its full work,
+    // not make it look objective by discarding the nonsymmetric stress part.
+    struct Nonobjective;
+    impl FiniteStrainPotential for Nonobjective {
+        fn energy_density(&self, f: &[f64; 9]) -> f64 {
+            f[1] - f[3]
+        }
+        fn first_piola(&self, _: &[f64; 9]) -> Result<[f64; 9], MaterialError> {
+            Ok([0.0, 1.0, 0.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        }
+        fn consistent_tangent(&self, _: &[f64; 9]) -> Result<[[f64; 9]; 9], MaterialError> {
+            panic!("motion recovery must not request a tangent")
+        }
+    }
+    with_cx(|_, cx| {
+        let material = Nonobjective;
+        let p = problem(
+            &NODES[..4],
+            &TETS[..1],
+            HyperelasticLawField::Uniform(&material),
+        );
+        let spin = [0.0, 0.5, 0.0, -0.5, 0.0, 0.0, 0.0, 0.0, 0.0];
+        let response = p
+            .element_motion_responses(
+                &[0.0; 12],
+                &affine_velocity(&NODES[..4], &spin, [0.0; 3]),
+                cx,
+            )
+            .unwrap()
+            .remove(0);
+        assert_eq!(response.spatial_strain_rate_per_s, [0.0; 9]);
+        assert_eq!(response.green_lagrange_strain_rate_per_s, [0.0; 9]);
+        near(response.reference_stress_power_w, 1.0 / 6.0, 1.0);
+        near(response.spatial_stress_power_w, 1.0 / 6.0, 1.0);
     });
 }

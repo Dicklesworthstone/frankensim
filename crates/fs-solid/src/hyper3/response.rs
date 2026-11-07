@@ -17,6 +17,11 @@
 //! The supplied displacement need not be an equilibrium solution. These fields
 //! describe its admitted P1 state; they do not certify equilibrium, a continuum
 //! peak stress, material failure or spatial convergence.
+//!
+//! Motion recovery adds the actual referential velocity gradient, objective
+//! strain rates and stress power on that same state. Rates are total geometric
+//! rates, not an inferred elastic/plastic/thermal split. Stress power is not
+//! heat or a stored-energy rate when a material adapter has evolving history.
 
 use fs_exec::Cx;
 use fs_material::hyper::cards::FiniteStrainPotential;
@@ -66,6 +71,36 @@ pub struct HyperTetElementResponse {
     pub potential_j: f64,
 }
 
+/// Native finite-deformation fields and their instantaneous motion.
+///
+/// Every tensor is row-major, with tensor shear components rather than an
+/// engineering-shear or Mandel convention. No material history is advanced.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HyperTetElementMotionResponse {
+    /// Original stress, strain, volume and material-potential response.
+    pub response: HyperTetElementResponse,
+    /// Total referential velocity gradient Fdot = Grad_X(v), 1/s.
+    pub deformation_gradient_rate_per_s: [f64; 9],
+    /// Current spatial velocity gradient L = Fdot F^-1, 1/s.
+    pub spatial_velocity_gradient_per_s: [f64; 9],
+    /// Objective spatial deformation rate D = sym(L), 1/s.
+    /// Under a time-dependent superposed rotation Q, D becomes Q D Q^T.
+    pub spatial_strain_rate_per_s: [f64; 9],
+    /// Material total Green--Lagrange rate Edot = sym(F^T Fdot), 1/s.
+    /// This is invariant under a superposed spatial rigid motion.
+    pub green_lagrange_strain_rate_per_s: [f64; 9],
+    /// Jdot = J tr(L), 1/s, with positive values denoting dilation.
+    pub jacobian_rate_per_s: f64,
+    /// Instantaneous current-volume rate, V_reference Jdot, m^3/s.
+    pub current_volume_rate_m3_s: f64,
+    /// Original reference stress power V_reference P:Fdot, W.
+    pub reference_stress_power_w: f64,
+    /// Independently reconstructed current-volume stress power V_current sigma:L, W.
+    /// The FULL stress and velocity gradient are retained. For objective laws,
+    /// symmetry of sigma also gives sigma:D; asymmetry is never hidden here.
+    pub spatial_stress_power_w: f64,
+}
+
 impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
     /// Recover original element stress, total strain, volume and potential.
     ///
@@ -84,6 +119,163 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
     ) -> Result<Vec<HyperTetElementResponse>, HyperTetError> {
         self.prepare(cx)?.element_responses(displacement_m, cx)
     }
+
+    /// Recover native finite-strain fields, objective rates and stress power.
+    ///
+    /// Displacement and velocity use the same original node-major xyz order,
+    /// in metres and metres/second respectively. Repeated observations should
+    /// reuse the prepared owner; no equilibrium solve or history update occurs.
+    ///
+    /// # Errors
+    /// Native mesh/budget/material refusal, malformed motion, unrepresentable
+    /// rate or power, or cancellation. No partial field is published.
+    pub fn element_motion_responses(
+        &self,
+        displacement_m: &[f64],
+        velocity_m_s: &[f64],
+        cx: &Cx<'_>,
+    ) -> Result<Vec<HyperTetElementMotionResponse>, HyperTetError> {
+        self.prepare(cx)?
+            .element_motion_responses(displacement_m, velocity_m_s, cx)
+    }
+}
+
+pub(super) fn recover_motion_all<L: FiniteStrainPotential>(
+    problem: &HyperTetProblem<'_, L>,
+    elements: &[Element],
+    displacement_m: &[f64],
+    velocity_m_s: &[f64],
+    cx: &Cx<'_>,
+) -> Result<Vec<HyperTetElementMotionResponse>, HyperTetError> {
+    checkpoint(cx)?;
+    problem.check_len(displacement_m)?;
+    if velocity_m_s.len() != displacement_m.len()
+        || velocity_m_s.iter().any(|value| !value.is_finite())
+    {
+        return Err(HyperTetError::InvalidInput {
+            what: "one finite xyz velocity per original node required".into(),
+        });
+    }
+    let mut responses = Vec::with_capacity(elements.len());
+    for (element, geometry) in elements.iter().enumerate() {
+        if element % 256 == 0 {
+            checkpoint(cx)?;
+        }
+        let (f, rate) = motion_gradients_with::<L>(geometry, |node| {
+            (
+                core::array::from_fn(|i| displacement_m[3 * node + i]),
+                core::array::from_fn(|i| velocity_m_s[3 * node + i]),
+            )
+        })?;
+        responses.push(with_motion(recover(problem, element, geometry, f)?, rate)?);
+    }
+    checkpoint(cx)?;
+    Ok(responses)
+}
+
+pub(super) fn motion_gradients_with<L: FiniteStrainPotential>(
+    geometry: &Element,
+    mut motion_at_node: impl FnMut(usize) -> ([f64; 3], [f64; 3]),
+) -> Result<([f64; 9], [f64; 9]), HyperTetError> {
+    let mut rate = [0.0; 9];
+    let mut first_velocity = [0.0; 3];
+    let mut local_node = 0;
+    let mut finite = true;
+    // Reuse the native F owner and its original callback order. Differentiate
+    // velocity directly from zero: forming I+Grad(v) would erase tiny rates.
+    let f = HyperTetProblem::<L>::deformation_gradient_with(geometry, |node| {
+        let (displacement, velocity) = motion_at_node(node);
+        finite &= displacement.iter().chain(&velocity).all(|v| v.is_finite());
+        if local_node == 0 {
+            first_velocity = velocity;
+        } else {
+            for i in 0..3 {
+                let relative = velocity[i] - first_velocity[i];
+                for j in 0..3 {
+                    rate[3 * i + j] =
+                        relative.mul_add(geometry.gradients[local_node][j], rate[3 * i + j]);
+                }
+            }
+        }
+        local_node += 1;
+        displacement
+    });
+    if !finite || rate.iter().any(|v| !v.is_finite()) {
+        return Err(HyperTetError::InvalidInput {
+            what: "finite nodal motion and representable referential velocity gradient required"
+                .into(),
+        });
+    }
+    Ok((f, rate))
+}
+
+pub(super) fn with_motion(
+    response: HyperTetElementResponse,
+    rate: [f64; 9],
+) -> Result<HyperTetElementMotionResponse, HyperTetError> {
+    let f = response.deformation_gradient;
+    let inverse: [f64; 9] = core::array::from_fn(|ij| {
+        let (i, j) = (ij / 3, ij % 3);
+        let (a, b, c, d) = ((j + 1) % 3, (j + 2) % 3, (i + 1) % 3, (i + 2) % 3);
+        (f[3 * a + c] * f[3 * b + d] - f[3 * a + d] * f[3 * b + c]) / response.jacobian
+    });
+    let spatial_velocity_gradient_per_s: [f64; 9] = core::array::from_fn(|ij| {
+        (0..3).fold(0.0, |sum, k| {
+            rate[3 * (ij / 3) + k].mul_add(inverse[3 * k + ij % 3], sum)
+        })
+    });
+    let material_rate: [f64; 9] = core::array::from_fn(|ij| {
+        (0..3).fold(0.0, |sum, k| {
+            f[3 * k + ij / 3].mul_add(rate[3 * k + ij % 3], sum)
+        })
+    });
+    let symmetric =
+        |a: &[f64; 9]| core::array::from_fn(|ij| f64::midpoint(a[ij], a[3 * (ij % 3) + ij / 3]));
+    let spatial_strain_rate_per_s = symmetric(&spatial_velocity_gradient_per_s);
+    let green_lagrange_strain_rate_per_s = symmetric(&material_rate);
+    let jacobian_rate_per_s = response.jacobian
+        * (spatial_velocity_gradient_per_s[0]
+            + spatial_velocity_gradient_per_s[4]
+            + spatial_velocity_gradient_per_s[8]);
+    let current_volume_rate_m3_s = response.reference_volume_m3 * jacobian_rate_per_s;
+    let contraction =
+        |a: &[f64; 9], b: &[f64; 9]| a.iter().zip(b).fold(0.0, |sum, (x, y)| x.mul_add(*y, sum));
+    let reference_stress_power_w =
+        response.reference_volume_m3 * contraction(&response.first_piola_pa, &rate);
+    let spatial_stress_power_w = response.current_volume_m3
+        * contraction(&response.cauchy_pa, &spatial_velocity_gradient_per_s);
+    if inverse
+        .iter()
+        .chain(&spatial_velocity_gradient_per_s)
+        .chain(&spatial_strain_rate_per_s)
+        .chain(&green_lagrange_strain_rate_per_s)
+        .any(|value| !value.is_finite())
+        || [
+            jacobian_rate_per_s,
+            current_volume_rate_m3_s,
+            reference_stress_power_w,
+            spatial_stress_power_w,
+        ]
+        .iter()
+        .any(|value| !value.is_finite())
+    {
+        return Err(HyperTetError::MaterialRefused {
+            element: response.element,
+            what: "native motion strain rate, volume rate or stress power is not representable"
+                .into(),
+        });
+    }
+    Ok(HyperTetElementMotionResponse {
+        response,
+        deformation_gradient_rate_per_s: rate,
+        spatial_velocity_gradient_per_s,
+        spatial_strain_rate_per_s,
+        green_lagrange_strain_rate_per_s,
+        jacobian_rate_per_s,
+        current_volume_rate_m3_s,
+        reference_stress_power_w,
+        spatial_stress_power_w,
+    })
 }
 
 pub(super) fn recover_all<L: FiniteStrainPotential>(

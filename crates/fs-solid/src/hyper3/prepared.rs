@@ -225,6 +225,63 @@ impl<L: FiniteStrainPotential> PreparedHyperTetProblem<'_, L> {
         Ok(response)
     }
 
+    /// Native fields, total geometric strain rates and stress power per P1 cell.
+    ///
+    /// Both buffers use original node-major xyz order (m and m/s). Cached
+    /// reference gradients and the original combined material response are
+    /// reused; no tangent or constitutive-history advance is requested.
+    ///
+    /// # Errors
+    /// Malformed motion, invalid deformation/material domain, unrepresentable
+    /// rates or power, or cancellation. No partial field is published.
+    pub fn element_motion_responses(
+        &self,
+        displacement_m: &[f64],
+        velocity_m_s: &[f64],
+        cx: &Cx<'_>,
+    ) -> Result<Vec<super::response::HyperTetElementMotionResponse>, HyperTetError> {
+        super::response::recover_motion_all(
+            &self.problem,
+            &self.elements,
+            displacement_m,
+            velocity_m_s,
+            cx,
+        )
+    }
+
+    /// Recover one cell's native motion without allocating mesh-sized buffers.
+    ///
+    /// Calls `motion_at_node` once per original node, in original local order,
+    /// for its (displacement in m, velocity in m/s). Common translation and
+    /// velocity are removed before gradients, and tiny rates are differentiated
+    /// directly without subtracting unit deformation. Material evaluation occurs
+    /// once, through its original combined stress/potential response.
+    /// Callback side effects remain caller-owned; no material state is changed.
+    ///
+    /// # Errors
+    /// Missing element, nonfinite motion, geometry/material refusal,
+    /// unrepresentable rate or power, or cancellation.
+    pub fn element_motion_response_with(
+        &self,
+        element: usize,
+        motion_at_node: impl FnMut(usize) -> ([f64; 3], [f64; 3]),
+        cx: &Cx<'_>,
+    ) -> Result<super::response::HyperTetElementMotionResponse, HyperTetError> {
+        checkpoint(cx)?;
+        let geometry = self
+            .elements
+            .get(element)
+            .ok_or_else(|| HyperTetError::InvalidInput {
+                what: "motion element is outside the original prepared mesh".into(),
+            })?;
+        let (f, rate) = super::response::motion_gradients_with::<L>(geometry, motion_at_node)?;
+        checkpoint(cx)?;
+        let response = super::response::recover(&self.problem, element, geometry, f)?;
+        let motion = super::response::with_motion(response, rate)?;
+        checkpoint(cx)?;
+        Ok(motion)
+    }
+
     pub(super) fn evaluate(
         &self,
         displacement_m: &[f64],
